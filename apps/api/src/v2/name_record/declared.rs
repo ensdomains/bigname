@@ -33,8 +33,10 @@ pub(crate) struct LapsedRegistration {
 #[serde(rename_all = "snake_case")]
 pub(crate) enum LapsedHeldThrough {
     /// An unwrapped lease, held as the BaseRegistrar token.
+    /// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L118-L152 @ ens_v1@91c966f)
     Registrar,
     /// A lease held through the NameWrapper.
+    /// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L240-L305 @ ens_v1@91c966f)
     Wrapper,
 }
 

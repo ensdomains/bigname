@@ -112,6 +112,10 @@ async fn attach_grants(
     for ((_, _, item), registration) in rows.iter_mut().zip(registrations) {
         if let Some(name) = names.get(&registration) {
             item["name"] = json!(name.normalized_name);
+            item["registration_id"] = json!(crate::v2::address_names::permission_resource_handle(
+                Some(name),
+                registration,
+            ));
         }
         let ids = item
             .as_object_mut()

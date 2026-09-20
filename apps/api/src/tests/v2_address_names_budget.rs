@@ -340,8 +340,8 @@ async fn v2_address_names_permission_id_recovery_ignores_name_anchor_and_product
     // Alternate matching and distinct declared product IDs, and every authority kind and
     // support status of the permission resource. The row's `permission_resource_id` must always
     // be the handle the permissions route resolves to the resource: the registration a
-    // supported current name serves, or the resource itself when no such name claims it. The
-    // name anchor never redirects the read.
+    // current registration identity names, including when name coverage is unsupported.
+    // A name filter still cannot claim unsupported authority, but its lease remains auditable.
     for product_id in [lease_id, id] {
         for kind in ["registry_only", "registrar", "wrapper"] {
             for unsupported in [false, true] {
@@ -359,7 +359,7 @@ async fn v2_address_names_permission_id_recovery_ignores_name_anchor_and_product
                 // Preserve the registry binding that supplies the operator grant.
                 sqlx::query("UPDATE bigname_phase.permissions_current_resource_summary SET authority_kind=$1 WHERE resource_id=$2")
                     .bind(kind).bind(id).execute(&database.pool).await?;
-                let served = if unsupported { id } else { product_id }.to_string();
+                let served = product_id.to_string();
                 for namespace in ["", "&namespace=ens"] {
                     for dedupe in ["name", "registration"] {
                         let uri = format!(

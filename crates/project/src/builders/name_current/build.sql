@@ -420,7 +420,10 @@
                    event.after_state ->> 'authority_key' AS authority_key
             FROM project_authority_events event
             WHERE COALESCE(selected_authority.released_v1_tombstone, false)
-              AND event.resource_id = resource.resource_id
+              AND event.resource_id = CASE
+                  WHEN authority_context.authority_kind = 'registry_only'
+                      THEN selected_registration.resource_id
+                  ELSE resource.resource_id END
               AND event.event_kind IN ('RegistrationGranted', 'AuthorityEpochChanged')
               AND event.after_state ->> 'authority_kind' IS NOT NULL
             ORDER BY event.block_number DESC NULLS LAST,

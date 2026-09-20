@@ -30,7 +30,7 @@ mod current_name;
 use current_name::load_current_name_row;
 
 mod filter;
-pub(crate) use filter::current_registration_row;
+pub(crate) use filter::registration_row;
 
 mod paging;
 use filter::{EmptyPermissionsSelection, permissions_filter_inputs, resolve_permissions_filter};

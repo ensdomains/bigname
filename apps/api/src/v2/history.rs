@@ -243,6 +243,8 @@ pub(crate) async fn get_history(
 /// bound to a registry-only resource (a registrar token transferred without `reclaim`) has no
 /// binding or link at all, so every published registrar grant carrying the name's namehash is
 /// followed too, together with the registration resource Project selected.
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L118-L152 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L240-L305 @ ens_v1@91c966f)
 async fn registration_lease_resource_ids(
     state: &AppState,
     parent: &bigname_storage::NameCurrentRow,

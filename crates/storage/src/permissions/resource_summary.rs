@@ -102,11 +102,12 @@ pub async fn load_permissions_current_resource_summaries(
     Ok(rows.into_iter().map(|row| (row.resource_id, row)).collect())
 }
 
-/// Namespace membership for resource audit reads, including registrations with no current name.
-/// Whether `resource_id` is a NameWrapper resource whose canonical `NameWrapped` row recorded the
-/// BaseRegistrar lease it wrapped. Such a resource is never a public registration handle: the
-/// lease is the registration, also after the name was unwrapped, released or registered again.
-/// History rejects the same value by the same link.
+/// Whether retained activated events prove this resource wrapped a registrar lease: a recorded
+/// lease link, or a registrar grant for the same name in the wrap's transaction. The latter
+/// covers controller-derived registration after NameWrapped. This classification survives the
+/// current name row so obsolete wrapper handles cannot become registration audit handles.
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L289-L305 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L130-L152 @ ens_v1@91c966f)
 pub async fn resource_wrapped_a_registrar_lease(pool: &PgPool, resource_id: Uuid) -> Result<bool> {
     sqlx::query_scalar(
         r#"SELECT EXISTS (
@@ -116,7 +117,23 @@ pub async fn resource_wrapped_a_registrar_lease(pool: &PgPool, resource_id: Uuid
             WHERE ne.resource_id = $1
               AND ne.source_family = 'ens_v1_wrapper_l1'
               AND ne.event_kind = 'SurfaceBound'
-              AND ne.after_state ->> 'wrapped_registrar_resource_id' IS NOT NULL
+              AND (ne.after_state ->> 'wrapped_registrar_resource_id' IS NOT NULL
+                   OR EXISTS (
+                       SELECT 1 FROM bigname_phase.normalized_events grant_event
+                       JOIN bigname_phase.chain_lineage grant_lineage
+                         ON grant_lineage.chain_id = grant_event.chain_id
+                        AND grant_lineage.block_hash = grant_event.block_hash
+                       WHERE grant_event.chain_id = ne.chain_id
+                         AND grant_event.block_hash = ne.block_hash
+                         AND grant_event.transaction_hash = ne.transaction_hash
+                         AND grant_event.logical_name_id = ne.logical_name_id
+                         AND grant_event.source_family = 'ens_v1_registrar_l1'
+                         AND grant_event.event_kind = 'RegistrationGranted'
+                         AND grant_event.resource_id <> ne.resource_id
+                         AND grant_event.consumer_visibility = 'activated'
+                         AND grant_event.canonicality_state IN ('canonical', 'safe', 'finalized')
+                         AND grant_lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+                   ))
               AND ne.consumer_visibility = 'activated'
               AND ne.canonicality_state IN ('canonical', 'safe', 'finalized')
               AND (ne.block_hash IS NULL
@@ -150,4 +167,26 @@ pub async fn permission_resource_matches_namespace(
     .fetch_one(pool)
     .await
     .context("failed to check permission resource namespace")
+}
+
+/// Retained activated registry-only authority is control of a name, never its registration.
+pub async fn resource_is_registry_only(pool: &PgPool, resource_id: Uuid) -> Result<bool> {
+    sqlx::query_scalar(
+        "SELECT EXISTS (
+            SELECT 1 FROM bigname_phase.normalized_events ne
+            JOIN bigname_phase.chain_lineage lineage
+              ON lineage.chain_id = ne.chain_id AND lineage.block_hash = ne.block_hash
+            WHERE ne.resource_id = $1
+              AND ne.source_family IN ('ens_v1_registry_l1', 'ens_v1_registrar_l1',
+                  'basenames_base_registry', 'basenames_base_registrar')
+              AND ne.event_kind IN ('AuthorityEpochChanged', 'SurfaceBound')
+              AND ne.after_state ->> 'authority_kind' = 'registry_only'
+              AND ne.consumer_visibility = 'activated'
+              AND ne.canonicality_state IN ('canonical', 'safe', 'finalized')
+              AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized'))",
+    )
+    .bind(resource_id)
+    .fetch_one(pool)
+    .await
+    .context("failed to classify historical registry control resource")
 }

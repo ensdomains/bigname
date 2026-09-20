@@ -212,15 +212,19 @@ pub(super) async fn resolve_permissions_filter(
 }
 
 /// Whether `row` currently serves a supported registration, the condition under which a
-/// `registration_id` read resolves to the resource that controls the name.
+/// name-filtered read may claim current authority.
 pub(crate) fn current_registration_row(row: &NameCurrentRow) -> bool {
     string_field(row.coverage.get("status")).as_deref() != Some("unsupported")
-        && matches!(
-            name_registration_fields(Some(row), &row.namespace).registration_status,
-            RegistrationStatus::Active
-                | RegistrationStatus::Wrapped
-                | RegistrationStatus::Registered
-        )
+        && registration_row(row)
+}
+
+/// Retained registration identity can still select a resource audit when name coverage is
+/// unsupported; this does not make an unsupported name filter claim current authority.
+pub(crate) fn registration_row(row: &NameCurrentRow) -> bool {
+    matches!(
+        name_registration_fields(Some(row), &row.namespace).registration_status,
+        RegistrationStatus::Active | RegistrationStatus::Wrapped | RegistrationStatus::Registered
+    )
 }
 
 fn registration_uuid(row: &NameCurrentRow) -> Option<Uuid> {
@@ -262,11 +266,14 @@ async fn control_resource_for_registration(
         );
         V2Error::internal_error("failed to resolve registration resource")
     };
-    // The recorded wrap link outlives the name's current row, so a historical NameWrapper
-    // resource is rejected by it, as history rejects the same value.
+    // Retained authority evidence outlives the current name row. Neither a wrapper that
+    // wrapped a lease nor registry-only control becomes a registration when that row disappears.
     if bigname_storage::resource_wrapped_a_registrar_lease(&state.pool, registration_id)
         .await
         .map_err(failed)?
+        || bigname_storage::resource_is_registry_only(&state.pool, registration_id)
+            .await
+            .map_err(failed)?
     {
         return Ok(None);
     }
@@ -281,7 +288,7 @@ async fn control_resource_for_registration(
         let row = bigname_storage::load_name_current(&state.pool, &logical_name_id)
             .await
             .map_err(failed)?;
-        let Some(row) = row.as_ref().filter(|row| current_registration_row(row)) else {
+        let Some(row) = row.as_ref().filter(|row| registration_row(row)) else {
             continue;
         };
         if registration_uuid(row) == Some(registration_id) {

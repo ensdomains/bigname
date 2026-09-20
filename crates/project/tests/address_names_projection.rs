@@ -2730,6 +2730,10 @@ async fn registrar_handoff_without_reclaim_keeps_the_registry_owner_across_a_lat
 
     // The handoff arrives as its own batch and resumes the materialized projection.
     handoff_scenario::persist(&pool, &handoff).await?;
+    assert!(bigname_storage::resource_is_registry_only(&pool, registry_resource).await?,
+        "the real registrar-transfer epoch must classify the registry-only control resource");
+    assert!(!bigname_storage::resource_is_registry_only(&pool, registrar_resource).await?,
+        "the transferred lease must remain a registration handle");
     run_project(
         &pool,
         HANDOFF_BLOCK,
@@ -4939,7 +4943,14 @@ async fn seed_earlier_lease_release(
         }),
         json!({}),
     )
-    .await
+    .await?;
+    // Match the release producer: the ended lease carries its former holder.
+    let updated = sqlx::query("UPDATE normalized_events SET before_state = $1 WHERE event_identity = 'fixture:enriched-earlier-lease-release'")
+        .bind(json!({"registrant": "0x00000000000000000000000000000000000000aa"}))
+        .execute(pool)
+        .await?;
+    assert_eq!(updated.rows_affected(), 1);
+    Ok(())
 }
 
 /// Seeds the successor lease's batch at `block` when `stage` reaches it: the grant at block 12,
@@ -5678,6 +5689,16 @@ async fn project_enriched_registry_only_batches(
     .bind(OWNERLESS_LOGICAL)
     .fetch_one(&pool)
     .await?;
+    if matches!(later_batch, Some(LaterBatch::ReleaseOfRetainedLease)) {
+        let lapsed_authority: Option<String> = sqlx::query_scalar(
+            "SELECT declared_summary #>> '{registration,lapsed_registration,authority_kind}' FROM name_current WHERE logical_name_id = $1",
+        ).bind(OWNERLESS_LOGICAL).fetch_one(&pool).await?;
+        assert_eq!(
+            lapsed_authority.as_deref(),
+            Some("registrar"),
+            "the registry-only binding must preserve the released lease's holding contract"
+        );
+    }
     let address_registrant = sqlx::query_scalar(
         "SELECT address
          FROM address_names_current

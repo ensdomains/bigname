@@ -1430,6 +1430,15 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
   registry-only resource (a registrar token transferred without `reclaim`) has
   no binding of its own; the read reaches it, and every earlier such lease,
   through the name its `RegistrationGranted` row carries.
+  (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L118-L175 @ ens_v1@91c966f)
+  Events on a registry-only control resource use the registrar lease that existed
+  at the event's position, established by activated grant and release evidence on
+  the same chain branch. They do not borrow the latest lease from current name
+  state. During a released gap, or before a lease is proved, those control events
+  have no registration handle. A record event with no resource belongs to that
+  lease only while the registry-only binding is active and the lease exists at
+  the record's position. The same selection governs row IDs, registration filters,
+  counts and cursor anchors.
 
 ### `GET /v1/permissions`
 
@@ -1807,12 +1816,14 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
   `registration_status`, `registered_at`, `created_at`, and `expires_at`.
   Address-name rows also return `permission_resource_id`, the handle
   `GET /v1/permissions?registration_id=` resolves to the permission authority
-  resource behind the row's inline summary. While the name serves a supported
-  current registration it is that registration's `registration_id`, the same
-  value name detail serves: for a wrapped `.eth` name the BaseRegistrar lease,
-  although its permission rows live on the NameWrapper resource, which is not a
+  resource behind the row's inline summary. While the name retains a current
+  registration identity it is that registration's `registration_id`, including
+  when other name coverage is unsupported. This preserves a followable resource
+  audit without asserting current name support. It agrees with supported name
+  detail: for a wrapped `.eth` name it is the BaseRegistrar lease, although its
+  permission rows live on the NameWrapper resource, which is not a
   public registration handle. A wrapped subname has no lease and keeps its
-  NameWrapper resource. When no supported current name claims the resource,
+  NameWrapper resource. When no current registration claims the resource,
   the value is the resource UUID itself, which the permissions route reads as a
   resource audit. It remains available without `include=role_summary`. A
   `relation=resolves_to` row whose name has only a retained serving resource,

@@ -483,7 +483,7 @@ and whose `available` is true once it is past grace. ENSv2 draws the same line i
 registry: it checks expiry on every read and returns no resolver and no subregistry for an
 expired label. The handed-off name is therefore not the one exception. It becomes a
 [released v1 authority](glossary.md#released-v1-authority) tombstone: `status` `released` with
-the lease's `released_at`, and no current owner, manager, registrant, authority, expiry, control,
+the lease's `released_at`, and no current owner, manager, registrant, authority, control,
 resolver or records; the address listing drops it and a name-filtered permissions request
 selects nothing, as for any released name. The tombstone selects the registry-only binding,
 which stands for the released lease the way the closed NameWrapper binding stands for a wrapped

@@ -1087,7 +1087,7 @@ async fn seed_perms_wrapped_lease(
     let (grant_block, grant_logical_name_id, binding_block, link) = match shape {
         WrappedLeaseShape::LinkRecorded => (120, None, 121, json!(lease_resource_id)),
         WrappedLeaseShape::ControllerGranted => {
-            (121, Some(logical_name_id.as_str()), 120, Value::Null)
+            (120, Some(logical_name_id.as_str()), 120, Value::Null)
         }
     };
     let mut grant = v2_history_event(
@@ -1098,6 +1098,9 @@ async fn seed_perms_wrapped_lease(
         grant_block,
     );
     grant.after_state["namehash"] = json!(namehash);
+    if matches!(shape, WrappedLeaseShape::ControllerGranted) {
+        grant.log_index = Some(2);
+    }
     let mut binding = v2_history_event(
         "perms-wrapper-binding",
         Some(&logical_name_id),
@@ -2135,5 +2138,99 @@ async fn v2_permissions_rejects_unknown_namespace_before_snapshot_capture() -> R
         assert_eq!(payload["error"]["code"], json!("not_found"));
         assert_eq!(payload["error"]["message"], json!("namespace unknown is not supported"));
     }
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn historical_controller_wrap_is_never_a_registration_handle() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let (wrapper, _) =
+        seed_perms_wrapped_lease(&database, WrappedLeaseShape::ControllerGranted).await?;
+    sqlx::query("DELETE FROM bigname_phase.name_current WHERE raw_name = 'perms.eth'")
+        .execute(&database.pool)
+        .await?;
+    let payload = v2_permissions_payload_for_database(
+        &database,
+        &format!("/v1/permissions?registration_id={wrapper}"),
+    )
+    .await?;
+    assert_eq!(payload["data"], json!([]));
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn historical_registry_control_is_never_a_registration_handle() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_permissions_fixture(&database).await?;
+    let id = v2_permissions_current_resource_id();
+    let mut epoch = v2_history_event(
+        "perms-historical-registry-epoch",
+        None,
+        Some(id),
+        "AuthorityEpochChanged",
+        120,
+    );
+    epoch.source_family = "ens_v1_registrar_l1".to_owned();
+    epoch.after_state = json!({"authority_kind": "registry_only"});
+    seed_v2_history_blocks(&database, 120..=120).await?;
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[epoch]).await?;
+    sqlx::query("DELETE FROM bigname_phase.name_current WHERE raw_name = 'perms.eth'")
+        .execute(&database.pool)
+        .await?;
+    let payload = v2_permissions_payload_for_database(
+        &database,
+        &format!("/v1/permissions?registration_id={id}"),
+    )
+    .await?;
+    assert_eq!(payload["data"], json!([]));
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn resolver_roles_use_the_wrapped_registration_lease_handle() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let (wrapper, lease) =
+        seed_perms_wrapped_lease(&database, WrappedLeaseShape::LinkRecorded).await?;
+    let resolver = resolver_current_row("ethereum-mainnet", V2_RESOLVER_ADDRESS);
+    database
+        .seed_snapshot_selector_chain_positions(&resolver.chain_positions)
+        .await?;
+    upsert_test_resolver_current_rows(&database, &[resolver]).await?;
+    let mut permission = permission_current_row(
+        wrapper,
+        V2_PERMISSIONS_SUBJECT,
+        PermissionScope::Resolver {
+            chain_id: "ethereum-mainnet".to_owned(),
+            resolver_address: V2_RESOLVER_ADDRESS.to_owned(),
+        },
+        7,
+        120,
+    );
+    permission.provenance["normalized_event_ids"] = json!([]);
+    upsert_phase_permissions_current_rows(&database.pool, &[permission]).await?;
+    let payload = v2_resolver_payload_for_database(
+        &database,
+        &format!("/v1/resolvers/1/{V2_RESOLVER_ADDRESS}/roles"),
+    )
+    .await?;
+    assert_eq!(payload["data"].as_array().unwrap().len(), 1, "{payload}");
+    assert_eq!(
+        payload["data"][0]["registration_id"],
+        lease.to_string(),
+        "{payload}"
+    );
+    let followed = v2_permissions_payload_for_database(
+        &database,
+        &format!("/v1/permissions?registration_id={lease}"),
+    )
+    .await?;
+    assert!(
+        followed["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["grant_scope"]["kind"] == "resolver"),
+        "{followed}"
+    );
     database.cleanup().await
 }
