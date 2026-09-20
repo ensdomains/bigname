@@ -467,7 +467,14 @@ pub(super) async fn build(
                    ) AS alias_items,
                    -- Record links exist only on the record-ID generation: an ERC-1967
                    -- proxy whose admitted implementation's manifest declares `Linked`.
-                   -- Direct node-keyed and mirror declarations have no link state.
+                   -- PermissionedResolver keeps node-to-record links and emits `Linked`
+                   -- from `_link` (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L97-L100 @ ens_v2@a971bd64;
+                   -- upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L363-L367 @ ens_v2@a971bd64).
+                   -- PublicResolverV2 is node-keyed and has no record or link storage
+                   -- (upstream: .refs/ens_v2/contracts/src/resolver/PublicResolverV2.sol:L23-L59 @ ens_v2@a971bd64),
+                   -- and ENSV1Resolver forwards each name to the ENSv1 registry's resolver
+                   -- (upstream: .refs/ens_v2/contracts/src/resolver/ENSV1Resolver.sol:L13-L41 @ ens_v2@a971bd64;
+                   -- upstream: .refs/ens_v2/contracts/src/resolver/AbstractMirrorResolver.sol:L67-L81 @ ens_v2@a971bd64).
                    supported.supported
                        AND supported.source_family = 'ens_v2_resolver_l1'
                        AND supported.upgrade_event_id IS NOT NULL
