@@ -221,7 +221,7 @@ async fn seed_v1_topology_only_child(pool: &PgPool) -> Result<()> {
     // seen named: a registry-only resource, and SubregistryChanged, AuthorityTransferred
     // and PermissionChanged on it with no logical name (no AuthorityEpochChanged: the
     // authority is neither surfaced nor tokenized, crates/adapters/src/schema_v2/
-    // protocol/v1/authority_transition.rs).
+    // protocol/v1/authority_transition.rs). The three carry the one log's position.
     sqlx::query("INSERT INTO resources (resource_id, chain_id, block_hash, block_number, canonicality_state) VALUES ($1::uuid, $2, $3, 10, 'canonical')")
         .bind(V1_REGISTRY_ONLY_RESOURCE)
         .bind(CHAIN)
@@ -263,13 +263,13 @@ async fn seed_v1_topology_only_child(pool: &PgPool) -> Result<()> {
         (
             "issue-360-v1-topology-only-transfer",
             "AuthorityTransferred",
-            2,
+            1,
             transferred,
         ),
         (
             "issue-360-v1-topology-only-permission",
             "PermissionChanged",
-            3,
+            1,
             json!({
                 "subject": OWNER,
                 "scope": {"kind": "resource"},
