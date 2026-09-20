@@ -3,6 +3,9 @@ use std::collections::BTreeMap;
 use sqlx::{PgPool, Postgres, QueryBuilder};
 use uuid::Uuid;
 
+#[path = "registry_registration.rs"]
+mod registry_registration;
+
 use super::{
     EventHistoryReadFilter,
     filters::{
@@ -118,8 +121,8 @@ fn push_registration_binding_at_event(
     builder.push(
         "EXISTS (
             SELECT 1
-            FROM (SELECT ne.chain_id, ne.block_hash, ne.block_number,
-                         ne.logical_name_id) history_event
+            FROM (SELECT ne.chain_id, ne.block_hash, ne.block_number, ne.log_index,
+                         ne.logical_name_id, ne.namespace, ne.after_state) history_event
             CROSS JOIN bigname_phase.surface_bindings history_binding
             LEFT JOIN bigname_phase.chain_lineage binding_lineage
               ON binding_lineage.chain_id = history_binding.chain_id
@@ -148,7 +151,7 @@ fn push_registration_binding_at_event(
         "history_event",
         canonical_only,
     ));
-    builder.push(" AND ");
+    builder.push(" AND (");
     push_registration_resource_witness(
         builder,
         "history_binding.resource_id",
@@ -157,7 +160,20 @@ fn push_registration_binding_at_event(
         true,
         published,
     );
-    builder.push(")");
+    builder.push(" OR (");
+    builder.push(registry_registration::is_registry_only(
+        "history_binding.resource_id",
+        "history_event",
+        canonical_only,
+    ));
+    builder.push(" AND ");
+    builder.push(registry_registration::lease_at_event(
+        "history_event",
+        canonical_only,
+    ));
+    builder.push(" = ");
+    builder.push_bind(registration_id);
+    builder.push(")))");
 }
 
 // The scalar precheck cannot establish identity on each retained losing branch.
@@ -173,9 +189,9 @@ fn push_public_registration_at_event(
     }
     builder.push(
         "EXISTS (SELECT 1 FROM (
-            SELECT ne.chain_id, ne.block_hash, ne.block_number, ne.resource_id,
-                   ne.logical_name_id
-        ) history_event WHERE ",
+            SELECT ne.chain_id, ne.block_hash, ne.block_number, ne.log_index, ne.resource_id,
+                   ne.logical_name_id, ne.namespace, ne.after_state
+        ) history_event WHERE (",
     );
     push_registration_resource_witness(
         builder,
@@ -185,7 +201,20 @@ fn push_public_registration_at_event(
         false,
         published,
     );
-    builder.push(")");
+    builder.push(" OR (");
+    builder.push(registry_registration::is_registry_only(
+        "history_event.resource_id",
+        "history_event",
+        canonical_only,
+    ));
+    builder.push(" AND ");
+    builder.push(registry_registration::lease_at_event(
+        "history_event",
+        canonical_only,
+    ));
+    builder.push(" = ");
+    builder.push_bind(registration_id);
+    builder.push(")))");
 }
 
 fn push_registration_resource_witness(
@@ -347,6 +376,9 @@ fn push_product_registration_id_with_anchors(
     let reservation_fork = fork("reservation_state");
     let resource_fork = fork("event_resource");
     let binding_fork = fork("binding");
+    let registry_only =
+        registry_registration::is_registry_only("ne.resource_id", "ne", canonical_only);
+    let registry_lease = registry_registration::lease_at_event("ne", canonical_only);
     // Emit a Boolean literal so canonical reads retain constant-folded index predicates.
     builder.push(format!(
         r#"
@@ -478,6 +510,7 @@ fn push_product_registration_id_with_anchors(
                             )
                         )
                     ) THEN NULL::uuid
+                    WHEN {registry_only} THEN {registry_lease}
                     ELSE ne.resource_id
                 END
             )

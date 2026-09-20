@@ -17,6 +17,7 @@ use super::{
         HistorySelector, name_history_selector, product_registration_history_selector,
         resource_history_selector,
     },
+    wrapped_registrar::load_granted_logical_name_ids,
 };
 
 #[derive(Clone, Debug, Default)]
@@ -105,7 +106,7 @@ pub(in crate::history) async fn event_history_read_filter(
     }
 
     if let Some(resource_id) = filter.resource_id {
-        let logical_name_ids =
+        let mut logical_name_ids =
             load_logical_name_ids_for_resource_id(pool, resource_id, canonical_only, published)
                 .await
                 .with_context(|| {
@@ -113,6 +114,13 @@ pub(in crate::history) async fn event_history_read_filter(
                         "failed to load event history surface anchors for resource_id {resource_id}"
                     )
                 })?;
+        if !include_candidates && registration_id_is_public {
+            logical_name_ids.extend(
+                load_granted_logical_name_ids(pool, resource_id, canonical_only, published).await?,
+            );
+            logical_name_ids.sort_unstable();
+            logical_name_ids.dedup();
+        }
         selectors.push(if include_candidates {
             resource_history_selector(resource_id, &logical_name_ids, HistoryScope::Both)
         } else {

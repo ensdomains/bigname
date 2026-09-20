@@ -325,7 +325,26 @@ async fn registration_history_keeps_an_earlier_successor_lease_under_a_registry_
         ],
     )
     .await?;
-    seed_v2_history_blocks(&database, 120..=125).await?;
+    let blocks = (120..=125)
+        .map(|number| {
+            let parent = (number > 120).then(|| format!("0xhistory{}", number - 1));
+            raw_block(
+                "ethereum-mainnet",
+                &format!("0xhistory{number}"),
+                parent.as_deref(),
+                number,
+                1_700_000_000 + number,
+            )
+        })
+        .collect::<Vec<_>>();
+    upsert_phase_raw_blocks(&database.pool, &blocks).await?;
+    seed_schema_v2_ens_lookup_head(
+        &database.pool,
+        125,
+        "0xhistory125",
+        &crate::v2::format_timestamp(timestamp(1_700_000_125)),
+    )
+    .await?;
     // Project selected the latest successor lease as the name's registration.
     sqlx::query(
         "UPDATE bigname_phase.name_current
@@ -340,18 +359,43 @@ async fn registration_history_keeps_an_earlier_successor_lease_under_a_registry_
     .await?;
 
     let lease_event = |identity: &str, resource: Uuid, kind: &str, block_number: i64| {
-        let mut event =
-            v2_history_event(identity, Some(&logical_name_id), Some(resource), kind, block_number);
+        let mut event = v2_history_event(
+            identity,
+            (kind != "RegistrationGranted").then_some(logical_name_id.as_str()),
+            Some(resource),
+            kind,
+            block_number,
+        );
         event.after_state["namehash"] = json!(&namehash);
         event
     };
     bigname_storage::insert_normalized_event_fixtures(
         &database.pool,
         &[
-            lease_event("successor-earlier-grant", earlier_lease, "RegistrationGranted", 120),
-            lease_event("successor-earlier-renewal", earlier_lease, "RegistrationRenewed", 121),
-            lease_event("successor-earlier-release", earlier_lease, "RegistrationReleased", 122),
-            lease_event("successor-current-grant", current_lease, "RegistrationGranted", 124),
+            lease_event(
+                "successor-earlier-grant",
+                earlier_lease,
+                "RegistrationGranted",
+                120,
+            ),
+            lease_event(
+                "successor-earlier-renewal",
+                earlier_lease,
+                "RegistrationRenewed",
+                121,
+            ),
+            lease_event(
+                "successor-earlier-release",
+                earlier_lease,
+                "RegistrationReleased",
+                122,
+            ),
+            lease_event(
+                "successor-current-grant",
+                current_lease,
+                "RegistrationGranted",
+                124,
+            ),
         ],
     )
     .await?;
@@ -369,7 +413,11 @@ async fn registration_history_keeps_an_earlier_successor_lease_under_a_registry_
     let rows = registration["data"].as_array().expect("registration rows");
     assert_eq!(rows[0]["registration_id"], json!(current_lease.to_string()));
     for row in &rows[1..] {
-        assert_eq!(row["registration_id"], json!(earlier_lease.to_string()), "{row}");
+        assert_eq!(
+            row["registration_id"],
+            json!(earlier_lease.to_string()),
+            "{row}"
+        );
     }
     assert_eq!(registration["page"]["total_count"], json!(4));
 
@@ -403,6 +451,179 @@ async fn registration_history_keeps_an_earlier_successor_lease_under_a_registry_
     assert!(
         grant_plan.contains("normalized_events_v1_direct_node_probe_idx"),
         "registrar grants by name must probe the node index:\n{grant_plan}"
+    );
+
+    // The retained registry authority serves successive leases without receiving a new
+    // binding. Registrar grants above intentionally have no logical_name_id.
+    sqlx::query("UPDATE bigname_phase.surface_bindings SET active_from = to_timestamp(1700000120), block_number = 120, block_hash = '0xhistory120' WHERE resource_id = $1")
+        .bind(registry).execute(&database.pool).await?;
+    let mut registry_epoch = v2_history_event(
+        "successor-registry-epoch",
+        Some(&logical_name_id),
+        Some(registry),
+        "SurfaceBound",
+        120,
+    );
+    registry_epoch.log_index = Some(1);
+    registry_epoch.after_state = json!({"authority_kind": "registry_only", "node": namehash});
+    let mut registry_events = vec![registry_epoch];
+    for (block, label) in [(121, "earlier"), (123, "gap"), (125, "current")] {
+        let mut resolver = v2_history_event(
+            &format!("successor-{label}-resolver"),
+            Some(&logical_name_id),
+            Some(registry),
+            "ResolverChanged",
+            block,
+        );
+        resolver.source_family = "ens_v1_registry_l1".to_owned();
+        resolver.after_state["namehash"] = json!(namehash);
+        resolver.log_index = Some(1);
+        let mut record = v2_history_event(
+            &format!("successor-{label}-record"),
+            Some(&logical_name_id),
+            None,
+            "RecordChanged",
+            block,
+        );
+        record.source_family = "ens_v1_resolver_l1".to_owned();
+        record.log_index = Some(2);
+        registry_events.extend([resolver, record]);
+    }
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &registry_events).await?;
+    let name_history = v2_history_payload_for_database(
+        &database,
+        &format!("/v1/names/{NAME}/history?scope=both&page_size=20"),
+    )
+    .await?;
+    for (block, expected) in [
+        (121, json!(earlier_lease)),
+        (123, Value::Null),
+        (125, json!(current_lease)),
+    ] {
+        let resolver = name_history["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["type"] == "resolver" && row["block_number"] == block)
+            .expect("registry resolver event");
+        assert_eq!(resolver["registration_id"], expected, "{name_history}");
+    }
+    for (lease, block) in [(earlier_lease, 121), (current_lease, 125)] {
+        let history = v2_history_payload_for_database(
+            &database,
+            &format!("/v1/events?registration_id={lease}&page_size=20"),
+        )
+        .await?;
+        let rows = history["data"].as_array().unwrap();
+        for kind in ["resolver", "record"] {
+            let matches = rows
+                .iter()
+                .filter(|row| row["type"] == kind)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                matches.len(),
+                1,
+                "{lease} must keep exactly its own {kind}: {history}"
+            );
+            assert_eq!(matches[0]["block_number"], json!(block), "{history}");
+        }
+        let retained = bigname_storage::load_event_history(
+            &database.pool,
+            bigname_storage::EventHistoryFilter {
+                resource_id: Some(lease),
+                ..Default::default()
+            },
+            false,
+        )
+        .await?;
+        for kind in ["ResolverChanged", "RecordChanged"] {
+            let matches = retained
+                .iter()
+                .filter(|row| row.event_kind == kind)
+                .collect::<Vec<_>>();
+            assert_eq!(matches.len(), 1, "{retained:?}");
+            assert_eq!(matches[0].block_number, Some(block), "{retained:?}");
+        }
+    }
+    let registry_history = v2_history_payload_for_database(
+        &database,
+        &format!("/v1/events?registration_id={registry}&page_size=20"),
+    )
+    .await?;
+    assert!(
+        registry_history["data"].as_array().unwrap().is_empty(),
+        "{registry_history}"
+    );
+
+    // A candidate grant cannot make an otherwise unbound resource part of name history.
+    let candidate_lease = Uuid::from_u128(0x7173);
+    upsert_test_resources(
+        &database.pool,
+        &[address_name_resource(
+            candidate_lease,
+            None,
+            "0xcandidate-lease",
+            79,
+        )],
+    )
+    .await?;
+    let mut candidate_grant = lease_event(
+        "successor-candidate-grant",
+        candidate_lease,
+        "RegistrationGranted",
+        123,
+    );
+    candidate_grant.log_index = Some(3);
+    let mut candidate_renewal = lease_event(
+        "successor-candidate-renewal",
+        candidate_lease,
+        "RegistrationRenewed",
+        123,
+    );
+    candidate_renewal.logical_name_id = None;
+    candidate_renewal.log_index = Some(4);
+    bigname_storage::insert_normalized_event_fixtures(
+        &database.pool,
+        &[candidate_grant, candidate_renewal],
+    )
+    .await?;
+    sqlx::query("UPDATE bigname_phase.normalized_events SET consumer_visibility = 'candidate', migration_correlation_ids = ARRAY['history-candidate-grant'] WHERE event_identity = 'successor-candidate-grant'")
+        .execute(&database.pool).await?;
+    let before_activation = v2_history_payload_for_database(
+        &database,
+        &format!("/v1/names/{NAME}/history?scope=registration&page_size=20"),
+    )
+    .await?;
+    assert!(
+        before_activation["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| { row["registration_id"] != json!(candidate_lease) }),
+        "candidate grant admitted activated lease history: {before_activation}"
+    );
+    sqlx::query("UPDATE bigname_phase.normalized_events SET consumer_visibility = 'activated' WHERE event_identity = 'successor-candidate-grant'")
+        .execute(&database.pool).await?;
+    let after_activation = v2_history_payload_for_database(
+        &database,
+        &format!("/v1/names/{NAME}/history?scope=registration&page_size=20"),
+    )
+    .await?;
+    assert_eq!(
+        after_activation["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|row| { row["registration_id"] == json!(candidate_lease) })
+            .count(),
+        2,
+        "the activated grant must not claim an earlier registry resolver in the same block: {after_activation}"
+    );
+    assert_eq!(
+        after_activation["page"]["total_count"].as_u64(),
+        before_activation["page"]["total_count"]
+            .as_u64()
+            .map(|count| count + 2)
     );
 
     database.cleanup().await

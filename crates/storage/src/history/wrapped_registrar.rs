@@ -113,6 +113,7 @@ pub(super) fn push_registrar_grant_resources_query<'a>(
           AND lease.source_family LIKE 'ens\_v1\_%'
           AND lease.source_family = 'ens_v1_registrar_l1'
           AND lease.event_kind = 'RegistrationGranted'
+          AND lease.consumer_visibility = 'activated'
           AND lower(lease.after_state ->> 'namehash') = lower(surface.namehash)
           AND COALESCE(NULLIF(lease.after_state ->> 'authority_kind', ''), 'registrar')
               = 'registrar'
@@ -217,6 +218,42 @@ pub(super) async fn load_node_logical_name_ids(
         candidates.extend(load_namehash_surfaces(pool, &anchor, canonical_only).await?);
     }
     Ok(candidates)
+}
+
+/// Exact-name candidates proved by published, activated grants on a registrar resource.
+/// The event-level registration filter still checks which rows belong to this lease.
+pub(super) async fn load_granted_logical_name_ids(
+    pool: &PgPool,
+    resource_id: Uuid,
+    canonical_only: bool,
+    published: Option<&BTreeMap<String, i64>>,
+) -> Result<Vec<String>> {
+    let mut grants = QueryBuilder::<Postgres>::new(
+        "SELECT DISTINCT anchor.chain_id, anchor.namespace,
+                anchor.after_state ->> 'namehash' AS namehash
+         FROM bigname_phase.normalized_events anchor
+         LEFT JOIN bigname_phase.chain_lineage anchor_lineage
+           ON anchor_lineage.chain_id = anchor.chain_id
+          AND anchor_lineage.block_hash = anchor.block_hash
+         WHERE anchor.resource_id = ",
+    );
+    grants.push_bind(resource_id);
+    grants.push(
+        " AND anchor.source_family = 'ens_v1_registrar_l1'
+          AND anchor.event_kind = 'RegistrationGranted'
+          AND anchor.consumer_visibility = 'activated'
+          AND anchor.after_state ->> 'namehash' IS NOT NULL",
+    );
+    super::filters::push_publication_bound(&mut grants, "anchor", published);
+    if canonical_only {
+        push_canonical_row_filter(&mut grants, "anchor", "anchor_lineage");
+    }
+    let anchors: Vec<ResourceNamehashAnchor> = grants.build_query_as().fetch_all(pool).await?;
+    let mut names = std::collections::BTreeSet::new();
+    for anchor in anchors {
+        names.extend(load_namehash_surfaces(pool, &anchor, canonical_only).await?);
+    }
+    Ok(names.into_iter().collect())
 }
 
 #[derive(sqlx::FromRow)]
