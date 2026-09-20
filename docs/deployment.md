@@ -822,7 +822,8 @@ An interrupted walk resumes only from its existing exact phase
 [redo-marker scope](glossary.md#redo-marker-scope). Interpret separately
 validates the normalized arm-wide replay preimage, keeps its named replacement
 binding closed, and reopens only the other matching bindings in that authority
-arm. An activated boundary reopens only its recorded ENSv1 predecessor.
+arm. An activated boundary reopens only the ENSv1 bindings it closed at its
+recorded predecessor position.
 Activation does not create, infer, widen, or relax the phase marker or that
 replay evidence.
 

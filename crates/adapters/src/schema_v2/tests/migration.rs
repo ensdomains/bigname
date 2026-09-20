@@ -4909,6 +4909,13 @@ fn assert_synchronized_pair(output: &BatchOutput) -> String {
 // (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L111-L119 @ ens_v2@a971bd64)
 // (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L174-L188 @ ens_v1@91c966f)
 fn plain_unwrapped_input() -> anyhow::Result<BatchInput> {
+    unwrapped_input(None)
+}
+
+/// U-01's plain registration and eleven-log migration transaction. With `handoff`, the registrar
+/// token is transferred to that holder without `reclaim` in the block between registration and
+/// migration, and the holder is the party migrating.
+fn unwrapped_input(handoff: Option<Address>) -> anyhow::Result<BatchInput> {
     sol! { event NewTTL(bytes32 indexed node, uint64 ttl); }
     let fixture = fixture()?;
     let addresses = &fixture["addresses"];
@@ -4919,7 +4926,13 @@ fn plain_unwrapped_input() -> anyhow::Result<BatchInput> {
     let node = scenario["namehash"].as_str().unwrap().parse::<B256>()?;
     let eth_node = super::common::namehash(&["eth".to_owned()]).parse()?;
     let token = decimal_u256(&scenario["v2_token_id"])?;
-    let owner = Address::from([0x51; 20]);
+    let registrant = Address::from([0x51; 20]);
+    let owner = handoff.unwrap_or(registrant);
+    let registration_block = if handoff.is_some() {
+        block - 2
+    } else {
+        block - 1
+    };
     let controller = address(addresses, "unlocked_controller")?;
     let graveyard = address(addresses, "graveyard")?;
     let registrar = addresses["base_registrar"].as_str().unwrap();
@@ -4928,146 +4941,155 @@ fn plain_unwrapped_input() -> anyhow::Result<BatchInput> {
     let registration_controller = "0x0000000000000000000000000000000000000098";
     let resolver = Address::from([0x61; 20]);
     let at = |event, at, log, emitter| raw_at_transaction(event, at, 0, log, emitter);
-    let mut input = batch(
-        vec![
-            at(
-                super::v1_registry::NewOwner {
-                    node: eth_node,
-                    label: labelhash,
-                    owner,
-                }
-                .encode_log_data(),
-                block - 1,
-                0,
-                registry,
-            ),
-            at(
-                super::NameRegistered {
-                    name: label.to_owned(),
-                    label: labelhash,
-                    owner,
-                    expires: U256::from(scenario["stored_expiry"].as_u64().unwrap()),
-                }
-                .encode_log_data(),
-                block - 1,
-                1,
-                registration_controller,
-            ),
-            at(
-                super::v1_registry::NewResolver { node, resolver }.encode_log_data(),
-                block - 1,
-                2,
-                registry,
-            ),
-            at(
-                NewTTL { node, ttl: 60 }.encode_log_data(),
-                block - 1,
-                3,
-                registry,
-            ),
-            registrar_transfer_at(owner, controller, labelhash, block, 0, registrar),
-            at(
-                super::v1_registry::NewOwner {
-                    node: eth_node,
-                    label: labelhash,
-                    owner: controller,
-                }
-                .encode_log_data(),
-                block,
-                1,
-                registry,
-            ),
-            at(
-                super::v1_registry::Transfer {
-                    node,
-                    owner: graveyard,
-                }
-                .encode_log_data(),
-                block,
-                2,
-                registry,
-            ),
-            at(
-                super::v1_registry::NewResolver {
-                    node,
-                    resolver: Address::ZERO,
-                }
-                .encode_log_data(),
-                block,
-                3,
-                registry,
-            ),
-            at(
-                NewTTL { node, ttl: 0 }.encode_log_data(),
-                block,
-                4,
-                registry,
-            ),
-            registrar_transfer_at(controller, graveyard, labelhash, block, 5, registrar),
-            at(
-                super::v2_registry::LabelRegistered {
-                    tokenId: token,
-                    labelHash: labelhash,
-                    label: label.to_owned(),
-                    owner,
-                    expiry: scenario["stored_expiry"].as_u64().unwrap(),
-                    sender: controller,
-                }
-                .encode_log_data(),
-                block,
-                6,
-                v2,
-            ),
-            at(
-                super::v2_registry::TransferSingle {
-                    operator: controller,
-                    from: Address::ZERO,
-                    to: owner,
-                    id: token,
-                    value: U256::from(1),
-                }
-                .encode_log_data(),
-                block,
-                7,
-                v2,
-            ),
-            at(
-                super::v2_registry::TokenResource {
-                    tokenId: token,
-                    resource: token,
-                }
-                .encode_log_data(),
-                block,
-                8,
-                v2,
-            ),
-            at(
-                super::EACRolesChanged {
-                    resource: token,
-                    account: owner,
-                    oldRoleBitmap: U256::ZERO,
-                    newRoleBitmap: U256::from(0x1100000_u64) | (U256::from(0x11100000_u64) << 128),
-                }
-                .encode_log_data(),
-                block,
-                9,
-                v2,
-            ),
-            at(
-                super::v2_registry::ResolverUpdated {
-                    tokenId: token,
-                    resolver,
-                    sender: controller,
-                }
-                .encode_log_data(),
-                block,
-                10,
-                v2,
-            ),
-        ],
-        &fixture,
-        true,
-    );
+    let mut raw_logs = vec![
+        at(
+            super::v1_registry::NewOwner {
+                node: eth_node,
+                label: labelhash,
+                owner: registrant,
+            }
+            .encode_log_data(),
+            registration_block,
+            0,
+            registry,
+        ),
+        at(
+            super::NameRegistered {
+                name: label.to_owned(),
+                label: labelhash,
+                owner: registrant,
+                expires: U256::from(scenario["stored_expiry"].as_u64().unwrap()),
+            }
+            .encode_log_data(),
+            registration_block,
+            1,
+            registration_controller,
+        ),
+        at(
+            super::v1_registry::NewResolver { node, resolver }.encode_log_data(),
+            registration_block,
+            2,
+            registry,
+        ),
+        at(
+            NewTTL { node, ttl: 60 }.encode_log_data(),
+            registration_block,
+            3,
+            registry,
+        ),
+    ];
+    if let Some(holder) = handoff {
+        raw_logs.push(registrar_transfer_at(
+            registrant,
+            holder,
+            labelhash,
+            block - 1,
+            0,
+            registrar,
+        ));
+    }
+    raw_logs.extend([
+        registrar_transfer_at(owner, controller, labelhash, block, 0, registrar),
+        at(
+            super::v1_registry::NewOwner {
+                node: eth_node,
+                label: labelhash,
+                owner: controller,
+            }
+            .encode_log_data(),
+            block,
+            1,
+            registry,
+        ),
+        at(
+            super::v1_registry::Transfer {
+                node,
+                owner: graveyard,
+            }
+            .encode_log_data(),
+            block,
+            2,
+            registry,
+        ),
+        at(
+            super::v1_registry::NewResolver {
+                node,
+                resolver: Address::ZERO,
+            }
+            .encode_log_data(),
+            block,
+            3,
+            registry,
+        ),
+        at(
+            NewTTL { node, ttl: 0 }.encode_log_data(),
+            block,
+            4,
+            registry,
+        ),
+        registrar_transfer_at(controller, graveyard, labelhash, block, 5, registrar),
+        at(
+            super::v2_registry::LabelRegistered {
+                tokenId: token,
+                labelHash: labelhash,
+                label: label.to_owned(),
+                owner,
+                expiry: scenario["stored_expiry"].as_u64().unwrap(),
+                sender: controller,
+            }
+            .encode_log_data(),
+            block,
+            6,
+            v2,
+        ),
+        at(
+            super::v2_registry::TransferSingle {
+                operator: controller,
+                from: Address::ZERO,
+                to: owner,
+                id: token,
+                value: U256::from(1),
+            }
+            .encode_log_data(),
+            block,
+            7,
+            v2,
+        ),
+        at(
+            super::v2_registry::TokenResource {
+                tokenId: token,
+                resource: token,
+            }
+            .encode_log_data(),
+            block,
+            8,
+            v2,
+        ),
+        at(
+            super::EACRolesChanged {
+                resource: token,
+                account: owner,
+                oldRoleBitmap: U256::ZERO,
+                newRoleBitmap: U256::from(0x1100000_u64) | (U256::from(0x11100000_u64) << 128),
+            }
+            .encode_log_data(),
+            block,
+            9,
+            v2,
+        ),
+        at(
+            super::v2_registry::ResolverUpdated {
+                tokenId: token,
+                resolver,
+                sender: controller,
+            }
+            .encode_log_data(),
+            block,
+            10,
+            v2,
+        ),
+    ]);
+    let mut input = batch(raw_logs, &fixture, true);
     let kinds = &[
         "SubregistryChanged",
         "AuthorityTransferred",
@@ -5145,6 +5167,44 @@ fn plain_unwrapped_input() -> anyhow::Result<BatchInput> {
     Ok(input)
 }
 
+/// The handoff to `holder`, after which the registrant sends the registry record to the
+/// Graveyard with `setOwner` before the holder migrates. Nothing in the registry stops the
+/// current owner from naming the Graveyard, so the Graveyard holds resource control and resolver
+/// control on the registry-only resource from before the migration transaction.
+/// (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L16-L20 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L63-L68 @ ens_v1@91c966f)
+fn unwrapped_handoff_input_with_graveyard_registry_owner(
+    holder: Address,
+) -> anyhow::Result<BatchInput> {
+    let fixture = fixture()?;
+    let scenario = &fixture["scenarios"]["U-01"];
+    let node = scenario["namehash"].as_str().unwrap().parse::<B256>()?;
+    let graveyard = address(&fixture["addresses"], "graveyard")?;
+    let registry = "0x0000000000000000000000000000000000000099";
+    let mut input = unwrapped_input(Some(holder))?;
+    let block = input.raw_logs.last().unwrap().block_number;
+    let handoff = input
+        .raw_logs
+        .iter()
+        .position(|raw| raw.block_number == block - 1)
+        .expect("the handoff transfer");
+    input.raw_logs.insert(
+        handoff + 1,
+        raw_at_transaction(
+            super::v1_registry::Transfer {
+                node,
+                owner: graveyard,
+            }
+            .encode_log_data(),
+            block - 1,
+            0,
+            1,
+            registry,
+        ),
+    );
+    Ok(input)
+}
+
 #[test]
 fn plain_unwrapped_cleanup_keeps_one_predecessor_without_v1_reopenings() -> anyhow::Result<()> {
     let input = plain_unwrapped_input()?;
@@ -5214,6 +5274,352 @@ fn plain_unwrapped_cleanup_keeps_one_predecessor_without_v1_reopenings() -> anyh
             .iter()
             .any(|event| event.after_state["source_event"] == "NewResolver"
                 && event.after_state["resolver"] == ZERO_ADDRESS)
+    );
+    Ok(())
+}
+
+/// The Sepolia shape of `bnmig-0109-pw-unwrapped-012-r02.eth`: the registrar token was transferred
+/// without `reclaim` before the migration, so the name enters the migration transaction bound to
+/// a registry-only resource while its lease goes on under it. The migration transaction is the
+/// same complete unwrapped sequence, with the token holder as the migrating party. Reconciliation
+/// must treat it exactly like the plain case: no ENSv1 binding opens or closes inside the
+/// transaction, the registry cleanup observations sit on the lease, and the boundary is derived.
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L172-L175 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L111-L119 @ ens_v2@a971bd64)
+#[test]
+fn registry_only_handoff_cleanup_keeps_the_lease_without_v1_reopenings() -> anyhow::Result<()> {
+    let holder = Address::from([0x52; 20]);
+    let input = unwrapped_input(Some(holder))?;
+    let block = input.raw_logs.last().unwrap().block_number;
+    let output = interpret_test_batch(input)?;
+    let lease = output
+        .normalized_events
+        .iter()
+        .find(|event| {
+            event.source_family == "ens_v1_registrar_l1"
+                && event.event_kind == "RegistrationGranted"
+        })
+        .unwrap()
+        .resource_id
+        .unwrap();
+    let handoff_bindings = output
+        .surface_bindings
+        .iter()
+        .filter(|binding| binding.block_number == block - 1 && binding.authority_arm == "ens_v1")
+        .collect::<Vec<_>>();
+    assert_eq!(handoff_bindings.len(), 1, "{handoff_bindings:?}");
+    assert_ne!(
+        handoff_bindings[0].resource_id, lease,
+        "the handoff binds the name to a registry-only resource"
+    );
+    assert!(
+        output.binding_closures.iter().any(|closure| {
+            closure.block_number == block - 1 && closure.authority_arm == "ens_v1"
+        }),
+        "the handoff closes the lease binding"
+    );
+
+    assert_eq!(output.migration_authority_transitions.len(), 1);
+    assert!(
+        output
+            .surface_bindings
+            .iter()
+            .all(|binding| binding.block_number < block || binding.authority_arm != "ens_v1"),
+        "no ENSv1 binding opens inside the migration transaction: {:?}",
+        output
+            .surface_bindings
+            .iter()
+            .filter(|binding| binding.block_number == block)
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        output
+            .binding_closures
+            .iter()
+            .all(|closure| closure.block_number < block || closure.authority_arm != "ens_v1")
+    );
+    let migrated = output
+        .normalized_events
+        .iter()
+        .filter(|event| {
+            event.block_number == Some(block) && event.source_family.starts_with("ens_v1_")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        migrated
+            .iter()
+            .filter(|event| event.event_kind == "TokenControlTransferred"
+                && event.resource_id == Some(lease))
+            .count(),
+        2
+    );
+    assert!(migrated.iter().all(|event| !matches!(
+        event.event_kind.as_str(),
+        "SurfaceBound" | "SurfaceUnbound" | "AuthorityEpochChanged"
+    )));
+    // Registry metadata observations land on the lease without the fields that would restore
+    // temporary registry-only authority. Permission revocations are not metadata: each one stays
+    // on the resource whose grant it closes, which is the registry-only resource for the
+    // registrant's handoff grants and the lease for the controller's transient reclaim grant.
+    let (revocations, metadata): (Vec<&NormalizedEvent>, Vec<&NormalizedEvent>) = migrated
+        .iter()
+        .copied()
+        .filter(|event| event.source_family == "ens_v1_registry_l1")
+        .partition(|event| event.event_kind == "PermissionChanged");
+    assert!(!metadata.is_empty());
+    assert!(metadata.iter().all(|event| {
+        event.resource_id == Some(lease)
+            && event.after_state.get("authority_kind").is_none()
+            && event.after_state.get("authority_key").is_none()
+    }));
+    assert!(
+        revocations.iter().all(|event| {
+            !event.after_state["revocation_source"].is_null()
+                && (event.resource_id == Some(lease)
+                    || event.resource_id == Some(handoff_bindings[0].resource_id))
+        }),
+        "{revocations:#?}"
+    );
+    Ok(())
+}
+
+/// The sorted effective powers across `events`, read from their `before` or `after` state.
+fn effective_powers(events: &[NormalizedEvent], state: &str) -> Vec<String> {
+    let mut powers = events
+        .iter()
+        .flat_map(|event| {
+            let state = if state == "before" {
+                &event.before_state
+            } else {
+                &event.after_state
+            };
+            state["effective_powers"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+        })
+        .filter_map(|power| power.as_str().map(str::to_owned))
+        .collect::<Vec<_>>();
+    powers.sort();
+    powers
+}
+
+/// The handoff without `reclaim` leaves the registrant as registry owner, so the registrar
+/// transfer grants the registrant resource control and resolver control on the registry-only
+/// resource. The migration's reclaim moves the registry record to the controller and revokes
+/// those grants where they were made. Reconciliation removes the transient authority openings
+/// inside the migration transaction, but the revocations of grants made before it are durable
+/// permission history: dropping them would leave the registrant's registry-only grants as the
+/// latest permission rows on that resource.
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L172-L175 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L111 @ ens_v2@a971bd64)
+#[test]
+fn registry_only_handoff_cleanup_keeps_the_registrant_revocations_on_the_registry_resource()
+-> anyhow::Result<()> {
+    let registrant = format!("{:#x}", Address::from([0x51; 20]));
+    let holder = Address::from([0x52; 20]);
+    let input = unwrapped_input(Some(holder))?;
+    let block = input.raw_logs.last().unwrap().block_number;
+    let mut ordinary = input.clone();
+    ordinary
+        .manifests
+        .retain(|manifest| manifest.source_family != "ens_v2_migration_l1");
+    ordinary
+        .admissions
+        .retain(|admission| admission.source_manifest_id != Some(MIGRATION_MANIFEST_ID));
+    let output = interpret_test_batch(input)?;
+    let ordinary = interpret_test_batch(ordinary)?;
+    let registry_resource = output
+        .surface_bindings
+        .iter()
+        .find(|binding| binding.block_number == block - 1 && binding.authority_arm == "ens_v1")
+        .expect("the handoff binds the name to a registry-only resource")
+        .resource_id;
+    let registrant_permissions = |output: &BatchOutput, block_number: i64| {
+        output
+            .normalized_events
+            .iter()
+            .filter(|event| {
+                event.block_number == Some(block_number)
+                    && event.event_kind == "PermissionChanged"
+                    && event.resource_id == Some(registry_resource)
+                    && event.after_state["subject"]
+                        .as_str()
+                        .is_some_and(|subject| subject.eq_ignore_ascii_case(&registrant))
+            })
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    let handoff_grants = registrant_permissions(&output, block - 1);
+    assert_eq!(
+        effective_powers(&handoff_grants, "after"),
+        ["resolver_control", "resource_control"],
+        "the handoff grants the registrant on the registry-only resource: {handoff_grants:#?}"
+    );
+    assert_eq!(handoff_grants, registrant_permissions(&ordinary, block - 1));
+
+    let expected = registrant_permissions(&ordinary, block);
+    assert_eq!(
+        effective_powers(&expected, "before"),
+        ["resolver_control", "resource_control"],
+        "ordinary interpretation revokes both handoff grants at the reclaim: {expected:#?}"
+    );
+    assert!(
+        expected
+            .iter()
+            .all(|event| event.after_state["effective_powers"] == json!([])
+                && !event.after_state["revocation_source"].is_null()),
+        "{expected:#?}"
+    );
+    let reconciled = registrant_permissions(&output, block);
+    assert_eq!(
+        reconciled, expected,
+        "reconciliation keeps the registrant's revocations on the registry-only resource"
+    );
+    assert!(
+        output.normalized_events.iter().all(|event| {
+            event.block_number != Some(block)
+                || event.event_kind != "PermissionChanged"
+                || event.resource_id != Some(registry_resource)
+                || event.after_state["effective_powers"] == json!([])
+        }),
+        "no grant on the registry-only resource survives the migration transaction"
+    );
+    Ok(())
+}
+
+/// After the handoff without `reclaim`, the registrant sends the registry record to the Graveyard
+/// with `setOwner` before the holder migrates, so the Graveyard holds resource control and
+/// resolver control on the registry-only resource from before the migration transaction. Inside
+/// the transaction the controller's reclaim revokes those grants (log 1), the registry transfer to
+/// the Graveyard grants the same subject and scopes again as a temporary authority (log 2), and
+/// the resolver clear and the cleanup transfer revoke those temporary grants (logs 3 and 5).
+/// Only the reclaim's revocations close grants made before the transaction, so they are the ones
+/// reconciliation must keep: a revocation is transient only when a removed grant with the same
+/// subject and scope precedes it, not when one merely appears later in the transaction.
+/// (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L63-L68 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L111-L119 @ ens_v2@a971bd64)
+#[test]
+fn registry_only_handoff_cleanup_keeps_the_reclaim_revocations_of_a_prior_graveyard_owner()
+-> anyhow::Result<()> {
+    let holder = Address::from([0x52; 20]);
+    let graveyard = format!("{:#x}", address(&fixture()?["addresses"], "graveyard")?);
+    let input = unwrapped_handoff_input_with_graveyard_registry_owner(holder)?;
+    let block = input.raw_logs.last().unwrap().block_number;
+    let mut ordinary = input.clone();
+    ordinary
+        .manifests
+        .retain(|manifest| manifest.source_family != "ens_v2_migration_l1");
+    ordinary
+        .admissions
+        .retain(|admission| admission.source_manifest_id != Some(MIGRATION_MANIFEST_ID));
+    let output = interpret_test_batch(input)?;
+    let ordinary = interpret_test_batch(ordinary)?;
+    let registry_resource = output
+        .surface_bindings
+        .iter()
+        .find(|binding| binding.block_number == block - 1 && binding.authority_arm == "ens_v1")
+        .expect("the handoff binds the name to a registry-only resource")
+        .resource_id;
+    let graveyard_permissions = |output: &BatchOutput, block_number: i64| {
+        output
+            .normalized_events
+            .iter()
+            .filter(|event| {
+                event.block_number == Some(block_number)
+                    && event.event_kind == "PermissionChanged"
+                    && event.resource_id == Some(registry_resource)
+                    && event.after_state["subject"]
+                        .as_str()
+                        .is_some_and(|subject| subject.eq_ignore_ascii_case(&graveyard))
+            })
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    let at_log = |events: &[NormalizedEvent], log: i64| {
+        events
+            .iter()
+            .filter(|event| event.log_index == Some(log))
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    let revoked_by = |events: &[NormalizedEvent], source_event_kind: &str| {
+        !events.is_empty()
+            && events.iter().all(|event| {
+                event.after_state["effective_powers"] == json!([])
+                    && event.after_state["revocation_source"]["source_event_kind"]
+                        == source_event_kind
+            })
+    };
+
+    // The registrant's `setOwner` grants the Graveyard both scopes on the registry-only resource
+    // in the block before the migration; reconciliation leaves that block alone.
+    let prior_grants = graveyard_permissions(&ordinary, block - 1);
+    assert_eq!(
+        effective_powers(&prior_grants, "after"),
+        ["resolver_control", "resource_control"],
+        "the registry transfer grants the Graveyard on the registry-only resource: {prior_grants:#?}"
+    );
+    assert!(
+        prior_grants
+            .iter()
+            .all(|event| !event.after_state["grant_source"].is_null()),
+        "{prior_grants:#?}"
+    );
+    assert_eq!(prior_grants, graveyard_permissions(&output, block - 1));
+
+    // Ordinary interpretation of the migration transaction: the reclaim revokes the prior grants,
+    // the registry transfer grants the same keys again, and the later logs revoke those.
+    let migration = graveyard_permissions(&ordinary, block);
+    let reclaim_revocations = at_log(&migration, 1);
+    assert_eq!(
+        effective_powers(&reclaim_revocations, "before"),
+        ["resolver_control", "resource_control"],
+        "the reclaim revokes both prior grants: {migration:#?}"
+    );
+    assert!(
+        revoked_by(&reclaim_revocations, "AuthorityTransferred"),
+        "{reclaim_revocations:#?}"
+    );
+    let transient_grants = at_log(&migration, 2);
+    assert_eq!(
+        effective_powers(&transient_grants, "after"),
+        ["resolver_control", "resource_control"],
+        "the registry transfer to the Graveyard grants both scopes again: {migration:#?}"
+    );
+    assert!(
+        transient_grants
+            .iter()
+            .all(|event| !event.after_state["grant_source"].is_null()),
+        "{transient_grants:#?}"
+    );
+    assert!(
+        revoked_by(&at_log(&migration, 3), "ResolverChanged")
+            && revoked_by(&at_log(&migration, 5), "TokenControlTransferred"),
+        "the resolver clear and the cleanup transfer revoke the transient grants: {migration:#?}"
+    );
+    assert_eq!(
+        migration.len(),
+        reclaim_revocations.len() + transient_grants.len() + 2,
+        "{migration:#?}"
+    );
+
+    // Reconciliation keeps the reclaim's revocations and nothing else of the Graveyard's on the
+    // registry-only resource inside the migration transaction.
+    let reconciled = graveyard_permissions(&output, block);
+    assert_eq!(
+        reconciled, reclaim_revocations,
+        "reconciliation keeps the reclaim's revocations of the Graveyard's pre-migration grants \
+         on the registry-only resource and drops the transient grants with their revocations"
+    );
+    assert!(
+        output.normalized_events.iter().all(|event| {
+            event.block_number != Some(block)
+                || event.event_kind != "PermissionChanged"
+                || event.resource_id != Some(registry_resource)
+                || event.after_state["effective_powers"] == json!([])
+        }),
+        "no grant on the registry-only resource survives the migration transaction"
     );
     Ok(())
 }
