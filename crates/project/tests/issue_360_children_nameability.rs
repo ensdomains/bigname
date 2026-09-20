@@ -15,6 +15,7 @@ const V2_RESOURCE: &str = "00000000-0000-0000-0000-000000000360";
 const V2_BINDING: &str = "00000000-0000-0000-0000-000000000361";
 const V2_REGISTRY: &str = "00000000-0000-0000-0000-000000000362";
 const V2_REGISTRY_ADDRESS: &str = "0x0000000000000000000000000000000000000360";
+const V1_REGISTRY_ONLY_RESOURCE: &str = "00000000-0000-0000-0000-000000000363";
 const OWNER: &str = "0x0000000000000000000000000000000000000001";
 
 fn block_hash(block: i64) -> String {
@@ -231,7 +232,52 @@ async fn seed_v1_topology_only_child(pool: &PgPool) -> Result<()> {
             "owner": OWNER
         }),
     )
-    .await
+    .await?;
+    // The registry adapter emits a NewOwner for a label it has never observed with no
+    // logical name (crates/adapters/src/schema_v2/protocol/v1/registry.rs), so the
+    // authority events reach Project anchored on the registry-only resource alone.
+    sqlx::query("INSERT INTO resources (resource_id, chain_id, block_hash, block_number, canonicality_state) VALUES ($1::uuid, $2, $3, 10, 'canonical')")
+        .bind(V1_REGISTRY_ONLY_RESOURCE)
+        .bind(CHAIN)
+        .bind(block_hash(10))
+        .execute(pool)
+        .await?;
+    for (identity, event_kind, log_index, after_state) in [
+        (
+            "issue-360-v1-topology-only-epoch",
+            "AuthorityEpochChanged",
+            2,
+            json!({
+                "source_event": "NewOwner",
+                "authority_kind": "registry_only",
+                "child_node": V1_CHILD.trim_start_matches("ens:")
+            }),
+        ),
+        (
+            "issue-360-v1-topology-only-transfer",
+            "AuthorityTransferred",
+            3,
+            json!({
+                "source_event": "NewOwner",
+                "authority_kind": "registry_only",
+                "child_node": V1_CHILD.trim_start_matches("ens:"),
+                "owner": OWNER
+            }),
+        ),
+    ] {
+        insert_normalized_event(
+            pool,
+            identity,
+            None,
+            Some(V1_REGISTRY_ONLY_RESOURCE),
+            "ens_v1_registry_l1",
+            event_kind,
+            log_index,
+            after_state,
+        )
+        .await?;
+    }
+    Ok(())
 }
 
 async fn run_project(pool: &PgPool) -> Result<()> {
@@ -370,6 +416,23 @@ async fn ens_v1_topology_only_child_keeps_non_name_form() -> Result<()> {
     assert_eq!(
         served.canonicality_summary["target_block_hash"],
         block_hash(10)
+    );
+
+    // Contract: docs/api-v2-routes.md "GET /v1/addresses/{address}/names" — a node known
+    // only from registry owner events has a registry-only resource and no name surface, so
+    // the address collection omits it instead of listing the placeholder; the parent's
+    // subnames is its only listing.
+    let address_rows: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM address_names_current
+         WHERE lower(address) = lower($1) OR logical_name_id = $2",
+    )
+    .bind(OWNER)
+    .bind(V1_CHILD)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        address_rows, 0,
+        "a registry-only child with no name surface must not reach the address collection"
     );
     database.cleanup().await
 }
