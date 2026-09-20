@@ -281,7 +281,7 @@ The frozen catalog describes the object kinds the baseline uses — tables,
 views, sequences, indexes, constraints, triggers, functions and procedures,
 enum and domain types, and comments on those — and the phase schema is closed
 to every other kind. `apply-check.sh` refuses, by kind, an aggregate or window
-function, a range, multirange or composite type, an operator, operator class
+function, a range, multirange, composite or shell (declared but undefined) type, an operator, operator class
 or family, a materialized view, a partitioned table or index, a typed table, a foreign table,
 a rewrite rule, a row policy, an extended-statistics object, a collation, a
 conversion, a text-search object, or a cast to or from a phase type, and
@@ -455,7 +455,7 @@ values the system already documents as unstable across a boundary.
 
 5. **Serving indexes the projections never had** — no index in
    `bigname_phase` supports a name-text filter or a name sort, which is all
-   this ADR asserts about `/v2/search` and the GraphQL `name_contains` and
+   this ADR asserts about `/v1/search` and the GraphQL `name_contains` and
    name-ordered paths. What the planner does instead is unmeasured: a
    namespace-scoped request can walk `name_current_lookup_idx (namespace,
    namehash, logical_name_id)` before filtering `raw_name`, and a sort is
@@ -474,7 +474,7 @@ values the system already documents as unstable across a boundary.
    two shapes are the starting point for #404, benchmarked against the current
    `raw_name` queries rather than copied. Separately,
    `normalized_events` has no index leading with `namespace`. That is not the
-   same as the default `/v2/events` page having no index: a request with no
+   same as the default `/v1/events` page having no index: a request with no
    `event_type` still injects the product history event kinds
    (`apps/api/src/v2/events.rs`, `product_history_event_kinds()`), and
    `normalized_events_projection_idx (event_kind, canonicality_state, chain_id,
@@ -487,7 +487,7 @@ values the system already documents as unstable across a boundary.
    The name-text gap is confirmed present: no index in
    `schema-v2/baseline/06_projections.sql` supports a name-text filter or name
    sort (#404), and the two `name_current` predecessors above are the shapes
-   to measure first. For `/v2/events` (#402), the carve-out authorizes an index
+   to measure first. For `/v1/events` (#402), the carve-out authorizes an index
    only
    after `EXPLAIN` of the default query against the existing
    `normalized_events_projection_idx`; a `namespace`-leading index that

@@ -656,7 +656,7 @@ assert_frozen_catalog_sees_planted_changes() {
 # views, sequences, indexes, constraints, triggers, functions and procedures,
 # enum and domain types, and comments on those. Every other kind PostgreSQL
 # can put in a schema -- aggregate and window functions, range, multirange and
-# composite types, operators, operator classes and families, materialized
+# composite types, shell types, operators, operator classes and families, materialized
 # views, partitioned tables and indexes, foreign tables, rewrite rules, row
 # policies, extended statistics, collations, conversions, text-search objects
 # -- and any cast to or from a phase type is refused outright, named by kind,
@@ -672,6 +672,8 @@ SELECT kind || ' ' || name AS refused_object FROM (
     SELECT CASE t.typtype WHEN 'r' THEN 'range type' WHEN 'm' THEN 'multirange type' ELSE 'composite type' END, t.typname::text
     FROM pg_type t WHERE t.typnamespace = current_schema()::regnamespace
       AND (t.typtype IN ('r', 'm') OR (t.typtype = 'c' AND EXISTS (SELECT 1 FROM pg_class c WHERE c.oid = t.typrelid AND c.relkind = 'c')))
+    UNION ALL
+    SELECT 'shell type', t.typname::text FROM pg_type t WHERE t.typnamespace = current_schema()::regnamespace AND NOT t.typisdefined
     UNION ALL
     SELECT 'operator', o.oprname::text FROM pg_operator o WHERE o.oprnamespace = current_schema()::regnamespace
     UNION ALL
@@ -761,11 +763,12 @@ assert_refused_kinds_are_seen() {
         esac
         refusal_assertions_passed=$((refusal_assertions_passed + 1))
     done
-    # A foreign table and an operator class take a superuser to plant.
+    # A foreign table, an operator class and a shell type take a superuser to plant.
     if [ "$(printf '\\pset tuples_only on\nSELECT rolsuper FROM pg_roles WHERE rolname = current_user;\n' | run_psql_as_owner | tr -d ' ')" = t ]; then
         for planted in \
             'foreign table:CREATE FOREIGN DATA WRAPPER planted_fdw; CREATE SERVER planted_server FOREIGN DATA WRAPPER planted_fdw; CREATE FOREIGN TABLE planted_foreign (a integer) SERVER planted_server;' \
-            'operator class:CREATE OPERATOR CLASS planted_opc FOR TYPE int4 USING btree AS OPERATOR 1 <, OPERATOR 3 =, FUNCTION 1 btint4cmp(int4, int4);'
+            'operator class:CREATE OPERATOR CLASS planted_opc FOR TYPE int4 USING btree AS OPERATOR 1 <, OPERATOR 3 =, FUNCTION 1 btint4cmp(int4, int4);' \
+            'shell type:CREATE TYPE planted_shell;'
         do
             kind="${planted%%:*}"; sql="${planted#*:}"
             seen="$({
@@ -781,8 +784,8 @@ assert_refused_kinds_are_seen() {
             refusal_assertions_passed=$((refusal_assertions_passed + 1))
         done
     else
-        printf '%s\n' "note: the database user is not a superuser, the foreign-table and operator-class refusals were not planted" >&2
-        expected_refusal_assertions=$((expected_refusal_assertions - 2))
+        printf '%s\n' "note: the database user is not a superuser, the foreign-table, operator-class and shell-type refusals were not planted" >&2
+        expected_refusal_assertions=$((expected_refusal_assertions - 3))
     fi
 }
 # The fresh artifact above has no rows, so a schema-migration whose DDL runs
@@ -1707,7 +1710,7 @@ migration_application_log="$(
 # Future entries must use basename|one-line reason.
 intentional_phase_migration_skips=()
 refusal_assertions_passed=0
-expected_refusal_assertions=232
+expected_refusal_assertions=233
 predecessor_shape_proof_count=0
 expected_predecessor_shape_proof_count=40
 refusal_probe_seconds=0
@@ -10260,10 +10263,12 @@ assert_documented_head_is_newest_migration
 assert_no_migration_below_prior_head
 assert_frozen_schema_fingerprint
 assert_schema_holds_only_allowed_kinds "$frozen_schema" "the fresh baseline"
-assert_schema_holds_only_allowed_kinds "$scratch_schema" "the exercised scratch schema"
 assert_refused_kinds_are_seen
 assert_frozen_catalog_sees_planted_changes
 assert_exercised_schema_matches_frozen
+# Checked after the replay: a schema-migration may create an object only when it
+# finds rows, and refused kinds are absent from the catalog the replay compares.
+assert_schema_holds_only_allowed_kinds "$scratch_schema" "the exercised scratch schema"
 assert_reviewed_phase_migrations_applied
 if [ "$refusal_assertions_passed" -ne "$expected_refusal_assertions" ]; then
     printf '%s\n' \
