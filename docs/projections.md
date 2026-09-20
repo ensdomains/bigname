@@ -1006,11 +1006,18 @@ binding, alias, link, permission, and role-holder summaries store `total_count`,
 `sample_limit=100`, `sample_count`, `truncated`, and a deterministic `items`
 sample no longer than that limit. The link summary exists only for the
 record-ID resolver generation — an ERC-1967 proxy whose admitted
-implementation's manifest declares `Linked` — and lists, per node with a
-non-zero current record, the record ID, the node, whether it is the default
-(empty-name) node, the name surface known for that node if any, and the
-current `Linked` observation's position; the latest `Linked` per node is the
-same staged table record selection reads, so the two cannot disagree. Names are
+implementation's manifest declares `Linked`
+(upstream: .refs/ens_v2/contracts/src/resolver/interfaces/IRecordResolver.sol:L32-L38 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L97-L100 @ ens_v2@a971bd64) —
+and lists, per node with a non-zero current record, the record ID, the node,
+whether it is the default (empty-name) node whose record answers every
+unlinked name
+(upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L379-L386 @ ens_v2@a971bd64),
+the name surface known for that node if any, and the current `Linked`
+observation's position; each `Linked` overwrites the node's record ID
+(upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L363-L367 @ ens_v2@a971bd64),
+so the latest `Linked` per node is the current link, and it is the same staged
+table record selection reads, so the two cannot disagree. Names are
 looked up across every active canonical surface, not the run's scoped subset,
 and a surface entering scope pulls every resolver linking its node into scope,
 so a name observed after its link reaches the summary on that incremental run.

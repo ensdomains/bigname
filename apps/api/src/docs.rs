@@ -66,14 +66,17 @@ mod tests {
     }
 
     // The guide restates upstream protocol behavior in places; each such
-    // claim carries the same pinned citation the Markdown contract carries,
-    // so a citation the contract never verified cannot appear only here.
+    // claim carries the same pinned citation one of the checked-in contract
+    // docs carries, so a citation no doc verified cannot appear only here.
     #[test]
     fn every_upstream_citation_in_the_guide_is_in_the_route_contract() {
         let guide = include_str!("docs.html");
         let contract = concat!(
             include_str!("../../../docs/api-v2-routes.md"),
-            include_str!("../../../docs/api-v2.md")
+            include_str!("../../../docs/api-v2.md"),
+            include_str!("../../../docs/consumer-capabilities.md"),
+            include_str!("../../../docs/projections.md"),
+            include_str!("../../../docs/architecture.md")
         );
         let citations = guide
             .split("(upstream: ")
@@ -90,7 +93,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(
             unverified.is_empty(),
-            "citations in apps/api/src/docs.html absent from docs/api-v2-routes.md and docs/api-v2.md: {unverified:?}"
+            "citations in apps/api/src/docs.html absent from the contract docs (api-v2-routes, api-v2, consumer-capabilities, projections, architecture): {unverified:?}"
         );
     }
 

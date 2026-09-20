@@ -1326,7 +1326,9 @@ and record reads for the released or expired name continue to expose no current
 record inventory.
 
 An ENSv2 registration that lapses by path expiry is served like one released by
-`unregister`: `GET /v1/names/{name}` keeps answering with `registration_status`
+`unregister`, which ends the entry at the current block
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L196-L216 @ ens_v2@a971bd64):
+`GET /v1/names/{name}` keeps answering with `registration_status`
 `released`, the registration identity, timestamps and the lapsed `expires_at`,
 without a current owner, resolver or records, and `GET /v1/names/{name}/history`
 keeps serving the name's history. An ENSv1 lease that lapses past grace with no
