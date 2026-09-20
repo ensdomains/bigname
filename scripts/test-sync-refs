@@ -45,6 +45,28 @@ optional = true
                                 self.assertEqual([c.args[0] for c in run.call_args_list],
                                                  ["required", "comparison"] if include else ["required"])
 
+    def test_network_commands_retry_and_only_the_last_failure_is_fatal(self):
+        failed = mock.Mock(returncode=128, stdout="", stderr="fatal: unable to access")
+        succeeded = mock.Mock(returncode=0, stdout="", stderr="")
+        with mock.patch.object(sync.subprocess, "run", side_effect=[failed, failed, succeeded]) as run, \
+             mock.patch.object(sync.time, "sleep") as sleep:
+            sync.run_network(["git", "clone", "https://example.invalid/r", "r"])
+            self.assertEqual(run.call_count, 3)
+            self.assertEqual([c.args[0] for c in sleep.call_args_list], [5, 15])
+        with mock.patch.object(sync.subprocess, "run", return_value=failed) as run, \
+             mock.patch.object(sync.time, "sleep") as sleep:
+            with self.assertRaises(SystemExit) as exit:
+                sync.run_network(["git", "clone", "https://example.invalid/r", "r"])
+            self.assertEqual(exit.exception.code, 128)
+            self.assertEqual(run.call_count, sync.NETWORK_ATTEMPTS)
+            self.assertEqual([c.args[0] for c in sleep.call_args_list], [5, 15, 45])
+        with mock.patch.object(sync.subprocess, "run", return_value=failed) as run, \
+             mock.patch.object(sync.time, "sleep") as sleep:
+            with self.assertRaises(SystemExit):
+                sync.run(["git", "checkout", "--detach", "abc"])
+            self.assertEqual(run.call_count, 1)
+            sleep.assert_not_called()
+
     def test_required_check_failure_is_not_suppressed(self):
         with mock.patch.object(sys, "argv", ["sync-refs", "--check"]), \
              mock.patch.object(sync, "load_manifest", return_value={"refs": {"required": {}}}), \
