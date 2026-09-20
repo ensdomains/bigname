@@ -684,13 +684,8 @@ under such a binding, which never gets a binding of its own. Resources share a
 token id only as successive leases of the same label, and a successor grant
 requires the earlier lease to be past its grace period, which the adapters
 settle as a `RegistrationReleased` no later than the grant's block, so the
-release guard leaves exactly one live lease. Evidence positioned at the cleanup
-itself counts only for a lease already seen before the cleanup: one whose
-binding sits at that same log (the registrar identity materialized at
-`NameUnwrapped`) or one with a registrar lifecycle event of its own positioned
-before the cleanup, as set out below; otherwise the cleanup transfer, which
-every migration emits on the lease resource, could stand in as the only
-evidence for a lease first seen at the cleanup itself.
+release guard leaves exactly one live lease. Token evidence positioned at the
+cleanup itself must also satisfy one of the two evidence conditions below.
 Which of the four kinds carries the token id depends on the deployment profile:
 the Sepolia profile indexes the BaseRegistrar's numeric `NameRegistered` and
 `NameRenewed` as lifecycle events with the token id, while the Mainnet profile
@@ -708,13 +703,15 @@ transfer precedes the cleanup. On the unlocked-wrapped path `unwrapETH2LD`
 moves the token from the NameWrapper straight to the Graveyard, so for a name
 registered straight into the NameWrapper that cleanup transfer is the lease's
 first and only token-bearing event. The writer admits token evidence positioned
-at the cleanup in two cases: when a canonical ENSv1 binding of that resource is
-positioned at the cleanup log, or when the resource carries an activated
-canonical registrar lifecycle event of an admitted kind, on a canonical lineage
-block, positioned before the cleanup, token id or not, which on Mainnet is the
-controller grant. Either way the token id, the BaseRegistrar instance, the
-release guard and the exactly-one rule still apply, and the cleanup transfer
-never vouches for a lease first seen at the cleanup itself. Predecessor resolution therefore relies on those
+at the cleanup in two cases: when a canonical ENSv1 binding for the same name
+and resource is positioned at the cleanup log, or when that resource carries an
+activated canonical registrar lifecycle event of an admitted kind for the same
+name, on a canonical lineage block, positioned strictly before the cleanup.
+The latter event need not carry a token id; on Mainnet it can be the controller
+grant. An earlier event in the same transaction qualifies. Either way the token
+id, the BaseRegistrar instance, the release guard and the exactly-one rule
+still apply: the cleanup transfer alone cannot establish a predecessor.
+Predecessor resolution therefore relies on those
 transfers being activated with the name's `logical_name_id`, which the
 ordinary registrar adapter gives them whenever the surface is known.
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L118-L152 @ ens_v1@91c966f)
@@ -754,7 +751,12 @@ revocation is kept when it closes a grant made before the transaction: the
 controller's reclaim revokes the registry owner's handoff grants there, and
 dropping those revocations would leave the grants as the latest permission rows
 Project folds. A revocation that closes a grant the reconciliation itself
-removed is removed with it. Registry metadata observations remain attached
+removed is removed with it; the removed grant must precede the revocation in the
+transaction for the same subject and scope, since the registry owner the reclaim
+revokes may already be the Graveyard, which the transaction's own registry
+transfer grants again one log later.
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L63-L68 @ ens_v1@91c966f)
+Registry metadata observations remain attached
 to the existing registrar resource without fields that would restore temporary
 registry-only authority. Thus the actual registrar lease stays the predecessor
 at cleanup, and no replacement ENSv1 binding survives the strict cross-arm

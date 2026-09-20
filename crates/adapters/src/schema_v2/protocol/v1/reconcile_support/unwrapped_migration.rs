@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use super::super::refresh_interpreter_state_key;
 use crate::schema_v2::{
@@ -31,18 +31,25 @@ pub(in crate::schema_v2::protocol) fn reconcile(
     for proof in proofs {
         // Grants on the registry-only resource inside the proven transaction come from the
         // temporary authorities the controller's reclaim and cleanup close one log later; they are
-        // removed below, and so are the revocations that close them.
-        let transient_registry_grants = output
-            .normalized_events
-            .iter()
-            .filter(|event| {
-                proof.contains(event)
-                    && event.event_kind == "PermissionChanged"
-                    && event.resource_id == Some(proof.registry_resource_id)
-                    && !event.after_state["grant_source"].is_null()
-            })
-            .map(permission_key)
-            .collect::<BTreeSet<_>>();
+        // removed below, and so are the revocations that close them. A revocation closes such a
+        // grant only when the grant precedes it, so the earliest removed grant per subject and
+        // scope is kept by log position: the proof fixes the block and transaction, so the log
+        // index orders the events.
+        let mut transient_registry_grants = BTreeMap::<(String, String), i64>::new();
+        for event in output.normalized_events.iter().filter(|event| {
+            proof.contains(event)
+                && event.event_kind == "PermissionChanged"
+                && event.resource_id == Some(proof.registry_resource_id)
+                && !event.after_state["grant_source"].is_null()
+        }) {
+            let Some(log) = event.log_index else {
+                continue;
+            };
+            transient_registry_grants
+                .entry(permission_key(event))
+                .and_modify(|first| *first = (*first).min(log))
+                .or_insert(log);
+        }
         output.normalized_events.retain_mut(|event| {
             if !proof.contains(event) {
                 return true;
@@ -73,16 +80,25 @@ pub(in crate::schema_v2::protocol) fn reconcile(
                 // the registry owner holds resource and resolver control there from before this
                 // transaction; the controller's reclaim revokes those grants on that resource, so
                 // the revocations are durable permission history rather than transient authority.
+                // That owner may already be the Graveyard, which the transaction's registry
+                // transfer grants again one log after the reclaim: a revocation is transient only
+                // when a removed grant with the same subject and scope precedes it.
                 // (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L172-L175 @ ens_v1@91c966f)
+                // (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L63-L68 @ ens_v1@91c966f)
                 // (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L111 @ ens_v2@a971bd64)
                 let revoked = event
                     .after_state
                     .get("revocation_source")
                     .is_some_and(|value| !value.is_null());
+                let closes_transient_grant = event.resource_id == Some(proof.registry_resource_id)
+                    && transient_registry_grants
+                        .get(&permission_key(event))
+                        .zip(event.log_index)
+                        .is_some_and(|(grant, revocation)| *grant < revocation);
                 let predecessor_revocation = revoked
                     && (event.resource_id == Some(proof.resource_id)
                         || (event.resource_id == Some(proof.registry_resource_id)
-                            && !transient_registry_grants.contains(&permission_key(event))));
+                            && !closes_transient_grant));
                 return registrar_transfer || predecessor_revocation;
             }
             if event.source_family == "ens_v1_registry_l1" {
