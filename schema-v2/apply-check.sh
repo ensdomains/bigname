@@ -272,7 +272,7 @@ migration_uses_unicode_escape() {
 frozen_schema_catalog_sql="$(cat <<'CATALOG_SQL'
 SELECT line FROM (
     SELECT 0 AS section, c.relname AS a, '' AS b,
-           format('relation %s kind=%s persistence=%s acl=%s options=%s rls=%s force_rls=%s replica_identity=%s partition_key=%s partition_bound=%s inherits=%s',
+           format('relation %s kind=%s persistence=%s acl=%s options=%s rls=%s force_rls=%s replica_identity=%s partition_key=%s partition_bound=%s inherits=%s foreign=%s',
                   c.relname, c.relkind, c.relpersistence,
                   COALESCE(replace(array_to_string(c.relacl, ','), current_user, 'owner'), 'default'),
                   COALESCE((SELECT string_agg(o, ',' ORDER BY o) FROM unnest(c.reloptions) o), '-'),
@@ -281,7 +281,12 @@ SELECT line FROM (
                   COALESCE(pg_get_expr(c.relpartbound, c.oid), '-'),
                   COALESCE((SELECT string_agg(p.relname, ',' ORDER BY i.inhseqno)
                             FROM pg_inherits i JOIN pg_class p ON p.oid = i.inhparent
-                            WHERE i.inhrelid = c.oid), '-')) AS line
+                            WHERE i.inhrelid = c.oid), '-'),
+                  -- A foreign table's server and options live in pg_foreign_table.
+                  COALESCE((SELECT format('server=%s options=%s', srv.srvname,
+                                          COALESCE((SELECT string_agg(o, ',' ORDER BY o) FROM unnest(ft.ftoptions) o), '-'))
+                            FROM pg_foreign_table ft JOIN pg_foreign_server srv ON srv.oid = ft.ftserver
+                            WHERE ft.ftrelid = c.oid), '-')) AS line
     FROM pg_class c
     JOIN pg_namespace n ON n.oid = c.relnamespace
     WHERE n.nspname = current_schema() AND c.relkind IN ('r', 'p', 'v', 'm', 'S', 'f')
@@ -336,7 +341,7 @@ SELECT line FROM (
     WHERE n.nspname = current_schema()
     UNION ALL
     SELECT 3, c.relname, i.relname,
-           format('index %s.%s %s valid=%s', c.relname, i.relname, pg_get_indexdef(x.indexrelid), x.indisvalid)
+           format('index %s.%s %s valid=%s replident=%s', c.relname, i.relname, pg_get_indexdef(x.indexrelid), x.indisvalid, x.indisreplident)
     FROM pg_index x
     JOIN pg_class i ON i.oid = x.indexrelid
     JOIN pg_class c ON c.oid = x.indrelid
@@ -455,7 +460,8 @@ SELECT line FROM (
     WHERE n.nspname = current_schema() AND r.rulename <> '_RETURN'
     UNION ALL
     SELECT 12, s.stxname, '',
-           format('statistics %s %s', s.stxname, pg_get_statisticsobjdef(s.oid))
+           format('statistics %s %s target=%s', s.stxname, pg_get_statisticsobjdef(s.oid),
+                  COALESCE(to_jsonb(s) ->> 'stxstattarget', '-'))
     FROM pg_statistic_ext s JOIN pg_namespace n ON n.oid = s.stxnamespace
     WHERE n.nspname = current_schema()
     UNION ALL
@@ -683,7 +689,7 @@ END $$;
 SQL
         printf '%s\n' "$frozen_schema_catalog_sql"
         printf 'ROLLBACK;\n'
-    } | run_psql | sed "s/$schema/bigname_phase/g"
+    } | if [ "${3:-}" = owner ]; then run_psql_as_owner; else run_psql; fi | sed "s/$schema/bigname_phase/g"
 }
 assert_frozen_catalog_sees_planted_changes() {
     local planted reason planted_catalog
@@ -730,11 +736,13 @@ assert_frozen_catalog_sees_planted_changes() {
     for pair in \
         'SQL-standard routine bodies:CREATE FUNCTION planted_atomic(x integer) RETURNS boolean LANGUAGE sql IMMUTABLE BEGIN ATOMIC SELECT x > 1; END;:CREATE FUNCTION planted_atomic(x integer) RETURNS boolean LANGUAGE sql IMMUTABLE BEGIN ATOMIC SELECT x > 2; END;' \
         'range subtypes:CREATE TYPE planted_range AS RANGE (SUBTYPE = bigint);:CREATE TYPE planted_range AS RANGE (SUBTYPE = integer);' \
-        'aggregate transition functions:CREATE AGGREGATE planted_agg(bigint) (SFUNC = int8pl, STYPE = bigint, INITCOND = '"'"'1'"'"');:CREATE AGGREGATE planted_agg(bigint) (SFUNC = int8mul, STYPE = bigint, INITCOND = '"'"'1'"'"');'
+        'aggregate transition functions:CREATE AGGREGATE planted_agg(bigint) (SFUNC = int8pl, STYPE = bigint, INITCOND = '"'"'1'"'"');:CREATE AGGREGATE planted_agg(bigint) (SFUNC = int8mul, STYPE = bigint, INITCOND = '"'"'1'"'"');' \
+        'replica-identity indexes:ALTER TABLE chain_lineage REPLICA IDENTITY USING INDEX chain_lineage_pkey;:ALTER TABLE chain_lineage REPLICA IDENTITY USING INDEX chain_lineage_chain_id_block_hash_block_number_key;' \
+        'extended-statistics targets:CREATE STATISTICS planted_stats (dependencies) ON chain_id, block_number FROM chain_lineage; ALTER STATISTICS planted_stats SET STATISTICS 100;:CREATE STATISTICS planted_stats (dependencies) ON chain_id, block_number FROM chain_lineage; ALTER STATISTICS planted_stats SET STATISTICS 200;'
     do
         reason="${pair%%:*}"; pair="${pair#*:}"
-        frozen_schema_catalog_within "$frozen_schema" "${pair%%:CREATE *}" > "$planted_catalog"
-        frozen_schema_catalog_within "$frozen_schema" "CREATE ${pair#*:CREATE }" > "$other_catalog"
+        frozen_schema_catalog_within "$frozen_schema" "${pair%%;:*};" > "$planted_catalog"
+        frozen_schema_catalog_within "$frozen_schema" "${pair#*;:}" > "$other_catalog"
         if [ ! -s "$planted_catalog" ] || diff -q "$planted_catalog" "$other_catalog" >/dev/null; then
             printf '%s\n' "the frozen catalog does not tell two $reason apart" >&2
             rm -f -- "$planted_catalog" "$other_catalog"
@@ -742,6 +750,31 @@ assert_frozen_catalog_sees_planted_changes() {
         fi
         refusal_assertions_passed=$((refusal_assertions_passed + 1))
     done
+    # A foreign table's server and options: creating a foreign-data wrapper
+    # takes a superuser, which the external-server user need not be, so this
+    # pair runs on the owner's connection where it can and says so where not.
+    if [ "$(printf '\\pset tuples_only on\nSELECT rolsuper FROM pg_roles WHERE rolname = current_user;\n' | run_psql_as_owner | tr -d ' ')" = t ]; then
+        frozen_schema_catalog_within "$frozen_schema" \
+            'CREATE FOREIGN DATA WRAPPER planted_fdw; CREATE SERVER planted_server_a FOREIGN DATA WRAPPER planted_fdw; CREATE FOREIGN TABLE planted_foreign (a integer) SERVER planted_server_a OPTIONS (schema_name '"'"'x'"'"');' owner > "$planted_catalog"
+        frozen_schema_catalog_within "$frozen_schema" \
+            'CREATE FOREIGN DATA WRAPPER planted_fdw; CREATE SERVER planted_server_b FOREIGN DATA WRAPPER planted_fdw; CREATE FOREIGN TABLE planted_foreign (a integer) SERVER planted_server_b OPTIONS (schema_name '"'"'x'"'"');' owner > "$other_catalog"
+        if [ ! -s "$planted_catalog" ] || diff -q "$planted_catalog" "$other_catalog" >/dev/null; then
+            printf '%s\n' "the frozen catalog does not tell two foreign-table servers apart" >&2
+            rm -f -- "$planted_catalog" "$other_catalog"
+            exit 1
+        fi
+        frozen_schema_catalog_within "$frozen_schema" \
+            'CREATE FOREIGN DATA WRAPPER planted_fdw; CREATE SERVER planted_server_a FOREIGN DATA WRAPPER planted_fdw; CREATE FOREIGN TABLE planted_foreign (a integer) SERVER planted_server_a OPTIONS (schema_name '"'"'y'"'"');' owner > "$other_catalog"
+        if diff -q "$planted_catalog" "$other_catalog" >/dev/null; then
+            printf '%s\n' "the frozen catalog does not tell two foreign-table option sets apart" >&2
+            rm -f -- "$planted_catalog" "$other_catalog"
+            exit 1
+        fi
+        refusal_assertions_passed=$((refusal_assertions_passed + 1))
+    else
+        printf '%s\n' "note: the database user is not a superuser, foreign-table catalog proof not run" >&2
+        expected_refusal_assertions=$((expected_refusal_assertions - 1))
+    fi
     rm -f -- "$planted_catalog" "$other_catalog"
 }
 # The fresh artifact above has no rows, so a schema-migration whose DDL runs
@@ -797,8 +830,42 @@ assert_documented_head_is_newest_migration() {
 current_migration_inventory() {
     (cd "$ROOT/migrations" && sha384sum -- *.sql | sort -k2)
 }
+# sqlx identifies a schema-migration by the digits before the first
+# underscore, not by the file name, and refuses a directory with two files of
+# one version before applying anything; the description after the version only
+# affects how the files sort here.
+migration_version_of() {
+    local version="${1%%_*}"
+    if ! [[ "$version" =~ ^[0-9]{14}$ ]] || ! [[ "$1" =~ ^[0-9]{14}_[a-z0-9_]+\.sql$ ]]; then
+        printf '%s\n' "$1 is not named <14-digit version>_<description>.sql" >&2
+        return 1
+    fi
+    printf '%s\n' "$version"
+}
+assert_migration_versions_are_unique() {
+    local duplicated
+    duplicated="$(ls "$ROOT"/migrations/*.sql | xargs -n1 basename | cut -d_ -f1 | sort | uniq -d)"
+    if [ -n "$duplicated" ]; then
+        printf '%s\n' "migrations/ has more than one file of version ${duplicated//$'\n'/, }; sqlx refuses the directory, and a second description under an applied version would look new here" >&2
+        exit 1
+    fi
+    local file
+    for file in "$ROOT"/migrations/*.sql; do
+        migration_version_of "$(basename "$file")" >/dev/null || exit 1
+    done
+}
+# The rule proves itself: a later description under one version is not a
+# later version, and a name without the version shape is refused.
+if [ "$(migration_version_of 20260918120000_z.sql)" -gt "$(migration_version_of 20260918120000_a.sql)" ] \
+    || [ "$(migration_version_of 20260918120001_a.sql)" -le "$(migration_version_of 20260918120000_z.sql)" ] \
+    || migration_version_of 2026091812000_short.sql 2>/dev/null \
+    || migration_version_of 20260918120000-dash.sql 2>/dev/null; then
+    printf '%s\n' "the schema-migration version rule does not hold on planted names" >&2
+    exit 1
+fi
+assert_migration_versions_are_unique
 assert_no_migration_below_prior_head() {
-    local prior prior_head line entry checksum status
+    local prior prior_head prior_head_version line entry checksum status
     prior="$(prior_migration_inventory)" && status=0 || status=$?
     case "$status" in
         0) ;;
@@ -807,6 +874,7 @@ assert_no_migration_below_prior_head() {
     esac
     prior_head="$(printf '%s\n' "$prior" | tail -n 1 | awk '{print $2}')"
     [ -n "$prior_head" ] || return 0
+    prior_head_version="$(migration_version_of "$prior_head")" || exit 1
     local prior_checksum
     while IFS= read -r line; do
         [ -n "$line" ] || continue
@@ -821,9 +889,11 @@ assert_no_migration_below_prior_head() {
             fi
             continue
         fi
-        if ! [[ "$entry" > "$prior_head" ]]; then
+        # Compared by version, not name: a new description under the head's
+        # own version sorts after it and is still not newer.
+        if [ "$(migration_version_of "$entry")" -le "$prior_head_version" ]; then
             printf '%s\n' \
-                "$entry is new but sorts at or below the previous head $prior_head; sqlx would apply it to an initialized database while the freeze recorded nothing" >&2
+                "$entry is new but its version is at or below the previous head $prior_head; sqlx would apply it to an initialized database while the freeze recorded nothing" >&2
             exit 1
         fi
     done < "$migration_inventory"
@@ -1629,7 +1699,7 @@ migration_application_log="$(
 # Future entries must use basename|one-line reason.
 intentional_phase_migration_skips=()
 refusal_assertions_passed=0
-expected_refusal_assertions=217
+expected_refusal_assertions=220
 predecessor_shape_proof_count=0
 expected_predecessor_shape_proof_count=40
 refusal_probe_seconds=0
