@@ -271,9 +271,13 @@ migration_uses_unicode_escape() {
 # SCHEMA_V2_APPLY_CHECK_WRITE_FINGERPRINT=1 in the change that moves the schema.
 frozen_schema_catalog_sql="$(cat <<'CATALOG_SQL'
 SELECT line FROM (
-    SELECT 0 AS section, c.relname AS a, '' AS b,
-           format('relation %s kind=%s persistence=%s acl=%s options=%s rls=%s force_rls=%s replica_identity=%s partition_key=%s partition_bound=%s inherits=%s foreign=%s',
-                  c.relname, c.relkind, c.relpersistence,
+    -- The keys are text: a name-typed first branch would make the union name
+    -- and silently cut every later key at 63 bytes, where a schema-qualified
+    -- identity is longer, so rows would sort by a truncated key that depends
+    -- on the scratch schema's name.
+    SELECT 0 AS section, c.relname::text AS a, ''::text AS b,
+           format('relation %s kind=%s persistence=%s populated=%s acl=%s options=%s rls=%s force_rls=%s replica_identity=%s partition_key=%s partition_bound=%s inherits=%s foreign=%s',
+                  c.relname, c.relkind, c.relpersistence, c.relispopulated,
                   COALESCE(replace(array_to_string(c.relacl, ','), current_user, 'owner'), 'default'),
                   COALESCE((SELECT string_agg(o, ',' ORDER BY o) FROM unnest(c.reloptions) o), '-'),
                   c.relrowsecurity, c.relforcerowsecurity, c.relreplident,
@@ -401,11 +405,15 @@ SELECT line FROM (
     FROM pg_sequences s WHERE s.schemaname = current_schema()
     UNION ALL
     SELECT 8, t.typname, '',
-           format('type %s %s %s base=%s %s default=%s check=%s attributes=%s acl=%s range=%s', t.typname, t.typtype,
+           format('type %s %s %s base=%s %s collation=%s default=%s check=%s attributes=%s acl=%s range=%s', t.typname, t.typtype,
                   COALESCE((SELECT string_agg(e.enumlabel, ',' ORDER BY e.enumsortorder)
                             FROM pg_enum e WHERE e.enumtypid = t.oid), '-'),
                   CASE WHEN t.typtype = 'd' THEN format_type(t.typbasetype, t.typtypmod) ELSE '-' END,
                   CASE WHEN t.typtype = 'd' AND t.typnotnull THEN 'not null' ELSE 'null' END,
+                  -- A domain's COLLATE clause lives on the type, not on any column.
+                  COALESCE((SELECT format('%s.%s', cn.nspname, col.collname)
+                            FROM pg_collation col JOIN pg_namespace cn ON cn.oid = col.collnamespace
+                            WHERE col.oid = t.typcollation), '-'),
                   COALESCE(t.typdefault, '-'),
                   COALESCE((SELECT string_agg(format('%s %s', con.conname, pg_get_constraintdef(con.oid)), ',' ORDER BY con.conname)
                             FROM pg_constraint con WHERE con.contypid = t.oid), '-'),
@@ -427,17 +435,14 @@ SELECT line FROM (
     WHERE n.nspname = current_schema() AND t.typtype IN ('e', 'd', 'c', 'r')
       AND NOT EXISTS (SELECT 1 FROM pg_class c WHERE c.reltype = t.oid AND c.relkind <> 'c')
     UNION ALL
-    SELECT 9, COALESCE(c.relname, p.proname, t.typname, con.conname), COALESCE(a.attname, ''),
-           format('comment %s %s %s', COALESCE(c.relname, p.proname, t.typname, con.conname),
-                  COALESCE(a.attname, '-'), d.description)
+    -- A comment is keyed by the commented object's class and full identity
+    -- (a routine with its arguments, a constraint with its table), for every
+    -- object class the schema holds.
+    SELECT 9, replace(io.identity, current_schema(), 'bigname_phase'), io.type,
+           format('comment %s %s %s', io.type, io.identity, d.description)
     FROM pg_description d
-    LEFT JOIN pg_class c ON d.classoid = 'pg_class'::regclass AND c.oid = d.objoid
-    LEFT JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = d.objsubid AND d.objsubid > 0
-    LEFT JOIN pg_proc p ON d.classoid = 'pg_proc'::regclass AND p.oid = d.objoid
-    LEFT JOIN pg_type t ON d.classoid = 'pg_type'::regclass AND t.oid = d.objoid
-    LEFT JOIN pg_constraint con ON d.classoid = 'pg_constraint'::regclass AND con.oid = d.objoid
-    JOIN pg_namespace n ON n.oid = COALESCE(c.relnamespace, p.pronamespace, t.typnamespace, con.connamespace)
-    WHERE n.nspname = current_schema()
+    CROSS JOIN LATERAL pg_identify_object(d.classoid, d.objoid, d.objsubid) io
+    WHERE io.schema = current_schema()
     UNION ALL
     SELECT 10, c.relname, pol.polname,
            format('policy %s.%s permissive=%s command=%s roles=%s using=%s check=%s',
@@ -454,7 +459,7 @@ SELECT line FROM (
     WHERE n.nspname = current_schema()
     UNION ALL
     SELECT 11, c.relname, r.rulename,
-           format('rule %s.%s %s', c.relname, r.rulename, pg_get_ruledef(r.oid, true))
+           format('rule %s.%s %s enabled=%s', c.relname, r.rulename, pg_get_ruledef(r.oid, true), r.ev_enabled)
     FROM pg_rewrite r JOIN pg_class c ON c.oid = r.ev_class
     JOIN pg_namespace n ON n.oid = c.relnamespace
     WHERE n.nspname = current_schema() AND r.rulename <> '_RETURN'
@@ -520,8 +525,52 @@ SELECT line FROM (
                   o.oprcanhash, o.oprcanmerge)
     FROM pg_operator o JOIN pg_namespace n ON n.oid = o.oprnamespace
     WHERE n.nspname = current_schema()
+    UNION ALL
+    -- Text-search objects the schema holds: a configuration's parser and
+    -- ordered token-to-dictionary mappings, a dictionary's template and
+    -- options, a parser's and a template's functions.
+    SELECT 17, cfg.cfgname, 'configuration',
+           format('text search configuration %s parser=%s.%s mappings=%s', cfg.cfgname, pn.nspname, prs.prsname,
+                  COALESCE((SELECT string_agg(format('%s:%s', m.maptokentype,
+                                                     (SELECT string_agg(format('%s.%s', dn.nspname, dict.dictname), ',' ORDER BY mm.mapseqno)
+                                                      FROM pg_ts_config_map mm
+                                                      JOIN pg_ts_dict dict ON dict.oid = mm.mapdict
+                                                      JOIN pg_namespace dn ON dn.oid = dict.dictnamespace
+                                                      WHERE mm.mapcfg = cfg.oid AND mm.maptokentype = m.maptokentype)),
+                                              ';' ORDER BY m.maptokentype)
+                            FROM (SELECT DISTINCT maptokentype FROM pg_ts_config_map WHERE mapcfg = cfg.oid) m), '-'))
+    FROM pg_ts_config cfg
+    JOIN pg_namespace n ON n.oid = cfg.cfgnamespace
+    JOIN pg_ts_parser prs ON prs.oid = cfg.cfgparser
+    JOIN pg_namespace pn ON pn.oid = prs.prsnamespace
+    WHERE n.nspname = current_schema()
+    UNION ALL
+    SELECT 17, dict.dictname, 'dictionary',
+           format('text search dictionary %s template=%s.%s options=%s', dict.dictname, tn.nspname, tmpl.tmplname,
+                  COALESCE(dict.dictinitoption, '-'))
+    FROM pg_ts_dict dict
+    JOIN pg_namespace n ON n.oid = dict.dictnamespace
+    JOIN pg_ts_template tmpl ON tmpl.oid = dict.dicttemplate
+    JOIN pg_namespace tn ON tn.oid = tmpl.tmplnamespace
+    WHERE n.nspname = current_schema()
+    UNION ALL
+    SELECT 17, prs.prsname, 'parser',
+           format('text search parser %s start=%s token=%s end=%s headline=%s lextype=%s', prs.prsname,
+                  prs.prsstart::regproc, prs.prstoken::regproc, prs.prsend::regproc,
+                  prs.prsheadline::regproc, prs.prslextype::regproc)
+    FROM pg_ts_parser prs JOIN pg_namespace n ON n.oid = prs.prsnamespace
+    WHERE n.nspname = current_schema()
+    UNION ALL
+    SELECT 17, tmpl.tmplname, 'template',
+           format('text search template %s init=%s lexize=%s', tmpl.tmplname,
+                  tmpl.tmplinit::regproc, tmpl.tmpllexize::regproc)
+    FROM pg_ts_template tmpl JOIN pg_namespace n ON n.oid = tmpl.tmplnamespace
+    WHERE n.nspname = current_schema()
 ) catalog
-ORDER BY section, a, b, line;
+-- Byte order: the session collation may weigh punctuation last, and the
+-- scratch schema's name inside an identity would then reorder rows between
+-- two scratch schemas.
+ORDER BY section, a COLLATE "C", b COLLATE "C", line COLLATE "C";
 CATALOG_SQL
 )"
 frozen_schema_catalog="$ROOT/schema-v2/frozen-schema.txt"
@@ -738,7 +787,13 @@ assert_frozen_catalog_sees_planted_changes() {
         'range subtypes:CREATE TYPE planted_range AS RANGE (SUBTYPE = bigint);:CREATE TYPE planted_range AS RANGE (SUBTYPE = integer);' \
         'aggregate transition functions:CREATE AGGREGATE planted_agg(bigint) (SFUNC = int8pl, STYPE = bigint, INITCOND = '"'"'1'"'"');:CREATE AGGREGATE planted_agg(bigint) (SFUNC = int8mul, STYPE = bigint, INITCOND = '"'"'1'"'"');' \
         'replica-identity indexes:ALTER TABLE chain_lineage REPLICA IDENTITY USING INDEX chain_lineage_pkey;:ALTER TABLE chain_lineage REPLICA IDENTITY USING INDEX chain_lineage_chain_id_block_hash_block_number_key;' \
-        'extended-statistics targets:CREATE STATISTICS planted_stats (dependencies) ON chain_id, block_number FROM chain_lineage; ALTER STATISTICS planted_stats SET STATISTICS 100;:CREATE STATISTICS planted_stats (dependencies) ON chain_id, block_number FROM chain_lineage; ALTER STATISTICS planted_stats SET STATISTICS 200;'
+        'extended-statistics targets:CREATE STATISTICS planted_stats (dependencies) ON chain_id, block_number FROM chain_lineage; ALTER STATISTICS planted_stats SET STATISTICS 100;:CREATE STATISTICS planted_stats (dependencies) ON chain_id, block_number FROM chain_lineage; ALTER STATISTICS planted_stats SET STATISTICS 200;' \
+        'comments on overloaded routines:CREATE FUNCTION planted_c(x integer) RETURNS integer LANGUAGE sql AS '"'"'SELECT 1'"'"'; CREATE FUNCTION planted_c(x text) RETURNS integer LANGUAGE sql AS '"'"'SELECT 1'"'"'; COMMENT ON FUNCTION planted_c(integer) IS '"'"'first'"'"'; COMMENT ON FUNCTION planted_c(text) IS '"'"'second'"'"';:CREATE FUNCTION planted_c(x integer) RETURNS integer LANGUAGE sql AS '"'"'SELECT 1'"'"'; CREATE FUNCTION planted_c(x text) RETURNS integer LANGUAGE sql AS '"'"'SELECT 1'"'"'; COMMENT ON FUNCTION planted_c(integer) IS '"'"'second'"'"'; COMMENT ON FUNCTION planted_c(text) IS '"'"'first'"'"';' \
+        'rule firing states:CREATE TABLE planted_ruled (a integer); CREATE RULE planted_rule AS ON INSERT TO planted_ruled DO INSTEAD NOTHING;:CREATE TABLE planted_ruled (a integer); CREATE RULE planted_rule AS ON INSERT TO planted_ruled DO INSTEAD NOTHING; ALTER TABLE planted_ruled DISABLE RULE planted_rule;' \
+        'materialized-view population states:CREATE MATERIALIZED VIEW planted_mv AS SELECT 1 AS a WITH DATA;:CREATE MATERIALIZED VIEW planted_mv AS SELECT 1 AS a WITH NO DATA;' \
+        'domain collations:CREATE DOMAIN planted_dom AS text COLLATE "C";:CREATE DOMAIN planted_dom AS text COLLATE "POSIX";' \
+        'text-search mappings:CREATE TEXT SEARCH CONFIGURATION planted_ts (COPY = pg_catalog.simple); ALTER TEXT SEARCH CONFIGURATION planted_ts ALTER MAPPING FOR asciiword WITH pg_catalog.simple;:CREATE TEXT SEARCH CONFIGURATION planted_ts (COPY = pg_catalog.simple); ALTER TEXT SEARCH CONFIGURATION planted_ts ALTER MAPPING FOR asciiword WITH pg_catalog.english_stem;' \
+        'text-search dictionaries:CREATE TEXT SEARCH DICTIONARY planted_dict (TEMPLATE = pg_catalog.simple, StopWords = english);:CREATE TEXT SEARCH DICTIONARY planted_dict (TEMPLATE = pg_catalog.simple);'
     do
         reason="${pair%%:*}"; pair="${pair#*:}"
         frozen_schema_catalog_within "$frozen_schema" "${pair%%;:*};" > "$planted_catalog"
@@ -1699,7 +1754,7 @@ migration_application_log="$(
 # Future entries must use basename|one-line reason.
 intentional_phase_migration_skips=()
 refusal_assertions_passed=0
-expected_refusal_assertions=220
+expected_refusal_assertions=226
 predecessor_shape_proof_count=0
 expected_predecessor_shape_proof_count=40
 refusal_probe_seconds=0
