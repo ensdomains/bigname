@@ -217,51 +217,72 @@ async fn seed_v2_registry_path(pool: &PgPool) -> Result<()> {
 }
 
 async fn seed_v1_topology_only_child(pool: &PgPool) -> Result<()> {
-    insert_normalized_event(
-        pool,
-        "issue-360-v1-topology-only-child",
-        None,
-        None,
-        "ens_v1_registry_l1",
-        "SubregistryChanged",
-        1,
-        json!({
-            "node": PARENT.trim_start_matches("ens:"),
-            "child_node": V1_CHILD.trim_start_matches("ens:"),
-            "labelhash": V1_LABELHASH,
-            "owner": OWNER
-        }),
-    )
-    .await?;
-    // The registry adapter emits a NewOwner for a label it has never observed with no
-    // logical name (crates/adapters/src/schema_v2/protocol/v1/registry.rs), so the
-    // authority events reach Project anchored on the registry-only resource alone.
+    // The stream the ENSv1 registry adapter emits for a NewOwner on a node it has never
+    // seen named: a registry-only resource, and SubregistryChanged, AuthorityTransferred
+    // and PermissionChanged on it with no logical name (no AuthorityEpochChanged: the
+    // authority is neither surfaced nor tokenized, crates/adapters/src/schema_v2/
+    // protocol/v1/authority_transition.rs).
     sqlx::query("INSERT INTO resources (resource_id, chain_id, block_hash, block_number, canonicality_state) VALUES ($1::uuid, $2, $3, 10, 'canonical')")
         .bind(V1_REGISTRY_ONLY_RESOURCE)
         .bind(CHAIN)
         .bind(block_hash(10))
         .execute(pool)
         .await?;
+    let child_node = V1_CHILD.trim_start_matches("ens:");
+    let observation = json!({
+        "source_event": "NewOwner",
+        "emitter_role": "registry",
+        "authority_kind": "registry_only",
+        "authority_key": format!("registry-only:{CHAIN}:{child_node}"),
+        "node": PARENT.trim_start_matches("ens:"),
+        "child_node": child_node,
+        "labelhash": V1_LABELHASH,
+        "owner": OWNER,
+        "owner_getter": OWNER
+    });
+    let mut transferred = observation.clone();
+    transferred["registrar_surface_evidence"] = json!({
+        "registry_owner": {
+            "block_number": 10,
+            "log_index": 1,
+            "transaction_index": 0,
+            "timestamp": 1800000010,
+            "resource_id": V1_REGISTRY_ONLY_RESOURCE,
+            "source_family": "ens_v1_registry_l1",
+            "source_manifest_id": 1,
+            "state": observation.clone()
+        }
+    });
     for (identity, event_kind, log_index, after_state) in [
         (
-            "issue-360-v1-topology-only-epoch",
-            "AuthorityEpochChanged",
-            2,
-            json!({
-                "source_event": "NewOwner",
-                "authority_kind": "registry_only",
-                "child_node": V1_CHILD.trim_start_matches("ens:")
-            }),
+            "issue-360-v1-topology-only-child",
+            "SubregistryChanged",
+            1,
+            observation.clone(),
         ),
         (
             "issue-360-v1-topology-only-transfer",
             "AuthorityTransferred",
+            2,
+            transferred,
+        ),
+        (
+            "issue-360-v1-topology-only-permission",
+            "PermissionChanged",
             3,
             json!({
-                "source_event": "NewOwner",
-                "authority_kind": "registry_only",
-                "child_node": V1_CHILD.trim_start_matches("ens:"),
-                "owner": OWNER
+                "subject": OWNER,
+                "scope": {"kind": "resource"},
+                "effective_powers": ["resource_control"],
+                "inheritance_path": [],
+                "revocation_source": null,
+                "transfer_behavior": "replace_on_authority_change",
+                "grant_source": {
+                    "kind": "ens_v1_authority",
+                    "source_event_kind": "AuthorityTransferred",
+                    "authority_kind": "registry_only",
+                    "authority_key": format!("registry-only:{CHAIN}:{child_node}")
+                }
             }),
         ),
     ] {
