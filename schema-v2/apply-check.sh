@@ -249,14 +249,18 @@ legacy_public_schema_drop="20260806120000_drop_legacy_public_schema.sql"
 migration_inventory="$ROOT/schema-v2/migration-inventory.txt"
 # A post-cutoff schema-migration that names no bigname_phase object is never
 # applied by this check, so the rule for one is closed rather than parsed: it
-# may consist only of `DROP INDEX|SEQUENCE|VIEW|MATERIALIZED VIEW` statements
-# (with CONCURRENTLY, IF EXISTS, RESTRICT) whose every target is
-# `schema.name`, written with plain identifiers and no strings, quoted
-# identifiers, dollar quoting, block comments, or other lexical forms. A
-# routine drop is not closed-form: a bigname_phase routine that calls
-# `public.helper()` from its body holds no catalog dependency on it, so
-# RESTRICT lets the helper go and the phase routine fails at its next call;
-# a routine drop names bigname_phase and is applied and observed instead.
+# may consist only of `DROP INDEX` statements (with CONCURRENTLY, IF EXISTS,
+# RESTRICT) whose every target is `schema.name`, written with plain
+# identifiers and no strings, quoted identifiers, dollar quoting, block
+# comments, or other lexical forms. Every other drop is refused, because
+# RESTRICT only protects dependencies PostgreSQL records: a bigname_phase
+# PL/pgSQL routine that selects from `public.helper_view`, calls
+# `public.helper()`, or reads `nextval('public.helper_seq')` from its body
+# leaves no catalog dependency behind, so the drop succeeds and the routine
+# fails at its next call. An index is the one target no routine body can
+# depend on that way -- PostgreSQL chooses indexes by plan, not by name. A
+# file that drops anything else names bigname_phase and is applied and
+# observed here instead.
 # CONCURRENTLY is accepted only in a file whose first bytes are sqlx's
 # `-- no-transaction` marker and only over one index, since PostgreSQL
 # refuses it inside a transaction block and with more than one target.
@@ -290,11 +294,11 @@ migration_is_closed_form_drop() {
                     bad = bad " [DROP TABLE may detach a child or partition of a bigname_phase table: " substr(s, 1, 40) "]"
                     continue
                 }
-                if (match(u, /^DROP (FUNCTION|PROCEDURE|ROUTINE|AGGREGATE) /)) {
-                    bad = bad " [a routine drop is not protected by RESTRICT, since a bigname_phase routine body that calls it holds no dependency; name bigname_phase to have it applied and observed: " substr(s, 1, 40) "]"
+                if (match(u, /^DROP (FUNCTION|PROCEDURE|ROUTINE|AGGREGATE|VIEW|MATERIALIZED VIEW|SEQUENCE) /)) {
+                    bad = bad " [RESTRICT does not protect this target from a bigname_phase routine body that reads it, which records no dependency; name bigname_phase to have the drop applied and observed: " substr(s, 1, 40) "]"
                     continue
                 }
-                if (!match(u, /^DROP (INDEX( CONCURRENTLY)?|SEQUENCE|VIEW|MATERIALIZED VIEW)( IF EXISTS)? /)) {
+                if (!match(u, /^DROP INDEX( CONCURRENTLY)?( IF EXISTS)? /)) {
                     bad = bad " [not a closed-form drop: " substr(s, 1, 40) "]"
                     continue
                 }
@@ -397,10 +401,15 @@ SELECT line FROM (
     -- identity is longer, so rows would sort by a truncated key that depends
     -- on the scratch schema's name.
     SELECT 0 AS section, c.relname::text AS a, ''::text AS b,
-           format('relation %s kind=%s persistence=%s acl=%s options=%s rls=%s force_rls=%s replica_identity=%s inherits=%s',
+           format('relation %s kind=%s persistence=%s acl=%s options=%s toast_options=%s rls=%s force_rls=%s replica_identity=%s inherits=%s',
                   c.relname, c.relkind, c.relpersistence,
                   COALESCE(replace(array_to_string(c.relacl, ','), current_user, 'owner'), 'default'),
                   COALESCE((SELECT string_agg(o, ',' ORDER BY o) FROM unnest(c.reloptions) o), '-'),
+                  -- PostgreSQL stores toast.* parameters on the table's TOAST
+                  -- relation in pg_toast, not in the table's own reloptions.
+                  COALESCE((SELECT string_agg(o, ',' ORDER BY o)
+                            FROM pg_class tc, unnest(tc.reloptions) o
+                            WHERE tc.oid = c.reltoastrelid), '-'),
                   c.relrowsecurity, c.relforcerowsecurity, c.relreplident,
                   COALESCE((SELECT string_agg(p.relname, ',' ORDER BY i.inhseqno)
                             FROM pg_inherits i JOIN pg_class p ON p.oid = i.inhparent
@@ -410,10 +419,13 @@ SELECT line FROM (
     WHERE n.nspname = current_schema() AND c.relkind IN ('r', 'v', 'S')
     UNION ALL
     SELECT 1, c.relname, a.attname,
-           format('column %s.%s %s %s default=%s identity=%s generated=%s collation=%s storage=%s compression=%s statistics=%s acl=%s options=%s existing_rows=%s',
+           format('column %s.%s %s %s local=%s inherited=%s default=%s identity=%s generated=%s collation=%s storage=%s compression=%s statistics=%s acl=%s options=%s existing_rows=%s',
                   c.relname, a.attname,
                   format_type(a.atttypid, a.atttypmod),
                   CASE WHEN a.attnotnull THEN 'not null' ELSE 'null' END,
+                  -- A column defined locally survives the parent's; one that
+                  -- arrived only through inheritance disappears with it.
+                  a.attislocal, a.attinhcount,
                   COALESCE(pg_get_expr(d.adbin, d.adrelid), '-'),
                   COALESCE(NULLIF(a.attidentity, ''), '-'),
                   COALESCE(NULLIF(a.attgenerated, ''), '-'),
@@ -1092,16 +1104,19 @@ assert_uninventoried_migrations_are_schema_qualified() {
     # with its reason, and the closed form must be accepted.
     local -a refused=(
         'DROP INDEX IF EXISTS public.old_idx, name_current_lookup_idx RESTRICT;'
-        'DROP VIEW public.bridge CASCADE;'
+        'DROP INDEX public.bridge_idx CASCADE;'
         'DROP FUNCTION IF EXISTS public.fn(integer, text) cascade;'
         'DROP FUNCTION IF EXISTS public.fn(integer, text);'
         'DROP PROCEDURE public.p(integer) RESTRICT;'
         'DROP ROUTINE public.r();'
+        'DROP VIEW IF EXISTS public.helper_view;'
+        'DROP MATERIALIZED VIEW public.helper_mv RESTRICT;'
+        'DROP SEQUENCE IF EXISTS public.helper_seq;'
         'DROP TABLE public.phase_child RESTRICT;'
         'drop table if exists public.a, public.b;'
         'DROP INDEX CONCURRENTLY IF EXISTS "public"."ok_idx";'
-        'DROP VIEW "phase.audit";'
-        'DROP SEQUENCE U&"bigname\005Fphase".chain_phase_state_seq;'
+        'DROP INDEX "phase.audit_idx";'
+        'DROP INDEX U&"bigname\005Fphase".chain_phase_state_idx;'
         'CREATE INDEX x ON public.t (a);'
         'UPDATE public.t SET a = 1;'
         'ALTER TABLE public.shadow INHERIT chain_phase_state;'
@@ -1115,9 +1130,9 @@ assert_uninventoried_migrations_are_schema_qualified() {
         'CREATE TABLE public.audit AS SELECT "write_resolution_divergence"(1);'
         'INSERT INTO public.audit VALUES (nextval('"'"'reverse_hydration_attempt_ordinal_seq'"'"'));'
         'COMMENT ON TABLE public.audit IS $msg$text -- literal$msg$; UPDATE chain_phase_state SET a = 1;'
-        'DROP VIEW public.a /* -- */; UPDATE chain_phase_state SET a = 1;'
+        'DROP INDEX public.a_idx /* -- */; UPDATE chain_phase_state SET a = 1;'
         'CREATE FUNCTION public.touch() RETURNS int LANGUAGE sql AS '"'"'SELECT 1'"'"';'
-        'DROP VIEW public.a; DROP VIEW b;'
+        'DROP INDEX public.a_idx; DROP INDEX b_idx;'
         'DROP FUNCTION public.fn(integer) GARBAGE;'
         'DROP FUNCTION IF EXISTS public.fn(integer) RESTRICT GARBAGE;'
         'DROP FUNCTION public.fn(integer) public.g(integer);'
@@ -1151,7 +1166,7 @@ assert_uninventoried_migrations_are_schema_qualified() {
         printf '%s\n' "unicode-escape check refused a plain identifier" >&2
         exit 1
     fi
-    if ! printf -- '-- no-transaction\nDROP INDEX CONCURRENTLY IF EXISTS\n    public.old_idx;\nDROP VIEW IF EXISTS public.a, public.b;\nDROP MATERIALIZED VIEW public.mv RESTRICT;\nDROP SEQUENCE IF EXISTS public.s;\n' \
+    if ! printf -- '-- no-transaction\nDROP INDEX CONCURRENTLY IF EXISTS\n    public.old_idx;\n' \
         | migration_is_closed_form_drop /dev/stdin >/dev/null; then
         printf '%s\n' "closed-form check refused the closed form" >&2
         exit 1
@@ -1826,7 +1841,7 @@ migration_application_log="$(
 # Future entries must use basename|one-line reason.
 intentional_phase_migration_skips=()
 refusal_assertions_passed=0
-expected_refusal_assertions=246
+expected_refusal_assertions=249
 predecessor_shape_proof_count=0
 expected_predecessor_shape_proof_count=40
 refusal_probe_seconds=0
@@ -2012,7 +2027,12 @@ baseline_extension_statements="$(baseline_extension_statements_of "$ROOT/schema-
 # bookkeeping insert. Refused, as text, wherever it appears (a routine body
 # included, since a SET there runs with the same reach): a statement-leading
 # SET or RESET of any setting, SET ROLE, SET SESSION AUTHORIZATION, and
-# set_config with a false is_local. UPDATE ... SET and ALTER ... SET are not
+# set_config with a false is_local, and `ALTER ROLE`/`ALTER DATABASE` with a
+# configuration clause, which outlives the run: the disposable login may set
+# its own defaults, the open migration connection never sees them, the
+# catalog does not serialize role or database configuration, and cleanup
+# drops the role, so the change would reach production unobserved.
+# UPDATE ... SET and ALTER ... SET on an object (a routine, a table) are not
 # session state; set_config(..., true) inside a routine ends with the
 # transaction and a routine that restores what it changed is the documented
 # form. The text is the file's statements as the quote-aware splitter reads
@@ -2031,6 +2051,8 @@ session_state_scanner='
         }
         t = toupper(text)
         while (match(t, /SET_CONFIG *\([^)]*, *FALSE *\)/)) { print file ": " substr(t, RSTART, RLENGTH); t = substr(t, RSTART + RLENGTH) }
+        t = toupper(text)
+        while (match(t, /ALTER (ROLE|USER|DATABASE)[^;]* (SET|RESET) [A-Z_.]+/)) { print file ": " substr(t, RSTART, RLENGTH); t = substr(t, RSTART + RLENGTH) }
     }
 '
 session_state_statements_of() {
@@ -2067,6 +2089,9 @@ assert_session_state_rule_holds() {
         'SELECT '"'"'--'"'"'; SET standard_conforming_strings = off;'
         'SELECT $q$/*$q$; SET search_path TO pg_catalog; SELECT $q$*/$q$;'
         'SELECT '"'"'open; SET search_path = pg_catalog;'
+        'ALTER ROLE CURRENT_USER SET lock_timeout = '"'"'1ms'"'"';'
+        'alter user bigname reset search_path;'
+        'ALTER DATABASE bigname SET lock_timeout TO '"'"'1ms'"'"';'
     )
     local -a accepted=(
         'UPDATE t SET a = 1;'
@@ -2096,6 +2121,30 @@ assert_session_state_rule_holds() {
 }
 assert_session_state_rule_holds
 assert_no_session_state_statements
+# The replay records every version a deployed database records, but not when
+# it was installed or how long it took: `installed_on` defaults to the replay
+# clock and `execution_time` is written as zero, and the real values cannot
+# be reconstructed. Reading a version is therefore supported (the ledger is
+# the same set of rows); reading its timing is not, and a phase
+# schema-migration that branches on it would take a branch here that
+# deployment never takes.
+assert_no_migration_reads_synthetic_ledger_timing() {
+    local migration_file statements hits
+    for migration_file in "$ROOT"/migrations/*.sql; do
+        phase_migration_uses_production_schema "$migration_file" || continue
+        if ! statements="$(sql_statements "$migration_file")"; then
+            printf '%s\n' "$(basename "$migration_file") cannot be split into statements: $(printf '%s\n' "$statements" | tail -n 1)" >&2
+            exit 1
+        fi
+        hits="$(printf '%s\n' "$statements" | grep -oiE '(installed_on|execution_time)' | sort -u | tr '\n' ' ' || true)"
+        if [ -n "$hits" ]; then
+            printf '%s\n' \
+                "$(basename "$migration_file") reads the sqlx ledger's ${hits% } column, which this check can only synthesize (installed_on is the replay clock, execution_time is zero), so a branch on it would differ from sqlx migrate run; branch on the recorded version instead" >&2
+            exit 1
+        fi
+    done
+}
+assert_no_migration_reads_synthetic_ledger_timing
 check_baseline_extensions "$baseline_extension_statements" || exit 1
 # The login is provisioned by the owner without any database-level grant,
 # which the documented external-database user (CREATEDB and CREATEROLE, not

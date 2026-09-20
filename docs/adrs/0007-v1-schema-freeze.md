@@ -187,13 +187,19 @@ Since #849 `apply-check.sh` applies every schema-migration that names a
 that literal token, so a schema-migration written against the connection's
 search path would not be in it; the same script therefore closes that door
 by rule rather than by parsing: a schema-migration newer than the
-legacy-schema drop that names no `bigname_phase` object may consist only of `DROP`
-statements for indexes, sequences, views, materialized views, functions, and
-procedures whose every target is `schema.name`, written with plain
-identifiers and nothing quoted — no strings, quoted identifiers, dollar
-quoting, or block comments — and without `CASCADE`, since a cascading drop
-would take any dependent `bigname_phase` object with it unlisted, where the
-default `RESTRICT` makes that dependency fail the schema-migration loudly.
+legacy-schema drop that names no `bigname_phase` object may consist only of
+`DROP INDEX` statements whose every target is `schema.name`, written with
+plain identifiers and nothing quoted — no strings, quoted identifiers,
+dollar quoting, or block comments — and without `CASCADE`, since a cascading
+drop would take any dependent `bigname_phase` object with it unlisted. Every
+other drop kind is refused here because `RESTRICT` protects only the
+dependencies PostgreSQL records: a `bigname_phase` PL/pgSQL routine that
+calls `public.helper()`, selects from `public.helper_view`, or reads
+`nextval('public.helper_seq')` from its body records none, so such a drop
+succeeds and the routine fails at its next call. An index is the one target
+no routine body can depend on that way. A schema-migration that drops
+anything else names `bigname_phase`, which has it inventoried, applied and
+observed here.
 `DROP TABLE` is refused even with `RESTRICT`: a table in another schema can
 be an inheritance child or a partition of a `bigname_phase` table, and
 PostgreSQL drops it without complaint, taking the rows visible through the

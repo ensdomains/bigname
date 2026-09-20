@@ -679,8 +679,11 @@ partial `normalized_events` indexes the resolver-anchored event feed
 (`GET /v1/events?resolver=`) uses and retires the two `permission_*`
 resolver-history indexes that nothing reads; #415 added all four to the
 baseline without a schema-migration, so a namespace that took slice 1 in
-place lacks them all, and a namespace replaced from the baseline since
-2026-08-14 has all four. On an initialized production namespace, run
+place lacks them all, and a namespace replaced from the baseline between
+2026-08-14 and this release has all four. The baseline in this change
+carries only the two kept pointer indexes, so a namespace initialized or
+replaced from this release onward already has the end state and needs
+nothing here. On an initialized production namespace, run
 [`ops/resolver-history-indexes/install.sql`](../../ops/resolver-history-indexes/install.sql)
 in step 3 as [its runbook](../../ops/resolver-history-indexes/README.md)
 describes. `install.sql` is the reviewed source of those statements: the
