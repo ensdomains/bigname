@@ -1754,7 +1754,7 @@ migration_application_log="$(
 # Future entries must use basename|one-line reason.
 intentional_phase_migration_skips=()
 refusal_assertions_passed=0
-expected_refusal_assertions=226
+expected_refusal_assertions=227
 predecessor_shape_proof_count=0
 expected_predecessor_shape_proof_count=40
 refusal_probe_seconds=0
@@ -2009,15 +2009,48 @@ assert_dynamic_production_name_is_refused() {
 }
 assert_dynamic_production_name_is_refused
 
+# The baseline is applied the way phase-runner's initialize_schema_v2
+# applies it (apps/phase-runner/src/schema.rs): every file on one connection
+# inside one transaction, after SET LOCAL search_path TO <phase schema>,
+# public. Session state one file sets therefore reaches the next file here as
+# it does there; a file applied on its own connection would hide that.
 apply_baseline() {
     local sql_file
-    for sql_file in "${1:-$ROOT/schema-v2/baseline}"/*.sql; do
-        {
-            printf 'SET client_min_messages TO warning;\n'
-            printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    {
+        printf 'SET client_min_messages TO warning;\nBEGIN;\n'
+        printf 'SET LOCAL search_path TO "%s", public;\n' "$scratch_schema"
+        for sql_file in "${1:-$ROOT/schema-v2/baseline}"/*.sql; do
             cat "$sql_file"
-        } | run_psql
-    done
+            printf '\n'
+        done
+        printf '%s\n' "${2:-}"
+        printf 'COMMIT;\n'
+    } | run_psql
+}
+# The single session proves itself: with a search_path change planted at the
+# end of the first file, every later file's objects land in the other
+# scratch schema (the login may create there, and not in public), which a
+# probe after the files must see; a per-file connection would lose the
+# change and the probe would find nothing wrong. Rolled back, nothing lands.
+assert_baseline_session_state_carries() {
+    local planted_dir probe_stderr observed_error expected_error
+    planted_dir="$(mktemp -d "${TMPDIR:-/tmp}/schema-v2-planted-baseline.XXXXXX")"
+    cp "$ROOT"/schema-v2/baseline/*.sql "$planted_dir"/
+    printf '\nSET LOCAL search_path TO "%s", "%s";\n' "$frozen_schema" "$scratch_schema" >> "$planted_dir/01_chain.sql"
+    expected_error="baseline session state carried across files: normalized_events landed in the next schema"
+    if probe_stderr="$(apply_baseline "$planted_dir" "DO \$\$ BEGIN IF to_regclass('\"$frozen_schema\".normalized_events') IS NOT NULL THEN RAISE EXCEPTION '$expected_error'; END IF; END \$\$; ROLLBACK;" 2>&1 >/dev/null)"; then
+        printf '%s\n' "the baseline check applied a planted search_path change without the next files seeing it, so it does not run the baseline as one session" >&2
+        rm -rf -- "$planted_dir"
+        exit 1
+    fi
+    observed_error="$(printf '%s\n' "$probe_stderr" | psql_error_message)"
+    if [ "$observed_error" != "$expected_error" ]; then
+        printf '%s\n' "the planted baseline session failed for another reason: $observed_error" >&2
+        rm -rf -- "$planted_dir"
+        exit 1
+    fi
+    rm -rf -- "$planted_dir"
+    refusal_assertions_passed=$((refusal_assertions_passed + 1))
 }
 
 # A schema-migration database can exist before phase-runner installs the phase
@@ -2119,6 +2152,7 @@ SQL
 } | run_psql
 report_timing empty-schema
 
+assert_baseline_session_state_carries
 apply_baseline
 apply_baseline
 report_timing baseline-install
