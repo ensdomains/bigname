@@ -2730,10 +2730,19 @@ async fn registrar_handoff_without_reclaim_keeps_the_registry_owner_across_a_lat
 
     // The handoff arrives as its own batch and resumes the materialized projection.
     handoff_scenario::persist(&pool, &handoff).await?;
-    assert!(bigname_storage::resource_is_registry_control_for_registrar_lease(&pool, registry_resource).await?,
-        "the real registrar-transfer epoch must classify the registry-only control resource");
-    assert!(!bigname_storage::resource_is_registry_control_for_registrar_lease(&pool, registrar_resource).await?,
-        "the transferred lease must remain a registration handle");
+    assert!(
+        bigname_storage::resource_is_registry_control_for_registrar_lease(&pool, registry_resource)
+            .await?,
+        "the real registrar-transfer epoch must classify the registry-only control resource"
+    );
+    assert!(
+        !bigname_storage::resource_is_registry_control_for_registrar_lease(
+            &pool,
+            registrar_resource
+        )
+        .await?,
+        "the transferred lease must remain a registration handle"
+    );
     run_project(
         &pool,
         HANDOFF_BLOCK,
