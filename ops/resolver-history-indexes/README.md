@@ -46,6 +46,13 @@ permit writes, but each can wait for an existing batch transaction; inspect
 permits that transaction wait and bounds each build to six hours. Retain its
 output in the deployment receipt.
 
+After both builds finish, run `ANALYZE bigname_phase.normalized_events` (or
+confirm autovacuum has analyzed the table since). Both kept indexes key on a
+`lower(...)` expression, and an expression index has no statistics until the
+table is analyzed; without them the planner may keep scanning the chain's
+`ResolverChanged` history instead of taking the `BitmapOr` over the pair. The
+same applies when the schema-migration performs a build itself.
+
 The script checks the kept names twice and fails, with a non-zero `psql` exit,
 instead of reporting success over an index the feed cannot use. Both kept
 predicates name `consumer_visibility`, so it first refuses a namespace whose

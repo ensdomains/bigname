@@ -223,7 +223,22 @@ migration_is_closed_form_drop() {
                             else if (c == ")") depth--
                             if (depth < 1) ok = 0
                         }
-                        if (!ok || signature !~ /^[A-Z0-9_ .,\[\]()]*$/) bad = bad " [signature: " signature "]"
+                        # Each argument is a type name: words, optionally
+                        # schema-qualified, with a numeric typmod and array
+                        # brackets; an empty or other argument is refused.
+                        a = 0; arg = ""; sdepth = 0
+                        for (k = 1; k <= length(signature) && ok; k++) {
+                            c = substr(signature, k, 1)
+                            if (c == "(") sdepth++
+                            else if (c == ")") sdepth--
+                            if (c == "," && sdepth == 0) { args[++a] = arg; arg = "" } else arg = arg c
+                        }
+                        if (a > 0 || arg != "") args[++a] = arg
+                        for (k = 1; k <= a && ok; k++) {
+                            arg = args[k]; gsub(/^ +| +$/, "", arg)
+                            if (arg !~ /^[A-Z_][A-Z0-9_]*(\.[A-Z_][A-Z0-9_]*)?( [A-Z_][A-Z0-9_]*(\.[A-Z_][A-Z0-9_]*)?)*(\([0-9]+(, ?[0-9]+)*\))?(\[\])*$/) ok = 0
+                        }
+                        if (!ok) bad = bad " [signature: " signature "]"
                     }
                     if (target !~ /^[A-Z_][A-Z0-9_]*\.[A-Z_][A-Z0-9_]*$/) {
                         bad = bad " " (target == "" ? "[empty target]" : target)
@@ -244,7 +259,7 @@ migration_uses_unicode_escape() {
 # its storage options, row-security flags, replica identity and partitioning,
 # every column with its storage, statistics target, privileges and the
 # schema, provider and locale of its collation, constraint, index, view,
-# routine with its full argument list, trigger with its firing state,
+# routine with its full argument list and both body forms, trigger with its firing state,
 # sequence with its full range, type and domain with their privileges,
 # comment, policy, rule, extended
 # statistics object, the schema's own privileges, every collation the schema
@@ -333,7 +348,7 @@ SELECT line FROM (
     WHERE n.nspname = current_schema() AND c.relkind IN ('v', 'm')
     UNION ALL
     SELECT 5, p.proname, pg_get_function_identity_arguments(p.oid),
-           format('routine %s(%s) returns %s kind=%s lang=%s volatile=%s strict=%s leakproof=%s parallel=%s secdef=%s cost=%s rows=%s config=%s acl=%s body=%s',
+           format('routine %s(%s) returns %s kind=%s lang=%s volatile=%s strict=%s leakproof=%s parallel=%s secdef=%s cost=%s rows=%s config=%s acl=%s body=%s sqlbody=%s',
                   p.proname, pg_get_function_arguments(p.oid),
                   pg_get_function_result(p.oid), p.prokind,
                   (SELECT l.lanname FROM pg_language l WHERE l.oid = p.prolang),
@@ -341,7 +356,10 @@ SELECT line FROM (
                   p.procost, p.prorows,
                   COALESCE(array_to_string(p.proconfig, ';'), '-'),
                   COALESCE(replace(array_to_string(p.proacl, ','), current_user, 'owner'), 'default'),
-                  md5(replace(p.prosrc, current_schema(), 'bigname_phase')))
+                  md5(replace(p.prosrc, current_schema(), 'bigname_phase')),
+                  -- A SQL-standard body (BEGIN ATOMIC) is stored parsed, with
+                  -- prosrc empty; only its printed form tells two apart.
+                  md5(replace(COALESCE(pg_get_function_sqlbody(p.oid), ''), current_schema(), 'bigname_phase')))
     FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
     WHERE n.nspname = current_schema()
     UNION ALL
@@ -521,6 +539,7 @@ assert_frozen_schema_fingerprint() {
         rm -f -- "$observed" "$after_baseline"
         exit 1
     fi
+    assert_predecessor_baseline_transition "$after_baseline" "$observed"
     rm -f -- "$after_baseline"
     if [ "${SCHEMA_V2_APPLY_CHECK_WRITE_FINGERPRINT:-0}" = 1 ]; then
         cp "$observed" "$frozen_schema_catalog"
@@ -532,6 +551,66 @@ assert_frozen_schema_fingerprint() {
         exit 1
     fi
     rm -f -- "$observed"
+}
+# The comparison above proves every schema-migration is a no-op on the current
+# baseline, which a baseline edit with no schema-migration also satisfies: the
+# object is in both catalogs before any schema-migration runs. What an
+# initialized database actually does is start from an earlier baseline, so
+# the previous commit's baseline (the same point the inventory comparison
+# reads) plus every current schema-migration must be the current baseline.
+# The predecessor baseline is applied on its own before the schema-migrations
+# and must differ from the current one exactly when the baseline files do,
+# which proves this path reads the previous files and not the working tree.
+assert_predecessor_baseline_transition() {
+    local after_baseline="$1" observed="$2"
+    local base status predecessor_dir predecessor_catalog migrated_catalog file
+    base="$(prior_ref)" && status=0 || status=$?
+    case "$status" in
+        0) ;;
+        2) return 0 ;;
+        *) exit 1 ;;
+    esac
+    if ! git -C "$ROOT" cat-file -e "$base:schema-v2/baseline" 2>/dev/null; then
+        printf '%s\n' "note: $base has no baseline, predecessor transition not compared" >&2
+        return 0
+    fi
+    predecessor_dir="$(mktemp -d "${TMPDIR:-/tmp}/schema-v2-predecessor-baseline.XXXXXX")"
+    while IFS= read -r file; do
+        git -C "$ROOT" show "$base:schema-v2/baseline/$file" > "$predecessor_dir/$file"
+    done < <(git -C "$ROOT" ls-tree --name-only "$base:schema-v2/baseline")
+    predecessor_catalog="$(mktemp "${TMPDIR:-/tmp}/schema-v2-predecessor-catalog.XXXXXX")"
+    migrated_catalog="$(mktemp "${TMPDIR:-/tmp}/schema-v2-predecessor-migrated.XXXXXX")"
+    (
+        scratch_schema="$predecessor_schema"
+        # The catalog heads with the baseline's extension declarations; here
+        # they are the predecessor's, so a declaration added to the baseline
+        # alone shows up too.
+        baseline_extension_statements="$(baseline_extension_statements_of "$predecessor_dir")" || exit 1
+        apply_baseline "$predecessor_dir"
+        frozen_schema_catalog "$predecessor_schema" > "$predecessor_catalog"
+        for migration_file in "$ROOT"/migrations/*.sql; do
+            if phase_migration_uses_production_schema "$migration_file"; then
+                render_phase_migration "$migration_file" | run_psql
+            fi
+        done
+        frozen_schema_catalog "$predecessor_schema" > "$migrated_catalog"
+    ) || exit 1
+    if git -C "$ROOT" diff --quiet "$base" -- schema-v2/baseline; then
+        if ! diff -u "$after_baseline" "$predecessor_catalog" >&2; then
+            printf '%s\n' "the baseline files are unchanged since $base but the predecessor baseline produced another catalog (diff above)" >&2
+            exit 1
+        fi
+    elif diff -q "$after_baseline" "$predecessor_catalog" >/dev/null; then
+        printf '%s\n' "the baseline files changed since $base but the predecessor baseline produced the same catalog; the predecessor path is not reading the previous files" >&2
+        exit 1
+    fi
+    if ! diff -u "$migrated_catalog" "$observed" >&2; then
+        printf '%s\n' \
+            "the previous baseline ($base) plus every schema-migration and the current baseline are different artifacts (diff above: - previous baseline migrated, + current baseline); a baseline edit lands with the schema-migration that makes the same change on an initialized database" >&2
+        rm -rf -- "$predecessor_dir" "$predecessor_catalog" "$migrated_catalog"
+        exit 1
+    fi
+    rm -rf -- "$predecessor_dir" "$predecessor_catalog" "$migrated_catalog"
 }
 # The catalog proves on every run that it sees what it claims to: each change
 # below is planted in the frozen schema inside a transaction that is rolled
@@ -593,7 +672,21 @@ assert_frozen_catalog_sees_planted_changes() {
         fi
         refusal_assertions_passed=$((refusal_assertions_passed + 1))
     done
-    rm -f -- "$planted_catalog"
+    # Two SQL-standard bodies under one signature leave prosrc empty for both;
+    # the catalogs taken with each must still differ.
+    local other_body_catalog
+    other_body_catalog="$(mktemp "${TMPDIR:-/tmp}/schema-v2-planted-catalog.XXXXXX")"
+    frozen_schema_catalog_within "$frozen_schema" \
+        'CREATE FUNCTION planted_atomic(x integer) RETURNS boolean LANGUAGE sql IMMUTABLE BEGIN ATOMIC SELECT x > 1; END;' > "$planted_catalog"
+    frozen_schema_catalog_within "$frozen_schema" \
+        'CREATE FUNCTION planted_atomic(x integer) RETURNS boolean LANGUAGE sql IMMUTABLE BEGIN ATOMIC SELECT x > 2; END;' > "$other_body_catalog"
+    if [ ! -s "$planted_catalog" ] || diff -q "$planted_catalog" "$other_body_catalog" >/dev/null; then
+        printf '%s\n' "the frozen catalog does not tell two SQL-standard routine bodies apart" >&2
+        rm -f -- "$planted_catalog" "$other_body_catalog"
+        exit 1
+    fi
+    refusal_assertions_passed=$((refusal_assertions_passed + 1))
+    rm -f -- "$planted_catalog" "$other_body_catalog"
 }
 # The fresh artifact above has no rows, so a schema-migration whose DDL runs
 # only when a table holds data leaves it unchanged there. The scratch schema
@@ -697,7 +790,9 @@ assert_no_migration_below_prior_head() {
 # command substitution, so the fatal case is a status, not an exit, and the
 # caller tells it from the optional one instead of folding both into success.
 # SCHEMA_V2_PRIOR_INVENTORY_REF names the comparison point explicitly.
-prior_migration_inventory() {
+# prior_ref prints the base commit under the same statuses; the predecessor
+# baseline comparison reads the same point.
+prior_ref() {
     local base
     if ! git -C "$ROOT" rev-parse --git-dir >/dev/null 2>&1; then
         printf '%s\n' "note: no git history, previous inventory not compared" >&2
@@ -728,6 +823,12 @@ prior_migration_inventory() {
         printf '%s\n' "note: $base is not available, previous inventory not compared" >&2
         return 2
     fi
+    printf '%s\n' "$base"
+}
+prior_migration_inventory() {
+    local base status
+    base="$(prior_ref)" && status=0 || status=$?
+    [ "$status" = 0 ] || return "$status"
     if ! git -C "$ROOT" cat-file -e "$base:schema-v2/migration-inventory.txt" 2>/dev/null; then
         printf '%s\n' "note: $base has no migration inventory, previous inventory not compared" >&2
         return 2
@@ -770,6 +871,12 @@ assert_uninventoried_migrations_are_schema_qualified() {
         'DROP FUNCTION public.fn(integer),;'
         'DROP FUNCTION public.fn(integer) (text);'
         'DROP INDEX public.old_idx(integer);'
+        'DROP FUNCTION public.fn(integer,);'
+        'DROP FUNCTION public.fn(.);'
+        'DROP FUNCTION public.fn(,integer);'
+        'DROP FUNCTION public.fn(integer, numeric(10,));'
+        'DROP FUNCTION public.fn(text[)];'
+        'DROP FUNCTION public.fn(integer text.);'
         'DROP INDEX CONCURRENTLY IF EXISTS public.old_idx;'
         $'-- no-transaction\nDROP INDEX CONCURRENTLY public.a, public.b;'
         $'-- no-transaction\nDROP INDEX CONCURRENTLY IF EXISTS public.a, public.b RESTRICT;'
@@ -791,7 +898,7 @@ assert_uninventoried_migrations_are_schema_qualified() {
         printf '%s\n' "unicode-escape check refused a plain identifier" >&2
         exit 1
     fi
-    if ! printf -- '-- no-transaction\nDROP INDEX CONCURRENTLY IF EXISTS\n    public.old_idx;\nDROP VIEW IF EXISTS public.a, public.b;\nDROP MATERIALIZED VIEW public.mv RESTRICT;\nDROP SEQUENCE IF EXISTS public.s;\nDROP FUNCTION IF EXISTS public.fn(integer, text), public.g(numeric(10,2));\nDROP PROCEDURE public.p(integer, text) RESTRICT;\n' \
+    if ! printf -- '-- no-transaction\nDROP INDEX CONCURRENTLY IF EXISTS\n    public.old_idx;\nDROP VIEW IF EXISTS public.a, public.b;\nDROP MATERIALIZED VIEW public.mv RESTRICT;\nDROP SEQUENCE IF EXISTS public.s;\nDROP FUNCTION IF EXISTS public.fn(integer, text), public.g(numeric(10,2)), public.h(), public.k(double precision, character varying(10), text[], public.kind, timestamp with time zone);\nDROP PROCEDURE public.p(integer, text) RESTRICT;\n' \
         | migration_is_closed_form_drop /dev/stdin >/dev/null; then
         printf '%s\n' "closed-form check refused the closed form" >&2
         exit 1
@@ -1341,26 +1448,72 @@ if [[ ! "$scratch_schema" =~ ^[a-z0-9_]+$ ]]; then
     exit 1
 fi
 apply_check_role_password="$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')"
-# The owner's URL with its userinfo replaced by the run's login role.
-apply_check_url=""
-if [ -n "${BIGNAME_DATABASE_URL:-}" ]; then
-    url_scheme="${BIGNAME_DATABASE_URL%%://*}://"
-    url_rest="${BIGNAME_DATABASE_URL#*://}"
+# The owner's URL with its userinfo replaced by the given login and password.
+# libpq also takes credentials as query parameters, which override the
+# userinfo, and percent-decodes a parameter's name before reading it, so
+# `%75ser=` is `user=`; those keys are dropped after decoding and every other
+# connection option is kept as written.
+login_url_from() {
+    local owner_url="$1" login="$2" password="$3"
+    local url_scheme url_rest url_authority url_path url_query
+    url_scheme="${owner_url%%://*}://"
+    url_rest="${owner_url#*://}"
     # The authority ends at the first of / ? # -- /dbname is optional in libpq's
     # grammar, so a query may follow the host directly.
     url_authority="$(printf '%s' "$url_rest" | sed -E 's#[/?\#].*$##')"
     url_path="${url_rest#"$url_authority"}"
     url_path="${url_path%%#*}"
-    # libpq also takes credentials as query parameters, which would override the
-    # userinfo; keep every other connection option.
     url_query=""
     if [[ "$url_path" == *\?* ]]; then
         url_query="${url_path#*\?}"
         url_path="${url_path%%\?*}"
-        url_query="$(printf '%s' "$url_query" | tr '&' '\n' \
-            | { grep -vE '^(user|password|passfile)=' || true; } | paste -sd '&' -)"
+        url_query="$(printf '%s' "$url_query" | tr '&' '\n' | awk '
+            BEGIN { for (i = 0; i < 256; i++) byte[sprintf("%02x", i)] = i }
+            function decoded(text,    out, i, c, hex) {
+                out = ""; i = 1
+                while (i <= length(text)) {
+                    c = substr(text, i, 1); hex = tolower(substr(text, i + 1, 2))
+                    if (c == "%" && hex ~ /^[0-9a-f][0-9a-f]$/) { out = out sprintf("%c", byte[hex]); i += 3 }
+                    else { out = out c; i++ }
+                }
+                return out
+            }
+            { key = $0; sub(/=.*/, "", key); key = decoded(key) }
+            key == "user" || key == "password" || key == "passfile" { next }
+            { print }' | paste -sd '&' -)"
     fi
-    apply_check_url="${url_scheme}${apply_check_role}:${apply_check_role_password}@${url_authority##*@}${url_path}${url_query:+?$url_query}"
+    printf '%s\n' "${url_scheme}${login}:${password}@${url_authority##*@}${url_path}${url_query:+?$url_query}"
+}
+# The rewrite proves itself on every run: each planted query form must lose
+# its credential keys and keep the other options, encoded or not.
+assert_login_url_drops_credentials() {
+    local planted rewritten
+    for planted in \
+        'postgresql://owner:secret@db.example:5432/bigname?user=owner&password=secret&passfile=/x&sslmode=require' \
+        'postgresql://owner:secret@db.example/bigname?%75ser=owner&%70assword=secret&sslmode=require' \
+        'postgresql://owner:secret@db.example?PASSFILE=/x&%70%61%73%73%66%69%6C%65=/x&sslmode=require&user=owner' \
+        'postgres://db.example/bigname?application_name=a%3Db&user=owner&sslmode=require'; do
+        rewritten="$(login_url_from "$planted" login pw)"
+        case "$rewritten" in
+            *login:pw@db.example*sslmode=require*) ;;
+            *) printf '%s\n' "the login URL rewrite lost the host or an option: $rewritten" >&2; exit 1 ;;
+        esac
+        if [[ "$rewritten" == *owner* ]] || [[ "$rewritten" == *secret* ]] || [[ "$rewritten" == *passfile* ]] \
+            || [[ "$rewritten" == *%75ser* ]] || [[ "$rewritten" == *%70assword* ]] || [[ "$rewritten" == *%70%61* ]]; then
+            printf '%s\n' "the login URL rewrite kept a credential key: $rewritten" >&2
+            exit 1
+        fi
+    done
+    # A key libpq does not decode to a credential stays: it is not ours to drop.
+    case "$(login_url_from 'postgresql://owner:secret@db.example/bigname?PASSFILE=/x' login pw)" in
+        *PASSFILE=/x*) ;;
+        *) printf '%s\n' "the login URL rewrite dropped a non-credential key" >&2; exit 1 ;;
+    esac
+}
+assert_login_url_drops_credentials
+apply_check_url=""
+if [ -n "${BIGNAME_DATABASE_URL:-}" ]; then
+    apply_check_url="$(login_url_from "$BIGNAME_DATABASE_URL" "$apply_check_role" "$apply_check_role_password")"
 fi
 migration_application_log="$(
     mktemp "${TMPDIR:-/tmp}/schema-v2-migration-applications.XXXXXX"
@@ -1368,7 +1521,7 @@ migration_application_log="$(
 # Future entries must use basename|one-line reason.
 intentional_phase_migration_skips=()
 refusal_assertions_passed=0
-expected_refusal_assertions=212
+expected_refusal_assertions=213
 predecessor_shape_proof_count=0
 expected_predecessor_shape_proof_count=40
 refusal_probe_seconds=0
@@ -1389,6 +1542,7 @@ cleanup() {
     {
         printf 'DROP SCHEMA IF EXISTS "%s" CASCADE;\n' "$scratch_schema"
         printf 'DROP SCHEMA IF EXISTS "%s" CASCADE;\n' "${scratch_schema}_frozen"
+        printf 'DROP SCHEMA IF EXISTS "%s" CASCADE;\n' "${scratch_schema}_predecessor"
         printf 'DROP OWNED BY "%s";\n' "$apply_check_role"
         printf 'DROP ROLE IF EXISTS "%s";\n' "$apply_check_role"
     } | run_psql_as_owner >/dev/null 2>&1 || true
@@ -1549,6 +1703,7 @@ check_baseline_extensions "$baseline_extension_statements" || exit 1
 # holds CREATE on the database, so an assembled CREATE SCHEMA bigname_phase
 # fails where the production schema does not yet exist.
 frozen_schema="${scratch_schema}_frozen"
+predecessor_schema="${scratch_schema}_predecessor"
 {
     printf "CREATE ROLE \"%s\" LOGIN PASSWORD '%s';\n" \
         "$apply_check_role" "$apply_check_role_password"
@@ -1556,6 +1711,7 @@ frozen_schema="${scratch_schema}_frozen"
     printf '%s\n' "$baseline_extension_statements"
     printf 'CREATE SCHEMA "%s" AUTHORIZATION "%s";\n' "$scratch_schema" "$apply_check_role"
     printf 'CREATE SCHEMA "%s" AUTHORIZATION "%s";\n' "$frozen_schema" "$apply_check_role"
+    printf 'CREATE SCHEMA "%s" AUTHORIZATION "%s";\n' "$predecessor_schema" "$apply_check_role"
 } | run_psql_as_owner
 # Prove the role boundary on every run: an identifier the rewrite cannot see,
 # assembled inside EXECUTE, must fail on the production schema whether or not
@@ -1618,7 +1774,7 @@ assert_dynamic_production_name_is_refused
 
 apply_baseline() {
     local sql_file
-    for sql_file in "$ROOT"/schema-v2/baseline/*.sql; do
+    for sql_file in "${1:-$ROOT/schema-v2/baseline}"/*.sql; do
         {
             printf 'SET client_min_messages TO warning;\n'
             printf 'SET search_path TO "%s";\n' "$scratch_schema"

@@ -701,7 +701,11 @@ a receipt on a namespace that already has the two kept indexes and neither
 retired one. `install.sql` is its own readiness check and never drops or
 rebuilds a kept index; recover an interrupted build as its runbook describes.
 Keep the `install.sql` output with its start and end times in the release
-record. Then apply the schema-migrations in step 4. Unlike the other index
+record. Both kept indexes key on a `lower(...)` expression, so after the
+builds run `ANALYZE bigname_phase.normalized_events`, as for the lookahead
+indexes: without statistics the planner may keep scanning the chain's
+`ResolverChanged` history instead of taking the `BitmapOr` over the pair.
+Then apply the schema-migrations in step 4. Unlike the other index
 schema-migrations, this one builds each index that is still missing itself,
 as an ordinary `CREATE INDEX` that blocks writes to `normalized_events` for
 the build, and drops each retired index that still exists under the table's
@@ -1131,12 +1135,17 @@ indexes are additive; rollback may leave them in place.
    exit zero, then run `ANALYZE bigname_phase.normalized_events`;
    for the release containing
    `20260918120000_normalized_events_resolver_history_idx.sql`, run
-   `ops/resolver-history-indexes/install.sql` as described above and require
-   it to exit zero; it refuses a namespace that has not taken
+   `ops/resolver-history-indexes/install.sql` as described above, require
+   it to exit zero, then run `ANALYZE bigname_phase.normalized_events`; it
+   refuses a namespace that has not taken
    `20260811120000_ens_v2_migration_slice_1.sql`, so on one that is behind by
    more than one release apply the releases in order as described above the
    index block;
-   otherwise skip this step;
+   otherwise skip this step. Every `normalized_events` index this step builds
+   keys on an expression, and an expression index has no statistics until the
+   table is analyzed, so end the step with `ANALYZE bigname_phase.normalized_events`
+   whenever it built one, or confirm autovacuum has analyzed the table since
+   the build;
    For the release containing
    `20260814130000_surface_binding_authority_arm.sql`, a populated phase schema
    cannot take the required `NOT NULL` column without the forbidden historical

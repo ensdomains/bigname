@@ -114,7 +114,8 @@ reads; a database that took slice 1 in place lacks all four. Follow their
 applying `20260918120000_normalized_events_resolver_history_idx.sql` on a
 large initialized database: applied first, that schema-migration builds each
 missing kept index with an ordinary write-blocking `CREATE INDEX` and drops
-each retired one under the table's exclusive lock.
+each retired one under the table's exclusive lock. Analyze `normalized_events`
+after the builds, as the runbook says; the kept indexes key on expressions.
 
 Project's history lookups for changed names and primary names use eight indexes
 on `normalized_events`. Prebuild them concurrently on a large initialized
