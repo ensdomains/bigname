@@ -220,10 +220,14 @@ so it cannot see a name a schema-migration assembles at run time (`'bigname_' ||
 The check therefore applies every batch on a connection of its own, a
 per-run login that owns the scratch schema and holds no privilege on
 `bigname_phase` and no `CREATE` on the database — provisioned by the
-configured user with `CREATEROLE` alone, since the schemas are created for
-the login rather than granted to it, and the only statements that run on the
-configured user's own connection are the baseline's two reviewed
-`CREATE EXTENSION` lines, matched whole: whatever the rewrite misses
+configured user, who needs `CREATEROLE` for that login and, on an external
+server, `CREATEDB` as well, because the check runs in a database of its own
+there (created at start, dropped at exit) rather than asking for `CREATE` on
+the database the URL names; the schemas are created for the login rather
+than granted to it, and the only statements that run on the configured
+user's own connection are the baseline's two reviewed `CREATE EXTENSION`
+lines, matched whole, and the setup of sqlx's bookkeeping table the replays
+record into (refused when the database already has one): whatever the rewrite misses
 fails on the production schema instead of changing it unobserved. The check
 proves itself on every run against a planted set of the forms it refuses and
 the one it accepts, including an assembled production name that must be
@@ -238,8 +242,7 @@ read when it is no longer the default), constraint, index (with its validity), v
 routine (its full argument list with defaults, execution modes, planner cost
 and rows, privileges and a digest of its body), trigger (with its firing
 state), sequence (its whole range, cache, cycle and owning column), type,
-domain, comment, row-security policy, rule, extended-statistics object and
-the schema's own privileges, of the
+domain, comment and the schema's own privileges, of the
 baseline plus the inventoried schema-migrations, built into a fresh schema on every
 run and compared line for line, so a change to a baseline file or a
 schema-migration that moves the schema fails until the catalog is

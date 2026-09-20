@@ -90,7 +90,12 @@ render_phase_migration() {
 # description (the file name after the version, underscores as spaces) and
 # the SHA-384 of the file bytes sqlx would record. The bookkeeping table is
 # the one sqlx creates, made by the owner at setup because the login may not
-# create in public; each replay starts from it empty.
+# create in public; each replay starts from it empty. An initialized database
+# also records every schema-migration that never touches the phase schema,
+# and a phase schema-migration may read that history
+# (20260514110000_ens_v1_recent_renewal_resource_repair.sql does), so a
+# replay is handed the whole directory: with `sequence_applies=phase` a file
+# outside the phase inventory is recorded at its position and not applied.
 migration_sequence_sql() {
     local migration_file name version description checksum bookkeeping
     printf 'DELETE FROM _sqlx_migrations;\n'
@@ -100,6 +105,10 @@ migration_sequence_sql() {
         description="${name#*_}"; description="${description%.sql}"; description="${description//_/ }"
         checksum="$(sha384sum -- "$migration_file" | cut -d' ' -f1)"
         bookkeeping="INSERT INTO _sqlx_migrations ( version, description, success, checksum, execution_time ) VALUES ( $version, '$description', TRUE, '\\x$checksum', -1 );"
+        if [ "${sequence_applies:-all}" = phase ] && ! phase_migration_uses_production_schema "$migration_file"; then
+            printf '%s\nUPDATE _sqlx_migrations SET execution_time = 0 WHERE version = %s;\n' "$bookkeeping" "$version"
+            continue
+        fi
         if [ "$(head -c 17 "$migration_file")" = "-- no-transaction" ]; then
             render_phase_migration "$migration_file"
             printf '\n%s\n' "$bookkeeping"
@@ -113,6 +122,10 @@ migration_sequence_sql() {
 }
 apply_migration_sequence() {
     migration_sequence_sql "$@" | run_psql
+}
+# The replays: every file recorded, the phase inventory applied.
+replay_schema_migrations() {
+    sequence_applies=phase apply_migration_sequence "$ROOT"/migrations/*.sql
 }
 # Planted files live in a directory mktemp made under the temp root; nothing
 # else is ever removed.
@@ -138,18 +151,22 @@ production_schema_migrations() {
 assert_migration_sequence_session_mirrors_sqlx() {
     local planted_dir observed checksum probe_stderr observed_error
     planted_dir="$(mktemp -d "${TMPDIR:-/tmp}/schema-v2-planted-sequence.XXXXXX")"
-    printf 'SET lock_timeout TO %s;\n' "'123ms'" > "$planted_dir/00000000000001_a.sql"
-    printf 'SELECT current_setting(%s);\nSELECT pg_sleep(0.002);\nSELECT now() < statement_timestamp();\n' "'lock_timeout'" > "$planted_dir/00000000000002_b_two.sql"
-    printf -- '-- no-transaction\nSELECT pg_sleep(0.002);\nSELECT now() < statement_timestamp();\n' > "$planted_dir/00000000000003_c.sql"
+    # The first three name the phase schema (a string literal is enough for
+    # the inventory) and are applied; the fourth is outside the inventory and
+    # must be recorded at its position, never run.
+    printf 'SET lock_timeout TO %s;\nSELECT %s;\n' "'123ms'" "'bigname_phase'" > "$planted_dir/00000000000001_a.sql"
+    printf 'SELECT current_setting(%s);\nSELECT pg_sleep(0.002);\nSELECT now() < statement_timestamp();\nSELECT %s;\n' "'lock_timeout'" "'bigname_phase'" > "$planted_dir/00000000000002_b_two.sql"
+    printf -- '-- no-transaction\nSELECT pg_sleep(0.002);\nSELECT now() < statement_timestamp();\nSELECT %s;\n' "'bigname_phase'" > "$planted_dir/00000000000003_c.sql"
+    printf 'SELECT 1 / 0;\n' > "$planted_dir/00000000000004_d.sql"
     checksum="$(sha384sum -- "$planted_dir/00000000000002_b_two.sql" | cut -d' ' -f1)"
     observed="$({
         printf '\\pset format unaligned\n\\pset tuples_only on\n'
-        migration_sequence_sql "$planted_dir"/*.sql
+        sequence_applies=phase migration_sequence_sql "$planted_dir"/*.sql
         printf "SELECT version || ':' || description || ':' || (encode(checksum, 'hex') = '%s') || ':' || success || ':' || execution_time FROM _sqlx_migrations ORDER BY version;\n" "$checksum"
-    } | run_psql | grep -v '^$' | tr '\n' ' ')"
+    } | run_psql | grep -v "^$\|^$scratch_schema$" | tr '\n' ' ')"
     remove_planted_dir "$planted_dir"
     case "$observed" in
-        "123ms t f 1:a:false:true:0 2:b two:true:true:0 3:c:false:true:0 ") ;;
+        "123ms t f 1:a:false:true:0 2:b two:true:true:0 3:c:false:true:0 4:d:false:true:0 ") ;;
         "0 "*) printf '%s\n' "the schema-migration replay does not carry a committed session setting to the next file (saw: $observed), so it does not run the sequence as one session the way sqlx does" >&2; exit 1 ;;
         "123ms f "*) printf '%s\n' "the schema-migration replay runs a file outside a transaction block (saw: $observed), where sqlx wraps every file without the no-transaction marker" >&2; exit 1 ;;
         "123ms t t "*) printf '%s\n' "the schema-migration replay wraps a no-transaction file in a transaction block (saw: $observed), where sqlx runs it directly" >&2; exit 1 ;;
@@ -232,10 +249,14 @@ legacy_public_schema_drop="20260806120000_drop_legacy_public_schema.sql"
 migration_inventory="$ROOT/schema-v2/migration-inventory.txt"
 # A post-cutoff schema-migration that names no bigname_phase object is never
 # applied by this check, so the rule for one is closed rather than parsed: it
-# may consist only of `DROP INDEX|SEQUENCE|VIEW|MATERIALIZED VIEW|FUNCTION|
-# PROCEDURE` statements (with CONCURRENTLY, IF EXISTS, RESTRICT) whose every
-# target is `schema.name`, written with plain identifiers and no strings,
-# quoted identifiers, dollar quoting, block comments, or other lexical forms.
+# may consist only of `DROP INDEX|SEQUENCE|VIEW|MATERIALIZED VIEW` statements
+# (with CONCURRENTLY, IF EXISTS, RESTRICT) whose every target is
+# `schema.name`, written with plain identifiers and no strings, quoted
+# identifiers, dollar quoting, block comments, or other lexical forms. A
+# routine drop is not closed-form: a bigname_phase routine that calls
+# `public.helper()` from its body holds no catalog dependency on it, so
+# RESTRICT lets the helper go and the phase routine fails at its next call;
+# a routine drop names bigname_phase and is applied and observed instead.
 # CONCURRENTLY is accepted only in a file whose first bytes are sqlx's
 # `-- no-transaction` marker and only over one index, since PostgreSQL
 # refuses it inside a transaction block and with more than one target.
@@ -269,11 +290,15 @@ migration_is_closed_form_drop() {
                     bad = bad " [DROP TABLE may detach a child or partition of a bigname_phase table: " substr(s, 1, 40) "]"
                     continue
                 }
-                if (!match(u, /^DROP (INDEX( CONCURRENTLY)?|SEQUENCE|VIEW|MATERIALIZED VIEW|FUNCTION|PROCEDURE)( IF EXISTS)? /)) {
+                if (match(u, /^DROP (FUNCTION|PROCEDURE|ROUTINE|AGGREGATE) /)) {
+                    bad = bad " [a routine drop is not protected by RESTRICT, since a bigname_phase routine body that calls it holds no dependency; name bigname_phase to have it applied and observed: " substr(s, 1, 40) "]"
+                    continue
+                }
+                if (!match(u, /^DROP (INDEX( CONCURRENTLY)?|SEQUENCE|VIEW|MATERIALIZED VIEW)( IF EXISTS)? /)) {
                     bad = bad " [not a closed-form drop: " substr(s, 1, 40) "]"
                     continue
                 }
-                routine = (u ~ /^DROP (FUNCTION|PROCEDURE) /)
+                routine = 0
                 rest = substr(u, RSTART + RLENGTH)
                 if (rest ~ / CASCADE$/) {
                     bad = bad " [CASCADE may drop a dependent bigname_phase object: " substr(s, 1, 40) "]"
@@ -572,15 +597,14 @@ SQL
     } | run_psql | sed "s/$schema/bigname_phase/g"
 }
 assert_frozen_schema_fingerprint() {
-    local observed after_baseline sequence
+    local observed after_baseline
     observed="$(mktemp "${TMPDIR:-/tmp}/schema-v2-frozen-catalog.XXXXXX")"
     after_baseline="$(mktemp "${TMPDIR:-/tmp}/schema-v2-baseline-catalog.XXXXXX")"
     (
         scratch_schema="$frozen_schema"
         apply_baseline
         frozen_schema_catalog "$frozen_schema" > "$after_baseline"
-        mapfile -t sequence < <(production_schema_migrations)
-        apply_migration_sequence "${sequence[@]}"
+        replay_schema_migrations
         frozen_schema_catalog "$frozen_schema" > "$observed"
     )
     if [ ! -s "$observed" ] || [ ! -s "$after_baseline" ]; then
@@ -617,7 +641,7 @@ assert_frozen_schema_fingerprint() {
 # which proves this path reads the previous files and not the working tree.
 assert_predecessor_baseline_transition() {
     local after_baseline="$1" observed="$2"
-    local base status predecessor_dir predecessor_catalog migrated_catalog file sequence
+    local base status predecessor_dir predecessor_catalog migrated_catalog file
     base="$(prior_ref)" && status=0 || status=$?
     case "$status" in
         0) ;;
@@ -642,8 +666,7 @@ assert_predecessor_baseline_transition() {
         baseline_extension_statements="$(baseline_extension_statements_of "$predecessor_dir")" || exit 1
         apply_baseline "$predecessor_dir"
         frozen_schema_catalog "$predecessor_schema" > "$predecessor_catalog"
-        mapfile -t sequence < <(production_schema_migrations)
-        apply_migration_sequence "${sequence[@]}"
+        replay_schema_migrations
         assert_schema_holds_only_allowed_kinds "$predecessor_schema" "the migrated predecessor baseline"
         frozen_schema_catalog "$predecessor_schema" > "$migrated_catalog"
     ) || exit 1
@@ -887,13 +910,12 @@ assert_refused_kinds_are_seen() {
 # (every file is required to be idempotent once applied), and the result must
 # be the frozen artifact too, rows and all.
 assert_exercised_schema_matches_frozen() {
-    local exercised migration_file sequence
+    local exercised migration_file
     exercised="$(mktemp "${TMPDIR:-/tmp}/schema-v2-exercised-catalog.XXXXXX")"
-    mapfile -t sequence < <(production_schema_migrations)
-    for migration_file in "${sequence[@]}"; do
+    for migration_file in $(production_schema_migrations); do
         printf 'exercised|%s\n' "$(basename "$migration_file")" >> "$migration_application_log"
     done
-    apply_migration_sequence "${sequence[@]}"
+    replay_schema_migrations
     frozen_schema_catalog "$scratch_schema" > "$exercised"
     if ! diff -u "$frozen_schema_catalog" "$exercised" >&2; then
         printf '%s\n' \
@@ -1072,6 +1094,9 @@ assert_uninventoried_migrations_are_schema_qualified() {
         'DROP INDEX IF EXISTS public.old_idx, name_current_lookup_idx RESTRICT;'
         'DROP VIEW public.bridge CASCADE;'
         'DROP FUNCTION IF EXISTS public.fn(integer, text) cascade;'
+        'DROP FUNCTION IF EXISTS public.fn(integer, text);'
+        'DROP PROCEDURE public.p(integer) RESTRICT;'
+        'DROP ROUTINE public.r();'
         'DROP TABLE public.phase_child RESTRICT;'
         'drop table if exists public.a, public.b;'
         'DROP INDEX CONCURRENTLY IF EXISTS "public"."ok_idx";'
@@ -1126,7 +1151,7 @@ assert_uninventoried_migrations_are_schema_qualified() {
         printf '%s\n' "unicode-escape check refused a plain identifier" >&2
         exit 1
     fi
-    if ! printf -- '-- no-transaction\nDROP INDEX CONCURRENTLY IF EXISTS\n    public.old_idx;\nDROP VIEW IF EXISTS public.a, public.b;\nDROP MATERIALIZED VIEW public.mv RESTRICT;\nDROP SEQUENCE IF EXISTS public.s;\nDROP FUNCTION IF EXISTS public.fn(integer, text), public.g(numeric(10,2)), public.h(), public.k(double precision, character varying(10), text[], public.kind, timestamp with time zone);\nDROP PROCEDURE public.p(integer, text) RESTRICT;\n' \
+    if ! printf -- '-- no-transaction\nDROP INDEX CONCURRENTLY IF EXISTS\n    public.old_idx;\nDROP VIEW IF EXISTS public.a, public.b;\nDROP MATERIALIZED VIEW public.mv RESTRICT;\nDROP SEQUENCE IF EXISTS public.s;\n' \
         | migration_is_closed_form_drop /dev/stdin >/dev/null; then
         printf '%s\n' "closed-form check refused the closed form" >&2
         exit 1
@@ -1801,7 +1826,7 @@ migration_application_log="$(
 # Future entries must use basename|one-line reason.
 intentional_phase_migration_skips=()
 refusal_assertions_passed=0
-expected_refusal_assertions=243
+expected_refusal_assertions=246
 predecessor_shape_proof_count=0
 expected_predecessor_shape_proof_count=40
 refusal_probe_seconds=0
@@ -1990,23 +2015,31 @@ baseline_extension_statements="$(baseline_extension_statements_of "$ROOT/schema-
 # set_config with a false is_local. UPDATE ... SET and ALTER ... SET are not
 # session state; set_config(..., true) inside a routine ends with the
 # transaction and a routine that restores what it changed is the documented
-# form. A carve-out that needs session state extends this rule under ADR 0007.
+# form. The text is the file's statements as the quote-aware splitter reads
+# them, comments gone and quoted text kept, so a comment cannot hide a SET
+# and a string that looks like one is refused rather than trusted; a file the
+# splitter cannot read is refused as well. A carve-out that needs session
+# state extends this rule under ADR 0007.
 session_state_scanner='
-    { line = $0; sub(/--.*$/, "", line); text = text " " line }
+    { text = text " " $0 }
     END {
-        gsub(/\/\*[^*]*\*+([^\/*][^*]*\*+)*\//, " ", text)
         gsub(/[[:space:]]+/, " ", text)
         t = toupper(text) " "
         while (match(t, /(^|;|\(|[^A-Z_](BEGIN|THEN|ELSE|LOOP|DECLARE)) *(SET (LOCAL |SESSION )?[A-Z_.]+ *(=|TO[^A-Z_])|RESET [A-Z_]+|SET (ROLE|SESSION AUTHORIZATION)[^A-Z_])/)) {
             hit = substr(t, RSTART, RLENGTH); sub(/^[^SR]*/, "", hit); sub(/^SE(T|SSION) *$/, "", hit)
-            print FILENAME ": " hit; t = substr(t, RSTART + RLENGTH)
+            print file ": " hit; t = substr(t, RSTART + RLENGTH)
         }
         t = toupper(text)
-        while (match(t, /SET_CONFIG *\([^)]*, *FALSE *\)/)) { print FILENAME ": " substr(t, RSTART, RLENGTH); t = substr(t, RSTART + RLENGTH) }
+        while (match(t, /SET_CONFIG *\([^)]*, *FALSE *\)/)) { print file ": " substr(t, RSTART, RLENGTH); t = substr(t, RSTART + RLENGTH) }
     }
 '
 session_state_statements_of() {
-    awk "$session_state_scanner" "$1"
+    local statements
+    if ! statements="$(sql_statements "$1")"; then
+        printf '%s: %s\n' "$1" "$(printf '%s\n' "$statements" | tail -n 1)"
+        return 0
+    fi
+    printf '%s\n' "$statements" | awk -v file="$1" "$session_state_scanner"
 }
 assert_no_session_state_statements() {
     local file hits
@@ -2031,6 +2064,9 @@ assert_session_state_rule_holds() {
         'CREATE TABLE t (a int); SET lock_timeout TO '"'"'1ms'"'"';'
         'DO $$ BEGIN SET search_path TO pg_catalog; END $$;'
         'DO $$ BEGIN PERFORM set_config('"'"'search_path'"'"', '"'"'pg_catalog'"'"', false); END $$;'
+        'SELECT '"'"'--'"'"'; SET standard_conforming_strings = off;'
+        'SELECT $q$/*$q$; SET search_path TO pg_catalog; SELECT $q$*/$q$;'
+        'SELECT '"'"'open; SET search_path = pg_catalog;'
     )
     local -a accepted=(
         'UPDATE t SET a = 1;'
