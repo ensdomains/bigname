@@ -348,7 +348,7 @@ SELECT line FROM (
     WHERE n.nspname = current_schema() AND c.relkind IN ('v', 'm')
     UNION ALL
     SELECT 5, p.proname, pg_get_function_identity_arguments(p.oid),
-           format('routine %s(%s) returns %s kind=%s lang=%s volatile=%s strict=%s leakproof=%s parallel=%s secdef=%s cost=%s rows=%s config=%s acl=%s body=%s sqlbody=%s',
+           format('routine %s(%s) returns %s kind=%s lang=%s volatile=%s strict=%s leakproof=%s parallel=%s secdef=%s cost=%s rows=%s config=%s acl=%s body=%s sqlbody=%s aggregate=%s',
                   p.proname, pg_get_function_arguments(p.oid),
                   pg_get_function_result(p.oid), p.prokind,
                   (SELECT l.lanname FROM pg_language l WHERE l.oid = p.prolang),
@@ -359,7 +359,19 @@ SELECT line FROM (
                   md5(replace(p.prosrc, current_schema(), 'bigname_phase')),
                   -- A SQL-standard body (BEGIN ATOMIC) is stored parsed, with
                   -- prosrc empty; only its printed form tells two apart.
-                  md5(replace(COALESCE(pg_get_function_sqlbody(p.oid), ''), current_schema(), 'bigname_phase')))
+                  md5(replace(COALESCE(pg_get_function_sqlbody(p.oid), ''), current_schema(), 'bigname_phase')),
+                  -- An aggregate's behavior lives in pg_aggregate, not in these
+                  -- pg_proc fields: two of one signature can differ only there.
+                  COALESCE((SELECT format('kind=%s trans=%s final=%s combine=%s serial=%s deserial=%s mtrans=%s minvtrans=%s mfinal=%s finalextra=%s mfinalextra=%s finalmodify=%s mfinalmodify=%s sortop=%s transtype=%s transspace=%s mtranstype=%s init=%s minit=%s',
+                                          ag.aggkind, ag.aggtransfn::regproc, ag.aggfinalfn::regproc,
+                                          ag.aggcombinefn::regproc, ag.aggserialfn::regproc, ag.aggdeserialfn::regproc,
+                                          ag.aggmtransfn::regproc, ag.aggminvtransfn::regproc, ag.aggmfinalfn::regproc,
+                                          ag.aggfinalextra, ag.aggmfinalextra, ag.aggfinalmodify, ag.aggmfinalmodify,
+                                          COALESCE(NULLIF(ag.aggsortop::regoperator::text, '0'), '-'),
+                                          format_type(ag.aggtranstype, NULL), ag.aggtransspace,
+                                          COALESCE(NULLIF(format_type(ag.aggmtranstype, NULL), '-'), '-'),
+                                          COALESCE(ag.agginitval, '-'), COALESCE(ag.aggminitval, '-'))
+                            FROM pg_aggregate ag WHERE ag.aggfnoid = p.oid), '-'))
     FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
     WHERE n.nspname = current_schema()
     UNION ALL
@@ -717,7 +729,8 @@ assert_frozen_catalog_sees_planted_changes() {
     other_catalog="$(mktemp "${TMPDIR:-/tmp}/schema-v2-planted-catalog.XXXXXX")"
     for pair in \
         'SQL-standard routine bodies:CREATE FUNCTION planted_atomic(x integer) RETURNS boolean LANGUAGE sql IMMUTABLE BEGIN ATOMIC SELECT x > 1; END;:CREATE FUNCTION planted_atomic(x integer) RETURNS boolean LANGUAGE sql IMMUTABLE BEGIN ATOMIC SELECT x > 2; END;' \
-        'range subtypes:CREATE TYPE planted_range AS RANGE (SUBTYPE = bigint);:CREATE TYPE planted_range AS RANGE (SUBTYPE = integer);'
+        'range subtypes:CREATE TYPE planted_range AS RANGE (SUBTYPE = bigint);:CREATE TYPE planted_range AS RANGE (SUBTYPE = integer);' \
+        'aggregate transition functions:CREATE AGGREGATE planted_agg(bigint) (SFUNC = int8pl, STYPE = bigint, INITCOND = '"'"'1'"'"');:CREATE AGGREGATE planted_agg(bigint) (SFUNC = int8mul, STYPE = bigint, INITCOND = '"'"'1'"'"');'
     do
         reason="${pair%%:*}"; pair="${pair#*:}"
         frozen_schema_catalog_within "$frozen_schema" "${pair%%:CREATE *}" > "$planted_catalog"
@@ -1496,6 +1509,26 @@ apply_check_role_password="$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n'
 # userinfo, and percent-decodes a parameter's name before reading it, so
 # `%75ser=` is `user=`; those keys are dropped after decoding and every other
 # connection option is kept as written.
+# The query of a libpq URI without the named parameters, matched on the
+# percent-decoded parameter name (libpq decodes `%75ser=` to `user=`), every
+# other option kept as written.
+url_query_without() {
+    local query="$1"; shift
+    printf '%s' "$query" | tr '&' '\n' | awk -v dropped=" $* " '
+        BEGIN { for (i = 0; i < 256; i++) byte[sprintf("%02x", i)] = i }
+        function decoded(text,    out, i, c, hex) {
+            out = ""; i = 1
+            while (i <= length(text)) {
+                c = substr(text, i, 1); hex = tolower(substr(text, i + 1, 2))
+                if (c == "%" && hex ~ /^[0-9a-f][0-9a-f]$/) { out = out sprintf("%c", byte[hex]); i += 3 }
+                else { out = out c; i++ }
+            }
+            return out
+        }
+        { key = $0; sub(/=.*/, "", key); key = decoded(key) }
+        index(dropped, " " key " ") > 0 { next }
+        { print }' | paste -sd '&' -
+}
 login_url_from() {
     local owner_url="$1" login="$2" password="$3"
     local url_scheme url_rest url_authority url_path url_query
@@ -1508,22 +1541,8 @@ login_url_from() {
     url_path="${url_path%%#*}"
     url_query=""
     if [[ "$url_path" == *\?* ]]; then
-        url_query="${url_path#*\?}"
+        url_query="$(url_query_without "${url_path#*\?}" user password passfile)"
         url_path="${url_path%%\?*}"
-        url_query="$(printf '%s' "$url_query" | tr '&' '\n' | awk '
-            BEGIN { for (i = 0; i < 256; i++) byte[sprintf("%02x", i)] = i }
-            function decoded(text,    out, i, c, hex) {
-                out = ""; i = 1
-                while (i <= length(text)) {
-                    c = substr(text, i, 1); hex = tolower(substr(text, i + 1, 2))
-                    if (c == "%" && hex ~ /^[0-9a-f][0-9a-f]$/) { out = out sprintf("%c", byte[hex]); i += 3 }
-                    else { out = out c; i++ }
-                }
-                return out
-            }
-            { key = $0; sub(/=.*/, "", key); key = decoded(key) }
-            key == "user" || key == "password" || key == "passfile" { next }
-            { print }' | paste -sd '&' -)"
     fi
     printf '%s\n' "${url_scheme}${login}:${password}@${url_authority##*@}${url_path}${url_query:+?$url_query}"
 }
@@ -1555,7 +1574,8 @@ assert_login_url_drops_credentials() {
 }
 assert_login_url_drops_credentials
 # The same URL over another database: libpq's optional /dbname is replaced or
-# added, and the query is kept.
+# added, a query-form dbname (which would override the path) is dropped, and
+# every other option is kept.
 url_with_database() {
     local owner_url="$1" database="$2"
     local url_scheme url_rest url_authority url_path url_query
@@ -1566,12 +1586,26 @@ url_with_database() {
     url_path="${url_path%%#*}"
     url_query=""
     if [[ "$url_path" == *\?* ]]; then
-        url_query="?${url_path#*\?}"
+        url_query="$(url_query_without "${url_path#*\?}" dbname)"
     fi
-    printf '%s\n' "${url_scheme}${url_authority}/${database}${url_query}"
+    printf '%s\n' "${url_scheme}${url_authority}/${database}${url_query:+?$url_query}"
 }
-[ "$(url_with_database 'postgresql://owner:secret@db.example:5432/bigname?sslmode=require' scratch_db)" = 'postgresql://owner:secret@db.example:5432/scratch_db?sslmode=require' ] || { printf '%s\n' "the database rewrite lost the query or authority" >&2; exit 1; }
-[ "$(url_with_database 'postgresql://owner:secret@db.example?sslmode=require' scratch_db)" = 'postgresql://owner:secret@db.example/scratch_db?sslmode=require' ] || { printf '%s\n' "the database rewrite did not add a path" >&2; exit 1; }
+assert_database_url_rewrite_holds() {
+    local planted expected
+    for planted in \
+        'postgresql://owner:secret@db.example:5432/bigname?sslmode=require|postgresql://owner:secret@db.example:5432/scratch_db?sslmode=require' \
+        'postgresql://owner:secret@db.example?sslmode=require|postgresql://owner:secret@db.example/scratch_db?sslmode=require' \
+        'postgresql://db.example?dbname=existing&sslmode=require|postgresql://db.example/scratch_db?sslmode=require' \
+        'postgresql://db.example/bigname?sslmode=require&%64bname=existing|postgresql://db.example/scratch_db?sslmode=require' \
+        'postgresql://db.example?dbname=existing|postgresql://db.example/scratch_db'; do
+        expected="${planted#*|}"; planted="${planted%%|*}"
+        if [ "$(url_with_database "$planted" scratch_db)" != "$expected" ]; then
+            printf '%s\n' "the database rewrite of $planted gave $(url_with_database "$planted" scratch_db), expected $expected" >&2
+            exit 1
+        fi
+    done
+}
+assert_database_url_rewrite_holds
 # On an external server the configured user holds CREATEDB (the Rust tests
 # create their databases the same way; docs/development.md) but not
 # necessarily CREATE on the database the URL names, which CREATE SCHEMA needs.
@@ -1595,7 +1629,7 @@ migration_application_log="$(
 # Future entries must use basename|one-line reason.
 intentional_phase_migration_skips=()
 refusal_assertions_passed=0
-expected_refusal_assertions=216
+expected_refusal_assertions=217
 predecessor_shape_proof_count=0
 expected_predecessor_shape_proof_count=40
 refusal_probe_seconds=0
