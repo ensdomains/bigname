@@ -630,6 +630,190 @@ async fn registration_history_keeps_an_earlier_successor_lease_under_a_registry_
 }
 
 #[tokio::test]
+async fn nameless_registry_permissions_keep_the_lease_before_surface_materialization() -> Result<()>
+{
+    const NAME: &str = "nameless-registry-permissions.eth";
+    const OWNER: &str = "0x0000000000000000000000000000000000007190";
+    let database = TestDatabase::new_migrated().await?;
+    let node = bigname_lookup::ens_namehash_hex(NAME)?;
+    let registry = Uuid::from_u128(0x7190);
+    let lease = Uuid::from_u128(0x7191);
+    let successor = Uuid::from_u128(0x7192);
+    seed_identity_name(
+        &database,
+        "ens:nameless-registry-permissions.eth",
+        NAME,
+        NAME,
+        &node,
+        registry,
+        Uuid::from_u128(0x8190),
+        Uuid::from_u128(0x9190),
+        OWNER,
+        bigname_storage::AddressNameRelation::EffectiveController,
+        80,
+    )
+    .await?;
+    let blocks = (120..=125)
+        .map(|number| {
+            let parent = (number > 120).then(|| format!("0xhistory{}", number - 1));
+            raw_block(
+                "ethereum-mainnet",
+                &format!("0xhistory{number}"),
+                parent.as_deref(),
+                number,
+                1_700_000_000 + number,
+            )
+        })
+        .collect::<Vec<_>>();
+    upsert_phase_raw_blocks(&database.pool, &blocks).await?;
+    seed_schema_v2_ens_lookup_head(
+        &database.pool,
+        125,
+        "0xhistory125",
+        &crate::v2::format_timestamp(timestamp(1_700_000_125)),
+    )
+    .await?;
+    upsert_test_resources(
+        &database.pool,
+        &[
+            address_name_resource(lease, None, "0xnameless-lease", 120),
+            address_name_resource(successor, None, "0xnameless-successor", 125),
+        ],
+    )
+    .await?;
+    // Name materialization makes the registry resource reachable only after these rows
+    // were emitted. It must not rewrite the rows' missing logical_name_id or node fields.
+    sqlx::query("UPDATE bigname_phase.surface_bindings SET block_number = 123, block_hash = '0xhistory123', active_from = to_timestamp(1700000123) WHERE resource_id = $1")
+        .bind(registry).execute(&database.pool).await?;
+    sqlx::query("UPDATE bigname_phase.name_current SET declared_summary = jsonb_set(declared_summary, '{registration,resource_id}', to_jsonb($2::text)) WHERE resource_id = $1")
+        .bind(registry).bind(successor.to_string()).execute(&database.pool).await?;
+    let mut grant = v2_history_event(
+        "nameless-registry-grant",
+        None,
+        Some(lease),
+        "RegistrationGranted",
+        120,
+    );
+    grant.after_state["namehash"] = json!(node);
+    let mut authority = v2_history_event(
+        "nameless-registry-authority",
+        None,
+        Some(registry),
+        "AuthorityTransferred",
+        121,
+    );
+    authority.source_family = "ens_v1_registry_l1".to_owned();
+    authority.after_state = json!({"source_event": "Transfer", "node": node,
+        "owner": OWNER, "owner_getter": OWNER, "authority_kind": "registry_only",
+        "authority_key": format!("registry-only:ethereum-mainnet:{node}")});
+    let mut release = v2_history_event(
+        "nameless-registry-release",
+        None,
+        Some(lease),
+        "RegistrationReleased",
+        124,
+    );
+    release.after_state["namehash"] = json!(node);
+    let mut next = v2_history_event(
+        "nameless-registry-successor",
+        None,
+        Some(successor),
+        "RegistrationGranted",
+        125,
+    );
+    next.after_state["namehash"] = json!(node);
+    let mut events = vec![grant, authority, release, next];
+    // These are the exact nameless payload shapes made by registry::push_permission_change
+    // and protocol::permissions::{v1_grant_states,v1_revoke_states}: authority metadata
+    // is nested under the permission source, and neither source contains the node.
+    for (suffix, granted) in [("grant", true), ("revoke", false)] {
+        let mut permission = v2_history_event(
+            &format!("nameless-registry-permission-{suffix}"),
+            None,
+            Some(registry),
+            "PermissionChanged",
+            121,
+        );
+        permission.source_family = "ens_v1_registry_l1".to_owned();
+        let source = json!({"kind": "ens_v1_authority", "authority_kind": "registry_only",
+            "authority_key": format!("registry-only:ethereum-mainnet:{node}"),
+            "source_event_kind": "AuthorityTransferred"});
+        let state = |powers: Value, grant_source: Value, revocation_source: Value| {
+            json!({
+            "subject": if granted { OWNER } else { "0x0000000000000000000000000000000000007189" },
+            "scope": {"kind": "resource"}, "effective_powers": powers,
+            "grant_source": grant_source, "revocation_source": revocation_source,
+            "inheritance_path": [], "transfer_behavior": "replace_on_authority_change"})
+        };
+        permission.before_state = if granted {
+            state(json!([]), Value::Null, Value::Null)
+        } else {
+            state(json!(["resource_control"]), source.clone(), Value::Null)
+        };
+        permission.after_state = if granted {
+            state(json!(["resource_control"]), source, Value::Null)
+        } else {
+            state(json!([]), Value::Null, source)
+        };
+        events.push(permission);
+    }
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &events).await?;
+    for route in [
+        format!("/v1/events?name={NAME}&page_size=20"),
+        format!("/v1/events?registration_id={lease}&page_size=20"),
+    ] {
+        let history = v2_history_payload_for_database(&database, &route).await?;
+        let permissions = history["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|row| row["type"] == "permission")
+            .collect::<Vec<_>>();
+        assert_eq!(permissions.len(), 2, "{route}: {history}");
+        assert!(
+            permissions
+                .iter()
+                .all(|row| row["registration_id"] == json!(lease)),
+            "{route}: {history}"
+        );
+    }
+    let later = v2_history_payload_for_database(
+        &database,
+        &format!("/v1/events?registration_id={successor}&page_size=20"),
+    )
+    .await?;
+    assert!(
+        later["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row["type"] != "permission"),
+        "{later}"
+    );
+    let retained = bigname_storage::load_event_history(
+        &database.pool,
+        bigname_storage::EventHistoryFilter {
+            resource_id: Some(lease),
+            ..Default::default()
+        },
+        false,
+    )
+    .await?;
+    let permissions = retained
+        .iter()
+        .filter(|row| row.event_kind == "PermissionChanged")
+        .collect::<Vec<_>>();
+    assert_eq!(permissions.len(), 2, "{retained:?}");
+    assert!(
+        permissions
+            .iter()
+            .all(|row| row.registration_id == Some(lease)),
+        "{retained:?}"
+    );
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn noncanonical_history_of_a_name_wrapped_at_registration_keeps_the_registrar_lease_handle() -> Result<()> {
     const NAME: &str = "noncanonical-born-wrapped.eth";
     let database = TestDatabase::new_migrated().await?;

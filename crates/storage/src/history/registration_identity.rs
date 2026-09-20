@@ -169,6 +169,7 @@ fn push_registration_binding_at_event(
     builder.push(" AND ");
     builder.push(registry_registration::lease_at_event(
         "history_event",
+        "history_binding.resource_id",
         canonical_only,
     ));
     builder.push(" = ");
@@ -210,6 +211,7 @@ fn push_public_registration_at_event(
     builder.push(" AND ");
     builder.push(registry_registration::lease_at_event(
         "history_event",
+        "history_event.resource_id",
         canonical_only,
     ));
     builder.push(" = ");
@@ -378,7 +380,8 @@ fn push_product_registration_id_with_anchors(
     let binding_fork = fork("binding");
     let registry_only =
         registry_registration::is_registry_only("ne.resource_id", "ne", canonical_only);
-    let registry_lease = registry_registration::lease_at_event("ne", canonical_only);
+    let registry_lease =
+        registry_registration::lease_at_event("ne", "ne.resource_id", canonical_only);
     // Emit a Boolean literal so canonical reads retain constant-folded index predicates.
     builder.push(format!(
         r#"

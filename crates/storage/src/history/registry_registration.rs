@@ -29,7 +29,7 @@ pub(super) fn is_registry_only(resource: &str, event: &str, canonical_only: bool
 // The grant's node identifies the name even when the grant predates plaintext discovery.
 // Choosing the last grant first, then testing its release, preserves gaps between leases.
 // All evidence is at or before the event, hence also below its publication bound.
-pub(super) fn lease_at_event(event: &str, canonical_only: bool) -> String {
+pub(super) fn lease_at_event(event: &str, resource: &str, canonical_only: bool) -> String {
     let grant_fork = same_fork_as("registry_lease_grant", &[event], canonical_only);
     let release_fork = same_fork_as("registry_lease_release", &[event], canonical_only);
     let grant_canonical = canonical_row(
@@ -42,6 +42,7 @@ pub(super) fn lease_at_event(event: &str, canonical_only: bool) -> String {
         "registry_release_lineage",
         canonical_only,
     );
+    let event_name = name_at_event(event, resource, canonical_only);
     format!(
         r#"(
             SELECT registry_lease.resource_id FROM (
@@ -66,12 +67,7 @@ pub(super) fn lease_at_event(event: &str, canonical_only: bool) -> String {
                           registry_lease_grant.after_state #>> '{{grant_source,node}}',
                           registry_lease_grant.after_state #>> '{{revocation_source,node}}'
                       )), registry_lease_grant.logical_name_id
-                  ) = COALESCE({event}.logical_name_id,
-                      {event}.namespace || ':' || lower(COALESCE(
-                          {event}.after_state ->> 'child_node',
-                          {event}.after_state ->> 'namehash',
-                          {event}.after_state ->> 'node'
-                      )))
+                  ) = {event_name}
                   AND (registry_lease_grant.block_number, COALESCE(registry_lease_grant.log_index, -1)) <=
                       ({event}.block_number, COALESCE({event}.log_index, -1))
                   AND {grant_fork} AND {grant_canonical}
@@ -96,6 +92,51 @@ pub(super) fn lease_at_event(event: &str, canonical_only: bool) -> String {
                   AND {release_fork} AND {release_canonical}
             )
         )"#
+    )
+}
+
+// Permission rows emitted before name discovery retain their registry resource but carry
+// no node. The authority observation on that resource supplies the node without borrowing
+// a later binding or grant. Its position and fork must agree with the permission event.
+fn name_at_event(event: &str, resource: &str, canonical_only: bool) -> String {
+    let fork = same_fork_as("registry_name", &[event], canonical_only);
+    let canonical = canonical_row("registry_name", "registry_name_lineage", canonical_only);
+    let observed_name = "COALESCE(registry_name.logical_name_id,
+        registry_name.namespace || ':' || lower(COALESCE(
+            registry_name.after_state ->> 'child_node',
+            registry_name.after_state ->> 'namehash',
+            registry_name.after_state ->> 'node'
+        )))";
+    format!(
+        r#"COALESCE({event}.logical_name_id,
+            {event}.namespace || ':' || lower(COALESCE(
+                {event}.after_state ->> 'child_node',
+                {event}.after_state ->> 'namehash',
+                {event}.after_state ->> 'node'
+            )), (
+                SELECT {observed_name}
+                FROM bigname_phase.normalized_events registry_name
+                LEFT JOIN bigname_phase.chain_lineage registry_name_lineage
+                  ON registry_name_lineage.chain_id = registry_name.chain_id
+                 AND registry_name_lineage.block_hash = registry_name.block_hash
+                WHERE registry_name.resource_id = {resource}
+                  AND registry_name.chain_id = {event}.chain_id
+                  AND registry_name.namespace = {event}.namespace
+                  AND registry_name.source_family IN ('ens_v1_registry_l1', 'ens_v1_registrar_l1')
+                  AND registry_name.event_kind IN (
+                      'AuthorityTransferred', 'AuthorityEpochChanged', 'SurfaceBound'
+                  )
+                  AND registry_name.after_state ->> 'authority_kind' = 'registry_only'
+                  AND registry_name.consumer_visibility = 'activated'
+                  AND {observed_name} IS NOT NULL
+                  AND (registry_name.block_number, COALESCE(registry_name.log_index, -1)) <=
+                      ({event}.block_number, COALESCE({event}.log_index, -1))
+                  AND {fork} AND {canonical}
+                ORDER BY registry_name.block_number DESC,
+                         registry_name.log_index DESC NULLS LAST,
+                         registry_name.normalized_event_id DESC
+                LIMIT 1
+            ))"#,
     )
 }
 
