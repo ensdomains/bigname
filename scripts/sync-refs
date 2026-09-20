@@ -123,7 +123,9 @@ def sync_ref(key: str, entry: dict) -> None:
     else:
         run(["git", "-C", str(path), "remote", "set-url", "origin", repo])
     run_network(["git", "fetch", "--filter=blob:none", "--depth", "1", "origin", commit], cwd=path)
-    run(["git", "checkout", "--detach", commit], cwd=path)
+    # The blob-less clone and fetch leave the checkout to fetch each file's
+    # contents from the remote as it materializes them.
+    run_network(["git", "checkout", "--detach", commit], cwd=path)
     if key in RECURSIVE_SUBMODULE_REFS:
         run(["git", "submodule", "sync", "--recursive"], cwd=path)
         run_network(
