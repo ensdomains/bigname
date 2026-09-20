@@ -338,7 +338,7 @@ SELECT line FROM (
     WHERE n.nspname = current_schema()
     UNION ALL
     SELECT 3, c.relname, i.relname,
-           format('index %s.%s %s valid=%s replident=%s', c.relname, i.relname, pg_get_indexdef(x.indexrelid), x.indisvalid, x.indisreplident)
+           format('index %s.%s %s valid=%s replident=%s clustered=%s', c.relname, i.relname, pg_get_indexdef(x.indexrelid), x.indisvalid, x.indisreplident, x.indisclustered)
     FROM pg_index x
     JOIN pg_class i ON i.oid = x.indexrelid
     JOIN pg_class c ON c.oid = x.indrelid
@@ -636,6 +636,7 @@ assert_frozen_catalog_sees_planted_changes() {
     for pair in \
         'SQL-standard routine bodies:CREATE FUNCTION planted_atomic(x integer) RETURNS boolean LANGUAGE sql IMMUTABLE BEGIN ATOMIC SELECT x > 1; END;:CREATE FUNCTION planted_atomic(x integer) RETURNS boolean LANGUAGE sql IMMUTABLE BEGIN ATOMIC SELECT x > 2; END;' \
         'replica-identity indexes:ALTER TABLE chain_lineage REPLICA IDENTITY USING INDEX chain_lineage_pkey;:ALTER TABLE chain_lineage REPLICA IDENTITY USING INDEX chain_lineage_chain_id_block_hash_block_number_key;' \
+        'clustering indexes:ALTER TABLE chain_lineage CLUSTER ON chain_lineage_pkey;:ALTER TABLE chain_lineage CLUSTER ON chain_lineage_chain_id_block_hash_block_number_key;' \
         'comments on overloaded routines:CREATE FUNCTION planted_c(x integer) RETURNS integer LANGUAGE sql AS '"'"'SELECT 1'"'"'; CREATE FUNCTION planted_c(x text) RETURNS integer LANGUAGE sql AS '"'"'SELECT 1'"'"'; COMMENT ON FUNCTION planted_c(integer) IS '"'"'first'"'"'; COMMENT ON FUNCTION planted_c(text) IS '"'"'second'"'"';:CREATE FUNCTION planted_c(x integer) RETURNS integer LANGUAGE sql AS '"'"'SELECT 1'"'"'; CREATE FUNCTION planted_c(x text) RETURNS integer LANGUAGE sql AS '"'"'SELECT 1'"'"'; COMMENT ON FUNCTION planted_c(integer) IS '"'"'second'"'"'; COMMENT ON FUNCTION planted_c(text) IS '"'"'first'"'"';' \
         'domain collations:CREATE DOMAIN planted_dom AS text COLLATE "C";:CREATE DOMAIN planted_dom AS text COLLATE "POSIX";'
     do
@@ -680,6 +681,9 @@ SELECT kind || ' ' || name AS refused_object FROM (
     UNION ALL
     SELECT CASE c.relkind WHEN 'm' THEN 'materialized view' WHEN 'p' THEN 'partitioned table' WHEN 'I' THEN 'partitioned index' WHEN 'f' THEN 'foreign table' ELSE 'relation of kind ' || c.relkind::text END, c.relname::text
     FROM pg_class c WHERE c.relnamespace = current_schema()::regnamespace AND c.relkind NOT IN ('r', 'v', 'S', 'i', 'c', 't')
+    UNION ALL
+    SELECT 'typed table', c.relname::text FROM pg_class c
+    WHERE c.relnamespace = current_schema()::regnamespace AND c.reloftype <> 0
     UNION ALL
     SELECT 'rule', c.relname || '.' || r.rulename FROM pg_rewrite r JOIN pg_class c ON c.oid = r.ev_class
     WHERE c.relnamespace = current_schema()::regnamespace AND r.rulename <> '_RETURN'
@@ -732,6 +736,7 @@ assert_refused_kinds_are_seen() {
         'range type:CREATE TYPE planted_range AS RANGE (SUBTYPE = bigint);' \
         'multirange type:CREATE TYPE planted_range AS RANGE (SUBTYPE = bigint);' \
         'composite type:CREATE TYPE planted_row AS (a integer);' \
+        'typed table:CREATE TYPE planted_row AS (a integer); CREATE TABLE planted_typed OF planted_row;' \
         'operator:CREATE OPERATOR === (LEFTARG = text, RIGHTARG = text, FUNCTION = pg_catalog.texteq);' \
         'materialized view:CREATE MATERIALIZED VIEW planted_mv AS SELECT 1 AS a WITH NO DATA;' \
         'partitioned table:CREATE TABLE planted_parted (a integer) PARTITION BY LIST (a);' \
@@ -1702,7 +1707,7 @@ migration_application_log="$(
 # Future entries must use basename|one-line reason.
 intentional_phase_migration_skips=()
 refusal_assertions_passed=0
-expected_refusal_assertions=230
+expected_refusal_assertions=232
 predecessor_shape_proof_count=0
 expected_predecessor_shape_proof_count=40
 refusal_probe_seconds=0
