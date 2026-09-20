@@ -997,6 +997,162 @@ async fn v2_lookup_marks_unsupported_phase_inventory_fields() -> Result<()> {
 }
 
 #[tokio::test]
+async fn v2_lookup_include_inventory_serves_the_records_route_container() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_identity_name(
+        &database,
+        "ens:inventory-batch.eth",
+        "inventory-batch.eth",
+        "inventory-batch.eth",
+        "namehash:inventory-batch.eth",
+        Uuid::from_u128(0x5a0307),
+        Uuid::from_u128(0x5a0308),
+        Uuid::from_u128(0x5a0309),
+        "0x0000000000000000000000000000000000000abc",
+        bigname_storage::AddressNameRelation::TokenHolder,
+        38,
+    )
+    .await?;
+    // One entry the row cannot serve: it partitions into unsupported_keys on both routes.
+    let updated = sqlx::query(
+        r#"
+        UPDATE record_inventory_current inventory
+        SET selectors = inventory.selectors || '[{"record_key":"text:url","record_family":"text","selector_key":"url","cacheable":true}]'::jsonb,
+            entries = inventory.entries || '[{"record_key":"text:url","record_family":"text","selector_key":"url","status":"unsupported","unsupported_reason":"resolver_family_pending"}]'::jsonb
+        FROM name_current name
+        WHERE name.resource_id = inventory.resource_id
+          AND name.raw_name = 'inventory-batch.eth'
+        "#,
+    )
+    .execute(&database.lookup_pool)
+    .await?
+    .rows_affected();
+    assert_eq!(updated, 1);
+
+    let payload = v2_lookup_json(
+        &database,
+        json!({
+            "profile": "detail",
+            "include": "inventory",
+            "inputs": [
+                {"name": "inventory-batch.eth"},
+                {"name": "never-seeded.eth"},
+                {"address": "0x0000000000000000000000000000000000000abc", "relation": "owner"}
+            ]
+        }),
+    )
+    .await?;
+    let record = &payload["data"][0]["record"];
+    let inventory = &record["inventory"];
+    assert!(inventory["known_keys"].as_array().is_some_and(|keys| keys.contains(&json!("addr:60"))), "{record}");
+    assert_eq!(inventory["unset_keys"], json!([]));
+    assert_eq!(inventory["unsupported_keys"], json!(["text:url"]));
+    assert!(record.get("addresses").is_some(), "{record}");
+
+    // The container is the records route's, key for key.
+    let response = v2_get_response(
+        &database,
+        "/v1/names/inventory-batch.eth/records?include=inventory",
+    )
+    .await?;
+    let status = response.status();
+    let records: Value = read_json(response).await?;
+    assert_eq!(status, StatusCode::OK, "{records:#}");
+    assert_eq!(records["data"]["inventory"], *inventory, "{records:#}");
+
+    assert_eq!(payload["data"][1]["status"], json!("not_found"));
+    assert!(payload["data"][1].get("record").is_none());
+    let reverse_rows = payload["data"][2]["records"].as_array().expect("reverse rows");
+    assert!(!reverse_rows.is_empty());
+    assert!(reverse_rows.iter().all(|row| row.get("inventory").is_none()), "{reverse_rows:?}");
+
+    // Without the include the container is absent, on the same rows.
+    let plain = v2_lookup_json(
+        &database,
+        json!({"profile": "detail", "inputs": [{"name": "inventory-batch.eth"}]}),
+    )
+    .await?;
+    assert!(plain["data"][0]["record"].get("inventory").is_none());
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_lookup_include_inventory_lists_an_unsupported_row_under_unsupported_keys() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_identity_name(
+        &database,
+        "ens:inventory-unsupported.eth",
+        "inventory-unsupported.eth",
+        "inventory-unsupported.eth",
+        "namehash:inventory-unsupported.eth",
+        Uuid::from_u128(0x5a0407),
+        Uuid::from_u128(0x5a0408),
+        Uuid::from_u128(0x5a0409),
+        "0x0000000000000000000000000000000000000abc",
+        bigname_storage::AddressNameRelation::TokenHolder,
+        38,
+    )
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE record_inventory_current inventory
+        SET support_status = 'unsupported',
+            unsupported_reason = 'resolver_implementation_unknown'
+        FROM name_current name
+        WHERE name.resource_id = inventory.resource_id
+          AND name.raw_name = 'inventory-unsupported.eth'
+        "#,
+    )
+    .execute(&database.lookup_pool)
+    .await?;
+
+    let payload = v2_lookup_json(
+        &database,
+        json!({"profile": "detail", "include": "inventory", "inputs": [{"name": "inventory-unsupported.eth"}]}),
+    )
+    .await?;
+    let record = &payload["data"][0]["record"];
+    assert_eq!(payload["data"][0]["status"], json!("ok"));
+    assert!(record.get("addresses").is_none(), "{record}");
+    let inventory = &record["inventory"];
+    assert_eq!(inventory["known_keys"], json!([]));
+    assert_eq!(inventory["unset_keys"], json!([]));
+    assert!(inventory["unsupported_keys"].as_array().is_some_and(|keys| keys.contains(&json!("addr:60"))), "{record}");
+    let records = v2_get_json(
+        &database,
+        "/v1/names/inventory-unsupported.eth/records?include=inventory",
+    )
+    .await?;
+    assert_eq!(records["data"]["inventory"], *inventory, "{records:#}");
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_lookup_include_rejects_feed_and_unknown_expansions() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    for body in [
+        json!({"profile": "feed", "include": "inventory", "inputs": [{"name": "alice.eth"}]}),
+        json!({"profile": "detail", "include": "lineage", "inputs": [{"name": "alice.eth"}]}),
+        json!({"profile": "detail", "include": "inventory,counts", "inputs": [{"name": "alice.eth"}]}),
+    ] {
+        let response = v2_lookup_response_for_database(&database, "/v1/lookup", body).await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let payload: Value = read_json(response).await?;
+        assert_eq!(payload["error"]["code"], json!("invalid_input"));
+    }
+    // An empty include is no include.
+    let payload = v2_lookup_json(
+        &database,
+        json!({"profile": "feed", "include": "", "inputs": [{"name": "alice.eth"}]}),
+    )
+    .await?;
+    assert_eq!(payload["data"][0]["status"], json!("not_found"));
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn v2_lookup_detail_withholds_record_values_from_unsupported_inventory() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_identity_name(

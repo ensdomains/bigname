@@ -357,7 +357,8 @@ async fn load_phase_inventories<'a>(
     let query = format!(
         r#"
         SELECT ric.resource_id, ric.record_version_boundary,
-               ric.entries, ric.provenance, ric.unsupported_families,
+               ric.selectors, ric.entries,
+               ric.provenance, ric.unsupported_families,
                ric.support_status, ric.unsupported_reason,
                ric.chain_positions, ric.last_recomputed_at
         FROM bigname_phase.record_inventory_current ric
@@ -383,6 +384,7 @@ async fn load_phase_inventories<'a>(
                 resource_id,
                 support_status: row.try_get("support_status")?,
                 unsupported_reason: row.try_get("unsupported_reason")?,
+                selectors: row.try_get("selectors")?,
                 entries: row.try_get("entries")?,
                 provenance: row.try_get("provenance")?,
                 unsupported_families: row.try_get("unsupported_families")?,

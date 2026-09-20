@@ -39,6 +39,7 @@ pub struct IdentityRecordInventoryRow {
     pub resource_id: Uuid,
     pub support_status: String,
     pub unsupported_reason: Option<String>,
+    pub selectors: Value,
     pub entries: Value,
     pub provenance: Value,
     pub unsupported_families: Value,

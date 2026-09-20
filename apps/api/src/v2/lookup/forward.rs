@@ -12,13 +12,14 @@ use super::{
     admission::require_name_records_at_served_head,
     build::{build_forward_detail_record, build_forward_feed_record},
     dto::{LookupKind, LookupResult},
-    parse::{LookupProfile, ParsedNameLookup},
+    parse::{LookupInclude, LookupProfile, ParsedNameLookup},
     result_failure_reason, result_unsupported_reason,
 };
 
 pub(super) async fn render_name_lookup_results(
     state: &AppState,
     profile: LookupProfile,
+    include: LookupInclude,
     inputs: &[ParsedNameLookup],
     selected_snapshot: Option<&SelectedSnapshot>,
     results: &mut [Option<LookupResult>],
@@ -63,7 +64,7 @@ pub(super) async fn render_name_lookup_results(
                 Some(record) => {
                     let mut record = match profile {
                         LookupProfile::Feed => build_forward_feed_record(record),
-                        LookupProfile::Detail => build_forward_detail_record(record),
+                        LookupProfile::Detail => build_forward_detail_record(record, include),
                     }?;
                     if record.status != Status::Unsupported {
                         record.subregistry = subregistries.get(&lookup.logical_name_id).cloned();

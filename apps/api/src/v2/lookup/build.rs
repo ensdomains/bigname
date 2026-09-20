@@ -3,7 +3,8 @@ use std::collections::BTreeSet;
 use bigname_domain::resolver_read::{IndexedRecordStatus, evaluate_indexed_record};
 use serde_json::{Value, json};
 
-use super::{cursor::reverse_identity_is_primary, dto::LookupRecord};
+use super::{cursor::reverse_identity_is_primary, dto::LookupRecord, parse::LookupInclude};
+use crate::v2::name_records_inventory::inventory_summary_of;
 use crate::v2::support::{
     V2_RECORD_UNSUPPORTED_FIELD_NAMES, direct_json_field, record_addresses_from_entries,
     record_content_hash_from_entries, record_text_records_from_entries, record_unsupported_fields,
@@ -21,8 +22,19 @@ use crate::v2::{
 
 pub(super) fn build_forward_detail_record(
     record: &bigname_storage::IdentityNameRecordRow,
+    include: LookupInclude,
 ) -> V2Result<LookupRecord> {
-    build_detail_record(record, "60", None, Vec::new())
+    let mut built = build_detail_record(record, "60", None, Vec::new())?;
+    // The container is served with the inventory the value fields come from, so it is absent on
+    // a record that serves none: unsupported, unregistered, a reservation (docs/api-v2-routes.md).
+    if include.inventory && built.status != Status::Unsupported {
+        built.inventory = record
+            .record_inventory_current
+            .as_ref()
+            .filter(|_| name_record::identity_row_has_current_registration(&record.row))
+            .map(|inventory| inventory_summary_of(Some(inventory.into()), None));
+    }
+    Ok(built)
 }
 
 pub(super) fn build_forward_feed_record(
@@ -53,6 +65,7 @@ pub(super) fn build_forward_feed_record(
         addresses: None,
         text_records: None,
         content_hash: None,
+        inventory: None,
         primary_name: None,
         primary_address: None,
         chain_id: chain_id_from_positions(&record.row.chain_positions),
@@ -114,6 +127,7 @@ pub(super) fn build_reverse_feed_record(
         addresses: None,
         text_records: None,
         content_hash: None,
+        inventory: None,
         primary_name: None,
         primary_address: None,
         chain_id: chain_id_from_positions(&record.name_record.row.chain_positions),
@@ -213,6 +227,7 @@ fn build_detail_record(
         addresses,
         text_records,
         content_hash,
+        inventory: None,
         primary_name: json_string_at_paths(
             &record.row.declared_summary,
             &[
@@ -268,6 +283,7 @@ fn authority_unsupported_record(
         addresses: None,
         text_records: None,
         content_hash: None,
+        inventory: None,
         primary_name: None,
         primary_address: None,
         chain_id: None,
