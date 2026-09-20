@@ -80,6 +80,58 @@ render_phase_migration() {
     local migration_file="$1"
     sed "s/bigname_phase/$scratch_schema/g" "$migration_file"
 }
+# sqlx applies the pending sequence through one connection, each file inside
+# its own transaction unless its bytes start with `-- no-transaction`, so a
+# plain SET one file commits is in force for every later file. The replays
+# below mirror that: one session, a transaction per file.
+migration_sequence_sql() {
+    local migration_file
+    for migration_file in "$@"; do
+        if [ "$(head -c 17 "$migration_file")" = "-- no-transaction" ]; then
+            render_phase_migration "$migration_file"
+            printf '\n'
+        else
+            printf 'BEGIN;\n'
+            render_phase_migration "$migration_file"
+            printf '\nCOMMIT;\n'
+        fi
+    done
+}
+apply_migration_sequence() {
+    migration_sequence_sql "$@" | run_psql
+}
+production_schema_migrations() {
+    local migration_file
+    for migration_file in "$ROOT"/migrations/*.sql; do
+        if phase_migration_uses_production_schema "$migration_file"; then
+            printf '%s\n' "$migration_file"
+        fi
+    done
+}
+# The session proves itself on a planted sequence: the first file commits a
+# SET the second must still see (one session), the second reads its
+# transaction start against its statement clock (a transaction per file), and
+# a third file under the `-- no-transaction` marker reads the same and must
+# find no transaction block. Each wrong shape fails one of the three.
+assert_migration_sequence_session_mirrors_sqlx() {
+    local planted_dir observed
+    planted_dir="$(mktemp -d "${TMPDIR:-/tmp}/schema-v2-planted-sequence.XXXXXX")"
+    printf 'SET lock_timeout TO %s;\n' "'123ms'" > "$planted_dir/00000000000001_a.sql"
+    printf 'SELECT current_setting(%s);\nSELECT pg_sleep(0.002);\nSELECT now() < statement_timestamp();\n' "'lock_timeout'" > "$planted_dir/00000000000002_b.sql"
+    printf -- '-- no-transaction\nSELECT pg_sleep(0.002);\nSELECT now() < statement_timestamp();\n' > "$planted_dir/00000000000003_c.sql"
+    observed="$({
+        printf '\\pset format unaligned\n\\pset tuples_only on\n'
+        migration_sequence_sql "$planted_dir"/*.sql
+    } | run_psql | grep -v '^$' | tr '\n' ' ')"
+    rm -rf -- "$planted_dir"
+    case "$observed" in
+        "123ms t f ") refusal_assertions_passed=$((refusal_assertions_passed + 1)) ;;
+        "0 "*) printf '%s\n' "the schema-migration replay does not carry a committed session setting to the next file (saw: $observed), so it does not run the sequence as one session the way sqlx does" >&2; exit 1 ;;
+        "123ms f "*) printf '%s\n' "the schema-migration replay runs a file outside a transaction block (saw: $observed), where sqlx wraps every file without the no-transaction marker" >&2; exit 1 ;;
+        "123ms t t ") printf '%s\n' "the schema-migration replay wraps a no-transaction file in a transaction block (saw: $observed), where sqlx runs it directly" >&2; exit 1 ;;
+        *) printf '%s\n' "the planted schema-migration sequence answered unexpectedly (saw: ${observed:-nothing})" >&2; exit 1 ;;
+    esac
+}
 # Strip `--` comments the way PostgreSQL reads them: not inside a single-quoted
 # string ('' escapes), a double-quoted identifier, or a $$ body, across lines.
 # `quote` carries the open quoting from one line to the next; a file that ends
@@ -476,18 +528,15 @@ SQL
     } | run_psql | sed "s/$schema/bigname_phase/g"
 }
 assert_frozen_schema_fingerprint() {
-    local observed after_baseline migration_file
+    local observed after_baseline sequence
     observed="$(mktemp "${TMPDIR:-/tmp}/schema-v2-frozen-catalog.XXXXXX")"
     after_baseline="$(mktemp "${TMPDIR:-/tmp}/schema-v2-baseline-catalog.XXXXXX")"
     (
         scratch_schema="$frozen_schema"
         apply_baseline
         frozen_schema_catalog "$frozen_schema" > "$after_baseline"
-        for migration_file in "$ROOT"/migrations/*.sql; do
-            if phase_migration_uses_production_schema "$migration_file"; then
-                render_phase_migration "$migration_file" | run_psql
-            fi
-        done
+        mapfile -t sequence < <(production_schema_migrations)
+        apply_migration_sequence "${sequence[@]}"
         frozen_schema_catalog "$frozen_schema" > "$observed"
     )
     if [ ! -s "$observed" ] || [ ! -s "$after_baseline" ]; then
@@ -524,7 +573,7 @@ assert_frozen_schema_fingerprint() {
 # which proves this path reads the previous files and not the working tree.
 assert_predecessor_baseline_transition() {
     local after_baseline="$1" observed="$2"
-    local base status predecessor_dir predecessor_catalog migrated_catalog file
+    local base status predecessor_dir predecessor_catalog migrated_catalog file sequence
     base="$(prior_ref)" && status=0 || status=$?
     case "$status" in
         0) ;;
@@ -549,11 +598,8 @@ assert_predecessor_baseline_transition() {
         baseline_extension_statements="$(baseline_extension_statements_of "$predecessor_dir")" || exit 1
         apply_baseline "$predecessor_dir"
         frozen_schema_catalog "$predecessor_schema" > "$predecessor_catalog"
-        for migration_file in "$ROOT"/migrations/*.sql; do
-            if phase_migration_uses_production_schema "$migration_file"; then
-                render_phase_migration "$migration_file" | run_psql
-            fi
-        done
+        mapfile -t sequence < <(production_schema_migrations)
+        apply_migration_sequence "${sequence[@]}"
         frozen_schema_catalog "$predecessor_schema" > "$migrated_catalog"
     ) || exit 1
     if git -C "$ROOT" diff --quiet "$base" -- schema-v2/baseline; then
@@ -796,13 +842,13 @@ assert_refused_kinds_are_seen() {
 # (every file is required to be idempotent once applied), and the result must
 # be the frozen artifact too, rows and all.
 assert_exercised_schema_matches_frozen() {
-    local exercised migration_file
+    local exercised migration_file sequence
     exercised="$(mktemp "${TMPDIR:-/tmp}/schema-v2-exercised-catalog.XXXXXX")"
-    for migration_file in "$ROOT"/migrations/*.sql; do
-        if phase_migration_uses_production_schema "$migration_file"; then
-            emit_phase_migration "$migration_file" exercised | run_psql
-        fi
+    mapfile -t sequence < <(production_schema_migrations)
+    for migration_file in "${sequence[@]}"; do
+        printf 'exercised|%s\n' "$(basename "$migration_file")" >> "$migration_application_log"
     done
+    apply_migration_sequence "${sequence[@]}"
     frozen_schema_catalog "$scratch_schema" > "$exercised"
     if ! diff -u "$frozen_schema_catalog" "$exercised" >&2; then
         printf '%s\n' \
@@ -1710,7 +1756,7 @@ migration_application_log="$(
 # Future entries must use basename|one-line reason.
 intentional_phase_migration_skips=()
 refusal_assertions_passed=0
-expected_refusal_assertions=233
+expected_refusal_assertions=234
 predecessor_shape_proof_count=0
 expected_predecessor_shape_proof_count=40
 refusal_probe_seconds=0
@@ -2109,6 +2155,7 @@ SQL
 report_timing empty-schema
 
 assert_baseline_session_state_carries
+assert_migration_sequence_session_mirrors_sqlx
 apply_baseline
 apply_baseline
 report_timing baseline-install

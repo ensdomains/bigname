@@ -255,7 +255,11 @@ unchanged; the check therefore also takes the catalog of its scratch schema
 at the end of the run — populated by every predecessor-shape and behavior
 proof, rewound to older shapes by those proofs and carried back through the
 whole inventoried sequence, as sqlx would carry an initialized database —
-and that must be the frozen artifact too. Column order is not part of the
+and that must be the frozen artifact too. Every such replay applies the
+sequence the way `sqlx migrate run` does: through one session, each file in
+its own transaction unless it opens with `-- no-transaction`, so a setting
+one file commits is in force for the files after it, and the check plants a
+sequence on every run to prove all three properties. Column order is not part of the
 artifact: a column a schema-migration adds sits last on an initialized
 database and wherever the baseline lists it on a fresh one, and no
 schema-migration can move it.
