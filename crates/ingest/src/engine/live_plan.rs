@@ -63,7 +63,7 @@ pub async fn plan_live_continuation(
         .heads()
         .await
         .map_err(|error| provider_error("failed to fetch live target heads", error))?;
-    require_checkpoint_heads(&snapshot)?;
+    require_checkpoint_heads(&snapshot, "live")?;
     let node_head = Marker {
         number: snapshot.latest.number,
         hash: snapshot.latest.hash,
@@ -75,13 +75,27 @@ pub async fn plan_live_continuation(
     })
 }
 
-/// A live batch publishes safe and finalized heads with every block it loads, so a node that
-/// reports neither cannot serve live follow at all.
-pub(super) fn require_checkpoint_heads(snapshot: &HeadSnapshot) -> Result<()> {
+/// Applies, to a candidate reader, the admission a normal Ingest batch applies to its source
+/// before it plans anything (`Engine::run_normal_batch`): the node must report safe and
+/// finalized heads. A maintenance command that changes the source ahead of such a batch uses
+/// it so the batch's own refusal happens before the change rather than after it.
+pub async fn admit_ingest_checkpoint_heads(provider: &VerificationProvider) -> Result<()> {
+    let snapshot = provider
+        .chain_provider()
+        .heads()
+        .await
+        .map_err(|error| provider_error("failed to fetch ingest target heads", error))?;
+    require_checkpoint_heads(&snapshot, "ingest")
+}
+
+/// Normal Ingest and live follow both publish safe and finalized heads with every block they
+/// load, so a node that reports neither can serve neither. `work` names the batch in the
+/// error the way that batch reports it.
+pub(super) fn require_checkpoint_heads(snapshot: &HeadSnapshot, work: &str) -> Result<()> {
     if snapshot.safe.is_none() || snapshot.finalized.is_none() {
-        return Err(IngestError::data_integrity(
-            "live provider must report safe and finalized checkpoint heads",
-        ));
+        return Err(IngestError::data_integrity(format!(
+            "{work} provider must report safe and finalized checkpoint heads"
+        )));
     }
     Ok(())
 }

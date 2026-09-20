@@ -14,8 +14,8 @@ mod write;
 
 pub use engine::{
     BatchOutcome, BatchRequest, Engine, HeadMarkers, LiveBatchOutcome, LiveBatchRequest,
-    LiveContinuation, Marker, SourceCursor, SourceDescriptor, SourceProgress, admit_source_floor,
-    plan_live_continuation,
+    LiveContinuation, Marker, SourceCursor, SourceDescriptor, SourceProgress,
+    admit_ingest_checkpoint_heads, admit_source_floor, plan_live_continuation,
 };
 pub use error::{ErrorKind, IngestError, REDO_BOUNDARY_DIVERGENCE_PREFIX, Result};
 pub use manifest::{WatchFilter, WatchQuery, load_persisted_watch_filter, load_watch_filter};

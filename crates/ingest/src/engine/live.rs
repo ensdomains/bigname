@@ -22,7 +22,7 @@ impl Engine {
             .heads()
             .await
             .map_err(|error| provider_error("failed to fetch live target heads", error))?;
-        require_checkpoint_heads(&snapshot)?;
+        require_checkpoint_heads(&snapshot, "live")?;
 
         let node_latest = Marker {
             number: snapshot.latest.number,

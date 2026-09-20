@@ -22,7 +22,7 @@ pub(crate) mod query;
 mod redo;
 mod source_floor;
 
-pub use live_plan::{LiveContinuation, plan_live_continuation};
+pub use live_plan::{LiveContinuation, admit_ingest_checkpoint_heads, plan_live_continuation};
 pub use source_floor::admit_source_floor;
 mod window;
 
@@ -142,11 +142,7 @@ impl Engine {
             .heads()
             .await
             .map_err(|error| provider_error("failed to fetch ingest target heads", error))?;
-        if head_snapshot.safe.is_none() || head_snapshot.finalized.is_none() {
-            return Err(IngestError::data_integrity(
-                "ingest provider must report safe and finalized checkpoint heads",
-            ));
-        }
+        live_plan::require_checkpoint_heads(&head_snapshot, "ingest")?;
         let cursor_by_key = request
             .cursors
             .iter()

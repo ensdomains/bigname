@@ -207,7 +207,9 @@ engine's own rule (`bigname_ingest::admit_source_floor`) applied to the proposed
 descriptor, and which work resumes is read from the persisted phase state the
 way the runner reads it:
 
-- a redo in progress with blocks left is judged on what remains of its range;
+- a redo in progress with blocks left is judged on what remains of its range.
+  Both interfaces must also return the same hash for the range's last block,
+  which the redo batch resolves before loading its first window;
 - a redo that read its last block before the runner cleared its marker (its
   `redo_current_block_number` equals `redo_to_block_number`) has nothing left
   to read. Rerunning it only clears the marker and restores the lifecycle the
@@ -216,8 +218,10 @@ way the runner reads it:
   with a populated `live_continuation` when the interrupted pass had handed off
   (the compared block is the ancestor when the next block does not exist yet).
   A redo position outside its range is refused, as the engine refuses it;
-- an Ingest phase that has not completed replans from the declared start block
-  (zero, so a direct reader that has pruned any history is refused);
+- an unfinished Ingest phase, or a completed phase that never handed off,
+  replans from the declared start block (zero, so a direct reader that has pruned any history is refused). The
+  proposed reader must also report safe and finalized checkpoint heads, as the
+  normal Ingest batch requires before it plans work;
 - a completed Ingest phase that handed off to live follow is judged where live
   follow resumes, not on the retained Ingest cursor, which stops at the handoff
   while live progress is recorded separately. The command selects that block
@@ -239,8 +243,9 @@ A refusal names the floor and the range the resumed work would plan, and
 changes nothing; without it the command would report success and the next
 batch would fail the same check.
 It emits a receipt containing the previous cursor, unchanged phase state,
-checked boundaries, the block it compared and, after a handoff, the selected
-live continuation; retain that receipt with the deployment record. Raw facts,
+checked boundaries, the block it compared, the checked redo target when blocks
+remain in a redo and, after a handoff, the selected live continuation; retain
+that receipt with the deployment record. Raw facts,
 positions, redo ranges, manifest authority and verification state are preserved.
 A mismatch or held writer lock aborts before the update. The inverse change is
 supported for rollback after the same checks. An ordinary startup still rejects
