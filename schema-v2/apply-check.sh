@@ -82,23 +82,45 @@ render_phase_migration() {
 }
 # sqlx applies the pending sequence through one connection, each file inside
 # its own transaction unless its bytes start with `-- no-transaction`, so a
-# plain SET one file commits is in force for every later file. The replays
-# below mirror that: one session, a transaction per file.
+# plain SET one file commits is in force for every later file; inside that
+# transaction, after the file, it records the version in `_sqlx_migrations`
+# by its unqualified name, and after the commit it writes the execution time.
+# The replays below mirror all of that: one session, a transaction per file,
+# sqlx's bookkeeping statements at sqlx's positions with the version, the
+# description (the file name after the version, underscores as spaces) and
+# the SHA-384 of the file bytes sqlx would record. The bookkeeping table is
+# the one sqlx creates, made by the owner at setup because the login may not
+# create in public; each replay starts from it empty.
 migration_sequence_sql() {
-    local migration_file
+    local migration_file name version description checksum bookkeeping
+    printf 'DELETE FROM _sqlx_migrations;\n'
     for migration_file in "$@"; do
+        name="${migration_file##*/}"
+        version=$((10#${name%%_*}))
+        description="${name#*_}"; description="${description%.sql}"; description="${description//_/ }"
+        checksum="$(sha384sum -- "$migration_file" | cut -d' ' -f1)"
+        bookkeeping="INSERT INTO _sqlx_migrations ( version, description, success, checksum, execution_time ) VALUES ( $version, '$description', TRUE, '\\x$checksum', -1 );"
         if [ "$(head -c 17 "$migration_file")" = "-- no-transaction" ]; then
             render_phase_migration "$migration_file"
-            printf '\n'
+            printf '\n%s\n' "$bookkeeping"
         else
             printf 'BEGIN;\n'
             render_phase_migration "$migration_file"
-            printf '\nCOMMIT;\n'
+            printf '\n%s\nCOMMIT;\n' "$bookkeeping"
         fi
+        printf 'UPDATE _sqlx_migrations SET execution_time = 0 WHERE version = %s;\n' "$version"
     done
 }
 apply_migration_sequence() {
     migration_sequence_sql "$@" | run_psql
+}
+# Planted files live in a directory mktemp made under the temp root; nothing
+# else is ever removed.
+remove_planted_dir() {
+    case "$1" in
+        "${TMPDIR:-/tmp}"/schema-v2-*) rm -rf -- "$1" ;;
+        *) printf '%s\n' "refusing to remove $1: not a planted directory of this check" >&2; exit 1 ;;
+    esac
 }
 production_schema_migrations() {
     local migration_file
@@ -114,23 +136,45 @@ production_schema_migrations() {
 # a third file under the `-- no-transaction` marker reads the same and must
 # find no transaction block. Each wrong shape fails one of the three.
 assert_migration_sequence_session_mirrors_sqlx() {
-    local planted_dir observed
+    local planted_dir observed checksum probe_stderr observed_error
     planted_dir="$(mktemp -d "${TMPDIR:-/tmp}/schema-v2-planted-sequence.XXXXXX")"
     printf 'SET lock_timeout TO %s;\n' "'123ms'" > "$planted_dir/00000000000001_a.sql"
-    printf 'SELECT current_setting(%s);\nSELECT pg_sleep(0.002);\nSELECT now() < statement_timestamp();\n' "'lock_timeout'" > "$planted_dir/00000000000002_b.sql"
+    printf 'SELECT current_setting(%s);\nSELECT pg_sleep(0.002);\nSELECT now() < statement_timestamp();\n' "'lock_timeout'" > "$planted_dir/00000000000002_b_two.sql"
     printf -- '-- no-transaction\nSELECT pg_sleep(0.002);\nSELECT now() < statement_timestamp();\n' > "$planted_dir/00000000000003_c.sql"
+    checksum="$(sha384sum -- "$planted_dir/00000000000002_b_two.sql" | cut -d' ' -f1)"
     observed="$({
         printf '\\pset format unaligned\n\\pset tuples_only on\n'
         migration_sequence_sql "$planted_dir"/*.sql
+        printf "SELECT version || ':' || description || ':' || (encode(checksum, 'hex') = '%s') || ':' || success || ':' || execution_time FROM _sqlx_migrations ORDER BY version;\n" "$checksum"
     } | run_psql | grep -v '^$' | tr '\n' ' ')"
-    rm -rf -- "$planted_dir"
+    remove_planted_dir "$planted_dir"
     case "$observed" in
-        "123ms t f ") refusal_assertions_passed=$((refusal_assertions_passed + 1)) ;;
+        "123ms t f 1:a:false:true:0 2:b two:true:true:0 3:c:false:true:0 ") ;;
         "0 "*) printf '%s\n' "the schema-migration replay does not carry a committed session setting to the next file (saw: $observed), so it does not run the sequence as one session the way sqlx does" >&2; exit 1 ;;
         "123ms f "*) printf '%s\n' "the schema-migration replay runs a file outside a transaction block (saw: $observed), where sqlx wraps every file without the no-transaction marker" >&2; exit 1 ;;
-        "123ms t t ") printf '%s\n' "the schema-migration replay wraps a no-transaction file in a transaction block (saw: $observed), where sqlx runs it directly" >&2; exit 1 ;;
+        "123ms t t "*) printf '%s\n' "the schema-migration replay wraps a no-transaction file in a transaction block (saw: $observed), where sqlx runs it directly" >&2; exit 1 ;;
+        "123ms t f "*) printf '%s\n' "the schema-migration replay does not record what sqlx records in _sqlx_migrations (saw: $observed)" >&2; exit 1 ;;
         *) printf '%s\n' "the planted schema-migration sequence answered unexpectedly (saw: ${observed:-nothing})" >&2; exit 1 ;;
     esac
+    refusal_assertions_passed=$((refusal_assertions_passed + 1))
+    # The bookkeeping runs inside the file's transaction: a file that points
+    # search_path elsewhere for its transaction must make the version insert
+    # fail there, as it would under sqlx; a replay that recorded the version
+    # after the commit would not notice.
+    planted_dir="$(mktemp -d "${TMPDIR:-/tmp}/schema-v2-planted-sequence.XXXXXX")"
+    printf 'SET LOCAL search_path TO pg_catalog;\nSELECT 1;\n' > "$planted_dir/00000000000004_d.sql"
+    if probe_stderr="$(migration_sequence_sql "$planted_dir"/*.sql | run_psql 2>&1 >/dev/null)"; then
+        printf '%s\n' "the schema-migration replay recorded a version after a file moved search_path away for its transaction, so the bookkeeping does not run inside the file's transaction as sqlx runs it" >&2
+        exit 1
+    fi
+    remove_planted_dir "$planted_dir"
+    observed_error="$(printf '%s\n' "$probe_stderr" | psql_error_message)"
+    if [ "$observed_error" != 'relation "_sqlx_migrations" does not exist' ]; then
+        printf '%s\n' "the planted search_path file failed for another reason: $observed_error" >&2
+        exit 1
+    fi
+    printf 'DELETE FROM _sqlx_migrations;\n' | run_psql
+    refusal_assertions_passed=$((refusal_assertions_passed + 1))
 }
 # Strip `--` comments the way PostgreSQL reads them: not inside a single-quoted
 # string ('' escapes), a double-quoted identifier, or a $$ body, across lines.
@@ -600,6 +644,7 @@ assert_predecessor_baseline_transition() {
         frozen_schema_catalog "$predecessor_schema" > "$predecessor_catalog"
         mapfile -t sequence < <(production_schema_migrations)
         apply_migration_sequence "${sequence[@]}"
+        assert_schema_holds_only_allowed_kinds "$predecessor_schema" "the migrated predecessor baseline"
         frozen_schema_catalog "$predecessor_schema" > "$migrated_catalog"
     ) || exit 1
     if git -C "$ROOT" diff --quiet "$base" -- schema-v2/baseline; then
@@ -1756,7 +1801,7 @@ migration_application_log="$(
 # Future entries must use basename|one-line reason.
 intentional_phase_migration_skips=()
 refusal_assertions_passed=0
-expected_refusal_assertions=234
+expected_refusal_assertions=243
 predecessor_shape_proof_count=0
 expected_predecessor_shape_proof_count=40
 refusal_probe_seconds=0
@@ -1775,6 +1820,8 @@ cleanup() {
         rm -f -- "$migration_application_log"
     fi
     {
+        # Only the bookkeeping table this run created above; a pre-existing one refused the run.
+        [ "${sqlx_bookkeeping_created:-0}" != 1 ] || printf 'DROP TABLE IF EXISTS public._sqlx_migrations;\n'
         printf 'DROP SCHEMA IF EXISTS "%s" CASCADE;\n' "$scratch_schema"
         printf 'DROP SCHEMA IF EXISTS "%s" CASCADE;\n' "${scratch_schema}_frozen"
         printf 'DROP SCHEMA IF EXISTS "%s" CASCADE;\n' "${scratch_schema}_predecessor"
@@ -1933,6 +1980,86 @@ assert_baseline_extension_rule_holds() {
 }
 assert_baseline_extension_rule_holds
 baseline_extension_statements="$(baseline_extension_statements_of "$ROOT/schema-v2/baseline")" || exit 1
+# Neither the baseline nor a schema-migration may change session state: sqlx
+# carries a session across the whole sequence and the baseline runs as one
+# session, so a SET or RESET in one file governs how every later file is
+# parsed and where its unqualified names resolve -- including sqlx's own
+# bookkeeping insert. Refused, as text, wherever it appears (a routine body
+# included, since a SET there runs with the same reach): a statement-leading
+# SET or RESET of any setting, SET ROLE, SET SESSION AUTHORIZATION, and
+# set_config with a false is_local. UPDATE ... SET and ALTER ... SET are not
+# session state; set_config(..., true) inside a routine ends with the
+# transaction and a routine that restores what it changed is the documented
+# form. A carve-out that needs session state extends this rule under ADR 0007.
+session_state_scanner='
+    { line = $0; sub(/--.*$/, "", line); text = text " " line }
+    END {
+        gsub(/\/\*[^*]*\*+([^\/*][^*]*\*+)*\//, " ", text)
+        gsub(/[[:space:]]+/, " ", text)
+        t = toupper(text) " "
+        while (match(t, /(^|;|\(|[^A-Z_](BEGIN|THEN|ELSE|LOOP|DECLARE)) *(SET (LOCAL |SESSION )?[A-Z_.]+ *(=|TO[^A-Z_])|RESET [A-Z_]+|SET (ROLE|SESSION AUTHORIZATION)[^A-Z_])/)) {
+            hit = substr(t, RSTART, RLENGTH); sub(/^[^SR]*/, "", hit); sub(/^SE(T|SSION) *$/, "", hit)
+            print FILENAME ": " hit; t = substr(t, RSTART + RLENGTH)
+        }
+        t = toupper(text)
+        while (match(t, /SET_CONFIG *\([^)]*, *FALSE *\)/)) { print FILENAME ": " substr(t, RSTART, RLENGTH); t = substr(t, RSTART + RLENGTH) }
+    }
+'
+session_state_statements_of() {
+    awk "$session_state_scanner" "$1"
+}
+assert_no_session_state_statements() {
+    local file hits
+    for file in "$ROOT"/schema-v2/baseline/*.sql "$ROOT"/migrations/*.sql; do
+        hits="$(session_state_statements_of "$file")"
+        if [ -n "$hits" ]; then
+            printf '%s\n' "session state is changed by a baseline file or schema-migration, which sqlx and the baseline session would carry into every later file: ${hits//$'\n'/; }; a setting scoped to one routine goes through set_config(..., true) and is restored there, and a carve-out that needs more extends the session-state rule in schema-v2/apply-check.sh under ADR 0007" >&2
+            exit 1
+        fi
+    done
+}
+# The rule proves itself on planted files: each refused shape must be named,
+# each accepted shape must not.
+assert_session_state_rule_holds() {
+    local planted planted_dir
+    local -a refused=(
+        'SET standard_conforming_strings = off;'
+        'set local search_path to public;'
+        'RESET search_path;'
+        'SET SESSION AUTHORIZATION DEFAULT;'
+        'SET ROLE nobody;'
+        'CREATE TABLE t (a int); SET lock_timeout TO '"'"'1ms'"'"';'
+        'DO $$ BEGIN SET search_path TO pg_catalog; END $$;'
+        'DO $$ BEGIN PERFORM set_config('"'"'search_path'"'"', '"'"'pg_catalog'"'"', false); END $$;'
+    )
+    local -a accepted=(
+        'UPDATE t SET a = 1;'
+        'ALTER FUNCTION public.f() SET lock_timeout = '"'"'1ms'"'"';'
+        'INSERT INTO t VALUES (1) ON CONFLICT (a) DO UPDATE SET a = 2;'
+        'DO $$ BEGIN PERFORM set_config('"'"'search_path'"'"', '"'"'pg_catalog'"'"', true); END $$;'
+        'SELECT 1; -- SET search_path = pg_catalog;'
+        '/* SET search_path = pg_catalog; */ SELECT 1;'
+    )
+    planted_dir="$(mktemp -d "${TMPDIR:-/tmp}/schema-v2-session-state-rule.XXXXXX")"
+    for planted in "${refused[@]}"; do
+        printf '%s\n' "$planted" > "$planted_dir/planted.sql"
+        if [ -z "$(session_state_statements_of "$planted_dir/planted.sql")" ]; then
+            printf '%s\n' "session-state rule accepted a statement it must refuse: $planted" >&2
+            exit 1
+        fi
+        refusal_assertions_passed=$((refusal_assertions_passed + 1))
+    done
+    for planted in "${accepted[@]}"; do
+        printf '%s\n' "$planted" > "$planted_dir/planted.sql"
+        if [ -n "$(session_state_statements_of "$planted_dir/planted.sql")" ]; then
+            printf '%s\n' "session-state rule refused a statement that changes no session state: $planted" >&2
+            exit 1
+        fi
+    done
+    remove_planted_dir "$planted_dir"
+}
+assert_session_state_rule_holds
+assert_no_session_state_statements
 check_baseline_extensions "$baseline_extension_statements" || exit 1
 # The login is provisioned by the owner without any database-level grant,
 # which the documented external-database user (CREATEDB and CREATEROLE, not
@@ -1951,7 +2078,26 @@ predecessor_schema="${scratch_schema}_predecessor"
     printf 'CREATE SCHEMA "%s" AUTHORIZATION "%s";\n' "$scratch_schema" "$apply_check_role"
     printf 'CREATE SCHEMA "%s" AUTHORIZATION "%s";\n' "$frozen_schema" "$apply_check_role"
     printf 'CREATE SCHEMA "%s" AUTHORIZATION "%s";\n' "$predecessor_schema" "$apply_check_role"
+    # sqlx's own bookkeeping table, for the schema-migration replays; a
+    # database that already has one is not a scratch database.
+    cat <<'SQL'
+DO $$ BEGIN
+    IF to_regclass('public._sqlx_migrations') IS NOT NULL THEN
+        RAISE EXCEPTION 'the database already carries public._sqlx_migrations; run the check against a scratch database';
+    END IF;
+END $$;
+CREATE TABLE public._sqlx_migrations (
+    version BIGINT PRIMARY KEY,
+    description TEXT NOT NULL,
+    installed_on TIMESTAMPTZ NOT NULL DEFAULT now(),
+    success BOOLEAN NOT NULL,
+    checksum BYTEA NOT NULL,
+    execution_time BIGINT NOT NULL
+);
+SQL
+    printf 'GRANT SELECT, INSERT, UPDATE, DELETE ON public._sqlx_migrations TO "%s";\n' "$apply_check_role"
 } | run_psql_as_owner
+sqlx_bookkeeping_created=1
 # Prove the role boundary on every run: an identifier the rewrite cannot see,
 # assembled inside EXECUTE, must fail on the production schema whether or not
 # that schema exists in this database, while the same statement against the

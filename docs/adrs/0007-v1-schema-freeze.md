@@ -257,9 +257,18 @@ proof, rewound to older shapes by those proofs and carried back through the
 whole inventoried sequence, as sqlx would carry an initialized database —
 and that must be the frozen artifact too. Every such replay applies the
 sequence the way `sqlx migrate run` does: through one session, each file in
-its own transaction unless it opens with `-- no-transaction`, so a setting
-one file commits is in force for the files after it, and the check plants a
-sequence on every run to prove all three properties. Column order is not part of the
+its own transaction unless it opens with `-- no-transaction`, with sqlx's
+own `_sqlx_migrations` bookkeeping recorded inside that transaction by its
+unqualified name, so a setting one file commits is in force for the files
+after it and a file that moves `search_path` breaks the bookkeeping exactly
+where sqlx would; the check plants a sequence on every run to prove those
+properties. Neither a baseline file nor a schema-migration may change
+session state — a statement-leading `SET` or `RESET`, `SET ROLE`,
+`SET SESSION AUTHORIZATION`, or `set_config(..., false)`, in a routine body
+included — because the baseline session and the sqlx run carry it into every
+later file; a routine that needs a setting uses `set_config(..., true)` and
+restores it. The predecessor baseline, once migrated, is held to the
+closed-kind rule like the fresh and exercised schemas. Column order is not part of the
 artifact: a column a schema-migration adds sits last on an initialized
 database and wherever the baseline lists it on a fresh one, and no
 schema-migration can move it.
