@@ -169,8 +169,15 @@ pub async fn permission_resource_matches_namespace(
     .context("failed to check permission resource namespace")
 }
 
-/// Retained activated registry-only authority is control of a name, never its registration.
-pub async fn resource_is_registry_only(pool: &PgPool, resource_id: Uuid) -> Result<bool> {
+/// Registry-only control is not a registration handle when the same name has a distinct
+/// activated registrar lease. Ordinary registry-owned subnames have no such lease and keep
+/// their own resource handle, including historical resource audits.
+/// (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L75-L84 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L118-L152 @ ens_v1@91c966f)
+pub async fn resource_is_registry_control_for_registrar_lease(
+    pool: &PgPool,
+    resource_id: Uuid,
+) -> Result<bool> {
     sqlx::query_scalar(
         "SELECT EXISTS (
             SELECT 1 FROM bigname_phase.normalized_events ne
@@ -181,6 +188,27 @@ pub async fn resource_is_registry_only(pool: &PgPool, resource_id: Uuid) -> Resu
                   'basenames_base_registry', 'basenames_base_registrar')
               AND ne.event_kind IN ('AuthorityEpochChanged', 'SurfaceBound')
               AND ne.after_state ->> 'authority_kind' = 'registry_only'
+              AND EXISTS (
+                  SELECT 1 FROM bigname_phase.normalized_events grant_event
+                  JOIN bigname_phase.chain_lineage grant_lineage
+                    ON grant_lineage.chain_id = grant_event.chain_id
+                   AND grant_lineage.block_hash = grant_event.block_hash
+                  WHERE grant_event.namespace = ne.namespace
+                    AND grant_event.chain_id = ne.chain_id
+                    AND grant_event.source_family IN ('ens_v1_registrar_l1', 'basenames_base_registrar')
+                    AND grant_event.event_kind = 'RegistrationGranted'
+                    AND grant_event.resource_id <> ne.resource_id
+                    AND (grant_event.logical_name_id = ne.logical_name_id OR EXISTS (
+                        SELECT 1 FROM bigname_phase.name_surfaces surface
+                        WHERE surface.logical_name_id = ne.logical_name_id
+                          AND surface.namespace = ne.namespace
+                          AND surface.chain_id = ne.chain_id
+                          AND surface.namehash = grant_event.after_state ->> 'namehash'
+                    ))
+                    AND grant_event.consumer_visibility = 'activated'
+                    AND grant_event.canonicality_state IN ('canonical', 'safe', 'finalized')
+                    AND grant_lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+              )
               AND ne.consumer_visibility = 'activated'
               AND ne.canonicality_state IN ('canonical', 'safe', 'finalized')
               AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized'))",

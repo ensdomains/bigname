@@ -394,6 +394,8 @@ include!("tests/v2_address_names_budget.rs");
 include!("tests/v2_address_names_budget_fence.rs");
 include!("tests/v2_address_resolves_to.rs");
 include!("tests/v2_permissions.rs");
+#[path = "tests/v2_registry_permission_identity.rs"]
+mod v2_registry_permission_identity;
 include!("tests/v2_resolvers.rs");
 include!("tests/v2_resolver_collections.rs");
 include!("tests/v2_registries.rs");

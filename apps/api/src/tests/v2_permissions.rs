@@ -2163,17 +2163,24 @@ async fn historical_registry_control_is_never_a_registration_handle() -> Result<
     let database = TestDatabase::new_migrated().await?;
     seed_v2_permissions_fixture(&database).await?;
     let id = v2_permissions_current_resource_id();
+    let (logical, node): (String, String) = sqlx::query_as(
+        "SELECT logical_name_id, namehash FROM bigname_phase.name_surfaces WHERE raw_name = 'perms.eth'"
+    ).fetch_one(&database.pool).await?;
+    let mut grant = v2_history_event("perms-retained-lease", None,
+        Some(v2_permissions_stale_resource_id()), "RegistrationGranted", 119);
+    grant.source_family = "ens_v1_registrar_l1".to_owned();
+    grant.after_state = json!({"namehash": node});
     let mut epoch = v2_history_event(
         "perms-historical-registry-epoch",
-        None,
+        Some(&logical),
         Some(id),
         "AuthorityEpochChanged",
         120,
     );
     epoch.source_family = "ens_v1_registrar_l1".to_owned();
     epoch.after_state = json!({"authority_kind": "registry_only"});
-    seed_v2_history_blocks(&database, 120..=120).await?;
-    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[epoch]).await?;
+    seed_v2_history_blocks(&database, 119..=120).await?;
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[grant, epoch]).await?;
     sqlx::query("DELETE FROM bigname_phase.name_current WHERE raw_name = 'perms.eth'")
         .execute(&database.pool)
         .await?;

@@ -70,7 +70,8 @@ pub(crate) fn projected_registration_resource_id(summary: &Value) -> Option<&str
 }
 
 /// A name's `registration_id`: the projected registration resource, else the bound resource
-/// (a wrapped subname, an ENSv2 registration, or a row projected before the field existed).
+/// (a wrapped or registry-owned subname, an ENSv2 registration, or a row projected before
+/// the field existed).
 pub(crate) fn registration_id(summary: &Value, resource_id: Option<Uuid>) -> Option<String> {
     projected_registration_resource_id(summary)
         .map(str::to_owned)

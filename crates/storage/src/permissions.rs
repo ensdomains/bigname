@@ -30,7 +30,7 @@ pub use reads::{
 };
 pub use resource_summary::{
     load_permissions_current_resource_summaries, load_permissions_current_resource_summary,
-    permission_resource_matches_namespace, resource_wrapped_a_registrar_lease, resource_is_registry_only,
+    permission_resource_matches_namespace, resource_wrapped_a_registrar_lease, resource_is_registry_control_for_registrar_lease,
 };
 pub use types::{
     EffectivePermissionRow, EffectivePermissionScope, EffectivePermissionsAccountResourcePage,

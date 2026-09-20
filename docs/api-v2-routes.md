@@ -1715,7 +1715,11 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
   rows still carry the registrar lease as `registration_id`, the handle name
   detail serves, and the resource read is the read by that handle; the
   registry-only resource holds the rows but is not a public registration
-  handle and selects none by its own id.
+  handle and selects none by its own id. An ordinary registry-owned subname with
+  no registrar lease instead uses its registry resource as the registration
+  handle. That handle selects its grants both while the name is current and as
+  a resource audit after the current name row disappears.
+  (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L75-L84 @ ens_v1@91c966f)
   (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L175 @ ens_v1@91c966f)
   (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L17-L20 @ ens_v1@91c966f)
   (upstream: .refs/basenames/src/L2/Registry.sol:L49-L52 @ basenames@1809bbc)

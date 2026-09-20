@@ -266,14 +266,10 @@ async fn control_resource_for_registration(
         );
         V2Error::internal_error("failed to resolve registration resource")
     };
-    // Retained authority evidence outlives the current name row. Neither a wrapper that
-    // wrapped a lease nor registry-only control becomes a registration when that row disappears.
+    // A wrapper that wrapped a lease does not become a registration when its name disappears.
     if bigname_storage::resource_wrapped_a_registrar_lease(&state.pool, registration_id)
         .await
         .map_err(failed)?
-        || bigname_storage::resource_is_registry_only(&state.pool, registration_id)
-            .await
-            .map_err(failed)?
     {
         return Ok(None);
     }
@@ -299,7 +295,20 @@ async fn control_resource_for_registration(
             stands_in_for_a_lease = true;
         }
     }
-    Ok((!stands_in_for_a_lease).then_some(registration_id))
+    // A current registry-owned subname can identify this resource as its own registration.
+    // With no current identity, reject only registry control proven to stand beside a lease;
+    // ordinary registry resources retain their historical audit handle.
+    if stands_in_for_a_lease
+        || bigname_storage::resource_is_registry_control_for_registrar_lease(
+            &state.pool,
+            registration_id,
+        )
+        .await
+        .map_err(failed)?
+    {
+        return Ok(None);
+    }
+    Ok(Some(registration_id))
 }
 
 fn normalized_name_filter(params: &QueryParams) -> V2Result<Option<NormalizedNameFilter>> {
