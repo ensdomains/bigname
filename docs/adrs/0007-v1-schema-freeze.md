@@ -581,8 +581,8 @@ Neither needs scheduling again.
 This ADR governs bigname's own schema; its upstream dependencies are the two
 derivation-side outcomes above:
 
-- `.refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L47-L48
-  @ ens_v2@a971bd64` — anchors `ROLE_WAS_RESERVED` (bit 32) as an ENSv2
+- (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L47-L48 @ ens_v2@a971bd64)
+  — anchors `ROLE_WAS_RESERVED` (bit 32) as an ENSv2
   registry role, mirrored by `REGISTRY_ROLE_BITS` in
   `crates/adapters/src/schema_v2/protocol/permissions.rs`. The bit itself is
   mirrored, not diverged. What bigname does with it — exposing the token-only
@@ -590,12 +590,11 @@ derivation-side outcomes above:
   authorization — is the divergence `upstream.md` § Known divergences already
   records as "ENSv2 reservation-history marker appears in the permission
   vocabulary"; this ADR adds no second entry for it.
-- `.refs/ens_v1/contracts/resolvers/profiles/ContentHashResolver.sol:L14-L28`,
-  `.refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L47-L85`
-  `@ ens_v1@91c966f`, and
-  `.refs/basenames/src/L2/resolver/ContentHashResolver.sol:L32-L43`,
-  `.refs/basenames/src/L2/resolver/AddrResolver.sol:L57-L99`
-  `@ basenames@1809bbc` — anchor the verbatim byte storage and reads behind the
+- (upstream: .refs/ens_v1/contracts/resolvers/profiles/ContentHashResolver.sol:L14-L28 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L47-L85 @ ens_v1@91c966f)
+  (upstream: .refs/basenames/src/L2/resolver/ContentHashResolver.sol:L32-L43 @ basenames@1809bbc)
+  (upstream: .refs/basenames/src/L2/resolver/AddrResolver.sol:L57-L99 @ basenames@1809bbc)
+  — anchor the verbatim byte storage and reads behind the
   record-clear `not_found` classification above. Mirrored, not diverged.
 
 ## Consequences

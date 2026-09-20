@@ -384,7 +384,7 @@ SELECT line FROM (
     FROM pg_sequences s WHERE s.schemaname = current_schema()
     UNION ALL
     SELECT 8, t.typname, '',
-           format('type %s %s %s base=%s %s default=%s check=%s attributes=%s acl=%s', t.typname, t.typtype,
+           format('type %s %s %s base=%s %s default=%s check=%s attributes=%s acl=%s range=%s', t.typname, t.typtype,
                   COALESCE((SELECT string_agg(e.enumlabel, ',' ORDER BY e.enumsortorder)
                             FROM pg_enum e WHERE e.enumtypid = t.oid), '-'),
                   CASE WHEN t.typtype = 'd' THEN format_type(t.typbasetype, t.typtypmod) ELSE '-' END,
@@ -394,7 +394,18 @@ SELECT line FROM (
                             FROM pg_constraint con WHERE con.contypid = t.oid), '-'),
                   COALESCE((SELECT string_agg(format('%s %s', a.attname, format_type(a.atttypid, a.atttypmod)), ',' ORDER BY a.attnum)
                             FROM pg_attribute a WHERE a.attrelid = t.typrelid AND a.attnum > 0 AND NOT a.attisdropped), '-'),
-                  COALESCE(replace(array_to_string(t.typacl, ','), current_user, 'owner'), 'default'))
+                  COALESCE(replace(array_to_string(t.typacl, ','), current_user, 'owner'), 'default'),
+                  -- A range type's subtype, operator class, collation, canonical and
+                  -- difference functions, and multirange type: two ranges of one name
+                  -- print the same without them.
+                  COALESCE((SELECT format('%s opclass=%s collation=%s canonical=%s subdiff=%s multirange=%s',
+                                          format_type(r.rngsubtype, NULL),
+                                          (SELECT opc.opcname FROM pg_opclass opc WHERE opc.oid = r.rngsubopc),
+                                          COALESCE((SELECT col.collname FROM pg_collation col WHERE col.oid = r.rngcollation), '-'),
+                                          COALESCE(NULLIF(r.rngcanonical::regproc::text, '-'), '-'),
+                                          COALESCE(NULLIF(r.rngsubdiff::regproc::text, '-'), '-'),
+                                          format_type(r.rngmultitypid, NULL))
+                            FROM pg_range r WHERE r.rngtypid = t.oid), '-'))
     FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace
     WHERE n.nspname = current_schema() AND t.typtype IN ('e', 'd', 'c', 'r')
       AND NOT EXISTS (SELECT 1 FROM pg_class c WHERE c.reltype = t.oid AND c.relkind <> 'c')
@@ -436,13 +447,20 @@ SELECT line FROM (
     FROM pg_statistic_ext s JOIN pg_namespace n ON n.oid = s.stxnamespace
     WHERE n.nspname = current_schema()
     UNION ALL
+    -- Default privileges the baseline sets for the schema, and the ones it
+    -- sets for the owning role in every schema (defaclnamespace 0), which
+    -- shape objects created later without moving any existing ACL.
     SELECT 13, '', '',
-           format('schema acl=%s default_acl=%s',
+           format('schema acl=%s default_acl=%s owner_default_acl=%s',
                   COALESCE(replace(array_to_string(n.nspacl, ','), current_user, 'owner'), 'default'),
                   COALESCE((SELECT string_agg(format('%s:%s', da.defaclobjtype,
                                                      replace(array_to_string(da.defaclacl, ','), current_user, 'owner')),
                                               ';' ORDER BY da.defaclobjtype)
-                            FROM pg_default_acl da WHERE da.defaclnamespace = n.oid), '-'))
+                            FROM pg_default_acl da WHERE da.defaclnamespace = n.oid), '-'),
+                  COALESCE((SELECT string_agg(format('%s:%s', da.defaclobjtype,
+                                                     replace(array_to_string(da.defaclacl, ','), current_user, 'owner')),
+                                              ';' ORDER BY da.defaclobjtype)
+                            FROM pg_default_acl da WHERE da.defaclnamespace = 0 AND da.defaclrole = n.nspowner), '-'))
     FROM pg_namespace n WHERE n.nspname = current_schema()
     UNION ALL
     SELECT 14, col.collname, '',
@@ -470,6 +488,20 @@ SELECT line FROM (
     JOIN pg_namespace sn ON sn.oid = st.typnamespace
     JOIN pg_namespace tn ON tn.oid = tt.typnamespace
     WHERE current_schema() IN (sn.nspname, tn.nspname)
+    UNION ALL
+    -- An operator the schema holds changes how expressions resolve even when
+    -- its function already existed.
+    SELECT 16, o.oprname, format('%s,%s', format_type(o.oprleft, NULL), format_type(o.oprright, NULL)),
+           format('operator %s (%s, %s) returns %s function=%s commutator=%s negator=%s restrict=%s join=%s hashes=%s merges=%s',
+                  o.oprname, format_type(o.oprleft, NULL), format_type(o.oprright, NULL),
+                  format_type(o.oprresult, NULL), o.oprcode::regproc,
+                  COALESCE(NULLIF(o.oprcom::regoperator::text, '0'), '-'),
+                  COALESCE(NULLIF(o.oprnegate::regoperator::text, '0'), '-'),
+                  COALESCE(NULLIF(o.oprrest::regproc::text, '-'), '-'),
+                  COALESCE(NULLIF(o.oprjoin::regproc::text, '-'), '-'),
+                  o.oprcanhash, o.oprcanmerge)
+    FROM pg_operator o JOIN pg_namespace n ON n.oid = o.oprnamespace
+    WHERE n.nspname = current_schema()
 ) catalog
 ORDER BY section, a, b, line;
 CATALOG_SQL
@@ -655,6 +687,11 @@ assert_frozen_catalog_sees_planted_changes() {
         'assignment cast:CREATE CAST (text AS canonicality_state) WITH INOUT AS ASSIGNMENT;'
         # A type privilege: no relation, column or routine row moves.
         'type privilege:REVOKE USAGE ON TYPE canonicality_state FROM PUBLIC;'
+        # An operator over an existing function: no routine row moves.
+        'operator:CREATE OPERATOR === (LEFTARG = text, RIGHTARG = text, FUNCTION = pg_catalog.texteq);'
+        # A default privilege for the owning role in every schema: no
+        # existing ACL moves.
+        'role-global default privilege:ALTER DEFAULT PRIVILEGES GRANT SELECT ON TABLES TO PUBLIC;'
     )
     planted_catalog="$(mktemp "${TMPDIR:-/tmp}/schema-v2-planted-catalog.XXXXXX")"
     for planted in "${planted_changes[@]}"; do
@@ -672,21 +709,27 @@ assert_frozen_catalog_sees_planted_changes() {
         fi
         refusal_assertions_passed=$((refusal_assertions_passed + 1))
     done
-    # Two SQL-standard bodies under one signature leave prosrc empty for both;
-    # the catalogs taken with each must still differ.
-    local other_body_catalog
-    other_body_catalog="$(mktemp "${TMPDIR:-/tmp}/schema-v2-planted-catalog.XXXXXX")"
-    frozen_schema_catalog_within "$frozen_schema" \
-        'CREATE FUNCTION planted_atomic(x integer) RETURNS boolean LANGUAGE sql IMMUTABLE BEGIN ATOMIC SELECT x > 1; END;' > "$planted_catalog"
-    frozen_schema_catalog_within "$frozen_schema" \
-        'CREATE FUNCTION planted_atomic(x integer) RETURNS boolean LANGUAGE sql IMMUTABLE BEGIN ATOMIC SELECT x > 2; END;' > "$other_body_catalog"
-    if [ ! -s "$planted_catalog" ] || diff -q "$planted_catalog" "$other_body_catalog" >/dev/null; then
-        printf '%s\n' "the frozen catalog does not tell two SQL-standard routine bodies apart" >&2
-        rm -f -- "$planted_catalog" "$other_body_catalog"
-        exit 1
-    fi
-    refusal_assertions_passed=$((refusal_assertions_passed + 1))
-    rm -f -- "$planted_catalog" "$other_body_catalog"
+    # Two definitions under one name that print the same without the
+    # column added for them: SQL-standard bodies leave prosrc empty for both,
+    # and range types share the generic type row. The catalogs taken with
+    # each must differ.
+    local other_catalog pair reason
+    other_catalog="$(mktemp "${TMPDIR:-/tmp}/schema-v2-planted-catalog.XXXXXX")"
+    for pair in \
+        'SQL-standard routine bodies:CREATE FUNCTION planted_atomic(x integer) RETURNS boolean LANGUAGE sql IMMUTABLE BEGIN ATOMIC SELECT x > 1; END;:CREATE FUNCTION planted_atomic(x integer) RETURNS boolean LANGUAGE sql IMMUTABLE BEGIN ATOMIC SELECT x > 2; END;' \
+        'range subtypes:CREATE TYPE planted_range AS RANGE (SUBTYPE = bigint);:CREATE TYPE planted_range AS RANGE (SUBTYPE = integer);'
+    do
+        reason="${pair%%:*}"; pair="${pair#*:}"
+        frozen_schema_catalog_within "$frozen_schema" "${pair%%:CREATE *}" > "$planted_catalog"
+        frozen_schema_catalog_within "$frozen_schema" "CREATE ${pair#*:CREATE }" > "$other_catalog"
+        if [ ! -s "$planted_catalog" ] || diff -q "$planted_catalog" "$other_catalog" >/dev/null; then
+            printf '%s\n' "the frozen catalog does not tell two $reason apart" >&2
+            rm -f -- "$planted_catalog" "$other_catalog"
+            exit 1
+        fi
+        refusal_assertions_passed=$((refusal_assertions_passed + 1))
+    done
+    rm -f -- "$planted_catalog" "$other_catalog"
 }
 # The fresh artifact above has no rows, so a schema-migration whose DDL runs
 # only when a table holds data leaves it unchanged there. The scratch schema
@@ -1511,6 +1554,37 @@ assert_login_url_drops_credentials() {
     esac
 }
 assert_login_url_drops_credentials
+# The same URL over another database: libpq's optional /dbname is replaced or
+# added, and the query is kept.
+url_with_database() {
+    local owner_url="$1" database="$2"
+    local url_scheme url_rest url_authority url_path url_query
+    url_scheme="${owner_url%%://*}://"
+    url_rest="${owner_url#*://}"
+    url_authority="$(printf '%s' "$url_rest" | sed -E 's#[/?\#].*$##')"
+    url_path="${url_rest#"$url_authority"}"
+    url_path="${url_path%%#*}"
+    url_query=""
+    if [[ "$url_path" == *\?* ]]; then
+        url_query="?${url_path#*\?}"
+    fi
+    printf '%s\n' "${url_scheme}${url_authority}/${database}${url_query}"
+}
+[ "$(url_with_database 'postgresql://owner:secret@db.example:5432/bigname?sslmode=require' scratch_db)" = 'postgresql://owner:secret@db.example:5432/scratch_db?sslmode=require' ] || { printf '%s\n' "the database rewrite lost the query or authority" >&2; exit 1; }
+[ "$(url_with_database 'postgresql://owner:secret@db.example?sslmode=require' scratch_db)" = 'postgresql://owner:secret@db.example/scratch_db?sslmode=require' ] || { printf '%s\n' "the database rewrite did not add a path" >&2; exit 1; }
+# On an external server the configured user holds CREATEDB (the Rust tests
+# create their databases the same way; docs/development.md) but not
+# necessarily CREATE on the database the URL names, which CREATE SCHEMA needs.
+# The check therefore runs in a database of its own, owned by that user, and
+# drops it on exit; the URL that named the server is kept for the drop.
+apply_check_database=""
+apply_check_server_url="${BIGNAME_DATABASE_URL:-}"
+if [ "${SCHEMA_V2_EXTERNAL_DATABASE:-0}" = 1 ] && [ -n "${BIGNAME_DATABASE_URL:-}" ]; then
+    apply_check_database="${scratch_schema}_db"
+    printf 'CREATE DATABASE "%s";\n' "$apply_check_database" | run_psql_as_owner
+    BIGNAME_DATABASE_URL="$(url_with_database "$BIGNAME_DATABASE_URL" "$apply_check_database")"
+    export BIGNAME_DATABASE_URL
+fi
 apply_check_url=""
 if [ -n "${BIGNAME_DATABASE_URL:-}" ]; then
     apply_check_url="$(login_url_from "$BIGNAME_DATABASE_URL" "$apply_check_role" "$apply_check_role_password")"
@@ -1521,7 +1595,7 @@ migration_application_log="$(
 # Future entries must use basename|one-line reason.
 intentional_phase_migration_skips=()
 refusal_assertions_passed=0
-expected_refusal_assertions=213
+expected_refusal_assertions=216
 predecessor_shape_proof_count=0
 expected_predecessor_shape_proof_count=40
 refusal_probe_seconds=0
@@ -1546,6 +1620,10 @@ cleanup() {
         printf 'DROP OWNED BY "%s";\n' "$apply_check_role"
         printf 'DROP ROLE IF EXISTS "%s";\n' "$apply_check_role"
     } | run_psql_as_owner >/dev/null 2>&1 || true
+    if [ -n "${apply_check_database:-}" ]; then
+        printf 'DROP DATABASE IF EXISTS "%s" WITH (FORCE);\n' "$apply_check_database" \
+            | BIGNAME_DATABASE_URL="$apply_check_server_url" run_psql_as_owner >/dev/null 2>&1 || true
+    fi
 }
 trap cleanup EXIT
 

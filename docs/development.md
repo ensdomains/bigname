@@ -76,7 +76,10 @@ Pass a focused command after `--`:
 whose configured user can create and drop temporary test databases. The
 phase-runner verification integration tests also create one shared, unprivileged
 test login role; that server user therefore needs `CREATEROLE` for the full
-phase-runner suite.
+phase-runner suite. `schema-v2/apply-check.sh` needs the same two: on such a
+server it creates a database of its own, owned by that user, runs there, and
+drops it on exit, so the user need not hold `CREATE` on the database the URL
+names.
 
 ## GraphQL compatibility fixture refresh
 
