@@ -20,7 +20,7 @@ use super::permission_support::{
 use super::{
     AddressNameGrant, CursorPayload, Envelope, GrantRelation, Meta, Page, QueryParamAllowlist,
     QueryParams, StrictQueryParams, V2Error, V2Result, decode, effective_permission_scope_value,
-    encode, permission_powers_value,
+    encode, permission_powers_value, record_resource_value,
     restrictions::ResourceRestrictions,
     validate_latest_collection_selectors,
     vocab::{AuthorityContext, WrapperFuses, WrapperState},
@@ -70,6 +70,11 @@ pub(crate) struct PermissionRow {
     #[serde(flatten)]
     pub(crate) grant: AddressNameGrant,
     pub(crate) registration_id: String,
+    /// Present for a grant on an ENSv2 record-ID resolver, whose resource is the keccak
+    /// of a setter argument: which record the granted resource is about.
+    /// (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L307-L338 @ ens_v2@a971bd64)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) record_resource: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) name: Option<String>,
     pub(crate) authority_context: AuthorityContext,
@@ -301,6 +306,12 @@ pub(crate) fn build_permission_row(
             powers: permission_powers_value(&row.effective_powers)?,
         },
         registration_id: row.resource_id.to_string(),
+        record_resource: row
+            .record_resource_selector
+            .as_ref()
+            .map(|selector| record_resource_value(selector, &row.effective_powers))
+            .transpose()?
+            .flatten(),
         name: name.map(str::to_owned),
         authority_context,
         wrapper_state,
@@ -404,6 +415,7 @@ mod tests {
                 chain_id: "ethereum-mainnet".to_owned(),
                 resolver_address: "0x0000000000000000000000000000000000000ABC".to_owned(),
             }),
+            record_resource_selector: None,
             grant_relation: None,
             effective_powers: json!(["set_resolver"]),
             grant_source: json!({

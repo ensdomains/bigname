@@ -186,6 +186,91 @@ async fn record_history_survives_relinks_and_excludes_later_unselected_writes() 
     Ok(())
 }
 
+// A grant scoped to a setter argument -- the resource is the keccak of the argument --
+// keeps the interpreter's decoded selector on the permission row, so reads can say
+// which record the resource is about; an argument the interpreter never saw leaves
+// the scope alone.
+// (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L307-L338 @ ens_v2@a971bd64)
+#[tokio::test]
+async fn record_resolver_permission_rows_keep_the_decoded_argument_selector() -> Result<()> {
+    let (db, pool) = database("record_id_permission_selector").await?;
+    seed(&pool).await?;
+    let grant = |resource: i64, selector: Value| {
+        json!({
+            "subject": "0x00000000000000000000000000000000000000ee",
+            "scope": {"kind": "resolver", "chain_id": CHAIN, "resolver_address": RESOLVER},
+            "effective_powers": ["set_text"],
+            "grant_source": {"kind": "raw_log", "source_event": "EACRolesChanged",
+                "upstream_resource": hash(resource), "root_resource": false,
+                "changed_powers": ["set_text"]},
+            "revocation_source": null, "inheritance_path": [], "transfer_behavior": {},
+            "source_event": "EACRolesChanged", "upstream_resource": hash(resource),
+            "resource": hash(resource), "root_resource": false, "selector": selector,
+            "storage_model": "resolver_record_id", "resolver": RESOLVER,
+            "resolver_record_id": "0", "record_key": "permission",
+        })
+    };
+    for (identity, resource, selector) in [
+        (
+            "grant-text",
+            501,
+            json!({"kind": "text", "key": "url", "hash": hash(501)}),
+        ),
+        (
+            "grant-unknown",
+            502,
+            json!({"kind": "resource", "key": null, "hash": null}),
+        ),
+        // A node-keyed named-resource selector hashes the key, not the resource.
+        // (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/resolver/PermissionedResolver.sol:L144-L153 @ ens_v2_sepolia_20260629@ccaeb58)
+        (
+            "grant-node-keyed",
+            503,
+            json!({"kind": "text", "key": "url", "hash": hash(777)}),
+        ),
+    ] {
+        sqlx::query("INSERT INTO resources (resource_id,chain_id,block_hash,block_number,canonicality_state) VALUES ($1::uuid,$2,$3,10,'canonical')")
+            .bind(resource_uuid(resource)).bind(CHAIN).bind(hash(10)).execute(&pool).await?;
+        sqlx::query("INSERT INTO normalized_events (event_identity,namespace,resource_id,event_kind,source_family,manifest_version,source_manifest_id,chain_id,block_number,block_hash,transaction_hash,transaction_index,log_index,derivation_kind,canonicality_state,after_state,raw_fact_ref) SELECT $1,'ens',$2::uuid,'PermissionChanged','ens_v2_resolver_l1',1,manifest_id,$3,11,$4,$5,0,$6,'ens_v2_permissions','canonical',$7,'{}'::jsonb FROM manifest_versions WHERE source_family='ens_v2_resolver_l1' AND chain_id=$3")
+            .bind(identity).bind(resource_uuid(resource)).bind(CHAIN).bind(hash(11)).bind(hash(1100)).bind(resource).bind(grant(resource, selector)).execute(&pool).await?;
+    }
+    run(&pool, 12, None, RunMode::Normal).await?;
+    let selector_of = |resource: i64| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, Value>(
+                "SELECT scope_detail FROM permissions_current WHERE resource_id = $1::uuid",
+            )
+            .bind(resource_uuid(resource))
+            .fetch_one(&pool)
+            .await
+        }
+    };
+    let described = selector_of(501).await?;
+    assert_eq!(
+        described["resource_selector"],
+        json!({"kind": "text", "key": "url", "hash": hash(501)})
+    );
+    assert_eq!(described["kind"], "resolver");
+    assert_eq!(described["resolver_address"], RESOLVER);
+    let undescribed = selector_of(502).await?;
+    assert!(
+        undescribed.get("resource_selector").is_none(),
+        "{undescribed}"
+    );
+    let node_keyed = selector_of(503).await?;
+    assert!(
+        node_keyed.get("resource_selector").is_none(),
+        "{node_keyed}"
+    );
+    db.cleanup().await?;
+    Ok(())
+}
+
+fn resource_uuid(n: i64) -> String {
+    format!("77000000-0000-0000-0000-{n:012}")
+}
+
 async fn assert_history(pool: &PgPool, id: i64, present: &[&str], absent: &[&str]) -> Result<()> {
     let page = bigname_storage::load_name_history_page(
         pool,

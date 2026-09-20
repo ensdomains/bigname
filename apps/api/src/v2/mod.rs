@@ -92,7 +92,7 @@ pub(crate) use params::{
 };
 pub(crate) use permission_values::{
     GrantRelation, effective_permission_scope_value, permission_grant_relation,
-    permission_powers_value,
+    permission_powers_value, record_resource_value,
 };
 pub(crate) use permissions::get_permissions;
 pub(crate) use primary_name::get_primary_name;
