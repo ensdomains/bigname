@@ -123,9 +123,213 @@ migration_sequence_sql() {
 apply_migration_sequence() {
     migration_sequence_sql "$@" | run_psql
 }
-# The replays: every file recorded, the phase inventory applied.
+# Column order is not in the catalog, because a column a schema-migration
+# adds sits last on an initialized database and wherever the baseline lists
+# it on a fresh one (`token_lineages.block_hash` is such a column today), so
+# an ordinal in the artifact would report every upgraded database as
+# divergent. What must hold instead is that a replay never moves a column:
+# the ones a schema already had keep their order, the ones the replay adds
+# come after them, and a table the replay creates from nothing matches the
+# baseline's layout -- that last case is the baseline and a schema-migration
+# creating the same table differently, where a positional INSERT, `SELECT *`,
+# a composite value or `row_to_json` read different columns on a fresh and on
+# an upgraded database. Names are compared hex-encoded, so no identifier can
+# carry the delimiter; the readable ones are for the message.
+column_order_of() {
+    {
+        printf '\\pset format unaligned\n\\pset tuples_only on\n\\pset fieldsep |\n'
+        printf 'SET search_path TO "%s";\n' "$1"
+        cat <<'SQL'
+SELECT encode(convert_to(c.relname, 'UTF8'), 'hex'),
+       string_agg(encode(convert_to(a.attname, 'UTF8'), 'hex'), ',' ORDER BY a.attnum),
+       c.relname, string_agg(a.attname, ',' ORDER BY a.attnum)
+FROM pg_class c
+JOIN pg_namespace ns ON ns.oid = c.relnamespace
+JOIN pg_attribute a ON a.attrelid = c.oid
+WHERE ns.nspname = current_schema() AND c.relkind = 'r'
+  AND a.attnum > 0 AND NOT a.attisdropped
+GROUP BY c.relname ORDER BY c.relname;
+SQL
+    } | run_psql
+}
+# Reads the fresh order, then the order this schema had before its replay,
+# then the order it has after.
+column_order_rule='
+    BEGIN { FS = "|" }
+    FILENAME == fresh_file { fresh[$1] = $2; fresh_shown[$1] = $4; next }
+    FILENAME == before_file { before[$1] = $2; before_shown[$1] = $4; next }
+    {
+        # A table the schema did not have before the replay was made by the
+        # replay alone, so the baseline is what it has to match.
+        if (!($1 in before)) {
+            if (($1 in fresh) && $2 != fresh[$1])
+                printf "%s: the baseline lays it out as [%s], a schema-migration created it as [%s]; ", $3, fresh_shown[$1], $4
+            next
+        }
+        bn = split(before[$1], b, ","); an = split($2, m, ",")
+        delete had
+        for (i = 1; i <= bn; i++) had[b[i]] = 1
+        delete still
+        for (i = 1; i <= an; i++) still[m[i]] = 1
+        kept = ""; keptn = 0
+        for (i = 1; i <= bn; i++) if (b[i] in still) kept = kept (keptn++ ? "," : "") b[i]
+        held = ""; heldn = 0; added = 0; late = 0
+        for (i = 1; i <= an; i++) {
+            if (m[i] in had) { held = held (heldn++ ? "," : "") m[i]; if (added) late = 1 }
+            else added = 1
+        }
+        if (held != kept) printf "%s: the replay moved a column it did not add, from [%s] to [%s]; ", $3, before_shown[$1], $4
+        else if (late) printf "%s: a column the replay added is not last in [%s]; ", $3, $4
+    }
+'
+# Planted orders the rule has to see, and two it has to stay quiet on: a
+# column a schema-migration appends, and a column this check\'s own
+# predecessor-shape proofs drop so the schema-migration re-adds it last.
+planted_column_order_row() {
+    local table="$1" hex="" readable="" column
+    shift
+    for column in "$@"; do
+        hex="$hex${hex:+,}$(printf '%s' "$column" | od -An -tx1 | tr -d ' \n')"
+        readable="$readable${readable:+,}$column"
+    done
+    printf '%s|%s|%s|%s\n' \
+        "$(printf '%s' "$table" | od -An -tx1 | tr -d ' \n')" "$hex" "$table" "$readable"
+}
+assert_column_order_rule_sees_planted_changes() {
+    local fresh before after seen
+    fresh="$(mktemp "${TMPDIR:-/tmp}/schema-v2-column-order.XXXXXX")"
+    before="$(mktemp "${TMPDIR:-/tmp}/schema-v2-column-order.XXXXXX")"
+    after="$(mktemp "${TMPDIR:-/tmp}/schema-v2-column-order.XXXXXX")"
+    {
+        planted_column_order_row walked_back a b c
+        planted_column_order_row appended a b c
+        planted_column_order_row reordered a b c
+        planted_column_order_row created k l m
+    } > "$fresh"
+    {
+        planted_column_order_row walked_back a c
+        planted_column_order_row appended a b c
+        planted_column_order_row reordered a b c
+    } > "$before"
+    {
+        planted_column_order_row walked_back a c b
+        planted_column_order_row appended a b c new
+        planted_column_order_row reordered b a c
+        planted_column_order_row created m l k
+    } > "$after"
+    seen="$(awk -v fresh_file="$fresh" -v before_file="$before" \
+        "$column_order_rule" "$fresh" "$before" "$after")"
+    rm -f -- "$fresh" "$before" "$after"
+    case "$seen" in
+        *"reordered: the replay moved a column it did not add, from [a,b,c] to [b,a,c]"*) ;;
+        *) printf '%s\n' "the column-order rule does not see a reordered table (saw: ${seen:-nothing})" >&2; exit 1 ;;
+    esac
+    refusal_assertions_passed=$((refusal_assertions_passed + 1))
+    case "$seen" in
+        *"created: the baseline lays it out as [k,l,m], a schema-migration created it as [m,l,k]"*) ;;
+        *) printf '%s\n' "the column-order rule does not see a table a schema-migration lays out differently (saw: ${seen:-nothing})" >&2; exit 1 ;;
+    esac
+    refusal_assertions_passed=$((refusal_assertions_passed + 1))
+    case "$seen" in
+        *walked_back*|*appended*) printf '%s\n' "the column-order rule refuses a column the replay added (saw: $seen)" >&2; exit 1 ;;
+    esac
+}
+assert_column_order_is_the_baseline_order() {
+    local context="$1" migrated_schema="$2" before="$3" fresh after reordered
+    fresh="$(mktemp "${TMPDIR:-/tmp}/schema-v2-column-order.XXXXXX")"
+    after="$(mktemp "${TMPDIR:-/tmp}/schema-v2-column-order.XXXXXX")"
+    column_order_of "$frozen_schema" > "$fresh"
+    column_order_of "$migrated_schema" > "$after"
+    reordered="$(awk -v fresh_file="$fresh" -v before_file="$before" \
+        "$column_order_rule" "$fresh" "$before" "$after")"
+    rm -f -- "$fresh" "$after"
+    if [ -n "$reordered" ]; then
+        printf '%s\n' \
+            "the $context holds a table whose columns moved: ${reordered%; }; a schema-migration may add a column, which lands last, but it may not reorder the columns a table already had, and a table it creates itself has to match the baseline's layout" >&2
+        exit 1
+    fi
+}
+# The catalog cannot see the ledger, so a schema-migration that rewrote a
+# predecessor's checksum or deleted its row would leave every comparison
+# equal while the deployed database carries history sqlx then rejects or
+# reapplies. After each replay the ledger must be exactly the rows the
+# sequence recorded, in order, with the file checksums.
+expected_migration_ledger() {
+    local migration_file name version description
+    for migration_file in "$@"; do
+        name="${migration_file##*/}"
+        version=$((10#${name%%_*}))
+        description="${name#*_}"; description="${description%.sql}"; description="${description//_/ }"
+        printf '%s|%s|%s|t|0\n' "$version" "$description" "$(sha384sum -- "$migration_file" | cut -d' ' -f1)"
+    done
+}
+observed_migration_ledger() {
+    {
+        printf '\\pset format unaligned\n\\pset tuples_only on\n\\pset fieldsep |\n'
+        printf "SELECT version, description, encode(checksum, 'hex'), success, execution_time FROM _sqlx_migrations ORDER BY version;\n"
+    } | run_psql
+}
+assert_migration_ledger_is_intact() {
+    local context="$1"; shift
+    if ! diff -u <(expected_migration_ledger "$@") <(observed_migration_ledger) >&2; then
+        printf '%s\n' \
+            "the sqlx ledger after the $context replay is not the history the sequence recorded (diff above: - expected, + observed); a schema-migration that rewrites or deletes a row in public._sqlx_migrations leaves the phase schema unchanged but breaks the next sqlx migrate run" >&2
+        exit 1
+    fi
+}
+# The same blind spot for role and database defaults: a schema-migration can
+# assemble `ALTER ROLE ... SET` at run time, where no text rule sees it, and
+# the catalog serializes no role configuration while cleanup drops the role.
+# `pg_db_role_setting` is a shared catalog, so what matters is the change
+# this run makes: the rows for this database or for every database, and for
+# the check login or for every role, are taken before the first replay and
+# must be unchanged after each one.
+role_and_database_settings() {
+    {
+        printf '\\pset format unaligned\n\\pset tuples_only on\n'
+        printf 'SELECT %s AS login;\n' "quote_literal('$apply_check_role')"
+        cat <<'SQL'
+SELECT format('%s on %s: %s',
+           COALESCE(r.rolname, 'all roles'), COALESCE(d.datname, 'all databases'),
+           to_jsonb(s.setconfig)::text)
+FROM pg_db_role_setting s
+LEFT JOIN pg_roles r ON r.oid = s.setrole
+LEFT JOIN pg_database d ON d.oid = s.setdatabase
+WHERE (s.setdatabase = 0 OR d.datname = current_database())
+ORDER BY 1;
+SQL
+    } | run_psql
+}
+assert_no_role_or_database_settings() {
+    local context="$1"
+    if ! diff -u "$role_and_database_settings_before" <(role_and_database_settings) >&2; then
+        printf '%s\n' \
+            "the $context replay changed a role or database default (diff above: - before, + after); a schema-migration may not change connection defaults, however it spells the statement, since the deployed runner would inherit it and no catalog records it" >&2
+        exit 1
+    fi
+}
+replay_ledger_and_settings_hold() {
+    local context="$1"
+    assert_migration_ledger_is_intact "$context" "$ROOT"/migrations/*.sql
+    assert_no_role_or_database_settings "$context"
+}
+# The replays: every file recorded, the phase inventory applied, and the
+# ledger and connection defaults checked afterwards.
+# The fresh baseline is the order every other schema is read against, so it
+# is the one replay with nothing to compare against.
 replay_schema_migrations() {
+    local context="$1" before
+    if [ "$scratch_schema" = "$frozen_schema" ]; then
+        sequence_applies=phase apply_migration_sequence "$ROOT"/migrations/*.sql
+        replay_ledger_and_settings_hold "$context"
+        return
+    fi
+    before="$(mktemp "${TMPDIR:-/tmp}/schema-v2-column-order.XXXXXX")"
+    column_order_of "$scratch_schema" > "$before"
     sequence_applies=phase apply_migration_sequence "$ROOT"/migrations/*.sql
+    replay_ledger_and_settings_hold "$context"
+    assert_column_order_is_the_baseline_order "$context" "$scratch_schema" "$before"
+    rm -f -- "$before"
 }
 # Planted files live in a directory mktemp made under the temp root; nothing
 # else is ever removed.
@@ -403,15 +607,15 @@ SELECT line FROM (
     SELECT 0 AS section, c.relname::text AS a, ''::text AS b,
            format('relation %s kind=%s persistence=%s acl=%s options=%s toast_options=%s rls=%s force_rls=%s replica_identity=%s inherits=%s',
                   c.relname, c.relkind, c.relpersistence,
-                  COALESCE(replace(array_to_string(c.relacl, ','), current_user, 'owner'), 'default'),
-                  COALESCE((SELECT string_agg(o, ',' ORDER BY o) FROM unnest(c.reloptions) o), '-'),
+                  COALESCE(replace(to_jsonb(c.relacl::text[])::text, current_user, 'owner'), 'default'),
+                  COALESCE((SELECT jsonb_agg(o ORDER BY o)::text FROM unnest(c.reloptions) o), '-'),
                   -- PostgreSQL stores toast.* parameters on the table's TOAST
                   -- relation in pg_toast, not in the table's own reloptions.
-                  COALESCE((SELECT string_agg(o, ',' ORDER BY o)
+                  COALESCE((SELECT jsonb_agg(o ORDER BY o)::text
                             FROM pg_class tc, unnest(tc.reloptions) o
                             WHERE tc.oid = c.reltoastrelid), '-'),
                   c.relrowsecurity, c.relforcerowsecurity, c.relreplident,
-                  COALESCE((SELECT string_agg(p.relname, ',' ORDER BY i.inhseqno)
+                  COALESCE((SELECT jsonb_agg(p.relname ORDER BY i.inhseqno)::text
                             FROM pg_inherits i JOIN pg_class p ON p.oid = i.inhparent
                             WHERE i.inhrelid = c.oid), '-')) AS line
     FROM pg_class c
@@ -446,8 +650,8 @@ SELECT line FROM (
                   a.attstorage, COALESCE(NULLIF(a.attcompression, ''), '-'),
                   CASE WHEN a.attstattarget IS NULL OR a.attstattarget < 0 THEN 'default'
                        ELSE a.attstattarget::text END,
-                  COALESCE(replace(array_to_string(a.attacl, ','), current_user, 'owner'), 'default'),
-                  COALESCE((SELECT string_agg(o, ',' ORDER BY o) FROM unnest(a.attoptions) o), '-'),
+                  COALESCE(replace(to_jsonb(a.attacl::text[])::text, current_user, 'owner'), 'default'),
+                  COALESCE((SELECT jsonb_agg(o ORDER BY o)::text FROM unnest(a.attoptions) o), '-'),
                   -- A column added with a default keeps that value for the rows that
                   -- predate it. Printed only when it is not the current default: then
                   -- old and new rows read different values, which a fresh database
@@ -489,8 +693,8 @@ SELECT line FROM (
                   (SELECT l.lanname FROM pg_language l WHERE l.oid = p.prolang),
                   p.provolatile, p.proisstrict, p.proleakproof, p.proparallel, p.prosecdef,
                   p.procost, p.prorows,
-                  COALESCE(array_to_string(p.proconfig, ';'), '-'),
-                  COALESCE(replace(array_to_string(p.proacl, ','), current_user, 'owner'), 'default'),
+                  COALESCE(to_jsonb(p.proconfig)::text, '-'),
+                  COALESCE(replace(to_jsonb(p.proacl::text[])::text, current_user, 'owner'), 'default'),
                   md5(replace(p.prosrc, current_schema(), 'bigname_phase')),
                   -- A SQL-standard body (BEGIN ATOMIC) is stored parsed, with
                   -- prosrc empty; only its printed form tells two apart.
@@ -520,7 +724,9 @@ SELECT line FROM (
     UNION ALL
     SELECT 8, t.typname, '',
            format('type %s %s %s base=%s %s collation=%s default=%s check=%s attributes=%s acl=%s', t.typname, t.typtype,
-                  COALESCE((SELECT string_agg(e.enumlabel, ',' ORDER BY e.enumsortorder)
+                  -- Each label encoded on its own: joined with a delimiter,
+                  -- ('a,b','c') and ('a','b,c') serialize identically.
+                  COALESCE((SELECT jsonb_agg(e.enumlabel ORDER BY e.enumsortorder)::text
                             FROM pg_enum e WHERE e.enumtypid = t.oid), '-'),
                   CASE WHEN t.typtype = 'd' THEN format_type(t.typbasetype, t.typtypmod) ELSE '-' END,
                   CASE WHEN t.typtype = 'd' AND t.typnotnull THEN 'not null' ELSE 'null' END,
@@ -529,11 +735,11 @@ SELECT line FROM (
                             FROM pg_collation col JOIN pg_namespace cn ON cn.oid = col.collnamespace
                             WHERE col.oid = t.typcollation), '-'),
                   COALESCE(t.typdefault, '-'),
-                  COALESCE((SELECT string_agg(format('%s %s', con.conname, pg_get_constraintdef(con.oid)), ',' ORDER BY con.conname)
+                  COALESCE((SELECT jsonb_agg(jsonb_build_array(con.conname, pg_get_constraintdef(con.oid)) ORDER BY con.conname)::text
                             FROM pg_constraint con WHERE con.contypid = t.oid), '-'),
-                  COALESCE((SELECT string_agg(format('%s %s', a.attname, format_type(a.atttypid, a.atttypmod)), ',' ORDER BY a.attnum)
+                  COALESCE((SELECT jsonb_agg(jsonb_build_array(a.attname, format_type(a.atttypid, a.atttypmod)) ORDER BY a.attnum)::text
                             FROM pg_attribute a WHERE a.attrelid = t.typrelid AND a.attnum > 0 AND NOT a.attisdropped), '-'),
-                  COALESCE(replace(array_to_string(t.typacl, ','), current_user, 'owner'), 'default'))
+                  COALESCE(replace(to_jsonb(t.typacl::text[])::text, current_user, 'owner'), 'default'))
     FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace
     WHERE n.nspname = current_schema() AND t.typtype IN ('e', 'd')
     UNION ALL
@@ -551,14 +757,12 @@ SELECT line FROM (
     -- shape objects created later without moving any existing ACL.
     SELECT 13, '', '',
            format('schema acl=%s default_acl=%s owner_default_acl=%s',
-                  COALESCE(replace(array_to_string(n.nspacl, ','), current_user, 'owner'), 'default'),
-                  COALESCE((SELECT string_agg(format('%s:%s', da.defaclobjtype,
-                                                     replace(array_to_string(da.defaclacl, ','), current_user, 'owner')),
-                                              ';' ORDER BY da.defaclobjtype)
+                  COALESCE(replace(to_jsonb(n.nspacl::text[])::text, current_user, 'owner'), 'default'),
+                  COALESCE((SELECT replace(jsonb_agg(jsonb_build_array(da.defaclobjtype, da.defaclacl::text[])
+                                               ORDER BY da.defaclobjtype)::text, current_user, 'owner')
                             FROM pg_default_acl da WHERE da.defaclnamespace = n.oid), '-'),
-                  COALESCE((SELECT string_agg(format('%s:%s', da.defaclobjtype,
-                                                     replace(array_to_string(da.defaclacl, ','), current_user, 'owner')),
-                                              ';' ORDER BY da.defaclobjtype)
+                  COALESCE((SELECT replace(jsonb_agg(jsonb_build_array(da.defaclobjtype, da.defaclacl::text[])
+                                               ORDER BY da.defaclobjtype)::text, current_user, 'owner')
                             FROM pg_default_acl da WHERE da.defaclnamespace = 0 AND da.defaclrole = n.nspowner), '-'))
     FROM pg_namespace n WHERE n.nspname = current_schema()
 ) catalog
@@ -616,7 +820,7 @@ assert_frozen_schema_fingerprint() {
         scratch_schema="$frozen_schema"
         apply_baseline
         frozen_schema_catalog "$frozen_schema" > "$after_baseline"
-        replay_schema_migrations
+        replay_schema_migrations "fresh baseline"
         frozen_schema_catalog "$frozen_schema" > "$observed"
     )
     if [ ! -s "$observed" ] || [ ! -s "$after_baseline" ]; then
@@ -678,7 +882,7 @@ assert_predecessor_baseline_transition() {
         baseline_extension_statements="$(baseline_extension_statements_of "$predecessor_dir")" || exit 1
         apply_baseline "$predecessor_dir"
         frozen_schema_catalog "$predecessor_schema" > "$predecessor_catalog"
-        replay_schema_migrations
+        replay_schema_migrations "predecessor baseline"
         assert_schema_holds_only_allowed_kinds "$predecessor_schema" "the migrated predecessor baseline"
         frozen_schema_catalog "$predecessor_schema" > "$migrated_catalog"
     ) || exit 1
@@ -927,7 +1131,7 @@ assert_exercised_schema_matches_frozen() {
     for migration_file in $(production_schema_migrations); do
         printf 'exercised|%s\n' "$(basename "$migration_file")" >> "$migration_application_log"
     done
-    replay_schema_migrations
+    replay_schema_migrations "exercised scratch schema"
     frozen_schema_catalog "$scratch_schema" > "$exercised"
     if ! diff -u "$frozen_schema_catalog" "$exercised" >&2; then
         printf '%s\n' \
@@ -1841,7 +2045,7 @@ migration_application_log="$(
 # Future entries must use basename|one-line reason.
 intentional_phase_migration_skips=()
 refusal_assertions_passed=0
-expected_refusal_assertions=249
+expected_refusal_assertions=251
 predecessor_shape_proof_count=0
 expected_predecessor_shape_proof_count=40
 refusal_probe_seconds=0
@@ -1858,6 +2062,9 @@ cleanup() {
     fi
     if [ -n "${migration_application_log:-}" ]; then
         rm -f -- "$migration_application_log"
+    fi
+    if [ -n "${role_and_database_settings_before:-}" ]; then
+        rm -f -- "$role_and_database_settings_before"
     fi
     {
         # Only the bookkeeping table this run created above; a pre-existing one refused the run.
@@ -2183,6 +2390,8 @@ SQL
     printf 'GRANT SELECT, INSERT, UPDATE, DELETE ON public._sqlx_migrations TO "%s";\n' "$apply_check_role"
 } | run_psql_as_owner
 sqlx_bookkeeping_created=1
+role_and_database_settings_before="$(mktemp "${TMPDIR:-/tmp}/schema-v2-role-settings.XXXXXX")"
+role_and_database_settings > "$role_and_database_settings_before"
 # Prove the role boundary on every run: an identifier the rewrite cannot see,
 # assembled inside EXECUTE, must fail on the production schema whether or not
 # that schema exists in this database, while the same statement against the
@@ -10542,6 +10751,7 @@ assert_no_migration_below_prior_head
 assert_frozen_schema_fingerprint
 assert_schema_holds_only_allowed_kinds "$frozen_schema" "the fresh baseline"
 assert_refused_kinds_are_seen
+assert_column_order_rule_sees_planted_changes
 assert_frozen_catalog_sees_planted_changes
 assert_exercised_schema_matches_frozen
 # Checked after the replay: a schema-migration may create an object only when it

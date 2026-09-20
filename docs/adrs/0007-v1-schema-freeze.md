@@ -279,8 +279,25 @@ later file; a routine that needs a setting uses `set_config(..., true)` and
 restores it. The predecessor baseline, once migrated, is held to the
 closed-kind rule like the fresh and exercised schemas. Column order is not part of the
 artifact: a column a schema-migration adds sits last on an initialized
-database and wherever the baseline lists it on a fresh one, and no
-schema-migration can move it.
+database and wherever the baseline lists it on a fresh one. What the check
+enforces instead, reading the live order on each replay rather than putting an
+ordinal in the artifact, is that a replay never moves a column a table already
+had, that the columns it does add come after them, and that a table a
+schema-migration creates from nothing matches the baseline's layout — so the
+baseline and a schema-migration cannot lay the same table out differently,
+which `SELECT *`, a positional `INSERT`, a composite value and `row_to_json`
+would all read differently on a fresh and on an upgraded database. Every value
+in the artifact that holds more than one element — privileges, storage
+parameters, inherited parents, enum labels, a domain's constraints, a composite
+type's attributes, a routine's configuration, a role's or database's connection
+defaults — is encoded as a JSON array rather than joined with a delimiter,
+since an element carrying the delimiter would let two different schemas
+serialize identically. Each replay also ends by comparing sqlx's
+`_sqlx_migrations` against the full expected history — one row per migration
+file, with the SHA-384 of its bytes — and `pg_db_role_setting` against the
+snapshot taken before the first replay, so a file that rewrites or deletes
+earlier bookkeeping, or changes a role's or a database's connection defaults
+however the statement is spelled, fails even though no catalog line moves.
 From acceptance on, a
 schema-migration of any of these kinds cannot land without moving the
 conformance test, which is where the carve-out or amendment is checked for.
