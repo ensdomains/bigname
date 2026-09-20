@@ -317,15 +317,31 @@ SELECT line FROM (
     JOIN pg_roles g ON g.oid = a.roleid
     LEFT JOIN pg_roles gr ON gr.oid = a.grantor
     UNION ALL
-    -- `pg_roles` prints every password as one mask, so a changed one is
-    -- invisible there; the verifier lives in superuser-only `pg_authid`, which
-    -- is why the statement rule also names the password form for the run that
-    -- cannot read it.
-    SELECT format('secret %s: %s', a.rolname, md5(COALESCE(a.rolpassword, '-')))
-    FROM pg_authid a
-    WHERE has_table_privilege('pg_authid', 'SELECT')
+    -- Default privileges in every schema of this database, not only the phase
+    -- schema and the role-global ones the frozen catalog carries: a file that
+    -- changes what the deployment role grants on objects created later in
+    -- `public` leaves no phase-schema trace, and cleanup drops the row.
+    SELECT format('default acl %s on %s for %s: %s',
+               d.defaclobjtype, COALESCE(ns.nspname, 'every schema'),
+               COALESCE(r.rolname, '-'), to_jsonb(d.defaclacl::text[])::text)
+    FROM pg_default_acl d
+    LEFT JOIN pg_namespace ns ON ns.oid = d.defaclnamespace
+    LEFT JOIN pg_roles r ON r.oid = d.defaclrole
 ) configuration ORDER BY 1;
 SQL
+        # `pg_roles` prints every password as one mask, so a changed one is
+        # invisible there and the verifier lives in `pg_authid`. A WHERE cannot
+        # guard that read: PostgreSQL checks the relation privilege when the
+        # scan opens, and the documented external-server login (CREATEDB and
+        # CREATEROLE, not superuser) cannot select from it. The privilege is
+        # therefore decided before the statement is sent, and the run that
+        # cannot read it relies on the statement rule naming the password form.
+        if [ "$(printf '\\pset tuples_only on\nSELECT has_table_privilege('"'"'pg_authid'"'"', '"'"'SELECT'"'"');\n' | run_psql_as_owner | tr -d ' ')" = t ]; then
+            cat <<'SQL'
+SELECT format('secret %s: %s', a.rolname, md5(COALESCE(a.rolpassword, '-')))
+FROM pg_authid a ORDER BY 1;
+SQL
+        fi
     } | run_psql_as_owner
 }
 # The snapshot has to see what no text rule can. The plant is on the role this
@@ -715,7 +731,11 @@ SELECT line FROM (
     WHERE n.nspname = current_schema() AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
     UNION ALL
     SELECT 2, c.relname, con.conname,
-           format('constraint %s.%s %s', c.relname, con.conname, pg_get_constraintdef(con.oid))
+           -- A locally defined constraint survives NO INHERIT; one that arrived
+           -- only through inheritance disappears with it, and the printed
+           -- definition is identical either way.
+           format('constraint %s.%s %s local=%s inherited=%s', c.relname, con.conname,
+                  pg_get_constraintdef(con.oid), con.conislocal, con.coninhcount)
     FROM pg_constraint con
     JOIN pg_class c ON c.oid = con.conrelid
     JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -2092,7 +2112,7 @@ migration_application_log="$(
 # Future entries must use basename|one-line reason.
 intentional_phase_migration_skips=()
 refusal_assertions_passed=0
-expected_refusal_assertions=255
+expected_refusal_assertions=256
 predecessor_shape_proof_count=0
 expected_predecessor_shape_proof_count=40
 refusal_probe_seconds=0
@@ -2304,7 +2324,28 @@ session_state_scanner='
             print file ": " hit; t = substr(t, RSTART + RLENGTH)
         }
         t = toupper(text)
-        while (match(t, /SET_CONFIG *\([^)]*, *FALSE *\)/)) { print file ": " substr(t, RSTART, RLENGTH); t = substr(t, RSTART + RLENGTH) }
+        while (match(t, /SET_CONFIG *\(/)) {
+            start = RSTART; depth = 0; i = RSTART
+            while (i <= length(t)) {
+                c = substr(t, i, 1)
+                if (c == "(") depth++
+                else if (c == ")") { depth--; if (depth == 0) break }
+                i++
+            }
+            call = substr(t, start, i - start + 1)
+            # The local flag is the argument after the last top-level comma.
+            depth = 0; last = 0
+            for (j = 1; j <= length(call); j++) {
+                c = substr(call, j, 1)
+                if (c == "(") depth++
+                else if (c == ")") depth--
+                else if (c == "," && depth == 1) last = j
+            }
+            tail = substr(call, last + 1, length(call) - last - 1)
+            gsub(/[[:space:]]/, "", tail)
+            if (last == 0 || tail != "TRUE") print file ": " call
+            t = substr(t, i + 1)
+        }
         t = toupper(text)
         while (match(t, /ALTER (ROLE|USER|DATABASE)[^;]* (SET|RESET) [A-Z_.]+/)) { print file ": " substr(t, RSTART, RLENGTH); t = substr(t, RSTART + RLENGTH) }
         t = toupper(text)
@@ -2351,12 +2392,14 @@ assert_session_state_rule_holds() {
         'ALTER ROLE CURRENT_USER PASSWORD '"'"'planted'"'"';'
         'alter user bigname password '"'"'planted'"'"';'
         'CREATE ROLE planted_login LOGIN PASSWORD '"'"'planted'"'"';'
+        'DO $$ BEGIN PERFORM set_config(concat('"'"'lock_'"'"', '"'"'timeout'"'"'), '"'"'1ms'"'"', false); END $$;'
     )
     local -a accepted=(
         'UPDATE t SET a = 1;'
         'ALTER FUNCTION public.f() SET lock_timeout = '"'"'1ms'"'"';'
         'INSERT INTO t VALUES (1) ON CONFLICT (a) DO UPDATE SET a = 2;'
         'DO $$ BEGIN PERFORM set_config('"'"'search_path'"'"', '"'"'pg_catalog'"'"', true); END $$;'
+        'DO $$ BEGIN PERFORM set_config(concat('"'"'lock_'"'"', '"'"'timeout'"'"'), '"'"'1ms'"'"', true); END $$;'
         'SELECT 1; -- SET search_path = pg_catalog;'
         '/* SET search_path = pg_catalog; */ SELECT 1;'
     )

@@ -599,505 +599,505 @@ column token_lineages.inserted_at timestamp with time zone not null local=t inhe
 column token_lineages.observed_at timestamp with time zone not null local=t inherited=0 default=now() identity=- generated=- collation=- storage=p compression=- statistics=default acl=default options=- existing_rows=default
 column token_lineages.provenance jsonb not null local=t inherited=0 default='{}'::jsonb identity=- generated=- collation=- storage=x compression=- statistics=default acl=default options=- existing_rows=default
 column token_lineages.token_lineage_id uuid not null local=t inherited=0 default=- identity=- generated=- collation=- storage=p compression=- statistics=default acl=default options=- existing_rows=default
-constraint account_permission_state_current.account_permission_state_current_authority_contract_check CHECK ((authority_contract ~ '^0x[0-9a-f]{40}$'::text))
-constraint account_permission_state_current.account_permission_state_current_authority_kind_check CHECK ((authority_kind = ANY (ARRAY['registry'::text, 'wrapper'::text])))
-constraint account_permission_state_current.account_permission_state_current_canonicality_summary_check CHECK ((jsonb_typeof(canonicality_summary) = 'object'::text))
-constraint account_permission_state_current.account_permission_state_current_chain_id_check CHECK ((btrim(chain_id) <> ''::text))
-constraint account_permission_state_current.account_permission_state_current_chain_positions_check CHECK ((jsonb_typeof(chain_positions) = 'object'::text))
-constraint account_permission_state_current.account_permission_state_current_effective_powers_check CHECK (((approved AND (authority_kind = 'registry'::text) AND (effective_powers = '["registry_control"]'::jsonb)) OR (approved AND (authority_kind = 'wrapper'::text) AND (effective_powers = '["wrapper_control"]'::jsonb)) OR ((NOT approved) AND (effective_powers = '[]'::jsonb))))
-constraint account_permission_state_current.account_permission_state_current_grant_source_check CHECK ((jsonb_typeof(grant_source) = 'object'::text))
-constraint account_permission_state_current.account_permission_state_current_inheritance_path_check CHECK ((jsonb_typeof(inheritance_path) = 'array'::text))
-constraint account_permission_state_current.account_permission_state_current_manifest_version_check CHECK ((manifest_version > 0))
-constraint account_permission_state_current.account_permission_state_current_owner_check CHECK ((owner ~ '^0x[0-9a-f]{40}$'::text))
-constraint account_permission_state_current.account_permission_state_current_pkey PRIMARY KEY (chain_id, authority_kind, authority_contract, owner, subject, relation_kind)
-constraint account_permission_state_current.account_permission_state_current_provenance_check CHECK ((jsonb_typeof(provenance) = 'object'::text))
-constraint account_permission_state_current.account_permission_state_current_relation_kind_check CHECK ((relation_kind = 'operator'::text))
-constraint account_permission_state_current.account_permission_state_current_revocation_source_check CHECK (((revocation_source IS NULL) OR (jsonb_typeof(revocation_source) = 'object'::text)))
-constraint account_permission_state_current.account_permission_state_current_subject_check CHECK ((subject ~ '^0x[0-9a-f]{40}$'::text))
-constraint account_permission_state_current.account_permission_state_current_transfer_behavior_check CHECK ((jsonb_typeof(transfer_behavior) = 'object'::text))
-constraint address_names_current.address_names_current_address_check CHECK ((btrim(address) <> ''::text))
-constraint address_names_current.address_names_current_binding_kind_check CHECK ((binding_kind = ANY (ARRAY['declared_registry_path'::text, 'linked_subregistry_path'::text, 'resolver_alias_path'::text, 'observed_wildcard_path'::text, 'observed_only'::text])))
-constraint address_names_current.address_names_current_canonicality_summary_check CHECK ((jsonb_typeof(canonicality_summary) = 'object'::text))
-constraint address_names_current.address_names_current_chain_positions_check CHECK ((jsonb_typeof(chain_positions) = 'object'::text))
-constraint address_names_current.address_names_current_check CHECK (((token_lineage_id IS NULL) OR (resource_id IS NOT NULL)))
-constraint address_names_current.address_names_current_check1 CHECK ((((support_status = 'supported'::text) AND (unsupported_reason IS NULL)) OR ((support_status = 'unsupported'::text) AND (unsupported_reason IS NOT NULL) AND (btrim(unsupported_reason) <> ''::text))))
-constraint address_names_current.address_names_current_logical_identity_check CHECK ((logical_name_id = ((namespace || ':'::text) || namehash)))
-constraint address_names_current.address_names_current_logical_name_id_fkey FOREIGN KEY (logical_name_id) REFERENCES name_surfaces(logical_name_id)
-constraint address_names_current.address_names_current_manifest_version_check CHECK ((manifest_version > 0))
-constraint address_names_current.address_names_current_namehash_check CHECK ((btrim(namehash) <> ''::text))
-constraint address_names_current.address_names_current_namespace_check CHECK ((btrim(namespace) <> ''::text))
-constraint address_names_current.address_names_current_pkey PRIMARY KEY (address, logical_name_id, relation)
-constraint address_names_current.address_names_current_provenance_check CHECK ((jsonb_typeof(provenance) = 'object'::text))
-constraint address_names_current.address_names_current_relation_check CHECK ((relation = ANY (ARRAY['registrant'::text, 'token_holder'::text, 'effective_controller'::text])))
-constraint address_names_current.address_names_current_resource_id_fkey FOREIGN KEY (resource_id) REFERENCES resources(resource_id)
-constraint address_names_current.address_names_current_resource_id_token_lineage_id_fkey FOREIGN KEY (resource_id, token_lineage_id) REFERENCES resources(resource_id, token_lineage_id)
-constraint address_names_current.address_names_current_support_status_check CHECK ((support_status = ANY (ARRAY['supported'::text, 'unsupported'::text])))
-constraint address_names_current.address_names_current_surface_binding_id_fkey FOREIGN KEY (surface_binding_id) REFERENCES surface_bindings(surface_binding_id)
-constraint address_names_current.address_names_current_surface_binding_id_logical_name_id_r_fkey FOREIGN KEY (surface_binding_id, logical_name_id, resource_id, binding_kind) REFERENCES surface_bindings(surface_binding_id, logical_name_id, resource_id, binding_kind)
-constraint address_names_current.address_names_current_token_lineage_id_fkey FOREIGN KEY (token_lineage_id) REFERENCES token_lineages(token_lineage_id)
-constraint address_records_current.address_records_current_address_check CHECK (((address = lower(address)) AND (address ~ '^0x[0-9a-f]{40}$'::text)))
-constraint address_records_current.address_records_current_canonicality_summary_check CHECK ((jsonb_typeof(canonicality_summary) = 'object'::text))
-constraint address_records_current.address_records_current_chain_positions_check CHECK ((jsonb_typeof(chain_positions) = 'object'::text))
-constraint address_records_current.address_records_current_check CHECK (((record_key = ('addr:'::text || coin_type)) OR (record_key = 'addr:2147483648'::text)))
-constraint address_records_current.address_records_current_check1 CHECK ((((support_status = 'supported'::text) AND (unsupported_reason IS NULL)) OR ((support_status = 'unsupported'::text) AND (unsupported_reason IS NOT NULL) AND (btrim(unsupported_reason) <> ''::text))))
-constraint address_records_current.address_records_current_coin_type_check CHECK ((coin_type ~ '^[0-9]+$'::text))
-constraint address_records_current.address_records_current_logical_identity_check CHECK ((logical_name_id = ((namespace || ':'::text) || namehash)))
-constraint address_records_current.address_records_current_logical_name_id_fkey FOREIGN KEY (logical_name_id) REFERENCES name_surfaces(logical_name_id)
-constraint address_records_current.address_records_current_manifest_version_check CHECK ((manifest_version > 0))
-constraint address_records_current.address_records_current_namehash_check CHECK ((btrim(namehash) <> ''::text))
-constraint address_records_current.address_records_current_namespace_check CHECK ((btrim(namespace) <> ''::text))
-constraint address_records_current.address_records_current_pkey PRIMARY KEY (address, coin_type, logical_name_id)
-constraint address_records_current.address_records_current_provenance_check CHECK ((jsonb_typeof(provenance) = 'object'::text))
-constraint address_records_current.address_records_current_record_resource_id_fkey FOREIGN KEY (record_resource_id) REFERENCES resources(resource_id)
-constraint address_records_current.address_records_current_resource_id_fkey FOREIGN KEY (resource_id) REFERENCES resources(resource_id)
-constraint address_records_current.address_records_current_support_status_check CHECK ((support_status = ANY (ARRAY['supported'::text, 'unsupported'::text])))
-constraint address_records_current.address_records_current_surface_binding_id_fkey FOREIGN KEY (surface_binding_id) REFERENCES surface_bindings(surface_binding_id)
-constraint chain_header_audit.chain_header_audit_chain_id_block_hash_fkey FOREIGN KEY (chain_id, block_hash) REFERENCES chain_lineage(chain_id, block_hash)
-constraint chain_header_audit.chain_header_audit_check CHECK (((logs_bloom IS NOT NULL) OR (transactions_root IS NOT NULL) OR (receipts_root IS NOT NULL) OR (state_root IS NOT NULL)))
-constraint chain_header_audit.chain_header_audit_pkey PRIMARY KEY (chain_id, block_hash)
-constraint chain_heads.chain_heads_chain_id_check CHECK ((btrim(chain_id) <> ''::text))
-constraint chain_heads.chain_heads_chain_id_finalized_block_hash_finalized_block__fkey FOREIGN KEY (chain_id, finalized_block_hash, finalized_block_number) REFERENCES chain_lineage(chain_id, block_hash, block_number)
-constraint chain_heads.chain_heads_chain_id_latest_block_hash_latest_block_number_fkey FOREIGN KEY (chain_id, latest_block_hash, latest_block_number) REFERENCES chain_lineage(chain_id, block_hash, block_number)
-constraint chain_heads.chain_heads_chain_id_safe_block_hash_safe_block_number_fkey FOREIGN KEY (chain_id, safe_block_hash, safe_block_number) REFERENCES chain_lineage(chain_id, block_hash, block_number)
-constraint chain_heads.chain_heads_check CHECK (((safe_block_hash IS NULL) = (safe_block_number IS NULL)))
-constraint chain_heads.chain_heads_check1 CHECK (((finalized_block_hash IS NULL) = (finalized_block_number IS NULL)))
-constraint chain_heads.chain_heads_check2 CHECK (((safe_block_number IS NULL) OR (safe_block_number <= latest_block_number)))
-constraint chain_heads.chain_heads_check3 CHECK (((finalized_block_number IS NULL) OR ((safe_block_number IS NOT NULL) AND (finalized_block_number <= safe_block_number))))
-constraint chain_heads.chain_heads_latest_block_number_check CHECK ((latest_block_number >= 0))
-constraint chain_heads.chain_heads_lineage_orphaning_epoch_check CHECK ((lineage_orphaning_epoch >= 0))
-constraint chain_heads.chain_heads_pkey PRIMARY KEY (chain_id)
-constraint chain_lineage.chain_lineage_block_hash_check CHECK ((btrim(block_hash) <> ''::text))
-constraint chain_lineage.chain_lineage_block_number_check CHECK ((block_number >= 0))
-constraint chain_lineage.chain_lineage_chain_id_block_hash_block_number_key UNIQUE (chain_id, block_hash, block_number)
-constraint chain_lineage.chain_lineage_chain_id_check CHECK ((btrim(chain_id) <> ''::text))
-constraint chain_lineage.chain_lineage_check CHECK ((canonicality_updated_at >= first_observed_at))
-constraint chain_lineage.chain_lineage_parent_hash_check CHECK (((parent_hash IS NULL) OR (btrim(parent_hash) <> ''::text)))
-constraint chain_lineage.chain_lineage_pkey PRIMARY KEY (chain_id, block_hash)
-constraint chain_phase_state.chain_phase_state_chain_id_check CHECK ((btrim(chain_id) <> ''::text))
-constraint chain_phase_state.chain_phase_state_check CHECK (((current_block_number IS NULL) = (current_block_hash IS NULL)))
-constraint chain_phase_state.chain_phase_state_check1 CHECK (((target_block_number IS NULL) = (target_block_hash IS NULL)))
-constraint chain_phase_state.chain_phase_state_check2 CHECK (((redo_current_block_number IS NULL) = (redo_current_block_hash IS NULL)))
-constraint chain_phase_state.chain_phase_state_check3 CHECK (((redo_target_block_number IS NULL) = (redo_target_block_hash IS NULL)))
-constraint chain_phase_state.chain_phase_state_check4 CHECK ((((NOT redo_in_progress) AND (redo_mode IS NULL) AND (redo_previous_phase_status IS NULL) AND (redo_previous_last_error IS NULL) AND (redo_previous_started_at IS NULL) AND (redo_previous_finished_at IS NULL) AND (redo_from_block_number IS NULL) AND (redo_to_block_number IS NULL) AND (redo_current_block_number IS NULL) AND (redo_current_block_hash IS NULL) AND (redo_target_block_number IS NULL) AND (redo_target_block_hash IS NULL)) OR (redo_in_progress AND (phase_status = ANY (ARRAY['running'::text, 'paused'::text])) AND (redo_mode IS NOT NULL) AND (redo_previous_phase_status = ANY (ARRAY['idle'::text, 'running'::text, 'paused'::text, 'completed'::text, 'failed'::text])) AND (((redo_previous_phase_status = 'idle'::text) AND (redo_previous_started_at IS NULL) AND (redo_previous_finished_at IS NULL)) OR ((redo_previous_phase_status = ANY (ARRAY['running'::text, 'paused'::text])) AND (redo_previous_started_at IS NOT NULL) AND (redo_previous_finished_at IS NULL)) OR ((redo_previous_phase_status = ANY (ARRAY['completed'::text, 'failed'::text])) AND (redo_previous_started_at IS NOT NULL) AND (redo_previous_finished_at IS NOT NULL) AND (redo_previous_finished_at >= redo_previous_started_at))) AND (((redo_previous_phase_status = 'failed'::text) AND (redo_previous_last_error IS NOT NULL) AND (btrim(redo_previous_last_error) <> ''::text)) OR ((redo_previous_phase_status <> 'failed'::text) AND (redo_previous_last_error IS NULL))) AND (redo_from_block_number IS NOT NULL) AND (redo_from_block_number >= 0) AND (redo_to_block_number IS NOT NULL) AND (redo_to_block_number >= redo_from_block_number) AND ((redo_current_block_number IS NULL) OR ((redo_current_block_number >= redo_from_block_number) AND (redo_current_block_number <= redo_to_block_number))) AND ((redo_target_block_number IS NULL) OR ((redo_target_block_number >= redo_from_block_number) AND (redo_target_block_number <= redo_to_block_number))) AND ((redo_current_block_number IS NULL) OR (redo_target_block_number IS NULL) OR (redo_current_block_number <= redo_target_block_number)) AND ((redo_mode <> 'recompute_flags'::text) OR (phase_name = 'interpret'::text)))))
-constraint chain_phase_state.chain_phase_state_check5 CHECK (((live_handoff_block_number IS NULL) = (live_handoff_block_hash IS NULL)))
-constraint chain_phase_state.chain_phase_state_check6 CHECK (((live_handoff_block_number IS NULL) OR ((phase_name = 'ingest'::text) AND (live_handoff_block_number >= 0))))
-constraint chain_phase_state.chain_phase_state_check7 CHECK ((((phase_status = 'idle'::text) AND (started_at IS NULL) AND (finished_at IS NULL)) OR ((phase_status = ANY (ARRAY['running'::text, 'paused'::text])) AND (started_at IS NOT NULL) AND (finished_at IS NULL)) OR ((phase_status = ANY (ARRAY['completed'::text, 'failed'::text])) AND (started_at IS NOT NULL) AND (finished_at IS NOT NULL) AND (finished_at >= started_at))))
-constraint chain_phase_state.chain_phase_state_check8 CHECK ((((phase_status = 'failed'::text) AND (last_error IS NOT NULL)) OR (redo_in_progress AND (phase_status = ANY (ARRAY['running'::text, 'paused'::text]))) OR ((phase_status <> 'failed'::text) AND (NOT redo_in_progress) AND (last_error IS NULL))))
-constraint chain_phase_state.chain_phase_state_current_block_number_check CHECK (((current_block_number IS NULL) OR (current_block_number >= 0)))
-constraint chain_phase_state.chain_phase_state_ingest_redo_manifest_authority_check CHECK (((redo_manifest_authority_fingerprint IS NULL) OR ((phase_name = 'ingest'::text) AND redo_in_progress AND (redo_manifest_authority_fingerprint ~ '^[0-9a-f]{64}$'::text))))
-constraint chain_phase_state.chain_phase_state_ingest_redo_source_boundaries_check CHECK (((redo_source_boundary_markers IS NULL) OR ((phase_name = 'ingest'::text) AND redo_in_progress AND (jsonb_typeof(redo_source_boundary_markers) = 'object'::text) AND (redo_source_boundary_markers <> '{}'::jsonb))))
-constraint chain_phase_state.chain_phase_state_input_content_hash_check CHECK (((input_content_hash IS NULL) OR (btrim(input_content_hash) <> ''::text)))
-constraint chain_phase_state.chain_phase_state_last_error_check CHECK (((last_error IS NULL) OR (btrim(last_error) <> ''::text)))
-constraint chain_phase_state.chain_phase_state_phase_name_check CHECK ((phase_name = ANY (ARRAY['ingest'::text, 'interpret'::text, 'project'::text, 'verify'::text, 'live'::text])))
-constraint chain_phase_state.chain_phase_state_phase_status_check CHECK ((phase_status = ANY (ARRAY['idle'::text, 'running'::text, 'paused'::text, 'completed'::text, 'failed'::text])))
-constraint chain_phase_state.chain_phase_state_pkey PRIMARY KEY (chain_id, phase_name)
-constraint chain_phase_state.chain_phase_state_redo_attempt_generation_check CHECK ((redo_attempt_generation >= 0))
-constraint chain_phase_state.chain_phase_state_redo_mode_check CHECK (((redo_mode IS NULL) OR (redo_mode = ANY (ARRAY['redo'::text, 'recompute_flags'::text]))))
-constraint chain_phase_state.chain_phase_state_target_block_number_check CHECK (((target_block_number IS NULL) OR (target_block_number >= 0)))
-constraint chain_phase_state.chain_phase_state_unconfigured_settlement_check CHECK (((settled_while_unconfigured IS NULL) OR settled_while_unconfigured))
-constraint chain_phase_state.chain_phase_state_verification_level_check CHECK (((verification_level IS NULL) OR (verification_level = ANY (ARRAY['quick_synced'::text, 'cross_checked'::text, 'node_checked'::text]))))
-constraint chain_phase_state.chain_phase_state_verification_phase_check CHECK (((verification_level IS NULL) OR (phase_name = 'verify'::text)))
-constraint children_current.children_current_canonicality_summary_check CHECK ((jsonb_typeof(canonicality_summary) = 'object'::text))
-constraint children_current.children_current_chain_positions_check CHECK ((jsonb_typeof(chain_positions) = 'object'::text))
-constraint children_current.children_current_check CHECK ((parent_logical_name_id <> child_logical_name_id))
-constraint children_current.children_current_child_logical_name_id_check CHECK ((btrim(child_logical_name_id) <> ''::text))
-constraint children_current.children_current_decoded_label_matches_raw_check CHECK (((decoded_label IS NULL) OR (convert_to(decoded_label, 'UTF8'::name) = raw_label)))
-constraint children_current.children_current_decoded_label_requires_raw_check CHECK (((decoded_label IS NULL) OR (raw_label IS NOT NULL)))
-constraint children_current.children_current_decoded_name_matches_raw_check CHECK (((decoded_name IS NULL) OR (convert_to(decoded_name, 'UTF8'::name) = raw_name)))
-constraint children_current.children_current_decoded_name_requires_raw_check CHECK (((decoded_name IS NULL) OR (raw_name IS NOT NULL)))
-constraint children_current.children_current_labelhash_check CHECK ((btrim(labelhash) <> ''::text))
-constraint children_current.children_current_logical_identity_check CHECK ((child_logical_name_id = ((namespace || ':'::text) || namehash)))
-constraint children_current.children_current_manifest_version_check CHECK ((manifest_version > 0))
-constraint children_current.children_current_namehash_check CHECK ((btrim(namehash) <> ''::text))
-constraint children_current.children_current_namespace_check CHECK ((btrim(namespace) <> ''::text))
-constraint children_current.children_current_owner_check CHECK (((owner IS NULL) OR (btrim(owner) <> ''::text)))
-constraint children_current.children_current_parent_logical_name_id_fkey FOREIGN KEY (parent_logical_name_id) REFERENCES name_surfaces(logical_name_id)
-constraint children_current.children_current_pkey PRIMARY KEY (parent_logical_name_id, child_logical_name_id, surface_class)
-constraint children_current.children_current_provenance_check CHECK ((jsonb_typeof(provenance) = 'object'::text))
-constraint children_current.children_current_raw_label_check CHECK (((raw_label IS NULL) OR (octet_length(raw_label) > 0)))
-constraint children_current.children_current_raw_name_check CHECK (((raw_name IS NULL) OR (octet_length(raw_name) > 0)))
-constraint children_current.children_current_registrant_check CHECK (((registrant IS NULL) OR (btrim(registrant) <> ''::text)))
-constraint children_current.children_current_surface_class_check CHECK ((surface_class = 'declared'::text))
-constraint contract_instance_addresses.contract_instance_addresses_active_from_block_number_check CHECK (((active_from_block_number IS NULL) OR (active_from_block_number >= 0)))
-constraint contract_instance_addresses.contract_instance_addresses_active_to_block_number_check CHECK (((active_to_block_number IS NULL) OR (active_to_block_number >= 0)))
-constraint contract_instance_addresses.contract_instance_addresses_address_check CHECK ((btrim(address) <> ''::text))
-constraint contract_instance_addresses.contract_instance_addresses_chain_id_check CHECK ((btrim(chain_id) <> ''::text))
-constraint contract_instance_addresses.contract_instance_addresses_check CHECK (((active_from_block_hash IS NULL) OR (active_from_block_number IS NOT NULL)))
-constraint contract_instance_addresses.contract_instance_addresses_check1 CHECK (((active_to_block_hash IS NULL) OR (active_to_block_number IS NOT NULL)))
-constraint contract_instance_addresses.contract_instance_addresses_check2 CHECK (((active_from_block_number IS NULL) OR (active_to_block_number IS NULL) OR (active_to_block_number >= active_from_block_number)))
-constraint contract_instance_addresses.contract_instance_addresses_check3 CHECK (((deactivated_at IS NULL) OR (deactivated_at >= admitted_at)))
-constraint contract_instance_addresses.contract_instance_addresses_instance_chain_fkey FOREIGN KEY (chain_id, contract_instance_id) REFERENCES contract_instances(chain_id, contract_instance_id)
-constraint contract_instance_addresses.contract_instance_addresses_manifest_fkey FOREIGN KEY (source_manifest_id, chain_id) REFERENCES manifest_versions(manifest_id, chain_id) ON DELETE SET NULL (source_manifest_id)
-constraint contract_instance_addresses.contract_instance_addresses_no_overlap EXCLUDE USING gist (contract_instance_id WITH =, int8range(active_from_block_number, active_to_block_number, '[]'::text) WITH &&)
-constraint contract_instance_addresses.contract_instance_addresses_pkey PRIMARY KEY (contract_instance_address_id)
-constraint contract_instance_addresses.contract_instance_addresses_provenance_check CHECK ((jsonb_typeof(provenance) = 'object'::text))
-constraint contract_instances.contract_instances_chain_id_check CHECK ((btrim(chain_id) <> ''::text))
-constraint contract_instances.contract_instances_chain_id_contract_instance_id_key UNIQUE (chain_id, contract_instance_id)
-constraint contract_instances.contract_instances_contract_kind_check CHECK ((contract_kind = ANY (ARRAY['root'::text, 'contract'::text])))
-constraint contract_instances.contract_instances_pkey PRIMARY KEY (contract_instance_id)
-constraint contract_instances.contract_instances_provenance_check CHECK ((jsonb_typeof(provenance) = 'object'::text))
-constraint discovery_edges.discovery_edges_active_from_block_number_check CHECK (((active_from_block_number IS NULL) OR (active_from_block_number >= 0)))
-constraint discovery_edges.discovery_edges_active_to_block_number_check CHECK (((active_to_block_number IS NULL) OR (active_to_block_number >= 0)))
-constraint discovery_edges.discovery_edges_admission_basis_check CHECK ((btrim(admission_basis) <> ''::text))
-constraint discovery_edges.discovery_edges_chain_id_check CHECK ((btrim(chain_id) <> ''::text))
-constraint discovery_edges.discovery_edges_check1 CHECK (((active_from_block_number IS NULL) = (active_from_block_hash IS NULL)))
-constraint discovery_edges.discovery_edges_check2 CHECK (((active_to_block_number IS NULL) = (active_to_block_hash IS NULL)))
-constraint discovery_edges.discovery_edges_check3 CHECK (((active_from_block_number IS NULL) OR (active_to_block_number IS NULL) OR (active_to_block_number >= active_from_block_number)))
-constraint discovery_edges.discovery_edges_check4 CHECK (((deactivated_at IS NULL) OR (deactivated_at >= admitted_at)))
-constraint discovery_edges.discovery_edges_discovery_source_check CHECK ((btrim(discovery_source) <> ''::text))
-constraint discovery_edges.discovery_edges_edge_kind_check CHECK ((edge_kind = ANY (ARRAY['resolver'::text, 'subregistry'::text, 'proxy_implementation'::text, 'migration'::text, 'registry_announcement'::text])))
-constraint discovery_edges.discovery_edges_from_instance_chain_fkey FOREIGN KEY (chain_id, from_contract_instance_id) REFERENCES contract_instances(chain_id, contract_instance_id)
-constraint discovery_edges.discovery_edges_manifest_fkey FOREIGN KEY (source_manifest_id, chain_id) REFERENCES manifest_versions(manifest_id, chain_id) ON DELETE SET NULL (source_manifest_id)
-constraint discovery_edges.discovery_edges_pkey PRIMARY KEY (discovery_edge_id)
-constraint discovery_edges.discovery_edges_provenance_check CHECK ((jsonb_typeof(provenance) = 'object'::text))
-constraint discovery_edges.discovery_edges_self_edge_check CHECK (((edge_kind = 'registry_announcement'::text) OR ((edge_kind = 'resolver'::text) AND (discovery_source = 'ResolverCreated'::text)) OR (from_contract_instance_id <> to_contract_instance_id)))
-constraint discovery_edges.discovery_edges_to_instance_chain_fkey FOREIGN KEY (chain_id, to_contract_instance_id) REFERENCES contract_instances(chain_id, contract_instance_id)
-constraint discovery_watch_admissions.discovery_watch_admissions_active_from_block_number_check CHECK ((active_from_block_number >= 0))
-constraint discovery_watch_admissions.discovery_watch_admissions_address_check CHECK ((btrim(address) <> ''::text))
-constraint discovery_watch_admissions.discovery_watch_admissions_chain_id_check CHECK ((btrim(chain_id) <> ''::text))
-constraint discovery_watch_admissions.discovery_watch_admissions_check CHECK ((active_to_block_number >= active_from_block_number))
-constraint discovery_watch_admissions.discovery_watch_admissions_lineage_orphaning_epoch_check CHECK ((lineage_orphaning_epoch >= 0))
-constraint discovery_watch_admissions.discovery_watch_admissions_manifest_authority_fingerprint_check CHECK ((btrim(manifest_authority_fingerprint) <> ''::text))
-constraint discovery_watch_admissions.discovery_watch_admissions_namespace_check CHECK ((btrim(namespace) <> ''::text))
-constraint discovery_watch_admissions.discovery_watch_admissions_pkey PRIMARY KEY (chain_id, manifest_authority_fingerprint, lineage_orphaning_epoch, namespace, target_source_family, target_deployment_label, address, topic0, active_from_block_number, active_to_block_number)
-constraint discovery_watch_admissions.discovery_watch_admissions_target_deployment_label_check CHECK ((btrim(target_deployment_label) <> ''::text))
-constraint discovery_watch_admissions.discovery_watch_admissions_target_source_family_check CHECK ((btrim(target_source_family) <> ''::text))
-constraint discovery_watch_admissions.discovery_watch_admissions_topic0_check CHECK ((btrim(topic0) <> ''::text))
-constraint ens_names.ens_names_hash_check CHECK ((btrim(hash) <> ''::text))
-constraint ens_names.ens_names_name_check CHECK ((name <> ''::text))
-constraint ens_names.ens_names_pkey PRIMARY KEY (hash)
-constraint ingest_cursors.ingest_cursors_chain_id_check CHECK ((btrim(chain_id) <> ''::text))
-constraint ingest_cursors.ingest_cursors_last_processed_order_check CHECK (((last_processed_block_number IS NULL) OR ((last_processed_block_number >= start_block_number) AND (last_processed_block_number < next_block_number))))
-constraint ingest_cursors.ingest_cursors_last_processed_pair_check CHECK (((last_processed_block_number IS NULL) = (last_processed_block_hash IS NULL)))
-constraint ingest_cursors.ingest_cursors_next_block_order_check CHECK ((next_block_number >= start_block_number))
-constraint ingest_cursors.ingest_cursors_pkey PRIMARY KEY (chain_id, source_key)
-constraint ingest_cursors.ingest_cursors_seed_basis_check CHECK ((seed_basis = ANY (ARRAY['base_seam'::text, 'new_signature_range'::text, 'ethereum_head'::text])))
-constraint ingest_cursors.ingest_cursors_source_key_check CHECK ((btrim(source_key) <> ''::text))
-constraint ingest_cursors.ingest_cursors_source_kind_check CHECK ((btrim(source_kind) <> ''::text))
-constraint ingest_cursors.ingest_cursors_start_block_number_check CHECK ((start_block_number >= 0))
-constraint ingest_cursors.ingest_cursors_target_block_order_check CHECK (((target_block_number IS NULL) OR (target_block_number >= start_block_number)))
-constraint interpret_decode_skips.interpret_decode_skips_block_hash_check CHECK ((btrim(block_hash) <> ''::text))
-constraint interpret_decode_skips.interpret_decode_skips_block_number_check CHECK ((block_number >= 0))
-constraint interpret_decode_skips.interpret_decode_skips_chain_id_check CHECK ((btrim(chain_id) <> ''::text))
-constraint interpret_decode_skips.interpret_decode_skips_decode_context_check CHECK ((btrim(decode_context) <> ''::text))
-constraint interpret_decode_skips.interpret_decode_skips_emitting_address_check CHECK ((btrim(emitting_address) <> ''::text))
-constraint interpret_decode_skips.interpret_decode_skips_interpreter_content_hash_check CHECK ((btrim(interpreter_content_hash) <> ''::text))
-constraint interpret_decode_skips.interpret_decode_skips_log_index_check CHECK ((log_index >= 0))
-constraint interpret_decode_skips.interpret_decode_skips_pkey PRIMARY KEY (chain_id, block_hash, transaction_hash, log_index, interpreter_content_hash)
-constraint interpret_decode_skips.interpret_decode_skips_selection_topic0_check CHECK ((btrim(selection_topic0) <> ''::text))
-constraint interpret_decode_skips.interpret_decode_skips_source_family_check CHECK ((btrim(source_family) <> ''::text))
-constraint interpret_decode_skips.interpret_decode_skips_transaction_hash_check CHECK ((btrim(transaction_hash) <> ''::text))
-constraint label_preimages.label_preimages_decoded_label_matches_raw_check CHECK (((decoded_label IS NULL) OR (convert_to(decoded_label, 'UTF8'::name) = raw_label)))
-constraint label_preimages.label_preimages_labelhash_check CHECK ((btrim(labelhash) <> ''::text))
-constraint label_preimages.label_preimages_normalization_coherence_check CHECK (((normalized_under_version AND (normalization_error IS NULL)) OR ((NOT normalized_under_version) AND (normalization_error IS NOT NULL) AND (btrim(normalization_error) <> ''::text))))
-constraint label_preimages.label_preimages_normalizer_version_check CHECK ((btrim(normalizer_version) <> ''::text))
-constraint label_preimages.label_preimages_pkey PRIMARY KEY (labelhash)
-constraint label_preimages.label_preimages_provenance_check CHECK ((jsonb_typeof(provenance) = 'object'::text))
-constraint label_preimages.label_preimages_raw_label_check CHECK ((octet_length(raw_label) > 0))
-constraint label_preimages.label_preimages_source_kind_check CHECK ((btrim(source_kind) <> ''::text))
-constraint label_preimages.label_preimages_source_priority_check CHECK ((source_priority >= 0))
-constraint manifest_authority_attestations.manifest_authority_attestations_attested_by_check CHECK ((btrim(attested_by) <> ''::text))
-constraint manifest_authority_attestations.manifest_authority_attestations_authority_fingerprint_check CHECK ((authority_fingerprint ~ '^[0-9a-f]{64}$'::text))
-constraint manifest_authority_attestations.manifest_authority_attestations_chain_id_check CHECK ((btrim(chain_id) <> ''::text))
-constraint manifest_authority_attestations.manifest_authority_attestations_check CHECK ((redo_to_block_number >= redo_from_block_number))
-constraint manifest_authority_attestations.manifest_authority_attestations_generation_token_check CHECK ((btrim(generation_token) <> ''::text))
-constraint manifest_authority_attestations.manifest_authority_attestations_phase_name_check CHECK ((phase_name = 'interpret'::text))
-constraint manifest_authority_attestations.manifest_authority_attestations_pkey PRIMARY KEY (chain_id, phase_name, generation_token)
-constraint manifest_authority_attestations.manifest_authority_attestations_redo_from_block_number_check CHECK ((redo_from_block_number >= 0))
-constraint manifest_contract_instances.manifest_contract_instances_abi_ref_check CHECK (((abi_ref IS NULL) OR (btrim(abi_ref) <> ''::text)))
-constraint manifest_contract_instances.manifest_contract_instances_chain_id_check CHECK ((btrim(chain_id) <> ''::text))
-constraint manifest_contract_instances.manifest_contract_instances_chain_id_contract_instance_id_fkey FOREIGN KEY (chain_id, contract_instance_id) REFERENCES contract_instances(chain_id, contract_instance_id)
-constraint manifest_contract_instances.manifest_contract_instances_chain_id_implementation_contra_fkey FOREIGN KEY (chain_id, implementation_contract_instance_id) REFERENCES contract_instances(chain_id, contract_instance_id)
-constraint manifest_contract_instances.manifest_contract_instances_check CHECK ((((declaration_kind = 'root'::text) AND (role IS NULL)) OR ((declaration_kind = 'contract'::text) AND (role IS NOT NULL) AND (btrim(role) <> ''::text))))
-constraint manifest_contract_instances.manifest_contract_instances_check1 CHECK ((((proxy_kind = 'none'::text) AND (implementation_contract_instance_id IS NULL) AND (declared_implementation_address IS NULL)) OR ((proxy_kind <> 'none'::text) AND (implementation_contract_instance_id IS NOT NULL) AND (declared_implementation_address IS NOT NULL) AND (btrim(declared_implementation_address) <> ''::text))))
-constraint manifest_contract_instances.manifest_contract_instances_declaration_kind_check CHECK ((declaration_kind = ANY (ARRAY['root'::text, 'contract'::text])))
-constraint manifest_contract_instances.manifest_contract_instances_declaration_name_check CHECK ((btrim(declaration_name) <> ''::text))
-constraint manifest_contract_instances.manifest_contract_instances_declared_address_check CHECK ((btrim(declared_address) <> ''::text))
-constraint manifest_contract_instances.manifest_contract_instances_manifest_fkey FOREIGN KEY (manifest_id, chain_id) REFERENCES manifest_versions(manifest_id, chain_id) ON DELETE CASCADE
-constraint manifest_contract_instances.manifest_contract_instances_manifest_id_declaration_kind_de_key UNIQUE (manifest_id, declaration_kind, declaration_name)
-constraint manifest_contract_instances.manifest_contract_instances_pkey PRIMARY KEY (manifest_contract_instance_id)
-constraint manifest_contract_instances.manifest_contract_instances_proxy_kind_check CHECK ((btrim(proxy_kind) <> ''::text))
-constraint manifest_contract_instances.manifest_contract_instances_start_block_number_check CHECK (((start_block_number IS NULL) OR (start_block_number >= 0)))
-constraint manifest_discovery_rules.manifest_discovery_rules_admission_check CHECK ((btrim(admission) <> ''::text))
-constraint manifest_discovery_rules.manifest_discovery_rules_edge_kind_check CHECK ((edge_kind = ANY (ARRAY['resolver'::text, 'subregistry'::text, 'proxy_implementation'::text, 'migration'::text, 'registry_announcement'::text])))
-constraint manifest_discovery_rules.manifest_discovery_rules_from_role_check CHECK (((from_role IS NULL) OR (btrim(from_role) <> ''::text)))
-constraint manifest_discovery_rules.manifest_discovery_rules_manifest_fkey FOREIGN KEY (manifest_id) REFERENCES manifest_versions(manifest_id) ON DELETE CASCADE
-constraint manifest_discovery_rules.manifest_discovery_rules_pkey PRIMARY KEY (manifest_discovery_rule_id)
-constraint manifest_discovery_rules.manifest_discovery_rules_rule_payload_check CHECK ((jsonb_typeof(rule_payload) = 'object'::text))
-constraint manifest_versions.manifest_versions_applied_change_count_check CHECK ((applied_change_count >= 0))
-constraint manifest_versions.manifest_versions_chain_id_check CHECK ((btrim(chain_id) <> ''::text))
-constraint manifest_versions.manifest_versions_deployment_label_check CHECK ((btrim(deployment_label) <> ''::text))
-constraint manifest_versions.manifest_versions_file_path_check CHECK ((btrim(file_path) <> ''::text))
-constraint manifest_versions.manifest_versions_file_path_key UNIQUE (file_path)
-constraint manifest_versions.manifest_versions_manifest_id_chain_id_key UNIQUE (manifest_id, chain_id)
-constraint manifest_versions.manifest_versions_manifest_id_namespace_source_family_manif_key UNIQUE (manifest_id, namespace, source_family, manifest_version, chain_id)
-constraint manifest_versions.manifest_versions_manifest_payload_check CHECK ((jsonb_typeof(manifest_payload) = 'object'::text))
-constraint manifest_versions.manifest_versions_manifest_version_check CHECK ((manifest_version > 0))
-constraint manifest_versions.manifest_versions_namespace_check CHECK ((btrim(namespace) <> ''::text))
-constraint manifest_versions.manifest_versions_namespace_source_family_chain_id_deployme_key UNIQUE (namespace, source_family, chain_id, deployment_label, manifest_version)
-constraint manifest_versions.manifest_versions_normalizer_version_check CHECK ((btrim(normalizer_version) <> ''::text))
-constraint manifest_versions.manifest_versions_pkey PRIMARY KEY (manifest_id)
-constraint manifest_versions.manifest_versions_rollout_status_check CHECK ((rollout_status = ANY (ARRAY['draft'::text, 'shadow'::text, 'active'::text, 'deprecated'::text])))
-constraint manifest_versions.manifest_versions_source_family_check CHECK ((btrim(source_family) <> ''::text))
-constraint migration_candidate_discovery_effects.migration_candidate_discovery__migration_correlation_ids_check1 CHECK ((cardinality(migration_correlation_ids) > 0))
-constraint migration_candidate_discovery_effects.migration_candidate_discovery_chain_id_block_hash_block_nu_fkey FOREIGN KEY (chain_id, block_hash, block_number) REFERENCES chain_lineage(chain_id, block_hash, block_number)
-constraint migration_candidate_discovery_effects.migration_candidate_discovery_e_migration_correlation_ids_check CHECK (migration_correlation_ids_valid(migration_correlation_ids))
-constraint migration_candidate_discovery_effects.migration_candidate_discovery_ef_interpreter_content_hash_check CHECK ((btrim(interpreter_content_hash) <> ''::text))
-constraint migration_candidate_discovery_effects.migration_candidate_discovery_effects_block_number_check CHECK ((block_number >= 0))
-constraint migration_candidate_discovery_effects.migration_candidate_discovery_effects_consumer_visibility_check CHECK ((consumer_visibility = 'candidate'::text))
-constraint migration_candidate_discovery_effects.migration_candidate_discovery_effects_correlation_kind_check CHECK ((btrim(correlation_kind) <> ''::text))
-constraint migration_candidate_discovery_effects.migration_candidate_discovery_effects_effect_identity_check CHECK ((btrim(effect_identity) <> ''::text))
-constraint migration_candidate_discovery_effects.migration_candidate_discovery_effects_effect_kind_check CHECK ((btrim(effect_kind) <> ''::text))
-constraint migration_candidate_discovery_effects.migration_candidate_discovery_effects_evidence_refs_check CHECK ((jsonb_typeof(evidence_refs) = 'array'::text))
-constraint migration_candidate_discovery_effects.migration_candidate_discovery_effects_log_index_check CHECK ((log_index >= 0))
-constraint migration_candidate_discovery_effects.migration_candidate_discovery_effects_pkey PRIMARY KEY (effect_identity)
-constraint migration_candidate_discovery_effects.migration_candidate_discovery_effects_proposed_effect_check CHECK ((jsonb_typeof(proposed_effect) = 'object'::text))
-constraint migration_candidate_discovery_effects.migration_candidate_discovery_effects_transaction_index_check CHECK ((transaction_index >= 0))
-constraint migration_candidate_identity_effects.migration_candidate_identity__chain_id_block_hash_block_nu_fkey FOREIGN KEY (chain_id, block_hash, block_number) REFERENCES chain_lineage(chain_id, block_hash, block_number)
-constraint migration_candidate_identity_effects.migration_candidate_identity_e_migration_correlation_ids_check1 CHECK ((cardinality(migration_correlation_ids) > 0))
-constraint migration_candidate_identity_effects.migration_candidate_identity_ef_migration_correlation_ids_check CHECK (migration_correlation_ids_valid(migration_correlation_ids))
-constraint migration_candidate_identity_effects.migration_candidate_identity_eff_interpreter_content_hash_check CHECK ((btrim(interpreter_content_hash) <> ''::text))
-constraint migration_candidate_identity_effects.migration_candidate_identity_effects_block_number_check CHECK ((block_number >= 0))
-constraint migration_candidate_identity_effects.migration_candidate_identity_effects_consumer_visibility_check CHECK ((consumer_visibility = 'candidate'::text))
-constraint migration_candidate_identity_effects.migration_candidate_identity_effects_correlation_kind_check CHECK ((correlation_kind = 'authority_transition'::text))
-constraint migration_candidate_identity_effects.migration_candidate_identity_effects_effect_identity_check CHECK ((btrim(effect_identity) <> ''::text))
-constraint migration_candidate_identity_effects.migration_candidate_identity_effects_effect_kind_check CHECK ((btrim(effect_kind) <> ''::text))
-constraint migration_candidate_identity_effects.migration_candidate_identity_effects_evidence_refs_check CHECK ((jsonb_typeof(evidence_refs) = 'array'::text))
-constraint migration_candidate_identity_effects.migration_candidate_identity_effects_log_index_check CHECK ((log_index >= 0))
-constraint migration_candidate_identity_effects.migration_candidate_identity_effects_pkey PRIMARY KEY (effect_identity)
-constraint migration_candidate_identity_effects.migration_candidate_identity_effects_proposed_effect_check CHECK ((jsonb_typeof(proposed_effect) = 'object'::text))
-constraint migration_candidate_identity_effects.migration_candidate_identity_effects_transaction_index_check CHECK ((transaction_index >= 0))
-constraint migration_discovery_associations.migration_discovery_associati_chain_id_block_hash_block_nu_fkey FOREIGN KEY (chain_id, block_hash, block_number) REFERENCES chain_lineage(chain_id, block_hash, block_number)
-constraint migration_discovery_associations.migration_discovery_associati_chain_id_registry_contract_i_fkey FOREIGN KEY (chain_id, registry_contract_instance_id) REFERENCES contract_instances(chain_id, contract_instance_id)
-constraint migration_discovery_associations.migration_discovery_associatio_source_manifest_id_chain_id_fkey FOREIGN KEY (source_manifest_id, chain_id) REFERENCES manifest_versions(manifest_id, chain_id)
-constraint migration_discovery_associations.migration_discovery_associations_block_number_check CHECK ((block_number >= 0))
-constraint migration_discovery_associations.migration_discovery_associations_consumer_visibility_check CHECK ((consumer_visibility = ANY (ARRAY['candidate'::text, 'activated'::text])))
-constraint migration_discovery_associations.migration_discovery_associations_correlation_kind_check CHECK ((correlation_kind = 'migration_registry_creation'::text))
-constraint migration_discovery_associations.migration_discovery_associations_evidence_refs_check CHECK ((jsonb_typeof(evidence_refs) = 'array'::text))
-constraint migration_discovery_associations.migration_discovery_associations_interpreter_content_hash_check CHECK ((btrim(interpreter_content_hash) <> ''::text))
-constraint migration_discovery_associations.migration_discovery_associations_log_index_check CHECK ((log_index >= 0))
-constraint migration_discovery_associations.migration_discovery_associations_logical_edge_identity_check CHECK ((btrim(logical_edge_identity) <> ''::text))
-constraint migration_discovery_associations.migration_discovery_associations_migration_correlation_id_check CHECK ((btrim(migration_correlation_id) <> ''::text))
-constraint migration_discovery_associations.migration_discovery_associations_pkey PRIMARY KEY (logical_edge_identity, migration_correlation_id)
-constraint migration_discovery_associations.migration_discovery_associations_registry_address_check CHECK ((btrim(registry_address) <> ''::text))
-constraint migration_discovery_associations.migration_discovery_associations_transaction_index_check CHECK ((transaction_index >= 0))
-constraint migration_event_associations.migration_event_associations_block_number_check CHECK ((block_number >= 0))
-constraint migration_event_associations.migration_event_associations_chain_id_block_hash_block_num_fkey FOREIGN KEY (chain_id, block_hash, block_number) REFERENCES chain_lineage(chain_id, block_hash, block_number)
-constraint migration_event_associations.migration_event_associations_consumer_visibility_check CHECK ((consumer_visibility = ANY (ARRAY['candidate'::text, 'activated'::text])))
-constraint migration_event_associations.migration_event_associations_correlation_kind_check CHECK ((correlation_kind = ANY (ARRAY['authority_transition'::text, 'synchronized_renewal'::text, 'graveyard_cleanup'::text, 'migration_registry_creation'::text, 'controller_configuration'::text])))
-constraint migration_event_associations.migration_event_associations_event_identity_check CHECK ((btrim(event_identity) <> ''::text))
-constraint migration_event_associations.migration_event_associations_evidence_refs_check CHECK ((jsonb_typeof(evidence_refs) = 'array'::text))
-constraint migration_event_associations.migration_event_associations_interpreter_content_hash_check CHECK ((btrim(interpreter_content_hash) <> ''::text))
-constraint migration_event_associations.migration_event_associations_log_index_check CHECK ((log_index >= 0))
-constraint migration_event_associations.migration_event_associations_migration_correlation_id_check CHECK ((btrim(migration_correlation_id) <> ''::text))
-constraint migration_event_associations.migration_event_associations_pkey PRIMARY KEY (event_identity, migration_correlation_id)
-constraint migration_event_associations.migration_event_associations_transaction_index_check CHECK ((transaction_index >= 0))
-constraint name_current.name_current_binding_kind_check CHECK (((binding_kind IS NULL) OR (binding_kind = ANY (ARRAY['declared_registry_path'::text, 'linked_subregistry_path'::text, 'resolver_alias_path'::text, 'observed_wildcard_path'::text, 'observed_only'::text]))))
-constraint name_current.name_current_canonicality_summary_check CHECK ((jsonb_typeof(canonicality_summary) = 'object'::text))
-constraint name_current.name_current_chain_positions_check CHECK ((jsonb_typeof(chain_positions) = 'object'::text))
-constraint name_current.name_current_check CHECK ((((surface_binding_id IS NULL) AND (resource_id IS NULL) AND (binding_kind IS NULL)) OR ((surface_binding_id IS NOT NULL) AND (resource_id IS NOT NULL) AND (binding_kind IS NOT NULL) AND (btrim(binding_kind) <> ''::text))))
-constraint name_current.name_current_check1 CHECK (((token_lineage_id IS NULL) OR (resource_id IS NOT NULL)))
-constraint name_current.name_current_check2 CHECK ((((support_status = 'supported'::text) AND (unsupported_reason IS NULL)) OR ((support_status = 'unsupported'::text) AND (unsupported_reason IS NOT NULL) AND (btrim(unsupported_reason) <> ''::text))))
-constraint name_current.name_current_declared_summary_check CHECK ((jsonb_typeof(declared_summary) = 'object'::text))
-constraint name_current.name_current_logical_identity_check CHECK ((logical_name_id = ((namespace || ':'::text) || namehash)))
-constraint name_current.name_current_logical_name_id_fkey FOREIGN KEY (logical_name_id) REFERENCES name_surfaces(logical_name_id)
-constraint name_current.name_current_manifest_version_check CHECK ((manifest_version > 0))
-constraint name_current.name_current_namehash_check CHECK ((btrim(namehash) <> ''::text))
-constraint name_current.name_current_namespace_check CHECK ((btrim(namespace) <> ''::text))
-constraint name_current.name_current_pkey PRIMARY KEY (logical_name_id)
-constraint name_current.name_current_provenance_check CHECK ((jsonb_typeof(provenance) = 'object'::text))
-constraint name_current.name_current_resource_id_fkey FOREIGN KEY (resource_id) REFERENCES resources(resource_id)
-constraint name_current.name_current_resource_id_token_lineage_id_fkey FOREIGN KEY (resource_id, token_lineage_id) REFERENCES resources(resource_id, token_lineage_id)
-constraint name_current.name_current_serving_resource_id_fkey FOREIGN KEY (serving_resource_id) REFERENCES resources(resource_id)
-constraint name_current.name_current_support_status_check CHECK ((support_status = ANY (ARRAY['supported'::text, 'unsupported'::text])))
-constraint name_current.name_current_surface_binding_id_fkey FOREIGN KEY (surface_binding_id) REFERENCES surface_bindings(surface_binding_id)
-constraint name_current.name_current_surface_binding_id_logical_name_id_resource_i_fkey FOREIGN KEY (surface_binding_id, logical_name_id, resource_id, binding_kind) REFERENCES surface_bindings(surface_binding_id, logical_name_id, resource_id, binding_kind)
-constraint name_current.name_current_token_lineage_id_fkey FOREIGN KEY (token_lineage_id) REFERENCES token_lineages(token_lineage_id)
-constraint name_surfaces.name_surfaces_block_number_check CHECK ((block_number >= 0))
-constraint name_surfaces.name_surfaces_chain_id_block_hash_block_number_fkey FOREIGN KEY (chain_id, block_hash, block_number) REFERENCES chain_lineage(chain_id, block_hash, block_number)
-constraint name_surfaces.name_surfaces_chain_id_logical_name_id_key UNIQUE (chain_id, logical_name_id)
-constraint name_surfaces.name_surfaces_check CHECK ((cardinality(raw_labels) = cardinality(labelhashes)))
-constraint name_surfaces.name_surfaces_logical_identity_check CHECK ((logical_name_id = ((namespace || ':'::text) || namehash)))
-constraint name_surfaces.name_surfaces_namehash_check CHECK ((btrim(namehash) <> ''::text))
-constraint name_surfaces.name_surfaces_namespace_check CHECK ((btrim(namespace) <> ''::text))
-constraint name_surfaces.name_surfaces_normalization_errors_check CHECK ((jsonb_typeof(normalization_errors) = 'array'::text))
-constraint name_surfaces.name_surfaces_normalizer_version_check CHECK ((btrim(normalizer_version) <> ''::text))
-constraint name_surfaces.name_surfaces_pkey PRIMARY KEY (logical_name_id)
-constraint name_surfaces.name_surfaces_provenance_check CHECK ((jsonb_typeof(provenance) = 'object'::text))
-constraint name_surfaces.name_surfaces_visibility_coherence_check CHECK ((((visibility_state = 'active'::text) AND (deactivation_reason IS NULL) AND (deactivated_at IS NULL) AND (normalization_errors = '[]'::jsonb)) OR ((visibility_state = 'shadow'::text) AND (deactivation_reason IS NOT NULL) AND (btrim(deactivation_reason) <> ''::text) AND (deactivated_at IS NOT NULL))))
-constraint name_surfaces.name_surfaces_visibility_state_check CHECK ((visibility_state = ANY (ARRAY['active'::text, 'shadow'::text])))
-constraint normalized_events.normalized_events_after_state_check CHECK ((jsonb_typeof(after_state) = 'object'::text))
-constraint normalized_events.normalized_events_before_state_check CHECK ((jsonb_typeof(before_state) = 'object'::text))
-constraint normalized_events.normalized_events_block_number_check CHECK (((block_number IS NULL) OR (block_number >= 0)))
-constraint normalized_events.normalized_events_candidate_correlation_check CHECK (((consumer_visibility = 'activated'::text) OR (cardinality(migration_correlation_ids) > 0)))
-constraint normalized_events.normalized_events_chain_id_block_hash_block_number_fkey FOREIGN KEY (chain_id, block_hash, block_number) REFERENCES chain_lineage(chain_id, block_hash, block_number)
-constraint normalized_events.normalized_events_chain_id_check CHECK ((btrim(chain_id) <> ''::text))
-constraint normalized_events.normalized_events_chain_id_logical_name_id_fkey FOREIGN KEY (chain_id, logical_name_id) REFERENCES name_surfaces(chain_id, logical_name_id)
-constraint normalized_events.normalized_events_chain_id_resource_id_fkey FOREIGN KEY (chain_id, resource_id) REFERENCES resources(chain_id, resource_id)
-constraint normalized_events.normalized_events_check CHECK (((block_hash IS NULL) = (block_number IS NULL)))
-constraint normalized_events.normalized_events_check1 CHECK (((transaction_hash IS NULL) OR ((block_hash IS NOT NULL) AND (btrim(transaction_hash) <> ''::text))))
-constraint normalized_events.normalized_events_check2 CHECK ((((transaction_index IS NULL) AND (log_index IS NULL)) OR ((transaction_hash IS NOT NULL) AND (transaction_index IS NOT NULL) AND (transaction_index >= 0) AND (log_index IS NOT NULL) AND (log_index >= 0))))
-constraint normalized_events.normalized_events_consumer_visibility_check CHECK ((consumer_visibility = ANY (ARRAY['candidate'::text, 'activated'::text])))
-constraint normalized_events.normalized_events_derivation_kind_check CHECK ((derivation_kind = ANY (ARRAY['ens_v1_reverse_claim'::text, 'ens_v1_unwrapped_authority'::text, 'ens_v2_migration'::text, 'ens_v2_permissions'::text, 'ens_v2_registrar'::text, 'ens_v2_registry_resource_surface'::text, 'ens_v2_resolver'::text, 'manifest_sync'::text, 'proxy_upgrade'::text, 'raw_block_preimage_observation'::text, 'raw_log_preimage_observation'::text, 'standard_approval'::text])))
-constraint normalized_events.normalized_events_event_identity_check CHECK ((btrim(event_identity) <> ''::text))
-constraint normalized_events.normalized_events_event_identity_key UNIQUE (event_identity)
-constraint normalized_events.normalized_events_event_kind_check CHECK ((event_kind = ANY (ARRAY['AccountPermissionChanged'::text, 'AliasChanged'::text, 'AuthorityEpochChanged'::text, 'AuthorityTransferred'::text, 'ContractDiscovered'::text, 'ExpiryChanged'::text, 'MigrationApplied'::text, 'ParentChanged'::text, 'PermissionChanged'::text, 'PermissionScopeChanged'::text, 'PreimageObserved'::text, 'RecordChanged'::text, 'RecordVersionChanged'::text, 'RegistrarNameRegistered'::text, 'RegistrationGranted'::text, 'RegistrationReleased'::text, 'RegistrationRenewed'::text, 'RegistrationReserved'::text, 'RegistryCreated'::text, 'ResolverChanged'::text, 'ResolverPermissionArgument'::text, 'ResolverRecordLinked'::text, 'ReverseChanged'::text, 'RootPermissionChanged'::text, 'SourceManifestUpdated'::text, 'SubregistryChanged'::text, 'SurfaceBound'::text, 'SurfaceUnbound'::text, 'TokenControlTransferred'::text, 'TokenRegenerated'::text, 'TokenResourceLinked'::text, 'Upgraded'::text])))
-constraint normalized_events.normalized_events_manifest_version_check CHECK ((manifest_version > 0))
-constraint normalized_events.normalized_events_migration_correlation_ids_check CHECK (migration_correlation_ids_valid(migration_correlation_ids))
-constraint normalized_events.normalized_events_namespace_check CHECK ((btrim(namespace) <> ''::text))
-constraint normalized_events.normalized_events_pkey PRIMARY KEY (normalized_event_id)
-constraint normalized_events.normalized_events_raw_fact_ref_check CHECK ((jsonb_typeof(raw_fact_ref) = 'object'::text))
-constraint normalized_events.normalized_events_source_family_check CHECK ((btrim(source_family) <> ''::text))
-constraint normalized_events.normalized_events_source_manifest_id_namespace_source_fami_fkey FOREIGN KEY (source_manifest_id, namespace, source_family, manifest_version, chain_id) REFERENCES manifest_versions(manifest_id, namespace, source_family, manifest_version, chain_id) ON DELETE SET NULL (source_manifest_id)
-constraint permissions_current.permissions_current_canonicality_summary_check CHECK ((jsonb_typeof(canonicality_summary) = 'object'::text))
-constraint permissions_current.permissions_current_chain_positions_check CHECK ((jsonb_typeof(chain_positions) = 'object'::text))
-constraint permissions_current.permissions_current_effective_powers_check CHECK ((jsonb_typeof(effective_powers) = 'array'::text))
-constraint permissions_current.permissions_current_grant_source_check CHECK ((jsonb_typeof(grant_source) = 'object'::text))
-constraint permissions_current.permissions_current_inheritance_path_check CHECK ((jsonb_typeof(inheritance_path) = 'array'::text))
-constraint permissions_current.permissions_current_manifest_version_check CHECK ((manifest_version > 0))
-constraint permissions_current.permissions_current_pkey PRIMARY KEY (resource_id, subject, scope)
-constraint permissions_current.permissions_current_provenance_check CHECK ((jsonb_typeof(provenance) = 'object'::text))
-constraint permissions_current.permissions_current_resource_id_fkey FOREIGN KEY (resource_id) REFERENCES resources(resource_id)
-constraint permissions_current.permissions_current_revocation_source_check CHECK (((revocation_source IS NULL) OR (jsonb_typeof(revocation_source) = 'object'::text)))
-constraint permissions_current.permissions_current_scope_check CHECK ((btrim(scope) <> ''::text))
-constraint permissions_current.permissions_current_scope_detail_check CHECK ((jsonb_typeof(scope_detail) = 'object'::text))
-constraint permissions_current.permissions_current_scope_kind_check CHECK ((scope_kind = ANY (ARRAY['root'::text, 'registry'::text, 'resource'::text, 'resolver'::text, 'record_manager'::text])))
-constraint permissions_current.permissions_current_subject_check CHECK ((btrim(subject) <> ''::text))
-constraint permissions_current.permissions_current_transfer_behavior_check CHECK ((jsonb_typeof(transfer_behavior) = 'object'::text))
-constraint permissions_current_resource_summary.permissions_current_resource_summary_authority_kind_check CHECK (((authority_kind IS NULL) OR (btrim(authority_kind) <> ''::text)))
-constraint permissions_current_resource_summary.permissions_current_resource_summary_canonicality_summary_check CHECK ((jsonb_typeof(canonicality_summary) = 'object'::text))
-constraint permissions_current_resource_summary.permissions_current_resource_summary_chain_positions_check CHECK ((jsonb_typeof(chain_positions) = 'object'::text))
-constraint permissions_current_resource_summary.permissions_current_resource_summary_check CHECK ((((support_status = 'supported'::text) AND (unsupported_reason IS NULL)) OR ((support_status = 'unsupported'::text) AND (unsupported_reason IS NOT NULL) AND (btrim(unsupported_reason) <> ''::text))))
-constraint permissions_current_resource_summary.permissions_current_resource_summary_manifest_version_check CHECK ((manifest_version > 0))
-constraint permissions_current_resource_summary.permissions_current_resource_summary_pkey PRIMARY KEY (resource_id)
-constraint permissions_current_resource_summary.permissions_current_resource_summary_provenance_check CHECK ((jsonb_typeof(provenance) = 'object'::text))
-constraint permissions_current_resource_summary.permissions_current_resource_summary_registry_binding_check CHECK ((((registry_owner IS NULL) AND (registry_contract IS NULL) AND (registry_binding_provenance IS NULL) AND (registry_binding_chain_positions IS NULL)) OR ((registry_owner IS NOT NULL) AND (registry_contract IS NOT NULL) AND (registry_binding_provenance IS NOT NULL) AND (registry_binding_chain_positions IS NOT NULL) AND (registry_owner ~ '^0x[0-9a-f]{40}$'::text) AND (registry_contract ~ '^0x[0-9a-f]{40}$'::text) AND (jsonb_typeof(registry_binding_provenance) = 'object'::text) AND (jsonb_typeof(registry_binding_chain_positions) = 'object'::text))))
-constraint permissions_current_resource_summary.permissions_current_resource_summary_resource_id_fkey FOREIGN KEY (resource_id) REFERENCES resources(resource_id)
-constraint permissions_current_resource_summary.permissions_current_resource_summary_restrictions_check CHECK (((resource_restrictions IS NULL) OR (jsonb_typeof(resource_restrictions) = 'object'::text)))
-constraint permissions_current_resource_summary.permissions_current_resource_summary_root_resource_id_fkey FOREIGN KEY (root_resource_id) REFERENCES resources(resource_id)
-constraint permissions_current_resource_summary.permissions_current_resource_summary_support_status_check CHECK ((support_status = ANY (ARRAY['supported'::text, 'unsupported'::text])))
-constraint primary_names_current.primary_names_current_address_check CHECK ((btrim(address) <> ''::text))
-constraint primary_names_current.primary_names_current_claim_name_check CHECK ((((claim_status = ANY (ARRAY['success'::text, 'invalid_name'::text])) AND (raw_claim_name IS NOT NULL) AND (btrim(raw_claim_name) <> ''::text)) OR ((claim_status = ANY (ARRAY['not_found'::text, 'unsupported'::text])) AND (raw_claim_name IS NULL))))
-constraint primary_names_current.primary_names_current_claim_provenance_check CHECK ((jsonb_typeof(claim_provenance) = 'object'::text))
-constraint primary_names_current.primary_names_current_claim_status_check CHECK ((claim_status = ANY (ARRAY['success'::text, 'not_found'::text, 'unsupported'::text, 'invalid_name'::text])))
-constraint primary_names_current.primary_names_current_coin_type_check CHECK ((btrim(coin_type) <> ''::text))
-constraint primary_names_current.primary_names_current_namespace_check CHECK ((btrim(namespace) <> ''::text))
-constraint primary_names_current.primary_names_current_normalized_claim_check CHECK (((NOT claim_name_is_normalized) OR (claim_status = 'success'::text)))
-constraint primary_names_current.primary_names_current_pkey PRIMARY KEY (address, coin_type, namespace)
-constraint primary_names_current.primary_names_current_reverse_hydration_attempt_check CHECK ((((reverse_hydration_attempted_block_number IS NULL) AND (reverse_hydration_attempted_block_hash IS NULL) AND (reverse_hydration_attempt_ordinal IS NULL)) OR ((reverse_hydration_attempted_block_number IS NOT NULL) AND (reverse_hydration_attempted_block_number >= 0) AND (reverse_hydration_attempted_block_hash IS NOT NULL) AND (btrim(reverse_hydration_attempted_block_hash) <> ''::text) AND (reverse_hydration_attempt_ordinal IS NOT NULL) AND (reverse_hydration_attempt_ordinal > 0))))
-constraint primary_names_current.primary_names_current_unsupported_reason_check CHECK (((unsupported_reason IS NULL) OR (btrim(unsupported_reason) <> ''::text)))
-constraint primary_names_current.primary_names_current_unsupported_reason_coherence_check CHECK ((((claim_status = 'unsupported'::text) AND (unsupported_reason IS NOT NULL)) OR ((claim_status <> 'unsupported'::text) AND (unsupported_reason IS NULL))))
-constraint project_generation_failures.project_generation_failures_chain_id_check CHECK ((btrim(chain_id) <> ''::text))
-constraint project_generation_failures.project_generation_failures_evidence_check CHECK ((jsonb_typeof(evidence) = 'object'::text))
-constraint project_generation_failures.project_generation_failures_failure_fingerprint_check CHECK ((failure_fingerprint ~ '^[0-9a-f]{64}$'::text))
-constraint project_generation_failures.project_generation_failures_failure_kind_check CHECK ((failure_kind = ANY (ARRAY['dual_current_exact_name_authority'::text, 'dual_current_child_authority'::text])))
-constraint project_generation_failures.project_generation_failures_interpreter_content_hash_check CHECK ((btrim(interpreter_content_hash) <> ''::text))
-constraint project_generation_failures.project_generation_failures_logical_name_id_check CHECK ((btrim(logical_name_id) <> ''::text))
-constraint project_generation_failures.project_generation_failures_pkey PRIMARY KEY (chain_id, target_block_number, target_block_hash, interpreter_content_hash, failure_kind, failure_fingerprint)
-constraint project_generation_failures.project_generation_failures_target_block_hash_check CHECK ((btrim(target_block_hash) <> ''::text))
-constraint project_generation_failures.project_generation_failures_target_block_number_check CHECK ((target_block_number >= 0))
-constraint project_redo_child_registration_history.project_redo_child_registration_history_block_number_check CHECK ((block_number >= 0))
-constraint project_redo_child_registration_history.project_redo_child_registration_history_event_kind_check CHECK ((event_kind = ANY (ARRAY['RegistrationReserved'::text, 'RegistrationGranted'::text, 'RegistrationRenewed'::text])))
-constraint project_redo_child_registration_history.project_redo_child_registration_history_logical_name_id_check CHECK ((btrim(logical_name_id) <> ''::text))
-constraint project_redo_child_registration_history.project_redo_child_registration_history_pkey PRIMARY KEY (chain_id, event_identity)
-constraint project_redo_expiry_roots.project_redo_expiry_roots_block_number_check CHECK ((block_number >= 0))
-constraint project_redo_expiry_roots.project_redo_expiry_roots_logical_name_id_check CHECK ((btrim(logical_name_id) <> ''::text))
-constraint project_redo_expiry_roots.project_redo_expiry_roots_pkey PRIMARY KEY (chain_id, event_identity)
-constraint project_redo_expiry_roots.project_redo_expiry_roots_scope_check CHECK (((logical_name_id IS NOT NULL) OR (resource_id IS NOT NULL)))
-constraint project_redo_resolver_evidence.project_redo_resolver_evidence_block_number_check CHECK ((block_number >= 0))
-constraint project_redo_resolver_evidence.project_redo_resolver_evidence_check CHECK (((before_resolver_address IS NOT NULL) OR (after_resolver_address IS NOT NULL)))
-constraint project_redo_resolver_evidence.project_redo_resolver_evidence_event_kind_check CHECK ((event_kind = ANY (ARRAY['PermissionChanged'::text, 'ResolverChanged'::text, 'AliasChanged'::text])))
-constraint project_redo_resolver_evidence.project_redo_resolver_evidence_pkey PRIMARY KEY (chain_id, event_identity)
-constraint raw_logs.raw_logs_block_number_check CHECK ((block_number >= 0))
-constraint raw_logs.raw_logs_chain_id_block_hash_block_number_fkey FOREIGN KEY (chain_id, block_hash, block_number) REFERENCES chain_lineage(chain_id, block_hash, block_number)
-constraint raw_logs.raw_logs_emitting_address_check CHECK ((btrim(emitting_address) <> ''::text))
-constraint raw_logs.raw_logs_log_index_check CHECK ((log_index >= 0))
-constraint raw_logs.raw_logs_pkey PRIMARY KEY (chain_id, block_hash, log_index)
-constraint raw_logs.raw_logs_transaction_index_check CHECK ((transaction_index >= 0))
-constraint raw_logs.raw_logs_transaction_position_fkey FOREIGN KEY (chain_id, block_hash, transaction_hash, transaction_index) REFERENCES raw_transactions(chain_id, block_hash, transaction_hash, transaction_index)
-constraint raw_receipts.raw_receipts_block_number_check CHECK ((block_number >= 0))
-constraint raw_receipts.raw_receipts_chain_id_block_hash_block_number_fkey FOREIGN KEY (chain_id, block_hash, block_number) REFERENCES chain_lineage(chain_id, block_hash, block_number)
-constraint raw_receipts.raw_receipts_chain_id_block_hash_transaction_index_key UNIQUE (chain_id, block_hash, transaction_index)
-constraint raw_receipts.raw_receipts_contract_address_check CHECK (((contract_address IS NULL) OR (btrim(contract_address) <> ''::text)))
-constraint raw_receipts.raw_receipts_cumulative_gas_used_check CHECK (((cumulative_gas_used IS NULL) OR (cumulative_gas_used >= (0)::numeric)))
-constraint raw_receipts.raw_receipts_gas_used_check CHECK (((gas_used IS NULL) OR (gas_used >= (0)::numeric)))
-constraint raw_receipts.raw_receipts_pkey PRIMARY KEY (chain_id, block_hash, transaction_hash)
-constraint raw_receipts.raw_receipts_transaction_index_check CHECK ((transaction_index >= 0))
-constraint raw_receipts.raw_receipts_transaction_position_fkey FOREIGN KEY (chain_id, block_hash, transaction_hash, transaction_index) REFERENCES raw_transactions(chain_id, block_hash, transaction_hash, transaction_index)
-constraint raw_transactions.raw_transactions_block_number_check CHECK ((block_number >= 0))
-constraint raw_transactions.raw_transactions_chain_id_block_hash_block_number_fkey FOREIGN KEY (chain_id, block_hash, block_number) REFERENCES chain_lineage(chain_id, block_hash, block_number)
-constraint raw_transactions.raw_transactions_chain_id_block_hash_transaction_index_key UNIQUE (chain_id, block_hash, transaction_index)
-constraint raw_transactions.raw_transactions_from_address_check CHECK ((btrim(from_address) <> ''::text))
-constraint raw_transactions.raw_transactions_pkey PRIMARY KEY (chain_id, block_hash, transaction_hash)
-constraint raw_transactions.raw_transactions_to_address_check CHECK (((to_address IS NULL) OR (btrim(to_address) <> ''::text)))
-constraint raw_transactions.raw_transactions_transaction_hash_check CHECK ((btrim(transaction_hash) <> ''::text))
-constraint raw_transactions.raw_transactions_transaction_index_check CHECK ((transaction_index >= 0))
-constraint raw_transactions.raw_transactions_transaction_position_key UNIQUE (chain_id, block_hash, transaction_hash, transaction_index)
-constraint raw_transactions.raw_transactions_value_check CHECK (((value IS NULL) OR (value >= (0)::numeric)))
-constraint record_inventory_current.record_inventory_current_canonicality_summary_check CHECK ((jsonb_typeof(canonicality_summary) = 'object'::text))
-constraint record_inventory_current.record_inventory_current_chain_positions_check CHECK ((jsonb_typeof(chain_positions) = 'object'::text))
-constraint record_inventory_current.record_inventory_current_check CHECK ((((support_status = 'supported'::text) AND (unsupported_reason IS NULL)) OR ((support_status = 'unsupported'::text) AND (unsupported_reason IS NOT NULL) AND (btrim(unsupported_reason) <> ''::text))))
-constraint record_inventory_current.record_inventory_current_entries_check CHECK ((jsonb_typeof(entries) = 'array'::text))
-constraint record_inventory_current.record_inventory_current_last_change_check CHECK (((last_change IS NULL) OR (jsonb_typeof(last_change) = 'object'::text)))
-constraint record_inventory_current.record_inventory_current_manifest_version_check CHECK ((manifest_version > 0))
-constraint record_inventory_current.record_inventory_current_pkey PRIMARY KEY (resource_id, record_version_boundary_key)
-constraint record_inventory_current.record_inventory_current_provenance_check CHECK ((jsonb_typeof(provenance) = 'object'::text))
-constraint record_inventory_current.record_inventory_current_record_version_boundary_check CHECK ((jsonb_typeof(record_version_boundary) = 'object'::text))
-constraint record_inventory_current.record_inventory_current_record_version_boundary_key_check CHECK ((btrim(record_version_boundary_key) <> ''::text))
-constraint record_inventory_current.record_inventory_current_resource_id_fkey FOREIGN KEY (resource_id) REFERENCES resources(resource_id)
-constraint record_inventory_current.record_inventory_current_selectors_check CHECK ((jsonb_typeof(selectors) = 'array'::text))
-constraint record_inventory_current.record_inventory_current_support_status_check CHECK ((support_status = ANY (ARRAY['supported'::text, 'unsupported'::text])))
-constraint record_inventory_current.record_inventory_current_unsupported_families_check CHECK ((jsonb_typeof(unsupported_families) = 'array'::text))
-constraint resolution_divergences.resolution_divergences_check CHECK ((indexed_result <> live_result))
-constraint resolution_divergences.resolution_divergences_check1 CHECK ((last_observed_at >= first_observed_at))
-constraint resolution_divergences.resolution_divergences_clearing_time_check CHECK (((cleared_at IS NULL) OR (cleared_at >= last_observed_at)))
-constraint resolution_divergences.resolution_divergences_logical_name_id_fkey FOREIGN KEY (logical_name_id) REFERENCES name_surfaces(logical_name_id)
-constraint resolution_divergences.resolution_divergences_observed_positions_check CHECK ((jsonb_typeof(observed_positions) = 'object'::text))
-constraint resolution_divergences.resolution_divergences_observed_positions_check1 CHECK ((observed_positions <> '{}'::jsonb))
-constraint resolution_divergences.resolution_divergences_pkey PRIMARY KEY (logical_name_id, resolver_chain_id, resolver_address, request_kind_hash, observed_positions)
-constraint resolution_divergences.resolution_divergences_request_kind_check CHECK ((btrim(request_kind) <> ''::text))
-constraint resolution_divergences.resolution_divergences_resolver_address_check CHECK ((btrim(resolver_address) <> ''::text))
-constraint resolution_divergences.resolution_divergences_resolver_chain_id_check CHECK ((btrim(resolver_chain_id) <> ''::text))
-constraint resolver_current.resolver_current_canonicality_summary_check CHECK ((jsonb_typeof(canonicality_summary) = 'object'::text))
-constraint resolver_current.resolver_current_chain_id_check CHECK ((btrim(chain_id) <> ''::text))
-constraint resolver_current.resolver_current_chain_positions_check CHECK ((jsonb_typeof(chain_positions) = 'object'::text))
-constraint resolver_current.resolver_current_check CHECK ((((support_status = 'supported'::text) AND (unsupported_reason IS NULL)) OR ((support_status = 'unsupported'::text) AND (unsupported_reason IS NOT NULL) AND (btrim(unsupported_reason) <> ''::text))))
-constraint resolver_current.resolver_current_declared_summary_check CHECK ((jsonb_typeof(declared_summary) = 'object'::text))
-constraint resolver_current.resolver_current_manifest_version_check CHECK ((manifest_version > 0))
-constraint resolver_current.resolver_current_pkey PRIMARY KEY (chain_id, resolver_address)
-constraint resolver_current.resolver_current_provenance_check CHECK ((jsonb_typeof(provenance) = 'object'::text))
-constraint resolver_current.resolver_current_resolver_address_check CHECK ((btrim(resolver_address) <> ''::text))
-constraint resolver_current.resolver_current_support_status_check CHECK ((support_status = ANY (ARRAY['supported'::text, 'unsupported'::text])))
-constraint resources.resources_block_number_check CHECK ((block_number >= 0))
-constraint resources.resources_chain_id_block_hash_block_number_fkey FOREIGN KEY (chain_id, block_hash, block_number) REFERENCES chain_lineage(chain_id, block_hash, block_number)
-constraint resources.resources_chain_id_resource_id_key UNIQUE (chain_id, resource_id)
-constraint resources.resources_chain_id_token_lineage_id_fkey FOREIGN KEY (chain_id, token_lineage_id) REFERENCES token_lineages(chain_id, token_lineage_id)
-constraint resources.resources_pkey PRIMARY KEY (resource_id)
-constraint resources.resources_provenance_check CHECK ((jsonb_typeof(provenance) = 'object'::text))
-constraint resources.resources_resource_id_token_lineage_id_key UNIQUE (resource_id, token_lineage_id)
-constraint resources.resources_token_lineage_id_key UNIQUE (token_lineage_id)
-constraint service_heartbeats.service_heartbeats_chain_id_check CHECK ((btrim(chain_id) <> ''::text))
-constraint service_heartbeats.service_heartbeats_instance_id_check CHECK ((btrim(instance_id) <> ''::text))
-constraint service_heartbeats.service_heartbeats_phase_name_check CHECK ((phase_name = ANY (ARRAY['ingest'::text, 'interpret'::text, 'project'::text, 'verify'::text, 'live'::text])))
-constraint service_heartbeats.service_heartbeats_pkey PRIMARY KEY (service_name, instance_id, chain_id, phase_name)
-constraint service_heartbeats.service_heartbeats_service_name_check CHECK ((btrim(service_name) <> ''::text))
-constraint service_heartbeats.service_heartbeats_time_order_check CHECK ((heartbeat_at >= started_at))
-constraint surface_bindings.surface_bindings_authority_arm_check CHECK ((authority_arm = ANY (ARRAY['ens_v1'::text, 'ens_v2'::text, 'basenames'::text])))
-constraint surface_bindings.surface_bindings_binding_kind_check CHECK ((binding_kind = ANY (ARRAY['declared_registry_path'::text, 'linked_subregistry_path'::text, 'resolver_alias_path'::text, 'observed_wildcard_path'::text, 'observed_only'::text])))
-constraint surface_bindings.surface_bindings_block_number_check CHECK ((block_number >= 0))
-constraint surface_bindings.surface_bindings_chain_id_block_hash_block_number_fkey FOREIGN KEY (chain_id, block_hash, block_number) REFERENCES chain_lineage(chain_id, block_hash, block_number)
-constraint surface_bindings.surface_bindings_chain_id_logical_name_id_fkey FOREIGN KEY (chain_id, logical_name_id) REFERENCES name_surfaces(chain_id, logical_name_id)
-constraint surface_bindings.surface_bindings_chain_id_resource_id_fkey FOREIGN KEY (chain_id, resource_id) REFERENCES resources(chain_id, resource_id)
-constraint surface_bindings.surface_bindings_check CHECK (((active_to IS NULL) OR (active_to > active_from)))
-constraint surface_bindings.surface_bindings_no_overlap EXCLUDE USING gist (chain_id WITH =, logical_name_id WITH =, authority_arm WITH =, tstzrange(active_from, COALESCE(active_to, 'infinity'::timestamp with time zone), '[)'::text) WITH &&) WHERE ((canonicality_state = ANY (ARRAY['canonical'::canonicality_state, 'safe'::canonicality_state, 'finalized'::canonicality_state])))
-constraint surface_bindings.surface_bindings_pkey PRIMARY KEY (surface_binding_id)
-constraint surface_bindings.surface_bindings_provenance_check CHECK ((jsonb_typeof(provenance) = 'object'::text))
-constraint surface_bindings.surface_bindings_surface_binding_id_logical_name_id_resourc_key UNIQUE (surface_binding_id, logical_name_id, resource_id, binding_kind)
-constraint token_lineages.token_lineages_block_number_check CHECK ((block_number >= 0))
-constraint token_lineages.token_lineages_chain_id_block_hash_block_number_fkey FOREIGN KEY (chain_id, block_hash, block_number) REFERENCES chain_lineage(chain_id, block_hash, block_number)
-constraint token_lineages.token_lineages_chain_id_token_lineage_id_key UNIQUE (chain_id, token_lineage_id)
-constraint token_lineages.token_lineages_pkey PRIMARY KEY (token_lineage_id)
-constraint token_lineages.token_lineages_provenance_check CHECK ((jsonb_typeof(provenance) = 'object'::text))
+constraint account_permission_state_current.account_permission_state_current_authority_contract_check CHECK ((authority_contract ~ '^0x[0-9a-f]{40}$'::text)) local=t inherited=0
+constraint account_permission_state_current.account_permission_state_current_authority_kind_check CHECK ((authority_kind = ANY (ARRAY['registry'::text, 'wrapper'::text]))) local=t inherited=0
+constraint account_permission_state_current.account_permission_state_current_canonicality_summary_check CHECK ((jsonb_typeof(canonicality_summary) = 'object'::text)) local=t inherited=0
+constraint account_permission_state_current.account_permission_state_current_chain_id_check CHECK ((btrim(chain_id) <> ''::text)) local=t inherited=0
+constraint account_permission_state_current.account_permission_state_current_chain_positions_check CHECK ((jsonb_typeof(chain_positions) = 'object'::text)) local=t inherited=0
+constraint account_permission_state_current.account_permission_state_current_effective_powers_check CHECK (((approved AND (authority_kind = 'registry'::text) AND (effective_powers = '["registry_control"]'::jsonb)) OR (approved AND (authority_kind = 'wrapper'::text) AND (effective_powers = '["wrapper_control"]'::jsonb)) OR ((NOT approved) AND (effective_powers = '[]'::jsonb)))) local=t inherited=0
+constraint account_permission_state_current.account_permission_state_current_grant_source_check CHECK ((jsonb_typeof(grant_source) = 'object'::text)) local=t inherited=0
+constraint account_permission_state_current.account_permission_state_current_inheritance_path_check CHECK ((jsonb_typeof(inheritance_path) = 'array'::text)) local=t inherited=0
+constraint account_permission_state_current.account_permission_state_current_manifest_version_check CHECK ((manifest_version > 0)) local=t inherited=0
+constraint account_permission_state_current.account_permission_state_current_owner_check CHECK ((owner ~ '^0x[0-9a-f]{40}$'::text)) local=t inherited=0
+constraint account_permission_state_current.account_permission_state_current_pkey PRIMARY KEY (chain_id, authority_kind, authority_contract, owner, subject, relation_kind) local=t inherited=0
+constraint account_permission_state_current.account_permission_state_current_provenance_check CHECK ((jsonb_typeof(provenance) = 'object'::text)) local=t inherited=0
+constraint account_permission_state_current.account_permission_state_current_relation_kind_check CHECK ((relation_kind = 'operator'::text)) local=t inherited=0
+constraint account_permission_state_current.account_permission_state_current_revocation_source_check CHECK (((revocation_source IS NULL) OR (jsonb_typeof(revocation_source) = 'object'::text))) local=t inherited=0
+constraint account_permission_state_current.account_permission_state_current_subject_check CHECK ((subject ~ '^0x[0-9a-f]{40}$'::text)) local=t inherited=0
+constraint account_permission_state_current.account_permission_state_current_transfer_behavior_check CHECK ((jsonb_typeof(transfer_behavior) = 'object'::text)) local=t inherited=0
+constraint address_names_current.address_names_current_address_check CHECK ((btrim(address) <> ''::text)) local=t inherited=0
+constraint address_names_current.address_names_current_binding_kind_check CHECK ((binding_kind = ANY (ARRAY['declared_registry_path'::text, 'linked_subregistry_path'::text, 'resolver_alias_path'::text, 'observed_wildcard_path'::text, 'observed_only'::text]))) local=t inherited=0
+constraint address_names_current.address_names_current_canonicality_summary_check CHECK ((jsonb_typeof(canonicality_summary) = 'object'::text)) local=t inherited=0
+constraint address_names_current.address_names_current_chain_positions_check CHECK ((jsonb_typeof(chain_positions) = 'object'::text)) local=t inherited=0
+constraint address_names_current.address_names_current_check CHECK (((token_lineage_id IS NULL) OR (resource_id IS NOT NULL))) local=t inherited=0
+constraint address_names_current.address_names_current_check1 CHECK ((((support_status = 'supported'::text) AND (unsupported_reason IS NULL)) OR ((support_status = 'unsupported'::text) AND (unsupported_reason IS NOT NULL) AND (btrim(unsupported_reason) <> ''::text)))) local=t inherited=0
+constraint address_names_current.address_names_current_logical_identity_check CHECK ((logical_name_id = ((namespace || ':'::text) || namehash))) local=t inherited=0
+constraint address_names_current.address_names_current_logical_name_id_fkey FOREIGN KEY (logical_name_id) REFERENCES name_surfaces(logical_name_id) local=t inherited=0
+constraint address_names_current.address_names_current_manifest_version_check CHECK ((manifest_version > 0)) local=t inherited=0
+constraint address_names_current.address_names_current_namehash_check CHECK ((btrim(namehash) <> ''::text)) local=t inherited=0
+constraint address_names_current.address_names_current_namespace_check CHECK ((btrim(namespace) <> ''::text)) local=t inherited=0
+constraint address_names_current.address_names_current_pkey PRIMARY KEY (address, logical_name_id, relation) local=t inherited=0
+constraint address_names_current.address_names_current_provenance_check CHECK ((jsonb_typeof(provenance) = 'object'::text)) local=t inherited=0
+constraint address_names_current.address_names_current_relation_check CHECK ((relation = ANY (ARRAY['registrant'::text, 'token_holder'::text, 'effective_controller'::text]))) local=t inherited=0
+constraint address_names_current.address_names_current_resource_id_fkey FOREIGN KEY (resource_id) REFERENCES resources(resource_id) local=t inherited=0
+constraint address_names_current.address_names_current_resource_id_token_lineage_id_fkey FOREIGN KEY (resource_id, token_lineage_id) REFERENCES resources(resource_id, token_lineage_id) local=t inherited=0
+constraint address_names_current.address_names_current_support_status_check CHECK ((support_status = ANY (ARRAY['supported'::text, 'unsupported'::text]))) local=t inherited=0
+constraint address_names_current.address_names_current_surface_binding_id_fkey FOREIGN KEY (surface_binding_id) REFERENCES surface_bindings(surface_binding_id) local=t inherited=0
+constraint address_names_current.address_names_current_surface_binding_id_logical_name_id_r_fkey FOREIGN KEY (surface_binding_id, logical_name_id, resource_id, binding_kind) REFERENCES surface_bindings(surface_binding_id, logical_name_id, resource_id, binding_kind) local=t inherited=0
+constraint address_names_current.address_names_current_token_lineage_id_fkey FOREIGN KEY (token_lineage_id) REFERENCES token_lineages(token_lineage_id) local=t inherited=0
+constraint address_records_current.address_records_current_address_check CHECK (((address = lower(address)) AND (address ~ '^0x[0-9a-f]{40}$'::text))) local=t inherited=0
+constraint address_records_current.address_records_current_canonicality_summary_check CHECK ((jsonb_typeof(canonicality_summary) = 'object'::text)) local=t inherited=0
+constraint address_records_current.address_records_current_chain_positions_check CHECK ((jsonb_typeof(chain_positions) = 'object'::text)) local=t inherited=0
+constraint address_records_current.address_records_current_check CHECK (((record_key = ('addr:'::text || coin_type)) OR (record_key = 'addr:2147483648'::text))) local=t inherited=0
+constraint address_records_current.address_records_current_check1 CHECK ((((support_status = 'supported'::text) AND (unsupported_reason IS NULL)) OR ((support_status = 'unsupported'::text) AND (unsupported_reason IS NOT NULL) AND (btrim(unsupported_reason) <> ''::text)))) local=t inherited=0
+constraint address_records_current.address_records_current_coin_type_check CHECK ((coin_type ~ '^[0-9]+$'::text)) local=t inherited=0
+constraint address_records_current.address_records_current_logical_identity_check CHECK ((logical_name_id = ((namespace || ':'::text) || namehash))) local=t inherited=0
+constraint address_records_current.address_records_current_logical_name_id_fkey FOREIGN KEY (logical_name_id) REFERENCES name_surfaces(logical_name_id) local=t inherited=0
+constraint address_records_current.address_records_current_manifest_version_check CHECK ((manifest_version > 0)) local=t inherited=0
+constraint address_records_current.address_records_current_namehash_check CHECK ((btrim(namehash) <> ''::text)) local=t inherited=0
+constraint address_records_current.address_records_current_namespace_check CHECK ((btrim(namespace) <> ''::text)) local=t inherited=0
+constraint address_records_current.address_records_current_pkey PRIMARY KEY (address, coin_type, logical_name_id) local=t inherited=0
+constraint address_records_current.address_records_current_provenance_check CHECK ((jsonb_typeof(provenance) = 'object'::text)) local=t inherited=0
+constraint address_records_current.address_records_current_record_resource_id_fkey FOREIGN KEY (record_resource_id) REFERENCES resources(resource_id) local=t inherited=0
+constraint address_records_current.address_records_current_resource_id_fkey FOREIGN KEY (resource_id) REFERENCES resources(resource_id) local=t inherited=0
+constraint address_records_current.address_records_current_support_status_check CHECK ((support_status = ANY (ARRAY['supported'::text, 'unsupported'::text]))) local=t inherited=0
+constraint address_records_current.address_records_current_surface_binding_id_fkey FOREIGN KEY (surface_binding_id) REFERENCES surface_bindings(surface_binding_id) local=t inherited=0
+constraint chain_header_audit.chain_header_audit_chain_id_block_hash_fkey FOREIGN KEY (chain_id, block_hash) REFERENCES chain_lineage(chain_id, block_hash) local=t inherited=0
+constraint chain_header_audit.chain_header_audit_check CHECK (((logs_bloom IS NOT NULL) OR (transactions_root IS NOT NULL) OR (receipts_root IS NOT NULL) OR (state_root IS NOT NULL))) local=t inherited=0
+constraint chain_header_audit.chain_header_audit_pkey PRIMARY KEY (chain_id, block_hash) local=t inherited=0
+constraint chain_heads.chain_heads_chain_id_check CHECK ((btrim(chain_id) <> ''::text)) local=t inherited=0
+constraint chain_heads.chain_heads_chain_id_finalized_block_hash_finalized_block__fkey FOREIGN KEY (chain_id, finalized_block_hash, finalized_block_number) REFERENCES chain_lineage(chain_id, block_hash, block_number) local=t inherited=0
+constraint chain_heads.chain_heads_chain_id_latest_block_hash_latest_block_number_fkey FOREIGN KEY (chain_id, latest_block_hash, latest_block_number) REFERENCES chain_lineage(chain_id, block_hash, block_number) local=t inherited=0
+constraint chain_heads.chain_heads_chain_id_safe_block_hash_safe_block_number_fkey FOREIGN KEY (chain_id, safe_block_hash, safe_block_number) REFERENCES chain_lineage(chain_id, block_hash, block_number) local=t inherited=0
+constraint chain_heads.chain_heads_check CHECK (((safe_block_hash IS NULL) = (safe_block_number IS NULL))) local=t inherited=0
+constraint chain_heads.chain_heads_check1 CHECK (((finalized_block_hash IS NULL) = (finalized_block_number IS NULL))) local=t inherited=0
+constraint chain_heads.chain_heads_check2 CHECK (((safe_block_number IS NULL) OR (safe_block_number <= latest_block_number))) local=t inherited=0
+constraint chain_heads.chain_heads_check3 CHECK (((finalized_block_number IS NULL) OR ((safe_block_number IS NOT NULL) AND (finalized_block_number <= safe_block_number)))) local=t inherited=0
+constraint chain_heads.chain_heads_latest_block_number_check CHECK ((latest_block_number >= 0)) local=t inherited=0
+constraint chain_heads.chain_heads_lineage_orphaning_epoch_check CHECK ((lineage_orphaning_epoch >= 0)) local=t inherited=0
+constraint chain_heads.chain_heads_pkey PRIMARY KEY (chain_id) local=t inherited=0
+constraint chain_lineage.chain_lineage_block_hash_check CHECK ((btrim(block_hash) <> ''::text)) local=t inherited=0
+constraint chain_lineage.chain_lineage_block_number_check CHECK ((block_number >= 0)) local=t inherited=0
+constraint chain_lineage.chain_lineage_chain_id_block_hash_block_number_key UNIQUE (chain_id, block_hash, block_number) local=t inherited=0
+constraint chain_lineage.chain_lineage_chain_id_check CHECK ((btrim(chain_id) <> ''::text)) local=t inherited=0
+constraint chain_lineage.chain_lineage_check CHECK ((canonicality_updated_at >= first_observed_at)) local=t inherited=0
+constraint chain_lineage.chain_lineage_parent_hash_check CHECK (((parent_hash IS NULL) OR (btrim(parent_hash) <> ''::text))) local=t inherited=0
+constraint chain_lineage.chain_lineage_pkey PRIMARY KEY (chain_id, block_hash) local=t inherited=0
+constraint chain_phase_state.chain_phase_state_chain_id_check CHECK ((btrim(chain_id) <> ''::text)) local=t inherited=0
+constraint chain_phase_state.chain_phase_state_check CHECK (((current_block_number IS NULL) = (current_block_hash IS NULL))) local=t inherited=0
+constraint chain_phase_state.chain_phase_state_check1 CHECK (((target_block_number IS NULL) = (target_block_hash IS NULL))) local=t inherited=0
+constraint chain_phase_state.chain_phase_state_check2 CHECK (((redo_current_block_number IS NULL) = (redo_current_block_hash IS NULL))) local=t inherited=0
+constraint chain_phase_state.chain_phase_state_check3 CHECK (((redo_target_block_number IS NULL) = (redo_target_block_hash IS NULL))) local=t inherited=0
+constraint chain_phase_state.chain_phase_state_check4 CHECK ((((NOT redo_in_progress) AND (redo_mode IS NULL) AND (redo_previous_phase_status IS NULL) AND (redo_previous_last_error IS NULL) AND (redo_previous_started_at IS NULL) AND (redo_previous_finished_at IS NULL) AND (redo_from_block_number IS NULL) AND (redo_to_block_number IS NULL) AND (redo_current_block_number IS NULL) AND (redo_current_block_hash IS NULL) AND (redo_target_block_number IS NULL) AND (redo_target_block_hash IS NULL)) OR (redo_in_progress AND (phase_status = ANY (ARRAY['running'::text, 'paused'::text])) AND (redo_mode IS NOT NULL) AND (redo_previous_phase_status = ANY (ARRAY['idle'::text, 'running'::text, 'paused'::text, 'completed'::text, 'failed'::text])) AND (((redo_previous_phase_status = 'idle'::text) AND (redo_previous_started_at IS NULL) AND (redo_previous_finished_at IS NULL)) OR ((redo_previous_phase_status = ANY (ARRAY['running'::text, 'paused'::text])) AND (redo_previous_started_at IS NOT NULL) AND (redo_previous_finished_at IS NULL)) OR ((redo_previous_phase_status = ANY (ARRAY['completed'::text, 'failed'::text])) AND (redo_previous_started_at IS NOT NULL) AND (redo_previous_finished_at IS NOT NULL) AND (redo_previous_finished_at >= redo_previous_started_at))) AND (((redo_previous_phase_status = 'failed'::text) AND (redo_previous_last_error IS NOT NULL) AND (btrim(redo_previous_last_error) <> ''::text)) OR ((redo_previous_phase_status <> 'failed'::text) AND (redo_previous_last_error IS NULL))) AND (redo_from_block_number IS NOT NULL) AND (redo_from_block_number >= 0) AND (redo_to_block_number IS NOT NULL) AND (redo_to_block_number >= redo_from_block_number) AND ((redo_current_block_number IS NULL) OR ((redo_current_block_number >= redo_from_block_number) AND (redo_current_block_number <= redo_to_block_number))) AND ((redo_target_block_number IS NULL) OR ((redo_target_block_number >= redo_from_block_number) AND (redo_target_block_number <= redo_to_block_number))) AND ((redo_current_block_number IS NULL) OR (redo_target_block_number IS NULL) OR (redo_current_block_number <= redo_target_block_number)) AND ((redo_mode <> 'recompute_flags'::text) OR (phase_name = 'interpret'::text))))) local=t inherited=0
+constraint chain_phase_state.chain_phase_state_check5 CHECK (((live_handoff_block_number IS NULL) = (live_handoff_block_hash IS NULL))) local=t inherited=0
+constraint chain_phase_state.chain_phase_state_check6 CHECK (((live_handoff_block_number IS NULL) OR ((phase_name = 'ingest'::text) AND (live_handoff_block_number >= 0)))) local=t inherited=0
+constraint chain_phase_state.chain_phase_state_check7 CHECK ((((phase_status = 'idle'::text) AND (started_at IS NULL) AND (finished_at IS NULL)) OR ((phase_status = ANY (ARRAY['running'::text, 'paused'::text])) AND (started_at IS NOT NULL) AND (finished_at IS NULL)) OR ((phase_status = ANY (ARRAY['completed'::text, 'failed'::text])) AND (started_at IS NOT NULL) AND (finished_at IS NOT NULL) AND (finished_at >= started_at)))) local=t inherited=0
+constraint chain_phase_state.chain_phase_state_check8 CHECK ((((phase_status = 'failed'::text) AND (last_error IS NOT NULL)) OR (redo_in_progress AND (phase_status = ANY (ARRAY['running'::text, 'paused'::text]))) OR ((phase_status <> 'failed'::text) AND (NOT redo_in_progress) AND (last_error IS NULL)))) local=t inherited=0
+constraint chain_phase_state.chain_phase_state_current_block_number_check CHECK (((current_block_number IS NULL) OR (current_block_number >= 0))) local=t inherited=0
+constraint chain_phase_state.chain_phase_state_ingest_redo_manifest_authority_check CHECK (((redo_manifest_authority_fingerprint IS NULL) OR ((phase_name = 'ingest'::text) AND redo_in_progress AND (redo_manifest_authority_fingerprint ~ '^[0-9a-f]{64}$'::text)))) local=t inherited=0
+constraint chain_phase_state.chain_phase_state_ingest_redo_source_boundaries_check CHECK (((redo_source_boundary_markers IS NULL) OR ((phase_name = 'ingest'::text) AND redo_in_progress AND (jsonb_typeof(redo_source_boundary_markers) = 'object'::text) AND (redo_source_boundary_markers <> '{}'::jsonb)))) local=t inherited=0
+constraint chain_phase_state.chain_phase_state_input_content_hash_check CHECK (((input_content_hash IS NULL) OR (btrim(input_content_hash) <> ''::text))) local=t inherited=0
+constraint chain_phase_state.chain_phase_state_last_error_check CHECK (((last_error IS NULL) OR (btrim(last_error) <> ''::text))) local=t inherited=0
+constraint chain_phase_state.chain_phase_state_phase_name_check CHECK ((phase_name = ANY (ARRAY['ingest'::text, 'interpret'::text, 'project'::text, 'verify'::text, 'live'::text]))) local=t inherited=0
+constraint chain_phase_state.chain_phase_state_phase_status_check CHECK ((phase_status = ANY (ARRAY['idle'::text, 'running'::text, 'paused'::text, 'completed'::text, 'failed'::text]))) local=t inherited=0
+constraint chain_phase_state.chain_phase_state_pkey PRIMARY KEY (chain_id, phase_name) local=t inherited=0
+constraint chain_phase_state.chain_phase_state_redo_attempt_generation_check CHECK ((redo_attempt_generation >= 0)) local=t inherited=0
+constraint chain_phase_state.chain_phase_state_redo_mode_check CHECK (((redo_mode IS NULL) OR (redo_mode = ANY (ARRAY['redo'::text, 'recompute_flags'::text])))) local=t inherited=0
+constraint chain_phase_state.chain_phase_state_target_block_number_check CHECK (((target_block_number IS NULL) OR (target_block_number >= 0))) local=t inherited=0
+constraint chain_phase_state.chain_phase_state_unconfigured_settlement_check CHECK (((settled_while_unconfigured IS NULL) OR settled_while_unconfigured)) local=t inherited=0
+constraint chain_phase_state.chain_phase_state_verification_level_check CHECK (((verification_level IS NULL) OR (verification_level = ANY (ARRAY['quick_synced'::text, 'cross_checked'::text, 'node_checked'::text])))) local=t inherited=0
+constraint chain_phase_state.chain_phase_state_verification_phase_check CHECK (((verification_level IS NULL) OR (phase_name = 'verify'::text))) local=t inherited=0
+constraint children_current.children_current_canonicality_summary_check CHECK ((jsonb_typeof(canonicality_summary) = 'object'::text)) local=t inherited=0
+constraint children_current.children_current_chain_positions_check CHECK ((jsonb_typeof(chain_positions) = 'object'::text)) local=t inherited=0
+constraint children_current.children_current_check CHECK ((parent_logical_name_id <> child_logical_name_id)) local=t inherited=0
+constraint children_current.children_current_child_logical_name_id_check CHECK ((btrim(child_logical_name_id) <> ''::text)) local=t inherited=0
+constraint children_current.children_current_decoded_label_matches_raw_check CHECK (((decoded_label IS NULL) OR (convert_to(decoded_label, 'UTF8'::name) = raw_label))) local=t inherited=0
+constraint children_current.children_current_decoded_label_requires_raw_check CHECK (((decoded_label IS NULL) OR (raw_label IS NOT NULL))) local=t inherited=0
+constraint children_current.children_current_decoded_name_matches_raw_check CHECK (((decoded_name IS NULL) OR (convert_to(decoded_name, 'UTF8'::name) = raw_name))) local=t inherited=0
+constraint children_current.children_current_decoded_name_requires_raw_check CHECK (((decoded_name IS NULL) OR (raw_name IS NOT NULL))) local=t inherited=0
+constraint children_current.children_current_labelhash_check CHECK ((btrim(labelhash) <> ''::text)) local=t inherited=0
+constraint children_current.children_current_logical_identity_check CHECK ((child_logical_name_id = ((namespace || ':'::text) || namehash))) local=t inherited=0
+constraint children_current.children_current_manifest_version_check CHECK ((manifest_version > 0)) local=t inherited=0
+constraint children_current.children_current_namehash_check CHECK ((btrim(namehash) <> ''::text)) local=t inherited=0
+constraint children_current.children_current_namespace_check CHECK ((btrim(namespace) <> ''::text)) local=t inherited=0
+constraint children_current.children_current_owner_check CHECK (((owner IS NULL) OR (btrim(owner) <> ''::text))) local=t inherited=0
+constraint children_current.children_current_parent_logical_name_id_fkey FOREIGN KEY (parent_logical_name_id) REFERENCES name_surfaces(logical_name_id) local=t inherited=0
+constraint children_current.children_current_pkey PRIMARY KEY (parent_logical_name_id, child_logical_name_id, surface_class) local=t inherited=0
+constraint children_current.children_current_provenance_check CHECK ((jsonb_typeof(provenance) = 'object'::text)) local=t inherited=0
+constraint children_current.children_current_raw_label_check CHECK (((raw_label IS NULL) OR (octet_length(raw_label) > 0))) local=t inherited=0
+constraint children_current.children_current_raw_name_check CHECK (((raw_name IS NULL) OR (octet_length(raw_name) > 0))) local=t inherited=0
+constraint children_current.children_current_registrant_check CHECK (((registrant IS NULL) OR (btrim(registrant) <> ''::text))) local=t inherited=0
+constraint children_current.children_current_surface_class_check CHECK ((surface_class = 'declared'::text)) local=t inherited=0
+constraint contract_instance_addresses.contract_instance_addresses_active_from_block_number_check CHECK (((active_from_block_number IS NULL) OR (active_from_block_number >= 0))) local=t inherited=0
+constraint contract_instance_addresses.contract_instance_addresses_active_to_block_number_check CHECK (((active_to_block_number IS NULL) OR (active_to_block_number >= 0))) local=t inherited=0
+constraint contract_instance_addresses.contract_instance_addresses_address_check CHECK ((btrim(address) <> ''::text)) local=t inherited=0
+constraint contract_instance_addresses.contract_instance_addresses_chain_id_check CHECK ((btrim(chain_id) <> ''::text)) local=t inherited=0
+constraint contract_instance_addresses.contract_instance_addresses_check CHECK (((active_from_block_hash IS NULL) OR (active_from_block_number IS NOT NULL))) local=t inherited=0
+constraint contract_instance_addresses.contract_instance_addresses_check1 CHECK (((active_to_block_hash IS NULL) OR (active_to_block_number IS NOT NULL))) local=t inherited=0
+constraint contract_instance_addresses.contract_instance_addresses_check2 CHECK (((active_from_block_number IS NULL) OR (active_to_block_number IS NULL) OR (active_to_block_number >= active_from_block_number))) local=t inherited=0
+constraint contract_instance_addresses.contract_instance_addresses_check3 CHECK (((deactivated_at IS NULL) OR (deactivated_at >= admitted_at))) local=t inherited=0
+constraint contract_instance_addresses.contract_instance_addresses_instance_chain_fkey FOREIGN KEY (chain_id, contract_instance_id) REFERENCES contract_instances(chain_id, contract_instance_id) local=t inherited=0
+constraint contract_instance_addresses.contract_instance_addresses_manifest_fkey FOREIGN KEY (source_manifest_id, chain_id) REFERENCES manifest_versions(manifest_id, chain_id) ON DELETE SET NULL (source_manifest_id) local=t inherited=0
+constraint contract_instance_addresses.contract_instance_addresses_no_overlap EXCLUDE USING gist (contract_instance_id WITH =, int8range(active_from_block_number, active_to_block_number, '[]'::text) WITH &&) local=t inherited=0
+constraint contract_instance_addresses.contract_instance_addresses_pkey PRIMARY KEY (contract_instance_address_id) local=t inherited=0
+constraint contract_instance_addresses.contract_instance_addresses_provenance_check CHECK ((jsonb_typeof(provenance) = 'object'::text)) local=t inherited=0
+constraint contract_instances.contract_instances_chain_id_check CHECK ((btrim(chain_id) <> ''::text)) local=t inherited=0
+constraint contract_instances.contract_instances_chain_id_contract_instance_id_key UNIQUE (chain_id, contract_instance_id) local=t inherited=0
+constraint contract_instances.contract_instances_contract_kind_check CHECK ((contract_kind = ANY (ARRAY['root'::text, 'contract'::text]))) local=t inherited=0
+constraint contract_instances.contract_instances_pkey PRIMARY KEY (contract_instance_id) local=t inherited=0
+constraint contract_instances.contract_instances_provenance_check CHECK ((jsonb_typeof(provenance) = 'object'::text)) local=t inherited=0
+constraint discovery_edges.discovery_edges_active_from_block_number_check CHECK (((active_from_block_number IS NULL) OR (active_from_block_number >= 0))) local=t inherited=0
+constraint discovery_edges.discovery_edges_active_to_block_number_check CHECK (((active_to_block_number IS NULL) OR (active_to_block_number >= 0))) local=t inherited=0
+constraint discovery_edges.discovery_edges_admission_basis_check CHECK ((btrim(admission_basis) <> ''::text)) local=t inherited=0
+constraint discovery_edges.discovery_edges_chain_id_check CHECK ((btrim(chain_id) <> ''::text)) local=t inherited=0
+constraint discovery_edges.discovery_edges_check1 CHECK (((active_from_block_number IS NULL) = (active_from_block_hash IS NULL))) local=t inherited=0
+constraint discovery_edges.discovery_edges_check2 CHECK (((active_to_block_number IS NULL) = (active_to_block_hash IS NULL))) local=t inherited=0
+constraint discovery_edges.discovery_edges_check3 CHECK (((active_from_block_number IS NULL) OR (active_to_block_number IS NULL) OR (active_to_block_number >= active_from_block_number))) local=t inherited=0
+constraint discovery_edges.discovery_edges_check4 CHECK (((deactivated_at IS NULL) OR (deactivated_at >= admitted_at))) local=t inherited=0
+constraint discovery_edges.discovery_edges_discovery_source_check CHECK ((btrim(discovery_source) <> ''::text)) local=t inherited=0
+constraint discovery_edges.discovery_edges_edge_kind_check CHECK ((edge_kind = ANY (ARRAY['resolver'::text, 'subregistry'::text, 'proxy_implementation'::text, 'migration'::text, 'registry_announcement'::text]))) local=t inherited=0
+constraint discovery_edges.discovery_edges_from_instance_chain_fkey FOREIGN KEY (chain_id, from_contract_instance_id) REFERENCES contract_instances(chain_id, contract_instance_id) local=t inherited=0
+constraint discovery_edges.discovery_edges_manifest_fkey FOREIGN KEY (source_manifest_id, chain_id) REFERENCES manifest_versions(manifest_id, chain_id) ON DELETE SET NULL (source_manifest_id) local=t inherited=0
+constraint discovery_edges.discovery_edges_pkey PRIMARY KEY (discovery_edge_id) local=t inherited=0
+constraint discovery_edges.discovery_edges_provenance_check CHECK ((jsonb_typeof(provenance) = 'object'::text)) local=t inherited=0
+constraint discovery_edges.discovery_edges_self_edge_check CHECK (((edge_kind = 'registry_announcement'::text) OR ((edge_kind = 'resolver'::text) AND (discovery_source = 'ResolverCreated'::text)) OR (from_contract_instance_id <> to_contract_instance_id))) local=t inherited=0
+constraint discovery_edges.discovery_edges_to_instance_chain_fkey FOREIGN KEY (chain_id, to_contract_instance_id) REFERENCES contract_instances(chain_id, contract_instance_id) local=t inherited=0
+constraint discovery_watch_admissions.discovery_watch_admissions_active_from_block_number_check CHECK ((active_from_block_number >= 0)) local=t inherited=0
+constraint discovery_watch_admissions.discovery_watch_admissions_address_check CHECK ((btrim(address) <> ''::text)) local=t inherited=0
+constraint discovery_watch_admissions.discovery_watch_admissions_chain_id_check CHECK ((btrim(chain_id) <> ''::text)) local=t inherited=0
+constraint discovery_watch_admissions.discovery_watch_admissions_check CHECK ((active_to_block_number >= active_from_block_number)) local=t inherited=0
+constraint discovery_watch_admissions.discovery_watch_admissions_lineage_orphaning_epoch_check CHECK ((lineage_orphaning_epoch >= 0)) local=t inherited=0
+constraint discovery_watch_admissions.discovery_watch_admissions_manifest_authority_fingerprint_check CHECK ((btrim(manifest_authority_fingerprint) <> ''::text)) local=t inherited=0
+constraint discovery_watch_admissions.discovery_watch_admissions_namespace_check CHECK ((btrim(namespace) <> ''::text)) local=t inherited=0
+constraint discovery_watch_admissions.discovery_watch_admissions_pkey PRIMARY KEY (chain_id, manifest_authority_fingerprint, lineage_orphaning_epoch, namespace, target_source_family, target_deployment_label, address, topic0, active_from_block_number, active_to_block_number) local=t inherited=0
+constraint discovery_watch_admissions.discovery_watch_admissions_target_deployment_label_check CHECK ((btrim(target_deployment_label) <> ''::text)) local=t inherited=0
+constraint discovery_watch_admissions.discovery_watch_admissions_target_source_family_check CHECK ((btrim(target_source_family) <> ''::text)) local=t inherited=0
+constraint discovery_watch_admissions.discovery_watch_admissions_topic0_check CHECK ((btrim(topic0) <> ''::text)) local=t inherited=0
+constraint ens_names.ens_names_hash_check CHECK ((btrim(hash) <> ''::text)) local=t inherited=0
+constraint ens_names.ens_names_name_check CHECK ((name <> ''::text)) local=t inherited=0
+constraint ens_names.ens_names_pkey PRIMARY KEY (hash) local=t inherited=0
+constraint ingest_cursors.ingest_cursors_chain_id_check CHECK ((btrim(chain_id) <> ''::text)) local=t inherited=0
+constraint ingest_cursors.ingest_cursors_last_processed_order_check CHECK (((last_processed_block_number IS NULL) OR ((last_processed_block_number >= start_block_number) AND (last_processed_block_number < next_block_number)))) local=t inherited=0
+constraint ingest_cursors.ingest_cursors_last_processed_pair_check CHECK (((last_processed_block_number IS NULL) = (last_processed_block_hash IS NULL))) local=t inherited=0
+constraint ingest_cursors.ingest_cursors_next_block_order_check CHECK ((next_block_number >= start_block_number)) local=t inherited=0
+constraint ingest_cursors.ingest_cursors_pkey PRIMARY KEY (chain_id, source_key) local=t inherited=0
+constraint ingest_cursors.ingest_cursors_seed_basis_check CHECK ((seed_basis = ANY (ARRAY['base_seam'::text, 'new_signature_range'::text, 'ethereum_head'::text]))) local=t inherited=0
+constraint ingest_cursors.ingest_cursors_source_key_check CHECK ((btrim(source_key) <> ''::text)) local=t inherited=0
+constraint ingest_cursors.ingest_cursors_source_kind_check CHECK ((btrim(source_kind) <> ''::text)) local=t inherited=0
+constraint ingest_cursors.ingest_cursors_start_block_number_check CHECK ((start_block_number >= 0)) local=t inherited=0
+constraint ingest_cursors.ingest_cursors_target_block_order_check CHECK (((target_block_number IS NULL) OR (target_block_number >= start_block_number))) local=t inherited=0
+constraint interpret_decode_skips.interpret_decode_skips_block_hash_check CHECK ((btrim(block_hash) <> ''::text)) local=t inherited=0
+constraint interpret_decode_skips.interpret_decode_skips_block_number_check CHECK ((block_number >= 0)) local=t inherited=0
+constraint interpret_decode_skips.interpret_decode_skips_chain_id_check CHECK ((btrim(chain_id) <> ''::text)) local=t inherited=0
+constraint interpret_decode_skips.interpret_decode_skips_decode_context_check CHECK ((btrim(decode_context) <> ''::text)) local=t inherited=0
+constraint interpret_decode_skips.interpret_decode_skips_emitting_address_check CHECK ((btrim(emitting_address) <> ''::text)) local=t inherited=0
+constraint interpret_decode_skips.interpret_decode_skips_interpreter_content_hash_check CHECK ((btrim(interpreter_content_hash) <> ''::text)) local=t inherited=0
+constraint interpret_decode_skips.interpret_decode_skips_log_index_check CHECK ((log_index >= 0)) local=t inherited=0
+constraint interpret_decode_skips.interpret_decode_skips_pkey PRIMARY KEY (chain_id, block_hash, transaction_hash, log_index, interpreter_content_hash) local=t inherited=0
+constraint interpret_decode_skips.interpret_decode_skips_selection_topic0_check CHECK ((btrim(selection_topic0) <> ''::text)) local=t inherited=0
+constraint interpret_decode_skips.interpret_decode_skips_source_family_check CHECK ((btrim(source_family) <> ''::text)) local=t inherited=0
+constraint interpret_decode_skips.interpret_decode_skips_transaction_hash_check CHECK ((btrim(transaction_hash) <> ''::text)) local=t inherited=0
+constraint label_preimages.label_preimages_decoded_label_matches_raw_check CHECK (((decoded_label IS NULL) OR (convert_to(decoded_label, 'UTF8'::name) = raw_label))) local=t inherited=0
+constraint label_preimages.label_preimages_labelhash_check CHECK ((btrim(labelhash) <> ''::text)) local=t inherited=0
+constraint label_preimages.label_preimages_normalization_coherence_check CHECK (((normalized_under_version AND (normalization_error IS NULL)) OR ((NOT normalized_under_version) AND (normalization_error IS NOT NULL) AND (btrim(normalization_error) <> ''::text)))) local=t inherited=0
+constraint label_preimages.label_preimages_normalizer_version_check CHECK ((btrim(normalizer_version) <> ''::text)) local=t inherited=0
+constraint label_preimages.label_preimages_pkey PRIMARY KEY (labelhash) local=t inherited=0
+constraint label_preimages.label_preimages_provenance_check CHECK ((jsonb_typeof(provenance) = 'object'::text)) local=t inherited=0
+constraint label_preimages.label_preimages_raw_label_check CHECK ((octet_length(raw_label) > 0)) local=t inherited=0
+constraint label_preimages.label_preimages_source_kind_check CHECK ((btrim(source_kind) <> ''::text)) local=t inherited=0
+constraint label_preimages.label_preimages_source_priority_check CHECK ((source_priority >= 0)) local=t inherited=0
+constraint manifest_authority_attestations.manifest_authority_attestations_attested_by_check CHECK ((btrim(attested_by) <> ''::text)) local=t inherited=0
+constraint manifest_authority_attestations.manifest_authority_attestations_authority_fingerprint_check CHECK ((authority_fingerprint ~ '^[0-9a-f]{64}$'::text)) local=t inherited=0
+constraint manifest_authority_attestations.manifest_authority_attestations_chain_id_check CHECK ((btrim(chain_id) <> ''::text)) local=t inherited=0
+constraint manifest_authority_attestations.manifest_authority_attestations_check CHECK ((redo_to_block_number >= redo_from_block_number)) local=t inherited=0
+constraint manifest_authority_attestations.manifest_authority_attestations_generation_token_check CHECK ((btrim(generation_token) <> ''::text)) local=t inherited=0
+constraint manifest_authority_attestations.manifest_authority_attestations_phase_name_check CHECK ((phase_name = 'interpret'::text)) local=t inherited=0
+constraint manifest_authority_attestations.manifest_authority_attestations_pkey PRIMARY KEY (chain_id, phase_name, generation_token) local=t inherited=0
+constraint manifest_authority_attestations.manifest_authority_attestations_redo_from_block_number_check CHECK ((redo_from_block_number >= 0)) local=t inherited=0
+constraint manifest_contract_instances.manifest_contract_instances_abi_ref_check CHECK (((abi_ref IS NULL) OR (btrim(abi_ref) <> ''::text))) local=t inherited=0
+constraint manifest_contract_instances.manifest_contract_instances_chain_id_check CHECK ((btrim(chain_id) <> ''::text)) local=t inherited=0
+constraint manifest_contract_instances.manifest_contract_instances_chain_id_contract_instance_id_fkey FOREIGN KEY (chain_id, contract_instance_id) REFERENCES contract_instances(chain_id, contract_instance_id) local=t inherited=0
+constraint manifest_contract_instances.manifest_contract_instances_chain_id_implementation_contra_fkey FOREIGN KEY (chain_id, implementation_contract_instance_id) REFERENCES contract_instances(chain_id, contract_instance_id) local=t inherited=0
+constraint manifest_contract_instances.manifest_contract_instances_check CHECK ((((declaration_kind = 'root'::text) AND (role IS NULL)) OR ((declaration_kind = 'contract'::text) AND (role IS NOT NULL) AND (btrim(role) <> ''::text)))) local=t inherited=0
+constraint manifest_contract_instances.manifest_contract_instances_check1 CHECK ((((proxy_kind = 'none'::text) AND (implementation_contract_instance_id IS NULL) AND (declared_implementation_address IS NULL)) OR ((proxy_kind <> 'none'::text) AND (implementation_contract_instance_id IS NOT NULL) AND (declared_implementation_address IS NOT NULL) AND (btrim(declared_implementation_address) <> ''::text)))) local=t inherited=0
+constraint manifest_contract_instances.manifest_contract_instances_declaration_kind_check CHECK ((declaration_kind = ANY (ARRAY['root'::text, 'contract'::text]))) local=t inherited=0
+constraint manifest_contract_instances.manifest_contract_instances_declaration_name_check CHECK ((btrim(declaration_name) <> ''::text)) local=t inherited=0
+constraint manifest_contract_instances.manifest_contract_instances_declared_address_check CHECK ((btrim(declared_address) <> ''::text)) local=t inherited=0
+constraint manifest_contract_instances.manifest_contract_instances_manifest_fkey FOREIGN KEY (manifest_id, chain_id) REFERENCES manifest_versions(manifest_id, chain_id) ON DELETE CASCADE local=t inherited=0
+constraint manifest_contract_instances.manifest_contract_instances_manifest_id_declaration_kind_de_key UNIQUE (manifest_id, declaration_kind, declaration_name) local=t inherited=0
+constraint manifest_contract_instances.manifest_contract_instances_pkey PRIMARY KEY (manifest_contract_instance_id) local=t inherited=0
+constraint manifest_contract_instances.manifest_contract_instances_proxy_kind_check CHECK ((btrim(proxy_kind) <> ''::text)) local=t inherited=0
+constraint manifest_contract_instances.manifest_contract_instances_start_block_number_check CHECK (((start_block_number IS NULL) OR (start_block_number >= 0))) local=t inherited=0
+constraint manifest_discovery_rules.manifest_discovery_rules_admission_check CHECK ((btrim(admission) <> ''::text)) local=t inherited=0
+constraint manifest_discovery_rules.manifest_discovery_rules_edge_kind_check CHECK ((edge_kind = ANY (ARRAY['resolver'::text, 'subregistry'::text, 'proxy_implementation'::text, 'migration'::text, 'registry_announcement'::text]))) local=t inherited=0
+constraint manifest_discovery_rules.manifest_discovery_rules_from_role_check CHECK (((from_role IS NULL) OR (btrim(from_role) <> ''::text))) local=t inherited=0
+constraint manifest_discovery_rules.manifest_discovery_rules_manifest_fkey FOREIGN KEY (manifest_id) REFERENCES manifest_versions(manifest_id) ON DELETE CASCADE local=t inherited=0
+constraint manifest_discovery_rules.manifest_discovery_rules_pkey PRIMARY KEY (manifest_discovery_rule_id) local=t inherited=0
+constraint manifest_discovery_rules.manifest_discovery_rules_rule_payload_check CHECK ((jsonb_typeof(rule_payload) = 'object'::text)) local=t inherited=0
+constraint manifest_versions.manifest_versions_applied_change_count_check CHECK ((applied_change_count >= 0)) local=t inherited=0
+constraint manifest_versions.manifest_versions_chain_id_check CHECK ((btrim(chain_id) <> ''::text)) local=t inherited=0
+constraint manifest_versions.manifest_versions_deployment_label_check CHECK ((btrim(deployment_label) <> ''::text)) local=t inherited=0
+constraint manifest_versions.manifest_versions_file_path_check CHECK ((btrim(file_path) <> ''::text)) local=t inherited=0
+constraint manifest_versions.manifest_versions_file_path_key UNIQUE (file_path) local=t inherited=0
+constraint manifest_versions.manifest_versions_manifest_id_chain_id_key UNIQUE (manifest_id, chain_id) local=t inherited=0
+constraint manifest_versions.manifest_versions_manifest_id_namespace_source_family_manif_key UNIQUE (manifest_id, namespace, source_family, manifest_version, chain_id) local=t inherited=0
+constraint manifest_versions.manifest_versions_manifest_payload_check CHECK ((jsonb_typeof(manifest_payload) = 'object'::text)) local=t inherited=0
+constraint manifest_versions.manifest_versions_manifest_version_check CHECK ((manifest_version > 0)) local=t inherited=0
+constraint manifest_versions.manifest_versions_namespace_check CHECK ((btrim(namespace) <> ''::text)) local=t inherited=0
+constraint manifest_versions.manifest_versions_namespace_source_family_chain_id_deployme_key UNIQUE (namespace, source_family, chain_id, deployment_label, manifest_version) local=t inherited=0
+constraint manifest_versions.manifest_versions_normalizer_version_check CHECK ((btrim(normalizer_version) <> ''::text)) local=t inherited=0
+constraint manifest_versions.manifest_versions_pkey PRIMARY KEY (manifest_id) local=t inherited=0
+constraint manifest_versions.manifest_versions_rollout_status_check CHECK ((rollout_status = ANY (ARRAY['draft'::text, 'shadow'::text, 'active'::text, 'deprecated'::text]))) local=t inherited=0
+constraint manifest_versions.manifest_versions_source_family_check CHECK ((btrim(source_family) <> ''::text)) local=t inherited=0
+constraint migration_candidate_discovery_effects.migration_candidate_discovery__migration_correlation_ids_check1 CHECK ((cardinality(migration_correlation_ids) > 0)) local=t inherited=0
+constraint migration_candidate_discovery_effects.migration_candidate_discovery_chain_id_block_hash_block_nu_fkey FOREIGN KEY (chain_id, block_hash, block_number) REFERENCES chain_lineage(chain_id, block_hash, block_number) local=t inherited=0
+constraint migration_candidate_discovery_effects.migration_candidate_discovery_e_migration_correlation_ids_check CHECK (migration_correlation_ids_valid(migration_correlation_ids)) local=t inherited=0
+constraint migration_candidate_discovery_effects.migration_candidate_discovery_ef_interpreter_content_hash_check CHECK ((btrim(interpreter_content_hash) <> ''::text)) local=t inherited=0
+constraint migration_candidate_discovery_effects.migration_candidate_discovery_effects_block_number_check CHECK ((block_number >= 0)) local=t inherited=0
+constraint migration_candidate_discovery_effects.migration_candidate_discovery_effects_consumer_visibility_check CHECK ((consumer_visibility = 'candidate'::text)) local=t inherited=0
+constraint migration_candidate_discovery_effects.migration_candidate_discovery_effects_correlation_kind_check CHECK ((btrim(correlation_kind) <> ''::text)) local=t inherited=0
+constraint migration_candidate_discovery_effects.migration_candidate_discovery_effects_effect_identity_check CHECK ((btrim(effect_identity) <> ''::text)) local=t inherited=0
+constraint migration_candidate_discovery_effects.migration_candidate_discovery_effects_effect_kind_check CHECK ((btrim(effect_kind) <> ''::text)) local=t inherited=0
+constraint migration_candidate_discovery_effects.migration_candidate_discovery_effects_evidence_refs_check CHECK ((jsonb_typeof(evidence_refs) = 'array'::text)) local=t inherited=0
+constraint migration_candidate_discovery_effects.migration_candidate_discovery_effects_log_index_check CHECK ((log_index >= 0)) local=t inherited=0
+constraint migration_candidate_discovery_effects.migration_candidate_discovery_effects_pkey PRIMARY KEY (effect_identity) local=t inherited=0
+constraint migration_candidate_discovery_effects.migration_candidate_discovery_effects_proposed_effect_check CHECK ((jsonb_typeof(proposed_effect) = 'object'::text)) local=t inherited=0
+constraint migration_candidate_discovery_effects.migration_candidate_discovery_effects_transaction_index_check CHECK ((transaction_index >= 0)) local=t inherited=0
+constraint migration_candidate_identity_effects.migration_candidate_identity__chain_id_block_hash_block_nu_fkey FOREIGN KEY (chain_id, block_hash, block_number) REFERENCES chain_lineage(chain_id, block_hash, block_number) local=t inherited=0
+constraint migration_candidate_identity_effects.migration_candidate_identity_e_migration_correlation_ids_check1 CHECK ((cardinality(migration_correlation_ids) > 0)) local=t inherited=0
+constraint migration_candidate_identity_effects.migration_candidate_identity_ef_migration_correlation_ids_check CHECK (migration_correlation_ids_valid(migration_correlation_ids)) local=t inherited=0
+constraint migration_candidate_identity_effects.migration_candidate_identity_eff_interpreter_content_hash_check CHECK ((btrim(interpreter_content_hash) <> ''::text)) local=t inherited=0
+constraint migration_candidate_identity_effects.migration_candidate_identity_effects_block_number_check CHECK ((block_number >= 0)) local=t inherited=0
+constraint migration_candidate_identity_effects.migration_candidate_identity_effects_consumer_visibility_check CHECK ((consumer_visibility = 'candidate'::text)) local=t inherited=0
+constraint migration_candidate_identity_effects.migration_candidate_identity_effects_correlation_kind_check CHECK ((correlation_kind = 'authority_transition'::text)) local=t inherited=0
+constraint migration_candidate_identity_effects.migration_candidate_identity_effects_effect_identity_check CHECK ((btrim(effect_identity) <> ''::text)) local=t inherited=0
+constraint migration_candidate_identity_effects.migration_candidate_identity_effects_effect_kind_check CHECK ((btrim(effect_kind) <> ''::text)) local=t inherited=0
+constraint migration_candidate_identity_effects.migration_candidate_identity_effects_evidence_refs_check CHECK ((jsonb_typeof(evidence_refs) = 'array'::text)) local=t inherited=0
+constraint migration_candidate_identity_effects.migration_candidate_identity_effects_log_index_check CHECK ((log_index >= 0)) local=t inherited=0
+constraint migration_candidate_identity_effects.migration_candidate_identity_effects_pkey PRIMARY KEY (effect_identity) local=t inherited=0
+constraint migration_candidate_identity_effects.migration_candidate_identity_effects_proposed_effect_check CHECK ((jsonb_typeof(proposed_effect) = 'object'::text)) local=t inherited=0
+constraint migration_candidate_identity_effects.migration_candidate_identity_effects_transaction_index_check CHECK ((transaction_index >= 0)) local=t inherited=0
+constraint migration_discovery_associations.migration_discovery_associati_chain_id_block_hash_block_nu_fkey FOREIGN KEY (chain_id, block_hash, block_number) REFERENCES chain_lineage(chain_id, block_hash, block_number) local=t inherited=0
+constraint migration_discovery_associations.migration_discovery_associati_chain_id_registry_contract_i_fkey FOREIGN KEY (chain_id, registry_contract_instance_id) REFERENCES contract_instances(chain_id, contract_instance_id) local=t inherited=0
+constraint migration_discovery_associations.migration_discovery_associatio_source_manifest_id_chain_id_fkey FOREIGN KEY (source_manifest_id, chain_id) REFERENCES manifest_versions(manifest_id, chain_id) local=t inherited=0
+constraint migration_discovery_associations.migration_discovery_associations_block_number_check CHECK ((block_number >= 0)) local=t inherited=0
+constraint migration_discovery_associations.migration_discovery_associations_consumer_visibility_check CHECK ((consumer_visibility = ANY (ARRAY['candidate'::text, 'activated'::text]))) local=t inherited=0
+constraint migration_discovery_associations.migration_discovery_associations_correlation_kind_check CHECK ((correlation_kind = 'migration_registry_creation'::text)) local=t inherited=0
+constraint migration_discovery_associations.migration_discovery_associations_evidence_refs_check CHECK ((jsonb_typeof(evidence_refs) = 'array'::text)) local=t inherited=0
+constraint migration_discovery_associations.migration_discovery_associations_interpreter_content_hash_check CHECK ((btrim(interpreter_content_hash) <> ''::text)) local=t inherited=0
+constraint migration_discovery_associations.migration_discovery_associations_log_index_check CHECK ((log_index >= 0)) local=t inherited=0
+constraint migration_discovery_associations.migration_discovery_associations_logical_edge_identity_check CHECK ((btrim(logical_edge_identity) <> ''::text)) local=t inherited=0
+constraint migration_discovery_associations.migration_discovery_associations_migration_correlation_id_check CHECK ((btrim(migration_correlation_id) <> ''::text)) local=t inherited=0
+constraint migration_discovery_associations.migration_discovery_associations_pkey PRIMARY KEY (logical_edge_identity, migration_correlation_id) local=t inherited=0
+constraint migration_discovery_associations.migration_discovery_associations_registry_address_check CHECK ((btrim(registry_address) <> ''::text)) local=t inherited=0
+constraint migration_discovery_associations.migration_discovery_associations_transaction_index_check CHECK ((transaction_index >= 0)) local=t inherited=0
+constraint migration_event_associations.migration_event_associations_block_number_check CHECK ((block_number >= 0)) local=t inherited=0
+constraint migration_event_associations.migration_event_associations_chain_id_block_hash_block_num_fkey FOREIGN KEY (chain_id, block_hash, block_number) REFERENCES chain_lineage(chain_id, block_hash, block_number) local=t inherited=0
+constraint migration_event_associations.migration_event_associations_consumer_visibility_check CHECK ((consumer_visibility = ANY (ARRAY['candidate'::text, 'activated'::text]))) local=t inherited=0
+constraint migration_event_associations.migration_event_associations_correlation_kind_check CHECK ((correlation_kind = ANY (ARRAY['authority_transition'::text, 'synchronized_renewal'::text, 'graveyard_cleanup'::text, 'migration_registry_creation'::text, 'controller_configuration'::text]))) local=t inherited=0
+constraint migration_event_associations.migration_event_associations_event_identity_check CHECK ((btrim(event_identity) <> ''::text)) local=t inherited=0
+constraint migration_event_associations.migration_event_associations_evidence_refs_check CHECK ((jsonb_typeof(evidence_refs) = 'array'::text)) local=t inherited=0
+constraint migration_event_associations.migration_event_associations_interpreter_content_hash_check CHECK ((btrim(interpreter_content_hash) <> ''::text)) local=t inherited=0
+constraint migration_event_associations.migration_event_associations_log_index_check CHECK ((log_index >= 0)) local=t inherited=0
+constraint migration_event_associations.migration_event_associations_migration_correlation_id_check CHECK ((btrim(migration_correlation_id) <> ''::text)) local=t inherited=0
+constraint migration_event_associations.migration_event_associations_pkey PRIMARY KEY (event_identity, migration_correlation_id) local=t inherited=0
+constraint migration_event_associations.migration_event_associations_transaction_index_check CHECK ((transaction_index >= 0)) local=t inherited=0
+constraint name_current.name_current_binding_kind_check CHECK (((binding_kind IS NULL) OR (binding_kind = ANY (ARRAY['declared_registry_path'::text, 'linked_subregistry_path'::text, 'resolver_alias_path'::text, 'observed_wildcard_path'::text, 'observed_only'::text])))) local=t inherited=0
+constraint name_current.name_current_canonicality_summary_check CHECK ((jsonb_typeof(canonicality_summary) = 'object'::text)) local=t inherited=0
+constraint name_current.name_current_chain_positions_check CHECK ((jsonb_typeof(chain_positions) = 'object'::text)) local=t inherited=0
+constraint name_current.name_current_check CHECK ((((surface_binding_id IS NULL) AND (resource_id IS NULL) AND (binding_kind IS NULL)) OR ((surface_binding_id IS NOT NULL) AND (resource_id IS NOT NULL) AND (binding_kind IS NOT NULL) AND (btrim(binding_kind) <> ''::text)))) local=t inherited=0
+constraint name_current.name_current_check1 CHECK (((token_lineage_id IS NULL) OR (resource_id IS NOT NULL))) local=t inherited=0
+constraint name_current.name_current_check2 CHECK ((((support_status = 'supported'::text) AND (unsupported_reason IS NULL)) OR ((support_status = 'unsupported'::text) AND (unsupported_reason IS NOT NULL) AND (btrim(unsupported_reason) <> ''::text)))) local=t inherited=0
+constraint name_current.name_current_declared_summary_check CHECK ((jsonb_typeof(declared_summary) = 'object'::text)) local=t inherited=0
+constraint name_current.name_current_logical_identity_check CHECK ((logical_name_id = ((namespace || ':'::text) || namehash))) local=t inherited=0
+constraint name_current.name_current_logical_name_id_fkey FOREIGN KEY (logical_name_id) REFERENCES name_surfaces(logical_name_id) local=t inherited=0
+constraint name_current.name_current_manifest_version_check CHECK ((manifest_version > 0)) local=t inherited=0
+constraint name_current.name_current_namehash_check CHECK ((btrim(namehash) <> ''::text)) local=t inherited=0
+constraint name_current.name_current_namespace_check CHECK ((btrim(namespace) <> ''::text)) local=t inherited=0
+constraint name_current.name_current_pkey PRIMARY KEY (logical_name_id) local=t inherited=0
+constraint name_current.name_current_provenance_check CHECK ((jsonb_typeof(provenance) = 'object'::text)) local=t inherited=0
+constraint name_current.name_current_resource_id_fkey FOREIGN KEY (resource_id) REFERENCES resources(resource_id) local=t inherited=0
+constraint name_current.name_current_resource_id_token_lineage_id_fkey FOREIGN KEY (resource_id, token_lineage_id) REFERENCES resources(resource_id, token_lineage_id) local=t inherited=0
+constraint name_current.name_current_serving_resource_id_fkey FOREIGN KEY (serving_resource_id) REFERENCES resources(resource_id) local=t inherited=0
+constraint name_current.name_current_support_status_check CHECK ((support_status = ANY (ARRAY['supported'::text, 'unsupported'::text]))) local=t inherited=0
+constraint name_current.name_current_surface_binding_id_fkey FOREIGN KEY (surface_binding_id) REFERENCES surface_bindings(surface_binding_id) local=t inherited=0
+constraint name_current.name_current_surface_binding_id_logical_name_id_resource_i_fkey FOREIGN KEY (surface_binding_id, logical_name_id, resource_id, binding_kind) REFERENCES surface_bindings(surface_binding_id, logical_name_id, resource_id, binding_kind) local=t inherited=0
+constraint name_current.name_current_token_lineage_id_fkey FOREIGN KEY (token_lineage_id) REFERENCES token_lineages(token_lineage_id) local=t inherited=0
+constraint name_surfaces.name_surfaces_block_number_check CHECK ((block_number >= 0)) local=t inherited=0
+constraint name_surfaces.name_surfaces_chain_id_block_hash_block_number_fkey FOREIGN KEY (chain_id, block_hash, block_number) REFERENCES chain_lineage(chain_id, block_hash, block_number) local=t inherited=0
+constraint name_surfaces.name_surfaces_chain_id_logical_name_id_key UNIQUE (chain_id, logical_name_id) local=t inherited=0
+constraint name_surfaces.name_surfaces_check CHECK ((cardinality(raw_labels) = cardinality(labelhashes))) local=t inherited=0
+constraint name_surfaces.name_surfaces_logical_identity_check CHECK ((logical_name_id = ((namespace || ':'::text) || namehash))) local=t inherited=0
+constraint name_surfaces.name_surfaces_namehash_check CHECK ((btrim(namehash) <> ''::text)) local=t inherited=0
+constraint name_surfaces.name_surfaces_namespace_check CHECK ((btrim(namespace) <> ''::text)) local=t inherited=0
+constraint name_surfaces.name_surfaces_normalization_errors_check CHECK ((jsonb_typeof(normalization_errors) = 'array'::text)) local=t inherited=0
+constraint name_surfaces.name_surfaces_normalizer_version_check CHECK ((btrim(normalizer_version) <> ''::text)) local=t inherited=0
+constraint name_surfaces.name_surfaces_pkey PRIMARY KEY (logical_name_id) local=t inherited=0
+constraint name_surfaces.name_surfaces_provenance_check CHECK ((jsonb_typeof(provenance) = 'object'::text)) local=t inherited=0
+constraint name_surfaces.name_surfaces_visibility_coherence_check CHECK ((((visibility_state = 'active'::text) AND (deactivation_reason IS NULL) AND (deactivated_at IS NULL) AND (normalization_errors = '[]'::jsonb)) OR ((visibility_state = 'shadow'::text) AND (deactivation_reason IS NOT NULL) AND (btrim(deactivation_reason) <> ''::text) AND (deactivated_at IS NOT NULL)))) local=t inherited=0
+constraint name_surfaces.name_surfaces_visibility_state_check CHECK ((visibility_state = ANY (ARRAY['active'::text, 'shadow'::text]))) local=t inherited=0
+constraint normalized_events.normalized_events_after_state_check CHECK ((jsonb_typeof(after_state) = 'object'::text)) local=t inherited=0
+constraint normalized_events.normalized_events_before_state_check CHECK ((jsonb_typeof(before_state) = 'object'::text)) local=t inherited=0
+constraint normalized_events.normalized_events_block_number_check CHECK (((block_number IS NULL) OR (block_number >= 0))) local=t inherited=0
+constraint normalized_events.normalized_events_candidate_correlation_check CHECK (((consumer_visibility = 'activated'::text) OR (cardinality(migration_correlation_ids) > 0))) local=t inherited=0
+constraint normalized_events.normalized_events_chain_id_block_hash_block_number_fkey FOREIGN KEY (chain_id, block_hash, block_number) REFERENCES chain_lineage(chain_id, block_hash, block_number) local=t inherited=0
+constraint normalized_events.normalized_events_chain_id_check CHECK ((btrim(chain_id) <> ''::text)) local=t inherited=0
+constraint normalized_events.normalized_events_chain_id_logical_name_id_fkey FOREIGN KEY (chain_id, logical_name_id) REFERENCES name_surfaces(chain_id, logical_name_id) local=t inherited=0
+constraint normalized_events.normalized_events_chain_id_resource_id_fkey FOREIGN KEY (chain_id, resource_id) REFERENCES resources(chain_id, resource_id) local=t inherited=0
+constraint normalized_events.normalized_events_check CHECK (((block_hash IS NULL) = (block_number IS NULL))) local=t inherited=0
+constraint normalized_events.normalized_events_check1 CHECK (((transaction_hash IS NULL) OR ((block_hash IS NOT NULL) AND (btrim(transaction_hash) <> ''::text)))) local=t inherited=0
+constraint normalized_events.normalized_events_check2 CHECK ((((transaction_index IS NULL) AND (log_index IS NULL)) OR ((transaction_hash IS NOT NULL) AND (transaction_index IS NOT NULL) AND (transaction_index >= 0) AND (log_index IS NOT NULL) AND (log_index >= 0)))) local=t inherited=0
+constraint normalized_events.normalized_events_consumer_visibility_check CHECK ((consumer_visibility = ANY (ARRAY['candidate'::text, 'activated'::text]))) local=t inherited=0
+constraint normalized_events.normalized_events_derivation_kind_check CHECK ((derivation_kind = ANY (ARRAY['ens_v1_reverse_claim'::text, 'ens_v1_unwrapped_authority'::text, 'ens_v2_migration'::text, 'ens_v2_permissions'::text, 'ens_v2_registrar'::text, 'ens_v2_registry_resource_surface'::text, 'ens_v2_resolver'::text, 'manifest_sync'::text, 'proxy_upgrade'::text, 'raw_block_preimage_observation'::text, 'raw_log_preimage_observation'::text, 'standard_approval'::text]))) local=t inherited=0
+constraint normalized_events.normalized_events_event_identity_check CHECK ((btrim(event_identity) <> ''::text)) local=t inherited=0
+constraint normalized_events.normalized_events_event_identity_key UNIQUE (event_identity) local=t inherited=0
+constraint normalized_events.normalized_events_event_kind_check CHECK ((event_kind = ANY (ARRAY['AccountPermissionChanged'::text, 'AliasChanged'::text, 'AuthorityEpochChanged'::text, 'AuthorityTransferred'::text, 'ContractDiscovered'::text, 'ExpiryChanged'::text, 'MigrationApplied'::text, 'ParentChanged'::text, 'PermissionChanged'::text, 'PermissionScopeChanged'::text, 'PreimageObserved'::text, 'RecordChanged'::text, 'RecordVersionChanged'::text, 'RegistrarNameRegistered'::text, 'RegistrationGranted'::text, 'RegistrationReleased'::text, 'RegistrationRenewed'::text, 'RegistrationReserved'::text, 'RegistryCreated'::text, 'ResolverChanged'::text, 'ResolverPermissionArgument'::text, 'ResolverRecordLinked'::text, 'ReverseChanged'::text, 'RootPermissionChanged'::text, 'SourceManifestUpdated'::text, 'SubregistryChanged'::text, 'SurfaceBound'::text, 'SurfaceUnbound'::text, 'TokenControlTransferred'::text, 'TokenRegenerated'::text, 'TokenResourceLinked'::text, 'Upgraded'::text]))) local=t inherited=0
+constraint normalized_events.normalized_events_manifest_version_check CHECK ((manifest_version > 0)) local=t inherited=0
+constraint normalized_events.normalized_events_migration_correlation_ids_check CHECK (migration_correlation_ids_valid(migration_correlation_ids)) local=t inherited=0
+constraint normalized_events.normalized_events_namespace_check CHECK ((btrim(namespace) <> ''::text)) local=t inherited=0
+constraint normalized_events.normalized_events_pkey PRIMARY KEY (normalized_event_id) local=t inherited=0
+constraint normalized_events.normalized_events_raw_fact_ref_check CHECK ((jsonb_typeof(raw_fact_ref) = 'object'::text)) local=t inherited=0
+constraint normalized_events.normalized_events_source_family_check CHECK ((btrim(source_family) <> ''::text)) local=t inherited=0
+constraint normalized_events.normalized_events_source_manifest_id_namespace_source_fami_fkey FOREIGN KEY (source_manifest_id, namespace, source_family, manifest_version, chain_id) REFERENCES manifest_versions(manifest_id, namespace, source_family, manifest_version, chain_id) ON DELETE SET NULL (source_manifest_id) local=t inherited=0
+constraint permissions_current.permissions_current_canonicality_summary_check CHECK ((jsonb_typeof(canonicality_summary) = 'object'::text)) local=t inherited=0
+constraint permissions_current.permissions_current_chain_positions_check CHECK ((jsonb_typeof(chain_positions) = 'object'::text)) local=t inherited=0
+constraint permissions_current.permissions_current_effective_powers_check CHECK ((jsonb_typeof(effective_powers) = 'array'::text)) local=t inherited=0
+constraint permissions_current.permissions_current_grant_source_check CHECK ((jsonb_typeof(grant_source) = 'object'::text)) local=t inherited=0
+constraint permissions_current.permissions_current_inheritance_path_check CHECK ((jsonb_typeof(inheritance_path) = 'array'::text)) local=t inherited=0
+constraint permissions_current.permissions_current_manifest_version_check CHECK ((manifest_version > 0)) local=t inherited=0
+constraint permissions_current.permissions_current_pkey PRIMARY KEY (resource_id, subject, scope) local=t inherited=0
+constraint permissions_current.permissions_current_provenance_check CHECK ((jsonb_typeof(provenance) = 'object'::text)) local=t inherited=0
+constraint permissions_current.permissions_current_resource_id_fkey FOREIGN KEY (resource_id) REFERENCES resources(resource_id) local=t inherited=0
+constraint permissions_current.permissions_current_revocation_source_check CHECK (((revocation_source IS NULL) OR (jsonb_typeof(revocation_source) = 'object'::text))) local=t inherited=0
+constraint permissions_current.permissions_current_scope_check CHECK ((btrim(scope) <> ''::text)) local=t inherited=0
+constraint permissions_current.permissions_current_scope_detail_check CHECK ((jsonb_typeof(scope_detail) = 'object'::text)) local=t inherited=0
+constraint permissions_current.permissions_current_scope_kind_check CHECK ((scope_kind = ANY (ARRAY['root'::text, 'registry'::text, 'resource'::text, 'resolver'::text, 'record_manager'::text]))) local=t inherited=0
+constraint permissions_current.permissions_current_subject_check CHECK ((btrim(subject) <> ''::text)) local=t inherited=0
+constraint permissions_current.permissions_current_transfer_behavior_check CHECK ((jsonb_typeof(transfer_behavior) = 'object'::text)) local=t inherited=0
+constraint permissions_current_resource_summary.permissions_current_resource_summary_authority_kind_check CHECK (((authority_kind IS NULL) OR (btrim(authority_kind) <> ''::text))) local=t inherited=0
+constraint permissions_current_resource_summary.permissions_current_resource_summary_canonicality_summary_check CHECK ((jsonb_typeof(canonicality_summary) = 'object'::text)) local=t inherited=0
+constraint permissions_current_resource_summary.permissions_current_resource_summary_chain_positions_check CHECK ((jsonb_typeof(chain_positions) = 'object'::text)) local=t inherited=0
+constraint permissions_current_resource_summary.permissions_current_resource_summary_check CHECK ((((support_status = 'supported'::text) AND (unsupported_reason IS NULL)) OR ((support_status = 'unsupported'::text) AND (unsupported_reason IS NOT NULL) AND (btrim(unsupported_reason) <> ''::text)))) local=t inherited=0
+constraint permissions_current_resource_summary.permissions_current_resource_summary_manifest_version_check CHECK ((manifest_version > 0)) local=t inherited=0
+constraint permissions_current_resource_summary.permissions_current_resource_summary_pkey PRIMARY KEY (resource_id) local=t inherited=0
+constraint permissions_current_resource_summary.permissions_current_resource_summary_provenance_check CHECK ((jsonb_typeof(provenance) = 'object'::text)) local=t inherited=0
+constraint permissions_current_resource_summary.permissions_current_resource_summary_registry_binding_check CHECK ((((registry_owner IS NULL) AND (registry_contract IS NULL) AND (registry_binding_provenance IS NULL) AND (registry_binding_chain_positions IS NULL)) OR ((registry_owner IS NOT NULL) AND (registry_contract IS NOT NULL) AND (registry_binding_provenance IS NOT NULL) AND (registry_binding_chain_positions IS NOT NULL) AND (registry_owner ~ '^0x[0-9a-f]{40}$'::text) AND (registry_contract ~ '^0x[0-9a-f]{40}$'::text) AND (jsonb_typeof(registry_binding_provenance) = 'object'::text) AND (jsonb_typeof(registry_binding_chain_positions) = 'object'::text)))) local=t inherited=0
+constraint permissions_current_resource_summary.permissions_current_resource_summary_resource_id_fkey FOREIGN KEY (resource_id) REFERENCES resources(resource_id) local=t inherited=0
+constraint permissions_current_resource_summary.permissions_current_resource_summary_restrictions_check CHECK (((resource_restrictions IS NULL) OR (jsonb_typeof(resource_restrictions) = 'object'::text))) local=t inherited=0
+constraint permissions_current_resource_summary.permissions_current_resource_summary_root_resource_id_fkey FOREIGN KEY (root_resource_id) REFERENCES resources(resource_id) local=t inherited=0
+constraint permissions_current_resource_summary.permissions_current_resource_summary_support_status_check CHECK ((support_status = ANY (ARRAY['supported'::text, 'unsupported'::text]))) local=t inherited=0
+constraint primary_names_current.primary_names_current_address_check CHECK ((btrim(address) <> ''::text)) local=t inherited=0
+constraint primary_names_current.primary_names_current_claim_name_check CHECK ((((claim_status = ANY (ARRAY['success'::text, 'invalid_name'::text])) AND (raw_claim_name IS NOT NULL) AND (btrim(raw_claim_name) <> ''::text)) OR ((claim_status = ANY (ARRAY['not_found'::text, 'unsupported'::text])) AND (raw_claim_name IS NULL)))) local=t inherited=0
+constraint primary_names_current.primary_names_current_claim_provenance_check CHECK ((jsonb_typeof(claim_provenance) = 'object'::text)) local=t inherited=0
+constraint primary_names_current.primary_names_current_claim_status_check CHECK ((claim_status = ANY (ARRAY['success'::text, 'not_found'::text, 'unsupported'::text, 'invalid_name'::text]))) local=t inherited=0
+constraint primary_names_current.primary_names_current_coin_type_check CHECK ((btrim(coin_type) <> ''::text)) local=t inherited=0
+constraint primary_names_current.primary_names_current_namespace_check CHECK ((btrim(namespace) <> ''::text)) local=t inherited=0
+constraint primary_names_current.primary_names_current_normalized_claim_check CHECK (((NOT claim_name_is_normalized) OR (claim_status = 'success'::text))) local=t inherited=0
+constraint primary_names_current.primary_names_current_pkey PRIMARY KEY (address, coin_type, namespace) local=t inherited=0
+constraint primary_names_current.primary_names_current_reverse_hydration_attempt_check CHECK ((((reverse_hydration_attempted_block_number IS NULL) AND (reverse_hydration_attempted_block_hash IS NULL) AND (reverse_hydration_attempt_ordinal IS NULL)) OR ((reverse_hydration_attempted_block_number IS NOT NULL) AND (reverse_hydration_attempted_block_number >= 0) AND (reverse_hydration_attempted_block_hash IS NOT NULL) AND (btrim(reverse_hydration_attempted_block_hash) <> ''::text) AND (reverse_hydration_attempt_ordinal IS NOT NULL) AND (reverse_hydration_attempt_ordinal > 0)))) local=t inherited=0
+constraint primary_names_current.primary_names_current_unsupported_reason_check CHECK (((unsupported_reason IS NULL) OR (btrim(unsupported_reason) <> ''::text))) local=t inherited=0
+constraint primary_names_current.primary_names_current_unsupported_reason_coherence_check CHECK ((((claim_status = 'unsupported'::text) AND (unsupported_reason IS NOT NULL)) OR ((claim_status <> 'unsupported'::text) AND (unsupported_reason IS NULL)))) local=t inherited=0
+constraint project_generation_failures.project_generation_failures_chain_id_check CHECK ((btrim(chain_id) <> ''::text)) local=t inherited=0
+constraint project_generation_failures.project_generation_failures_evidence_check CHECK ((jsonb_typeof(evidence) = 'object'::text)) local=t inherited=0
+constraint project_generation_failures.project_generation_failures_failure_fingerprint_check CHECK ((failure_fingerprint ~ '^[0-9a-f]{64}$'::text)) local=t inherited=0
+constraint project_generation_failures.project_generation_failures_failure_kind_check CHECK ((failure_kind = ANY (ARRAY['dual_current_exact_name_authority'::text, 'dual_current_child_authority'::text]))) local=t inherited=0
+constraint project_generation_failures.project_generation_failures_interpreter_content_hash_check CHECK ((btrim(interpreter_content_hash) <> ''::text)) local=t inherited=0
+constraint project_generation_failures.project_generation_failures_logical_name_id_check CHECK ((btrim(logical_name_id) <> ''::text)) local=t inherited=0
+constraint project_generation_failures.project_generation_failures_pkey PRIMARY KEY (chain_id, target_block_number, target_block_hash, interpreter_content_hash, failure_kind, failure_fingerprint) local=t inherited=0
+constraint project_generation_failures.project_generation_failures_target_block_hash_check CHECK ((btrim(target_block_hash) <> ''::text)) local=t inherited=0
+constraint project_generation_failures.project_generation_failures_target_block_number_check CHECK ((target_block_number >= 0)) local=t inherited=0
+constraint project_redo_child_registration_history.project_redo_child_registration_history_block_number_check CHECK ((block_number >= 0)) local=t inherited=0
+constraint project_redo_child_registration_history.project_redo_child_registration_history_event_kind_check CHECK ((event_kind = ANY (ARRAY['RegistrationReserved'::text, 'RegistrationGranted'::text, 'RegistrationRenewed'::text]))) local=t inherited=0
+constraint project_redo_child_registration_history.project_redo_child_registration_history_logical_name_id_check CHECK ((btrim(logical_name_id) <> ''::text)) local=t inherited=0
+constraint project_redo_child_registration_history.project_redo_child_registration_history_pkey PRIMARY KEY (chain_id, event_identity) local=t inherited=0
+constraint project_redo_expiry_roots.project_redo_expiry_roots_block_number_check CHECK ((block_number >= 0)) local=t inherited=0
+constraint project_redo_expiry_roots.project_redo_expiry_roots_logical_name_id_check CHECK ((btrim(logical_name_id) <> ''::text)) local=t inherited=0
+constraint project_redo_expiry_roots.project_redo_expiry_roots_pkey PRIMARY KEY (chain_id, event_identity) local=t inherited=0
+constraint project_redo_expiry_roots.project_redo_expiry_roots_scope_check CHECK (((logical_name_id IS NOT NULL) OR (resource_id IS NOT NULL))) local=t inherited=0
+constraint project_redo_resolver_evidence.project_redo_resolver_evidence_block_number_check CHECK ((block_number >= 0)) local=t inherited=0
+constraint project_redo_resolver_evidence.project_redo_resolver_evidence_check CHECK (((before_resolver_address IS NOT NULL) OR (after_resolver_address IS NOT NULL))) local=t inherited=0
+constraint project_redo_resolver_evidence.project_redo_resolver_evidence_event_kind_check CHECK ((event_kind = ANY (ARRAY['PermissionChanged'::text, 'ResolverChanged'::text, 'AliasChanged'::text]))) local=t inherited=0
+constraint project_redo_resolver_evidence.project_redo_resolver_evidence_pkey PRIMARY KEY (chain_id, event_identity) local=t inherited=0
+constraint raw_logs.raw_logs_block_number_check CHECK ((block_number >= 0)) local=t inherited=0
+constraint raw_logs.raw_logs_chain_id_block_hash_block_number_fkey FOREIGN KEY (chain_id, block_hash, block_number) REFERENCES chain_lineage(chain_id, block_hash, block_number) local=t inherited=0
+constraint raw_logs.raw_logs_emitting_address_check CHECK ((btrim(emitting_address) <> ''::text)) local=t inherited=0
+constraint raw_logs.raw_logs_log_index_check CHECK ((log_index >= 0)) local=t inherited=0
+constraint raw_logs.raw_logs_pkey PRIMARY KEY (chain_id, block_hash, log_index) local=t inherited=0
+constraint raw_logs.raw_logs_transaction_index_check CHECK ((transaction_index >= 0)) local=t inherited=0
+constraint raw_logs.raw_logs_transaction_position_fkey FOREIGN KEY (chain_id, block_hash, transaction_hash, transaction_index) REFERENCES raw_transactions(chain_id, block_hash, transaction_hash, transaction_index) local=t inherited=0
+constraint raw_receipts.raw_receipts_block_number_check CHECK ((block_number >= 0)) local=t inherited=0
+constraint raw_receipts.raw_receipts_chain_id_block_hash_block_number_fkey FOREIGN KEY (chain_id, block_hash, block_number) REFERENCES chain_lineage(chain_id, block_hash, block_number) local=t inherited=0
+constraint raw_receipts.raw_receipts_chain_id_block_hash_transaction_index_key UNIQUE (chain_id, block_hash, transaction_index) local=t inherited=0
+constraint raw_receipts.raw_receipts_contract_address_check CHECK (((contract_address IS NULL) OR (btrim(contract_address) <> ''::text))) local=t inherited=0
+constraint raw_receipts.raw_receipts_cumulative_gas_used_check CHECK (((cumulative_gas_used IS NULL) OR (cumulative_gas_used >= (0)::numeric))) local=t inherited=0
+constraint raw_receipts.raw_receipts_gas_used_check CHECK (((gas_used IS NULL) OR (gas_used >= (0)::numeric))) local=t inherited=0
+constraint raw_receipts.raw_receipts_pkey PRIMARY KEY (chain_id, block_hash, transaction_hash) local=t inherited=0
+constraint raw_receipts.raw_receipts_transaction_index_check CHECK ((transaction_index >= 0)) local=t inherited=0
+constraint raw_receipts.raw_receipts_transaction_position_fkey FOREIGN KEY (chain_id, block_hash, transaction_hash, transaction_index) REFERENCES raw_transactions(chain_id, block_hash, transaction_hash, transaction_index) local=t inherited=0
+constraint raw_transactions.raw_transactions_block_number_check CHECK ((block_number >= 0)) local=t inherited=0
+constraint raw_transactions.raw_transactions_chain_id_block_hash_block_number_fkey FOREIGN KEY (chain_id, block_hash, block_number) REFERENCES chain_lineage(chain_id, block_hash, block_number) local=t inherited=0
+constraint raw_transactions.raw_transactions_chain_id_block_hash_transaction_index_key UNIQUE (chain_id, block_hash, transaction_index) local=t inherited=0
+constraint raw_transactions.raw_transactions_from_address_check CHECK ((btrim(from_address) <> ''::text)) local=t inherited=0
+constraint raw_transactions.raw_transactions_pkey PRIMARY KEY (chain_id, block_hash, transaction_hash) local=t inherited=0
+constraint raw_transactions.raw_transactions_to_address_check CHECK (((to_address IS NULL) OR (btrim(to_address) <> ''::text))) local=t inherited=0
+constraint raw_transactions.raw_transactions_transaction_hash_check CHECK ((btrim(transaction_hash) <> ''::text)) local=t inherited=0
+constraint raw_transactions.raw_transactions_transaction_index_check CHECK ((transaction_index >= 0)) local=t inherited=0
+constraint raw_transactions.raw_transactions_transaction_position_key UNIQUE (chain_id, block_hash, transaction_hash, transaction_index) local=t inherited=0
+constraint raw_transactions.raw_transactions_value_check CHECK (((value IS NULL) OR (value >= (0)::numeric))) local=t inherited=0
+constraint record_inventory_current.record_inventory_current_canonicality_summary_check CHECK ((jsonb_typeof(canonicality_summary) = 'object'::text)) local=t inherited=0
+constraint record_inventory_current.record_inventory_current_chain_positions_check CHECK ((jsonb_typeof(chain_positions) = 'object'::text)) local=t inherited=0
+constraint record_inventory_current.record_inventory_current_check CHECK ((((support_status = 'supported'::text) AND (unsupported_reason IS NULL)) OR ((support_status = 'unsupported'::text) AND (unsupported_reason IS NOT NULL) AND (btrim(unsupported_reason) <> ''::text)))) local=t inherited=0
+constraint record_inventory_current.record_inventory_current_entries_check CHECK ((jsonb_typeof(entries) = 'array'::text)) local=t inherited=0
+constraint record_inventory_current.record_inventory_current_last_change_check CHECK (((last_change IS NULL) OR (jsonb_typeof(last_change) = 'object'::text))) local=t inherited=0
+constraint record_inventory_current.record_inventory_current_manifest_version_check CHECK ((manifest_version > 0)) local=t inherited=0
+constraint record_inventory_current.record_inventory_current_pkey PRIMARY KEY (resource_id, record_version_boundary_key) local=t inherited=0
+constraint record_inventory_current.record_inventory_current_provenance_check CHECK ((jsonb_typeof(provenance) = 'object'::text)) local=t inherited=0
+constraint record_inventory_current.record_inventory_current_record_version_boundary_check CHECK ((jsonb_typeof(record_version_boundary) = 'object'::text)) local=t inherited=0
+constraint record_inventory_current.record_inventory_current_record_version_boundary_key_check CHECK ((btrim(record_version_boundary_key) <> ''::text)) local=t inherited=0
+constraint record_inventory_current.record_inventory_current_resource_id_fkey FOREIGN KEY (resource_id) REFERENCES resources(resource_id) local=t inherited=0
+constraint record_inventory_current.record_inventory_current_selectors_check CHECK ((jsonb_typeof(selectors) = 'array'::text)) local=t inherited=0
+constraint record_inventory_current.record_inventory_current_support_status_check CHECK ((support_status = ANY (ARRAY['supported'::text, 'unsupported'::text]))) local=t inherited=0
+constraint record_inventory_current.record_inventory_current_unsupported_families_check CHECK ((jsonb_typeof(unsupported_families) = 'array'::text)) local=t inherited=0
+constraint resolution_divergences.resolution_divergences_check CHECK ((indexed_result <> live_result)) local=t inherited=0
+constraint resolution_divergences.resolution_divergences_check1 CHECK ((last_observed_at >= first_observed_at)) local=t inherited=0
+constraint resolution_divergences.resolution_divergences_clearing_time_check CHECK (((cleared_at IS NULL) OR (cleared_at >= last_observed_at))) local=t inherited=0
+constraint resolution_divergences.resolution_divergences_logical_name_id_fkey FOREIGN KEY (logical_name_id) REFERENCES name_surfaces(logical_name_id) local=t inherited=0
+constraint resolution_divergences.resolution_divergences_observed_positions_check CHECK ((jsonb_typeof(observed_positions) = 'object'::text)) local=t inherited=0
+constraint resolution_divergences.resolution_divergences_observed_positions_check1 CHECK ((observed_positions <> '{}'::jsonb)) local=t inherited=0
+constraint resolution_divergences.resolution_divergences_pkey PRIMARY KEY (logical_name_id, resolver_chain_id, resolver_address, request_kind_hash, observed_positions) local=t inherited=0
+constraint resolution_divergences.resolution_divergences_request_kind_check CHECK ((btrim(request_kind) <> ''::text)) local=t inherited=0
+constraint resolution_divergences.resolution_divergences_resolver_address_check CHECK ((btrim(resolver_address) <> ''::text)) local=t inherited=0
+constraint resolution_divergences.resolution_divergences_resolver_chain_id_check CHECK ((btrim(resolver_chain_id) <> ''::text)) local=t inherited=0
+constraint resolver_current.resolver_current_canonicality_summary_check CHECK ((jsonb_typeof(canonicality_summary) = 'object'::text)) local=t inherited=0
+constraint resolver_current.resolver_current_chain_id_check CHECK ((btrim(chain_id) <> ''::text)) local=t inherited=0
+constraint resolver_current.resolver_current_chain_positions_check CHECK ((jsonb_typeof(chain_positions) = 'object'::text)) local=t inherited=0
+constraint resolver_current.resolver_current_check CHECK ((((support_status = 'supported'::text) AND (unsupported_reason IS NULL)) OR ((support_status = 'unsupported'::text) AND (unsupported_reason IS NOT NULL) AND (btrim(unsupported_reason) <> ''::text)))) local=t inherited=0
+constraint resolver_current.resolver_current_declared_summary_check CHECK ((jsonb_typeof(declared_summary) = 'object'::text)) local=t inherited=0
+constraint resolver_current.resolver_current_manifest_version_check CHECK ((manifest_version > 0)) local=t inherited=0
+constraint resolver_current.resolver_current_pkey PRIMARY KEY (chain_id, resolver_address) local=t inherited=0
+constraint resolver_current.resolver_current_provenance_check CHECK ((jsonb_typeof(provenance) = 'object'::text)) local=t inherited=0
+constraint resolver_current.resolver_current_resolver_address_check CHECK ((btrim(resolver_address) <> ''::text)) local=t inherited=0
+constraint resolver_current.resolver_current_support_status_check CHECK ((support_status = ANY (ARRAY['supported'::text, 'unsupported'::text]))) local=t inherited=0
+constraint resources.resources_block_number_check CHECK ((block_number >= 0)) local=t inherited=0
+constraint resources.resources_chain_id_block_hash_block_number_fkey FOREIGN KEY (chain_id, block_hash, block_number) REFERENCES chain_lineage(chain_id, block_hash, block_number) local=t inherited=0
+constraint resources.resources_chain_id_resource_id_key UNIQUE (chain_id, resource_id) local=t inherited=0
+constraint resources.resources_chain_id_token_lineage_id_fkey FOREIGN KEY (chain_id, token_lineage_id) REFERENCES token_lineages(chain_id, token_lineage_id) local=t inherited=0
+constraint resources.resources_pkey PRIMARY KEY (resource_id) local=t inherited=0
+constraint resources.resources_provenance_check CHECK ((jsonb_typeof(provenance) = 'object'::text)) local=t inherited=0
+constraint resources.resources_resource_id_token_lineage_id_key UNIQUE (resource_id, token_lineage_id) local=t inherited=0
+constraint resources.resources_token_lineage_id_key UNIQUE (token_lineage_id) local=t inherited=0
+constraint service_heartbeats.service_heartbeats_chain_id_check CHECK ((btrim(chain_id) <> ''::text)) local=t inherited=0
+constraint service_heartbeats.service_heartbeats_instance_id_check CHECK ((btrim(instance_id) <> ''::text)) local=t inherited=0
+constraint service_heartbeats.service_heartbeats_phase_name_check CHECK ((phase_name = ANY (ARRAY['ingest'::text, 'interpret'::text, 'project'::text, 'verify'::text, 'live'::text]))) local=t inherited=0
+constraint service_heartbeats.service_heartbeats_pkey PRIMARY KEY (service_name, instance_id, chain_id, phase_name) local=t inherited=0
+constraint service_heartbeats.service_heartbeats_service_name_check CHECK ((btrim(service_name) <> ''::text)) local=t inherited=0
+constraint service_heartbeats.service_heartbeats_time_order_check CHECK ((heartbeat_at >= started_at)) local=t inherited=0
+constraint surface_bindings.surface_bindings_authority_arm_check CHECK ((authority_arm = ANY (ARRAY['ens_v1'::text, 'ens_v2'::text, 'basenames'::text]))) local=t inherited=0
+constraint surface_bindings.surface_bindings_binding_kind_check CHECK ((binding_kind = ANY (ARRAY['declared_registry_path'::text, 'linked_subregistry_path'::text, 'resolver_alias_path'::text, 'observed_wildcard_path'::text, 'observed_only'::text]))) local=t inherited=0
+constraint surface_bindings.surface_bindings_block_number_check CHECK ((block_number >= 0)) local=t inherited=0
+constraint surface_bindings.surface_bindings_chain_id_block_hash_block_number_fkey FOREIGN KEY (chain_id, block_hash, block_number) REFERENCES chain_lineage(chain_id, block_hash, block_number) local=t inherited=0
+constraint surface_bindings.surface_bindings_chain_id_logical_name_id_fkey FOREIGN KEY (chain_id, logical_name_id) REFERENCES name_surfaces(chain_id, logical_name_id) local=t inherited=0
+constraint surface_bindings.surface_bindings_chain_id_resource_id_fkey FOREIGN KEY (chain_id, resource_id) REFERENCES resources(chain_id, resource_id) local=t inherited=0
+constraint surface_bindings.surface_bindings_check CHECK (((active_to IS NULL) OR (active_to > active_from))) local=t inherited=0
+constraint surface_bindings.surface_bindings_no_overlap EXCLUDE USING gist (chain_id WITH =, logical_name_id WITH =, authority_arm WITH =, tstzrange(active_from, COALESCE(active_to, 'infinity'::timestamp with time zone), '[)'::text) WITH &&) WHERE ((canonicality_state = ANY (ARRAY['canonical'::canonicality_state, 'safe'::canonicality_state, 'finalized'::canonicality_state]))) local=t inherited=0
+constraint surface_bindings.surface_bindings_pkey PRIMARY KEY (surface_binding_id) local=t inherited=0
+constraint surface_bindings.surface_bindings_provenance_check CHECK ((jsonb_typeof(provenance) = 'object'::text)) local=t inherited=0
+constraint surface_bindings.surface_bindings_surface_binding_id_logical_name_id_resourc_key UNIQUE (surface_binding_id, logical_name_id, resource_id, binding_kind) local=t inherited=0
+constraint token_lineages.token_lineages_block_number_check CHECK ((block_number >= 0)) local=t inherited=0
+constraint token_lineages.token_lineages_chain_id_block_hash_block_number_fkey FOREIGN KEY (chain_id, block_hash, block_number) REFERENCES chain_lineage(chain_id, block_hash, block_number) local=t inherited=0
+constraint token_lineages.token_lineages_chain_id_token_lineage_id_key UNIQUE (chain_id, token_lineage_id) local=t inherited=0
+constraint token_lineages.token_lineages_pkey PRIMARY KEY (token_lineage_id) local=t inherited=0
+constraint token_lineages.token_lineages_provenance_check CHECK ((jsonb_typeof(provenance) = 'object'::text)) local=t inherited=0
 index account_permission_state_current.account_permission_state_current_active_subject_idx CREATE INDEX account_permission_state_current_active_subject_idx ON bigname_phase.account_permission_state_current USING btree (subject, chain_id, authority_contract, owner) WHERE approved valid=t replident=f clustered=f
 index account_permission_state_current.account_permission_state_current_applicability_idx CREATE INDEX account_permission_state_current_applicability_idx ON bigname_phase.account_permission_state_current USING btree (chain_id, authority_contract, owner, subject) WHERE approved valid=t replident=f clustered=f
 index account_permission_state_current.account_permission_state_current_pkey CREATE UNIQUE INDEX account_permission_state_current_pkey ON bigname_phase.account_permission_state_current USING btree (chain_id, authority_kind, authority_contract, owner, subject, relation_kind) valid=t replident=f clustered=f

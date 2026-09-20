@@ -244,7 +244,9 @@ every relation (with its privileges, storage parameters, row-level-security
 flags, replica identity, partitioning and parents), column (type,
 nullability, default, identity, generation, collation, storage, compression,
 statistics target, privileges, and the value rows that predate the column
-read when it is no longer the default), constraint, index (with its validity), view,
+read when it is no longer the default), constraint (with whether it is
+defined locally or inherited, which decides whether `NO INHERIT` removes it),
+index (with its validity), view,
 routine (its full argument list with defaults, execution modes, planner cost
 and rows, privileges and a digest of its body), trigger (with its firing
 state), sequence (its whole range, cache, cycle and owning column), type,
@@ -297,9 +299,12 @@ serialize identically. Each replay also ends by comparing sqlx's
 file, with the SHA-384 of its bytes — and the cluster's role
 configuration — connection defaults, every role attribute (`LOGIN`,
 `SUPERUSER`, `BYPASSRLS`, `CREATEDB`, `CREATEROLE`, `REPLICATION`, `INHERIT`,
-connection limit, expiry), role memberships, and, where the check can read
-`pg_authid`, the password verifiers — against the snapshot taken before the
-first replay. A file that rewrites or deletes earlier bookkeeping, or changes
+connection limit, expiry), role memberships, the default privileges of every
+schema in the database rather than only the phase schema's, and, where the
+check can read `pg_authid`, the password verifiers — against the snapshot taken
+before the first replay. That last read is decided before the statement is
+sent, because PostgreSQL checks the relation privilege when the scan opens and
+the documented external-server login is not a superuser. A file that rewrites or deletes earlier bookkeeping, or changes
 any of that however the statement is spelled, fails even though no catalog
 line moves; the password form is also named by the statement rule, because a
 run that cannot read `pg_authid` sees only one mask for every password.
