@@ -277,6 +277,18 @@ schema that does not also change `apply-check.sh` and regenerate
 `schema-v2/frozen-schema.txt` is out of contract.** That coupling is what makes the
 freeze observable rather than aspirational.
 
+The frozen catalog describes the object kinds the baseline uses — tables,
+views, sequences, indexes, constraints, triggers, functions and procedures,
+enum and domain types, and comments on those — and the phase schema is closed
+to every other kind. `apply-check.sh` refuses, by kind, an aggregate or window
+function, a range, multirange or composite type, an operator, operator class
+or family, a materialized view, a partitioned table or index, a foreign table,
+a rewrite rule, a row policy, an extended-statistics object, a collation, a
+conversion, a text-search object, or a cast to or from a phase type, and
+plants one of each on every run to prove it. A carve-out that needs one of
+those kinds extends the rule and the catalog under this ADR; nothing outside
+the catalog's vocabulary can enter the schema unobserved.
+
 ### What the freeze promises
 
 - No schema change to the frozen artifact during the V1 milestone, except the

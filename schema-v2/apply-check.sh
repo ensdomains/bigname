@@ -276,24 +276,17 @@ SELECT line FROM (
     -- identity is longer, so rows would sort by a truncated key that depends
     -- on the scratch schema's name.
     SELECT 0 AS section, c.relname::text AS a, ''::text AS b,
-           format('relation %s kind=%s persistence=%s populated=%s acl=%s options=%s rls=%s force_rls=%s replica_identity=%s partition_key=%s partition_bound=%s inherits=%s foreign=%s',
-                  c.relname, c.relkind, c.relpersistence, c.relispopulated,
+           format('relation %s kind=%s persistence=%s acl=%s options=%s rls=%s force_rls=%s replica_identity=%s inherits=%s',
+                  c.relname, c.relkind, c.relpersistence,
                   COALESCE(replace(array_to_string(c.relacl, ','), current_user, 'owner'), 'default'),
                   COALESCE((SELECT string_agg(o, ',' ORDER BY o) FROM unnest(c.reloptions) o), '-'),
                   c.relrowsecurity, c.relforcerowsecurity, c.relreplident,
-                  COALESCE(pg_get_partkeydef(c.oid), '-'),
-                  COALESCE(pg_get_expr(c.relpartbound, c.oid), '-'),
                   COALESCE((SELECT string_agg(p.relname, ',' ORDER BY i.inhseqno)
                             FROM pg_inherits i JOIN pg_class p ON p.oid = i.inhparent
-                            WHERE i.inhrelid = c.oid), '-'),
-                  -- A foreign table's server and options live in pg_foreign_table.
-                  COALESCE((SELECT format('server=%s options=%s', srv.srvname,
-                                          COALESCE((SELECT string_agg(o, ',' ORDER BY o) FROM unnest(ft.ftoptions) o), '-'))
-                            FROM pg_foreign_table ft JOIN pg_foreign_server srv ON srv.oid = ft.ftserver
-                            WHERE ft.ftrelid = c.oid), '-')) AS line
+                            WHERE i.inhrelid = c.oid), '-')) AS line
     FROM pg_class c
     JOIN pg_namespace n ON n.oid = c.relnamespace
-    WHERE n.nspname = current_schema() AND c.relkind IN ('r', 'p', 'v', 'm', 'S', 'f')
+    WHERE n.nspname = current_schema() AND c.relkind IN ('r', 'v', 'S')
     UNION ALL
     SELECT 1, c.relname, a.attname,
            format('column %s.%s %s %s default=%s identity=%s generated=%s collation=%s storage=%s compression=%s statistics=%s acl=%s options=%s existing_rows=%s',
@@ -357,7 +350,7 @@ SELECT line FROM (
     WHERE n.nspname = current_schema() AND c.relkind IN ('v', 'm')
     UNION ALL
     SELECT 5, p.proname, pg_get_function_identity_arguments(p.oid),
-           format('routine %s(%s) returns %s kind=%s lang=%s volatile=%s strict=%s leakproof=%s parallel=%s secdef=%s cost=%s rows=%s config=%s acl=%s body=%s sqlbody=%s aggregate=%s',
+           format('routine %s(%s) returns %s kind=%s lang=%s volatile=%s strict=%s leakproof=%s parallel=%s secdef=%s cost=%s rows=%s config=%s acl=%s body=%s sqlbody=%s',
                   p.proname, pg_get_function_arguments(p.oid),
                   pg_get_function_result(p.oid), p.prokind,
                   (SELECT l.lanname FROM pg_language l WHERE l.oid = p.prolang),
@@ -368,19 +361,7 @@ SELECT line FROM (
                   md5(replace(p.prosrc, current_schema(), 'bigname_phase')),
                   -- A SQL-standard body (BEGIN ATOMIC) is stored parsed, with
                   -- prosrc empty; only its printed form tells two apart.
-                  md5(replace(COALESCE(pg_get_function_sqlbody(p.oid), ''), current_schema(), 'bigname_phase')),
-                  -- An aggregate's behavior lives in pg_aggregate, not in these
-                  -- pg_proc fields: two of one signature can differ only there.
-                  COALESCE((SELECT format('kind=%s trans=%s final=%s combine=%s serial=%s deserial=%s mtrans=%s minvtrans=%s mfinal=%s finalextra=%s mfinalextra=%s finalmodify=%s mfinalmodify=%s sortop=%s transtype=%s transspace=%s mtranstype=%s init=%s minit=%s',
-                                          ag.aggkind, ag.aggtransfn::regproc, ag.aggfinalfn::regproc,
-                                          ag.aggcombinefn::regproc, ag.aggserialfn::regproc, ag.aggdeserialfn::regproc,
-                                          ag.aggmtransfn::regproc, ag.aggminvtransfn::regproc, ag.aggmfinalfn::regproc,
-                                          ag.aggfinalextra, ag.aggmfinalextra, ag.aggfinalmodify, ag.aggmfinalmodify,
-                                          COALESCE(NULLIF(ag.aggsortop::regoperator::text, '0'), '-'),
-                                          format_type(ag.aggtranstype, NULL), ag.aggtransspace,
-                                          COALESCE(NULLIF(format_type(ag.aggmtranstype, NULL), '-'), '-'),
-                                          COALESCE(ag.agginitval, '-'), COALESCE(ag.aggminitval, '-'))
-                            FROM pg_aggregate ag WHERE ag.aggfnoid = p.oid), '-'))
+                  md5(replace(COALESCE(pg_get_function_sqlbody(p.oid), ''), current_schema(), 'bigname_phase')))
     FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
     WHERE n.nspname = current_schema()
     UNION ALL
@@ -405,7 +386,7 @@ SELECT line FROM (
     FROM pg_sequences s WHERE s.schemaname = current_schema()
     UNION ALL
     SELECT 8, t.typname, '',
-           format('type %s %s %s base=%s %s collation=%s default=%s check=%s attributes=%s acl=%s range=%s', t.typname, t.typtype,
+           format('type %s %s %s base=%s %s collation=%s default=%s check=%s attributes=%s acl=%s', t.typname, t.typtype,
                   COALESCE((SELECT string_agg(e.enumlabel, ',' ORDER BY e.enumsortorder)
                             FROM pg_enum e WHERE e.enumtypid = t.oid), '-'),
                   CASE WHEN t.typtype = 'd' THEN format_type(t.typbasetype, t.typtypmod) ELSE '-' END,
@@ -419,21 +400,9 @@ SELECT line FROM (
                             FROM pg_constraint con WHERE con.contypid = t.oid), '-'),
                   COALESCE((SELECT string_agg(format('%s %s', a.attname, format_type(a.atttypid, a.atttypmod)), ',' ORDER BY a.attnum)
                             FROM pg_attribute a WHERE a.attrelid = t.typrelid AND a.attnum > 0 AND NOT a.attisdropped), '-'),
-                  COALESCE(replace(array_to_string(t.typacl, ','), current_user, 'owner'), 'default'),
-                  -- A range type's subtype, operator class, collation, canonical and
-                  -- difference functions, and multirange type: two ranges of one name
-                  -- print the same without them.
-                  COALESCE((SELECT format('%s opclass=%s collation=%s canonical=%s subdiff=%s multirange=%s',
-                                          format_type(r.rngsubtype, NULL),
-                                          (SELECT opc.opcname FROM pg_opclass opc WHERE opc.oid = r.rngsubopc),
-                                          COALESCE((SELECT col.collname FROM pg_collation col WHERE col.oid = r.rngcollation), '-'),
-                                          COALESCE(NULLIF(r.rngcanonical::regproc::text, '-'), '-'),
-                                          COALESCE(NULLIF(r.rngsubdiff::regproc::text, '-'), '-'),
-                                          format_type(r.rngmultitypid, NULL))
-                            FROM pg_range r WHERE r.rngtypid = t.oid), '-'))
+                  COALESCE(replace(array_to_string(t.typacl, ','), current_user, 'owner'), 'default'))
     FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace
-    WHERE n.nspname = current_schema() AND t.typtype IN ('e', 'd', 'c', 'r')
-      AND NOT EXISTS (SELECT 1 FROM pg_class c WHERE c.reltype = t.oid AND c.relkind <> 'c')
+    WHERE n.nspname = current_schema() AND t.typtype IN ('e', 'd')
     UNION ALL
     -- A comment is keyed by the commented object's class and full identity
     -- (a routine with its arguments, a constraint with its table), for every
@@ -443,32 +412,6 @@ SELECT line FROM (
     FROM pg_description d
     CROSS JOIN LATERAL pg_identify_object(d.classoid, d.objoid, d.objsubid) io
     WHERE io.schema = current_schema()
-    UNION ALL
-    SELECT 10, c.relname, pol.polname,
-           format('policy %s.%s permissive=%s command=%s roles=%s using=%s check=%s',
-                  c.relname, pol.polname, pol.polpermissive, pol.polcmd,
-                  COALESCE((SELECT string_agg(label, ',' ORDER BY label)
-                            FROM (SELECT CASE WHEN r = 0 THEN 'public'
-                                              WHEN pg_get_userbyid(r) = current_user THEN 'owner'
-                                              ELSE pg_get_userbyid(r) END AS label
-                                  FROM unnest(pol.polroles) r) roles), '-'),
-                  COALESCE(pg_get_expr(pol.polqual, pol.polrelid), '-'),
-                  COALESCE(pg_get_expr(pol.polwithcheck, pol.polrelid), '-'))
-    FROM pg_policy pol JOIN pg_class c ON c.oid = pol.polrelid
-    JOIN pg_namespace n ON n.oid = c.relnamespace
-    WHERE n.nspname = current_schema()
-    UNION ALL
-    SELECT 11, c.relname, r.rulename,
-           format('rule %s.%s %s enabled=%s', c.relname, r.rulename, pg_get_ruledef(r.oid, true), r.ev_enabled)
-    FROM pg_rewrite r JOIN pg_class c ON c.oid = r.ev_class
-    JOIN pg_namespace n ON n.oid = c.relnamespace
-    WHERE n.nspname = current_schema() AND r.rulename <> '_RETURN'
-    UNION ALL
-    SELECT 12, s.stxname, '',
-           format('statistics %s %s target=%s', s.stxname, pg_get_statisticsobjdef(s.oid),
-                  COALESCE(to_jsonb(s) ->> 'stxstattarget', '-'))
-    FROM pg_statistic_ext s JOIN pg_namespace n ON n.oid = s.stxnamespace
-    WHERE n.nspname = current_schema()
     UNION ALL
     -- Default privileges the baseline sets for the schema, and the ones it
     -- sets for the owning role in every schema (defaclnamespace 0), which
@@ -485,87 +428,6 @@ SELECT line FROM (
                                               ';' ORDER BY da.defaclobjtype)
                             FROM pg_default_acl da WHERE da.defaclnamespace = 0 AND da.defaclrole = n.nspowner), '-'))
     FROM pg_namespace n WHERE n.nspname = current_schema()
-    UNION ALL
-    SELECT 14, col.collname, '',
-           format('collation %s provider=%s collate=%s ctype=%s locale=%s deterministic=%s',
-                  col.collname, col.collprovider,
-                  COALESCE(NULLIF(col.collcollate, ''), '-'),
-                  COALESCE(NULLIF(col.collctype, ''), '-'),
-                  COALESCE(to_jsonb(col) ->> 'colllocale', to_jsonb(col) ->> 'colliculocale', '-'),
-                  col.collisdeterministic)
-    FROM pg_collation col JOIN pg_namespace n ON n.oid = col.collnamespace
-    WHERE n.nspname = current_schema()
-    UNION ALL
-    -- A cast is catalogued by its types, not a schema: every cast whose source
-    -- or target type lives here is listed, since an implicit or assignment
-    -- cast changes how production SQL resolves operators and functions.
-    SELECT 15, format_type(ca.castsource, NULL), format_type(ca.casttarget, NULL),
-           format('cast %s -> %s context=%s method=%s function=%s',
-                  format_type(ca.castsource, NULL), format_type(ca.casttarget, NULL),
-                  ca.castcontext, ca.castmethod,
-                  COALESCE((SELECT format('%s(%s)', p.proname, pg_get_function_identity_arguments(p.oid))
-                            FROM pg_proc p WHERE p.oid = ca.castfunc), '-'))
-    FROM pg_cast ca
-    JOIN pg_type st ON st.oid = ca.castsource
-    JOIN pg_type tt ON tt.oid = ca.casttarget
-    JOIN pg_namespace sn ON sn.oid = st.typnamespace
-    JOIN pg_namespace tn ON tn.oid = tt.typnamespace
-    WHERE current_schema() IN (sn.nspname, tn.nspname)
-    UNION ALL
-    -- An operator the schema holds changes how expressions resolve even when
-    -- its function already existed.
-    SELECT 16, o.oprname, format('%s,%s', format_type(o.oprleft, NULL), format_type(o.oprright, NULL)),
-           format('operator %s (%s, %s) returns %s function=%s commutator=%s negator=%s restrict=%s join=%s hashes=%s merges=%s',
-                  o.oprname, format_type(o.oprleft, NULL), format_type(o.oprright, NULL),
-                  format_type(o.oprresult, NULL), o.oprcode::regproc,
-                  COALESCE(NULLIF(o.oprcom::regoperator::text, '0'), '-'),
-                  COALESCE(NULLIF(o.oprnegate::regoperator::text, '0'), '-'),
-                  COALESCE(NULLIF(o.oprrest::regproc::text, '-'), '-'),
-                  COALESCE(NULLIF(o.oprjoin::regproc::text, '-'), '-'),
-                  o.oprcanhash, o.oprcanmerge)
-    FROM pg_operator o JOIN pg_namespace n ON n.oid = o.oprnamespace
-    WHERE n.nspname = current_schema()
-    UNION ALL
-    -- Text-search objects the schema holds: a configuration's parser and
-    -- ordered token-to-dictionary mappings, a dictionary's template and
-    -- options, a parser's and a template's functions.
-    SELECT 17, cfg.cfgname, 'configuration',
-           format('text search configuration %s parser=%s.%s mappings=%s', cfg.cfgname, pn.nspname, prs.prsname,
-                  COALESCE((SELECT string_agg(format('%s:%s', m.maptokentype,
-                                                     (SELECT string_agg(format('%s.%s', dn.nspname, dict.dictname), ',' ORDER BY mm.mapseqno)
-                                                      FROM pg_ts_config_map mm
-                                                      JOIN pg_ts_dict dict ON dict.oid = mm.mapdict
-                                                      JOIN pg_namespace dn ON dn.oid = dict.dictnamespace
-                                                      WHERE mm.mapcfg = cfg.oid AND mm.maptokentype = m.maptokentype)),
-                                              ';' ORDER BY m.maptokentype)
-                            FROM (SELECT DISTINCT maptokentype FROM pg_ts_config_map WHERE mapcfg = cfg.oid) m), '-'))
-    FROM pg_ts_config cfg
-    JOIN pg_namespace n ON n.oid = cfg.cfgnamespace
-    JOIN pg_ts_parser prs ON prs.oid = cfg.cfgparser
-    JOIN pg_namespace pn ON pn.oid = prs.prsnamespace
-    WHERE n.nspname = current_schema()
-    UNION ALL
-    SELECT 17, dict.dictname, 'dictionary',
-           format('text search dictionary %s template=%s.%s options=%s', dict.dictname, tn.nspname, tmpl.tmplname,
-                  COALESCE(dict.dictinitoption, '-'))
-    FROM pg_ts_dict dict
-    JOIN pg_namespace n ON n.oid = dict.dictnamespace
-    JOIN pg_ts_template tmpl ON tmpl.oid = dict.dicttemplate
-    JOIN pg_namespace tn ON tn.oid = tmpl.tmplnamespace
-    WHERE n.nspname = current_schema()
-    UNION ALL
-    SELECT 17, prs.prsname, 'parser',
-           format('text search parser %s start=%s token=%s end=%s headline=%s lextype=%s', prs.prsname,
-                  prs.prsstart::regproc, prs.prstoken::regproc, prs.prsend::regproc,
-                  prs.prsheadline::regproc, prs.prslextype::regproc)
-    FROM pg_ts_parser prs JOIN pg_namespace n ON n.oid = prs.prsnamespace
-    WHERE n.nspname = current_schema()
-    UNION ALL
-    SELECT 17, tmpl.tmplname, 'template',
-           format('text search template %s init=%s lexize=%s', tmpl.tmplname,
-                  tmpl.tmplinit::regproc, tmpl.tmpllexize::regproc)
-    FROM pg_ts_template tmpl JOIN pg_namespace n ON n.oid = tmpl.tmplnamespace
-    WHERE n.nspname = current_schema()
 ) catalog
 -- Byte order: the session collation may weigh punctuation last, and the
 -- scratch schema's name inside an identity would then reorder rows between
@@ -743,19 +605,8 @@ SQL
 assert_frozen_catalog_sees_planted_changes() {
     local planted reason planted_catalog
     local -a planted_changes=(
-        # A schema-local collation named like the catalog one, and a text
-        # column moved onto it: same name, another definition and namespace.
-        'schema-local collation:CREATE COLLATION "C" FROM pg_catalog."C"; ALTER TABLE service_heartbeats ALTER COLUMN phase_name TYPE text COLLATE "C";'
-        # A collation the schema holds that no column uses yet.
-        'unused collation:CREATE COLLATION phase_c FROM pg_catalog."C";'
-        # An implicit INOUT cast on a phase type: no function, no relation,
-        # only a pg_cast row, and it changes operator resolution.
-        'implicit cast:CREATE CAST (canonicality_state AS text) WITH INOUT AS IMPLICIT;'
-        'assignment cast:CREATE CAST (text AS canonicality_state) WITH INOUT AS ASSIGNMENT;'
         # A type privilege: no relation, column or routine row moves.
         'type privilege:REVOKE USAGE ON TYPE canonicality_state FROM PUBLIC;'
-        # An operator over an existing function: no routine row moves.
-        'operator:CREATE OPERATOR === (LEFTARG = text, RIGHTARG = text, FUNCTION = pg_catalog.texteq);'
         # A default privilege for the owning role in every schema: no
         # existing ACL moves.
         'role-global default privilege:ALTER DEFAULT PRIVILEGES GRANT SELECT ON TABLES TO PUBLIC;'
@@ -784,16 +635,9 @@ assert_frozen_catalog_sees_planted_changes() {
     other_catalog="$(mktemp "${TMPDIR:-/tmp}/schema-v2-planted-catalog.XXXXXX")"
     for pair in \
         'SQL-standard routine bodies:CREATE FUNCTION planted_atomic(x integer) RETURNS boolean LANGUAGE sql IMMUTABLE BEGIN ATOMIC SELECT x > 1; END;:CREATE FUNCTION planted_atomic(x integer) RETURNS boolean LANGUAGE sql IMMUTABLE BEGIN ATOMIC SELECT x > 2; END;' \
-        'range subtypes:CREATE TYPE planted_range AS RANGE (SUBTYPE = bigint);:CREATE TYPE planted_range AS RANGE (SUBTYPE = integer);' \
-        'aggregate transition functions:CREATE AGGREGATE planted_agg(bigint) (SFUNC = int8pl, STYPE = bigint, INITCOND = '"'"'1'"'"');:CREATE AGGREGATE planted_agg(bigint) (SFUNC = int8mul, STYPE = bigint, INITCOND = '"'"'1'"'"');' \
         'replica-identity indexes:ALTER TABLE chain_lineage REPLICA IDENTITY USING INDEX chain_lineage_pkey;:ALTER TABLE chain_lineage REPLICA IDENTITY USING INDEX chain_lineage_chain_id_block_hash_block_number_key;' \
-        'extended-statistics targets:CREATE STATISTICS planted_stats (dependencies) ON chain_id, block_number FROM chain_lineage; ALTER STATISTICS planted_stats SET STATISTICS 100;:CREATE STATISTICS planted_stats (dependencies) ON chain_id, block_number FROM chain_lineage; ALTER STATISTICS planted_stats SET STATISTICS 200;' \
         'comments on overloaded routines:CREATE FUNCTION planted_c(x integer) RETURNS integer LANGUAGE sql AS '"'"'SELECT 1'"'"'; CREATE FUNCTION planted_c(x text) RETURNS integer LANGUAGE sql AS '"'"'SELECT 1'"'"'; COMMENT ON FUNCTION planted_c(integer) IS '"'"'first'"'"'; COMMENT ON FUNCTION planted_c(text) IS '"'"'second'"'"';:CREATE FUNCTION planted_c(x integer) RETURNS integer LANGUAGE sql AS '"'"'SELECT 1'"'"'; CREATE FUNCTION planted_c(x text) RETURNS integer LANGUAGE sql AS '"'"'SELECT 1'"'"'; COMMENT ON FUNCTION planted_c(integer) IS '"'"'second'"'"'; COMMENT ON FUNCTION planted_c(text) IS '"'"'first'"'"';' \
-        'rule firing states:CREATE TABLE planted_ruled (a integer); CREATE RULE planted_rule AS ON INSERT TO planted_ruled DO INSTEAD NOTHING;:CREATE TABLE planted_ruled (a integer); CREATE RULE planted_rule AS ON INSERT TO planted_ruled DO INSTEAD NOTHING; ALTER TABLE planted_ruled DISABLE RULE planted_rule;' \
-        'materialized-view population states:CREATE MATERIALIZED VIEW planted_mv AS SELECT 1 AS a WITH DATA;:CREATE MATERIALIZED VIEW planted_mv AS SELECT 1 AS a WITH NO DATA;' \
-        'domain collations:CREATE DOMAIN planted_dom AS text COLLATE "C";:CREATE DOMAIN planted_dom AS text COLLATE "POSIX";' \
-        'text-search mappings:CREATE TEXT SEARCH CONFIGURATION planted_ts (COPY = pg_catalog.simple); ALTER TEXT SEARCH CONFIGURATION planted_ts ALTER MAPPING FOR asciiword WITH pg_catalog.simple;:CREATE TEXT SEARCH CONFIGURATION planted_ts (COPY = pg_catalog.simple); ALTER TEXT SEARCH CONFIGURATION planted_ts ALTER MAPPING FOR asciiword WITH pg_catalog.english_stem;' \
-        'text-search dictionaries:CREATE TEXT SEARCH DICTIONARY planted_dict (TEMPLATE = pg_catalog.simple, StopWords = english);:CREATE TEXT SEARCH DICTIONARY planted_dict (TEMPLATE = pg_catalog.simple);'
+        'domain collations:CREATE DOMAIN planted_dom AS text COLLATE "C";:CREATE DOMAIN planted_dom AS text COLLATE "POSIX";'
     do
         reason="${pair%%:*}"; pair="${pair#*:}"
         frozen_schema_catalog_within "$frozen_schema" "${pair%%;:*};" > "$planted_catalog"
@@ -805,32 +649,136 @@ assert_frozen_catalog_sees_planted_changes() {
         fi
         refusal_assertions_passed=$((refusal_assertions_passed + 1))
     done
-    # A foreign table's server and options: creating a foreign-data wrapper
-    # takes a superuser, which the external-server user need not be, so this
-    # pair runs on the owner's connection where it can and says so where not.
-    if [ "$(printf '\\pset tuples_only on\nSELECT rolsuper FROM pg_roles WHERE rolname = current_user;\n' | run_psql_as_owner | tr -d ' ')" = t ]; then
-        frozen_schema_catalog_within "$frozen_schema" \
-            'CREATE FOREIGN DATA WRAPPER planted_fdw; CREATE SERVER planted_server_a FOREIGN DATA WRAPPER planted_fdw; CREATE FOREIGN TABLE planted_foreign (a integer) SERVER planted_server_a OPTIONS (schema_name '"'"'x'"'"');' owner > "$planted_catalog"
-        frozen_schema_catalog_within "$frozen_schema" \
-            'CREATE FOREIGN DATA WRAPPER planted_fdw; CREATE SERVER planted_server_b FOREIGN DATA WRAPPER planted_fdw; CREATE FOREIGN TABLE planted_foreign (a integer) SERVER planted_server_b OPTIONS (schema_name '"'"'x'"'"');' owner > "$other_catalog"
-        if [ ! -s "$planted_catalog" ] || diff -q "$planted_catalog" "$other_catalog" >/dev/null; then
-            printf '%s\n' "the frozen catalog does not tell two foreign-table servers apart" >&2
-            rm -f -- "$planted_catalog" "$other_catalog"
-            exit 1
-        fi
-        frozen_schema_catalog_within "$frozen_schema" \
-            'CREATE FOREIGN DATA WRAPPER planted_fdw; CREATE SERVER planted_server_a FOREIGN DATA WRAPPER planted_fdw; CREATE FOREIGN TABLE planted_foreign (a integer) SERVER planted_server_a OPTIONS (schema_name '"'"'y'"'"');' owner > "$other_catalog"
-        if diff -q "$planted_catalog" "$other_catalog" >/dev/null; then
-            printf '%s\n' "the frozen catalog does not tell two foreign-table option sets apart" >&2
-            rm -f -- "$planted_catalog" "$other_catalog"
-            exit 1
-        fi
-        refusal_assertions_passed=$((refusal_assertions_passed + 1))
-    else
-        printf '%s\n' "note: the database user is not a superuser, foreign-table catalog proof not run" >&2
-        expected_refusal_assertions=$((expected_refusal_assertions - 1))
-    fi
     rm -f -- "$planted_catalog" "$other_catalog"
+}
+# The phase schema is closed to the object kinds the baseline uses: tables,
+# views, sequences, indexes, constraints, triggers, functions and procedures,
+# enum and domain types, and comments on those. Every other kind PostgreSQL
+# can put in a schema -- aggregate and window functions, range, multirange and
+# composite types, operators, operator classes and families, materialized
+# views, partitioned tables and indexes, foreign tables, rewrite rules, row
+# policies, extended statistics, collations, conversions, text-search objects
+# -- and any cast to or from a phase type is refused outright, named by kind,
+# rather than fingerprinted: the catalog above describes what the schema may
+# hold, and a carve-out that needs a new kind extends this rule under ADR
+# 0007. Refusing is the closed form of the catalog: an object kind it does
+# not describe cannot appear unobserved.
+refused_object_kinds_sql="$(cat <<'KINDS_SQL'
+SELECT kind || ' ' || name AS refused_object FROM (
+    SELECT CASE p.prokind WHEN 'a' THEN 'aggregate' ELSE 'window function' END AS kind, p.proname::text AS name
+    FROM pg_proc p WHERE p.pronamespace = current_schema()::regnamespace AND p.prokind IN ('a', 'w')
+    UNION ALL
+    SELECT CASE t.typtype WHEN 'r' THEN 'range type' WHEN 'm' THEN 'multirange type' ELSE 'composite type' END, t.typname::text
+    FROM pg_type t WHERE t.typnamespace = current_schema()::regnamespace
+      AND (t.typtype IN ('r', 'm') OR (t.typtype = 'c' AND EXISTS (SELECT 1 FROM pg_class c WHERE c.oid = t.typrelid AND c.relkind = 'c')))
+    UNION ALL
+    SELECT 'operator', o.oprname::text FROM pg_operator o WHERE o.oprnamespace = current_schema()::regnamespace
+    UNION ALL
+    SELECT 'operator class', opc.opcname::text FROM pg_opclass opc WHERE opc.opcnamespace = current_schema()::regnamespace
+    UNION ALL
+    SELECT 'operator family', opf.opfname::text FROM pg_opfamily opf WHERE opf.opfnamespace = current_schema()::regnamespace
+    UNION ALL
+    SELECT CASE c.relkind WHEN 'm' THEN 'materialized view' WHEN 'p' THEN 'partitioned table' WHEN 'I' THEN 'partitioned index' WHEN 'f' THEN 'foreign table' ELSE 'relation of kind ' || c.relkind::text END, c.relname::text
+    FROM pg_class c WHERE c.relnamespace = current_schema()::regnamespace AND c.relkind NOT IN ('r', 'v', 'S', 'i', 'c', 't')
+    UNION ALL
+    SELECT 'rule', c.relname || '.' || r.rulename FROM pg_rewrite r JOIN pg_class c ON c.oid = r.ev_class
+    WHERE c.relnamespace = current_schema()::regnamespace AND r.rulename <> '_RETURN'
+    UNION ALL
+    SELECT 'row policy', c.relname || '.' || pol.polname FROM pg_policy pol JOIN pg_class c ON c.oid = pol.polrelid
+    WHERE c.relnamespace = current_schema()::regnamespace
+    UNION ALL
+    SELECT 'extended statistics', st.stxname::text FROM pg_statistic_ext st WHERE st.stxnamespace = current_schema()::regnamespace
+    UNION ALL
+    SELECT 'collation', col.collname::text FROM pg_collation col WHERE col.collnamespace = current_schema()::regnamespace
+    UNION ALL
+    SELECT 'conversion', cv.conname::text FROM pg_conversion cv WHERE cv.connamespace = current_schema()::regnamespace
+    UNION ALL
+    SELECT 'text search configuration', cfg.cfgname::text FROM pg_ts_config cfg WHERE cfg.cfgnamespace = current_schema()::regnamespace
+    UNION ALL
+    SELECT 'text search dictionary', d.dictname::text FROM pg_ts_dict d WHERE d.dictnamespace = current_schema()::regnamespace
+    UNION ALL
+    SELECT 'text search parser', prs.prsname::text FROM pg_ts_parser prs WHERE prs.prsnamespace = current_schema()::regnamespace
+    UNION ALL
+    SELECT 'text search template', tm.tmplname::text FROM pg_ts_template tm WHERE tm.tmplnamespace = current_schema()::regnamespace
+    UNION ALL
+    SELECT 'cast', format_type(ca.castsource, NULL) || ' -> ' || format_type(ca.casttarget, NULL)
+    FROM pg_cast ca JOIN pg_type st ON st.oid = ca.castsource JOIN pg_type tt ON tt.oid = ca.casttarget
+    WHERE current_schema()::regnamespace IN (st.typnamespace, tt.typnamespace)
+) refused ORDER BY (kind || ' ' || name) COLLATE "C";
+KINDS_SQL
+)"
+refused_object_kinds_of() {
+    local schema="$1"
+    {
+        printf '\\pset format unaligned\n\\pset tuples_only on\n'
+        printf 'SET search_path TO "%s";\n' "$schema"
+        printf '%s\n' "$refused_object_kinds_sql"
+    } | run_psql
+}
+assert_schema_holds_only_allowed_kinds() {
+    local schema="$1" label="$2" refused
+    refused="$(refused_object_kinds_of "$schema")"
+    if [ -n "$refused" ]; then
+        printf '%s\n' "$label holds an object kind the phase schema is closed to: ${refused//$'\n'/; }; a carve-out that needs it extends the closed-kind rule in schema-v2/apply-check.sh under ADR 0007" >&2
+        exit 1
+    fi
+}
+# The rule proves itself on every run: one object of each refused kind the
+# login can create is planted in a rolled-back transaction and must be named.
+assert_refused_kinds_are_seen() {
+    local planted kind sql seen
+    for planted in \
+        'aggregate:CREATE AGGREGATE planted_agg(bigint) (SFUNC = int8pl, STYPE = bigint);' \
+        'range type:CREATE TYPE planted_range AS RANGE (SUBTYPE = bigint);' \
+        'multirange type:CREATE TYPE planted_range AS RANGE (SUBTYPE = bigint);' \
+        'composite type:CREATE TYPE planted_row AS (a integer);' \
+        'operator:CREATE OPERATOR === (LEFTARG = text, RIGHTARG = text, FUNCTION = pg_catalog.texteq);' \
+        'materialized view:CREATE MATERIALIZED VIEW planted_mv AS SELECT 1 AS a WITH NO DATA;' \
+        'partitioned table:CREATE TABLE planted_parted (a integer) PARTITION BY LIST (a);' \
+        'rule:CREATE TABLE planted_ruled (a integer); CREATE RULE planted_rule AS ON INSERT TO planted_ruled DO INSTEAD NOTHING;' \
+        'row policy:CREATE POLICY planted_policy ON chain_lineage USING (true);' \
+        'extended statistics:CREATE STATISTICS planted_stats (dependencies) ON chain_id, block_number FROM chain_lineage;' \
+        'collation:CREATE COLLATION planted_c FROM pg_catalog."C";' \
+        'text search configuration:CREATE TEXT SEARCH CONFIGURATION planted_ts (COPY = pg_catalog.simple);' \
+        'text search dictionary:CREATE TEXT SEARCH DICTIONARY planted_dict (TEMPLATE = pg_catalog.simple);' \
+        'cast:CREATE CAST (canonicality_state AS text) WITH INOUT AS IMPLICIT;'
+    do
+        kind="${planted%%:*}"; sql="${planted#*:}"
+        seen="$({
+            printf '\\pset format unaligned\n\\pset tuples_only on\n'
+            printf 'SET search_path TO "%s";\nBEGIN;\n%s\n' "$frozen_schema" "$sql"
+            printf '%s\n' "$refused_object_kinds_sql"
+            printf 'ROLLBACK;\n'
+        } | run_psql)"
+        case "$seen" in
+            "$kind "*|*$'\n'"$kind "*) ;;
+            *) printf '%s\n' "the closed-kind rule does not see a planted $kind (saw: ${seen:-nothing})" >&2; exit 1 ;;
+        esac
+        refusal_assertions_passed=$((refusal_assertions_passed + 1))
+    done
+    # A foreign table and an operator class take a superuser to plant.
+    if [ "$(printf '\\pset tuples_only on\nSELECT rolsuper FROM pg_roles WHERE rolname = current_user;\n' | run_psql_as_owner | tr -d ' ')" = t ]; then
+        for planted in \
+            'foreign table:CREATE FOREIGN DATA WRAPPER planted_fdw; CREATE SERVER planted_server FOREIGN DATA WRAPPER planted_fdw; CREATE FOREIGN TABLE planted_foreign (a integer) SERVER planted_server;' \
+            'operator class:CREATE OPERATOR CLASS planted_opc FOR TYPE int4 USING btree AS OPERATOR 1 <, OPERATOR 3 =, FUNCTION 1 btint4cmp(int4, int4);'
+        do
+            kind="${planted%%:*}"; sql="${planted#*:}"
+            seen="$({
+                printf '\\pset format unaligned\n\\pset tuples_only on\n'
+                printf 'SET search_path TO "%s";\nBEGIN;\n%s\n' "$frozen_schema" "$sql"
+                printf '%s\n' "$refused_object_kinds_sql"
+                printf 'ROLLBACK;\n'
+            } | run_psql_as_owner)"
+            case "$seen" in
+                "$kind "*|*$'\n'"$kind "*) ;;
+                *) printf '%s\n' "the closed-kind rule does not see a planted $kind (saw: ${seen:-nothing})" >&2; exit 1 ;;
+            esac
+            refusal_assertions_passed=$((refusal_assertions_passed + 1))
+        done
+    else
+        printf '%s\n' "note: the database user is not a superuser, the foreign-table and operator-class refusals were not planted" >&2
+        expected_refusal_assertions=$((expected_refusal_assertions - 2))
+    fi
 }
 # The fresh artifact above has no rows, so a schema-migration whose DDL runs
 # only when a table holds data leaves it unchanged there. The scratch schema
@@ -1754,7 +1702,7 @@ migration_application_log="$(
 # Future entries must use basename|one-line reason.
 intentional_phase_migration_skips=()
 refusal_assertions_passed=0
-expected_refusal_assertions=227
+expected_refusal_assertions=230
 predecessor_shape_proof_count=0
 expected_predecessor_shape_proof_count=40
 refusal_probe_seconds=0
@@ -10306,6 +10254,9 @@ assert_uninventoried_migrations_are_schema_qualified
 assert_documented_head_is_newest_migration
 assert_no_migration_below_prior_head
 assert_frozen_schema_fingerprint
+assert_schema_holds_only_allowed_kinds "$frozen_schema" "the fresh baseline"
+assert_schema_holds_only_allowed_kinds "$scratch_schema" "the exercised scratch schema"
+assert_refused_kinds_are_seen
 assert_frozen_catalog_sees_planted_changes
 assert_exercised_schema_matches_frozen
 assert_reviewed_phase_migrations_applied
