@@ -4,7 +4,7 @@ mod mirror;
 
 use sqlx::{Postgres, Transaction};
 
-use crate::{Marker, ProjectError, Result};
+use crate::{Marker, Result};
 
 pub(super) async fn build(
     transaction: &mut Transaction<'_, Postgres>,
@@ -17,15 +17,7 @@ pub(super) async fn build(
     // surfaces, so an earlier event may win when a later event's name has no such surface. Once
     // selected, only that resolver contributes the boundary, selectors, and entries; a selected
     // clear suppresses the inventory row.
-    sqlx::query(BUILD_RECORD_INVENTORY)
-        .bind(chain_id)
-        .bind(target.number)
-        .bind(&target.hash)
-        .execute(&mut **transaction)
-        .await
-        .map_err(|error| {
-            ProjectError::database("failed to build record_inventory_current", error)
-        })?;
+    mirror::build_inventory(transaction, chain_id, target, BUILD_RECORD_INVENTORY).await?;
     mirror::build(transaction, chain_id, target).await?;
     cleared::build(transaction, chain_id, target).await?;
     Ok(())

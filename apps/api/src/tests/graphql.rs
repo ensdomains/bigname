@@ -2178,6 +2178,95 @@ async fn graphql_domain_owner_falls_back_to_registrant_then_zero_address() -> Re
     Ok(())
 }
 
+/// The GraphQL record loader applies the same read-time rule as the other record-inventory
+/// readers: a value hydrated at a block that is later orphaned is not served, and the
+/// event-derived baseline takes its place at once (docs/projections.md).
+#[tokio::test]
+async fn graphql_domain_resolver_uses_the_event_baseline_for_an_orphaned_hydration() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_graphql_compat_fixture(&database).await?;
+    seed_alice_record_inventory(&database).await?;
+    sqlx::query(
+        "INSERT INTO bigname_phase.chain_lineage
+             (chain_id, block_hash, block_number, block_timestamp, canonicality_state)
+         VALUES
+             ('ethereum-mainnet', '0xgraphql-record-hydration', 410,
+              '2026-04-17T00:00:02Z', 'canonical')",
+    )
+    .execute(&database.pool)
+    .await?;
+    let updated = sqlx::query(
+        r#"
+        UPDATE bigname_phase.record_inventory_current
+        SET entries = $1
+        WHERE entries @> '[{"record_key": "contenthash", "value": "0xe30101701220aabbccdd"}]'::jsonb
+        "#,
+    )
+    .bind(json!([
+        {
+            "record_key": "addr:60",
+            "record_family": "addr",
+            "selector_key": "60",
+            "status": "success",
+            "value": "0x00000000000000000000000000000000000000aa",
+        },
+        {
+            "record_key": "contenthash",
+            "record_family": "contenthash",
+            "selector_key": null,
+            "status": "success",
+            "value": "0xe30101701220aabbccdd",
+            "canonical_head_multicall_hydration": {
+                "chain_id": "ethereum-mainnet",
+                "block_number": 410,
+                "block_hash": "0xgraphql-record-hydration",
+                "baseline": {
+                    "record_key": "contenthash",
+                    "record_family": "contenthash",
+                    "selector_key": null,
+                    "status": "unsupported",
+                    "unsupported_reason": "value_not_retained_in_normalized_events",
+                },
+            },
+        },
+    ]))
+    .execute(&database.pool)
+    .await?;
+    assert_eq!(updated.rows_affected(), 1);
+    let query = r#"query Domain($id: ID!) {
+        domain(id: $id) { resolver { contentHash addresses { coinType address } } }
+    }"#;
+
+    let payload = post_graphql(database.app_state(), query, json!({ "id": "alice.eth" })).await?;
+    let resolver = &payload["data"]["domain"]["resolver"];
+    assert_eq!(
+        resolver["contentHash"],
+        json!("0xe30101701220aabbccdd"),
+        "a hydration read from a readable block is served: {payload}"
+    );
+
+    sqlx::query(
+        "UPDATE bigname_phase.chain_lineage SET canonicality_state = 'orphaned'
+         WHERE chain_id = 'ethereum-mainnet' AND block_hash = '0xgraphql-record-hydration'",
+    )
+    .execute(&database.pool)
+    .await?;
+    let payload = post_graphql(database.app_state(), query, json!({ "id": "alice.eth" })).await?;
+    let resolver = &payload["data"]["domain"]["resolver"];
+    assert_eq!(
+        resolver["contentHash"],
+        Value::Null,
+        "an orphaned hydration block must fall back to the event baseline: {payload}"
+    );
+    assert_eq!(
+        resolver["addresses"],
+        json!([{ "coinType": 60, "address": "0x00000000000000000000000000000000000000aa" }]),
+        "entries without a hydration read are unaffected: {payload}"
+    );
+
+    database.cleanup().await
+}
+
 #[tokio::test]
 async fn graphql_domain_resolver_serves_record_inventory_fields() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;

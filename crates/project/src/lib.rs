@@ -5,7 +5,11 @@ mod engine;
 mod error;
 mod hydration;
 mod integrity;
+#[cfg(test)]
+mod profile;
 mod publish;
+#[cfg(test)]
+mod reference;
 mod resolver_address;
 mod scope;
 mod stage;

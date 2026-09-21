@@ -9,7 +9,7 @@ Accepted: 2026-09-11
 > The freeze is effective from the acceptance date, 2026-09-11 — the day the
 > last of that history landed (#885, the canonicality rule of carve-out 3;
 > the pre-acceptance head landed on 2026-09-07). Every schema-migration up to
-> that day predates the freeze; the twenty-four that landed after it, before this
+> that day predates the freeze; the twenty-seven that landed after it, before this
 > ADR merged, are the first breach and are recorded as such below.
 
 ## Context
@@ -104,11 +104,11 @@ The V1 schema contract is the pair:
   the head is advanced here.
 
 The draft named `20260811120200_ens_v2_migration_slice_1_constraints.sql`, which
-was the head when it was written. Sixty-three schema-migrations follow it up to the
+was the head when it was written. Sixty-six schema-migrations follow it up to the
 head named above: 38 landed before acceptance, while this ADR was a draft,
 under the review-only process § Alternatives describes, so none of them is a
 carve-out under this ADR — they entered the frozen artifact by predating the
-freeze — twenty-four landed after acceptance, which the next paragraphs
+freeze — twenty-seven landed after acceptance, which the next paragraphs
 record, and the last is carve-out 6 below, which this ADR lands with itself.
 The head is restated so the frozen artifact is the tree the
 milestone actually builds on. The 38 are not all slice work. Four are the
@@ -143,10 +143,10 @@ is one more independent change:
 exact zero `addr:60` stays absent when a default derivation exists — a
 serving-semantics change, and the last schema-migration before acceptance.
 
-The remaining twenty-four landed after acceptance and before this ADR merged,
+The remaining twenty-seven landed after acceptance and before this ADR merged,
 twelve in #893 (2026-09-16), one each in #897 and #899, two in #907 (all
 2026-09-17), two in #902, two in #905 and one in #912 (2026-09-18), and one
-each in #934, #936 and #939 (2026-09-23), none as a carve-out or with an amendment: under the effective date above they are the first
+each in #934, #936 and #939 and three in #940 (2026-09-23), none as a carve-out or with an amendment: under the effective date above they are the first
 breach of the freeze, recorded here rather than reclassified as history.
 `20260909120000`–`120200_resolver_record_id_events` widen the
 `normalized_events` event-kind CHECK in three steps — a constraint
@@ -184,7 +184,11 @@ for the address history read and checks them in the same file, with a
 concurrent prebuild installer under `ops/address-history-indexes/`; #936's
 `20260923130000` adds a `normalized_events` `(chain_id, block_number DESC
 NULLS LAST)` index for history and event pages read in chain order, checked
-the same way, with its installer under `ops/events-order-index/`; #939's
+the same way, with its installer under `ops/events-order-index/`; #940's
+`20260922010000`, `20260922010100` and `20260923140000` add `normalized_events`
+and `name_surfaces` indexes for Project's scoped node and label reads, the last
+with the `label_hashes` function its GIN index keys on, each checked the same
+way, with an installer under `ops/project-progressive/`; #939's
 `20260923150000` creates the Project-owned `child_registration_events`
 projection table with its CHECKs and two indexes, filled only by the full
 Project rebuild that #939's interpreter content hash rotation requires. Then
@@ -258,7 +262,10 @@ read when it is no longer the default), constraint (with whether it is
 defined locally or inherited, which decides whether `NO INHERIT` removes it),
 index (with its validity), view,
 routine (its full argument list with defaults, execution modes, planner cost
-and rows, privileges and a digest of its body), trigger (with its firing
+and rows, privileges and a digest of its body with runs of whitespace
+collapsed, the comparison `20260923140000_project_name_surfaces_label_indexes.sql`
+itself accepts a body by, since that file and the baseline indent
+`label_hashes` differently), trigger (with its firing
 state), sequence (its whole range, cache, cycle and owning column), type,
 domain, comment and the schema's own privileges, of the
 baseline plus the inventoried schema-migrations, built into a fresh schema on every
@@ -781,10 +788,10 @@ through `apply-check.sh`, but the written contract trailed the schema by three
 weeks. And the miss repeated once more: between acceptance and this ADR's
 merge, #893 landed twelve schema-migrations — a new projection table,
 constraint replacements on populated tables, function replacements — and
-#897, #899, #907, #902, #905, #912, #934, #936 and #939 a thirteenth
-through twenty-fourth — seven index files, two check-only files, a
-constraint replacement with its rename, and a new projection table — under
-the review-only process, with no carve-out and no amendment. They are
+#897, #899, #907, #902, #905, #912, #934, #936, #939 and #940 a thirteenth
+through twenty-seventh — ten index files, one of them also creating the
+function its index keys on, two check-only files, a constraint replacement
+with its rename, and a new projection table — under the review-only process, with no carve-out and no amendment. They are
 inventoried under the frozen artifact and the head advanced to the last of
 them, because the artifact has to be the tree that exists; they are not
 retroactively authorized. From this ADR's merge the process is the one it

@@ -8,10 +8,19 @@ pub(super) async fn include_registry_read_anchors(
     target_block: i64,
 ) -> Result<()> {
     sqlx::query(
-        "INSERT INTO project_scope_resources
+        &super::frontier::query(
+            transaction,
+            "registry_read_anchors",
+            "INSERT INTO project_scope_resources
          SELECT DISTINCT pointer.resource_id
          FROM project_scope_names scope
-         JOIN normalized_events pointer USING (logical_name_id)
+         JOIN LATERAL (
+             SELECT * FROM normalized_events
+             WHERE logical_name_id = scope.logical_name_id AND chain_id = $1 AND block_number <= $2
+               AND event_kind = 'ResolverChanged'
+               AND consumer_visibility = 'activated'
+               AND canonicality_state IN ('canonical', 'safe', 'finalized') OFFSET 0
+         ) pointer ON TRUE
          JOIN chain_lineage lineage
            ON lineage.chain_id = pointer.chain_id
           AND lineage.block_number = pointer.block_number
@@ -27,6 +36,8 @@ pub(super) async fn include_registry_read_anchors(
            AND pointer.canonicality_state IN ('canonical', 'safe', 'finalized')
            AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
          ON CONFLICT DO NOTHING",
+        )
+        .await?,
     )
     .bind(chain_id)
     .bind(target_block)
@@ -158,6 +169,18 @@ pub(super) async fn include_resource_pointers(
     chain_id: &str,
     target_block: i64,
 ) -> Result<()> {
+    #[cfg(test)]
+    if crate::reference::enabled(transaction).await? {
+        return crate::reference::execute(
+            transaction,
+            chain_id,
+            target_block,
+            None,
+            include_str!("../../testdata/sql/scope/resolver_pointers_previous.sql"),
+        )
+        .await;
+    }
+
     // A resource slice rebuild embeds its selected resolver classification in record inventory.
     // Scope both the projected pointer and every readable ResolverChanged resolver of a scoped
     // resource. Redo needs the former to retract losing output, while the latter set lets
@@ -171,7 +194,13 @@ pub(super) async fn include_resource_pointers(
         "INSERT INTO project_scope_resolver_permission_history
          SELECT lower(candidate.resolver_address)
          FROM project_scope_resources scope
-         JOIN normalized_events event USING (resource_id)
+         JOIN LATERAL (
+             SELECT * FROM normalized_events
+             WHERE resource_id = scope.resource_id AND chain_id = $1 AND block_number <= $2
+               AND event_kind = 'PermissionChanged'
+               AND consumer_visibility = 'activated'
+               AND canonicality_state IN ('canonical', 'safe', 'finalized') OFFSET 0
+         ) event ON TRUE
          JOIN chain_lineage lineage
            ON lineage.chain_id = event.chain_id
           AND lineage.block_hash = event.block_hash
@@ -210,8 +239,14 @@ pub(super) async fn include_resource_pointers(
              WHERE inventory.provenance ->> 'chain_id' = $1
              UNION ALL
              SELECT DISTINCT event.after_state ->> 'resolver' AS resolver_address
-             FROM normalized_events event
-             JOIN project_scope_resources scope USING (resource_id)
+             FROM project_scope_resources scope
+             JOIN LATERAL (
+                 SELECT * FROM normalized_events
+                 WHERE resource_id = scope.resource_id AND chain_id = $1 AND block_number <= $2
+                   AND event_kind = 'ResolverChanged'
+                   AND consumer_visibility = 'activated'
+                   AND canonicality_state IN ('canonical', 'safe', 'finalized') OFFSET 0
+             ) event ON TRUE
              JOIN chain_lineage lineage
                ON lineage.chain_id = event.chain_id
               AND lineage.block_hash = event.block_hash

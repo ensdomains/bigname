@@ -124,6 +124,17 @@ before applying the matching schema-migrations. The script fails unless all eigh
 are valid, ready, and have the reviewed definition, and the later validity-check
 schema-migration refuses the same shapes.
 
+Project's scoped node history and progressive mirror dependency traversal read
+`normalized_events` and `name_surfaces` through five indexes. Prebuild them
+concurrently on a large initialized database following
+[their index runbook](../ops/project-progressive/README.md) before applying the
+matching schema-migrations, and run its `validate.sql` before recording the
+release. A deployment that already recorded
+`20260922010100_project_mirror_scope_indexes.sql` (Sepolia) must first update
+that version's recorded checksum, as the runbook's
+[checksum section](../ops/project-progressive/README.md#recorded-checksum-of-20260922010100)
+describes, because the file no longer builds two obsolete label indexes.
+
 Interpret's per-batch ENSv1 [lookahead loader](glossary.md#lookahead-loader)
 reads `normalized_events` through two partial expression indexes. Follow their
 [online index runbook](../ops/v1-lookahead-indexes/README.md) before applying

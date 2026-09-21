@@ -5,7 +5,7 @@
 // asks whether a name in the declaration's namespace uses the address, which is exactly what a
 // pointer proves. See docs/architecture.md § Discovery graph and docs/manifests.md § Resolver
 // creation capture.
-pub(super) const DISCOVERY_CTES: &str = r#"
+const DISCOVERY_CTES: &str = r#"
 active_discovery_admissions AS (
     SELECT lower(address.address) AS resolver_address,
            origin.namespace,
@@ -78,3 +78,25 @@ discovered AS (
      AND declaration.resolver_address = admission.resolver_address
 )
 "#;
+
+// Scope filtering commutes with both discovery arms: each preserves resolver_address, and
+// declaration precedence only compares candidates for that same address. Keep every historical
+// admission/namespace/family row for selected addresses and leave full rebuilds unchanged.
+pub(super) fn discovery_ctes(full_rebuild: bool) -> std::borrow::Cow<'static, str> {
+    if full_rebuild {
+        return std::borrow::Cow::Borrowed(DISCOVERY_CTES);
+    }
+    std::borrow::Cow::Owned(DISCOVERY_CTES.replacen(
+        "WHERE edge.chain_id = $1",
+        "WHERE edge.chain_id = $1
+      AND EXISTS (
+          SELECT 1 FROM project_scope_resolvers scope
+          WHERE lower(scope.resolver_address) = lower(address.address)
+      )
+      AND NOT EXISTS (
+          SELECT 1 FROM project_scope_resolver_passthrough passthrough
+          WHERE lower(passthrough.resolver_address) = lower(address.address)
+      )",
+        1,
+    ))
+}
