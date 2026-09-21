@@ -118,8 +118,13 @@ mismatch remains a genuine lower-head reorg and follows the normal publication
 path.
 
 The `verify` reader may overlap the live loop. It freezes its target at the
-finalized marker while live continues toward the latest head. Every [provider-trusted verification](glossary.md#verification-level) plan completes that finite scan before entering Live, including reference-less Base, Ethereum Mainnet, and Sepolia. A Compared Base plan remains paired unless the chain is configured with `verify-before-live`. Ethereum-head intake derives that setting, so Mainnet and Sepolia remain serial even with a distinct verification-only reference. A mismatch is non-retryable and stops
-only that chain.
+finalized marker while live continues toward the latest head. Every [provider-trusted verification](glossary.md#verification-level) plan completes that finite scan before entering Live, including reference-less Base, Ethereum Mainnet, and Sepolia. A Compared Base plan remains paired unless the chain is configured with `verify-before-live`. Ethereum-head intake derives that setting, so Mainnet and Sepolia remain serial even with a distinct verification-only reference. For an independent RPC reference, a comparison mismatch triggers one fresh
+reference fetch for the same frozen batch and watch filter. Verify logs the first
+mismatch and repeats the complete comparison; it advances only if that comparison
+passes. A second mismatch is non-retryable and stops only that chain. Local Reth
+reference mismatches remain immediately fatal. Transport errors retain their
+existing bounded retry policy; this additional attempt covers inconsistent data
+in otherwise successful RPC responses.
 The frozen target remains protected across resume: every source's head
 publication must retain the same durable finalized block, and operator rewind
 cannot go below the safe head, so neither path can orphan a block inside an

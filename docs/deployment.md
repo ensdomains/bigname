@@ -111,7 +111,7 @@ The resolver-anchored event feed (`GET /v1/events?resolver=`) uses two partial
 schema-migration, beside two `permission_*` resolver-history indexes nothing
 reads; a database that took slice 1 in place lacks all four. Follow their
 [online index runbook](../ops/resolver-history-indexes/README.md) before
-applying `20260918120000_normalized_events_resolver_history_idx.sql` on a
+applying `20260924120000_normalized_events_resolver_history_idx.sql` on a
 large initialized database: applied first, that schema-migration builds each
 missing kept index with an ordinary write-blocking `CREATE INDEX` and drops
 each retired one under the table's exclusive lock. Analyze `normalized_events`
@@ -129,6 +129,11 @@ reads `normalized_events` through two partial expression indexes. Follow their
 [online index runbook](../ops/v1-lookahead-indexes/README.md) before applying
 the matching schema-migration on a large initialized database, and before
 starting a release that contains the loader.
+
+The address history read looks up an address's past names and resources
+through three partial expression indexes on `normalized_events`. Follow their
+[online index runbook](../ops/address-history-indexes/README.md) before applying
+the matching schema-migration on a large initialized database.
 
 The API binds to the configured `BIGNAME_API_HOST` and
 `BIGNAME_API_PORT`; `/healthz` remains its local readiness endpoint. Current
@@ -496,7 +501,8 @@ The interpreter content hash and the manifest-authority fingerprint are independ
 The interpreter hash covers inputs that can change
 Interpret or Project output, including manifest `[[abi.events]]` declarations;
 when it changes, complete the full-history Interpret redo and the stamped
-Project redo before deploying the matching API.
+Project redo before deploying the matching API. A new Project-owned table is
+such a change: see [child registration events](#child-registration-events-in-name-history).
 `read_features` can change the manifest-authority fingerprint while the interpreter content hash remains byte-identical.
 On an initialized chain, that authority change still blocks
 ordinary derived work until the exact token-attested full-range Interpret redo
@@ -649,7 +655,12 @@ downstream redo within that namespace.
 ## Verification mismatch repair
 
 A [stored-history verification](glossary.md#stored-history-verification)
-mismatch stops only the affected chain and is not retried.
+mismatch stops only the affected chain. Against an independent RPC reference
+the runner fetches the same batch once more before stopping, so a single
+`verification reference mismatch; fetching the same batch once more` warning
+followed by normal progress needs no action; the chain stops only when the
+second comparison also mismatches, and that stop is not retried. Against a
+local Reth reference the first mismatch stops the chain.
 `chain_phase_state.last_error` on the `verify` row records the block number,
 field, stored value, and reference value. If verification was paired with live
 follow, the `live` row records the same stop reason. The other configured chain
@@ -724,6 +735,7 @@ GRANT SELECT ON TABLE
     bigname_phase.address_names_current,
     bigname_phase.address_records_current,
     bigname_phase.children_current,
+    bigname_phase.child_registration_events,
     bigname_phase.permissions_current,
     bigname_phase.account_permission_state_current,
     bigname_phase.permissions_current_resource_summary,
@@ -965,6 +977,35 @@ backend can hold several `work_mem` allocations at once, so the worst case a
 server commits to is roughly `max_connections x work_mem x concurrent sort or
 hash nodes`, on top of `shared_buffers`.
 
+## PostgreSQL JIT
+
+Both compose files start PostgreSQL with `jit=off` (`POSTGRES_JIT`, default
+`off`). PostgreSQL's just-in-time compiler turns a statement's expressions into
+native code before running it when the planner's cost estimate crosses
+`jit_above_cost`. That pays off for one long statement over millions of rows.
+Bigname's statements are the opposite shape: many short statements, prepared
+and re-planned per batch, whose costs the planner overestimates because JSONB
+filters, partial expression indexes and temporary tables carry poor statistics.
+The estimate crosses the threshold, the statement compiles for tens of
+milliseconds to seconds, then touches a few dozen rows. Measured on Sepolia:
+one resolver statement took 11.4 s with JIT (about 2,000 compiled functions)
+and 19 ms without; the Project test suites went from more than 30 minutes to
+their normal length when the test databases turned JIT off (#922).
+
+The setting is server-wide and applies to every chain and every role. It is a
+Compose command argument, so changing it means recreating the `postgres`
+container with the server Compose definition and environment
+(`docker compose --env-file .env.server -f docker-compose.server.yml up -d postgres`),
+which restarts every session; stop the phase runner and the API first, as for
+any PostgreSQL restart. To
+use JIT for one deliberately heavy statement, run `SET LOCAL jit = on` inside
+that transaction rather than turning it on globally.
+
+CI keeps JIT on for the API test job on purpose: the API plan tests assert
+that a page or count plan stays below the JIT threshold, which is a bound on
+the plan's cost, and they can only observe it with JIT enabled. That guard is
+independent of the production setting.
+
 ## Owner-ratified Sepolia source-role rollout
 
 Do not begin this destructive rollout until the Issue #411 part-2 release
@@ -1059,3 +1100,20 @@ this collision. Keep the existing read-only data mounts and writable MDBX lock
 file; do not disable MDBX locking to work around it.
 
 This build rotates the [interpreter content hash](glossary.md#interpreter-content-hash), for every chain and whether or not direct reads are used: the Reth v2.5.0 update moves the seven Alloy crates the hash fingerprints from 1.5.7 to 1.7.3 in `Cargo.lock` (`crates/content-hash/src/lockfile.rs`), and the Rust 1.98 update edits `crates/interpret/src/recompute.rs`, a hashed source file (`crates/content-hash/src/compute.rs`). An existing deployment must therefore finish the full-history Interpret redo and the Project redo it installs, as [interpretation replay](storage.md#interpretation-replay) requires for any rotation, before the matching API serves; follow the runbook's [planned migration and fingerprint boundary](runbooks/production-docker.md#planned-migration-and-fingerprint-boundary). A full Interpret replay that is already required for another reason discharges this obligation when it runs under the new binary; it must not be bypassed. The source transport change itself neither requires nor performs that redo.
+
+### Child registration events in name history
+
+The build that adds name history's
+[`include=child_registrations`](api-v2-routes.md#direct-child-registrations-includechild_registrations)
+adds the Project-owned table
+[`child_registration_events`](projections.md#child-registration-events) and
+changes `crates/project/src`, so it rotates the
+[interpreter content hash](glossary.md#interpreter-content-hash) for every
+chain. Schema-migration `20260923150000_child_registration_events.sql` creates
+the empty table on an existing phase schema, and `init-schema` installs it on a
+fresh one. The table fills only when Project rebuilds, so an existing
+deployment applies the schema-migration, reapplies the API role's SELECT grant
+above, and finishes the full-history Interpret redo and the Project redo it
+installs before the matching API serves, as for any rotation. Until then the
+API refuses to serve the new build's snapshots, as described above, so no
+request sees an empty table as a complete answer.

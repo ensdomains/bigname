@@ -5,7 +5,9 @@ use tracing::error;
 
 use crate::AppState;
 use crate::v2::{
-    Status, V2Error, V2Result, load_subregistry_refs, registries::snapshot_block_for_chain,
+    Status, V2Error, V2Result, load_subregistry_refs,
+    name_records_inventory::{abi_input_for_identity_row, load_abi_content_types},
+    registries::snapshot_block_for_chain,
 };
 
 use super::{
@@ -57,17 +59,24 @@ pub(super) async fn render_name_lookup_results(
         subregistries.extend(load_subregistry_refs(&state.pool, &names, Some(block)).await?);
     }
 
+    // Every served inventory container, by input, for one batched ABI read after rendering.
+    let mut abi_rows = Vec::new();
     for input in inputs {
         let (status, record) = match input.lookup.as_ref() {
             None => (Status::InvalidName, None),
             Some(lookup) => match records.get(&lookup.logical_name_id) {
-                Some(record) => {
+                Some(row) => {
                     let mut record = match profile {
-                        LookupProfile::Feed => build_forward_feed_record(record),
-                        LookupProfile::Detail => build_forward_detail_record(record, include),
+                        LookupProfile::Feed => build_forward_feed_record(row),
+                        LookupProfile::Detail => build_forward_detail_record(row, include),
                     }?;
                     if record.status != Status::Unsupported {
                         record.subregistry = subregistries.get(&lookup.logical_name_id).cloned();
+                    }
+                    if record.inventory.is_some()
+                        && let Some(inventory) = row.record_inventory_current.as_ref()
+                    {
+                        abi_rows.push((input.index, inventory));
                     }
                     (record.status, Some(record))
                 }
@@ -85,6 +94,20 @@ pub(super) async fn render_name_lookup_results(
             records: None,
             page: None,
         });
+    }
+    let inputs = abi_rows
+        .iter()
+        .map(|(_, inventory)| abi_input_for_identity_row(inventory))
+        .collect::<Vec<_>>();
+    let answers = load_abi_content_types(&state.pool, &inputs).await?;
+    for ((index, _), answer) in abi_rows.into_iter().zip(answers) {
+        if let Some(inventory) = results[index]
+            .as_mut()
+            .and_then(|result| result.record.as_mut())
+            .and_then(|record| record.inventory.as_mut())
+        {
+            inventory.set_abi_content_types(answer);
+        }
     }
     Ok(())
 }

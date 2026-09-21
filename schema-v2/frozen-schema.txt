@@ -7,6 +7,7 @@ relation chain_header_audit kind=r persistence=p acl=default options=- toast_opt
 relation chain_heads kind=r persistence=p acl=default options=- toast_options=- rls=f force_rls=f replica_identity=d inherits=-
 relation chain_lineage kind=r persistence=p acl=default options=- toast_options=- rls=f force_rls=f replica_identity=d inherits=-
 relation chain_phase_state kind=r persistence=p acl=default options=- toast_options=- rls=f force_rls=f replica_identity=d inherits=-
+relation child_registration_events kind=r persistence=p acl=default options=- toast_options=- rls=f force_rls=f replica_identity=d inherits=-
 relation children_current kind=r persistence=p acl=default options=- toast_options=- rls=f force_rls=f replica_identity=d inherits=-
 relation contract_instance_addresses kind=r persistence=p acl=default options=- toast_options=- rls=f force_rls=f replica_identity=d inherits=-
 relation contract_instance_addresses_contract_instance_address_id_seq kind=S persistence=p acl=default options=- toast_options=- rls=f force_rls=f replica_identity=n inherits=-
@@ -162,6 +163,22 @@ column chain_phase_state.target_block_hash text null local=t inherited=0 default
 column chain_phase_state.target_block_number bigint null local=t inherited=0 default=- identity=- generated=- collation=- storage=p compression=- statistics=default acl=default options=- existing_rows=default
 column chain_phase_state.updated_at timestamp with time zone not null local=t inherited=0 default=now() identity=- generated=- collation=- storage=p compression=- statistics=default acl=default options=- existing_rows=default
 column chain_phase_state.verification_level text null local=t inherited=0 default=- identity=- generated=- collation=pg_catalog.default storage=x compression=- statistics=default acl=default options=- existing_rows=default
+column child_registration_events.block_hash text not null local=t inherited=0 default=- identity=- generated=- collation=pg_catalog.default storage=x compression=- statistics=default acl=default options=- existing_rows=default
+column child_registration_events.block_number bigint not null local=t inherited=0 default=- identity=- generated=- collation=- storage=p compression=- statistics=default acl=default options=- existing_rows=default
+column child_registration_events.chain_id text not null local=t inherited=0 default=- identity=- generated=- collation=pg_catalog.default storage=x compression=- statistics=default acl=default options=- existing_rows=default
+column child_registration_events.child_logical_name_id text not null local=t inherited=0 default=- identity=- generated=- collation=pg_catalog.default storage=x compression=- statistics=default acl=default options=- existing_rows=default
+column child_registration_events.event_identity text not null local=t inherited=0 default=- identity=- generated=- collation=pg_catalog.default storage=x compression=- statistics=default acl=default options=- existing_rows=default
+column child_registration_events.event_kind text not null local=t inherited=0 default=- identity=- generated=- collation=pg_catalog.default storage=x compression=- statistics=default acl=default options=- existing_rows=default
+column child_registration_events.inserted_at timestamp with time zone not null local=t inherited=0 default=now() identity=- generated=- collation=- storage=p compression=- statistics=default acl=default options=- existing_rows=default
+column child_registration_events.last_recomputed_at timestamp with time zone not null local=t inherited=0 default=now() identity=- generated=- collation=- storage=p compression=- statistics=default acl=default options=- existing_rows=default
+column child_registration_events.log_order_key bigint not null local=t inherited=0 default=- identity=- generated=- collation=- storage=p compression=- statistics=default acl=default options=- existing_rows=default
+column child_registration_events.manifest_version bigint not null local=t inherited=0 default=- identity=- generated=- collation=- storage=p compression=- statistics=default acl=default options=- existing_rows=default
+column child_registration_events.namespace text not null local=t inherited=0 default=- identity=- generated=- collation=pg_catalog.default storage=x compression=- statistics=default acl=default options=- existing_rows=default
+column child_registration_events.parent_logical_name_id text not null local=t inherited=0 default=- identity=- generated=- collation=pg_catalog.default storage=x compression=- statistics=default acl=default options=- existing_rows=default
+column child_registration_events.provenance jsonb not null local=t inherited=0 default='{}'::jsonb identity=- generated=- collation=- storage=x compression=- statistics=default acl=default options=- existing_rows=default
+column child_registration_events.target_block_hash text not null local=t inherited=0 default=- identity=- generated=- collation=pg_catalog.default storage=x compression=- statistics=default acl=default options=- existing_rows=default
+column child_registration_events.target_block_number bigint not null local=t inherited=0 default=- identity=- generated=- collation=- storage=p compression=- statistics=default acl=default options=- existing_rows=default
+column child_registration_events.transaction_order_key text not null local=t inherited=0 default=- identity=- generated=- collation=pg_catalog.default storage=x compression=- statistics=default acl=default options=- existing_rows=default
 column children_current.canonicality_summary jsonb not null local=t inherited=0 default='{}'::jsonb identity=- generated=- collation=- storage=x compression=- statistics=default acl=default options=- existing_rows=default
 column children_current.chain_positions jsonb not null local=t inherited=0 default='{}'::jsonb identity=- generated=- collation=- storage=x compression=- statistics=default acl=default options=- existing_rows=default
 column children_current.child_logical_name_id text not null local=t inherited=0 default=- identity=- generated=- collation=pg_catalog.default storage=x compression=- statistics=default acl=default options=- existing_rows=default
@@ -697,6 +714,20 @@ constraint chain_phase_state.chain_phase_state_target_block_number_check CHECK (
 constraint chain_phase_state.chain_phase_state_unconfigured_settlement_check CHECK (((settled_while_unconfigured IS NULL) OR settled_while_unconfigured)) local=t inherited=0
 constraint chain_phase_state.chain_phase_state_verification_level_check CHECK (((verification_level IS NULL) OR (verification_level = ANY (ARRAY['quick_synced'::text, 'cross_checked'::text, 'node_checked'::text])))) local=t inherited=0
 constraint chain_phase_state.chain_phase_state_verification_phase_check CHECK (((verification_level IS NULL) OR (phase_name = 'verify'::text))) local=t inherited=0
+constraint child_registration_events.child_registration_events_block_hash_check CHECK ((btrim(block_hash) <> ''::text)) local=t inherited=0
+constraint child_registration_events.child_registration_events_block_number_check CHECK ((block_number >= 0)) local=t inherited=0
+constraint child_registration_events.child_registration_events_chain_id_check CHECK ((btrim(chain_id) <> ''::text)) local=t inherited=0
+constraint child_registration_events.child_registration_events_check CHECK ((parent_logical_name_id <> child_logical_name_id)) local=t inherited=0
+constraint child_registration_events.child_registration_events_check1 CHECK ((target_block_number >= block_number)) local=t inherited=0
+constraint child_registration_events.child_registration_events_event_identity_check CHECK ((btrim(event_identity) <> ''::text)) local=t inherited=0
+constraint child_registration_events.child_registration_events_event_kind_check CHECK ((event_kind = ANY (ARRAY['RegistrationGranted'::text, 'LabelRegistered'::text]))) local=t inherited=0
+constraint child_registration_events.child_registration_events_log_order_key_check CHECK ((log_order_key >= '-1'::integer)) local=t inherited=0
+constraint child_registration_events.child_registration_events_manifest_version_check CHECK ((manifest_version >= 0)) local=t inherited=0
+constraint child_registration_events.child_registration_events_namespace_check CHECK ((btrim(namespace) <> ''::text)) local=t inherited=0
+constraint child_registration_events.child_registration_events_pkey PRIMARY KEY (parent_logical_name_id, event_identity) local=t inherited=0
+constraint child_registration_events.child_registration_events_provenance_check CHECK ((jsonb_typeof(provenance) = 'object'::text)) local=t inherited=0
+constraint child_registration_events.child_registration_events_same_namespace_check CHECK ((starts_with(parent_logical_name_id, (namespace || ':'::text)) AND starts_with(child_logical_name_id, (namespace || ':'::text)))) local=t inherited=0
+constraint child_registration_events.child_registration_events_target_block_hash_check CHECK ((btrim(target_block_hash) <> ''::text)) local=t inherited=0
 constraint children_current.children_current_canonicality_summary_check CHECK ((jsonb_typeof(canonicality_summary) = 'object'::text)) local=t inherited=0
 constraint children_current.children_current_chain_positions_check CHECK ((jsonb_typeof(chain_positions) = 'object'::text)) local=t inherited=0
 constraint children_current.children_current_check CHECK ((parent_logical_name_id <> child_logical_name_id)) local=t inherited=0
@@ -1118,6 +1149,9 @@ index chain_lineage.chain_lineage_readable_height_idx CREATE UNIQUE INDEX chain_
 index chain_lineage.chain_lineage_state_idx CREATE INDEX chain_lineage_state_idx ON bigname_phase.chain_lineage USING btree (chain_id, canonicality_state, block_number DESC) valid=t replident=f clustered=f
 index chain_phase_state.chain_phase_state_pkey CREATE UNIQUE INDEX chain_phase_state_pkey ON bigname_phase.chain_phase_state USING btree (chain_id, phase_name) valid=t replident=f clustered=f
 index chain_phase_state.chain_phase_state_status_idx CREATE INDEX chain_phase_state_status_idx ON bigname_phase.chain_phase_state USING btree (phase_name, phase_status, updated_at) valid=t replident=f clustered=f
+index child_registration_events.child_registration_events_chain_block_idx CREATE INDEX child_registration_events_chain_block_idx ON bigname_phase.child_registration_events USING btree (chain_id, block_number) valid=t replident=f clustered=f
+index child_registration_events.child_registration_events_parent_history_idx CREATE INDEX child_registration_events_parent_history_idx ON bigname_phase.child_registration_events USING btree (parent_logical_name_id, chain_id, block_number, block_hash, transaction_order_key, log_order_key, event_identity) valid=t replident=f clustered=f
+index child_registration_events.child_registration_events_pkey CREATE UNIQUE INDEX child_registration_events_pkey ON bigname_phase.child_registration_events USING btree (parent_logical_name_id, event_identity) valid=t replident=f clustered=f
 index children_current.children_current_labelhash_idx CREATE INDEX children_current_labelhash_idx ON bigname_phase.children_current USING btree (namespace, lower(labelhash), parent_logical_name_id, child_logical_name_id) valid=t replident=f clustered=f
 index children_current.children_current_namehash_idx CREATE INDEX children_current_namehash_idx ON bigname_phase.children_current USING btree (namespace, namehash) valid=t replident=f clustered=f
 index children_current.children_current_parent_idx CREATE INDEX children_current_parent_idx ON bigname_phase.children_current USING btree (parent_logical_name_id, surface_class, namehash, child_logical_name_id) valid=t replident=f clustered=f
@@ -1173,6 +1207,9 @@ index name_surfaces.name_surfaces_chain_id_logical_name_id_key CREATE UNIQUE IND
 index name_surfaces.name_surfaces_hash_idx CREATE UNIQUE INDEX name_surfaces_hash_idx ON bigname_phase.name_surfaces USING btree (namespace, namehash) valid=t replident=f clustered=f
 index name_surfaces.name_surfaces_pkey CREATE UNIQUE INDEX name_surfaces_pkey ON bigname_phase.name_surfaces USING btree (logical_name_id) valid=t replident=f clustered=f
 index name_surfaces.name_surfaces_visibility_idx CREATE INDEX name_surfaces_visibility_idx ON bigname_phase.name_surfaces USING btree (namespace, visibility_state, namehash) valid=t replident=f clustered=f
+index normalized_events.normalized_events_address_registrant_match_idx CREATE INDEX normalized_events_address_registrant_match_idx ON bigname_phase.normalized_events USING btree (lower(COALESCE((after_state ->> 'registrant'::text), ''::text))) WHERE ((event_kind = 'RegistrationGranted'::text) AND (consumer_visibility = 'activated'::text) AND (canonicality_state = ANY (ARRAY['canonical'::canonicality_state, 'safe'::canonicality_state, 'finalized'::canonicality_state]))) valid=t replident=f clustered=f
+index normalized_events.normalized_events_address_registry_owner_match_idx CREATE INDEX normalized_events_address_registry_owner_match_idx ON bigname_phase.normalized_events USING btree (lower(COALESCE((after_state ->> 'owner'::text), ''::text))) WHERE ((event_kind = 'AuthorityTransferred'::text) AND (consumer_visibility = 'activated'::text) AND (canonicality_state = ANY (ARRAY['canonical'::canonicality_state, 'safe'::canonicality_state, 'finalized'::canonicality_state]))) valid=t replident=f clustered=f
+index normalized_events.normalized_events_address_token_holder_match_idx CREATE INDEX normalized_events_address_token_holder_match_idx ON bigname_phase.normalized_events USING btree (lower(COALESCE((after_state ->> 'to'::text), ''::text))) WHERE ((event_kind = 'TokenControlTransferred'::text) AND (consumer_visibility = 'activated'::text) AND (canonicality_state = ANY (ARRAY['canonical'::canonicality_state, 'safe'::canonicality_state, 'finalized'::canonicality_state]))) valid=t replident=f clustered=f
 index normalized_events.normalized_events_basenames_record_node_resolver_idx CREATE INDEX normalized_events_basenames_record_node_resolver_idx ON bigname_phase.normalized_events USING btree (chain_id, lower((after_state ->> 'node'::text)), lower(COALESCE(NULLIF((after_state ->> 'resolver'::text), ''::text), NULLIF((raw_fact_ref ->> 'emitting_address'::text), ''::text))), block_number, transaction_index, log_index, normalized_event_id) WHERE ((logical_name_id IS NULL) AND (source_family = 'basenames_base_resolver'::text) AND (event_kind = ANY (ARRAY['RecordChanged'::text, 'RecordVersionChanged'::text])) AND (consumer_visibility = 'activated'::text) AND (canonicality_state = ANY (ARRAY['canonical'::canonicality_state, 'safe'::canonicality_state, 'finalized'::canonicality_state]))) valid=t replident=f clustered=f
 index normalized_events.normalized_events_block_idx CREATE INDEX normalized_events_block_idx ON bigname_phase.normalized_events USING btree (chain_id, block_hash, transaction_index, log_index, normalized_event_id) WHERE (block_hash IS NOT NULL) valid=t replident=f clustered=f
 index normalized_events.normalized_events_chain_block_number_idx CREATE INDEX normalized_events_chain_block_number_idx ON bigname_phase.normalized_events USING btree (chain_id, block_number) valid=t replident=f clustered=f
@@ -1414,6 +1451,25 @@ comment table column bigname_phase.chain_phase_state.target_block_hash This valu
 comment table column bigname_phase.chain_phase_state.target_block_number This value is the phase target block height.
 comment table column bigname_phase.chain_phase_state.updated_at This time records the latest state change.
 comment table column bigname_phase.chain_phase_state.verification_level This value states how source data was checked.
+comment table bigname_phase.child_registration_events Project-owned historical membership of direct child registration events: one row per parent name and registration event of a name exactly one label below it. Rebuilt from canonical normalized events and name surfaces; event payloads stay in normalized_events.
+comment table column bigname_phase.child_registration_events.block_hash This value is the event block hash, a history order key and the readable-lineage check.
+comment table column bigname_phase.child_registration_events.block_number This value is the event block height, the first history order key.
+comment table column bigname_phase.child_registration_events.chain_id This value identifies the chain of the event and of the child surface.
+comment table column bigname_phase.child_registration_events.child_logical_name_id This value identifies the child name the event carried when it happened.
+comment table column bigname_phase.child_registration_events.event_identity This value identifies the registration event in normalized_events; name history joins the event by it.
+comment table column bigname_phase.child_registration_events.event_kind This value is the stored registration kind of the event.
+comment table column bigname_phase.child_registration_events.inserted_at This Project-owned maintenance time records the first insertion of the row.
+comment table column bigname_phase.child_registration_events.last_recomputed_at This Project-owned maintenance time records the latest rebuild of the row.
+comment table column bigname_phase.child_registration_events.log_order_key This value is the event log index, or -1 when the event has none, so it orders as history orders a missing index.
+comment table column bigname_phase.child_registration_events.manifest_version This value records the manifest version that admitted the event.
+comment table column bigname_phase.child_registration_events.namespace This value identifies the name system shared by the parent and the child.
+comment table column bigname_phase.child_registration_events.parent_logical_name_id This value identifies the parent name: the event namespace and the namehash of the child surface labels without its first label.
+comment table column bigname_phase.child_registration_events.provenance This object cites the normalized event row and source family the membership was derived from.
+comment table column bigname_phase.child_registration_events.target_block_hash This value identifies the Project target hash of the publication that wrote the row.
+comment table column bigname_phase.child_registration_events.target_block_number This value identifies the Project target height of the publication that wrote the row.
+comment table column bigname_phase.child_registration_events.transaction_order_key This value is the event transaction hash, or an empty string when the event has none, so it orders as history orders a missing hash.
+comment index bigname_phase.child_registration_events_chain_block_idx This bounded index lets Project replace one chain's rows by block range.
+comment index bigname_phase.child_registration_events_parent_history_idx This bounded index serves one parent's child registrations in history order on one chain, in both directions. Every key is a bounded identifier or hash.
 comment table bigname_phase.children_current This table stores current direct children. Verbatim child-name and label bytes are present when a preimage was observed on chain and are null when only topology hashes are known.
 comment table column bigname_phase.children_current.canonicality_summary This object summarizes the selected block states.
 comment table column bigname_phase.children_current.chain_positions This object identifies the selected chain positions.

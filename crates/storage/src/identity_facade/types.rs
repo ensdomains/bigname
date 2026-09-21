@@ -37,6 +37,7 @@ pub struct IdentityNameCurrentRow {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IdentityRecordInventoryRow {
     pub resource_id: Uuid,
+    pub record_version_boundary_key: String,
     pub support_status: String,
     pub unsupported_reason: Option<String>,
     pub selectors: Value,

@@ -404,6 +404,18 @@ logs, and a resource-scoped `PermissionChanged` for the NameWrapper per-token
 `Approval`; declared registrar and resolver approvals still decode without
 normalized output.
 
+## Direct child registration
+
+a registration row of a name exactly one label below another name, in the same
+namespace and on the same chain, as the event attributed it when it happened.
+Name history lists these rows for the parent with
+[`include=child_registrations`](api-v2-routes.md#direct-child-registrations-includechild_registrations).
+The rule is historical: a child released since, or registered under a registry
+the parent no longer links, still counts. It is a stored grant row, not one
+registration action, so one registration can contribute several rows. The
+Project table [`child_registration_events`](projections.md#child-registration-events)
+records which events qualify for which parent.
+
 ## Discovery graph / discovery edge
 
 the time-versioned indexability and
@@ -1847,8 +1859,9 @@ deterministic baseline, not an input to deterministic replay.
 The closed set of Project-owned maintenance fields is `last_recomputed_at` on
 every projection
 table except `primary_names_current`; `inserted_at` on `name_current`,
-`children_current`, `permissions_current`, `record_inventory_current`,
-`resolver_current`, `address_names_current`, and `address_records_current`; and
+`children_current`, `permissions_current`, `account_permission_state_current`,
+`record_inventory_current`, `resolver_current`, `address_names_current`,
+`address_records_current`, and `child_registration_events`; and
 `reverse_hydration_attempted_block_number`,
 `reverse_hydration_attempted_block_hash`, and
 `reverse_hydration_attempt_ordinal` on `primary_names_current`. The Project
@@ -1942,6 +1955,16 @@ producer, it will never appear in a response. Current examples are the
 should say so where it is documented, so a reader does not mistake it for
 coverage. Don't add fixtures or exemplars that make reserved surface look
 produced.
+
+## Representative name
+
+the one name that stands for a group of rows when an address-name
+read collapses several names into one row, as `dedupe=registration` does for
+names that share a registration resource. It is the group member whose name
+text sorts first, with ties broken by namespace and namehash. The row's name
+fields, counts, and primary-name flag describe that member; fields defined as
+group facets, such as `relations` or `resolutions`, still cover every member.
+See [`GET /v1/addresses/{address}/names`](api-v2-routes.md#get-v1addressesaddressnames).
 
 ## Resolver profile
 

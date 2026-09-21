@@ -9,7 +9,7 @@ Accepted: 2026-09-11
 > The freeze is effective from the acceptance date, 2026-09-11 — the day the
 > last of that history landed (#885, the canonicality rule of carve-out 3;
 > the pre-acceptance head landed on 2026-09-07). Every schema-migration up to
-> that day predates the freeze; the twenty-one that landed after it, before this
+> that day predates the freeze; the twenty-three that landed after it, before this
 > ADR merged, are the first breach and are recorded as such below.
 
 ## Context
@@ -97,18 +97,18 @@ The V1 schema contract is the pair:
 
 - the `schema-v2/baseline/` tree, and
 - the schema-migration head at
-  `migrations/20260918120000_normalized_events_resolver_history_idx.sql`.
+  `migrations/20260924120000_normalized_events_resolver_history_idx.sql`.
   `schema-v2/apply-check.sh` asserts on every run that this line and the one
   in [`storage.md`](../storage.md) name the newest file in `migrations/`, so a
   merge that brings a later schema-migration fails the conformance job until
   the head is advanced here.
 
 The draft named `20260811120200_ens_v2_migration_slice_1_constraints.sql`, which
-was the head when it was written. Sixty schema-migrations follow it up to the
+was the head when it was written. Sixty-two schema-migrations follow it up to the
 head named above: 38 landed before acceptance, while this ADR was a draft,
 under the review-only process § Alternatives describes, so none of them is a
 carve-out under this ADR — they entered the frozen artifact by predating the
-freeze — twenty-one landed after acceptance, which the next paragraphs
+freeze — twenty-three landed after acceptance, which the next paragraphs
 record, and the last is carve-out 6 below, which this ADR lands with itself.
 The head is restated so the frozen artifact is the tree the
 milestone actually builds on. The 38 are not all slice work. Four are the
@@ -143,9 +143,10 @@ is one more independent change:
 exact zero `addr:60` stays absent when a default derivation exists — a
 serving-semantics change, and the last schema-migration before acceptance.
 
-The remaining twenty-one landed after acceptance and before this ADR merged,
+The remaining twenty-three landed after acceptance and before this ADR merged,
 twelve in #893 (2026-09-16), one each in #897 and #899, two in #907 (all
-2026-09-17), two in #902, two in #905 and one in #912 (2026-09-18), none as a carve-out or with an amendment: under the effective date above they are the first
+2026-09-17), two in #902, two in #905 and one in #912 (2026-09-18), and one
+each in #934 and #939 (2026-09-23), none as a carve-out or with an amendment: under the effective date above they are the first
 breach of the freeze, recorded here rather than reclassified as history.
 `20260909120000`–`120200_resolver_record_id_events` widen the
 `normalized_events` event-kind CHECK in three steps — a constraint
@@ -177,8 +178,14 @@ after #907 had landed it — a comment and the `quote_all_identifiers` guard —
 which the inventory below now forbids: sqlx records each file's checksum and
 refuses to run against a database that applied the earlier bytes, so any
 database that took #907's version before #902 merged must have that row's
-checksum corrected by hand before its next `sqlx migrate run`. Then
-`20260918120000`, carve-out 6, is this ADR's own. The head named above is
+checksum corrected by hand before its next `sqlx migrate run`. #934's
+`20260923120000` adds three partial expression `normalized_events` indexes
+for the address history read and checks them in the same file, with a
+concurrent prebuild installer under `ops/address-history-indexes/`; #939's
+`20260923150000` creates the Project-owned `child_registration_events`
+projection table with its CHECKs and two indexes, filled only by the full
+Project rebuild that #939's interpreter content hash rotation requires. Then
+`20260924120000`, carve-out 6, is this ADR's own. The head named above is
 the last of them, so the frozen artifact is the tree an initialized database
 actually holds; the breach is the subject of the Rollout section below.
 
@@ -572,7 +579,7 @@ values the system already documents as unstable across a boundary.
    shape reads the primary key and filters), and no other read filters
    `PermissionChanged` by scope resolver. **Decided: the `pointer_*` pair in,
    the `permission_*` pair out, with this ADR.**
-   `migrations/20260918120000_normalized_events_resolver_history_idx.sql`
+   `migrations/20260924120000_normalized_events_resolver_history_idx.sql`
    builds each kept index when it is missing and, when one is present,
    refuses an invalid index, another definition, or a table under the name
    rather than adopting it; it drops each retired index that exists and
@@ -693,9 +700,9 @@ through `apply-check.sh`, but the written contract trailed the schema by three
 weeks. And the miss repeated once more: between acceptance and this ADR's
 merge, #893 landed twelve schema-migrations — a new projection table,
 constraint replacements on populated tables, function replacements — and
-#897, #899, #907, #902, #905 and #912 a thirteenth through twenty-first —
-five index files, two check-only files, and a constraint replacement with
-its rename — under the
+#897, #899, #907, #902, #905, #912, #934 and #939 a thirteenth through
+twenty-third — six index files, two check-only files, a constraint
+replacement with its rename, and a new projection table — under the
 review-only process, with no carve-out and no amendment. They are
 inventoried under the frozen artifact and the head advanced to the last of
 them, because the artifact has to be the tree that exists; they are not

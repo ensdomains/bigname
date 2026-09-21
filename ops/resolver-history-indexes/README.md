@@ -93,7 +93,7 @@ never drop one while a phase runner is projecting. An interrupted concurrent
 drop of a retired index leaves it invalid; rerunning the script drops it.
 
 The matching versioned schema-migration
-`20260918120000_normalized_events_resolver_history_idx.sql` is a no-op before
+`20260924120000_normalized_events_resolver_history_idx.sql` is a no-op before
 the phase schema exists. Where the table exists it builds each kept index that
 is missing — as an ordinary, write-blocking `CREATE INDEX`, which is why a
 large database prebuilds first — and, where a kept name is already taken,

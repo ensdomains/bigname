@@ -674,20 +674,40 @@ no-ops when the indexes already exist, and it ends with the same check, so
 invalid, not ready, on another table, not an index, or has another definition.
 
 The release containing
-`20260918120000_normalized_events_resolver_history_idx.sql` carries the two
+`20260923120000_normalized_events_address_match_indexes.sql` adds the three
+partial expression indexes the address history read uses to find the names and
+resources an address held in the past. On an initialized production namespace,
+build them in step 3 by running
+[`ops/address-history-indexes/install.sql`](../../ops/address-history-indexes/install.sql)
+as [its runbook](../../ops/address-history-indexes/README.md) describes, then run
+`ANALYZE bigname_phase.normalized_events`. The builds are concurrent, permit
+writes, and can finish before the stop/start window opens; `install.sql` is its
+own readiness check and never drops or rebuilds an index. If this step is
+skipped, the schema-migration builds the three indexes without `CONCURRENTLY`
+inside the SQLx transaction, and each build holds a `SHARE` lock on
+`normalized_events` that blocks Interpret's writes until it finishes. An index
+prebuilt by hand under another name is not detected and leaves a duplicate, so
+build only through `install.sql`, which uses the three names exactly. Keep its output with
+its start and end times in the release record. Then apply the schema-migrations
+in step 4; the schema-migration's `IF NOT EXISTS` builds are no-ops when the
+indexes already exist, and it ends with the same check. The indexes change no
+stored row and no interpreter content hash input.
+
+The release containing
+`20260924120000_normalized_events_resolver_history_idx.sql` carries the two
 partial `normalized_events` indexes the resolver-anchored event feed
 (`GET /v1/events?resolver=`) uses and retires the two `permission_*`
 resolver-history indexes that nothing reads; #415 added all four to the
 baseline without a schema-migration, so a namespace that took slice 1 in
 place lacks them all, and a namespace replaced from the baseline between
-2026-08-14 and this release has all four. The baseline in this change
+2026-08-14 and this release has all four. The baseline in this release
 carries only the two kept pointer indexes, so a namespace initialized or
 replaced from this release onward already has the end state and needs
 nothing here. On an initialized production namespace, run
 [`ops/resolver-history-indexes/install.sql`](../../ops/resolver-history-indexes/install.sql)
 in step 3 as [its runbook](../../ops/resolver-history-indexes/README.md)
 describes. `install.sql` is the reviewed source of those statements: the
-index list earlier in this runbook repeats the two kept builds, and the two
+index block later in this runbook repeats the two kept builds, and the two
 drops have no copy there, because `install.sql` drops a retired name only
 when it holds the index #415 built and refuses a table, an index on another
 table, or an index with another definition under that name, which a bare
@@ -708,11 +728,11 @@ record. Both kept indexes key on a `lower(...)` expression, so after the
 builds run `ANALYZE bigname_phase.normalized_events`, as for the lookahead
 indexes: without statistics the planner may keep scanning the chain's
 `ResolverChanged` history instead of taking the `BitmapOr` over the pair.
-Then apply the schema-migrations in step 4. Unlike the other index
-schema-migrations, this one builds each index that is still missing itself,
-as an ordinary `CREATE INDEX` that blocks writes to `normalized_events` for
-the build, and drops each retired index that still exists under the table's
-exclusive lock, so on a populated namespace step 3 must come first; where a
+Then apply the schema-migrations in step 4. Like the other index
+schema-migrations, this one builds each kept index that is still missing
+itself, as an ordinary `CREATE INDEX` that blocks writes to
+`normalized_events` for the build, and it also drops each retired index that
+still exists under the table's exclusive lock, so on a populated namespace step 3 must come first; where a
 kept name is already taken it applies the same check, so `sqlx migrate run`
 stops without recording it if that name is invalid, not ready, on another
 table, not an index, or has another definition, and it refuses a retired name
@@ -1137,7 +1157,11 @@ indexes are additive; rollback may leave them in place.
    `ops/v1-lookahead-indexes/install.sql` as described above, require it to
    exit zero, then run `ANALYZE bigname_phase.normalized_events`;
    for the release containing
-   `20260918120000_normalized_events_resolver_history_idx.sql`, run
+   `20260923120000_normalized_events_address_match_indexes.sql`, run
+   `ops/address-history-indexes/install.sql` as described above, require it to
+   exit zero, then run `ANALYZE bigname_phase.normalized_events`;
+   for the release containing
+   `20260924120000_normalized_events_resolver_history_idx.sql`, run
    `ops/resolver-history-indexes/install.sql` as described above, require
    it to exit zero, then run `ANALYZE bigname_phase.normalized_events`; it
    refuses a namespace that has not taken
@@ -1145,7 +1169,7 @@ indexes are additive; rollback may leave them in place.
    more than one release apply the releases in order as described above the
    index block;
    otherwise skip this step. Every `normalized_events` index this step builds
-   keys on an expression, and an expression index has no statistics until the
+   except `normalized_events_chain_block_number_idx` keys on an expression, and an expression index has no statistics until the
    table is analyzed, so end the step with `ANALYZE bigname_phase.normalized_events`
    whenever it built one, or confirm autovacuum has analyzed the table since
    the build;

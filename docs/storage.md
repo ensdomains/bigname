@@ -6,7 +6,7 @@ milestone](glossary.md#v1-milestone) by
 conformance test that makes the freeze observable, and every authorized
 carve-out. The frozen artifact is the `schema-v2/baseline/` tree plus the
 schema-migration head
-`migrations/20260918120000_normalized_events_resolver_history_idx.sql`; a
+`migrations/20260924120000_normalized_events_resolver_history_idx.sql`; a
 carve-out that lands as a schema-migration advances this head here and in the
 ADR in the same change.
 
@@ -218,6 +218,7 @@ mandatory full Interpret and Project redos.
 | `interpret_decode_skips` | Interpret | Append-only operator diagnostics for selected event logs from undeclared emitters skipped after malformed ABI decoding, and for logs that preceded their emitter's same-batch discovery admission; never identity, normalized-event, projection, or serving data. |
 | `migration_event_associations`, `migration_discovery_associations`, `migration_candidate_identity_effects`, `migration_candidate_discovery_effects` | Interpret | Correlation-versioned diagnostic associations and effects that slice 1 must not use to alter independently admitted normalized events, identity rows, or [discovery edges](glossary.md#discovery-graph--discovery-edge). The ordinary `registry_announcement` indexability edge remains a watch-plan input. |
 | `*_current` projection families | Project | Current serving state, rebuildable from canonical interpreted input. |
+| `child_registration_events` | Project | Historical membership of each name's [direct child registration](glossary.md#direct-child-registration) events, rebuildable from canonical interpreted input; name history selects rows through it and reads the events themselves from `normalized_events`. |
 | `chain_phase_state`, redo/invalidation state, `service_heartbeats` | phase runner; manifest synchronization may stamp or widen required Ingest redo work recorded by the [manifest-authority marker](glossary.md#manifest-authority-marker), and Interpret may stamp discovery-owned required Ingest work in the transaction that finalizes a completed pass | Phase progress, repair work, and runtime liveness. Both coordination writers use the shared required-Ingest installer under the existing synchronization and runner phase-exclusion rules. They preserve lifecycle backup fields, clear resumable evidence for genuinely new demand, and never execute the redo. The phase runner remains the sole executor and redo authority. |
 | `project_generation_failures` | phase runner after Project rollback | Append-only audit evidence for a [projection generation failure](glossary.md#projection-generation-failure); never a product projection. |
 | `resolution_divergences` | guarded lookup functions; Project publication may only clear outdated direct observations | Active live/indexed resolver disagreements and retained observations retired after the exact resolver becomes null; diagnostic only. |
@@ -281,6 +282,37 @@ that was open at the row's position. The rows that prove the requested resource 
 inside) also lie at or below the read's published block, so a grant Interpret has written above
 the publication a read is bound to does not turn that publication's older rows, count, or cursor
 anchors into registration history.
+
+Address history (`GET /v1/addresses/{address}/history`) runs three statements in
+`crates/storage/src/history/`. The anchor lookup (`address_matches.rs`) finds the names and
+resources the address holds now in `address_names_current` and held in the past from three kinds
+of activated, canonical events: a `RegistrationGranted` whose `registrant` is the address, a
+`TokenControlTransferred` whose `to` is the address, and an `AuthorityTransferred` whose `owner`
+is the address, each compared lowercased. One partial expression index per kind keys those rows
+by the lowercased value: `normalized_events_address_registrant_match_idx`,
+`normalized_events_address_token_holder_match_idx`, and
+`normalized_events_address_registry_owner_match_idx`. Their expressions and predicates must stay
+identical to the query text. The capped count and the page then read the rows of those names and
+resources plus the resolver record writes attributed to the resources (`filters.rs`). That filter
+is an OR of `logical_name_id`, `resource_id`, and `normalized_event_id` conditions. The attributed
+event ids do not depend on the row, so the filter computes them once as an array
+(`= ANY(ARRAY(SELECT ...))`); PostgreSQL then answers each branch from
+`normalized_events_name_history_idx`, `normalized_events_resource_history_idx`, and the primary
+key and combines the results. Written as `IN (SELECT ...)`, the branch cannot be an index
+condition inside the OR, and the planner reads every canonical row to keep the few that match.
+The three indexes cover only activated rows in readable canonicality states, so an anchor read
+that drops either condition cannot use them and falls back to a broad scan, such as
+`normalized_events_projection_idx` without the address as a key: a read with `canonical_only=false` (possible only through the
+storage functions `load_address_history_for_relations` and
+`load_address_history_page_for_relations`, which the public route always calls with `true`), and
+`GET /v1/diagnostics/events` with an address filter, which also reads candidate rows.
+`GET /v1/names/{name}/history` with `scope=both` uses the same filter. The registration-scoped
+read keeps a correlated `IN` because its attribution check refers to the row. These are access
+paths only: no stored row, response, or [interpreter content
+hash](glossary.md#interpreter-content-hash) input changes. Existing installations receive the
+three indexes through `20260923120000_normalized_events_address_match_indexes.sql`; prebuild
+them concurrently on a large database with
+[`ops/address-history-indexes/install.sql`](../ops/address-history-indexes/README.md) first.
 
 History loaders called with `canonical_only=false` also return rows of activated losing
 branches. For those reads every binding, grant and wrapper-link witness must lie on the event's

@@ -14,6 +14,7 @@ const EXPECTED_TABLES: &[&str] = &[
     "chain_header_audit",
     "chain_lineage",
     "chain_phase_state",
+    "child_registration_events",
     "children_current",
     "contract_instance_addresses",
     "contract_instances",

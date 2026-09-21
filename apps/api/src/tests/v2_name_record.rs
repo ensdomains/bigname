@@ -2731,7 +2731,9 @@ async fn v2_pre_surface_recovered_record_is_authoritative_for_profile_and_record
         json!({
             "known_keys": ["text:pre-surface"],
             "unset_keys": [],
-            "unsupported_keys": []
+            "unsupported_keys": [],
+            "abi_content_types": null,
+            "abi_unsupported_reason": "abi_observations_not_supported"
         })
     );
     let divergence_count: i64 =
@@ -3046,7 +3048,9 @@ async fn v2_get_name_records_include_inventory_uses_product_key_lists() -> Resul
         json!({
             "known_keys": ["addr:60", "avatar"],
             "unset_keys": [],
-            "unsupported_keys": ["text:email"]
+            "unsupported_keys": ["text:email"],
+            "abi_content_types": null,
+            "abi_unsupported_reason": "abi_observations_not_supported"
         })
     );
 
@@ -3102,7 +3106,9 @@ async fn v2_get_name_records_inventory_partitions_unsupported_entries() -> Resul
         json!({
             "known_keys": ["addr:60"],
             "unset_keys": [],
-            "unsupported_keys": ["avatar"]
+            "unsupported_keys": ["avatar"],
+            "abi_content_types": null,
+            "abi_unsupported_reason": "abi_observations_not_supported"
         })
     );
 
@@ -3120,7 +3126,9 @@ async fn v2_get_name_records_inventory_absence_is_unknown_not_unsupported() -> R
         json!({
             "known_keys": [],
             "unset_keys": [],
-            "unsupported_keys": []
+            "unsupported_keys": [],
+            "abi_content_types": null,
+            "abi_unsupported_reason": "inventory_not_available"
         })
     );
 
@@ -4034,7 +4042,9 @@ async fn v2_get_name_records_withholds_values_from_unsupported_inventory() -> Re
         json!({
             "known_keys": [],
             "unset_keys": [],
-            "unsupported_keys": ["addr:60", "avatar", "text:description"]
+            "unsupported_keys": ["addr:60", "avatar", "text:description"],
+            "abi_content_types": null,
+            "abi_unsupported_reason": "inventory_not_authoritative"
         })
     );
 

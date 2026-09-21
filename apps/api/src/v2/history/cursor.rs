@@ -20,6 +20,8 @@ pub(crate) struct HistoryCursorBinding<'a> {
     pub(crate) scope: HistoryScope,
     pub(crate) order: HistoryOrder,
     pub(crate) params: &'a QueryParams,
+    /// `include=child_registrations`, which changes the collection's rows.
+    pub(crate) child_registrations: bool,
 }
 
 fn history_cursor_filters(binding: &HistoryCursorBinding<'_>) -> BTreeMap<String, String> {
@@ -38,6 +40,7 @@ fn history_cursor_filters(binding: &HistoryCursorBinding<'_>) -> BTreeMap<String
         ),
     ]);
     insert_history_filter_keys(&mut filters, binding.params);
+    super::children::insert_children_filter_key(&mut filters, binding.child_registrations);
     filters
 }
 
