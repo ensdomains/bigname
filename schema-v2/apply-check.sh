@@ -290,7 +290,11 @@ assert_column_order_is_the_baseline_order() {
     local context="$1" migrated_schema="$2" before="$3" fresh after reordered
     fresh="$(mktemp "${TMPDIR:-/tmp}/schema-v2-column-order.XXXXXX")"
     after="$(mktemp "${TMPDIR:-/tmp}/schema-v2-column-order.XXXXXX")"
-    column_order_of "$frozen_schema" > "$fresh"
+    if [ -n "${frozen_column_order:-}" ]; then
+        cp -- "$frozen_column_order" "$fresh"
+    else
+        column_order_of "$frozen_schema" > "$fresh"
+    fi
     column_order_of "$migrated_schema" > "$after"
     reordered="$(awk -v fresh_file="$fresh" -v before_file="$before" \
         "$column_order_rule" "$fresh" "$before" "$after")"
@@ -415,8 +419,19 @@ assert_role_configuration_snapshot_sees_planted_changes() {
         exit 1
     fi
 }
+# A connection as the check's login with the given password, which says
+# something only where the server checks it; set-up finds that out.
+login_authenticates_with() {
+    login_connection_error="$(printf 'SELECT 1;\n' \
+        | apply_check_url="$(login_url_from "${BIGNAME_DATABASE_URL:-}" "$apply_check_role" "$1")" run_psql 2>&1 >/dev/null)"
+}
 assert_no_role_or_database_settings() {
     local context="$1"
+    if [ "${login_password_checked:-0}" = 1 ] && ! login_authenticates_with "$apply_check_role_password"; then
+        printf '%s\n' \
+            "after the $context replay the check's login no longer connects with the password it was created with ($login_connection_error); a schema-migration may not change a password, however it spells the statement, since the deployed runner's next connection would fail" >&2
+        exit 1
+    fi
     if ! diff -u "$role_and_database_settings_before" <(role_and_database_settings) >&2; then
         printf '%s\n' \
             "the $context replay changed a role or database configuration (diff above: - before, + after); a schema-migration may not change a connection default, a role attribute, a role membership or a password, however it spells the statement, since the deployed runner connects through them and no catalog records them" >&2
@@ -425,8 +440,8 @@ assert_no_role_or_database_settings() {
 }
 replay_ledger_and_settings_hold() {
     local context="$1"
-    assert_migration_ledger_is_intact "$context" "$ROOT"/migrations/*.sql
     assert_no_role_or_database_settings "$context"
+    assert_migration_ledger_is_intact "$context" "$ROOT"/migrations/*.sql
 }
 # The replays: every file recorded, the phase inventory applied, and the
 # ledger and connection defaults checked afterwards.
@@ -434,7 +449,7 @@ replay_ledger_and_settings_hold() {
 # is the one replay with nothing to compare against.
 replay_schema_migrations() {
     local context="$1" before
-    if [ "$scratch_schema" = "$frozen_schema" ]; then
+    if [ "$scratch_schema" = "$frozen_schema" ] && [ -z "${frozen_column_order:-}" ]; then
         sequence_applies=phase apply_migration_sequence "$ROOT"/migrations/*.sql
         replay_ledger_and_settings_hold "$context"
         return
@@ -1042,6 +1057,98 @@ assert_frozen_schema_fingerprint() {
     fi
     rm -f -- "$observed"
 }
+# The replays rename the phase schema by rewriting its name in each file's
+# text, which a name the rewrite cannot see -- assembled from pieces, in
+# another case, encoded -- escapes: compared as a value, it takes one branch
+# here and the other under sqlx, where the schema is bigname_phase. The fresh
+# baseline and the predecessor transition are therefore replayed once more
+# unrewritten, in a database of their own where the schema has its production
+# name, and must give the same catalogs, object kinds and column order. Every
+# change the configured user makes there first checks that it is in that
+# database.
+assert_literal_schema_name_replays_match() {
+    local after_baseline observed settings_before fresh_order planted_order planted_dir status
+    local in_literal_database="DO \$\$ BEGIN IF current_database() <> '$literal_database' THEN RAISE EXCEPTION 'not the literal-name database'; END IF; END \$\$;"
+    printf 'CREATE DATABASE "%s";\n' "$literal_database" | run_psql_as_owner
+    literal_database_created=1
+    after_baseline="$(mktemp "${TMPDIR:-/tmp}/schema-v2-literal-baseline.XXXXXX")"
+    observed="$(mktemp "${TMPDIR:-/tmp}/schema-v2-literal-catalog.XXXXXX")"
+    settings_before="$(mktemp "${TMPDIR:-/tmp}/schema-v2-literal-settings.XXXXXX")"
+    fresh_order="$(mktemp "${TMPDIR:-/tmp}/schema-v2-literal-order.XXXXXX")"
+    planted_order="$(mktemp "${TMPDIR:-/tmp}/schema-v2-literal-order.XXXXXX")"
+    # Not `( ... ) || ...`: bash does not stop on a failed command inside a
+    # subshell whose status is tested.
+    set +e
+    (
+        set -e
+        database="$literal_database"
+        if [ -n "${BIGNAME_DATABASE_URL:-}" ]; then
+            BIGNAME_DATABASE_URL="$(url_with_database "$BIGNAME_DATABASE_URL" "$literal_database")"
+            apply_check_url="$(login_url_from "$BIGNAME_DATABASE_URL" "$apply_check_role" "$apply_check_role_password")"
+        fi
+        scratch_schema=bigname_phase frozen_schema=bigname_phase predecessor_schema=bigname_phase
+        {
+            printf '%s\n' "$in_literal_database" "$baseline_extension_statements"
+            printf 'CREATE SCHEMA bigname_phase AUTHORIZATION "%s";\n' "$apply_check_role"
+            sqlx_bookkeeping_setup_sql
+        } | run_psql_as_owner
+        role_and_database_settings > "$settings_before"
+        role_and_database_settings_before="$settings_before"
+        apply_baseline
+        frozen_schema_catalog bigname_phase > "$after_baseline"
+        replay_schema_migrations "literal-name fresh baseline"
+        frozen_schema_catalog bigname_phase > "$observed"
+        if ! diff -u "$frozen_schema_catalog" "$observed" >&2; then
+            printf '%s\n' "the fresh baseline replayed with the schema named bigname_phase differs from $(basename "$frozen_schema_catalog") (diff above: - frozen, + literal name)" >&2
+            exit 1
+        fi
+        assert_schema_holds_only_allowed_kinds bigname_phase "the literal-name fresh baseline"
+        # The fresh schema is dropped for the predecessor, so its column
+        # order is kept for that replay's column-order rule.
+        column_order_of bigname_phase > "$fresh_order"
+        frozen_column_order="$fresh_order"
+        {
+            printf '%s\n' "$in_literal_database" 'DROP SCHEMA bigname_phase CASCADE;'
+            printf 'CREATE SCHEMA bigname_phase AUTHORIZATION "%s";\n' "$apply_check_role"
+        } | run_psql_as_owner
+        assert_predecessor_baseline_transition "$after_baseline" "$observed"
+        # A planted file that branches on an assembled name must move this
+        # catalog; under the rewrite it takes the other branch.
+        planted_dir="$(mktemp -d "${TMPDIR:-/tmp}/schema-v2-planted-literal.XXXXXX")"
+        cat > "$planted_dir/00000000000001_planted_literal_branch.sql" <<'PLANT'
+DO $$ BEGIN
+    IF 'bigname_' || 'phase' = 'bigname_phase' THEN
+        CREATE TABLE bigname_phase.planted_literal_branch (a integer);
+    END IF;
+END $$;
+PLANT
+        sequence_applies=phase apply_migration_sequence "$planted_dir"/*.sql
+        remove_planted_dir "$planted_dir"
+        case "$(diff "$frozen_schema_catalog" <(frozen_schema_catalog bigname_phase) || true)" in
+            *"> relation planted_literal_branch "*) ;;
+            *) printf '%s\n' "the literal-name replay does not see a planted branch on an assembled schema name" >&2; exit 1 ;;
+        esac
+        # The column-order rule reads the kept fresh order: a baseline column
+        # dropped and added back, so now last, must be refused.
+        column_order_of bigname_phase > "$planted_order"
+        printf 'ALTER TABLE bigname_phase.chain_lineage DROP COLUMN block_hash CASCADE;\nALTER TABLE bigname_phase.chain_lineage ADD COLUMN block_hash text;\n' | run_psql
+        case "$( (assert_column_order_is_the_baseline_order "planted literal-name" bigname_phase "$planted_order") 2>&1 || true)" in
+            *"chain_lineage: the replay moved a column it did not add"*) ;;
+            *) printf '%s\n' "the literal-name replay's column-order rule does not see a planted reorder" >&2; exit 1 ;;
+        esac
+    )
+    status=$?
+    set -e
+    rm -f -- "$after_baseline" "$observed" "$settings_before" "$fresh_order" "$planted_order"
+    if [ "$status" != 0 ]; then
+        printf '%s\n' \
+            "the replay with the phase schema named bigname_phase, unrewritten as sqlx applies it, failed above after the same replays under the scratch name passed; unless the failure is the connection or set-up, a schema-migration reads the name in a form the rewrite cannot see (assembled, in another case, encoded) and behaves differently under it -- name the schema literally" >&2
+        exit 1
+    fi
+    refusal_assertions_passed=$((refusal_assertions_passed + 2))
+    printf 'DROP DATABASE "%s" WITH (FORCE);\n' "$literal_database" | run_psql_as_owner
+    literal_database_created=0
+}
 # The comparison above proves every schema-migration is a no-op on the current
 # baseline, which a baseline edit with no schema-migration also satisfies: the
 # object is in both catalogs before any schema-migration runs. What an
@@ -1126,7 +1233,7 @@ assert_predecessor_baseline_transition() {
         assert_schema_holds_only_allowed_kinds "$predecessor_schema" "the migrated predecessor baseline"
         baseline_extension_statements="$migrated_extension_statements" \
             frozen_schema_catalog "$predecessor_schema" > "$migrated_catalog"
-    ) || exit 1
+    )
     if git -C "$ROOT" diff --quiet "$base" -- schema-v2/baseline; then
         if ! diff -u "$after_baseline" "$predecessor_catalog" >&2; then
             printf '%s\n' "the baseline files are unchanged since $base but the predecessor baseline produced another catalog (diff above)" >&2
@@ -2309,12 +2416,13 @@ migration_application_log="$(
 # Future entries must use basename|one-line reason.
 intentional_phase_migration_skips=()
 refusal_assertions_passed=0
-# Base 173, main added 78, this branch 139 (56 of them the backslash-command,
+# Base 173, main added 78, this branch 142 (59 of them the backslash-command,
 # SET-spelling, session-residue, session-identity (database, connection and
-# temporary namespace included), recorded-history and ambiguous foreign key plants), and
+# temporary namespace included), recorded-history, ambiguous foreign key,
+# assembled password and literal-name branch and column-order plants), and
 # the merges fold main's four address-match and event-order not-ready probes
 # into their invalid ones (-4); predecessor proofs base 39, +6, +1.
-expected_refusal_assertions=386
+expected_refusal_assertions=389
 predecessor_shape_proof_count=0
 expected_predecessor_shape_proof_count=46
 refusal_probe_seconds=0
@@ -2334,6 +2442,10 @@ cleanup() {
     fi
     if [ -n "${role_and_database_settings_before:-}" ]; then
         rm -f -- "$role_and_database_settings_before"
+    fi
+    # Before the role, which owns the schema in it.
+    if [ "${literal_database_created:-0}" = 1 ]; then
+        printf 'DROP DATABASE IF EXISTS "%s" WITH (FORCE);\n' "$literal_database" | run_psql_as_owner >/dev/null 2>&1 || true
     fi
     {
         # Only the bookkeeping table this run created above; a pre-existing one refused the run.
@@ -2786,16 +2898,10 @@ check_baseline_extensions "$baseline_extension_statements" || exit 1
 # fails where the production schema does not yet exist.
 frozen_schema="${scratch_schema}_frozen"
 predecessor_schema="${scratch_schema}_predecessor"
-{
-    printf "CREATE ROLE \"%s\" LOGIN PASSWORD '%s';\n" \
-        "$apply_check_role" "$apply_check_role_password"
-    printf 'GRANT "%s" TO CURRENT_USER;\n' "$apply_check_role"
-    printf '%s\n' "$baseline_extension_statements"
-    printf 'CREATE SCHEMA "%s" AUTHORIZATION "%s";\n' "$scratch_schema" "$apply_check_role"
-    printf 'CREATE SCHEMA "%s" AUTHORIZATION "%s";\n' "$frozen_schema" "$apply_check_role"
-    printf 'CREATE SCHEMA "%s" AUTHORIZATION "%s";\n' "$predecessor_schema" "$apply_check_role"
-    # sqlx's own bookkeeping table, for the schema-migration replays; a
-    # database that already has one is not a scratch database.
+literal_database="${scratch_schema}_literal"
+# sqlx's own bookkeeping table, for the schema-migration replays; a
+# database that already has one is not a scratch database.
+sqlx_bookkeeping_setup_sql() {
     cat <<'SQL'
 DO $$ BEGIN
     IF to_regclass('public._sqlx_migrations') IS NOT NULL THEN
@@ -2812,11 +2918,77 @@ CREATE TABLE public._sqlx_migrations (
 );
 SQL
     printf 'GRANT SELECT, INSERT, UPDATE, DELETE ON public._sqlx_migrations TO "%s";\n' "$apply_check_role"
+}
+{
+    printf "CREATE ROLE \"%s\" LOGIN PASSWORD '%s';\n" \
+        "$apply_check_role" "$apply_check_role_password"
+    printf 'GRANT "%s" TO CURRENT_USER;\n' "$apply_check_role"
+    printf '%s\n' "$baseline_extension_statements"
+    printf 'CREATE SCHEMA "%s" AUTHORIZATION "%s";\n' "$scratch_schema" "$apply_check_role"
+    printf 'CREATE SCHEMA "%s" AUTHORIZATION "%s";\n' "$frozen_schema" "$apply_check_role"
+    printf 'CREATE SCHEMA "%s" AUTHORIZATION "%s";\n' "$predecessor_schema" "$apply_check_role"
+    sqlx_bookkeeping_setup_sql
 } | run_psql_as_owner
 sqlx_bookkeeping_created=1
 role_and_database_settings_before="$(mktemp "${TMPDIR:-/tmp}/schema-v2-role-settings.XXXXXX")"
 role_and_database_settings > "$role_and_database_settings_before"
 assert_role_configuration_snapshot_sees_planted_changes
+# `pg_roles` masks every password, so a changed one shows in `pg_authid`,
+# which the snapshot reads where the configured user may, or in the login no
+# longer connecting with the password it was created with, which means
+# something only where the server refuses a wrong one. A run with neither
+# would pass a schema-migration that assembles a password change, so it does
+# not start.
+password_verifiers_readable() {
+    [ "$(printf '\\pset tuples_only on\nSELECT has_table_privilege('"'"'pg_authid'"'"', '"'"'SELECT'"'"');\n' | run_psql_as_owner | tr -d ' ')" = t ]
+}
+login_password_checked=0
+if [ "$psql_mode" != database-container ] && ! login_authenticates_with "not-$apply_check_role_password"; then
+    wrong_password_refusal="$login_connection_error"
+    if ! login_authenticates_with "$apply_check_role_password"; then
+        printf '%s\n' "the check's login cannot connect with the password it was created with" >&2
+        exit 1
+    fi
+    login_password_checked=1
+fi
+if [ "$login_password_checked" = 0 ] && ! password_verifiers_readable; then
+    printf '%s\n' \
+        "this run could not see a schema-migration change a password: the configured user cannot read pg_authid and the server accepts the check's login without its password; run the check as a superuser or against a server that authenticates the login by password" >&2
+    exit 1
+fi
+# Proved on the form no text rule sees, a statement assembled at run time:
+# every read this run has must see it. The configured user then restores the
+# login's password, as the stored verifier where it can read one, so the
+# snapshot taken before still holds.
+assert_assembled_password_change_is_seen() {
+    local planted_dir verifier=""
+    if password_verifiers_readable; then
+        verifier="$(printf "\\pset tuples_only on\nSELECT rolpassword FROM pg_authid WHERE rolname = '%s';\n" "$apply_check_role" \
+            | run_psql_as_owner | tr -d ' ')"
+        [ -n "$verifier" ] || { printf '%s\n' "the check's login has no password verifier to restore" >&2; exit 1; }
+    fi
+    planted_dir="$(mktemp -d "${TMPDIR:-/tmp}/schema-v2-planted-password.XXXXXX")"
+    cat > "$planted_dir/00000000000001_planted_password.sql" <<'PLANT'
+DO $$ BEGIN EXECUTE concat('ALTER ROLE CURRENT_USER PASS', 'WORD ''planted'''); END $$;
+PLANT
+    migration_sequence_sql "$planted_dir"/*.sql | run_psql >/dev/null
+    remove_planted_dir "$planted_dir"
+    if [ -n "$verifier" ]; then
+        case "$(diff "$role_and_database_settings_before" <(role_and_database_settings) || true)" in
+            *"> secret $apply_check_role: "*) ;;
+            *) printf '%s\n' "the role snapshot does not see a planted assembled password change" >&2; exit 1 ;;
+        esac
+    fi
+    if [ "$login_password_checked" = 1 ] && login_authenticates_with "$apply_check_role_password"; then
+        printf '%s\n' "the login still connects with its old password after a planted assembled password change, so the server may not check it after all (the wrong password was refused with: $wrong_password_refusal)" >&2
+        exit 1
+    fi
+    printf "ALTER ROLE \"%s\" PASSWORD '%s';\n" "$apply_check_role" "${verifier:-$apply_check_role_password}" | run_psql_as_owner
+    printf 'DELETE FROM _sqlx_migrations;\n' | run_psql
+    assert_no_role_or_database_settings "planted password"
+    refusal_assertions_passed=$((refusal_assertions_passed + 1))
+}
+assert_assembled_password_change_is_seen
 # Prove the role boundary on every run: an identifier the rewrite cannot see,
 # assembled inside EXECUTE, must fail on the production schema whether or not
 # that schema exists in this database, while the same statement against the
@@ -12086,6 +12258,7 @@ assert_uninventoried_migrations_are_schema_qualified
 assert_documented_head_is_newest_migration
 assert_no_migration_below_prior_head
 assert_frozen_schema_fingerprint
+assert_literal_schema_name_replays_match
 assert_schema_holds_only_allowed_kinds "$frozen_schema" "the fresh baseline"
 assert_refused_kinds_are_seen
 assert_column_order_rule_sees_planted_changes

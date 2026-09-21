@@ -240,9 +240,10 @@ so it cannot see a name a schema-migration assembles at run time (`'bigname_' ||
 The check therefore applies every batch on a connection of its own, a
 per-run login that owns the scratch schema and holds no privilege on
 `bigname_phase` and no `CREATE` on the database — provisioned by the
-configured user, who needs `CREATEROLE` for that login and, on an external
-server, `CREATEDB` as well, because the check runs in a database of its own
-there (created at start, dropped at exit) rather than asking for `CREATE` on
+configured user, who needs `CREATEROLE` for that login and `CREATEDB`,
+because the replays under the production schema name described below run in
+a database of their own and, on an external server, so does the whole check
+(each created at start and dropped at exit) rather than asking for `CREATE` on
 the database the URL names; the schemas are created for the login rather
 than granted to it, and the only statements that run on the configured
 user's own connection are the baseline's two reviewed `CREATE EXTENSION`
@@ -292,7 +293,15 @@ configured user installs the current declarations before any replay and the
 database alone would report an extension an initialized database lacks; a
 baseline that gains an extension without a schema-migration that creates it
 is refused on that header. Removing an extension is not modelled: the previous
-baseline's own declaration would run as the per-run login and fail. That fresh artifact holds no rows, so a
+baseline's own declaration would run as the per-run login and fail. Both
+replays run once more without the rewrite, in a database of their own where
+the schema is named `bigname_phase` as in production, and must give the same
+catalogs, object kinds and column order: a name the rewrite cannot see —
+assembled from pieces, in another case, encoded — reaches the same schema
+there as under sqlx, so a schema-migration that compares one with the literal
+and takes another branch under the scratch name is refused on those
+comparisons. Those replays hold no rows, so a branch that also depends on the
+data it finds is left to review. That fresh artifact holds no rows, so a
 schema-migration whose DDL runs only when a table has data would leave it
 unchanged; the check therefore also takes the catalog of its scratch schema
 at the end of the run — populated by every predecessor-shape and behavior
@@ -390,22 +399,25 @@ before the first replay. That last read is decided before the statement is
 sent, because PostgreSQL checks the relation privilege when the scan opens and
 the documented external-server login is not a superuser. A file that rewrites or deletes earlier bookkeeping, or changes
 any of that however the statement is spelled, fails even though no catalog
-line moves; the password form is also named by the statement rule, because a
-run that cannot read `pg_authid` sees only one mask for every password.
+line moves. A run that cannot read `pg_authid`, which `pg_roles` shows as
+one mask for every password, instead reconnects as its login after each replay
+with the password it created that login with; that proves something only
+where the server refuses a wrong password, which the check tries first, and a
+run that can do neither refuses to start. The password form is also named by
+the statement rule.
 From acceptance on, a
 schema-migration of any of these kinds cannot land without moving the
 conformance test, which is where the carve-out or amendment is checked for.
 
 The check is built to catch a schema-migration that would behave differently
 under sqlx on a production database through ordinary SQL, including dynamic
-SQL whose effect it can observe at run time. SQL written to hide what it does
-from the check — a keyword, schema name or role name assembled from pieces so
-that no rule can see it — is outside what a conformance test can close, and
-review is the control for it. Two such forms are declined on that ground: a
-phase schema name assembled from pieces and compared as a value, which the
-textual rewrite to the scratch schema cannot see, and an assembled password
-change where the configured user is not a superuser and so cannot read the
-password verifiers.
+SQL whose effect it can observe at run time: an assembled phase schema name
+compared as a value is caught by the replays under the literal name as far as
+an empty schema shows it, and an assembled password change by the verifier
+snapshot or the reconnect. SQL
+written to hide from a text rule what no run-time read observes — a keyword or
+role name assembled from pieces so that no rule can see it — is outside what a
+conformance test can close, and review is the control for it.
 
 An authorized carve-out that lands as a schema-migration becomes the new head,
 and the change that lands it must advance the head named above and the head

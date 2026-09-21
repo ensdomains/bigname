@@ -79,7 +79,11 @@ test login role; that server user therefore needs `CREATEROLE` for the full
 phase-runner suite. `schema-v2/apply-check.sh` needs the same two: on such a
 server it creates a database of its own, owned by that user, runs there, and
 drops it on exit, so the user need not hold `CREATE` on the database the URL
-names.
+names; on any server it creates one more for its replays under the production
+schema name. It refuses to start when that user cannot read `pg_authid` (is
+not a superuser) and cannot show that the server checks its login's password,
+which it never can when psql runs inside the database container: it would
+then have no way to see a schema-migration change a password.
 
 ## GraphQL compatibility fixture refresh
 
