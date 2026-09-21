@@ -37,6 +37,14 @@ pub(crate) async fn get_resolver_aliases(
     collection(path, params.into_inner(), state, "aliases").await
 }
 
+pub(crate) async fn get_resolver_links(
+    Path(path): Path<(String, String)>,
+    params: ResolverCollectionQuery,
+    State(state): State<AppState>,
+) -> V2Result<Json<Envelope<Vec<Value>>>> {
+    collection(path, params.into_inner(), state, "links").await
+}
+
 pub(crate) async fn get_resolver_roles(
     Path(path): Path<(String, String)>,
     params: ResolverCollectionQuery,
@@ -126,10 +134,10 @@ async fn collection(
         .map_err(|_| read_error())?
         .ok_or_else(|| V2Error::not_found("resolver was not found"))?;
     require_phase_target_snapshot(&row.chain_positions, slug, &selected)?;
-    let summary_key = if section == "roles" {
-        "role_holders"
-    } else {
-        "aliases"
+    let summary_key = match section {
+        "roles" => "role_holders",
+        "links" => "links",
+        _ => "aliases",
     };
     let summary = row.declared_summary.get(summary_key);
     let mut meta = snapshot_meta(&selected)?;
@@ -192,19 +200,21 @@ async fn collection(
     };
     let mut data = Vec::with_capacity(rows.len());
     for (_, _, mut item) in rows {
-        if section == "roles" {
-            if let Some(selector) = item
-                .as_object_mut()
-                .and_then(|object| object.remove("record_resource_selector"))
-                && let Some(resource) =
-                    crate::v2::record_resource_value(&selector, &item["powers"])?
-            {
-                item["record_resource"] = resource;
+        match section {
+            "roles" => {
+                if let Some(selector) = item
+                    .as_object_mut()
+                    .and_then(|object| object.remove("record_resource_selector"))
+                    && let Some(resource) =
+                        crate::v2::record_resource_value(&selector, &item["powers"])?
+                {
+                    item["record_resource"] = resource;
+                }
+                item["powers"] = permission_powers_value(&item["powers"])?;
+                data.push(item);
             }
-            item["powers"] = permission_powers_value(&item["powers"])?;
-            data.push(item);
-        } else {
-            data.push(compact_resolver_binding_item(&item)?);
+            "links" => data.push(super::link_items::compact_resolver_link_item(&item)?),
+            _ => data.push(compact_resolver_binding_item(&item)?),
         }
     }
     if crate::v2::lookup::head::load_selected_project_generations(&state.pool, &selected).await?

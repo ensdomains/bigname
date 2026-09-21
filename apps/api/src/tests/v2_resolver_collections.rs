@@ -171,6 +171,163 @@ async fn v2_resolver_collection_roles_page_per_registration_and_scope() -> Resul
 }
 
 #[tokio::test]
+async fn v2_resolver_collection_links_pages_latest_link_per_node_in_record_order() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let resolver = resolver_current_row("ethereum-mainnet", V2_RESOLVER_ADDRESS);
+    database
+        .seed_snapshot_selector_chain_positions(&resolver.chain_positions)
+        .await?;
+    upsert_test_resolver_current_rows(&database, &[resolver]).await?;
+    upsert_phase_raw_blocks(
+        &database.pool,
+        &[
+            raw_block("ethereum-mainnet", "0xlinks150", None, 150, 1_700_000_150),
+            raw_block("ethereum-mainnet", "0xlinks300", None, 300, 1_700_000_300),
+        ],
+    )
+    .await?;
+    let node = |index: u64| format!("0x{:064x}", index + 0x1000);
+    let link = |identity: &str, block: i64, log: i64, node: &str, record: &str, resolver: &str| {
+        let (hash, tx) = if block == 300 {
+            ("0xlinks300", "0xlinktx300")
+        } else {
+            ("0xlinks150", "0xlinktx150")
+        };
+        let mut event = history_event(
+            identity,
+            None,
+            None,
+            Some("ethereum-mainnet"),
+            Some(block),
+            Some(hash),
+            Some(tx),
+            Some(log),
+            CanonicalityState::Canonical,
+        );
+        event.event_kind = "ResolverRecordLinked".to_owned();
+        event.after_state = json!({"source_event":"Linked", "storage_model":"resolver_record_id",
+            "resolver":resolver, "node":node, "resolver_record_id":record});
+        // A record-ID resolver emits its own Linked logs; the read filters on the emitter.
+        // (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L363-L367 @ ens_v2@a971bd64)
+        event.raw_fact_ref["emitting_address"] = json!(resolver);
+        event
+    };
+    // Records 1, 2, 3 and 10: a text sort would place "10" before "2".
+    let records = ["1", "2", "3", "10"];
+    let mut events = (0..105u64)
+        .map(|index| {
+            link(
+                &format!("link-{index}"),
+                150,
+                index as i64,
+                &node(index),
+                records[(index % 4) as usize],
+                V2_RESOLVER_ADDRESS,
+            )
+        })
+        .collect::<Vec<_>>();
+    // Relinked: only the latest link per node counts.
+    events.push(link("relink-0", 150, 500, &node(0), "3", V2_RESOLVER_ADDRESS));
+    // Unlinked: record 0 removes the node.
+    events.push(link("unlink-1", 150, 501, &node(1), "0", V2_RESOLVER_ADDRESS));
+    // The default record: the empty-name node.
+    events.push(link(
+        "default",
+        150,
+        502,
+        "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "2",
+        V2_RESOLVER_ADDRESS,
+    ));
+    let mut orphan = link("orphan-2", 150, 503, &node(2), "9", V2_RESOLVER_ADDRESS);
+    orphan.canonicality_state = CanonicalityState::Orphaned;
+    events.push(orphan);
+    events.push(link("candidate-2", 150, 504, &node(2), "9", V2_RESOLVER_ADDRESS));
+    events.push(link(
+        "other-resolver",
+        150,
+        505,
+        &node(700),
+        "1",
+        "0x0000000000000000000000000000000000000bbb",
+    ));
+    // Above the selected height (202): not yet visible.
+    events.push(link("future-3", 300, 0, &node(3), "5", V2_RESOLVER_ADDRESS));
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &events).await?;
+    sqlx::query("UPDATE bigname_phase.normalized_events SET consumer_visibility = 'candidate', migration_correlation_ids = ARRAY['candidate-2'] WHERE event_identity = 'candidate-2'")
+        .execute(&database.pool).await?;
+    // Only node 4 has an active name surface; every other node is served by namehash
+    // alone. Node 5's surface is shadow -- withheld from readers, and its raw name is
+    // not even normalizable -- so it must neither be shown nor break the page. The
+    // root surface (the empty name at the all-zero node) exists on every ENS chain and
+    // must not attach to the default record's link.
+    sqlx::query("INSERT INTO bigname_phase.name_surfaces (logical_name_id, namespace, raw_name, raw_labels, dns_encoded_name, namehash, labelhashes, normalizer_version, visibility_state, deactivation_reason, deactivated_at, chain_id, block_hash, block_number, canonicality_state) VALUES ('ens:' || $1, 'ens', 'Linked.eth', ARRAY['linked','eth'], '\\x066c696e6b656403657468'::bytea, $1, ARRAY['labelhash:linked','labelhash:eth'], 'fixture', 'active', NULL, NULL, 'ethereum-mainnet', '0xlinks150', 150, 'canonical'), ('ens:' || $2, 'ens', 'bad..name', ARRAY['bad','','name'], '\\x00'::bytea, $2, ARRAY['a','b','c'], 'fixture', 'shadow', 'fixture', now(), 'ethereum-mainnet', '0xlinks150', 150, 'canonical'), ('ens:' || $3, 'ens', '', ARRAY[]::text[], '\\x00'::bytea, $3, ARRAY[]::text[], 'fixture', 'active', NULL, NULL, 'ethereum-mainnet', '0xlinks150', 150, 'canonical')")
+        .bind(node(4)).bind(node(5)).bind("0x0000000000000000000000000000000000000000000000000000000000000000").execute(&database.pool).await?;
+
+    let base = format!("/v1/resolvers/1/{V2_RESOLVER_ADDRESS}/links?page_size=40");
+    let first = v2_resolver_payload_for_database(&database, &base).await?;
+    // 105 links, minus the unlinked node, plus the default record.
+    assert_eq!(first["page"]["total_count"], 105);
+    assert_eq!(first["page"]["has_more"], true);
+    let token = first["meta"]["as_of_token"].clone();
+    let mut all = first["data"].as_array().unwrap().clone();
+    let mut page = first;
+    while let Some(cursor) = page["page"]["next_cursor"].as_str() {
+        page =
+            v2_resolver_payload_for_database(&database, &format!("{base}&cursor={cursor}")).await?;
+        assert_eq!(page["meta"]["as_of_token"], token);
+        assert_eq!(page["page"]["total_count"], 105);
+        all.extend(page["data"].as_array().unwrap().clone());
+    }
+    assert_eq!(all.len(), 105);
+    let keys = all
+        .iter()
+        .map(|row| {
+            (
+                row["record_id"].as_str().unwrap().parse::<u64>().unwrap(),
+                row["namehash"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut sorted = keys.clone();
+    sorted.sort();
+    assert_eq!(keys, sorted, "links sort by numeric record then namehash");
+    assert_eq!(keys.last().unwrap().0, 10);
+    let by_node = all
+        .iter()
+        .map(|row| (row["namehash"].as_str().unwrap().to_owned(), row.clone()))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    assert_eq!(by_node[&node(0)]["record_id"], "3");
+    assert!(!by_node.contains_key(&node(1)));
+    assert_eq!(by_node[&node(2)]["record_id"], "3");
+    assert_eq!(by_node[&node(3)]["record_id"], "10");
+    assert!(!by_node.contains_key(&node(700)));
+    let default = &by_node["0x0000000000000000000000000000000000000000000000000000000000000000"];
+    assert_eq!(default["default"], true);
+    assert_eq!(default["record_id"], "2");
+    assert!(default.get("name").is_none());
+    let named = &by_node[&node(4)];
+    assert_eq!(named["name"], "linked.eth");
+    assert_eq!(named["display_name"], "linked.eth");
+    assert_eq!(named["namespace"], "ens");
+    assert_eq!(named["default"], false);
+    assert_eq!(
+        named["link_event"],
+        json!({
+            "block_number": 150,
+            "timestamp": "2023-11-14T22:15:50Z",
+            "transaction_hash": "0xlinktx150",
+            "log_index": 4
+        })
+    );
+    assert!(by_node[&node(5)].get("name").is_none(), "shadow surface must not name a link");
+    assert!(all.iter().all(|row| row.get("logical_name_id").is_none()
+        && row.get("normalized_event_id").is_none()
+        && row.get("chain_position").is_none()));
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn v2_resolver_collection_unsupported_is_not_empty_supported() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     let resolver = unsupported_resolver_current_row("ethereum-mainnet", V2_RESOLVER_ADDRESS);
@@ -178,7 +335,7 @@ async fn v2_resolver_collection_unsupported_is_not_empty_supported() -> Result<(
         .seed_snapshot_selector_chain_positions(&resolver.chain_positions)
         .await?;
     upsert_test_resolver_current_rows(&database, &[resolver]).await?;
-    for section in ["aliases", "roles"] {
+    for section in ["aliases", "links", "roles"] {
         let payload = v2_resolver_payload_for_database(
             &database,
             &format!("/v1/resolvers/1/{V2_RESOLVER_ADDRESS}/{section}"),
