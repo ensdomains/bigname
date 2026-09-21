@@ -56,11 +56,6 @@ loc = 607
 justification = "Manifest state, address-epoch persistence, and derived-phase invalidation remain in one transaction boundary; PR #583 grew the file to 598 lines on main and this branch's nine-line no-effect notice crosses the threshold when rebased. Split on the next substantive touch."
 
 [[files]]
-path = "crates/project/src/builders/record_inventory.rs"
-loc = 720
-justification = "The inventory build retains pointer eligibility, value selection, and cleared-pointer rows; historical attribution and mirror substitution are separate modules."
-
-[[files]]
 path = "crates/storage/src/record_inventory/snapshot_reads.rs"
 loc = 612
 justification = "Snapshot admission, anchor fallback, and canonical-lineage proof remain together; this slice ratchets the file below its base allowance without expanding its responsibilities."

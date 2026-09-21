@@ -14,8 +14,17 @@ pub(super) async fn build(
     // Reuse the registrant event already selected by name_current, including its lifecycle
     // scope. Controller folds read the selected authority epoch's project_authority_events;
     // the resource-keyed folds below are scoped by their join to the staged current resource.
-    sqlx::query(
-        r#"
+    sqlx::query(BUILD_ADDRESS_NAMES)
+        .bind(chain_id)
+        .bind(target.number)
+        .bind(&target.hash)
+        .execute(&mut **transaction)
+        .await
+        .map_err(|error| ProjectError::database("failed to build address_names_current", error))?;
+    Ok(())
+}
+
+pub(in crate::builders) const BUILD_ADDRESS_NAMES: &str = r#"
         WITH RECURSIVE target_time AS (
             SELECT extract(epoch FROM lineage.block_timestamp) AS epoch_seconds
             FROM chain_lineage lineage
@@ -190,9 +199,9 @@ pub(super) async fn build(
                         COALESCE((selected_binding.provenance ->> 'log_index')::bigint, -1)
                     )
               )
-              -- Anti-join instead of a DISTINCT ON over the union: `project_authority_events` is
-              -- indexed on (logical_name_id, normalized_event_id) but not on the event id alone,
-              -- so deduplicating afterwards would sort the whole authority-event set on a rebuild.
+              -- Anti-join instead of a DISTINCT ON over the union: deduplicating afterwards would
+              -- sort the whole authority-event set on a rebuild, while this probes
+              -- `project_authority_events` by name and event id through its index.
               AND NOT EXISTS (
                   SELECT 1
                   FROM project_authority_events base
@@ -363,17 +372,16 @@ pub(super) async fn build(
             LEFT JOIN project_authority_events registration
               ON registration.normalized_event_id =
                  (name.provenance ->> 'registrant_event_id')::bigint
+            -- The token holder is read from the registrant event when that event is a token
+            -- transfer. `registration` is that event already: the event id is the key of
+            -- project_authority_events.
             LEFT JOIN LATERAL (
-                SELECT lower(event.after_state ->> 'to') AS token_holder,
-                       event.*
-                FROM project_authority_events event
-                WHERE event.normalized_event_id = registration.normalized_event_id
-                  AND event.event_kind = 'TokenControlTransferred'
-                ORDER BY event.block_number DESC NULLS LAST,
-                         event.transaction_index DESC NULLS LAST,
-                         event.log_index DESC NULLS LAST,
-                         event.normalized_event_id DESC
-                LIMIT 1
+                SELECT lower(registration.after_state ->> 'to') AS token_holder,
+                       registration.normalized_event_id,
+                       registration.block_number,
+                       registration.block_hash,
+                       registration.manifest_version
+                WHERE registration.event_kind = 'TokenControlTransferred'
             ) token_holder ON TRUE
             LEFT JOIN controllers controller
               ON controller.logical_name_id = name.logical_name_id
@@ -520,13 +528,4 @@ pub(super) async fn build(
         LEFT JOIN project_stage_permissions_current_resource_summary summary
           ON summary.resource_id = name.resource_id
         ORDER BY selected.address, selected.logical_name_id, selected.relation
-        "#,
-    )
-    .bind(chain_id)
-    .bind(target.number)
-    .bind(&target.hash)
-    .execute(&mut **transaction)
-    .await
-    .map_err(|error| ProjectError::database("failed to build address_names_current", error))?;
-    Ok(())
-}
+        "#;

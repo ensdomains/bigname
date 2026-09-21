@@ -3,8 +3,16 @@ use sqlx::{Postgres, Transaction};
 use crate::{ProjectError, Result};
 
 pub(super) async fn build(transaction: &mut Transaction<'_, Postgres>) -> Result<()> {
-    sqlx::query(
-        r#"
+    sqlx::query(PROJECT_DIRECT_TOPOLOGY)
+        .execute(&mut **transaction)
+        .await
+        .map_err(|error| {
+            ProjectError::database("failed to build direct ENS name topology", error)
+        })?;
+    Ok(())
+}
+
+pub(in crate::builders) const PROJECT_DIRECT_TOPOLOGY: &str = r#"
         UPDATE project_stage_name_current name
         SET declared_summary = jsonb_set(
             name.declared_summary,
@@ -66,10 +74,4 @@ pub(super) async fn build(transaction: &mut Transaction<'_, Postgres>) -> Result
           AND jsonb_typeof(name.declared_summary -> 'topology') IS DISTINCT FROM 'object'
           AND name.declared_summary -> 'resolver' ->> 'address' IS NOT NULL
           AND name.declared_summary -> 'resolver' ->> 'chain_id' IS NOT NULL
-        "#,
-    )
-    .execute(&mut **transaction)
-    .await
-    .map_err(|error| ProjectError::database("failed to build direct ENS name topology", error))?;
-    Ok(())
-}
+        "#;
