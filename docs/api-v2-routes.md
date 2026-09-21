@@ -2545,6 +2545,11 @@ For a registrar lease first identified by a later readable observation, registra
 - `/roles` returns one `{address, registration_id, name?, powers, grant_event?,
   record_resource?}` row
   for each current resolver-scoped permission row with at least one power.
+  Its `registration_id` follows the same published permission-handle mapping as
+  `GET /v1/permissions`, including before a readable name exists. Following that
+  handle selects the same grant. Evidence above the captured publication cannot
+  change the handle between pages; an unproven lease leaves the resource audit
+  handle intact.
   `record_resource` follows the `GET /v1/permissions` contract: on a record-ID
   resolver it names the record a holder's argument-scoped grant is about.
   Grouping rows by `record_resource.hash` therefore lists the records some

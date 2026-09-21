@@ -347,8 +347,9 @@ fn push_registration_lifecycle_witness(
     }
     builder.push(" AND ");
     builder.push(same_fork_as("lifecycle_grant", anchors, canonical_only));
-    // A NameWrapped row with no link wrapped a name that has no BaseRegistrar lease (a
-    // wrapped subname), so the NameWrapper resource is that name's registration.
+    // A null link is ambiguous: preserve history's wrapper-handle fallback. It does not
+    // prove that no registrar lease exists; see docs/api-v2.md's known gap for registrations
+    // through NameWrapper.
     builder.push(
         "))
           OR (

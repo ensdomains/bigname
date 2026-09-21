@@ -142,12 +142,17 @@ async fn collection(
             .find(|p| p.chain_id == slug)
             .ok_or_else(read_error)?
             .block_number;
+        let mut publication_block_bounds = publication.block_bounds();
+        if let Some(bound) = publication_block_bounds.get_mut(slug) {
+            *bound = (*bound).min(height);
+        }
         reads::page(
             &state.pool,
             slug,
             &address,
             section,
             height,
+            &publication_block_bounds,
             key.as_ref(),
             params.page_size,
         )

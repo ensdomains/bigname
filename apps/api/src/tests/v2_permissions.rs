@@ -2578,3 +2578,9 @@ async fn assert_registry_permission_namespace_chains(
         .bind(registry).bind(lease).execute(&database.pool).await?;
     Ok(())
 }
+
+#[path = "v2_resolver_registry_roles.rs"]
+mod resolver_registry_roles;
+
+#[path = "v2_registry_token_handoff.rs"]
+mod registry_token_handoff;

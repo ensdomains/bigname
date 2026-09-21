@@ -251,6 +251,8 @@ pub async fn load_registry_permission_registration_map(
     let same_authority = registry_permission_same_node("candidate", "authority");
     let same_grant = registry_permission_same_node("candidate", "grant_event");
     let node_candidates = registry_permission_node_candidates();
+    let anchor_identity = registry_permission_token_identity("anchor");
+    let authority_candidates = registry_permission_authority_candidates(node_candidates);
     let query = format!(
         r#"WITH eligible AS NOT MATERIALIZED (
             SELECT ne.*,
@@ -269,9 +271,11 @@ pub async fn load_registry_permission_registration_map(
               AND ne.canonicality_state IN ('canonical', 'safe', 'finalized')
               AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
         ), anchors AS (
-            SELECT DISTINCT anchor.namespace, anchor.chain_id, anchor.node, anchor.logical_name_id,
+            SELECT DISTINCT anchor.namespace, anchor.chain_id,
+                COALESCE(anchor.node, recovered.node) AS node, anchor.logical_name_id,
                 (anchor.source_family LIKE 'basenames\_%') AS basenames
             FROM eligible anchor
+            LEFT JOIN LATERAL ({anchor_identity}) recovered ON true
             WHERE (anchor.resource_id = ANY($1::uuid[])
                 AND anchor.source_family IN ('ens_v1_registry_l1', 'ens_v1_registrar_l1',
                     'basenames_base_registry', 'basenames_base_registrar')
@@ -296,7 +300,7 @@ pub async fn load_registry_permission_registration_map(
         FROM candidates candidate
         JOIN LATERAL (
             SELECT authority.resource_id, authority.after_state, authority.event_kind
-            FROM ({node_candidates}) authority
+            FROM ({authority_candidates}) authority
             WHERE {same_authority}
               AND authority.source_family IN ('ens_v1_registry_l1', 'ens_v1_registrar_l1',
                   'ens_v1_wrapper_l1', 'basenames_base_registry', 'basenames_base_registrar')
@@ -387,4 +391,66 @@ fn registry_permission_node_candidates() -> &'static str {
        SELECT probe.* FROM eligible probe
        WHERE probe.chain_id = candidate.chain_id AND probe.namespace = candidate.namespace
          AND probe.logical_name_id = ANY(candidate.logical_ids)"
+}
+
+// A pre-surface token transfer can emit an epoch without node/name fields. Its token
+// companion supplies only identity; the epoch still supplies authority, resource and order.
+// Probe the exact raw log through normalized_events_block_idx, never arbitrary resource history.
+fn registry_permission_same_raw_log(left: &str, right: &str) -> String {
+    format!(
+        "{left}.chain_id = {right}.chain_id AND {left}.namespace = {right}.namespace
+         AND {left}.source_family = {right}.source_family
+         AND {left}.manifest_version = {right}.manifest_version
+         AND {left}.source_manifest_id IS NOT DISTINCT FROM {right}.source_manifest_id
+         AND {left}.block_hash = {right}.block_hash AND {left}.block_number = {right}.block_number
+         AND {left}.transaction_hash = {right}.transaction_hash
+         AND {left}.transaction_index = {right}.transaction_index AND {left}.log_index = {right}.log_index
+         AND lower({left}.raw_fact_ref ->> 'emitting_address') = lower({right}.raw_fact_ref ->> 'emitting_address')
+         AND {left}.raw_fact_ref @> jsonb_build_object('kind','raw_log','chain_id',{left}.chain_id,
+             'block_hash',{left}.block_hash,'block_number',{left}.block_number,
+             'transaction_hash',{left}.transaction_hash,'transaction_index',{left}.transaction_index,'log_index',{left}.log_index)
+         AND {right}.raw_fact_ref @> jsonb_build_object('kind','raw_log','chain_id',{right}.chain_id,
+             'block_hash',{right}.block_hash,'block_number',{right}.block_number,
+             'transaction_hash',{right}.transaction_hash,'transaction_index',{right}.transaction_index,'log_index',{right}.log_index)"
+    )
+}
+
+fn registry_permission_token_identity(epoch: &str) -> String {
+    let same_log = registry_permission_same_raw_log(epoch, "companion");
+    format!(
+        "SELECT min(companion.node) AS node FROM eligible companion
+         WHERE {epoch}.event_kind = 'AuthorityEpochChanged'
+           AND {epoch}.source_family IN ('ens_v1_registrar_l1', 'basenames_base_registrar')
+           AND {epoch}.after_state ->> 'source_event' = 'Transfer'
+           AND {epoch}.node_key IS NULL
+           AND companion.event_kind = 'TokenControlTransferred'
+           AND companion.after_state ->> 'source_event' = 'Transfer'
+           AND companion.node IS NOT NULL AND {same_log}
+         HAVING count(DISTINCT companion.node) = 1"
+    )
+}
+
+fn registry_permission_authority_candidates(node_candidates: &str) -> String {
+    let columns = "resource_id,after_state,event_kind,namespace,chain_id,source_family,block_number,log_index,normalized_event_id,logical_name_id";
+    let direct_columns = columns
+        .split(',')
+        .map(|c| format!("probe.{c}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let epoch_columns = columns
+        .split(',')
+        .map(|c| format!("epoch.{c}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let same_log = registry_permission_same_raw_log("token", "epoch");
+    let identity = registry_permission_token_identity("epoch");
+    format!(
+        "SELECT {direct_columns}, probe.node FROM ({node_candidates}) probe
+         UNION ALL
+         SELECT {epoch_columns}, recovered.node FROM ({node_candidates}) token
+         JOIN eligible epoch ON {same_log}
+         JOIN LATERAL ({identity}) recovered ON recovered.node = token.node
+         WHERE token.event_kind = 'TokenControlTransferred'
+           AND token.source_family IN ('ens_v1_registrar_l1', 'basenames_base_registrar')"
+    )
 }

@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use super::read_error;
 use crate::v2::{HistoryEventType, V2Result, history_event_type};
 use serde_json::{Value, json};
@@ -9,6 +11,7 @@ pub(super) async fn page(
     address: &str,
     section: &str,
     height: i64,
+    publication_block_bounds: &BTreeMap<String, i64>,
     key: Option<&(String, String)>,
     page_size: u64,
 ) -> V2Result<(Vec<(String, String, Value)>, u64)> {
@@ -79,7 +82,7 @@ pub(super) async fn page(
         })
         .collect::<V2Result<Vec<_>>>()?;
     if section == "roles" {
-        attach_grants(pool, &mut result, height).await?;
+        attach_grants(pool, &mut result, height, publication_block_bounds).await?;
     }
     Ok((result, total as u64))
 }
@@ -88,6 +91,7 @@ async fn attach_grants(
     pool: &sqlx::PgPool,
     rows: &mut [(String, String, Value)],
     height: i64,
+    publication_block_bounds: &BTreeMap<String, i64>,
 ) -> V2Result<()> {
     let ids = rows
         .iter()
@@ -109,6 +113,19 @@ async fn attach_grants(
     let names = bigname_storage::load_current_names_by_resource_ids(pool, &registrations)
         .await
         .map_err(|_| read_error())?;
+    let nameless = registrations
+        .iter()
+        .filter(|id| !names.contains_key(id))
+        .copied()
+        .collect::<Vec<_>>();
+    let leases = bigname_storage::load_registry_permission_registration_map(
+        pool,
+        &nameless,
+        None,
+        publication_block_bounds,
+    )
+    .await
+    .map_err(|_| read_error())?;
     for ((_, _, item), registration) in rows.iter_mut().zip(registrations) {
         if let Some(name) = names.get(&registration) {
             item["name"] = json!(name.normalized_name);
@@ -116,6 +133,8 @@ async fn attach_grants(
                 Some(name),
                 registration,
             ));
+        } else if let Some(lease) = leases.get(&registration) {
+            item["registration_id"] = json!(lease);
         }
         let ids = item
             .as_object_mut()

@@ -65,6 +65,8 @@ pub(crate) fn lapsed_registration(summary: &Value) -> Option<LapsedRegistration>
 
 /// The registration resource Project selected for the name. For a `.eth` second-level name
 /// this is its BaseRegistrar lease, also while the name is wrapped.
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L130-L152 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L246-L270 @ ens_v1@91c966f)
 pub(crate) fn projected_registration_resource_id(summary: &Value) -> Option<&str> {
     declared_registration(summary)?.get("resource_id")?.as_str()
 }
