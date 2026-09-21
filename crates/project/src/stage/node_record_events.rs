@@ -1,11 +1,40 @@
+use sqlx::{Postgres, Transaction};
+
+use crate::{ProjectError, Result};
+
+// This history includes only rows that the node branches below can select. Keep their
+// source, manifest and lineage predicates in place; staging is not serving admission.
+const STAGE_HISTORY_SQL: &str = include_str!("node_record_events/history.sql");
+const INDEX_HISTORY_SQL: &str = include_str!("node_record_events/index.sql");
+
+pub(crate) async fn prepare(
+    transaction: &mut Transaction<'_, Postgres>,
+    chain_id: &str,
+    target_block: i64,
+) -> Result<()> {
+    sqlx::query(STAGE_HISTORY_SQL)
+        .bind(chain_id)
+        .bind(target_block)
+        .execute(&mut **transaction)
+        .await
+        .map_err(|error| ProjectError::database("failed to stage node record history", error))?;
+    for statement in INDEX_HISTORY_SQL.split(';') {
+        if statement.trim().is_empty() {
+            continue;
+        }
+        sqlx::query(statement)
+            .execute(&mut **transaction)
+            .await
+            .map_err(|error| {
+                ProjectError::database("failed to index node record history", error)
+            })?;
+    }
+    Ok(())
+}
+
 pub(crate) const SCOPED_NODE_RECORD_EVENT_IDS_SQL: &str = r#"
 SELECT record.normalized_event_id
-FROM (
-    SELECT logical_name_id FROM project_scope_names
-    UNION
-    SELECT logical_name_id FROM project_scope_children
-) scope
-JOIN name_surfaces surface USING (logical_name_id)
+FROM name_surfaces surface
 JOIN chain_lineage surface_lineage
   ON surface_lineage.chain_id = surface.chain_id
  AND (surface_lineage.block_number, surface_lineage.block_hash) =
@@ -44,7 +73,7 @@ JOIN (
 JOIN LATERAL (
     SELECT event.normalized_event_id, event.chain_id,
            event.block_number, event.block_hash
-    FROM normalized_events event
+    FROM project_node_record_history event
     WHERE pointer.pointer_source_family IN (
               'ens_v1_registry_l1', 'ens_v1_registrar_l1',
               'ens_v1_wrapper_l1', 'ens_v2_registry_l1', 'ens_v2_root_l1'
@@ -64,7 +93,7 @@ JOIN LATERAL (
     UNION ALL
     SELECT event.normalized_event_id, event.chain_id,
            event.block_number, event.block_hash
-    FROM normalized_events event
+    FROM project_node_record_history event
     JOIN project_declared_resolver_addresses declaration
       ON declaration.namespace = pointer.namespace
      AND declaration.resolver_address = pointer.resolver_address
@@ -89,7 +118,7 @@ JOIN LATERAL (
     -- stage that node's writes on every declared ENSv1 resolver.
     SELECT event.normalized_event_id, event.chain_id,
            event.block_number, event.block_hash
-    FROM normalized_events event
+    FROM project_node_record_history event
     JOIN project_declared_resolver_addresses ensv1
       ON ensv1.source_family = 'ens_v1_resolver_l1'
      AND ensv1.resolver_address = lower(COALESCE(
@@ -115,7 +144,7 @@ JOIN LATERAL (
     UNION ALL
     SELECT event.normalized_event_id, event.chain_id,
            event.block_number, event.block_hash
-    FROM normalized_events event
+    FROM project_node_record_history event
     WHERE pointer.pointer_source_family = 'basenames_base_registry'
       AND event.chain_id = $1
       AND event.logical_name_id IS NULL
@@ -134,7 +163,11 @@ JOIN chain_lineage record_lineage
   ON record_lineage.chain_id = record.chain_id
  AND (record_lineage.block_number, record_lineage.block_hash) =
      (record.block_number, record.block_hash)
-WHERE surface.chain_id = $1 AND surface.block_number <= $2
+WHERE (EXISTS (SELECT 1 FROM project_scope_names scope
+               WHERE scope.logical_name_id = surface.logical_name_id)
+       OR EXISTS (SELECT 1 FROM project_scope_children scope
+                  WHERE scope.logical_name_id = surface.logical_name_id))
+  AND surface.chain_id = $1 AND surface.block_number <= $2
   AND surface.canonicality_state IN ('canonical', 'safe', 'finalized')
   AND surface_lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
   AND pointer.resolver_address NOT IN (
@@ -146,17 +179,16 @@ UNION
 -- linked to the name (a pre-surface pointer keeps null logical_name_id and resource_id). The
 -- ENSv1 mirror resolver walk reads these by node (builders/record_inventory/mirror.rs).
 SELECT event.normalized_event_id
-FROM (
-    SELECT logical_name_id FROM project_scope_names
-    UNION
-    SELECT logical_name_id FROM project_scope_children
-) scope
-JOIN name_surfaces surface USING (logical_name_id)
-JOIN normalized_events event
+FROM name_surfaces surface
+JOIN project_node_record_history event
   ON event.chain_id = surface.chain_id
  AND event.namespace = surface.namespace
  AND lower(event.after_state ->> 'node') = lower(surface.namehash)
-WHERE surface.chain_id = $1 AND surface.block_number <= $2
+WHERE (EXISTS (SELECT 1 FROM project_scope_names scope
+               WHERE scope.logical_name_id = surface.logical_name_id)
+       OR EXISTS (SELECT 1 FROM project_scope_children scope
+                  WHERE scope.logical_name_id = surface.logical_name_id))
+  AND surface.chain_id = $1 AND surface.block_number <= $2
   AND surface.canonicality_state IN ('canonical', 'safe', 'finalized')
   AND event.event_kind = 'ResolverChanged'
   AND event.source_family IN ('ens_v1_registry_l1', 'ens_v1_registrar_l1', 'ens_v1_wrapper_l1')

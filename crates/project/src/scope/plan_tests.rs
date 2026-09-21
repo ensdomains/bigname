@@ -13,7 +13,6 @@ const CHILD_LOGICAL_NAME_ID: &str =
     "ens:0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
 const AFTER_CHILD_INDEX: &str = "normalized_events_v1_subregistry_after_child_scope_idx";
-const ENS_V1_RECORD_INDEX: &str = "normalized_events_ens_v1_record_node_resolver_idx";
 const BASENAMES_RECORD_INDEX: &str = "normalized_events_basenames_record_node_resolver_idx";
 
 const BASELINE: &[&str] = &[
@@ -38,7 +37,7 @@ const BASENAMES_RECORD_MIGRATION: &str = include_str!(concat!(
 ));
 
 #[tokio::test]
-async fn basenames_node_record_recovery_uses_its_partial_index() -> Result<()> {
+async fn node_record_recovery_uses_indexed_history() -> Result<()> {
     let database = TestDatabase::create(TestDatabaseConfig::new(
         "basenames_node_record_recovery_plan",
     ))
@@ -179,6 +178,7 @@ async fn basenames_node_record_recovery_uses_its_partial_index() -> Result<()> {
     .execute(&mut *transaction)
     .await?;
 
+    crate::stage::node_record_events::prepare(&mut transaction, CHAIN, 20).await?;
     let plan = sqlx::query_scalar::<_, String>(&format!(
         "EXPLAIN (COSTS OFF) {SCOPED_NODE_RECORD_EVENT_IDS_SQL}"
     ))
@@ -189,12 +189,8 @@ async fn basenames_node_record_recovery_uses_its_partial_index() -> Result<()> {
     .join("\n");
     eprintln!("{plan}");
     assert!(
-        plan.contains(BASENAMES_RECORD_INDEX),
-        "production node-only staging must use {BASENAMES_RECORD_INDEX}:\n{plan}"
-    );
-    assert!(
-        plan.contains(ENS_V1_RECORD_INDEX),
-        "production node-only staging must preserve {ENS_V1_RECORD_INDEX}:\n{plan}"
+        plan.contains("project_node_record_history_lookup"),
+        "production node-only staging must use the indexed history stage:\n{plan}"
     );
 
     transaction.rollback().await?;
