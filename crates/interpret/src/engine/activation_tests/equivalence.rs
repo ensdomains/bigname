@@ -79,11 +79,10 @@ async fn fresh_activation_and_candidate_state_redo_retain_identical_interpret_en
     stamp_interpreter_hash(redo.pool(), bigname_content_hash::INTERPRETER_CONTENT_HASH).await?;
     write_migration_range(redo.pool(), false, true).await?;
 
-    // The reduced corpus omits the registry reclaim, Graveyard transfer, and
-    // resolver clear from the production unwrapped sequence. This test proves
-    // fresh-versus-redo Interpret equivalence only; publication is blocked on
-    // the faithful path by #822. Working-path Project fresh/redo parity is
-    // covered by the issue_503_children reclassification tests.
+    // The corpus is the complete unwrapped migration transaction over a predecessor without a
+    // resolver, so no resolver clear is emitted. This test proves fresh-versus-redo Interpret
+    // equivalence only. Working-path Project fresh/redo parity is covered by the
+    // issue_503_children reclassification tests.
 
     let fresh_state = semantic_end_state(fresh.pool()).await?;
     let redo_state = semantic_end_state(redo.pool()).await?;
@@ -140,7 +139,7 @@ async fn seed_activation_corpus(pool: &PgPool) -> TestResult {
             mode: RunMode::Normal,
         })
         .await?;
-    seed_migration_facts(pool, label, labelhash).await?;
+    seed_migration_facts(pool, label, labelhash, namehash).await?;
     stamp_interpreter_hash(pool, bigname_content_hash::INTERPRETER_CONTENT_HASH).await?;
     install_stage_capture(pool).await?;
     Ok(())

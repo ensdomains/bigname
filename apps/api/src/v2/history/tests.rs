@@ -1,5 +1,6 @@
 use super::*;
 use crate::v2::RawQueryParams;
+use bigname_storage::HistoryCursor;
 
 fn sample_cursor() -> HistoryCursor {
     HistoryCursor {

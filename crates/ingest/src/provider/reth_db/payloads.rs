@@ -42,7 +42,7 @@ impl RethDbReader {
             let number =
                 u64::try_from(expected.number).context("negative selected block number")?;
             // Block position supplies the ID directly: no transaction-hash index is needed.
-            // (upstream: .refs/reth/crates/storage/provider/src/providers/database/provider.rs:L2221 @ reth@88505c7f)
+            // (upstream: .refs/reth/crates/storage/provider/src/providers/database/provider.rs:L2320 @ reth@189c0df3)
             let indices = factory
                 .block_body_indices(number)?
                 .context("missing body indices")?;
@@ -91,7 +91,7 @@ impl RethDbReader {
                         .checked_add(index as u64)
                         .context("transaction ID overflow")?;
                     // ID reads retrieve signed transactions from static files.
-                    // (upstream: .refs/reth/crates/storage/provider/src/providers/database/provider.rs:L1995 @ reth@88505c7f)
+                    // (upstream: .refs/reth/crates/storage/provider/src/providers/database/provider.rs:L2088 @ reth@189c0df3)
                     let tx = factory
                         .transaction_by_id(id)?
                         .context("missing selected transaction")?;
@@ -100,8 +100,8 @@ impl RethDbReader {
                         bail!("selected transaction hash mismatch");
                     }
                     // Stored senders may be absent, so retain the bundle reader's recovery fallback.
-                    // (upstream: .refs/reth/crates/storage/provider/src/providers/database/provider.rs:L2102 @ reth@88505c7f)
-                    // (upstream: .refs/reth/crates/storage/provider/src/providers/database/provider.rs:L1903 @ reth@88505c7f)
+                    // (upstream: .refs/reth/crates/storage/provider/src/providers/database/provider.rs:L2195 @ reth@189c0df3)
+                    // (upstream: .refs/reth/crates/storage/provider/src/providers/database/provider.rs:L1996 @ reth@189c0df3)
                     let sender = match factory.transaction_sender(id)? {
                         Some(s) => s,
                         None => tx.recover_signer_unchecked()?,

@@ -1,3 +1,6 @@
+# Direct Reth database reads for the phase runner. docs/reth-db-reader.md
+# explains the mount contract; docs/runbooks/production-docker.md has the
+# operator steps.
 services:
   api:
     networks:
@@ -8,14 +11,53 @@ services:
     networks:
       - default
       - eth_archive_node
+    # MDBX readers register themselves in the node's existing db/mdbx.lck, which
+    # the node creates writable by its own user only. Run the reader as that
+    # numeric user and group instead of loosening the node's file modes.
+    user: "${RETH_READER_USER:?set RETH_READER_USER to the numeric uid:gid that owns the node's db/mdbx.lck}"
+    # MDBX identifies lock owners by process ID, so the reader must see the same
+    # process IDs as the node: container:<node container name>, or host when the
+    # node runs directly on the host.
+    pid: "${RETH_NODE_PID_NAMESPACE:?set RETH_NODE_PID_NAMESPACE to container:<reth container name>, or host}"
     volumes:
+      # Writable wrapper owned by the reader. Reth creates
+      # rocksdb-secondary-tmp-<pid> beside the rocksdb directory, so the directory
+      # at RETH_DATA_DIR inside the container cannot be read-only. The wrapper is
+      # a separate host directory; the node's datadir is never mounted writable.
       - type: bind
-        source: ${RETH_DATA_DIR:?set RETH_DATA_DIR to the host's canonical reth database directory}
-        target: ${RETH_DATA_DIR:?set RETH_DATA_DIR to the in-container canonical reth database directory}
+        source: ${RETH_READER_DIR:?set RETH_READER_DIR to an existing host directory owned by RETH_READER_USER}
+        target: ${RETH_DATA_DIR:?set RETH_DATA_DIR to the host's canonical reth data directory}
+        read_only: false
+        bind:
+          create_host_path: false
+      # The node's three storage directories, read-only, under the wrapper.
+      - type: bind
+        source: ${RETH_DATA_DIR:?set RETH_DATA_DIR to the host's canonical reth data directory}/db
+        target: ${RETH_DATA_DIR:?set RETH_DATA_DIR to the host's canonical reth data directory}/db
         read_only: true
-
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${RETH_DATA_DIR:?set RETH_DATA_DIR to the host's canonical reth data directory}/static_files
+        target: ${RETH_DATA_DIR:?set RETH_DATA_DIR to the host's canonical reth data directory}/static_files
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${RETH_DATA_DIR:?set RETH_DATA_DIR to the host's canonical reth data directory}/rocksdb
+        target: ${RETH_DATA_DIR:?set RETH_DATA_DIR to the host's canonical reth data directory}/rocksdb
+        read_only: true
+        bind:
+          create_host_path: false
+      # The one writable node file: the node's actual lock file, never a copy.
+      - type: bind
+        source: ${RETH_DATA_DIR:?set RETH_DATA_DIR to the host's canonical reth data directory}/db/mdbx.lck
+        target: ${RETH_DATA_DIR:?set RETH_DATA_DIR to the host's canonical reth data directory}/db/mdbx.lck
+        read_only: false
+        bind:
+          create_host_path: false
 
 networks:
   eth_archive_node:
     external: true
-    name: eth-archive-node_default
+    name: ${RETH_NETWORK_NAME:-eth-archive-node_default}

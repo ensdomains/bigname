@@ -47,6 +47,26 @@ impl ResourceRestrictions {
     }
 }
 
+impl ResourceRestrictions {
+    /// Serve the restrictions under the name's `registration_id`. The constraint model of a
+    /// wrapped `.eth` name lives on its NameWrapper resource while the registration is
+    /// identified by its BaseRegistrar lease.
+    /// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L143-L153 @ ens_v1@91c966f)
+    /// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L246-L278 @ ens_v1@91c966f)
+    pub(crate) fn for_registration(mut self, id: Option<String>) -> Self {
+        let (Self::EnsV1Wrapper {
+            registration_id, ..
+        }
+        | Self::EnsV2Registry {
+            registration_id, ..
+        }) = &mut self;
+        if let Some(id) = id {
+            *registration_id = id;
+        }
+        self
+    }
+}
+
 fn wrapper_restrictions(registration_id: String, block: &Value) -> V2Result<ResourceRestrictions> {
     let wrapper_state = block
         .get("wrapper_state")

@@ -13,11 +13,11 @@ pub(super) fn activate_registry_only_authority(
 ) {
     if active_after.is_none()
         && state
-            .v1_registry_owner(&selected.source.namespace, &raw_namehash)
+            .v1_registry_owner(&selected.source.namespace, raw_namehash)
             .is_some_and(|owner| !owner.eq_ignore_ascii_case(ZERO_ADDRESS))
     {
         let registry_owner = state
-            .v1_registry_owner(&selected.source.namespace, &raw_namehash)
+            .v1_registry_owner(&selected.source.namespace, raw_namehash)
             .expect("checked registry owner");
         let authority = V1NameState {
             logical_name_id: linked.logical_name_id.clone(),
@@ -44,12 +44,12 @@ pub(super) fn activate_registry_only_authority(
         };
         state.remember_v1_registry_authority(
             &selected.source.namespace,
-            &raw_namehash,
+            raw_namehash,
             authority.clone(),
         );
         state.activate_v1_authority(
             &selected.source.namespace,
-            &raw_namehash,
+            raw_namehash,
             Some(authority.clone()),
         );
         *active_after = Some(authority);

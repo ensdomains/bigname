@@ -344,7 +344,25 @@ and retains or opens the concrete ENSv2 binding. Child and `unlocked_wrapped`
 second-level predecessors close at the exact ENSv1 cleanup recorded by the
 boundary; `locked_wrapped` second-level predecessors close at the boundary
 position. Reconciled registrar-token `unwrapped` predecessors use that same
-exact-cleanup rule; recorded #822 coverage remains pending runtime acceptance. The unlocked wrapped controller
+exact-cleanup rule; recorded #822 coverage remains pending runtime acceptance.
+For both registrar-token paths the predecessor is the token, not a binding:
+the unlocked controller receives the BaseRegistrar token from whoever holds
+it, reclaims the ENSv1 registry record for itself, writes the Graveyard as
+owner with an empty resolver and TTL, parks the token in the Graveyard and
+only then registers the name in ENSv2, and the registry-owner record never
+holds the token. The writer finds the lease as the one resource of the name
+with an activated registrar lifecycle event carrying the recorded token id,
+emitted by the recorded BaseRegistrar instance before the cleanup, and whose
+registration was not released before the cleanup; no binding is consulted, so
+a lease binding already closed by a
+[registry-only handoff](glossary.md#registry-only-handoff) still qualifies and
+so does a `registerOnly` successor lease that never had a binding.
+It then closes whatever ENSv1 binding of the name is still open at the
+cleanup, zero or one, and refuses a binding opened at the cleanup instant,
+which could not be closed there and would outlive the boundary.
+(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L92-L121 @ ens_v2@a971bd6)
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L172-L175 @ ens_v1@91c966f)
+The unlocked wrapped controller
 unwraps before injecting the ENSv2 registration.
 (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L146-L148 @ ens_v2@a971bd64)
 If the deployment profile had not materialized the registrar identity before
@@ -776,9 +794,9 @@ suffix does not inherit that level. Without that reference, Base records
 `quick_synced` from its target-covering intake dRPC. A
 Base `reth_db` reference is explicitly unsupported: the pinned reader uses
 reth's Ethereum node type, whose signed transaction and receipt types are the
-Ethereum primitives (upstream: .refs/reth/crates/ethereum/node/src/node.rs:L121 @ reth@88505c7f)
-(upstream: .refs/reth/crates/ethereum/primitives/src/lib.rs:L27 @ reth@88505c7f)
-(upstream: .refs/reth/crates/ethereum/primitives/src/lib.rs:L51 @ reth@88505c7f). Bigname does not
+Ethereum primitives (upstream: .refs/reth/crates/ethereum/node/src/node.rs:L128 @ reth@189c0df3)
+(upstream: .refs/reth/crates/ethereum/primitives/src/lib.rs:L27 @ reth@189c0df3)
+(upstream: .refs/reth/crates/ethereum/primitives/src/lib.rs:L51 @ reth@189c0df3). Bigname does not
 implement a separate OP Stack transaction and receipt reader.
 Base-aware local database verification is tracked by
 [issue #433](https://github.com/ensdomains/bigname/issues/433). Under that

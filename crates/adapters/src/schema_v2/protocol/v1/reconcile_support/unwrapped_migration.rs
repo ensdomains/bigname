@@ -1,11 +1,55 @@
+use std::collections::BTreeMap;
+
 use super::super::refresh_interpreter_state_key;
-use crate::schema_v2::{migration::UnwrappedReconciliation, model::BatchOutput};
+use crate::schema_v2::{
+    migration::UnwrappedReconciliation,
+    model::{BatchOutput, NormalizedEvent},
+};
+
+/// The subject and scope a permission row is about. The scope is compared by its fields, not by
+/// the order its producer wrote them in.
+fn permission_key(event: &NormalizedEvent) -> (String, String) {
+    let scope = &event.after_state["scope"];
+    let scope = match scope.as_object() {
+        Some(fields) => serde_json::to_string(&fields.iter().collect::<BTreeMap<_, _>>())
+            .unwrap_or_else(|_| scope.to_string()),
+        None => scope.to_string(),
+    };
+    (
+        event.after_state["subject"]
+            .as_str()
+            .unwrap_or_default()
+            .to_ascii_lowercase(),
+        scope,
+    )
+}
 
 pub(in crate::schema_v2::protocol) fn reconcile(
     output: &mut BatchOutput,
     proofs: &[UnwrappedReconciliation],
 ) {
     for proof in proofs {
+        // Grants on the registry-only resource inside the proven transaction come from the
+        // temporary authorities the controller's reclaim and cleanup close one log later; they are
+        // removed below, and so are the revocations that close them. A revocation closes such a
+        // grant only when the grant precedes it, so the earliest removed grant per subject and
+        // scope is kept by log position: the proof fixes the block and transaction, so the log
+        // index orders the events.
+        let mut transient_registry_grants = BTreeMap::<(String, String), i64>::new();
+        for event in output.normalized_events.iter().filter(|event| {
+            proof.contains(event)
+                && event.event_kind == "PermissionChanged"
+                && event.resource_id == Some(proof.registry_resource_id)
+                && !event.after_state["grant_source"].is_null()
+        }) {
+            let Some(log) = event.log_index else {
+                continue;
+            };
+            transient_registry_grants
+                .entry(permission_key(event))
+                .and_modify(|first| *first = (*first).min(log))
+                .or_insert(log);
+        }
         output.normalized_events.retain_mut(|event| {
             if !proof.contains(event) {
                 return true;
@@ -22,17 +66,39 @@ pub(in crate::schema_v2::protocol) fn reconcile(
             if event.event_kind == "PermissionChanged" {
                 // Keep actual registrar-token transfers and predecessor revocations for audit.
                 // Grants derived from a temporary registry authority are not durable permissions.
+                // Registrar-token transfers are kept on the lease only: a transfer-sourced grant on
+                // the registry-only resource inside this transaction is the temporary authority the
+                // controller's reclaim closes one log later.
                 let registrar_transfer = event.resource_id == Some(proof.resource_id)
                     && event.source_family == "ens_v1_registrar_l1"
                     && event.after_state["scope"]["kind"] == "resource"
                     && ["grant_source", "revocation_source"].iter().any(|field| {
                         event.after_state[field]["source_event_kind"] == "TokenControlTransferred"
                     });
-                let predecessor_revocation = event.resource_id == Some(proof.resource_id)
-                    && event
-                        .after_state
-                        .get("revocation_source")
-                        .is_some_and(|value| !value.is_null());
+                // A revocation stays on the resource whose grant it closes. After a registrar
+                // transfer without `reclaim` the name is bound to the registry-only resource and
+                // the registry owner holds resource and resolver control there from before this
+                // transaction; the controller's reclaim revokes those grants on that resource, so
+                // the revocations are durable permission history rather than transient authority.
+                // That owner may already be the Graveyard, which the transaction's registry
+                // transfer grants again one log after the reclaim: a revocation is transient only
+                // when a removed grant with the same subject and scope precedes it.
+                // (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L172-L175 @ ens_v1@91c966f)
+                // (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L63-L68 @ ens_v1@91c966f)
+                // (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L111 @ ens_v2@a971bd64)
+                let revoked = event
+                    .after_state
+                    .get("revocation_source")
+                    .is_some_and(|value| !value.is_null());
+                let closes_transient_grant = event.resource_id == Some(proof.registry_resource_id)
+                    && transient_registry_grants
+                        .get(&permission_key(event))
+                        .zip(event.log_index)
+                        .is_some_and(|(grant, revocation)| *grant < revocation);
+                let predecessor_revocation = revoked
+                    && (event.resource_id == Some(proof.resource_id)
+                        || (event.resource_id == Some(proof.registry_resource_id)
+                            && !closes_transient_grant));
                 return registrar_transfer || predecessor_revocation;
             }
             if event.source_family == "ens_v1_registry_l1" {

@@ -497,6 +497,19 @@ collection route carry neither header.
   in another form (an RFC 3339 string at `control.expiry`, or no expiry at all)
   is outside this listing by design; `GET /v1/names/{name}` still serves its
   `expires_at`.
+- Released names: the listing means "registrations whose expiry falls in this
+  window", whether the registration is live, in grace or released. A released
+  name keeps the lapsed registration's expiry, so it appears in every window
+  that covers that old expiry: every released ENSv1 `.eth` lease, and an ENSv2
+  registration that lapsed by path expiry, whose registry entry still holds
+  the expiry. An ENSv2 registration ended by an explicit release loses its
+  expiry with the entry, so it is outside every window; `GET /v1/names/{name}`
+  serves it as `released` without `expires_at`. A released row has
+  `registration_status: released`, its old `expires_at`, and
+  no `owner` or `registrant`. The row shape has no `lapsed_registration` field;
+  `GET /v1/names/{name}` serves that block, with the last holder, for a released
+  ENSv1 name. A client that wants only held names filters rows on
+  `registration_status`.
 - Pagination behavior: standard collection pagination by `expires_at` in the
   requested order, ties broken by namespace, name, and namehash. Cursors are
   bound to namespace, both bounds, and order. `page.total_count` is `null`.
@@ -532,7 +545,16 @@ collection route carry neither header.
   The registration summary is not nested; it is represented by
   `registration_id`, `token_id`, `owner`, `manager`, `registrant`,
   `registered_at`, `created_at`, `expires_at`, and `registration_status` on
-  the same object when backed. An ENSv1 wrapper-backed row also carries
+  the same object when backed. For a `.eth` second-level name
+  `registration_id` is the BaseRegistrar lease whether or not the name is
+  wrapped; see
+  [registration identity of wrapped names](api-v2.md#registration-identity-of-wrapped-names).
+  A released ENSv1 name keeps its lapsed `expires_at`, serves no current
+  `registrant`, and carries
+  `lapsed_registration: {registrant?, held_through?, released_at?}` with the
+  holder the lease had when it lapsed; see
+  [lapsed registration](api-v2.md#lapsed-registration). The block is omitted
+  for every name that is not released. An ENSv1 wrapper-backed row also carries
   `wrapper_state` with the current [`wrapped`](glossary.md#wrapped-namewrapper-state),
   [`emancipated`](glossary.md#emancipated-namewrapper-state), or
   [`locked`](glossary.md#locked-namewrapper-state) lifecycle value and the typed
@@ -1400,7 +1422,30 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
   Registration-id anchored history from `GET /v1/history/resources/{resource_id}`
   moves to `GET /v1/events?registration_id=...`. `scope=registration` on this
   route is limited to registration lifecycles associated with the requested
-  name.
+  name. For a wrapped `.eth` name those are its BaseRegistrar leases: the read
+  follows each published NameWrapper binding of the name to the lease it
+  wrapped, so registrar rows recorded before the name was known are included,
+  and NameWrapper rows report the lease as their `registration_id`. A `.eth`
+  lease granted with `registerOnly` while the name stayed bound to a
+  registry-only resource (a registrar token transferred without `reclaim`) has
+  no binding of its own; the read reaches it, and every earlier such lease,
+  through the name its `RegistrationGranted` row carries.
+  (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L118-L175 @ ens_v1@91c966f)
+  Events on a registry-only control resource use the registrar lease that existed
+  at the event's position, established by activated grant and release evidence on
+  the same chain branch. They do not borrow the latest lease from current name
+  state. This includes resolver changes recorded before name materialization:
+  a resource still under registry-only control needs no token lineage or active
+  name binding to identify the lease at that event. A resolver change on an
+  unbound read resource after that control ended still has no registration
+  handle. This includes a dormant registry resolver first materialized by wrapping:
+  the registry read observation has no authority key, even when the pre-surface
+  handoff emitted no closing row on the old registry resource.
+  During a released gap, or before a lease is proved, those control
+  events have no registration handle. A record event with no resource belongs to that
+  lease only while the registry-only binding is active and the lease exists at
+  the record's position. The same selection governs row IDs, registration filters,
+  counts and cursor anchors.
 
 ### `GET /v1/permissions`
 
@@ -1552,7 +1597,10 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
   scopes share that order. The account key is
   `account:{chain_id}:{authority_kind}:{authority_contract}:{owner}`. The
   opaque cursor binds the exact normalized collection anchor: normalized
-  `address`, normalized `name` when supplied, resolved `registration_id`,
+  `address`, normalized `name` when supplied, the selected public
+  `registration_id` (the one named, else the registration the name serves,
+  which for a wrapped `.eth` name is the lease and never the NameWrapper
+  resource that holds its rows),
   namespace when explicit or implied by a name (and namespace absence for an
   address-only request, matching its all-namespace result set),
   `include=lineage`, the fixed sort, the last keyset tuple, and the captured
@@ -1588,6 +1636,25 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
   including the wrapper list or `permission_support_unknown` when
   applicable. A `registration_id` outside an explicit `namespace` instead
   returns an empty page without permission support metadata.
+  Rows of a wrapped `.eth` name carry the BaseRegistrar lease as
+  `registration_id`, the same handle name detail serves.
+  `GET /v1/permissions?registration_id=<lease>` for a wrapped name returns the
+  permission rows of the NameWrapper resource that currently controls the name,
+  matched through the name's current `registration_id`; a name registered
+  through the NameWrapper, whose wrap recorded no lease, is matched the same
+  way. Registering through the NameWrapper registers the lease to the wrapper
+  and wraps it in one call, and the registrar mints and emits before the wrap,
+  so the controller event that creates the registration comes after
+  `NameWrapped` and the wrap records no lease.
+  (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L289-L305 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L130-L152 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L894-L902 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/deployments/mainnet/WrappedETHRegistrarController.json:L656 @ ens_v1@91c966f)
+  `restrictions.registration_id` is the lease on every page of a read
+  bound to it, including an empty page filtered by `address`.
+  The NameWrapper resource itself is not the name's registration, so pairing
+  the name with it is the supported empty intersection described above, and
+  reading it alone returns an empty page without permission support metadata.
   An unrecognized namespace returns `404 not_found`. A publication change
   during the read returns `409 stale`, as described above.
   When `name` or `registration_id` binds the read to a registration, the
@@ -1651,7 +1718,23 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
   an ENSv1 or Basenames registrar-token transfer without reclaim when the original
   registry owner remains nonzero and has approved the operator: the name selects
   the registry-only resource, and its name, resource and address reads agree.
-  The registrar token's separate resource does not replace that selection.
+  The registrar token's separate resource does not replace that selection. The
+  rows still carry the registrar lease as `registration_id`, the handle name
+  detail serves, and the resource read is the read by that handle; the
+  registry-only resource holds the rows but is not a public registration
+  handle and selects none by its own id. This also holds before name materialization
+  when activated, canonical registry authority and registrar grant observations
+  identify the same node on the same chain; absent logical names alone prove no
+  relationship. Both mapping directions use the captured publication: later
+  activated observations cannot change the advertised or selected handle before
+  Project publishes them. During a released gap with no live lease, retained
+  registry grants instead use their registry resource as a followable
+  `resource_audit` handle; this does not claim a live name registration, and the
+  released lease does not select that control or a successor's grants.
+  An ordinary registry-owned subname with no registrar lease also uses its
+  registry resource as the registration handle. That handle selects its grants both while the name is current and as
+  a resource audit after the current name row disappears.
+  (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L75-L84 @ ens_v1@91c966f)
   (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L175 @ ens_v1@91c966f)
   (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L17-L20 @ ens_v1@91c966f)
   (upstream: .refs/basenames/src/L2/Registry.sol:L49-L52 @ basenames@1809bbc)
@@ -1750,11 +1833,20 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
 - Response shape: `data` is an array of record-shaped rows with `name`,
   `display_name`, `namespace`, `namehash`, `owner`, `registrant`,
   `registration_status`, `registered_at`, `created_at`, and `expires_at`.
-  Address-name rows also return `permission_resource_id`, the selected
-  permission authority resource UUID used by its inline summary. It remains
-  available without `include=role_summary` and does not redefine name detail's
-  `registration_id`. A `relation=resolves_to` row whose name has only a retained
-  serving resource, and therefore no permission authority, omits it.
+  Address-name rows also return `permission_resource_id`, the handle
+  `GET /v1/permissions?registration_id=` resolves to the permission authority
+  resource behind the row's inline summary. While the name retains a current
+  registration identity it is that registration's `registration_id`, including
+  when other name coverage is unsupported. This preserves a followable resource
+  audit without asserting current name support. It agrees with supported name
+  detail: for a wrapped `.eth` name it is the BaseRegistrar lease, although its
+  permission rows live on the NameWrapper resource, which is not a
+  public registration handle. A wrapped subname has no lease and keeps its
+  NameWrapper resource. When no current registration claims the resource,
+  the value is the resource UUID itself, which the permissions route reads as a
+  resource audit. It remains available without `include=role_summary`. A
+  `relation=resolves_to` row whose name has only a retained serving resource,
+  and therefore no permission authority, omits it.
   Address-name rows add `is_primary` and `relations`, where `relations` is the
   subset of `owner`, `manager`, and `registrant` that matched, or
   `["resolves_to"]` on a `relation=resolves_to` read. A `resolves_to` row also
@@ -2233,7 +2325,20 @@ For a registrar lease first identified by a later readable observation, registra
   product `registration_id` filter likewise excludes V1 ownerless rows linked
   only to the registry resource retained for reads. Raw diagnostics keeps that
   resource attribution. The filter still returns resource-less events for names
-  bound to the requested registration. The served API currently exposes the old single-field shape, with
+  bound to the requested registration, but only events inside a binding of that
+  registration that was open at the event's position on the event's own chain
+  branch, so an older registration does not acquire a later registration's name
+  events. Record writes on the name's resolver that carry no resource are kept
+  through the same binding, or through Project's attribution of the write to
+  that registration's own records or to the records of a NameWrapper resource
+  whose `NameWrapped` row recorded the lease; attribution to another
+  registration of the same name does not admit the write, its count, or its
+  cursor anchor. A handle is a public registration only when a
+  registration grant backs it: directly, through a NameWrapper binding that
+  recorded the lease it wrapped, or, for a wrapped name with no registrar
+  lease, through the NameWrapper binding itself. A reservation, a
+  registry-only resource, or a NameWrapper resource that wraps a lease selects
+  no product rows; that also governs counts, summaries and cursor anchors. The served API currently exposes the old single-field shape, with
   `registration_id` only; the field change is the committed contract and lands
   in an immediate companion change. The
   slice-2 consumer activation contract maps each
@@ -2440,6 +2545,11 @@ For a registrar lease first identified by a later readable observation, registra
 - `/roles` returns one `{address, registration_id, name?, powers, grant_event?,
   record_resource?}` row
   for each current resolver-scoped permission row with at least one power.
+  Its `registration_id` follows the same published permission-handle mapping as
+  `GET /v1/permissions`, including before a readable name exists. Following that
+  handle selects the same grant. Evidence above the captured publication cannot
+  change the handle between pages; an unproven lease leaves the resource audit
+  handle intact.
   `record_resource` follows the `GET /v1/permissions` contract: on a record-ID
   resolver it names the record a holder's argument-scoped grant is about.
   Grouping rows by `record_resource.hash` therefore lists the records some

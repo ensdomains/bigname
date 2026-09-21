@@ -24,9 +24,13 @@ sqlx.workspace = true
 tokio = { workspace = true, features = ["time"] }
 tracing.workspace = true
 uuid.workspace = true
-reth-ethereum = { git = "https://github.com/paradigmxyz/reth", tag = "v2.2.0", default-features = false, features = ["std", "node"], optional = true }
+reth-ethereum = { git = "https://github.com/paradigmxyz/reth", tag = "v2.5.0", default-features = false, features = ["std", "node"], optional = true }
 
 bigname-manifests.workspace = true
 
 [dev-dependencies]
 bigname-test-support.workspace = true
+
+[[example]]
+name = "reth-db-smoke"
+required-features = ["reth-db"]

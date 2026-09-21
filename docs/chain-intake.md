@@ -160,8 +160,8 @@ source-key set check before it rewrites derived data. A change to a persisted
 identity field—source key, normalized kind, seed basis, or start block—requires
 an explicitly reviewed reset that removes the cursor and every durable Ingest
 output that may have come from that source, followed by a [full source
-re-walk](glossary.md#re-derivation-boundary); it is never an in-place cursor
-update. Changing only the provider endpoint is allowed because endpoints are
+re-walk](glossary.md#re-derivation-boundary); it is never an implicit in-place cursor update. The narrow same-node RPC/direct-DB
+transport exception below preserves that physical source and its retained extent. Changing only the provider endpoint is allowed because endpoints are
 not persisted source identity and therefore do not trip the runtime identity
 guard. An independent level attests only that the current verification-only
 endpoint was excluded from intake for all facts retained since the last full
@@ -186,11 +186,90 @@ its applicable reviewed reset and preservation procedure, and the owner-approved
 rollback and restoration plan authorize that reset; the generic
 verification-mismatch prose does not, and an ordinary redo is not a substitute.
 
+### Same-node Sepolia transport change
+
+`phase-runner source-transport --from-source OLD --to-source NEW --attest-same-node`
+is an explicit maintenance operation for switching the same Sepolia execution
+node between its HTTP (`drpc`) and direct database (`reth_db`) interfaces: a
+[source transport](glossary.md#source-transport) change. `reth`, the other
+accepted spelling of the direct reader's kind, names the same interface; the
+command treats it as `reth_db` when deciding what the change moves between and
+keeps the spelling the deployment configured in the cursor.
+Both descriptors must keep the same key, `ethereum_head` seed, start zero,
+and explicit `intake` role. This exception does not admit another source or
+claim new historical coverage. Stop every phase writer first. The command takes
+all five phase advisory locks, locks the cursor and Ingest state, compares
+both endpoints' retained canonical boundary hashes, compares the watched logs
+of the block the resumed work reads first, and applies the
+[source-floor admission](#download-range-planning) that the resumed work
+applies, before changing only the persisted source kind. The admission is the
+engine's own rule (`bigname_ingest::admit_source_floor`) applied to the proposed
+descriptor, and which work resumes is read from the persisted phase state the
+way the runner reads it:
+
+- a redo in progress with blocks left is judged on what remains of its range.
+  Both interfaces must also return the same hash for the range's last block,
+  which the redo batch resolves before loading its first window;
+- a redo that read its last block before the runner cleared its marker (its
+  `redo_current_block_number` equals `redo_to_block_number`) has nothing left
+  to read. Rerunning it only clears the marker and restores the lifecycle the
+  redo interrupted, so the command judges that restored lifecycle by the rules
+  below; the receipt then shows `ingest_phase.redo_in_progress: true` together
+  with a populated `live_continuation` when the interrupted pass had handed off
+  (the compared block is the ancestor when the next block does not exist yet).
+  A redo position outside its range is refused, as the engine refuses it;
+- an unfinished Ingest phase, or a completed phase that never handed off,
+  replans from the declared start block (zero, so a direct reader that has pruned
+  any history is refused). The proposed reader must also report safe and
+  finalized checkpoint heads, as the normal Ingest batch requires before it
+  plans work. When the cursor retains a normal target, both interfaces must
+  return the same hash for that block: normal Ingest resolves its retained
+  target before loading the next window, even when the reader's latest head is
+  lower. This check does not lower or reset the target and does not apply to
+  live follow;
+- a completed Ingest phase that handed off to live follow is judged where live
+  follow resumes, not on the retained Ingest cursor, which stops at the handoff
+  while live progress is recorded separately. The command selects that block
+  from the published chain head with the live engine's own rule
+  (`bigname_ingest::plan_live_continuation`): the block after the highest
+  published block the node still reports with the published hash, no lower than
+  the published finalized block. When live follow has already published the
+  node's head there is no next block to compare yet, so the command compares
+  the published head itself, the boundary live follow extends, and still applies
+  the floor to the block after it;
+- a failed Ingest phase that retains a completed extent awaiting
+  completed-phase revalidation (the failed status, the completed-validation
+  error, matching current and target markers and a matching live handoff) is
+  judged like a handed-off phase, because the runner revalidates it without a
+  historical rescan. Every other failed or unfinished Ingest phase replans from
+  the declared start.
+
+A refusal names the floor and the range the resumed work would plan, and
+changes nothing; without it the command would report success and the next
+batch would fail the same check.
+It emits a receipt containing the previous cursor, unchanged phase state,
+checked boundaries, the block it compared, the checked `normal_target` or
+`redo_target` when applicable and, after a handoff, the selected live
+continuation; retain that receipt with the deployment record. Raw facts,
+positions, redo ranges, manifest authority and verification state are preserved.
+A mismatch or held writer lock aborts before the update. The inverse change is
+supported for rollback after the same checks. An ordinary startup still rejects
+an unreviewed source-kind change.
+
+The direct reader must retain the next required Ingest range, and it refuses to
+open a datadir whose stored genesis block hash is not Sepolia's
+([direct Reth reader](reth-db-reader.md)). Switching
+transport does not recover pruned history, grant historical state access or
+make the node independent of its former HTTP interface. Keep a separate state
+RPC where needed. A verification-only endpoint that previously supplied any
+retained facts still cannot establish independent coverage of those facts;
+this command does not clear that provenance restriction.
+
 Production intake shape is exact:
 `ethereum-mainnet` has one local Reth DB
 source, while `base-mainnet` has one Coinbase SQL historical source and one
 dRPC source meeting at block `48,428,000`; either may add one distinct verification-only source of its supported kind. `ethereum-sepolia` has exactly one
-dRPC intake source with `ethereum_head` seed basis and start block zero, plus zero or one verification-only dRPC with the same seed basis and start. The
+dRPC or local Reth DB intake source with `ethereum_head` seed basis and start block zero, plus zero or one verification-only dRPC with the same seed basis and start. The
 runner will validate the Sepolia rule before Ingest creates a source cursor,
 contacts the provider, or writes raw facts. Live follow uses only the chain
 block provider from that
@@ -199,9 +278,9 @@ its target-covering intake cursor. The dRPC
 source kind is capped at `cross_checked`, and chain policy caps its independent extent at the `48,428,000` seam. A Base
 `reth_db` reference is unsupported because the pinned reader uses reth's
 Ethereum node type, whose signed transaction and receipt types are the Ethereum
-primitives (upstream: .refs/reth/crates/ethereum/node/src/node.rs:L121 @ reth@88505c7f)
-(upstream: .refs/reth/crates/ethereum/primitives/src/lib.rs:L27 @ reth@88505c7f)
-(upstream: .refs/reth/crates/ethereum/primitives/src/lib.rs:L51 @ reth@88505c7f). Bigname does not
+primitives (upstream: .refs/reth/crates/ethereum/node/src/node.rs:L128 @ reth@189c0df3)
+(upstream: .refs/reth/crates/ethereum/primitives/src/lib.rs:L27 @ reth@189c0df3)
+(upstream: .refs/reth/crates/ethereum/primitives/src/lib.rs:L51 @ reth@189c0df3). Bigname does not
 implement a separate OP Stack transaction and receipt reader.
 Base-aware local database verification is tracked by
 [issue #433](https://github.com/ensdomains/bigname/issues/433). Under the Issue #411
@@ -262,42 +341,42 @@ not imply starting above a floor that moved during downtime or a deep reorg.
 Those refusals are an early, cheap answer, not the guarantee. The reported floor
 is optimistic even on an idle node: reth advances a receipt static file's block
 position before deciding whether to write that block's receipts
-(upstream: .refs/reth/crates/storage/provider/src/providers/database/provider.rs:L2504 @ reth@88505c7f)
-(upstream: .refs/reth/crates/storage/provider/src/providers/database/provider.rs:L2512 @ reth@88505c7f),
+(upstream: .refs/reth/crates/storage/provider/src/providers/database/provider.rs:L2635 @ reth@189c0df3)
+(upstream: .refs/reth/crates/storage/provider/src/providers/database/provider.rs:L2643 @ reth@189c0df3),
 so the lowest retained range can begin with receipt-less blocks, and a receipt log
 filter can drop individual receipts inside a block that was written
-(upstream: .refs/reth/crates/storage/provider/src/providers/database/provider.rs:L2528 @ reth@88505c7f).
+(upstream: .refs/reth/crates/storage/provider/src/providers/database/provider.rs:L2659 @ reth@189c0df3).
 The guarantee is at the read: every fetched block whose receipt count does not
 match the transaction count in its retained body indices fails the log read. That
 covers what no floor can express — receipt-less blocks inside a retained range,
 receipts pruned out of database tables, and a partial receipt list, which would
 otherwise attribute logs to the wrong transaction. Pruning
 receipts deletes whole static-file ranges while leaving their headers readable
-(upstream: .refs/reth/crates/prune/prune/src/segments/receipts.rs:L34 @ reth@88505c7f)
-(upstream: .refs/reth/crates/prune/prune/src/segments/mod.rs:L41 @ reth@88505c7f),
+(upstream: .refs/reth/crates/prune/prune/src/segments/receipts.rs:L34 @ reth@189c0df3)
+(upstream: .refs/reth/crates/prune/prune/src/segments/mod.rs:L41 @ reth@189c0df3),
 and a deleted range reads back as no rows and no error
-(upstream: .refs/reth/crates/storage/provider/src/providers/static_file/manager.rs:L1996 @ reth@88505c7f)
-(upstream: .refs/reth/crates/storage/provider/src/providers/static_file/manager.rs:L1998 @ reth@88505c7f).
+(upstream: .refs/reth/crates/storage/provider/src/providers/static_file/manager.rs:L2047 @ reth@189c0df3)
+(upstream: .refs/reth/crates/storage/provider/src/providers/static_file/manager.rs:L2049 @ reth@189c0df3).
 
 The rule is deliberately stricter than the reference client's own guard. reth
 refuses an `eth_getLogs` range below its expired-history floor with
 `PrunedHistoryUnavailable`
-(upstream: .refs/reth/crates/rpc/rpc/src/eth/filter.rs:L584 @ reth@88505c7f)
-(upstream: .refs/reth/crates/rpc/rpc/src/eth/filter.rs:L586 @ reth@88505c7f),
+(upstream: .refs/reth/crates/rpc/rpc/src/eth/filter.rs:L597 @ reth@189c0df3)
+(upstream: .refs/reth/crates/rpc/rpc/src/eth/filter.rs:L599 @ reth@189c0df3),
 but that floor tracks the lowest transaction static file
-(upstream: .refs/reth/crates/storage/provider/src/providers/static_file/manager.rs:L1221 @ reth@88505c7f)
-(upstream: .refs/reth/crates/storage/provider/src/providers/static_file/manager.rs:L1224 @ reth@88505c7f),
+(upstream: .refs/reth/crates/storage/provider/src/providers/static_file/manager.rs:L1226 @ reth@189c0df3)
+(upstream: .refs/reth/crates/storage/provider/src/providers/static_file/manager.rs:L1229 @ reth@189c0df3),
 so a node whose receipts were pruned while its transactions were kept passes the
 guard, and each of its receipt-less blocks then contributes no logs rather than
 an error
-(upstream: .refs/reth/crates/rpc/rpc/src/eth/filter.rs:L1265 @ reth@88505c7f)
-(upstream: .refs/reth/crates/rpc/rpc/src/eth/filter.rs:L1272 @ reth@88505c7f).
+(upstream: .refs/reth/crates/rpc/rpc/src/eth/filter.rs:L1282 @ reth@189c0df3)
+(upstream: .refs/reth/crates/rpc/rpc/src/eth/filter.rs:L1289 @ reth@189c0df3).
 Intake reads receipts directly, so it refuses there too. That widening is
 recorded in `docs/upstream.md` § Known divergences. The receipt floor is read
 from the static files on disk, so it bounds nothing on a node that keeps
 receipts in database tables
-(upstream: .refs/reth/crates/storage/provider/src/either_writer.rs:L188 @ reth@88505c7f)
-(upstream: .refs/reth/crates/storage/provider/src/either_writer.rs:L190 @ reth@88505c7f),
+(upstream: .refs/reth/crates/storage/provider/src/either_writer.rs:L193 @ reth@189c0df3)
+(upstream: .refs/reth/crates/storage/provider/src/either_writer.rs:L195 @ reth@189c0df3),
 whose row-wise prune checkpoints are not read. On that configuration the floor
 falls back to expired history alone, and the receipt-count check is what stops a
 pruned window from being recorded: any block whose bloom admits a watched event

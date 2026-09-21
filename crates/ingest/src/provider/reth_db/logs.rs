@@ -84,8 +84,8 @@ impl RethDbReader {
                 })?;
             // The planning floor can be stale: the pruner deletes static files before it
             // commits the transaction whose id makes a read-only provider re-read its index
-            // (upstream: .refs/reth/crates/storage/provider/src/providers/database/mod.rs:L279 @ reth@88505c7f)
-            // (upstream: .refs/reth/crates/prune/prune/src/pruner.rs:L363 @ reth@88505c7f).
+            // (upstream: .refs/reth/crates/storage/provider/src/providers/database/mod.rs:L294 @ reth@189c0df3)
+            // (upstream: .refs/reth/crates/prune/prune/src/pruner.rs:L363 @ reth@189c0df3).
             // A block missing its receipts reads as an empty list, so compare against the
             // body indices, which pruning receipts leaves in place.
             if receipts.len() as u64 != indices.tx_count {

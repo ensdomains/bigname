@@ -33,6 +33,8 @@ const VERIFIABLE_FACTORY: &str = "0x9e726eb570beb6bceb495ab8cda7df517d4e841c";
 const WRAPPER_REGISTRY_IMPLEMENTATION: &str = "0x2741543c3b14640b97bc70a233318032f7e35bac";
 const MIGRATION_REGISTRY: &str = "0x0000000000000000000000000000000000000771";
 const OWNER: &str = "0x0000000000000000000000000000000000000051";
+/// The BaseRegistrar transfer to the Graveyard in `seed_migration_facts`.
+const MIGRATION_CLEANUP_LOG_INDEX: i64 = 3;
 
 mod ens_registry {
     use alloy_sol_types::sol;
@@ -69,6 +71,12 @@ sol! {
 
 #[path = "tests/unlocked_wrapped.rs"]
 mod unlocked_wrapped;
+
+#[path = "tests/registry_only_handoff.rs"]
+mod registry_only_handoff;
+
+#[path = "tests/mainnet_wrapped_registration.rs"]
+mod mainnet_wrapped_registration;
 
 #[path = "activation_tests/equivalence.rs"]
 mod equivalence;
@@ -121,7 +129,7 @@ async fn checked_in_sepolia_manifests_materialize_exactly_one_transition_predece
         "the admitted BaseRegistrar facts must materialize one live ENSv1 predecessor"
     );
 
-    seed_migration_facts(pool, label, labelhash).await?;
+    seed_migration_facts(pool, label, labelhash, namehash).await?;
     let loaded = load::batch_input(
         pool,
         CHAIN,
@@ -184,7 +192,10 @@ async fn checked_in_sepolia_manifests_materialize_exactly_one_transition_predece
             .await?;
     assert_eq!(
         closed_at,
-        Some(time::OffsetDateTime::from_unix_timestamp(MIGRATION_BLOCK)?),
+        Some(
+            time::OffsetDateTime::from_unix_timestamp(MIGRATION_BLOCK)?
+                + time::Duration::microseconds(MIGRATION_CLEANUP_LOG_INDEX)
+        ),
         "the activated transition preserves the registrar cleanup-time close"
     );
     let successor_count: i64 = sqlx::query_scalar(
@@ -198,13 +209,10 @@ async fn checked_in_sepolia_manifests_materialize_exactly_one_transition_predece
     .await?;
     assert_eq!(successor_count, 1);
 
-    // This reduced transition-writer fixture omits the ENSv1→ENSv2 migration transaction's
-    // user-to-controller registrar `Transfer`, registry `NewOwner` reclaim,
-    // registry `Transfer` to the Graveyard, conditional `NewResolver`, ENSv2
-    // `TransferSingle`, `EACRolesChanged`, and `ResolverUpdated` logs, while it
-    // injects `RegistryCreated` and `ProxyDeployed` logs absent from U-01. It
-    // proves exactly-one predecessor materialization, not a production
-    // publication path. The complete transaction is covered separately below.
+    // This fixture drives the checked-in Sepolia manifests through the complete migration
+    // transaction plus the `RegistryCreated` and `ProxyDeployed` logs absent from U-01. It proves
+    // exactly-one predecessor materialization through the production writer, not a publication
+    // path; the wrapped-then-unwrapped predecessor and Redo replay are covered below.
 
     database.cleanup().await?;
     Ok(())
@@ -614,8 +622,22 @@ async fn seed_faithful_unwrapped_migration(
     .await
 }
 
-async fn seed_migration_facts(pool: &PgPool, label: &[u8], labelhash: B256) -> TestResult {
+/// The unlocked controller's complete `.eth` migration transaction with the migration registry
+/// creation logs appended: registrar transfer to the controller, registry reclaim, registry
+/// `setRecord` to the Graveyard, registrar transfer to the Graveyard, ENSv2 registration with its
+/// mint, resource link and role grant. The predecessor here holds no resolver, so `setRecord`
+/// emits no `NewResolver`.
+/// (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L111-L119 @ ens_v2@a971bd64)
+/// (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L174-L188 @ ens_v1@91c966f)
+async fn seed_migration_facts(
+    pool: &PgPool,
+    label: &[u8],
+    labelhash: B256,
+    namehash: B256,
+) -> TestResult {
+    let owner = OWNER.parse::<Address>()?;
     let controller = UNLOCKED_CONTROLLER.parse::<Address>()?;
+    let graveyard = GRAVEYARD.parse::<Address>()?;
     let mut versioned = labelhash.0;
     versioned[28..].fill(0);
     let token = U256::from_be_bytes(versioned);
@@ -626,8 +648,8 @@ async fn seed_migration_facts(pool: &PgPool, label: &[u8], labelhash: B256) -> T
         0,
         BASE_REGISTRAR,
         base_registrar::Transfer {
-            from: controller,
-            to: GRAVEYARD.parse()?,
+            from: owner,
+            to: controller,
             tokenId: U256::from_be_bytes(labelhash.0),
         }
         .encode_log_data(),
@@ -637,12 +659,50 @@ async fn seed_migration_facts(pool: &PgPool, label: &[u8], labelhash: B256) -> T
         pool,
         MIGRATION_BLOCK,
         1,
+        ENS_REGISTRY,
+        ens_registry::NewOwner {
+            node: eth_node(),
+            label: labelhash,
+            owner: controller,
+        }
+        .encode_log_data(),
+    )
+    .await?;
+    insert_log(
+        pool,
+        MIGRATION_BLOCK,
+        2,
+        ENS_REGISTRY,
+        ens_registry::Transfer {
+            node: namehash,
+            owner: graveyard,
+        }
+        .encode_log_data(),
+    )
+    .await?;
+    insert_log(
+        pool,
+        MIGRATION_BLOCK,
+        MIGRATION_CLEANUP_LOG_INDEX,
+        BASE_REGISTRAR,
+        base_registrar::Transfer {
+            from: controller,
+            to: graveyard,
+            tokenId: U256::from_be_bytes(labelhash.0),
+        }
+        .encode_log_data(),
+    )
+    .await?;
+    insert_log(
+        pool,
+        MIGRATION_BLOCK,
+        4,
         ETH_REGISTRY,
         LabelRegistered {
             tokenId: token,
             labelHash: labelhash,
             label: std::str::from_utf8(label)?.to_owned(),
-            owner: OWNER.parse()?,
+            owner,
             expiry: 1_900_000_000,
             sender: controller,
         }
@@ -652,7 +712,22 @@ async fn seed_migration_facts(pool: &PgPool, label: &[u8], labelhash: B256) -> T
     insert_log(
         pool,
         MIGRATION_BLOCK,
-        2,
+        5,
+        ETH_REGISTRY,
+        TransferSingle {
+            operator: controller,
+            from: Address::ZERO,
+            to: owner,
+            id: token,
+            value: U256::from(1_u64),
+        }
+        .encode_log_data(),
+    )
+    .await?;
+    insert_log(
+        pool,
+        MIGRATION_BLOCK,
+        6,
         ETH_REGISTRY,
         TokenResource {
             tokenId: token,
@@ -664,7 +739,21 @@ async fn seed_migration_facts(pool: &PgPool, label: &[u8], labelhash: B256) -> T
     insert_log(
         pool,
         MIGRATION_BLOCK,
-        3,
+        7,
+        ETH_REGISTRY,
+        EACRolesChanged {
+            resource: token,
+            account: owner,
+            oldRoleBitmap: U256::ZERO,
+            newRoleBitmap: "97409655027181761882228017414928043062435250176".parse()?,
+        }
+        .encode_log_data(),
+    )
+    .await?;
+    insert_log(
+        pool,
+        MIGRATION_BLOCK,
+        8,
         MIGRATION_REGISTRY,
         RegistryCreated {}.encode_log_data(),
     )
@@ -672,7 +761,7 @@ async fn seed_migration_facts(pool: &PgPool, label: &[u8], labelhash: B256) -> T
     insert_log(
         pool,
         MIGRATION_BLOCK,
-        4,
+        9,
         VERIFIABLE_FACTORY,
         ProxyDeployed {
             sender: LOCKED_CONTROLLER.parse()?,

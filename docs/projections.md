@@ -391,6 +391,12 @@ before registrar rows were joined by resource identity.
   registrar rows, and rule 2 alone would drop the registrar lease, and with it `registered_at`
   and the registrar expiry, from every name registered through the NameWrapper under a manifest
   where the controller event grants the lease.
+  Registration-scoped history does not have rule 1. Under a manifest where the controller event
+  grants the lease, Project serves the lease as the name's registration while history still
+  uses the NameWrapper resource as that name's handle. `docs/api-v2.md`
+  [states this known gap](api-v2.md#known-gap-a-name-registered-through-the-namewrapper-where-the-controller-event-grants-the-lease).
+  It closes when registrations come from the BaseRegistrar's own events, and the two changes
+  must be deployed together.
   (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L264-L268 @ ens_v1@91c966f)
   (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L289-L305 @ ens_v1@91c966f)
   (upstream: .refs/ens_v1/deployments/mainnet/WrappedETHRegistrarController.json:L656 @ ens_v1@91c966f)
@@ -405,9 +411,10 @@ contract, not a change of holder, and the person who holds the name afterwards i
 
 `declared_summary.registration.resource_id` names the registration of an ENSv1 name by its
 BaseRegistrar lease: the selected registration's own resource, or the lease the current wrapper
-binding recorded. It is the lease whether the name was wrapped at registration or later, and
-stays the same through unwrap and rewrap. It is `null` for ENSv2 registrations. No API route
-reads this key yet.
+binding leads to by the two rules above. It is the lease whether the name was wrapped at
+registration or later, and stays the same through unwrap and rewrap. It is `null` when the name
+has no registrar lease (a wrapped subname) and for ENSv2 registrations; the API then uses the
+bound resource.
 
 Incremental scope brings in the same rows a rebuild names, in both directions. A scoped wrapper
 resource or name adds the exact registrar resource its canonical `SurfaceBound` row names, and a
@@ -476,7 +483,7 @@ and whose `available` is true once it is past grace. ENSv2 draws the same line i
 registry: it checks expiry on every read and returns no resolver and no subregistry for an
 expired label. The handed-off name is therefore not the one exception. It becomes a
 [released v1 authority](glossary.md#released-v1-authority) tombstone: `status` `released` with
-the lease's `released_at`, and no current owner, manager, registrant, authority, expiry, control,
+the lease's `released_at`, and no current owner, manager, registrant, authority, control,
 resolver or records; the address listing drops it and a name-filtered permissions request
 selects nothing, as for any released name. The tombstone selects the registry-only binding,
 which stands for the released lease the way the closed NameWrapper binding stands for a wrapped
@@ -500,10 +507,41 @@ selects the closed NameWrapper binding that stands for the lease, found by the s
 above: the recorded `wrapped_registrar_resource_id`, or a named grant in the wrap's transaction.
 The rule starts from a registrar `RegistrationReleased`, so it does not fire when only the
 NameWrapper's own expiry has passed and the registrar lease, renewed on the BaseRegistrar
-directly, is still live; that name is not released.
+directly, is still live; that name is not released. In that state the NameWrapper reports no
+owner for a name whose `PARENT_CANNOT_CONTROL` fuse is burned, which every wrapped `.eth`
+second-level name has, so `registration.registrant` and `control.registrant` are `null` from the
+first block whose timestamp is past the NameWrapper expiry, together with the already cleared
+`wrapper_state` and token-holder relation. The `registrant` address-to-name relation reads the
+same field and is dropped with it. A renewal through the NameWrapper moves its expiry and
+restores all of them.
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L843-L856 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1013 @ ens_v1@91c966f)
+
+A tombstone keeps `registration.expiry`, the lapsed lease's own expiry, and adds
+`registration.lapsed_registration = {registrant, authority_kind, authority_key, released_at}`:
+the holder selected by the registrant fold at the release, and the authority the released
+lease binding's resource had before its closing epoch (the NameWrapper for a lease that lapsed
+while wrapped). The registrar's `RegistrationReleased` row names the BaseRegistrar token owner
+it ended. For an unwrapped lease that is the holder, and the fold reads it. For a wrapped lease
+it is the NameWrapper contract, so the fold skips the release and the holder is the NameWrapper
+token owner at the release: the `NameWrapped` owner, then each later NameWrapper transfer. The
+fold recognizes the wrapped lease by the same two rules as above, the recorded
+`wrapped_registrar_resource_id` or a named grant in the wrap's transaction, so the NameWrapper
+contract is never served as the lapsed holder under either manifest shape. An unwrapped lease
+becomes a tombstone only when no ENSv1 registry owner can take the node over at the release,
+for example after `registerOnly`, which does not write the registry; its `authority_kind` is
+`registrar`. `released_at` is the timestamp of the block at which the adapter settled the
+release, the first block whose timestamp is after the lease's expiry plus the 90-day grace
+period. The API serves `authority_kind` as `lapsed_registration.held_through`, only for the
+values `registrar` and `wrapper`, and does not serve `authority_key`.
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L118-L127 @ ens_v1@91c966f) `registration.registrant`, `authority_kind` and
+`authority_key` stay `null`, so nothing that reads current state (address-to-name relations,
+permissions, counts) sees the lapsed holder. No other row carries the block.
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L71-L76 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L101-L104 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L157-L169 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L265 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L297 @ ens_v1@91c966f)
 
 A pre-existing owner-retraction gap remains: if an owner-zeroing ENSv1 or Basenames registry
 `AuthorityTransferred` event hides a child that has no current child or exact-name row, later retracting that

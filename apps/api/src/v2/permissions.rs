@@ -1,26 +1,23 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use axum::{Json, extract::State};
-use bigname_storage::{
-    EffectivePermissionRow, PermissionGrantRelation, PermissionsCurrentAccountResourceCursor,
-};
+use bigname_storage::{EffectivePermissionRow, PermissionGrantRelation};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sqlx::types::Uuid;
 
 use crate::AppState;
 
+use super::address_names::permission_resource_handle;
 use super::collection_snapshot::CollectionSnapshot;
-use super::cursor::{cursor_value, invalid_cursor_error};
 use super::name_record::wrapper_metadata;
 use super::permission_support::{
     PermissionRequestScope, PermissionSupport, apply_permissions_collection_support_meta,
     permission_support_for_resources,
 };
 use super::{
-    AddressNameGrant, CursorPayload, Envelope, GrantRelation, Meta, Page, QueryParamAllowlist,
-    QueryParams, StrictQueryParams, V2Error, V2Result, decode, effective_permission_scope_value,
-    encode, permission_powers_value, record_resource_value,
+    AddressNameGrant, Envelope, GrantRelation, Meta, Page, QueryParamAllowlist, QueryParams,
+    StrictQueryParams, V2Error, V2Result, decode, effective_permission_scope_value, encode,
+    permission_powers_value, record_resource_value,
     restrictions::ResourceRestrictions,
     validate_latest_collection_selectors,
     vocab::{AuthorityContext, WrapperFuses, WrapperState},
@@ -34,17 +31,17 @@ mod current_name;
 use current_name::load_current_name_row;
 
 mod filter;
-use filter::{EmptyPermissionsSelection, permissions_filter_inputs, resolve_permissions_filter};
+pub(crate) use filter::registration_row;
 
-const PERMISSIONS_SORT: &str = "address_registration_scope_asc";
+mod paging;
+use filter::{EmptyPermissionsSelection, permissions_filter_inputs, resolve_permissions_filter};
+use paging::{permissions_cursor_payload, permissions_storage_cursor};
+
 const NAMESPACE_FILTER_KEY: &str = "namespace";
 const NAME_FILTER_KEY: &str = "name";
 const ADDRESS_FILTER_KEY: &str = "address";
 const REGISTRATION_ID_FILTER_KEY: &str = "registration_id";
 const INCLUDE_FILTER_KEY: &str = "include";
-const SUBJECT_CURSOR_KEY: &str = "subject";
-const RESOURCE_ID_CURSOR_KEY: &str = "resource_id";
-const SCOPE_CURSOR_KEY: &str = "scope";
 
 pub(crate) struct PermissionsQueryParams;
 
@@ -124,8 +121,14 @@ pub(crate) async fn get_permissions(
         CollectionSnapshot::capture_for_namespace(&state, params.cursor.as_deref(), namespace)
             .await?;
 
-    let resolved =
-        resolve_permissions_filter(&state, &params, include_lineage, &filter_inputs).await?;
+    let resolved = resolve_permissions_filter(
+        &state,
+        &params,
+        include_lineage,
+        &filter_inputs,
+        &snapshot.block_bounds(),
+    )
+    .await?;
     let storage_cursor = params
         .cursor
         .as_deref()
@@ -137,7 +140,13 @@ pub(crate) async fn get_permissions(
 
     if let Some(selection) = resolved.empty_selection {
         let support = if selection == EmptyPermissionsSelection::SupersededNameRegistrationPair {
-            let ids = resolved.resource_id.into_iter().collect::<Vec<_>>();
+            // The explicitly requested registration classifies the empty page like its own
+            // standalone read, through the resource that controls it; the name's own control
+            // resource does not.
+            let ids = resolved
+                .pair_support_resource_id
+                .into_iter()
+                .collect::<Vec<_>>();
             let summaries =
                 bigname_storage::load_permissions_current_resource_summaries(&state.pool, &ids)
                     .await
@@ -187,10 +196,25 @@ pub(crate) async fn get_permissions(
     )
     .await
     .map_err(|_| V2Error::internal_error("failed to load permission support"))?;
+    // The selected resource is included so an empty page still serves its restrictions under
+    // the name's registration_id.
     let current_names =
-        bigname_storage::load_current_names_by_resource_ids(&state.pool, &resource_ids)
+        bigname_storage::load_current_names_by_resource_ids(&state.pool, &support_resource_ids)
             .await
             .map_err(|_| V2Error::internal_error("failed to load permission names"))?;
+    let nameless_resource_ids = support_resource_ids
+        .iter()
+        .copied()
+        .filter(|id| !current_names.contains_key(id))
+        .collect::<Vec<_>>();
+    let registry_registrations = bigname_storage::load_registry_permission_registration_map(
+        &state.pool,
+        &nameless_resource_ids,
+        None,
+        &snapshot.block_bounds(),
+    )
+    .await
+    .map_err(|_| V2Error::internal_error("failed to load permission registrations"))?;
     let next_cursor = storage_page.next_cursor.as_ref().map(|cursor| {
         encode(&snapshot.bind_cursor(permissions_cursor_payload(cursor, &resolved.cursor_filters)))
     });
@@ -200,13 +224,20 @@ pub(crate) async fn get_permissions(
         .iter()
         .map(|row| {
             let current_name = current_names.get(&row.resource_id);
-            build_permission_row(
+            let mut permission = build_permission_row(
                 row,
                 current_name.map(|name| name.normalized_name.as_str()),
                 current_name.map(|name| &name.declared_summary),
                 include_lineage,
                 resolved.authority_context,
-            )
+            )?;
+            permission.registration_id = permission_resource_handle(current_name, row.resource_id);
+            if current_name.is_none()
+                && let Some(registration) = registry_registrations.get(&row.resource_id)
+            {
+                permission.registration_id = registration.to_string();
+            }
+            Ok(permission)
         })
         .collect::<V2Result<Vec<_>>>()?;
     let mut meta = snapshot.finish(&state).await?;
@@ -226,7 +257,24 @@ pub(crate) async fn get_permissions(
         .and_then(|resource_id| permission_summaries.get(&resource_id))
         .map(ResourceRestrictions::from_summary)
         .transpose()?
-        .flatten();
+        .flatten()
+        .map(|restrictions| {
+            restrictions.for_registration(
+                resolved
+                    .resource_id
+                    .and_then(|resource_id| {
+                        current_names
+                            .get(&resource_id)
+                            .map(|name| permission_resource_handle(Some(name), resource_id))
+                    })
+                    .or_else(|| {
+                        resolved
+                            .resource_id
+                            .and_then(|id| registry_registrations.get(&id))
+                            .map(ToString::to_string)
+                    }),
+            )
+        });
 
     Ok(Json(PermissionsResponse {
         envelope: Envelope {
@@ -265,7 +313,8 @@ fn empty_permissions_response(
                 PermissionRequestScope::ResourceBound,
             );
         }
-        EmptyPermissionsSelection::NamespaceRegistrationMismatch => {}
+        EmptyPermissionsSelection::NamespaceRegistrationMismatch
+        | EmptyPermissionsSelection::ResourceIsNotARegistration => {}
     }
 
     Json(PermissionsResponse {
@@ -322,50 +371,6 @@ pub(crate) fn build_permission_row(
     })
 }
 
-fn permissions_cursor_payload(
-    cursor: &PermissionsCurrentAccountResourceCursor,
-    filters: &BTreeMap<String, String>,
-) -> CursorPayload {
-    CursorPayload::new(
-        PERMISSIONS_SORT,
-        filters.clone(),
-        BTreeMap::from([
-            (SUBJECT_CURSOR_KEY.to_owned(), cursor.subject.clone()),
-            (
-                RESOURCE_ID_CURSOR_KEY.to_owned(),
-                cursor.resource_id.to_string(),
-            ),
-            (SCOPE_CURSOR_KEY.to_owned(), cursor.scope.clone()),
-        ]),
-        None,
-    )
-}
-
-fn permissions_storage_cursor(
-    payload: &CursorPayload,
-    expected_filters: &BTreeMap<String, String>,
-) -> V2Result<PermissionsCurrentAccountResourceCursor> {
-    if payload.sort != PERMISSIONS_SORT {
-        return Err(invalid_cursor_error());
-    }
-    if &payload.filters != expected_filters {
-        return Err(invalid_cursor_error());
-    }
-    if payload.last_item.len() != 3 {
-        return Err(invalid_cursor_error());
-    }
-
-    let resource_id = cursor_value(payload, RESOURCE_ID_CURSOR_KEY, invalid_cursor_error)?
-        .parse::<Uuid>()
-        .map_err(|_| invalid_cursor_error())?;
-
-    Ok(PermissionsCurrentAccountResourceCursor {
-        subject: cursor_value(payload, SUBJECT_CURSOR_KEY, invalid_cursor_error)?,
-        resource_id,
-        scope: cursor_value(payload, SCOPE_CURSOR_KEY, invalid_cursor_error)?,
-    })
-}
-
 fn permissions_include_lineage(include: &[String]) -> V2Result<bool> {
     let mut include_lineage = false;
     for value in include {
@@ -379,8 +384,11 @@ fn permissions_include_lineage(include: &[String]) -> V2Result<bool> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use bigname_storage::{EffectivePermissionScope, PermissionsCurrentAccountResourceCursor};
     use serde_json::json;
+    use sqlx::types::Uuid;
     use sqlx::types::time::OffsetDateTime;
 
     use super::*;
