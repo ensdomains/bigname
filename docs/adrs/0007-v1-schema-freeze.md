@@ -399,11 +399,11 @@ before the first replay. That last read is decided before the statement is
 sent, because PostgreSQL checks the relation privilege when the scan opens and
 the documented external-server login is not a superuser. A file that rewrites or deletes earlier bookkeeping, or changes
 any of that however the statement is spelled, fails even though no catalog
-line moves. A run that cannot read `pg_authid`, which `pg_roles` shows as
-one mask for every password, instead reconnects as its login after each replay
-with the password it created that login with; that proves something only
-where the server refuses a wrong password, which the check tries first, and a
-run that can do neither refuses to start. The password form is also named by
+line moves. Where the server refuses a wrong password, which the check tries
+first, it also reconnects as its login after each replay with the password it
+created that login with, which is all a run that cannot read `pg_authid` has,
+`pg_roles` showing one mask for every password; a run that can do neither
+refuses to start. The password form is also named by
 the statement rule.
 From acceptance on, a
 schema-migration of any of these kinds cannot land without moving the
