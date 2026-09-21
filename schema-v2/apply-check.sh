@@ -384,6 +384,13 @@ SELECT line FROM (
     FROM pg_default_acl d
     LEFT JOIN pg_namespace ns ON ns.oid = d.defaclnamespace
     LEFT JOIN pg_roles r ON r.oid = d.defaclrole
+    UNION ALL
+    -- The database's own attributes: a connection limit or refused
+    -- connections reach every later deployed connection.
+    SELECT format('database %s: owner=%s connlimit=%s allowconn=%s template=%s tablespace=%s acl=%s',
+               d.datname, pg_get_userbyid(d.datdba), d.datconnlimit, d.datallowconn, d.datistemplate,
+               (SELECT spcname FROM pg_tablespace WHERE oid = d.dattablespace), COALESCE(d.datacl::text, '-'))
+    FROM pg_database d WHERE d.datname = current_database()
 ) configuration ORDER BY 1;
 SQL
         # `pg_roles` prints every password as one mask, so a changed one is
@@ -1028,6 +1035,18 @@ SELECT line FROM (
     JOIN pg_namespace n ON n.oid = c.relnamespace
     WHERE n.nspname = current_schema() AND NOT t.tgisinternal
     UNION ALL
+    -- A foreign key is enforced by internal triggers the rows above leave out;
+    -- one that no longer fires is a key no longer enforced.
+    SELECT 6, c.relname, con.conname,
+           format('constraint trigger %s.%s enabled=%s', c.relname, con.conname,
+                  string_agg(DISTINCT t.tgenabled::text, ',' ORDER BY t.tgenabled::text))
+    FROM pg_trigger t JOIN pg_constraint con ON con.oid = t.tgconstraint
+    JOIN pg_class c ON c.oid = con.conrelid
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE n.nspname = current_schema() AND t.tgisinternal
+    GROUP BY c.relname, con.conname
+    HAVING bool_or(t.tgenabled <> 'O')
+    UNION ALL
     SELECT 7, s.sequencename, '',
            format('sequence %s %s start=%s increment=%s min=%s max=%s cache=%s cycle=%s owned_by=%s',
                   s.sequencename, s.data_type, s.start_value, s.increment_by,
@@ -1085,6 +1104,21 @@ SELECT line FROM (
                                                ORDER BY da.defaclobjtype)::text
                             FROM pg_default_acl da WHERE da.defaclnamespace = 0 AND da.defaclrole = n.nspowner), '-'))
     FROM pg_namespace n WHERE n.nspname = current_schema()
+    UNION ALL
+    -- Every object belongs to the schema's owner, whom the ACL rows write as
+    -- owner, so another owner would otherwise print the same.
+    SELECT 14, o.kind, o.name, format('%s %s is not owned by the schema owner', o.kind, o.name)
+    FROM (
+        SELECT 'relation' AS kind, c.relname::text AS name, c.relowner AS owner
+        FROM pg_class c WHERE c.relnamespace = current_schema()::regnamespace
+        UNION ALL
+        SELECT 'routine', p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')', p.proowner
+        FROM pg_proc p WHERE p.pronamespace = current_schema()::regnamespace
+        UNION ALL
+        SELECT 'type', t.typname::text, t.typowner
+        FROM pg_type t WHERE t.typnamespace = current_schema()::regnamespace
+    ) o
+    WHERE o.owner <> (SELECT n.nspowner FROM pg_namespace n WHERE n.nspname = current_schema())
 ) catalog
 -- Byte order: the session collation may weigh punctuation last, and the
 -- scratch schema's name inside an identity would then reorder rows between
@@ -1212,7 +1246,7 @@ SELECT line FROM (
 OUTSIDE_SQL
 )"
 assert_literal_schema_name_replays_match() {
-    local after_baseline observed settings_before fresh_order planted_order outside_before copy_stream populated
+    local after_baseline observed settings_before fresh_order planted_order outside_before copy_stream copy_tables copy_sequences populated
     local planted_dir status main_database="$database" main_url="${BIGNAME_DATABASE_URL:-}" exercised_schema="$scratch_schema"
     local in_literal_database="DO \$\$ BEGIN IF current_database() <> '$literal_database' THEN RAISE EXCEPTION 'not the literal-name database'; END IF; END \$\$;"
     # Copying the rows needs session_replication_role, a superuser setting, so
@@ -1230,6 +1264,8 @@ assert_literal_schema_name_replays_match() {
     planted_order="$(mktemp "${TMPDIR:-/tmp}/schema-v2-literal-order.XXXXXX")"
     outside_before="$(mktemp "${TMPDIR:-/tmp}/schema-v2-literal-outside.XXXXXX")"
     copy_stream="$(mktemp "${TMPDIR:-/tmp}/schema-v2-literal-copy.XXXXXX")"
+    copy_tables="$(mktemp "${TMPDIR:-/tmp}/schema-v2-literal-copy.XXXXXX")"
+    copy_sequences="$(mktemp "${TMPDIR:-/tmp}/schema-v2-literal-copy.XXXXXX")"
     # Not `( ... ) || ...`: bash does not stop on a failed command inside a
     # subshell whose status is tested.
     set +e
@@ -1282,19 +1318,41 @@ assert_literal_schema_name_replays_match() {
             # a fresh baseline column by column before every file runs again.
             reset_literal_schema
             apply_baseline
+            main_owner_psql() { database="$main_database" BIGNAME_DATABASE_URL="$main_url" run_psql_as_owner; }
+            printf "\\\\pset format unaligned\n\\\\pset tuples_only on\nSELECT quote_ident(c.relname) || '|' || string_agg(quote_ident(a.attname), ', ' ORDER BY a.attnum) FROM pg_class c JOIN pg_attribute a ON a.attrelid = c.oid WHERE c.relnamespace = '\"%s\"'::regnamespace AND c.relkind = 'r' AND a.attnum > 0 AND NOT a.attisdropped AND a.attgenerated = '' GROUP BY c.relname ORDER BY c.relname;\n" "$exercised_schema" \
+                | main_owner_psql > "$copy_tables"
+            printf "\\\\pset format unaligned\n\\\\pset tuples_only on\nSELECT quote_ident(relname) FROM pg_class WHERE relnamespace = '\"%s\"'::regnamespace AND relkind = 'S' ORDER BY relname;\n" "$exercised_schema" \
+                | main_owner_psql > "$copy_sequences"
             {
                 printf 'SET session_replication_role = replica;\n'
                 while IFS='|' read -r table columns; do
                     printf 'COPY bigname_phase.%s (%s) FROM STDIN;\n' "$table" "$columns"
-                    printf 'COPY (SELECT %s FROM "%s".%s) TO STDOUT;\n' "$columns" "$exercised_schema" "$table" \
-                        | database="$main_database" BIGNAME_DATABASE_URL="$main_url" run_psql_as_owner
+                    printf 'COPY (SELECT %s FROM "%s".%s) TO STDOUT;\n' "$columns" "$exercised_schema" "$table" | main_owner_psql
                     printf '\\.\n'
-                done < <(printf "\\\\pset format unaligned\n\\\\pset tuples_only on\nSELECT quote_ident(c.relname) || '|' || string_agg(quote_ident(a.attname), ', ' ORDER BY a.attnum) FROM pg_class c JOIN pg_attribute a ON a.attrelid = c.oid WHERE c.relnamespace = '\"%s\"'::regnamespace AND c.relkind = 'r' AND a.attnum > 0 AND NOT a.attisdropped AND a.attgenerated = '' GROUP BY c.relname ORDER BY c.relname;\n" "$exercised_schema" \
-                    | database="$main_database" BIGNAME_DATABASE_URL="$main_url" run_psql_as_owner)
-                printf "\\\\pset format unaligned\n\\\\pset tuples_only on\nSELECT format('SELECT setval(%%L, %%s);', 'bigname_phase.' || quote_ident(sequencename), last_value) FROM pg_sequences WHERE schemaname = '%s' AND last_value IS NOT NULL;\n" "$exercised_schema" \
-                    | database="$main_database" BIGNAME_DATABASE_URL="$main_url" run_psql_as_owner
+                done < "$copy_tables"
+                # A sequence's position is its value and whether that value was
+                # handed out, which only the sequence relation itself reports.
+                while IFS= read -r sequence; do
+                    printf "\\\\pset format unaligned\n\\\\pset tuples_only on\nSELECT format('SELECT setval(%%L, %%s, %%s);', 'bigname_phase.%s', last_value, is_called::text) FROM \"%s\".%s;\n" "$sequence" "$exercised_schema" "$sequence" \
+                        | main_owner_psql
+                done < "$copy_sequences"
             } > "$copy_stream"
             run_psql_as_owner < "$copy_stream" >/dev/null
+            # Checked, not assumed: every table's row count and every sequence's
+            # position must read the same on both sides.
+            copy_state_sql() {
+                printf '\\pset format unaligned\n\\pset tuples_only on\n'
+                while IFS='|' read -r table columns; do
+                    printf "SELECT '%s ' || count(*) FROM \"%s\".%s;\n" "$table" "$1" "$table"
+                done < "$copy_tables"
+                while IFS= read -r sequence; do
+                    printf "SELECT '%s ' || last_value || ' ' || is_called FROM \"%s\".%s;\n" "$sequence" "$1" "$sequence"
+                done < "$copy_sequences"
+            }
+            if ! diff -u <(copy_state_sql "$exercised_schema" | main_owner_psql) <(copy_state_sql bigname_phase | run_psql_as_owner) >&2; then
+                printf '%s\n' "the exercised rows did not copy into the literal-name database intact (diff above: - exercised, + copy)" >&2
+                exit 1
+            fi
             replay_schema_migrations "literal-name populated"
             if ! diff -u "$frozen_schema_catalog" <(frozen_schema_catalog bigname_phase) >&2; then
                 printf '%s\n' "the exercised replay's rows replayed with the schema named bigname_phase give another catalog than $(basename "$frozen_schema_catalog") (diff above: - frozen, + literal name)" >&2
@@ -1349,6 +1407,13 @@ PLANT
             *"+schema planted_outside"*) ;;
             *) printf '%s\n' "the literal-name replay does not see a planted schema outside the phase schema" >&2; exit 1 ;;
         esac
+        # The role and database snapshot sees the database's own attributes.
+        printf 'ALTER DATABASE "%s" CONNECTION LIMIT 5;\n' "$literal_database" | run_psql_as_owner
+        case "$(diff "$settings_before" <(role_and_database_settings) || true)" in
+            *"> database $literal_database: "*"connlimit=5 "*) ;;
+            *) printf '%s\n' "the role and database snapshot does not see a planted connection limit on the database" >&2; exit 1 ;;
+        esac
+        printf 'ALTER DATABASE "%s" CONNECTION LIMIT -1;\n' "$literal_database" | run_psql_as_owner
         # The column-order rule reads the kept fresh order: a baseline column
         # dropped and added back, so now last, must be refused.
         column_order_of bigname_phase > "$planted_order"
@@ -1360,13 +1425,13 @@ PLANT
     )
     status=$?
     set -e
-    rm -f -- "$after_baseline" "$observed" "$settings_before" "$fresh_order" "$planted_order" "$outside_before" "$copy_stream"
+    rm -f -- "$after_baseline" "$observed" "$settings_before" "$fresh_order" "$planted_order" "$outside_before" "$copy_stream" "$copy_tables" "$copy_sequences"
     if [ "$status" != 0 ]; then
         printf '%s\n' \
             "the replay with the phase schema named bigname_phase, unrewritten as sqlx applies it and run as the configured user, failed above after the same replays under the scratch name and the login passed; unless the failure is the connection or set-up, a schema-migration reads the name in a form the rewrite cannot see (assembled, in another case, encoded), or reads who runs it, and behaves differently -- name the schema literally and do not branch on identity" >&2
         exit 1
     fi
-    refusal_assertions_passed=$((refusal_assertions_passed + 4 + populated))
+    refusal_assertions_passed=$((refusal_assertions_passed + 5 + populated))
     if [ "$populated" = 0 ]; then
         printf '%s\n' "note: the configured user is not a superuser, so the exercised replay's rows were not replayed under the literal name" >&2
         expected_refusal_assertions=$((expected_refusal_assertions - 1))
@@ -1515,6 +1580,27 @@ assert_frozen_catalog_sees_planted_changes() {
             rm -f -- "$planted_catalog"
             exit 1
         fi
+        refusal_assertions_passed=$((refusal_assertions_passed + 1))
+    done
+    # Changes only the configured user can make, planted on its connection: an
+    # object handed to another owner, and, for a superuser, a table's
+    # foreign-key triggers switched off.
+    local -a owner_planted_changes=(
+        'is not owned by the schema owner:ALTER FUNCTION label_hashes(text[]) OWNER TO CURRENT_USER;'
+    )
+    if [ "$(printf '\\pset tuples_only on\nSELECT rolsuper FROM pg_roles WHERE rolname = current_user;\n' | run_psql_as_owner | tr -d ' ')" = t ]; then
+        owner_planted_changes+=('constraint trigger address_names_current.:ALTER TABLE address_names_current DISABLE TRIGGER ALL;')
+    else
+        printf '%s\n' "note: the database user is not a superuser, so disabled foreign-key triggers were not planted" >&2
+        expected_refusal_assertions=$((expected_refusal_assertions - 1))
+    fi
+    for planted in "${owner_planted_changes[@]}"; do
+        reason="${planted%%:*}"
+        frozen_schema_catalog_within "$frozen_schema" "${planted#*:}" owner > "$planted_catalog"
+        case "$(diff "$frozen_schema_catalog" "$planted_catalog" || true)" in
+            *"> "*"$reason"*) ;;
+            *) printf '%s\n' "the frozen catalog does not see a planted change (${planted#*:})" >&2; rm -f -- "$planted_catalog"; exit 1 ;;
+        esac
         refusal_assertions_passed=$((refusal_assertions_passed + 1))
     done
     # Two definitions under one name that print the same without the
@@ -2653,15 +2739,16 @@ migration_application_log="$(
 # Future entries must use basename|one-line reason.
 intentional_phase_migration_skips=()
 refusal_assertions_passed=0
-# Base 173, main added 78, this branch 168 (85 of them the backslash-command,
+# Base 173, main added 78, this branch 171 (88 of them the backslash-command,
 # SET-spelling, session-residue, session-identity (database, connection and
 # temporary namespace included), recorded-history, ambiguous foreign key,
 # assembled password, literal-name branch and column-order, baseline-residue,
 # setting-name, backend-status, routine quoting, extension-dependency,
-# handler, literal-name identity, outside-object and populated plants), and
+# handler, literal-name identity, outside-object, populated, ownership,
+# constraint-trigger and database-attribute plants), and
 # the merges fold main's four address-match and event-order not-ready probes
 # into their invalid ones (-4); predecessor proofs base 39, +6, +1.
-expected_refusal_assertions=415
+expected_refusal_assertions=418
 predecessor_shape_proof_count=0
 expected_predecessor_shape_proof_count=46
 refusal_probe_seconds=0

@@ -270,8 +270,11 @@ outside quoted text and comments made one space, since
 `20260923140000_project_name_surfaces_label_indexes.sql` and the baseline
 indent `label_hashes` differently; string literals, quoted identifiers,
 dollar-quoted strings and comments are compared as written), trigger (with its firing
-state), sequence (its whole range, cache, cycle and owning column), type,
-domain, comment and the schema's own privileges, of the
+state, and a foreign key whose internal triggers no longer all fire, which
+would stop enforcing it while its definition reads the same), sequence (its whole range, cache, cycle and owning column), type,
+domain, comment and the schema's own privileges, with any object not owned
+by the schema's owner named (privileges write that owner as owner, by role,
+so the catalog reads alike whoever owns the schema), of the
 baseline plus the inventoried schema-migrations, built into a fresh schema on every
 run and compared line for line, so a change to a baseline file or a
 schema-migration that moves the schema fails until the catalog is
@@ -308,7 +311,9 @@ branch on who runs the file, however the file reads it, takes the other path
 there wherever the two differ in what it tests, and is refused when that path
 changes what these replays compare (a path that only changes rows is left to
 review). A third such replay, where the configured user is a superuser,
-replays the exercised scratch schema's rows (copied with triggers suspended),
+replays the exercised scratch schema's rows and sequence positions (copied
+with triggers suspended, each sequence's value with whether it was handed out,
+and the row counts and positions checked equal on both sides),
 so a branch on rows and the name together is covered as far as those rows
 reach. Because a failure the login meets can be swallowed and then succeed as
 the configured user, nothing outside the phase schema may appear or change in
@@ -430,7 +435,9 @@ file, with the SHA-384 of its bytes — and the cluster's role
 configuration — connection defaults, every role attribute (`LOGIN`,
 `SUPERUSER`, `BYPASSRLS`, `CREATEDB`, `CREATEROLE`, `REPLICATION`, `INHERIT`,
 connection limit, expiry), role memberships, the default privileges of every
-schema in the database rather than only the phase schema's, and, where the
+schema in the database rather than only the phase schema's, the database's
+own attributes (owner, connection limit, whether it accepts connections, the
+template flag, tablespace and privileges), and, where the
 check can read `pg_authid`, the password verifiers — against the snapshot taken
 before the first replay. That last read is decided before the statement is
 sent, because PostgreSQL checks the relation privilege when the scan opens and
