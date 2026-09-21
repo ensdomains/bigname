@@ -96,6 +96,8 @@ render_phase_migration() {
 # (20260514110000_ens_v1_recent_renewal_resource_repair.sql does), so a
 # replay is handed the whole directory: with `sequence_applies=phase` a file
 # outside the phase inventory is recorded at its position and not applied.
+# `sequence_recorded` lists the versions a database already recorded, which
+# sqlx skips; they are recorded at their positions and not applied either.
 migration_sequence_sql() {
     local migration_file name version description checksum bookkeeping login_digest=""
     if [ "${session_residue_probe:-on}" = on ]; then
@@ -108,7 +110,8 @@ migration_sequence_sql() {
         description="${name#*_}"; description="${description%.sql}"; description="${description//_/ }"
         checksum="$(sha384sum -- "$migration_file" | cut -d' ' -f1)"
         bookkeeping="INSERT INTO _sqlx_migrations ( version, description, success, checksum, execution_time ) VALUES ( $version, '$description', TRUE, '\\x$checksum', -1 );"
-        if [ "${sequence_applies:-all}" = phase ] && ! phase_migration_uses_production_schema "$migration_file"; then
+        if [[ $'\n'"${sequence_recorded:-}"$'\n' == *$'\n'"${name%%_*}"$'\n'* ]] \
+            || { [ "${sequence_applies:-all}" = phase ] && ! phase_migration_uses_production_schema "$migration_file"; }; then
             printf '%s\nUPDATE _sqlx_migrations SET execution_time = 0 WHERE version = %s;\n' "$bookkeeping" "$version"
             continue
         fi
@@ -135,7 +138,9 @@ migration_sequence_sql() {
 # compares a digest of the login's own connection defaults, memberships and
 # default privileges with the one taken before the sequence, since a change a
 # later file reverts is gone from the end-of-replay snapshot but reaches any
-# deployment interrupted between the two.
+# deployment interrupted between the two. The temporary namespace a temporary
+# table allocates is not probed: nothing frees it before the session ends and
+# 20260917141000 allocates it, so the session-identity rule refuses reading it.
 login_configuration_digest_sql="SELECT md5(concat_ws(' ',
     (SELECT string_agg(to_jsonb(s)::text, ' ' ORDER BY to_jsonb(s)::text) FROM pg_catalog.pg_db_role_setting s WHERE s.setrole = r.oid),
     (SELECT string_agg(to_jsonb(m)::text, ' ' ORDER BY to_jsonb(m)::text) FROM pg_catalog.pg_auth_members m WHERE r.oid IN (m.roleid, m.member)),
@@ -504,6 +509,21 @@ assert_migration_sequence_session_mirrors_sqlx() {
     observed_error="$(printf '%s\n' "$probe_stderr" | psql_error_message)"
     if [ "$observed_error" != 'relation "_sqlx_migrations" does not exist' ]; then
         printf '%s\n' "the planted search_path file failed for another reason: $observed_error" >&2
+        exit 1
+    fi
+    printf 'DELETE FROM _sqlx_migrations;\n' | run_psql
+    refusal_assertions_passed=$((refusal_assertions_passed + 1))
+    # Phase files the database already recorded are skipped by version, whatever
+    # their names now, and the one after them runs.
+    planted_dir="$(mktemp -d "${TMPDIR:-/tmp}/schema-v2-planted-sequence.XXXXXX")"
+    printf "SELECT 'bigname_phase';\nDO \$\$ BEGIN RAISE EXCEPTION '%s'; END \$\$;\n" 'the recorded file ran' > "$planted_dir/00000000000001_recorded.sql"
+    printf "SELECT 'bigname_phase';\nDO \$\$ BEGIN RAISE EXCEPTION '%s'; END \$\$;\n" 'the renamed recorded file ran' > "$planted_dir/00000000000002_renamed.sql"
+    printf "SELECT 'bigname_phase';\nDO \$\$ BEGIN RAISE EXCEPTION '%s'; END \$\$;\n" 'the pending file ran' > "$planted_dir/00000000000003_pending.sql"
+    probe_stderr="$(sequence_recorded=$'00000000000001\n00000000000002\n' migration_sequence_sql "$planted_dir"/*.sql | run_psql 2>&1 >/dev/null)" || true
+    remove_planted_dir "$planted_dir"
+    observed_error="$(printf '%s\n' "$probe_stderr" | psql_error_message)"
+    if [ "$observed_error" != 'the pending file ran' ]; then
+        printf '%s\n' "the schema-migration replay does not skip a file the database already recorded and run the next, as sqlx does (saw: ${observed_error:-no error})" >&2
         exit 1
     fi
     printf 'DELETE FROM _sqlx_migrations;\n' | run_psql
@@ -1000,7 +1020,7 @@ assert_frozen_schema_fingerprint() {
     fi
     if ! diff -u "$after_baseline" "$observed" >&2; then
         printf '%s\n' \
-            "the baseline alone (a fresh database) and the baseline plus every schema-migration (an initialized one) are different artifacts (diff above: - baseline, + migrated); a baseline edit needs the matching schema-migration, and a schema-migration needs the matching baseline edit" >&2
+            "the baseline alone (a fresh database) and the baseline plus every schema-migration (an initialized one) are different artifacts (diff above: - baseline, + migrated); a schema-migration needs the matching baseline edit" >&2
         rm -f -- "$observed" "$after_baseline"
         exit 1
     fi
@@ -1022,7 +1042,8 @@ assert_frozen_schema_fingerprint() {
 # object is in both catalogs before any schema-migration runs. What an
 # initialized database actually does is start from an earlier baseline, so
 # the previous commit's baseline (the same point the inventory comparison
-# reads) plus every current schema-migration must be the current baseline.
+# reads) plus the schema-migrations added since must be the current baseline;
+# rerunning an older file there would let it carry a baseline-only edit.
 # The predecessor baseline is applied on its own before the schema-migrations
 # and must differ from the current one exactly when the baseline files do,
 # which proves this path reads the previous files and not the working tree.
@@ -1047,15 +1068,59 @@ assert_predecessor_baseline_transition() {
     migrated_catalog="$(mktemp "${TMPDIR:-/tmp}/schema-v2-predecessor-migrated.XXXXXX")"
     (
         scratch_schema="$predecessor_schema"
-        # The catalog heads with the baseline's extension declarations; here
-        # they are the predecessor's, so a declaration added to the baseline
-        # alone shows up too.
-        baseline_extension_statements="$(baseline_extension_statements_of "$predecessor_dir")" || exit 1
+        # A database at the predecessor recorded every version in its
+        # directory, and sqlx skips a recorded version after comparing only its
+        # checksum, so only the files added since run, and a recorded file that
+        # is gone or whose bytes changed stops sqlx.
+        predecessor_files="$(git -C "$ROOT" ls-tree "$base:migrations")" || exit 1
+        sequence_recorded=""
+        while IFS=$'\t' read -r meta name; do
+            [ -n "$name" ] || continue
+            version="${name%%_*}"
+            case "$version" in
+                '' | *[!0-9]*)
+                    printf '%s\n' "$base:migrations lists $name, which carries no version" >&2
+                    exit 1 ;;
+            esac
+            current_files=("$ROOT"/migrations/"$version"_*.sql)
+            if [ ! -e "${current_files[0]}" ] \
+                || [ "$(git -C "$ROOT" hash-object -- "${current_files[0]}")" != "${meta##* }" ]; then
+                printf '%s\n' "$name is recorded by every database at $base, and here it is gone or its bytes changed; sqlx refuses to run against a database that applied the earlier file" >&2
+                exit 1
+            fi
+            sequence_recorded+="$version"$'\n'
+        done <<< "$predecessor_files"
+        if [ -z "$sequence_recorded" ]; then
+            printf '%s\n' "$base:migrations lists no schema-migration, so the predecessor transition would rerun every file" >&2
+            exit 1
+        fi
+        predecessor_extension_statements="$(baseline_extension_statements_of "$predecessor_dir")" || exit 1
+        # An initialized database has the extensions its baseline declared and
+        # the ones a schema-migration added since creates; the configured user
+        # installed the current ones for every replay, so the migrated catalog
+        # heads with that union rather than with what the database reports.
+        migrated_extension_statements="$(
+            for file in "$ROOT"/migrations/*.sql; do
+                name="${file##*/}"
+                [[ $'\n'"$sequence_recorded" == *$'\n'"${name%%_*}"$'\n'* ]] && continue
+                phase_migration_uses_production_schema "$file" || continue
+                sql_statements "$file" | tr '\n' ' '
+                printf '\n'
+            done | sed -E 's/[[:space:]]+/ /g' \
+                | grep -oiE 'CREATE EXTENSION( IF NOT EXISTS)? [[:alnum:]_]+( WITH SCHEMA [[:alnum:]_]+)?' \
+                | awk '{ s = "CREATE EXTENSION"; i = 3; if (toupper($3) == "IF") { s = s " IF NOT EXISTS"; i = 6 }
+                         s = s " " tolower($i); if (NF > i) s = s " WITH SCHEMA " tolower($(i + 3)); print s }'
+            printf '%s\n' "$predecessor_extension_statements"
+        )"
+        migrated_extension_statements="$(printf '%s\n' "$migrated_extension_statements" \
+            | sed -E 's/[[:space:]]+/ /g; s/ *; *$//; s/^ //' | grep -v '^$' | sort -u)"
         apply_baseline "$predecessor_dir"
-        frozen_schema_catalog "$predecessor_schema" > "$predecessor_catalog"
+        baseline_extension_statements="$predecessor_extension_statements" \
+            frozen_schema_catalog "$predecessor_schema" > "$predecessor_catalog"
         replay_schema_migrations "predecessor baseline"
         assert_schema_holds_only_allowed_kinds "$predecessor_schema" "the migrated predecessor baseline"
-        frozen_schema_catalog "$predecessor_schema" > "$migrated_catalog"
+        baseline_extension_statements="$migrated_extension_statements" \
+            frozen_schema_catalog "$predecessor_schema" > "$migrated_catalog"
     ) || exit 1
     if git -C "$ROOT" diff --quiet "$base" -- schema-v2/baseline; then
         if ! diff -u "$after_baseline" "$predecessor_catalog" >&2; then
@@ -1068,7 +1133,7 @@ assert_predecessor_baseline_transition() {
     fi
     if ! diff -u "$migrated_catalog" "$observed" >&2; then
         printf '%s\n' \
-            "the previous baseline ($base) plus every schema-migration and the current baseline are different artifacts (diff above: - previous baseline migrated, + current baseline); a baseline edit lands with the schema-migration that makes the same change on an initialized database" >&2
+            "the previous baseline ($base) plus the schema-migrations added since and the current baseline are different artifacts (diff above: - previous baseline migrated, + current baseline); a baseline edit lands with a new schema-migration that makes the same change on an initialized database" >&2
         rm -rf -- "$predecessor_dir" "$predecessor_catalog" "$migrated_catalog"
         exit 1
     fi
@@ -2239,12 +2304,12 @@ migration_application_log="$(
 # Future entries must use basename|one-line reason.
 intentional_phase_migration_skips=()
 refusal_assertions_passed=0
-# Base 173, main added 54, this branch 125 (42 of them the backslash-command,
-# SET-spelling, session-residue, session-identity and ambiguous foreign key
-# plants), and the merges fold main's four address-match and event-order
-# not-ready probes into their invalid ones (-4); predecessor proofs base 39,
-# +3, +1.
-expected_refusal_assertions=348
+# Base 173, main added 54, this branch 139 (56 of them the backslash-command,
+# SET-spelling, session-residue, session-identity (database, connection and
+# temporary namespace included), recorded-history and ambiguous foreign key plants), and
+# the merges fold main's four address-match and event-order not-ready probes
+# into their invalid ones (-4); predecessor proofs base 39, +3, +1.
+expected_refusal_assertions=362
 predecessor_shape_proof_count=0
 expected_predecessor_shape_proof_count=43
 refusal_probe_seconds=0
@@ -2617,11 +2682,14 @@ assert_no_migration_reads_synthetic_ledger_timing() {
     done
 }
 assert_no_migration_reads_synthetic_ledger_timing
-# The replay runs every file as this check's disposable login and deployment
-# runs it as the writer, so a phase schema-migration that reads who it runs as
-# -- the user or role, whether a role exists or what it holds, a privilege, or
-# a privilege failure it swallows -- takes a path here that deployment does
-# not. Refused by name in the statement text, quoted text included, as the
+# The replay runs every file as this check's disposable login, in a database
+# and on a connection of its own, and deployment runs it as the writer, so a
+# phase schema-migration that reads who it runs as -- the user or role, whether
+# a role exists or what it holds, a privilege, or a privilege failure it
+# swallows -- or where -- the database, the server or client address, or the
+# session's temporary namespace, which one file's temporary table allocates
+# for the files after it -- takes a path here that deployment does not.
+# Refused by name in the statement text, quoted text included, as the
 # ledger-timing rule above; bare USER is left out because quoted prose uses the
 # word, and bare ROLE because `manifest_contract_instances.role` is a column.
 session_identity_reads_of() {
@@ -2630,9 +2698,10 @@ session_identity_reads_of() {
         printf '%s\n' "$statements" | tail -n 1
         return 0
     fi
-    printf '%s\n' "$statements" \
-        | grep -oiE '(^|[^[:alnum:]_])(CURRENT_USER|SESSION_USER|CURRENT_ROLE|SYSTEM_USER|GETPGUSERNAME|PG_GET_USERBYID|PG_HAS_ROLE|HAS_[A-Z_]+_PRIVILEGE|PG_ROLES|PG_USER|PG_AUTHID|PG_AUTH_MEMBERS|PG_SHADOW|TO_REGROLE|REGROLE|ROLNAME|ROLSUPER|USENAME|IS_SUPERUSER|SESSION_AUTHORIZATION|ENABLED_ROLES|APPLICABLE_ROLES|ADMINISTRABLE_ROLE_AUTHORIZATIONS|(TABLE|COLUMN|ROUTINE|USAGE|UDT)_PRIVILEGES|ROLE_[A-Z]+_GRANTS|INSUFFICIENT_PRIVILEGE|UNDEFINED_OBJECT|42501|42704)([^[:alnum:]_]|$)' \
-        | tr -cd '[:alnum:]_\n' | tr '[:lower:]' '[:upper:]' | sort -u | tr '\n' ' ' || true
+    # Whole words, so `pg_catalog.` does not use up the boundary of the name after it.
+    printf '%s\n' "$statements" | grep -oE '[[:alnum:]_]+' \
+        | grep -xiE '(CURRENT_USER|SESSION_USER|CURRENT_ROLE|SYSTEM_USER|GETPGUSERNAME|PG_GET_USERBYID|PG_HAS_ROLE|HAS_[A-Z_]+_PRIVILEGE|PG_ROLES|PG_USER|PG_AUTHID|PG_AUTH_MEMBERS|PG_SHADOW|TO_REGROLE|REGROLE|ROLNAME|ROLSUPER|USENAME|IS_SUPERUSER|SESSION_AUTHORIZATION|ENABLED_ROLES|APPLICABLE_ROLES|ADMINISTRABLE_ROLE_AUTHORIZATIONS|(TABLE|COLUMN|ROUTINE|USAGE|UDT)_PRIVILEGES|ROLE_[A-Z]+_GRANTS|INSUFFICIENT_PRIVILEGE|UNDEFINED_OBJECT|42501|42704|CURRENT_DATABASE|CURRENT_CATALOG|PG_DATABASE|DATNAME|[A-Z_]*_CATALOG|CATALOG_NAME|INFORMATION_SCHEMA_CATALOG_NAME|INET_(SERVER|CLIENT)_(ADDR|PORT)|CLIENT_(ADDR|PORT|HOSTNAME)|DATID|PG_STAT_(ACTIVITY|DATABASE|SSL|GSSAPI)|PORT|LISTEN_ADDRESSES|UNIX_SOCKET_DIRECTORIES|CLUSTER_NAME|PG_MY_TEMP_SCHEMA|CURRENT_SCHEMAS|PG_IS_OTHER_TEMP_SCHEMA)' \
+        | tr '[:lower:]' '[:upper:]' | grep -vx PG_CATALOG | sort -u | tr '\n' ' ' || true
 }
 assert_no_migration_branches_on_session_identity() {
     local migration_file hits planted planted_dir
@@ -2646,15 +2715,32 @@ assert_no_migration_branches_on_session_identity() {
         'DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '"'"'bigname'"'"') THEN ALTER TABLE bigname_phase.t ADD COLUMN c integer; END IF; END $$;'
         'DO $$ BEGIN ALTER TABLE bigname_phase.t ADD COLUMN c integer; EXCEPTION WHEN SQLSTATE '"'"'42501'"'"' THEN NULL; END $$;'
         'DO $$ BEGIN IF system_user IS NOT NULL THEN ALTER TABLE bigname_phase.t ADD COLUMN c integer; END IF; END $$;'
+        'DO $$ BEGIN IF (SELECT client_addr FROM pg_stat_activity WHERE pid = pg_backend_pid()) IS NULL THEN ALTER TABLE bigname_phase.t ADD COLUMN c integer; END IF; END $$;'
+        'DO $$ BEGIN IF current_setting('"'"'port'"'"') <> '"'"'5432'"'"' THEN ALTER TABLE bigname_phase.t ADD COLUMN c integer; END IF; END $$;'
+        'DO $$ BEGIN IF (SELECT datid FROM pg_stat_database LIMIT 1) IS NULL THEN ALTER TABLE bigname_phase.t ADD COLUMN c integer; END IF; END $$;'
         'DO $$ BEGIN IF EXISTS (SELECT 1 FROM information_schema.table_privileges WHERE table_name = '"'"'t'"'"') THEN ALTER TABLE bigname_phase.t ADD COLUMN c integer; END IF; END $$;'
         'DO $$ BEGIN GRANT SELECT ON bigname_phase.t TO bigname_reader; EXCEPTION WHEN undefined_object THEN NULL; END $$;'
         'DO $$ BEGIN IF (SELECT pg_get_userbyid(relowner) FROM pg_class WHERE oid = '"'"'bigname_phase.t'"'"'::regclass) = '"'"'bigname'"'"' THEN ALTER TABLE bigname_phase.t ADD COLUMN c integer; END IF; END $$;'
+        'DO $$ BEGIN IF pg_catalog.current_database() = '"'"'bigname'"'"' THEN ALTER TABLE bigname_phase.t ADD COLUMN c integer; END IF; END $$;'
+        'DO $$ BEGIN IF current_catalog LIKE '"'"'%_db'"'"' THEN RETURN; END IF; ALTER TABLE bigname_phase.t ADD COLUMN c integer; END $$;'
+        'DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_database WHERE oid > 1) THEN ALTER TABLE bigname_phase.t ADD COLUMN c integer; END IF; END $$;'
+        'DO $$ BEGIN IF (SELECT count(*) FROM pg_stat_activity WHERE datname = '"'"'bigname'"'"') > 1 THEN RETURN; END IF; ALTER TABLE bigname_phase.t ADD COLUMN c integer; END $$;'
+        'DO $$ BEGIN IF (SELECT table_catalog FROM information_schema.tables WHERE table_schema = '"'"'bigname_phase'"'"' LIMIT 1) = '"'"'bigname'"'"' THEN ALTER TABLE bigname_phase.t ADD COLUMN c integer; END IF; END $$;'
+        'DO $$ BEGIN IF (SELECT catalog_name FROM information_schema.information_schema_catalog_name) = '"'"'bigname'"'"' THEN ALTER TABLE bigname_phase.t ADD COLUMN c integer; END IF; END $$;'
+        'DO $$ BEGIN IF inet_server_port() = 5432 THEN ALTER TABLE bigname_phase.t ADD COLUMN c integer; END IF; END $$;'
+        'DO $$ BEGIN IF pg_catalog.pg_my_temp_schema() = 0 THEN ALTER TABLE bigname_phase.t ADD COLUMN c integer; END IF; END $$;'
+        'DO $$ BEGIN IF array_length(current_schemas(true), 1) > 3 THEN RETURN; END IF; ALTER TABLE bigname_phase.t ADD COLUMN c integer; END $$;'
+        'DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname LIKE '"'"'pg_temp%'"'"' AND NOT pg_is_other_temp_schema(oid)) THEN RETURN; END IF; ALTER TABLE bigname_phase.t ADD COLUMN c integer; END $$;'
     )
     local -a accepted=(
         'SELECT role FROM bigname_phase.manifest_contract_instances WHERE role = '"'"'registry'"'"';'
         'COMMENT ON TABLE bigname_phase.t IS '"'"'the user who registered the name'"'"';'
         'SELECT 1; -- current_user'
         'CREATE INDEX t_current_user_idx ON bigname_phase.t (current_username);'
+        'SELECT c.relname FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = current_schema();'
+        'SELECT 1 FROM information_schema.columns WHERE table_schema = '"'"'bigname_phase'"'"' AND column_name = '"'"'c'"'"';'
+        'CREATE TEMP TABLE probe (LIKE bigname_phase.t); DROP TABLE pg_temp.probe;'
+        'CREATE FUNCTION bigname_phase.f() RETURNS integer LANGUAGE sql SET search_path = pg_catalog, bigname_phase, pg_temp AS '"'"'SELECT 1'"'"';'
     )
     planted_dir="$(mktemp -d "${TMPDIR:-/tmp}/schema-v2-session-identity-rule.XXXXXX")"
     for planted in "${refused[@]}"; do
@@ -2678,7 +2764,7 @@ assert_no_migration_branches_on_session_identity() {
         hits="$(session_identity_reads_of "$migration_file")"
         if [ -n "$hits" ]; then
             printf '%s\n' \
-                "$(basename "$migration_file") reads ${hits% }, which answers differently for this check's disposable login than for the deployment writer, so a branch on identity, role existence or privilege takes a path here that sqlx migrate run does not; a schema-migration may not depend on who runs it, and a carve-out that needs to extends the session-identity rule in schema-v2/apply-check.sh under ADR 0007" >&2
+                "$(basename "$migration_file") reads ${hits% }, which answers differently for this check's disposable login, scratch database and replay session than for the deployment writer, so a branch on identity, role existence, privilege, database, server address or temporary namespace takes a path here that sqlx migrate run does not; a schema-migration may not depend on who runs it or where, and a carve-out that needs to extends the session-identity rule in schema-v2/apply-check.sh under ADR 0007" >&2
             exit 1
         fi
     done

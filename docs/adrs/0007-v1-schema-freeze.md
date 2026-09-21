@@ -268,9 +268,24 @@ regenerated (`SCHEMA_V2_APPLY_CHECK_WRITE_FINGERPRINT=1`) in the same
 change — whatever the object is called. The catalog is taken twice, after
 the baseline alone (what a fresh database gets, the schema-migrations being
 no-ops before it exists) and after the schema-migrations (what an
-initialized database gets), and the two must agree: a baseline edit without
-its schema-migration, or the reverse, is refused on that comparison before
-the frozen file is consulted. That fresh artifact holds no rows, so a
+initialized database gets), and the two must agree: a schema-migration
+without its baseline edit is refused on that comparison before the frozen
+file is consulted. A baseline edit without its schema-migration can pass it,
+every schema-migration being a no-op on the edited baseline, so the check
+also migrates the previous baseline — read at the same point as the previous
+inventory — the way `sqlx migrate run` migrates a database at that revision:
+every version in the previous `migrations/` directory is recorded without
+being run, a recorded file that is gone or whose bytes changed is refused as
+sqlx would refuse it, and only the phase schema-migrations added since are
+applied, so an older file rerun cannot seem to carry a baseline-only edit, and
+the result must be the current artifact. The previous baseline's catalog heads
+with its own extension declarations and the migrated one with those plus each
+`CREATE EXTENSION` a schema-migration added since carries, since the
+configured user installs the current declarations before any replay and the
+database alone would report an extension an initialized database lacks; a
+baseline that gains an extension without a schema-migration that creates it
+is refused on that header. Removing an extension is not modelled: the previous
+baseline's own declaration would run as the per-run login and fail. That fresh artifact holds no rows, so a
 schema-migration whose DDL runs only when a table has data would leave it
 unchanged; the check therefore also takes the catalog of its scratch schema
 at the end of the run — populated by every predecessor-shape and behavior
@@ -324,7 +339,18 @@ or a caught `insufficient_privilege` or `undefined_object` by name or SQLSTATE
 deployment as the writer database user, so a branch on identity, role
 existence or privilege takes a path here that deployment does not; bare `user`
 is left alone because the rule reads quoted prose too, and bare `role` because
-`manifest_contract_instances.role` is a column. The predecessor baseline, once migrated, is held to the closed-kind
+`manifest_contract_instances.role` is a column. Nor may it read where it runs
+— `current_database`, `current_catalog`, `pg_database`, `datname`, an
+`information_schema` `*_catalog` column or `catalog_name`, or the server or
+client address or port through the `inet_*` functions, `pg_stat_activity`,
+`pg_stat_database` or the `port`, `listen_addresses`,
+`unix_socket_directories` and `cluster_name` settings — since on an external server the replay runs in a
+database of its own, or read the session's temporary namespace through
+`pg_my_temp_schema`, `current_schemas` or `pg_is_other_temp_schema`: a file
+that creates and drops a temporary table leaves that namespace allocated for
+the files after it in one `sqlx migrate run` but not in a catch-up split
+across runs, and the probe cannot refuse it, because nothing frees it before
+the session ends and the frozen `20260917141000` allocates it. The predecessor baseline, once migrated, is held to the closed-kind
 rule like the fresh and exercised schemas, and that rule also refuses a
 foreign key whose referenced table has more than one unique index that could
 back it: PostgreSQL picks the first valid one in index OID order and the
