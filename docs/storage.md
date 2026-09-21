@@ -267,6 +267,27 @@ identity rather than by matching names or timestamps.
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L289-L305 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/deployments/mainnet/WrappedETHRegistrarController.json:L656 @ ens_v1@91c966f)
 
+History reads follow the same recorded identity. A product read by `registration_id` reports
+the lease for NameWrapper rows whose wrapper `SurfaceBound` row names it, and the name and
+resource anchors of a history read include the leases a name's wrapper bindings recorded and the
+names whose wrapper bindings recorded a lease. Like every other anchor loader, the wrapper-link
+loader takes the read's publication block bounds, so a link recorded above the published block
+of its chain is not followed. A registration-scoped product read gathers its candidates from
+three index-keyed arms (the lease's names, the resources of those names, and resolver record
+writes attributed to them) and then keeps a row only when its product registration identity is
+the requested lease, or when the row has no resource and falls inside a binding of that lease
+that was open at the row's position. The rows that prove the requested resource is a registration
+(its grant, a wrapper `SurfaceBound` row that names it, the binding a resource-less row falls
+inside) also lie at or below the read's published block, so a grant Interpret has written above
+the publication a read is bound to does not turn that publication's older rows, count, or cursor
+anchors into registration history.
+
+History loaders called with `canonical_only=false` also return rows of activated losing
+branches. For those reads every binding, grant and wrapper-link witness must lie on the event's
+own parent-hash path in `chain_lineage`; matching block numbers or canonicality states do not
+connect two retained forks. The HTTP product routes always read canonical rows only, where the
+check is skipped.
+
 A canonical, admitted, normalization-valid readable observation may also disclose a retained unnamed ENSv1 registrar lease to its exact namehash and labelhash only when that same live resource and token lineage are already the selected authority. Current admitted ENS registry ownership evidence must match the registrar's nonzero current owner; missing ownership evidence, a different authority, expiry, release, or migration retirement prevents attachment. A readable observation does not select authority. The binding begins at the observation. Earlier resource-only events remain unchanged.
 
 `registration_window` retains whether restoration reconciles preceding setup logs or the complete
@@ -668,17 +689,73 @@ shared production/test activation function after all batch correlation paths fin
 there is no second test-only transition implementation. Its transition carries the exact
 logical name, full chain position, expected `ens_v1` arm, predecessor selector,
 expected `ens_v2` arm, and concrete successor binding/resource. The writer
-selects current matching predecessors under `FOR UPDATE` and performs the
-cross-arm close and successor retain/open in that same transaction. It never
+locks the exact ENSv2 successor binding `FOR UPDATE`, resolves the predecessor
+(the wrapper and child paths lock the one NameWrapper binding they close
+`FOR UPDATE`; the registrar path reads the lease's evidence rows unlocked and
+takes row locks only through the `UPDATE` that closes the open ENSv1
+binding), and performs the cross-arm close and successor retain/open in that
+same transaction. It never
 ranks multiple predecessors and never applies the transition to descendants.
 There is no runtime or manifest activation flag.
 
 The `.eth` second-level selector is path-specific. The registrar-token
 `unwrapped` and `unlocked_wrapped` paths record their exact BaseRegistrar
-transfer to the Graveyard, select the registrar resource immediately before
-that cleanup, and close it at the cleanup position. The `locked_wrapped` path
+transfer to the Graveyard and select the lease: the one resource of the name
+that carries an activated registrar lifecycle event (`RegistrationGranted`,
+`RegistrationRenewed`, `ExpiryChanged`, `TokenControlTransferred`) with the
+recorded token id, emitted by the recorded BaseRegistrar instance before that
+cleanup, and whose registration was not released before the cleanup. Whether
+the lease ever had an `ens_v1` binding is not consulted. The token is the
+predecessor because the controller takes it from whoever holds it and reclaims
+the registry record for itself before parking both in the Graveyard; the
+registry-owner record never holds the token. A lease whose binding a
+[registry-only handoff](glossary.md#registry-only-handoff) closed earlier
+therefore still qualifies, and so does a lease granted with `registerOnly`
+under such a binding, which never gets a binding of its own. Resources share a
+token id only as successive leases of the same label, and a successor grant
+requires the earlier lease to be past its grace period, which the adapters
+settle as a `RegistrationReleased` no later than the grant's block, so the
+release guard leaves exactly one live lease. Token evidence positioned at the
+cleanup itself must also satisfy one of the two evidence conditions below.
+Which of the four kinds carries the token id depends on the deployment profile:
+the Sepolia profile indexes the BaseRegistrar's numeric `NameRegistered` and
+`NameRenewed` as lifecycle events with the token id, while the Mainnet profile
+declares `NameRegistered` for `RegistrationReleased` and `NameRenewed` for
+`RegistrationRenewed` and `ExpiryChanged` (`manifests/mainnet/ethereum/ens/ens_v1_registrar_l1/v1.toml`);
+neither declaration names `RegistrationGranted`, which is what the registrar
+adapter requires before it interprets the numeric events as lifecycle events
+(`crates/adapters/src/schema_v2/protocol/v1/registrar.rs`), and the
+controller-derived `RegistrationGranted`/`RegistrationRenewed` after-state
+carries no token id, so on Mainnet only `TokenControlTransferred` is lease
+evidence, and which transfer that is depends on the path. A retained lease
+never transferred before its direct unwrapped migration is handed to the
+controller first, so the migration transaction's own holder-to-controller
+transfer precedes the cleanup. On the unlocked-wrapped path `unwrapETH2LD`
+moves the token from the NameWrapper straight to the Graveyard, so for a name
+registered straight into the NameWrapper that cleanup transfer is the lease's
+first and only token-bearing event. The writer admits token evidence positioned
+at the cleanup in two cases: when a canonical ENSv1 binding for the same name
+and resource is positioned at the cleanup log, or when that resource carries an
+activated canonical registrar lifecycle event of an admitted kind for the same
+name, on a canonical lineage block, positioned strictly before the cleanup.
+The latter event need not carry a token id; on Mainnet it can be the controller
+grant. An earlier event in the same transaction qualifies. Either way the token
+id, the BaseRegistrar instance, the release guard and the exactly-one rule
+still apply: the cleanup transfer alone cannot establish a predecessor.
+Predecessor resolution therefore relies on those
+transfers being activated with the name's `logical_name_id`, which the
+ordinary registrar adapter gives them whenever the surface is known.
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L118-L152 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L382-L395 @ ens_v1@91c966f)
+(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L128-L150 @ ens_v2@a971bd6) The writer closes whatever `ens_v1` binding of the
+name is still open at the cleanup position, zero or one, and refuses an
+`ens_v1` binding opened at the cleanup instant itself. Authority-boundary
+events are not lease evidence: they carry the registrar observation but land
+on the resource that gained or lost the name. The `locked_wrapped` path
 selects the live NameWrapper resource immediately before the ENSv2 registration
-boundary and closes it there. The unlocked wrapped controller unwraps before
+boundary and closes it there.
+(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L92-L121 @ ens_v2@a971bd6)
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L172-L175 @ ens_v1@91c966f) The unlocked wrapped controller unwraps before
 injecting the ENSv2 registration, so ordinary ENSv1 interpretation has already
 closed its wrapper binding and reactivated its registrar position before that
 recorded transfer. If no prior registrar identity was materialized, that exact
@@ -690,15 +767,31 @@ proof requires the admitted BaseRegistrar holder-to-controller transfer,
 registry reclaim to that controller, registry transfer to Graveyard, any
 emitted resolver/TTL clears, the matching registrar transfer to Graveyard,
 and exactly one complete ENSv2 successor for the same name and transaction.
+The name may enter the transaction bound to its lease or, after a registrar
+transfer without `reclaim`, to the registry-only resource the lease goes on
+under; the registrar state is the lease either way.
 The successor proof ends at its initial mint/resource-link/role-grant sequence;
 subsequent same-transaction token transfers and role changes remain ordinary.
 (upstream: .refs/ens_v2/contracts/deployments/sepolia-20260629-r1/ETHRegistry.json:L2347 @ ens_v2@a971bd64)
 Reconciliation retains raw facts and normalized ownership/cleanup observations,
-but removes intervening ENSv1 authority bindings and their derived permission
-changes. Registry metadata remains attached to the existing registrar resource
-without fields that would restore temporary registry-only authority. Thus the
-actual registrar predecessor stays eligible immediately before cleanup, and
-no replacement ENSv1 binding survives the strict cross-arm transition. Missing,
+but removes intervening ENSv1 authority bindings and the permission grants
+those temporary authorities derive. Permission revocations stay on the resource
+whose grant they close. On the lease every revocation is kept for audit. On the
+registry-only resource a transfer without `reclaim` left the name bound to, a
+revocation is kept when it closes a grant made before the transaction: the
+controller's reclaim revokes the registry owner's handoff grants there, and
+dropping those revocations would leave the grants as the latest permission rows
+Project folds. A revocation that closes a grant the reconciliation itself
+removed is removed with it; the removed grant must precede the revocation in the
+transaction for the same subject and scope, since the registry owner the reclaim
+revokes may already be the Graveyard, which the transaction's own registry
+transfer grants again one log later.
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L63-L68 @ ens_v1@91c966f)
+Registry metadata observations remain attached
+to the existing registrar resource without fields that would restore temporary
+registry-only authority. Thus the actual registrar lease stays the predecessor
+at cleanup, and no replacement ENSv1 binding survives the strict cross-arm
+transition. Missing,
 ambiguous, or mismatched proof leaves ordinary interpretation unchanged; zero
 or multiple eligible predecessors remain integrity errors in the writer.
 (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L111-L119 @ ens_v2@a971bd64)
@@ -1844,3 +1937,7 @@ objects.
 - `crates/storage` provides the typed persistence and read boundaries above.
 - `apps/api` reads phase projections and lookup output; it does not write raw
   facts, interpretation output, projection rows, or legacy execution artifacts.
+
+### Same-node source transport maintenance
+
+The phase runner owns the explicit Sepolia [source transport](glossary.md#source-transport) change described under [same-node Sepolia transport change](chain-intake.md#same-node-sepolia-transport-change). It changes only `ingest_cursors.source_kind` under all phase advisory locks after checking the old and new node interfaces against retained hashes and the next block. Source key, seed, start, progress, raw identities/canonicality, redo obligations and derived output remain unchanged. It grants no new verification independence. This documented exception does not permit arbitrary provider replacement or ordinary startup to rewrite cursor identity.

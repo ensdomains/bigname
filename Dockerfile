@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 
-ARG RUST_VERSION=1.93.1
+ARG RUST_VERSION=1.98.0
 
 FROM rust:${RUST_VERSION}-bookworm AS builder
 
@@ -42,11 +42,17 @@ RUN set -eu; \
     done; \
     for member in apps/phase-runner crates/content-hash; do \
         echo 'fn main() {}' > "$member/build.rs"; \
-    done
+    done; \
+    mkdir -p crates/ingest/examples \
+        && echo 'fn main() {}' > crates/ingest/examples/reth-db-smoke.rs
 
+# The reth-db-smoke example is bigname-ingest's bounded read-only sample. It is
+# built here and shipped next to phase-runner so that an operator runs it with
+# the production mounts, user and PID namespace (docs/reth-db-reader.md). Its
+# required feature, reth-db, is unified in from phase-runner's dependency.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
-    cargo build --locked --release --workspace --bins
+    cargo build --locked --release --workspace --bins --example reth-db-smoke
 
 COPY apps apps
 COPY crates crates
@@ -66,7 +72,7 @@ ENV BIGNAME_BUILD_SHA=${BIGNAME_BUILD_SHA}
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     find apps crates tools migrations manifests schema-v2 -exec touch {} + \
-    && cargo build --locked --release --workspace --bins
+    && cargo build --locked --release --workspace --bins --example reth-db-smoke
 
 FROM ubuntu:24.04 AS runtime
 
@@ -80,8 +86,12 @@ WORKDIR /app
 
 COPY --from=builder /app/target/release/bigname-api /usr/local/bin/bigname-api
 COPY --from=builder /app/target/release/phase-runner /usr/local/bin/phase-runner
+COPY --from=builder /app/target/release/examples/reth-db-smoke /usr/local/bin/reth-db-smoke
 COPY --from=builder --chown=bigname:bigname /app/manifests /app/manifests
 COPY --chmod=0755 docker/entrypoint.sh /usr/local/bin/bigname
+
+# Direct Reth readers run as the node UID to share its writable MDBX lock file.
+RUN chmod 755 /app && chmod -R a+rX /app/manifests
 
 ENV BIGNAME_API_BIND_ADDR=0.0.0.0:3000 \
     BIGNAME_PHASE_RUNNER_MANIFESTS_ROOT=/app/manifests/mainnet \

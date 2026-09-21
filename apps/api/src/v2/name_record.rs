@@ -26,6 +26,8 @@ use super::{
 
 #[path = "name_record/counts.rs"]
 mod counts;
+#[path = "name_record/declared.rs"]
+mod declared;
 
 #[path = "name_record/inventory.rs"]
 mod inventory;
@@ -36,6 +38,13 @@ mod verified;
 #[path = "name_record/wrapper.rs"]
 mod wrapper;
 
+pub(crate) use declared::{
+    LapsedRegistration, lapsed_registration, projected_registration_resource_id, registration_id,
+};
+use declared::{
+    chain_positions_created_at, declared_created_at, declared_expires_at, declared_owner,
+    declared_registered_at, declared_registrant, declared_registration,
+};
 use inventory::load_name_record_inventory;
 pub(super) use values::{
     chain_id_from_positions, declared_token_id, identity_declared_token_id,
@@ -44,8 +53,7 @@ pub(super) use values::{
     value_to_string,
 };
 use values::{
-    has_name_binding, json_address_at_paths, json_chain_id, json_timestamp_at_paths,
-    json_value_present, network, object_field, response_chain_id,
+    has_name_binding, json_chain_id, json_value_present, network, object_field, response_chain_id,
 };
 pub(crate) use wrapper::{wrapper_lifecycle_matches_fuses, wrapper_metadata};
 pub(crate) struct NameRecordQueryParams;
@@ -81,6 +89,8 @@ pub(crate) struct NameRecord {
     pub(crate) wrapper_fuses: Option<WrapperFuses>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) authority: Option<Authority>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) lapsed_registration: Option<LapsedRegistration>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) migrated_at: Option<String>,
     pub(crate) name: String,
@@ -314,7 +324,7 @@ pub(crate) fn build_name_record(
 
     Ok(NameRecord {
         registration_id: (registration.registration_status != RegistrationStatus::Unregistered)
-            .then(|| row.resource_id.map(|value| value.to_string()))
+            .then(|| registration_id(&row.declared_summary, row.resource_id))
             .flatten(),
         token_id: if has_name_binding(row) {
             declared_token_id(row)
@@ -331,6 +341,7 @@ pub(crate) fn build_name_record(
         wrapper_state,
         wrapper_fuses,
         authority: Authority::from_provenance(&row.provenance),
+        lapsed_registration: lapsed_registration(&row.declared_summary),
         migrated_at: None,
         name: row.normalized_name.clone(),
         display_name: row.canonical_display_name.clone(),
@@ -437,64 +448,6 @@ fn registration_fields_from_parts(
         ),
         owner,
     }
-}
-
-pub(super) fn declared_registration(summary: &Value) -> Option<&Value> {
-    object_field(summary, "registration")
-}
-
-pub(super) fn declared_owner(summary: &Value) -> Option<String> {
-    json_address_at_paths(
-        summary,
-        &[&["control", "owner"], &["control", "registry_owner"]],
-    )
-}
-
-pub(super) fn declared_registrant(summary: &Value) -> Option<String> {
-    json_address_at_paths(
-        summary,
-        &[&["registration", "registrant"], &["control", "registrant"]],
-    )
-}
-
-pub(super) fn declared_registered_at(summary: &Value) -> Option<String> {
-    json_timestamp_at_paths(
-        summary,
-        &[
-            &["registration", "registered_at"],
-            &["registration", "registration_date"],
-        ],
-    )
-}
-
-pub(super) fn declared_created_at(summary: &Value) -> Option<String> {
-    json_timestamp_at_paths(
-        summary,
-        &[&["registration", "created_at"], &["history", "created_at"]],
-    )
-}
-
-pub(super) fn declared_expires_at(summary: &Value) -> Option<String> {
-    json_timestamp_at_paths(
-        summary,
-        &[
-            &["registration", "expires_at"],
-            &["registration", "expiry_date"],
-            &["registration", "expiry"],
-            &["control", "expires_at"],
-            &["control", "expiry_date"],
-            &["control", "expiry"],
-        ],
-    )
-}
-
-fn chain_positions_created_at(chain_positions: &Value) -> Option<String> {
-    chain_positions
-        .as_object()
-        .into_iter()
-        .flatten()
-        .filter_map(|(_, position)| json_timestamp_at_paths(position, &[&["timestamp"]]))
-        .min()
 }
 
 pub(crate) fn classify_registration_status(

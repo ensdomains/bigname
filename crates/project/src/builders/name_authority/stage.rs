@@ -267,24 +267,33 @@ async fn ownerless_registry(transaction: &mut Transaction<'_, Postgres>) -> Resu
 }
 
 /// What `build` runs before `AUTHORITY_EVENTS`; the plan test stages the same way.
-pub(super) const SELECTED_BINDINGS: [&str; 3] = [
+pub(super) const SELECTED_BINDINGS: [&str; 5] = [
+    // Temporary tables are never analyzed automatically, and the builders read every table
+    // staged here once per name. Without statistics the planner assumes a handful of rows
+    // and joins them by nested loop.
     "ALTER TABLE project_name_authority ADD PRIMARY KEY (logical_name_id)",
+    "ANALYZE project_name_authority",
     "CREATE TEMP TABLE project_bindings ON COMMIT DROP AS
      SELECT candidate.*
      FROM project_name_authority authority
      JOIN project_binding_candidates candidate
        ON candidate.surface_binding_id = authority.selected_binding_id",
     "CREATE INDEX ON project_bindings (logical_name_id)",
+    "ANALYZE project_bindings",
 ];
 pub(super) const AUTHORITY_EVENTS: &str = include_str!("authority_events.sql");
 
 pub(super) async fn build(transaction: &mut Transaction<'_, Postgres>) -> Result<()> {
     for statement in SELECTED_BINDINGS.into_iter().chain([
         AUTHORITY_EVENTS,
+        // Each staged event joins at most one name, so the event id is the table's key.
+        "ALTER TABLE project_authority_events ADD PRIMARY KEY (normalized_event_id)",
         "CREATE INDEX ON project_authority_events (logical_name_id, normalized_event_id)",
         "CREATE INDEX ON project_authority_events (resource_id, normalized_event_id)",
+        "ANALYZE project_authority_events",
         include_str!("registration_events.sql"),
         "CREATE INDEX ON project_registration_events (logical_name_id, normalized_event_id)",
+        "ANALYZE project_registration_events",
         "CREATE TEMP TABLE project_name_serving ON COMMIT DROP AS
          SELECT authority.logical_name_id,
                 pointer.resource_id AS serving_resource_id,
@@ -393,6 +402,7 @@ pub(super) async fn build(transaction: &mut Transaction<'_, Postgres>) -> Result
         "CREATE UNIQUE INDEX ON project_name_serving (logical_name_id)",
         "CREATE INDEX ON project_name_serving (serving_resource_id)",
         "CREATE INDEX ON project_name_serving (resolver_chain_id, resolver_address)",
+        "ANALYZE project_name_serving",
     ]) {
         sqlx::query(statement)
             .execute(&mut **transaction)

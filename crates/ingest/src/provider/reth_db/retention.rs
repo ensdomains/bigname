@@ -8,28 +8,28 @@ use super::EthereumRethProviderFactory;
 /// These readings are an optimistic bound, not a completeness guarantee: reth advances a
 /// receipt static file's block position before deciding whether to write that block's
 /// receipts, so the lowest retained range can begin with receipt-less blocks
-/// (upstream: .refs/reth/crates/storage/provider/src/providers/database/provider.rs:L2504 @ reth@88505c7f)
-/// (upstream: .refs/reth/crates/storage/provider/src/providers/database/provider.rs:L2512 @ reth@88505c7f),
+/// (upstream: .refs/reth/crates/storage/provider/src/providers/database/provider.rs:L2635 @ reth@189c0df3)
+/// (upstream: .refs/reth/crates/storage/provider/src/providers/database/provider.rs:L2643 @ reth@189c0df3),
 /// and a log filter can drop individual receipts inside a written block
-/// (upstream: .refs/reth/crates/storage/provider/src/providers/database/provider.rs:L2528 @ reth@88505c7f).
+/// (upstream: .refs/reth/crates/storage/provider/src/providers/database/provider.rs:L2659 @ reth@189c0df3).
 /// The floor is therefore the cheap early refusal; comparing each fetched block's receipts
 /// against its body indices is what actually guarantees a window was readable.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct RetentionReadings {
     /// Lowest block whose history has not expired, as reth's own RPC layer reads it
-    /// (upstream: .refs/reth/crates/storage/provider/src/providers/database/mod.rs:L705 @ reth@88505c7f).
+    /// (upstream: .refs/reth/crates/storage/provider/src/providers/database/mod.rs:L723 @ reth@189c0df3).
     pub(super) earliest_history_block: u64,
     /// Lowest block covered by a receipt static file, when receipts are stored there.
     /// Pruning static-file receipts deletes whole jars below the configured block
-    /// (upstream: .refs/reth/crates/prune/prune/src/segments/receipts.rs:L34 @ reth@88505c7f)
-    /// (upstream: .refs/reth/crates/prune/prune/src/segments/mod.rs:L41 @ reth@88505c7f),
+    /// (upstream: .refs/reth/crates/prune/prune/src/segments/receipts.rs:L34 @ reth@189c0df3)
+    /// (upstream: .refs/reth/crates/prune/prune/src/segments/mod.rs:L41 @ reth@189c0df3),
     /// which leaves headers readable while every log below the boundary is gone.
     ///
     /// This reports the lowest jar on disk, so it bounds nothing on a node that keeps
     /// receipts in database tables — receipt pruning without `storage_v2`, or a receipt
     /// log filter with it
-    /// (upstream: .refs/reth/crates/storage/provider/src/either_writer.rs:L188 @ reth@88505c7f)
-    /// (upstream: .refs/reth/crates/storage/provider/src/either_writer.rs:L190 @ reth@88505c7f)
+    /// (upstream: .refs/reth/crates/storage/provider/src/either_writer.rs:L193 @ reth@189c0df3)
+    /// (upstream: .refs/reth/crates/storage/provider/src/either_writer.rs:L195 @ reth@189c0df3)
     /// — whose rows are pruned against a checkpoint this does not read, leaving that
     /// configuration bounded only by `earliest_history_block`.
     pub(super) lowest_receipt_block: Option<u64>,
@@ -37,9 +37,9 @@ pub(super) struct RetentionReadings {
 
 /// Reads `earliest_block_number` first: that call catches a read-only provider up with the
 /// node and re-initializes the static-file index that `get_lowest_range_start` then reads
-/// (upstream: .refs/reth/crates/storage/provider/src/providers/database/mod.rs:L272 @ reth@88505c7f)
-/// (upstream: .refs/reth/crates/storage/provider/src/providers/database/mod.rs:L580 @ reth@88505c7f)
-/// (upstream: .refs/reth/crates/storage/provider/src/providers/database/mod.rs:L705 @ reth@88505c7f).
+/// (upstream: .refs/reth/crates/storage/provider/src/providers/database/mod.rs:L287 @ reth@189c0df3)
+/// (upstream: .refs/reth/crates/storage/provider/src/providers/database/mod.rs:L598 @ reth@189c0df3)
+/// (upstream: .refs/reth/crates/storage/provider/src/providers/database/mod.rs:L723 @ reth@189c0df3).
 pub(super) fn read_retention(factory: &EthereumRethProviderFactory) -> Result<RetentionReadings> {
     Ok(RetentionReadings {
         earliest_history_block: factory.earliest_block_number()?,

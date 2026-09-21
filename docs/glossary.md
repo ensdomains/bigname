@@ -195,6 +195,37 @@ cursors and feed Ingest and Live; only verification-only sources can earn an
 independent [verification level](#verification-level). Role tokens are exact;
 `verification_only` is not an alias for `verification-only`.
 
+<a id="source-transport"></a>
+## Source transport (same-node transport change)
+
+which of one execution node's two interfaces an intake source reads through: the
+node's HTTP JSON-RPC endpoint (source kind `drpc`) or a direct read of the same
+node's database files on the same host (source kind `reth_db`). A *source
+transport change* is the explicit `phase-runner source-transport` maintenance
+command that switches a Sepolia intake source between the two without
+re-ingesting. It rewrites only the stored source kind of the chain's one intake
+cursor, after confirming that every phase writer is stopped, that both
+interfaces report the hashes Ingest retained at its boundaries, that both
+report the same watched logs for the block the resumed work reads first, and
+that the direct reader's retention floor admits the range that work plans. The
+resumed work is a redo in progress with blocks left, a normal Ingest batch from
+the declared start, or, once Ingest has handed off to live follow (including a
+completed extent awaiting completed-phase revalidation), live follow from the
+block after the highest published block the node still holds. A redo that
+already read its last block only clears its marker when rerun, so it is judged
+on the lifecycle it interrupted; the receipt then carries the still-set redo
+marker alongside the selected live continuation when that lifecycle had handed
+off.
+The operator
+attests that both interfaces belong to the same node; the command cannot prove
+it. Progress, raw facts, redo state and the
+[verification level](#verification-level) are unchanged, and the change grants
+no new independence between sources. See
+[same-node Sepolia transport change](chain-intake.md#same-node-sepolia-transport-change).
+Do not confuse this with [Transport](#transport), the `/v1/lookup` topology field
+for a resolution served across a chain boundary, or with network transport
+failures.
+
 ## Stored-history verification
 
 the read-only phase that validates a chain's
@@ -655,7 +686,25 @@ Interpret's validated operation associated with an activated
 from an `ens_v1` predecessor binding to a concrete `ens_v2` successor binding.
 Child, registrar-token `unwrapped`, and `unlocked_wrapped` second-level
 predecessors close at their recorded ENSv1 cleanup; `locked_wrapped`
-second-level predecessors close at the boundary. It is the only writer
+second-level predecessors close at the boundary. For the two registrar-token
+paths the predecessor is the BaseRegistrar token itself, found by its own
+lifecycle evidence rather than through any binding: a lease whose binding a
+[registry-only handoff](#registry-only-handoff) already closed still qualifies,
+as does a `registerOnly` successor lease that never had one, and the writer
+closes whatever ENSv1 binding of the name is still open at the cleanup, zero or
+one. On Mainnet that evidence is a `TokenControlTransferred` with the token id:
+for a never-transferred lease on the direct unwrapped path the migration
+transaction's own holder-to-controller transfer, which precedes the cleanup; on
+the unlocked-wrapped path, where `unwrapETH2LD` moves the token from the
+NameWrapper straight to the Graveyard, the cleanup transfer itself, admitted
+for a name registered straight into the NameWrapper because its controller
+grant is a registrar lifecycle event of the lease positioned before the
+cleanup. The
+Sepolia profile also indexes the numeric BaseRegistrar lifecycle events.
+(upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L382-L395 @ ens_v1@91c966f)
+(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L128-L150 @ ens_v2@a971bd6)
+(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L92-L121 @ ens_v2@a971bd6)
+It is the only writer
 allowed to cross those `authority_arm` values. The transition and its activated
 `MigrationApplied` event correspond one-to-one, so Project consumes the event's
 already-validated successor, position, and correlation ID without correlating
@@ -1930,6 +1979,25 @@ retracts that pointer nor prevents later old-registry root-resolver updates.
 (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L75-L82 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L48-L54 @ ens_v1@91c966f)
 
+<a id="registry-only-handoff"></a>
+## Registry-only handoff
+
+a BaseRegistrar token transfer without `reclaim`. The registrar changes the
+token holder but leaves the ENSv1 registry owner the registrar wrote earlier,
+so from that transfer the name is bound to a registry-only resource, whose owner
+is the registry record, while the lease goes on under it: its expiry, renewals
+and later transfers are still the token's. Ordinary ENSv1 interpretation closes
+the lease binding and opens the registry-only binding at the transfer; Project
+reads which lease a registry-only binding stands for
+(`project_registry_only_handoffs`). An ENSv1→ENSv2 migration of such a name
+migrates the token: the unlocked controller reclaims the registry record for
+itself before parking the token, so the
+[migration authority transition](#migration-authority-transition) finds the
+lease by its token evidence and closes the registry-only binding at the
+cleanup.
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L172-L175 @ ens_v1@91c966f)
+(upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L111-L118 @ ens_v2@a971bd6)
+
 ## Resolution divergence ledger
 
 the schema-v2 audit table whose active rows
@@ -2011,9 +2079,12 @@ granted under it without touching the registry.
 The lease that lapsed while wrapped is the ordinary case: the NameWrapper's
 registry custody expired with the lease, so nothing current owns the node. The
 tombstone selects the released lease binding, serves the registration as
-`released` with its identity and timestamps, and serves no current registrant,
-authority, expiry, owner, control, resolver or records. It is positive proof
-that the registration is absent, so the row is supported rather than
+`released` with its identity, timestamps and the lapsed lease's expiry, and
+serves no current registrant, authority, owner, control, resolver or records.
+The holder the lease had when it lapsed, and whether it was held through the
+registrar or the NameWrapper (`held_through`), are kept apart in a
+`lapsed_registration` block that no current-state read uses. It is positive
+proof that the registration is absent, so the row is supported rather than
 `current_authority_not_projected`. A lease registered through the NameWrapper
 never has a binding of its own, so its released lease binding is the closed
 NameWrapper binding that stands for it: the one whose `NameWrapped` rows recorded
@@ -2171,7 +2242,9 @@ and reverting `OffchainLookup` for anything below it
 (upstream: .refs/basenames/src/L1/L1Resolver.sol:L173 @ basenames@1809bbc).
 Do not confuse this with network transport failures: a provider's DNS, TLS, or
 connection error aborts a request before persistence. There is no `transport`
-discovery edge kind.
+discovery edge kind. It is also unrelated to
+[source transport](#source-transport), which is about how Ingest reads one
+execution node.
 
 ## Universal Resolver ancestor discovery
 

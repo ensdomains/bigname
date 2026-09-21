@@ -55,8 +55,28 @@ its controller declared in the fixture [deployment profile](glossary.md#deployme
 current ENSv1 bindings and permissions for the current name, one ENSv2 binding,
 and the expected ENSv2 owner. These tests require execution evidence before a
 passing claim; none of them substitutes for the complete catalog replay matrix.
-The reduced `checked_in_sepolia_manifests_materialize_exactly_one_transition_predecessor`
-remains a transition-materialization test, not a complete transaction proof.
+`checked_in_sepolia_manifests_materialize_exactly_one_transition_predecessor`
+drives the complete unwrapped migration transaction through the checked-in
+Sepolia manifests and the production writer; it is a transition-materialization
+test, not a publication proof.
+`registry_only_handoff_migrates_the_lease_and_closes_every_v1_binding` does the
+same for a lease whose token moved without `reclaim` before the migration, the
+Sepolia block 11723340 shape, asserting that the boundary resolves on the lease,
+that the registry-only binding closes at the registrar cleanup, and that no
+ENSv1 binding stays open. The adapter test
+`registry_only_handoff_cleanup_keeps_the_registrant_revocations_on_the_registry_resource`
+checks the same shape's permissions: the reconciliation keeps the reclaim's
+revocations of the registry owner's handoff grants on the registry-only
+resource, matching ordinary interpretation, so that owner's control does not
+outlive the migration in Project's latest-row permission fold.
+`mainnet_declared_registrar_resolves_the_lease_of_a_wrapper_minted_registration`
+does the same on the unlocked-wrapped path with the checked-in Mainnet
+registrar manifest re-chained to Sepolia, for a name registered straight into
+the NameWrapper: its controller grant carries no token id and its only
+token-bearing event is the cleanup transfer from the NameWrapper to the
+Graveyard, which the writer admits because the grant had been observed before
+the transaction; a Redo pass over the migration block must reproduce the same
+bindings.
 
 | ID | Recorded baseline disposition | Pinned exact catalog result | Checked-in rule anchor |
 | --- | --- | --- | --- |

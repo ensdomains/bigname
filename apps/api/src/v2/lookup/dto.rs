@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::v2::name_record::LapsedRegistration;
 use crate::v2::{
     AddressNameResolution, Authority, Page, RegistrationStatus, RegistryRef, Relation, Resolver,
     Status,
@@ -115,6 +116,9 @@ pub(crate) struct LookupRecord {
     pub(crate) expires_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) registration_status: Option<RegistrationStatus>,
+    /// The lapsed holder of a released ENSv1 lease; never current data.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) lapsed_registration: Option<LapsedRegistration>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) resolver: Option<Resolver>,
     #[serde(skip_serializing_if = "Option::is_none")]

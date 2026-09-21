@@ -11,6 +11,22 @@ pub(super) enum HistorySelector {
         logical_name_ids: Vec<String>,
         resource_ids: Vec<Uuid>,
     },
+    /// A registration-scoped product read. The rows of these names and resources are the
+    /// candidates; the registration filter decides which belong to the registration.
+    ProductRegistration {
+        logical_name_ids: Vec<String>,
+        resource_ids: Vec<Uuid>,
+    },
+}
+
+pub(super) fn product_registration_history_selector(
+    resource_ids: Vec<Uuid>,
+    logical_name_ids: Vec<String>,
+) -> HistorySelector {
+    HistorySelector::ProductRegistration {
+        logical_name_ids,
+        resource_ids,
+    }
 }
 
 impl HistorySelector {

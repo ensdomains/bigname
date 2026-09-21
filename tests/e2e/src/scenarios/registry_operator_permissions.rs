@@ -381,12 +381,58 @@ async fn verify_snapshot(
                 projected_bindings[0]["registry_contract"],
                 format!("{registry:#x}")
             );
+            // The registry-only resource holds the rows but is not a registration handle. The
+            // rows carry the registration the name serves, its registrar lease, the same value
+            // name detail serves; that handle reads the same rows, and the registry-only
+            // resource id selects none.
+            let detail = api.get(&format!("/v1/names/{name}")).await?;
+            let served = detail["data"]["registration_id"]
+                .as_str()
+                .expect("name detail registration_id")
+                .to_owned();
+            let declared: Option<String> = sqlx::query_scalar(
+                "SELECT declared_summary #>> '{registration,resource_id}' FROM name_current WHERE raw_name=$1",
+            )
+            .bind(&name)
+            .fetch_one(&run.db.pool)
+            .await?;
+            assert_eq!(
+                declared.as_deref(),
+                Some(served.as_str()),
+                "name detail serves the declared registration {name}"
+            );
+            assert_ne!(
+                served,
+                selected.to_string(),
+                "the registry-only resource is not the registration handle {name}"
+            );
             assert!(
                 body["data"]
                     .as_array()
                     .unwrap()
                     .iter()
-                    .all(|row| row["registration_id"] == selected.to_string())
+                    .all(|row| row["registration_id"] == served),
+                "rows carry the registration the name serves {name}: {body}"
+            );
+            let by_lease = api
+                .get(&format!(
+                    "/v1/permissions?registration_id={served}&include=lineage"
+                ))
+                .await?;
+            assert_eq!(
+                by_lease["data"].as_array().unwrap().len(),
+                body["data"].as_array().unwrap().len(),
+                "the lease read agrees with the name read {name}: {by_lease}"
+            );
+            assert!(has_operator(&by_lease), "lease route {name}: {by_lease}");
+            let (status, by_resource) = api
+                .get_json(&format!("/v1/permissions?registration_id={selected}"))
+                .await?;
+            ensure!(status == 200, "{name}: {status} {by_resource}");
+            assert_eq!(
+                by_resource["data"],
+                json!([]),
+                "the registry-only resource selects no rows {name}: {by_resource}"
             );
             assert!(
                 has_operator(&account_http),
