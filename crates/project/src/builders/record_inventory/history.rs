@@ -18,8 +18,40 @@ pub(super) async fn build(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
 ) -> Result<()> {
-    sqlx::query(
-        r#"
+    // This statement and the inventory build after it join the pointer stages and the staged
+    // resolver rows to every node-keyed record event. Temporary tables are never analyzed
+    // automatically; with the default guess of a few rows the planner compares every record
+    // event with every pointer.
+    for table in [
+        "project_record_pointer_history",
+        "project_record_pointers",
+        "project_stage_resolver_current",
+    ] {
+        sqlx::query(&format!("ANALYZE {table}"))
+            .execute(&mut **transaction)
+            .await
+            .map_err(|error| ProjectError::database("failed to analyze pointer stages", error))?;
+    }
+    sqlx::query(ATTRIBUTE_RECORD_HISTORY)
+        .bind(chain_id)
+        .execute(&mut **transaction)
+        .await
+        .map_err(|error| {
+            ProjectError::database(
+                "failed to attribute historical pointer record writes",
+                error,
+            )
+        })?;
+    sqlx::query("CREATE INDEX ON project_record_history_attribution (resource_id)")
+        .execute(&mut **transaction)
+        .await
+        .map_err(|error| {
+            ProjectError::database("failed to index historical pointer attribution", error)
+        })?;
+    Ok(())
+}
+
+pub(in crate::builders) const ATTRIBUTE_RECORD_HISTORY: &str = r#"
         CREATE TEMP TABLE project_record_history_attribution ON COMMIT DROP AS
         SELECT pointer.resource_id, event.normalized_event_id
         FROM project_record_pointer_history pointer
@@ -115,22 +147,4 @@ pub(super) async fn build(
         UNION
         SELECT resource_id, normalized_event_id
         FROM project_linked_record_history_attribution
-        "#,
-    )
-    .bind(chain_id)
-    .execute(&mut **transaction)
-    .await
-    .map_err(|error| {
-        ProjectError::database(
-            "failed to attribute historical pointer record writes",
-            error,
-        )
-    })?;
-    sqlx::query("CREATE INDEX ON project_record_history_attribution (resource_id)")
-        .execute(&mut **transaction)
-        .await
-        .map_err(|error| {
-            ProjectError::database("failed to index historical pointer attribution", error)
-        })?;
-    Ok(())
-}
+        "#;

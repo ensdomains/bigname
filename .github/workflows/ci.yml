@@ -33,7 +33,7 @@ concurrency:
 # entry per job.
 env:
   CARGO_TERM_COLOR: always
-  RUST_VERSION: 1.93.1
+  RUST_VERSION: 1.98.0
   FOUNDRY_VERSION: v1.7.1
 
 jobs:
@@ -765,7 +765,9 @@ jobs:
   e2e_shard_1:
     name: test (e2e shard 1/2)
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    # 25 minutes covers a shard whose dependency cache restored. The extra 15 cover
+    # the cold phase-runner build below, which only runs when the restore missed.
+    timeout-minutes: 40
     needs:
       - e2e_build
     # Start after the artifact and cache build; e2e results remain independently aggregated.
@@ -878,13 +880,27 @@ jobs:
           )
           echo "BIGNAME_E2E_CANONICAL_PHASE_RUNNER=$artifact_dir/phase-runner" >>"$GITHUB_ENV"
 
+      # The harness builds phase-runner under BIGNAME_E2E_COMMAND_TIMEOUT_SECS (600s).
+      # With restored dependencies that build compiles only this workspace's crates.
+      # When the builder could not save the cache (run 35203124311 hit a cache API
+      # rate limit), the harness build compiles every dependency, Reth included,
+      # which takes about 600s even on an idle runner (612s in that run's builder)
+      # and overran the deadline here. Build once outside the deadline instead, with
+      # the harness's own command, profile and target directory, so the timed build
+      # stays incremental.
+      - name: Build phase-runner dependencies after a cache miss
+        if: steps.phase_runner_cache.outputs.cache-hit != 'true'
+        run: cargo build --locked --package phase-runner --bin phase-runner
+
       - name: Run e2e shard 1/2
         run: tests/e2e/run-gate
 
   e2e_shard_2:
     name: test (e2e shard 2/2)
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    # 25 minutes covers a shard whose dependency cache restored. The extra 15 cover
+    # the cold phase-runner build below, which only runs when the restore missed.
+    timeout-minutes: 40
     needs:
       - e2e_build
     # Start after the artifact and cache build; e2e results remain independently aggregated.
@@ -996,6 +1012,18 @@ jobs:
             fi
           )
           echo "BIGNAME_E2E_CANONICAL_PHASE_RUNNER=$artifact_dir/phase-runner" >>"$GITHUB_ENV"
+
+      # The harness builds phase-runner under BIGNAME_E2E_COMMAND_TIMEOUT_SECS (600s).
+      # With restored dependencies that build compiles only this workspace's crates.
+      # When the builder could not save the cache (run 35203124311 hit a cache API
+      # rate limit), the harness build compiles every dependency, Reth included,
+      # which takes about 600s even on an idle runner (612s in that run's builder)
+      # and overran the deadline here. Build once outside the deadline instead, with
+      # the harness's own command, profile and target directory, so the timed build
+      # stays incremental.
+      - name: Build phase-runner dependencies after a cache miss
+        if: steps.phase_runner_cache.outputs.cache-hit != 'true'
+        run: cargo build --locked --package phase-runner --bin phase-runner
 
       - name: Run e2e shard 2/2
         run: tests/e2e/run-gate

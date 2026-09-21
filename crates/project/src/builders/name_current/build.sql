@@ -1,15 +1,4 @@
 
-        WITH v2_lifecycle_events AS (
-            SELECT event.*, COALESCE(event.resource_id::text, (
-                SELECT linked.resource_id::text FROM project_events linked
-                WHERE linked.logical_name_id = event.logical_name_id AND linked.resource_id IS NOT NULL
-                  AND linked.event_kind IN ('RegistrationGranted', 'RegistrationReserved') AND linked.source_family IN ('ens_v2_root_l1', 'ens_v2_registry_l1', 'ens_v2_registrar_l1')
-                  AND COALESCE(linked.after_state ->> 'registry_contract_instance_id', linked.raw_fact_ref ->> 'emitting_address', linked.after_state ->> 'registry') = COALESCE(event.after_state ->> 'registry_contract_instance_id', event.raw_fact_ref ->> 'emitting_address', event.after_state ->> 'registry') AND linked.after_state ->> 'token_id' = event.after_state ->> 'token_id'
-                ORDER BY linked.block_number DESC NULLS LAST, linked.normalized_event_id DESC LIMIT 1
-            ), NULLIF(CONCAT(COALESCE(event.after_state ->> 'registry_contract_instance_id', event.raw_fact_ref ->> 'emitting_address', event.after_state ->> 'registry'), ':', event.after_state ->> 'token_id'), ':')) AS lifecycle_key
-            FROM project_events event
-            WHERE event.source_family IN ('ens_v2_root_l1', 'ens_v2_registry_l1', 'ens_v2_registrar_l1')
-        )
         INSERT INTO project_stage_name_current (
             logical_name_id, namespace, raw_name, namehash,
             surface_binding_id, resource_id, serving_resource_id,
@@ -45,7 +34,8 @@
                        'resource_id', CASE
                            WHEN NOT COALESCE(selected_registration.is_v2_lifecycle, false)
                                THEN lifecycle.registrar_resource_id END,
-                       'registrant', registrant.registrant,
+                       'registrant', CASE WHEN NOT effective_wrapper.owner_lapsed
+                           THEN registrant.registrant END,
                        'expiry', CASE
                            WHEN selected_registration.is_v2_lifecycle
                             AND selected_registration.event_kind IS NOT NULL
@@ -79,11 +69,18 @@
                        -- A released ENSv1 lease whose custody was not revived is a tombstone:
                        -- the registrar lease is gone, and whether nothing current owns the node
                        -- or the registry still holds the owner a transfer without `reclaim`
-                       -- left behind, the lapsed registrant, authority and expiry are history
-                       -- only.
+                       -- left behind, no current registrant or authority is served. `expiry`
+                       -- stays the lapsed lease's own expiry, and the holder and authority the
+                       -- lease had when it lapsed move into `lapsed_registration`, a block only
+                       -- a tombstone carries and nothing reads as current state.
                        WHEN COALESCE(selected_authority.released_v1_tombstone, false)
                            THEN jsonb_build_object('authority_kind', NULL, 'authority_key', NULL,
-                               'registrant', NULL, 'expiry', NULL)
+                               'registrant', NULL,
+                               'lapsed_registration', jsonb_build_object(
+                                   'registrant', registrant.registrant,
+                                   'authority_kind', lapsed_authority.authority_kind,
+                                   'authority_key', lapsed_authority.authority_key,
+                                   'released_at', selected_registration.after_state -> 'released_at'))
                        -- An ENSv2 registration lapsed by path expiry keeps its lapsed expiry as
                        -- a readable detail (the registry entry still holds it); an explicit
                        -- release clears the entry, so nothing current remains.
@@ -125,7 +122,8 @@
                                         wrapper_expiry.servable_expiry_seconds))
                                    AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))
                            END,
-                           'registrant', registrant.registrant,
+                           'registrant', CASE WHEN NOT effective_wrapper.owner_lapsed
+                               THEN registrant.registrant END,
                            'registry_owner', control_owner.registry_owner,
                            'latest_event_kind', control.latest_event_kind
                        )
@@ -303,17 +301,17 @@
         ) registration_latest ON TRUE
         LEFT JOIN LATERAL (
             SELECT event.event_kind, event.after_state, event.resource_id, event.lifecycle_key
-            FROM (SELECT DISTINCT ON (event.lifecycle_key) event.* FROM v2_lifecycle_events event
+            FROM (SELECT DISTINCT ON (event.lifecycle_key) event.* FROM project_v2_lifecycle_events event
             WHERE event.logical_name_id = surface.logical_name_id AND (
                   event.event_kind IN ('RegistrationGranted', 'RegistrationReserved') OR
                   (event.event_kind = 'RegistrationReleased' AND ((event.after_state ->> 'source_event' = 'RegistryPathExpired' AND event.after_state ->> 'derived_from' = 'interpreter_state' AND event.after_state ->> 'terminal_reason' = 'registry_name_binding_expired')
-                        OR EXISTS (SELECT 1 FROM v2_lifecycle_events active WHERE active.logical_name_id = event.logical_name_id AND active.lifecycle_key = event.lifecycle_key
+                        OR EXISTS (SELECT 1 FROM project_v2_lifecycle_events active WHERE active.logical_name_id = event.logical_name_id AND active.lifecycle_key = event.lifecycle_key
                             AND active.event_kind IN ('RegistrationGranted', 'RegistrationReserved') AND ROW(COALESCE(active.block_number, -1), active.normalized_event_id) < ROW(COALESCE(event.block_number, -1), event.normalized_event_id)
-                            AND NOT EXISTS (SELECT 1 FROM v2_lifecycle_events expiry WHERE expiry.logical_name_id = event.logical_name_id AND expiry.lifecycle_key = event.lifecycle_key
+                            AND NOT EXISTS (SELECT 1 FROM project_v2_lifecycle_events expiry WHERE expiry.logical_name_id = event.logical_name_id AND expiry.lifecycle_key = event.lifecycle_key
                                 AND expiry.event_kind = 'RegistrationReleased' AND expiry.after_state ->> 'source_event' = 'RegistryPathExpired' AND expiry.after_state ->> 'derived_from' = 'interpreter_state' AND expiry.after_state ->> 'terminal_reason' = 'registry_name_binding_expired' AND ROW(COALESCE(expiry.block_number, -1), expiry.normalized_event_id) BETWEEN ROW(COALESCE(active.block_number, -1), active.normalized_event_id) AND ROW(COALESCE(event.block_number, -1), event.normalized_event_id)
                             )))
               ))
-              AND NOT EXISTS (SELECT 1 FROM v2_lifecycle_events later WHERE later.logical_name_id = event.logical_name_id AND later.lifecycle_key = event.lifecycle_key
+              AND NOT EXISTS (SELECT 1 FROM project_v2_lifecycle_events later WHERE later.logical_name_id = event.logical_name_id AND later.lifecycle_key = event.lifecycle_key
                     AND ((event.event_kind = 'RegistrationReleased' AND later.event_kind IN ('RegistrationGranted', 'RegistrationReserved')) OR (event.event_kind <> 'RegistrationReleased' AND later.event_kind = 'RegistrationReleased'))
                     AND ROW(COALESCE(later.block_number, -1), later.normalized_event_id) > ROW(COALESCE(event.block_number, -1), event.normalized_event_id)
               )
@@ -348,7 +346,7 @@
                    CASE WHEN identity.has_lifecycle THEN selected_registration.resource_id ELSE binding.resource_id END AS event_resource_id FROM (SELECT selected_registration.is_v2_lifecycle AND selected_registration.event_kind IS NOT NULL AS has_lifecycle,
                    selected_registration.is_v2_lifecycle AND selected_registration.event_kind IS NOT NULL AND selected_registration.resource_id IS DISTINCT FROM binding.resource_id AS mismatch) identity) row_identity
         LEFT JOIN LATERAL (
-            SELECT event.event_kind FROM v2_lifecycle_events event
+            SELECT event.event_kind FROM project_v2_lifecycle_events event
             WHERE selected_registration.is_v2_lifecycle AND event.logical_name_id = surface.logical_name_id
               AND event.lifecycle_key IS NOT DISTINCT FROM COALESCE(selected_registration.lifecycle_key, row_identity.event_resource_id::text)
               AND event.event_kind IN ('RegistrationGranted', 'RegistrationRenewed', 'RegistrationReleased', 'RegistrationReserved', 'ExpiryChanged')
@@ -368,7 +366,7 @@
               ON lineage.chain_id = event.chain_id
              AND lineage.block_number = event.block_number
              AND lineage.block_hash = event.block_hash
-            WHERE event.logical_name_id = surface.logical_name_id AND (NOT selected_registration.is_v2_lifecycle OR EXISTS (SELECT 1 FROM v2_lifecycle_events selected_event WHERE selected_event.normalized_event_id = event.normalized_event_id AND selected_event.lifecycle_key IS NOT DISTINCT FROM COALESCE(selected_registration.lifecycle_key, row_identity.event_resource_id::text)))
+            WHERE event.logical_name_id = surface.logical_name_id AND (NOT selected_registration.is_v2_lifecycle OR EXISTS (SELECT 1 FROM project_v2_lifecycle_events selected_event WHERE selected_event.normalized_event_id = event.normalized_event_id AND selected_event.lifecycle_key IS NOT DISTINCT FROM COALESCE(selected_registration.lifecycle_key, row_identity.event_resource_id::text)))
               AND event.event_kind = 'RegistrationGranted'
             ORDER BY event.block_number DESC NULLS LAST,
                      event.transaction_index DESC NULLS LAST, event.log_index DESC NULLS LAST,
@@ -379,7 +377,7 @@
             SELECT event.after_state ->> 'authority_kind' AS authority_kind,
                    event.after_state ->> 'authority_key' AS authority_key
             FROM project_authority_events event
-            WHERE event.logical_name_id = surface.logical_name_id AND (NOT selected_registration.is_v2_lifecycle OR EXISTS (SELECT 1 FROM v2_lifecycle_events selected_event WHERE selected_event.normalized_event_id = event.normalized_event_id AND selected_event.lifecycle_key IS NOT DISTINCT FROM COALESCE(selected_registration.lifecycle_key, row_identity.event_resource_id::text)))
+            WHERE event.logical_name_id = surface.logical_name_id AND (NOT selected_registration.is_v2_lifecycle OR EXISTS (SELECT 1 FROM project_v2_lifecycle_events selected_event WHERE selected_event.normalized_event_id = event.normalized_event_id AND selected_event.lifecycle_key IS NOT DISTINCT FROM COALESCE(selected_registration.lifecycle_key, row_identity.event_resource_id::text)))
               AND (
                     event.event_kind IN ('RegistrationGranted', 'AuthorityEpochChanged')
                  OR (event.event_kind = 'SurfaceBound' AND event.after_state @>
@@ -404,16 +402,75 @@
             LIMIT 1
         ) authority_context ON TRUE
         LEFT JOIN LATERAL (
+            -- The authority the released lease binding had before its closing epoch cleared
+            -- it: the NameWrapper for a lease that lapsed while wrapped. Only a released
+            -- tombstone serves it, inside `lapsed_registration`.
+            SELECT event.after_state ->> 'authority_kind' AS authority_kind,
+                   event.after_state ->> 'authority_key' AS authority_key
+            FROM project_authority_events event
+            WHERE COALESCE(selected_authority.released_v1_tombstone, false)
+              AND event.resource_id = CASE
+                  WHEN authority_context.authority_kind = 'registry_only'
+                      THEN selected_registration.resource_id
+                  ELSE resource.resource_id END
+              AND event.event_kind IN ('RegistrationGranted', 'AuthorityEpochChanged')
+              AND event.after_state ->> 'authority_kind' IS NOT NULL
+            ORDER BY event.block_number DESC NULLS LAST,
+                     event.transaction_index DESC NULLS LAST, event.log_index DESC NULLS LAST,
+                     event.normalized_event_id DESC
+            LIMIT 1
+        ) lapsed_authority ON TRUE
+        LEFT JOIN LATERAL (
             SELECT lower(CASE event.event_kind
                        WHEN 'TokenControlTransferred' THEN event.after_state ->> 'to'
+                       WHEN 'RegistrationReleased' THEN event.before_state ->> 'registrant'
                        ELSE event.after_state ->> 'registrant'
                    END) AS registrant,
                    event.normalized_event_id
             FROM project_registration_events event
-            WHERE event.logical_name_id = surface.logical_name_id AND (NOT selected_registration.is_v2_lifecycle OR EXISTS (SELECT 1 FROM v2_lifecycle_events selected_event WHERE selected_event.normalized_event_id = event.normalized_event_id AND selected_event.lifecycle_key IS NOT DISTINCT FROM COALESCE(selected_registration.lifecycle_key, row_identity.event_resource_id::text)))
+            WHERE event.logical_name_id = surface.logical_name_id AND (NOT selected_registration.is_v2_lifecycle OR EXISTS (SELECT 1 FROM project_v2_lifecycle_events selected_event WHERE selected_event.normalized_event_id = event.normalized_event_id AND selected_event.lifecycle_key IS NOT DISTINCT FROM COALESCE(selected_registration.lifecycle_key, row_identity.event_resource_id::text)))
               AND event.event_kind IN (
-                  'RegistrationGranted', 'TokenControlTransferred'
+                  'RegistrationGranted', 'RegistrationReleased', 'TokenControlTransferred'
               )
+              AND NOT (
+                  event.event_kind = 'RegistrationReleased'
+                  AND event.source_family = 'ens_v1_registrar_l1'
+                  AND EXISTS (
+                      SELECT 1
+                      FROM project_events wrapper_binding
+                      WHERE wrapper_binding.logical_name_id = event.logical_name_id
+                        AND wrapper_binding.source_family = 'ens_v1_wrapper_l1'
+                        AND wrapper_binding.event_kind = 'SurfaceBound'
+                        -- The release names the BaseRegistrar token owner, which for a wrapped
+                        -- lease is the NameWrapper contract: wrapping moves the registrar token
+                        -- to the NameWrapper, and registering through it mints the token to the
+                        -- NameWrapper. The holder is the NameWrapper token owner, so the fold
+                        -- skips the release of a lease the name's wrap stands for: the wrap
+                        -- recorded the lease, or a controller event granted the lease in the
+                        -- wrap's transaction after NameWrapped recorded nothing.
+                        -- (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L265 @ ens_v1@91c966f)
+                        -- (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L297 @ ens_v1@91c966f)
+                        AND (
+                            wrapper_binding.after_state ->>
+                                'wrapped_registrar_resource_id' = event.resource_id::text
+                            OR EXISTS (
+                                SELECT 1 FROM project_events registration
+                                WHERE registration.resource_id = event.resource_id
+                                  AND registration.source_family = 'ens_v1_registrar_l1'
+                                  AND registration.event_kind = 'RegistrationGranted'
+                                  AND registration.logical_name_id =
+                                      wrapper_binding.logical_name_id
+                                  AND registration.transaction_hash =
+                                      wrapper_binding.transaction_hash
+                            )
+                        )
+                  )
+              )
+              AND CASE event.event_kind
+                      WHEN 'TokenControlTransferred' THEN event.after_state ->> 'to'
+                      WHEN 'RegistrationReleased' THEN event.before_state ->> 'registrant'
+                      ELSE event.after_state ->> 'registrant'
+                  END IS NOT NULL
             ORDER BY event.block_number DESC NULLS LAST,
                      event.transaction_index DESC NULLS LAST, event.log_index DESC NULLS LAST,
                      event.normalized_event_id DESC
@@ -430,7 +487,7 @@
                        ELSE NULL
                    END AS expiry_seconds
             FROM project_authority_events event
-            WHERE event.logical_name_id = surface.logical_name_id AND (NOT selected_registration.is_v2_lifecycle OR EXISTS (SELECT 1 FROM v2_lifecycle_events selected_event WHERE selected_event.normalized_event_id = event.normalized_event_id AND selected_event.lifecycle_key IS NOT DISTINCT FROM COALESCE(selected_registration.lifecycle_key, row_identity.event_resource_id::text)))
+            WHERE event.logical_name_id = surface.logical_name_id AND (NOT selected_registration.is_v2_lifecycle OR EXISTS (SELECT 1 FROM project_v2_lifecycle_events selected_event WHERE selected_event.normalized_event_id = event.normalized_event_id AND selected_event.lifecycle_key IS NOT DISTINCT FROM COALESCE(selected_registration.lifecycle_key, row_identity.event_resource_id::text)))
               AND event.event_kind IN (
                   'RegistrationGranted', 'RegistrationRenewed', 'RegistrationReleased',
                   'ExpiryChanged'
@@ -538,7 +595,15 @@
                          OR target_time.epoch_seconds IS NULL THEN NULL
                        WHEN wrapper_expiry.expiry_seconds < target_time.epoch_seconds THEN 0
                        ELSE wrapper.fuses
-                   END AS fuses
+                   END AS fuses,
+                   -- Past its own expiry the NameWrapper reports no owner for a name whose
+                   -- PARENT_CANNOT_CONTROL fuse was burned, also while the registrar lease is
+                   -- still live (a renewal made on the BaseRegistrar alone does not move it).
+                   -- (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L843-L856 @ ens_v1@91c966f)
+                   COALESCE(wrapper.wrapper_state IN ('emancipated', 'locked')
+                       AND wrapper.fuses IS NOT NULL
+                       AND wrapper_expiry.expiry_seconds < target_time.epoch_seconds,
+                       false) AS owner_lapsed
         ) effective_wrapper ON TRUE
         LEFT JOIN LATERAL (
             SELECT lineage.block_timestamp
@@ -557,7 +622,7 @@
         LEFT JOIN LATERAL (
             SELECT event.*
             FROM project_authority_events event
-            WHERE event.logical_name_id = surface.logical_name_id AND (NOT selected_registration.is_v2_lifecycle OR EXISTS (SELECT 1 FROM v2_lifecycle_events selected_event WHERE selected_event.normalized_event_id = event.normalized_event_id AND selected_event.lifecycle_key IS NOT DISTINCT FROM COALESCE(selected_registration.lifecycle_key, row_identity.event_resource_id::text))) AND event.after_state ? 'status'
+            WHERE event.logical_name_id = surface.logical_name_id AND (NOT selected_registration.is_v2_lifecycle OR EXISTS (SELECT 1 FROM project_v2_lifecycle_events selected_event WHERE selected_event.normalized_event_id = event.normalized_event_id AND selected_event.lifecycle_key IS NOT DISTINCT FROM COALESCE(selected_registration.lifecycle_key, row_identity.event_resource_id::text))) AND event.after_state ? 'status'
             ORDER BY event.block_number DESC NULLS LAST,
                      event.transaction_index DESC NULLS LAST,
                      event.log_index DESC NULLS LAST,
@@ -581,7 +646,7 @@
                        )
                    END) AS registry_owner
             FROM project_authority_events event
-            WHERE event.logical_name_id = surface.logical_name_id AND (NOT selected_registration.is_v2_lifecycle OR EXISTS (SELECT 1 FROM v2_lifecycle_events selected_event WHERE selected_event.normalized_event_id = event.normalized_event_id AND selected_event.lifecycle_key IS NOT DISTINCT FROM COALESCE(selected_registration.lifecycle_key, row_identity.event_resource_id::text)))
+            WHERE event.logical_name_id = surface.logical_name_id AND (NOT selected_registration.is_v2_lifecycle OR EXISTS (SELECT 1 FROM project_v2_lifecycle_events selected_event WHERE selected_event.normalized_event_id = event.normalized_event_id AND selected_event.lifecycle_key IS NOT DISTINCT FROM COALESCE(selected_registration.lifecycle_key, row_identity.event_resource_id::text)))
               AND (
                     event.event_kind IN ('AuthorityTransferred', 'AuthorityEpochChanged')
                  OR (selected_registration.is_v2_lifecycle AND event.event_kind = 'TokenControlTransferred')
@@ -599,7 +664,7 @@
         LEFT JOIN LATERAL (
             SELECT event.event_kind AS latest_event_kind
             FROM project_authority_events event
-            WHERE event.logical_name_id = surface.logical_name_id AND (NOT selected_registration.is_v2_lifecycle OR EXISTS (SELECT 1 FROM v2_lifecycle_events selected_event WHERE selected_event.normalized_event_id = event.normalized_event_id AND selected_event.lifecycle_key IS NOT DISTINCT FROM COALESCE(selected_registration.lifecycle_key, row_identity.event_resource_id::text)))
+            WHERE event.logical_name_id = surface.logical_name_id AND (NOT selected_registration.is_v2_lifecycle OR EXISTS (SELECT 1 FROM project_v2_lifecycle_events selected_event WHERE selected_event.normalized_event_id = event.normalized_event_id AND selected_event.lifecycle_key IS NOT DISTINCT FROM COALESCE(selected_registration.lifecycle_key, row_identity.event_resource_id::text)))
               AND event.event_kind IN (
                   'TokenControlTransferred', 'AuthorityTransferred',
                   'AuthorityEpochChanged'
@@ -612,7 +677,7 @@
         ) control ON TRUE
         LEFT JOIN LATERAL (
             SELECT event.* FROM project_authority_events event
-            WHERE event.logical_name_id = surface.logical_name_id AND (NOT selected_registration.is_v2_lifecycle OR EXISTS (SELECT 1 FROM v2_lifecycle_events selected_event WHERE selected_event.normalized_event_id = event.normalized_event_id AND selected_event.lifecycle_key IS NOT DISTINCT FROM COALESCE(selected_registration.lifecycle_key, row_identity.event_resource_id::text)))
+            WHERE event.logical_name_id = surface.logical_name_id AND (NOT selected_registration.is_v2_lifecycle OR EXISTS (SELECT 1 FROM project_v2_lifecycle_events selected_event WHERE selected_event.normalized_event_id = event.normalized_event_id AND selected_event.lifecycle_key IS NOT DISTINCT FROM COALESCE(selected_registration.lifecycle_key, row_identity.event_resource_id::text)))
               AND event.event_kind IN (
                   'AuthorityTransferred', 'TokenControlTransferred',
                   'AuthorityEpochChanged'
@@ -643,7 +708,7 @@
                   OR NOT selected_registration.is_v2_lifecycle
                   OR (binding.resource_id IS NULL AND event.resource_id IS NULL)
                   OR (binding.resource_id IS NOT NULL AND EXISTS (
-                      SELECT 1 FROM v2_lifecycle_events selected_event
+                      SELECT 1 FROM project_v2_lifecycle_events selected_event
                       WHERE selected_event.normalized_event_id = event.normalized_event_id
                         AND selected_event.lifecycle_key IS NOT DISTINCT FROM COALESCE(
                             selected_registration.lifecycle_key,

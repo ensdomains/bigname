@@ -213,9 +213,23 @@ fn prove(
     let node = logical.strip_prefix("ens:")?;
     let predecessor = state.v1_name("ens", node)?;
     let registrar = state.v1_registrar("ens", node)?;
+    let registry_resource_id = stable_uuid(&format!(
+        "resource:registry-only:{}:{node}",
+        boundary.chain_id
+    ));
+    // The name enters the transaction bound either to its lease or, after a registrar transfer
+    // without `reclaim`, to the registry-only resource the lease goes on under. The controller
+    // reclaims the registry record from whoever it names before parking the token, so the token
+    // is the predecessor either way and the registrar state is the lease.
+    // (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L172-L175 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L111 @ ens_v2@a971bd64)
+    let lease_bound = predecessor.resource_id == registrar.resource_id
+        && predecessor.authority_source_family == V1_REGISTRAR_FAMILY;
+    let registry_only_bound = predecessor.resource_id == registry_resource_id
+        && predecessor.authority_source_family == "ens_v1_registry_l1"
+        && predecessor.token_lineage_id.is_none();
     if !predecessor.surface_known
-        || predecessor.resource_id != registrar.resource_id
-        || predecessor.authority_source_family != V1_REGISTRAR_FAMILY
+        || !(lease_bound || registry_only_bound)
         || registrar.expiry? <= incoming.raw.block_timestamp.unix_timestamp()
     {
         return None;
@@ -367,10 +381,7 @@ fn prove(
     Some(UnwrappedReconciliation {
         logical_name_id: logical.clone(),
         resource_id: registrar.resource_id,
-        registry_resource_id: stable_uuid(&format!(
-            "resource:registry-only:{}:{node}",
-            boundary.chain_id
-        )),
+        registry_resource_id,
         chain_id: boundary.chain_id.clone(),
         block_hash: boundary.block_hash.clone()?,
         transaction_hash: boundary.transaction_hash.clone()?,

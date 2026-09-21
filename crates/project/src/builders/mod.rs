@@ -9,6 +9,8 @@ mod name_topology;
 mod permission_resources;
 mod permissions;
 mod primary_names;
+#[cfg(test)]
+mod rebuild_tests;
 mod record_inventory;
 mod resolver;
 pub(crate) use resolver::LINK_DIGEST_SQL;

@@ -47,6 +47,7 @@ pub(super) fn build_forward_feed_record(
         created_at: None,
         expires_at: None,
         registration_status: None,
+        lapsed_registration: None,
         resolver: None,
         subregistry: None,
         addresses: None,
@@ -107,6 +108,7 @@ pub(super) fn build_reverse_feed_record(
         created_at: None,
         expires_at: None,
         registration_status: None,
+        lapsed_registration: None,
         resolver: None,
         subregistry: None,
         addresses: None,
@@ -192,7 +194,9 @@ fn build_detail_record(
         namespace: record.row.namespace.clone(),
         namehash: record.row.namehash.clone(),
         registration_id: (registration.registration_status != RegistrationStatus::Unregistered)
-            .then(|| record.row.resource_id.map(|value| value.to_string()))
+            .then(|| {
+                name_record::registration_id(&record.row.declared_summary, record.row.resource_id)
+            })
             .flatten(),
         token_id,
         owner: registration.owner,
@@ -202,6 +206,7 @@ fn build_detail_record(
         created_at: registration.created_at,
         expires_at: registration.expires_at,
         registration_status: Some(registration.registration_status),
+        lapsed_registration: name_record::lapsed_registration(&record.row.declared_summary),
         resolver,
         subregistry: None,
         primary_address,
@@ -257,6 +262,7 @@ fn authority_unsupported_record(
         created_at: None,
         expires_at: None,
         registration_status: None,
+        lapsed_registration: None,
         resolver: None,
         subregistry: None,
         addresses: None,

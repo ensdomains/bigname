@@ -12806,7 +12806,23 @@ async fn lapsed_wrapped_v1_lease_without_revived_custody_serves_a_released_tombs
     assert_eq!(registration["released_at"], 5);
     assert!(registration["registrant"].is_null());
     assert!(registration["authority_kind"].is_null());
-    assert!(registration["expiry"].is_null());
+    assert!(registration["authority_key"].is_null());
+    // The lapsed lease keeps its own expiry; its last holder and authority are served only
+    // inside the lapsed block.
+    assert_eq!(registration["expiry"], 4);
+    assert_eq!(
+        registration["lapsed_registration"],
+        json!({
+            "registrant": live.2["registration"]["registrant"],
+            "authority_kind": "wrapper",
+            "authority_key": "wrapper:0xalice",
+            "released_at": 5,
+        })
+    );
+    assert!(
+        live.2["registration"].get("lapsed_registration").is_none(),
+        "a live registration carries no lapsed block"
+    );
     assert_eq!(row.4["control"], json!({"status": "unregistered"}));
     assert!(row.4["resolver"]["address"].is_null());
     assert!(row.4["resolver"]["chain_id"].is_null());

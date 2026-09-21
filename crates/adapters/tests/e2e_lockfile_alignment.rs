@@ -50,34 +50,37 @@ const CODEGEN_AND_DECODE_PACKAGES: [&str; 8] = [
 
 const LOCKFILE_REGISTRY: &str = "registry+https://github.com/rust-lang/crates.io-index";
 
-// Reviewed feature-activation edges present in only one workspace at PR #373 round 5; the lists
+// Reviewed feature-activation edges present in only one workspace, last reviewed for the Reth 2.5 lockfile in PR #910; the lists
 // pin logical slots and the companion fingerprints pin every parent and target source identity.
-const REVIEWED_ROOT_ONLY_DEPENDENCY_SLOTS: [&str; 42] = [
-    "alloy-primitives 1.5.7 (registry+https://github.com/rust-lang/crates.io-index) -> getrandom",
-    "alloy-rlp 0.3.15 (registry+https://github.com/rust-lang/crates.io-index) -> alloy-rlp-derive",
-    "alloy-rlp-derive 0.3.15 (registry+https://github.com/rust-lang/crates.io-index) -> proc-macro2",
-    "alloy-rlp-derive 0.3.15 (registry+https://github.com/rust-lang/crates.io-index) -> quote",
-    "alloy-rlp-derive 0.3.15 (registry+https://github.com/rust-lang/crates.io-index) -> syn",
-    "ark-serialize 0.5.0 (registry+https://github.com/rust-lang/crates.io-index) -> ark-serialize-derive",
-    "ark-serialize-derive 0.5.0 (registry+https://github.com/rust-lang/crates.io-index) -> proc-macro2",
-    "ark-serialize-derive 0.5.0 (registry+https://github.com/rust-lang/crates.io-index) -> quote",
-    "ark-serialize-derive 0.5.0 (registry+https://github.com/rust-lang/crates.io-index) -> syn",
+const REVIEWED_ROOT_ONLY_DEPENDENCY_SLOTS: [&str; 44] = [
+    "alloy-primitives 1.7.3 (registry+https://github.com/rust-lang/crates.io-index) -> getrandom",
+    "alloy-rlp 0.3.16 (registry+https://github.com/rust-lang/crates.io-index) -> alloy-rlp-derive",
+    "alloy-rlp-derive 0.3.16 (registry+https://github.com/rust-lang/crates.io-index) -> proc-macro2",
+    "alloy-rlp-derive 0.3.16 (registry+https://github.com/rust-lang/crates.io-index) -> quote",
+    "alloy-rlp-derive 0.3.16 (registry+https://github.com/rust-lang/crates.io-index) -> syn",
     "arrayvec 0.7.6 (registry+https://github.com/rust-lang/crates.io-index) -> serde",
     "bitvec 1.0.1 (registry+https://github.com/rust-lang/crates.io-index) -> serde",
-    "cc 1.2.60 (registry+https://github.com/rust-lang/crates.io-index) -> jobserver",
-    "cc 1.2.60 (registry+https://github.com/rust-lang/crates.io-index) -> libc",
+    "cc 1.4.6 (registry+https://github.com/rust-lang/crates.io-index) -> jobserver",
+    "cc 1.4.6 (registry+https://github.com/rust-lang/crates.io-index) -> libc",
     "crypto-common 0.1.7 (registry+https://github.com/rust-lang/crates.io-index) -> rand_core",
     "ecdsa 0.16.9 (registry+https://github.com/rust-lang/crates.io-index) -> serdect",
     "elliptic-curve 0.13.8 (registry+https://github.com/rust-lang/crates.io-index) -> hkdf",
     "elliptic-curve 0.13.8 (registry+https://github.com/rust-lang/crates.io-index) -> pem-rfc7468",
     "elliptic-curve 0.13.8 (registry+https://github.com/rust-lang/crates.io-index) -> serdect",
+    "fixed-cache 0.1.10 (registry+https://github.com/rust-lang/crates.io-index) -> typeid",
     "futures-channel 0.3.32 (registry+https://github.com/rust-lang/crates.io-index) -> futures-core",
     "futures-channel 0.3.32 (registry+https://github.com/rust-lang/crates.io-index) -> futures-sink",
     "futures-util 0.3.32 (registry+https://github.com/rust-lang/crates.io-index) -> futures-channel",
     "getrandom 0.3.4 (registry+https://github.com/rust-lang/crates.io-index) -> js-sys",
     "getrandom 0.3.4 (registry+https://github.com/rust-lang/crates.io-index) -> wasm-bindgen",
-    "hashbrown 0.16.1 (registry+https://github.com/rust-lang/crates.io-index) -> allocator-api2",
-    "hashbrown 0.16.1 (registry+https://github.com/rust-lang/crates.io-index) -> equivalent",
+    "getrandom 0.4.2 (registry+https://github.com/rust-lang/crates.io-index) -> cfg-if",
+    "getrandom 0.4.2 (registry+https://github.com/rust-lang/crates.io-index) -> libc",
+    "getrandom 0.4.2 (registry+https://github.com/rust-lang/crates.io-index) -> r-efi",
+    "getrandom 0.4.2 (registry+https://github.com/rust-lang/crates.io-index) -> rand_core",
+    "getrandom 0.4.2 (registry+https://github.com/rust-lang/crates.io-index) -> wasip2",
+    "getrandom 0.4.2 (registry+https://github.com/rust-lang/crates.io-index) -> wasip3",
+    "hashbrown 0.17.0 (registry+https://github.com/rust-lang/crates.io-index) -> allocator-api2",
+    "hashbrown 0.17.0 (registry+https://github.com/rust-lang/crates.io-index) -> equivalent",
     "hkdf 0.12.4 (registry+https://github.com/rust-lang/crates.io-index) -> hmac",
     "jobserver 0.1.34 (registry+https://github.com/rust-lang/crates.io-index) -> getrandom",
     "jobserver 0.1.34 (registry+https://github.com/rust-lang/crates.io-index) -> libc",
@@ -90,21 +93,16 @@ const REVIEWED_ROOT_ONLY_DEPENDENCY_SLOTS: [&str; 42] = [
     "rapidhash 4.4.1 (registry+https://github.com/rust-lang/crates.io-index) -> rand",
     "rustc-hash 2.1.2 (registry+https://github.com/rust-lang/crates.io-index) -> rand",
     "sec1 0.7.3 (registry+https://github.com/rust-lang/crates.io-index) -> serdect",
-    "semver 1.0.27 (registry+https://github.com/rust-lang/crates.io-index) -> serde",
-    "semver 1.0.27 (registry+https://github.com/rust-lang/crates.io-index) -> serde_core",
     "serde_json 1.0.149 (registry+https://github.com/rust-lang/crates.io-index) -> indexmap",
     "serdect 0.2.0 (registry+https://github.com/rust-lang/crates.io-index) -> base16ct",
     "serdect 0.2.0 (registry+https://github.com/rust-lang/crates.io-index) -> serde",
+    "wasip3 0.4.0+wasi-0.3.0-rc-2026-01-06 (registry+https://github.com/rust-lang/crates.io-index) -> wit-bindgen",
 ];
 
-const REVIEWED_E2E_ONLY_DEPENDENCY_SLOTS: [&str; 3] = [
-    "getrandom 0.4.2 (registry+https://github.com/rust-lang/crates.io-index) -> js-sys",
-    "getrandom 0.4.2 (registry+https://github.com/rust-lang/crates.io-index) -> rand_core",
-    "getrandom 0.4.2 (registry+https://github.com/rust-lang/crates.io-index) -> wasm-bindgen",
-];
+const REVIEWED_E2E_ONLY_DEPENDENCY_SLOTS: [&str; 0] = [];
 
-const REVIEWED_ROOT_ONLY_IDENTITY_FINGERPRINT: &str = "fnv1a128:5331b9e577f86248cc237af8f416be2f";
-const REVIEWED_E2E_ONLY_IDENTITY_FINGERPRINT: &str = "fnv1a128:1d703d88e39c19c82e51de14e7e16347";
+const REVIEWED_ROOT_ONLY_IDENTITY_FINGERPRINT: &str = "fnv1a128:4a7c34d91820302e3cd238f66b05a30a";
+const REVIEWED_E2E_ONLY_IDENTITY_FINGERPRINT: &str = "fnv1a128:6c62272e07bb014262b821756295c58d";
 
 #[test]
 fn e2e_codegen_and_decode_lockfile_closure_matches_workspace() {

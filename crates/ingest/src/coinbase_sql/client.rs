@@ -102,7 +102,7 @@ impl CoinbaseSqlClient {
                     }
                     .into());
                 }
-                Err(error) if attempt + 1 < MAX_ATTEMPTS => backoff(attempt, false).await,
+                Err(_) if attempt + 1 < MAX_ATTEMPTS => backoff(attempt, false).await,
                 Err(error) => return Err(error).context("Coinbase SQL request failed"),
             }
         }
