@@ -97,7 +97,10 @@ render_phase_migration() {
 # replay is handed the whole directory: with `sequence_applies=phase` a file
 # outside the phase inventory is recorded at its position and not applied.
 migration_sequence_sql() {
-    local migration_file name version description checksum bookkeeping
+    local migration_file name version description checksum bookkeeping login_digest=""
+    if [ "${session_residue_probe:-on}" = on ]; then
+        login_digest="$(printf '\\pset tuples_only on\n%s;\n' "$login_configuration_digest_sql" | run_psql | tr -d ' \n')"
+    fi
     printf 'DELETE FROM _sqlx_migrations;\n'
     for migration_file in "$@"; do
         name="${migration_file##*/}"
@@ -118,7 +121,51 @@ migration_sequence_sql() {
             printf '\n%s\nCOMMIT;\n' "$bookkeeping"
         fi
         printf 'UPDATE _sqlx_migrations SET execution_time = 0 WHERE version = %s;\n' "$version"
+        [ "${session_residue_probe:-on}" = off ] || session_residue_probe_sql "$name" "$login_digest"
     done
+}
+# sqlx applies only the pending files and the runbook splits a catch-up across
+# several runs, so what one file leaves in the session -- a setting however it
+# was made (PostgreSQL lists no custom placeholder setting, which only the
+# text rule sees), a temporary object, a prepared statement, a holdable
+# cursor, a session advisory lock, a LISTEN, an assumed role, a transaction a
+# no-transaction file leaves open -- reaches the next file in this one-session replay and not in a deployment that starts it
+# on a fresh connection. No file may leave any: the probe runs on the replay
+# connection after each applied file's commit and bookkeeping. It also
+# compares a digest of the login's own connection defaults, memberships and
+# default privileges with the one taken before the sequence, since a change a
+# later file reverts is gone from the end-of-replay snapshot but reaches any
+# deployment interrupted between the two.
+login_configuration_digest_sql="SELECT md5(concat_ws(' ',
+    (SELECT string_agg(to_jsonb(s)::text, ' ' ORDER BY to_jsonb(s)::text) FROM pg_catalog.pg_db_role_setting s WHERE s.setrole = r.oid),
+    (SELECT string_agg(to_jsonb(m)::text, ' ' ORDER BY to_jsonb(m)::text) FROM pg_catalog.pg_auth_members m WHERE r.oid IN (m.roleid, m.member)),
+    (SELECT string_agg(to_jsonb(d)::text, ' ' ORDER BY to_jsonb(d)::text) FROM pg_catalog.pg_default_acl d WHERE d.defaclrole = r.oid)))
+FROM pg_catalog.pg_roles r WHERE r.rolname = session_user"
+session_residue_probe_sql() {
+    local name="$1" login_digest="$2"
+    cat <<SQL
+DO \$residue_probe\$
+DECLARE leftover text;
+BEGIN
+    SELECT string_agg(residue, '; ' ORDER BY residue) INTO leftover FROM (
+        SELECT 'setting ' || name AS residue FROM pg_catalog.pg_settings WHERE source = 'session'
+        UNION ALL SELECT 'temporary relation ' || relname FROM pg_catalog.pg_class WHERE relnamespace = pg_catalog.pg_my_temp_schema()
+        UNION ALL SELECT 'temporary routine ' || proname FROM pg_catalog.pg_proc WHERE pronamespace = pg_catalog.pg_my_temp_schema()
+        UNION ALL SELECT 'temporary type ' || typname FROM pg_catalog.pg_type WHERE typnamespace = pg_catalog.pg_my_temp_schema() AND typrelid = 0
+        UNION ALL SELECT 'prepared statement ' || name FROM pg_catalog.pg_prepared_statements
+        UNION ALL SELECT 'holdable cursor ' || name FROM pg_catalog.pg_cursors WHERE is_holdable
+        UNION ALL SELECT 'session advisory lock ' || objid FROM pg_catalog.pg_locks WHERE locktype = 'advisory' AND pid = pg_catalog.pg_backend_pid()
+        UNION ALL SELECT 'LISTEN ' || channel FROM pg_catalog.pg_listening_channels() channel
+        UNION ALL SELECT 'role ' || current_user WHERE current_user <> session_user
+        UNION ALL SELECT 'an open transaction' WHERE pg_catalog.pg_current_xact_id_if_assigned() IS NOT NULL
+        UNION ALL SELECT 'a changed connection default, membership or default privilege of the login'
+        WHERE ($login_configuration_digest_sql) IS DISTINCT FROM '$login_digest'
+    ) session_residue;
+    IF leftover IS NOT NULL THEN
+        RAISE EXCEPTION '$name leaves session state behind after its commit: %', leftover;
+    END IF;
+END \$residue_probe\$;
+SQL
 }
 apply_migration_sequence() {
     migration_sequence_sql "$@" | run_psql
@@ -426,9 +473,11 @@ assert_migration_sequence_session_mirrors_sqlx() {
     printf -- '-- no-transaction\nSELECT pg_sleep(0.002);\nSELECT now() < statement_timestamp();\nSELECT %s;\n' "'bigname_phase'" > "$planted_dir/00000000000003_c.sql"
     printf 'SELECT 1 / 0;\n' > "$planted_dir/00000000000004_d.sql"
     checksum="$(sha384sum -- "$planted_dir/00000000000002_b_two.sql" | cut -d' ' -f1)"
+    # The residue probe is off for this sequence alone: its first file commits
+    # a SET on purpose, the residue the probe exists to refuse.
     observed="$({
         printf '\\pset format unaligned\n\\pset tuples_only on\n'
-        sequence_applies=phase migration_sequence_sql "$planted_dir"/*.sql
+        session_residue_probe=off sequence_applies=phase migration_sequence_sql "$planted_dir"/*.sql
         printf "SELECT version || ':' || description || ':' || (encode(checksum, 'hex') = '%s') || ':' || success || ':' || execution_time FROM _sqlx_migrations ORDER BY version;\n" "$checksum"
     } | run_psql | grep -v "^$\|^$scratch_schema$" | tr '\n' ' ')"
     remove_planted_dir "$planted_dir"
@@ -459,6 +508,61 @@ assert_migration_sequence_session_mirrors_sqlx() {
     fi
     printf 'DELETE FROM _sqlx_migrations;\n' | run_psql
     refusal_assertions_passed=$((refusal_assertions_passed + 1))
+}
+# The probe proves itself on planted sequences: each kind of residue must be
+# named at the file that leaves it, a connection default a later file reverts
+# included, and what ends with the file's transaction must pass. The login's
+# own defaults are restored afterwards and must match the setup snapshot.
+assert_session_residue_probe_holds() {
+    local expected residue revert planted_dir probe_stderr observed_error
+    while IFS='|' read -r -u 3 expected residue revert; do
+        planted_dir="$(mktemp -d "${TMPDIR:-/tmp}/schema-v2-planted-residue.XXXXXX")"
+        case "$residue" in
+            'no-transaction '*) printf -- '-- no-transaction\n%s\n' "${residue#no-transaction }" ;;
+            *) printf '%s\n' "$residue" ;;
+        esac > "$planted_dir/00000000000001_planted_residue.sql"
+        printf 'SELECT 1;\n' > "$planted_dir/00000000000002_planted_after.sql"
+        [ -z "$revert" ] || printf '%s\n' "$revert" > "$planted_dir/00000000000003_planted_revert.sql"
+        if probe_stderr="$(migration_sequence_sql "$planted_dir"/*.sql | run_psql 2>&1 >/dev/null)"; then
+            printf '%s\n' "the session-residue probe accepted a file that leaves $expected behind: $residue" >&2
+            exit 1
+        fi
+        remove_planted_dir "$planted_dir"
+        observed_error="$(printf '%s\n' "$probe_stderr" | psql_error_message)"
+        case "$observed_error" in
+            "00000000000001_planted_residue.sql leaves session state behind after its commit: "*"$expected"*) ;;
+            *) printf '%s\n' "the planted $expected residue failed for another reason: $observed_error" >&2; exit 1 ;;
+        esac
+        refusal_assertions_passed=$((refusal_assertions_passed + 1))
+    done 3<<'PLANTS'
+setting lock_timeout|DO $$ BEGIN EXECUTE 'SET lock_timeout = ''4321ms'''; END $$;|
+setting TimeZone|SET TIME ZONE 'UTC';|
+temporary relation planted_stage|CREATE TEMP TABLE planted_stage AS SELECT 42 AS v;|
+temporary routine planted_routine|CREATE FUNCTION pg_temp.planted_routine() RETURNS integer LANGUAGE sql AS 'SELECT 1';|
+temporary type planted_enum|CREATE TYPE pg_temp.planted_enum AS ENUM ('a');|
+prepared statement planted_statement|PREPARE planted_statement AS SELECT 1;|
+holdable cursor planted_cursor|DECLARE planted_cursor CURSOR WITH HOLD FOR SELECT 1;|
+session advisory lock|SELECT pg_advisory_lock(pg_backend_pid(), 20260921);|
+LISTEN planted_channel|LISTEN planted_channel;|
+temporary relation planted_outside|no-transaction CREATE TEMP TABLE planted_outside (v integer);|
+an open transaction|no-transaction BEGIN; SELECT 1;|
+a changed connection default|ALTER ROLE CURRENT_USER SET lock_timeout = '1s';|ALTER ROLE CURRENT_USER RESET lock_timeout;
+a changed connection default|ALTER DEFAULT PRIVILEGES GRANT SELECT ON TABLES TO PUBLIC;|ALTER DEFAULT PRIVILEGES REVOKE SELECT ON TABLES FROM PUBLIC;
+PLANTS
+    printf 'ALTER ROLE CURRENT_USER RESET lock_timeout;\nALTER DEFAULT PRIVILEGES REVOKE SELECT ON TABLES FROM PUBLIC;\n' | run_psql
+    assert_no_role_or_database_settings "planted session-residue"
+    planted_dir="$(mktemp -d "${TMPDIR:-/tmp}/schema-v2-planted-residue.XXXXXX")"
+    printf 'CREATE TEMP TABLE planted_stage (v integer) ON COMMIT DROP;\n' > "$planted_dir/00000000000001_on_commit_drop.sql"
+    printf 'DROP TABLE IF EXISTS pg_temp.planted_stage;\nCREATE TEMP TABLE planted_stage (v integer);\nDROP TABLE planted_stage;\n' > "$planted_dir/00000000000002_create_then_drop.sql"
+    printf 'SELECT pg_advisory_xact_lock(pg_backend_pid(), 20260921);\n' > "$planted_dir/00000000000003_transaction_lock.sql"
+    printf "SELECT set_config('lock_timeout', '1ms', true);\n" > "$planted_dir/00000000000004_local_config.sql"
+    printf "SET LOCAL lock_timeout = '1ms';\n" > "$planted_dir/00000000000005_set_local.sql"
+    if ! probe_stderr="$(migration_sequence_sql "$planted_dir"/*.sql | run_psql 2>&1 >/dev/null)"; then
+        printf '%s\n' "the session-residue probe refused what ends with the file's transaction: $(printf '%s\n' "$probe_stderr" | psql_error_message)" >&2
+        exit 1
+    fi
+    remove_planted_dir "$planted_dir"
+    printf 'DELETE FROM _sqlx_migrations;\n' | run_psql
 }
 # Strip `--` comments the way PostgreSQL reads them: not inside a single-quoted
 # string ('' escapes), a double-quoted identifier, or a $$ body, across lines.
@@ -1107,6 +1211,18 @@ SELECT kind || ' ' || name AS refused_object FROM (
     SELECT 'cast', format_type(ca.castsource, NULL) || ' -> ' || format_type(ca.casttarget, NULL)
     FROM pg_cast ca JOIN pg_type st ON st.oid = ca.castsource JOIN pg_type tt ON tt.oid = ca.casttarget
     WHERE current_schema()::regnamespace IN (st.typnamespace, tt.typnamespace)
+    UNION ALL
+    -- PostgreSQL backs a foreign key with the first valid matching unique index
+    -- in index OID order and the catalog does not print which, so with two
+    -- candidates two histories that print alike would drop or cascade apart.
+    SELECT 'ambiguous foreign key', c.relname || '.' || con.conname
+    FROM pg_constraint con JOIN pg_class c ON c.oid = con.conrelid
+    WHERE con.connamespace = current_schema()::regnamespace AND con.contype = 'f'
+      AND (SELECT count(*) FROM pg_index i
+           WHERE i.indrelid = con.confrelid AND i.indisvalid AND i.indisunique AND i.indimmediate
+             AND i.indpred IS NULL AND i.indexprs IS NULL AND i.indnkeyatts = cardinality(con.confkey)
+             AND (i.indkey::int2[])[0:i.indnkeyatts - 1] @> con.confkey
+             AND con.confkey @> (i.indkey::int2[])[0:i.indnkeyatts - 1]) > 1
 ) refused ORDER BY (kind || ' ' || name) COLLATE "C";
 KINDS_SQL
 )"
@@ -1145,7 +1261,8 @@ assert_refused_kinds_are_seen() {
         'collation:CREATE COLLATION planted_c FROM pg_catalog."C";' \
         'text search configuration:CREATE TEXT SEARCH CONFIGURATION planted_ts (COPY = pg_catalog.simple);' \
         'text search dictionary:CREATE TEXT SEARCH DICTIONARY planted_dict (TEMPLATE = pg_catalog.simple);' \
-        'cast:CREATE CAST (canonicality_state AS text) WITH INOUT AS IMPLICIT;'
+        'cast:CREATE CAST (canonicality_state AS text) WITH INOUT AS IMPLICIT;' \
+        'ambiguous foreign key:CREATE UNIQUE INDEX planted_dup ON chain_lineage (block_number, chain_id, block_hash);'
     do
         kind="${planted%%:*}"; sql="${planted#*:}"
         seen="$({
@@ -2122,10 +2239,12 @@ migration_application_log="$(
 # Future entries must use basename|one-line reason.
 intentional_phase_migration_skips=()
 refusal_assertions_passed=0
-# Base 173, main added 54, this branch 83, and the merges fold main's four
-# address-match and event-order not-ready probes into their invalid ones (-4);
-# predecessor proofs base 39, +3, +1.
-expected_refusal_assertions=306
+# Base 173, main added 54, this branch 125 (42 of them the backslash-command,
+# SET-spelling, session-residue, session-identity and ambiguous foreign key
+# plants), and the merges fold main's four address-match and event-order
+# not-ready probes into their invalid ones (-4); predecessor proofs base 39,
+# +3, +1.
+expected_refusal_assertions=348
 predecessor_shape_proof_count=0
 expected_predecessor_shape_proof_count=43
 refusal_probe_seconds=0
@@ -2203,6 +2322,11 @@ sql_statement_splitter='
                                && (i == 2 || substr(line, i - 2, 1) !~ /[A-Za-z0-9_]/))
                 }
                 else if (c == ";") { emit(stmt ";"); stmt = ""; i++; continue }
+                # psql runs a backslash command on the client and the server
+                # has no token for one, so the replay would accept what sqlx
+                # rejects, and `\set ON_ERROR_STOP 0` would silence the errors
+                # of every later file.
+                else if (c == "\\") { print "[psql meta-command: a backslash outside quoted text]"; bad = 1; exit 1 }
             } else if (length(quote) > 1) {
                 if (substr(line, i, length(quote)) == quote) { stmt = stmt quote; i += length(quote); quote = ""; continue }
             } else if (escaped && c == "\\") {
@@ -2219,6 +2343,7 @@ sql_statement_splitter='
         if (text != ";") print text
     }
     END {
+        if (bad) exit 1
         if (depth > 0) { print "[unterminated block comment]"; exit 1 }
         if (quote != "") { print "[unterminated quote]"; exit 1 }
         sub(/[[:space:]]+$/, "", stmt)
@@ -2313,26 +2438,30 @@ baseline_extension_statements="$(baseline_extension_statements_of "$ROOT/schema-
 # parsed and where its unqualified names resolve -- including sqlx's own
 # bookkeeping insert. Refused, as text, wherever it appears (a routine body
 # included, since a SET there runs with the same reach): a statement-leading
-# SET or RESET of any setting, SET ROLE, SET SESSION AUTHORIZATION, and
-# set_config with a false is_local, and `ALTER ROLE`/`ALTER DATABASE` with a
-# configuration clause, which outlives the run: the disposable login may set
-# its own defaults, the open migration connection never sees them, the
-# catalog does not serialize role or database configuration, and cleanup
-# drops the role, so the change would reach production unobserved.
+# SET or RESET of any setting, the SQL-standard SET TIME ZONE, SCHEMA, NAMES,
+# XML OPTION and SESSION CHARACTERISTICS spellings too, SET ROLE, SET SESSION
+# AUTHORIZATION, and set_config with a false is_local, and `ALTER ROLE`/`ALTER
+# DATABASE` with a configuration clause, which outlives the run: the
+# disposable login may set its own defaults, the open migration connection
+# never sees them, the catalog does not serialize role or database
+# configuration, and cleanup drops the role, so the change would reach
+# production unobserved.
 # UPDATE ... SET and ALTER ... SET on an object (a routine, a table) are not
 # session state; set_config(..., true) inside a routine ends with the
 # transaction and a routine that restores what it changed is the documented
 # form. The text is the file's statements as the quote-aware splitter reads
 # them, comments gone and quoted text kept, so a comment cannot hide a SET
 # and a string that looks like one is refused rather than trusted; a file the
-# splitter cannot read is refused as well. A carve-out that needs session
+# splitter cannot read, a psql backslash command included, is refused as well.
+# The baseline gets no per-file residue probe, so for its session settings
+# this text is the guard. A carve-out that needs session
 # state extends this rule under ADR 0007.
 session_state_scanner='
     { text = text " " $0 }
     END {
         gsub(/[[:space:]]+/, " ", text)
         t = toupper(text) " "
-        while (match(t, /(^|;|\(|[^A-Z_](BEGIN|THEN|ELSE|LOOP|DECLARE)) *(SET (LOCAL |SESSION )?[A-Z_.]+ *(=|TO[^A-Z_])|RESET [A-Z_]+|SET (ROLE|SESSION AUTHORIZATION)[^A-Z_])/)) {
+        while (match(t, /(^|;|\(|'"'"'|[^A-Z_](BEGIN|THEN|ELSE|LOOP|DECLARE)) *(SET (LOCAL |SESSION )?([A-Z_%][A-Z0-9_.%]*|"[^"]*") *(=|TO[^A-Z_])|RESET ([A-Z_%][A-Z0-9_.%]*|"[^"]*")|SET (LOCAL |SESSION )?(ROLE|SESSION AUTHORIZATION|SESSION CHARACTERISTICS)[^A-Z_]|SET (LOCAL |SESSION )?(TIME ZONE|SCHEMA|NAMES|XML OPTION)[^A-Z_])/)) {
             hit = substr(t, RSTART, RLENGTH); sub(/^[^SR]*/, "", hit); sub(/^SE(T|SSION) *$/, "", hit)
             print file ": " hit; t = substr(t, RSTART + RLENGTH)
         }
@@ -2377,6 +2506,11 @@ assert_no_session_state_statements() {
     local file hits
     for file in "$ROOT"/schema-v2/baseline/*.sql "$ROOT"/migrations/*.sql; do
         hits="$(session_state_statements_of "$file")"
+        case "$hits" in
+            *'[psql meta-command'*)
+                printf '%s\n' "${hits//$'\n'/; }: the replay's psql runs a backslash command on the client, but sqlx sends the file to the server, which rejects it, so remove it" >&2
+                exit 1 ;;
+        esac
         if [ -n "$hits" ]; then
             printf '%s\n' "session state is changed by a baseline file or schema-migration, which sqlx and the baseline session would carry into every later file: ${hits//$'\n'/; }; a setting scoped to one routine goes through set_config(..., true) and is restored there, and a carve-out that needs more extends the session-state rule in schema-v2/apply-check.sh under ADR 0007" >&2
             exit 1
@@ -2406,6 +2540,22 @@ assert_session_state_rule_holds() {
         'alter user bigname password '"'"'planted'"'"';'
         'CREATE ROLE planted_login LOGIN PASSWORD '"'"'planted'"'"';'
         'DO $$ BEGIN PERFORM set_config(concat('"'"'lock_'"'"', '"'"'timeout'"'"'), '"'"'1ms'"'"', false); END $$;'
+        'SET TIME ZONE '"'"'UTC'"'"';'
+        'SET SESSION TIME ZONE LOCAL;'
+        'DO $$ BEGIN set schema '"'"'public'"'"'; END $$;'
+        'SET NAMES '"'"'UTF8'"'"';'
+        'SET XML OPTION DOCUMENT;'
+        'SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL SERIALIZABLE;'
+        'SELECT 1; \echo hi'
+        '\set ON_ERROR_STOP 0'
+        'SELECT 1 \gexec'
+        'SET bigname.v2_cutover = '"'"'on'"'"';'
+        'SET "bigname.cutover" TO '"'"'on'"'"';'
+        'RESET bigname.v2_cutover;'
+        'DO $$ BEGIN EXECUTE '"'"'SET bigname.cutover = '"'"''"'"'on'"'"''"'"''"'"'; END $$;'
+        'DO $$ BEGIN EXECUTE format('"'"'SET %I = %L'"'"', '"'"'bigname.cutover'"'"', '"'"'on'"'"'); END $$;'
+        'SET SESSION ROLE bigname;'
+        'SET LOCAL ROLE bigname;'
     )
     local -a accepted=(
         'UPDATE t SET a = 1;'
@@ -2415,6 +2565,13 @@ assert_session_state_rule_holds() {
         'DO $$ BEGIN PERFORM set_config(concat('"'"'lock_'"'"', '"'"'timeout'"'"'), '"'"'1ms'"'"', true); END $$;'
         'SELECT 1; -- SET search_path = pg_catalog;'
         '/* SET search_path = pg_catalog; */ SELECT 1;'
+        'ALTER TABLE t SET SCHEMA public;'
+        'SET CONSTRAINTS ALL DEFERRED;'
+        'SELECT E'"'"'it\'"'"'s \\ \echo'"'"', '"'"'\x'"'"'::bytea, $q$\set ON_ERROR_STOP 0$q$ AS "a\b";'
+        'SELECT 1; -- \echo hi'
+        '/* \set ON_ERROR_STOP 0 */ SELECT 1;'
+        'COMMENT ON TABLE t IS '"'"'Set when the name is registered'"'"';'
+        'UPDATE t SET a2 = 1;'
     )
     planted_dir="$(mktemp -d "${TMPDIR:-/tmp}/schema-v2-session-state-rule.XXXXXX")"
     for planted in "${refused[@]}"; do
@@ -2460,6 +2617,73 @@ assert_no_migration_reads_synthetic_ledger_timing() {
     done
 }
 assert_no_migration_reads_synthetic_ledger_timing
+# The replay runs every file as this check's disposable login and deployment
+# runs it as the writer, so a phase schema-migration that reads who it runs as
+# -- the user or role, whether a role exists or what it holds, a privilege, or
+# a privilege failure it swallows -- takes a path here that deployment does
+# not. Refused by name in the statement text, quoted text included, as the
+# ledger-timing rule above; bare USER is left out because quoted prose uses the
+# word, and bare ROLE because `manifest_contract_instances.role` is a column.
+session_identity_reads_of() {
+    local statements
+    if ! statements="$(sql_statements "$1")"; then
+        printf '%s\n' "$statements" | tail -n 1
+        return 0
+    fi
+    printf '%s\n' "$statements" \
+        | grep -oiE '(^|[^[:alnum:]_])(CURRENT_USER|SESSION_USER|CURRENT_ROLE|SYSTEM_USER|GETPGUSERNAME|PG_GET_USERBYID|PG_HAS_ROLE|HAS_[A-Z_]+_PRIVILEGE|PG_ROLES|PG_USER|PG_AUTHID|PG_AUTH_MEMBERS|PG_SHADOW|TO_REGROLE|REGROLE|ROLNAME|ROLSUPER|USENAME|IS_SUPERUSER|SESSION_AUTHORIZATION|ENABLED_ROLES|APPLICABLE_ROLES|ADMINISTRABLE_ROLE_AUTHORIZATIONS|(TABLE|COLUMN|ROUTINE|USAGE|UDT)_PRIVILEGES|ROLE_[A-Z]+_GRANTS|INSUFFICIENT_PRIVILEGE|UNDEFINED_OBJECT|42501|42704)([^[:alnum:]_]|$)' \
+        | tr -cd '[:alnum:]_\n' | tr '[:lower:]' '[:upper:]' | sort -u | tr '\n' ' ' || true
+}
+assert_no_migration_branches_on_session_identity() {
+    local migration_file hits planted planted_dir
+    local -a refused=(
+        'DO $$ BEGIN IF current_user = '"'"'bigname'"'"' THEN ALTER TABLE bigname_phase.t ADD COLUMN c integer; END IF; END $$;'
+        'DO $$ BEGIN IF to_regrole('"'"'bigname_reader'"'"') IS NOT NULL THEN GRANT SELECT ON bigname_phase.t TO bigname_reader; END IF; END $$;'
+        'DO $$ BEGIN IF pg_has_role('"'"'bigname'"'"', '"'"'MEMBER'"'"') THEN ALTER TABLE bigname_phase.t ADD COLUMN c integer; END IF; END $$;'
+        'DO $$ BEGIN IF current_setting('"'"'is_superuser'"'"') = '"'"'on'"'"' THEN ALTER TABLE bigname_phase.t ADD COLUMN c integer; END IF; END $$;'
+        'DO $$ BEGIN CREATE SCHEMA bigname_phase_probe; DROP SCHEMA bigname_phase_probe; EXCEPTION WHEN insufficient_privilege THEN NULL; END $$;'
+        'DO $$ BEGIN IF has_table_privilege('"'"'bigname_phase.t'"'"', '"'"'UPDATE'"'"') THEN UPDATE bigname_phase.t SET c = 1; END IF; END $$;'
+        'DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '"'"'bigname'"'"') THEN ALTER TABLE bigname_phase.t ADD COLUMN c integer; END IF; END $$;'
+        'DO $$ BEGIN ALTER TABLE bigname_phase.t ADD COLUMN c integer; EXCEPTION WHEN SQLSTATE '"'"'42501'"'"' THEN NULL; END $$;'
+        'DO $$ BEGIN IF system_user IS NOT NULL THEN ALTER TABLE bigname_phase.t ADD COLUMN c integer; END IF; END $$;'
+        'DO $$ BEGIN IF EXISTS (SELECT 1 FROM information_schema.table_privileges WHERE table_name = '"'"'t'"'"') THEN ALTER TABLE bigname_phase.t ADD COLUMN c integer; END IF; END $$;'
+        'DO $$ BEGIN GRANT SELECT ON bigname_phase.t TO bigname_reader; EXCEPTION WHEN undefined_object THEN NULL; END $$;'
+        'DO $$ BEGIN IF (SELECT pg_get_userbyid(relowner) FROM pg_class WHERE oid = '"'"'bigname_phase.t'"'"'::regclass) = '"'"'bigname'"'"' THEN ALTER TABLE bigname_phase.t ADD COLUMN c integer; END IF; END $$;'
+    )
+    local -a accepted=(
+        'SELECT role FROM bigname_phase.manifest_contract_instances WHERE role = '"'"'registry'"'"';'
+        'COMMENT ON TABLE bigname_phase.t IS '"'"'the user who registered the name'"'"';'
+        'SELECT 1; -- current_user'
+        'CREATE INDEX t_current_user_idx ON bigname_phase.t (current_username);'
+    )
+    planted_dir="$(mktemp -d "${TMPDIR:-/tmp}/schema-v2-session-identity-rule.XXXXXX")"
+    for planted in "${refused[@]}"; do
+        printf '%s\n' "$planted" > "$planted_dir/planted.sql"
+        if [ -z "$(session_identity_reads_of "$planted_dir/planted.sql")" ]; then
+            printf '%s\n' "session-identity rule accepted a statement it must refuse: $planted" >&2
+            exit 1
+        fi
+        refusal_assertions_passed=$((refusal_assertions_passed + 1))
+    done
+    for planted in "${accepted[@]}"; do
+        printf '%s\n' "$planted" > "$planted_dir/planted.sql"
+        if [ -n "$(session_identity_reads_of "$planted_dir/planted.sql")" ]; then
+            printf '%s\n' "session-identity rule refused a statement that reads no identity: $planted" >&2
+            exit 1
+        fi
+    done
+    remove_planted_dir "$planted_dir"
+    for migration_file in "$ROOT"/migrations/*.sql; do
+        phase_migration_uses_production_schema "$migration_file" || continue
+        hits="$(session_identity_reads_of "$migration_file")"
+        if [ -n "$hits" ]; then
+            printf '%s\n' \
+                "$(basename "$migration_file") reads ${hits% }, which answers differently for this check's disposable login than for the deployment writer, so a branch on identity, role existence or privilege takes a path here that sqlx migrate run does not; a schema-migration may not depend on who runs it, and a carve-out that needs to extends the session-identity rule in schema-v2/apply-check.sh under ADR 0007" >&2
+            exit 1
+        fi
+    done
+}
+assert_no_migration_branches_on_session_identity
 check_baseline_extensions "$baseline_extension_statements" || exit 1
 # The login is provisioned by the owner without any database-level grant,
 # which the documented external-database user (CREATEDB and CREATEROLE, not
@@ -2708,6 +2932,7 @@ report_timing empty-schema
 
 assert_baseline_session_state_carries
 assert_migration_sequence_session_mirrors_sqlx
+assert_session_residue_probe_holds
 apply_baseline
 apply_baseline
 report_timing baseline-install

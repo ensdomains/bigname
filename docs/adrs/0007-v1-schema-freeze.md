@@ -283,13 +283,54 @@ own `_sqlx_migrations` bookkeeping recorded inside that transaction by its
 unqualified name, so a setting one file commits is in force for the files
 after it and a file that moves `search_path` breaks the bookkeeping exactly
 where sqlx would; the check plants a sequence on every run to prove those
-properties. Neither a baseline file nor a schema-migration may change
-session state — a statement-leading `SET` or `RESET`, `SET ROLE`,
-`SET SESSION AUTHORIZATION`, or `set_config(..., false)`, in a routine body
-included — because the baseline session and the sqlx run carry it into every
-later file; a routine that needs a setting uses `set_config(..., true)` and
-restores it. The predecessor baseline, once migrated, is held to the
-closed-kind rule like the fresh and exercised schemas. Column order is not part of the
+properties. Neither a baseline file nor a schema-migration may change session
+state — a statement-leading `SET` or `RESET` of any setting, a custom
+placeholder or quoted name, or a quoted or `format`-built `SET` run through
+`EXECUTE` included, the SQL-standard
+`SET TIME ZONE`, `SET SCHEMA`, `SET NAMES`, `SET XML OPTION` and
+`SET SESSION CHARACTERISTICS`, `SET [SESSION | LOCAL] ROLE`, `SET SESSION AUTHORIZATION`, or
+`set_config(..., false)`, in a routine body included — because the baseline
+session and the sqlx run carry it into every later file; a routine that needs
+a setting uses `set_config(..., true)` and restores it. Nor may either hold a
+psql backslash command outside quoted text or a comment: the replay feeds each
+file to psql, which runs the command on the client, while sqlx sends the file
+to the server, which rejects it, so the check would pass a file deployment
+refuses, and a `\set ON_ERROR_STOP 0` would hide every later file's errors.
+Because sqlx applies only the files a database has not recorded, and a
+catch-up can be split across several runs, what one file leaves in the session
+reaches the next file in the replay but not in a deployment that starts that
+file on a fresh connection. After each applied file's commit and bookkeeping
+the check therefore probes the replay connection and refuses, naming the file,
+a session-level setting however it was made (PostgreSQL lists no custom
+placeholder setting, which only the statement rule sees), a temporary table,
+routine or type, a prepared statement, a holdable cursor, a session advisory
+lock, a `LISTEN`, an assumed role, a transaction a `-- no-transaction` file
+leaves open, or a change to the login's own connection
+defaults, memberships or default privileges since the sequence began — the
+last because a later file that reverts it hides it from the end-of-replay
+snapshot, while a deployment interrupted between the two keeps it. What ends
+with the file's transaction — `ON COMMIT DROP`, a temporary table the file
+drops again, a transaction-level advisory lock, `set_config(..., true)` —
+passes; the one planted sequence that commits a setting on purpose, to prove
+the replay is a single session, runs without the probe, and the probe proves
+itself on planted files. A phase schema-migration may not read who runs it
+either — `current_user`, `session_user`, `current_role`, `system_user`,
+`getpgusername`, `pg_get_userbyid`, `pg_has_role`, a `has_*_privilege`
+function, `pg_roles`, `pg_user`, `pg_authid`, `pg_auth_members`, `pg_shadow`,
+`to_regrole` or `regrole`, `rolname`, `rolsuper`, `usename`, `is_superuser`,
+`session_authorization`, the `information_schema` role and privilege views,
+or a caught `insufficient_privilege` or `undefined_object` by name or SQLSTATE
+— because the replay runs as the per-run login and
+deployment as the writer database user, so a branch on identity, role
+existence or privilege takes a path here that deployment does not; bare `user`
+is left alone because the rule reads quoted prose too, and bare `role` because
+`manifest_contract_instances.role` is a column. The predecessor baseline, once migrated, is held to the closed-kind
+rule like the fresh and exercised schemas, and that rule also refuses a
+foreign key whose referenced table has more than one unique index that could
+back it: PostgreSQL picks the first valid one in index OID order and the
+catalog does not print
+which, so two histories that print alike would drop or cascade differently.
+Column order is not part of the
 artifact: a column a schema-migration adds sits last on an initialized
 database and wherever the baseline lists it on a fresh one. What the check
 enforces instead, reading the live order on each replay rather than putting an
@@ -321,6 +362,17 @@ run that cannot read `pg_authid` sees only one mask for every password.
 From acceptance on, a
 schema-migration of any of these kinds cannot land without moving the
 conformance test, which is where the carve-out or amendment is checked for.
+
+The check is built to catch a schema-migration that would behave differently
+under sqlx on a production database through ordinary SQL, including dynamic
+SQL whose effect it can observe at run time. SQL written to hide what it does
+from the check — a keyword, schema name or role name assembled from pieces so
+that no rule can see it — is outside what a conformance test can close, and
+review is the control for it. Two such forms are declined on that ground: a
+phase schema name assembled from pieces and compared as a value, which the
+textual rewrite to the scratch schema cannot see, and an assembled password
+change where the configured user is not a superuser and so cannot read the
+password verifiers.
 
 An authorized carve-out that lands as a schema-migration becomes the new head,
 and the change that lands it must advance the head named above and the head
