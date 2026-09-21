@@ -794,9 +794,9 @@ suffix does not inherit that level. Without that reference, Base records
 `quick_synced` from its target-covering intake dRPC. A
 Base `reth_db` reference is explicitly unsupported: the pinned reader uses
 reth's Ethereum node type, whose signed transaction and receipt types are the
-Ethereum primitives (upstream: .refs/reth/crates/ethereum/node/src/node.rs:L121 @ reth@88505c7f)
-(upstream: .refs/reth/crates/ethereum/primitives/src/lib.rs:L27 @ reth@88505c7f)
-(upstream: .refs/reth/crates/ethereum/primitives/src/lib.rs:L51 @ reth@88505c7f). Bigname does not
+Ethereum primitives (upstream: .refs/reth/crates/ethereum/node/src/node.rs:L128 @ reth@189c0df3)
+(upstream: .refs/reth/crates/ethereum/primitives/src/lib.rs:L27 @ reth@189c0df3)
+(upstream: .refs/reth/crates/ethereum/primitives/src/lib.rs:L51 @ reth@189c0df3). Bigname does not
 implement a separate OP Stack transaction and receipt reader.
 Base-aware local database verification is tracked by
 [issue #433](https://github.com/ensdomains/bigname/issues/433). Under that

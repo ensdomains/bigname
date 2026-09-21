@@ -1906,3 +1906,7 @@ objects.
 - `crates/storage` provides the typed persistence and read boundaries above.
 - `apps/api` reads phase projections and lookup output; it does not write raw
   facts, interpretation output, projection rows, or legacy execution artifacts.
+
+### Same-node source transport maintenance
+
+The phase runner owns the explicit Sepolia [source transport](glossary.md#source-transport) change described under [same-node Sepolia transport change](chain-intake.md#same-node-sepolia-transport-change). It changes only `ingest_cursors.source_kind` under all phase advisory locks after checking the old and new node interfaces against retained hashes and the next block. Source key, seed, start, progress, raw identities/canonicality, redo obligations and derived output remain unchanged. It grants no new verification independence. This documented exception does not permit arbitrary provider replacement or ordinary startup to rewrite cursor identity.
