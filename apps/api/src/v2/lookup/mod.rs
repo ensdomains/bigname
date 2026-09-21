@@ -42,8 +42,8 @@ use head::{load_served_head, revalidate_served_head};
 use page::ReverseLookupPage;
 use parse::{
     LookupProfile, ParsedAddressLookup, bind_address_cursor, ensure_lookup_batch_limit,
-    parse_address_input, parse_lookup_json_body, parse_lookup_namespace, parse_lookup_profile,
-    parse_name_input,
+    parse_address_input, parse_lookup_include, parse_lookup_json_body, parse_lookup_namespace,
+    parse_lookup_profile, parse_name_input,
 };
 use relation_filter::{
     requires_relation_post_filter, reverse_record_matches_relation, trim_reverse_record_relations,
@@ -63,6 +63,7 @@ pub(crate) async fn get_lookup(
     let body = parse_lookup_json_body(body)?;
     ensure_lookup_batch_limit(body.inputs.len())?;
     let profile = parse_lookup_profile(body.profile.as_deref())?;
+    let include = parse_lookup_include(body.include.as_deref(), profile)?;
     let namespace = parse_lookup_namespace(body.namespace.as_deref())?;
     let has_address_inputs = body
         .inputs
@@ -118,6 +119,7 @@ pub(crate) async fn get_lookup(
     render_name_lookup_results(
         &state,
         profile,
+        include,
         &name_inputs,
         selected_snapshot,
         &mut results,

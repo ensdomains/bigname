@@ -51,21 +51,69 @@ pub(crate) fn validate_product_record(record: ResolutionRecordKey) -> Option<Res
     }
 }
 
+/// The sections of an inventory row the summary reads, so the lookup route's identity-facade
+/// row and the records route's full row produce one container.
+pub(crate) struct InventorySections<'a> {
+    pub(crate) authoritative: bool,
+    pub(crate) selectors: &'a Value,
+    pub(crate) entries: &'a Value,
+    pub(crate) explicit_gaps: &'a Value,
+    pub(crate) unsupported_families: &'a Value,
+}
+
+impl<'a> From<&'a RecordInventoryCurrentRow> for InventorySections<'a> {
+    fn from(row: &'a RecordInventoryCurrentRow) -> Self {
+        Self {
+            authoritative: serving_record_inventory(Some(row)).is_some(),
+            selectors: &row.selectors,
+            entries: &row.entries,
+            explicit_gaps: &row.explicit_gaps,
+            unsupported_families: &row.unsupported_families,
+        }
+    }
+}
+
+impl<'a> From<&'a bigname_storage::IdentityRecordInventoryRow> for InventorySections<'a> {
+    fn from(row: &'a bigname_storage::IdentityRecordInventoryRow) -> Self {
+        // The records route derives coverage from support_status the same way
+        // (crates/storage/src/record_inventory/snapshot_reads.rs) and serves no explicit gaps.
+        Self {
+            authoritative: row.support_status == "supported",
+            selectors: &row.selectors,
+            entries: &row.entries,
+            explicit_gaps: &NO_GAPS,
+            unsupported_families: &row.unsupported_families,
+        }
+    }
+}
+
+static NO_GAPS: Value = Value::Array(Vec::new());
+
 pub(super) fn inventory_summary(
     record_inventory: Option<&RecordInventoryCurrentRow>,
+    requested_records: Option<&[ResolutionRecordKey]>,
+) -> RecordInventory {
+    inventory_summary_of(
+        record_inventory.map(InventorySections::from),
+        requested_records,
+    )
+}
+
+pub(crate) fn inventory_summary_of(
+    record_inventory: Option<InventorySections<'_>>,
     requested_records: Option<&[ResolutionRecordKey]>,
 ) -> RecordInventory {
     let Some(record_inventory) = record_inventory else {
         return RecordInventory::default();
     };
 
-    if serving_record_inventory(Some(record_inventory)).is_none() {
+    if !record_inventory.authoritative {
         // An unsupported row can assert neither presence nor absence, so every product key it
         // knows about, and every requested key, is unsupported (docs/api-v2-routes.md).
         let mut unsupported_keys = keys_from_sections(&[
-            &record_inventory.selectors,
-            &record_inventory.entries,
-            &record_inventory.explicit_gaps,
+            record_inventory.selectors,
+            record_inventory.entries,
+            record_inventory.explicit_gaps,
         ])
         .into_iter()
         .collect::<BTreeSet<_>>();
@@ -82,7 +130,7 @@ pub(super) fn inventory_summary(
         };
     }
 
-    let unset_keys = keys_from_sections(&[&record_inventory.explicit_gaps]);
+    let unset_keys = keys_from_sections(&[record_inventory.explicit_gaps]);
     let mut unsupported_keys = record_inventory
         .entries
         .as_array()
@@ -95,12 +143,17 @@ pub(super) fn inventory_summary(
 
     if let Some(records) = requested_records {
         for record in records {
-            if unsupported_family_reason(record_inventory, &record.record_family).is_some() {
+            if family_unsupported_reason(
+                record_inventory.unsupported_families,
+                &record.record_family,
+            )
+            .is_some()
+            {
                 unsupported_keys.insert(record.record_key.clone());
             }
         }
     }
-    let known_keys = keys_from_sections(&[&record_inventory.selectors, &record_inventory.entries])
+    let known_keys = keys_from_sections(&[record_inventory.selectors, record_inventory.entries])
         .into_iter()
         // Route-local inventory partitions unsupported-status entries into unsupported_keys only.
         .filter(|key| !unsupported_keys.contains(key))
@@ -132,8 +185,11 @@ pub(super) fn unsupported_family_reason(
     record_inventory: &RecordInventoryCurrentRow,
     record_family: &str,
 ) -> Option<String> {
-    record_inventory
-        .unsupported_families
+    family_unsupported_reason(&record_inventory.unsupported_families, record_family)
+}
+
+fn family_unsupported_reason(unsupported_families: &Value, record_family: &str) -> Option<String> {
+    unsupported_families
         .as_array()
         .into_iter()
         .flatten()
