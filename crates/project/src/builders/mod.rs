@@ -13,6 +13,8 @@ mod primary_names;
 mod rebuild_tests;
 mod record_inventory;
 mod resolver;
+pub(crate) use resolver::LINK_DIGEST_SQL;
+pub(crate) use resolver::SUMMARY_VERSION as RESOLVER_SUMMARY_VERSION;
 
 use sqlx::{Postgres, Transaction};
 

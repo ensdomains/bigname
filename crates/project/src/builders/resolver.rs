@@ -1,9 +1,11 @@
 mod alias_summary;
 mod binding_summary;
 mod declaration_precedence;
+mod link_summary;
 mod mirror;
 mod permission_summary;
 mod read_features;
+mod section_summaries;
 
 use sqlx::{Postgres, Transaction};
 
@@ -11,8 +13,12 @@ use crate::{
     Marker, ProjectError, Result, resolver_address::PERMISSION_CHANGED_RESOLVER_ADDRESS_VALUES,
 };
 use declaration_precedence::DISCOVERY_CTES;
+pub(super) use link_summary::DEFAULT_RECORD_NODE;
+pub(crate) use link_summary::LINK_DIGEST_SQL;
 use mirror::{DIRECT_MIRROR_DECLARED, MIRROR_CLASSIFICATION, MIRROR_ROLE};
 use read_features::{DECLARED_READ_FEATURES, IMPLEMENTATION_READ_FEATURES};
+use section_summaries::SECTION_SUMMARIES;
+pub(crate) use section_summaries::SUMMARY_VERSION;
 
 const SUMMARY_SAMPLE_LIMIT: i32 = 100;
 
@@ -24,6 +30,7 @@ pub(super) async fn build(
 ) -> Result<()> {
     binding_summary::stage(transaction, chain_id, SUMMARY_SAMPLE_LIMIT, full_rebuild).await?;
     alias_summary::stage(transaction, chain_id, SUMMARY_SAMPLE_LIMIT).await?;
+    link_summary::stage(transaction, chain_id, SUMMARY_SAMPLE_LIMIT, target.number).await?;
     permission_summary::stage(transaction, chain_id, SUMMARY_SAMPLE_LIMIT, full_rebuild).await?;
 
     let resolver_build = format!(
@@ -387,7 +394,14 @@ pub(super) async fn build(
                        )) implementation
                        WHERE lower(implementation ->> 'address') =
                              lower(upgrade.after_state ->> 'implementation')
-                   ) AS upgraded_to_declared
+                   ) AS upgraded_to_declared,
+                   EXISTS (
+                       SELECT 1
+                       FROM jsonb_array_elements(COALESCE(
+                           manifest.manifest_payload -> 'abi' -> 'events', '[]'::jsonb
+                       )) abi_event
+                       WHERE abi_event -> 'normalized_events' ? 'ResolverRecordLinked'
+                   ) AS record_links_declared
             FROM candidates candidate
             JOIN project_manifests manifest
               ON (
@@ -451,6 +465,26 @@ pub(super) async fn build(
                            COALESCE(alias.items, '[]'::jsonb),
                        format('$[0 to %s]', $5::integer - 1)::jsonpath
                    ) AS alias_items,
+                   -- Record links exist only on the record-ID generation: an ERC-1967
+                   -- proxy whose admitted implementation's manifest declares `Linked`.
+                   -- PermissionedResolver keeps node-to-record links and emits `Linked`
+                   -- from `_link` (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L97-L100 @ ens_v2@a971bd64;
+                   -- upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L363-L367 @ ens_v2@a971bd64).
+                   -- PublicResolverV2 is node-keyed and has no record or link storage
+                   -- (upstream: .refs/ens_v2/contracts/src/resolver/PublicResolverV2.sol:L23-L59 @ ens_v2@a971bd64),
+                   -- and ENSV1Resolver forwards each name to the ENSv1 registry's resolver
+                   -- (upstream: .refs/ens_v2/contracts/src/resolver/ENSV1Resolver.sol:L13-L41 @ ens_v2@a971bd64;
+                   -- upstream: .refs/ens_v2/contracts/src/resolver/AbstractMirrorResolver.sol:L67-L81 @ ens_v2@a971bd64).
+                   supported.supported
+                       AND supported.source_family = 'ens_v2_resolver_l1'
+                       AND supported.upgrade_event_id IS NOT NULL
+                       AND COALESCE(supported.classification_role, '')
+                           NOT IN ('public_resolver_v2', '{MIRROR_ROLE}')
+                       AND supported.record_links_declared AS links_supported,
+                   COALESCE(link.link_count, 0) AS link_count,
+                   COALESCE(link.record_count, 0) AS linked_record_count,
+                   COALESCE(link.digest, md5('')) AS link_digest,
+                   COALESCE(link.items, '[]'::jsonb) AS link_items,
                    COALESCE(permission.item_count, 0) AS permission_count,
                    COALESCE(permission.items, '[]'::jsonb) AS permission_items,
                    COALESCE(permission.role_count, 0) AS role_count,
@@ -461,6 +495,7 @@ pub(super) async fn build(
             FROM supported
             LEFT JOIN project_resolver_binding_summary binding USING (resolver_address)
             LEFT JOIN project_resolver_alias_summary alias USING (resolver_address)
+            LEFT JOIN project_resolver_link_summary link USING (resolver_address)
             LEFT JOIN project_resolver_permission_summary permission USING (resolver_address)
             LEFT JOIN resolver_candidate_citations citation USING (resolver_address)
         )
@@ -489,56 +524,8 @@ pub(super) async fn build(
                        END,
                        'mirror', {MIRROR_CLASSIFICATION}
                    )),
-                   'bindings', CASE WHEN enumeration_supported THEN jsonb_build_object(
-                       'status', 'supported', 'count', binding_count,
-                       'total_count', binding_count, 'sample_limit', $5,
-                       'sample_count', jsonb_array_length(binding_items),
-                       'truncated', binding_count > jsonb_array_length(binding_items),
-                       'items', binding_items
-                   ) ELSE jsonb_build_object(
-                       'status', 'unsupported', 'unsupported_reason', enumeration_reason
-                   ) END,
-                   'aliases', CASE WHEN enumeration_supported THEN jsonb_build_object(
-                       'status', 'supported', 'count', alias_count,
-                       'total_count', alias_count, 'sample_limit', $5,
-                       'sample_count', jsonb_array_length(alias_items),
-                       'truncated', alias_count > jsonb_array_length(alias_items),
-                       'items', alias_items
-                   ) ELSE jsonb_build_object(
-                       'status', 'unsupported', 'unsupported_reason', enumeration_reason
-                   ) END,
-                   'permissions', CASE WHEN enumeration_supported THEN jsonb_build_object(
-                       'status', 'supported', 'count', permission_count,
-                       'total_count', permission_count, 'sample_limit', $5,
-                       'sample_count', jsonb_array_length(permission_items),
-                       'truncated', permission_count > jsonb_array_length(permission_items),
-                       'items', permission_items
-                   ) ELSE jsonb_build_object(
-                       'status', 'unsupported', 'unsupported_reason', enumeration_reason
-                   ) END,
-                   'role_holders', CASE WHEN enumeration_supported THEN jsonb_build_object(
-                       'status', 'supported', 'count', role_count,
-                       'total_count', role_count, 'sample_limit', $5,
-                       'sample_count', jsonb_array_length(role_items),
-                       'truncated', role_count > jsonb_array_length(role_items),
-                       'items', role_items
-                   ) ELSE jsonb_build_object(
-                       'status', 'unsupported', 'unsupported_reason', enumeration_reason
-                   ) END,
-                   'event_summary', CASE WHEN enumeration_supported THEN jsonb_build_object(
-                       'status', 'supported',
-                       'count', binding_count + alias_event_count + permission_event_count,
-                       'by_kind', jsonb_strip_nulls(jsonb_build_object(
-                           'ResolverChanged', NULLIF(binding_count, 0),
-                           'AliasChanged', NULLIF(alias_event_count, 0),
-                           'PermissionChanged', NULLIF(permission_event_count, 0)
-                       ))
-                   ) ELSE jsonb_build_object(
-                       'status', 'unsupported', 'unsupported_reason', enumeration_reason
-                   ) END,
-                   'coverage', jsonb_build_object(
-                       'status', 'projected', 'exhaustiveness', 'not_asserted'
-                   )
+                   {SECTION_SUMMARIES},
+                   'summary_version', {SUMMARY_VERSION}
                ),
                CASE WHEN supported THEN 'supported' ELSE 'unsupported' END,
                support_reason,

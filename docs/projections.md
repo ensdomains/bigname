@@ -1001,13 +1001,40 @@ updates with null name/resource fields. Full rebuild and redo use the same
 selection rule; retracted events never remain as synthetic per-name facts.
 
 `resolver_current` summarizes one resolver contract across readable bound names,
-aliases, roles, record evidence, and normalized events. Embedded binding,
-alias, permission, and role-holder summaries store `total_count`,
+aliases, record links, roles, record evidence, and normalized events. Embedded
+binding, alias, link, permission, and role-holder summaries store `total_count`,
 `sample_limit=100`, `sample_count`, `truncated`, and a deterministic `items`
-sample no longer than that limit. Full bound-name and permission collections
+sample no longer than that limit. The link summary exists only for the
+record-ID resolver generation — an ERC-1967 proxy whose admitted
+implementation's manifest declares `Linked`
+(upstream: .refs/ens_v2/contracts/src/resolver/interfaces/IRecordResolver.sol:L32-L38 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L97-L100 @ ens_v2@a971bd64) —
+and lists, per node with a non-zero current record, the record ID, the node,
+whether it is the default (empty-name) node whose record answers every
+unlinked name
+(upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L379-L386 @ ens_v2@a971bd64),
+the name surface known for that node if any, and the current `Linked`
+observation's position; each `Linked` overwrites the node's record ID
+(upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L363-L367 @ ens_v2@a971bd64),
+so the latest `Linked` per node is the current link, and it is the same staged
+table record selection reads, so the two cannot disagree. Names are
+looked up across every active canonical surface, not the run's scoped subset,
+and a surface entering scope pulls every resolver linking its node into scope,
+so a name observed after its link reaches the summary on that incremental run.
+The summary also carries a `digest` of the full link set (node, record, event
+identity); redo rebuilds any resolver whose digest no longer matches the
+canonical set, which covers a retracted link on a node nothing else consumes. On a
+node-keyed resolver the summary is `unsupported` with
+`record_links_not_applicable`. Full bound-name and permission collections
 remain on their name-side projections and routes instead of being duplicated
 into one resolver row. The resolver summary is diagnostic and does not replace
-exact-name topology.
+exact-name topology. Every row also carries `summary_version`, the shape of the
+summary as the Project code that wrote it defined it; a run rebuilds each
+resolver row whose version differs from the running code's (a row from before
+the field existed included), so a deploy that adds or reshapes a section
+reaches every resolver — a manifest-declared one with no events and an
+unchanged citation included — on the first run, without waiting for evidence
+that would otherwise rescope it.
 
 `resolver_current.unsupported_reason` for an ENSv2 resolver (and the
 `coverage.unsupported_reason` copied onto its record inventory) uses a closed
