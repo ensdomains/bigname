@@ -23,7 +23,7 @@ it does not preserve the deleted v1 DTOs.
 
 | Capability | Route owner | Notes |
 | --- | --- | --- |
-| Batched forward and reverse lookup | `POST /v1/lookup` | `profile=feed` is the field-budgeted path; `profile=detail` returns the documented full record shape. |
+| Batched forward and reverse lookup | `POST /v1/lookup` | `profile=feed` is the field-budgeted path; `profile=detail` returns the documented full record shape, and with `include=inventory` each name result carries the records route's `inventory` container (known, unset, and unsupported product keys), so a caller holding many names reads their key inventories in one request instead of one records read per name. |
 | Indexing readiness | `GET /v1/status` | Per-chain projection progress, stored head, indexing-process liveness, network-head readiness, and required Sepolia completed-Ingest state plus [verification-level evidence](glossary.md#verification-level). |
 | Exact name profile | `GET /v1/names/{name}` | Indexed or verified name and record fields, plus [expiry-effective](glossary.md#expiry-effective-namewrapper-fuse-word) ENSv1 NameWrapper lifecycle and fuse data when backed, subject to the route's source rules. |
 | Resolver records | `GET /v1/names/{name}/records` | Key-selected record reads plus inventory metadata. |

@@ -153,10 +153,13 @@ Field ownership:
 - Name-filter request fields are route-local: `q` is shared by search and
   address-name collections, `match` is search-only, and `dedupe` is
   address-name-only.
-- Records-route containers are route-local: `records`, `inventory`,
-  `known_keys`, `unset_keys`, `unsupported_keys`, and `value` are the per-key
-  answer and inventory shape for one resolver-record route, not shared domain
-  vocabulary.
+- Record-answer containers are route-local: `records` and `value` are the
+  per-key answer shape for one resolver-record route, not shared domain
+  vocabulary. The inventory container `inventory: {known_keys, unset_keys,
+  unsupported_keys}` has one shape on the two routes that serve it,
+  `GET /v1/names/{name}/records?include=inventory` and `POST /v1/lookup` with
+  `include=inventory`; the records route defines its meaning and the lookup
+  route serves it unchanged, per name, so a batch of names is one request.
 - Permission lineage containers are route-local: `lineage`, `grant`,
   `revocation`, `inheritance_path`, and `transfer_behavior` exist only on
   `include=lineage` for `/v1/permissions`.
@@ -216,8 +219,13 @@ collection route carry neither header.
 - Purpose: batched forward name-to-record and reverse address-plus-coin-type
   resolution. `profile=feed` is the latency path; `profile=detail` returns
   full records.
-- Request parameters: body `{inputs, profile, namespace?}`. Each input is
-  `{id?, name}` or `{id?, address, coin_type?, relation?, page_size?, cursor?}`.
+- Request parameters: body `{inputs, profile, namespace?, include?}`. Each
+  input is `{id?, name}` or `{id?, address, coin_type?, relation?, page_size?,
+  cursor?}`. `include` is the comma-separated expansion string the `GET`
+  routes take, and allows `inventory` only; it requires `profile=detail`
+  (`profile=feed` with `include` is `400 invalid_input`, since feed is the
+  field-budgeted path) and applies to name inputs; reverse rows never carry
+  it.
   Reverse inputs default to `coin_type=60` when omitted. Reverse `relation`
   accepts a comma-separated set of `owner`, `manager`, and `registrant`; `any`
   is the normalized all-three set. Reverse rows match when any listed relation
@@ -270,6 +278,21 @@ collection route carry neither header.
   the record's `unsupported_fields`, exactly as when no inventory exists;
   `status` and `resolver` keep following the name row. The per-key reason is
   served by `GET /v1/names/{name}/records`.
+  With `include=inventory`, each `profile=detail` name result whose record
+  has a current registration and a record inventory row on its serving
+  resource also carries `record.inventory: {known_keys, unset_keys,
+  unsupported_keys}`, the records route's container with the records route's
+  meaning: `known_keys` and `unset_keys` come from a record inventory whose
+  coverage is authoritative, and an `unsupported` inventory row lists every
+  product key it knows about under `unsupported_keys` with the other two
+  empty. No `keys` allowlist applies, so `unsupported_keys` holds only keys the
+  row itself carries. The container is omitted, not empty, on a record with no
+  serving inventory: a `status=unsupported` or `unregistered` record, a
+  reservation, or a name whose serving resource has no inventory row; the
+  four value fields are then listed in `unsupported_fields` as before. This
+  is the batch form of the records route's inventory for a caller holding many
+  names, bounded by the batch limit above; per-key values, `source=verified`,
+  and the `keys` allowlist stay on the records route.
   See [registration status](api-v2.md#status-vocabulary) for the upstream
   basis.
   An ownerless ENSv2 reservation does not meet this exception, even if identity
@@ -983,8 +1006,9 @@ collection route carry neither header.
   route adds its synthetic primary-address request. A 200-selector inventory
   may therefore produce 201 provider keys when `addr:60` was absent; an
   inventory with more than 200 selectors still returns `422 unsupported`.
-  `include=inventory` adds route-local
-  `inventory: {known_keys, unset_keys, unsupported_keys}`. Deep inventory
+  `include=inventory` adds
+  `inventory: {known_keys, unset_keys, unsupported_keys}`, the container
+  `POST /v1/lookup` also serves per name with the same meaning. Deep inventory
   internals stay on diagnostics.
 - Pagination behavior: none.
 - Status semantics: a missing name returns `404 not_found`. Missing, unset, or

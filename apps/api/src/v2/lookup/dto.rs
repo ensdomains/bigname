@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::v2::name_record::LapsedRegistration;
+use crate::v2::name_records_inventory::RecordInventory;
 use crate::v2::{
     AddressNameResolution, Authority, Page, RegistrationStatus, RegistryRef, Relation, Resolver,
     Status,
@@ -13,6 +14,7 @@ use crate::v2::{
 pub(crate) struct LookupRequest {
     pub(super) profile: Option<String>,
     pub(super) namespace: Option<String>,
+    pub(super) include: Option<String>,
     pub(super) inputs: Vec<LookupInput>,
 }
 
@@ -129,6 +131,9 @@ pub(crate) struct LookupRecord {
     pub(crate) text_records: Option<BTreeMap<String, String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) content_hash: Option<String>,
+    /// Present only on `profile=detail` name results with `include=inventory`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) inventory: Option<RecordInventory>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) primary_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
