@@ -263,10 +263,11 @@ read when it is no longer the default), constraint (with whether it is
 defined locally or inherited, which decides whether `NO INHERIT` removes it),
 index (with its validity), view,
 routine (its full argument list with defaults, execution modes, planner cost
-and rows, privileges and a digest of its body with runs of whitespace
-collapsed, the comparison `20260923140000_project_name_surfaces_label_indexes.sql`
-itself accepts a body by, since that file and the baseline indent
-`label_hashes` differently), trigger (with its firing
+and rows, privileges and a digest of its body with each run of whitespace
+outside quoted text and comments made one space, since
+`20260923140000_project_name_surfaces_label_indexes.sql` and the baseline
+indent `label_hashes` differently; string literals, quoted identifiers,
+dollar-quoted strings and comments are compared as written), trigger (with its firing
 state), sequence (its whole range, cache, cycle and owning column), type,
 domain, comment and the schema's own privileges, of the
 baseline plus the inventoried schema-migrations, built into a fresh schema on every
@@ -344,7 +345,13 @@ with the file's transaction — `ON COMMIT DROP`, a temporary table the file
 drops again, a transaction-level advisory lock, `set_config(..., true)` —
 passes; the one planted sequence that commits a setting on purpose, to prove
 the replay is a single session, runs without the probe, and the probe proves
-itself on planted files. A phase schema-migration may not read who runs it
+itself on planted files. The baseline, which the installer runs as one
+transaction, is probed inside it after each file: a setting set in the
+session that no longer reads what it did once the installer's own `SET LOCAL`s
+ran, however it was made (PostgreSQL lists no custom placeholder setting,
+which only the statement rule sees), a temporary object, a prepared statement, a cursor, an advisory lock or
+an assumed role is refused, naming the file, and a `LISTEN` after the commit;
+its planted forms include a `SET` assembled inside `EXECUTE`. A phase schema-migration may not read who runs it
 either — `current_user`, `session_user`, `current_role`, `system_user`,
 `getpgusername`, `pg_get_userbyid`, `pg_has_role`, a `has_*_privilege`
 function, `pg_roles`, `pg_user`, `pg_authid`, `pg_auth_members`, `pg_shadow`,
@@ -359,9 +366,14 @@ is left alone because the rule reads quoted prose too, and bare `role` because
 — `current_database`, `current_catalog`, `pg_database`, `datname`, an
 `information_schema` `*_catalog` column or `catalog_name`, or the server or
 client address or port through the `inet_*` functions, `pg_stat_activity`,
+`pg_stat_get_activity`, the `pg_stat_get_backend_*` functions,
 `pg_stat_database` or the `port`, `listen_addresses`,
 `unix_socket_directories` and `cluster_name` settings — since on an external server the replay runs in a
-database of its own, or read the session's temporary namespace through
+database of its own. Because settings name who and where as well
+(`session_authorization`, `port`), a setting is read only by the name the text
+spells: `current_setting`, quoted or not, with anything but a quoted literal,
+`pg_settings`, `pg_show_all_settings`, `pg_file_settings` and the word `SHOW`
+anywhere in the text are refused. Nor may it read the session's temporary namespace through
 `pg_my_temp_schema`, `current_schemas` or `pg_is_other_temp_schema`: a file
 that creates and drops a temporary table leaves that namespace allocated for
 the files after it in one `sqlx migrate run` but not in a catch-up split

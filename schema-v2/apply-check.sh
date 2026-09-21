@@ -800,6 +800,103 @@ migration_uses_unicode_escape() {
 # baseline file or a schema-migration that moves the schema without moving the
 # frozen catalog fails, whatever its name. Regenerate deliberately with
 # SCHEMA_V2_APPLY_CHECK_WRITE_FINGERPRINT=1 in the change that moves the schema.
+# The session helpers the catalog query calls, created in pg_temp on the
+# catalog's own connection.
+frozen_catalog_helpers_sql="$(cat <<'SQL'
+-- Evaluates a column default expression as the column's type and prints it as
+-- a one-element array, which is how pg_attribute.attmissingval prints, so the
+-- two compare.
+CREATE FUNCTION pg_temp.frozen_catalog_default(expression text, is_array boolean) RETURNS text
+LANGUAGE plpgsql STABLE AS $$
+DECLARE evaluated text;
+BEGIN
+    IF expression IS NULL THEN RETURN NULL; END IF;
+    -- An array value is stored as the one element of a text-typed array, and
+    -- PostgreSQL flattens ARRAY[ARRAY[...]] instead.
+    IF is_array THEN
+        EXECUTE format('SELECT ARRAY[(%s)::text]::text', expression) INTO evaluated;
+    ELSE
+        EXECUTE format('SELECT ARRAY[(%s)]::text', expression) INTO evaluated;
+    END IF;
+    RETURN evaluated;
+END $$;
+-- A routine body with each run of whitespace outside quoted text and comments
+-- made one space, and none after a line comment, which ends at either newline
+-- character and keeps one \n; string literals (E'' escapes included), quoted
+-- identifiers, dollar-quoted strings and comments are kept as written.
+-- Whitespace is the lexer's own set, not Unicode's. 20260923140000 and the baseline indent
+-- label_hashes differently, so fresh and upgraded databases store different
+-- text for one definition.
+CREATE FUNCTION pg_temp.frozen_catalog_body(body text) RETURNS text
+LANGUAGE plpgsql IMMUTABLE AS $normalize$
+DECLARE
+    ch text[];
+    n integer;
+    parts text[] := '{}';
+    i integer := 1;
+    j integer;
+    depth integer;
+    tag text;
+    gap boolean := false;
+BEGIN
+    IF body IS NULL OR body = '' THEN RETURN body; END IF;
+    ch := regexp_split_to_array(body, '');
+    n := cardinality(ch);
+    WHILE i <= n LOOP
+        IF ch[i] ~ '^[ \t\n\r\f\v]$' THEN
+            gap := true;
+            i := i + 1;
+            CONTINUE;
+        END IF;
+        IF gap AND cardinality(parts) > 0 AND right(parts[cardinality(parts)], 1) <> E'\n' THEN
+            parts := parts || ' '::text;
+        END IF;
+        gap := false;
+        j := i + 1;
+        IF ch[i] = '''' OR ch[i] = '"' THEN
+            WHILE j <= n LOOP
+                IF ch[i] = '''' AND ch[j] = '\' AND i > 1 AND upper(ch[i - 1]) = 'E'
+                    AND (i = 2 OR ch[i - 2] !~ '^[[:alnum:]_$]$') THEN
+                    j := j + 2;
+                ELSIF ch[j] = ch[i] AND j < n AND ch[j + 1] = ch[i] THEN
+                    j := j + 2;
+                ELSIF ch[j] = ch[i] THEN
+                    j := j + 1;
+                    EXIT;
+                ELSE
+                    j := j + 1;
+                END IF;
+            END LOOP;
+        ELSIF ch[i] = '$' AND (i = 1 OR ch[i - 1] !~ '^[[:alnum:]_$]$') THEN
+            tag := substring(array_to_string(ch[i:i + 64], '') FROM '^\$(?:[[:alpha:]_][[:alnum:]_]*)?\$');
+            IF tag IS NOT NULL THEN
+                j := strpos(array_to_string(ch[i + length(tag):n], ''), tag);
+                j := CASE WHEN j = 0 THEN n + 1 ELSE i + 2 * length(tag) + j - 1 END;
+            END IF;
+        ELSIF ch[i] = '-' AND j <= n AND ch[j] = '-' THEN
+            WHILE j <= n AND ch[j] NOT IN (E'\n', E'\r') LOOP j := j + 1; END LOOP;
+            parts := parts || (array_to_string(ch[i:j - 1], '') || E'\n');
+            i := j + 1;
+            CONTINUE;
+        ELSIF ch[i] = '/' AND j <= n AND ch[j] = '*' THEN
+            depth := 1;
+            j := j + 1;
+            WHILE j <= n AND depth > 0 LOOP
+                IF ch[j] = '/' AND j < n AND ch[j + 1] = '*' THEN depth := depth + 1; j := j + 2;
+                ELSIF ch[j] = '*' AND j < n AND ch[j + 1] = '/' THEN depth := depth - 1; j := j + 2;
+                ELSE j := j + 1;
+                END IF;
+            END LOOP;
+        ELSE
+            WHILE j <= n AND ch[j] !~ '^[ \t\n\r\f\v''"$/-]$' LOOP j := j + 1; END LOOP;
+        END IF;
+        parts := parts || array_to_string(ch[i:j - 1], '');
+        i := j;
+    END LOOP;
+    RETURN array_to_string(parts, '');
+END $normalize$;
+SQL
+)"
 frozen_schema_catalog_sql="$(cat <<'CATALOG_SQL'
 SELECT line FROM (
     -- The keys are text: a name-typed first branch would make the union name
@@ -901,12 +998,7 @@ SELECT line FROM (
                   p.procost, p.prorows,
                   COALESCE(to_jsonb(p.proconfig)::text, '-'),
                   COALESCE(replace(to_jsonb(p.proacl::text[])::text, current_user, 'owner'), 'default'),
-                  -- Runs of whitespace collapsed, the comparison
-                  -- 20260923140000_project_name_surfaces_label_indexes.sql
-                  -- accepts label_hashes by: it and the baseline indent that
-                  -- body differently, so fresh and upgraded databases store
-                  -- different text for the one definition.
-                  md5(btrim(regexp_replace(replace(p.prosrc, current_schema(), 'bigname_phase'), '\s+', ' ', 'g'))),
+                  md5(pg_temp.frozen_catalog_body(replace(p.prosrc, current_schema(), 'bigname_phase'))),
                   -- A SQL-standard body (BEGIN ATOMIC) is stored parsed, with
                   -- prosrc empty; only its printed form tells two apart.
                   md5(replace(COALESCE(pg_get_function_sqlbody(p.oid), ''), current_schema(), 'bigname_phase')))
@@ -1001,25 +1093,7 @@ frozen_schema_catalog() {
     {
         printf '\\pset format unaligned\n\\pset tuples_only on\n'
         printf 'SET search_path TO "%s";\n' "$schema"
-        # Evaluates a column default expression as the column's type and prints
-        # it as a one-element array, which is how pg_attribute.attmissingval
-        # prints, so the two compare.
-        cat <<'SQL'
-CREATE FUNCTION pg_temp.frozen_catalog_default(expression text, is_array boolean) RETURNS text
-LANGUAGE plpgsql STABLE AS $$
-DECLARE evaluated text;
-BEGIN
-    IF expression IS NULL THEN RETURN NULL; END IF;
-    -- An array value is stored as the one element of a text-typed array, and
-    -- PostgreSQL flattens ARRAY[ARRAY[...]] instead.
-    IF is_array THEN
-        EXECUTE format('SELECT ARRAY[(%s)::text]::text', expression) INTO evaluated;
-    ELSE
-        EXECUTE format('SELECT ARRAY[(%s)]::text', expression) INTO evaluated;
-    END IF;
-    RETURN evaluated;
-END $$;
-SQL
+        printf '%s\n' "$frozen_catalog_helpers_sql"
         printf '%s\n' "$frozen_schema_catalog_sql"
     } | run_psql | sed "s/$schema/bigname_phase/g"
 }
@@ -1262,20 +1336,7 @@ frozen_schema_catalog_within() {
         printf '\\pset format unaligned\n\\pset tuples_only on\n'
         printf 'SET search_path TO "%s";\n' "$schema"
         printf 'BEGIN;\n%s\n' "$planted_sql"
-        cat <<'SQL'
-CREATE FUNCTION pg_temp.frozen_catalog_default(expression text, is_array boolean) RETURNS text
-LANGUAGE plpgsql STABLE AS $$
-DECLARE evaluated text;
-BEGIN
-    IF expression IS NULL THEN RETURN NULL; END IF;
-    IF is_array THEN
-        EXECUTE format('SELECT ARRAY[(%s)::text]::text', expression) INTO evaluated;
-    ELSE
-        EXECUTE format('SELECT ARRAY[(%s)]::text', expression) INTO evaluated;
-    END IF;
-    RETURN evaluated;
-END $$;
-SQL
+        printf '%s\n' "$frozen_catalog_helpers_sql"
         printf '%s\n' "$frozen_schema_catalog_sql"
         printf 'ROLLBACK;\n'
     } | if [ "${3:-}" = owner ]; then run_psql_as_owner; else run_psql; fi | sed "s/$schema/bigname_phase/g"
@@ -1316,7 +1377,11 @@ assert_frozen_catalog_sees_planted_changes() {
         'replica-identity indexes:ALTER TABLE chain_lineage REPLICA IDENTITY USING INDEX chain_lineage_pkey;:ALTER TABLE chain_lineage REPLICA IDENTITY USING INDEX chain_lineage_chain_id_block_hash_block_number_key;' \
         'clustering indexes:ALTER TABLE chain_lineage CLUSTER ON chain_lineage_pkey;:ALTER TABLE chain_lineage CLUSTER ON chain_lineage_chain_id_block_hash_block_number_key;' \
         'comments on overloaded routines:CREATE FUNCTION planted_c(x integer) RETURNS integer LANGUAGE sql AS '"'"'SELECT 1'"'"'; CREATE FUNCTION planted_c(x text) RETURNS integer LANGUAGE sql AS '"'"'SELECT 1'"'"'; COMMENT ON FUNCTION planted_c(integer) IS '"'"'first'"'"'; COMMENT ON FUNCTION planted_c(text) IS '"'"'second'"'"';:CREATE FUNCTION planted_c(x integer) RETURNS integer LANGUAGE sql AS '"'"'SELECT 1'"'"'; CREATE FUNCTION planted_c(x text) RETURNS integer LANGUAGE sql AS '"'"'SELECT 1'"'"'; COMMENT ON FUNCTION planted_c(integer) IS '"'"'second'"'"'; COMMENT ON FUNCTION planted_c(text) IS '"'"'first'"'"';' \
-        'domain collations:CREATE DOMAIN planted_dom AS text COLLATE "C";:CREATE DOMAIN planted_dom AS text COLLATE "POSIX";'
+        'domain collations:CREATE DOMAIN planted_dom AS text COLLATE "C";:CREATE DOMAIN planted_dom AS text COLLATE "POSIX";' \
+        'routine string literals:CREATE FUNCTION planted_lit() RETURNS text LANGUAGE sql AS $$SELECT '"'"'a  b'"'"'$$;:CREATE FUNCTION planted_lit() RETURNS text LANGUAGE sql AS $$SELECT '"'"'a b'"'"'$$;' \
+        'routine escape-string literals:CREATE FUNCTION planted_esc() RETURNS text LANGUAGE sql AS $$SELECT E'"'"'it\'"'"'s  x'"'"'$$;:CREATE FUNCTION planted_esc() RETURNS text LANGUAGE sql AS $$SELECT E'"'"'it\'"'"'s x'"'"'$$;' \
+        'routine dollar-quoted strings:CREATE FUNCTION planted_dq() RETURNS text LANGUAGE plpgsql AS $f$BEGIN RETURN $q$a  b$q$; END$f$;:CREATE FUNCTION planted_dq() RETURNS text LANGUAGE plpgsql AS $f$BEGIN RETURN $q$a b$q$; END$f$;' \
+        'routine quoted identifiers:CREATE FUNCTION planted_qi() RETURNS integer LANGUAGE sql AS $$SELECT "a  b" FROM (SELECT 1 AS "a  b", 2 AS "a b") t$$;:CREATE FUNCTION planted_qi() RETURNS integer LANGUAGE sql AS $$SELECT "a b" FROM (SELECT 1 AS "a  b", 2 AS "a b") t$$;'
     do
         reason="${pair%%:*}"; pair="${pair#*:}"
         frozen_schema_catalog_within "$frozen_schema" "${pair%%;:*};" > "$planted_catalog"
@@ -1328,6 +1393,18 @@ assert_frozen_catalog_sees_planted_changes() {
         fi
         refusal_assertions_passed=$((refusal_assertions_passed + 1))
     done
+    # Whitespace outside quoted text and comments is not part of a body.
+    frozen_schema_catalog_within "$frozen_schema" "CREATE FUNCTION planted_ws() RETURNS text LANGUAGE sql AS \$\$
+        SELECT 'a  b' -- c
+            || 'd'
+    \$\$;" > "$planted_catalog"
+    frozen_schema_catalog_within "$frozen_schema" "CREATE FUNCTION planted_ws() RETURNS text LANGUAGE sql AS \$\$SELECT 'a  b' -- c
+|| 'd'\$\$;" > "$other_catalog"
+    if [ ! -s "$planted_catalog" ] || ! diff -q "$planted_catalog" "$other_catalog" >/dev/null; then
+        printf '%s\n' "the frozen catalog tells apart two routine bodies that differ only in whitespace outside quoted text" >&2
+        rm -f -- "$planted_catalog" "$other_catalog"
+        exit 1
+    fi
     rm -f -- "$planted_catalog" "$other_catalog"
 }
 # The phase schema is closed to the object kinds the baseline uses: tables,
@@ -2416,13 +2493,14 @@ migration_application_log="$(
 # Future entries must use basename|one-line reason.
 intentional_phase_migration_skips=()
 refusal_assertions_passed=0
-# Base 173, main added 78, this branch 142 (59 of them the backslash-command,
+# Base 173, main added 78, this branch 159 (76 of them the backslash-command,
 # SET-spelling, session-residue, session-identity (database, connection and
 # temporary namespace included), recorded-history, ambiguous foreign key,
-# assembled password and literal-name branch and column-order plants), and
+# assembled password, literal-name branch and column-order, baseline-residue,
+# setting-name, backend-status and routine quoting plants), and
 # the merges fold main's four address-match and event-order not-ready probes
 # into their invalid ones (-4); predecessor proofs base 39, +6, +1.
-expected_refusal_assertions=389
+expected_refusal_assertions=406
 predecessor_shape_proof_count=0
 expected_predecessor_shape_proof_count=46
 refusal_probe_seconds=0
@@ -2553,7 +2631,7 @@ baseline_extension_statements_of() {
 check_baseline_extensions() {
     local statements="$1" required_extension extension_statement
     for required_extension in btree_gist pgcrypto; do
-        if ! printf '%s\n' "$statements" | grep -qxF "CREATE EXTENSION IF NOT EXISTS $required_extension WITH SCHEMA public;"; then
+        if ! printf '%s\n' "$statements" | grep -xF "CREATE EXTENSION IF NOT EXISTS $required_extension WITH SCHEMA public;" >/dev/null; then
             printf '%s\n' "schema-v2/baseline no longer declares CREATE EXTENSION IF NOT EXISTS $required_extension WITH SCHEMA public; as a statement of its own; init-schema on an empty database needs it" >&2
             return 1
         fi
@@ -2811,15 +2889,26 @@ assert_no_migration_reads_synthetic_ledger_timing
 # ledger-timing rule above; bare USER is left out because quoted prose uses the
 # word, and bare ROLE because `manifest_contract_instances.role` is a column.
 session_identity_reads_of() {
-    local statements
+    local statements flat
     if ! statements="$(sql_statements "$1")"; then
         printf '%s\n' "$statements" | tail -n 1
         return 0
     fi
-    # Whole words, so `pg_catalog.` does not use up the boundary of the name after it.
-    printf '%s\n' "$statements" | grep -oE '[[:alnum:]_]+' \
-        | grep -xiE '(CURRENT_USER|SESSION_USER|CURRENT_ROLE|SYSTEM_USER|GETPGUSERNAME|PG_GET_USERBYID|PG_HAS_ROLE|HAS_[A-Z_]+_PRIVILEGE|PG_ROLES|PG_USER|PG_AUTHID|PG_AUTH_MEMBERS|PG_SHADOW|TO_REGROLE|REGROLE|ROLNAME|ROLSUPER|USENAME|IS_SUPERUSER|SESSION_AUTHORIZATION|ENABLED_ROLES|APPLICABLE_ROLES|ADMINISTRABLE_ROLE_AUTHORIZATIONS|(TABLE|COLUMN|ROUTINE|USAGE|UDT)_PRIVILEGES|ROLE_[A-Z]+_GRANTS|INSUFFICIENT_PRIVILEGE|UNDEFINED_OBJECT|42501|42704|CURRENT_DATABASE|CURRENT_CATALOG|PG_DATABASE|DATNAME|[A-Z_]*_CATALOG|CATALOG_NAME|INFORMATION_SCHEMA_CATALOG_NAME|INET_(SERVER|CLIENT)_(ADDR|PORT)|CLIENT_(ADDR|PORT|HOSTNAME)|DATID|PG_STAT_(ACTIVITY|DATABASE|SSL|GSSAPI)|PORT|LISTEN_ADDRESSES|UNIX_SOCKET_DIRECTORIES|CLUSTER_NAME|PG_MY_TEMP_SCHEMA|CURRENT_SCHEMAS|PG_IS_OTHER_TEMP_SCHEMA)' \
-        | tr '[:lower:]' '[:upper:]' | grep -vx PG_CATALOG | sort -u | tr '\n' ' ' || true
+    flat="$(printf '%s\n' "$statements" | tr '\n' ' ')"
+    {
+        # Whole words, so `pg_catalog.` does not use up the boundary of the name after it.
+        printf '%s\n' "$statements" | grep -oE '[[:alnum:]_]+' \
+            | grep -xiE '(CURRENT_USER|SESSION_USER|CURRENT_ROLE|SYSTEM_USER|GETPGUSERNAME|PG_GET_USERBYID|PG_HAS_ROLE|HAS_[A-Z_]+_PRIVILEGE|PG_ROLES|PG_USER|PG_AUTHID|PG_AUTH_MEMBERS|PG_SHADOW|TO_REGROLE|REGROLE|ROLNAME|ROLSUPER|USENAME|IS_SUPERUSER|SESSION_AUTHORIZATION|ENABLED_ROLES|APPLICABLE_ROLES|ADMINISTRABLE_ROLE_AUTHORIZATIONS|(TABLE|COLUMN|ROUTINE|USAGE|UDT)_PRIVILEGES|ROLE_[A-Z]+_GRANTS|INSUFFICIENT_PRIVILEGE|UNDEFINED_OBJECT|42501|42704|CURRENT_DATABASE|CURRENT_CATALOG|PG_DATABASE|DATNAME|[A-Z_]*_CATALOG|CATALOG_NAME|INFORMATION_SCHEMA_CATALOG_NAME|INET_(SERVER|CLIENT)_(ADDR|PORT)|CLIENT_(ADDR|PORT|HOSTNAME)|DATID|PG_STAT_(ACTIVITY|DATABASE|SSL|GSSAPI)|PORT|LISTEN_ADDRESSES|UNIX_SOCKET_DIRECTORIES|CLUSTER_NAME|PG_MY_TEMP_SCHEMA|CURRENT_SCHEMAS|PG_IS_OTHER_TEMP_SCHEMA|PG_SETTINGS|PG_SHOW_ALL_SETTINGS|PG_FILE_SETTINGS|SHOW|PG_STAT_GET_ACTIVITY|PG_STAT_GET_BACKEND_[A-Z_]+)' \
+            | tr '[:lower:]' '[:upper:]' | grep -vx PG_CATALOG || true
+        # Settings name who and where too (session_authorization, port), so one
+        # is read only by the name the text spells: current_setting, quoted or
+        # not, takes a quoted literal, doubled inside EXECUTE text; SHOW, whose
+        # name is a bare word, is refused as a word above.
+        if [ "$(printf '%s' "$flat" | grep -oiE '"?current_setting"? *\(' | wc -l)" \
+            != "$(printf '%s' "$flat" | grep -oiE "\"?current_setting\"? *\( *('[A-Za-z0-9_.]+'|''[A-Za-z0-9_.]+'') *[,)]" | wc -l)" ]; then
+            printf '%s\n' 'CURRENT_SETTING(A-COMPUTED-NAME)'
+        fi
+    } | sort -u | tr '\n' ' ' || true
 }
 assert_no_migration_branches_on_session_identity() {
     local migration_file hits planted planted_dir
@@ -2848,6 +2937,13 @@ assert_no_migration_branches_on_session_identity() {
         'DO $$ BEGIN IF inet_server_port() = 5432 THEN ALTER TABLE bigname_phase.t ADD COLUMN c integer; END IF; END $$;'
         'DO $$ BEGIN IF pg_catalog.pg_my_temp_schema() = 0 THEN ALTER TABLE bigname_phase.t ADD COLUMN c integer; END IF; END $$;'
         'DO $$ BEGIN IF array_length(current_schemas(true), 1) > 3 THEN RETURN; END IF; ALTER TABLE bigname_phase.t ADD COLUMN c integer; END $$;'
+        'DO $$ BEGIN IF current_setting('"'"'session_'"'"' || '"'"'authorization'"'"') = '"'"'bigname'"'"' THEN ALTER TABLE bigname_phase.t ADD COLUMN c integer; END IF; END $$;'
+        'DO $$ BEGIN IF (SELECT setting FROM pg_settings WHERE name = '"'"'po'"'"' || '"'"'rt'"'"') <> '"'"'5432'"'"' THEN ALTER TABLE bigname_phase.t ADD COLUMN c integer; END IF; END $$;'
+        'DO $$ DECLARE v text; BEGIN EXECUTE '"'"'SHOW '"'"' || '"'"'po'"'"' || '"'"'rt'"'"' INTO v; IF v <> '"'"'5432'"'"' THEN ALTER TABLE bigname_phase.t ADD COLUMN c integer; END IF; END $$;'
+        'DO $do$ DECLARE v text; BEGIN EXECUTE $q$SHOW $q$ || '"'"'po'"'"' || '"'"'rt'"'"' INTO v; IF v <> '"'"'5432'"'"' THEN ALTER TABLE bigname_phase.t ADD COLUMN c integer; END IF; END $do$;'
+        'DO $$ DECLARE r record; BEGIN FOR r IN SHOW ALL LOOP IF r.setting = '"'"'5432'"'"' THEN ALTER TABLE bigname_phase.t ADD COLUMN c integer; END IF; END LOOP; END $$;'
+        'DO $$ BEGIN IF pg_catalog."current_setting"('"'"'session_'"'"' || '"'"'authorization'"'"') = '"'"'bigname'"'"' THEN ALTER TABLE bigname_phase.t ADD COLUMN c integer; END IF; END $$;'
+        'DO $$ BEGIN IF (SELECT client_port FROM pg_stat_get_activity(pg_backend_pid())) IS NULL THEN ALTER TABLE bigname_phase.t ADD COLUMN c integer; END IF; END $$;'
         'DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname LIKE '"'"'pg_temp%'"'"' AND NOT pg_is_other_temp_schema(oid)) THEN RETURN; END IF; ALTER TABLE bigname_phase.t ADD COLUMN c integer; END $$;'
     )
     local -a accepted=(
@@ -2859,6 +2955,8 @@ assert_no_migration_branches_on_session_identity() {
         'SELECT 1 FROM information_schema.columns WHERE table_schema = '"'"'bigname_phase'"'"' AND column_name = '"'"'c'"'"';'
         'CREATE TEMP TABLE probe (LIKE bigname_phase.t); DROP TABLE pg_temp.probe;'
         'CREATE FUNCTION bigname_phase.f() RETURNS integer LANGUAGE sql SET search_path = pg_catalog, bigname_phase, pg_temp AS '"'"'SELECT 1'"'"';'
+        'SELECT current_setting('"'"'search_path'"'"'), pg_catalog.current_setting( '"'"'quote_all_identifiers'"'"' , true);'
+        'DO $$ BEGIN EXECUTE '"'"'SELECT current_setting('"'"''"'"'search_path'"'"''"'"')'"'"'; RAISE NOTICE '"'"'nothing to report'"'"'; END $$;'
     )
     planted_dir="$(mktemp -d "${TMPDIR:-/tmp}/schema-v2-session-identity-rule.XXXXXX")"
     for planted in "${refused[@]}"; do
@@ -2882,7 +2980,7 @@ assert_no_migration_branches_on_session_identity() {
         hits="$(session_identity_reads_of "$migration_file")"
         if [ -n "$hits" ]; then
             printf '%s\n' \
-                "$(basename "$migration_file") reads ${hits% }, which answers differently for this check's disposable login, scratch database and replay session than for the deployment writer, so a branch on identity, role existence, privilege, database, server address or temporary namespace takes a path here that sqlx migrate run does not; a schema-migration may not depend on who runs it or where, and a carve-out that needs to extends the session-identity rule in schema-v2/apply-check.sh under ADR 0007" >&2
+                "$(basename "$migration_file") reads ${hits% }, which answers differently for this check's disposable login, scratch database and replay session than for the deployment writer, so a branch on identity, role existence, privilege, database, server address or temporary namespace takes a path here that sqlx migrate run does not; a schema-migration may not depend on who runs it or where, and reads a setting only by its literal name, and a carve-out that needs to extends the session-identity rule in schema-v2/apply-check.sh under ADR 0007" >&2
             exit 1
         fi
     done
@@ -3053,17 +3151,69 @@ assert_dynamic_production_name_is_refused
 # inside one transaction, after SET LOCAL search_path TO <phase schema>,
 # public. Session state one file sets therefore reaches the next file here as
 # it does there; a file applied on its own connection would hide that.
+# The baseline gets no per-file commit, so its probe runs inside the one
+# transaction, after each file: a setting that is set in the session, or was
+# when the installer's own SET LOCALs had run, must still read what it did
+# then (a configuration reload moves only the others), and no file may leave a
+# temporary object, a prepared statement, a cursor, an advisory lock or an
+# assumed role for the files after it. PostgreSQL lists no custom placeholder
+# setting, which only the statement rule sees, and the snapshot sits in two
+# such placeholders, transaction-local. A LISTEN takes effect at the commit,
+# so it is probed there.
+baseline_settings_snapshot_sql="DO \$baseline_settings\$ BEGIN
+    PERFORM pg_catalog.set_config('schema_v2_check.baseline_settings',
+        (SELECT string_agg(name || '=' || COALESCE(setting, ''), chr(31) ORDER BY name) FROM pg_catalog.pg_settings), true);
+    PERFORM pg_catalog.set_config('schema_v2_check.baseline_session_settings',
+        (SELECT string_agg(name, chr(31) ORDER BY name) FROM pg_catalog.pg_settings WHERE source = 'session'), true);
+END \$baseline_settings\$;"
+baseline_residue_probe_sql() {
+    cat <<SQL
+DO \$baseline_probe\$
+DECLARE leftover text;
+BEGIN
+    SELECT string_agg(residue, '; ' ORDER BY residue) INTO leftover FROM (
+        SELECT 'setting ' || name AS residue FROM pg_catalog.pg_settings
+        WHERE name || '=' || COALESCE(setting, '') <> ALL (COALESCE(string_to_array(
+            pg_catalog.current_setting('schema_v2_check.baseline_settings', true), chr(31)), '{}'))
+          AND (source = 'session' OR name = ANY (COALESCE(string_to_array(
+            pg_catalog.current_setting('schema_v2_check.baseline_session_settings', true), chr(31)), '{}')))
+        UNION ALL SELECT 'a reset of every setting' WHERE COALESCE(pg_catalog.current_setting('schema_v2_check.baseline_session_settings', true), '') = ''
+        UNION ALL SELECT 'temporary relation ' || relname FROM pg_catalog.pg_class WHERE relnamespace = pg_catalog.pg_my_temp_schema()
+        UNION ALL SELECT 'temporary routine ' || proname FROM pg_catalog.pg_proc WHERE pronamespace = pg_catalog.pg_my_temp_schema()
+        UNION ALL SELECT 'temporary type ' || typname FROM pg_catalog.pg_type WHERE typnamespace = pg_catalog.pg_my_temp_schema() AND typrelid = 0
+        UNION ALL SELECT 'prepared statement ' || name FROM pg_catalog.pg_prepared_statements
+        UNION ALL SELECT 'cursor ' || name FROM pg_catalog.pg_cursors
+        UNION ALL SELECT 'advisory lock ' || objid FROM pg_catalog.pg_locks WHERE locktype = 'advisory' AND pid = pg_catalog.pg_backend_pid()
+        UNION ALL SELECT 'role ' || current_user WHERE current_user <> session_user
+    ) baseline_residue;
+    IF leftover IS NOT NULL THEN
+        RAISE EXCEPTION '$1 leaves session state behind for the baseline files after it: %', leftover;
+    END IF;
+END \$baseline_probe\$;
+SQL
+}
+baseline_listen_probe_sql="DO \$baseline_listen\$
+DECLARE channels text;
+BEGIN
+    SELECT string_agg(channel, ', ' ORDER BY channel) INTO channels FROM pg_catalog.pg_listening_channels() channel;
+    IF channels IS NOT NULL THEN
+        RAISE EXCEPTION 'a baseline file leaves session state behind: LISTEN %', channels;
+    END IF;
+END \$baseline_listen\$;"
 apply_baseline() {
     local sql_file
     {
         printf 'SET client_min_messages TO warning;\nBEGIN;\n'
         printf 'SET LOCAL search_path TO "%s", public;\n' "$scratch_schema"
+        [ "${baseline_residue_probe:-on}" = off ] || printf '%s\n' "$baseline_settings_snapshot_sql"
         for sql_file in "${1:-$ROOT/schema-v2/baseline}"/*.sql; do
             cat "$sql_file"
             printf '\n'
+            [ "${baseline_residue_probe:-on}" = off ] || baseline_residue_probe_sql "${sql_file##*/}"
         done
         printf '%s\n' "${2:-}"
         printf 'COMMIT;\n'
+        [ "${baseline_residue_probe:-on}" = off ] || printf '%s\n' "$baseline_listen_probe_sql"
     } | run_psql
 }
 # The single session proves itself: with a search_path change planted at the
@@ -3077,7 +3227,7 @@ assert_baseline_session_state_carries() {
     cp "$ROOT"/schema-v2/baseline/*.sql "$planted_dir"/
     printf '\nSET LOCAL search_path TO "%s", "%s";\n' "$frozen_schema" "$scratch_schema" >> "$planted_dir/01_chain.sql"
     expected_error="baseline session state carried across files: normalized_events landed in the next schema"
-    if probe_stderr="$(apply_baseline "$planted_dir" "DO \$\$ BEGIN IF to_regclass('\"$frozen_schema\".normalized_events') IS NOT NULL THEN RAISE EXCEPTION '$expected_error'; END IF; END \$\$; ROLLBACK;" 2>&1 >/dev/null)"; then
+    if probe_stderr="$(baseline_residue_probe=off apply_baseline "$planted_dir" "DO \$\$ BEGIN IF to_regclass('\"$frozen_schema\".normalized_events') IS NOT NULL THEN RAISE EXCEPTION '$expected_error'; END IF; END \$\$; ROLLBACK;" 2>&1 >/dev/null)"; then
         printf '%s\n' "the baseline check applied a planted search_path change without the next files seeing it, so it does not run the baseline as one session" >&2
         rm -rf -- "$planted_dir"
         exit 1
@@ -3090,6 +3240,42 @@ assert_baseline_session_state_carries() {
     fi
     rm -rf -- "$planted_dir"
     refusal_assertions_passed=$((refusal_assertions_passed + 1))
+}
+# The probe proves itself on a planted first file, one form each, committed
+# so the LISTEN takes effect; the setting is assembled, which no statement
+# rule reads.
+assert_baseline_residue_probe_holds() {
+    local expected residue planted_dir probe_stderr observed_error
+    while IFS='|' read -r -u 3 expected residue; do
+        planted_dir="$(mktemp -d "${TMPDIR:-/tmp}/schema-v2-planted-baseline-residue.XXXXXX")"
+        printf '%s\n' "$residue" > "$planted_dir/00_planted.sql"
+        if probe_stderr="$(apply_baseline "$planted_dir" 2>&1 >/dev/null)"; then
+            printf '%s\n' "the baseline probe accepted a file that leaves $expected behind: $residue" >&2
+            exit 1
+        fi
+        remove_planted_dir "$planted_dir"
+        observed_error="$(printf '%s\n' "$probe_stderr" | psql_error_message)"
+        case "$observed_error" in
+            *"leaves session state behind"*"$expected"*) ;;
+            *) printf '%s\n' "the planted baseline $expected failed for another reason: $observed_error" >&2; exit 1 ;;
+        esac
+        refusal_assertions_passed=$((refusal_assertions_passed + 1))
+    done 3<<'PLANTS'
+setting lock_timeout|DO $$ BEGIN EXECUTE concat('S', 'ET lock_timeout TO ''1ms'''); END $$;
+temporary relation planted_stage|CREATE TEMP TABLE planted_stage (v integer) ON COMMIT DROP;
+prepared statement planted_statement|PREPARE planted_statement AS SELECT 1;
+cursor planted_cursor|DECLARE planted_cursor CURSOR FOR SELECT 1;
+advisory lock|SELECT pg_advisory_xact_lock(20260921);
+LISTEN planted_channel|LISTEN planted_channel;
+PLANTS
+    # What a file restores before it ends is not left behind.
+    planted_dir="$(mktemp -d "${TMPDIR:-/tmp}/schema-v2-planted-baseline-residue.XXXXXX")"
+    printf '%s\n' "DO \$\$ DECLARE previous text := current_setting('lock_timeout'); BEGIN PERFORM set_config('lock_timeout', '1ms', true); PERFORM set_config('lock_timeout', previous, true); END \$\$;" > "$planted_dir/00_planted.sql"
+    if ! probe_stderr="$(apply_baseline "$planted_dir" 2>&1 >/dev/null)"; then
+        printf '%s\n' "the baseline probe refused a setting the file restored: $(printf '%s\n' "$probe_stderr" | psql_error_message)" >&2
+        exit 1
+    fi
+    remove_planted_dir "$planted_dir"
 }
 
 # A schema-migration database can exist before phase-runner installs the phase
@@ -3198,6 +3384,7 @@ SQL
 report_timing empty-schema
 
 assert_baseline_session_state_carries
+assert_baseline_residue_probe_holds
 assert_migration_sequence_session_mirrors_sqlx
 assert_session_residue_probe_holds
 apply_baseline
