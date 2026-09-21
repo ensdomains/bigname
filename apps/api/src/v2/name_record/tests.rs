@@ -226,3 +226,34 @@ fn wrapper_summary(state: &str, fuses: u32) -> serde_json::Value {
         }
     })
 }
+
+#[test]
+fn lapsed_registration_held_through_is_a_closed_set() {
+    let held_through = |authority_kind: serde_json::Value| {
+        let summary = json!({"registration": {"lapsed_registration": {
+            "registrant": "0x00000000000000000000000000000000000000aa",
+            "authority_kind": authority_kind,
+            "released_at": 1_700_000_000,
+        }}});
+        serde_json::to_value(lapsed_registration(&summary).expect("lapsed block"))
+            .expect("lapsed block serializes")
+    };
+    assert_eq!(
+        held_through(json!("registrar"))["held_through"],
+        "registrar"
+    );
+    assert_eq!(held_through(json!("wrapper"))["held_through"], "wrapper");
+    // Project's other authority kinds never hold a lease, so they are not served as one.
+    for other in [
+        json!("registry_only"),
+        json!("ens_v2_registry"),
+        json!(null),
+    ] {
+        let lapsed = held_through(other.clone());
+        assert!(lapsed.get("held_through").is_none(), "{other}: {lapsed}");
+        assert_eq!(
+            lapsed["registrant"],
+            "0x00000000000000000000000000000000000000aa"
+        );
+    }
+}

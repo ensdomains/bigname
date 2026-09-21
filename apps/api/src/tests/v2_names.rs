@@ -272,6 +272,118 @@ async fn v2_get_names_lists_a_namespace_expiry_window_in_expiry_order() -> Resul
     database.cleanup().await
 }
 
+// A released `.eth` name stays in the listing: the listing means "registrations whose expiry falls
+// in this window", whether the registration is live, in grace or released. The released row
+// carries its status and its old expiry and no current registrant or owner.
+#[tokio::test]
+async fn v2_get_names_lists_a_released_name_inside_the_window_next_to_a_live_one() -> Result<()> {
+    const HOLDER: &str = "0x0000000000000000000000000000000000000abc";
+    let database = TestDatabase::new_migrated().await?;
+    for (logical, name, resource, token, binding) in [
+        (
+            "ens:lapsed-listed.eth",
+            "lapsed-listed.eth",
+            0x5a_0702_u128,
+            0x5a_0703_u128,
+            0x5a_0704_u128,
+        ),
+        (
+            "ens:live-listed.eth",
+            "live-listed.eth",
+            0x5a_0712,
+            0x5a_0713,
+            0x5a_0714,
+        ),
+    ] {
+        seed_identity_name(
+            &database,
+            logical,
+            name,
+            name,
+            &format!("namehash:{name}"),
+            Uuid::from_u128(resource),
+            Uuid::from_u128(token),
+            Uuid::from_u128(binding),
+            HOLDER,
+            bigname_storage::AddressNameRelation::TokenHolder,
+            38,
+        )
+        .await?;
+    }
+    // The registration object Project writes for a released ENSv1 tombstone.
+    sqlx::query(
+        "UPDATE name_current
+         SET declared_summary = declared_summary || jsonb_build_object(
+             'registration', (declared_summary -> 'registration') || jsonb_build_object(
+                 'status', 'released', 'authority_kind', NULL, 'authority_key', NULL,
+                 'registrant', NULL, 'expiry', 1700000000, 'released_at', 1707776000,
+                 'lapsed_registration', jsonb_build_object(
+                     'registrant', $1::text, 'authority_kind', 'registrar',
+                     'authority_key', 'registrar:lapsed', 'released_at', 1707776000)),
+             'control', jsonb_build_object('status', 'unregistered'))
+         WHERE raw_name = 'lapsed-listed.eth'",
+    )
+    .bind(HOLDER)
+    .execute(&database.lookup_pool)
+    .await?;
+
+    let payload = v2_names_payload(
+        &database,
+        "/v1/names?namespace=ens&expires_after=2023-01-01T00:00:00Z&expires_before=2031-01-01T00:00:00Z",
+    )
+    .await?;
+    assert_eq!(
+        payload["data"],
+        json!([
+            {
+                "name": "lapsed-listed.eth",
+                "display_name": "lapsed-listed.eth",
+                "namespace": "ens",
+                "namehash": "0x648f55586c02f13100041eeef8fa1550dc7dc35f0e5871dc7bea445cfbccce32",
+                "registration_status": "released",
+                "registered_at": "2026-04-17T00:00:21Z",
+                "created_at": "2026-04-17T00:00:11Z",
+                "expires_at": "2023-11-14T22:13:20Z"
+            },
+            {
+                "name": "live-listed.eth",
+                "display_name": "live-listed.eth",
+                "namespace": "ens",
+                "namehash": "0xf5d57b8ccea9df92d48c79fec7260d742812b8f135ef7bf64d5b7b87ac11ea29",
+                "owner": HOLDER,
+                "registrant": HOLDER,
+                "registration_status": "active",
+                "registered_at": "2026-04-17T00:00:21Z",
+                "created_at": "2026-04-17T00:00:11Z",
+                "expires_at": "2030-03-17T17:46:40Z"
+            }
+        ]),
+        "the released name keeps its place at its old expiry, with no registrant or owner"
+    );
+
+    // A window that covers only the old expiry still serves the released name.
+    let payload = v2_names_payload(
+        &database,
+        "/v1/names?namespace=ens&expires_after=2023-11-14T22:13:20Z&expires_before=2023-11-14T22:13:21Z",
+    )
+    .await?;
+    assert_eq!(v2_names_listed(&payload), vec!["lapsed-listed.eth"]);
+
+    // The lapsed holder is on the name's own record, not on the listing row.
+    let detail =
+        v2_name_record_payload_for_database(&database, "/v1/names/lapsed-listed.eth").await?;
+    assert_eq!(
+        detail["data"]["lapsed_registration"],
+        json!({
+            "registrant": HOLDER,
+            "held_through": "registrar",
+            "released_at": "2024-02-12T22:13:20Z",
+        })
+    );
+
+    database.cleanup().await
+}
+
 #[tokio::test]
 async fn v2_collection_cursor_requires_same_publication_and_bound_evaluation_time() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;

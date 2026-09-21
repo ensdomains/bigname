@@ -1,5 +1,6 @@
 use super::*;
 use crate::v2::decode;
+use crate::v2::{AddressNamesDedupe, AddressNamesSort};
 use bigname_storage::{AddressNamesCurrentSortedCursor, AddressNamesCurrentSortedCursorValue};
 use sqlx::types::Uuid;
 

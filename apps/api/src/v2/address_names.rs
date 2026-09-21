@@ -6,9 +6,7 @@ use axum::{
     extract::{Path, State},
 };
 use bigname_storage::{
-    AddressNameCurrentEntry, AddressNameRelation, AddressNamesCurrentDedupe,
-    AddressNamesCurrentOrder, AddressNamesCurrentSort, EffectivePermissionRow, NameCurrentRow,
-    PrimaryNameClaimStatus,
+    AddressNameCurrentEntry, EffectivePermissionRow, NameCurrentRow, PrimaryNameClaimStatus,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -20,10 +18,10 @@ use super::permission_support::{
 };
 use super::support::{ensure_public_namespace, parse_evm_address};
 use super::{
-    AddressNamesDedupe, AddressNamesSort, Authority, Envelope, GrantRelation, Page,
-    QueryParamAllowlist, RegistrationStatus, Relation, RelationSet, SortOrder, StrictQueryParams,
-    V2Error, V2Result, api_error_to_v2, decode, effective_permission_scope_value, encode,
-    name_record::{load_migrated_at, name_registration_fields},
+    Authority, Envelope, GrantRelation, Page, QueryParamAllowlist, RegistrationStatus, Relation,
+    RelationSet, SortOrder, StrictQueryParams, V2Error, V2Result, api_error_to_v2, decode,
+    effective_permission_scope_value, encode,
+    name_record::{load_migrated_at, name_registration_fields, registration_id},
     permission_powers_value,
     restrictions::ResourceRestrictions,
     validate_latest_collection_selectors,
@@ -42,6 +40,12 @@ pub(crate) use self::cursor::{
 mod cursor;
 mod resolves_to;
 mod role_summary;
+mod storage_mapping;
+
+pub(crate) use self::storage_mapping::{
+    dedupe_to_storage, order_to_storage, relation_from_storage, relation_set_to_storage,
+    sort_to_storage,
+};
 
 pub(crate) use self::resolves_to::{AddressNameResolution, address_name_resolution};
 #[cfg(test)]
@@ -369,7 +373,14 @@ pub(crate) async fn get_address_names(
                     .get(&entry.resource_id)
                     .map(ResourceRestrictions::from_summary)
                     .transpose()?
-                    .flatten();
+                    .flatten()
+                    .map(|restrictions| {
+                        restrictions.for_registration(
+                            name_rows
+                                .get(&entry.logical_name_id)
+                                .and_then(|row| registration_id(&row.declared_summary, None)),
+                        )
+                    });
             }
             Ok(row)
         })
@@ -467,7 +478,7 @@ pub(crate) fn build_address_name(
         display_name: entry.canonical_display_name.clone(),
         namespace: entry.namespace.clone(),
         namehash: entry.namehash.clone(),
-        permission_resource_id: Some(entry.resource_id.to_string()),
+        permission_resource_id: Some(permission_resource_handle(name_row, entry.resource_id)),
         owner: registration.owner,
         registrant: registration.registrant,
         registration_status: registration.registration_status,
@@ -491,54 +502,22 @@ pub(crate) fn build_address_name(
     }
 }
 
-/// The `address_names_current` relation an authority relation reads. `resolves_to` reads
-/// `address_records_current` instead and has no storage relation here.
-pub(crate) fn relation_to_storage(relation: Relation) -> Option<AddressNameRelation> {
-    match relation {
-        Relation::Owner => Some(AddressNameRelation::TokenHolder),
-        Relation::Manager => Some(AddressNameRelation::EffectiveController),
-        Relation::Registrant => Some(AddressNameRelation::Registrant),
-        Relation::ResolvesTo => None,
-    }
-}
-
-pub(crate) fn relation_set_to_storage(relation_set: &RelationSet) -> Vec<AddressNameRelation> {
-    relation_set
-        .as_slice()
-        .iter()
-        .copied()
-        .filter_map(relation_to_storage)
-        .collect()
-}
-
-pub(crate) fn relation_from_storage(relation: AddressNameRelation) -> Relation {
-    match relation {
-        AddressNameRelation::TokenHolder => Relation::Owner,
-        AddressNameRelation::EffectiveController => Relation::Manager,
-        AddressNameRelation::Registrant => Relation::Registrant,
-    }
-}
-
-pub(crate) fn dedupe_to_storage(dedupe: AddressNamesDedupe) -> AddressNamesCurrentDedupe {
-    match dedupe {
-        AddressNamesDedupe::Name => AddressNamesCurrentDedupe::Surface,
-        AddressNamesDedupe::Registration => AddressNamesCurrentDedupe::Resource,
-    }
-}
-
-pub(crate) fn sort_to_storage(sort: AddressNamesSort) -> AddressNamesCurrentSort {
-    match sort {
-        AddressNamesSort::Name => AddressNamesCurrentSort::Name,
-        AddressNamesSort::ExpiresAt => AddressNamesCurrentSort::ExpiresAt,
-        AddressNamesSort::RegisteredAt => AddressNamesCurrentSort::RegisteredAt,
-    }
-}
-
-pub(crate) fn order_to_storage(order: SortOrder) -> AddressNamesCurrentOrder {
-    match order {
-        SortOrder::Asc => AddressNamesCurrentOrder::Asc,
-        SortOrder::Desc => AddressNamesCurrentOrder::Desc,
-    }
+/// The value `GET /v1/permissions?registration_id=` resolves to this row's permission resource:
+/// the registration the name currently serves (its BaseRegistrar lease for a wrapped `.eth`
+/// name, whose rows live on the NameWrapper resource), or the resource itself when no
+/// current registration claims it. Unsupported name coverage does not erase a retained handle.
+/// A wrapped subname has no lease, so it keeps its NameWrapper resource.
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L240-L305 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L390-L414 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L118-L152 @ ens_v1@91c966f)
+pub(crate) fn permission_resource_handle(
+    name_row: Option<&NameCurrentRow>,
+    resource_id: sqlx::types::Uuid,
+) -> String {
+    name_row
+        .filter(|row| super::permissions::registration_row(row))
+        .and_then(|row| registration_id(&row.declared_summary, None))
+        .unwrap_or_else(|| resource_id.to_string())
 }
 
 pub(crate) fn build_address_name_role_summary(
