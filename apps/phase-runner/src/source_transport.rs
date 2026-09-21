@@ -164,14 +164,22 @@ async fn apply_transition(
         "transport change requires a retained boundary"
     );
     let resume = resume_point(tx, database.pool(), chain, cursor, &phase, &new_provider).await?;
-    if let ResumePoint::DeclaredStart(_) = &resume {
+    let normal_target = if let ResumePoint::DeclaredStart(_) = &resume {
         // A normal batch requires safe and finalized heads from its source before it plans
         // anything; live follow applies its own version while selecting its continuation, and
         // a redo batch does not read heads.
         admit_ingest_checkpoint_heads(&new_provider).await.context(
             "the proposed reader cannot serve the Ingest batch that resumes after this change",
         )?;
-    }
+        // Normal Ingest keeps the original target across partial batches and resolves it
+        // before loading its next window, even if the reader's latest head is now lower.
+        match cursor["target_block_number"].as_i64() {
+            Some(to) => compare_target(&old_provider, &new_provider, "normal Ingest", to).await?,
+            None => Value::Null,
+        }
+    } else {
+        Value::Null
+    };
     let redo_target = match &resume {
         ResumePoint::Redo(_) => {
             // A redo batch resolves the range's last block on its source before it reads
@@ -181,16 +189,7 @@ async fn apply_transition(
             let to = phase["redo_to_block_number"].as_i64().ok_or_else(|| {
                 anyhow::anyhow!("ingest redo is in progress without a redo range")
             })?;
-            let left = old_provider
-                .fetch(WatchFilter::default(), to, to)
-                .await
-                .with_context(|| format!("redo target block {to} is not readable"))?;
-            let right = new_provider
-                .fetch(WatchFilter::default(), to, to)
-                .await
-                .with_context(|| format!("redo target block {to} is not readable"))?;
-            ensure!(left.end == right.end, "redo target differs at block {to}");
-            json!({"block": to, "hash": right.end.hash})
+            compare_target(&old_provider, &new_provider, "redo", to).await?
         }
         _ => Value::Null,
     };
@@ -231,8 +230,28 @@ async fn apply_transition(
         "compared_block":compared,"compared_block_hash":right.end.hash,
         "compared_block_log_count":right.logs.len(),
         "live_continuation":resume.live_continuation_receipt(),"redo_target":redo_target,
+        "normal_target":normal_target,
         "same_node_attested":true}),
     )
+}
+
+/// Compare the target the resumed batch resolves before loading any further blocks.
+async fn compare_target(
+    old_provider: &VerificationProvider,
+    new_provider: &VerificationProvider,
+    kind: &str,
+    to: i64,
+) -> Result<Value> {
+    let left = old_provider
+        .fetch(WatchFilter::default(), to, to)
+        .await
+        .with_context(|| format!("{kind} target block {to} is not readable"))?;
+    let right = new_provider
+        .fetch(WatchFilter::default(), to, to)
+        .await
+        .with_context(|| format!("{kind} target block {to} is not readable"))?;
+    ensure!(left.end == right.end, "{kind} target differs at block {to}");
+    Ok(json!({"block": to, "hash": right.end.hash}))
 }
 
 /// The work Ingest resumes with after the change, read from the persisted runner state the

@@ -841,6 +841,97 @@ async fn redo_target_missing_on_the_candidate_is_refused() -> Result<()> {
     db.cleanup().await
 }
 
+#[tokio::test]
+async fn retained_normal_target_missing_on_the_candidate_is_refused() -> Result<()> {
+    let db = ScratchDatabase::create("source_transport_normal_target").await?;
+    seed_watch_set(db.pool()).await?;
+    seed_ingest(db.pool(), "drpc", Redo::None).await?;
+    // A normal batch selects the node's latest block as its target and retains that target
+    // in SourceProgress even when only its first window completes. The runner persists it
+    // separately from the cursor position (state_ingest_progress::upsert_ingest_cursor),
+    // and the resumed engine resolves that same target before loading the next window.
+    sqlx::query(
+        "UPDATE ingest_cursors SET next_block_number = 256, target_block_number = 1000,
+            last_processed_block_number = 255, last_processed_block_hash = $2
+         WHERE chain_id = $1",
+    )
+    .bind(SEPOLIA)
+    .bind(block_hash(255))
+    .execute(db.pool())
+    .await?;
+    sqlx::query(
+        "UPDATE chain_phase_state SET phase_status = 'failed', finished_at = now(),
+            last_error = 'normal batch interrupted', current_block_number = 255,
+            current_block_hash = $2, target_block_number = 1000, target_block_hash = $3
+         WHERE chain_id = $1 AND phase_name = 'ingest'",
+    )
+    .bind(SEPOLIA)
+    .bind(block_hash(255))
+    .bind(block_hash(1000))
+    .execute(db.pool())
+    .await?;
+    let node = NodeDouble::through(1000).with_watched_log(256);
+    // Both checkpoint heads exist, and all retained boundaries and the next block match.
+    // This reader lacks only the higher retained target; its retention floor is zero.
+    let behind = NodeDouble::through(998).with_watched_log(256);
+    let before = snapshot(db.pool()).await?;
+    let mut probe = db.pool().begin().await?;
+
+    let error = switch_with_readers(&db, "drpc", &node, "reth_db", &behind, |source| {
+        let provider = VerificationProvider::new(SEPOLIA, "drpc", source.endpoint())?;
+        Ok(if source.source_kind == "reth_db" {
+            provider.with_declared_retention_floor(0)
+        } else {
+            provider
+        })
+    })
+    .await
+    .expect_err("normal Ingest resolves its retained target before reading block 256");
+    assert!(
+        format!("{error:#}").contains("normal Ingest target block 1000 is not readable"),
+        "{error:#}"
+    );
+    // Probe from a pre-opened second session before any further request can flush a queued
+    // rollback; refusal must already have released every writer lock.
+    let attempts = PhaseName::ALL
+        .iter()
+        .map(|phase| {
+            format!(
+                "pg_try_advisory_xact_lock(hashtextextended('phase-runner:{SEPOLIA}:{phase}', \
+                 0::bigint))"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let row = sqlx::raw_sql(&format!("SELECT {attempts}"))
+        .fetch_one(&mut *probe)
+        .await?;
+    for (index, phase) in PhaseName::ALL.iter().enumerate() {
+        assert!(row.try_get::<bool, _>(index)?, "{phase} lock remains held");
+    }
+    probe.rollback().await?;
+    assert_eq!(before, snapshot(db.pool()).await?);
+
+    let forked = node.clone().with_hash(1000, block_hash(2000));
+    let error = switch(&db, "drpc", &node, "reth_db", &forked)
+        .await
+        .expect_err("both readers must agree on the retained target's hash");
+    assert!(format!("{error:#}").contains("normal Ingest target differs at block 1000"));
+    assert_eq!(before, snapshot(db.pool()).await?);
+
+    let receipt = switch_to_direct_reader_with_floor(&db, &node, 0).await?;
+    assert_eq!(receipt["next_block"], 256);
+    assert_eq!(
+        receipt["normal_target"],
+        json!({"block": 1000, "hash": block_hash(1000)})
+    );
+    assert_eq!(
+        snapshot(db.pool()).await?,
+        with_stored_kind(before, "reth_db")
+    );
+    db.cleanup().await
+}
+
 /// Runs the production switch with each descriptor read through an HTTP node double. The
 /// direct database reader needs a real Reth datadir, so `direct` stands in for it; the locks,
 /// cursor checks, comparisons and update are the ones `transition` runs.

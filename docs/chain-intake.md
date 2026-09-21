@@ -219,9 +219,14 @@ way the runner reads it:
   (the compared block is the ancestor when the next block does not exist yet).
   A redo position outside its range is refused, as the engine refuses it;
 - an unfinished Ingest phase, or a completed phase that never handed off,
-  replans from the declared start block (zero, so a direct reader that has pruned any history is refused). The
-  proposed reader must also report safe and finalized checkpoint heads, as the
-  normal Ingest batch requires before it plans work;
+  replans from the declared start block (zero, so a direct reader that has pruned
+  any history is refused). The proposed reader must also report safe and
+  finalized checkpoint heads, as the normal Ingest batch requires before it
+  plans work. When the cursor retains a normal target, both interfaces must
+  return the same hash for that block: normal Ingest resolves its retained
+  target before loading the next window, even when the reader's latest head is
+  lower. This check does not lower or reset the target and does not apply to
+  live follow;
 - a completed Ingest phase that handed off to live follow is judged where live
   follow resumes, not on the retained Ingest cursor, which stops at the handoff
   while live progress is recorded separately. The command selects that block
@@ -243,9 +248,9 @@ A refusal names the floor and the range the resumed work would plan, and
 changes nothing; without it the command would report success and the next
 batch would fail the same check.
 It emits a receipt containing the previous cursor, unchanged phase state,
-checked boundaries, the block it compared, the checked redo target when blocks
-remain in a redo and, after a handoff, the selected live continuation; retain
-that receipt with the deployment record. Raw facts,
+checked boundaries, the block it compared, the checked `normal_target` or
+`redo_target` when applicable and, after a handoff, the selected live
+continuation; retain that receipt with the deployment record. Raw facts,
 positions, redo ranges, manifest authority and verification state are preserved.
 A mismatch or held writer lock aborts before the update. The inverse change is
 supported for rollback after the same checks. An ordinary startup still rejects
