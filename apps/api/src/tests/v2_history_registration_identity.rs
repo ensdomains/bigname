@@ -630,8 +630,7 @@ async fn registration_history_keeps_an_earlier_successor_lease_under_a_registry_
 }
 
 #[tokio::test]
-async fn nameless_registry_permissions_keep_the_lease_before_surface_materialization() -> Result<()>
-{
+async fn nameless_registry_events_keep_the_lease_before_surface_materialization() -> Result<()> {
     const NAME: &str = "nameless-registry-permissions.eth";
     const OWNER: &str = "0x0000000000000000000000000000000000007190";
     let database = TestDatabase::new_migrated().await?;
@@ -653,7 +652,7 @@ async fn nameless_registry_permissions_keep_the_lease_before_surface_materializa
         80,
     )
     .await?;
-    let blocks = (120..=125)
+    let blocks = (120..=127)
         .map(|number| {
             let parent = (number > 120).then(|| format!("0xhistory{}", number - 1));
             raw_block(
@@ -668,9 +667,9 @@ async fn nameless_registry_permissions_keep_the_lease_before_surface_materializa
     upsert_phase_raw_blocks(&database.pool, &blocks).await?;
     seed_schema_v2_ens_lookup_head(
         &database.pool,
-        125,
-        "0xhistory125",
-        &crate::v2::format_timestamp(timestamp(1_700_000_125)),
+        127,
+        "0xhistory127",
+        &crate::v2::format_timestamp(timestamp(1_700_000_127)),
     )
     .await?;
     upsert_test_resources(
@@ -683,10 +682,26 @@ async fn nameless_registry_permissions_keep_the_lease_before_surface_materializa
     .await?;
     // Name materialization makes the registry resource reachable only after these rows
     // were emitted. It must not rewrite the rows' missing logical_name_id or node fields.
-    sqlx::query("UPDATE bigname_phase.surface_bindings SET block_number = 123, block_hash = '0xhistory123', active_from = to_timestamp(1700000123) WHERE resource_id = $1")
+    sqlx::query("UPDATE bigname_phase.surface_bindings SET block_number = 126, block_hash = '0xhistory126', active_from = to_timestamp(1700000126) WHERE resource_id = $1")
         .bind(registry).execute(&database.pool).await?;
     sqlx::query("UPDATE bigname_phase.name_current SET declared_summary = jsonb_set(declared_summary, '{registration,resource_id}', to_jsonb($2::text)) WHERE resource_id = $1")
         .bind(registry).bind(successor.to_string()).execute(&database.pool).await?;
+    // Registry control resources have no token lineage. None of the resolver rows below
+    // has a binding at its event position; the later binding supplies only reachability.
+    sqlx::query("UPDATE bigname_phase.address_names_current SET token_lineage_id = NULL WHERE resource_id = $1")
+        .bind(registry).execute(&database.pool).await?;
+    sqlx::query(
+        "UPDATE bigname_phase.name_current SET token_lineage_id = NULL WHERE resource_id = $1",
+    )
+    .bind(registry)
+    .execute(&database.pool)
+    .await?;
+    sqlx::query(
+        "UPDATE bigname_phase.resources SET token_lineage_id = NULL WHERE resource_id = $1",
+    )
+    .bind(registry)
+    .execute(&database.pool)
+    .await?;
     let mut grant = v2_history_event(
         "nameless-registry-grant",
         None,
@@ -723,6 +738,23 @@ async fn nameless_registry_permissions_keep_the_lease_before_surface_materializa
     );
     next.after_state["namehash"] = json!(node);
     let mut events = vec![grant, authority, release, next];
+    // NewResolver retains the controlling registry resource but no logical name before
+    // discovery, and its payload carries the node (registry::surface::link_resolver_event).
+    // (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L86-L94 @ ens_v1@91c966f)
+    for block in [122, 124, 125] {
+        let mut resolver = v2_history_event(
+            &format!("nameless-resolver-{block}"),
+            None,
+            Some(registry),
+            "ResolverChanged",
+            block,
+        );
+        resolver.source_family = "ens_v1_registry_l1".into();
+        resolver.log_index = Some(1);
+        resolver.after_state = json!({"source_event": "NewResolver", "node": node,
+            "resolver": "0x0000000000000000000000000000000000000abc"});
+        events.push(resolver);
+    }
     // These are the exact nameless payload shapes made by registry::push_permission_change
     // and protocol::permissions::{v1_grant_states,v1_revoke_states}: authority metadata
     // is nested under the permission source, and neither source contains the node.
@@ -777,6 +809,42 @@ async fn nameless_registry_permissions_keep_the_lease_before_surface_materializa
             "{route}: {history}"
         );
     }
+    let all =
+        v2_history_payload_for_database(&database, &format!("/v1/events?name={NAME}&page_size=20"))
+            .await?;
+    for (block, expected) in [
+        (122, json!(lease)),
+        (124, Value::Null),
+        (125, json!(successor)),
+    ] {
+        let row = all["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["type"] == "resolver" && row["block_number"] == block)
+            .unwrap();
+        assert_eq!(row["registration_id"], expected, "{all}");
+    }
+    for (id, expected_block, count) in [(lease, 122, 6), (successor, 125, 2)] {
+        let history = v2_history_payload_for_database(
+            &database,
+            &format!("/v1/events?registration_id={id}&page_size=20"),
+        )
+        .await?;
+        let resolvers = history["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|row| row["type"] == "resolver")
+            .collect::<Vec<_>>();
+        assert_eq!(resolvers.len(), 1, "{history}");
+        assert_eq!(
+            resolvers[0]["block_number"],
+            json!(expected_block),
+            "{history}"
+        );
+        assert_eq!(history["page"]["total_count"], json!(count), "{history}");
+    }
     let later = v2_history_payload_for_database(
         &database,
         &format!("/v1/events?registration_id={successor}&page_size=20"),
@@ -799,6 +867,13 @@ async fn nameless_registry_permissions_keep_the_lease_before_surface_materializa
         false,
     )
     .await?;
+    let resolvers = retained
+        .iter()
+        .filter(|row| row.event_kind == "ResolverChanged")
+        .collect::<Vec<_>>();
+    assert_eq!(resolvers.len(), 1, "{retained:?}");
+    assert_eq!(resolvers[0].block_number, Some(122), "{retained:?}");
+    assert_eq!(resolvers[0].registration_id, Some(lease), "{retained:?}");
     let permissions = retained
         .iter()
         .filter(|row| row.event_kind == "PermissionChanged")
@@ -810,6 +885,57 @@ async fn nameless_registry_permissions_keep_the_lease_before_surface_materializa
             .all(|row| row.registration_id == Some(lease)),
         "{retained:?}"
     );
+    // setRecord can clear an existing registry owner and then emit NewResolver in the
+    // same call. The read resource survives, but its former control must not confer a lease.
+    // (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L29-L41 @ ens_v1@91c966f)
+    let logical: String = sqlx::query_scalar(
+        "SELECT logical_name_id FROM bigname_phase.surface_bindings WHERE resource_id = $1",
+    )
+    .bind(registry)
+    .fetch_one(&database.pool)
+    .await?;
+    sqlx::query("UPDATE bigname_phase.surface_bindings SET active_to = to_timestamp(1700000127) WHERE resource_id = $1")
+        .bind(registry).execute(&database.pool).await?;
+    let mut ownerless = v2_history_event(
+        "registry-control-cleared",
+        Some(&logical),
+        Some(registry),
+        "AuthorityTransferred",
+        127,
+    );
+    ownerless.source_family = "ens_v1_registry_l1".into();
+    ownerless.after_state = json!({"source_event": "Transfer", "node": node,
+        "owner": "0x0000000000000000000000000000000000000000",
+        "owner_getter": "0x0000000000000000000000000000000000000000", "authority_kind": null});
+    let mut read_resolver = v2_history_event(
+        "registry-read-resolver",
+        Some(&logical),
+        Some(registry),
+        "ResolverChanged",
+        127,
+    );
+    read_resolver.source_family = "ens_v1_registry_l1".into();
+    read_resolver.log_index = Some(1);
+    read_resolver.after_state = json!({"source_event": "NewResolver", "node": node,
+        "resolver": "0x0000000000000000000000000000000000000abd"});
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[ownerless, read_resolver])
+        .await?;
+    let all =
+        v2_history_payload_for_database(&database, &format!("/v1/events?name={NAME}&page_size=20"))
+            .await?;
+    let read_only = all["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["type"] == "resolver" && row["block_number"] == 127)
+        .unwrap();
+    assert_eq!(read_only["registration_id"], Value::Null, "{all}");
+    let current = v2_history_payload_for_database(
+        &database,
+        &format!("/v1/events?registration_id={successor}&page_size=20"),
+    )
+    .await?;
+    assert_eq!(current["page"]["total_count"], json!(2), "{current}");
     database.cleanup().await
 }
 

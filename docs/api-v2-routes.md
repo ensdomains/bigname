@@ -1434,8 +1434,12 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
   Events on a registry-only control resource use the registrar lease that existed
   at the event's position, established by activated grant and release evidence on
   the same chain branch. They do not borrow the latest lease from current name
-  state. During a released gap, or before a lease is proved, those control events
-  have no registration handle. A record event with no resource belongs to that
+  state. This includes resolver changes recorded before name materialization:
+  a resource still under registry-only control needs no token lineage or active
+  name binding to identify the lease at that event. A resolver change on an
+  unbound read resource after that control ended still has no registration
+  handle. During a released gap, or before a lease is proved, those control
+  events have no registration handle. A record event with no resource belongs to that
   lease only while the registry-only binding is active and the lease exists at
   the record's position. The same selection governs row IDs, registration filters,
   counts and cursor anchors.
@@ -1715,7 +1719,10 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
   rows still carry the registrar lease as `registration_id`, the handle name
   detail serves, and the resource read is the read by that handle; the
   registry-only resource holds the rows but is not a public registration
-  handle and selects none by its own id. An ordinary registry-owned subname with
+  handle and selects none by its own id. This also holds before name materialization
+  when activated, canonical registry authority and registrar grant observations
+  identify the same node on the same chain; absent logical names alone prove no
+  relationship. An ordinary registry-owned subname with
   no registrar lease instead uses its registry resource as the registration
   handle. That handle selects its grants both while the name is current and as
   a resource audit after the current name row disappears.

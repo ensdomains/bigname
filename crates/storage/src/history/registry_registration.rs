@@ -26,6 +26,45 @@ pub(super) fn is_registry_only(resource: &str, event: &str, canonical_only: bool
     )
 }
 
+// A resolver without a binding can belong to pre-surface control or to the read resource
+// retained after ownership was cleared. Only the former bypasses the read-only fallback.
+pub(super) fn is_registry_control_at_event(
+    resource: &str,
+    event: &str,
+    canonical_only: bool,
+) -> String {
+    let fork = same_fork_as("registry_control", &[event], canonical_only);
+    let canonical = canonical_row(
+        "registry_control",
+        "registry_control_lineage",
+        canonical_only,
+    );
+    format!(
+        r#"COALESCE((
+            SELECT registry_control.event_kind <> 'SurfaceUnbound'
+               AND registry_control.after_state ->> 'authority_kind' = 'registry_only'
+            FROM bigname_phase.normalized_events registry_control
+            LEFT JOIN bigname_phase.chain_lineage registry_control_lineage
+              ON registry_control_lineage.chain_id = registry_control.chain_id
+             AND registry_control_lineage.block_hash = registry_control.block_hash
+            WHERE registry_control.resource_id = {resource}
+              AND registry_control.chain_id = {event}.chain_id
+              AND registry_control.namespace = {event}.namespace
+              AND registry_control.source_family IN ('ens_v1_registry_l1', 'ens_v1_registrar_l1')
+              AND registry_control.event_kind IN (
+                  'AuthorityTransferred', 'AuthorityEpochChanged', 'SurfaceBound', 'SurfaceUnbound'
+              )
+              AND registry_control.consumer_visibility = 'activated'
+              AND (registry_control.block_number, COALESCE(registry_control.log_index, -1)) <=
+                  ({event}.block_number, COALESCE({event}.log_index, -1))
+              AND {fork} AND {canonical}
+            ORDER BY registry_control.block_number DESC, registry_control.log_index DESC NULLS LAST,
+                     registry_control.normalized_event_id DESC
+            LIMIT 1
+        ), FALSE)"#
+    )
+}
+
 // The grant's node identifies the name even when the grant predates plaintext discovery.
 // Choosing the last grant first, then testing its release, preserves gaps between leases.
 // All evidence is at or before the event, hence also below its publication bound.

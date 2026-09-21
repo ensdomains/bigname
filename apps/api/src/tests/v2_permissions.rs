@@ -2241,3 +2241,167 @@ async fn resolver_roles_use_the_wrapped_registration_lease_handle() -> Result<()
     );
     database.cleanup().await
 }
+
+
+#[tokio::test]
+async fn nameless_registry_epoch_rejects_raw_permission_handle_with_distinct_lease() -> Result<()> {
+    assert_nameless_registry_permission_handle("AuthorityEpochChanged").await
+}
+
+#[tokio::test]
+async fn nameless_registry_transfer_rejects_raw_permission_handle_with_distinct_lease() -> Result<()>
+{
+    assert_nameless_registry_permission_handle("AuthorityTransferred").await
+}
+
+async fn assert_nameless_registry_permission_handle(kind: &str) -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_permissions_fixture(&database).await?;
+    let registry = v2_permissions_stale_resource_id();
+    let lease = v2_permissions_current_resource_id();
+    let node = bigname_lookup::ens_namehash_hex("presurface-permissions.eth")?;
+    let other_node = bigname_lookup::ens_namehash_hex("unrelated-presurface.eth")?;
+    sqlx::query("DELETE FROM bigname_phase.name_current")
+        .execute(&database.pool)
+        .await?;
+    sqlx::query(
+        "UPDATE bigname_phase.resources SET token_lineage_id = NULL WHERE resource_id = $1",
+    )
+    .bind(registry)
+    .execute(&database.pool)
+    .await?;
+    seed_v2_history_blocks(&database, 118..=119).await?;
+    let mut permission = permission_current_row(
+        registry,
+        V2_PERMISSIONS_SUBJECT,
+        PermissionScope::Resource,
+        1,
+        119,
+    );
+    permission.chain_positions = json!({"block_number": 119, "block_hash": "0xhistory119"});
+    permission.effective_powers = json!(["resource_control"]);
+    permission.grant_source = json!({"kind": "ens_v1_authority", "authority_kind": "registry_only",
+        "authority_key": format!("registry-only:ethereum-mainnet:{node}"),
+        "source_event_kind": "AuthorityTransferred"});
+    permission.transfer_behavior = json!("replace_on_authority_change");
+    upsert_phase_permissions_current_rows(&database.pool, &[permission]).await?;
+    let surface_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM bigname_phase.name_surfaces WHERE namehash = $1")
+            .bind(&node)
+            .fetch_one(&database.pool)
+            .await?;
+    assert_eq!(
+        surface_count, 0,
+        "there is no materialized name for this node"
+    );
+    let route = format!("/v1/permissions?registration_id={registry}");
+    let no_lease = v2_permissions_payload_for_database(&database, &route).await?;
+    assert!(
+        !no_lease["data"].as_array().unwrap().is_empty(),
+        "{no_lease}"
+    );
+
+    // Numeric registration and registry authority producers retain the node and resource
+    // before the label is known. The authority need not have a SurfaceBound observation.
+    // (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L142-L152 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L60-L68 @ ens_v1@91c966f)
+    let mut grant = v2_history_event(
+        "presurface-lease",
+        None,
+        Some(lease),
+        "RegistrationGranted",
+        118,
+    );
+    grant.after_state["namehash"] = json!(node);
+    let mut authority = v2_history_event("presurface-authority", None, Some(registry), kind, 119);
+    authority.source_family = "ens_v1_registry_l1".into();
+    authority.after_state = json!({"source_event": "Transfer", "node": node,
+        "owner": V2_PERMISSIONS_SUBJECT, "owner_getter": V2_PERMISSIONS_SUBJECT,
+        "authority_kind": "registry_only", "authority_key": format!("registry-only:ethereum-mainnet:{node}")});
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[grant, authority]).await?;
+    let rejected = v2_permissions_payload_for_database(&database, &route).await?;
+    assert_eq!(rejected["data"], json!([]), "{kind}: {rejected}");
+
+    // NewOwner evidence carries both a parent node and a child node. Prefer the child;
+    // legacy namehash evidence also takes precedence over the generic node field.
+    for field in ["namehash", "child_node"] {
+        sqlx::query("UPDATE bigname_phase.normalized_events SET after_state = jsonb_set(after_state, ARRAY[$1], $2) WHERE event_identity = 'presurface-authority'")
+            .bind(field).bind(json!(other_node)).execute(&database.pool).await?;
+        assert!(
+            !bigname_storage::resource_is_registry_control_for_registrar_lease(
+                &database.pool,
+                registry
+            )
+            .await?,
+            "{field} must take precedence"
+        );
+        sqlx::query("UPDATE bigname_phase.normalized_events SET after_state = jsonb_set(after_state, ARRAY[$1], $2) WHERE event_identity = 'presurface-authority'")
+            .bind(field).bind(json!(node.to_uppercase())).execute(&database.pool).await?;
+        assert!(
+            bigname_storage::resource_is_registry_control_for_registrar_lease(
+                &database.pool,
+                registry
+            )
+            .await?,
+            "node case is not identity"
+        );
+        sqlx::query("UPDATE bigname_phase.normalized_events SET after_state = after_state - $1 WHERE event_identity = 'presurface-authority'")
+            .bind(field).execute(&database.pool).await?;
+    }
+    // Each independent evidence failure must keep the ordinary resource audit available.
+    // In particular, two absent logical names never prove that two nodes are the same.
+    for (field, value) in [("namehash", json!(other_node)), ("namehash", Value::Null)] {
+        sqlx::query("UPDATE bigname_phase.normalized_events SET after_state = jsonb_set(after_state, ARRAY[$1], $2) WHERE event_identity = 'presurface-lease'")
+            .bind(field).bind(value).execute(&database.pool).await?;
+        let audit = v2_permissions_payload_for_database(&database, &route).await?;
+        assert_eq!(
+            audit["data"], no_lease["data"],
+            "unrelated or unknown node: {audit}"
+        );
+    }
+    sqlx::query("UPDATE bigname_phase.normalized_events SET after_state = jsonb_set(after_state, '{namehash}', $1) WHERE event_identity = 'presurface-lease'")
+        .bind(json!(node)).execute(&database.pool).await?;
+    for identity in ["presurface-lease", "presurface-authority"] {
+        sqlx::query("UPDATE bigname_phase.normalized_events SET consumer_visibility = 'candidate', migration_correlation_ids = ARRAY['presurface-permission-test'] WHERE event_identity = $1")
+            .bind(identity).execute(&database.pool).await?;
+        assert!(
+            !bigname_storage::resource_is_registry_control_for_registrar_lease(
+                &database.pool,
+                registry
+            )
+            .await?,
+            "candidate {identity}"
+        );
+        sqlx::query("UPDATE bigname_phase.normalized_events SET consumer_visibility = 'activated', canonicality_state = 'orphaned' WHERE event_identity = $1")
+            .bind(identity).execute(&database.pool).await?;
+        assert!(
+            !bigname_storage::resource_is_registry_control_for_registrar_lease(
+                &database.pool,
+                registry
+            )
+            .await?,
+            "noncanonical {identity}"
+        );
+        sqlx::query("UPDATE bigname_phase.normalized_events SET canonicality_state = 'canonical' WHERE event_identity = $1")
+            .bind(identity).execute(&database.pool).await?;
+    }
+    for block in [118_i64, 119] {
+        sqlx::query("UPDATE bigname_phase.chain_lineage SET canonicality_state = 'orphaned' WHERE block_hash = $1 AND chain_id = 'ethereum-mainnet'")
+            .bind(format!("0xhistory{block}")).execute(&database.pool).await?;
+        assert!(
+            !bigname_storage::resource_is_registry_control_for_registrar_lease(
+                &database.pool,
+                registry
+            )
+            .await?,
+            "noncanonical lineage {block}"
+        );
+        sqlx::query("UPDATE bigname_phase.chain_lineage SET canonicality_state = 'canonical' WHERE block_hash = $1 AND chain_id = 'ethereum-mainnet'")
+            .bind(format!("0xhistory{block}")).execute(&database.pool).await?;
+    }
+    assert!(
+        bigname_storage::resource_is_registry_control_for_registrar_lease(&database.pool, registry)
+            .await?
+    );
+    database.cleanup().await
+}

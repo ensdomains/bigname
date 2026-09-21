@@ -186,7 +186,7 @@ pub async fn resource_is_registry_control_for_registrar_lease(
             WHERE ne.resource_id = $1
               AND ne.source_family IN ('ens_v1_registry_l1', 'ens_v1_registrar_l1',
                   'basenames_base_registry', 'basenames_base_registrar')
-              AND ne.event_kind IN ('AuthorityEpochChanged', 'SurfaceBound')
+              AND ne.event_kind IN ('AuthorityTransferred', 'AuthorityEpochChanged', 'SurfaceBound')
               AND ne.after_state ->> 'authority_kind' = 'registry_only'
               AND EXISTS (
                   SELECT 1 FROM bigname_phase.normalized_events grant_event
@@ -198,13 +198,22 @@ pub async fn resource_is_registry_control_for_registrar_lease(
                     AND grant_event.source_family IN ('ens_v1_registrar_l1', 'basenames_base_registrar')
                     AND grant_event.event_kind = 'RegistrationGranted'
                     AND grant_event.resource_id <> ne.resource_id
-                    AND (grant_event.logical_name_id = ne.logical_name_id OR EXISTS (
+                    AND CASE WHEN
+                        COALESCE(ne.after_state ->> 'child_node',
+                            ne.after_state ->> 'namehash', ne.after_state ->> 'node') IS NOT NULL
+                        AND COALESCE(grant_event.after_state ->> 'child_node',
+                            grant_event.after_state ->> 'namehash', grant_event.after_state ->> 'node') IS NOT NULL
+                    THEN lower(COALESCE(ne.after_state ->> 'child_node',
+                             ne.after_state ->> 'namehash', ne.after_state ->> 'node')) =
+                         lower(COALESCE(grant_event.after_state ->> 'child_node',
+                             grant_event.after_state ->> 'namehash', grant_event.after_state ->> 'node'))
+                    ELSE grant_event.logical_name_id = ne.logical_name_id OR EXISTS (
                         SELECT 1 FROM bigname_phase.name_surfaces surface
                         WHERE surface.logical_name_id = ne.logical_name_id
                           AND surface.namespace = ne.namespace
                           AND surface.chain_id = ne.chain_id
                           AND surface.namehash = grant_event.after_state ->> 'namehash'
-                    ))
+                    ) END
                     AND grant_event.consumer_visibility = 'activated'
                     AND grant_event.canonicality_state IN ('canonical', 'safe', 'finalized')
                     AND grant_lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
