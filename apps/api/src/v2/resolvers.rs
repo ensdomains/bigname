@@ -118,7 +118,8 @@ pub(crate) async fn get_resolver(
         None,
         Some(resolver_namespace(chain_id_slug)?),
     )
-    .await?;
+    .await?
+    .continuing_from_request_cursor(params.cursor.is_some());
 
     let scope = resolver_snapshot_scope(chain_id_slug)?;
     let require_selected_head = params.at.is_none() && params.finality == Finality::Latest;

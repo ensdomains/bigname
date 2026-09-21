@@ -22,7 +22,7 @@ use super::{
 };
 
 use crate::v2::{
-    RecordAnswer, SnapshotReadResource, Source, api_error_to_v2_for_resource,
+    RecordAnswer, RecordSelection, SnapshotReadResource, Source, api_error_to_v2_for_resource,
     build_indexed_name_records, build_verified_name_records, default_requested_records,
     load_ephemeral_verified_record_lookup, parse_raw_query_params_with_allowlist,
     parse_record_keys, snapshot_meta,
@@ -165,7 +165,13 @@ async fn build_name_records_diagnostic(
     comparison_explicit_gaps: Vec<RecordComparisonGap>,
     selected_snapshot: &mut SelectedSnapshot,
 ) -> V2Result<NameRecordsDiagnostic> {
-    let indexed = build_indexed_name_records(row, record_inventory, Some(records), false, true)?;
+    let indexed = build_indexed_name_records(
+        row,
+        record_inventory,
+        RecordSelection::requested(records),
+        false,
+        true,
+    )?;
     let verified_records = build_bounded_ephemeral_verified_record_answers(
         state,
         row,
@@ -174,8 +180,7 @@ async fn build_name_records_diagnostic(
         selected_snapshot,
     )
     .await?;
-    let indexed_records = indexed.records.unwrap_or_default();
-    let comparison = build_record_comparison(records, &indexed_records, &verified_records);
+    let comparison = build_record_comparison(records, &indexed.records, &verified_records);
     let value_sources = build_value_sources(&comparison);
 
     let mut record_inventory_section = build_record_inventory_section_for_name(
@@ -230,12 +235,12 @@ async fn build_bounded_ephemeral_verified_record_answers(
         let verified = build_verified_name_records(
             row,
             record_inventory,
-            Some(chunk),
+            RecordSelection::requested(chunk),
             verified_lookup,
             false,
             true,
         )?;
-        answers.extend(verified.records.unwrap_or_default());
+        answers.extend(verified.records);
     }
     Ok(answers)
 }

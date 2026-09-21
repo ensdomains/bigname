@@ -694,6 +694,24 @@ indexes already exist, and it ends with the same check. The indexes change no
 stored row and no interpreter content hash input.
 
 The release containing
+`20260923130000_normalized_events_chain_block_number_desc_idx.sql` adds the
+index history and event pages read in chain-position order. On an initialized
+production namespace, build it in step 3 by running
+[`ops/events-order-index/install.sql`](../../ops/events-order-index/install.sql)
+as [its runbook](../../ops/events-order-index/README.md) describes. This runbook
+carries no copy of the statement; `install.sql` is the only source, and
+`schema-v2/apply-check.sh` proves it builds what the fresh baseline and the
+schema-migration build. The build is concurrent and permits writes, so it can
+finish while the existing runner is still processing, before the stop/start
+window opens; step 3 then only runs `install.sql` again as the check. Keep the
+`install.sql` output with its start and end times in the release record. Then
+apply the schema-migrations in step 4; the schema-migration's `IF NOT EXISTS`
+build is a no-op when the index already exists, and it ends with the same check,
+so `sqlx migrate run` stops without recording it if the index is missing,
+invalid, not ready, on another table, not an index, or has another definition.
+No `ANALYZE` is needed: the index is on plain columns.
+
+The release containing
 `20260924120000_normalized_events_resolver_history_idx.sql` carries the two
 partial `normalized_events` indexes the resolver-anchored event feed
 (`GET /v1/events?resolver=`) uses and retires the two `permission_*`
@@ -1161,6 +1179,10 @@ indexes are additive; rollback may leave them in place.
    `ops/address-history-indexes/install.sql` as described above, require it to
    exit zero, then run `ANALYZE bigname_phase.normalized_events`;
    for the release containing
+   `20260923130000_normalized_events_chain_block_number_desc_idx.sql`, run
+   `ops/events-order-index/install.sql` as described above and require it to
+   exit zero;
+   for the release containing
    `20260924120000_normalized_events_resolver_history_idx.sql`, run
    `ops/resolver-history-indexes/install.sql` as described above, require
    it to exit zero, then run `ANALYZE bigname_phase.normalized_events`; it
@@ -1169,7 +1191,8 @@ indexes are additive; rollback may leave them in place.
    more than one release apply the releases in order as described above the
    index block;
    otherwise skip this step. Every `normalized_events` index this step builds
-   except `normalized_events_chain_block_number_idx` keys on an expression, and an expression index has no statistics until the
+   except `normalized_events_chain_block_number_idx` and
+   `normalized_events_chain_block_number_desc_idx` keys on an expression, and an expression index has no statistics until the
    table is analyzed, so end the step with `ANALYZE bigname_phase.normalized_events`
    whenever it built one, or confirm autovacuum has analyzed the table since
    the build;

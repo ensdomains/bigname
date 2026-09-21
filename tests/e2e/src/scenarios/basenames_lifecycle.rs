@@ -60,8 +60,14 @@ fn assert_addr60_not_found(body: &Value) {
         "Basenames addr:60 should be absent: {body}"
     );
     assert!(body.pointer("/data/records/addr:60/value").is_none());
-    assert!(body.pointer("/data/addresses/60").is_none());
-    assert!(body.pointer("/data/primary_address").is_none());
+    for removed in [
+        "addresses",
+        "text_records",
+        "content_hash",
+        "primary_address",
+    ] {
+        assert!(body["data"].get(removed).is_none(), "{removed}: {body}");
+    }
 }
 
 fn addr60_observation(body: &Value) -> Value {
@@ -70,8 +76,6 @@ fn addr60_observation(body: &Value) -> Value {
             "status": body.pointer("/data/records/addr:60/status"),
             "value": body.pointer("/data/records/addr:60/value"),
         },
-        "address": body.pointer("/data/addresses/60"),
-        "primary_address": body.pointer("/data/primary_address"),
     })
 }
 
@@ -1351,10 +1355,10 @@ async fn l2_zero_addr60_uses_stubbed_verified_transport() -> Result<()> {
             "divergence_before": before, "divergence_after": after
         }),
         json!({
-            "indexed":{"record":{"status":"not_found", "value":null}, "address":null, "primary_address":null},
-            "verified":{"record":{"status":"not_found", "value":null}, "address":null, "primary_address":null},
-            "verified_repeat":{"record":{"status":"not_found", "value":null}, "address":null, "primary_address":null},
-            "auto":{"record":{"status":"not_found", "value":null}, "address":null, "primary_address":null},
+            "indexed":{"record":{"status":"not_found", "value":null}},
+            "verified":{"record":{"status":"not_found", "value":null}},
+            "verified_repeat":{"record":{"status":"not_found", "value":null}},
+            "auto":{"record":{"status":"not_found", "value":null}},
             "divergence_before":[0,0], "divergence_after":[0,0]
         })
     );

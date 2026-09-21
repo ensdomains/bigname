@@ -55,15 +55,16 @@ pub(crate) async fn load_indexed_record_inventory_current_for_snapshot(
     readback::load_indexed_record_inventory_current_for_snapshot(pool, row, selected_snapshot).await
 }
 
-pub(crate) async fn load_record_inventory_for_source(
+/// The record inventory `GET /v1/names/{name}/records` reads for every source: the served row at
+/// the selected snapshot on whichever chain the deployment indexes, with the binding,
+/// serving-resource, chain-position, version-boundary, and snapshot checks of the any-chain
+/// readback. It feeds the default key set, indexed answers, and `include=inventory`. It does not
+/// admit verified execution, which the lookup engine checks separately; name detail and
+/// diagnostics keep their own loaders.
+pub(crate) async fn load_records_route_inventory(
     pool: &PgPool,
     row: &NameCurrentRow,
     selected_snapshot: &SelectedSnapshot,
-    source: crate::v2::RequestSource,
 ) -> std::result::Result<Option<RecordInventoryCurrentRow>, SnapshotSelectionError> {
-    if source == crate::v2::RequestSource::Verified {
-        load_supported_record_inventory_current_for_snapshot(pool, row, selected_snapshot).await
-    } else {
-        load_indexed_record_inventory_current_for_snapshot(pool, row, selected_snapshot).await
-    }
+    load_indexed_record_inventory_current_for_snapshot(pool, row, selected_snapshot).await
 }

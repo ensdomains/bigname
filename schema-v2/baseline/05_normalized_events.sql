@@ -488,6 +488,13 @@ CREATE INDEX IF NOT EXISTS normalized_events_block_idx
 CREATE INDEX IF NOT EXISTS normalized_events_chain_block_number_idx
     ON normalized_events (chain_id, block_number);
 
+-- Serves history and event pages in their newest-first order read forward and in
+-- their oldest-first order read backward. Keep it identical to
+-- ops/events-order-index/install.sql and
+-- migrations/20260923130000_normalized_events_chain_block_number_desc_idx.sql.
+CREATE INDEX IF NOT EXISTS normalized_events_chain_block_number_desc_idx
+    ON normalized_events (chain_id, block_number DESC NULLS LAST);
+
 CREATE INDEX IF NOT EXISTS normalized_events_emitter_history_idx
     ON normalized_events (
         lower(raw_fact_ref ->> 'emitting_address'),
