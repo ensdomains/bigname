@@ -245,10 +245,12 @@ because the replays under the production schema name described below run in
 a database of their own and, on an external server, so does the whole check
 (each created at start and dropped at exit) rather than asking for `CREATE` on
 the database the URL names; the schemas are created for the login rather
-than granted to it, and the only statements that run on the configured
-user's own connection are the baseline's two reviewed `CREATE EXTENSION`
-lines, matched whole, and the setup of sqlx's bookkeeping table the replays
-record into (refused when the database already has one): whatever the rewrite misses
+than granted to it, and outside the replays under the production schema name
+described below, which run as the configured user in that database of their
+own, the only statements that run on the configured user's own connection
+are the baseline's two reviewed `CREATE EXTENSION` lines, matched whole, and
+the setup of sqlx's bookkeeping table the replays record into (refused when
+the database already has one): whatever the rewrite misses
 fails on the production schema instead of changing it unobserved. The check
 proves itself on every run against a planted set of the forms it refuses and
 the one it accepts, including an assembled production name that must be
@@ -301,8 +303,20 @@ catalogs, object kinds and column order: a name the rewrite cannot see —
 assembled from pieces, in another case, encoded — reaches the same schema
 there as under sqlx, so a schema-migration that compares one with the literal
 and takes another branch under the scratch name is refused on those
-comparisons. Those replays hold no rows, so a branch that also depends on the
-data it finds is left to review. That fresh artifact holds no rows, so a
+comparisons. They run as the configured user rather than the login, so a
+branch on who runs the file, however the file reads it, takes the other path
+there wherever the two differ in what it tests, and is refused when that path
+changes what these replays compare (a path that only changes rows is left to
+review). A third such replay, where the configured user is a superuser,
+replays the exercised scratch schema's rows (copied with triggers suspended),
+so a branch on rows and the name together is covered as far as those rows
+reach. Because a failure the login meets can be swallowed and then succeed as
+the configured user, nothing outside the phase schema may appear or change in
+that database, down to owners and privileges. A file that takes another path
+for the configured user runs it with that user's privileges, and what it does
+outside that database, to roles for one, is reported by the role snapshot but
+not undone; such a file is what these comparisons exist to refuse. The fresh
+artifact above holds no rows, so a
 schema-migration whose DDL runs only when a table has data would leave it
 unchanged; the check therefore also takes the catalog of its scratch schema
 at the end of the run — populated by every predecessor-shape and behavior
@@ -369,11 +383,19 @@ client address or port through the `inet_*` functions, `pg_stat_activity`,
 `pg_stat_get_activity`, the `pg_stat_get_backend_*` functions,
 `pg_stat_database` or the `port`, `listen_addresses`,
 `unix_socket_directories` and `cluster_name` settings — since on an external server the replay runs in a
-database of its own. Because settings name who and where as well
-(`session_authorization`, `port`), a setting is read only by the name the text
-spells: `current_setting`, quoted or not, with anything but a quoted literal,
-`pg_settings`, `pg_show_all_settings`, `pg_file_settings` and the word `SHOW`
-anywhere in the text are refused. Nor may it read the session's temporary namespace through
+database of its own. A setting answers with the connection's defaults, which
+the login does not share with the writer (`ALTER ROLE ... SET`), and some
+name who and where (`session_authorization`, `port`), so the only settings a
+phase schema-migration reads are `search_path` and `quote_all_identifiers`,
+to put them back after `set_config(..., true)`, by a quoted literal to
+`current_setting`, quoted or not — in a routine body it creates as well, which
+the rule reads like the rest of the file, so a trigger that needs another
+setting lands under a carve-out that extends the rule; any other read, `pg_settings`,
+`pg_show_all_settings`, `pg_file_settings` and the word `SHOW` anywhere in the
+text are refused. Nor may it catch every error (`WHEN OTHERS`) or every
+access-rule violation (`syntax_error_or_access_rule_violation`, `SQLSTATE
+'42000'`), which swallows the privilege failure the login meets where the
+writer succeeds. Nor may it read the session's temporary namespace through
 `pg_my_temp_schema`, `current_schemas` or `pg_is_other_temp_schema`: a file
 that creates and drops a temporary table leaves that namespace allocated for
 the files after it in one `sqlx migrate run` but not in a catch-up split
@@ -383,7 +405,10 @@ rule like the fresh and exercised schemas, and that rule also refuses a
 foreign key whose referenced table has more than one unique index that could
 back it: PostgreSQL picks the first valid one in index OID order and the
 catalog does not print
-which, so two histories that print alike would drop or cascade differently.
+which, so two histories that print alike would drop or cascade differently,
+and an object that is a member of an extension or depends on one
+(`ALTER FUNCTION ... DEPENDS ON EXTENSION`), which `DROP EXTENSION` takes
+along while the catalog prints neither relationship.
 Column order is not part of the
 artifact: a column a schema-migration adds sits last on an initialized
 database and wherever the baseline lists it on a fresh one. What the check
@@ -425,8 +450,12 @@ The check is built to catch a schema-migration that would behave differently
 under sqlx on a production database through ordinary SQL, including dynamic
 SQL whose effect it can observe at run time: an assembled phase schema name
 compared as a value is caught by the replays under the literal name as far as
-an empty schema shows it, and an assembled password change by the verifier
-snapshot or the reconnect. SQL
+their rows reach, an identity read however it is spelled by the same replays
+run as the configured user where that user differs from the login in what the
+branch tests and its other path changes the schema or anything outside it,
+and an assembled password change by the verifier snapshot or the reconnect. A
+branch keyed to an identity neither has, such as a production-only role, is
+beyond any check that does not run as that role. SQL
 written to hide from a text rule what no run-time read observes — a keyword or
 role name assembled from pieces so that no rule can see it — is outside what a
 conformance test can close, and review is the control for it.

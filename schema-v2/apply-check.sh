@@ -44,7 +44,8 @@ fi
 # in a DO body -- fails on the production schema instead of changing it
 # unobserved. A separate login, not SET ROLE on the owner's session: RESET
 # ROLE would hand a schema-migration the owner back. Only role set-up and teardown
-# use the owner's connection.
+# use the owner's connection here; the replays under the literal schema name
+# run as the owner, in a database of their own (assert_literal_schema_name_replays_match).
 run_psql_as_owner() {
     case "$psql_mode" in
         database-container)
@@ -895,6 +896,22 @@ BEGIN
     END LOOP;
     RETURN array_to_string(parts, '');
 END $normalize$;
+-- An ACL with the owner written as owner wherever it is a whole grantee or
+-- grantor, matched on the name as ACL text prints it (double-quoted unless
+-- all ASCII letters, digits and underscores), so the catalog reads alike
+-- whoever owns the schema.
+CREATE FUNCTION pg_temp.frozen_catalog_acl(acl aclitem[], owner oid) RETURNS text[]
+LANGUAGE sql STABLE AS $$
+    SELECT CASE WHEN acl IS NULL THEN NULL ELSE ARRAY(
+        SELECT CASE WHEN m[1] = o.printed THEN 'owner' ELSE m[1] END || '=' || m[2] || '/'
+               || CASE WHEN m[3] = o.printed THEN 'owner' ELSE m[3] END
+        FROM unnest(acl::text[]) WITH ORDINALITY AS a(item, n)
+        CROSS JOIN LATERAL regexp_match(a.item, '^("(?:[^"]|"")*"|[^=]*)=([^/]*)/(.*)$') AS m
+        ORDER BY a.n) END
+    FROM (SELECT CASE WHEN r.rolname ~ '^[A-Za-z0-9_]+$' THEN r.rolname::text
+                      ELSE '"' || replace(r.rolname, '"', '""') || '"' END AS printed
+          FROM pg_catalog.pg_roles r WHERE r.oid = owner) o
+$$;
 SQL
 )"
 frozen_schema_catalog_sql="$(cat <<'CATALOG_SQL'
@@ -906,7 +923,7 @@ SELECT line FROM (
     SELECT 0 AS section, c.relname::text AS a, ''::text AS b,
            format('relation %s kind=%s persistence=%s acl=%s options=%s toast_options=%s rls=%s force_rls=%s replica_identity=%s inherits=%s',
                   c.relname, c.relkind, c.relpersistence,
-                  COALESCE(replace(to_jsonb(c.relacl::text[])::text, current_user, 'owner'), 'default'),
+                  COALESCE(to_jsonb(pg_temp.frozen_catalog_acl(c.relacl, c.relowner))::text, 'default'),
                   COALESCE((SELECT jsonb_agg(o ORDER BY o)::text FROM unnest(c.reloptions) o), '-'),
                   -- PostgreSQL stores toast.* parameters on the table's TOAST
                   -- relation in pg_toast, not in the table's own reloptions.
@@ -949,7 +966,7 @@ SELECT line FROM (
                   a.attstorage, COALESCE(NULLIF(a.attcompression, ''), '-'),
                   CASE WHEN a.attstattarget IS NULL OR a.attstattarget < 0 THEN 'default'
                        ELSE a.attstattarget::text END,
-                  COALESCE(replace(to_jsonb(a.attacl::text[])::text, current_user, 'owner'), 'default'),
+                  COALESCE(to_jsonb(pg_temp.frozen_catalog_acl(a.attacl, c.relowner))::text, 'default'),
                   COALESCE((SELECT jsonb_agg(o ORDER BY o)::text FROM unnest(a.attoptions) o), '-'),
                   -- A column added with a default keeps that value for the rows that
                   -- predate it. Printed only when it is not the current default: then
@@ -997,7 +1014,7 @@ SELECT line FROM (
                   p.provolatile, p.proisstrict, p.proleakproof, p.proparallel, p.prosecdef,
                   p.procost, p.prorows,
                   COALESCE(to_jsonb(p.proconfig)::text, '-'),
-                  COALESCE(replace(to_jsonb(p.proacl::text[])::text, current_user, 'owner'), 'default'),
+                  COALESCE(to_jsonb(pg_temp.frozen_catalog_acl(p.proacl, p.proowner))::text, 'default'),
                   md5(pg_temp.frozen_catalog_body(replace(p.prosrc, current_schema(), 'bigname_phase'))),
                   -- A SQL-standard body (BEGIN ATOMIC) is stored parsed, with
                   -- prosrc empty; only its printed form tells two apart.
@@ -1042,7 +1059,7 @@ SELECT line FROM (
                             FROM pg_constraint con WHERE con.contypid = t.oid), '-'),
                   COALESCE((SELECT jsonb_agg(jsonb_build_array(a.attname, format_type(a.atttypid, a.atttypmod)) ORDER BY a.attnum)::text
                             FROM pg_attribute a WHERE a.attrelid = t.typrelid AND a.attnum > 0 AND NOT a.attisdropped), '-'),
-                  COALESCE(replace(to_jsonb(t.typacl::text[])::text, current_user, 'owner'), 'default'))
+                  COALESCE(to_jsonb(pg_temp.frozen_catalog_acl(t.typacl, t.typowner))::text, 'default'))
     FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace
     WHERE n.nspname = current_schema() AND t.typtype IN ('e', 'd')
     UNION ALL
@@ -1060,12 +1077,12 @@ SELECT line FROM (
     -- shape objects created later without moving any existing ACL.
     SELECT 13, '', '',
            format('schema acl=%s default_acl=%s owner_default_acl=%s',
-                  COALESCE(replace(to_jsonb(n.nspacl::text[])::text, current_user, 'owner'), 'default'),
-                  COALESCE((SELECT replace(jsonb_agg(jsonb_build_array(da.defaclobjtype, da.defaclacl::text[])
-                                               ORDER BY da.defaclobjtype)::text, current_user, 'owner')
+                  COALESCE(to_jsonb(pg_temp.frozen_catalog_acl(n.nspacl, n.nspowner))::text, 'default'),
+                  COALESCE((SELECT jsonb_agg(jsonb_build_array(da.defaclobjtype, pg_temp.frozen_catalog_acl(da.defaclacl, n.nspowner))
+                                               ORDER BY da.defaclobjtype)::text
                             FROM pg_default_acl da WHERE da.defaclnamespace = n.oid), '-'),
-                  COALESCE((SELECT replace(jsonb_agg(jsonb_build_array(da.defaclobjtype, da.defaclacl::text[])
-                                               ORDER BY da.defaclobjtype)::text, current_user, 'owner')
+                  COALESCE((SELECT jsonb_agg(jsonb_build_array(da.defaclobjtype, pg_temp.frozen_catalog_acl(da.defaclacl, n.nspowner))
+                                               ORDER BY da.defaclobjtype)::text
                             FROM pg_default_acl da WHERE da.defaclnamespace = 0 AND da.defaclrole = n.nspowner), '-'))
     FROM pg_namespace n WHERE n.nspname = current_schema()
 ) catalog
@@ -1135,14 +1152,75 @@ assert_frozen_schema_fingerprint() {
 # text, which a name the rewrite cannot see -- assembled from pieces, in
 # another case, encoded -- escapes: compared as a value, it takes one branch
 # here and the other under sqlx, where the schema is bigname_phase. The fresh
-# baseline and the predecessor transition are therefore replayed once more
+# baseline, the predecessor transition and, where the configured user is a
+# superuser, the exercised replay's rows are therefore replayed once more
 # unrewritten, in a database of their own where the schema has its production
-# name, and must give the same catalogs, object kinds and column order. Every
-# change the configured user makes there first checks that it is in that
-# database.
+# name, and must give the same catalogs, object kinds and column order. They
+# run as the configured user rather than the login, so a branch on who runs a
+# file -- read however the file spells it -- takes the other path here wherever
+# the two differ in what it tests; and since a failure the login meets can be
+# swallowed, nothing outside the phase schema may appear or change in that
+# database. The schema resets check that they are in that database; every
+# other statement reaches it through the connection rewritten to it. A file
+# that takes another path for the configured user runs that path with its
+# privileges, and what it does outside this database is not undone; such a
+# file is what the comparisons refuse.
+objects_outside_phase_sql="$(cat <<'OUTSIDE_SQL'
+\pset format unaligned
+\pset tuples_only on
+WITH outside AS (
+    SELECT n.oid, n.nspname FROM pg_namespace n
+    WHERE n.nspname NOT IN ('bigname_phase', 'pg_catalog', 'information_schema', 'pg_toast') AND n.nspname !~ '^pg_(toast_)?temp_'
+)
+SELECT line FROM (
+    SELECT format('schema %s owner=%s acl=%s', o.nspname, pg_get_userbyid(n.nspowner), COALESCE(n.nspacl::text, '-')) AS line
+    FROM outside o JOIN pg_namespace n ON n.oid = o.oid
+    UNION ALL
+    SELECT format('relation %s.%s kind=%s owner=%s acl=%s', o.nspname, c.relname, c.relkind, pg_get_userbyid(c.relowner), COALESCE(c.relacl::text, '-'))
+    FROM pg_class c JOIN outside o ON o.oid = c.relnamespace
+    UNION ALL
+    SELECT format('routine %s.%s(%s) owner=%s acl=%s', o.nspname, p.proname, pg_get_function_identity_arguments(p.oid), pg_get_userbyid(p.proowner), COALESCE(p.proacl::text, '-'))
+    FROM pg_proc p JOIN outside o ON o.oid = p.pronamespace
+    UNION ALL
+    SELECT format('type %s.%s owner=%s acl=%s', o.nspname, t.typname, pg_get_userbyid(t.typowner), COALESCE(t.typacl::text, '-'))
+    FROM pg_type t JOIN outside o ON o.oid = t.typnamespace
+    UNION ALL SELECT 'operator ' || o.nspname || '.' || op.oprname || '(' || format_type(op.oprleft, NULL) || ',' || format_type(op.oprright, NULL) || ')' FROM pg_operator op JOIN outside o ON o.oid = op.oprnamespace
+    UNION ALL SELECT 'operator class ' || o.nspname || '.' || opc.opcname FROM pg_opclass opc JOIN outside o ON o.oid = opc.opcnamespace
+    UNION ALL SELECT 'operator family ' || o.nspname || '.' || opf.opfname FROM pg_opfamily opf JOIN outside o ON o.oid = opf.opfnamespace
+    UNION ALL SELECT 'collation ' || o.nspname || '.' || col.collname FROM pg_collation col JOIN outside o ON o.oid = col.collnamespace
+    UNION ALL SELECT 'conversion ' || o.nspname || '.' || cv.conname FROM pg_conversion cv JOIN outside o ON o.oid = cv.connamespace
+    UNION ALL SELECT 'text search configuration ' || o.nspname || '.' || cfg.cfgname FROM pg_ts_config cfg JOIN outside o ON o.oid = cfg.cfgnamespace
+    UNION ALL SELECT 'text search dictionary ' || o.nspname || '.' || d.dictname FROM pg_ts_dict d JOIN outside o ON o.oid = d.dictnamespace
+    UNION ALL SELECT 'text search parser ' || o.nspname || '.' || prs.prsname FROM pg_ts_parser prs JOIN outside o ON o.oid = prs.prsnamespace
+    UNION ALL SELECT 'text search template ' || o.nspname || '.' || tm.tmplname FROM pg_ts_template tm JOIN outside o ON o.oid = tm.tmplnamespace
+    UNION ALL SELECT 'statistics ' || o.nspname || '.' || st.stxname FROM pg_statistic_ext st JOIN outside o ON o.oid = st.stxnamespace
+    UNION ALL SELECT 'trigger ' || o.nspname || '.' || c.relname || '.' || tg.tgname FROM pg_trigger tg JOIN pg_class c ON c.oid = tg.tgrelid JOIN outside o ON o.oid = c.relnamespace
+    UNION ALL SELECT 'rule ' || o.nspname || '.' || c.relname || '.' || r.rulename FROM pg_rewrite r JOIN pg_class c ON c.oid = r.ev_class JOIN outside o ON o.oid = c.relnamespace
+    UNION ALL SELECT 'policy ' || o.nspname || '.' || c.relname || '.' || pol.polname FROM pg_policy pol JOIN pg_class c ON c.oid = pol.polrelid JOIN outside o ON o.oid = c.relnamespace
+    UNION ALL SELECT 'extension ' || extname || ' ' || extversion FROM pg_extension
+    UNION ALL SELECT 'event trigger ' || evtname FROM pg_event_trigger
+    UNION ALL SELECT 'publication ' || pubname FROM pg_publication
+    UNION ALL SELECT 'foreign data wrapper ' || fdwname FROM pg_foreign_data_wrapper
+    UNION ALL SELECT 'foreign server ' || srvname FROM pg_foreign_server
+    UNION ALL SELECT 'user mapping ' || srvname || ' for ' || usename FROM pg_user_mappings
+    UNION ALL SELECT 'access method ' || amname FROM pg_am
+    UNION ALL SELECT 'language ' || lanname FROM pg_language
+    UNION ALL SELECT 'tablespace ' || spcname FROM pg_tablespace
+    UNION ALL SELECT 'cast ' || format_type(castsource, NULL) || ' -> ' || format_type(casttarget, NULL) FROM pg_cast WHERE oid >= 16384
+    UNION ALL SELECT 'large objects ' || count(*) FROM pg_largeobject_metadata
+) everything ORDER BY line COLLATE "C";
+OUTSIDE_SQL
+)"
 assert_literal_schema_name_replays_match() {
-    local after_baseline observed settings_before fresh_order planted_order planted_dir status
+    local after_baseline observed settings_before fresh_order planted_order outside_before copy_stream populated
+    local planted_dir status main_database="$database" main_url="${BIGNAME_DATABASE_URL:-}" exercised_schema="$scratch_schema"
     local in_literal_database="DO \$\$ BEGIN IF current_database() <> '$literal_database' THEN RAISE EXCEPTION 'not the literal-name database'; END IF; END \$\$;"
+    # Copying the rows needs session_replication_role, a superuser setting, so
+    # triggers and foreign keys do not replay what the rows already carry.
+    populated=0
+    if [ "$(printf '\\pset tuples_only on\nSELECT rolsuper FROM pg_roles WHERE rolname = current_user;\n' | run_psql_as_owner | tr -d ' ')" = t ]; then
+        populated=1
+    fi
     printf 'CREATE DATABASE "%s";\n' "$literal_database" | run_psql_as_owner
     literal_database_created=1
     after_baseline="$(mktemp "${TMPDIR:-/tmp}/schema-v2-literal-baseline.XXXXXX")"
@@ -1150,6 +1228,8 @@ assert_literal_schema_name_replays_match() {
     settings_before="$(mktemp "${TMPDIR:-/tmp}/schema-v2-literal-settings.XXXXXX")"
     fresh_order="$(mktemp "${TMPDIR:-/tmp}/schema-v2-literal-order.XXXXXX")"
     planted_order="$(mktemp "${TMPDIR:-/tmp}/schema-v2-literal-order.XXXXXX")"
+    outside_before="$(mktemp "${TMPDIR:-/tmp}/schema-v2-literal-outside.XXXXXX")"
+    copy_stream="$(mktemp "${TMPDIR:-/tmp}/schema-v2-literal-copy.XXXXXX")"
     # Not `( ... ) || ...`: bash does not stop on a failed command inside a
     # subshell whose status is tested.
     set +e
@@ -1158,14 +1238,26 @@ assert_literal_schema_name_replays_match() {
         database="$literal_database"
         if [ -n "${BIGNAME_DATABASE_URL:-}" ]; then
             BIGNAME_DATABASE_URL="$(url_with_database "$BIGNAME_DATABASE_URL" "$literal_database")"
-            apply_check_url="$(login_url_from "$BIGNAME_DATABASE_URL" "$apply_check_role" "$apply_check_role_password")"
         fi
+        run_psql() { run_psql_as_owner; }
+        login_password_checked=0
         scratch_schema=bigname_phase frozen_schema=bigname_phase predecessor_schema=bigname_phase
+        reset_literal_schema() {
+            printf '%s\n' "$in_literal_database" 'DROP SCHEMA IF EXISTS bigname_phase CASCADE;' 'CREATE SCHEMA bigname_phase;' \
+                | run_psql_as_owner
+        }
+        assert_nothing_outside_phase() {
+            if ! diff -u "$outside_before" <(printf '%s\n' "$objects_outside_phase_sql" | run_psql_as_owner) >&2; then
+                printf '%s\n' "the $1 replay left objects outside the phase schema (diff above: - before, + after); a schema-migration creates nothing outside bigname_phase, and one that does only where a failure is not swallowed takes another path under the login" >&2
+                exit 1
+            fi
+        }
         {
             printf '%s\n' "$in_literal_database" "$baseline_extension_statements"
-            printf 'CREATE SCHEMA bigname_phase AUTHORIZATION "%s";\n' "$apply_check_role"
             sqlx_bookkeeping_setup_sql
         } | run_psql_as_owner
+        reset_literal_schema
+        printf '%s\n' "$objects_outside_phase_sql" | run_psql_as_owner > "$outside_before"
         role_and_database_settings > "$settings_before"
         role_and_database_settings_before="$settings_before"
         apply_baseline
@@ -1177,17 +1269,43 @@ assert_literal_schema_name_replays_match() {
             exit 1
         fi
         assert_schema_holds_only_allowed_kinds bigname_phase "the literal-name fresh baseline"
-        # The fresh schema is dropped for the predecessor, so its column
-        # order is kept for that replay's column-order rule.
+        assert_nothing_outside_phase "literal-name fresh baseline"
+        # The fresh schema is dropped for the later replays, so its column
+        # order is kept for their column-order rule.
         column_order_of bigname_phase > "$fresh_order"
         frozen_column_order="$fresh_order"
-        {
-            printf '%s\n' "$in_literal_database" 'DROP SCHEMA bigname_phase CASCADE;'
-            printf 'CREATE SCHEMA bigname_phase AUTHORIZATION "%s";\n' "$apply_check_role"
-        } | run_psql_as_owner
+        reset_literal_schema
         assert_predecessor_baseline_transition "$after_baseline" "$observed"
-        # A planted file that branches on an assembled name must move this
-        # catalog; under the rewrite it takes the other branch.
+        assert_nothing_outside_phase "literal-name predecessor"
+        if [ "$populated" = 1 ]; then
+            # The exercised schema holds the current shape, so its rows go into
+            # a fresh baseline column by column before every file runs again.
+            reset_literal_schema
+            apply_baseline
+            {
+                printf 'SET session_replication_role = replica;\n'
+                while IFS='|' read -r table columns; do
+                    printf 'COPY bigname_phase.%s (%s) FROM STDIN;\n' "$table" "$columns"
+                    printf 'COPY (SELECT %s FROM "%s".%s) TO STDOUT;\n' "$columns" "$exercised_schema" "$table" \
+                        | database="$main_database" BIGNAME_DATABASE_URL="$main_url" run_psql_as_owner
+                    printf '\\.\n'
+                done < <(printf "\\\\pset format unaligned\n\\\\pset tuples_only on\nSELECT quote_ident(c.relname) || '|' || string_agg(quote_ident(a.attname), ', ' ORDER BY a.attnum) FROM pg_class c JOIN pg_attribute a ON a.attrelid = c.oid WHERE c.relnamespace = '\"%s\"'::regnamespace AND c.relkind = 'r' AND a.attnum > 0 AND NOT a.attisdropped AND a.attgenerated = '' GROUP BY c.relname ORDER BY c.relname;\n" "$exercised_schema" \
+                    | database="$main_database" BIGNAME_DATABASE_URL="$main_url" run_psql_as_owner)
+                printf "\\\\pset format unaligned\n\\\\pset tuples_only on\nSELECT format('SELECT setval(%%L, %%s);', 'bigname_phase.' || quote_ident(sequencename), last_value) FROM pg_sequences WHERE schemaname = '%s' AND last_value IS NOT NULL;\n" "$exercised_schema" \
+                    | database="$main_database" BIGNAME_DATABASE_URL="$main_url" run_psql_as_owner
+            } > "$copy_stream"
+            run_psql_as_owner < "$copy_stream" >/dev/null
+            replay_schema_migrations "literal-name populated"
+            if ! diff -u "$frozen_schema_catalog" <(frozen_schema_catalog bigname_phase) >&2; then
+                printf '%s\n' "the exercised replay's rows replayed with the schema named bigname_phase give another catalog than $(basename "$frozen_schema_catalog") (diff above: - frozen, + literal name)" >&2
+                exit 1
+            fi
+            assert_schema_holds_only_allowed_kinds bigname_phase "the literal-name populated schema"
+            assert_nothing_outside_phase "literal-name populated"
+        fi
+        # Planted files that must move what these replays compare: a branch on
+        # an assembled name, on who runs the file read through EXECUTE, and, with
+        # rows, on both rows and name; a swallowed failure outside the schema.
         planted_dir="$(mktemp -d "${TMPDIR:-/tmp}/schema-v2-planted-literal.XXXXXX")"
         cat > "$planted_dir/00000000000001_planted_literal_branch.sql" <<'PLANT'
 DO $$ BEGIN
@@ -1196,11 +1314,40 @@ DO $$ BEGIN
     END IF;
 END $$;
 PLANT
+        cat > "$planted_dir/00000000000002_planted_identity_branch.sql" <<PLANT
+DO \$\$ DECLARE who text; BEGIN
+    EXECUTE concat('SELECT current_', 'user') INTO who;
+    IF who <> '$apply_check_role' THEN
+        CREATE TABLE bigname_phase.planted_identity_branch (a integer);
+    END IF;
+END \$\$;
+PLANT
+        if [ "$populated" = 1 ]; then
+            cat > "$planted_dir/00000000000003_planted_populated_branch.sql" <<'PLANT'
+DO $$ BEGIN
+    IF EXISTS (SELECT 1 FROM bigname_phase.chain_lineage) AND 'bigname_' || 'phase' = 'bigname_phase' THEN
+        CREATE TABLE bigname_phase.planted_populated_branch (a integer);
+    END IF;
+END $$;
+PLANT
+        fi
         sequence_applies=phase apply_migration_sequence "$planted_dir"/*.sql
         remove_planted_dir "$planted_dir"
-        case "$(diff "$frozen_schema_catalog" <(frozen_schema_catalog bigname_phase) || true)" in
-            *"> relation planted_literal_branch "*) ;;
-            *) printf '%s\n' "the literal-name replay does not see a planted branch on an assembled schema name" >&2; exit 1 ;;
+        planted_catalog_diff="$(diff "$frozen_schema_catalog" <(frozen_schema_catalog bigname_phase) || true)"
+        for planted in planted_literal_branch planted_identity_branch $([ "$populated" = 1 ] && printf planted_populated_branch); do
+            case "$planted_catalog_diff" in
+                *"> relation $planted "*) ;;
+                *) printf '%s\n' "the literal-name replay does not see the planted $planted" >&2; exit 1 ;;
+            esac
+        done
+        planted_dir="$(mktemp -d "${TMPDIR:-/tmp}/schema-v2-planted-literal.XXXXXX")"
+        printf '%s\n' "DO \$\$ BEGIN EXECUTE 'CREATE SCHEMA planted_outside'; EXCEPTION WHEN OTHERS THEN NULL; END \$\$;" \
+            > "$planted_dir/00000000000004_planted_outside.sql"
+        apply_migration_sequence "$planted_dir"/*.sql
+        remove_planted_dir "$planted_dir"
+        case "$( (assert_nothing_outside_phase "planted") 2>&1 || true)" in
+            *"+schema planted_outside"*) ;;
+            *) printf '%s\n' "the literal-name replay does not see a planted schema outside the phase schema" >&2; exit 1 ;;
         esac
         # The column-order rule reads the kept fresh order: a baseline column
         # dropped and added back, so now last, must be refused.
@@ -1213,13 +1360,17 @@ PLANT
     )
     status=$?
     set -e
-    rm -f -- "$after_baseline" "$observed" "$settings_before" "$fresh_order" "$planted_order"
+    rm -f -- "$after_baseline" "$observed" "$settings_before" "$fresh_order" "$planted_order" "$outside_before" "$copy_stream"
     if [ "$status" != 0 ]; then
         printf '%s\n' \
-            "the replay with the phase schema named bigname_phase, unrewritten as sqlx applies it, failed above after the same replays under the scratch name passed; unless the failure is the connection or set-up, a schema-migration reads the name in a form the rewrite cannot see (assembled, in another case, encoded) and behaves differently under it -- name the schema literally" >&2
+            "the replay with the phase schema named bigname_phase, unrewritten as sqlx applies it and run as the configured user, failed above after the same replays under the scratch name and the login passed; unless the failure is the connection or set-up, a schema-migration reads the name in a form the rewrite cannot see (assembled, in another case, encoded), or reads who runs it, and behaves differently -- name the schema literally and do not branch on identity" >&2
         exit 1
     fi
-    refusal_assertions_passed=$((refusal_assertions_passed + 2))
+    refusal_assertions_passed=$((refusal_assertions_passed + 4 + populated))
+    if [ "$populated" = 0 ]; then
+        printf '%s\n' "note: the configured user is not a superuser, so the exercised replay's rows were not replayed under the literal name" >&2
+        expected_refusal_assertions=$((expected_refusal_assertions - 1))
+    fi
     printf 'DROP DATABASE "%s" WITH (FORCE);\n' "$literal_database" | run_psql_as_owner
     literal_database_created=0
 }
@@ -1466,6 +1617,14 @@ SELECT kind || ' ' || name AS refused_object FROM (
     FROM pg_cast ca JOIN pg_type st ON st.oid = ca.castsource JOIN pg_type tt ON tt.oid = ca.casttarget
     WHERE current_schema()::regnamespace IN (st.typnamespace, tt.typnamespace)
     UNION ALL
+    -- An extension member or dependent goes with DROP EXTENSION, and neither
+    -- relationship prints in the catalog.
+    SELECT CASE d.deptype WHEN 'e' THEN 'extension member' ELSE 'extension dependency' END,
+           pg_describe_object(d.classid, d.objid, d.objsubid)
+    FROM pg_depend d
+    WHERE d.deptype IN ('e', 'x')
+      AND (pg_identify_object(d.classid, d.objid, d.objsubid)).schema = current_schema()
+    UNION ALL
     -- PostgreSQL backs a foreign key with the first valid matching unique index
     -- in index OID order and the catalog does not print which, so with two
     -- candidates two histories that print alike would drop or cascade apart.
@@ -1516,7 +1675,8 @@ assert_refused_kinds_are_seen() {
         'text search configuration:CREATE TEXT SEARCH CONFIGURATION planted_ts (COPY = pg_catalog.simple);' \
         'text search dictionary:CREATE TEXT SEARCH DICTIONARY planted_dict (TEMPLATE = pg_catalog.simple);' \
         'cast:CREATE CAST (canonicality_state AS text) WITH INOUT AS IMPLICIT;' \
-        'ambiguous foreign key:CREATE UNIQUE INDEX planted_dup ON chain_lineage (block_number, chain_id, block_hash);'
+        'ambiguous foreign key:CREATE UNIQUE INDEX planted_dup ON chain_lineage (block_number, chain_id, block_hash);' \
+        'extension dependency:CREATE FUNCTION planted_ext() RETURNS integer LANGUAGE sql AS $$SELECT 1$$; ALTER FUNCTION planted_ext() DEPENDS ON EXTENSION pgcrypto;'
     do
         kind="${planted%%:*}"; sql="${planted#*:}"
         seen="$({
@@ -2493,14 +2653,15 @@ migration_application_log="$(
 # Future entries must use basename|one-line reason.
 intentional_phase_migration_skips=()
 refusal_assertions_passed=0
-# Base 173, main added 78, this branch 159 (76 of them the backslash-command,
+# Base 173, main added 78, this branch 168 (85 of them the backslash-command,
 # SET-spelling, session-residue, session-identity (database, connection and
 # temporary namespace included), recorded-history, ambiguous foreign key,
 # assembled password, literal-name branch and column-order, baseline-residue,
-# setting-name, backend-status and routine quoting plants), and
+# setting-name, backend-status, routine quoting, extension-dependency,
+# handler, literal-name identity, outside-object and populated plants), and
 # the merges fold main's four address-match and event-order not-ready probes
 # into their invalid ones (-4); predecessor proofs base 39, +6, +1.
-expected_refusal_assertions=406
+expected_refusal_assertions=415
 predecessor_shape_proof_count=0
 expected_predecessor_shape_proof_count=46
 refusal_probe_seconds=0
@@ -2541,6 +2702,10 @@ cleanup() {
     fi
 }
 trap cleanup EXIT
+# A signal otherwise ends bash without the EXIT trap, leaving the login and
+# the databases behind; exiting runs it.
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # The owner keeps the race probe (another session's wait event is not visible
 # to an ordinary login) and installs the extensions the baseline declares,
@@ -2889,7 +3054,7 @@ assert_no_migration_reads_synthetic_ledger_timing
 # ledger-timing rule above; bare USER is left out because quoted prose uses the
 # word, and bare ROLE because `manifest_contract_instances.role` is a column.
 session_identity_reads_of() {
-    local statements flat
+    local statements flat squashed
     if ! statements="$(sql_statements "$1")"; then
         printf '%s\n' "$statements" | tail -n 1
         return 0
@@ -2898,15 +3063,28 @@ session_identity_reads_of() {
     {
         # Whole words, so `pg_catalog.` does not use up the boundary of the name after it.
         printf '%s\n' "$statements" | grep -oE '[[:alnum:]_]+' \
-            | grep -xiE '(CURRENT_USER|SESSION_USER|CURRENT_ROLE|SYSTEM_USER|GETPGUSERNAME|PG_GET_USERBYID|PG_HAS_ROLE|HAS_[A-Z_]+_PRIVILEGE|PG_ROLES|PG_USER|PG_AUTHID|PG_AUTH_MEMBERS|PG_SHADOW|TO_REGROLE|REGROLE|ROLNAME|ROLSUPER|USENAME|IS_SUPERUSER|SESSION_AUTHORIZATION|ENABLED_ROLES|APPLICABLE_ROLES|ADMINISTRABLE_ROLE_AUTHORIZATIONS|(TABLE|COLUMN|ROUTINE|USAGE|UDT)_PRIVILEGES|ROLE_[A-Z]+_GRANTS|INSUFFICIENT_PRIVILEGE|UNDEFINED_OBJECT|42501|42704|CURRENT_DATABASE|CURRENT_CATALOG|PG_DATABASE|DATNAME|[A-Z_]*_CATALOG|CATALOG_NAME|INFORMATION_SCHEMA_CATALOG_NAME|INET_(SERVER|CLIENT)_(ADDR|PORT)|CLIENT_(ADDR|PORT|HOSTNAME)|DATID|PG_STAT_(ACTIVITY|DATABASE|SSL|GSSAPI)|PORT|LISTEN_ADDRESSES|UNIX_SOCKET_DIRECTORIES|CLUSTER_NAME|PG_MY_TEMP_SCHEMA|CURRENT_SCHEMAS|PG_IS_OTHER_TEMP_SCHEMA|PG_SETTINGS|PG_SHOW_ALL_SETTINGS|PG_FILE_SETTINGS|SHOW|PG_STAT_GET_ACTIVITY|PG_STAT_GET_BACKEND_[A-Z_]+)' \
+            | grep -xiE '(CURRENT_USER|SESSION_USER|CURRENT_ROLE|SYSTEM_USER|GETPGUSERNAME|PG_GET_USERBYID|PG_HAS_ROLE|HAS_[A-Z_]+_PRIVILEGE|PG_ROLES|PG_USER|PG_AUTHID|PG_AUTH_MEMBERS|PG_SHADOW|TO_REGROLE|REGROLE|ROLNAME|ROLSUPER|USENAME|IS_SUPERUSER|SESSION_AUTHORIZATION|ENABLED_ROLES|APPLICABLE_ROLES|ADMINISTRABLE_ROLE_AUTHORIZATIONS|(TABLE|COLUMN|ROUTINE|USAGE|UDT)_PRIVILEGES|ROLE_[A-Z]+_GRANTS|INSUFFICIENT_PRIVILEGE|UNDEFINED_OBJECT|42501|42704|CURRENT_DATABASE|CURRENT_CATALOG|PG_DATABASE|DATNAME|[A-Z_]*_CATALOG|CATALOG_NAME|INFORMATION_SCHEMA_CATALOG_NAME|INET_(SERVER|CLIENT)_(ADDR|PORT)|CLIENT_(ADDR|PORT|HOSTNAME)|DATID|PG_STAT_(ACTIVITY|DATABASE|SSL|GSSAPI)|PORT|LISTEN_ADDRESSES|UNIX_SOCKET_DIRECTORIES|CLUSTER_NAME|PG_MY_TEMP_SCHEMA|CURRENT_SCHEMAS|PG_IS_OTHER_TEMP_SCHEMA|PG_SETTINGS|PG_SHOW_ALL_SETTINGS|PG_FILE_SETTINGS|SHOW|PG_STAT_GET_ACTIVITY|PG_STAT_GET_BACKEND_[A-Z_]+|SYNTAX_ERROR_OR_ACCESS_RULE_VIOLATION)' \
             | tr '[:lower:]' '[:upper:]' | grep -vx PG_CATALOG || true
-        # Settings name who and where too (session_authorization, port), so one
-        # is read only by the name the text spells: current_setting, quoted or
-        # not, takes a quoted literal, doubled inside EXECUTE text; SHOW, whose
-        # name is a bare word, is refused as a word above.
+        # A setting answers with the connection's defaults, which the login
+        # does not share with the deployment writer (ALTER ROLE ... SET), and
+        # some name who and where (session_authorization, port). A file reads
+        # only search_path and quote_all_identifiers, to put them back after
+        # set_config(..., true), by a quoted literal (doubled inside EXECUTE
+        # text) to current_setting, quoted or not; SHOW is refused as a word
+        # above.
         if [ "$(printf '%s' "$flat" | grep -oiE '"?current_setting"? *\(' | wc -l)" \
-            != "$(printf '%s' "$flat" | grep -oiE "\"?current_setting\"? *\( *('[A-Za-z0-9_.]+'|''[A-Za-z0-9_.]+'') *[,)]" | wc -l)" ]; then
-            printf '%s\n' 'CURRENT_SETTING(A-COMPUTED-NAME)'
+            != "$(printf '%s' "$flat" | grep -oiE "\"?current_setting\"? *\( *('(search_path|quote_all_identifiers)'|''(search_path|quote_all_identifiers)'') *[,)]" | wc -l)" ]; then
+            printf '%s\n' 'CURRENT_SETTING(OTHER-THAN-SEARCH_PATH-OR-QUOTE_ALL_IDENTIFIERS)'
+        fi
+        # A handler for every error or every access-rule violation swallows the
+        # privilege failure the login meets where the writer succeeds; read with
+        # block comments and double quotes as spaces, so neither hides OTHERS.
+        squashed="$(printf '%s' "$flat" | sed -E 's#/\*([^*]|\*+[^*/])*\*+/# #g; s/"/ /g')"
+        if printf '%s' "$squashed" | grep -iE "(^|[^[:alnum:]_])WHEN[^;]*[^[:alnum:]_]OTHERS[[:space:]]+THEN([^[:alnum:]_]|$)" >/dev/null; then
+            printf '%s\n' 'WHEN-OTHERS'
+        fi
+        if printf '%s' "$squashed" | grep -iE "SQLSTATE[[:space:]]+'{1,2}42000'" >/dev/null; then
+            printf '%s\n' "SQLSTATE-42000"
         fi
     } | sort -u | tr '\n' ' ' || true
 }
@@ -2944,6 +3122,11 @@ assert_no_migration_branches_on_session_identity() {
         'DO $$ DECLARE r record; BEGIN FOR r IN SHOW ALL LOOP IF r.setting = '"'"'5432'"'"' THEN ALTER TABLE bigname_phase.t ADD COLUMN c integer; END IF; END LOOP; END $$;'
         'DO $$ BEGIN IF pg_catalog."current_setting"('"'"'session_'"'"' || '"'"'authorization'"'"') = '"'"'bigname'"'"' THEN ALTER TABLE bigname_phase.t ADD COLUMN c integer; END IF; END $$;'
         'DO $$ BEGIN IF (SELECT client_port FROM pg_stat_get_activity(pg_backend_pid())) IS NULL THEN ALTER TABLE bigname_phase.t ADD COLUMN c integer; END IF; END $$;'
+        'DO $$ BEGIN IF current_setting('"'"'DateStyle'"'"') = '"'"'ISO, DMY'"'"' THEN ALTER TABLE bigname_phase.t ADD COLUMN c integer; END IF; END $$;'
+        'DO $$ BEGIN EXECUTE '"'"'CREATE SCHEMA planted_'"'"' || '"'"'outside'"'"'; EXCEPTION WHEN OTHERS THEN NULL; END $$;'
+        'DO $$ BEGIN EXECUTE '"'"'CREATE SCHEMA planted_outside'"'"'; EXCEPTION WHEN SQLSTATE '"'"'42000'"'"' THEN NULL; END $$;'
+        'DO $$ BEGIN EXECUTE '"'"'CREATE SCHEMA planted_outside'"'"'; EXCEPTION WHEN "others" THEN NULL; END $$;'
+        'DO $$ BEGIN EXECUTE '"'"'CREATE SCHEMA planted_outside'"'"'; EXCEPTION WHEN/**/OTHERS THEN NULL; END $$;'
         'DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname LIKE '"'"'pg_temp%'"'"' AND NOT pg_is_other_temp_schema(oid)) THEN RETURN; END IF; ALTER TABLE bigname_phase.t ADD COLUMN c integer; END $$;'
     )
     local -a accepted=(
@@ -2957,6 +3140,9 @@ assert_no_migration_branches_on_session_identity() {
         'CREATE FUNCTION bigname_phase.f() RETURNS integer LANGUAGE sql SET search_path = pg_catalog, bigname_phase, pg_temp AS '"'"'SELECT 1'"'"';'
         'SELECT current_setting('"'"'search_path'"'"'), pg_catalog.current_setting( '"'"'quote_all_identifiers'"'"' , true);'
         'DO $$ BEGIN EXECUTE '"'"'SELECT current_setting('"'"''"'"'search_path'"'"''"'"')'"'"'; RAISE NOTICE '"'"'nothing to report'"'"'; END $$;'
+        'DO $$ BEGIN PERFORM 1 / 0; EXCEPTION WHEN data_exception OR division_by_zero THEN NULL; END $$; COMMENT ON TABLE bigname_phase.t IS '"'"'kept for others'"'"';'
+        'COMMENT ON TABLE bigname_phase.t IS '"'"'set by the registrar or others; see 42000 below'"'"';'
+        'SELECT CASE WHEN t.a OR others.b THEN 1 END FROM bigname_phase.t t, bigname_phase.t others;'
     )
     planted_dir="$(mktemp -d "${TMPDIR:-/tmp}/schema-v2-session-identity-rule.XXXXXX")"
     for planted in "${refused[@]}"; do
@@ -2980,7 +3166,7 @@ assert_no_migration_branches_on_session_identity() {
         hits="$(session_identity_reads_of "$migration_file")"
         if [ -n "$hits" ]; then
             printf '%s\n' \
-                "$(basename "$migration_file") reads ${hits% }, which answers differently for this check's disposable login, scratch database and replay session than for the deployment writer, so a branch on identity, role existence, privilege, database, server address or temporary namespace takes a path here that sqlx migrate run does not; a schema-migration may not depend on who runs it or where, and reads a setting only by its literal name, and a carve-out that needs to extends the session-identity rule in schema-v2/apply-check.sh under ADR 0007" >&2
+                "$(basename "$migration_file") reads ${hits% }, which answers differently for this check's disposable login, scratch database and replay session than for the deployment writer, so a branch on identity, role existence, privilege, database, server address or temporary namespace takes a path here that sqlx migrate run does not; a schema-migration may not depend on who runs it or where, reads no setting but search_path and quote_all_identifiers and those by their literal names, and catches no error class that holds a privilege failure, and a carve-out that needs to extends the session-identity rule in schema-v2/apply-check.sh under ADR 0007" >&2
             exit 1
         fi
     done
@@ -12445,7 +12631,6 @@ assert_uninventoried_migrations_are_schema_qualified
 assert_documented_head_is_newest_migration
 assert_no_migration_below_prior_head
 assert_frozen_schema_fingerprint
-assert_literal_schema_name_replays_match
 assert_schema_holds_only_allowed_kinds "$frozen_schema" "the fresh baseline"
 assert_refused_kinds_are_seen
 assert_column_order_rule_sees_planted_changes
@@ -12454,6 +12639,8 @@ assert_exercised_schema_matches_frozen
 # Checked after the replay: a schema-migration may create an object only when it
 # finds rows, and refused kinds are absent from the catalog the replay compares.
 assert_schema_holds_only_allowed_kinds "$scratch_schema" "the exercised scratch schema"
+# After the exercised replay, whose rows it copies.
+assert_literal_schema_name_replays_match
 assert_reviewed_phase_migrations_applied
 if [ "$refusal_assertions_passed" -ne "$expected_refusal_assertions" ]; then
     printf '%s\n' \
