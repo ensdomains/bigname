@@ -114,11 +114,47 @@ pub(super) async fn include_changed_record_consumers(
     // Match those facts to
     // the previously published inventory's exact name surface so a record-only live window
     // rebuilds the consuming name and resource without expanding every name on a shared resolver.
-    // Materialize both resolver keys so replay can hash-join instead of comparing every
-    // changed event with every inventory row. DISTINCT below also removes equal mirror keys.
+    // Filter each record family before materializing its distinct lookup keys, so PostgreSQL
+    // can estimate each arm from the analyzed event table. Materialize canonical inventory
+    // surfaces before matching.
+    // Each arm can then hash both the resolver and the name/node, avoiding the cross-product
+    // of changed records and inventory rows that share a public resolver. Keep pointer IDs
+    // distinct across inventory versions so the Basenames node-only guard retains its evidence.
+    // Match Basenames candidates before checking pointer evidence: the correlated guard must
+    // not prevent a composite hash join or cast pointer IDs from unrelated inventory rows.
     sqlx::query(
-        "WITH inventory_resolvers AS MATERIALIZED (
-             SELECT inventory.resource_id, inventory.provenance, resolver.address
+        "WITH attributed_records AS MATERIALIZED (
+             SELECT DISTINCT event.logical_name_id,
+                    lower(event.raw_fact_ref ->> 'emitting_address') AS address
+             FROM project_changed_events event
+             WHERE event.event_kind IN ('RecordChanged', 'RecordVersionChanged')
+               AND event.source_family IN (
+                   'ens_v1_resolver_l1', 'ens_v2_resolver_l1',
+                   'basenames_base_resolver'
+               )
+               AND event.logical_name_id IS NOT NULL
+               AND event.raw_fact_ref ->> 'emitting_address' IS NOT NULL
+         ), node_records AS MATERIALIZED (
+             SELECT DISTINCT lower(event.after_state ->> 'node') AS node,
+                    lower(event.raw_fact_ref ->> 'emitting_address') AS address
+             FROM project_changed_events event
+             WHERE event.event_kind IN ('RecordChanged', 'RecordVersionChanged')
+               AND event.source_family = 'ens_v1_resolver_l1'
+               AND event.logical_name_id IS NULL
+               AND event.raw_fact_ref ->> 'emitting_address' IS NOT NULL
+         ), basenames_records AS MATERIALIZED (
+             SELECT DISTINCT lower(event.after_state ->> 'node') AS node,
+                    lower(event.raw_fact_ref ->> 'emitting_address') AS address
+             FROM project_changed_events event
+             WHERE event.event_kind IN ('RecordChanged', 'RecordVersionChanged')
+               AND event.source_family = 'basenames_base_resolver'
+               AND event.logical_name_id IS NULL
+               AND event.raw_fact_ref ->> 'emitting_address' IS NOT NULL
+         ), inventory_resolvers AS MATERIALIZED (
+             SELECT DISTINCT inventory.resource_id,
+                    inventory.provenance ->> 'logical_name_id' AS logical_name_id,
+                    inventory.provenance ->> 'resolver_pointer_event_id' AS pointer_event_id,
+                    resolver.address
              FROM record_inventory_current inventory
              CROSS JOIN LATERAL (VALUES
                  (lower(inventory.provenance ->> 'resolver_address')),
@@ -126,56 +162,53 @@ pub(super) async fn include_changed_record_consumers(
              ) resolver(address)
              WHERE inventory.provenance ->> 'chain_id' = $1
                AND resolver.address IS NOT NULL
-         ), matched AS MATERIALIZED (
-             SELECT DISTINCT inventory.resource_id,
-                    inventory.provenance ->> 'logical_name_id' AS logical_name_id
-             FROM project_changed_events event
-             JOIN inventory_resolvers inventory
-               ON lower(event.raw_fact_ref ->> 'emitting_address') = inventory.address
+         ), inventory_surfaces AS MATERIALIZED (
+             SELECT DISTINCT inventory.resource_id, inventory.logical_name_id,
+                    inventory.address, inventory.pointer_event_id,
+                    lower(surface.namehash) AS node
+             FROM inventory_resolvers inventory
              JOIN name_surfaces surface
-               ON surface.logical_name_id =
-                  inventory.provenance ->> 'logical_name_id'
+               ON surface.logical_name_id = inventory.logical_name_id
               AND surface.chain_id = $1
              JOIN chain_lineage lineage
                ON lineage.chain_id = surface.chain_id
               AND lineage.block_number = surface.block_number
               AND lineage.block_hash = surface.block_hash
-             WHERE event.event_kind IN ('RecordChanged', 'RecordVersionChanged')
-               AND event.source_family IN (
-                   'ens_v1_resolver_l1', 'ens_v2_resolver_l1',
-                   'basenames_base_resolver'
-               )
-               AND event.raw_fact_ref ->> 'emitting_address' IS NOT NULL
-               AND (
-                   event.logical_name_id = surface.logical_name_id
-                   OR (
-                       event.logical_name_id IS NULL
-                       AND (
-                           event.source_family = 'ens_v1_resolver_l1'
-                           OR (
-                               event.source_family = 'basenames_base_resolver'
-                               AND EXISTS (
-                                   SELECT 1
-                                   FROM normalized_events pointer
-                                   WHERE pointer.normalized_event_id =
-                                       (inventory.provenance ->>
-                                           'resolver_pointer_event_id')::bigint
-                                     AND pointer.source_family =
-                                         'basenames_base_registry'
-                               )
-                           )
-                       )
-                       AND lower(event.after_state ->> 'node') =
-                           lower(surface.namehash)
-                   )
-               )
-               AND surface.block_number <= $2
+             WHERE surface.block_number <= $2
                AND surface.canonicality_state IN (
                    'canonical', 'safe', 'finalized'
                )
                AND lineage.canonicality_state IN (
                    'canonical', 'safe', 'finalized'
                )
+         ), basenames_candidates AS MATERIALIZED (
+             SELECT inventory.resource_id, inventory.logical_name_id,
+                    inventory.pointer_event_id
+             FROM basenames_records event
+             JOIN inventory_surfaces inventory
+               ON event.address = inventory.address
+              AND event.node = inventory.node
+         ), matched AS MATERIALIZED (
+             SELECT inventory.resource_id, inventory.logical_name_id
+             FROM attributed_records event
+             JOIN inventory_surfaces inventory
+               ON event.address = inventory.address
+              AND event.logical_name_id = inventory.logical_name_id
+             UNION
+             SELECT inventory.resource_id, inventory.logical_name_id
+             FROM node_records event
+             JOIN inventory_surfaces inventory
+               ON event.address = inventory.address
+              AND event.node = inventory.node
+             UNION
+             SELECT inventory.resource_id, inventory.logical_name_id
+             FROM basenames_candidates inventory
+             WHERE EXISTS (
+                 SELECT 1
+                 FROM normalized_events pointer
+                 WHERE pointer.normalized_event_id = inventory.pointer_event_id::bigint
+                   AND pointer.source_family = 'basenames_base_registry'
+             )
          ), inserted_resources AS (
              INSERT INTO project_scope_resources
              SELECT resource_id FROM matched
