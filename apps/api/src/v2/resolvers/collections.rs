@@ -151,8 +151,7 @@ async fn collection(
             slug,
             &address,
             section,
-            height,
-            &publication_block_bounds,
+            (height, &publication_block_bounds),
             key.as_ref(),
             params.page_size,
         )

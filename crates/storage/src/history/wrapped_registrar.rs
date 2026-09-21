@@ -1,10 +1,14 @@
-//! The link a `NameWrapped` event records from a NameWrapper resource to the
-//! BaseRegistrar lease it wrapped (`after_state.wrapped_registrar_resource_id`
+//! The link our adapter records for `NameWrapped` from a NameWrapper resource to
+//! the BaseRegistrar lease it wrapped (`after_state.wrapped_registrar_resource_id`
 //! on the NameWrapper's `SurfaceBound` row). History follows that link in both
 //! directions so a wrapped `.eth` name keeps one registration handle: its lease.
 //! The name a BaseRegistrar grant carries (`after_state.namehash`) is followed
 //! the same way, so a lease that never received a binding of its own still
 //! reaches the name's registration history.
+//! Upstream wrapping transfers the registrar token and reclaims registry ownership;
+//! the link and public registration handle above are Bigname's representation.
+//! (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L246-L278 @ ens_v1@91c966f)
+//! (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L130-L152 @ ens_v1@91c966f)
 
 use std::collections::BTreeMap;
 

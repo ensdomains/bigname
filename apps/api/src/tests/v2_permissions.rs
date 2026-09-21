@@ -2584,3 +2584,6 @@ mod resolver_registry_roles;
 
 #[path = "v2_registry_token_handoff.rs"]
 mod registry_token_handoff;
+
+#[path = "v2_registry_released_audit.rs"]
+mod registry_released_audit;

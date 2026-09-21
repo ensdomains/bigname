@@ -10,8 +10,7 @@ pub(super) async fn page(
     chain: &str,
     address: &str,
     section: &str,
-    height: i64,
-    publication_block_bounds: &BTreeMap<String, i64>,
+    (height, publication_block_bounds): (i64, &BTreeMap<String, i64>),
     key: Option<&(String, String)>,
     page_size: u64,
 ) -> V2Result<(Vec<(String, String, Value)>, u64)> {

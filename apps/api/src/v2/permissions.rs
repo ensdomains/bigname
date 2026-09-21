@@ -7,8 +7,9 @@ use serde_json::Value;
 
 use crate::AppState;
 
+use super::address_names::permission_resource_handle;
 use super::collection_snapshot::CollectionSnapshot;
-use super::name_record::{registration_id, wrapper_metadata};
+use super::name_record::wrapper_metadata;
 use super::permission_support::{
     PermissionRequestScope, PermissionSupport, apply_permissions_collection_support_meta,
     permission_support_for_resources,
@@ -230,6 +231,7 @@ pub(crate) async fn get_permissions(
                 include_lineage,
                 resolved.authority_context,
             )?;
+            permission.registration_id = permission_resource_handle(current_name, row.resource_id);
             if current_name.is_none()
                 && let Some(registration) = registry_registrations.get(&row.resource_id)
             {
@@ -260,8 +262,11 @@ pub(crate) async fn get_permissions(
             restrictions.for_registration(
                 resolved
                     .resource_id
-                    .and_then(|resource_id| current_names.get(&resource_id))
-                    .and_then(|name| registration_id(&name.declared_summary, None))
+                    .and_then(|resource_id| {
+                        current_names
+                            .get(&resource_id)
+                            .map(|name| permission_resource_handle(Some(name), resource_id))
+                    })
                     .or_else(|| {
                         resolved
                             .resource_id
@@ -349,9 +354,7 @@ pub(crate) fn build_permission_row(
             grant_scope: effective_permission_scope_value(&row.scope)?,
             powers: permission_powers_value(&row.effective_powers)?,
         },
-        registration_id: declared_summary
-            .and_then(|summary| registration_id(summary, None))
-            .unwrap_or_else(|| row.resource_id.to_string()),
+        registration_id: row.resource_id.to_string(),
         record_resource: row
             .record_resource_selector
             .as_ref()
