@@ -1438,7 +1438,10 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
   a resource still under registry-only control needs no token lineage or active
   name binding to identify the lease at that event. A resolver change on an
   unbound read resource after that control ended still has no registration
-  handle. During a released gap, or before a lease is proved, those control
+  handle. This includes a dormant registry resolver first materialized by wrapping:
+  the registry read observation has no authority key, even when the pre-surface
+  handoff emitted no closing row on the old registry resource.
+  During a released gap, or before a lease is proved, those control
   events have no registration handle. A record event with no resource belongs to that
   lease only while the registry-only binding is active and the lease exists at
   the record's position. The same selection governs row IDs, registration filters,
@@ -1722,9 +1725,14 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
   handle and selects none by its own id. This also holds before name materialization
   when activated, canonical registry authority and registrar grant observations
   identify the same node on the same chain; absent logical names alone prove no
-  relationship. An ordinary registry-owned subname with
-  no registrar lease instead uses its registry resource as the registration
-  handle. That handle selects its grants both while the name is current and as
+  relationship. Both mapping directions use the captured publication: later
+  activated observations cannot change the advertised or selected handle before
+  Project publishes them. During a released gap with no live lease, retained
+  registry grants instead use their registry resource as a followable
+  `resource_audit` handle; this does not claim a live name registration, and the
+  released lease does not select that control or a successor's grants.
+  An ordinary registry-owned subname with no registrar lease also uses its
+  registry resource as the registration handle. That handle selects its grants both while the name is current and as
   a resource audit after the current name row disappears.
   (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L75-L84 @ ens_v1@91c966f)
   (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L175 @ ens_v1@91c966f)

@@ -120,8 +120,14 @@ pub(crate) async fn get_permissions(
         CollectionSnapshot::capture_for_namespace(&state, params.cursor.as_deref(), namespace)
             .await?;
 
-    let resolved =
-        resolve_permissions_filter(&state, &params, include_lineage, &filter_inputs).await?;
+    let resolved = resolve_permissions_filter(
+        &state,
+        &params,
+        include_lineage,
+        &filter_inputs,
+        &snapshot.block_bounds(),
+    )
+    .await?;
     let storage_cursor = params
         .cursor
         .as_deref()
@@ -195,6 +201,19 @@ pub(crate) async fn get_permissions(
         bigname_storage::load_current_names_by_resource_ids(&state.pool, &support_resource_ids)
             .await
             .map_err(|_| V2Error::internal_error("failed to load permission names"))?;
+    let nameless_resource_ids = support_resource_ids
+        .iter()
+        .copied()
+        .filter(|id| !current_names.contains_key(id))
+        .collect::<Vec<_>>();
+    let registry_registrations = bigname_storage::load_registry_permission_registration_map(
+        &state.pool,
+        &nameless_resource_ids,
+        None,
+        &snapshot.block_bounds(),
+    )
+    .await
+    .map_err(|_| V2Error::internal_error("failed to load permission registrations"))?;
     let next_cursor = storage_page.next_cursor.as_ref().map(|cursor| {
         encode(&snapshot.bind_cursor(permissions_cursor_payload(cursor, &resolved.cursor_filters)))
     });
@@ -204,13 +223,19 @@ pub(crate) async fn get_permissions(
         .iter()
         .map(|row| {
             let current_name = current_names.get(&row.resource_id);
-            build_permission_row(
+            let mut permission = build_permission_row(
                 row,
                 current_name.map(|name| name.normalized_name.as_str()),
                 current_name.map(|name| &name.declared_summary),
                 include_lineage,
                 resolved.authority_context,
-            )
+            )?;
+            if current_name.is_none()
+                && let Some(registration) = registry_registrations.get(&row.resource_id)
+            {
+                permission.registration_id = registration.to_string();
+            }
+            Ok(permission)
         })
         .collect::<V2Result<Vec<_>>>()?;
     let mut meta = snapshot.finish(&state).await?;
@@ -236,7 +261,13 @@ pub(crate) async fn get_permissions(
                 resolved
                     .resource_id
                     .and_then(|resource_id| current_names.get(&resource_id))
-                    .and_then(|name| registration_id(&name.declared_summary, None)),
+                    .and_then(|name| registration_id(&name.declared_summary, None))
+                    .or_else(|| {
+                        resolved
+                            .resource_id
+                            .and_then(|id| registry_registrations.get(&id))
+                            .map(ToString::to_string)
+                    }),
             )
         });
 

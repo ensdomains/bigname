@@ -3164,3 +3164,7 @@ async fn registration_history_excludes_record_writes_attributed_to_another_lease
 
     database.cleanup().await
 }
+
+mod registry_handoff_history {
+    include!("v2_history_registry_handoff.rs");
+}

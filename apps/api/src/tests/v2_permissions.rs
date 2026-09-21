@@ -2322,6 +2322,8 @@ async fn assert_nameless_registry_permission_handle(kind: &str) -> Result<()> {
     let rejected = v2_permissions_payload_for_database(&database, &route).await?;
     assert_eq!(rejected["data"], json!([]), "{kind}: {rejected}");
 
+    assert_nameless_permission_roundtrip(&database, registry, lease).await?;
+
     // NewOwner evidence carries both a parent node and a child node. Prefer the child;
     // legacy namehash evidence also takes precedence over the generic node field.
     for field in ["namehash", "child_node"] {
@@ -2335,6 +2337,7 @@ async fn assert_nameless_registry_permission_handle(kind: &str) -> Result<()> {
             .await?,
             "{field} must take precedence"
         );
+        assert_no_registry_permission_mapping(&database, registry, lease).await?;
         sqlx::query("UPDATE bigname_phase.normalized_events SET after_state = jsonb_set(after_state, ARRAY[$1], $2) WHERE event_identity = 'presurface-authority'")
             .bind(field).bind(json!(node.to_uppercase())).execute(&database.pool).await?;
         assert!(
@@ -2345,6 +2348,7 @@ async fn assert_nameless_registry_permission_handle(kind: &str) -> Result<()> {
             .await?,
             "node case is not identity"
         );
+        assert_nameless_permission_roundtrip(&database, registry, lease).await?;
         sqlx::query("UPDATE bigname_phase.normalized_events SET after_state = after_state - $1 WHERE event_identity = 'presurface-authority'")
             .bind(field).execute(&database.pool).await?;
     }
@@ -2353,6 +2357,7 @@ async fn assert_nameless_registry_permission_handle(kind: &str) -> Result<()> {
     for (field, value) in [("namehash", json!(other_node)), ("namehash", Value::Null)] {
         sqlx::query("UPDATE bigname_phase.normalized_events SET after_state = jsonb_set(after_state, ARRAY[$1], $2) WHERE event_identity = 'presurface-lease'")
             .bind(field).bind(value).execute(&database.pool).await?;
+        assert_no_registry_permission_mapping(&database, registry, lease).await?;
         let audit = v2_permissions_payload_for_database(&database, &route).await?;
         assert_eq!(
             audit["data"], no_lease["data"],
@@ -2372,6 +2377,7 @@ async fn assert_nameless_registry_permission_handle(kind: &str) -> Result<()> {
             .await?,
             "candidate {identity}"
         );
+        assert_no_registry_permission_mapping(&database, registry, lease).await?;
         sqlx::query("UPDATE bigname_phase.normalized_events SET consumer_visibility = 'activated', canonicality_state = 'orphaned' WHERE event_identity = $1")
             .bind(identity).execute(&database.pool).await?;
         assert!(
@@ -2382,6 +2388,7 @@ async fn assert_nameless_registry_permission_handle(kind: &str) -> Result<()> {
             .await?,
             "noncanonical {identity}"
         );
+        assert_no_registry_permission_mapping(&database, registry, lease).await?;
         sqlx::query("UPDATE bigname_phase.normalized_events SET canonicality_state = 'canonical' WHERE event_identity = $1")
             .bind(identity).execute(&database.pool).await?;
     }
@@ -2396,6 +2403,7 @@ async fn assert_nameless_registry_permission_handle(kind: &str) -> Result<()> {
             .await?,
             "noncanonical lineage {block}"
         );
+        assert_no_registry_permission_mapping(&database, registry, lease).await?;
         sqlx::query("UPDATE bigname_phase.chain_lineage SET canonicality_state = 'canonical' WHERE block_hash = $1 AND chain_id = 'ethereum-mainnet'")
             .bind(format!("0xhistory{block}")).execute(&database.pool).await?;
     }
@@ -2403,5 +2411,170 @@ async fn assert_nameless_registry_permission_handle(kind: &str) -> Result<()> {
         bigname_storage::resource_is_registry_control_for_registrar_lease(&database.pool, registry)
             .await?
     );
+    assert_registry_permission_namespace_chains(&database, registry, lease).await?;
+    assert_nameless_permission_publication_lifecycle(&database, registry, lease, &node).await?;
     database.cleanup().await
+}
+
+async fn assert_nameless_permission_roundtrip(
+    database: &TestDatabase,
+    registry: Uuid,
+    lease: Uuid,
+) -> Result<()> {
+    let by_address = v2_permissions_payload_for_database(
+        database, &format!("/v1/permissions?address={V2_PERMISSIONS_SUBJECT}"),
+    ).await?;
+    let row = by_address["data"].as_array().unwrap().iter()
+        .find(|row| row["powers"] == json!(["registration_control"]))
+        .expect("retained registry grant");
+    assert_eq!(row["registration_id"], lease.to_string(), "{by_address}");
+    assert_eq!(row["authority_context"], "resource_audit");
+    assert_eq!(row["grant_scope"]["kind"], "registration");
+    if registry != lease {
+        assert!(!by_address["data"].as_array().unwrap().iter()
+            .any(|row| row["registration_id"] == registry.to_string()), "{by_address}");
+    }
+    for route in [format!("/v1/permissions?registration_id={lease}"),
+        format!("/v1/permissions?registration_id={lease}&address={V2_PERMISSIONS_SUBJECT}")] {
+        let selected = v2_permissions_payload_for_database(database, &route).await?;
+        assert!(selected["data"].as_array().unwrap().contains(row), "{route}: {selected}");
+    }
+    let raw = v2_permissions_payload_for_database(database,
+        &format!("/v1/permissions?registration_id={registry}")).await?;
+    if registry != lease {
+        assert_eq!(raw["data"], json!([]), "{raw}");
+    } else {
+        assert!(raw["data"].as_array().unwrap().contains(row), "{raw}");
+    }
+    Ok(())
+}
+
+async fn assert_no_registry_permission_mapping(
+    database: &TestDatabase, registry: Uuid, lease: Uuid,
+) -> Result<()> {
+    let bounds = std::collections::BTreeMap::from([("ethereum-mainnet".to_owned(), 130)]);
+    for (resources, requested) in [(vec![registry], None), (vec![], Some(lease))] {
+        let mapping = bigname_storage::load_registry_permission_registration_map(
+            &database.pool, &resources, requested, &bounds).await?;
+        assert!(mapping.is_empty(), "unexpected registry mapping {mapping:?}");
+    }
+    Ok(())
+}
+
+async fn assert_nameless_permission_publication_lifecycle(
+    database: &TestDatabase, registry: Uuid, lease: Uuid, node: &str,
+) -> Result<()> {
+    // Boundary-derived evidence can lack log positions. Match the existing history order
+    // (-1 for absent positions), including a release at the same boundary as its grant.
+    let mut boundary_release = v2_history_event("permission-boundary-release", None, Some(lease), "RegistrationReleased", 118);
+    boundary_release.source_family = "ens_v2_migration_l1".into();
+    boundary_release.log_index = None;
+    boundary_release.transaction_hash = None;
+    sqlx::query("UPDATE bigname_phase.normalized_events SET transaction_index=NULL, log_index=NULL WHERE event_identity='presurface-lease'")
+        .execute(&database.pool).await?;
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[boundary_release]).await?;
+    assert_nameless_permission_roundtrip(database, registry, registry).await?;
+    sqlx::query("DELETE FROM bigname_phase.normalized_events WHERE event_identity='permission-boundary-release'")
+        .execute(&database.pool).await?;
+    sqlx::query("UPDATE bigname_phase.normalized_events SET transaction_index=0, log_index=0 WHERE event_identity='presurface-lease'")
+        .execute(&database.pool).await?;
+
+    // Interpret can be ahead of Project. Seed retained future facts without advancing the
+    // published head, then explicitly publish each point of this registry/lease lifecycle.
+    let blocks = (140..=160).map(|number| raw_block("ethereum-mainnet",
+        &format!("0xhistory{number}"), None, number, 1_700_000_000 + number)).collect::<Vec<_>>();
+    upsert_phase_raw_blocks(&database.pool, &blocks).await?;
+    let publication_hash: String = sqlx::query_scalar("SELECT current_block_hash FROM chain_phase_state WHERE chain_id='ethereum-mainnet' AND phase_name='project'")
+        .fetch_one(&database.pool).await?;
+
+    sqlx::query("UPDATE bigname_phase.normalized_events SET block_number=140, block_hash='0xhistory140' WHERE event_identity='presurface-lease'")
+        .execute(&database.pool).await?;
+    assert_nameless_permission_roundtrip(database, registry, registry).await?;
+    assert_no_registry_permission_mapping(database, registry, lease).await?;
+    sqlx::query("UPDATE bigname_phase.normalized_events SET block_number=118, block_hash='0xhistory118' WHERE event_identity='presurface-lease'")
+        .execute(&database.pool).await?;
+
+    let successor = Uuid::from_u128(0xe300);
+    upsert_test_resources(&database.pool, &[resource(successor)]).await?;
+    let mut release = v2_history_event("presurface-release", None, Some(lease), "RegistrationReleased", 140);
+    release.source_family = "ens_v2_migration_l1".into();
+    release.log_index = None;
+    release.transaction_hash = None;
+    release.after_state["namehash"] = json!(node);
+    let mut grant = v2_history_event("presurface-successor", None, Some(successor), "RegistrationGranted", 150);
+    grant.after_state["namehash"] = json!(node);
+    let mut successor_release = v2_history_event("presurface-successor-release", None, Some(successor), "RegistrationReleased", 155);
+    successor_release.source_family = "ens_v2_migration_l1".into();
+    successor_release.log_index = None;
+    successor_release.transaction_hash = None;
+    successor_release.after_state["namehash"] = json!(node);
+    let mut handoff = v2_history_event("presurface-handoff", None, Some(successor), "AuthorityEpochChanged", 160);
+    handoff.after_state["namehash"] = json!(node);
+    handoff.after_state["authority_kind"] = json!("registrar");
+    handoff.after_state["authority_key"] = json!("registrar:successor");
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[release, grant, successor_release, handoff]).await?;
+    assert_nameless_permission_roundtrip(database, registry, lease).await?;
+
+    for (block, handle) in [(140, registry), (150, successor), (155, registry)] {
+        seed_schema_v2_ens_lookup_head(&database.pool, block, &format!("0xhistory{block}"), "2026-06-10T00:00:00Z").await?;
+        assert_nameless_permission_roundtrip(database, registry, handle).await?;
+        let old_lease = v2_permissions_payload_for_database(database,
+            &format!("/v1/permissions?registration_id={lease}&address={V2_PERMISSIONS_SUBJECT}")).await?;
+        assert!(!old_lease["data"].as_array().unwrap().iter()
+            .any(|row| row["powers"] == json!(["registration_control"])), "old lease selected registry grant: {old_lease}");
+    }
+    // A released latest grant must not revive an older grant even if its release is absent.
+    sqlx::query("DELETE FROM bigname_phase.normalized_events WHERE event_identity='presurface-release'")
+        .execute(&database.pool).await?;
+    assert_nameless_permission_roundtrip(database, registry, registry).await?;
+    // Now remove successor release, proving the *different-resource* handoff itself closes R.
+    sqlx::query("DELETE FROM bigname_phase.normalized_events WHERE event_identity='presurface-successor-release'")
+        .execute(&database.pool).await?;
+    seed_schema_v2_ens_lookup_head(&database.pool, 160, "0xhistory160", "2026-06-10T00:00:00Z").await?;
+    assert_nameless_permission_roundtrip(database, registry, registry).await?;
+    let bounds = std::collections::BTreeMap::from([("ethereum-mainnet".to_owned(), 160)]);
+    for (resources, requested) in [(vec![registry], None), (vec![], Some(successor))] {
+        assert!(bigname_storage::load_registry_permission_registration_map(
+            &database.pool, &resources, requested, &bounds).await?.is_empty());
+    }
+    assert!(bigname_storage::load_registry_permission_registration_map(
+        &database.pool, &[registry], None, &std::collections::BTreeMap::new()).await?.is_empty());
+    seed_schema_v2_ens_lookup_head(&database.pool, 130, &publication_hash, "2026-06-10T00:00:00Z").await?;
+    Ok(())
+}
+
+
+async fn assert_registry_permission_namespace_chains(
+    database: &TestDatabase, registry: Uuid, lease: Uuid,
+) -> Result<()> {
+    sqlx::query("UPDATE bigname_phase.normalized_events SET namespace='basenames' WHERE event_identity='presurface-authority'")
+        .execute(&database.pool).await?;
+    assert_no_registry_permission_mapping(database, registry, lease).await?;
+    sqlx::query("UPDATE bigname_phase.normalized_events SET namespace='ens' WHERE event_identity='presurface-authority'")
+        .execute(&database.pool).await?;
+    let blocks = (118..=119).map(|n| raw_block("base-mainnet", &format!("0xhistory{n}"), None, n, 1_700_000_000+n)).collect::<Vec<_>>();
+    upsert_phase_raw_blocks(&database.pool, &blocks).await?;
+    let base_registry = Uuid::from_u128(0xf001);
+    let base_lease = Uuid::from_u128(0xf002);
+    let resources = [base_registry, base_lease].map(|id| {
+        let mut row = resource(id);
+        row.chain_id = "base-mainnet".into();
+        row.block_number = 118;
+        row.block_hash = "0xhistory118".into();
+        row
+    });
+    upsert_test_resources(&database.pool, &resources).await?;
+    sqlx::query("UPDATE bigname_phase.normalized_events SET chain_id='base-mainnet', resource_id=$1 WHERE event_identity='presurface-authority'")
+        .bind(base_registry).execute(&database.pool).await?;
+    let bounds = std::collections::BTreeMap::from([("ethereum-mainnet".to_owned(),130),("base-mainnet".to_owned(),130)]);
+    assert!(bigname_storage::load_registry_permission_registration_map(&database.pool, &[base_registry], None, &bounds).await?.is_empty());
+    assert!(bigname_storage::load_registry_permission_registration_map(&database.pool, &[], Some(lease), &bounds).await?.is_empty());
+    sqlx::query("UPDATE bigname_phase.normalized_events SET chain_id='base-mainnet', namespace='basenames', resource_id=CASE WHEN event_identity='presurface-authority' THEN $1 ELSE $2 END, source_family=CASE WHEN event_identity='presurface-authority' THEN 'basenames_base_registry' ELSE 'basenames_base_registrar' END WHERE event_identity IN ('presurface-authority','presurface-lease')")
+        .bind(base_registry).bind(base_lease).execute(&database.pool).await?;
+    let expected = std::collections::BTreeMap::from([(base_registry,base_lease)]);
+    assert_eq!(bigname_storage::load_registry_permission_registration_map(&database.pool, &[base_registry], None, &bounds).await?, expected);
+    assert_eq!(bigname_storage::load_registry_permission_registration_map(&database.pool, &[], Some(base_lease), &bounds).await?, expected);
+    sqlx::query("UPDATE bigname_phase.normalized_events SET chain_id='ethereum-mainnet', namespace='ens', resource_id=CASE WHEN event_identity='presurface-authority' THEN $1 ELSE $2 END, source_family=CASE WHEN event_identity='presurface-authority' THEN 'ens_v1_registry_l1' ELSE 'ens_v1_registrar_l1' END WHERE event_identity IN ('presurface-authority','presurface-lease')")
+        .bind(registry).bind(lease).execute(&database.pool).await?;
+    Ok(())
 }

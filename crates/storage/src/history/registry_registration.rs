@@ -26,9 +26,10 @@ pub(super) fn is_registry_only(resource: &str, event: &str, canonical_only: bool
     )
 }
 
-// A resolver without a binding can belong to pre-surface control or to the read resource
-// retained after ownership was cleared. Only the former bypasses the read-only fallback.
-pub(super) fn is_registry_control_at_event(
+// Retained same-resource authority evidence lets ordinary pre-surface resolver changes
+// use a lease. A handoff can be recorded only on the new resource, so the caller must
+// still reject explicitly dormant RegistryRead materialization with no authority key.
+pub(super) fn has_registry_control_observation_at_event(
     resource: &str,
     event: &str,
     canonical_only: bool,

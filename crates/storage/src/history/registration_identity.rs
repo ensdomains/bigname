@@ -382,8 +382,11 @@ fn push_product_registration_id_with_anchors(
         registry_registration::is_registry_only("ne.resource_id", "ne", canonical_only);
     let registry_lease =
         registry_registration::lease_at_event("ne", "ne.resource_id", canonical_only);
-    let registry_control =
-        registry_registration::is_registry_control_at_event("ne.resource_id", "ne", canonical_only);
+    let registry_control = registry_registration::has_registry_control_observation_at_event(
+        "ne.resource_id",
+        "ne",
+        canonical_only,
+    );
     // Emit a Boolean literal so canonical reads retain constant-folded index predicates.
     builder.push(format!(
         r#"
@@ -473,7 +476,15 @@ fn push_product_registration_id_with_anchors(
                         )
                         OR (
                             ne.event_kind = 'ResolverChanged'
-                            AND NOT {registry_control}
+                            AND (
+                                NOT {registry_control}
+                                OR COALESCE(
+                                    ne.after_state ->> 'surface_materialization' = 'true'
+                                    AND ne.after_state ->> 'authority_kind' = 'registry_only'
+                                    AND ne.after_state ->> 'authority_key' IS NULL,
+                                    FALSE
+                                )
+                            )
                             AND NOT EXISTS (
                                 SELECT 1
                                 FROM bigname_phase.resources event_resource

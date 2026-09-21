@@ -91,6 +91,7 @@ pub(super) async fn resolve_permissions_filter(
     params: &QueryParams,
     include_lineage: bool,
     inputs: &PermissionsFilterInputs,
+    block_bounds: &BTreeMap<String, i64>,
 ) -> V2Result<ResolvedPermissionsFilter> {
     let resolved_name_row = match inputs.name_filter.as_ref() {
         Some(name_filter) => Some(
@@ -121,7 +122,7 @@ pub(super) async fn resolve_permissions_filter(
 
     let pair_support_resource_id = match inputs.requested_resource_id {
         Some(requested) if superseded_pair => Some(
-            control_resource_for_registration(state, requested)
+            control_resource_for_registration(state, requested, block_bounds)
                 .await?
                 .unwrap_or(requested),
         ),
@@ -133,7 +134,8 @@ pub(super) async fn resolve_permissions_filter(
     let resource_id = match (name_resource_id, inputs.requested_resource_id) {
         (Some(name_resource_id), _) => Some(name_resource_id),
         (None, Some(requested)) if inputs.name_filter.is_none() => {
-            let control_resource = control_resource_for_registration(state, requested).await?;
+            let control_resource =
+                control_resource_for_registration(state, requested, block_bounds).await?;
             resource_is_not_a_registration = control_resource.is_none();
             Some(control_resource.unwrap_or(requested))
         }
@@ -257,6 +259,7 @@ fn registration_uuid(row: &NameCurrentRow) -> Option<Uuid> {
 async fn control_resource_for_registration(
     state: &AppState,
     registration_id: Uuid,
+    block_bounds: &BTreeMap<String, i64>,
 ) -> V2Result<Option<Uuid>> {
     let failed = |error| {
         tracing::error!(
@@ -295,17 +298,34 @@ async fn control_resource_for_registration(
             stands_in_for_a_lease = true;
         }
     }
-    // A current registry-owned subname can identify this resource as its own registration.
-    // With no current identity, reject only registry control proven to stand beside a lease;
-    // ordinary registry resources retain their historical audit handle.
-    if stands_in_for_a_lease
-        || bigname_storage::resource_is_registry_control_for_registrar_lease(
-            &state.pool,
-            registration_id,
-        )
-        .await
-        .map_err(failed)?
-    {
+    let controls = bigname_storage::load_registry_permission_registration_map(
+        &state.pool,
+        &[],
+        Some(registration_id),
+        block_bounds,
+    )
+    .await
+    .map_err(failed)?;
+    if controls.len() > 1 {
+        return Err(V2Error::internal_error(
+            "ambiguous registration control resource",
+        ));
+    }
+    if let Some(resource_id) = controls.keys().next() {
+        return Ok(Some(*resource_id));
+    }
+    // A live registrar lease is the public handle for its registry control. If no live
+    // lease exists at this publication, retained grants remain followable resource audits;
+    // an expired lease must not select that control or a successor's grants.
+    let registry_leases = bigname_storage::load_registry_permission_registration_map(
+        &state.pool,
+        &[registration_id],
+        None,
+        block_bounds,
+    )
+    .await
+    .map_err(failed)?;
+    if stands_in_for_a_lease || registry_leases.contains_key(&registration_id) {
         return Ok(None);
     }
     Ok(Some(registration_id))
