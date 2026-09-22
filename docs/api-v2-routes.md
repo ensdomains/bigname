@@ -1962,6 +1962,24 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
   coverage is unsupported. When no current authority can be proven, no current
   address relation can be established and the name is structurally absent;
   callers use name detail or batch lookup for its explicit coverage reason.
+  A name bigname has never materialized as a
+  [name surface](glossary.md#surface-name-surface) is likewise absent even
+  when its registry owner is proven. On the ENSv1 arm a surface comes from a
+  label-bearing registrar or NameWrapper event; a node known only from registry
+  owner events — a subname written with `setSubnodeOwner` or
+  `setSubnodeRecord`, which emit the labelhash and not the label, and never
+  wrapped — has a registry-only resource but no surface, whether or not a
+  label preimage for it exists
+  ([ADR 0002](adrs/0002-surface-resource-identity.md), ENSv1 authority-anchor
+  rules)
+  (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L49-L58 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L75-L83 @ ens_v1@91c966f).
+  Such a name has no current name row for any relation or `is_migrated` value
+  to list, and this route never serves a
+  [non-name form](glossary.md#non-name-form) for it. Its only listing is the
+  row on its parent's `GET /v1/names/{name}/subnames`, named from a proven
+  preimage or by the placeholder. The same rule applies to reverse inputs of
+  `POST /v1/lookup`.
 - Replaces (v1): `GET /v1/addresses/{address}/names` and address-relation
   uses of `GET /v1/names`.
 
