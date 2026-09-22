@@ -1898,7 +1898,7 @@ dependencies = [
  "sqlx",
  "time",
  "tokio",
- "tracing-subscriber 0.3.23",
+ "tracing-subscriber",
  "uuid",
 ]
 

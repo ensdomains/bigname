@@ -15,6 +15,7 @@ const V2_RESOURCE: &str = "00000000-0000-0000-0000-000000000360";
 const V2_BINDING: &str = "00000000-0000-0000-0000-000000000361";
 const V2_REGISTRY: &str = "00000000-0000-0000-0000-000000000362";
 const V2_REGISTRY_ADDRESS: &str = "0x0000000000000000000000000000000000000360";
+const V1_REGISTRY_ONLY_RESOURCE: &str = "00000000-0000-0000-0000-000000000363";
 const OWNER: &str = "0x0000000000000000000000000000000000000001";
 
 fn block_hash(block: i64) -> String {
@@ -216,22 +217,88 @@ async fn seed_v2_registry_path(pool: &PgPool) -> Result<()> {
 }
 
 async fn seed_v1_topology_only_child(pool: &PgPool) -> Result<()> {
-    insert_normalized_event(
-        pool,
-        "issue-360-v1-topology-only-child",
-        None,
-        None,
-        "ens_v1_registry_l1",
-        "SubregistryChanged",
-        1,
-        json!({
-            "node": PARENT.trim_start_matches("ens:"),
-            "child_node": V1_CHILD.trim_start_matches("ens:"),
-            "labelhash": V1_LABELHASH,
-            "owner": OWNER
-        }),
-    )
-    .await
+    // The stream the ENSv1 registry adapter emits for a NewOwner on a node it has never
+    // seen named: a registry-only resource, and SubregistryChanged, AuthorityTransferred
+    // and PermissionChanged on it with no logical name (no AuthorityEpochChanged: the
+    // authority is neither surfaced nor tokenized, crates/adapters/src/schema_v2/
+    // protocol/v1/authority_transition.rs). The three carry the one log's position.
+    sqlx::query("INSERT INTO resources (resource_id, chain_id, block_hash, block_number, canonicality_state) VALUES ($1::uuid, $2, $3, 10, 'canonical')")
+        .bind(V1_REGISTRY_ONLY_RESOURCE)
+        .bind(CHAIN)
+        .bind(block_hash(10))
+        .execute(pool)
+        .await?;
+    let child_node = V1_CHILD.trim_start_matches("ens:");
+    let observation = json!({
+        "source_event": "NewOwner",
+        "emitter_role": "registry",
+        "authority_kind": "registry_only",
+        "authority_key": format!("registry-only:{CHAIN}:{child_node}"),
+        "node": PARENT.trim_start_matches("ens:"),
+        "child_node": child_node,
+        "labelhash": V1_LABELHASH,
+        "owner": OWNER,
+        "owner_getter": OWNER
+    });
+    let mut transferred = observation.clone();
+    transferred["registrar_surface_evidence"] = json!({
+        "registry_owner": {
+            "block_number": 10,
+            "log_index": 1,
+            "transaction_index": 0,
+            "timestamp": 1800000010,
+            "resource_id": V1_REGISTRY_ONLY_RESOURCE,
+            "source_family": "ens_v1_registry_l1",
+            "source_manifest_id": 1,
+            "state": observation.clone()
+        }
+    });
+    for (identity, event_kind, log_index, after_state) in [
+        (
+            "issue-360-v1-topology-only-child",
+            "SubregistryChanged",
+            1,
+            observation.clone(),
+        ),
+        (
+            "issue-360-v1-topology-only-transfer",
+            "AuthorityTransferred",
+            1,
+            transferred,
+        ),
+        (
+            "issue-360-v1-topology-only-permission",
+            "PermissionChanged",
+            1,
+            json!({
+                "subject": OWNER,
+                "scope": {"kind": "resource"},
+                "effective_powers": ["resource_control"],
+                "inheritance_path": [],
+                "revocation_source": null,
+                "transfer_behavior": "replace_on_authority_change",
+                "grant_source": {
+                    "kind": "ens_v1_authority",
+                    "source_event_kind": "AuthorityTransferred",
+                    "authority_kind": "registry_only",
+                    "authority_key": format!("registry-only:{CHAIN}:{child_node}")
+                }
+            }),
+        ),
+    ] {
+        insert_normalized_event(
+            pool,
+            identity,
+            None,
+            Some(V1_REGISTRY_ONLY_RESOURCE),
+            "ens_v1_registry_l1",
+            event_kind,
+            log_index,
+            after_state,
+        )
+        .await?;
+    }
+    Ok(())
 }
 
 async fn run_project(pool: &PgPool) -> Result<()> {
@@ -370,6 +437,23 @@ async fn ens_v1_topology_only_child_keeps_non_name_form() -> Result<()> {
     assert_eq!(
         served.canonicality_summary["target_block_hash"],
         block_hash(10)
+    );
+
+    // Contract: docs/api-v2-routes.md "GET /v1/addresses/{address}/names" — a node known
+    // only from registry owner events has a registry-only resource and no name surface, so
+    // the address collection omits it instead of listing the placeholder; the parent's
+    // subnames is its only listing.
+    let address_rows: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM address_names_current
+         WHERE lower(address) = lower($1) OR logical_name_id = $2",
+    )
+    .bind(OWNER)
+    .bind(V1_CHILD)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        address_rows, 0,
+        "a registry-only child with no name surface must not reach the address collection"
     );
     database.cleanup().await
 }
