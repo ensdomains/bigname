@@ -1,5 +1,5 @@
 //! Keyset cursors for the history collections, `/v1/events`, name history, and address history
-//! (docs/api-v2-routes.md, "Shared Route Rules"). A cursor holds its anchor's position in the
+//! (docs/api-v1-routes.md, "Shared Route Rules"). A cursor holds its anchor's position in the
 //! history order and continues after it against whatever is published when the next page is
 //! read, whether or not the anchor row still exists. A cursor issued before this layout names
 //! only its anchor row; it resumes from that row's position and restarts once when the row is

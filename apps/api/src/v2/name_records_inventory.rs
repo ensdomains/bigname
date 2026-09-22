@@ -121,7 +121,7 @@ pub(crate) fn inventory_summary_of(
 
     if !record_inventory.authoritative {
         // An unsupported row can assert neither presence nor absence, so every product key it
-        // knows about, and every requested key, is unsupported (docs/api-v2-routes.md).
+        // knows about, and every requested key, is unsupported (docs/api-v1-routes.md).
         let mut unsupported_keys = keys_from_sections(&[
             record_inventory.selectors,
             record_inventory.entries,

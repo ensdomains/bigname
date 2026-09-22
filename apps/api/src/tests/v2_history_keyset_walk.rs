@@ -1,4 +1,4 @@
-// Whole-walk equality for history walks (docs/api-v2-routes.md, "Shared Route Rules"): on a
+// Whole-walk equality for history walks (docs/api-v1-routes.md, "Shared Route Rules"): on a
 // fixed dataset, paging one row at a time returns exactly the unpaged ordered collection, in
 // both directions, on every history route. Rows share a log position so only `event_identity`
 // orders them, one row has no transaction hash or log index, and name history also merges

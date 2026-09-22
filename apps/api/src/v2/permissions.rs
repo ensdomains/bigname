@@ -84,7 +84,7 @@ pub(crate) struct PermissionRow {
 }
 
 /// The `GET /v1/permissions` body: the collection envelope plus, for a resource-bound read, the
-/// selected registration's [resource restrictions](../../../../docs/api-v2.md#resource-restrictions).
+/// selected registration's [resource restrictions](../../../../docs/api-v1.md#resource-restrictions).
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub(crate) struct PermissionsResponse {
     #[serde(flatten)]

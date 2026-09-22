@@ -202,6 +202,6 @@ the chain has already decided who holds it.
 - [`architecture.md` § ENSv1→ENSv2 current authority](../architecture.md#ensv1ensv2-current-authority)
 - [`manifests.md` § ENSv1 (`sepolia` deployment profile)](../manifests.md)
 - [`consumer-capabilities.md`](../consumer-capabilities.md)
-- [`api-v2-routes.md`](../api-v2-routes.md)
+- [`api-v1-routes.md`](../api-v1-routes.md)
 - [`upstream.md` § Known divergences](../upstream.md#known-divergences)
 - Linear TYR-13

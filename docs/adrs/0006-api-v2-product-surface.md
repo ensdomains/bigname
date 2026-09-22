@@ -42,7 +42,7 @@ The flat record shape below is unchanged for `GET /v1/names/{name}` and
 `POST /v1/lookup` with `profile=detail`, including their `addresses`,
 `text_records`, `content_hash`, `primary_address`, and `unsupported_fields`
 contracts. Route details live in
-[`api-v2-routes.md`](../api-v2-routes.md#get-v1namesnamerecords).
+[`api-v1-routes.md`](../api-v1-routes.md#get-v1namesnamerecords).
 
 ## 2026-08-06 Amendment: Schema-v2 Serving Boundary
 

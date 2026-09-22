@@ -714,7 +714,7 @@ retained losing-fork row, whose event no longer exists, attaches to nothing.
 What the response does not assert is current correlation: the only
 per-association field it carries is `consumer_visibility`, which, like the
 row's stored `canonicality_state`, is what Interpret recorded when it last
-derived the row, and the route contract in `api-v2-routes.md` says so. The route behavior is pinned by
+derived the row, and the route contract in `api-v1-routes.md` says so. The route behavior is pinned by
 `diagnostics_hide_an_event_on_an_orphaned_lineage_with_its_still_canonical_association`
 in `apps/api/src/tests/v2_history.rs`.
 The position indexes on these
@@ -933,7 +933,7 @@ fixtures.
 Product history cursors hold a position in the history order rather than a
 normalized-event row ID, so the slice-1 test re-walk leaves them to the
 [history walk](glossary.md#history-walk) rule in
-[api-v2.md](api-v2.md#cursors-and-pagination). A diagnostic-events
+[api-v1.md](api-v1.md#cursors-and-pagination). A diagnostic-events
 cursor issued before the re-walk at a fixed readable chain head must remain
 valid and continue from the same stable normalized-event anchor, although its remaining rows and fields
 may reflect candidate admission. A pre-existing diagnostic row's numeric

@@ -6,7 +6,7 @@ Date: 2026-05-06
 This document records the pre-v2 flattening plan. References below to v1
 routes, the worker, durable execution traces, replay fences, or the legacy
 `public` projection plane are historical and do not describe the current
-runtime. The current contracts are `docs/api-v2.md`, `docs/storage.md`,
+runtime. The current contracts are `docs/api-v1.md`, `docs/storage.md`,
 `docs/projections.md`, and `docs/execution.md`.
 
 ## Context
