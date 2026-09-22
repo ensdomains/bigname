@@ -1022,8 +1022,13 @@ SELECT line FROM (
     -- identity is longer, so rows would sort by a truncated key that depends
     -- on the scratch schema's name.
     SELECT 0 AS section, c.relname::text AS a, ''::text AS b,
-           format('relation %s kind=%s persistence=%s acl=%s options=%s toast_options=%s rls=%s force_rls=%s replica_identity=%s inherits=%s',
+           format('relation %s kind=%s persistence=%s tablespace=%s am=%s acl=%s options=%s toast_options=%s rls=%s force_rls=%s replica_identity=%s inherits=%s',
                   c.relname, c.relkind, c.relpersistence,
+                  -- Where the relation is stored and by which access method;
+                  -- ALTER TABLE ... SET TABLESPACE or SET ACCESS METHOD moves
+                  -- neither a column nor a row.
+                  COALESCE((SELECT t.spcname FROM pg_tablespace t WHERE t.oid = c.reltablespace), 'default'),
+                  COALESCE((SELECT am.amname FROM pg_am am WHERE am.oid = c.relam), '-'),
                   COALESCE(to_jsonb(pg_temp.frozen_catalog_acl(c.relacl, c.relowner))::text, 'default'),
                   COALESCE((SELECT jsonb_agg(o ORDER BY o)::text FROM unnest(c.reloptions) o), '-'),
                   -- PostgreSQL stores toast.* parameters on the table's TOAST
@@ -1096,7 +1101,9 @@ SELECT line FROM (
     WHERE n.nspname = current_schema()
     UNION ALL
     SELECT 3, c.relname, i.relname,
-           format('index %s.%s %s valid=%s replident=%s clustered=%s', c.relname, i.relname, pg_get_indexdef(x.indexrelid), x.indisvalid, x.indisreplident, x.indisclustered)
+           format('index %s.%s %s tablespace=%s valid=%s replident=%s clustered=%s', c.relname, i.relname, pg_get_indexdef(x.indexrelid),
+                  COALESCE((SELECT t.spcname FROM pg_tablespace t WHERE t.oid = i.reltablespace), 'default'),
+                  x.indisvalid, x.indisreplident, x.indisclustered)
     FROM pg_index x
     JOIN pg_class i ON i.oid = x.indexrelid
     JOIN pg_class c ON c.oid = x.indrelid
@@ -1317,7 +1324,9 @@ SELECT line FROM (
     -- A relation, routine or type that was already here can change without
     -- changing hands (the ledger losing its primary key, a routine body
     -- replaced), so each line carries a digest of its definition.
-    SELECT format('relation %s.%s kind=%s owner=%s acl=%s def=%s', o.nspname, c.relname, c.relkind, pg_get_userbyid(c.relowner), COALESCE(c.relacl::text, '-'),
+    SELECT format('relation %s.%s kind=%s owner=%s tablespace=%s am=%s acl=%s def=%s', o.nspname, c.relname, c.relkind, pg_get_userbyid(c.relowner),
+               COALESCE((SELECT t.spcname FROM pg_tablespace t WHERE t.oid = c.reltablespace), 'default'),
+               COALESCE((SELECT am.amname FROM pg_am am WHERE am.oid = c.relam), '-'), COALESCE(c.relacl::text, '-'),
                md5(concat_ws(' | ', c.relpersistence, c.relreplident, c.relrowsecurity, c.relforcerowsecurity, COALESCE(c.reloptions::text, '-'),
                    COALESCE((SELECT string_agg(concat_ws(' ', a.attname, format_type(a.atttypid, a.atttypmod), a.attnotnull,
                                                          COALESCE(pg_get_expr(ad.adbin, ad.adrelid), '-'), a.attidentity, a.attgenerated, a.attcollation),
@@ -1791,11 +1800,23 @@ assert_frozen_catalog_sees_planted_changes() {
         'is not owned by the schema owner:ALTER FUNCTION label_hashes(text[]) OWNER TO CURRENT_USER;'
         "schema owner is not the role that runs the schema-migrations:REASSIGN OWNED BY \"$apply_check_role\" TO CURRENT_USER;"
     )
+    local planted_tablespace="${scratch_schema}_planted" superuser=0
     if [ "$(printf '\\pset tuples_only on\nSELECT rolsuper FROM pg_roles WHERE rolname = current_user;\n' | run_psql_as_owner | tr -d ' ')" = t ]; then
-        owner_planted_changes+=('constraint trigger address_names_current.:ALTER TABLE address_names_current DISABLE TRIGGER ALL;')
+        superuser=1
+        owner_planted_changes+=(
+            'constraint trigger address_names_current.:ALTER TABLE address_names_current DISABLE TRIGGER ALL;'
+            'am=planted_am :CREATE ACCESS METHOD planted_am TYPE TABLE HANDLER heap_tableam_handler; ALTER TABLE chain_heads SET ACCESS METHOD planted_am;'
+            "relation chain_heads kind=r persistence=p tablespace=$planted_tablespace :ALTER TABLE chain_heads SET TABLESPACE \"$planted_tablespace\";"
+            "tablespace=$planted_tablespace valid=:ALTER INDEX chain_lineage_pkey SET TABLESPACE \"$planted_tablespace\";"
+        )
+        # A second tablespace without a server directory: PostgreSQL 15 and
+        # later place it inside the data directory when this developer
+        # setting is on. It stays empty, since each move rolls back.
+        cluster_plant_restore="DROP TABLESPACE IF EXISTS \"$planted_tablespace\";"
+        printf 'SET allow_in_place_tablespaces = on;\nCREATE TABLESPACE "%s" LOCATION %s;\n' "$planted_tablespace" "''" | run_psql_as_owner
     else
-        printf '%s\n' "note: the database user is not a superuser, so disabled foreign-key triggers were not planted" >&2
-        expected_refusal_assertions=$((expected_refusal_assertions - 1))
+        printf '%s\n' "note: the database user is not a superuser, so disabled foreign-key triggers, a table access method and tablespace moves were not planted" >&2
+        expected_refusal_assertions=$((expected_refusal_assertions - 4))
     fi
     for planted in "${owner_planted_changes[@]}"; do
         reason="${planted%%:*}"
@@ -1806,6 +1827,10 @@ assert_frozen_catalog_sees_planted_changes() {
         esac
         refusal_assertions_passed=$((refusal_assertions_passed + 1))
     done
+    if [ "$superuser" = 1 ]; then
+        printf 'DROP TABLESPACE "%s";\n' "$planted_tablespace" | run_psql_as_owner
+        cluster_plant_restore=""
+    fi
     # Two definitions under one name that print the same without the
     # column added for them: SQL-standard bodies leave prosrc empty for both,
     # and range types share the generic type row. The catalogs taken with
@@ -3029,11 +3054,12 @@ migration_application_log="$(
 # Future entries must use basename|one-line reason.
 intentional_phase_migration_skips=()
 refusal_assertions_passed=0
-# Base 173, main added 90, this branch 206 (123 of them the backslash-command,
+# Base 173, main added 90, this branch 216 (133 of them the backslash-command,
 # psql-variable, schema-owner, parameter-privilege, installer-race,
 # other-database setting and attribute, outside-definition and membership,
 # exercised-row, identity-row, dropped-fact, lost-column, sequence-position,
 # server-statement, server-file read, shared-object and configuration-file,
+# administration-function, tablespace and access-method,
 # SET-spelling, session-residue, session-identity (database, connection and
 # temporary namespace included), recorded-history, ambiguous foreign key,
 # assembled password, literal-name branch and column-order, baseline-residue,
@@ -3043,7 +3069,7 @@ refusal_assertions_passed=0
 # the merges fold main's five address-match, event-order and mirror-pointer
 # not-ready probes into their invalid ones (-5); predecessor proofs base 39,
 # main +7, this branch +1.
-expected_refusal_assertions=464
+expected_refusal_assertions=474
 predecessor_shape_proof_count=0
 expected_predecessor_shape_proof_count=47
 refusal_probe_seconds=0
@@ -3314,8 +3340,13 @@ session_state_scanner='
         # only as a top-level statement, so the text always shows it, and the
         # server-side file and program forms of COPY, lo_import and lo_export,
         # a file name given as a literal, a dollar quote or a format() slot.
+        # Also the administration functions whose effect no snapshot holds,
+        # such as the progress of a replication slot or origin, which a replica
+        # moves on its own: replication slots and origins, logical decoding,
+        # WAL and recovery control, configuration reload, the backends of
+        # other sessions, and statistics resets.
         t = toupper(text) " "
-        while (match(t, /(^|[^A-Z0-9_])(ALTER SYSTEM[^A-Z0-9_]|COPY [^;]*[^A-Z0-9_](TO|FROM) ?(PROGRAM[^A-Z0-9_]|E?'"'"'|\$|%)|LO_(IMPORT|EXPORT) *\()/)) {
+        while (match(t, /(^|[^A-Z0-9_])(ALTER SYSTEM[^A-Z0-9_]|COPY [^;]*[^A-Z0-9_](TO|FROM) ?(PROGRAM[^A-Z0-9_]|E?'"'"'|\$|%)|LO_(IMPORT|EXPORT) *\(|(PG_REPLICATION_[A-Z_]+|PG_[A-Z_]*REPLICATION_SLOT[A-Z_]*|PG_LOGICAL_[A-Z_]+|PG_SWITCH_WAL|PG_CREATE_RESTORE_POINT|PG_PROMOTE|PG_WAL_REPLAY_[A-Z_]+|PG_BACKUP_(START|STOP)|PG_LOG_STANDBY_SNAPSHOT|PG_RELOAD_CONF|PG_ROTATE_LOGFILE|PG_TERMINATE_BACKEND|PG_CANCEL_BACKEND|PG_STAT_RESET[A-Z_]*) *\()/)) {
             hit = substr(t, RSTART, RLENGTH); sub(/^[^A-Z]*/, "", hit)
             print file ": [server outside the database: " hit "]"; t = substr(t, RSTART + RLENGTH)
         }
@@ -3338,7 +3369,7 @@ assert_no_session_state_statements() {
                 printf '%s\n' "${hits//$'\n'/; }: the replay's psql runs a backslash command on the client, but sqlx sends the file to the server, which rejects it, so remove it" >&2
                 exit 1 ;;
             *'[server outside the database'*)
-                printf '%s\n' "${hits//$'\n'/; }: ALTER SYSTEM rewrites the configuration of every database on the server, and COPY to or from a file or a program, lo_import and lo_export read or write files on the database server or run a program there; no catalog this check compares holds any of it and a schema-migration has no use for it, so remove it (ADR 0008)" >&2
+                printf '%s\n' "${hits//$'\n'/; }: ALTER SYSTEM rewrites the configuration of every database on the server, COPY to or from a file or a program, lo_import and lo_export read or write files on the database server or run a program there, and the administration functions for replication slots and origins, logical decoding, WAL and recovery, configuration reload, other sessions' backends and statistics change the server; no catalog this check compares holds any of it and a schema-migration has no use for it, so remove it (ADR 0008)" >&2
                 exit 1 ;;
             *'[psql variable'*)
                 printf '%s\n' "${hits//$'\n'/; }: the replay's psql replaces :name, :'name', :\"name\" and :{?name} with a variable of its own, DBNAME and USER among them, but sqlx sends the colon to the server, so write the value itself; a slice bound that starts with a name takes a space after the colon" >&2
@@ -3402,6 +3433,13 @@ assert_session_state_rule_holds() {
         'DO $$ BEGIN EXECUTE format('"'"'COPY (SELECT 1) TO %L'"'"', '"'"'/tmp/planted'"'"'); END $$;'
         'SELECT lo_export(1, '"'"'/tmp/planted'"'"');'
         'SELECT pg_catalog.lo_import('"'"'/etc/hostname'"'"');'
+        'SELECT pg_replication_slot_advance('"'"'planted'"'"', pg_current_wal_lsn());'
+        'DO $$ BEGIN PERFORM pg_catalog.pg_replication_origin_advance('"'"'planted'"'"', '"'"'0/100'"'"'); END $$;'
+        'SELECT * FROM pg_logical_slot_get_changes('"'"'planted'"'"', NULL, NULL);'
+        'SELECT pg_switch_wal();'
+        'SELECT pg_reload_conf();'
+        'SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE pid <> pg_backend_pid();'
+        'SELECT pg_stat_reset();'
     )
     local -a accepted=(
         'UPDATE t SET a = 1;'
@@ -3422,6 +3460,7 @@ assert_session_state_rule_holds() {
         'UPDATE t SET a2 = 1;'
         'COPY (SELECT 1) TO STDOUT;'
         'CREATE TABLE bigname_phase.copy_to (a int);'
+        'CREATE TABLE bigname_phase.reset_log (pg_stat_reset timestamptz, pg_switch_wal_at timestamptz); SELECT count(*) FROM pg_replication_slots;'
         'COMMENT ON TABLE t IS '"'"'a copy of the rows, taken from the log'"'"';'
     )
     planted_dir="$(mktemp -d "${TMPDIR:-/tmp}/schema-v2-session-state-rule.XXXXXX")"

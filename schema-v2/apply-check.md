@@ -26,10 +26,10 @@ Terms used below:
 `frozen-schema.txt` is the catalog of the baseline plus the inventoried schema-migrations. Regenerate it with `SCHEMA_V2_APPLY_CHECK_WRITE_FINGERPRINT=1` in the change that moves the schema. It records:
 
 - the baseline's extension declarations;
-- every relation, with its privileges, storage parameters, row-level-security flags, replica identity, partitioning and parents;
+- every relation, with the tablespace it is stored in, its access method, its privileges, storage parameters, row-level-security flags, replica identity, partitioning and parents;
 - every column: type, nullability, default, identity, generation, collation, storage, compression, statistics target, attribute options, privileges, whether it is defined locally or inherited, and the value rows that predate the column read once it is no longer the default;
 - every constraint, with whether it is defined locally or inherited, which decides whether `NO INHERIT` removes it;
-- every index, with its validity and its replica-identity and `CLUSTER` flags, and every view;
+- every index, with its tablespace (which `pg_get_indexdef` does not print), its validity and its replica-identity and `CLUSTER` flags, and every view;
 - every routine: its full argument list with defaults, execution modes, planner cost and rows, privileges, and a digest of its body. The digest treats each run of whitespace outside quoted text and comments as one space, because `20260923140000_project_name_surfaces_label_indexes.sql` and the baseline indent `label_hashes` differently. String literals, quoted identifiers, dollar-quoted strings and comments are compared as written;
 - every trigger with its firing state, including a foreign key whose internal triggers no longer all fire, which would stop enforcing it while its definition reads the same;
 - every sequence: its whole range, cache, cycle and owning column;
@@ -173,7 +173,10 @@ These apply to every baseline file and schema-migration. The check reads each fi
 - **No role or database defaults, and no passwords.** `ALTER ROLE`, `ALTER USER` or `ALTER DATABASE ... SET` or `RESET`, and a `PASSWORD` in `ALTER` or `CREATE ROLE`, `USER` or `GROUP`, are refused, in quoted text and `EXECUTE` strings too.
 - **No psql backslash commands** outside quoted text or a comment. The replay feeds each file to psql, which runs the command on the client, while sqlx sends the file to the server, which rejects it. The check would pass a file deployment refuses, and a `\set ON_ERROR_STOP 0` would hide every later file's errors.
 - **No psql variables.** No colon before a name outside quoted text or a comment (`:name`, `:'name'`, `:"name"`, `:{?name}`): psql replaces it with a variable it defines, `DBNAME` and `USER` among them, before sending, while sqlx sends the colon. A cast (`::`), `:=` and a numeric array slice bound pass; a slice bound that starts with a name takes a space after the colon.
-- **Nothing outside the databases.** Refused: `ALTER SYSTEM`, which PostgreSQL runs only as a top-level statement, so the text always shows it; `COPY` to or from a file or a program, which reads or writes a file on the database server or runs a program there; and `lo_import` and `lo_export`, which read or write files on the database server. The file name may be a literal, a dollar quote or a `format()` slot. No catalog the check compares holds any of this.
+- **Nothing outside the databases.** No catalog the check compares holds any of this. Refused:
+  - `ALTER SYSTEM`, which PostgreSQL runs only as a top-level statement, so the text always shows it;
+  - `COPY` to or from a file or a program, which reads or writes a file on the database server or runs a program there, and `lo_import` and `lo_export`, which read or write files on the database server. The file name may be a literal, a dollar quote or a `format()` slot;
+  - a call to a server administration function: replication slots and origins (`pg_replication_*` and the `*_replication_slot*` functions, `pg_replication_slot_advance` and `pg_replication_origin_advance` among them), logical decoding (`pg_logical_*`), WAL and recovery control (`pg_switch_wal`, `pg_create_restore_point`, `pg_promote`, `pg_wal_replay_*`, `pg_backup_start` and `pg_backup_stop`, `pg_log_standby_snapshot`), `pg_reload_conf`, `pg_rotate_logfile`, `pg_terminate_backend`, `pg_cancel_backend` and `pg_stat_reset*`.
 
 ### Nothing left in the session
 
@@ -216,7 +219,7 @@ Before the first replay the check takes a snapshot of role, database and server 
 - the default privileges of every schema in the database, not only the phase schema's;
 - every database's attributes: owner, connection limit, whether it accepts connections, the template flag, tablespace and privileges;
 - privileges on server parameters (`GRANT SET` or `ALTER SYSTEM ON PARAMETER`);
-- tablespaces (owner, privileges, options), replication slots and origins, subscriptions, and comments and security labels on shared objects;
+- tablespaces (owner, privileges, options), replication slots and origins, subscriptions, and comments and security labels on shared objects. A slot or origin is recorded by what it is, not by its progress, which a live replica or subscriber moves on its own; the functions that move it are refused by the statement rule instead;
 - where the check is a superuser, every line of the server's configuration files, including the `postgresql.auto.conf` that `ALTER SYSTEM` rewrites;
 - where the check can read `pg_authid`, the password verifiers.
 
@@ -228,7 +231,9 @@ A change to any of these fails however the statement was spelled, even though no
 
 Most rules above prove themselves on every run. The check plants files, statements or changes it must refuse, and forms it must accept, and fails if a plant is missed or a form refused. Each snapshot plant is restored straight away, and cleanup restores one that a failed run leaves in flight. These rules have no plants: the history comparisons, the named head, the inventory match, the one-spelling rule, the rule that every phase schema-migration is exercised, the ledger contents, the ledger-timing rule, and the rules under [Tables, names and comments](#tables-names-and-comments).
 
-Some plants are skipped, each with a note in the log: those that need a superuser when the configured user is not one, the `ALTER SYSTEM` plant when a configuration file already sets its parameter, and the tablespace plant when `pg_global` already has options. The run's last line reports how many refusal assertions passed out of the expected total, which the skipped plants lower.
+The tablespace plants move a table and an index to a tablespace the check creates with `allow_in_place_tablespaces`, which PostgreSQL 15 and later provide so a test needs no server directory; it is dropped straight after.
+
+Some plants are skipped, each with a note in the log: those that need a superuser when the configured user is not one, the `ALTER SYSTEM` plant when a configuration file already sets its parameter, and the `pg_global` tablespace-option plant when `pg_global` already has options. The run's last line reports how many refusal assertions passed out of the expected total, which the skipped plants lower.
 
 ## Limits
 
