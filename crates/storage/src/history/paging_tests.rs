@@ -421,16 +421,27 @@ async fn explain_page(
     }
 }
 
+/// A product cursor at `event_identity`: its id and its full history position.
 async fn cursor_at(connection: &mut PgConnection, event_identity: &str) -> Result<HistoryCursor> {
-    let normalized_event_id = sqlx::query_scalar(
-        "SELECT normalized_event_id FROM normalized_events WHERE event_identity = $1",
-    )
-    .bind(event_identity)
-    .fetch_one(&mut *connection)
-    .await?;
+    let (normalized_event_id, block_number, chain_id, block_hash, transaction_hash, log_index) =
+        sqlx::query_as(
+            "SELECT normalized_event_id, block_number, chain_id, block_hash, transaction_hash,
+                    log_index
+             FROM normalized_events WHERE event_identity = $1",
+        )
+        .bind(event_identity)
+        .fetch_one(&mut *connection)
+        .await?;
     Ok(HistoryCursor {
-        normalized_event_id,
+        normalized_event_id: Some(normalized_event_id),
         event_identity: event_identity.to_owned(),
+        position: Some(crate::HistoryPosition {
+            block_number,
+            chain_id,
+            block_hash,
+            transaction_hash,
+            log_index,
+        }),
     })
 }
 

@@ -614,11 +614,14 @@ Rules:
 - `meta` is always present. Single-resource routes that read chain-derived state
   include `meta.as_of` and `meta.as_of_token` when they can attribute at least
   one served snapshot-pinned chain position. Product name, subname, ownership,
-  permission and history collections disclose `meta.as_of` and bind cursors to
+  and permission collections disclose `meta.as_of` and bind cursors to
   the current publication; they omit `meta.as_of_token` because old publications
   are not retained for collection replay. A changed publication returns `409 stale`
   requiring a restart without the cursor; a first page, sent without one, is
-  simply retried. `/v1/search` reports request-scoped `meta.as_of` as
+  simply retried. History collections (`/v1/events`, name history, and address
+  history) disclose in `meta.as_of` the publication captured when the request
+  was admitted and do not bind cursors to it; see [Cursors And Pagination](#cursors-and-pagination).
+  `/v1/search` reports request-scoped `meta.as_of` as
   staleness attribution without a publication-bound cursor. Diagnostic event
   collections retain their separately documented latest-state behavior.
   Control-plane routes (`/v1/status`, `/v1/namespaces/{namespace}`) omit both.
@@ -1158,12 +1161,17 @@ from `chain_heads`, project progress from the `project` row in
 `chain_phase_state`, and both timestamps from the matching readable
 `chain_lineage` rows.
 
-Top-level collections page over mutable latest-state tables. They therefore
-omit `meta.as_of` and `meta.as_of_token`, except that search reports
-request-scoped `meta.as_of` for staleness attribution while still omitting
-`meta.as_of_token`. Their cursors do not claim a snapshot bound. Newly issued collection cursors carry no snapshot token; a
-legacy cursor's snapshot component is ignored rather than treated as a
-validity condition. Omitted `finality` and explicit `finality=latest` are accepted.
+Top-level collections page over mutable latest-state tables. They omit
+`meta.as_of_token`, because old publications are not retained for replay
+through `at`. Product name, subname, ownership, and permission collections
+report in `meta.as_of` the publication their cursors are bound to; history
+collections report the publication captured when the request was admitted,
+as a [history walk](glossary.md#history-walk) whose cursor holds only a
+position; search reports request-scoped `meta.as_of` for staleness
+attribution. No collection cursor claims a snapshot bound that `at` could
+replay. A history cursor carries no publication token, and the token of a
+history cursor issued before the walk rule is ignored rather than treated as
+a validity condition. Omitted `finality` and explicit `finality=latest` are accepted.
 An `at` selector returns `400 invalid_input` with
 `at is not supported because collection routes read latest state`.
 `finality=safe` and `finality=finalized` return `400 invalid_input` with
@@ -1209,13 +1217,51 @@ The `chain_positions` query parameter from `v1` does not exist in `v2`.
 
 Cursors are opaque and versioned. They are not bound to the route path string,
 so route evolution does not invalidate outstanding cursors. Top-level
-collection cursors bind the collection anchor, namespace, filters, and sort,
-but not a snapshot. A bare search cursor uses the request's derived namespace
+collection cursors bind the collection anchor, namespace, filters, and sort.
+Current-state product collection cursors also bind the publication they read,
+as described under `meta` above. History collection cursors bind no snapshot or
+publication, and the publication token of a history cursor issued before the
+walk rule is ignored. A bare search cursor uses the request's derived namespace
 set as its namespace anchor and fails closed if that set has changed. Cursors
 preserve keyset position across requests without claiming that the mutable
-dataset is frozen. A legacy collection cursor's snapshot component is ignored.
-Snapshot-bound cursor semantics remain on single-resource responses with nested
+dataset is frozen. Snapshot-bound cursor semantics remain on single-resource responses with nested
 pagination where documented.
+
+History collections (`/v1/events`, name history including
+`include=child_registrations`, and address history) are
+[history walks](glossary.md#history-walk), not snapshots.
+A history cursor holds the position of the last row it returned in the history
+order: block number, chain, block hash, transaction hash, log index, and the
+row's `event_identity` as the final tiebreaker. It carries no publication token
+and no evaluation time. A continuation reads whatever is published when it runs
+and returns the rows after that position; the row the cursor came from need not
+still exist. A later page can therefore include rows published after the first
+page, a row can move or disappear after an Interpret redo, and `total_count`
+can change between pages. `meta.as_of` is the publication captured when the page was admitted: the
+page's rows are bounded at it, but some inputs are read from current state
+rather than from that publication (the resolver classification that decides
+whether a pointer attributes writes, and the address relation kinds listed
+under [history collection filters](api-v2-routes.md#history-collection-filters)),
+so not every field of a page belongs to that one publication. Publication
+changes do not expire a position cursor, and a publication that lands while a
+page is being read does not refuse that page either. That page is still capped at the publication
+it reports, so no row above it can appear; but when the new publication
+rewrites rows at or below it, for example after a reorg, the page can mix rows
+from before and after that rewrite. Because `event_identity`
+is only the final tiebreaker, a re-derivation that changes the identities of
+events sharing one log position can skip or repeat a row at that position,
+which the same walk rule covers. A history cursor returns `400 invalid_input`
+when it is malformed or replayed against a different query, and that check
+comes before publication admission. A history cursor issued before this rule
+names its last row instead of carrying its position: its publication token is
+ignored and it resumes from that row's position. A history read can still
+return `409 stale` for three distinct reasons: a requested namespace has no
+publication yet ("not available; retry after indexing is ready"), an Interpret
+redo is active or ran during the read, or a cursor issued before this rule
+names a row that no longer exists. The first two are temporary: retry the same
+request with the same cursor. Only the third requires restarting without the
+cursor, and it happens once. A parameter that pins a history walk to
+one block may be added later; it is not part of this contract.
 
 The `/v1/events`, name-history, and address-history collections use a
 collection-wide `redo_in_progress` check. An active Interpret redo on any chain
@@ -1234,14 +1280,13 @@ name history has no post-transaction display-name read. With
 surface, read inside the same page transaction. An active redo at any
 check, or a redo
 that began between them, returns `409 stale` instead of exposing a partially
-reconstructed normalized-event range. A
-well-formed cursor whose event anchor is gone therefore returns `stale` when the
-redo check takes precedence and `400 invalid_input` otherwise. Product
+reconstructed normalized-event range. That refusal is a retry, not an expiry:
+once the redo finishes, the same cursor continues. Product
 event-type filtering precedes keyset pagination, so page rows and continuation
-metadata describe only product-visible events. For requests without an explicit
-`type`, cursor anchor validation omits the implicit product event-type filter,
-so a still-existing non-product anchor continues to the next product-visible
-row. An explicit `type` (one label or a set) remains part of anchor validation.
+metadata describe only product-visible events. A cursor's position orders the
+walk whether or not the row it came from is product-visible or matches an
+explicit `type`, so the continuation starts at the next product-visible row
+after that position.
 History cursors also encode the direction in their sort token and the
 canonical `type` set and timestamp bounds in their filters, so `order=asc`,
 `type`, `from_timestamp`, and `to_timestamp` each fail closed when a cursor is
@@ -1250,15 +1295,10 @@ replayed against a different query. Name history cursors also record
 filters](api-v2-routes.md#history-collection-filters). Cursor bytes remain
 unstable.
 
-A full Interpret and Project re-walk that must not change product behavior at a
-fixed readable chain head does not invalidate an outstanding collection cursor
-merely because an internal normalized-event row ID changes. On `/v1/events`,
-name history, address history, and every other product cursor surface backed by
-normalized-event row identity, a cursor issued before the re-walk must resume
-after publication from the same underlying normalized-event keyset anchor, with
-identical remaining product rows, pages, fields, `has_more`, and summary
-behavior, including when the anchor is a non-product event. The diagnostic-events
-route must also accept its pre-re-walk cursor and continue from the same stable
+A full Interpret and Project re-walk does not invalidate a history cursor: the
+cursor holds a position, not a normalized-event row ID, and continues under the
+[history walk](glossary.md#history-walk) rule above. The diagnostic-events
+route must accept its pre-re-walk cursor and continue from the same stable
 normalized-event anchor, but its remaining diagnostic rows and fields may
 reflect newly admitted candidate data. A pre-existing diagnostic row's numeric
 `normalized_event_id` may change, while its `event_identity` and pre-existing
@@ -1266,11 +1306,11 @@ semantic fields remain stable apart from those allowed candidate additions.
 Implementations may preserve numeric
 normalized-event IDs or resolve an old token through stable `event_identity`
 plus its stored sort tuple; these are alternative storage strategies. Freshly
-issued cursor bytes may differ. The boundary acceptance gate exercises both the
-product and diagnostic continuation contracts, then separately verifies fresh
-post-re-walk cursors.
+issued cursor bytes may differ. The boundary acceptance gate exercises the
+diagnostic continuation contract, then separately verifies fresh post-re-walk
+diagnostic cursors.
 
-That identical-product continuation rule applies only when the declared
+A re-walk leaves product rows unchanged only when the declared
 [re-derivation boundary](glossary.md#re-derivation-boundary) preserves product
 semantics. The intentional
 [#348](https://github.com/ensdomains/bigname/issues/348) and

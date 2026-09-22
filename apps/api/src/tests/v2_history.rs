@@ -835,7 +835,8 @@ async fn v2_registration_filter_keeps_bound_name_surface_history() -> Result<()>
         .next_cursor
         .as_ref()
         .expect("newer registration cursor");
-    let invalid_cursor = bigname_storage::load_event_history_page(
+    // The newer registration's cursor is a position: the old registration continues from it.
+    let continued = bigname_storage::load_event_history_page(
         &database.pool,
         bigname_storage::EventHistoryFilter {
             resource_id: Some(resource_id),
@@ -847,12 +848,14 @@ async fn v2_registration_filter_keeps_bound_name_surface_history() -> Result<()>
         bigname_storage::HistorySummaryMode::None,
         false,
     )
-    .await
-    .expect_err("a newer name event cannot anchor the old registration");
-    assert!(
-        invalid_cursor
-            .downcast_ref::<bigname_storage::InvalidHistoryCursor>()
-            .is_some()
+    .await?;
+    assert_eq!(
+        continued
+            .rows
+            .iter()
+            .map(|row| row.event_identity.as_str())
+            .collect::<Vec<_>>(),
+        vec!["registration-filter-record"]
     );
 
     let storage_page = bigname_storage::load_event_history_page(
@@ -2608,7 +2611,7 @@ async fn v2_history_requested_exact_count_exceeds_default_cap() -> Result<()> {
 }
 
 #[tokio::test]
-async fn v2_history_continuation_excludes_unpublished_interpret_events() -> Result<()> {
+async fn v2_history_continuation_reads_interpret_events_once_published() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_history_fixture(&database).await?;
     let base = "/v1/names/history.eth/history?page_size=1&include=total_count";
@@ -2627,10 +2630,14 @@ async fn v2_history_continuation_excludes_unpublished_interpret_events() -> Resu
         "chain_id": "ethereum-mainnet", "block_number": 21_000_004,
         "block_hash": "0xhistory21000004", "timestamp": "2026-04-17T00:00:04Z"
     }})).await?;
-    let response = v2_history_response_for_database(&database, &format!("{base}&cursor={cursor}")).await?;
-    assert_eq!(response.status(), StatusCode::CONFLICT);
-    let failure: Value = read_json(response).await?;
-    assert_eq!(failure["error"]["code"], json!("stale"));
+    // Once published, the continuation reads it: the count grows, and the newest-first walk
+    // still continues below its anchor.
+    let published =
+        v2_history_payload_for_database(&database, &format!("{base}&cursor={cursor}")).await?;
+    let first_total = first["page"]["total_count"].as_u64().unwrap();
+    assert_eq!(published["page"]["total_count"], json!(first_total + 1));
+    assert_eq!(published["meta"]["as_of"]["1"]["block_number"], json!(21_000_004));
+    assert_eq!(history_blocks(&published), history_blocks(&next));
     database.cleanup().await
 }
 
