@@ -638,7 +638,12 @@ downstream redo within that namespace.
 ## Verification mismatch repair
 
 A [stored-history verification](glossary.md#stored-history-verification)
-mismatch stops only the affected chain and is not retried.
+mismatch stops only the affected chain. Against an independent RPC reference
+the runner fetches the same batch once more before stopping, so a single
+`verification reference mismatch; fetching the same batch once more` warning
+followed by normal progress needs no action; the chain stops only when the
+second comparison also mismatches, and that stop is not retried. Against a
+local Reth reference the first mismatch stops the chain.
 `chain_phase_state.last_error` on the `verify` row records the block number,
 field, stored value, and reference value. If verification was paired with live
 follow, the `live` row records the same stop reason. The other configured chain
