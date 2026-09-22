@@ -107,15 +107,16 @@ fn require_keyed_pointer_scans(node: &Value, inside_pointer: bool) -> Result<usi
             .is_some_and(|alias| alias.starts_with("pointer"));
     let mut count = 0;
     if inside && node["Relation Name"] == "project_events" {
-        let condition = node["Index Cond"].as_str().unwrap_or("");
-        ensure!(
-            condition.contains("logical_name_id =") || condition.contains("resource_id ="),
-            "pointer scanned unrelated history: {node}"
-        );
-        ensure!(
-            !condition.contains("logical_name_id IS NULL"),
-            "broad NULL-name scan: {node}"
-        );
+        if node["Node Type"] == "Bitmap Heap Scan" {
+            // A bitmap heap scan carries only a recheck; the keyed condition
+            // lives on its Bitmap Index Scan descendants.
+            ensure!(
+                keyed_bitmap_index_scans(node)? > 0,
+                "bitmap heap scan without a keyed index scan: {node}"
+            );
+            return Ok(1);
+        }
+        require_keyed_condition(node, node["Index Cond"].as_str().unwrap_or(""))?;
         count += 1;
     }
     if let Some(plans) = node["Plans"].as_array() {
@@ -124,6 +125,69 @@ fn require_keyed_pointer_scans(node: &Value, inside_pointer: bool) -> Result<usi
         }
     }
     Ok(count)
+}
+fn keyed_bitmap_index_scans(node: &Value) -> Result<usize> {
+    let mut count = 0;
+    if let Some(plans) = node["Plans"].as_array() {
+        for child in plans {
+            if child["Node Type"] == "Bitmap Index Scan" {
+                require_keyed_condition(child, child["Index Cond"].as_str().unwrap_or(""))?;
+                count += 1;
+            } else {
+                count += keyed_bitmap_index_scans(child)?;
+            }
+        }
+    }
+    Ok(count)
+}
+fn require_keyed_condition(node: &Value, condition: &str) -> Result<()> {
+    ensure!(
+        condition.contains("logical_name_id =") || condition.contains("resource_id ="),
+        "pointer scanned unrelated history: {node}"
+    );
+    ensure!(
+        !condition.contains("logical_name_id IS NULL"),
+        "broad NULL-name scan: {node}"
+    );
+    Ok(())
+}
+
+#[test]
+fn plan_validator_accepts_keyed_index_and_bitmap_scans_and_rejects_broad_scans() {
+    let keyed_index = json!({
+        "Node Type": "Index Scan", "Alias": "pointer", "Relation Name": "project_events",
+        "Index Cond": "(logical_name_id = authority.logical_name_id)"
+    });
+    assert_eq!(require_keyed_pointer_scans(&keyed_index, false).unwrap(), 1);
+    let keyed_bitmap = json!({
+        "Node Type": "Bitmap Heap Scan", "Alias": "pointer", "Relation Name": "project_events",
+        "Recheck Cond": "(resource_id = linked.resource_id)",
+        "Plans": [{
+            "Node Type": "Bitmap Index Scan", "Index Name": "project_events_resource_idx",
+            "Index Cond": "(resource_id = linked.resource_id)"
+        }]
+    });
+    assert_eq!(
+        require_keyed_pointer_scans(&keyed_bitmap, false).unwrap(),
+        1
+    );
+    let unkeyed_bitmap = json!({
+        "Node Type": "Bitmap Heap Scan", "Alias": "pointer", "Relation Name": "project_events",
+        "Recheck Cond": "(logical_name_id IS NULL)",
+        "Plans": [{
+            "Node Type": "Bitmap Index Scan", "Index Name": "project_events_name_idx",
+            "Index Cond": "(logical_name_id IS NULL)"
+        }]
+    });
+    assert!(require_keyed_pointer_scans(&unkeyed_bitmap, false).is_err());
+    let seq_scan = json!({
+        "Node Type": "Seq Scan", "Alias": "pointer", "Relation Name": "project_events"
+    });
+    assert!(require_keyed_pointer_scans(&seq_scan, false).is_err());
+    let outside = json!({
+        "Node Type": "Seq Scan", "Alias": "authority", "Relation Name": "project_events"
+    });
+    assert_eq!(require_keyed_pointer_scans(&outside, false).unwrap(), 0);
 }
 
 #[tokio::test]
