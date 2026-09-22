@@ -68,3 +68,23 @@ impl Display for DefaultRecordInventoryCurrentReadFilter {
     }
 }
 use std::fmt::{self, Display, Formatter};
+
+/// Read-time fallback prevents a retained RPC value from outliving its canonical block.
+/// The inventory table alias is `ric`, matching the other record-inventory fragments.
+pub const READABLE_RECORD_INVENTORY_ENTRIES: &str = r#"
+COALESCE((
+    SELECT jsonb_agg(CASE
+        WHEN entry ? 'canonical_head_multicall_hydration' AND NOT EXISTS (
+            SELECT 1 FROM bigname_phase.chain_lineage hydration_lineage
+            WHERE hydration_lineage.chain_id = entry
+                -> 'canonical_head_multicall_hydration' ->> 'chain_id'
+              AND hydration_lineage.block_hash = entry
+                -> 'canonical_head_multicall_hydration' ->> 'block_hash'
+              AND hydration_lineage.block_number::text = entry
+                -> 'canonical_head_multicall_hydration' ->> 'block_number'
+              AND hydration_lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+        ) THEN entry -> 'canonical_head_multicall_hydration' -> 'baseline'
+        ELSE entry END ORDER BY ordinal)
+    FROM jsonb_array_elements(ric.entries) WITH ORDINALITY elements(entry, ordinal)
+), '[]'::jsonb)
+"#;

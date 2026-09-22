@@ -265,20 +265,23 @@ pub(super) async fn close(
     chain_id: &str,
     target: &Marker,
 ) -> Result<()> {
+    sqlx::query("CREATE TEMP TABLE project_inventory_seen_resources (resource_id uuid PRIMARY KEY) ON COMMIT DROP")
+        .execute(&mut **transaction).await
+        .map_err(|error| ProjectError::database("failed to create inventory frontier", error))?;
     mirror::stage(transaction, chain_id, target.number).await?;
     // A pointer-derived name can be bound to another resource, whose latest pointer can name a
     // further surface. Reach the finite name/resource fixed point before staging and publication.
     loop {
         let before = scope_size(transaction).await?;
         include_pointer_names(transaction, chain_id, target.number).await?;
-        mirror::include(transaction).await?;
+        mirror::include(transaction, chain_id, target.number).await?;
         super::close_binding_scope(transaction, chain_id, target).await?;
         if scope_size(transaction).await? == before {
-            sqlx::query("DROP TABLE project_mirror_pairs")
+            sqlx::query("DROP TABLE project_mirror_seen_resources, project_mirror_seen_names, project_mirror_changed_nodes, project_inventory_seen_resources")
                 .execute(&mut **transaction)
                 .await
                 .map_err(|error| {
-                    ProjectError::database("failed to drop mirror scope pairs", error)
+                    ProjectError::database("failed to drop inventory scope work tables", error)
                 })?;
             return Ok(());
         }
@@ -308,9 +311,13 @@ async fn include_pointer_names(
         .await
         .map_err(|error| ProjectError::database("failed to analyze inventory scope", error))?;
     sqlx::query(
-        "INSERT INTO project_scope_names
+        "WITH frontier AS MATERIALIZED (
+             INSERT INTO project_inventory_seen_resources SELECT resource_id FROM project_scope_resources
+             ON CONFLICT DO NOTHING RETURNING resource_id
+         )
+         INSERT INTO project_scope_names
          SELECT DISTINCT event.logical_name_id
-         FROM project_scope_resources scope
+         FROM frontier scope
          JOIN normalized_events event USING (resource_id)
          JOIN chain_lineage lineage
            ON lineage.chain_id = event.chain_id

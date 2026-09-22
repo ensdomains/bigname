@@ -82,6 +82,17 @@ CREATE INDEX IF NOT EXISTS normalized_events_projection_idx
         block_number,
         normalized_event_id
     );
+CREATE INDEX IF NOT EXISTS normalized_events_project_node_history_idx
+    ON normalized_events (chain_id, lower(after_state ->> 'node'), block_number)
+    WHERE logical_name_id IS NULL
+      AND consumer_visibility = 'activated'
+      AND canonicality_state IN ('canonical', 'safe', 'finalized')
+      AND after_state ->> 'node' IS NOT NULL
+      AND ((event_kind IN ('RecordChanged', 'RecordVersionChanged')
+            AND source_family IN ('ens_v1_resolver_l1', 'ens_v2_resolver_l1', 'basenames_base_resolver'))
+           OR (event_kind = 'ResolverChanged'
+               AND source_family IN ('ens_v1_registry_l1', 'ens_v1_registrar_l1', 'ens_v1_wrapper_l1')));
+
 INSERT INTO chain_lineage VALUES('bench',10,'block','canonical');
 INSERT INTO project_declared_resolver_addresses VALUES('ens','0xshared','ens_v2_resolver_l1','public_resolver_v2',1);
 INSERT INTO name_surfaces SELECT 'ens:node-'||i,'ens','node-'||i,'bench',10,'block','canonical' FROM generate_series(1,__NAMES__)i;

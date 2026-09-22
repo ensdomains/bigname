@@ -133,6 +133,26 @@ After event-derived publication, configured Ethereum
 - supported ENSv1 `text:<key>` entries whose normalized event retained the key
   but not the value.[^ensnode-legacy-revresolver-l311][^ensnode-legacy-revresolver-l316][^ensnode-legacy-text-l356]
 
+Text hydration is restricted to supported inventory entries on the four
+manifest-admitted legacy public resolvers `0x4976fb03…`, `0xDaaF96c3…`,
+`0x226159d5…`, and `0x5FfC0143…`, whose admitted text profiles are recorded by
+the pinned ENS app metadata (upstream: .refs/ens_app_v3/src/constants/resolverAddressData.ts:L71 @ ens_app_v3@7175858)
+(upstream: .refs/ens_app_v3/src/constants/resolverAddressData.ts:L88 @ ens_app_v3@7175858)
+(upstream: .refs/ens_app_v3/src/constants/resolverAddressData.ts:L105 @ ens_app_v3@7175858)
+(upstream: .refs/ens_app_v3/src/constants/resolverAddressData.ts:L121 @ ens_app_v3@7175858).
+A successful text read, including an empty value, is retained while its read
+block remains canonical. Merely advancing the head does not reread it. A scoped
+Project rebuild replaces inventory entries with their event-derived state;
+missing values in that replacement are hydrated again. This includes changes
+to record values, resolver pointers and record-version boundaries. A read from
+an orphaned block is retried at the current canonical head; failure restores
+the missing-value baseline. Previously hydrated entries that become unsupported
+or fall outside the admitted resolver list are restored without an RPC call.
+Record-inventory readers expose the event-derived baseline immediately when a
+hydration block is orphaned, even before a retry runs. This text policy does not
+change the bounded refresh of event-silent reverse
+claims described below.
+
 Hydration uses the exact number and hash from `chain_heads`, revalidates that
 head in the publication transaction, and never calls provider `latest`.
 Failed calls restore the event-derived baseline and keep Project retryable. It

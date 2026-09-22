@@ -149,3 +149,72 @@ async fn project_batch_future_is_send_for_the_runner() -> Result<()> {
     }));
     Ok(())
 }
+
+#[tokio::test]
+async fn tiny_node_scope_does_not_materialize_unrelated_history() -> Result<()> {
+    use super::super::node_record_events::STAGE_HISTORY_SQL;
+    let database = TestDatabase::create(TestDatabaseConfig::new("tiny_node_scope")).await?;
+    let mut tx = database.pool().begin().await?;
+    raw_sql(
+        &SEED
+            .replace("__NAMES__", "3000")
+            .replace("__RECORDS__", "100000"),
+    )
+    .execute(&mut *tx)
+    .await?;
+    raw_sql(
+        "TRUNCATE project_scope_names, project_scope_children;
+        INSERT INTO project_scope_names VALUES ('ens:node-1');
+        INSERT INTO project_scope_children VALUES ('ens:node-2');
+        ANALYZE project_scope_names; ANALYZE project_scope_children;",
+    )
+    .execute(&mut *tx)
+    .await?;
+    let plan: Value = sqlx::query_scalar(&format!(
+        "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) {STAGE_HISTORY_SQL}"
+    ))
+    .bind("bench")
+    .bind(10_i64)
+    .fetch_one(&mut *tx)
+    .await?;
+    let ids: Vec<i64> = sqlx::query_scalar(
+        "SELECT normalized_event_id FROM project_node_record_history ORDER BY 1",
+    )
+    .fetch_all(&mut *tx)
+    .await?;
+    assert_eq!(ids, vec![100001, 100002]);
+    fn visited(node: &Value) -> f64 {
+        let own = if node["Relation Name"] == "normalized_events" {
+            node["Actual Loops"].as_f64().unwrap_or_default()
+                * (node["Actual Rows"].as_f64().unwrap_or_default()
+                    + node["Rows Removed by Filter"].as_f64().unwrap_or_default())
+        } else {
+            0.0
+        };
+        own + node["Plans"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(visited)
+            .sum::<f64>()
+    }
+    let rows = visited(&plan[0]["Plan"]);
+    ensure!(
+        rows < 100.0,
+        "tiny scope visited {rows} historical rows: {plan}"
+    );
+    eprintln!(
+        "tiny scope materialization: {} ms; {rows} history rows",
+        plan[0]["Execution Time"]
+    );
+    raw_sql("DROP TABLE project_node_record_history; TRUNCATE project_scope_names, project_scope_children;")
+        .execute(&mut *tx).await?;
+    super::super::node_record_events::prepare(&mut tx, "bench", 10).await?;
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM project_node_record_history")
+        .fetch_one(&mut *tx)
+        .await?;
+    assert_eq!(count, 0);
+    tx.rollback().await?;
+    database.cleanup().await?;
+    Ok(())
+}

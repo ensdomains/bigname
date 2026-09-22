@@ -161,13 +161,13 @@ pub use primary_name::{
     normalized_claim_name,
 };
 pub use record_inventory::{
-    RECORD_INVENTORY_CANONICALITY_SUMMARY_FILTER, RECORD_INVENTORY_PROJECTION_LINEAGE_FILTER,
-    RECORD_INVENTORY_RECORD_SERVING_FILTER, RECORD_INVENTORY_RESOURCE_CANONICALITY_FILTER,
-    RECORD_INVENTORY_RESOURCE_LINEAGE_FILTER, RESOURCE_CANONICALITY_JOINS,
-    RecordInventoryCurrentRow, count_record_inventory_selectors_by_lookup_keys,
-    load_record_inventory_current, load_record_inventory_current_batch,
-    load_record_inventory_current_for_snapshot, load_record_inventory_current_with_anchor_fallback,
-    record_version_boundary_storage_key,
+    READABLE_RECORD_INVENTORY_ENTRIES, RECORD_INVENTORY_CANONICALITY_SUMMARY_FILTER,
+    RECORD_INVENTORY_PROJECTION_LINEAGE_FILTER, RECORD_INVENTORY_RECORD_SERVING_FILTER,
+    RECORD_INVENTORY_RESOURCE_CANONICALITY_FILTER, RECORD_INVENTORY_RESOURCE_LINEAGE_FILTER,
+    RESOURCE_CANONICALITY_JOINS, RecordInventoryCurrentRow,
+    count_record_inventory_selectors_by_lookup_keys, load_record_inventory_current,
+    load_record_inventory_current_batch, load_record_inventory_current_for_snapshot,
+    load_record_inventory_current_with_anchor_fallback, record_version_boundary_storage_key,
 };
 pub use registries::{
     RegistryContractRow, RegistryCreation, RegistryCreationBasis, RegistryReferenceKeysetCursor,

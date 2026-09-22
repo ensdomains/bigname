@@ -83,6 +83,17 @@ CREATE INDEX IF NOT EXISTS normalized_events_projection_idx
     );
 
 ALTER TABLE name_surfaces ADD COLUMN raw_labels text[];
+CREATE INDEX IF NOT EXISTS name_surfaces_project_labels_idx ON name_surfaces USING gin(raw_labels);
+CREATE INDEX IF NOT EXISTS name_surfaces_project_suffix_idx ON name_surfaces(namespace, raw_labels);
+CREATE INDEX IF NOT EXISTS name_surfaces_project_node_idx ON name_surfaces(namespace, lower(namehash));
+CREATE INDEX IF NOT EXISTS normalized_events_project_v1_pointer_node_idx
+    ON normalized_events(chain_id, namespace, lower(after_state ->> 'node'), block_number)
+    WHERE event_kind = 'ResolverChanged'
+      AND source_family IN ('ens_v1_registry_l1', 'ens_v1_registrar_l1', 'ens_v1_wrapper_l1')
+      AND after_state ->> 'node' IS NOT NULL
+      AND consumer_visibility = 'activated'
+      AND canonicality_state IN ('canonical', 'safe', 'finalized');
+
 CREATE TEMP TABLE project_changed_events (LIKE normalized_events);
 INSERT INTO chain_lineage VALUES('bench',10,'block','canonical'),('bench',11,'future','canonical'),('bench',9,'orphan','orphaned'),('other',10,'block','canonical');
 INSERT INTO project_declared_resolver_addresses VALUES('ens','0xmirror','mirror','ensv1_mirror_resolver',2),('other','0xmirror','mirror','ensv1_mirror_resolver',3),('ens','0xordinary','v2','public_resolver_v2',2);

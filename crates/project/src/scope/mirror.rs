@@ -2,9 +2,8 @@ use sqlx::{Postgres, Transaction};
 
 use crate::{ProjectError, Result};
 
-// Pointer history, surfaces, changed events and declarations do not change during inventory
-// closure. Build their dependency pairs once; only scope membership changes between passes.
-// Start from the mirror's actual suffix walks so unrelated v1 nodes are never aggregated.
+// Follow only newly scoped names/resources and changed v1 nodes. The seen sets are
+// transaction-local; replay starts fresh and never reuses a graph from another head.
 pub(super) async fn stage(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
@@ -28,8 +27,23 @@ pub(super) async fn stage(
     Ok(())
 }
 
-pub(super) async fn include(transaction: &mut Transaction<'_, Postgres>) -> Result<()> {
+pub(super) async fn include(
+    transaction: &mut Transaction<'_, Postgres>,
+    chain_id: &str,
+    target_block: i64,
+) -> Result<()> {
+    for statement in [
+        "ANALYZE project_scope_names",
+        "ANALYZE project_scope_resources",
+    ] {
+        sqlx::query(statement)
+            .execute(&mut **transaction)
+            .await
+            .map_err(|error| ProjectError::database("failed to analyze mirror frontier", error))?;
+    }
     sqlx::query(include_str!("mirror_include.sql"))
+        .bind(chain_id)
+        .bind(target_block)
         .execute(&mut **transaction)
         .await
         .map_err(|error| ProjectError::database("failed to scope mirror resolver pairs", error))?;

@@ -12,7 +12,10 @@ use crate::snapshot_selection::{
 
 use super::{
     boundary_key::{boundary_has_event_pointer, boundary_str, record_version_boundary_storage_key},
-    canonicality::{DEFAULT_RECORD_INVENTORY_CURRENT_READ_FILTER, RESOURCE_CANONICALITY_JOINS},
+    canonicality::{
+        DEFAULT_RECORD_INVENTORY_CURRENT_READ_FILTER, READABLE_RECORD_INVENTORY_ENTRIES,
+        RESOURCE_CANONICALITY_JOINS,
+    },
     row_decode::{RecordInventoryCurrentRow, decode_record_inventory_current_row},
 };
 
@@ -42,7 +45,7 @@ pub async fn load_record_inventory_current(
             '[]'::jsonb AS explicit_gaps,
             ric.unsupported_families,
             ric.last_change,
-            ric.entries,
+            {READABLE_RECORD_INVENTORY_ENTRIES} AS entries,
             ric.provenance,
             CASE WHEN ric.support_status = 'supported' THEN jsonb_build_object('status', 'projected', 'exhaustiveness', 'not_asserted') ELSE jsonb_build_object('status', 'unsupported', 'exhaustiveness', 'not_asserted', 'unsupported_reason', ric.unsupported_reason) END AS coverage,
             ric.chain_positions,
@@ -145,7 +148,7 @@ pub async fn load_record_inventory_current_batch(
             '[]'::jsonb AS explicit_gaps,
             ric.unsupported_families,
             ric.last_change,
-            ric.entries,
+            {READABLE_RECORD_INVENTORY_ENTRIES} AS entries,
             ric.provenance,
             CASE WHEN ric.support_status = 'supported' THEN jsonb_build_object('status', 'projected', 'exhaustiveness', 'not_asserted') ELSE jsonb_build_object('status', 'unsupported', 'exhaustiveness', 'not_asserted', 'unsupported_reason', ric.unsupported_reason) END AS coverage,
             ric.chain_positions,

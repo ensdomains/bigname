@@ -4,7 +4,7 @@ use crate::{ProjectError, Result};
 
 // This history includes only rows that the node branches below can select. Keep their
 // source, manifest and lineage predicates in place; staging is not serving admission.
-const STAGE_HISTORY_SQL: &str = include_str!("node_record_events/history.sql");
+pub(super) const STAGE_HISTORY_SQL: &str = include_str!("node_record_events/history.sql");
 const INDEX_HISTORY_SQL: &str = include_str!("node_record_events/index.sql");
 
 pub(crate) async fn prepare(

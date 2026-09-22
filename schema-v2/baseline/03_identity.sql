@@ -551,3 +551,7 @@ COMMENT ON COLUMN surface_bindings.observed_at IS
     'This time records the stored observation.';
 COMMENT ON COLUMN surface_bindings.inserted_at IS
     'This time records row creation.';
+
+CREATE INDEX IF NOT EXISTS name_surfaces_project_labels_idx ON name_surfaces USING gin(raw_labels);
+CREATE INDEX IF NOT EXISTS name_surfaces_project_suffix_idx ON name_surfaces(namespace, raw_labels);
+CREATE INDEX IF NOT EXISTS name_surfaces_project_node_idx ON name_surfaces(namespace, lower(namehash));
