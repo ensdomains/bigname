@@ -794,7 +794,7 @@ after slice 3, each as its own content-hash rotation (#745 on 2026-08-31 and
   (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L47-L85 @ ens_v1@91c966f)
   (upstream: .refs/basenames/src/L2/resolver/ContentHashResolver.sol:L32-L43 @ basenames@1809bbc)
   (upstream: .refs/basenames/src/L2/resolver/AddrResolver.sol:L57-L99 @ basenames@1809bbc);
-  [`api-v2.md`](../api-v2.md#status-vocabulary) § Status Vocabulary carries the read-side rule.
+  [`api-v1.md`](../api-v1.md#status-vocabulary) § Status Vocabulary carries the read-side rule.
 
 Neither needs scheduling again.
 
