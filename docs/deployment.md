@@ -971,8 +971,10 @@ their normal length when the test databases turned JIT off (#922).
 
 The setting is server-wide and applies to every chain and every role. It is a
 Compose command argument, so changing it means recreating the `postgres`
-container (`docker compose up -d postgres`), which restarts every session;
-stop the phase runner and the API first, as for any PostgreSQL restart. To
+container with the server Compose definition and environment
+(`docker compose --env-file .env.server -f docker-compose.server.yml up -d postgres`),
+which restarts every session; stop the phase runner and the API first, as for
+any PostgreSQL restart. To
 use JIT for one deliberately heavy statement, run `SET LOCAL jit = on` inside
 that transaction rather than turning it on globally.
 
