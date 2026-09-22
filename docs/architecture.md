@@ -809,7 +809,9 @@ never compares the intake provider with itself. The runner rejects a verificatio
 level stronger than the chain-specific verification path can earn before persisting
 the level or proceeding to Live. On a reference-comparison path, a
 mismatch records its block, field, stored value, and reference value, then stops
-only that chain. Normal verification starts at the durable ingest-cursor extent,
+only that chain; against an independent RPC reference the runner first fetches
+the same batch once more and stops only if that second comparison also
+mismatches (see [chain intake](chain-intake.md)). Normal verification starts at the durable ingest-cursor extent,
 not a replacement command-line start, and a resumed scan retains the weaker of
 its prior whole-extent level and the current reference's level.
 The project phase is the single schema-v2 projection writer and has no claim

@@ -1211,8 +1211,9 @@ async fn required_ingest_redo_demotes_an_overlapping_completed_verify_attestatio
     );
     assert_eq!(
         references.calls.load(Ordering::SeqCst),
-        2,
-        "normal restart must execute Verify against the changed raw-fact set"
+        3,
+        "normal restart must execute Verify against the changed raw-fact set, \
+         and a persistent mismatch fetches the reference once more before failing"
     );
     drop(runner);
     scratch.cleanup().await

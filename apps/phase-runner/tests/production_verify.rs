@@ -2654,17 +2654,54 @@ async fn base_drpc_seam_cannot_be_moved_by_verify_redo_configuration() -> Result
 }
 
 #[tokio::test]
+async fn rpc_index_mismatch_retries_once_and_advances_only_after_a_match() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_verify_transient_index").await?;
+    seed_chain(scratch.pool(), BASE, 5, 5, 5, 1).await?;
+    let reference = Arc::new(FixtureReferences::new([reference_log(BASE, 1)]));
+    reference
+        .state
+        .lock()
+        .expect("fixture state lock")
+        .first_log_index = Some(9);
+    let runner = verifier_runner(&scratch, reference.clone(), Arc::new(CompleteLivePhase)).await?;
+    runner
+        .run_chain(&base_chain(true)?, CancellationToken::new())
+        .await?;
+    let calls = reference.calls();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(
+        calls[0], calls[1],
+        "retry must preserve source and frozen range"
+    );
+    let state: (String, Option<i64>, Option<String>) = sqlx::query_as(
+        "SELECT phase_status, current_block_number, last_error FROM chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'verify'",
+    )
+    .bind(BASE)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(state, ("completed".to_owned(), Some(5), None));
+    drop(runner);
+    scratch.cleanup().await
+}
+
+#[tokio::test]
 async fn mismatch_is_fatal_durable_and_restartable_after_wipe_and_resync() -> Result<()> {
     let scratch = ScratchDatabase::create("production_verify_mismatch").await?;
     seed_chain(scratch.pool(), BASE, 5, 5, 5, 1).await?;
     let reference = Arc::new(FixtureReferences::new([reference_log(BASE, 2)]));
-    let runner = verifier_runner(&scratch, reference, Arc::new(CompleteLivePhase)).await?;
+    let runner = verifier_runner(&scratch, reference.clone(), Arc::new(CompleteLivePhase)).await?;
     let chain = base_chain(true)?;
 
     let error = runner
         .run_chain(&chain, CancellationToken::new())
         .await
         .expect_err("different stored and reference log bytes must stop verification");
+    assert_eq!(
+        reference.calls().len(),
+        2,
+        "persistent mismatch gets exactly one retry"
+    );
     assert_eq!(error.kind(), ErrorKind::VerificationMismatch);
     assert!(!error.is_retryable());
     for context in ["block 2", "raw_logs[0].data", "ours=0x01", "reference=0x02"] {
@@ -3048,6 +3085,14 @@ async fn verify_redo_rechecks_the_requested_range_and_persists_its_level() -> Re
     assert_eq!(
         reference.calls(),
         vec![
+            ReferenceCall {
+                chain_id: BASE.to_owned(),
+                source_key: "drpc-reference".to_owned(),
+                provider_kind: VerificationProviderKind::IndependentRpc,
+                level: VerificationLevel::CrossChecked,
+                from: 2,
+                to: 3,
+            },
             ReferenceCall {
                 chain_id: BASE.to_owned(),
                 source_key: "drpc-reference".to_owned(),
@@ -4243,6 +4288,7 @@ struct FixtureState {
     logs: BTreeMap<String, Vec<VerificationLog>>,
     preflights: usize,
     calls: Vec<ReferenceCall>,
+    first_log_index: Option<i64>,
 }
 
 struct FixtureReferences {
@@ -4335,7 +4381,7 @@ impl VerificationReferenceProvider for FixtureReferences {
                 from: from_block,
                 to: to_block,
             });
-            let logs = state
+            let mut logs: Vec<_> = state
                 .logs
                 .get(&chain_id)
                 .into_iter()
@@ -4343,7 +4389,17 @@ impl VerificationReferenceProvider for FixtureReferences {
                 .filter(|log| (from_block..=to_block).contains(&log.block_number))
                 .cloned()
                 .collect();
-            (logs, self.gate.clone())
+            if state.calls.len() == 1 {
+                if let Some(index) = state.first_log_index {
+                    for log in &mut logs {
+                        log.log_index = index;
+                    }
+                }
+                (logs, self.gate.clone())
+            } else {
+                // The gate models the initial in-flight request, not its retry.
+                (logs, None)
+            }
         };
         Box::pin(async move {
             if let Some(gate) = gate {
