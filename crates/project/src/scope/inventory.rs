@@ -268,15 +268,16 @@ pub(super) async fn close(
     sqlx::query("CREATE TEMP TABLE project_inventory_seen_resources (resource_id uuid PRIMARY KEY) ON COMMIT DROP")
         .execute(&mut **transaction).await
         .map_err(|error| ProjectError::database("failed to create inventory frontier", error))?;
-    mirror::stage(transaction, chain_id, target.number).await?;
+    let mut mirror_strategy = mirror::stage(transaction, chain_id, target.number).await?;
     // A pointer-derived name can be bound to another resource, whose latest pointer can name a
     // further surface. Reach the finite name/resource fixed point before staging and publication.
     loop {
         let before = scope_size(transaction).await?;
         include_pointer_names(transaction, chain_id, target.number).await?;
-        mirror::include(transaction, chain_id, target.number).await?;
+        mirror::include(transaction, chain_id, target.number, &mut mirror_strategy).await?;
         super::close_binding_scope(transaction, chain_id, target).await?;
         if scope_size(transaction).await? == before {
+            mirror::finish(transaction, mirror_strategy).await?;
             sqlx::query("DROP TABLE project_mirror_seen_resources, project_mirror_seen_names, project_mirror_changed_nodes, project_inventory_seen_resources")
                 .execute(&mut **transaction)
                 .await
