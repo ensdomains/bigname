@@ -2,9 +2,6 @@ use sqlx::PgPool;
 
 use crate::{ProjectError, Result, builders, integrity, publish, scope, stage};
 
-#[path = "engine_jit.rs"]
-mod jit;
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Marker {
     pub number: i64,
@@ -75,19 +72,6 @@ impl Engine {
 }
 
 async fn derive(
-    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    request: &BatchRequest,
-    target: &Marker,
-) -> Result<u64> {
-    if !jit::applies(transaction, request).await? {
-        return derive_inner(transaction, request, target).await;
-    }
-    let mut local = jit::Scope::begin(transaction).await?;
-    let result = derive_inner(local.transaction(), request, target).await;
-    local.finish(result).await
-}
-
-async fn derive_inner(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     request: &BatchRequest,
     target: &Marker,
