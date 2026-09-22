@@ -11,8 +11,41 @@ pub(super) async fn include(
     if full_rebuild {
         return Ok(());
     }
-    sqlx::query(
-        r#"INSERT INTO project_events
+    let statement = INCLUDE_SQL;
+    #[cfg(test)]
+    let statement = if crate::reference::enabled(transaction).await? {
+        include_str!("linked_records_previous.sql")
+    } else {
+        statement
+    };
+    #[cfg(test)]
+    if crate::profile::execute(
+        transaction,
+        chain_id,
+        target_block,
+        statement,
+        crate::profile::Stage::LinkedRecords,
+    )
+    .await?
+    {
+        return Ok(());
+    }
+    sqlx::query(statement)
+        .bind(chain_id)
+        .bind(target_block)
+        .execute(&mut **transaction)
+        .await
+        .map_err(|error| {
+            ProjectError::database("failed to stage linked resolver history", error)
+        })?;
+    Ok(())
+}
+
+// The ID table contains exactly the rows inserted by events::create and this
+// statement. Returning IDs from the INSERT preserves same-statement duplicates
+// while preventing duplicates on subsequent includes without rereading wide rows.
+const INCLUDE_SQL: &str = r#"WITH inserted AS (
+        INSERT INTO project_events
         SELECT event.* FROM normalized_events event
         JOIN project_scope_resolvers scope
           ON lower(event.after_state ->> 'resolver') = lower(scope.resolver_address)
@@ -25,13 +58,13 @@ pub(super) async fn include(
           AND (event.event_kind IN ('ResolverRecordLinked', 'ResolverPermissionArgument')
                OR (event.event_kind = 'RecordChanged'
                    AND event.after_state ->> 'storage_model' = 'resolver_record_id'))
-          AND NOT EXISTS (SELECT 1 FROM project_events staged
-                          WHERE staged.normalized_event_id = event.normalized_event_id)"#,
+          AND NOT EXISTS (SELECT 1 FROM project_staged_event_ids staged
+                          WHERE staged.normalized_event_id = event.normalized_event_id)
+        RETURNING normalized_event_id
     )
-    .bind(chain_id)
-    .bind(target_block)
-    .execute(&mut **transaction)
-    .await
-    .map_err(|error| ProjectError::database("failed to stage linked resolver history", error))?;
-    Ok(())
-}
+    INSERT INTO project_staged_event_ids
+    SELECT normalized_event_id FROM inserted ON CONFLICT DO NOTHING"#;
+
+#[cfg(test)]
+#[path = "linked_records_tests.rs"]
+mod tests;

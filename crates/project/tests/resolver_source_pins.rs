@@ -177,7 +177,7 @@ async fn seed_duplicate_declarations(pool: &PgPool) -> TestResult {
 
 #[tokio::test]
 async fn duplicate_declarations_project_latest_role_and_features_together() -> TestResult {
-    let resolver = include_str!("../src/builders/resolver.rs");
+    let resolver = include_str!("../src/builders/resolver/build.sql");
     let features = include_str!("../src/builders/resolver/read_features.rs");
     assert_eq!(
         production_order(resolver, "SELECT declaration ->> 'role'"),

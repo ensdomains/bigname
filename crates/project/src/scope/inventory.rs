@@ -264,21 +264,35 @@ pub(super) async fn close(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
     target: &Marker,
+    evidence_only: bool,
 ) -> Result<()> {
     sqlx::query("CREATE TEMP TABLE project_inventory_seen_resources (resource_id uuid PRIMARY KEY) ON COMMIT DROP")
         .execute(&mut **transaction).await
         .map_err(|error| ProjectError::database("failed to create inventory frontier", error))?;
+    sqlx::query("CREATE TEMP TABLE project_inventory_frontier_resources (resource_id uuid PRIMARY KEY) ON COMMIT DROP")
+        .execute(&mut **transaction).await
+        .map_err(|e| ProjectError::database("failed to create inventory keys", e))?;
     let mut mirror_strategy = mirror::stage(transaction, chain_id, target.number).await?;
+    mirror::use_evidence_inputs(&mut mirror_strategy, evidence_only);
     // A pointer-derived name can be bound to another resource, whose latest pointer can name a
     // further surface. Reach the finite name/resource fixed point before staging and publication.
     loop {
         let before = scope_size(transaction).await?;
         include_pointer_names(transaction, chain_id, target.number).await?;
         mirror::include(transaction, chain_id, target.number, &mut mirror_strategy).await?;
+        if evidence_only {
+            if crate::stage::mirror_evidence::resolve_inputs(transaction, chain_id, target.number)
+                .await?
+            {
+                super::resolver_dependents::include(transaction, chain_id).await?;
+            }
+            crate::stage::mirror_evidence::invalidate_resolver_dependents(transaction, chain_id)
+                .await?;
+        }
         super::close_binding_scope(transaction, chain_id, target).await?;
         if scope_size(transaction).await? == before {
             mirror::finish(transaction, mirror_strategy).await?;
-            sqlx::query("DROP TABLE project_mirror_seen_resources, project_mirror_seen_names, project_mirror_changed_nodes, project_inventory_seen_resources")
+            sqlx::query("DROP TABLE project_mirror_seen_resources, project_mirror_seen_names, project_mirror_changed_nodes, project_inventory_seen_resources, project_inventory_frontier_resources")
                 .execute(&mut **transaction)
                 .await
                 .map_err(|error| {
@@ -307,37 +321,92 @@ async fn include_pointer_names(
     // Publication deletes every scoped resource before inserting its replacement. Stage every
     // readable linked pointer name so the inventory builder can fall back to an earlier pointer
     // when a later pointer's name surface is not visible at the target.
-    sqlx::query("ANALYZE project_scope_resources")
+    #[cfg(test)]
+    if crate::reference::enabled(transaction).await? {
+        sqlx::query("ANALYZE project_scope_resources")
+            .execute(&mut **transaction)
+            .await
+            .map_err(|e| {
+                ProjectError::database("failed to analyze reference inventory scope", e)
+            })?;
+        return crate::reference::execute(
+            transaction,
+            chain_id,
+            target_block,
+            None,
+            include_str!("inventory_pointer_previous.sql"),
+        )
+        .await;
+    }
+    sqlx::query("TRUNCATE project_inventory_frontier_resources")
         .execute(&mut **transaction)
         .await
-        .map_err(|error| ProjectError::database("failed to analyze inventory scope", error))?;
-    sqlx::query(
-        "WITH frontier AS MATERIALIZED (
-             INSERT INTO project_inventory_seen_resources SELECT resource_id FROM project_scope_resources
-             ON CONFLICT DO NOTHING RETURNING resource_id
-         )
-         INSERT INTO project_scope_names
-         SELECT DISTINCT event.logical_name_id
-         FROM frontier scope
-         JOIN normalized_events event USING (resource_id)
-         JOIN chain_lineage lineage
-           ON lineage.chain_id = event.chain_id
-          AND lineage.block_hash = event.block_hash
-          AND lineage.block_number = event.block_number
-         WHERE event.chain_id = $1
-           AND event.block_number <= $2
-           AND event.event_kind = 'ResolverChanged'
-           AND event.logical_name_id IS NOT NULL
-           AND event.consumer_visibility = 'activated'
-           AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
-           AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
-         ON CONFLICT DO NOTHING",
+        .map_err(|e| ProjectError::database("failed to clear inventory frontier", e))?;
+    let count = sqlx::query(
+        "WITH added AS (
+             INSERT INTO project_inventory_seen_resources
+             SELECT scope.resource_id FROM project_scope_resources scope
+             WHERE NOT EXISTS (SELECT 1 FROM project_inventory_seen_resources seen
+                 WHERE seen.resource_id = scope.resource_id)
+             ON CONFLICT DO NOTHING RETURNING resource_id)
+         INSERT INTO project_inventory_frontier_resources SELECT resource_id FROM added",
     )
-    .bind(chain_id)
-    .bind(target_block)
     .execute(&mut **transaction)
     .await
-    .map_err(|error| ProjectError::database("failed to scope inventory pointer names", error))?;
+    .map_err(|e| ProjectError::database("failed to populate inventory frontier", e))?
+    .rows_affected();
+    sqlx::query("ANALYZE project_inventory_frontier_resources")
+        .execute(&mut **transaction)
+        .await
+        .map_err(|e| ProjectError::database("failed to analyze inventory frontier", e))?;
+    let statement = "INSERT INTO project_scope_names
+         SELECT DISTINCT event.logical_name_id
+         FROM project_inventory_frontier_resources scope
+         JOIN LATERAL (
+             SELECT event.logical_name_id FROM normalized_events event
+             JOIN chain_lineage lineage
+               ON lineage.chain_id = event.chain_id
+              AND lineage.block_hash = event.block_hash
+              AND lineage.block_number = event.block_number
+             WHERE event.resource_id = scope.resource_id
+               AND event.chain_id = $1
+               AND event.block_number <= $2
+               AND event.event_kind = 'ResolverChanged'
+               AND event.logical_name_id IS NOT NULL
+               AND event.consumer_visibility = 'activated'
+               AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
+               AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized') OFFSET 0
+         ) event ON TRUE
+         ON CONFLICT DO NOTHING";
+    let broad = count > 256;
+    let statement = if broad {
+        statement.replace(" OFFSET 0", "")
+    } else {
+        statement.to_owned()
+    };
+    tracing::debug!(
+        new_resources = count,
+        strategy = if broad { "set_based" } else { "keyed" },
+        "Project inventory frontier prepared"
+    );
+    #[cfg(test)]
+    if crate::profile::execute(
+        transaction,
+        chain_id,
+        target_block,
+        &statement,
+        crate::profile::Stage::InventoryNames,
+    )
+    .await?
+    {
+        return Ok(());
+    }
+    sqlx::query(&statement)
+        .bind(chain_id)
+        .bind(target_block)
+        .execute(&mut **transaction)
+        .await
+        .map_err(|e| ProjectError::database("failed to scope inventory pointer names", e))?;
     Ok(())
 }
 
@@ -348,3 +417,7 @@ mod tests;
 #[cfg(test)]
 #[path = "changed_node_tests.rs"]
 mod changed_node_tests;
+
+#[cfg(test)]
+#[path = "inventory_frontier_tests.rs"]
+mod frontier_tests;

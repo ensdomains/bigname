@@ -1737,3 +1737,9 @@ async fn database(name: &str) -> Result<(TestDatabase, PgPool)> {
     drop(connection);
     Ok((database, pool))
 }
+
+#[path = "mirror_dependency_metadata_repro.rs"]
+mod dependency_metadata_repro;
+
+#[path = "mirror_classification_inputs.rs"]
+mod classification_inputs;

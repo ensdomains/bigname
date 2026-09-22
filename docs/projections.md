@@ -1299,15 +1299,38 @@ namespace), the resolver's own unsupported reason, `mirrored_resolver_is_mirror`
 answer for a descendant is resolver-defined), alongside the selected node. A
 mirror whose own classification is unsupported or belongs to another namespace
 keeps the ordinary resolver reason or `resolver_classification_missing`. The
-derivation is a pure function of the staged events: incremental scope pairs a
-mirror-pointer resource with the names (and any pointer resources) of every node
-its walk consults, pairs a scoped consulted name, pointer resource, or changed
-node-keyed ENSv1 pointer with the mirror-pointer resources of every name whose
-walk consults that node, stages a scoped name's node-keyed ENSv1 pointers and the
-queried node's writes on every declared ENSv1 resolver, and re-scopes a mirrored
-row when the resolver it was derived from writes. An ancestor's resolver change or clear and a write for the
-queried node therefore rebuild the mirrored row in the same publication, and
-full, incremental, and redo builds converge. `address_records_current` and
+derivation uses staged event history and the explicitly reusable resolver classification
+fields described below. During ordinary forward incremental work, a mirror-pointer
+resource requires the surfaces and historical registry pointers of every node its
+walk consults as **inputs**. Reading an unchanged ancestor does not put that ancestor,
+its pointer resource, or unrelated mirror subscribers into the affected publication
+scope. Unchanged rows retain their stored provenance and target timestamps,
+including the name API's fallback `created_at` when no creation event is available.
+An absent ancestor output stays absent when that ancestor is only read; a new or
+changed surface still enters the ordinary affected scope.
+
+An independently affected consulted name or pointer resource, or a changed node-keyed
+ENSv1 pointer, still invalidates every mirror-pointer resource whose walk consults
+that node. Ancestor resolver changes and clears, queried-node record writes, resolver
+classification changes, and newly admitted name/path evidence must therefore rebuild
+their affected mirrors in the same publication. Inputs discovered while rebuilding one
+mirror do not become independent invalidation seeds. Full rebuild and redo/retraction
+work retain the conservative bidirectional closure.
+
+Mirror computation stages eligible historical registry pointers for consulted nodes,
+including clears and pointers without a logical name or resource, and queried-node
+writes on every declared ENSv1 resolver. It may reuse only the retained resolver's
+`declared_summary.classification`, `support_status`, `unsupported_reason`,
+`manifest_version`, and `provenance.manifest_id` as classification inputs when that
+resolver is outside the affected resolver scope and its retained target is on the
+current canonical lineage at or before the selected target. Missing, future, or
+noncanonical retained classification requires
+an ordinary resolver rebuild, bypassing unchanged-row carry-forward, and invalidates
+its retained direct and mirrored dependents. These input fields never supply a new publication
+target or permit reuse of record values. A classification change uses the newly
+rebuilt resolver instead. Full, incremental, and redo builds agree on affected record
+values and event provenance; unchanged forward-incremental rows intentionally retain
+their earlier publication targets. `address_records_current` and
 name-side record reads consume mirrored rows like any other supported inventory.
 
 For ENSv1, an admitted current resolver may contribute supported address, text,

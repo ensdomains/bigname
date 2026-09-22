@@ -14,6 +14,7 @@ pub(super) async fn create(
     chain_id: &str,
     target_block: i64,
 ) -> Result<()> {
+    super::mirror_evidence::create(transaction).await?;
     for statement in ANALYZE_HISTORY_SCOPES_SQL
         .split(';')
         .filter(|statement| !statement.trim().is_empty())
@@ -120,6 +121,9 @@ pub(super) async fn create(
         UNION
         -- Candidate-only resources supply just the resolver evidence consumed by this build.
         -- They remain outside delete-and-publish resource scope.
+        SELECT normalized_event_id
+        FROM project_mirror_evidence_events
+        UNION
         SELECT normalized_event_id
         FROM project_scope_resolver_candidate_events
         UNION

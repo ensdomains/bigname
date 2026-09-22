@@ -31,8 +31,9 @@ pub(super) async fn stage_pointers(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
 ) -> Result<()> {
-    sqlx::query(
-        r#"
+    crate::stage::mirror_evidence::create(transaction).await?;
+    crate::stage::mirror_evidence::classifications(transaction, chain_id).await?;
+    let pointer_sql = r#"
         CREATE TEMP TABLE project_mirror_pointers ON COMMIT DROP AS
         SELECT pointer.*,
                resolver.support_status AS mirror_support_status,
@@ -50,12 +51,16 @@ pub(super) async fn stage_pointers(
           ON declaration_manifest.manifest_id = (resolver.provenance ->> 'manifest_id')::bigint
          AND declaration_manifest.namespace = pointer.pointer_namespace
         WHERE pointer.pointer_source_family IN ('ens_v2_registry_l1', 'ens_v2_root_l1')
-        "#,
-    )
-    .bind(chain_id)
-    .execute(&mut **transaction)
-    .await
-    .map_err(|error| ProjectError::database("failed to stage mirror resolver pointers", error))?;
+        "#;
+    let pointer_sql =
+        crate::stage::mirror_evidence::classification_sql(transaction, pointer_sql, true).await?;
+    sqlx::query(&pointer_sql)
+        .bind(chain_id)
+        .execute(&mut **transaction)
+        .await
+        .map_err(|error| {
+            ProjectError::database("failed to stage mirror resolver pointers", error)
+        })?;
     sqlx::query("CREATE INDEX ON project_mirror_pointers (resource_id)")
         .execute(&mut **transaction)
         .await
@@ -170,6 +175,8 @@ pub(super) async fn stage_pointers(
          AND declaration_manifest.namespace = nearest.mirrored_pointer_namespace
         "#
     );
+    let selection =
+        crate::stage::mirror_evidence::classification_sql(transaction, &selection, true).await?;
     sqlx::query(&selection)
         .bind(chain_id)
         .execute(&mut **transaction)
@@ -220,6 +227,26 @@ pub(super) async fn stage_pointers(
                 ProjectError::database("failed to index mirrored resolver selection", error)
             })?;
     }
+    Ok(())
+}
+
+pub(super) async fn build_inventory(
+    transaction: &mut Transaction<'_, Postgres>,
+    chain_id: &str,
+    target: &Marker,
+    statement: &str,
+) -> Result<()> {
+    let statement =
+        crate::stage::mirror_evidence::classification_sql(transaction, statement, false).await?;
+    sqlx::query(&statement)
+        .bind(chain_id)
+        .bind(target.number)
+        .bind(&target.hash)
+        .execute(&mut **transaction)
+        .await
+        .map_err(|error| {
+            ProjectError::database("failed to build record_inventory_current", error)
+        })?;
     Ok(())
 }
 

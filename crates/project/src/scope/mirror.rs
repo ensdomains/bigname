@@ -2,36 +2,52 @@ use sqlx::{Postgres, Transaction};
 
 use crate::{ProjectError, Result};
 
-// This changes only the execution strategy, never scope membership. Once bulk
-// pairs exist, reuse them until this transaction ends, including later closure steps.
+// The graph and its independent seen keys live only for this canonical transaction.
+// New scope keys discover affected mirror pointers; cached links serve later closure steps.
 #[derive(Default)]
 pub(super) struct Strategy {
-    bulk: bool,
+    iterations: usize,
+    evidence_only: bool,
+    #[cfg(test)]
+    audit: bool,
+    #[cfg(test)]
+    reference: Option<deployed_reference::Strategy>,
 }
 
-// Follow only newly scoped names/resources and changed v1 nodes. The seen sets are
-// transaction-local; replay starts fresh and never reuses a graph from another head.
 pub(super) async fn stage(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
     target_block: i64,
 ) -> Result<Strategy> {
-    for statement in include_str!("mirror.sql")
-        .split(';')
-        .filter(|sql| !sql.trim().is_empty())
-    {
-        let query = sqlx::query(statement);
-        let query = if statement.contains("$1") {
-            query.bind(chain_id).bind(target_block)
-        } else {
-            query
-        };
-        query
-            .execute(&mut **transaction)
-            .await
-            .map_err(|error| ProjectError::database("failed to stage mirror scope pairs", error))?;
+    crate::stage::mirror_evidence::create(transaction).await?;
+    #[cfg(test)]
+    if crate::engine::contract_compare::audit::enabled(transaction).await? {
+        crate::engine::contract_compare::audit::mirror_stage(transaction, chain_id, target_block)
+            .await?;
+        return Ok(Strategy {
+            audit: true,
+            ..Strategy::default()
+        });
     }
+    #[cfg(test)]
+    if crate::reference::enabled(transaction).await? {
+        return Ok(Strategy {
+            reference: Some(deployed_reference::stage(transaction, chain_id, target_block).await?),
+            ..Strategy::default()
+        });
+    }
+    execute(
+        transaction,
+        chain_id,
+        target_block,
+        include_str!("mirror.sql"),
+    )
+    .await?;
     Ok(Strategy::default())
+}
+
+pub(super) fn use_evidence_inputs(strategy: &mut Strategy, enabled: bool) {
+    strategy.evidence_only = enabled;
 }
 
 pub(super) async fn include(
@@ -40,81 +56,153 @@ pub(super) async fn include(
     target_block: i64,
     strategy: &mut Strategy,
 ) -> Result<()> {
-    if !strategy.bulk {
-        let broad: bool = sqlx::query_scalar(include_str!("mirror_broad.sql"))
-            .bind(chain_id)
-            .bind(target_block)
-            .fetch_one(&mut **transaction)
-            .await
-            .map_err(|error| ProjectError::database("failed to assess mirror scope size", error))?;
-        if broad {
-            stage_bulk(transaction, chain_id, target_block).await?;
-            strategy.bulk = true;
-        }
+    #[cfg(test)]
+    if strategy.audit {
+        return crate::engine::contract_compare::audit::mirror_include(transaction).await;
     }
-    if strategy.bulk {
-        sqlx::query(include_str!("mirror_bulk_include.sql"))
-            .execute(&mut **transaction)
-            .await
-            .map_err(|error| ProjectError::database("failed to scope bulk mirror pairs", error))?;
-        return Ok(());
+    #[cfg(test)]
+    if let Some(reference) = strategy.reference.as_mut() {
+        return deployed_reference::include(transaction, chain_id, target_block, reference).await;
     }
-    for statement in [
-        "ANALYZE project_scope_names",
-        "ANALYZE project_scope_resources",
-    ] {
-        sqlx::query(statement)
-            .execute(&mut **transaction)
-            .await
-            .map_err(|error| ProjectError::database("failed to analyze mirror frontier", error))?;
-    }
-    sqlx::query(include_str!("mirror_include.sql"))
-        .bind(chain_id)
-        .bind(target_block)
-        .execute(&mut **transaction)
+
+    let started = std::time::Instant::now();
+    // Materialized frontiers and deduplicated suffixes handle both isolated updates
+    // and shared ancestors. No seed/history threshold constructs a chain-wide graph.
+    execute(
+        transaction,
+        chain_id,
+        target_block,
+        include_str!("mirror_bulk.sql"),
+    )
+    .await?;
+    execute(
+        transaction,
+        chain_id,
+        target_block,
+        if strategy.evidence_only {
+            include_str!("mirror_evidence_include.sql")
+        } else {
+            include_str!("mirror_bulk_include.sql")
+        },
+    )
+    .await?;
+    if tracing::enabled!(tracing::Level::DEBUG) {
+        let counts: (i64, i64, i64, i64) = sqlx::query_as(
+            "SELECT (SELECT count(*) FROM project_mirror_frontier_names),
+                    (SELECT count(*) FROM project_mirror_frontier_resources),
+                    (SELECT count(*) FROM project_mirror_new_pointers),
+                    (SELECT count(*) FROM project_mirror_links)",
+        )
+        .fetch_one(&mut **transaction)
         .await
-        .map_err(|error| ProjectError::database("failed to scope mirror resolver pairs", error))?;
+        .map_err(|error| ProjectError::database("failed to measure mirror frontier", error))?;
+        tracing::debug!(
+            strategy = "affected_graph",
+            reason = "new_scope_keys",
+            iteration = strategy.iterations,
+            new_names = counts.0,
+            new_resources = counts.1,
+            new_pointers = counts.2,
+            cached_links = counts.3,
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "Project mirror expansion completed"
+        );
+    }
+    execute(
+        transaction,
+        chain_id,
+        target_block,
+        include_str!("mirror_batch_finish.sql"),
+    )
+    .await?;
+    strategy.iterations += 1;
     Ok(())
 }
 
-async fn stage_bulk(
+async fn execute(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
     target_block: i64,
+    statements: &str,
 ) -> Result<()> {
-    // Reconstruct from original changed events, not the consumed frontier. This
-    // also preserves changed-node dependencies when switching after a small pass.
-    for statement in include_str!("mirror_bulk.sql")
-        .split(';')
-        .filter(|s| !s.trim().is_empty())
-    {
-        let query = sqlx::query(statement);
+    for statement in statements.split(';').filter(|sql| !sql.trim().is_empty()) {
+        // Only the bounded, analyzed inputs to this statement select its plan. This
+        // changes join freedom, never the affected graph or eligibility predicates.
+        let mut planned = statement.to_owned();
+        if statement.contains(" OFFSET 0") {
+            let inputs = [
+                "frontier_resources",
+                "resource_nodes",
+                "seeds",
+                "queried_names",
+                "suffixes",
+                "wanted",
+            ]
+            .into_iter()
+            .filter(|name| statement.contains(&format!("FROM project_mirror_{name} ")))
+            .map(|name| format!("SELECT 1 FROM project_mirror_{name}"))
+            .collect::<Vec<_>>();
+            debug_assert!(!inputs.is_empty());
+            let broad: bool = sqlx::query_scalar(&format!(
+                "SELECT EXISTS(SELECT 1 FROM ({}) inputs OFFSET 256 LIMIT 1)",
+                inputs.join(" UNION ALL ")
+            ))
+            .fetch_one(&mut **transaction)
+            .await
+            .map_err(|e| ProjectError::database("failed to assess mirror frontier", e))?;
+            if broad {
+                planned = planned.replace(" OFFSET 0", "");
+            }
+            tracing::debug!(
+                strategy = if broad { "set_based" } else { "keyed" },
+                "Project mirror history strategy selected"
+            );
+        }
+        #[cfg(test)]
+        if let Some(stage) = crate::profile::mirror_stage(&planned) {
+            if crate::profile::execute(transaction, chain_id, target_block, &planned, stage).await?
+            {
+                continue;
+            }
+        }
+        let query = sqlx::query(&planned);
         let query = if statement.contains("$1") {
             query.bind(chain_id).bind(target_block)
         } else {
             query
         };
-        query
-            .execute(&mut **transaction)
-            .await
-            .map_err(|error| ProjectError::database("failed to stage bulk mirror pairs", error))?;
+        query.execute(&mut **transaction).await.map_err(|error| {
+            ProjectError::database("failed to expand affected mirror graph", error)
+        })?;
     }
     Ok(())
 }
 
 pub(super) async fn finish(
     transaction: &mut Transaction<'_, Postgres>,
-    strategy: Strategy,
+    _strategy: Strategy,
 ) -> Result<()> {
-    if strategy.bulk {
-        sqlx::query("DROP TABLE project_mirror_pairs")
-            .execute(&mut **transaction)
-            .await
-            .map_err(|error| ProjectError::database("failed to drop bulk mirror pairs", error))?;
+    #[cfg(test)]
+    if _strategy.audit {
+        return crate::engine::contract_compare::audit::mirror_finish(transaction).await;
     }
+    #[cfg(test)]
+    if let Some(reference) = _strategy.reference {
+        return deployed_reference::finish(transaction, reference).await;
+    }
+    sqlx::query(
+        "DROP TABLE project_mirror_links, project_mirror_seen_seeds, project_mirror_seen_pointers, project_mirror_seen_nodes, project_mirror_cached_nodes",
+    )
+    .execute(&mut **transaction)
+    .await
+    .map_err(|error| ProjectError::database("failed to drop affected mirror graph", error))?;
     Ok(())
 }
 
 #[cfg(test)]
 #[path = "mirror_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "mirror_reference.rs"]
+mod deployed_reference;

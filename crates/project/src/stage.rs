@@ -3,8 +3,10 @@ use sqlx::{Postgres, Transaction};
 use crate::{Marker, ProjectError, Result};
 
 mod event_ids;
+mod events;
 mod history;
 mod linked_records;
+pub(crate) mod mirror_evidence;
 pub(crate) mod node_record_events;
 
 const PROJECTION_TABLES: &[&str] = &[
@@ -48,6 +50,7 @@ pub(crate) async fn inputs(
     target: &Marker,
     full_rebuild: bool,
 ) -> Result<()> {
+    mirror_evidence::create(transaction).await?;
     create_events(transaction, chain_id, target.number, full_rebuild).await?;
     linked_records::include(transaction, chain_id, target.number, full_rebuild).await?;
     // Collect statistics after all history is staged so builders can plan joins
@@ -188,54 +191,7 @@ async fn create_events(
         event_ids::create(transaction, chain_id, target_block).await?;
     }
 
-    let scope_join = if full_rebuild {
-        ""
-    } else {
-        "JOIN project_event_ids scope
-           ON scope.normalized_event_id = event.normalized_event_id"
-    };
-    let statement = format!(
-        "CREATE TEMP TABLE project_events ON COMMIT DROP AS
-         SELECT event.*
-         FROM normalized_events event
-         {scope_join}
-         LEFT JOIN chain_lineage lineage
-           ON lineage.chain_id = event.chain_id
-          AND lineage.block_hash = event.block_hash
-          AND lineage.block_number = event.block_number
-         WHERE event.chain_id = $1
-           AND event.consumer_visibility = 'activated'
-           AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
-           AND (
-               (event.block_number IS NULL AND event.block_hash IS NULL)
-               OR (
-                   event.block_number <= $2
-                   AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
-               )
-           )"
-    );
-    sqlx::query(&statement)
-        .bind(chain_id)
-        .bind(target_block)
-        .execute(&mut **transaction)
-        .await
-        .map_err(|error| ProjectError::database("failed to stage canonical events", error))?;
-    for statement in [
-        "CREATE INDEX ON project_events (logical_name_id, normalized_event_id)",
-        "CREATE INDEX ON project_events (resource_id, normalized_event_id)",
-        "CREATE INDEX ON project_events (event_kind, normalized_event_id)",
-        "CREATE INDEX ON project_events (event_kind, chain_id, normalized_event_id)",
-        // Resolver pointers and records are looked up by node, once per reverse claim in primary
-        // names. The index covers every row: the planner reads expression statistics only from
-        // a complete index, and with a partial one it guessed hundreds of rows per node.
-        "CREATE INDEX ON project_events (lower(after_state ->> 'node'))",
-    ] {
-        sqlx::query(statement)
-            .execute(&mut **transaction)
-            .await
-            .map_err(|error| ProjectError::database("failed to index staged events", error))?;
-    }
-    Ok(())
+    events::create(transaction, chain_id, target_block, full_rebuild).await
 }
 
 async fn create_identity_views(
@@ -248,6 +204,8 @@ async fn create_identity_views(
         ""
     } else {
         "JOIN (
+             SELECT logical_name_id FROM project_mirror_evidence_names
+             UNION
              SELECT logical_name_id FROM project_scope_names
              UNION
              SELECT logical_name_id FROM project_scope_children

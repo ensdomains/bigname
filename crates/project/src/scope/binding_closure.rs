@@ -7,6 +7,18 @@ pub(super) async fn close_binding_scope(
     chain_id: &str,
     target: &Marker,
 ) -> Result<()> {
+    #[cfg(test)]
+    if crate::reference::enabled(transaction).await? {
+        return crate::reference::execute(
+            transaction,
+            chain_id,
+            target.number,
+            Some(&target.hash),
+            include_str!("binding_previous.sql"),
+        )
+        .await;
+    }
+
     super::authority::include_latest_arm_resources(transaction, chain_id, target.number).await?;
     super::resolver::include_registry_read_anchors(transaction, chain_id, target.number).await?;
     super::wrapper_registrar::include_names_for_scoped_registrars(
@@ -22,10 +34,17 @@ pub(super) async fn close_binding_scope(
     )
     .await?;
     sqlx::query(
-        "INSERT INTO project_scope_resources
+        &super::frontier::query(
+            transaction,
+            "active_bindings_from_names",
+            "INSERT INTO project_scope_resources
          SELECT binding.resource_id
-         FROM surface_bindings binding
-         JOIN project_scope_names scope USING (logical_name_id)
+         FROM project_scope_names scope
+         JOIN LATERAL (
+             SELECT * FROM surface_bindings WHERE logical_name_id = scope.logical_name_id
+               AND chain_id = $1 AND block_number <= $2
+               AND canonicality_state IN ('canonical', 'safe', 'finalized') OFFSET 0
+         ) binding ON TRUE
          JOIN chain_lineage lineage
            ON lineage.chain_id = binding.chain_id
           AND lineage.block_hash = binding.block_hash
@@ -45,6 +64,8 @@ pub(super) async fn close_binding_scope(
                )
            )
          ON CONFLICT DO NOTHING",
+        )
+        .await?,
     )
     .bind(chain_id)
     .bind(target.number)
@@ -67,10 +88,17 @@ pub(super) async fn close_binding_scope(
     .await?;
 
     sqlx::query(
-        "INSERT INTO project_scope_names
+        &super::frontier::query(
+            transaction,
+            "active_bindings_from_resources",
+            "INSERT INTO project_scope_names
          SELECT binding.logical_name_id
-         FROM surface_bindings binding
-         JOIN project_scope_resources scope USING (resource_id)
+         FROM project_scope_resources scope
+         JOIN LATERAL (
+             SELECT * FROM surface_bindings WHERE resource_id = scope.resource_id
+               AND chain_id = $1 AND block_number <= $2
+               AND canonicality_state IN ('canonical', 'safe', 'finalized') OFFSET 0
+         ) binding ON TRUE
          JOIN chain_lineage lineage
            ON lineage.chain_id = binding.chain_id
           AND lineage.block_hash = binding.block_hash
@@ -90,6 +118,8 @@ pub(super) async fn close_binding_scope(
                )
            )
          ON CONFLICT DO NOTHING",
+        )
+        .await?,
     )
     .bind(chain_id)
     .bind(target.number)
@@ -99,3 +129,7 @@ pub(super) async fn close_binding_scope(
     .map_err(|error| ProjectError::database("failed to close name binding scope", error))?;
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "binding_tests.rs"]
+mod tests;

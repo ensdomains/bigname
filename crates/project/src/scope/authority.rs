@@ -291,11 +291,18 @@ pub(super) async fn include_latest_arm_resources(
     target_block: i64,
 ) -> Result<()> {
     sqlx::query(
-        "INSERT INTO project_scope_resources
+        &super::frontier::query(
+            transaction,
+            "latest_arm_resources",
+            "INSERT INTO project_scope_resources
          SELECT DISTINCT ON (binding.logical_name_id, binding.authority_arm)
                 binding.resource_id
-         FROM surface_bindings binding
-         JOIN project_scope_names scope USING (logical_name_id)
+         FROM project_scope_names scope
+         JOIN LATERAL (
+             SELECT * FROM surface_bindings WHERE logical_name_id = scope.logical_name_id
+               AND chain_id = $1 AND block_number <= $2
+               AND canonicality_state IN ('canonical', 'safe', 'finalized') OFFSET 0
+         ) binding ON TRUE
          JOIN chain_lineage lineage
            ON lineage.chain_id = binding.chain_id
           AND lineage.block_hash = binding.block_hash
@@ -312,6 +319,8 @@ pub(super) async fn include_latest_arm_resources(
                   COALESCE((binding.provenance ->> 'log_index')::bigint, -1) DESC,
                   binding.surface_binding_id DESC
          ON CONFLICT DO NOTHING",
+        )
+        .await?,
     )
     .bind(chain_id)
     .bind(target_block)
