@@ -13,7 +13,10 @@ use crate::{
         DEFAULT_ADDRESS_NAMES_CURRENT_IDENTITY_JOINS, DEFAULT_ADDRESS_NAMES_CURRENT_READ_FILTER,
     },
     name_current::{DEFAULT_NAME_CURRENT_LINEAGE_JOINS, DEFAULT_NAME_CURRENT_READ_FILTER},
-    record_inventory::{DEFAULT_RECORD_INVENTORY_CURRENT_READ_FILTER, RESOURCE_CANONICALITY_JOINS},
+    record_inventory::{
+        DEFAULT_RECORD_INVENTORY_CURRENT_READ_FILTER, READABLE_RECORD_INVENTORY_ENTRIES,
+        RESOURCE_CANONICALITY_JOINS,
+    },
 };
 
 pub async fn load_phase_identity_records_by_ids(
@@ -357,7 +360,7 @@ async fn load_phase_inventories<'a>(
     let query = format!(
         r#"
         SELECT ric.resource_id, ric.record_version_boundary,
-               ric.selectors, ric.entries,
+               ric.selectors, {READABLE_RECORD_INVENTORY_ENTRIES} AS entries,
                ric.provenance, ric.unsupported_families,
                ric.support_status, ric.unsupported_reason,
                ric.chain_positions, ric.last_recomputed_at

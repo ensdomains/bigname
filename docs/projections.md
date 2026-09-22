@@ -148,10 +148,11 @@ to record values, resolver pointers and record-version boundaries. A read from
 an orphaned block is retried at the current canonical head; failure restores
 the missing-value baseline. Previously hydrated entries that become unsupported
 or fall outside the admitted resolver list are restored without an RPC call.
-Record-inventory readers expose the event-derived baseline immediately when a
-hydration block is orphaned, even before a retry runs. This text policy does not
-change the bounded refresh of event-silent reverse
-claims described below.
+Every record-inventory reader (the snapshot and batch reads, the identity name
+records behind lookup, and the GraphQL record loader) exposes the event-derived
+baseline immediately when a hydration block is orphaned, even before a retry
+runs. This text policy does not change the bounded refresh of event-silent
+reverse claims described below.
 
 Hydration uses the exact number and hash from `chain_heads`, revalidates that
 head in the publication transaction, and never calls provider `latest`.

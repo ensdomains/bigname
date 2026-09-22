@@ -1529,6 +1529,92 @@ async fn v2_lookup_uses_the_event_baseline_for_an_orphaned_hydration() -> Result
     database.cleanup().await
 }
 
+/// A record value read by canonical-head hydration is served only while its read block stays
+/// readable. Once that block is orphaned, the detail lookup serves the event-derived baseline
+/// (here: no retained contenthash) without waiting for a re-read (docs/projections.md).
+#[tokio::test]
+async fn v2_lookup_uses_the_event_baseline_for_an_orphaned_record_hydration() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_identity_name(
+        &database,
+        "ens:hydrated.eth",
+        "hydrated.eth",
+        "hydrated.eth",
+        "namehash:hydrated.eth",
+        Uuid::from_u128(0x5a01a1),
+        Uuid::from_u128(0x5a01a2),
+        Uuid::from_u128(0x5a01a3),
+        "0x0000000000000000000000000000000000000abc",
+        bigname_storage::AddressNameRelation::TokenHolder,
+        38,
+    )
+    .await?;
+    sqlx::query(
+        "INSERT INTO chain_lineage
+             (chain_id, block_hash, block_number, block_timestamp, canonicality_state)
+         VALUES
+             ('ethereum-mainnet', '0xrecord-hydration', 37,
+              '2026-04-17T00:00:37Z', 'canonical')",
+    )
+    .execute(&database.lookup_pool)
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE record_inventory_current inventory
+        SET entries = $1
+        FROM name_current name
+        WHERE name.resource_id = inventory.resource_id
+          AND name.raw_name = 'hydrated.eth'
+        "#,
+    )
+    .bind(json!([
+        {
+            "record_key": "contenthash",
+            "record_family": "contenthash",
+            "selector_key": null,
+            "status": "success",
+            "value": "0xe3010170aabb",
+            "canonical_head_multicall_hydration": {
+                "chain_id": "ethereum-mainnet",
+                "block_number": 37,
+                "block_hash": "0xrecord-hydration",
+                "baseline": {
+                    "record_key": "contenthash",
+                    "record_family": "contenthash",
+                    "selector_key": null,
+                    "status": "unsupported",
+                    "unsupported_reason": "value_not_retained_in_normalized_events"
+                }
+            }
+        }
+    ]))
+    .execute(&database.lookup_pool)
+    .await?;
+    let request = json!({"profile": "detail", "inputs": [{"name": "hydrated.eth"}]});
+
+    let payload = v2_lookup_json(&database, request.clone()).await?;
+    assert_eq!(
+        payload["data"][0]["record"]["content_hash"],
+        json!("0xe3010170aabb"),
+        "a hydration read from a readable block is served: {payload}"
+    );
+
+    sqlx::query(
+        "UPDATE chain_lineage SET canonicality_state = 'orphaned'
+         WHERE chain_id = 'ethereum-mainnet' AND block_hash = '0xrecord-hydration'",
+    )
+    .execute(&database.lookup_pool)
+    .await?;
+    let payload = v2_lookup_json(&database, request).await?;
+    let record = &payload["data"][0]["record"];
+    assert!(
+        record.get("content_hash").is_none_or(Value::is_null),
+        "an orphaned hydration block must fall back to the event baseline: {record}"
+    );
+
+    database.cleanup().await
+}
+
 #[tokio::test]
 async fn v2_lookup_rejects_head_reorg_before_project_republication() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;

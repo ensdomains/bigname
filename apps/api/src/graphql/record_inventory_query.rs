@@ -2,9 +2,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result, bail};
 use bigname_storage::{
-    RECORD_INVENTORY_CANONICALITY_SUMMARY_FILTER, RECORD_INVENTORY_PROJECTION_LINEAGE_FILTER,
-    RECORD_INVENTORY_RECORD_SERVING_FILTER, RECORD_INVENTORY_RESOURCE_CANONICALITY_FILTER,
-    RECORD_INVENTORY_RESOURCE_LINEAGE_FILTER, RESOURCE_CANONICALITY_JOINS,
+    READABLE_RECORD_INVENTORY_ENTRIES, RECORD_INVENTORY_CANONICALITY_SUMMARY_FILTER,
+    RECORD_INVENTORY_PROJECTION_LINEAGE_FILTER, RECORD_INVENTORY_RECORD_SERVING_FILTER,
+    RECORD_INVENTORY_RESOURCE_CANONICALITY_FILTER, RECORD_INVENTORY_RESOURCE_LINEAGE_FILTER,
+    RESOURCE_CANONICALITY_JOINS,
 };
 use serde_json::Value;
 use sqlx::{PgPool, Row, types::Uuid};
@@ -28,7 +29,8 @@ struct InventoryCandidate {
 fn phase_graphql_record_inventory_query() -> String {
     format!(
         r#"
-        SELECT ric.resource_id, ric.record_version_boundary, ric.selectors, ric.entries,
+        SELECT ric.resource_id, ric.record_version_boundary, ric.selectors,
+               {READABLE_RECORD_INVENTORY_ENTRIES} AS entries,
                ric.chain_positions, ric.support_status
         FROM bigname_phase.record_inventory_current ric
         {RESOURCE_CANONICALITY_JOINS}
