@@ -1524,26 +1524,31 @@ assert_index_install_hint project-history-index-on-another-table-hint \
 } | run_psql >/dev/null
 # All eight indexes are now the ones the installer built. The validity check
 # passes on that shape under both search_path settings and changes nothing.
+# The count names the eight indexes: the baseline also carries other
+# normalized_events_project_*_idx indexes (the scoped node history and ENSv1
+# pointer-node indexes), which this check does not cover.
+project_history_index_list="$(printf "'%s'," "${project_history_index_names[@]}")"
+project_history_index_list="${project_history_index_list%,}"
 {
     printf 'SET search_path TO "%s";\n' "$scratch_schema"
     emit_phase_migration "$project_history_validity_migration" preceding-shape
     printf 'SET search_path TO public;\n'
     emit_phase_migration "$project_history_validity_migration" baseline-first
     printf 'SET search_path TO "%s";\n' "$scratch_schema"
-    cat <<'SQL'
-DO $$
+    cat <<SQL
+DO \$\$
 BEGIN
     IF (
         SELECT count(*)
         FROM pg_index
         JOIN pg_class index_class ON index_class.oid = pg_index.indexrelid
         WHERE pg_index.indrelid = 'normalized_events'::regclass
-          AND index_class.relname LIKE 'normalized\_events\_project\_%\_idx'
+          AND index_class.relname IN ($project_history_index_list)
           AND pg_index.indisvalid AND pg_index.indisready
     ) <> 8 THEN
         RAISE EXCEPTION 'project-scoped history index validity check changed an index';
     END IF;
-END $$;
+END \$\$;
 SQL
 } | run_psql
 assert_migration_context_count "$project_history_validity_migration" empty-schema 1
