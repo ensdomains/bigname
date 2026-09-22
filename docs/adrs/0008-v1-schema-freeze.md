@@ -280,7 +280,8 @@ state, and a foreign key whose internal triggers no longer all fire, which
 would stop enforcing it while its definition reads the same), sequence (its whole range, cache, cycle and owning column), type,
 domain, comment and the schema's own privileges, with any object not owned
 by the schema's owner named (privileges write that owner as owner, by role,
-so the catalog reads alike whoever owns the schema), of the
+so the catalog reads alike whoever owns the schema) and the schema itself
+named when the role that runs the schema-migrations no longer owns it, of the
 baseline plus the inventoried schema-migrations, built into a fresh schema on every
 run and compared line for line, so a change to a baseline file or a
 schema-migration that moves the schema fails until the catalog is
@@ -448,7 +449,8 @@ configuration — connection defaults, every role attribute (`LOGIN`,
 connection limit, expiry), role memberships, the default privileges of every
 schema in the database rather than only the phase schema's, the database's
 own attributes (owner, connection limit, whether it accepts connections, the
-template flag, tablespace and privileges), and, where the
+template flag, tablespace and privileges), privileges on server parameters
+(`GRANT SET` or `ALTER SYSTEM ON PARAMETER`), and, where the
 check can read `pg_authid`, the password verifiers — against the snapshot taken
 before the first replay. That last read is decided before the statement is
 sent, because PostgreSQL checks the relation privilege when the scan opens and
@@ -749,7 +751,9 @@ values the system already documents as unstable across a boundary.
    refuses a retired name held by anything that is not an index; the two
    retired definitions leave the baseline in the same change. On a large
    database the operator prebuilds and drops concurrently with
-   `ops/resolver-history-indexes/install.sql` first, as
+   `ops/resolver-history-indexes/install.sql` first, which checks each retired
+   name again straight before dropping it, because a name that was free can be
+   taken during the hours the builds may run, as
    [`deployment.md`](../deployment.md) and the production runbook list,
    since the file's own build is an ordinary write-blocking `CREATE INDEX`
    and its drop takes the table's exclusive lock. Access paths only; no

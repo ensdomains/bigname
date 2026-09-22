@@ -210,7 +210,12 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_pointer_before_resolve
 
 -- The two retired indexes have no reader (see the schema-migration header);
 -- a concurrent drop waits for the batch transaction the same way a build does.
+-- A retired name that was free before the builds can be taken while they or
+-- the first drop run, and a drop matches on the name alone, so the check runs
+-- again straight before each drop and stops on anything but the retired index.
+DO $$ BEGIN PERFORM pg_temp.check_resolver_history_indexes(false); END $$;
 DROP INDEX CONCURRENTLY IF EXISTS bigname_phase.normalized_events_permission_after_resolver_history_idx;
+DO $$ BEGIN PERFORM pg_temp.check_resolver_history_indexes(false); END $$;
 DROP INDEX CONCURRENTLY IF EXISTS bigname_phase.normalized_events_permission_before_resolver_history_idx;
 
 -- Printed first so the receipt shows the flags even when the check below fails.

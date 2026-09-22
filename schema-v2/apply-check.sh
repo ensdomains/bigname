@@ -391,6 +391,11 @@ SELECT line FROM (
                d.datname, pg_get_userbyid(d.datdba), d.datconnlimit, d.datallowconn, d.datistemplate,
                (SELECT spcname FROM pg_tablespace WHERE oid = d.dattablespace), COALESCE(d.datacl::text, '-'))
     FROM pg_database d WHERE d.datname = current_database()
+    UNION ALL
+    -- A privilege on a server parameter (GRANT SET or ALTER SYSTEM ON
+    -- PARAMETER) is cluster-wide; REVOKE removes the row again.
+    SELECT format('parameter %s: %s', p.parname, COALESCE(p.paracl::text, '-'))
+    FROM pg_parameter_acl p
 ) configuration ORDER BY 1;
 SQL
         # `pg_roles` prints every password as one mask, so a changed one is
@@ -424,6 +429,25 @@ assert_role_configuration_snapshot_sees_planted_changes() {
     refusal_assertions_passed=$((refusal_assertions_passed + 1))
     if ! diff -u "$role_and_database_settings_before" <(role_and_database_settings) >&2; then
         printf '%s\n' "the planted connection limit did not restore (diff above: - before, + after)" >&2
+        exit 1
+    fi
+    # Only a superuser, or a holder of the grant option, can grant a parameter.
+    if [ "$(printf '\\pset tuples_only on\nSELECT rolsuper FROM pg_roles WHERE rolname = current_user;\n' | run_psql_as_owner | tr -d ' ')" != t ]; then
+        printf '%s\n' "note: the database user is not a superuser, so a parameter privilege was not planted" >&2
+        expected_refusal_assertions=$((expected_refusal_assertions - 1))
+        return
+    fi
+    printf 'GRANT SET ON PARAMETER lock_timeout TO "%s";\n' "$apply_check_role" | run_psql_as_owner
+    planted="$(role_and_database_settings)"
+    printf 'REVOKE SET ON PARAMETER lock_timeout FROM "%s";\n' "$apply_check_role" | run_psql_as_owner
+    seen="$(diff "$role_and_database_settings_before" <(printf '%s\n' "$planted") || true)"
+    case "$seen" in
+        *"> parameter lock_timeout: "*) ;;
+        *) printf '%s\n' "the role-configuration snapshot does not see a planted parameter privilege (saw: ${seen:-nothing})" >&2; exit 1 ;;
+    esac
+    refusal_assertions_passed=$((refusal_assertions_passed + 1))
+    if ! diff -u "$role_and_database_settings_before" <(role_and_database_settings) >&2; then
+        printf '%s\n' "the planted parameter privilege did not restore (diff above: - before, + after)" >&2
         exit 1
     fi
 }
@@ -1124,6 +1148,16 @@ SELECT line FROM (
         FROM pg_type t WHERE t.typnamespace = current_schema()::regnamespace
     ) o
     WHERE o.owner <> (SELECT n.nspowner FROM pg_namespace n WHERE n.nspname = current_schema())
+    UNION ALL
+    -- The schema belongs to the role that runs the schema-migrations, which is
+    -- the role reading this catalog unless the reader names it, so a schema
+    -- handed on with every object in it shows here although the rows above
+    -- write the new owner as owner.
+    SELECT 15, '', '', 'schema owner is not the role that runs the schema-migrations'
+    FROM pg_namespace n
+    WHERE n.nspname = current_schema()
+      AND n.nspowner <> (SELECT r.oid FROM pg_roles r
+                         WHERE r.rolname = COALESCE(NULLIF(current_setting('schema_v2_check.phase_owner', true), ''), current_user))
 ) catalog
 -- Byte order: the session collation may weigh punctuation last, and the
 -- scratch schema's name inside an identity would then reorder rows between
@@ -1574,6 +1608,10 @@ frozen_schema_catalog_within() {
         printf '\\pset format unaligned\n\\pset tuples_only on\n'
         printf 'SET search_path TO "%s";\n' "$schema"
         printf 'BEGIN;\n%s\n' "$planted_sql"
+        # Read as the configured user, the schema still belongs to the login.
+        if [ "${3:-}" = owner ]; then
+            printf "SET LOCAL schema_v2_check.phase_owner = '%s';\n" "$apply_check_role"
+        fi
         printf '%s\n' "$frozen_catalog_helpers_sql"
         printf '%s\n' "$frozen_schema_catalog_sql"
         printf 'ROLLBACK;\n'
@@ -1609,6 +1647,7 @@ assert_frozen_catalog_sees_planted_changes() {
     # foreign-key triggers switched off.
     local -a owner_planted_changes=(
         'is not owned by the schema owner:ALTER FUNCTION label_hashes(text[]) OWNER TO CURRENT_USER;'
+        "schema owner is not the role that runs the schema-migrations:REASSIGN OWNED BY \"$apply_check_role\" TO CURRENT_USER;"
     )
     if [ "$(printf '\\pset tuples_only on\nSELECT rolsuper FROM pg_roles WHERE rolname = current_user;\n' | run_psql_as_owner | tr -d ' ')" = t ]; then
         owner_planted_changes+=('constraint trigger address_names_current.:ALTER TABLE address_names_current DISABLE TRIGGER ALL;')
@@ -2761,8 +2800,8 @@ migration_application_log="$(
 # Future entries must use basename|one-line reason.
 intentional_phase_migration_skips=()
 refusal_assertions_passed=0
-# Base 173, main added 90, this branch 175 (92 of them the backslash-command,
-# psql-variable, SET-spelling, session-residue, session-identity (database, connection and
+# Base 173, main added 90, this branch 178 (95 of them the backslash-command,
+# psql-variable, schema-owner, parameter-privilege, installer-race, SET-spelling, session-residue, session-identity (database, connection and
 # temporary namespace included), recorded-history, ambiguous foreign key,
 # assembled password, literal-name branch and column-order, baseline-residue,
 # setting-name, backend-status, routine quoting, extension-dependency,
@@ -2771,7 +2810,7 @@ refusal_assertions_passed=0
 # the merges fold main's five address-match, event-order and mirror-pointer
 # not-ready probes into their invalid ones (-5); predecessor proofs base 39,
 # main +7, this branch +1.
-expected_refusal_assertions=433
+expected_refusal_assertions=436
 predecessor_shape_proof_count=0
 expected_predecessor_shape_proof_count=47
 refusal_probe_seconds=0
@@ -7179,6 +7218,74 @@ assert_index_install_hint resolver-history-index-on-another-table-hint \
     printf '%s\n' "DROP INDEX $resolver_history_first_index;"
     render_phase_migration "$resolver_history_install"
 } | run_psql >/dev/null
+# A retired name that is free before the builds can be taken while they run.
+# A writer's lock held by a second session keeps the installer in its first
+# build; an index on another table then takes a retired name, and the
+# installer must refuse it at the check before that drop and leave it.
+assert_resolver_history_revalidates_before_drop() {
+    local retired="${resolver_history_retired_names%% *}" holder_pid installer_pid attempt waiting=0 stderr_file status observed expected
+    stop_race_sessions() {
+        printf 'SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = current_user AND pid <> pg_backend_pid() AND (query LIKE %s OR query LIKE %s);\n' \
+            "'%apply_check_lock_holder%'" "'%CREATE INDEX CONCURRENTLY IF NOT EXISTS%'" | run_psql >/dev/null
+    }
+    stderr_file="$(mktemp "${TMPDIR:-/tmp}/schema-v2-installer-race.XXXXXX")"
+    printf 'SET search_path TO "%s";\nDROP INDEX %s;\n' "$scratch_schema" "$resolver_history_first_index" | run_psql >/dev/null
+    printf 'BEGIN;\nLOCK TABLE "%s".normalized_events IN ROW EXCLUSIVE MODE;\nSELECT pg_sleep(120) AS apply_check_lock_holder;\nROLLBACK;\n' \
+        "$scratch_schema" | run_psql >/dev/null 2>&1 &
+    holder_pid=$!
+    for attempt in $(seq 1 60); do
+        if [ "$(
+            printf '\\pset tuples_only on\n\\pset format unaligned\nSELECT count(*) FROM pg_stat_activity WHERE usename = current_user AND pid <> pg_backend_pid() AND state = %s AND query LIKE %s;\n' \
+                "'active'" "'%apply_check_lock_holder%'" | run_psql
+        )" = 1 ]; then
+            break
+        fi
+        sleep 0.5
+    done
+    render_phase_migration "$resolver_history_install" | run_psql >/dev/null 2>"$stderr_file" &
+    installer_pid=$!
+    for attempt in $(seq 1 120); do
+        waiting="$(
+            printf '\\pset tuples_only on\n\\pset format unaligned\nSELECT count(*) FROM pg_stat_activity WHERE usename = current_user AND pid <> pg_backend_pid() AND state = %s AND wait_event_type = %s AND query LIKE %s;\n' \
+                "'active'" "'Lock'" "'%CREATE INDEX CONCURRENTLY IF NOT EXISTS%'" | run_psql
+        )"
+        [ "$waiting" = 1 ] && break
+        sleep 0.5
+    done
+    if [ "$waiting" != 1 ]; then
+        stop_race_sessions
+        wait "$holder_pid" "$installer_pid" 2>/dev/null || true
+        printf '%s\n' "the resolver-history installer never waited in its first build, so a retired name could not be taken mid-run" >&2
+        exit 1
+    fi
+    printf 'SET search_path TO "%s";\nCREATE INDEX %s ON discovery_edges (chain_id);\n' "$scratch_schema" "$retired" | run_psql >/dev/null
+    printf 'SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = current_user AND pid <> pg_backend_pid() AND query LIKE %s;\n' \
+        "'%apply_check_lock_holder%'" | run_psql >/dev/null
+    wait "$holder_pid" 2>/dev/null || true
+    wait "$installer_pid" && status=0 || status=$?
+    observed="$(psql_error_message < "$stderr_file")"
+    expected="$scratch_schema.$retired is an index on another table, so it cannot be the retired index; remove or rename that index, then rerun this script"
+    if [ "$status" = 0 ] || [ "$observed" != "$expected" ]; then
+        printf '%s\n' "the resolver-history installer did not refuse a retired name taken during its builds (exit $status)" "expected PostgreSQL error: $expected" "observed PostgreSQL error: $observed" >&2
+        cat -- "$stderr_file" >&2
+        exit 1
+    fi
+    if [ "$(
+        printf '\\pset tuples_only on\n\\pset format unaligned\nSELECT count(*) FROM pg_index WHERE indexrelid = to_regclass(%s) AND indrelid = to_regclass(%s);\n' \
+            "'$scratch_schema.$retired'" "'$scratch_schema.discovery_edges'" | run_psql
+    )" != 1 ]; then
+        printf '%s\n' "the resolver-history installer refused but did not leave the index that took $retired" >&2
+        exit 1
+    fi
+    rm -f -- "$stderr_file"
+    {
+        printf 'SET search_path TO "%s";\n' "$scratch_schema"
+        printf '%s\n' "DROP INDEX $retired;"
+        render_phase_migration "$resolver_history_install"
+    } | run_psql >/dev/null
+    refusal_assertions_passed=$((refusal_assertions_passed + 1))
+}
+assert_resolver_history_revalidates_before_drop
 # Put each index in turn into every shape the schema-migration must refuse
 # rather than adopt: invalid, another definition, a table under the name. The
 # expected definition it names must be how the fresh-baseline index prints,

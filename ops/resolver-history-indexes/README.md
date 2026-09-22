@@ -66,8 +66,10 @@ is not both `indisvalid` and `indisready`, an index on another table, an index
 whose definition is not the reviewed one, or a table, view, or other relation
 that is not an index, and a retired name held by anything but the index #415 built
 (a table, an index on another table, an index with another definition).
-Names that resolve to nothing pass this first check. After the builds
-and drops it makes the same check and also requires both kept indexes to exist
+Names that resolve to nothing pass this first check. It makes the same check
+again straight before each drop, because a retired name that was free can be
+taken while the builds run, and a drop matches on the name alone. After the
+builds and drops it makes the same check and also requires both kept indexes to exist
 and both retired names to resolve to nothing. It prints the index rows before
 the last check, so the receipt shows the flags and definitions either way. The
 definition is compared exactly as `pg_get_indexdef` prints it, read with
