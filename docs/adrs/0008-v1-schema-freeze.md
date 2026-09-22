@@ -327,11 +327,11 @@ the configured user, nothing outside the phase schema may appear or change in
 that database, down to owners, privileges and the definitions of relations
 (columns, constraints, indexes, triggers, rules, policies), routines, types,
 operators, operator classes and families, statistics and collations, the
-`_sqlx_migrations` ledger's included. A file that takes another path
-for the configured user runs it with that user's privileges, and what it does
-outside that database, to roles for one, is reported by the role snapshot but
-not undone; such a file is what these comparisons exist to refuse. The fresh
-artifact above holds no rows, so a
+`_sqlx_migrations` ledger's included, and the member objects of every
+extension. A file that takes another path for the configured user runs it with
+that user's privileges, and what it does outside that database, to roles for
+one, is reported by the role snapshot but not undone; such a file is what
+these comparisons exist to refuse. The fresh artifact above holds no rows, so a
 schema-migration whose DDL runs only when a table has data would leave it
 unchanged; the check therefore also takes the catalog of its scratch schema
 at the end of the run — populated by every predecessor-shape and behavior
@@ -341,12 +341,13 @@ and that must be the frozen artifact too. That pass, and the replay of the
 same rows under the literal name, must also keep every table's row count and
 the exact contents of the raw facts and normalized events: a schema-migration
 changes the shape, not the facts, so it may backfill coordination or
-bookkeeping rows but not add or remove rows, or rewrite what Ingest recorded
-and Interpret derived, which a redo re-derives from. Every such replay applies the
-sequence the way `sqlx migrate run` does: through one session, each file in
-its own transaction unless it opens with `-- no-transaction`, with sqlx's
-own `_sqlx_migrations` bookkeeping recorded inside that transaction by its
-unqualified name, so a setting one file commits is in force for the files
+bookkeeping rows but not add or remove rows, rewrite, drop or drop a column of
+what Ingest recorded and Interpret derived, which a redo re-derives from, or
+move an existing sequence, which would hand an ID out again. Every such replay
+applies the sequence the way `sqlx migrate run` does: through one session, each
+file in its own transaction unless it opens with `-- no-transaction`, with
+sqlx's own `_sqlx_migrations` bookkeeping recorded inside that transaction by
+its unqualified name, so a setting one file commits is in force for the files
 after it and a file that moves `search_path` breaks the bookkeeping exactly
 where sqlx would; the check plants a sequence on every run to prove those
 properties. Neither a baseline file nor a schema-migration may change session

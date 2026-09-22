@@ -1322,7 +1322,13 @@ SELECT line FROM (
     UNION ALL SELECT 'trigger ' || o.nspname || '.' || c.relname || '.' || tg.tgname FROM pg_trigger tg JOIN pg_class c ON c.oid = tg.tgrelid JOIN outside o ON o.oid = c.relnamespace
     UNION ALL SELECT 'rule ' || o.nspname || '.' || c.relname || '.' || r.rulename FROM pg_rewrite r JOIN pg_class c ON c.oid = r.ev_class JOIN outside o ON o.oid = c.relnamespace
     UNION ALL SELECT 'policy ' || o.nspname || '.' || c.relname || '.' || pol.polname FROM pg_policy pol JOIN pg_class c ON c.oid = pol.polrelid JOIN outside o ON o.oid = c.relnamespace
-    UNION ALL SELECT 'extension ' || extname || ' ' || extversion FROM pg_extension
+    -- An extension's members decide what a later DROP or ALTER EXTENSION ...
+    -- UPDATE takes with it, so the set is part of the line.
+    UNION ALL SELECT format('extension %s %s schema=%s owner=%s config=%s members=%s', e.extname, e.extversion, e.extnamespace::regnamespace,
+               pg_get_userbyid(e.extowner), COALESCE(e.extconfig::regclass[]::text, '-'),
+               (SELECT count(*) || ':' || md5(COALESCE(string_agg(pg_describe_object(dp.classid, dp.objid, dp.objsubid), ',' ORDER BY pg_describe_object(dp.classid, dp.objid, dp.objsubid)), ''))
+                FROM pg_depend dp WHERE dp.refclassid = 'pg_extension'::regclass AND dp.refobjid = e.oid AND dp.deptype = 'e'))
+        FROM pg_extension e
     UNION ALL SELECT 'event trigger ' || evtname FROM pg_event_trigger
     UNION ALL SELECT 'publication ' || pubname FROM pg_publication
     UNION ALL SELECT 'foreign data wrapper ' || fdwname FROM pg_foreign_data_wrapper
@@ -1527,6 +1533,14 @@ PLANT
             *) printf '%s\n' "the literal-name replay does not see a planted definition change outside the phase schema" >&2; exit 1 ;;
         esac
         printf 'ALTER TABLE public._sqlx_migrations ADD PRIMARY KEY (version);\n' | run_psql_as_owner
+        # Nor its membership in an extension: an object of the configured
+        # user's own joins pgcrypto, which only the members line shows.
+        printf 'CREATE FUNCTION public.planted_member() RETURNS integer LANGUAGE sql AS %s;\nALTER EXTENSION pgcrypto ADD FUNCTION public.planted_member();\n' "'SELECT 1'" | run_psql_as_owner
+        case "$( (assert_nothing_outside_phase "planted membership") 2>&1 || true)" in
+            *"+extension pgcrypto "*) ;;
+            *) printf '%s\n' "the literal-name replay does not see a planted extension member outside the phase schema" >&2; exit 1 ;;
+        esac
+        printf 'ALTER EXTENSION pgcrypto DROP FUNCTION public.planted_member();\nDROP FUNCTION public.planted_member();\n' | run_psql_as_owner
         # The role and database snapshot sees the database's own attributes.
         printf 'ALTER DATABASE "%s" CONNECTION LIMIT 5;\n' "$literal_database" | run_psql_as_owner
         case "$(diff "$settings_before" <(role_and_database_settings) || true)" in
@@ -1564,7 +1578,7 @@ PLANT
             "the replay with the phase schema named bigname_phase, unrewritten as sqlx applies it and run as the configured user, failed above after the same replays under the scratch name and the login passed; unless the failure is the connection or set-up, a schema-migration reads the name in a form the rewrite cannot see (assembled, in another case, encoded), or reads who runs it, and behaves differently -- name the schema literally and do not branch on identity" >&2
         exit 1
     fi
-    refusal_assertions_passed=$((refusal_assertions_passed + 7 + populated))
+    refusal_assertions_passed=$((refusal_assertions_passed + 8 + populated))
     if [ "$populated" = 0 ]; then
         printf '%s\n' "note: the configured user is not a superuser, so the exercised replay's rows were not replayed under the literal name" >&2
         expected_refusal_assertions=$((expected_refusal_assertions - 1))
@@ -1953,38 +1967,57 @@ assert_refused_kinds_are_seen() {
 # Table ownership), which a redo re-derives from rather than repairs; a
 # backfill of coordination or bookkeeping rows keeps its row count and passes.
 # Contents are read over the columns a table had before the replay, so a
-# column the replay adds is not a change, and a table it drops is retired.
+# column the replay adds is not a change. A table the replay drops is retired,
+# unless it holds raw facts or normalized events, which may neither be dropped
+# nor lose a column; and an existing sequence keeps its position, since a
+# reset one hands an ID out again.
 table_columns_of() {
     printf '\\pset format unaligned\n\\pset tuples_only on\n'
-    printf "SELECT quote_ident(c.relname) || '|' || CASE WHEN left(c.relname, 4) = 'raw_' OR c.relname = 'normalized_events' THEN string_agg(quote_ident(a.attname), ', ' ORDER BY a.attnum) ELSE '' END FROM pg_class c JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped WHERE c.relnamespace = '\"%s\"'::regnamespace AND c.relkind IN ('r', 'p') GROUP BY c.relname ORDER BY c.relname;\n" "$1"
+    printf "SELECT quote_ident(c.relname) || '|' || CASE WHEN c.relkind = 'S' THEN '(sequence)' WHEN left(c.relname, 4) = 'raw_' OR c.relname = 'normalized_events' THEN string_agg(quote_ident(a.attname), ', ' ORDER BY a.attnum) ELSE '' END FROM pg_class c LEFT JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped AND c.relkind <> 'S' WHERE c.relnamespace = '\"%s\"'::regnamespace AND c.relkind IN ('r', 'p', 'S') GROUP BY c.relname, c.relkind ORDER BY c.relname;\n" "$1"
 }
 rows_state_sql() {
     local schema="$1" table columns
     printf '\\pset format unaligned\n\\pset tuples_only on\n'
+    cat <<'SQL'
+CREATE OR REPLACE FUNCTION pg_temp.row_state(schema_name text, relation text, columns text) RETURNS text
+LANGUAGE plpgsql AS $row_state$
+DECLARE
+    state text;
+BEGIN
+    IF to_regclass(format('%I.%s', schema_name, relation)) IS NULL THEN
+        RETURN relation || CASE WHEN columns IN ('', '(sequence)') THEN ' retired' ELSE ' dropped' END;
+    END IF;
+    IF columns = '(sequence)' THEN
+        EXECUTE format('SELECT %L || '' last_value='' || last_value || '' is_called='' || is_called FROM %I.%s', relation, schema_name, relation) INTO state;
+    ELSIF columns = '' THEN
+        EXECUTE format('SELECT %L || '' rows='' || count(*) FROM %I.%s', relation, schema_name, relation) INTO state;
+    ELSE
+        EXECUTE format('SELECT %L || '' rows='' || count(*) || '' content='' || md5(COALESCE(string_agg(r, '','' ORDER BY r), '''')) FROM (SELECT md5(ROW(%s)::text) AS r FROM %I.%s) x',
+                       relation, columns, schema_name, relation) INTO state;
+    END IF;
+    RETURN state;
+EXCEPTION WHEN undefined_column THEN
+    RETURN relation || ' lost a column';
+END
+$row_state$;
+SQL
     while IFS='|' read -r table columns; do
-        if [ -z "$columns" ]; then
-            printf "SELECT '%s rows=' || count(*) FROM \"%s\".%s;\n" "$table" "$schema" "$table"
-        else
-            printf "SELECT '%s rows=' || count(*) || ' content=' || md5(COALESCE(string_agg(r, ',' ORDER BY r), '')) FROM (SELECT md5(ROW(%s)::text) AS r FROM \"%s\".%s) x;\n" \
-                "$table" "$columns" "$schema" "$table"
-        fi
+        printf "SELECT pg_temp.row_state('%s', '%s', '%s');\n" "$schema" "$table" "$columns"
     done < "$2"
 }
 assert_replay_keeps_rows() {
-    local context="$1" schema="$2" before_columns="$3" before_state="$4" kept status=0
-    kept="$(mktemp "${TMPDIR:-/tmp}/schema-v2-rows-kept.XXXXXX")"
-    awk -F'|' 'NR == FNR { present[$1] = 1; next } present[$1]' <(table_columns_of "$schema" | run_psql) "$before_columns" > "$kept"
-    if ! diff -u <(awk 'NR == FNR { split($0, f, "|"); keep[f[1]] = 1; next } keep[$1]' "$kept" "$before_state") \
-        <(rows_state_sql "$schema" "$kept" | run_psql) >&2; then
+    local context="$1" schema="$2" before_columns="$3" before_state="$4" after retired
+    after="$(rows_state_sql "$schema" "$before_columns" | run_psql)"
+    retired="$(printf '%s\n' "$after" | awk '$2 == "retired" { print $1 }')"
+    if ! diff -u <(awk 'NR == FNR { gone[$1] = 1; next } !gone[$1]' <(printf '%s\n' "$retired") "$before_state") \
+        <(printf '%s\n' "$after" | awk '$2 != "retired"') >&2; then
         printf '%s\n' \
-            "the $context replay added, removed or rewrote rows (diff above: - before, + after); a schema-migration changes the shape, not the facts: it may not add or remove rows on an initialized database, or rewrite raw facts or normalized events, which a redo re-derives from" >&2
-        status=1
+            "the $context replay added, removed or rewrote rows, dropped facts, or moved a sequence (diff above: - before, + after); a schema-migration changes the shape, not the facts: it may not add or remove rows on an initialized database, rewrite or drop raw facts or normalized events, which a redo re-derives from, or reset a sequence that hands out their IDs" >&2
+        exit 1
     fi
-    rm -f -- "$kept"
-    [ "$status" = 0 ] || exit 1
 }
 assert_exercised_schema_matches_frozen() {
-    local exercised migration_file rows_columns rows_before planted
+    local exercised migration_file rows_columns rows_before rows_sequence planted
     exercised="$(mktemp "${TMPDIR:-/tmp}/schema-v2-exercised-catalog.XXXXXX")"
     for migration_file in $(production_schema_migrations); do
         printf 'exercised|%s\n' "$(basename "$migration_file")" >> "$migration_application_log"
@@ -1995,12 +2028,17 @@ assert_exercised_schema_matches_frozen() {
     rows_state_sql "$scratch_schema" "$rows_columns" | run_psql > "$rows_before"
     # The rule proves itself on the exercised rows, rolled back: a removed
     # normalized event and a rewritten one must each move its line.
+    rows_sequence="$(awk -F'|' '$2 == "(sequence)" { print $1; exit }' "$rows_columns")"
+    [ -n "$rows_sequence" ] || { printf '%s\n' "the exercised scratch schema holds no sequence for the row rule to prove itself on" >&2; exit 1; }
     for planted in \
-        "DELETE FROM \"$scratch_schema\".normalized_events WHERE ctid = (SELECT ctid FROM \"$scratch_schema\".normalized_events LIMIT 1);" \
-        "UPDATE \"$scratch_schema\".normalized_events SET after_state = COALESCE(after_state, '{}'::jsonb) || '{\"planted\": true}' WHERE ctid = (SELECT ctid FROM \"$scratch_schema\".normalized_events LIMIT 1);"; do
-        case "$(diff "$rows_before" <({ printf 'BEGIN;\n%s\n' "$planted"; rows_state_sql "$scratch_schema" "$rows_columns"; printf 'ROLLBACK;\n'; } | run_psql) || true)" in
-            *"> normalized_events rows="*) ;;
-            *) printf '%s\n' "the row rule does not see a planted change to the exercised rows: $planted" >&2; exit 1 ;;
+        "> normalized_events rows=:DELETE FROM \"$scratch_schema\".normalized_events WHERE ctid = (SELECT ctid FROM \"$scratch_schema\".normalized_events LIMIT 1);" \
+        "> normalized_events rows=:UPDATE \"$scratch_schema\".normalized_events SET after_state = COALESCE(after_state, '{}'::jsonb) || '{\"planted\": true}' WHERE ctid = (SELECT ctid FROM \"$scratch_schema\".normalized_events LIMIT 1);" \
+        "> raw_logs dropped:DROP TABLE \"$scratch_schema\".raw_logs CASCADE;" \
+        "> normalized_events lost a column:ALTER TABLE \"$scratch_schema\".normalized_events DROP COLUMN after_state CASCADE;" \
+        "> $rows_sequence last_value=:ALTER SEQUENCE \"$scratch_schema\".$rows_sequence RESTART WITH 424242;"; do
+        case "$(diff "$rows_before" <({ printf 'BEGIN;\n%s\n' "${planted#*:}"; rows_state_sql "$scratch_schema" "$rows_columns"; printf 'ROLLBACK;\n'; } | run_psql) || true)" in
+            *"${planted%%:*}"*) ;;
+            *) printf '%s\n' "the row rule does not see a planted change to the exercised rows: ${planted#*:}" >&2; exit 1 ;;
         esac
         refusal_assertions_passed=$((refusal_assertions_passed + 1))
     done
@@ -2930,9 +2968,10 @@ migration_application_log="$(
 # Future entries must use basename|one-line reason.
 intentional_phase_migration_skips=()
 refusal_assertions_passed=0
-# Base 173, main added 90, this branch 183 (100 of them the backslash-command,
+# Base 173, main added 90, this branch 187 (104 of them the backslash-command,
 # psql-variable, schema-owner, parameter-privilege, installer-race,
-# other-database setting and attribute, outside-definition, exercised-row,
+# other-database setting and attribute, outside-definition and membership,
+# exercised-row, dropped-fact, lost-column, sequence-position,
 # SET-spelling, session-residue, session-identity (database, connection and
 # temporary namespace included), recorded-history, ambiguous foreign key,
 # assembled password, literal-name branch and column-order, baseline-residue,
@@ -2942,7 +2981,7 @@ refusal_assertions_passed=0
 # the merges fold main's five address-match, event-order and mirror-pointer
 # not-ready probes into their invalid ones (-5); predecessor proofs base 39,
 # main +7, this branch +1.
-expected_refusal_assertions=441
+expected_refusal_assertions=445
 predecessor_shape_proof_count=0
 expected_predecessor_shape_proof_count=47
 refusal_probe_seconds=0
