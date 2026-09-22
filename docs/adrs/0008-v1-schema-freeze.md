@@ -353,6 +353,11 @@ psql backslash command outside quoted text or a comment: the replay feeds each
 file to psql, which runs the command on the client, while sqlx sends the file
 to the server, which rejects it, so the check would pass a file deployment
 refuses, and a `\set ON_ERROR_STOP 0` would hide every later file's errors.
+Nor may either hold a colon before a name there (`:name`, `:'name'`,
+`:"name"`, `:{?name}`): psql replaces it with a variable it defines, `DBNAME`
+and `USER` among them, before sending, while sqlx sends the colon. A cast
+(`::`), `:=` and a numeric array slice bound pass; a slice bound that starts
+with a name takes a space after the colon.
 Because sqlx applies only the files a database has not recorded, and a
 catch-up can be split across several runs, what one file leaves in the session
 reaches the next file in the replay but not in a deployment that starts that
@@ -453,7 +458,11 @@ line moves. Where the server refuses a wrong password, which the check tries
 first, it also reconnects as its login after each replay with the password it
 created that login with, which is all a run that cannot read `pg_authid` has,
 `pg_roles` showing one mask for every password; a run that can do neither
-refuses to start. The password form is also named by
+refuses to start. The replays under the literal schema name run as the
+configured user instead, so there the check first confirms the server refuses
+that user a wrong password and then reconnects with the configured credential
+after each replay, and refuses to run them where it can neither do that nor
+read `pg_authid`. The password form is also named by
 the statement rule.
 From acceptance on, a
 schema-migration of any of these kinds cannot land without moving the

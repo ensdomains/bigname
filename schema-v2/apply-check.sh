@@ -434,10 +434,15 @@ login_authenticates_with() {
         | apply_check_url="$(login_url_from "${BIGNAME_DATABASE_URL:-}" "$apply_check_role" "$1")" run_psql 2>&1 >/dev/null)"
 }
 assert_no_role_or_database_settings() {
-    local context="$1"
+    local context="$1" owner_connection_error
     if [ "${login_password_checked:-0}" = 1 ] && ! login_authenticates_with "$apply_check_role_password"; then
         printf '%s\n' \
             "after the $context replay the check's login no longer connects with the password it was created with ($login_connection_error); a schema-migration may not change a password, however it spells the statement, since the deployed runner's next connection would fail" >&2
+        exit 1
+    fi
+    if [ "${owner_password_checked:-0}" = 1 ] && ! owner_connection_error="$(printf 'SELECT 1;\n' | run_psql_as_owner 2>&1 >/dev/null)"; then
+        printf '%s\n' \
+            "after the $context replay the configured user no longer connects with its configured credential ($owner_connection_error); a schema-migration may not change a password, however it spells the statement, since the deployed runner's next connection would fail" >&2
         exit 1
     fi
     if ! diff -u "$role_and_database_settings_before" <(role_and_database_settings) >&2; then
@@ -1276,7 +1281,24 @@ assert_literal_schema_name_replays_match() {
             BIGNAME_DATABASE_URL="$(url_with_database "$BIGNAME_DATABASE_URL" "$literal_database")"
         fi
         run_psql() { run_psql_as_owner; }
+        # These replays run as the configured user, so a password change shows
+        # in pg_authid or in that user's credential no longer connecting, and
+        # the second means something only where the server refuses that user a
+        # wrong password. The user name is percent-encoded byte by byte, which
+        # libpq decodes, so any role name fits the URL.
         login_password_checked=0
+        owner_password_checked=0
+        owner_name="$(printf '\\pset tuples_only on\n\\pset format unaligned\nSELECT current_user;\n' | run_psql_as_owner)"
+        if [ "$psql_mode" != database-container ] && ! printf 'SELECT 1;\n' \
+            | BIGNAME_DATABASE_URL="$(login_url_from "$BIGNAME_DATABASE_URL" "$(printf '%s' "$owner_name" | od -An -v -tx1 | tr -d ' \n' | sed 's/../%&/g')" "not-$apply_check_role_password")" \
+                run_psql_as_owner >/dev/null 2>&1; then
+            owner_password_checked=1
+        fi
+        if [ "$owner_password_checked" = 0 ] && ! password_verifiers_readable; then
+            printf '%s\n' \
+                "the literal-name replays run as the configured user, and this run could not see one change that user's password: it cannot read pg_authid and the server accepts that user without its password; run the check as a superuser or against a server that authenticates the configured user by password" >&2
+            exit 1
+        fi
         scratch_schema=bigname_phase frozen_schema=bigname_phase predecessor_schema=bigname_phase
         reset_literal_schema() {
             printf '%s\n' "$in_literal_database" 'DROP SCHEMA IF EXISTS bigname_phase CASCADE;' 'CREATE SCHEMA bigname_phase;' \
@@ -2739,8 +2761,8 @@ migration_application_log="$(
 # Future entries must use basename|one-line reason.
 intentional_phase_migration_skips=()
 refusal_assertions_passed=0
-# Base 173, main added 90, this branch 171 (88 of them the backslash-command,
-# SET-spelling, session-residue, session-identity (database, connection and
+# Base 173, main added 90, this branch 175 (92 of them the backslash-command,
+# psql-variable, SET-spelling, session-residue, session-identity (database, connection and
 # temporary namespace included), recorded-history, ambiguous foreign key,
 # assembled password, literal-name branch and column-order, baseline-residue,
 # setting-name, backend-status, routine quoting, extension-dependency,
@@ -2749,7 +2771,7 @@ refusal_assertions_passed=0
 # the merges fold main's five address-match, event-order and mirror-pointer
 # not-ready probes into their invalid ones (-5); predecessor proofs base 39,
 # main +7, this branch +1.
-expected_refusal_assertions=429
+expected_refusal_assertions=433
 predecessor_shape_proof_count=0
 expected_predecessor_shape_proof_count=47
 refusal_probe_seconds=0
@@ -2841,6 +2863,12 @@ sql_statement_splitter='
                 # rejects, and `\set ON_ERROR_STOP 0` would silence the errors
                 # of every later file.
                 else if (c == "\\") { print "[psql meta-command: a backslash outside quoted text]"; bad = 1; exit 1 }
+                # psql also replaces :name, :'"'"'name'"'"', :"name" and :{?name} with a
+                # variable it defines, DBNAME and USER among them, before sending
+                # the text, and sqlx sends the colon. A cast (::), := and a
+                # numeric slice bound name no variable.
+                else if (c == ":" && substr(line, i + 1, 1) == ":") { stmt = stmt "::"; i += 2; continue }
+                else if (c == ":" && substr(line, i + 1, 1) !~ /^([][:space:]0-9=(),;+*\/<>-]|)$/) { print "[psql variable: a colon before a name outside quoted text]"; bad = 1; exit 1 }
             } else if (length(quote) > 1) {
                 if (substr(line, i, length(quote)) == quote) { stmt = stmt quote; i += length(quote); quote = ""; continue }
             } else if (escaped && c == "\\") {
@@ -3024,6 +3052,9 @@ assert_no_session_state_statements() {
             *'[psql meta-command'*)
                 printf '%s\n' "${hits//$'\n'/; }: the replay's psql runs a backslash command on the client, but sqlx sends the file to the server, which rejects it, so remove it" >&2
                 exit 1 ;;
+            *'[psql variable'*)
+                printf '%s\n' "${hits//$'\n'/; }: the replay's psql replaces :name, :'name', :\"name\" and :{?name} with a variable of its own, DBNAME and USER among them, but sqlx sends the colon to the server, so write the value itself; a slice bound that starts with a name takes a space after the colon" >&2
+                exit 1 ;;
         esac
         if [ -n "$hits" ]; then
             printf '%s\n' "session state is changed by a baseline file or schema-migration, which sqlx and the baseline session would carry into every later file: ${hits//$'\n'/; }; a setting scoped to one routine goes through set_config(..., true) and is restored there, and a carve-out that needs more extends the session-state rule in schema-v2/apply-check.sh under ADR 0008" >&2
@@ -3063,6 +3094,10 @@ assert_session_state_rule_holds() {
         'SELECT 1; \echo hi'
         '\set ON_ERROR_STOP 0'
         'SELECT 1 \gexec'
+        'CREATE TABLE bigname_phase.probe AS SELECT :'"'"'DBNAME'"'"';'
+        'SELECT :"USER";'
+        'SELECT :DBNAME;'
+        'SELECT :{?DBNAME};'
         'SET bigname.v2_cutover = '"'"'on'"'"';'
         'SET "bigname.cutover" TO '"'"'on'"'"';'
         'RESET bigname.v2_cutover;'
@@ -3084,6 +3119,8 @@ assert_session_state_rule_holds() {
         'SELECT E'"'"'it\'"'"'s \\ \echo'"'"', '"'"'\x'"'"'::bytea, $q$\set ON_ERROR_STOP 0$q$ AS "a\b";'
         'SELECT 1; -- \echo hi'
         '/* \set ON_ERROR_STOP 0 */ SELECT 1;'
+        'SELECT '"'"'1'"'"'::int, (ARRAY[1, 2, 3])[1:2], (ARRAY[1, 2, 3])[2 : 3], f(a := 1);'
+        'SELECT '"'"':'"'"''"'"'DBNAME'"'"''"'"''"'"', $q$:'"'"'DBNAME'"'"'$q$ AS ":DBNAME"; -- :USER'
         'COMMENT ON TABLE t IS '"'"'Set when the name is registered'"'"';'
         'UPDATE t SET a2 = 1;'
     )
