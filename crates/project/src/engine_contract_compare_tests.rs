@@ -419,25 +419,33 @@ async fn contract_private_snapshots_validate_all_ten_rows_and_reject_unnecessary
     branch.rollback().await?;
     snapshot::compare(
         &mut tx,
-        &mut baseline,
-        &mut candidate,
-        &mut reference,
-        &Scopes::default(),
-        &old,
-        &target,
-        10,
+        snapshot::Snapshots {
+            baseline: &mut baseline,
+            candidate: &mut candidate,
+            reference: &mut reference,
+        },
+        snapshot::Expectations {
+            mandatory: &Scopes::default(),
+            old_scope: &old,
+            target: &target,
+            previous: 10,
+        },
     )
     .await?;
     assert!(
         snapshot::compare(
             &mut tx,
-            &mut baseline,
-            &mut wrongly_refreshed,
-            &mut reference,
-            &Scopes::default(),
-            &old,
-            &target,
-            10
+            snapshot::Snapshots {
+                baseline: &mut baseline,
+                candidate: &mut wrongly_refreshed,
+                reference: &mut reference,
+            },
+            snapshot::Expectations {
+                mandatory: &Scopes::default(),
+                old_scope: &old,
+                target: &target,
+                previous: 10,
+            },
         )
         .await
         .is_err()

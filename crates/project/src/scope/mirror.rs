@@ -159,11 +159,10 @@ async fn execute(
             );
         }
         #[cfg(test)]
-        if let Some(stage) = crate::profile::mirror_stage(&planned) {
-            if crate::profile::execute(transaction, chain_id, target_block, &planned, stage).await?
-            {
-                continue;
-            }
+        if let Some(stage) = crate::profile::mirror_stage(&planned)
+            && crate::profile::execute(transaction, chain_id, target_block, &planned, stage).await?
+        {
+            continue;
         }
         let query = sqlx::query(&planned);
         let query = if statement.contains("$1") {

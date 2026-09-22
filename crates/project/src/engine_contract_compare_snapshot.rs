@@ -105,16 +105,40 @@ impl Rows {
     }
 }
 
+/// The three private snapshots one comparison reads: the old output, the candidate output and
+/// the reference (old algorithm) output for the same target.
+pub(in crate::engine) struct Snapshots<'a> {
+    pub(in crate::engine) baseline: &'a mut Snapshot,
+    pub(in crate::engine) candidate: &'a mut Snapshot,
+    pub(in crate::engine) reference: &'a mut Snapshot,
+}
+
+/// What a candidate row must satisfy to differ from the baseline: the independently captured
+/// mandatory scopes, the legacy publication scope, the target metadata and the previous marker
+/// that retained rows are validated against.
+pub(in crate::engine) struct Expectations<'a> {
+    pub(in crate::engine) mandatory: &'a Scopes,
+    pub(in crate::engine) old_scope: &'a Scopes,
+    pub(in crate::engine) target: &'a Target,
+    pub(in crate::engine) previous: i64,
+}
+
 pub(in crate::engine) async fn compare(
     tx: &mut Transaction<'_, Postgres>,
-    baseline: &mut Snapshot,
-    candidate: &mut Snapshot,
-    reference: &mut Snapshot,
-    mandatory: &Scopes,
-    old_scope: &Scopes,
-    target: &Target,
-    previous: i64,
+    snapshots: Snapshots<'_>,
+    expectations: Expectations<'_>,
 ) -> Result<()> {
+    let Snapshots {
+        baseline,
+        candidate,
+        reference,
+    } = snapshots;
+    let Expectations {
+        mandatory,
+        old_scope,
+        target,
+        previous,
+    } = expectations;
     let mut audit_report = writer(&candidate.directory.join("independent-scopes.json"))?;
     serde_json::to_writer(
         &mut audit_report,
@@ -129,15 +153,12 @@ pub(in crate::engine) async fn compare(
         let mut c = Rows::open(&candidate.directory.join(table))?;
         let mut r = Rows::open(&reference.directory.join(table))?;
         let (mut exact, mut retained) = (0_u64, 0_u64);
-        loop {
-            let Some(key) = [&b.next, &c.next, &r.next]
-                .into_iter()
-                .filter_map(|v| v.as_ref().map(|(k, _)| k))
-                .min()
-                .cloned()
-            else {
-                break;
-            };
+        while let Some(key) = [&b.next, &c.next, &r.next]
+            .into_iter()
+            .filter_map(|v| v.as_ref().map(|(k, _)| k))
+            .min()
+            .cloned()
+        {
             let verdict = compare_row(
                 table,
                 b.at(&key),

@@ -109,6 +109,18 @@ fn bounds(target: i64, from: i64, to: i64) -> Result<()> {
     Ok(())
 }
 
+/// One `chain_phase_state` row as the guard reads it: phase name, status, current block number
+/// and hash, redo flag, last error, and whether the run finished after it started.
+type PhaseState = (
+    String,
+    String,
+    Option<i64>,
+    Option<String>,
+    bool,
+    Option<String>,
+    bool,
+);
+
 async fn guard(
     tx: &mut Transaction<'_, Postgres>,
     target: &Marker,
@@ -116,7 +128,7 @@ async fn guard(
     to: i64,
 ) -> Result<()> {
     bounds(target.number, from, to)?;
-    let phases:Vec<(String,String,Option<i64>,Option<String>,bool,Option<String>,bool)>=sqlx::query_as(
+    let phases: Vec<PhaseState> = sqlx::query_as(
         "SELECT phase_name,phase_status,current_block_number,current_block_hash,redo_in_progress,last_error,
                 started_at IS NOT NULL AND finished_at IS NOT NULL AND finished_at>=started_at
          FROM chain_phase_state WHERE chain_id=$1 AND phase_name IN ('project','interpret') FOR SHARE")

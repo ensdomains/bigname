@@ -9,7 +9,7 @@ use std::collections::BTreeSet;
 pub(crate) mod audit;
 #[path = "engine_contract_compare_snapshot.rs"]
 mod snapshot;
-pub(super) use snapshot::{Snapshot, compare};
+pub(super) use snapshot::{Expectations, Snapshot, Snapshots, compare};
 
 pub(super) const TABLES: &[(&str, &str)] = &[
     ("name_current", "logical_name_id"),

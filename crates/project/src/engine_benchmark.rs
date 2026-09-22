@@ -64,19 +64,22 @@ async fn retained_sepolia_passes_rollback() -> Result<()> {
     };
     run_benchmark(
         options,
-        previous,
-        targets,
-        compare,
-        evidence_dir,
-        profile,
-        std::env::var("BIGNAME_BENCHMARK_REBUILD_BASELINE").as_deref() == Ok("1"),
-        contract,
+        Benchmark {
+            previous,
+            targets,
+            compare,
+            evidence_dir,
+            profile,
+            rebuild_baseline: std::env::var("BIGNAME_BENCHMARK_REBUILD_BASELINE").as_deref()
+                == Ok("1"),
+            contract,
+        },
     )
     .await
 }
 
-async fn run_benchmark(
-    options: PgConnectOptions,
+/// What one benchmark run does, read from the `BIGNAME_BENCHMARK_*` environment.
+struct Benchmark {
     previous: i64,
     targets: Vec<i64>,
     compare: bool,
@@ -84,7 +87,18 @@ async fn run_benchmark(
     profile: bool,
     rebuild_baseline: bool,
     contract: bool,
-) -> Result<()> {
+}
+
+async fn run_benchmark(options: PgConnectOptions, benchmark: Benchmark) -> Result<()> {
+    let Benchmark {
+        previous,
+        targets,
+        compare,
+        evidence_dir,
+        profile,
+        rebuild_baseline,
+        contract,
+    } = benchmark;
     let pool = PgPoolOptions::new()
         .max_connections(2)
         .connect_with(options)
@@ -261,13 +275,17 @@ async fn run_benchmark(
             let target_metadata = super::contract_compare::Target::load(&mut tx, &target).await?;
             super::contract_compare::compare(
                 &mut tx,
-                contract_baseline.as_mut().unwrap(),
-                &mut candidate,
-                &mut reference,
-                &mandatory,
-                &legacy_scope,
-                &target_metadata,
-                resume.number,
+                super::contract_compare::Snapshots {
+                    baseline: contract_baseline.as_mut().unwrap(),
+                    candidate: &mut candidate,
+                    reference: &mut reference,
+                },
+                super::contract_compare::Expectations {
+                    mandatory: &mandatory,
+                    old_scope: &legacy_scope,
+                    target: &target_metadata,
+                    previous: resume.number,
+                },
             )
             .await?;
             sqlx::query("ROLLBACK TO SAVEPOINT benchmark_comparison")
@@ -416,13 +434,15 @@ async fn historical_baseline_reference_and_two_candidates_clean_work_tables() ->
     for profile in [false, true] {
         run_benchmark(
             options.clone(),
-            10,
-            vec![11, 12],
-            true,
-            Some(evidence.clone()),
-            profile,
-            true,
-            false,
+            Benchmark {
+                previous: 10,
+                targets: vec![11, 12],
+                compare: true,
+                evidence_dir: Some(evidence.clone()),
+                profile,
+                rebuild_baseline: true,
+                contract: false,
+            },
         )
         .await?;
         let entries = std::fs::read_dir(&evidence)?.collect::<std::result::Result<Vec<_>, _>>()?;
@@ -475,13 +495,15 @@ async fn contract_baseline_audit_reference_and_two_candidates_rollback() -> Resu
         .options([("search_path", "bigname_phase,public")]);
     run_benchmark(
         options,
-        10,
-        vec![11, 12],
-        false,
-        Some(evidence.clone()),
-        false,
-        true,
-        true,
+        Benchmark {
+            previous: 10,
+            targets: vec![11, 12],
+            compare: false,
+            evidence_dir: Some(evidence.clone()),
+            profile: false,
+            rebuild_baseline: true,
+            contract: true,
+        },
     )
     .await?;
     let phase:Option<i64>=sqlx::query_scalar("SELECT current_block_number FROM bigname_phase.chain_phase_state WHERE chain_id='ethereum-sepolia' AND phase_name='interpret'").fetch_one(database.pool()).await?;
