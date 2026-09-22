@@ -954,6 +954,35 @@ backend can hold several `work_mem` allocations at once, so the worst case a
 server commits to is roughly `max_connections x work_mem x concurrent sort or
 hash nodes`, on top of `shared_buffers`.
 
+## PostgreSQL JIT
+
+Both compose files start PostgreSQL with `jit=off` (`POSTGRES_JIT`, default
+`off`). PostgreSQL's just-in-time compiler turns a statement's expressions into
+native code before running it when the planner's cost estimate crosses
+`jit_above_cost`. That pays off for one long statement over millions of rows.
+Bigname's statements are the opposite shape: many short statements, prepared
+and re-planned per batch, whose costs the planner overestimates because JSONB
+filters, partial expression indexes and temporary tables carry poor statistics.
+The estimate crosses the threshold, the statement compiles for tens of
+milliseconds to seconds, then touches a few dozen rows. Measured on Sepolia:
+one resolver statement took 11.4 s with JIT (about 2,000 compiled functions)
+and 19 ms without; the Project test suites went from more than 30 minutes to
+their normal length when the test databases turned JIT off (#922).
+
+The setting is server-wide and applies to every chain and every role. It is a
+Compose command argument, so changing it means recreating the `postgres`
+container with the server Compose definition and environment
+(`docker compose --env-file .env.server -f docker-compose.server.yml up -d postgres`),
+which restarts every session; stop the phase runner and the API first, as for
+any PostgreSQL restart. To
+use JIT for one deliberately heavy statement, run `SET LOCAL jit = on` inside
+that transaction rather than turning it on globally.
+
+CI keeps JIT on for the API test job on purpose: the API plan tests assert
+that a page or count plan stays below the JIT threshold, which is a bound on
+the plan's cost, and they can only observe it with JIT enabled. That guard is
+independent of the production setting.
+
 ## Owner-ratified Sepolia source-role rollout
 
 Do not begin this destructive rollout until the Issue #411 part-2 release
