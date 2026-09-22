@@ -337,10 +337,10 @@ assert_migration_ledger_is_intact() {
 # The same blind spot for role and database defaults: a schema-migration can
 # assemble `ALTER ROLE ... SET` at run time, where no text rule sees it, and
 # the catalog serializes no role configuration while cleanup drops the role.
-# `pg_db_role_setting` is a shared catalog, so what matters is the change
-# this run makes: the rows for this database or for every database, and for
-# the check login or for every role, are taken before the first replay and
-# must be unchanged after each one.
+# `pg_db_role_setting` is a shared catalog, so every row, whichever database
+# it names, is taken before the first replay and must be unchanged after each
+# one: a replay in the check's own database can still set a default for the
+# deployment's database.
 role_and_database_settings() {
     {
         printf '\\pset format unaligned\n\\pset tuples_only on\n'
@@ -353,7 +353,6 @@ SELECT line FROM (
     FROM pg_db_role_setting s
     LEFT JOIN pg_roles r ON r.oid = s.setrole
     LEFT JOIN pg_database d ON d.oid = s.setdatabase
-    WHERE (s.setdatabase = 0 OR d.datname = current_database())
     UNION ALL
     -- Every role attribute, for the same reason: LOGIN, SUPERUSER, BYPASSRLS,
     -- CREATEDB, CREATEROLE, REPLICATION, INHERIT, a connection limit and an
@@ -429,6 +428,20 @@ assert_role_configuration_snapshot_sees_planted_changes() {
     refusal_assertions_passed=$((refusal_assertions_passed + 1))
     if ! diff -u "$role_and_database_settings_before" <(role_and_database_settings) >&2; then
         printf '%s\n' "the planted connection limit did not restore (diff above: - before, + after)" >&2
+        exit 1
+    fi
+    # A default set for another database than the one the check runs in.
+    printf 'ALTER ROLE "%s" IN DATABASE template1 SET lock_timeout = %s;\n' "$apply_check_role" "'1ms'" | run_psql_as_owner
+    planted="$(role_and_database_settings)"
+    printf 'ALTER ROLE "%s" IN DATABASE template1 RESET lock_timeout;\n' "$apply_check_role" | run_psql_as_owner
+    seen="$(diff "$role_and_database_settings_before" <(printf '%s\n' "$planted") || true)"
+    case "$seen" in
+        *"> setting $apply_check_role on template1: "*) ;;
+        *) printf '%s\n' "the role-configuration snapshot does not see a default planted for another database (saw: ${seen:-nothing})" >&2; exit 1 ;;
+    esac
+    refusal_assertions_passed=$((refusal_assertions_passed + 1))
+    if ! diff -u "$role_and_database_settings_before" <(role_and_database_settings) >&2; then
+        printf '%s\n' "the default planted for another database did not restore (diff above: - before, + after)" >&2
         exit 1
     fi
     # Only a superuser, or a holder of the grant option, can grant a parameter.
@@ -1249,24 +1262,62 @@ SELECT line FROM (
     SELECT format('schema %s owner=%s acl=%s', o.nspname, pg_get_userbyid(n.nspowner), COALESCE(n.nspacl::text, '-')) AS line
     FROM outside o JOIN pg_namespace n ON n.oid = o.oid
     UNION ALL
-    SELECT format('relation %s.%s kind=%s owner=%s acl=%s', o.nspname, c.relname, c.relkind, pg_get_userbyid(c.relowner), COALESCE(c.relacl::text, '-'))
+    -- A relation, routine or type that was already here can change without
+    -- changing hands (the ledger losing its primary key, a routine body
+    -- replaced), so each line carries a digest of its definition.
+    SELECT format('relation %s.%s kind=%s owner=%s acl=%s def=%s', o.nspname, c.relname, c.relkind, pg_get_userbyid(c.relowner), COALESCE(c.relacl::text, '-'),
+               md5(concat_ws(' | ', c.relpersistence, c.relreplident, c.relrowsecurity, c.relforcerowsecurity, COALESCE(c.reloptions::text, '-'),
+                   COALESCE((SELECT string_agg(concat_ws(' ', a.attname, format_type(a.atttypid, a.atttypmod), a.attnotnull,
+                                                         COALESCE(pg_get_expr(ad.adbin, ad.adrelid), '-'), a.attidentity, a.attgenerated, a.attcollation),
+                                               ', ' ORDER BY a.attnum)
+                             FROM pg_attribute a LEFT JOIN pg_attrdef ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum
+                             WHERE a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped), '-'),
+                   COALESCE((SELECT string_agg(con.conname || ' ' || pg_get_constraintdef(con.oid), ', ' ORDER BY con.conname)
+                             FROM pg_constraint con WHERE con.conrelid = c.oid), '-'),
+                   COALESCE((SELECT pg_get_indexdef(i.indexrelid) || ' ' || i.indisvalid || ' ' || i.indisready FROM pg_index i WHERE i.indexrelid = c.oid), '-'),
+                   COALESCE(CASE WHEN c.relkind IN ('v', 'm') THEN pg_get_viewdef(c.oid) END, '-'),
+                   COALESCE((SELECT concat_ws(' ', s.seqtypid, s.seqstart, s.seqincrement, s.seqmax, s.seqmin, s.seqcache, s.seqcycle)
+                             FROM pg_sequence s WHERE s.seqrelid = c.oid), '-'),
+                   COALESCE((SELECT string_agg(pg_get_triggerdef(tg.oid) || ' ' || tg.tgenabled::text, ', ' ORDER BY tg.tgname)
+                             FROM pg_trigger tg WHERE tg.tgrelid = c.oid), '-'),
+                   COALESCE((SELECT string_agg(pg_get_ruledef(r.oid), ', ' ORDER BY r.rulename)
+                             FROM pg_rewrite r WHERE r.ev_class = c.oid AND r.rulename <> '_RETURN'), '-'),
+                   COALESCE((SELECT string_agg(concat_ws(' ', pol.polname, pol.polcmd, pol.polpermissive, pol.polroles::text,
+                                                         COALESCE(pg_get_expr(pol.polqual, pol.polrelid), '-'), COALESCE(pg_get_expr(pol.polwithcheck, pol.polrelid), '-')),
+                                               ', ' ORDER BY pol.polname)
+                             FROM pg_policy pol WHERE pol.polrelid = c.oid), '-'))))
     FROM pg_class c JOIN outside o ON o.oid = c.relnamespace
     UNION ALL
-    SELECT format('routine %s.%s(%s) owner=%s acl=%s', o.nspname, p.proname, pg_get_function_identity_arguments(p.oid), pg_get_userbyid(p.proowner), COALESCE(p.proacl::text, '-'))
+    SELECT format('routine %s.%s(%s) owner=%s acl=%s def=%s', o.nspname, p.proname, pg_get_function_identity_arguments(p.oid), pg_get_userbyid(p.proowner), COALESCE(p.proacl::text, '-'),
+               md5(CASE WHEN p.prokind = 'a' THEN (SELECT to_jsonb(ag)::text FROM pg_aggregate ag WHERE ag.aggfnoid = p.oid) ELSE pg_get_functiondef(p.oid) END))
     FROM pg_proc p JOIN outside o ON o.oid = p.pronamespace
     UNION ALL
-    SELECT format('type %s.%s owner=%s acl=%s', o.nspname, t.typname, pg_get_userbyid(t.typowner), COALESCE(t.typacl::text, '-'))
+    SELECT format('type %s.%s owner=%s acl=%s def=%s', o.nspname, t.typname, pg_get_userbyid(t.typowner), COALESCE(t.typacl::text, '-'),
+               md5(concat_ws(' | ', t.typtype, t.typbasetype, t.typtypmod, t.typnotnull, COALESCE(t.typdefault, '-'), t.typcollation,
+                   COALESCE((SELECT string_agg(e.enumlabel, ',' ORDER BY e.enumsortorder) FROM pg_enum e WHERE e.enumtypid = t.oid), '-'),
+                   COALESCE((SELECT string_agg(con.conname || ' ' || pg_get_constraintdef(con.oid), ', ' ORDER BY con.conname)
+                             FROM pg_constraint con WHERE con.contypid = t.oid), '-'),
+                   COALESCE((SELECT to_jsonb(rg)::text FROM pg_range rg WHERE rg.rngtypid = t.oid), '-'))))
     FROM pg_type t JOIN outside o ON o.oid = t.typnamespace
-    UNION ALL SELECT 'operator ' || o.nspname || '.' || op.oprname || '(' || format_type(op.oprleft, NULL) || ',' || format_type(op.oprright, NULL) || ')' FROM pg_operator op JOIN outside o ON o.oid = op.oprnamespace
-    UNION ALL SELECT 'operator class ' || o.nspname || '.' || opc.opcname FROM pg_opclass opc JOIN outside o ON o.oid = opc.opcnamespace
-    UNION ALL SELECT 'operator family ' || o.nspname || '.' || opf.opfname FROM pg_opfamily opf JOIN outside o ON o.oid = opf.opfnamespace
-    UNION ALL SELECT 'collation ' || o.nspname || '.' || col.collname FROM pg_collation col JOIN outside o ON o.oid = col.collnamespace
+    UNION ALL SELECT 'operator ' || o.nspname || '.' || op.oprname || '(' || format_type(op.oprleft, NULL) || ',' || format_type(op.oprright, NULL) || ') '
+               || concat_ws(' ', op.oprcode::regprocedure, op.oprrest, op.oprjoin, op.oprcom, op.oprnegate, op.oprcanmerge, op.oprcanhash)
+        FROM pg_operator op JOIN outside o ON o.oid = op.oprnamespace
+    UNION ALL SELECT 'operator class ' || o.nspname || '.' || opc.opcname || ' ' || concat_ws(' ', opc.opcmethod, opc.opcintype, opc.opcdefault, opc.opckeytype, opc.opcfamily)
+        FROM pg_opclass opc JOIN outside o ON o.oid = opc.opcnamespace
+    UNION ALL SELECT 'operator family ' || o.nspname || '.' || opf.opfname || ' ' || md5(concat_ws(' | ', opf.opfmethod,
+               COALESCE((SELECT string_agg(concat_ws(' ', ao.amopstrategy, ao.amopopr, ao.amoplefttype, ao.amoprighttype, ao.amoppurpose, ao.amopsortfamily), ', ' ORDER BY ao.amopstrategy, ao.amoplefttype, ao.amoprighttype)
+                         FROM pg_amop ao WHERE ao.amopfamily = opf.oid), '-'),
+               COALESCE((SELECT string_agg(concat_ws(' ', ap.amprocnum, ap.amproc, ap.amproclefttype, ap.amprocrighttype), ', ' ORDER BY ap.amprocnum, ap.amproclefttype, ap.amprocrighttype)
+                         FROM pg_amproc ap WHERE ap.amprocfamily = opf.oid), '-')))
+        FROM pg_opfamily opf JOIN outside o ON o.oid = opf.opfnamespace
+    UNION ALL SELECT 'collation ' || o.nspname || '.' || col.collname || ' ' || concat_ws(' ', col.collprovider, col.collisdeterministic, col.collencoding, col.collcollate, col.collctype, col.colliculocale, col.collicurules)
+        FROM pg_collation col JOIN outside o ON o.oid = col.collnamespace
     UNION ALL SELECT 'conversion ' || o.nspname || '.' || cv.conname FROM pg_conversion cv JOIN outside o ON o.oid = cv.connamespace
     UNION ALL SELECT 'text search configuration ' || o.nspname || '.' || cfg.cfgname FROM pg_ts_config cfg JOIN outside o ON o.oid = cfg.cfgnamespace
     UNION ALL SELECT 'text search dictionary ' || o.nspname || '.' || d.dictname FROM pg_ts_dict d JOIN outside o ON o.oid = d.dictnamespace
     UNION ALL SELECT 'text search parser ' || o.nspname || '.' || prs.prsname FROM pg_ts_parser prs JOIN outside o ON o.oid = prs.prsnamespace
     UNION ALL SELECT 'text search template ' || o.nspname || '.' || tm.tmplname FROM pg_ts_template tm JOIN outside o ON o.oid = tm.tmplnamespace
-    UNION ALL SELECT 'statistics ' || o.nspname || '.' || st.stxname FROM pg_statistic_ext st JOIN outside o ON o.oid = st.stxnamespace
+    UNION ALL SELECT 'statistics ' || o.nspname || '.' || st.stxname || ' ' || pg_get_statisticsobjdef(st.oid) || ' ' || COALESCE(st.stxstattarget::text, '-') FROM pg_statistic_ext st JOIN outside o ON o.oid = st.stxnamespace
     UNION ALL SELECT 'trigger ' || o.nspname || '.' || c.relname || '.' || tg.tgname FROM pg_trigger tg JOIN pg_class c ON c.oid = tg.tgrelid JOIN outside o ON o.oid = c.relnamespace
     UNION ALL SELECT 'rule ' || o.nspname || '.' || c.relname || '.' || r.rulename FROM pg_rewrite r JOIN pg_class c ON c.oid = r.ev_class JOIN outside o ON o.oid = c.relnamespace
     UNION ALL SELECT 'policy ' || o.nspname || '.' || c.relname || '.' || pol.polname FROM pg_policy pol JOIN pg_class c ON c.oid = pol.polrelid JOIN outside o ON o.oid = c.relnamespace
@@ -1463,6 +1514,14 @@ PLANT
             *"+schema planted_outside"*) ;;
             *) printf '%s\n' "the literal-name replay does not see a planted schema outside the phase schema" >&2; exit 1 ;;
         esac
+        # An object that was already outside keeps its kind, owner and
+        # privileges when its definition changes: the ledger without its key.
+        printf 'ALTER TABLE public._sqlx_migrations DROP CONSTRAINT _sqlx_migrations_pkey;\n' | run_psql_as_owner
+        case "$( (assert_nothing_outside_phase "planted definition") 2>&1 || true)" in
+            *"+relation public._sqlx_migrations kind=r "*) ;;
+            *) printf '%s\n' "the literal-name replay does not see a planted definition change outside the phase schema" >&2; exit 1 ;;
+        esac
+        printf 'ALTER TABLE public._sqlx_migrations ADD PRIMARY KEY (version);\n' | run_psql_as_owner
         # The role and database snapshot sees the database's own attributes.
         printf 'ALTER DATABASE "%s" CONNECTION LIMIT 5;\n' "$literal_database" | run_psql_as_owner
         case "$(diff "$settings_before" <(role_and_database_settings) || true)" in
@@ -1487,7 +1546,7 @@ PLANT
             "the replay with the phase schema named bigname_phase, unrewritten as sqlx applies it and run as the configured user, failed above after the same replays under the scratch name and the login passed; unless the failure is the connection or set-up, a schema-migration reads the name in a form the rewrite cannot see (assembled, in another case, encoded), or reads who runs it, and behaves differently -- name the schema literally and do not branch on identity" >&2
         exit 1
     fi
-    refusal_assertions_passed=$((refusal_assertions_passed + 5 + populated))
+    refusal_assertions_passed=$((refusal_assertions_passed + 6 + populated))
     if [ "$populated" = 0 ]; then
         printf '%s\n' "note: the configured user is not a superuser, so the exercised replay's rows were not replayed under the literal name" >&2
         expected_refusal_assertions=$((expected_refusal_assertions - 1))
@@ -2800,8 +2859,9 @@ migration_application_log="$(
 # Future entries must use basename|one-line reason.
 intentional_phase_migration_skips=()
 refusal_assertions_passed=0
-# Base 173, main added 90, this branch 178 (95 of them the backslash-command,
-# psql-variable, schema-owner, parameter-privilege, installer-race, SET-spelling, session-residue, session-identity (database, connection and
+# Base 173, main added 90, this branch 180 (97 of them the backslash-command,
+# psql-variable, schema-owner, parameter-privilege, installer-race,
+# other-database setting, outside-definition, SET-spelling, session-residue, session-identity (database, connection and
 # temporary namespace included), recorded-history, ambiguous foreign key,
 # assembled password, literal-name branch and column-order, baseline-residue,
 # setting-name, backend-status, routine quoting, extension-dependency,
@@ -2810,7 +2870,7 @@ refusal_assertions_passed=0
 # the merges fold main's five address-match, event-order and mirror-pointer
 # not-ready probes into their invalid ones (-5); predecessor proofs base 39,
 # main +7, this branch +1.
-expected_refusal_assertions=436
+expected_refusal_assertions=438
 predecessor_shape_proof_count=0
 expected_predecessor_shape_proof_count=47
 refusal_probe_seconds=0

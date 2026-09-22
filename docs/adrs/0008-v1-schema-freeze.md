@@ -324,7 +324,10 @@ and the row counts and positions checked equal on both sides),
 so a branch on rows and the name together is covered as far as those rows
 reach. Because a failure the login meets can be swallowed and then succeed as
 the configured user, nothing outside the phase schema may appear or change in
-that database, down to owners and privileges. A file that takes another path
+that database, down to owners, privileges and the definitions of relations
+(columns, constraints, indexes, triggers, rules, policies), routines, types,
+operators, operator classes and families, statistics and collations, the
+`_sqlx_migrations` ledger's included. A file that takes another path
 for the configured user runs it with that user's privileges, and what it does
 outside that database, to roles for one, is reported by the role snapshot but
 not undone; such a file is what these comparisons exist to refuse. The fresh
@@ -444,7 +447,8 @@ since an element carrying the delimiter would let two different schemas
 serialize identically. Each replay also ends by comparing sqlx's
 `_sqlx_migrations` against the full expected history — one row per migration
 file, with the SHA-384 of its bytes — and the cluster's role
-configuration — connection defaults, every role attribute (`LOGIN`,
+configuration — connection defaults for every database, not only the one the
+check runs in, every role attribute (`LOGIN`,
 `SUPERUSER`, `BYPASSRLS`, `CREATEDB`, `CREATEROLE`, `REPLICATION`, `INHERIT`,
 connection limit, expiry), role memberships, the default privileges of every
 schema in the database rather than only the phase schema's, the database's
