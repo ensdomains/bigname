@@ -366,7 +366,7 @@ async fn record_inventory_projection_covers_selected_snapshot(
         if selected_position.block_number == target_block_number {
             return Ok(selected_position.block_hash == target_block_hash);
         }
-        if !phase_target_is_canonical_lineage_member(
+        if !block_is_canonical_lineage_member(
             pool,
             chain_id,
             target_block_number,
@@ -412,10 +412,24 @@ async fn record_inventory_projection_covers_selected_snapshot(
             }
             continue;
         }
-        if !position_is_canonical_lineage_member(pool, chain_id, projected_position).await? {
+        if !block_is_canonical_lineage_member(
+            pool,
+            chain_id,
+            projected_position.block_number,
+            &projected_position.block_hash,
+        )
+        .await?
+        {
             return Ok(false);
         }
-        if !position_is_canonical_lineage_member(pool, chain_id, selected_position).await? {
+        if !block_is_canonical_lineage_member(
+            pool,
+            chain_id,
+            selected_position.block_number,
+            &selected_position.block_hash,
+        )
+        .await?
+        {
             return Ok(false);
         }
         if record_inventory_has_newer_projection_inputs(
@@ -485,41 +499,9 @@ fn positions_by_chain_id(
     Ok(by_chain_id)
 }
 
-async fn position_is_canonical_lineage_member(
-    pool: &PgPool,
-    chain_id: &str,
-    position: &ChainPosition,
-) -> std::result::Result<bool, SnapshotSelectionError> {
-    sqlx::query_scalar::<_, bool>(
-        r#"
-        SELECT EXISTS (
-            SELECT 1
-            FROM bigname_phase.chain_lineage
-            WHERE chain_id = $1
-              AND block_hash = $2
-              AND block_number = $3
-              AND canonicality_state IN (
-                  'canonical'::bigname_phase.canonicality_state,
-                  'safe'::bigname_phase.canonicality_state,
-                  'finalized'::bigname_phase.canonicality_state
-              )
-        )
-        "#,
-    )
-    .bind(chain_id)
-    .bind(&position.block_hash)
-    .bind(position.block_number)
-    .fetch_one(pool)
-    .await
-    .map_err(|error| {
-        SnapshotSelectionError::internal(format!(
-            "failed to check record_inventory_current chain position block {} on chain {chain_id}: {error}",
-            position.block_hash
-        ))
-    })
-}
-
-async fn phase_target_is_canonical_lineage_member(
+/// Whether `block_hash` at `block_number` is on the readable lineage of `chain_id`. Both the
+/// projection's own chain position and its phase target are checked with this one query.
+async fn block_is_canonical_lineage_member(
     pool: &PgPool,
     chain_id: &str,
     block_number: i64,
@@ -548,7 +530,7 @@ async fn phase_target_is_canonical_lineage_member(
     .await
     .map_err(|error| {
         SnapshotSelectionError::internal(format!(
-            "failed to check record_inventory_current target block {block_hash} on chain {chain_id}: {error}"
+            "failed to check record_inventory_current block {block_hash} on chain {chain_id}: {error}"
         ))
     })
 }
