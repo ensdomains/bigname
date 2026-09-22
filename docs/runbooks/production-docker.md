@@ -673,6 +673,27 @@ no-ops when the indexes already exist, and it ends with the same check, so
 `sqlx migrate run` stops without recording it if either index is missing,
 invalid, not ready, on another table, not an index, or has another definition.
 
+The release containing `20260922010000_project_node_history_idx.sql` and
+`20260922010100_project_mirror_scope_indexes.sql` adds the five indexes Project's
+scoped node history and progressive mirror dependency traversal read. On an
+initialized production namespace, build them in step 3 by running
+[`ops/project-progressive/install.sql`](../../ops/project-progressive/install.sql)
+through an autocommit SQL client, then
+[`ops/project-progressive/validate.sql`](../../ops/project-progressive/validate.sql),
+as [their runbook](../../ops/project-progressive/README.md) describes. This
+runbook carries no copy of the five statements; `install.sql` is the only
+source. The builds are concurrent and permit writes, so they can finish while
+the existing runner is still processing, before the stop/start window opens.
+`validate.sql` fails unless all five names are valid and ready indexes; an
+existing name is not proof of a valid or matching index, so also compare each
+`pg_get_indexdef` with `install.sql`. An interrupted build leaves an invalid
+index; confirm in `pg_stat_progress_create_index` that no build is still
+running, then review before an explicitly authorized retry. Keep both outputs
+with their start and end times in the release record. Then apply the
+schema-migrations in step 4; their `IF NOT EXISTS` builds are no-ops when the
+indexes already exist, and they must not perform the first build against a
+populated production table, because an ordinary index build blocks writes.
+
 The release containing
 `20260923120000_normalized_events_address_match_indexes.sql` adds the three
 partial expression indexes the address history read uses to find the names and
@@ -1112,6 +1133,11 @@ indexes are additive; rollback may leave them in place.
    `20260923120000_normalized_events_address_match_indexes.sql`, run
    `ops/address-history-indexes/install.sql` as described above, require it to
    exit zero, then run `ANALYZE bigname_phase.normalized_events`;
+   for the release containing `20260922010000_project_node_history_idx.sql`
+   or `20260922010100_project_mirror_scope_indexes.sql`, run
+   `ops/project-progressive/install.sql` then
+   `ops/project-progressive/validate.sql` as described above and require both
+   to exit zero;
    otherwise skip this step;
    For the release containing
    `20260814130000_surface_binding_authority_arm.sql`, a populated phase schema
