@@ -396,8 +396,39 @@ SELECT line FROM (
     -- PARAMETER) is cluster-wide; REVOKE removes the row again.
     SELECT format('parameter %s: %s', p.parname, COALESCE(p.paracl::text, '-'))
     FROM pg_parameter_acl p
+    UNION ALL
+    -- The rest of what the server holds outside any one database, each of
+    -- which a superuser routine can change: tablespaces, replication slots
+    -- and origins, subscriptions, and comments and labels on shared objects.
+    SELECT format('tablespace %s: owner=%s acl=%s options=%s', t.spcname, pg_get_userbyid(t.spcowner),
+               COALESCE(t.spcacl::text, '-'), COALESCE(to_jsonb(t.spcoptions)::text, '-'))
+    FROM pg_tablespace t
+    UNION ALL
+    SELECT format('replication slot %s: type=%s plugin=%s database=%s temporary=%s',
+               s.slot_name, s.slot_type, COALESCE(s.plugin, '-'), COALESCE(s.database, '-'), s.temporary)
+    FROM pg_replication_slots s
+    UNION ALL
+    SELECT format('replication origin %s', o.roname) FROM pg_replication_origin o
+    UNION ALL
+    SELECT format('subscription %s on %s: owner=%s enabled=%s', s.subname, d.datname, pg_get_userbyid(s.subowner), s.subenabled)
+    FROM pg_subscription s JOIN pg_database d ON d.oid = s.subdbid
+    UNION ALL
+    SELECT format('shared comment on %s: %s', pg_describe_object(c.classoid, c.objoid, 0), md5(c.description))
+    FROM pg_shdescription c
+    UNION ALL
+    SELECT format('shared security label %s on %s: %s', l.provider, pg_describe_object(l.classoid, l.objoid, 0), md5(l.label))
+    FROM pg_shseclabel l
 ) configuration ORDER BY 1;
 SQL
+        # The server's configuration files, postgresql.auto.conf among them,
+        # which ALTER SYSTEM rewrites and a superuser's COPY can overwrite;
+        # only a superuser can read them.
+        if [ "$(printf '\\pset tuples_only on\nSELECT has_table_privilege('"'"'pg_file_settings'"'"', '"'"'SELECT'"'"');\n' | run_psql_as_owner | tr -d ' ')" = t ]; then
+            cat <<'SQL'
+SELECT format('configuration file %s line %s: %s=%s applied=%s error=%s', f.sourcefile, f.sourceline, f.name, f.setting, f.applied, COALESCE(f.error, '-'))
+FROM pg_file_settings f ORDER BY 1;
+SQL
+        fi
         # `pg_roles` prints every password as one mask, so a changed one is
         # invisible there and the verifier lives in `pg_authid`. A WHERE cannot
         # guard that read: PostgreSQL checks the relation privilege when the
@@ -413,57 +444,77 @@ SQL
         fi
     } | run_psql_as_owner
 }
-# The snapshot has to see what no text rule can. The plant is on the role this
-# run created itself, and it is restored immediately; the check refuses to run
-# if the restore does not land.
+# The snapshot has to see what no text rule can. Each plant is on an object
+# this run names itself, or on a value it checks is unset first, and is
+# restored immediately; the check refuses to run if the restore does not land,
+# and cleanup runs the restore of a plant a failed run left in flight.
+cluster_plant_restore=""
+snapshot_sees_planted() {
+    local label="$1" pattern="$2" plant="$3" restore="$4" planted seen
+    cluster_plant_restore="$restore"
+    printf 'SET client_min_messages = error;\n%s\n' "$plant" | run_psql_as_owner >/dev/null
+    planted="$(role_and_database_settings)"
+    printf 'SET client_min_messages = error;\n%s\n' "$restore" | run_psql_as_owner >/dev/null
+    cluster_plant_restore=""
+    seen="$(diff "$role_and_database_settings_before" <(printf '%s\n' "$planted") || true)"
+    case "$seen" in
+        *"$pattern"*) ;;
+        *) printf '%s\n' "the role and cluster snapshot does not see $label (saw: ${seen:-nothing})" >&2; exit 1 ;;
+    esac
+    refusal_assertions_passed=$((refusal_assertions_passed + 1))
+    if ! diff -u "$role_and_database_settings_before" <(role_and_database_settings) >&2; then
+        printf '%s\n' "$label did not restore (diff above: - before, + after)" >&2
+        exit 1
+    fi
+}
 assert_role_configuration_snapshot_sees_planted_changes() {
-    local planted seen
-    printf 'ALTER ROLE "%s" CONNECTION LIMIT 5;\n' "$apply_check_role" | run_psql_as_owner
-    planted="$(role_and_database_settings)"
-    printf 'ALTER ROLE "%s" CONNECTION LIMIT -1;\n' "$apply_check_role" | run_psql_as_owner
-    seen="$(diff "$role_and_database_settings_before" <(printf '%s\n' "$planted") || true)"
-    case "$seen" in
-        *connlimit=5*) ;;
-        *) printf '%s\n' "the role-configuration snapshot does not see a planted connection limit (saw: ${seen:-nothing})" >&2; exit 1 ;;
-    esac
-    refusal_assertions_passed=$((refusal_assertions_passed + 1))
-    if ! diff -u "$role_and_database_settings_before" <(role_and_database_settings) >&2; then
-        printf '%s\n' "the planted connection limit did not restore (diff above: - before, + after)" >&2
-        exit 1
-    fi
+    local planted_name="${scratch_schema}_planted"
+    snapshot_sees_planted "a planted connection limit" "connlimit=5" \
+        "ALTER ROLE \"$apply_check_role\" CONNECTION LIMIT 5;" \
+        "ALTER ROLE \"$apply_check_role\" CONNECTION LIMIT -1;"
     # A default set for another database than the one the check runs in.
-    printf 'ALTER ROLE "%s" IN DATABASE template1 SET lock_timeout = %s;\n' "$apply_check_role" "'1ms'" | run_psql_as_owner
-    planted="$(role_and_database_settings)"
-    printf 'ALTER ROLE "%s" IN DATABASE template1 RESET lock_timeout;\n' "$apply_check_role" | run_psql_as_owner
-    seen="$(diff "$role_and_database_settings_before" <(printf '%s\n' "$planted") || true)"
-    case "$seen" in
-        *"> setting $apply_check_role on template1: "*) ;;
-        *) printf '%s\n' "the role-configuration snapshot does not see a default planted for another database (saw: ${seen:-nothing})" >&2; exit 1 ;;
-    esac
-    refusal_assertions_passed=$((refusal_assertions_passed + 1))
-    if ! diff -u "$role_and_database_settings_before" <(role_and_database_settings) >&2; then
-        printf '%s\n' "the default planted for another database did not restore (diff above: - before, + after)" >&2
-        exit 1
-    fi
-    # Only a superuser, or a holder of the grant option, can grant a parameter.
+    snapshot_sees_planted "a default planted for another database" "> setting $apply_check_role on template1: " \
+        "ALTER ROLE \"$apply_check_role\" IN DATABASE template1 SET lock_timeout = '1ms';" \
+        "ALTER ROLE \"$apply_check_role\" IN DATABASE template1 RESET lock_timeout;"
+    snapshot_sees_planted "a planted comment on a role" "> shared comment on role $apply_check_role: " \
+        "COMMENT ON ROLE \"$apply_check_role\" IS 'planted';" \
+        "COMMENT ON ROLE \"$apply_check_role\" IS NULL;"
+    # Only a superuser can make the rest, or holds the grant option.
     if [ "$(printf '\\pset tuples_only on\nSELECT rolsuper FROM pg_roles WHERE rolname = current_user;\n' | run_psql_as_owner | tr -d ' ')" != t ]; then
-        printf '%s\n' "note: the database user is not a superuser, so a parameter privilege was not planted" >&2
-        expected_refusal_assertions=$((expected_refusal_assertions - 1))
+        printf '%s\n' "note: the database user is not a superuser, so a parameter privilege, a configuration-file line, a tablespace option, a replication slot, a replication origin and a subscription were not planted" >&2
+        expected_refusal_assertions=$((expected_refusal_assertions - 6))
         return
     fi
-    printf 'GRANT SET ON PARAMETER lock_timeout TO "%s";\n' "$apply_check_role" | run_psql_as_owner
-    planted="$(role_and_database_settings)"
-    printf 'REVOKE SET ON PARAMETER lock_timeout FROM "%s";\n' "$apply_check_role" | run_psql_as_owner
-    seen="$(diff "$role_and_database_settings_before" <(printf '%s\n' "$planted") || true)"
-    case "$seen" in
-        *"> parameter lock_timeout: "*) ;;
-        *) printf '%s\n' "the role-configuration snapshot does not see a planted parameter privilege (saw: ${seen:-nothing})" >&2; exit 1 ;;
-    esac
-    refusal_assertions_passed=$((refusal_assertions_passed + 1))
-    if ! diff -u "$role_and_database_settings_before" <(role_and_database_settings) >&2; then
-        printf '%s\n' "the planted parameter privilege did not restore (diff above: - before, + after)" >&2
-        exit 1
+    snapshot_sees_planted "a planted parameter privilege" "> parameter lock_timeout: " \
+        "GRANT SET ON PARAMETER lock_timeout TO \"$apply_check_role\";" \
+        "REVOKE SET ON PARAMETER lock_timeout FROM \"$apply_check_role\";"
+    # ALTER SYSTEM RESET would also remove an operator's own line, so the
+    # plant sets the parameter's default only where no file sets it.
+    if [ "$(printf '\\pset tuples_only on\nSELECT count(*) FROM pg_file_settings WHERE name = %s;\n' "'log_parameter_max_length_on_error'" | run_psql_as_owner | tr -d ' ')" = 0 ]; then
+        snapshot_sees_planted "a planted ALTER SYSTEM" "> configuration file " \
+            "ALTER SYSTEM SET log_parameter_max_length_on_error = 0;" \
+            "ALTER SYSTEM RESET log_parameter_max_length_on_error;"
+    else
+        printf '%s\n' "note: a configuration file already sets log_parameter_max_length_on_error, so ALTER SYSTEM was not planted" >&2
+        expected_refusal_assertions=$((expected_refusal_assertions - 1))
     fi
+    if [ "$(printf '\\pset tuples_only on\nSELECT spcoptions IS NULL FROM pg_tablespace WHERE spcname = %s;\n' "'pg_global'" | run_psql_as_owner | tr -d ' ')" = t ]; then
+        snapshot_sees_planted "a planted tablespace option" "> tablespace pg_global: " \
+            "ALTER TABLESPACE pg_global SET (seq_page_cost = 1.5);" \
+            "ALTER TABLESPACE pg_global RESET (seq_page_cost);"
+    else
+        printf '%s\n' "note: pg_global already has options, so a tablespace option was not planted" >&2
+        expected_refusal_assertions=$((expected_refusal_assertions - 1))
+    fi
+    snapshot_sees_planted "a planted replication slot" "> replication slot $planted_name: " \
+        "SELECT pg_create_physical_replication_slot('$planted_name');" \
+        "SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE slot_name = '$planted_name';"
+    snapshot_sees_planted "a planted replication origin" "> replication origin $planted_name" \
+        "SELECT pg_replication_origin_create('$planted_name');" \
+        "SELECT pg_replication_origin_drop(roname) FROM pg_replication_origin WHERE roname = '$planted_name';"
+    snapshot_sees_planted "a planted subscription" "> subscription $planted_name on " \
+        "CREATE SUBSCRIPTION \"$planted_name\" CONNECTION 'dbname=$planted_name' PUBLICATION planted WITH (connect = false, slot_name = NONE);" \
+        "DROP SUBSCRIPTION IF EXISTS \"$planted_name\";"
 }
 # A connection as the check's login with the given password, which says
 # something only where the server checks it; set-up finds that out.
@@ -1962,18 +2013,22 @@ assert_refused_kinds_are_seen() {
 # (every file is required to be idempotent once applied), and the result must
 # be the frozen artifact too, rows and all.
 # Schema-migrations change the shape, not the facts. On an initialized
-# database no file may add or remove a row, and none may rewrite the raw facts
-# Ingest recorded or the normalized events Interpret derived (storage.md,
-# Table ownership), which a redo re-derives from rather than repairs; a
-# backfill of coordination or bookkeeping rows keeps its row count and passes.
-# Contents are read over the columns a table had before the replay, so a
-# column the replay adds is not a change. A table the replay drops is retired,
-# unless it holds raw facts or normalized events, which may neither be dropped
-# nor lose a column; and an existing sequence keeps its position, since a
-# reset one hands an ID out again.
+# database no file may add or remove a row, and none may rewrite what Ingest
+# recorded or Interpret derived (storage.md, Table ownership): chain data, raw
+# facts, contract instances, identity rows, discovery edges, label preimages,
+# normalized events and Interpret's diagnostics, which a redo re-derives from
+# or builds on rather than repairs. Every table's contents are therefore
+# compared except the ones a schema-migration may backfill in place, which
+# keep their row count: coordination state, manifest synchronization's rows,
+# the divergence ledger and Project's rebuildable projections. A table this
+# list does not name is compared, so a new one is covered until review names
+# it. Contents are read over the columns a table had before the replay, so a
+# column the replay adds is not a change. A listed table the replay drops is
+# retired; any other may neither be dropped nor lose a column. An existing
+# sequence keeps its position, since a reset one hands an ID out again.
 table_columns_of() {
     printf '\\pset format unaligned\n\\pset tuples_only on\n'
-    printf "SELECT quote_ident(c.relname) || '|' || CASE WHEN c.relkind = 'S' THEN '(sequence)' WHEN left(c.relname, 4) = 'raw_' OR c.relname = 'normalized_events' THEN string_agg(quote_ident(a.attname), ', ' ORDER BY a.attnum) ELSE '' END FROM pg_class c LEFT JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped AND c.relkind <> 'S' WHERE c.relnamespace = '\"%s\"'::regnamespace AND c.relkind IN ('r', 'p', 'S') GROUP BY c.relname, c.relkind ORDER BY c.relname;\n" "$1"
+    printf "SELECT quote_ident(c.relname) || '|' || CASE WHEN c.relkind = 'S' THEN '(sequence)' WHEN right(c.relname, 8) = '_current' OR left(c.relname, 9) = 'manifest_' OR left(c.relname, 13) = 'project_redo_' OR c.relname IN ('permissions_current_resource_summary', 'child_registration_events', 'chain_phase_state', 'service_heartbeats', 'discovery_watch_admissions', 'resolution_divergences') THEN '' ELSE string_agg(quote_ident(a.attname), ', ' ORDER BY a.attnum) END FROM pg_class c LEFT JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped AND c.relkind <> 'S' WHERE c.relnamespace = '\"%s\"'::regnamespace AND c.relkind IN ('r', 'p', 'S') GROUP BY c.relname, c.relkind ORDER BY c.relname;\n" "$1"
 }
 rows_state_sql() {
     local schema="$1" table columns
@@ -2012,12 +2067,12 @@ assert_replay_keeps_rows() {
     if ! diff -u <(awk 'NR == FNR { gone[$1] = 1; next } !gone[$1]' <(printf '%s\n' "$retired") "$before_state") \
         <(printf '%s\n' "$after" | awk '$2 != "retired"') >&2; then
         printf '%s\n' \
-            "the $context replay added, removed or rewrote rows, dropped facts, or moved a sequence (diff above: - before, + after); a schema-migration changes the shape, not the facts: it may not add or remove rows on an initialized database, rewrite or drop raw facts or normalized events, which a redo re-derives from, or reset a sequence that hands out their IDs" >&2
+            "the $context replay added, removed or rewrote rows, dropped a table or column it may not, or moved a sequence (diff above: - before, + after); a schema-migration changes the shape, not the facts: on an initialized database it may not add or remove rows, rewrite or drop what Ingest recorded or Interpret derived, or reset a sequence that hands out IDs, and it backfills in place only the coordination, manifest, divergence and projection tables table_columns_of names in schema-v2/apply-check.sh under ADR 0008" >&2
         exit 1
     fi
 }
 assert_exercised_schema_matches_frozen() {
-    local exercised migration_file rows_columns rows_before rows_sequence planted
+    local exercised migration_file rows_columns rows_before rows_sequence rows_identity planted
     exercised="$(mktemp "${TMPDIR:-/tmp}/schema-v2-exercised-catalog.XXXXXX")"
     for migration_file in $(production_schema_migrations); do
         printf 'exercised|%s\n' "$(basename "$migration_file")" >> "$migration_application_log"
@@ -2027,12 +2082,18 @@ assert_exercised_schema_matches_frozen() {
     table_columns_of "$scratch_schema" | run_psql > "$rows_columns"
     rows_state_sql "$scratch_schema" "$rows_columns" | run_psql > "$rows_before"
     # The rule proves itself on the exercised rows, rolled back: a removed
-    # normalized event and a rewritten one must each move its line.
+    # normalized event, a rewritten one, a rewritten resource and a rewritten
+    # row of the first populated discovery or identity table must each move
+    # its line. The proofs leave discovery_edges itself empty.
     rows_sequence="$(awk -F'|' '$2 == "(sequence)" { print $1; exit }' "$rows_columns")"
     [ -n "$rows_sequence" ] || { printf '%s\n' "the exercised scratch schema holds no sequence for the row rule to prove itself on" >&2; exit 1; }
+    rows_identity="$(awk '$2 ~ /^rows=[1-9]/ { populated[$1] = 1 } END { n = split("discovery_edges contract_instances contract_instance_addresses surface_bindings name_surfaces token_lineages label_preimages", t, " "); for (i = 1; i <= n; i++) if (t[i] in populated) { print t[i]; exit } }' "$rows_before")"
+    [ -n "$rows_identity" ] || { printf '%s\n' "the exercised scratch schema holds no discovery or identity row besides resources for the row rule to prove itself on" >&2; exit 1; }
     for planted in \
         "> normalized_events rows=:DELETE FROM \"$scratch_schema\".normalized_events WHERE ctid = (SELECT ctid FROM \"$scratch_schema\".normalized_events LIMIT 1);" \
         "> normalized_events rows=:UPDATE \"$scratch_schema\".normalized_events SET after_state = COALESCE(after_state, '{}'::jsonb) || '{\"planted\": true}' WHERE ctid = (SELECT ctid FROM \"$scratch_schema\".normalized_events LIMIT 1);" \
+        "> resources rows=:UPDATE \"$scratch_schema\".resources SET provenance = provenance || '{\"planted\": true}' WHERE ctid = (SELECT ctid FROM \"$scratch_schema\".resources LIMIT 1);" \
+        "> $rows_identity rows=:UPDATE \"$scratch_schema\".$rows_identity SET provenance = provenance || '{\"planted\": true}' WHERE ctid = (SELECT ctid FROM \"$scratch_schema\".$rows_identity LIMIT 1);" \
         "> raw_logs dropped:DROP TABLE \"$scratch_schema\".raw_logs CASCADE;" \
         "> normalized_events lost a column:ALTER TABLE \"$scratch_schema\".normalized_events DROP COLUMN after_state CASCADE;" \
         "> $rows_sequence last_value=:ALTER SEQUENCE \"$scratch_schema\".$rows_sequence RESTART WITH 424242;"; do
@@ -2968,10 +3029,11 @@ migration_application_log="$(
 # Future entries must use basename|one-line reason.
 intentional_phase_migration_skips=()
 refusal_assertions_passed=0
-# Base 173, main added 90, this branch 187 (104 of them the backslash-command,
+# Base 173, main added 90, this branch 206 (123 of them the backslash-command,
 # psql-variable, schema-owner, parameter-privilege, installer-race,
 # other-database setting and attribute, outside-definition and membership,
-# exercised-row, dropped-fact, lost-column, sequence-position,
+# exercised-row, identity-row, dropped-fact, lost-column, sequence-position,
+# server-statement, server-file read, shared-object and configuration-file,
 # SET-spelling, session-residue, session-identity (database, connection and
 # temporary namespace included), recorded-history, ambiguous foreign key,
 # assembled password, literal-name branch and column-order, baseline-residue,
@@ -2981,7 +3043,7 @@ refusal_assertions_passed=0
 # the merges fold main's five address-match, event-order and mirror-pointer
 # not-ready probes into their invalid ones (-5); predecessor proofs base 39,
 # main +7, this branch +1.
-expected_refusal_assertions=445
+expected_refusal_assertions=464
 predecessor_shape_proof_count=0
 expected_predecessor_shape_proof_count=47
 refusal_probe_seconds=0
@@ -3001,6 +3063,10 @@ cleanup() {
     fi
     if [ -n "${role_and_database_settings_before:-}" ]; then
         rm -f -- "$role_and_database_settings_before"
+    fi
+    # Only the restore of the one snapshot plant a failure left in flight.
+    if [ -n "${cluster_plant_restore:-}" ]; then
+        printf '%s\n' "$cluster_plant_restore" | run_psql_as_owner >/dev/null 2>&1 || true
     fi
     # Before the role, which owns the schema in it.
     if [ "${literal_database_created:-0}" = 1 ]; then
@@ -3244,6 +3310,15 @@ session_state_scanner='
         while (match(t, /ALTER (ROLE|USER|DATABASE)[^;]* (SET|RESET) [A-Z_.]+/)) { print file ": " substr(t, RSTART, RLENGTH); t = substr(t, RSTART + RLENGTH) }
         t = toupper(text)
         while (match(t, /(ALTER|CREATE) (ROLE|USER|GROUP)[^;]* PASSWORD/)) { print file ": " substr(t, RSTART, RLENGTH); t = substr(t, RSTART + RLENGTH) }
+        # The server outside its databases: ALTER SYSTEM, which PostgreSQL runs
+        # only as a top-level statement, so the text always shows it, and the
+        # server-side file and program forms of COPY, lo_import and lo_export,
+        # a file name given as a literal, a dollar quote or a format() slot.
+        t = toupper(text) " "
+        while (match(t, /(^|[^A-Z0-9_])(ALTER SYSTEM[^A-Z0-9_]|COPY [^;]*[^A-Z0-9_](TO|FROM) ?(PROGRAM[^A-Z0-9_]|E?'"'"'|\$|%)|LO_(IMPORT|EXPORT) *\()/)) {
+            hit = substr(t, RSTART, RLENGTH); sub(/^[^A-Z]*/, "", hit)
+            print file ": [server outside the database: " hit "]"; t = substr(t, RSTART + RLENGTH)
+        }
     }
 '
 session_state_statements_of() {
@@ -3261,6 +3336,9 @@ assert_no_session_state_statements() {
         case "$hits" in
             *'[psql meta-command'*)
                 printf '%s\n' "${hits//$'\n'/; }: the replay's psql runs a backslash command on the client, but sqlx sends the file to the server, which rejects it, so remove it" >&2
+                exit 1 ;;
+            *'[server outside the database'*)
+                printf '%s\n' "${hits//$'\n'/; }: ALTER SYSTEM rewrites the configuration of every database on the server, and COPY to or from a file or a program, lo_import and lo_export read or write files on the database server or run a program there; no catalog this check compares holds any of it and a schema-migration has no use for it, so remove it (ADR 0008)" >&2
                 exit 1 ;;
             *'[psql variable'*)
                 printf '%s\n' "${hits//$'\n'/; }: the replay's psql replaces :name, :'name', :\"name\" and :{?name} with a variable of its own, DBNAME and USER among them, but sqlx sends the colon to the server, so write the value itself; a slice bound that starts with a name takes a space after the colon" >&2
@@ -3315,6 +3393,15 @@ assert_session_state_rule_holds() {
         'DO $$ BEGIN EXECUTE format('"'"'SET %I = %L'"'"', '"'"'bigname.cutover'"'"', '"'"'on'"'"'); END $$;'
         'SET SESSION ROLE bigname;'
         'SET LOCAL ROLE bigname;'
+        'ALTER SYSTEM SET work_mem = '"'"'8MB'"'"';'
+        'alter system reset all;'
+        'COPY bigname_phase.t TO '"'"'/tmp/planted'"'"';'
+        'copy (select 1) to program '"'"'true'"'"';'
+        'COPY bigname_phase.t FROM $f$/etc/hostname$f$;'
+        'copy bigname_phase.t to e'"'"'/tmp/planted'"'"';'
+        'DO $$ BEGIN EXECUTE format('"'"'COPY (SELECT 1) TO %L'"'"', '"'"'/tmp/planted'"'"'); END $$;'
+        'SELECT lo_export(1, '"'"'/tmp/planted'"'"');'
+        'SELECT pg_catalog.lo_import('"'"'/etc/hostname'"'"');'
     )
     local -a accepted=(
         'UPDATE t SET a = 1;'
@@ -3333,6 +3420,9 @@ assert_session_state_rule_holds() {
         'SELECT '"'"':'"'"''"'"'DBNAME'"'"''"'"''"'"', $q$:'"'"'DBNAME'"'"'$q$ AS ":DBNAME"; -- :USER'
         'COMMENT ON TABLE t IS '"'"'Set when the name is registered'"'"';'
         'UPDATE t SET a2 = 1;'
+        'COPY (SELECT 1) TO STDOUT;'
+        'CREATE TABLE bigname_phase.copy_to (a int);'
+        'COMMENT ON TABLE t IS '"'"'a copy of the rows, taken from the log'"'"';'
     )
     planted_dir="$(mktemp -d "${TMPDIR:-/tmp}/schema-v2-session-state-rule.XXXXXX")"
     for planted in "${refused[@]}"; do
@@ -3382,9 +3472,10 @@ assert_no_migration_reads_synthetic_ledger_timing
 # and on a connection of its own, and deployment runs it as the writer, so a
 # phase schema-migration that reads who it runs as -- the user or role, whether
 # a role exists or what it holds, a privilege, or a privilege failure it
-# swallows -- or where -- the database, the server or client address, or the
-# session's temporary namespace, which one file's temporary table allocates
-# for the files after it -- takes a path here that deployment does not.
+# swallows -- or where -- the database, the server or client address, the
+# server's files, or the session's temporary namespace, which one file's
+# temporary table allocates for the files after it -- takes a path here that
+# deployment does not.
 # Refused by name in the statement text, quoted text included, as the
 # ledger-timing rule above; bare USER is left out because quoted prose uses the
 # word, and bare ROLE because `manifest_contract_instances.role` is a column.
@@ -3398,7 +3489,7 @@ session_identity_reads_of() {
     {
         # Whole words, so `pg_catalog.` does not use up the boundary of the name after it.
         printf '%s\n' "$statements" | grep -oE '[[:alnum:]_]+' \
-            | grep -xiE '(CURRENT_USER|SESSION_USER|CURRENT_ROLE|SYSTEM_USER|GETPGUSERNAME|PG_GET_USERBYID|PG_HAS_ROLE|HAS_[A-Z_]+_PRIVILEGE|PG_ROLES|PG_USER|PG_AUTHID|PG_AUTH_MEMBERS|PG_SHADOW|TO_REGROLE|REGROLE|ROLNAME|ROLSUPER|USENAME|IS_SUPERUSER|SESSION_AUTHORIZATION|ENABLED_ROLES|APPLICABLE_ROLES|ADMINISTRABLE_ROLE_AUTHORIZATIONS|(TABLE|COLUMN|ROUTINE|USAGE|UDT)_PRIVILEGES|ROLE_[A-Z]+_GRANTS|INSUFFICIENT_PRIVILEGE|UNDEFINED_OBJECT|42501|42704|CURRENT_DATABASE|CURRENT_CATALOG|PG_DATABASE|DATNAME|[A-Z_]*_CATALOG|CATALOG_NAME|INFORMATION_SCHEMA_CATALOG_NAME|INET_(SERVER|CLIENT)_(ADDR|PORT)|CLIENT_(ADDR|PORT|HOSTNAME)|DATID|PG_STAT_(ACTIVITY|DATABASE|SSL|GSSAPI)|PORT|LISTEN_ADDRESSES|UNIX_SOCKET_DIRECTORIES|CLUSTER_NAME|PG_MY_TEMP_SCHEMA|CURRENT_SCHEMAS|PG_IS_OTHER_TEMP_SCHEMA|PG_SETTINGS|PG_SHOW_ALL_SETTINGS|PG_FILE_SETTINGS|SHOW|PG_STAT_GET_ACTIVITY|PG_STAT_GET_BACKEND_[A-Z_]+|SYNTAX_ERROR_OR_ACCESS_RULE_VIOLATION)' \
+            | grep -xiE '(CURRENT_USER|SESSION_USER|CURRENT_ROLE|SYSTEM_USER|GETPGUSERNAME|PG_GET_USERBYID|PG_HAS_ROLE|HAS_[A-Z_]+_PRIVILEGE|PG_ROLES|PG_USER|PG_AUTHID|PG_AUTH_MEMBERS|PG_SHADOW|TO_REGROLE|REGROLE|ROLNAME|ROLSUPER|USENAME|IS_SUPERUSER|SESSION_AUTHORIZATION|ENABLED_ROLES|APPLICABLE_ROLES|ADMINISTRABLE_ROLE_AUTHORIZATIONS|(TABLE|COLUMN|ROUTINE|USAGE|UDT)_PRIVILEGES|ROLE_[A-Z]+_GRANTS|INSUFFICIENT_PRIVILEGE|UNDEFINED_OBJECT|42501|42704|CURRENT_DATABASE|CURRENT_CATALOG|PG_DATABASE|DATNAME|[A-Z_]*_CATALOG|CATALOG_NAME|INFORMATION_SCHEMA_CATALOG_NAME|INET_(SERVER|CLIENT)_(ADDR|PORT)|CLIENT_(ADDR|PORT|HOSTNAME)|DATID|PG_STAT_(ACTIVITY|DATABASE|SSL|GSSAPI)|PG_READ_(BINARY_)?FILE|PG_STAT_FILE|PG_LS_[A-Z_]*DIR|PORT|LISTEN_ADDRESSES|UNIX_SOCKET_DIRECTORIES|CLUSTER_NAME|PG_MY_TEMP_SCHEMA|CURRENT_SCHEMAS|PG_IS_OTHER_TEMP_SCHEMA|PG_SETTINGS|PG_SHOW_ALL_SETTINGS|PG_FILE_SETTINGS|SHOW|PG_STAT_GET_ACTIVITY|PG_STAT_GET_BACKEND_[A-Z_]+|SYNTAX_ERROR_OR_ACCESS_RULE_VIOLATION)' \
             | tr '[:lower:]' '[:upper:]' | grep -vx PG_CATALOG || true
         # A setting answers with the connection's defaults, which the login
         # does not share with the deployment writer (ALTER ROLE ... SET), and
@@ -3442,6 +3533,8 @@ assert_no_migration_branches_on_session_identity() {
         'DO $$ BEGIN GRANT SELECT ON bigname_phase.t TO bigname_reader; EXCEPTION WHEN undefined_object THEN NULL; END $$;'
         'DO $$ BEGIN IF (SELECT pg_get_userbyid(relowner) FROM pg_class WHERE oid = '"'"'bigname_phase.t'"'"'::regclass) = '"'"'bigname'"'"' THEN ALTER TABLE bigname_phase.t ADD COLUMN c integer; END IF; END $$;'
         'DO $$ BEGIN IF pg_catalog.current_database() = '"'"'bigname'"'"' THEN ALTER TABLE bigname_phase.t ADD COLUMN c integer; END IF; END $$;'
+        'DO $$ BEGIN IF pg_read_file('"'"'PG_VERSION'"'"') LIKE '"'"'16%'"'"' THEN ALTER TABLE bigname_phase.t ADD COLUMN c integer; END IF; END $$;'
+        'DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_catalog.pg_ls_dir('"'"'.'"'"') d WHERE d = '"'"'standby.signal'"'"') THEN ALTER TABLE bigname_phase.t ADD COLUMN c integer; END IF; END $$;'
         'DO $$ BEGIN IF current_catalog LIKE '"'"'%_db'"'"' THEN RETURN; END IF; ALTER TABLE bigname_phase.t ADD COLUMN c integer; END $$;'
         'DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_database WHERE oid > 1) THEN ALTER TABLE bigname_phase.t ADD COLUMN c integer; END IF; END $$;'
         'DO $$ BEGIN IF (SELECT count(*) FROM pg_stat_activity WHERE datname = '"'"'bigname'"'"') > 1 THEN RETURN; END IF; ALTER TABLE bigname_phase.t ADD COLUMN c integer; END $$;'
@@ -3501,7 +3594,7 @@ assert_no_migration_branches_on_session_identity() {
         hits="$(session_identity_reads_of "$migration_file")"
         if [ -n "$hits" ]; then
             printf '%s\n' \
-                "$(basename "$migration_file") reads ${hits% }, which answers differently for this check's disposable login, scratch database and replay session than for the deployment writer, so a branch on identity, role existence, privilege, database, server address or temporary namespace takes a path here that sqlx migrate run does not; a schema-migration may not depend on who runs it or where, reads no setting but search_path and quote_all_identifiers and those by their literal names, and catches no error class that holds a privilege failure, and a carve-out that needs to extends the session-identity rule in schema-v2/apply-check.sh under ADR 0008" >&2
+                "$(basename "$migration_file") reads ${hits% }, which answers differently for this check's disposable login, scratch database and replay session than for the deployment writer, so a branch on identity, role existence, privilege, database, server address, server files or temporary namespace takes a path here that sqlx migrate run does not; a schema-migration may not depend on who runs it or where, reads no setting but search_path and quote_all_identifiers and those by their literal names, and catches no error class that holds a privilege failure, and a carve-out that needs to extends the session-identity rule in schema-v2/apply-check.sh under ADR 0008" >&2
             exit 1
         fi
     done

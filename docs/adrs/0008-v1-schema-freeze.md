@@ -337,13 +337,24 @@ unchanged; the check therefore also takes the catalog of its scratch schema
 at the end of the run — populated by every predecessor-shape and behavior
 proof, rewound to older shapes by those proofs and carried back through the
 whole inventoried sequence, as sqlx would carry an initialized database —
-and that must be the frozen artifact too. That pass, and the replay of the
-same rows under the literal name, must also keep every table's row count and
-the exact contents of the raw facts and normalized events: a schema-migration
-changes the shape, not the facts, so it may backfill coordination or
-bookkeeping rows but not add or remove rows, rewrite, drop or drop a column of
-what Ingest recorded and Interpret derived, which a redo re-derives from, or
-move an existing sequence, which would hand an ID out again. Every such replay
+and that must be the frozen artifact too. That pass, and the replay of the same
+rows under the literal name, must also keep every table's row count, every
+existing sequence's position and the exact contents of every table except the
+ones a schema-migration may backfill in place: the phase runner's coordination
+state (`chain_phase_state`, `service_heartbeats`), Interpret's redo
+coordination (`discovery_watch_admissions`, `project_redo_*`), manifest
+synchronization's `manifest_*` rows, the `resolution_divergences` ledger, and
+Project's rebuildable projections (the `*_current` families and
+`child_registration_events`). A schema-migration changes the shape, not the
+facts: it may not add or remove rows anywhere, nor rewrite, drop or drop a
+column of any other table — what Ingest recorded and Interpret derived (chain
+data, raw facts, contract instances, identity rows, discovery edges, label
+preimages, normalized events and Interpret's diagnostics), which a redo
+re-derives from or builds on rather than repairs, the operator's rainbow
+candidates, and the audit of each [projection generation
+failure](../glossary.md#projection-generation-failure) — nor move an existing
+sequence, which would hand an ID out again. A table the list does not name is
+compared, so a new one is covered until review names it. Every such replay
 applies the sequence the way `sqlx migrate run` does: through one session, each
 file in its own transaction unless it opens with `-- no-transaction`, with
 sqlx's own `_sqlx_migrations` bookkeeping recorded inside that transaction by
@@ -367,7 +378,12 @@ Nor may either hold a colon before a name there (`:name`, `:'name'`,
 `:"name"`, `:{?name}`): psql replaces it with a variable it defines, `DBNAME`
 and `USER` among them, before sending, while sqlx sends the colon. A cast
 (`::`), `:=` and a numeric array slice bound pass; a slice bound that starts
-with a name takes a space after the colon.
+with a name takes a space after the colon. Nor may either change the server
+outside its databases: `ALTER SYSTEM`, which PostgreSQL runs only as a
+top-level statement, so the text always shows it, `COPY` to or from a file or
+a program, and `lo_import` and `lo_export` read or write files on the database
+server or run a program there, whether the file name is a literal, a dollar
+quote or a `format()` slot; no catalog the check compares holds any of it.
 Because sqlx applies only the files a database has not recorded, and a
 catch-up can be split across several runs, what one file leaves in the session
 reaches the next file in the replay but not in a deployment that starts that
@@ -408,7 +424,9 @@ is left alone because the rule reads quoted prose too, and bare `role` because
 client address or port through the `inet_*` functions, `pg_stat_activity`,
 `pg_stat_get_activity`, the `pg_stat_get_backend_*` functions,
 `pg_stat_database` or the `port`, `listen_addresses`,
-`unix_socket_directories` and `cluster_name` settings — since on an external server the replay runs in a
+`unix_socket_directories` and `cluster_name` settings, or the server's files
+through `pg_read_file`, `pg_read_binary_file`, `pg_stat_file` or a
+`pg_ls_*dir` function — since on an external server the replay runs in a
 database of its own. A setting answers with the connection's defaults, which
 the login does not share with the writer (`ALTER ROLE ... SET`), and some
 name who and where (`session_authorization`, `port`), so the only settings a
@@ -461,7 +479,11 @@ schema in the database rather than only the phase schema's, every
 database's attributes, not only the one a replay runs in (owner, connection
 limit, whether it accepts connections, the template flag, tablespace and
 privileges), privileges on server parameters
-(`GRANT SET` or `ALTER SYSTEM ON PARAMETER`), and, where the
+(`GRANT SET` or `ALTER SYSTEM ON PARAMETER`), tablespaces (owner, privileges,
+options), replication slots and origins, subscriptions, comments and security
+labels on shared objects, and, where the check is a superuser, every line of
+the server's configuration files, the `postgresql.auto.conf` that
+`ALTER SYSTEM` rewrites among them, and, where the
 check can read `pg_authid`, the password verifiers — against the snapshot taken
 before the first replay. That last read is decided before the statement is
 sent, because PostgreSQL checks the relation privilege when the scan opens and
