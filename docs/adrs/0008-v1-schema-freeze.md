@@ -337,7 +337,12 @@ unchanged; the check therefore also takes the catalog of its scratch schema
 at the end of the run — populated by every predecessor-shape and behavior
 proof, rewound to older shapes by those proofs and carried back through the
 whole inventoried sequence, as sqlx would carry an initialized database —
-and that must be the frozen artifact too. Every such replay applies the
+and that must be the frozen artifact too. That pass, and the replay of the
+same rows under the literal name, must also keep every table's row count and
+the exact contents of the raw facts and normalized events: a schema-migration
+changes the shape, not the facts, so it may backfill coordination or
+bookkeeping rows but not add or remove rows, or rewrite what Ingest recorded
+and Interpret derived, which a redo re-derives from. Every such replay applies the
 sequence the way `sqlx migrate run` does: through one session, each file in
 its own transaction unless it opens with `-- no-transaction`, with sqlx's
 own `_sqlx_migrations` bookkeeping recorded inside that transaction by its
@@ -451,9 +456,10 @@ configuration — connection defaults for every database, not only the one the
 check runs in, every role attribute (`LOGIN`,
 `SUPERUSER`, `BYPASSRLS`, `CREATEDB`, `CREATEROLE`, `REPLICATION`, `INHERIT`,
 connection limit, expiry), role memberships, the default privileges of every
-schema in the database rather than only the phase schema's, the database's
-own attributes (owner, connection limit, whether it accepts connections, the
-template flag, tablespace and privileges), privileges on server parameters
+schema in the database rather than only the phase schema's, every
+database's attributes, not only the one a replay runs in (owner, connection
+limit, whether it accepts connections, the template flag, tablespace and
+privileges), privileges on server parameters
 (`GRANT SET` or `ALTER SYSTEM ON PARAMETER`), and, where the
 check can read `pg_authid`, the password verifiers — against the snapshot taken
 before the first replay. That last read is decided before the statement is

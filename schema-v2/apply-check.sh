@@ -384,12 +384,13 @@ SELECT line FROM (
     LEFT JOIN pg_namespace ns ON ns.oid = d.defaclnamespace
     LEFT JOIN pg_roles r ON r.oid = d.defaclrole
     UNION ALL
-    -- The database's own attributes: a connection limit or refused
-    -- connections reach every later deployed connection.
+    -- Every database's attributes, not only the one a replay runs in: a
+    -- connection limit or refused connections reach every later deployed
+    -- connection to the deployment's database.
     SELECT format('database %s: owner=%s connlimit=%s allowconn=%s template=%s tablespace=%s acl=%s',
                d.datname, pg_get_userbyid(d.datdba), d.datconnlimit, d.datallowconn, d.datistemplate,
                (SELECT spcname FROM pg_tablespace WHERE oid = d.dattablespace), COALESCE(d.datacl::text, '-'))
-    FROM pg_database d WHERE d.datname = current_database()
+    FROM pg_database d
     UNION ALL
     -- A privilege on a server parameter (GRANT SET or ALTER SYSTEM ON
     -- PARAMETER) is cluster-wide; REVOKE removes the row again.
@@ -1460,7 +1461,11 @@ assert_literal_schema_name_replays_match() {
                 printf '%s\n' "the exercised rows did not copy into the literal-name database intact (diff above: - exercised, + copy)" >&2
                 exit 1
             fi
+            table_columns_of bigname_phase | run_psql > "$copy_tables.columns"
+            rows_state_sql bigname_phase "$copy_tables.columns" | run_psql > "$copy_tables.rows"
             replay_schema_migrations "literal-name populated"
+            assert_replay_keeps_rows "literal-name populated" bigname_phase "$copy_tables.columns" "$copy_tables.rows"
+            rm -f -- "$copy_tables.columns" "$copy_tables.rows"
             if ! diff -u "$frozen_schema_catalog" <(frozen_schema_catalog bigname_phase) >&2; then
                 printf '%s\n' "the exercised replay's rows replayed with the schema named bigname_phase give another catalog than $(basename "$frozen_schema_catalog") (diff above: - frozen, + literal name)" >&2
                 exit 1
@@ -1529,6 +1534,19 @@ PLANT
             *) printf '%s\n' "the role and database snapshot does not see a planted connection limit on the database" >&2; exit 1 ;;
         esac
         printf 'ALTER DATABASE "%s" CONNECTION LIMIT -1;\n' "$literal_database" | run_psql_as_owner
+        # And another database's: the one the scratch-name replays ran in,
+        # put back to its own limit.
+        other_database="$(printf '\\pset tuples_only on\n\\pset format unaligned\nSELECT current_database();\n' \
+            | database="$main_database" BIGNAME_DATABASE_URL="$main_url" run_psql_as_owner)"
+        other_connlimit="$(printf '\\pset tuples_only on\n\\pset format unaligned\nSELECT datconnlimit FROM pg_database WHERE datname = %s;\n' "'$other_database'" | run_psql_as_owner)"
+        printf 'ALTER DATABASE "%s" CONNECTION LIMIT 7;\n' "$other_database" | run_psql_as_owner
+        case "$(diff "$settings_before" <(role_and_database_settings) || true)" in
+            *"> database $other_database: "*"connlimit=7 "*) ;;
+            *) printf '%s\n' "the role and database snapshot does not see a planted connection limit on another database" >&2
+               printf 'ALTER DATABASE "%s" CONNECTION LIMIT %s;\n' "$other_database" "$other_connlimit" | run_psql_as_owner
+               exit 1 ;;
+        esac
+        printf 'ALTER DATABASE "%s" CONNECTION LIMIT %s;\n' "$other_database" "$other_connlimit" | run_psql_as_owner
         # The column-order rule reads the kept fresh order: a baseline column
         # dropped and added back, so now last, must be refused.
         column_order_of bigname_phase > "$planted_order"
@@ -1546,7 +1564,7 @@ PLANT
             "the replay with the phase schema named bigname_phase, unrewritten as sqlx applies it and run as the configured user, failed above after the same replays under the scratch name and the login passed; unless the failure is the connection or set-up, a schema-migration reads the name in a form the rewrite cannot see (assembled, in another case, encoded), or reads who runs it, and behaves differently -- name the schema literally and do not branch on identity" >&2
         exit 1
     fi
-    refusal_assertions_passed=$((refusal_assertions_passed + 6 + populated))
+    refusal_assertions_passed=$((refusal_assertions_passed + 7 + populated))
     if [ "$populated" = 0 ]; then
         printf '%s\n' "note: the configured user is not a superuser, so the exercised replay's rows were not replayed under the literal name" >&2
         expected_refusal_assertions=$((expected_refusal_assertions - 1))
@@ -1929,13 +1947,66 @@ assert_refused_kinds_are_seen() {
 # sequence once more is what sqlx does on an initialized database at deploy
 # (every file is required to be idempotent once applied), and the result must
 # be the frozen artifact too, rows and all.
+# Schema-migrations change the shape, not the facts. On an initialized
+# database no file may add or remove a row, and none may rewrite the raw facts
+# Ingest recorded or the normalized events Interpret derived (storage.md,
+# Table ownership), which a redo re-derives from rather than repairs; a
+# backfill of coordination or bookkeeping rows keeps its row count and passes.
+# Contents are read over the columns a table had before the replay, so a
+# column the replay adds is not a change, and a table it drops is retired.
+table_columns_of() {
+    printf '\\pset format unaligned\n\\pset tuples_only on\n'
+    printf "SELECT quote_ident(c.relname) || '|' || CASE WHEN left(c.relname, 4) = 'raw_' OR c.relname = 'normalized_events' THEN string_agg(quote_ident(a.attname), ', ' ORDER BY a.attnum) ELSE '' END FROM pg_class c JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped WHERE c.relnamespace = '\"%s\"'::regnamespace AND c.relkind IN ('r', 'p') GROUP BY c.relname ORDER BY c.relname;\n" "$1"
+}
+rows_state_sql() {
+    local schema="$1" table columns
+    printf '\\pset format unaligned\n\\pset tuples_only on\n'
+    while IFS='|' read -r table columns; do
+        if [ -z "$columns" ]; then
+            printf "SELECT '%s rows=' || count(*) FROM \"%s\".%s;\n" "$table" "$schema" "$table"
+        else
+            printf "SELECT '%s rows=' || count(*) || ' content=' || md5(COALESCE(string_agg(r, ',' ORDER BY r), '')) FROM (SELECT md5(ROW(%s)::text) AS r FROM \"%s\".%s) x;\n" \
+                "$table" "$columns" "$schema" "$table"
+        fi
+    done < "$2"
+}
+assert_replay_keeps_rows() {
+    local context="$1" schema="$2" before_columns="$3" before_state="$4" kept status=0
+    kept="$(mktemp "${TMPDIR:-/tmp}/schema-v2-rows-kept.XXXXXX")"
+    awk -F'|' 'NR == FNR { present[$1] = 1; next } present[$1]' <(table_columns_of "$schema" | run_psql) "$before_columns" > "$kept"
+    if ! diff -u <(awk 'NR == FNR { split($0, f, "|"); keep[f[1]] = 1; next } keep[$1]' "$kept" "$before_state") \
+        <(rows_state_sql "$schema" "$kept" | run_psql) >&2; then
+        printf '%s\n' \
+            "the $context replay added, removed or rewrote rows (diff above: - before, + after); a schema-migration changes the shape, not the facts: it may not add or remove rows on an initialized database, or rewrite raw facts or normalized events, which a redo re-derives from" >&2
+        status=1
+    fi
+    rm -f -- "$kept"
+    [ "$status" = 0 ] || exit 1
+}
 assert_exercised_schema_matches_frozen() {
-    local exercised migration_file
+    local exercised migration_file rows_columns rows_before planted
     exercised="$(mktemp "${TMPDIR:-/tmp}/schema-v2-exercised-catalog.XXXXXX")"
     for migration_file in $(production_schema_migrations); do
         printf 'exercised|%s\n' "$(basename "$migration_file")" >> "$migration_application_log"
     done
+    rows_columns="$(mktemp "${TMPDIR:-/tmp}/schema-v2-rows-columns.XXXXXX")"
+    rows_before="$(mktemp "${TMPDIR:-/tmp}/schema-v2-rows-before.XXXXXX")"
+    table_columns_of "$scratch_schema" | run_psql > "$rows_columns"
+    rows_state_sql "$scratch_schema" "$rows_columns" | run_psql > "$rows_before"
+    # The rule proves itself on the exercised rows, rolled back: a removed
+    # normalized event and a rewritten one must each move its line.
+    for planted in \
+        "DELETE FROM \"$scratch_schema\".normalized_events WHERE ctid = (SELECT ctid FROM \"$scratch_schema\".normalized_events LIMIT 1);" \
+        "UPDATE \"$scratch_schema\".normalized_events SET after_state = COALESCE(after_state, '{}'::jsonb) || '{\"planted\": true}' WHERE ctid = (SELECT ctid FROM \"$scratch_schema\".normalized_events LIMIT 1);"; do
+        case "$(diff "$rows_before" <({ printf 'BEGIN;\n%s\n' "$planted"; rows_state_sql "$scratch_schema" "$rows_columns"; printf 'ROLLBACK;\n'; } | run_psql) || true)" in
+            *"> normalized_events rows="*) ;;
+            *) printf '%s\n' "the row rule does not see a planted change to the exercised rows: $planted" >&2; exit 1 ;;
+        esac
+        refusal_assertions_passed=$((refusal_assertions_passed + 1))
+    done
     replay_schema_migrations "exercised scratch schema"
+    assert_replay_keeps_rows "exercised scratch schema" "$scratch_schema" "$rows_columns" "$rows_before"
+    rm -f -- "$rows_columns" "$rows_before"
     frozen_schema_catalog "$scratch_schema" > "$exercised"
     if ! diff -u "$frozen_schema_catalog" "$exercised" >&2; then
         printf '%s\n' \
@@ -2859,9 +2930,10 @@ migration_application_log="$(
 # Future entries must use basename|one-line reason.
 intentional_phase_migration_skips=()
 refusal_assertions_passed=0
-# Base 173, main added 90, this branch 180 (97 of them the backslash-command,
+# Base 173, main added 90, this branch 183 (100 of them the backslash-command,
 # psql-variable, schema-owner, parameter-privilege, installer-race,
-# other-database setting, outside-definition, SET-spelling, session-residue, session-identity (database, connection and
+# other-database setting and attribute, outside-definition, exercised-row,
+# SET-spelling, session-residue, session-identity (database, connection and
 # temporary namespace included), recorded-history, ambiguous foreign key,
 # assembled password, literal-name branch and column-order, baseline-residue,
 # setting-name, backend-status, routine quoting, extension-dependency,
@@ -2870,7 +2942,7 @@ refusal_assertions_passed=0
 # the merges fold main's five address-match, event-order and mirror-pointer
 # not-ready probes into their invalid ones (-5); predecessor proofs base 39,
 # main +7, this branch +1.
-expected_refusal_assertions=438
+expected_refusal_assertions=441
 predecessor_shape_proof_count=0
 expected_predecessor_shape_proof_count=47
 refusal_probe_seconds=0
