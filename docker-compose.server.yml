@@ -70,6 +70,15 @@ services:
       # ceiling with it: docs/deployment.md § Database connection budget.
       - -c
       - superuser_reserved_connections=${POSTGRES_SUPERUSER_RESERVED_CONNECTIONS:-3}
+      # Bigname's statements are many, short and poorly estimated (JSONB filters,
+      # partial expression indexes, temp tables), so the planner crosses the JIT
+      # cost threshold for work that finishes in milliseconds and then spends
+      # seconds compiling it, on every execution. Nothing Bigname runs benefits
+      # from JIT; CI and the local test harness already run without it. Opt a
+      # single heavy statement back in with SET LOCAL jit = on if ever needed.
+      # docs/deployment.md § PostgreSQL JIT.
+      - -c
+      - jit=${POSTGRES_JIT:-off}
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-bigname}
       POSTGRES_USER: ${POSTGRES_USER:-bigname}
