@@ -418,5 +418,6 @@ async fn profiled_mirror_substages_preserve_each_nonempty_closure_step() -> Resu
     Ok(())
 }
 
+#[cfg(test)]
 #[path = "mirror_dependency_repro.rs"]
 mod dependency_repro;

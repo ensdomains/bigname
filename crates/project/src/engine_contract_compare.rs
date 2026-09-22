@@ -5,8 +5,10 @@ use serde_json::{Value, json};
 use sqlx::{Postgres, Transaction};
 use std::collections::BTreeSet;
 
+#[cfg(test)]
 #[path = "engine_contract_compare_audit.rs"]
 pub(crate) mod audit;
+#[cfg(test)]
 #[path = "engine_contract_compare_snapshot.rs"]
 mod snapshot;
 pub(super) use snapshot::{Expectations, Snapshot, Snapshots, compare};

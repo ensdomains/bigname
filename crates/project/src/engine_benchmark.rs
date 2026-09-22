@@ -8,11 +8,14 @@ use sqlx::{Postgres, Transaction, postgres::PgConnectOptions, postgres::PgPoolOp
 
 use super::{BatchRequest, RunMode};
 
+#[cfg(test)]
 #[path = "engine_reference.rs"]
 mod reference_output;
 
+#[cfg(test)]
 #[path = "engine_benchmark_safety.rs"]
 mod safety;
+#[cfg(test)]
 #[path = "engine_same_head.rs"]
 mod same_head;
 
