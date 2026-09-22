@@ -87,9 +87,12 @@ async fn unchanged_mirror_sibling_and_evidence_ancestor_retain_all_fields() -> R
         "classification read must not republish its resolver"
     );
     let affected = selected_rows(&pool, &changed_id, V2_RESOURCE, true).await?;
+    // The rebuilt mirror still selects the evidence-only ancestor, which the mirror rejects.
+    let rebuilt = inventory(&pool, V2_RESOURCE).await?;
+    assert_eq!(rebuilt["chain_positions"]["target_block_number"], 12);
     assert_eq!(
-        inventory(&pool, V2_RESOURCE).await?["entries"][0]["record_key"],
-        "text:description"
+        rebuilt["provenance"]["mirror"]["mirrored_unsupported_reason"],
+        "ancestor_resolver_not_extended"
     );
     run(&pool, 12, 0, 12, None, RunMode::Normal).await?;
     let full = selected_rows(&pool, &changed_id, V2_RESOURCE, true).await?;

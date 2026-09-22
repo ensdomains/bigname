@@ -40,7 +40,7 @@ END $$;
 -- exist and both retired names to resolve to nothing, so the script fails
 -- instead of reporting success. README.md describes the recovery.
 -- The definition check matches the one in the schema-migration
--- 20260924120000_normalized_events_resolver_history_idx.sql. PostgreSQL always
+-- 20260925120000_normalized_events_resolver_history_idx.sql. PostgreSQL always
 -- prints the table's schema name, and a type's schema name only when the
 -- session search_path does not include it. The printed text is not rewritten to
 -- even that out, because a text replacement would also change a string literal

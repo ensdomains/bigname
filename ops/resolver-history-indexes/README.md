@@ -27,7 +27,7 @@ planner can match: Project's resolver scoping (`crates/project/src/scope`,
 inside a lateral `VALUES` list, which no expression index serves, and nothing
 else filters `PermissionChanged` by scope resolver. They are retired: dropped
 by the schema-migration and removed from the baseline in the same change.
-[ADR 0007](../../docs/adrs/0007-v1-schema-freeze.md) records both halves as
+[ADR 0008](../../docs/adrs/0008-v1-schema-freeze.md) records both halves as
 carve-out 6.
 
 These change access paths only: no normalized event, canonicality state, raw
@@ -93,7 +93,7 @@ never drop one while a phase runner is projecting. An interrupted concurrent
 drop of a retired index leaves it invalid; rerunning the script drops it.
 
 The matching versioned schema-migration
-`20260924120000_normalized_events_resolver_history_idx.sql` is a no-op before
+`20260925120000_normalized_events_resolver_history_idx.sql` is a no-op before
 the phase schema exists. Where the table exists it builds each kept index that
 is missing — as an ordinary, write-blocking `CREATE INDEX`, which is why a
 large database prebuilds first — and, where a kept name is already taken,

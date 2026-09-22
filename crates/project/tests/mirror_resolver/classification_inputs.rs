@@ -13,12 +13,15 @@ async fn node_only_ancestor_classification_change_invalidates_mirror() -> Result
     sqlx::query("UPDATE normalized_events SET logical_name_id=NULL,resource_id=NULL WHERE event_identity=$1")
         .bind(format!("{}:parent-pointer", fixture.id)).execute(&pool).await?;
     run(&pool, 11, 0, 11, None, RunMode::Normal).await?;
+    let before = inventory(&pool, V2_RESOURCE).await?;
+    assert_eq!(before["support_status"], "unsupported");
     assert_eq!(
-        inventory(&pool, V2_RESOURCE).await?["support_status"],
-        "supported"
+        before["provenance"]["mirror"]["mirrored_unsupported_reason"],
+        "ancestor_resolver_not_extended"
     );
     // Publish a new admitted classification at block12; no registry pointer or
-    // record changes accompany it. Extended ancestor forwarding is unsupported.
+    // record changes accompany it. The ancestor is still not derived through, but the row
+    // must be rebuilt because the reason moves to the extended-resolver case.
     sqlx::query("INSERT INTO normalized_events(event_identity,namespace,event_kind,source_family,manifest_version,source_manifest_id,chain_id,block_number,block_hash,derivation_kind,canonicality_state,after_state,raw_fact_ref)
         SELECT 'parent-classification-update',namespace,event_kind,source_family,manifest_version,source_manifest_id,chain_id,12,$1,derivation_kind,canonicality_state,
                jsonb_set(after_state,'{manifest_payload,contracts,1,read_features}','[\"ensip10_extended_resolver\"]'),raw_fact_ref
@@ -65,8 +68,14 @@ async fn stale_mirror_classification_is_rebuilt_even_on_record_only_update() -> 
         resolver_current(&pool, PARENT_RESOLVER).await?["support_status"],
         "supported"
     );
-    assert_eq!(affected["support_status"], "supported");
-    assert_eq!(affected["entries"][0]["value"], "new child value");
+    // The mirror still rejects the non-extended ancestor, and the rebuilt row names that reason
+    // from the fresh classification, not the stale retained one.
+    assert_eq!(affected["support_status"], "unsupported");
+    assert_eq!(
+        affected["provenance"]["mirror"]["mirrored_unsupported_reason"],
+        "ancestor_resolver_not_extended"
+    );
+    assert_eq!(affected["entries"], json!([]));
     assert_eq!(affected["chain_positions"]["target_block_number"], 12);
     run(&pool, 12, 0, 12, None, RunMode::Normal).await?;
     assert_eq!(affected, inventory(&pool, V2_RESOURCE).await?);
@@ -107,7 +116,11 @@ async fn absent_input_ancestor_stays_absent_while_missing_classification_rebuild
         "supported"
     );
     let affected = inventory(&pool, V2_RESOURCE).await?;
-    assert_eq!(affected["support_status"], "supported");
+    assert_eq!(affected["support_status"], "unsupported");
+    assert_eq!(
+        affected["provenance"]["mirror"]["mirrored_unsupported_reason"],
+        "ancestor_resolver_not_extended"
+    );
     run(&pool, 12, 0, 12, None, RunMode::Normal).await?;
     assert_eq!(affected, inventory(&pool, V2_RESOURCE).await?);
     database.cleanup().await?;

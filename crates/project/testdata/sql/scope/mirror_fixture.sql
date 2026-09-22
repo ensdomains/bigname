@@ -96,6 +96,15 @@ CREATE INDEX IF NOT EXISTS normalized_events_project_v1_pointer_node_idx
       AND after_state ->> 'node' IS NOT NULL
       AND consumer_visibility = 'activated'
       AND canonicality_state IN ('canonical', 'safe', 'finalized');
+CREATE INDEX IF NOT EXISTS normalized_events_project_v1_pointer_addressed_node_idx
+    ON normalized_events(chain_id, namespace,
+        lower(COALESCE(after_state ->> 'child_node', after_state ->> 'namehash', after_state ->> 'node')),
+        block_number)
+    WHERE event_kind = 'ResolverChanged'
+      AND source_family IN ('ens_v1_registry_l1', 'ens_v1_registrar_l1', 'ens_v1_wrapper_l1')
+      AND COALESCE(after_state ->> 'child_node', after_state ->> 'namehash', after_state ->> 'node') IS NOT NULL
+      AND consumer_visibility = 'activated'
+      AND canonicality_state IN ('canonical', 'safe', 'finalized');
 
 CREATE TEMP TABLE project_changed_events (LIKE normalized_events);
 INSERT INTO chain_lineage VALUES('bench',10,'block','canonical'),('bench',11,'future','canonical'),('bench',9,'orphan','orphaned'),('other',10,'block','canonical');

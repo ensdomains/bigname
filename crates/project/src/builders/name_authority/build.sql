@@ -602,14 +602,18 @@
                        WHEN regime.logical_name_id IS NOT NULL THEN 'ens_v2'
                        WHEN shared.logical_name_id IS NOT NULL
                         AND COALESCE(summary.has_ens_v2, false) THEN 'ens_v2'
-                       WHEN (
-                           COALESCE(summary.has_ens_v1, false)
-                           OR COALESCE(event_summary.has_ens_v1, false)
-                       ) AND (
-                           COALESCE(summary.has_ens_v2, false)
-                           OR COALESCE(event_summary.has_ens_v2, false)
-                       ) THEN NULL
+                       -- Follow the chain (docs/adrs/0007-follow-the-chain-ens-authority.md). Only a
+                       -- registered ENSv2 entry opens an ENSv2 binding, and it decides the name
+                       -- whatever ENSv1 holds, without a proof; a reservation opens none and
+                       -- defers to ENSv1. Only arms that hold the name now are candidates.
+                       -- (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/universalResolver/libraries/LibResolution.sol:L58-L85 @ ens_v2_sepolia_20260916@366de741)
+                       -- (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/resolver/ENSV1Resolver.sol:L40-L43 @ ens_v2_sepolia_20260916@366de741)
+                       WHEN COALESCE(summary.has_ens_v2, false) THEN 'ens_v2'
                        WHEN summary.arm_count = 1 THEN summary.sole_arm
+                       -- Nothing is open on either arm: ENSv1 history decides first, as it
+                       -- would for a name with no ENSv2 entry.
+                       WHEN summary.logical_name_id IS NULL
+                        AND COALESCE(event_summary.has_ens_v1, false) THEN 'ens_v1'
                        WHEN summary.logical_name_id IS NULL
                         AND event_summary.arm_count = 1 THEN event_summary.sole_arm
                    END AS selected_authority_arm,
@@ -620,17 +624,27 @@
                    proof.successor_resource_id,
                    released.released_v2_resource_id,
                    released_v1.released_v1_resource_id, released_v1.released_v1_binding_id,
+                   -- Any ENSv1 evidence, open or historical: a shared-infrastructure selection
+                   -- of ENSv2 over it publishes no authority epoch.
                    COALESCE(summary.has_ens_v1, false)
                        OR COALESCE(event_summary.has_ens_v1, false) AS has_ens_v1,
-                   COALESCE(summary.has_ens_v2, false)
-                       OR COALESCE(event_summary.has_ens_v2, false) AS has_ens_v2,
                    (shared.logical_name_id IS NOT NULL
                     AND COALESCE(summary.has_ens_v2, false)
                     AND proof.logical_name_id IS NULL AND released.logical_name_id IS NULL AND regime.logical_name_id IS NULL) AS shared_infrastructure_authority,
+                   -- The arm was selected from event history with nothing open: the sole arm with
+                   -- history, or ENSv1 when both arms have history and no ENSv2 release tombstone
+                   -- or regime applies. Its lifecycle state then reads that arm's events.
                    COALESCE(
                        proof.logical_name_id IS NULL
                            AND summary.logical_name_id IS NULL
-                           AND event_summary.arm_count = 1,
+                           AND (
+                               event_summary.arm_count = 1
+                               OR (
+                                   released.logical_name_id IS NULL
+                                   AND regime.logical_name_id IS NULL
+                                   AND event_summary.has_ens_v1
+                               )
+                           ),
                        false
                    ) AS bindingless_event_authority,
                    CASE
@@ -740,8 +754,7 @@
         )
         SELECT selected.logical_name_id, selected.selected_authority_arm,
                selected.selected_resource_id, selected.selected_binding_id,
-               (ownerless.logical_name_id IS NOT NULL AND selected.selected_binding_id IS NULL
-                AND NOT (selected.has_ens_v1 AND selected.has_ens_v2)) AS known_ownerless_registry,
+               ownerless_profile.eligible AS known_ownerless_registry,
                ownerless.resource_id AS ownerless_registry_resource_id, ownerless.owner_getter_reason,
                (selected.released_v1_binding_id IS NOT NULL
                 AND selected.selected_binding_id = selected.released_v1_binding_id) AS released_v1_tombstone,
@@ -758,16 +771,7 @@
                    ELSE 'registered'
                END AS lifecycle_state,
                CASE
-                   WHEN selected.selected_authority_arm IS NULL AND selected.has_ens_v1 AND selected.has_ens_v2
-                    AND selected.deployment_profile = 'sepolia'
-                       THEN 'independent_ens_deployments_overlap'
-                   WHEN selected.selected_authority_arm IS NULL AND selected.has_ens_v1 AND selected.has_ens_v2
-                       THEN 'conflicting_current_ens_authority'
-                   WHEN ownerless.logical_name_id IS NOT NULL AND NOT (
-                        selected.has_ens_v1 AND selected.has_ens_v2
-                    )
-                    AND selected.selected_binding_id IS NULL
-                       THEN NULL
+                   WHEN ownerless_profile.eligible THEN NULL
                    WHEN selected.selected_binding_id IS NULL THEN 'current_authority_not_projected'
                END AS unsupported_reason,
                selected.deployment_profile,
@@ -780,6 +784,14 @@
                        THEN 'ens_v1' END)) AS resource_authority_context
         FROM selected
         LEFT JOIN project_latest_registry_owner ownerless USING (logical_name_id)
+        -- The ownerless-registry profile serves an ENSv1 or Basenames registry row, so it never
+        -- applies under ENSv2 authority: a released ENSv2 regime keeps retained or later ENSv1
+        -- registry facts as history (docs/glossary.md#released-v2-authority).
+        CROSS JOIN LATERAL (
+            SELECT ownerless.logical_name_id IS NOT NULL
+                   AND selected.selected_binding_id IS NULL
+                   AND selected.selected_authority_arm IS DISTINCT FROM 'ens_v2' AS eligible
+        ) ownerless_profile
         LEFT JOIN LATERAL (
             SELECT event.event_kind
             FROM project_events event

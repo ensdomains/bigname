@@ -1,10 +1,15 @@
 //! A resource whose latest pointer is a declared ENSv1 mirror resolver: Project re-points it at the
-//! ENSv1 resolver the mirror would call for the queried name, the exact node's registry resolver
-//! first, else the nearest ancestor's (the root is never consulted), and attributes that
-//! resolver's node-keyed writes for the queried node. When the mirror cannot be followed, Project
-//! publishes the resource's inventory row with no attributed writes at all
+//! ENSv1 resolver the mirror would call for the queried name when the registry walk selects that
+//! resolver at the queried node itself, and attributes that resolver's node-keyed writes for the
+//! queried node. The walk reads each registry pointer by the node the event addresses
+//! (`child_node`, then `namehash`, then `node`) and never consults the root. The mirror keeps a
+//! nearest resolver found on an ancestor only when it supports `IExtendedResolver`, and Project
+//! derives through neither kind of ancestor, so a nearest ancestor attributes nothing and the walk
+//! does not continue past it. When the mirror cannot be followed, Project publishes the resource's
+//! inventory row with no attributed writes at all
 //! (`crates/project/src/builders/record_inventory/mirror.rs`).
-//! (upstream: .refs/ens_v2/contracts/src/resolver/ENSV1Resolver.sol:L38-L41 @ ens_v2@a971bd64)
+//! (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/resolver/ENSV1Resolver.sol:L40-L43 @ ens_v2_sepolia_20260916@366de741)
+//! (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/universalResolver/libraries/LibResolution.sol:L39-L48 @ ens_v2_sepolia_20260916@366de741)
 //! (upstream: .refs/ens_v1/contracts/universalResolver/RegistryUtils.sol:L25-L38 @ ens_v1@91c966f)
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -199,6 +204,28 @@ pub(super) fn push_empty_mirror_writes_for_test(
     push_mirror_writes(builder, walk, published);
 }
 
+/// The mirror substitution statement over one consulted node, the queried name itself, for plan
+/// tests that need the registry pointer lookup to run.
+#[cfg(test)]
+pub(super) fn push_exact_node_mirror_writes_for_test(
+    builder: &mut QueryBuilder<'static, Postgres>,
+    resource_id: Uuid,
+    node: &str,
+    raw_labels: &[&str],
+    published: Option<&BTreeMap<String, i64>>,
+) {
+    let walk: &'static MirrorWalk = Box::leak(Box::new(MirrorWalk {
+        resource_ids: vec![resource_id],
+        chain_ids: vec!["ethereum-mainnet".to_owned()],
+        namespaces: vec!["ens".to_owned()],
+        depths: vec![0],
+        nodes: vec![node.to_owned()],
+        labels: vec![Value::from(raw_labels.to_vec())],
+        queried_nodes: vec![node.to_owned()],
+    }));
+    push_mirror_writes(builder, walk, published);
+}
+
 /// `SELECT resource_id, normalized_event_id`: one row with a null id for every followed mirror,
 /// and one per node-keyed write of the ENSv1 resolver it follows for the queried node.
 fn push_mirror_writes<'a>(
@@ -248,7 +275,10 @@ fn push_mirror_writes<'a>(
                 WHERE registry.chain_id = walk.chain_id
                   AND registry.event_kind = 'ResolverChanged'
                   AND registry.source_family IN {ENS_V1_POINTER_FAMILIES}
-                  AND lower(registry.after_state ->> 'node') = lower(surface.namehash)
+                  AND COALESCE(registry.after_state ->> 'child_node', registry.after_state ->> 'namehash',
+                               registry.after_state ->> 'node') IS NOT NULL
+                  AND lower(COALESCE(registry.after_state ->> 'child_node', registry.after_state ->> 'namehash',
+                                     registry.after_state ->> 'node')) = lower(surface.namehash)
                   AND registry.namespace = surface.namespace"
     ));
     push_readable_event(builder, "registry", published);
@@ -291,9 +321,10 @@ fn push_mirror_writes<'a>(
     // (upstream: .refs/ens_v1/contracts/universalResolver/ResolverCaller.sol:L66-L87 @ ens_v1@91c966f)
     // (upstream: .refs/ens_v1/contracts/universalResolver/ResolverCaller.sol:L108-L117 @ ens_v1@91c966f)
     // (upstream: .refs/ens_v1/contracts/universalResolver/ResolverCaller.sol:L175-L187 @ ens_v1@91c966f)
-    // Excluding it is bigname's attribution rule, mirroring the Project producer that marks such
-    // a row `ensip10_extended_resolver`
-    // (bigname: `crates/project/src/builders/record_inventory/mirror.rs:156-161`).
+    // A non-extended ancestor is rejected by the mirror outright. Following only the exact node is
+    // bigname's attribution rule, mirroring the Project producer that marks an ancestor row
+    // `ensip10_extended_resolver` or `ancestor_resolver_not_extended`
+    // (bigname: `crates/project/src/builders/record_inventory/mirror.rs:169-179`).
     builder.push(
         "
               ON declaration.active
@@ -303,9 +334,7 @@ fn push_mirror_writes<'a>(
               AND resolver.support_status = 'supported'
               AND resolver.declared_summary #>> '{classification,source_family}' =
                   'ens_v1_resolver_l1'
-              AND NOT (nearest.ancestor_depth > 0
-                       AND COALESCE(resolver.declared_summary #> '{classification,read_features}',
-                                    '[]'::jsonb) ? 'ensip10_extended_resolver')
+              AND nearest.ancestor_depth = 0
         )
         SELECT followed.resource_id, NULL::bigint AS normalized_event_id FROM followed
         UNION ALL

@@ -254,9 +254,10 @@ async fn assert_exact_name_authority(
 /// relation asserted *after* that authority epoch started — the selection would
 /// silently drop it, and dropping a live contradiction is what this refuses.
 ///
-/// A released ENSv2 child is deliberately outside that: release publishes no row and
-/// never falls back to ENSv1, so a later ENSv1 relation is residue with nothing left to
-/// contradict rather than a dual-current pair.
+/// A released ENSv2 child held by a migration proof or a qualifying ENSv2 release tombstone or
+/// regime is deliberately outside that: release publishes no row and never falls back to ENSv1,
+/// so a later ENSv1 relation is residue with nothing left to contradict rather than a
+/// dual-current pair. A child without those follows its selected arm.
 async fn assert_child_authority(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,

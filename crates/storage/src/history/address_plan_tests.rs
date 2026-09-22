@@ -12,7 +12,8 @@ use sqlx::{PgConnection, Postgres, QueryBuilder, Row};
 use uuid::Uuid;
 
 use super::super::attribution::{
-    push_empty_mirror_writes_for_test, push_pointer_window_attribution_for_test,
+    push_empty_mirror_writes_for_test, push_exact_node_mirror_writes_for_test,
+    push_pointer_window_attribution_for_test,
 };
 use super::super::{
     EventHistoryReadFilter,
@@ -56,6 +57,15 @@ async fn address_history_anchor_plan_uses_address_match_indexes() -> Result<()> 
 #[tokio::test]
 async fn bounded_record_attribution_plans_do_not_scan_normalized_events() -> Result<()> {
     with_fixture("bounded_attribution_plan", check_attribution_plans).await
+}
+
+#[tokio::test]
+async fn bounded_mirror_registry_probe_uses_the_addressed_node_index() -> Result<()> {
+    with_fixture(
+        "bounded_mirror_registry_plan",
+        check_mirror_registry_probe_plan,
+    )
+    .await
 }
 
 #[tokio::test]
@@ -194,8 +204,9 @@ async fn check_anchor_plan(connection: &mut PgConnection) -> Result<()> {
 /// The bounded attribution reader's two statements: the pointer-window attribution for the
 /// target's resource, and the mirror substitution with an empty walk (no mirror pointer, the
 /// common case on Mainnet). Neither may read `normalized_events` sequentially. The ENSv2
-/// declared-resolver arm, the `ResolverRecordLinked` scan and the mirror registry lookup have no
-/// dedicated index (docs/storage.md), so this checks only that each read is an index read.
+/// declared-resolver arm and the `ResolverRecordLinked` scan have no dedicated index
+/// (docs/storage.md), so this checks only that each read is an index read. The mirror registry
+/// lookup, which an empty walk never runs, is checked by `check_mirror_registry_probe_plan`.
 async fn check_attribution_plans(connection: &mut PgConnection) -> Result<()> {
     let resource_ids: &'static [Uuid] = Box::leak(Box::new([target_resource()]));
     let published =
@@ -225,6 +236,66 @@ async fn check_attribution_plans(connection: &mut PgConnection) -> Result<()> {
     ensure!(
         plan_failures.is_empty(),
         "bounded attribution plans:\n{}",
+        plan_failures.join("\n\n")
+    );
+    Ok(())
+}
+
+/// The mirror substitution with a walk over the target's own node, so the ENSv1 registry pointer
+/// lookup runs. That lookup keys each `ResolverChanged` by the node it addresses (`child_node`,
+/// then `namehash`, then `node`) and must read it through
+/// `normalized_events_project_v1_pointer_addressed_node_idx` in both the generic and the bound
+/// plan (docs/storage.md), not through a broader index filtered by that expression.
+async fn check_mirror_registry_probe_plan(connection: &mut PgConnection) -> Result<()> {
+    const INDEX: &str = "normalized_events_project_v1_pointer_addressed_node_idx";
+    fn registry_reads<'a>(node: &'a Value, output: &mut Vec<&'a Value>) {
+        // The planner renames the lateral subquery's scan (`registry_1`).
+        if node["Relation Name"] == "normalized_events"
+            && node["Alias"]
+                .as_str()
+                .is_some_and(|alias| alias.starts_with("registry"))
+        {
+            output.push(node);
+        }
+        for child in node["Plans"].as_array().into_iter().flatten() {
+            registry_reads(child, output);
+        }
+    }
+    let published =
+        std::collections::BTreeMap::from([("ethereum-mainnet".to_owned(), UNRELATED_NAMES + 10)]);
+    let target_hash = format!("0x{:064x}", 0xa11);
+    let push_mirror = |builder: &mut QueryBuilder<'static, Postgres>| {
+        push_exact_node_mirror_writes_for_test(
+            builder,
+            target_resource(),
+            &target_hash,
+            &["target", "eth"],
+            Some(&published),
+        );
+    };
+    let mut plan_failures = Vec::new();
+    for plan in explain_both(connection, push_mirror).await? {
+        let mut reads = Vec::new();
+        registry_reads(&plan[0]["Plan"], &mut reads);
+        let keyed = !reads.is_empty()
+            && reads.iter().all(|read| {
+                let mut indexes = read["Index Name"].as_str().into_iter().collect::<Vec<_>>();
+                bitmap_index_names(read, &mut indexes);
+                indexes == [INDEX]
+            });
+        if !keyed {
+            plan_failures.push(format!("registry probe does not use {INDEX}: {plan}"));
+        }
+        if let Err(error) = assert_no_event_seq_scan("mirror registry", &plan) {
+            plan_failures.push(error.to_string());
+        }
+    }
+    let mut mirror = QueryBuilder::<Postgres>::new("");
+    push_mirror(&mut mirror);
+    mirror.build().fetch_all(&mut *connection).await?;
+    ensure!(
+        plan_failures.is_empty(),
+        "mirror registry plans:\n{}",
         plan_failures.join("\n\n")
     );
     Ok(())

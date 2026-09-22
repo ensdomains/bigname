@@ -1176,7 +1176,7 @@ assert_frozen_schema_fingerprint() {
         printf '%s\n' "wrote $(basename "$frozen_schema_catalog") ($(wc -l < "$observed" | tr -d ' ') lines)"
     elif ! diff -u "$frozen_schema_catalog" "$observed" >&2; then
         printf '%s\n' \
-            "the frozen artifact's catalog differs from $(basename "$frozen_schema_catalog") (diff above); a schema change lands with SCHEMA_V2_APPLY_CHECK_WRITE_FINGERPRINT=1 regenerating it in the same change, under an ADR 0007 carve-out or amendment" >&2
+            "the frozen artifact's catalog differs from $(basename "$frozen_schema_catalog") (diff above); a schema change lands with SCHEMA_V2_APPLY_CHECK_WRITE_FINGERPRINT=1 regenerating it in the same change, under an ADR 0008 carve-out or amendment" >&2
         rm -f -- "$observed"
         exit 1
     fi
@@ -1654,7 +1654,7 @@ assert_frozen_catalog_sees_planted_changes() {
 # -- and any cast to or from a phase type is refused outright, named by kind,
 # rather than fingerprinted: the catalog above describes what the schema may
 # hold, and a carve-out that needs a new kind extends this rule under ADR
-# 0007. Refusing is the closed form of the catalog: an object kind it does
+# 0008. Refusing is the closed form of the catalog: an object kind it does
 # not describe cannot appear unobserved.
 refused_object_kinds_sql="$(cat <<'KINDS_SQL'
 SELECT kind || ' ' || name AS refused_object FROM (
@@ -1737,7 +1737,7 @@ assert_schema_holds_only_allowed_kinds() {
     local schema="$1" label="$2" refused
     refused="$(refused_object_kinds_of "$schema")"
     if [ -n "$refused" ]; then
-        printf '%s\n' "$label holds an object kind the phase schema is closed to: ${refused//$'\n'/; }; a carve-out that needs it extends the closed-kind rule in schema-v2/apply-check.sh under ADR 0007" >&2
+        printf '%s\n' "$label holds an object kind the phase schema is closed to: ${refused//$'\n'/; }; a carve-out that needs it extends the closed-kind rule in schema-v2/apply-check.sh under ADR 0008" >&2
         exit 1
     fi
 }
@@ -1832,7 +1832,7 @@ assert_exercised_schema_matches_frozen() {
 assert_documented_head_is_newest_migration() {
     local newest documented doc
     newest="$(ls "$ROOT"/migrations/*.sql | sort | tail -n 1 | xargs basename)"
-    for doc in docs/adrs/0007-v1-schema-freeze.md docs/storage.md; do
+    for doc in docs/adrs/0008-v1-schema-freeze.md docs/storage.md; do
         documented="$(grep -oE 'migrations/[0-9]{14}_[a-z0-9_]+\.sql' "$ROOT/$doc" | head -n 1 | sed 's#^migrations/##')"
         if [ -z "$documented" ]; then
             printf '%s\n' "$doc names no schema-migration head" >&2
@@ -1840,7 +1840,7 @@ assert_documented_head_is_newest_migration() {
         fi
         if [ "$documented" != "$newest" ]; then
             printf '%s\n' \
-                "$doc names the schema-migration head $documented, but the newest file in migrations/ is $newest; advance the frozen head in ADR 0007 and storage.md in the change that lands the schema-migration" >&2
+                "$doc names the schema-migration head $documented, but the newest file in migrations/ is $newest; advance the frozen head in ADR 0008 and storage.md in the change that lands the schema-migration" >&2
             exit 1
         fi
     done
@@ -2739,18 +2739,19 @@ migration_application_log="$(
 # Future entries must use basename|one-line reason.
 intentional_phase_migration_skips=()
 refusal_assertions_passed=0
-# Base 173, main added 78, this branch 171 (88 of them the backslash-command,
+# Base 173, main added 90, this branch 171 (88 of them the backslash-command,
 # SET-spelling, session-residue, session-identity (database, connection and
 # temporary namespace included), recorded-history, ambiguous foreign key,
 # assembled password, literal-name branch and column-order, baseline-residue,
 # setting-name, backend-status, routine quoting, extension-dependency,
 # handler, literal-name identity, outside-object, populated, ownership,
 # constraint-trigger and database-attribute plants), and
-# the merges fold main's four address-match and event-order not-ready probes
-# into their invalid ones (-4); predecessor proofs base 39, +6, +1.
-expected_refusal_assertions=418
+# the merges fold main's five address-match, event-order and mirror-pointer
+# not-ready probes into their invalid ones (-5); predecessor proofs base 39,
+# main +7, this branch +1.
+expected_refusal_assertions=429
 predecessor_shape_proof_count=0
-expected_predecessor_shape_proof_count=46
+expected_predecessor_shape_proof_count=47
 refusal_probe_seconds=0
 timing_started=$SECONDS
 
@@ -2803,7 +2804,7 @@ trap 'exit 143' TERM
 # own. Anything else in a CREATE EXTENSION statement -- a third extension, another
 # schema, a second statement after the semicolon -- fails here rather than
 # running on the owner's connection; a new extension is a schema change and
-# joins this list under an ADR 0007 carve-out or amendment. A real
+# joins this list under an ADR 0008 carve-out or amendment. A real
 # init-schema on an empty database has only the baseline to install them, so
 # both must still be declared there.
 # The statements of an SQL file, one per line with whitespace collapsed and
@@ -2896,7 +2897,7 @@ check_baseline_extensions() {
             *)
                 printf '%s\n' \
                     "schema-v2/baseline carries a CREATE EXTENSION statement this check does not know: $extension_statement" \
-                    "only the two reviewed btree_gist and pgcrypto statements run on the owner's connection; a new extension is a schema change under ADR 0007 and joins the reviewed list here" >&2
+                    "only the two reviewed btree_gist and pgcrypto statements run on the owner's connection; a new extension is a schema change under ADR 0008 and joins the reviewed list here" >&2
                 return 1
                 ;;
         esac
@@ -2968,7 +2969,7 @@ baseline_extension_statements="$(baseline_extension_statements_of "$ROOT/schema-
 # splitter cannot read, a psql backslash command included, is refused as well.
 # The baseline gets no per-file residue probe, so for its session settings
 # this text is the guard. A carve-out that needs session
-# state extends this rule under ADR 0007.
+# state extends this rule under ADR 0008.
 session_state_scanner='
     { text = text " " $0 }
     END {
@@ -3025,7 +3026,7 @@ assert_no_session_state_statements() {
                 exit 1 ;;
         esac
         if [ -n "$hits" ]; then
-            printf '%s\n' "session state is changed by a baseline file or schema-migration, which sqlx and the baseline session would carry into every later file: ${hits//$'\n'/; }; a setting scoped to one routine goes through set_config(..., true) and is restored there, and a carve-out that needs more extends the session-state rule in schema-v2/apply-check.sh under ADR 0007" >&2
+            printf '%s\n' "session state is changed by a baseline file or schema-migration, which sqlx and the baseline session would carry into every later file: ${hits//$'\n'/; }; a setting scoped to one routine goes through set_config(..., true) and is restored there, and a carve-out that needs more extends the session-state rule in schema-v2/apply-check.sh under ADR 0008" >&2
             exit 1
         fi
     done
@@ -3253,7 +3254,7 @@ assert_no_migration_branches_on_session_identity() {
         hits="$(session_identity_reads_of "$migration_file")"
         if [ -n "$hits" ]; then
             printf '%s\n' \
-                "$(basename "$migration_file") reads ${hits% }, which answers differently for this check's disposable login, scratch database and replay session than for the deployment writer, so a branch on identity, role existence, privilege, database, server address or temporary namespace takes a path here that sqlx migrate run does not; a schema-migration may not depend on who runs it or where, reads no setting but search_path and quote_all_identifiers and those by their literal names, and catches no error class that holds a privilege failure, and a carve-out that needs to extends the session-identity rule in schema-v2/apply-check.sh under ADR 0007" >&2
+                "$(basename "$migration_file") reads ${hits% }, which answers differently for this check's disposable login, scratch database and replay session than for the deployment writer, so a branch on identity, role existence, privilege, database, server address or temporary namespace takes a path here that sqlx migrate run does not; a schema-migration may not depend on who runs it or where, reads no setting but search_path and quote_all_identifiers and those by their literal names, and catches no error class that holds a privilege failure, and a carve-out that needs to extends the session-identity rule in schema-v2/apply-check.sh under ADR 0008" >&2
             exit 1
         fi
     done
@@ -3621,7 +3622,8 @@ for migration_file in \
     "$ROOT/migrations/20260923130000_normalized_events_chain_block_number_desc_idx.sql" \
     "$ROOT/migrations/20260923140000_project_name_surfaces_label_indexes.sql" \
     "$ROOT/migrations/20260923150000_child_registration_events.sql" \
-    "$ROOT/migrations/20260924120000_normalized_events_resolver_history_idx.sql"
+    "$ROOT/migrations/20260924120000_normalized_events_project_v1_pointer_addressed_node_idx.sql" \
+    "$ROOT/migrations/20260925120000_normalized_events_resolver_history_idx.sql"
 do
     emit_phase_migration "$migration_file" empty-schema | run_psql
 done
@@ -5737,6 +5739,121 @@ DROP INDEX $events_order_index;
 CREATE INDEX $events_order_index ON normalized_events ($events_order_wrong_keys);
 SQL
 done
+# Recreate the mirror pointer index from its preceding schema shape. Compare the
+# resulting catalog definition to the fresh baseline, then prove a rerun leaves
+# it unchanged. The same proofs as the event page order index above.
+mirror_pointer_migration="$ROOT/migrations/20260924120000_normalized_events_project_v1_pointer_addressed_node_idx.sql"
+mirror_pointer_install="$ROOT/ops/mirror-pointer-index/install.sql"
+mirror_pointer_readme=ops/mirror-pointer-index/README.md
+mirror_pointer_index=normalized_events_project_v1_pointer_addressed_node_idx
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    cat <<'SQL'
+CREATE TEMP TABLE expected_mirror_pointer_index AS
+SELECT pg_get_indexdef(indexrelid) AS definition
+FROM pg_index
+WHERE indexrelid = 'normalized_events_project_v1_pointer_addressed_node_idx'::regclass;
+DROP INDEX normalized_events_project_v1_pointer_addressed_node_idx;
+SQL
+    emit_phase_migration "$mirror_pointer_migration" preceding-shape
+    emit_phase_migration "$mirror_pointer_migration" baseline-first
+    cat <<'SQL'
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_index, expected_mirror_pointer_index expected
+        WHERE indexrelid = 'normalized_events_project_v1_pointer_addressed_node_idx'::regclass
+          AND indrelid = 'normalized_events'::regclass
+          AND indisvalid AND indisready
+          AND pg_get_indexdef(indexrelid) = expected.definition
+    ) THEN
+        RAISE EXCEPTION 'mirror pointer index upgrade differs from the baseline';
+    END IF;
+END $$;
+DROP TABLE expected_mirror_pointer_index;
+SQL
+} | run_psql
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    emit_phase_migration "$mirror_pointer_migration" baseline-first
+    assert_search_path_sql "$scratch_schema"
+    printf 'SET search_path TO public;\n'
+    emit_phase_migration "$mirror_pointer_migration" baseline-first
+    assert_search_path_sql public
+    printf 'BEGIN;\nSET LOCAL search_path TO "%s", public;\n' "$scratch_schema"
+    render_phase_migration "$mirror_pointer_migration"
+    assert_search_path_sql "$scratch_schema, public"
+    printf 'COMMIT;\n'
+    assert_search_path_sql public
+    emit_quote_all_identifiers_probe "$mirror_pointer_migration" in-transaction
+} | run_psql
+assert_migration_context_count "$mirror_pointer_migration" empty-schema 1
+assert_migration_context_count "$mirror_pointer_migration" preceding-shape 1
+assert_migration_context_count "$mirror_pointer_migration" baseline-first 3
+assert_concurrent_index_installer mirror-pointer \
+    "$mirror_pointer_index" \
+    "$mirror_pointer_install" \
+    "$mirror_pointer_readme" \
+    normalized_events \
+    "block_number, chain_id"
+build_invalid_index "$mirror_pointer_index" normalized_events
+assert_index_install_hint mirror-pointer-invalid-index-hint \
+    "$mirror_pointer_install" \
+    "An interrupted concurrent build leaves an invalid index. Confirm in pg_stat_progress_create_index that no build is still running, run DROP INDEX CONCURRENTLY $scratch_schema.$mirror_pointer_index, then rerun this script."
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    printf '%s\n' \
+        "DROP INDEX CONCURRENTLY $mirror_pointer_index;" \
+        "CREATE INDEX $mirror_pointer_index ON discovery_edges (chain_id);"
+} | run_psql >/dev/null
+assert_index_install_refusal mirror-pointer-index-on-another-table \
+    "$mirror_pointer_install" \
+    "$mirror_pointer_index is missing from $scratch_schema.normalized_events or is not valid and ready; follow the recovery steps in $mirror_pointer_readme before retrying"
+assert_index_install_hint mirror-pointer-index-on-another-table-hint \
+    "$mirror_pointer_install" \
+    "An index on $scratch_schema.discovery_edges holds this name. Rename or remove it, then rerun this script."
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    printf '%s\n' "DROP INDEX $mirror_pointer_index;"
+    render_phase_migration "$mirror_pointer_install"
+} | run_psql >/dev/null
+mirror_pointer_recovery="follow the recovery steps in $mirror_pointer_readme, then run the schema-migrations again"
+with_index_invalidated "$mirror_pointer_index" normalized_events \
+    assert_migration_refusal "invalid-$mirror_pointer_index" \
+    "$mirror_pointer_migration" \
+    "$mirror_pointer_index exists but is not a valid and ready index on $scratch_schema.normalized_events; $mirror_pointer_recovery" <<SQL
+SQL
+assert_migration_refusal "table-named-$mirror_pointer_index" \
+    "$mirror_pointer_migration" \
+    "$scratch_schema.$mirror_pointer_index is a table, not an index, so the index was never built; remove or rename that relation, then run the schema-migrations again" <<SQL
+DROP INDEX $mirror_pointer_index;
+CREATE TABLE $mirror_pointer_index ();
+SQL
+assert_migration_refusal "other-table-$mirror_pointer_index" \
+    "$mirror_pointer_migration" \
+    "$mirror_pointer_index exists but is not a valid and ready index on $scratch_schema.normalized_events; $mirror_pointer_recovery" <<SQL
+DROP INDEX $mirror_pointer_index;
+CREATE INDEX $mirror_pointer_index ON discovery_edges (chain_id);
+SQL
+mirror_pointer_reviewed_definition="$(
+    {
+        printf 'SET search_path TO "%s";\n' "$scratch_schema"
+        printf '%s\n' \
+            '\pset tuples_only on' \
+            '\pset format unaligned' \
+            "SET search_path TO pg_catalog;" \
+            "SELECT pg_get_indexdef('$scratch_schema.$mirror_pointer_index'::regclass);"
+    } | run_psql
+)"
+# The earlier node-only key is the index this one replaces for the mirror
+# lookups, so a prebuild with that key under this name must be refused.
+mirror_pointer_node_only_keys="chain_id, namespace, lower((after_state ->> 'node'::text)), block_number"
+assert_migration_refusal "node-only-keys-$mirror_pointer_index" \
+    "$mirror_pointer_migration" \
+    "$mirror_pointer_index exists but does not have the reviewed definition; found \"CREATE INDEX $mirror_pointer_index ON $scratch_schema.normalized_events USING btree ($mirror_pointer_node_only_keys)\", expected \"$mirror_pointer_reviewed_definition\"; $mirror_pointer_recovery" <<SQL
+DROP INDEX $mirror_pointer_index;
+CREATE INDEX $mirror_pointer_index ON normalized_events ($mirror_pointer_node_only_keys);
+SQL
 # Exercise reverse_hydration_attempt_state_upgrade from the exact predecessor
 # shape, then validate the additive tuple invariant independently. Both files
 # must remain idempotent after the upgrade completes.
@@ -6804,7 +6921,7 @@ SQL
 # holds all four; from that shape the file must drop the two retired
 # `permission_*` indexes, which have no reader, and refuse a retired name
 # held by a table.
-resolver_history_index_migration="$ROOT/migrations/20260924120000_normalized_events_resolver_history_idx.sql"
+resolver_history_index_migration="$ROOT/migrations/20260925120000_normalized_events_resolver_history_idx.sql"
 resolver_history_index_names="normalized_events_pointer_after_resolver_history_idx normalized_events_pointer_before_resolver_history_idx"
 resolver_history_retired_names="normalized_events_permission_after_resolver_history_idx normalized_events_permission_before_resolver_history_idx"
 resolver_history_retired_sql='
@@ -7277,7 +7394,7 @@ BEGIN
     END IF;
 
     -- Add exact exceptions only after maintainer authorization. An entry here is
-    -- a carve-out under docs/adrs/0007-v1-schema-freeze.md: a table that trips the
+    -- a carve-out under docs/adrs/0008-v1-schema-freeze.md: a table that trips the
     -- forbidden-name policy and was authorized anyway. If a schema change fails
     -- above with a forbidden-table error, that ADR is where the exception is
     -- argued, not this list.
