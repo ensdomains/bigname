@@ -26,7 +26,7 @@ Terms used below:
 `frozen-schema.txt` is the catalog of the baseline plus the inventoried schema-migrations. Regenerate it with `SCHEMA_V2_APPLY_CHECK_WRITE_FINGERPRINT=1` in the change that moves the schema. It records:
 
 - the baseline's extension declarations;
-- every relation, with the tablespace it is stored in, its access method, its privileges, storage parameters, row-level-security flags, replica identity, partitioning and parents;
+- every relation, with its persistence (logged, unlogged or temporary), the tablespace it is stored in, its access method, its privileges, storage parameters, row-level-security flags, replica identity, partitioning and parents;
 - every column: type, nullability, default, identity, generation, collation, storage, compression, statistics target, attribute options, privileges, whether it is defined locally or inherited, and the value rows that predate the column read once it is no longer the default;
 - every constraint, with whether it is defined locally or inherited, which decides whether `NO INHERIT` removes it;
 - every index, with its tablespace (which `pg_get_indexdef` does not print), its validity and its replica-identity and `CLUSTER` flags, and every view;
@@ -161,7 +161,7 @@ The rewrite from `bigname_phase` to the scratch name is textual, so a name the r
 
 ### Statement rules
 
-These apply to every baseline file and schema-migration. The check reads each file's statements with comments removed and quoted text kept, so a comment cannot hide a statement, and a string that looks like one is refused rather than trusted. A file it cannot split into statements is refused.
+These apply to every baseline file and schema-migration. The check reads each file's statements with each comment read as a space, as PostgreSQL reads it, and quoted text kept, so a comment cannot hide a statement, and a string that looks like one is refused rather than trusted. A file it cannot split into statements is refused.
 
 - **No session state.** The baseline session and the sqlx run would carry it into every later file. Refused:
   - a statement-leading `SET` or `RESET` of any setting, including a custom placeholder or quoted name, and a quoted or `format`-built `SET` run through `EXECUTE`;
@@ -177,6 +177,15 @@ These apply to every baseline file and schema-migration. The check reads each fi
   - `ALTER SYSTEM`, which PostgreSQL runs only as a top-level statement, so the text always shows it;
   - `COPY` to or from a file or a program, which reads or writes a file on the database server or runs a program there, and `lo_import` and `lo_export`, which read or write files on the database server. The file name may be a literal, a dollar quote or a `format()` slot;
   - a call to a server administration function: replication slots and origins (`pg_replication_*` and the `*_replication_slot*` functions, `pg_replication_slot_advance` and `pg_replication_origin_advance` among them), logical decoding (`pg_logical_*`), WAL and recovery control (`pg_switch_wal`, `pg_create_restore_point`, `pg_promote`, `pg_wal_replay_*`, `pg_backup_start` and `pg_backup_stop`, `pg_log_standby_snapshot`), `pg_reload_conf`, `pg_rotate_logfile`, `pg_terminate_backend`, `pg_cancel_backend` and `pg_stat_reset*`.
+- **No publication or subscription DDL, and nothing that sets a sequence's position or changes how it counts.** A production database can hold an operator's own publication, subscription or sequence outside the phase schema, which no replay database has. A change guarded on one existing would pass every comparison and still change what production replicates or which values the sequence hands out. Refused in every statement but `COMMENT ON`, whose text never runs, in quoted text and `EXECUTE` strings too, with an `E'...'` newline or tab read as a space:
+  - `CREATE`, `ALTER` or `DROP` of a `PUBLICATION` or `SUBSCRIPTION`;
+  - `setval`, `ALTER SEQUENCE` and `TRUNCATE ... RESTART IDENTITY`;
+  - an identity column's `RESTART`, its sequence options (`SET INCREMENT`, `SET MINVALUE`, `SET START` and the rest) and `DROP IDENTITY`;
+  - `SET LOGGED` and `SET UNLOGGED`. `ALTER TABLE` applies them to a sequence too, and an unlogged sequence starts over after a crash. An unlogged table also drops out of a publication for all tables or for its schema.
+
+  No current file uses them, and none has needed to: the row rule keeps every phase sequence at its position, and the frozen catalog records how every phase sequence counts and every table's persistence. A phase change that truly needs one, such as widening a phase sequence with `ALTER SEQUENCE ... AS bigint`, extends this rule under an ADR 0008 carve-out. `nextval` stays allowed, because inventoried schema-migrations call it and it can only skip values, which a sequence never promises not to do.
+- **No direct writes to system catalogs.** An `UPDATE`, `INSERT`, `DELETE` or `MERGE` on a `pg_*` catalog table changes an object without the statement that names the change, so no text rule sees it, and on an object only production holds no comparison sees it either. Refused under the same reading as the rule above.
+- **No `CASCADE` in newer schema-migrations.** A schema-migration newer than the legacy-schema drop may not use `CASCADE`, other than a foreign key's `ON DELETE` or `ON UPDATE CASCADE`. It reads the text the way the rule above does: every statement but `COMMENT ON`, quoted text and `EXECUTE` strings included, with an `E'...'` newline or tab read as a space. In production `CASCADE` also drops objects that depend on its target and that only production holds, such as an operator's view over a phase column or a table's entry in a publication whose column list or row filter names the column. The drop would pass here and be silent there. Without `CASCADE` the statement fails in production instead. No such schema-migration uses it.
 
 ### Nothing left in the session
 
@@ -246,4 +255,7 @@ The check is built to catch a schema-migration that would behave differently und
 Beyond it:
 
 - a branch keyed to an identity neither the login nor the configured user has, such as a production-only role, is beyond any check that does not run as that role;
+- likewise, an object only the production database holds outside the phase schema, such as an operator's own table, is beyond any replay that does not hold it. The statement rules refuse what no current file uses: publication and subscription DDL, the statements that set a sequence's position or change how it counts, direct catalog writes and `CASCADE`. Left to review:
+  - any other change to such an object, such as dropping and re-creating an operator's sequence guarded on it existing, which the rules cannot refuse because inventoried schema-migrations use `DROP SEQUENCE` and `CREATE SEQUENCE`;
+  - how an operator's publication for all tables or for the phase schema follows ordinary phase-schema changes: a table created, dropped, moved to another schema, attached or detached as a partition;
 - SQL written to hide from a text rule what no run-time read observes, such as a keyword or role name assembled from pieces, is outside what a conformance check can close. Review is the control for it.

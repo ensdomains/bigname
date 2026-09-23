@@ -886,6 +886,22 @@ migration_is_closed_form_drop() {
 migration_uses_unicode_escape() {
     grep -qiE "U&[\"']" "$1"
 }
+# CASCADE also drops, in production only, what depends there on its target:
+# an operator's view over a phase column, a table's entry in a publication
+# whose column list or row filter names the column, a foreign key from an
+# operator's table. No replay
+# holds any of them, so the drop passes every comparison and is silent in
+# production, where without CASCADE it would fail. A foreign key's ON DELETE
+# or ON UPDATE CASCADE is a row action, not a drop. Read like the replication
+# rule: every statement but COMMENT ON, an E-string newline or tab a space.
+migration_cascade_of() {
+    { sql_statements "$1" 2>/dev/null || true; } \
+        | awk '{
+            t = toupper($0); if (t ~ /^COMMENT ON /) next
+            gsub(/\\[NRT]/, " ", t); gsub(/  +/, " ", t); gsub(/ON (DELETE|UPDATE) CASCADE/, "", t)
+            if (t ~ /(^|[^A-Z0-9_])CASCADE([^A-Z0-9_]|$)/) print
+        }'
+}
 # The frozen artifact is the baseline plus the inventoried schema-migrations
 # through the documented head. schema-v2/frozen-schema.txt is that artifact's
 # catalog -- the baseline's extension declarations, then every relation with
@@ -2302,7 +2318,7 @@ prior_migration_inventory() {
     git -C "$ROOT" show "$base:schema-v2/migration-inventory.txt" | awk 'NF == 1 { print "-", $1; next } { print }'
 }
 assert_uninventoried_migrations_are_schema_qualified() {
-    local migration_file migration_basename reason noncanonical
+    local migration_file migration_basename reason noncanonical cascade cascade_plant
     # The rule proves itself on every run: each planted form must be refused
     # with its reason, and the closed form must be accepted.
     local -a refused=(
@@ -2374,6 +2390,21 @@ assert_uninventoried_migrations_are_schema_qualified() {
         printf '%s\n' "closed-form check refused the closed form" >&2
         exit 1
     fi
+    for cascade_plant in \
+        'ALTER TABLE ONLY bigname_phase.name_current DROP COLUMN legacy_label CASCADE;' \
+        'DO $$ BEGIN EXECUTE '"'"'DROP VIEW bigname_phase.v CASCADE'"'"'; END $$;' \
+        'drop type bigname_phase.legacy_state cascade;' \
+        'DO $$ BEGIN EXECUTE E'"'"'DROP VIEW bigname_phase.v\nCASCADE'"'"'; END $$;'; do
+        if [ -z "$(printf '%s\n' "$cascade_plant" | migration_cascade_of /dev/stdin)" ]; then
+            printf '%s\n' "CASCADE check missed a planted form: $cascade_plant" >&2
+            exit 1
+        fi
+        refusal_assertions_passed=$((refusal_assertions_passed + 1))
+    done
+    if [ -n "$(printf '%s\n' 'CREATE TABLE bigname_phase.t (a bigint REFERENCES bigname_phase.u (a) ON DELETE CASCADE ON UPDATE CASCADE, cascade_depth int); COMMENT ON COLUMN bigname_phase.t.cascade_depth IS '"'"'depth of a cascade of rebuilds'"'"'; DO $$ BEGIN EXECUTE E'"'"'ALTER TABLE bigname_phase.t ADD FOREIGN KEY (a) REFERENCES bigname_phase.u (a) ON DELETE\nCASCADE'"'"'; END $$;' | migration_cascade_of /dev/stdin)" ]; then
+        printf '%s\n' "CASCADE check refused a foreign-key action or a look-alike" >&2
+        exit 1
+    fi
     if ! diff -u "$migration_inventory" <(current_migration_inventory) >&2; then
         printf '%s\n' \
             "migrations/ differs from $(basename "$migration_inventory") (see the diff above): a schema-migration lands by joining the inventory and advancing the documented head in the same change, cannot be named to sort below the head, and once listed its bytes are immutable (sqlx checks the same checksum on every initialized database)" >&2
@@ -2401,6 +2432,12 @@ assert_uninventoried_migrations_are_schema_qualified() {
         if migration_uses_unicode_escape "$migration_file"; then
             printf '%s\n' \
                 "$migration_basename uses a Unicode-escaped identifier or string (U&), which this check can neither inventory nor rewrite" >&2
+            exit 1
+        fi
+        cascade="$(migration_cascade_of "$migration_file")"
+        if [ -n "$cascade" ]; then
+            printf '%s\n' \
+                "$migration_basename uses CASCADE (${cascade//$'\n'/; }), which in production also drops what depends on its target there and no replay holds, such as an operator's view or a table's entry in a publication that names a column; drop each dependent by name, or leave CASCADE out so the statement fails where one exists (ADR 0008)" >&2
             exit 1
         fi
         if phase_migration_uses_production_schema "$migration_file"; then
@@ -3054,12 +3091,13 @@ migration_application_log="$(
 # Future entries must use basename|one-line reason.
 intentional_phase_migration_skips=()
 refusal_assertions_passed=0
-# Base 173, main added 90, this branch 216 (133 of them the backslash-command,
+# Base 173, main added 90, this branch 241 (158 of them the backslash-command,
 # psql-variable, schema-owner, parameter-privilege, installer-race,
 # other-database setting and attribute, outside-definition and membership,
 # exercised-row, identity-row, dropped-fact, lost-column, sequence-position,
 # server-statement, server-file read, shared-object and configuration-file,
-# administration-function, tablespace and access-method,
+# administration-function, tablespace and access-method, replication and
+# sequence-statement, catalog-write, comment-spacing, CASCADE,
 # SET-spelling, session-residue, session-identity (database, connection and
 # temporary namespace included), recorded-history, ambiguous foreign key,
 # assembled password, literal-name branch and column-order, baseline-residue,
@@ -3069,7 +3107,7 @@ refusal_assertions_passed=0
 # the merges fold main's five address-match, event-order and mirror-pointer
 # not-ready probes into their invalid ones (-5); predecessor proofs base 39,
 # main +7, this branch +1.
-expected_refusal_assertions=474
+expected_refusal_assertions=499
 predecessor_shape_proof_count=0
 expected_predecessor_shape_proof_count=47
 refusal_probe_seconds=0
@@ -3132,7 +3170,8 @@ trap 'exit 143' TERM
 # init-schema on an empty database has only the baseline to install them, so
 # both must still be declared there.
 # The statements of an SQL file, one per line with whitespace collapsed and
-# the trailing semicolon kept: line and (nested) block comments removed, the
+# the trailing semicolon kept: line and (nested) block comments replaced by
+# a space, as PostgreSQL reads them, the
 # splitter blind inside single quotes, quoted identifiers and dollar quoting,
 # so a statement inside a comment or a routine body is not a statement.
 sql_statement_splitter='
@@ -3147,8 +3186,8 @@ sql_statement_splitter='
                 i++; continue
             }
             if (quote == "") {
-                if (two == "--") break
-                if (two == "/*") { depth = 1; i += 2; continue }
+                if (two == "--") { stmt = stmt " "; break }
+                if (two == "/*") { stmt = stmt " "; depth = 1; i += 2; continue }
                 if (c == "$" && match(substr(line, i), /^\$[A-Za-z_][A-Za-z0-9_]*\$|^\$\$/)) {
                     quote = substr(line, i, RLENGTH); stmt = stmt quote; i += RLENGTH; continue
                 }
@@ -3294,16 +3333,16 @@ baseline_extension_statements="$(baseline_extension_statements_of "$ROOT/schema-
 # session state; set_config(..., true) inside a routine ends with the
 # transaction and a routine that restores what it changed is the documented
 # form. The text is the file's statements as the quote-aware splitter reads
-# them, comments gone and quoted text kept, so a comment cannot hide a SET
+# them, each comment a space and quoted text kept, so a comment cannot hide a SET
 # and a string that looks like one is refused rather than trusted; a file the
 # splitter cannot read, a psql backslash command included, is refused as well.
 # The baseline gets no per-file residue probe, so for its session settings
 # this text is the guard. A carve-out that needs session
 # state extends this rule under ADR 0008.
 session_state_scanner='
-    { text = text " " $0 }
+    { text = text " " $0; if (toupper($0) !~ /^COMMENT ON /) code = code " " $0 }
     END {
-        gsub(/[[:space:]]+/, " ", text)
+        gsub(/[[:space:]]+/, " ", text); gsub(/[[:space:]]+/, " ", code)
         t = toupper(text) " "
         while (match(t, /(^|;|\(|'"'"'|[^A-Z_](BEGIN|THEN|ELSE|LOOP|DECLARE)) *(SET (LOCAL |SESSION )?([A-Z_%][A-Z0-9_.%]*|"[^"]*") *(=|TO[^A-Z_])|RESET ([A-Z_%][A-Z0-9_.%]*|"[^"]*")|SET (LOCAL |SESSION )?(ROLE|SESSION AUTHORIZATION|SESSION CHARACTERISTICS)[^A-Z_]|SET (LOCAL |SESSION )?(TIME ZONE|SCHEMA|NAMES|XML OPTION)[^A-Z_])/)) {
             hit = substr(t, RSTART, RLENGTH); sub(/^[^SR]*/, "", hit); sub(/^SE(T|SSION) *$/, "", hit)
@@ -3350,6 +3389,28 @@ session_state_scanner='
             hit = substr(t, RSTART, RLENGTH); sub(/^[^A-Z]*/, "", hit)
             print file ": [server outside the database: " hit "]"; t = substr(t, RSTART + RLENGTH)
         }
+        # Replication and sequences, which a production database can hold
+        # outside the phase schema where no replay database does: publication
+        # and subscription DDL; setval, ALTER SEQUENCE, TRUNCATE ... RESTART
+        # IDENTITY and an identity column RESTART, sequence option or DROP
+        # IDENTITY; and SET LOGGED or UNLOGGED, which ALTER TABLE applies to a
+        # sequence too and which takes a table out of a publication for all
+        # tables or a schema. Also a direct write to a system catalog, which
+        # changes any of these without its statement. A comment is text that
+        # never runs, so these read every statement but COMMENT ON, an
+        # E-string newline or tab separates words the way whitespace does, and
+        # ALTER COLUMN x reads as ALTER x, its other spelling.
+        code = toupper(code) " "; gsub(/\\[NRT]/, " ", code); gsub(/  +/, " ", code); gsub(/ALTER COLUMN /, "ALTER ", code)
+        t = code
+        while (match(t, /(^|[^A-Z0-9_])((CREATE|ALTER|DROP) (PUBLICATION|SUBSCRIPTION)[^A-Z0-9_]|"?SETVAL"? *\(|ALTER SEQUENCE[^A-Z0-9_]|ALTER ("[^"]*"|[A-Z_][A-Z0-9_$]*) (SET GENERATED (ALWAYS|BY DEFAULT) )?(RESTART|SET (INCREMENT|MINVALUE|MAXVALUE|NO MINVALUE|NO MAXVALUE|START|CACHE|CYCLE|NO CYCLE)|DROP IDENTITY)[^A-Z0-9_]|SET (UN)?LOGGED *([;,)$]|'"'"'|$))|RESTART IDENTITY/)) {
+            hit = substr(t, RSTART, RLENGTH); sub(/^[^A-Z"]*/, "", hit)
+            print file ": [replication or sequence: " hit "]"; t = substr(t, RSTART + RLENGTH)
+        }
+        t = code
+        while (match(t, /(^|[^A-Z0-9_])(UPDATE|INSERT INTO|DELETE FROM|MERGE INTO)( ONLY)? ("?PG_CATALOG"? *\. *)?"?PG_[A-Z0-9_]*"?([^A-Z0-9_."]|$)/)) {
+            hit = substr(t, RSTART, RLENGTH); sub(/^[^A-Z]*/, "", hit)
+            print file ": [system catalog write: " hit "]"; t = substr(t, RSTART + RLENGTH)
+        }
     }
 '
 session_state_statements_of() {
@@ -3370,6 +3431,12 @@ assert_no_session_state_statements() {
                 exit 1 ;;
             *'[server outside the database'*)
                 printf '%s\n' "${hits//$'\n'/; }: ALTER SYSTEM rewrites the configuration of every database on the server, COPY to or from a file or a program, lo_import and lo_export read or write files on the database server or run a program there, and the administration functions for replication slots and origins, logical decoding, WAL and recovery, configuration reload, other sessions' backends and statistics change the server; no catalog this check compares holds any of it and a schema-migration has no use for it, so remove it (ADR 0008)" >&2
+                exit 1 ;;
+            *'[replication or sequence'*)
+                printf '%s\n' "${hits//$'\n'/; }: a production database can hold a publication, a subscription or a sequence outside the phase schema that no replay database has, so a change to one passes every comparison here and still changes what production replicates or which values the sequence hands out; no current file uses these statements, since the row rule keeps every phase sequence where it was and the frozen catalog records how each one counts and every table's persistence, so remove it, or extend this rule under an ADR 0008 carve-out if a phase change truly needs one" >&2
+                exit 1 ;;
+            *'[system catalog write'*)
+                printf '%s\n' "${hits//$'\n'/; }: a direct write to a system catalog changes an object without the statement that names the change, so no text rule sees it, and on an object only production holds no comparison sees it either; no schema-migration needs one, so write the DDL statement instead (ADR 0008)" >&2
                 exit 1 ;;
             *'[psql variable'*)
                 printf '%s\n' "${hits//$'\n'/; }: the replay's psql replaces :name, :'name', :\"name\" and :{?name} with a variable of its own, DBNAME and USER among them, but sqlx sends the colon to the server, so write the value itself; a slice bound that starts with a name takes a space after the colon" >&2
@@ -3440,6 +3507,27 @@ assert_session_state_rule_holds() {
         'SELECT pg_reload_conf();'
         'SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE pid <> pg_backend_pid();'
         'SELECT pg_stat_reset();'
+        'ALTER PUBLICATION operator_changes ADD TABLE bigname_phase.normalized_events;'
+        'DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_publication) THEN EXECUTE format('"'"'alter publication %I set (publish = %L)'"'"', '"'"'operator_changes'"'"', '"'"'insert'"'"'); END IF; END $$;'
+        'CREATE PUBLICATION bigname_changes FOR TABLES IN SCHEMA bigname_phase;'
+        'ALTER SUBSCRIPTION operator_feed CONNECTION '"'"'host=elsewhere'"'"';'
+        'DO $$ BEGIN EXECUTE '"'"'DROP SUBSCRIPTION IF EXISTS operator_feed'"'"'; END $$;'
+        'SELECT pg_catalog.setval('"'"'public.operator_seq'"'"', 1, false);'
+        'DO $$ BEGIN IF to_regclass('"'"'public.operator_seq'"'"') IS NOT NULL THEN EXECUTE '"'"'ALTER SEQUENCE public.operator_seq RESTART'"'"'; END IF; END $$;'
+        'ALTER TABLE IF EXISTS public.operator_table ALTER COLUMN id RESTART WITH 1;'
+        'alter table public.operator_table alter id set increment by -1;'
+        'TRUNCATE public.operator_table RESTART IDENTITY;'
+        'ALTER TABLE IF EXISTS public.operator_seq SET UNLOGGED;'
+        'ALTER TABLE public.operator_table ALTER COLUMN id DROP IDENTITY IF EXISTS, ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY;'
+        'ALTER TABLE public.operator_table ALTER COLUMN id SET GENERATED ALWAYS RESTART WITH 1;'
+        'SELECT pg_catalog."setval"('"'"'public.operator_seq'"'"', 1);'
+        'ALTER SEQUENCE/* reset */public.operator_seq RESTART;'
+        'DO $$ BEGIN EXECUTE E'"'"'ALTER TABLE public.operator_table\nALTER COLUMN id\nRESTART'"'"'; END $$;'
+        'UPDATE pg_catalog.pg_sequence SET seqincrement = 2 WHERE seqrelid = '"'"'public.operator_seq'"'"'::regclass;'
+        'delete from pg_publication_rel;'
+        'DO $$ BEGIN EXECUTE $ddl$ ALTER TABLE public.operator_table SET UNLOGGED $ddl$; END $$;'
+        'UPDATE "pg_catalog".pg_sequence SET seqcycle = true WHERE seqrelid = '"'"'public.operator_seq'"'"'::regclass;'
+        'ALTER SEQUENCE-- reset'$'\n''public.operator_seq RESTART;'
     )
     local -a accepted=(
         'UPDATE t SET a = 1;'
@@ -3462,6 +3550,12 @@ assert_session_state_rule_holds() {
         'CREATE TABLE bigname_phase.copy_to (a int);'
         'CREATE TABLE bigname_phase.reset_log (pg_stat_reset timestamptz, pg_switch_wal_at timestamptz); SELECT count(*) FROM pg_replication_slots;'
         'COMMENT ON TABLE t IS '"'"'a copy of the rows, taken from the log'"'"';'
+        'CREATE TABLE bigname_phase.publication_log (publication_block bigint, subscription_id bigint, restart_count int, start int); ALTER TABLE bigname_phase.publication_log ALTER COLUMN restart_count SET DEFAULT 0, ALTER COLUMN start SET NOT NULL, SET (fillfactor = 90); SELECT nextval('"'"'bigname_phase.publication_log_seq'"'"');'
+        'ALTER TABLE t ADD COLUMN b int; COMMENT ON COLUMN t.b IS '"'"'set when the runner must restart after the projection publication'"'"'; UPDATE t SET start = 1;'
+        'COMMENT ON TABLE bigname_phase.address_names_current IS '"'"'Rebuildable projection: Project may truncate it and refill it after a restart.'"'"';'
+        'ALTER TABLE bigname_phase.t ADD COLUMN restart boolean, ADD CONSTRAINT t_state CHECK (state IN ('"'"'running'"'"', '"'"'restart'"'"')), ALTER COLUMN redo_mode SET DEFAULT '"'"'restart'"'"', ALTER COLUMN restart SET DEFAULT false;'
+        'DELETE FROM pg_temp.scratch_rows; UPDATE bigname_phase.pg_style_rows SET a = 1; COMMENT ON TABLE t IS '"'"'Set logged-in readers apart'"'"';'
+        'COMMENT ON TABLE t IS '"'"'A generation is published before readers switch, so drop publication state only after the switch; never reset its id with setval() or ALTER SEQUENCE.'"'"';'
     )
     planted_dir="$(mktemp -d "${TMPDIR:-/tmp}/schema-v2-session-state-rule.XXXXXX")"
     for planted in "${refused[@]}"; do
