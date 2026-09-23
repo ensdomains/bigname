@@ -55,21 +55,34 @@ WITH candidates AS (    SELECT surface.namespace, surface.raw_labels
     -- descendant pointer. Keep processing these new endpoints against the cached pairs,
     -- but do not repeat the descendant/history probes. Exact array suffixes retain
     -- namespace boundaries and repeated labels. The empty root never subsumes a seed.
+    -- The seen set has no unique key (see mirror.sql), so an exact repeat, including the
+    -- empty root, is skipped here. The hash equalities match the seen-seed index.
     WHERE NOT EXISTS (
+        SELECT 1 FROM project_mirror_seen_seeds seen
+        WHERE seen.namespace = candidate.namespace
+          AND hash_array_extended(seen.raw_labels, 0) = hash_array_extended(candidate.raw_labels, 0)
+          AND seen.raw_labels = candidate.raw_labels
+    ) AND NOT EXISTS (
         SELECT 1 FROM generate_series(1, cardinality(candidate.raw_labels)) position
         JOIN project_mirror_seen_seeds seen
           ON seen.namespace = candidate.namespace
+         AND hash_array_extended(seen.raw_labels, 0) =
+             hash_array_extended(candidate.raw_labels[position:cardinality(candidate.raw_labels)], 0)
          AND seen.raw_labels = candidate.raw_labels[position:cardinality(candidate.raw_labels)]
         WHERE cardinality(seen.raw_labels) > 0
     )
-    ON CONFLICT DO NOTHING RETURNING namespace, raw_labels
+    RETURNING namespace, raw_labels
 ) SELECT * FROM added;
 ANALYZE project_mirror_seeds;
 CREATE TEMP TABLE project_mirror_queried_names ON COMMIT DROP AS
     SELECT DISTINCT surface.logical_name_id
     FROM project_mirror_seeds seed JOIN LATERAL (
         SELECT * FROM name_surfaces
-        WHERE namespace = seed.namespace AND raw_labels @> seed.raw_labels
+        -- The hash containment matches name_surfaces_project_label_hashes_idx and the array
+        -- containment decides the match, so a hash collision never changes the result.
+        WHERE namespace = seed.namespace
+          AND label_hashes(raw_labels) @> label_hashes(seed.raw_labels)
+          AND raw_labels @> seed.raw_labels
           AND cardinality(seed.raw_labels) > 0
           AND raw_labels[cardinality(raw_labels)-cardinality(seed.raw_labels)+1:
                          cardinality(raw_labels)] = seed.raw_labels OFFSET 0

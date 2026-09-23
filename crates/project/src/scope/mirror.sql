@@ -14,7 +14,11 @@ WHERE event.chain_id = $1 AND event.block_number <= $2
   AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
   AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized');
 
-CREATE TEMP TABLE project_mirror_seen_seeds(namespace text, raw_labels text[], PRIMARY KEY(namespace, raw_labels)) ON COMMIT DROP;
+-- Labels are chain data of any length, so no btree key holds the label array itself: an
+-- entry over about 2.7 KB would fail the insert. Seeds are keyed by a 64-bit hash of the
+-- array, and every probe also compares the labels, so a collision never changes a result.
+CREATE TEMP TABLE project_mirror_seen_seeds(namespace text, raw_labels text[]) ON COMMIT DROP;
+CREATE INDEX ON project_mirror_seen_seeds(namespace, hash_array_extended(raw_labels, 0));
 CREATE TEMP TABLE project_mirror_seen_pointers(resource_id uuid, logical_name_id text, PRIMARY KEY(resource_id, logical_name_id)) ON COMMIT DROP;
 CREATE TEMP TABLE project_mirror_links(mirror_resource_id uuid, consulted_logical_name_id text,
  namespace text, namehash text, PRIMARY KEY(mirror_resource_id,consulted_logical_name_id,namespace,namehash)) ON COMMIT DROP;

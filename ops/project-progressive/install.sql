@@ -9,9 +9,18 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_project_node_history_i
            OR (event_kind = 'ResolverChanged'
                AND source_family IN ('ens_v1_registry_l1', 'ens_v1_registrar_l1', 'ens_v1_wrapper_l1')));
 
-CREATE INDEX CONCURRENTLY IF NOT EXISTS name_surfaces_project_labels_idx ON bigname_phase.name_surfaces USING gin(raw_labels);
--- Replaces the earlier (namespace, raw_labels) array index, whose entries have no size bound.
-DROP INDEX CONCURRENTLY IF EXISTS bigname_phase.name_surfaces_project_suffix_idx;
+-- One 64-bit hash per label, in label order. It must match the definition in
+-- migrations/20260923140000_project_name_surfaces_label_indexes.sql, which refuses another.
+CREATE OR REPLACE FUNCTION bigname_phase.label_hashes(labels text[])
+RETURNS bigint[]
+LANGUAGE sql
+IMMUTABLE
+STRICT
+PARALLEL SAFE
+AS $label_hashes$
+    SELECT ARRAY(SELECT pg_catalog.hashtextextended(label, 0) FROM pg_catalog.unnest(labels) AS label)
+$label_hashes$;
+CREATE INDEX CONCURRENTLY IF NOT EXISTS name_surfaces_project_label_hashes_idx ON bigname_phase.name_surfaces USING gin(bigname_phase.label_hashes(raw_labels));
 CREATE INDEX CONCURRENTLY IF NOT EXISTS name_surfaces_project_suffix_hash_idx ON bigname_phase.name_surfaces(namespace, hash_array_extended(raw_labels, 0));
 CREATE INDEX CONCURRENTLY IF NOT EXISTS name_surfaces_project_node_idx ON bigname_phase.name_surfaces(namespace, lower(namehash));
 CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_project_v1_pointer_node_idx
@@ -21,3 +30,8 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_project_v1_pointer_nod
       AND after_state ->> 'node' IS NOT NULL
       AND consumer_visibility = 'activated'
       AND canonicality_state IN ('canonical', 'safe', 'finalized');
+
+-- Drop the earlier label-array indexes last, so the label lookups always have an index.
+-- Their entries have no size bound: a long enough label fails the name_surfaces insert.
+DROP INDEX CONCURRENTLY IF EXISTS bigname_phase.name_surfaces_project_labels_idx;
+DROP INDEX CONCURRENTLY IF EXISTS bigname_phase.name_surfaces_project_suffix_idx;

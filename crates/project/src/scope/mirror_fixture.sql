@@ -83,7 +83,10 @@ CREATE INDEX IF NOT EXISTS normalized_events_projection_idx
     );
 
 ALTER TABLE name_surfaces ADD COLUMN raw_labels text[];
-CREATE INDEX IF NOT EXISTS name_surfaces_project_labels_idx ON name_surfaces USING gin(raw_labels);
+CREATE FUNCTION label_hashes(labels text[]) RETURNS bigint[] LANGUAGE sql IMMUTABLE STRICT PARALLEL SAFE AS $$
+    SELECT ARRAY(SELECT pg_catalog.hashtextextended(label, 0) FROM pg_catalog.unnest(labels) AS label)
+$$;
+CREATE INDEX IF NOT EXISTS name_surfaces_project_label_hashes_idx ON name_surfaces USING gin(label_hashes(raw_labels));
 CREATE INDEX IF NOT EXISTS name_surfaces_project_suffix_hash_idx ON name_surfaces(namespace, hash_array_extended(raw_labels, 0));
 CREATE INDEX IF NOT EXISTS name_surfaces_project_node_idx ON name_surfaces(namespace, lower(namehash));
 CREATE INDEX IF NOT EXISTS normalized_events_project_v1_pointer_node_idx

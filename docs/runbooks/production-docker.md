@@ -673,8 +673,9 @@ no-ops when the indexes already exist, and it ends with the same check, so
 `sqlx migrate run` stops without recording it if either index is missing,
 invalid, not ready, on another table, not an index, or has another definition.
 
-The release containing `20260922010000_project_node_history_idx.sql` and
-`20260922010100_project_mirror_scope_indexes.sql` adds the five indexes Project's
+The release containing `20260922010000_project_node_history_idx.sql`,
+`20260922010100_project_mirror_scope_indexes.sql` and
+`20260923140000_project_name_surfaces_label_indexes.sql` adds the five indexes Project's
 scoped node history and progressive mirror dependency traversal read. On an
 initialized production namespace, build them in step 3 by running
 [`ops/project-progressive/install.sql`](../../ops/project-progressive/install.sql)
@@ -685,10 +686,11 @@ runbook carries no copy of the five statements; `install.sql` is the only
 source. The builds are concurrent and permit writes, so they can finish while
 the existing runner is still processing, before the stop/start window opens.
 `validate.sql` fails unless all five names are valid and ready indexes, the
-label-suffix index has its reviewed hash-expression definition, and the earlier
-`name_surfaces_project_suffix_idx` array index (which `install.sql` drops) is
-gone; an existing name is not proof of a valid or matching index, so also
-compare each other `pg_get_indexdef` with `install.sql`. An interrupted build leaves an invalid
+two label-hash indexes and their `label_hashes` function have their reviewed
+definitions, and the earlier `name_surfaces_project_labels_idx` and
+`name_surfaces_project_suffix_idx` label-array indexes (which `install.sql`
+drops) are gone; an existing name is not proof of a valid or matching index,
+so also compare each other `pg_get_indexdef` with `install.sql`. An interrupted build leaves an invalid
 index; confirm in `pg_stat_progress_create_index` that no build is still
 running, then review before an explicitly authorized retry. Keep both outputs
 with their start and end times in the release record. Then apply the

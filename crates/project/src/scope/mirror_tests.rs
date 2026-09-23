@@ -494,6 +494,75 @@ async fn long_labels_fit_the_suffix_index_that_serves_the_keyed_walk() -> Result
     Ok(())
 }
 
+/// One label can also be longer than a GIN index entry (about 2.7 KB). The label index must
+/// accept its surface, and the keyed descendant lookup for a seed must still use that index.
+#[tokio::test]
+async fn one_long_label_fits_the_label_index_that_serves_the_keyed_seed_lookup() -> Result<()> {
+    const LABEL_INDEX: &str = "name_surfaces_project_label_hashes_idx";
+    let database = TestDatabase::create(TestDatabaseConfig::new("mirror_label_index")).await?;
+    let mut tx = database.pool().begin().await?;
+    sqlx::raw_sql(include_str!("mirror_fixture.sql"))
+        .execute(&mut *tx)
+        .await?;
+    // 2,880 hex characters in one label do not compress below the GIN entry limit.
+    sqlx::raw_sql(
+        "INSERT INTO name_surfaces VALUES('long-label','ens','long-label','bench',10,'block','canonical',
+             ARRAY[(SELECT string_agg(md5(i::text), '' ORDER BY i) FROM generate_series(1, 90) i),'eth']);
+         INSERT INTO name_surfaces SELECT 'filler-'||i,'ens','filler-'||i,'bench',10,'block','canonical',
+             ARRAY['filler-'||i,'test'] FROM generate_series(1, 20000) i;
+         ANALYZE name_surfaces",
+    )
+    .execute(&mut *tx)
+    .await?;
+    let session = crate::profile::Session::create(&std::env::temp_dir())?;
+    let mut strategy = super::stage(&mut tx, "bench", 10).await?;
+    sqlx::query("INSERT INTO project_scope_names VALUES('long-label')")
+        .execute(&mut *tx)
+        .await?;
+    session
+        .scope(super::include(&mut tx, "bench", 10, &mut strategy))
+        .await?;
+    fn inspect(node: &serde_json::Value, probes: &mut f64, seeds: &mut f64) {
+        let loops = node["Actual Loops"].as_f64().unwrap_or_default();
+        if node["Index Name"] == LABEL_INDEX {
+            *probes += loops;
+        }
+        if node["Relation Name"] == "project_mirror_seeds" {
+            *seeds += loops * node["Actual Rows"].as_f64().unwrap_or_default();
+        }
+        for child in node["Plans"].as_array().into_iter().flatten() {
+            inspect(child, probes, seeds);
+        }
+    }
+    let (mut probes, mut seeds, mut plans) = (0.0, 0.0, 0);
+    for entry in std::fs::read_dir(session.directory())? {
+        let path = entry?.path();
+        if path
+            .to_string_lossy()
+            .contains("-project_mirror_queried_names-")
+        {
+            let plan: serde_json::Value = serde_json::from_slice(&std::fs::read(&path)?)?;
+            inspect(&plan[0]["Plan"], &mut probes, &mut seeds);
+            plans += 1;
+        }
+    }
+    assert_eq!(plans, 1);
+    assert!(seeds >= 1.0, "the long name is a seed");
+    assert_eq!(probes, seeds, "each seed probes {LABEL_INDEX} once");
+    let long_seed: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM project_mirror_seen_seeds seen JOIN name_surfaces surface
+             ON surface.logical_name_id = 'long-label' AND seen.raw_labels = surface.raw_labels)",
+    )
+    .fetch_one(&mut *tx)
+    .await?;
+    assert!(long_seed, "the long name's labels entered the seen seeds");
+    std::fs::remove_dir_all(session.directory())?;
+    super::finish(&mut tx, strategy).await?;
+    tx.rollback().await?;
+    database.cleanup().await?;
+    Ok(())
+}
+
 #[cfg(test)]
 #[path = "mirror_dependency_repro.rs"]
 mod dependency_repro;

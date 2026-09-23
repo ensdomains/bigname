@@ -619,7 +619,10 @@ for migration_file in \
     "$ROOT/migrations/20260917150000_normalized_events_v1_lookahead_indexes.sql" \
     "$ROOT/migrations/20260917160000_discovery_edges_index_validity_check.sql" \
     "$ROOT/migrations/20260917161000_project_scoped_history_index_validity_check.sql" \
-    "$ROOT/migrations/20260923120000_normalized_events_address_match_indexes.sql"
+    "$ROOT/migrations/20260922010000_project_node_history_idx.sql" \
+    "$ROOT/migrations/20260922010100_project_mirror_scope_indexes.sql" \
+    "$ROOT/migrations/20260923120000_normalized_events_address_match_indexes.sql" \
+    "$ROOT/migrations/20260923140000_project_name_surfaces_label_indexes.sql"
 do
     emit_phase_migration "$migration_file" empty-schema | run_psql
 done
@@ -867,7 +870,12 @@ for migration_file in \
     "$ROOT/migrations/20260914120000_lookup_publication_revalidation.sql" \
     "$ROOT/migrations/20260914120000_lookup_publication_revalidation.sql" \
     "$ROOT/migrations/20260914120100_address_records_current_comments.sql" \
-    "$ROOT/migrations/20260914120100_address_records_current_comments.sql"
+    "$ROOT/migrations/20260914120100_address_records_current_comments.sql" \
+    "$ROOT/migrations/20260922010000_project_node_history_idx.sql" \
+    "$ROOT/migrations/20260922010000_project_node_history_idx.sql" \
+    "$ROOT/migrations/20260922010100_project_mirror_scope_indexes.sql" \
+    "$ROOT/migrations/20260923140000_project_name_surfaces_label_indexes.sql" \
+    "$ROOT/migrations/20260923140000_project_name_surfaces_label_indexes.sql"
 do
     emit_phase_migration "$migration_file" baseline-first | run_psql
 done

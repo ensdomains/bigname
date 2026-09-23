@@ -552,8 +552,19 @@ COMMENT ON COLUMN surface_bindings.observed_at IS
 COMMENT ON COLUMN surface_bindings.inserted_at IS
     'This time records row creation.';
 
-CREATE INDEX IF NOT EXISTS name_surfaces_project_labels_idx ON name_surfaces USING gin(raw_labels);
--- Labels are chain data of any length, so the label-suffix lookup indexes a fixed-size
--- hash of the array and rechecks the array itself; see ops/project-progressive/README.md.
+-- Labels are chain data of any length, and an index entry larger than about 2.7 KB fails
+-- the insert. The label indexes therefore hold fixed-size 64-bit hashes (one per label,
+-- in label order, from this function, or one for the whole array), and every query that
+-- uses them also compares the labels themselves; see ops/project-progressive/README.md.
+CREATE OR REPLACE FUNCTION label_hashes(labels text[])
+RETURNS bigint[]
+LANGUAGE sql
+IMMUTABLE
+STRICT
+PARALLEL SAFE
+AS $$
+    SELECT ARRAY(SELECT pg_catalog.hashtextextended(label, 0) FROM pg_catalog.unnest(labels) AS label)
+$$;
+CREATE INDEX IF NOT EXISTS name_surfaces_project_label_hashes_idx ON name_surfaces USING gin(label_hashes(raw_labels));
 CREATE INDEX IF NOT EXISTS name_surfaces_project_suffix_hash_idx ON name_surfaces(namespace, hash_array_extended(raw_labels, 0));
 CREATE INDEX IF NOT EXISTS name_surfaces_project_node_idx ON name_surfaces(namespace, lower(namehash));
