@@ -25,7 +25,7 @@ use super::{
     AtSelector, Envelope, EventDetail, HistoryEventType, HistoryInclude, HistoryScope, Page,
     QueryParamAllowlist, QueryParams, SortOrder, StrictQueryParams, V2Error, V2Result,
     all_chain_slugs, api_error_to_v2, build_event_detail, decode, decode_at_token, encode,
-    history_include, raw_event_kind, validate_latest_collection_selectors,
+    raw_event_kind, validate_latest_collection_selectors,
 };
 
 const HISTORY_SORT_DESC: &str = "chain_position_desc";
@@ -69,6 +69,9 @@ pub(crate) struct HistoryEvent {
     #[serde(rename = "type")]
     pub(crate) event_type: HistoryEventType,
     pub(crate) name: String,
+    /// Present only with `include=child_registrations`: `name` or `child`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) subject: Option<HistoryRowSubject>,
     pub(crate) namespace: String,
     pub(crate) registration_id: Option<String>,
     pub(crate) block_number: Option<i64>,
@@ -90,7 +93,7 @@ pub(crate) async fn get_history(
 ) -> V2Result<Json<Envelope<Vec<HistoryEvent>>>> {
     let params = params.into_inner();
     validate_latest_collection_selectors(params.at.as_ref(), params.finality)?;
-    let include = history_include(&params.include)?;
+    let (include, child_registrations) = children::name_history_include(&params.include)?;
     let normalized = normalize_inferred_route_name(&input_name)
         .map_err(|error| V2Error::invalid_input(error.message))?;
     let namespace = params
@@ -100,12 +103,14 @@ pub(crate) async fn get_history(
 
     let logical_name_id =
         bigname_storage::logical_name_id_for_name(&namespace, &normalized.normalized_name);
+    children::refuse_registrar_root(child_registrations, &namespace, &logical_name_id)?;
     let cursor_binding = HistoryCursorBinding {
         namespace: &namespace,
         parent_logical_name_id: &logical_name_id,
         scope: params.scope,
         order: history_storage_order(params.order),
         params: &params,
+        child_registrations,
     };
     let snapshot = super::collection_snapshot::CollectionSnapshot::capture_for_namespace(
         &state,
@@ -191,24 +196,28 @@ pub(crate) async fn get_history(
     let mut options = history_page_options(&params, block_window);
     options.publication_block_bounds = Some(snapshot.block_bounds());
 
-    let storage_page = bigname_storage::load_name_history_page(
-        &state.pool,
-        &parent.logical_name_id,
-        &resource_ids,
-        storage_scope,
-        true,
-        storage_cursor.as_ref(),
-        params.page_size,
-        if params.include.iter().any(|v| v == "total_count") {
-            HistorySummaryMode::Count
-        } else {
-            HistorySummaryMode::CappedCount(HISTORY_TOTAL_COUNT_CAP)
+    let summary_mode = if params.include.iter().any(|v| v == "total_count") {
+        HistorySummaryMode::Count
+    } else {
+        HistorySummaryMode::CappedCount(HISTORY_TOTAL_COUNT_CAP)
+    };
+    let storage_page = children::load_page(
+        &state,
+        children::PageRequest {
+            logical_name_id: &parent.logical_name_id,
+            resource_ids: &resource_ids,
+            scope: storage_scope,
+            cursor: storage_cursor.as_ref(),
+            page_size: params.page_size,
+            summary_mode,
+            options: &options,
+            interpret_redo_fence: &interpret_redo_fence,
+            anchor_name: &normalized.normalized_name,
+            include,
         },
-        &options,
-        Some(&interpret_redo_fence),
+        child_registrations,
     )
-    .await
-    .map_err(|error| map_history_page_error(error, "failed to load name history"))?;
+    .await?;
 
     let next_cursor = storage_page.next_cursor.as_ref().map(|cursor| {
         encode(&snapshot.bind_cursor(history_cursor_payload(cursor, &cursor_binding)))
@@ -219,13 +228,8 @@ pub(crate) async fn get_history(
     } else {
         history_total_count(storage_page.summary.as_ref())
     };
-    let data = storage_page
-        .rows
-        .iter()
-        .filter_map(|row| build_history_event(row, &normalized.normalized_name, include))
-        .collect();
     Ok(Json(Envelope {
-        data,
+        data: storage_page.rows,
         page: Some(Page {
             cursor: params.cursor.clone(),
             next_cursor,
@@ -419,6 +423,7 @@ pub(crate) fn build_history_event(
         id: history_event_id(row),
         event_type,
         name: history_event_name(row, anchor_name),
+        subject: None,
         namespace: row.namespace.clone(),
         registration_id: row
             .registration_id
@@ -552,7 +557,10 @@ pub(crate) fn format_timestamp(value: OffsetDateTime) -> String {
     )
 }
 
+mod children;
 mod cursor;
+
+pub(crate) use self::children::HistoryRowSubject;
 
 pub(crate) use self::cursor::{
     HistoryCursorBinding, history_cursor_payload, history_storage_cursor,

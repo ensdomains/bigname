@@ -146,6 +146,7 @@ async fn v2_history_routes_continue_from_bound_non_product_cursor() -> Result<()
         scope: crate::v2::HistoryScope::Both,
         order: bigname_storage::HistoryOrder::Desc,
         params: &default_params,
+        child_registrations: false,
     };
     let routes = [
         (

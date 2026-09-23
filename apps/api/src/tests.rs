@@ -388,6 +388,7 @@ include!("tests/v2_history_registration_identity.rs");
 include!("tests/v2_history_publication_bounds.rs");
 include!("tests/v2_history_redo.rs");
 include!("tests/v2_history_paging.rs");
+include!("tests/v2_history_child_registrations.rs");
 include!("tests/v2_diag_events.rs");
 include!("tests/v2_address_names.rs");
 include!("tests/v2_address_names_budget.rs");

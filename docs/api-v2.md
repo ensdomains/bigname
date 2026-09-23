@@ -110,10 +110,11 @@ step-3-gate vocabulary needed by the route schemas:
 | `as_of_completeness` | per-chain positions suppressed from `as_of`, keyed by `chain_id`, with `{completeness, unsupported_reason}` | inferring request coverage from whichever rows happened to be returned |
 | `as_of_token` | opaque URL-safe snapshot token for replaying the exact served positions with `at` | reconstructing `at` from `chain_positions` |
 | `at` | snapshot selector parameter for routes that support point-in-time reads | `chain_positions` query parameter and timestamp-specific ad hoc selectors |
-| `include` | route-documented expansion allowlist; on `POST /v1/lookup` a body field with the same comma-separated grammar | comma-separated expansion flags, `meta` knobs, and route-specific include flags |
+| `include` | route-documented expansion allowlist; on `POST /v1/lookup` a body field with the same comma-separated grammar. One value selects rows instead of expanding them: name history's `child_registrations` adds direct child registration rows | comma-separated expansion flags, `meta` knobs, and route-specific include flags |
 | `sort` | route-documented sort field | `sort` (unchanged; allowed fields are now route-documented) |
 | `order` | sort direction, `asc` or `desc`; history collections default to `desc` (newest first) and treat `asc` as the exact reverse | `order` (unchanged) |
 | `scope` (history) | `name`, `registration`, `both` | `surface`, `resource`, `both` |
+| `subject` (history) | on name history with `include=child_registrations` only: the row's relation to the requested name, `name` for the name's own rows and `child` for a [direct child registration](api-v2-routes.md#direct-child-registrations-includechild_registrations) | comparing a row's `name` with the requested name |
 | `grant_scope` | the protocol scope of a permission row: `root`, `registry`, `registration`, `resolver`, `record_manager`, or [`account`](glossary.md#account-permission-scope) | permission-row `scope` (renamed so history `scope` and permission scope are two names for two concepts) |
 | `grant_relation` | optional explicit [grant relation](glossary.md#grant-relation); `operator` identifies a registry-wide approval, while direct permission rows omit the field | new in v2 |
 | `verification` | typed checked-answer summary for claimed-vs-verified answers | `verified_state`, `verified_primary_name` section wrappers |
@@ -601,7 +602,9 @@ Rules:
   anchor) populate
   it with a capped count over the page's exact filters: exact up to 10,000
   product-visible rows and `null` beyond by default; `include=total_count`
-  requests an exact uncapped count on anchored history. It is always `null` for unanchored event
+  requests an exact uncapped count on anchored history. On name history with
+  `include=child_registrations` the count covers the name's rows and its direct
+  child registration rows together, each event once. It is always `null` for unanchored event
   reads. `GET /v1/names/{name}/subnames` populates it with the parent's direct
   readable subname count, applying the same optional prefix and expiry filters
   as the page before its cursor.
@@ -1221,7 +1224,9 @@ unchanged; otherwise it returns `409 stale`. Each route checks before deriving
 identity and event anchors written by Interpret and checks again inside the
 repeatable-read page transaction. Events and address history then resolve
 display names and revalidate the captured redo state before returning data;
-name history has no post-transaction display-name read. An active redo at any
+name history has no post-transaction display-name read. With
+`include=child_registrations`, a child row's name comes from the child's name
+surface, read inside the same page transaction. An active redo at any
 check, or a redo
 that began between them, returns `409 stale` instead of exposing a partially
 reconstructed normalized-event range. A
@@ -1235,7 +1240,8 @@ row. An explicit `type` (one label or a set) remains part of anchor validation.
 History cursors also encode the direction in their sort token and the
 canonical `type` set and timestamp bounds in their filters, so `order=asc`,
 `type`, `from_timestamp`, and `to_timestamp` each fail closed when a cursor is
-replayed against a different query; see the [history collection
+replayed against a different query. Name history cursors also record
+`include=child_registrations`; see the [history collection
 filters](api-v2-routes.md#history-collection-filters). Cursor bytes remain
 unstable.
 
