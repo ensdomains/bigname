@@ -25,7 +25,7 @@ installer deliberately refuses a nonempty phase schema, so schema initialization
 is a separate deployment step rather than part of the repeatable smoke check. CI
 performs that setup immediately before invoking this script.
 
-The edge check reflects the #315 state. The API binary serves `/v1`, GraphQL, `/docs`,
+The edge check reflects the #315 state. The API binary serves `/v1`, GraphQL, `/`, `/docs`,
 and `/healthz`; the checked-in public edge admits `/v1` reads,
 `POST /v1/lookup`, GraphQL POST, and their browser preflights. `/v2`,
 documentation-helper paths, `/healthz`, GraphiQL, and encoded-traversal paths

@@ -1,6 +1,7 @@
 mod account_permissions;
 mod address_names;
 mod address_records;
+pub(crate) mod child_registrations;
 mod children;
 mod linked_records;
 mod name_authority;
@@ -39,5 +40,6 @@ pub(crate) async fn build_all(
     address_names::build(transaction, chain_id, target).await?;
     address_records::build(transaction, chain_id, target).await?;
     primary_names::build(transaction, chain_id, target).await?;
+    child_registrations::build(transaction, target, full_rebuild).await?;
     Ok(())
 }

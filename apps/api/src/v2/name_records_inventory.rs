@@ -7,11 +7,23 @@ use serde_json::Value;
 use super::name_record::string_field;
 use super::support::{ResolutionRecordKey, parse_resolution_record_key, serving_record_inventory};
 
+mod abi;
+#[cfg(test)]
+pub(crate) use abi::abi_content_types_test_hooks;
+pub(crate) use abi::{
+    abi_input_for_identity_row, fill_records_route_abi_content_types, load_abi_content_types,
+};
+
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct RecordInventory {
     pub(crate) known_keys: Vec<String>,
     pub(crate) unset_keys: Vec<String>,
     pub(crate) unsupported_keys: Vec<String>,
+    /// Observed ABI content types, or `null` with `abi_unsupported_reason`; filled by
+    /// [`RecordInventory::set_abi_content_types`] once per served container.
+    pub(crate) abi_content_types: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) abi_unsupported_reason: Option<String>,
 }
 
 pub(crate) fn default_requested_records(
@@ -124,9 +136,8 @@ pub(crate) fn inventory_summary_of(
                 .map(|record| record.record_key.clone()),
         );
         return RecordInventory {
-            known_keys: Vec::new(),
-            unset_keys: Vec::new(),
             unsupported_keys: unsupported_keys.into_iter().collect(),
+            ..RecordInventory::default()
         };
     }
 
@@ -163,6 +174,7 @@ pub(crate) fn inventory_summary_of(
         known_keys,
         unset_keys,
         unsupported_keys: unsupported_keys.into_iter().collect(),
+        ..RecordInventory::default()
     }
 }
 

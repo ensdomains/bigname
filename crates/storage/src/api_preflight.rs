@@ -50,6 +50,7 @@ pub async fn load_missing_api_lookup_ddl(pool: &PgPool) -> Result<Vec<ApiLookupD
                 ('relation', 'bigname_phase.address_names_current'),
                 ('relation', 'bigname_phase.address_records_current'),
                 ('relation', 'bigname_phase.children_current'),
+                ('relation', 'bigname_phase.child_registration_events'),
                 ('relation', 'bigname_phase.permissions_current'),
                 ('relation', 'bigname_phase.permissions_current_resource_summary'),
                 ('relation', 'bigname_phase.account_permission_state_current'),
