@@ -1615,11 +1615,15 @@ async fn later_wrapped_name_keeps_one_followable_registrar_lifecycle_handle() ->
             || plan.contains("normalized_events_name_history_idx"),
         "registration history must use the exact-name history index for associated rows:\n{plan}"
     );
+    // The exact-namehash surface lookup is planned with sequential scans disabled, so a
+    // `Seq Scan` here means no index serves the surface predicate at all. Which of the
+    // name_surfaces indexes the planner picks on this small database is a tie-break, not a
+    // contract, so the assertion names none of them.
     assert!(
-        plan.contains("name_surfaces_exact_namehash_projection_idx")
-            || plan.contains("name_surfaces_hash_idx")
-            || plan.contains("name_surfaces_visibility_idx"),
-        "wrapper association must use the exact-namehash surface index:\n{plan}"
+        !plan.contains("Seq Scan on name_surfaces")
+            && (plan.contains("Scan using name_surfaces_")
+                || plan.contains("Bitmap Index Scan on name_surfaces_")),
+        "wrapper association must read name_surfaces through an index:\n{plan}"
     );
     assert!(
         !plan.contains("Seq Scan on normalized_events"),

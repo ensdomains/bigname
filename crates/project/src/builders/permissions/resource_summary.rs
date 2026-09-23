@@ -13,6 +13,22 @@ pub(super) async fn build(
     target: &Marker,
     full_rebuild: bool,
 ) -> Result<()> {
+    #[cfg(test)]
+    if crate::profile::execute_bound(
+        transaction,
+        &query(),
+        crate::profile::Stage::ResourcePermissions,
+        &[
+            crate::profile::Parameter::Text(chain_id),
+            crate::profile::Parameter::I64(target.number),
+            crate::profile::Parameter::Text(&target.hash),
+            crate::profile::Parameter::Bool(full_rebuild),
+        ],
+    )
+    .await?
+    {
+        return Ok(());
+    }
     sqlx::query(&query())
         .bind(chain_id)
         .bind(target.number)

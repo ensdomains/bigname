@@ -11,6 +11,18 @@ use crate::{Marker, ProjectError, Result};
 const TEXT_VALUE_MISSING: &str = "value_not_retained_in_normalized_events";
 const BATCH_SIZE: usize = 250;
 
+// Manifest-admitted, non-proxy legacy public resolvers with text storage.
+// (upstream: .refs/ens_app_v3/src/constants/resolverAddressData.ts:L71 @ ens_app_v3@7175858)
+// (upstream: .refs/ens_app_v3/src/constants/resolverAddressData.ts:L88 @ ens_app_v3@7175858)
+// (upstream: .refs/ens_app_v3/src/constants/resolverAddressData.ts:L105 @ ens_app_v3@7175858)
+// (upstream: .refs/ens_app_v3/src/constants/resolverAddressData.ts:L121 @ ens_app_v3@7175858)
+const TEXT_RESOLVERS: &[&str] = &[
+    "0x4976fb03c32e5b8cfe2b6ccb31c09ba78ebaba41",
+    "0xdaaf96c344f63131acadd0ea35170e7892d3dfba",
+    "0x226159d592e2b063810a10ebf6dcbada94ed68b8",
+    "0x5ffc014343cd971b7eb70732021e26c35b744cc4",
+];
+
 pub(super) struct TextRow {
     pub(super) resource_id: String,
     pub(super) boundary_key: String,
@@ -21,46 +33,50 @@ pub(super) struct TextRow {
     pub(super) changed: bool,
 }
 
-pub(super) async fn load_candidates(pool: &PgPool) -> Result<Vec<TextRow>> {
-    let rows = sqlx::query_as::<_, (String, String, String, String, Value)>(
-        r#"
-        SELECT row.resource_id::text,
-               row.record_version_boundary_key,
-               lower(row.provenance ->> 'resolver_address'),
-               surface.namehash,
-               row.entries
-        FROM record_inventory_current row
-        JOIN name_surfaces surface
-          ON surface.logical_name_id = row.provenance ->> 'logical_name_id'
-        WHERE row.provenance ->> 'chain_id' = $1
-          AND row.support_status = 'supported'
-          AND EXISTS (
-              SELECT 1 FROM jsonb_array_elements(row.entries) entry
-              WHERE entry ->> 'record_family' = 'text'
-                AND (
-                    entry ->> 'unsupported_reason' = $2
-                    OR entry ? $3
-                )
-          )
-        ORDER BY row.resource_id, row.record_version_boundary_key
-        "#,
+pub(super) async fn load_candidates(pool: &PgPool, head: &Marker) -> Result<Vec<TextRow>> {
+    let rows = sqlx::query_as::<_, (String, String, String, String, Value, bool, Vec<i64>)>(
+        include_str!("text_candidates.sql"),
     )
     .bind(ETHEREUM)
     .bind(TEXT_VALUE_MISSING)
     .bind(HYDRATION_KEY)
+    .bind(TEXT_RESOLVERS)
+    .bind(head.number)
     .fetch_all(pool)
     .await
     .map_err(|error| ProjectError::database("failed to load text hydration candidates", error))?;
     rows.into_iter()
         .map(
-            |(resource_id, boundary_key, resolver_address, namehash, entries)| {
-                let calls = entries
-                    .as_array()
-                    .ok_or_else(|| ProjectError::data_integrity("record entries are not an array"))?
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(index, entry)| text_key(entry).map(|key| (index, key.to_owned())))
-                    .collect();
+            |(
+                resource_id,
+                boundary_key,
+                resolver_address,
+                namehash,
+                mut entries,
+                admitted,
+                pending,
+            )| {
+                let array = entries.as_array_mut().ok_or_else(|| {
+                    ProjectError::data_integrity("record entries are not an array")
+                })?;
+                let mut calls = Vec::new();
+                let mut changed = false;
+                for ordinal in pending {
+                    let index = (ordinal - 1) as usize;
+                    let entry = &mut array[index];
+                    if admitted {
+                        if let Some(key) = text_key(entry) {
+                            calls.push((index, key.to_owned()));
+                        }
+                    } else if let Some(baseline) = entry
+                        .get(HYDRATION_KEY)
+                        .and_then(|value| value.get("baseline"))
+                        .cloned()
+                    {
+                        *entry = baseline;
+                        changed = true;
+                    }
+                }
                 Ok(TextRow {
                     resource_id,
                     boundary_key,
@@ -68,7 +84,7 @@ pub(super) async fn load_candidates(pool: &PgPool) -> Result<Vec<TextRow>> {
                     namehash,
                     entries,
                     calls,
-                    changed: false,
+                    changed,
                 })
             },
         )

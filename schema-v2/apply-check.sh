@@ -529,9 +529,9 @@ migration_application_log="$(
 # Future entries must use basename|one-line reason.
 intentional_phase_migration_skips=()
 refusal_assertions_passed=0
-expected_refusal_assertions=227
+expected_refusal_assertions=251
 predecessor_shape_proof_count=0
-expected_predecessor_shape_proof_count=42
+expected_predecessor_shape_proof_count=45
 refusal_probe_seconds=0
 timing_started=$SECONDS
 
@@ -547,7 +547,8 @@ cleanup() {
     if [ -n "${migration_application_log:-}" ]; then
         rm -f -- "$migration_application_log"
     fi
-    printf 'DROP SCHEMA IF EXISTS "%s" CASCADE;\n' "$scratch_schema" \
+    printf 'DROP SCHEMA IF EXISTS "%s" CASCADE;\nDROP SCHEMA IF EXISTS "%s_foreign" CASCADE;\n' \
+        "$scratch_schema" "$scratch_schema" \
         | run_psql >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
@@ -629,8 +630,11 @@ for migration_file in \
     "$ROOT/migrations/20260917150000_normalized_events_v1_lookahead_indexes.sql" \
     "$ROOT/migrations/20260917160000_discovery_edges_index_validity_check.sql" \
     "$ROOT/migrations/20260917161000_project_scoped_history_index_validity_check.sql" \
+    "$ROOT/migrations/20260922010000_project_node_history_idx.sql" \
+    "$ROOT/migrations/20260922010100_project_mirror_scope_indexes.sql" \
     "$ROOT/migrations/20260923120000_normalized_events_address_match_indexes.sql" \
     "$ROOT/migrations/20260923130000_normalized_events_chain_block_number_desc_idx.sql" \
+    "$ROOT/migrations/20260923140000_project_name_surfaces_label_indexes.sql" \
     "$ROOT/migrations/20260923150000_child_registration_events.sql"
 do
     emit_phase_migration "$migration_file" empty-schema | run_psql
@@ -880,6 +884,11 @@ for migration_file in \
     "$ROOT/migrations/20260914120000_lookup_publication_revalidation.sql" \
     "$ROOT/migrations/20260914120100_address_records_current_comments.sql" \
     "$ROOT/migrations/20260914120100_address_records_current_comments.sql" \
+    "$ROOT/migrations/20260922010000_project_node_history_idx.sql" \
+    "$ROOT/migrations/20260922010000_project_node_history_idx.sql" \
+    "$ROOT/migrations/20260922010100_project_mirror_scope_indexes.sql" \
+    "$ROOT/migrations/20260923140000_project_name_surfaces_label_indexes.sql" \
+    "$ROOT/migrations/20260923140000_project_name_surfaces_label_indexes.sql" \
     "$ROOT/migrations/20260923150000_child_registration_events.sql" \
     "$ROOT/migrations/20260923150000_child_registration_events.sql"
 do
@@ -1613,26 +1622,31 @@ assert_index_install_hint project-history-index-on-another-table-hint \
 } | run_psql >/dev/null
 # All eight indexes are now the ones the installer built. The validity check
 # passes on that shape under both search_path settings and changes nothing.
+# The count names the eight indexes: the baseline also carries other
+# normalized_events_project_*_idx indexes (the scoped node history and ENSv1
+# pointer-node indexes), which this check does not cover.
+project_history_index_list="$(printf "'%s'," "${project_history_index_names[@]}")"
+project_history_index_list="${project_history_index_list%,}"
 {
     printf 'SET search_path TO "%s";\n' "$scratch_schema"
     emit_phase_migration "$project_history_validity_migration" preceding-shape
     printf 'SET search_path TO public;\n'
     emit_phase_migration "$project_history_validity_migration" baseline-first
     printf 'SET search_path TO "%s";\n' "$scratch_schema"
-    cat <<'SQL'
-DO $$
+    cat <<SQL
+DO \$\$
 BEGIN
     IF (
         SELECT count(*)
         FROM pg_index
         JOIN pg_class index_class ON index_class.oid = pg_index.indexrelid
         WHERE pg_index.indrelid = 'normalized_events'::regclass
-          AND index_class.relname LIKE 'normalized\_events\_project\_%\_idx'
+          AND index_class.relname IN ($project_history_index_list)
           AND pg_index.indisvalid AND pg_index.indisready
     ) <> 8 THEN
         RAISE EXCEPTION 'project-scoped history index validity check changed an index';
     END IF;
-END $$;
+END \$\$;
 SQL
 } | run_psql
 assert_migration_context_count "$project_history_validity_migration" empty-schema 1
@@ -2183,6 +2197,466 @@ SQL
 DROP INDEX $address_match_index_name;
 $address_match_found_definition;
 SQL
+done
+# Rebuild the two Project label-hash indexes and their label_hashes function
+# from the shape an earlier version of 20260922010100_project_mirror_scope_indexes.sql
+# left on Sepolia: the label-array GIN and btree indexes and no function. The schema-migration must
+# drop the old two and build what the fresh baseline builds, and a rerun must
+# leave that unchanged.
+label_hash_migration="$ROOT/migrations/20260923140000_project_name_surfaces_label_indexes.sql"
+label_hash_install="$ROOT/ops/project-progressive/install.sql"
+label_hash_readme=ops/project-progressive/README.md
+label_hash_index_names=(
+    name_surfaces_project_suffix_hash_idx
+    name_surfaces_project_label_hashes_idx
+)
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    cat <<'SQL'
+CREATE TEMP TABLE expected_label_hash_indexes AS
+SELECT index_class.relname AS index_name,
+       pg_get_indexdef(pg_index.indexrelid) AS definition
+FROM pg_index
+JOIN pg_class index_class ON index_class.oid = pg_index.indexrelid
+WHERE pg_index.indrelid = 'name_surfaces'::regclass
+  AND index_class.relname IN (
+      'name_surfaces_project_suffix_hash_idx',
+      'name_surfaces_project_label_hashes_idx'
+  );
+DO $$
+BEGIN
+    IF (SELECT count(*) FROM expected_label_hash_indexes) <> 2 THEN
+        RAISE EXCEPTION 'fresh baseline does not define both Project label-hash indexes';
+    END IF;
+END $$;
+DROP INDEX name_surfaces_project_suffix_hash_idx, name_surfaces_project_label_hashes_idx;
+DROP FUNCTION label_hashes(text[]);
+CREATE INDEX name_surfaces_project_labels_idx ON name_surfaces USING gin (raw_labels);
+CREATE INDEX name_surfaces_project_suffix_idx ON name_surfaces (namespace, raw_labels);
+SQL
+    emit_phase_migration "$label_hash_migration" preceding-shape
+    emit_phase_migration "$label_hash_migration" baseline-first
+    cat <<'SQL'
+DO $$
+BEGIN
+    IF (
+        SELECT count(*)
+        FROM expected_label_hash_indexes expected
+        JOIN pg_class index_class ON index_class.relname = expected.index_name
+        JOIN pg_index ON pg_index.indexrelid = index_class.oid
+        WHERE pg_index.indrelid = 'name_surfaces'::regclass
+          AND pg_index.indisvalid AND pg_index.indisready
+          AND pg_get_indexdef(pg_index.indexrelid) = expected.definition
+    ) <> 2
+        OR to_regclass('name_surfaces_project_labels_idx') IS NOT NULL
+        OR to_regclass('name_surfaces_project_suffix_idx') IS NOT NULL
+        OR to_regprocedure('label_hashes(text[])') IS NULL THEN
+        RAISE EXCEPTION 'Project label-hash index upgrade differs from the baseline';
+    END IF;
+END $$;
+DROP TABLE expected_label_hash_indexes;
+SQL
+} | run_psql
+# The schema-migration reads definitions under search_path pg_catalog and with
+# quote_all_identifiers off, and must leave both settings as it found them, in
+# the session and inside one transaction.
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    emit_phase_migration "$label_hash_migration" baseline-first
+    assert_search_path_sql "$scratch_schema"
+    printf 'SET search_path TO public;\n'
+    emit_phase_migration "$label_hash_migration" baseline-first
+    assert_search_path_sql public
+    printf 'BEGIN;\nSET LOCAL search_path TO "%s", public;\n' "$scratch_schema"
+    render_phase_migration "$label_hash_migration"
+    assert_search_path_sql "$scratch_schema, public"
+    printf 'COMMIT;\n'
+    assert_search_path_sql public
+    emit_quote_all_identifiers_probe "$label_hash_migration" in-transaction
+} | run_psql
+assert_migration_context_count "$label_hash_migration" empty-schema 1
+assert_migration_context_count "$label_hash_migration" preceding-shape 1
+assert_migration_context_count "$label_hash_migration" baseline-first 5
+# Put the function and each index in turn into every shape the schema-migration
+# must refuse, inside a transaction that rolls back.
+label_hash_recovery="follow the recovery steps in $label_hash_readme, then run the schema-migrations again"
+assert_migration_refusal label-hashes-function-body \
+    "$label_hash_migration" \
+    "$scratch_schema.label_hashes(text[]) exists but does not have the reviewed definition; $label_hash_recovery" <<SQL
+DROP INDEX name_surfaces_project_label_hashes_idx;
+CREATE OR REPLACE FUNCTION label_hashes(labels text[]) RETURNS bigint[]
+LANGUAGE sql IMMUTABLE STRICT PARALLEL SAFE AS 'SELECT ARRAY[]::bigint[]';
+SQL
+declare -A label_hash_wrong_keys=(
+    [name_surfaces_project_suffix_hash_idx]="(namespace, hash_array_extended(raw_labels, 1))"
+    [name_surfaces_project_label_hashes_idx]="USING gin (raw_labels)"
+)
+declare -A label_hash_reviewed_definition=()
+declare -A label_hash_wrong_definition=()
+for label_hash_index_name in "${label_hash_index_names[@]}"; do
+    label_hash_reviewed_definition[$label_hash_index_name]="$(
+        {
+            printf 'SET search_path TO "%s";\n' "$scratch_schema"
+            printf '%s\n' \
+                '\pset tuples_only on' \
+                '\pset format unaligned' \
+                "SET search_path TO pg_catalog;" \
+                "SELECT pg_get_indexdef('$scratch_schema.$label_hash_index_name'::regclass);"
+        } | run_psql
+    )"
+    label_hash_wrong_definition[$label_hash_index_name]="$(
+        {
+            printf 'BEGIN;\nSET LOCAL search_path TO "%s";\n' "$scratch_schema"
+            printf '%s\n' \
+                '\pset tuples_only on' \
+                '\pset format unaligned' \
+                "DROP INDEX $label_hash_index_name;" \
+                "CREATE INDEX $label_hash_index_name ON name_surfaces ${label_hash_wrong_keys[$label_hash_index_name]};" \
+                "SET LOCAL search_path TO pg_catalog;" \
+                "SELECT pg_get_indexdef('$scratch_schema.$label_hash_index_name'::regclass);" \
+                "ROLLBACK;"
+        } | run_psql
+    )"
+    assert_migration_refusal "invalid-$label_hash_index_name" \
+        "$label_hash_migration" \
+        "$label_hash_index_name exists but is not a valid and ready index on $scratch_schema.name_surfaces; $label_hash_recovery" <<SQL
+UPDATE pg_index SET indisvalid = false
+WHERE indexrelid = '$label_hash_index_name'::regclass;
+SQL
+    assert_migration_refusal "table-named-$label_hash_index_name" \
+        "$label_hash_migration" \
+        "$scratch_schema.$label_hash_index_name is a table, not an index, so the index was never built; remove or rename that relation, then run the schema-migrations again" <<SQL
+DROP INDEX $label_hash_index_name;
+CREATE TABLE $label_hash_index_name ();
+SQL
+    assert_migration_refusal "wrong-definition-$label_hash_index_name" \
+        "$label_hash_migration" \
+        "$label_hash_index_name exists but does not have the reviewed definition; found \"${label_hash_wrong_definition[$label_hash_index_name]}\", expected \"${label_hash_reviewed_definition[$label_hash_index_name]}\"; $label_hash_recovery" <<SQL
+DROP INDEX $label_hash_index_name;
+CREATE INDEX $label_hash_index_name ON name_surfaces ${label_hash_wrong_keys[$label_hash_index_name]};
+SQL
+    assert_migration_refusal "other-table-$label_hash_index_name" \
+        "$label_hash_migration" \
+        "$label_hash_index_name exists but is not a valid and ready index on $scratch_schema.name_surfaces; $label_hash_recovery" <<SQL
+DROP INDEX $label_hash_index_name;
+CREATE INDEX $label_hash_index_name ON discovery_edges (chain_id);
+SQL
+done
+# The live prebuild in ops/project-progressive/install.sql must build the
+# baseline definition of each label-hash index from the shape without it, pass
+# its own check, leave a caller's search_path and quote_all_identifiers as it
+# found them, refuse an invalid index, an index with another definition, and a
+# table under the name, and recover as its README says. It never drops an index.
+label_hash_install_recovery="follow the recovery steps in $label_hash_readme before retrying"
+for label_hash_index_name in "${label_hash_index_names[@]}"; do
+    label_hash_matches_baseline="DO \$\$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_index
+        WHERE indexrelid = '$label_hash_index_name'::regclass
+          AND indisvalid AND indisready
+          AND pg_get_indexdef(indexrelid) = (
+              SELECT definition FROM expected_installed_label_hash_index
+          )
+    ) THEN
+        RAISE EXCEPTION '$label_hash_index_name prebuild differs from the baseline';
+    END IF;
+END \$\$;"
+    {
+        printf 'SET search_path TO "%s";\n' "$scratch_schema"
+        printf '%s\n' \
+            "CREATE TABLE expected_installed_label_hash_index AS" \
+            "SELECT pg_get_indexdef(indexrelid) AS definition" \
+            "FROM pg_index WHERE indexrelid = '$label_hash_index_name'::regclass;" \
+            "DROP INDEX $label_hash_index_name;"
+        render_phase_migration "$label_hash_install"
+        render_phase_migration "$label_hash_install"
+        assert_search_path_sql "$scratch_schema"
+        printf '%s\n' "$label_hash_matches_baseline"
+        emit_quote_all_identifiers_probe "$label_hash_install" outside-transaction
+        printf '%s\n' "$label_hash_matches_baseline"
+        printf '%s\n' \
+            "UPDATE pg_index SET indisvalid = false" \
+            "WHERE indexrelid = '$label_hash_index_name'::regclass;"
+    } | run_psql >/dev/null
+    assert_index_install_refusal "label-hash-$label_hash_index_name-invalid-prebuild" \
+        "$label_hash_install" \
+        "$label_hash_index_name is missing from $scratch_schema.name_surfaces or is not valid and ready; $label_hash_install_recovery"
+    {
+        printf 'SET search_path TO "%s";\n' "$scratch_schema"
+        printf '%s\n' \
+            "DROP INDEX $label_hash_index_name;" \
+            "CREATE INDEX $label_hash_index_name ON name_surfaces ${label_hash_wrong_keys[$label_hash_index_name]};"
+    } | run_psql >/dev/null
+    assert_index_install_refusal "label-hash-$label_hash_index_name-wrong-definition" \
+        "$label_hash_install" \
+        "$label_hash_index_name exists but does not have the reviewed definition; found \"${label_hash_wrong_definition[$label_hash_index_name]}\", expected \"${label_hash_reviewed_definition[$label_hash_index_name]}\"; $label_hash_install_recovery"
+    {
+        printf 'SET search_path TO "%s";\n' "$scratch_schema"
+        printf '%s\n' "DROP INDEX $label_hash_index_name;" "CREATE TABLE $label_hash_index_name ();"
+    } | run_psql >/dev/null
+    assert_index_install_refusal "label-hash-$label_hash_index_name-table-under-name" \
+        "$label_hash_install" \
+        "$scratch_schema.$label_hash_index_name is a table, not an index, so the index was never built; remove or rename that relation, then follow $label_hash_readme before retrying"
+    {
+        printf 'SET search_path TO "%s";\n' "$scratch_schema"
+        printf '%s\n' \
+            "DROP TABLE $label_hash_index_name;" \
+            "CREATE INDEX $label_hash_index_name ON discovery_edges (chain_id);"
+    } | run_psql >/dev/null
+    assert_index_install_refusal "label-hash-$label_hash_index_name-index-on-another-table" \
+        "$label_hash_install" \
+        "$label_hash_index_name is missing from $scratch_schema.name_surfaces or is not valid and ready; $label_hash_install_recovery"
+    assert_index_install_hint "label-hash-$label_hash_index_name-index-on-another-table-hint" \
+        "$label_hash_install" \
+        "An index on $scratch_schema.discovery_edges holds this name. Rename or remove it, then rerun this script."
+    {
+        printf 'SET search_path TO "%s";\n' "$scratch_schema"
+        printf '%s\n' "DROP INDEX $label_hash_index_name;"
+        render_phase_migration "$label_hash_install"
+        printf '%s\n' "$label_hash_matches_baseline" "DROP TABLE expected_installed_label_hash_index;"
+    } | run_psql >/dev/null
+done
+# The installer never replaces label_hashes: another definition is refused
+# before anything is built.
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    printf '%s\n' \
+        "DROP INDEX name_surfaces_project_label_hashes_idx;" \
+        "CREATE OR REPLACE FUNCTION label_hashes(labels text[]) RETURNS bigint[]" \
+        "LANGUAGE sql IMMUTABLE STRICT PARALLEL SAFE AS 'SELECT ARRAY[]::bigint[]';"
+} | run_psql >/dev/null
+assert_index_install_refusal label-hash-function-body \
+    "$label_hash_install" \
+    "$scratch_schema.label_hashes(text[]) is missing or does not have the reviewed definition; $label_hash_install_recovery"
+# With one index absent and the other invalid, the installer stops on the
+# invalid one before building the absent one, and names the recovery.
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    printf '%s\n' "DROP FUNCTION label_hashes(text[]);"
+    sed -n '/^CREATE OR REPLACE FUNCTION label_hashes/,/^\$\$;/p' "$ROOT/schema-v2/baseline/03_identity.sql"
+    printf '%s\n' \
+        "CREATE INDEX name_surfaces_project_label_hashes_idx ON name_surfaces USING gin (label_hashes(raw_labels));" \
+        "DROP INDEX name_surfaces_project_suffix_hash_idx;" \
+        "UPDATE pg_index SET indisvalid = false" \
+        "WHERE indexrelid = 'name_surfaces_project_label_hashes_idx'::regclass;"
+} | run_psql >/dev/null
+assert_index_install_refusal label-hash-refuses-before-building \
+    "$label_hash_install" \
+    "name_surfaces_project_label_hashes_idx is missing from $scratch_schema.name_surfaces or is not valid and ready; $label_hash_install_recovery"
+assert_index_install_hint label-hash-invalid-index-hint \
+    "$label_hash_install" \
+    "An interrupted concurrent build leaves an invalid index. Confirm in pg_stat_progress_create_index that no build is still running, run DROP INDEX CONCURRENTLY $scratch_schema.name_surfaces_project_label_hashes_idx, then rerun this script."
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    cat <<'SQL'
+DO $$
+BEGIN
+    IF to_regclass('name_surfaces_project_suffix_hash_idx') IS NOT NULL THEN
+        RAISE EXCEPTION 'Project label-hash installer built an index before refusing';
+    END IF;
+END $$;
+DROP INDEX name_surfaces_project_label_hashes_idx;
+SQL
+    render_phase_migration "$label_hash_install"
+} | run_psql >/dev/null
+# After the schema-migration, ops/project-progressive/validate.sql and
+# validate-after-switch.sql both pass. Before the switch validate.sql also passes
+# while an old label-array index still exists; validate-after-switch.sql must
+# refuse that, and validate.sql must refuse an index of a reviewed name on
+# another table. Each setup runs in a transaction that rolls back.
+label_hash_validate="$ROOT/ops/project-progressive/validate.sql"
+label_hash_validate_after_switch="$ROOT/ops/project-progressive/validate-after-switch.sql"
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    render_phase_migration "$label_hash_validate"
+    render_phase_migration "$label_hash_validate_after_switch"
+    printf '%s\n' \
+        "BEGIN;" \
+        "CREATE INDEX name_surfaces_project_suffix_idx ON name_surfaces (namespace, raw_labels);"
+    render_phase_migration "$label_hash_validate"
+    printf '%s\n' "ROLLBACK;"
+} | run_psql >/dev/null
+assert_migration_refusal validate-after-switch-old-index \
+    "$label_hash_validate_after_switch" \
+    "Project progressive label-array indexes still exist after the switch: name_surfaces_project_suffix_idx; check that 20260923140000_project_name_surfaces_label_indexes.sql was applied" <<SQL
+CREATE INDEX name_surfaces_project_suffix_idx ON name_surfaces (namespace, raw_labels);
+SQL
+assert_migration_refusal validate-index-on-another-table \
+    "$label_hash_validate" \
+    "Project progressive indexes missing, invalid, or on another table: name_surfaces_project_node_idx" <<SQL
+DROP INDEX name_surfaces_project_node_idx;
+CREATE INDEX name_surfaces_project_node_idx ON discovery_edges (chain_id);
+SQL
+# Upgrade a database from main's shape, without this release's five Project
+# indexes or label_hashes, holding both long-label shapes the mirror tests use:
+# a 34-label array of about 4 KiB and a single 2,880-character label. A
+# whole-array btree or GIN entry for either row exceeds the index entry limit,
+# so any step that builds one fails here. The installer and both validators
+# run first, as on a live deployment, then the whole pending chain
+# 20260922010000 -> 20260922010100 -> 20260923140000 through the ordinary
+# schema-migration path. It must leave the fresh baseline's five indexes and
+# no legacy label-array index after every step, and an installer rerun must
+# change nothing.
+label_chain_migrations=(
+    "$ROOT/migrations/20260922010000_project_node_history_idx.sql"
+    "$ROOT/migrations/20260922010100_project_mirror_scope_indexes.sql"
+    "$label_hash_migration"
+)
+label_chain_matches_baseline="DO \$\$
+BEGIN
+    IF (
+        SELECT count(*)
+        FROM expected_label_chain_indexes expected
+        JOIN pg_class index_class ON index_class.relname = expected.index_name
+        JOIN pg_index ON pg_index.indexrelid = index_class.oid
+        WHERE pg_index.indrelid = expected.table_oid
+          AND pg_index.indisvalid AND pg_index.indisready
+          AND pg_get_indexdef(pg_index.indexrelid) = expected.definition
+    ) <> 5 THEN
+        RAISE EXCEPTION 'Project label upgrade chain does not match the fresh baseline';
+    END IF;
+END \$\$;"
+label_chain_no_legacy="DO \$\$
+BEGIN
+    IF to_regclass('$scratch_schema.name_surfaces_project_labels_idx') IS NOT NULL
+        OR to_regclass('$scratch_schema.name_surfaces_project_suffix_idx') IS NOT NULL THEN
+        RAISE EXCEPTION 'Project label upgrade chain built a whole-array label index';
+    END IF;
+END \$\$;"
+# A same-named index in another schema of the test database must neither
+# break the capture's exact count nor be touched by the chain. Create one in a
+# throwaway schema, run the proof, then require that index unchanged.
+label_chain_foreign_schema="${scratch_schema}_foreign"
+{
+    printf '%s\n' \
+        "CREATE SCHEMA \"$label_chain_foreign_schema\";" \
+        "CREATE TABLE \"$label_chain_foreign_schema\".example (id integer);" \
+        "CREATE INDEX name_surfaces_project_node_idx ON \"$label_chain_foreign_schema\".example (id);" \
+        "CREATE TABLE \"$label_chain_foreign_schema\".snapshot AS" \
+        "SELECT pg_index.indexrelid, pg_get_indexdef(pg_index.indexrelid) AS definition" \
+        "FROM pg_index WHERE indexrelid = '\"$label_chain_foreign_schema\".name_surfaces_project_node_idx'::regclass;"
+} | run_psql >/dev/null
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    cat <<'SQL'
+CREATE TEMP TABLE expected_label_chain_indexes AS
+SELECT index_class.relname AS index_name,
+       pg_index.indrelid AS table_oid,
+       pg_get_indexdef(pg_index.indexrelid) AS definition
+FROM pg_index
+JOIN pg_class index_class ON index_class.oid = pg_index.indexrelid
+WHERE index_class.relname IN (
+    'normalized_events_project_node_history_idx',
+    'normalized_events_project_v1_pointer_node_idx',
+    'name_surfaces_project_node_idx',
+    'name_surfaces_project_suffix_hash_idx',
+    'name_surfaces_project_label_hashes_idx'
+)
+  AND pg_index.indrelid IN ('name_surfaces'::regclass, 'normalized_events'::regclass);
+DO $$
+BEGIN
+    IF (SELECT count(*) FROM expected_label_chain_indexes) <> 5 THEN
+        RAISE EXCEPTION 'fresh baseline does not define all five Project progressive indexes';
+    END IF;
+END $$;
+DROP INDEX
+    normalized_events_project_node_history_idx,
+    normalized_events_project_v1_pointer_node_idx,
+    name_surfaces_project_node_idx,
+    name_surfaces_project_suffix_hash_idx,
+    name_surfaces_project_label_hashes_idx;
+DROP FUNCTION label_hashes(text[]);
+INSERT INTO chain_lineage (
+    chain_id, block_hash, block_number, block_timestamp, canonicality_state
+) VALUES ('label-chain', '0x01', 1, to_timestamp(1), 'canonical');
+WITH shapes(namehash, raw_labels) AS (
+    VALUES
+        ('0xlong-array',
+         ARRAY(SELECT md5(i || 'a') || md5(i || 'b') || md5(i || 'c') || md5(i || 'd')
+               FROM generate_series(1, 32) i ORDER BY i) || ARRAY['label-1', 'eth']),
+        ('0xlong-label',
+         ARRAY[(SELECT string_agg(md5(i::text), '' ORDER BY i) FROM generate_series(1, 90) i), 'eth'])
+)
+INSERT INTO name_surfaces (
+    logical_name_id, namespace, raw_name, raw_labels, dns_encoded_name,
+    namehash, labelhashes, normalizer_version, visibility_state,
+    chain_id, block_hash, block_number, canonicality_state
+)
+SELECT 'label-chain:' || namehash, 'label-chain', array_to_string(raw_labels, '.'),
+       raw_labels, '\x'::bytea, namehash,
+       ARRAY(SELECT '0x' || position FROM generate_series(1, cardinality(raw_labels)) position),
+       'test', 'active', 'label-chain', '0x01', 1, 'canonical'
+FROM shapes;
+DO $$
+BEGIN
+    IF (SELECT max(octet_length(array_to_string(raw_labels, ''))) FROM name_surfaces
+        WHERE chain_id = 'label-chain') <= 2712
+        OR (SELECT max(octet_length(raw_labels[1])) FROM name_surfaces
+            WHERE chain_id = 'label-chain') <= 2712 THEN
+        RAISE EXCEPTION 'long-label rows do not exceed the index entry limit';
+    END IF;
+END $$;
+SQL
+    render_phase_migration "$label_hash_install"
+    render_phase_migration "$label_hash_validate"
+    render_phase_migration "$label_hash_validate_after_switch"
+    printf '%s\n' "$label_chain_matches_baseline" "$label_chain_no_legacy"
+    for label_chain_migration in "${label_chain_migrations[@]}"; do
+        emit_phase_migration "$label_chain_migration" preceding-shape
+        printf '%s\n' "$label_chain_no_legacy"
+    done
+    printf '%s\n' "$label_chain_matches_baseline"
+    render_phase_migration "$label_hash_validate"
+    render_phase_migration "$label_hash_validate_after_switch"
+    render_phase_migration "$label_hash_install"
+    printf '%s\n' "$label_chain_matches_baseline" "$label_chain_no_legacy"
+    cat <<'SQL'
+DELETE FROM name_surfaces WHERE chain_id = 'label-chain';
+DELETE FROM chain_lineage WHERE chain_id = 'label-chain';
+DROP TABLE expected_label_chain_indexes;
+SQL
+} | run_psql >/dev/null
+{
+    printf '%s\n' \
+        "DO \$\$" \
+        "BEGIN" \
+        "    IF NOT EXISTS (" \
+        "        SELECT 1 FROM \"$label_chain_foreign_schema\".snapshot snap" \
+        "        JOIN pg_index ON pg_index.indexrelid = snap.indexrelid" \
+        "        WHERE pg_index.indexrelid = to_regclass('\"$label_chain_foreign_schema\".name_surfaces_project_node_idx')" \
+        "          AND pg_index.indisvalid AND pg_index.indisready" \
+        "          AND pg_get_indexdef(pg_index.indexrelid) = snap.definition" \
+        "    ) THEN" \
+        "        RAISE EXCEPTION 'Project label upgrade chain changed a same-named index in another schema';" \
+        "    END IF;" \
+        "END \$\$;" \
+        "DROP SCHEMA \"$label_chain_foreign_schema\" CASCADE;"
+} | run_psql >/dev/null
+assert_migration_context_count "${label_chain_migrations[0]}" preceding-shape 1
+assert_migration_context_count "${label_chain_migrations[1]}" preceding-shape 1
+assert_migration_context_count "$label_hash_migration" preceding-shape 2
+# A deployment that recorded the earlier 20260922010100 updates its recorded
+# checksum to the one sqlx stores for the current file: the SHA-384 of the file
+# bytes. Both documents that carry the UPDATE must name exactly that value.
+label_chain_checksum="$(
+    {
+        printf '%s\n' '\pset tuples_only on' '\pset format unaligned'
+        printf "SELECT encode(sha384(decode('%s', 'hex')), 'hex');\n" \
+            "$(od -An -v -tx1 "${label_chain_migrations[1]}" | tr -d ' \n')"
+    } | run_psql
+)"
+for label_chain_doc in ops/project-progressive/README.md docs/runbooks/production-docker.md; do
+    label_chain_documented="$(
+        grep -o "SET checksum = decode('[0-9a-f]*', 'hex') WHERE version = 20260922010100" \
+            "$ROOT/$label_chain_doc" | sed "s/.*decode('\([0-9a-f]*\)'.*/\1/" | sort -u
+    )"
+    if [ "$label_chain_documented" != "$label_chain_checksum" ]; then
+        printf '%s\n' \
+            "$label_chain_doc: documented checksum for 20260922010100 is \"$label_chain_documented\"," \
+            "but the checked-in file's SHA-384 is \"$label_chain_checksum\"" >&2
+        exit 1
+    fi
 done
 # Recreate the event page order index from its preceding schema shape. Compare
 # the resulting catalog definition to the fresh baseline, then prove a rerun

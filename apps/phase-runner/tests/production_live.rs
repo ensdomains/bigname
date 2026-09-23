@@ -4224,7 +4224,7 @@ async fn shortened_reverse_multicall_retracts_every_candidate_baseline() -> Resu
 }
 
 #[tokio::test]
-async fn valueless_legacy_text_hydration_is_head_pinned_and_refreshes() -> Result<()> {
+async fn valueless_legacy_text_hydration_reads_once_until_rebuilt() -> Result<()> {
     let scratch = ScratchDatabase::create("production_live_text_hydration").await?;
     seed_branch(scratch.pool(), ETHEREUM, 1, 2, None).await?;
     publish(scratch.pool(), ETHEREUM, 1, 1, 0, 0).await?;
@@ -4248,8 +4248,37 @@ async fn valueless_legacy_text_hydration_is_head_pinned_and_refreshes() -> Resul
         block_hash(1, 1)
     );
 
+    assert_eq!(
+        hydrator
+            .hydrate_canonical_head(ETHEREUM)
+            .await?
+            .text_candidates,
+        0
+    );
     publish(scratch.pool(), ETHEREUM, 1, 2, 0, 0).await?;
-    hydrator.hydrate_canonical_head(ETHEREUM).await?;
+    assert_eq!(
+        hydrator
+            .hydrate_canonical_head(ETHEREUM)
+            .await?
+            .text_candidates,
+        0
+    );
+    assert_eq!(text_entry(scratch.pool(), resource).await?, first);
+    // A Project rebuild replaces entries from event history. Only then fetch again.
+    sqlx::query("UPDATE record_inventory_current SET entries = $2 WHERE resource_id = $1")
+        .bind(resource)
+        .bind(json!([
+            first["canonical_head_multicall_hydration"]["baseline"].clone()
+        ]))
+        .execute(scratch.pool())
+        .await?;
+    assert_eq!(
+        hydrator
+            .hydrate_canonical_head(ETHEREUM)
+            .await?
+            .text_candidates,
+        1
+    );
     let refreshed = text_entry(scratch.pool(), resource).await?;
     assert_eq!(refreshed["status"], "not_found");
     assert!(refreshed.get("value").is_none());
@@ -4258,6 +4287,47 @@ async fn valueless_legacy_text_hydration_is_head_pinned_and_refreshes() -> Resul
         block_hash(1, 2)
     );
 
+    rpc.server.abort();
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn text_hydration_rejects_unknown_resolvers_and_restores_ineligible_values() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_live_text_admission").await?;
+    seed_branch(scratch.pool(), ETHEREUM, 1, 1, None).await?;
+    publish(scratch.pool(), ETHEREUM, 1, 1, 0, 0).await?;
+    let resource = seed_text_candidate(scratch.pool()).await?;
+    let rpc = HydrationRpc::spawn(BTreeMap::from([(block_hash(1, 1), "known".to_owned())])).await?;
+    let hydrator = Hydrator::new(
+        scratch.pool().clone(),
+        ChainRpcUrls::from_entries(&[format!("{ETHEREUM}={}", rpc.endpoint)])?,
+    );
+    assert_eq!(
+        hydrator
+            .hydrate_canonical_head(ETHEREUM)
+            .await?
+            .text_candidates,
+        1
+    );
+    sqlx::query(
+        "UPDATE record_inventory_current SET provenance = jsonb_set(
+        provenance, '{resolver_address}', '\"0xunknown\"'::jsonb) WHERE resource_id = $1",
+    )
+    .bind(resource)
+    .execute(scratch.pool())
+    .await?;
+    // No RPC is configured: restoration and unknown missing entries must not call it.
+    let no_rpc = Hydrator::new(scratch.pool().clone(), ChainRpcUrls::default());
+    let restored = no_rpc.hydrate_canonical_head(ETHEREUM).await?;
+    assert_eq!(restored.text_candidates, 0);
+    assert_eq!(restored.updated_rows, 1);
+    let entry = text_entry(scratch.pool(), resource).await?;
+    assert_eq!(entry["status"], "unsupported");
+    assert!(entry.get("value").is_none());
+    assert_eq!(
+        no_rpc.hydrate_canonical_head(ETHEREUM).await?.updated_rows,
+        0
+    );
     rpc.server.abort();
     scratch.cleanup().await
 }
@@ -4279,8 +4349,17 @@ async fn failed_text_hydration_retracts_the_previous_head_value() -> Result<()> 
     );
 
     hydrator.hydrate_canonical_head(ETHEREUM).await?;
-    seed_branch(scratch.pool(), ETHEREUM, 2, 2, Some((1, block_hash(1, 1)))).await?;
+    seed_branch(scratch.pool(), ETHEREUM, 2, 2, Some((0, block_hash(1, 0)))).await?;
     publish(scratch.pool(), ETHEREUM, 2, 2, 0, 0).await?;
+    let readable: Value = sqlx::query_scalar(&format!(
+        "SELECT {} FROM record_inventory_current ric WHERE ric.resource_id = $1",
+        bigname_storage::READABLE_RECORD_INVENTORY_ENTRIES
+    ))
+    .bind(resource)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(readable[0]["status"], "unsupported");
+    assert!(readable[0].get("value").is_none());
     let error = hydrator
         .hydrate_canonical_head(ETHEREUM)
         .await
@@ -4317,7 +4396,7 @@ async fn text_hydration_rpc_failure_retracts_the_previous_head_value() -> Result
     );
 
     hydrator.hydrate_canonical_head(ETHEREUM).await?;
-    seed_branch(scratch.pool(), ETHEREUM, 2, 2, Some((1, block_hash(1, 1)))).await?;
+    seed_branch(scratch.pool(), ETHEREUM, 2, 2, Some((0, block_hash(1, 0)))).await?;
     publish(scratch.pool(), ETHEREUM, 2, 2, 0, 0).await?;
     let error = hydrator
         .hydrate_canonical_head(ETHEREUM)
@@ -5183,7 +5262,7 @@ async fn seed_text_candidate(pool: &PgPool) -> Result<Uuid> {
     .bind(json!({
         "chain_id": ETHEREUM,
         "logical_name_id": logical_name_id,
-        "resolver_address": REVERSE_RESOLVER
+        "resolver_address": "0x4976fb03c32e5b8cfe2b6ccb31c09ba78ebaba41"
     }))
     .execute(pool)
     .await?;

@@ -65,9 +65,9 @@ impl Hydrator {
         }
 
         let reverse = reverse::load_candidates(&self.pool, &head).await?;
-        let mut text_rows = text::load_candidates(&self.pool).await?;
+        let mut text_rows = text::load_candidates(&self.pool, &head).await?;
         let text_candidates = text_rows.iter().map(|row| row.calls.len()).sum::<usize>();
-        if reverse.is_empty() && text_candidates == 0 {
+        if reverse.is_empty() && text_rows.is_empty() {
             return Ok(empty_outcome(head, false));
         }
         let missing_rpc = (reverse.needs_rpc() || text_candidates > 0)

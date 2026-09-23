@@ -16,6 +16,21 @@ pub(super) async fn build(
                 ProjectError::database("failed to stage ENSv2 lifecycle events", error)
             })?;
     }
+    #[cfg(test)]
+    if crate::profile::execute_bound(
+        transaction,
+        query::BUILD_NAME_CURRENT,
+        crate::profile::Stage::NameCurrent,
+        &[
+            crate::profile::Parameter::Text(chain_id),
+            crate::profile::Parameter::I64(target.number),
+            crate::profile::Parameter::Text(&target.hash),
+        ],
+    )
+    .await?
+    {
+        return Ok(());
+    }
     sqlx::query(query::BUILD_NAME_CURRENT)
         .bind(chain_id)
         .bind(target.number)
