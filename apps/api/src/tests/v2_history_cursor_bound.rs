@@ -890,3 +890,87 @@ async fn v2_history_refuses_interpret_redo_on_another_scope_chain() -> Result<()
     );
     database.cleanup().await
 }
+
+/// A name whose surface Project published only above the bound did not exist at the bound: its
+/// first page is `404`, even though a current name row already exists (Project's projection
+/// swap landed before its recorded position moved, or the name appeared after capture).
+#[tokio::test]
+async fn v2_name_history_judges_existence_at_the_bound() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_history_fixture(&database).await?;
+    // The surface is observed three blocks below the seed block: at HB_PUBLISHED_BLOCK + 1.
+    seed_v2_history_name(
+        &database,
+        "ens:late-history.eth",
+        "Late-History.eth",
+        "node:late-history.eth",
+        HB_PUBLISHED_BLOCK + 4,
+        Uuid::from_u128(0x7a10),
+        Uuid::from_u128(0x8a10),
+        Uuid::from_u128(0x9a10),
+    )
+    .await?;
+    let first = hb_ok(&database, "/v1/names/history.eth/history?page_size=2").await?;
+    assert_eq!(first["meta"]["as_of"]["1"]["block_number"], json!(HB_PUBLISHED_BLOCK));
+    let (status, payload) = hb_get(&database, "/v1/names/late-history.eth/history").await?;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{payload}");
+    database.cleanup().await
+}
+
+/// A continuation whose namespace lost its active manifest cannot recover by retrying: it is
+/// told to restart, while a first page keeps the not-available retry answer.
+#[tokio::test]
+async fn v2_history_continuation_restarts_when_its_manifest_is_gone() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_history_fixture(&database).await?;
+    database
+        .insert_manifest(
+            "ens",
+            "ens_v1_registry_l1",
+            HB_CHAIN,
+            "ens_v1",
+            1,
+            "active",
+            bigname_domain::normalization::ENS_NORMALIZER_VERSION,
+        )
+        .await?;
+    let get = |uri: String| {
+        let state = AppState::new_with_rpc_urls(
+            database.lookup_pool.clone(),
+            bigname_lookup::ChainRpcUrls::default(),
+        );
+        async move {
+            let response = app_router(state)
+                .oneshot(Request::builder().uri(uri).body(Body::empty()).expect("request"))
+                .await?;
+            let status = response.status();
+            anyhow::Ok((status, read_json::<Value>(response).await?))
+        }
+    };
+    let mut cursors = Vec::new();
+    for route in hb_routes() {
+        let base = format!("{route}&page_size=1");
+        let (status, first) = get(base.clone()).await?;
+        assert_eq!(status, StatusCode::OK, "{base}: {first}");
+        cursors.push((base, hb_next_cursor(&first)?));
+    }
+    sqlx::query(
+        "DELETE FROM bigname_phase.manifest_versions
+         WHERE namespace = 'ens' AND rollout_status = 'active'",
+    )
+    .execute(&database.pool)
+    .await?;
+    for (base, cursor) in cursors {
+        let (status, payload) = get(format!("{base}&cursor={cursor}")).await?;
+        assert_eq!(status, StatusCode::CONFLICT, "{base}: {payload}");
+        assert_eq!(payload["error"]["message"], json!(HB_RESTART), "{base}");
+        let (status, payload) = get(base.clone()).await?;
+        assert_eq!(status, StatusCode::CONFLICT, "{base}: {payload}");
+        assert_eq!(
+            payload["error"]["message"],
+            json!("collection publication is not available; retry after indexing is ready"),
+            "{base}"
+        );
+    }
+    database.cleanup().await
+}

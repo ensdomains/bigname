@@ -13,6 +13,7 @@ mod filters;
 pub mod history_anchor_read_test_hooks;
 mod keyset;
 mod lineage;
+mod name_at_bound;
 mod options;
 mod paging;
 #[cfg(any(test, feature = "test-support"))]
@@ -47,6 +48,7 @@ pub use child_registrations::{
     load_name_history_page_with_child_registrations,
 };
 pub use event_page::{load_event_history_page, load_event_history_page_with_redo_policy};
+pub use name_at_bound::name_surface_observed_above_bound;
 pub use options::{
     ChainBlockRange, HistoryBlockWindow, HistoryOrder, HistoryPageOptions, HistoryScope,
 };

@@ -1223,7 +1223,11 @@ so route evolution does not invalidate outstanding cursors. Top-level
 collection cursors bind the collection anchor, namespace, filters, and sort.
 History collection cursors also bind a [cursor bound](glossary.md#cursor-bound)
 per chain, so every page of one walk reads the same frozen history at or below
-that block while new blocks are published. Current-state product collection
+that block while new blocks are published. The one exception is the address
+history [known limitation](api-v2-routes.md#history-collection-filters): when
+one of the relation kinds listed there ends after the bound block, a
+continuation loses that name's remaining rows and reports a smaller
+`page.total_count`, and the cursor does not expire. Current-state product collection
 cursors bind the current publication instead. A bare search cursor uses the
 request's derived namespace set as its namespace anchor and fails closed if
 that set has changed; search cursors preserve keyset position across requests
@@ -1238,9 +1242,8 @@ collection-wide `redo_in_progress` check. An active Interpret redo on any chain
 returns `409 stale` for all three collections, regardless of the
 requested namespace or name. An active Project redo on a chain in the request
 scope does too, because a Project redo rewrites the projections that decide
-which events a history collection holds. Events validates the request and cursor
-binding before its first check, while address history also validates its
-namespace first. Each route then captures, in one read-only snapshot, both
+which events a history collection holds. Each route validates its namespace,
+then the request and cursor binding, before its first check. Each route then captures, in one read-only snapshot, both
 redo counters and flags of every chain in scope, the collection-wide Interpret
 flag, and the lineage row of each chain's [cursor
 bound](glossary.md#cursor-bound). Name history captures it before parent
@@ -1263,7 +1266,10 @@ Which `409 stale` message a redo produces depends on when it is seen. An
 Interpret redo already in progress on a requested chain when the request
 starts makes that chain's publication unservable, so the route answers
 `collection publication is not available; retry after indexing is ready`,
-like any unservable publication. On a first page, a Project redo already in
+like any unservable publication. A namespace that lost its manifests answers a
+first page the same way, but a continuation compares its manifest digest
+before that availability check and answers with the restart message below,
+because retrying the cursor cannot recover. On a first page, a Project redo already in
 progress on a chain in scope answers `history is temporarily unavailable while
 Project redo is in progress`, and an Interpret redo in progress only on a chain
 outside the request scope answers `history is temporarily unavailable while
@@ -1289,27 +1295,31 @@ replayed against a different query. Name history cursors also record
 filters](api-v2-routes.md#history-collection-filters). Cursor bytes remain
 unstable.
 
-A full Interpret and Project re-walk that must not change product behavior at a
-fixed readable chain head does not invalidate an outstanding collection cursor
-merely because an internal normalized-event row ID changes. On `/v1/events`,
-name history, address history, and every other product cursor surface backed by
-normalized-event row identity, a cursor issued before the re-walk must resume
-after publication from the same underlying normalized-event keyset anchor, with
-identical remaining product rows, pages, fields, `has_more`, and summary
-behavior, including when the anchor is a non-product event. The diagnostic-events
-route must also accept its pre-re-walk cursor and continue from the same stable
-normalized-event anchor, but its remaining diagnostic rows and fields may
-reflect newly admitted candidate data. A pre-existing diagnostic row's numeric
+A full Interpret and Project re-walk runs as a redo, which raises the redo
+counters a history cursor carries, so it expires every `/v1/events`, name
+history, and address history cursor issued before it, even when it must not
+change product behavior at a fixed readable chain head. Such a cursor returns
+`409 stale` requiring a restart without the cursor
+(see [Cursors And Pagination](#cursors-and-pagination)). This was a deliberate
+choice for position-bound history cursors: a redo counter says that history was
+rewritten, not which blocks, so every redo expires them. Cursors freshly issued
+after the re-walk publishes continue normally and, for a behavior-preserving
+re-walk, walk the same product rows, pages, fields, `has_more`, and summary
+results as before it. The diagnostic-events route must still accept its
+pre-re-walk cursor and continue from the same stable normalized-event anchor,
+but its remaining diagnostic rows and fields may reflect newly admitted
+candidate data. A pre-existing diagnostic row's numeric
 `normalized_event_id` may change, while its `event_identity` and pre-existing
 semantic fields remain stable apart from those allowed candidate additions.
 Implementations may preserve numeric
 normalized-event IDs or resolve an old token through stable `event_identity`
 plus its stored sort tuple; these are alternative storage strategies. Freshly
-issued cursor bytes may differ. The boundary acceptance gate exercises both the
-product and diagnostic continuation contracts, then separately verifies fresh
-post-re-walk cursors.
+issued cursor bytes may differ. The boundary acceptance gate checks that a
+pre-re-walk history cursor returns the `409 stale` restart, that the diagnostic
+cursor continues, and that fresh post-re-walk cursors walk identical product
+pages.
 
-That identical-product continuation rule applies only when the declared
+That identical-product rule for fresh cursors applies only when the declared
 [re-derivation boundary](glossary.md#re-derivation-boundary) preserves product
 semantics. The intentional
 [#348](https://github.com/ensdomains/bigname/issues/348) and

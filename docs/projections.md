@@ -729,9 +729,11 @@ above the range stay, because an operator redo can end below a target that is
 already published.
 
 For a slice-1 test re-walk that must not change product behavior at a fixed
-readable chain head, an outstanding product cursor backed by normalized-event
-identity must continue against the post-re-walk test publication. It resumes at
-the same
+readable chain head, an outstanding `/v1/events`, name history, or address
+history cursor returns the `409 stale` restart, because the re-walk runs as a
+redo and raises the redo counters the cursor carries. Any other outstanding
+product cursor backed by normalized-event identity must continue against the
+post-re-walk test publication. It resumes at the same
 normalized-event keyset anchor and preserves all remaining product rows, pages,
 fields, `has_more`, and summary behavior. The anchor may be an unmapped event,
 so an interleaved non-product event at a page boundary must not skip or duplicate

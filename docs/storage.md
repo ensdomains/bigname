@@ -913,9 +913,13 @@ target chain for ENSv1→ENSv2 migration. The ordinary announcement edge prevent
 an intake gap in the restart, historical-replay, and live-follow boundary
 fixtures.
 
-For normalized-event-backed product collections, the slice-1 test re-walk must
-also preserve outstanding cursor continuation at a fixed readable chain head.
-A cursor issued before the re-walk must resume after publication at the same
+The slice-1 test re-walk runs as a redo, so it raises the Interpret and Project
+redo counters that `/v1/events`, name history, and address history cursors
+carry. A history cursor issued before the re-walk therefore returns the `409
+stale` restart after publication, even at a fixed readable chain head and even
+though product behavior is preserved; fresh post-re-walk history cursors must
+walk identical product pages. Any other normalized-event-backed product cursor
+issued before the re-walk must resume after publication at the same
 normalized-event keyset anchor and preserve every remaining product row, page,
 field, `has_more`, and summary result. The anchor may be an unmapped event, so an
 interleaved non-product event at a page boundary must not skip or duplicate a

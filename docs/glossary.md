@@ -364,7 +364,9 @@ served Project publication when the walk's first page was read. Every page of
 the walk reads normalized events and decides which of them belong to the
 collection from evidence at or below that block, and reports the block as
 `meta.as_of`, so later blocks and later
-[projection generations](#projection-generation) do not change the walk. It
+[projection generations](#projection-generation) do not change the walk,
+except for the address-history relations listed as a known limitation in the
+[history collection filters](api-v2-routes.md#history-collection-filters). It
 is not the [served head](#served-head), which keeps moving. The cursor also
 records each chain's Interpret and Project redo counters, and the walk expires
 when the bound block is no longer readable (see

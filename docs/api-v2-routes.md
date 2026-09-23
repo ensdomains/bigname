@@ -52,7 +52,13 @@ namespace's chains, or the chains of every active public namespace when none
 is selected. Every page of the walk reads events at or below the bound and
 judges which events belong to the collection from evidence at or below it, so
 the rows, their order, and `page.total_count` stay the same on every page,
-however many blocks are published during the walk. `meta.as_of` on every page,
+however many blocks are published during the walk. Address history has one
+exception: the four relation kinds in the [known
+limitation](#history-collection-filters) of the history collection filters are
+judged from current state, so when such a relation between the address and a
+name ends after the bound block, a later page of the walk loses that name's
+remaining rows and reports a smaller `page.total_count`. The cursor does not
+expire when that happens. `meta.as_of` on every page,
 the first included, is the bound: its block number, hash, and timestamp per
 chain, not the API's current progress. The one current-state field on these
 pages is the display name on `/v1/events` and address history rows, which is
@@ -123,14 +129,20 @@ publishes the full Interpret and Project re-walk, and submits that old cursor to
 the post-re-walk test publication. The control and candidate test runs hold
 every other shared-boundary input constant, including PR #391's topology
 serializer. For
-`/v1/events`, name history, address history, and every other product cursor
-surface backed by normalized-event row identity, it must
-resume from the same normalized-event keyset anchor with identical remaining
-product rows, pages, fields, `has_more`, and summary behavior. Because that
-anchor may be an unmapped event absent from the response, the corpus places an
-unmapped normalized event at a product-page boundary and proves no visible row
-is skipped or duplicated. This default product-event exception does not remove
-an explicitly requested `type` from cursor anchor validation.
+`/v1/events`, name history, and address history, the re-walk runs as a redo
+that raises the redo counters their cursors carry, so the old cursor must
+return the `409 stale` restart described under [Shared Route
+Rules](#shared-route-rules), even though the re-walk preserves product
+behavior. A redo counter says that history was rewritten, not which blocks, so
+every redo expires those cursors. Any other product cursor surface backed by
+normalized-event row identity must resume from the same normalized-event keyset
+anchor with identical remaining product rows, pages, fields, `has_more`, and
+summary behavior. Fresh post-re-walk history cursors must walk identical product
+pages. Because a keyset anchor may be an unmapped event absent from the
+response, the corpus places an unmapped normalized event at a product-page
+boundary and proves no visible row is skipped or duplicated. This default
+product-event exception does not remove an explicitly requested `type` from
+cursor anchor validation.
 `/v1/diagnostics/events` must accept its old cursor
 and continue from the same stable normalized-event anchor, but its remaining
 rows and fields may include the expected new candidate diagnostics.
@@ -142,7 +154,7 @@ token through stable `event_identity` plus its stored sort tuple; these are
 alternative storage strategies. Freshly issued cursor bytes may differ. The
 gate separately verifies fresh post-re-walk cursors on every covered route.
 
-That identical-product continuation rule applies to a re-walk whose declared
+That identical-product rule applies to a re-walk whose declared
 contract preserves product behavior. An intentional [interpreter content
 hash](glossary.md#interpreter-content-hash) change may instead have a documented
 field and route-membership delta. For the
@@ -1546,7 +1558,9 @@ A recognized namespace with no available publication returns retryable `409 stal
   block and timestamp windows, product visibility, and duplicate suppression),
   so it agrees with what paging would enumerate. Every page reads at the
   walk's [cursor bound](glossary.md#cursor-bound), so the count is the count at
-  that block and is the same on every page of one walk. With
+  that block and is the same on every page of one walk, except when an
+  address-history relation in the known limitation above ends during the walk:
+  a later page then loses that name's rows and counts fewer. With
   `include=child_registrations`, the count covers the combined collection of
   name rows and direct child registration rows, each event counted once. It is capped: counting stops
   after 10,000 product-visible rows and a larger result reports
@@ -1745,7 +1759,10 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
   Historical replay through `at` is not supported.
 - Status semantics: no product-visible matches return `200` with empty `data`,
   `page.next_cursor=null`, and `page.has_more=false`. Missing names return
-  `404 not_found` on the first page. A continuation does not look the name up
+  `404 not_found` on the first page. The first page judges existence at the
+  bound it binds: a name whose surface was first observed above the bound block
+  of its chain, because a publication landed between capturing the bound and
+  looking the name up, is missing too. A continuation does not look the name up
   in current state again: the cursor already binds the name, and its rows come
   only from the name's bindings, NameWrapper links, and registrar grants at or
   below the [cursor bound](glossary.md#cursor-bound), and with
@@ -2726,6 +2743,10 @@ introduces it rebuilds Project from full history before serving the option; see
   working while new blocks are published and returns `409 stale` requiring a
   restart when the bound no longer holds. A first page whose check after the
   read fails returns `409 stale` too and can simply be retried.
+  One relation input is not bound: when a relation in the [known
+  limitation](#history-collection-filters) of the history collection filters
+  ends after the bound block, a continuation drops that name's remaining rows
+  and its `page.total_count` shrinks by them, without expiring the cursor.
   Historical replay through `at` is not supported.
 - Pagination behavior: product event-type filtering, including an explicit
   `type` set, runs before keyset page construction (newest first unless

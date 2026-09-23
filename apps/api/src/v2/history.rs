@@ -132,10 +132,10 @@ pub(crate) async fn get_history(
     let interpret_redo_fence = bigname_storage::capture_interpret_redo_fence(&state.pool)
         .await
         .map_err(|error| map_history_page_error(error, "failed to load name history"))?;
-    // The first page proves the name exists. A continuation does not look it up again: its cursor
-    // binds the name, and its rows come only from evidence at or below the cursor's bound.
+    // The first page proves the name existed at the bound. A continuation does not look it up
+    // again: its cursor binds the name, and its rows come only from evidence at or below the bound.
     if storage_cursor.is_none() {
-        let parent = bigname_storage::load_name_current(&state.pool, &logical_name_id)
+        let exists = name_exists_at_bound(&state.pool, &logical_name_id, &history.block_bounds())
             .await
             .map_err(|error| {
                 tracing::error!(error = ?error, "failed to load history parent projection");
@@ -144,7 +144,7 @@ pub(crate) async fn get_history(
                     namespace, normalized.normalized_name
                 ))
             })?;
-        if parent.is_none() {
+        if !exists {
             let current_fence = bigname_storage::capture_interpret_redo_fence(&state.pool)
                 .await
                 .map_err(|error| map_history_page_error(error, "failed to load name history"))?;
@@ -215,6 +215,21 @@ pub(crate) async fn get_history(
         }),
         meta: history.finish(&state).await?,
     }))
+}
+
+/// A current name row whose surface was not first observed above the bound: a name Project
+/// published only above the bound (its projection swap can land before its recorded position moves) did not
+/// exist at the block the page reads.
+async fn name_exists_at_bound(
+    pool: &sqlx::PgPool,
+    logical_name_id: &str,
+    block_bounds: &BTreeMap<String, i64>,
+) -> anyhow::Result<bool> {
+    Ok(bigname_storage::load_name_current(pool, logical_name_id)
+        .await?
+        .is_some()
+        && !bigname_storage::name_surface_observed_above_bound(pool, logical_name_id, block_bounds)
+            .await?)
 }
 
 /// The registration resources of a name as they stood at `block_bounds`: the resources its surface

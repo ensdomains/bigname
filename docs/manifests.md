@@ -1210,7 +1210,9 @@ rows, or projections from the transitional schema; it had no supported in-place
 replay over those transitional derived rows. This rule describes that initial
 cutover, not later versioned schema upgrades. The planned ENSv1→ENSv2 boundary
 above instead requires a reviewed in-place schema-migration so outstanding
-public cursors can continue across its full re-walk. Its historical fetch still
+public cursors other than history cursors can continue across its full
+re-walk; the re-walk's redo expires `/v1/events`, name history, and address
+history cursors with the `409 stale` restart. Its historical fetch still
 must complete the widened raw input before interpretation begins.
 
 Each admitted edge stores `from_contract_instance_id`, `to_contract_instance_id`, source manifest version, edge kind, discovery source, active range, and provenance.

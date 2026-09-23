@@ -47,12 +47,17 @@ impl HistoryCollection {
             .await
             .map_err(api_error_to_v2)?
             .for_namespace(namespace);
-        let published = published_positions(&namespaces).ok_or_else(not_available)?;
+        // A continuation compares its manifests before the availability exit: a namespace that
+        // lost its manifests is unavailable for good, and retrying the cursor cannot recover.
         let manifests = namespaces.manifest_digest();
+        if binding.is_some_and(|binding| binding.manifests != manifests) {
+            return Err(restart_required());
+        }
+        let published = published_positions(&namespaces).ok_or_else(not_available)?;
         let bound_blocks = match binding {
             Some(binding) => {
                 let chains = binding.chains.as_ref().ok_or_else(invalid_cursor_error)?;
-                if binding.manifests != manifests || !chains.keys().eq(published.keys()) {
+                if !chains.keys().eq(published.keys()) {
                     return Err(restart_required());
                 }
                 chains

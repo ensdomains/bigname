@@ -420,8 +420,11 @@ test-only slice-1 re-walk, each normalized-event-backed cursor surface reads a
 page and saves its `next_cursor`. After the full Interpret and Project re-walk
 publishes, that pre-rewalk cursor is submitted to the post-rewalk test
 publication.
-For `/v1/events`, name history, address history, and every other product cursor
-surface backed by normalized-event row identity, it must resume from the same
+For `/v1/events`, name history, and address history, the re-walk runs as a redo
+that raises the redo counters their cursors carry, so the pre-rewalk cursor must
+return the `409 stale` restart, and fresh post-rewalk cursors must walk
+identical product pages. Any other product cursor surface backed by
+normalized-event row identity must resume from the same
 normalized-event keyset anchor with identical remaining product rows, pages,
 fields, `has_more`, and summary behavior. The anchor may be an unmapped event
 absent from the product response, so the corpus interleaves an unmapped event at

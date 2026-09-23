@@ -968,8 +968,12 @@ async fn v2_get_history_paginates_with_anchor_bound_cursor() -> Result<()> {
     Ok(())
 }
 
+/// A behavior-preserving full re-walk rotates normalized-event row ids and runs as an
+/// Interpret and Project redo. The redo raises the counters a history cursor carries, so a
+/// saved `/v1/events`, name history, or address history cursor must restart, while fresh
+/// cursors walk the same pages. The diagnostic-events cursor binds no counters and continues.
 #[tokio::test]
-async fn normalized_event_cursors_resume_after_rewalk_ids_rotate() -> Result<()> {
+async fn rewalk_expires_history_cursors_and_keeps_diagnostic_cursors() -> Result<()> {
     const ADDRESS: &str = "0x00000000000000000000000000000000000000cc";
     let database = TestDatabase::new_migrated().await?;
     seed_v2_history_fixture(&database).await?;
@@ -1009,18 +1013,26 @@ async fn normalized_event_cursors_resume_after_rewalk_ids_rotate() -> Result<()>
     )
     .execute(&database.pool)
     .await?;
+    for phase in ["interpret", "project"] {
+        hb_phase_redo_begin(&database, phase).await?;
+        hb_phase_redo_finish(&database, phase).await?;
+    }
 
     for ((route, diagnostic), (first_before, saved_cursor, remaining_before)) in
         routes.iter().zip(before)
     {
-        let remaining_after = collect_remaining_cursor_pages(
-            &database,
-            route,
-            saved_cursor,
-            *diagnostic,
-        )
-        .await?;
-        assert_eq!(remaining_after, remaining_before, "saved cursor: {route}");
+        if *diagnostic {
+            let remaining_after =
+                collect_remaining_cursor_pages(&database, route, saved_cursor, true).await?;
+            assert_eq!(remaining_after, remaining_before, "saved cursor: {route}");
+        } else {
+            hb_expect_stale(
+                &database,
+                &format!("{route}&cursor={saved_cursor}"),
+                HB_RESTART,
+            )
+            .await?;
+        }
 
         let fresh = v2_history_payload_for_database(&database, route).await?;
         assert_eq!(

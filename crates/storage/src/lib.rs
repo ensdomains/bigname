@@ -90,7 +90,7 @@ pub use history::{
 };
 pub use history::{
     ChainRedoState, HistoryBoundState, PhaseRedoState, PhaseRedoStateMissing,
-    capture_history_bound_state,
+    capture_history_bound_state, name_surface_observed_above_bound,
 };
 pub use history::{SelectedInterpretRedoState, load_selected_interpret_redo_state};
 #[cfg(any(test, feature = "test-support"))]
