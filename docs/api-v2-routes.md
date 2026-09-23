@@ -41,8 +41,8 @@ with no claim, unsupported verification, or mismatched verification return
 All collection routes use the standard `page` object: `cursor`,
 `next_cursor`, `page_size`, nullable `total_count`, and `has_more`.
 
-The product collections `GET /v1/names`, subnames, name/address history,
-address names, permissions, and `/v1/events` read current state. Their cursors
+The product collections `GET /v1/names`, subnames, address names, and
+permissions read current state. Their cursors
 bind anchors, filters, sorting, the served project publication (including
 same-height replacement) and manifest revisions. Counts and rows use the same
 filters; time-dependent expiry filtering retains the first page's evaluation
@@ -58,10 +58,38 @@ A count spanning namespaces requires readable publications for all of them;
 otherwise it returns `409 stale` rather than a misleading partial total. Registry and resolver collections use the same publication fence
 in addition to their documented selected-chain position.
 
-These current-state collections still reject `at`, `finality=safe`, and
-`finality=finalized` with `400 invalid_input`; omitted or explicit
-`finality=latest` is accepted. `meta.as_of_token` is omitted because these
-collection publications cannot be replayed through `at`.
+The history collections, `/v1/events`, name history (with or without
+`include=child_registrations`), and address history, are walks, not snapshots.
+A history cursor holds the position of the last row it returned in the history
+order: block number, chain, block hash, transaction hash, log index, and the
+row's `event_identity` as the final tiebreaker. It binds the route's anchors,
+filters, and sort like any cursor, but no publication and no evaluation time. A
+continuation reads whatever is published when it runs and returns the rows
+after that position, whether or not the row the cursor came from still exists.
+A later page can therefore include rows published after the first page, a row
+can move or disappear after an Interpret redo, and `total_count` can change
+between pages. Each page reports the publication it read in `meta.as_of`. None
+of this returns `409 stale`. A publication that lands while a page is being
+read does not refuse the page either: the page can mix rows from the
+publication it reports with rows that publication did not have yet. Because
+`event_identity` is only the final tiebreaker, a re-derivation that changes the
+identities of events sharing one log position can skip or repeat a row at that
+position; that is the same walk rule, not an error. A history cursor returns
+`400 invalid_input` only when it is malformed or replayed against a different
+query. A requested namespace with no publication still returns retryable
+`409 stale` ("not available; retry after indexing is ready"), and an active
+Interpret redo still returns retryable `409 stale`; once the redo finishes, the
+same cursor continues, so that refusal is a retry, not an expiry. A history
+cursor issued before this rule names its last row instead of carrying its
+position: its publication token is ignored and it resumes from that row's
+position, and when the row no longer exists it returns `409 stale` once,
+requiring a restart without the cursor. A parameter that pins a history walk to
+one block may be added later; it is not part of this contract.
+
+These current-state and history collections still reject `at`,
+`finality=safe`, and `finality=finalized` with `400 invalid_input`; omitted or
+explicit `finality=latest` is accepted. `meta.as_of_token` is omitted because
+these collection publications cannot be replayed through `at`.
 
 Search and diagnostic-event cursors retain their existing latest-state behavior
 without a publication-validity claim. Search discloses request-scope `meta.as_of`
@@ -80,20 +108,13 @@ candidate-versus-activated behavior remains a replay and
 acceptance-test distinction, not a production serving interval. Other chains
 retain their ordinary independent publication decisions.
 
-In the test environment, the slice-1 acceptance gate saves each normalized-
-event-backed route's `next_cursor` at a fixed readable chain head, performs and
-publishes the full Interpret and Project re-walk, and submits that old cursor to
-the post-re-walk test publication. The control and candidate test runs hold
-every other shared-boundary input constant, including PR #391's topology
-serializer. For
-`/v1/events`, name history, address history, and every other product cursor
-surface backed by normalized-event row identity, it must
-resume from the same normalized-event keyset anchor with identical remaining
-product rows, pages, fields, `has_more`, and summary behavior. Because that
-anchor may be an unmapped event absent from the response, the corpus places an
-unmapped normalized event at a product-page boundary and proves no visible row
-is skipped or duplicated. This default product-event exception does not remove
-an explicitly requested `type` from cursor anchor validation.
+In the test environment, the slice-1 acceptance gate saves the
+`/v1/diagnostics/events` `next_cursor` at a fixed readable chain head, performs
+and publishes the full Interpret and Project re-walk, and submits that old
+cursor to the post-re-walk test publication. The control and candidate test
+runs hold every other shared-boundary input constant, including PR #391's
+topology serializer. Product history cursors hold positions, not row IDs, so
+the re-walk leaves them to the history walk rule above.
 `/v1/diagnostics/events` must accept its old cursor
 and continue from the same stable normalized-event anchor, but its remaining
 rows and fields may include the expected new candidate diagnostics.
@@ -103,10 +124,10 @@ stable, apart from the explicitly allowed candidate diagnostic additions.
 Implementations may preserve numeric normalized-event IDs or resolve the old
 token through stable `event_identity` plus its stored sort tuple; these are
 alternative storage strategies. Freshly issued cursor bytes may differ. The
-gate separately verifies fresh post-re-walk cursors on every covered route.
+gate separately verifies fresh post-re-walk diagnostic cursors.
 
-That identical-product continuation rule applies to a re-walk whose declared
-contract preserves product behavior. An intentional [interpreter content
+A re-walk whose declared contract preserves product behavior leaves product
+rows unchanged. An intentional [interpreter content
 hash](glossary.md#interpreter-content-hash) change may instead have a documented
 field and route-membership delta. For the
 [#348](https://github.com/ensdomains/bigname/issues/348) and
@@ -1682,11 +1703,12 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
   the rows `scope` selects plus the direct child registrations, under
   `scope=name`, `scope=registration`, and `scope=both` alike, and child rows
   are returned even when the scope selects no rows of the name itself.
-- Snapshot behavior: the page and its counts use the captured current
-  publication. The response discloses `meta.as_of`; continuation cursors bind
-  the publication and return `409 stale` requiring a restart when it changes.
-  A first page whose publication changes during the read returns `409 stale`
-  too and can simply be retried.
+- Walk behavior: each page and its counts read the publication current when
+  that page is read, and the response discloses it in `meta.as_of`. The
+  continuation cursor holds the last row's position, not a publication, so a
+  later page can include newer rows and never returns `409 stale` because the
+  publication changed; see the history walk rule in
+  [Shared Route Rules](#shared-route-rules).
   Historical replay through `at` is not supported.
 - Status semantics: no product-visible matches return `200` with empty `data`,
   `page.next_cursor=null`, and `page.has_more=false`. Missing names return
@@ -1705,9 +1727,9 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
   stale`. Because the check is collection-wide, an active Interpret redo on
   any chain returns `409 stale` regardless of the requested namespace or name.
   The same response applies when either check sees an active redo or a redo
-  began between the checks. A well-formed cursor whose event anchor is gone
-  returns `400 invalid_input` when no redo intervened and `stale` when the
-  redo check takes precedence.
+  began between the checks. That refusal is a retry: once the redo finishes,
+  the same cursor continues. A cursor continues whether or not the row it came
+  from still exists.
 - Replaces (v1): `GET /v1/history/names/{namespace}/{name}`.
   Registration-id anchored history from `GET /v1/history/resources/{resource_id}`
   moves to `GET /v1/events?registration_id=...`. `scope=registration` on this
@@ -2660,11 +2682,12 @@ introduces it rebuilds Project from full history before serving the option; see
   both. Without a distinct control resource, the sole registry-resource row
   remains visible.
   (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L89-L94 @ ens_v1@91c966f)
-- Snapshot behavior: the page and its counts use the captured current
-  publication. The response discloses `meta.as_of`; continuation cursors bind
-  the publication and return `409 stale` requiring a restart when it changes.
-  A first page whose publication changes during the read returns `409 stale`
-  too and can simply be retried.
+- Walk behavior: each page and its counts read the publication current when
+  that page is read, and the response discloses it in `meta.as_of`. The
+  continuation cursor holds the last row's position, not a publication, so a
+  later page can include newer rows and never returns `409 stale` because the
+  publication changed; see the history walk rule in
+  [Shared Route Rules](#shared-route-rules).
   Historical replay through `at` is not supported.
 - Pagination behavior: product event-type filtering, including an explicit
   `type` set, runs before keyset page construction (newest first unless
@@ -2685,9 +2708,9 @@ introduces it rebuilds Project from full history before serving the option; see
   check is collection-wide: an active Interpret redo on
   any chain returns retryable `409 stale` with no `data` page, regardless of the
   requested namespace. The same response applies when a redo began between the
-  checks. A well-formed cursor
-  whose event anchor is gone returns `400 invalid_input` when no redo intervened
-  and `stale` when the redo check takes precedence.
+  checks. That refusal is a retry: once the redo finishes, the same cursor
+  continues. A cursor continues whether or not the row it came from still
+  exists.
 - Replaces (v1): `GET /v1/history/addresses/{address}`.
 
 ### `GET /v1/search`
@@ -2872,11 +2895,12 @@ For a registrar lease first identified by a later readable observation, registra
   rule: populated (exact up to 10,000 rows, `null` beyond) when `name`,
   `registration_id`, `address`, or `resolver` anchors the read; opting into
   `include=total_count` removes that cap. It is always `null` for unanchored reads.
-- Snapshot behavior: the page and its counts use the captured current
-  publication. The response discloses `meta.as_of`; continuation cursors bind
-  the publication and return `409 stale` requiring a restart when it changes.
-  A first page whose publication changes during the read returns `409 stale`
-  too and can simply be retried.
+- Walk behavior: each page and its counts read the publication current when
+  that page is read, and the response discloses it in `meta.as_of`. The
+  continuation cursor holds the last row's position, not a publication, so a
+  later page can include newer rows and never returns `409 stale` because the
+  publication changed; see the history walk rule in
+  [Shared Route Rules](#shared-route-rules).
   Historical replay through `at` is not supported.
 - Status semantics: no product-visible matches return `200` with empty `data`,
   `page.next_cursor=null`, and `page.has_more=false`. Filter and cursor-binding
@@ -2888,9 +2912,9 @@ For a registrar lease first identified by a later readable observation, registra
   returning data. This check is collection-wide: an active
   Interpret redo on any chain returns retryable `409 stale` with no `data` page,
   regardless of the requested filters or namespace. The same response applies
-  when a redo began between the checks. A
-  well-formed cursor whose event anchor is gone returns `400 invalid_input` when
-  no redo intervened and `stale` when the redo check takes precedence.
+  when a redo began between the checks. That refusal is a retry: once the redo
+  finishes, the same cursor continues. A cursor continues whether or not the
+  row it came from still exists.
 - Replaces (v1): `GET /v1/events` compact event search.
 
 ### `GET /v1/resolvers/{chain_id}/{address}`
