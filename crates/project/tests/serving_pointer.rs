@@ -114,9 +114,9 @@ fn require_keyed_pointer_scans(node: &Value, inside_pointer: bool) -> Result<usi
                 keyed_bitmap_index_scans(node)? > 0,
                 "bitmap heap scan without a keyed index scan: {node}"
             );
-            return Ok(1);
+        } else {
+            require_keyed_condition(node, node["Index Cond"].as_str().unwrap_or(""))?;
         }
-        require_keyed_condition(node, node["Index Cond"].as_str().unwrap_or(""))?;
         count += 1;
     }
     if let Some(plans) = node["Plans"].as_array() {
@@ -133,7 +133,7 @@ fn keyed_bitmap_index_scans(node: &Value) -> Result<usize> {
             if child["Node Type"] == "Bitmap Index Scan" {
                 require_keyed_condition(child, child["Index Cond"].as_str().unwrap_or(""))?;
                 count += 1;
-            } else {
+            } else if child["Node Type"] == "BitmapAnd" || child["Node Type"] == "BitmapOr" {
                 count += keyed_bitmap_index_scans(child)?;
             }
         }
@@ -180,6 +180,21 @@ fn plan_validator_accepts_keyed_index_and_bitmap_scans_and_rejects_broad_scans()
         }]
     });
     assert!(require_keyed_pointer_scans(&unkeyed_bitmap, false).is_err());
+    let nested_or = json!({
+        "Node Type": "Bitmap Heap Scan", "Alias": "pointer", "Relation Name": "project_events",
+        "Plans": [{
+            "Node Type": "BitmapOr",
+            "Plans": [
+                { "Node Type": "Bitmap Index Scan", "Index Cond": "(resource_id = linked.resource_id)" },
+                { "Node Type": "Bitmap Index Scan", "Index Cond": "(logical_name_id = authority.logical_name_id)" }
+            ]
+        }]
+    });
+    assert_eq!(require_keyed_pointer_scans(&nested_or, false).unwrap(), 1);
+    let empty_bitmap = json!({
+        "Node Type": "Bitmap Heap Scan", "Alias": "pointer", "Relation Name": "project_events"
+    });
+    assert!(require_keyed_pointer_scans(&empty_bitmap, false).is_err());
     let seq_scan = json!({
         "Node Type": "Seq Scan", "Alias": "pointer", "Relation Name": "project_events"
     });
