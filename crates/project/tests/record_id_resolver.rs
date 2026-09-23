@@ -186,6 +186,68 @@ async fn record_history_survives_relinks_and_excludes_later_unselected_writes() 
     Ok(())
 }
 
+// ABI content types come from the writes the selected record holds, so a write made before a
+// name links to the record counts, and a name without an exact link reads the default record.
+#[tokio::test]
+async fn abi_content_types_follow_exact_links_and_the_default_record() -> Result<()> {
+    let (db, pool) = database("record_id_abi").await?;
+    seed(&pool).await?;
+    abi(&pool, "abi-seven", 10, 8, 7, "8").await?;
+    abi(&pool, "abi-two", 10, 9, 2, "4").await?;
+    link(&pool, "link-c-seven", 15, 1, Some(3), 7).await?;
+    run(&pool, 14, None, RunMode::Normal).await?;
+    assert_eq!(abi_content_types(&pool, 1).await?, observed(&[]));
+    assert_eq!(abi_content_types(&pool, 2).await?, observed(&["4"]));
+    // No exact link: the default record (2) is selected.
+    assert_eq!(abi_content_types(&pool, 3).await?, observed(&["4"]));
+    run(&pool, 15, Some(14), RunMode::Normal).await?;
+    // Record 7 was written before the link and is now selected.
+    assert_eq!(abi_content_types(&pool, 3).await?, observed(&["8"]));
+    // An unlinked name falls back to the default record.
+    assert_eq!(abi_content_types(&pool, 1).await?, observed(&["4"]));
+    run(&pool, 16, Some(15), RunMode::Normal).await?;
+    assert_eq!(abi_content_types(&pool, 1).await?, observed(&[]));
+    assert_eq!(abi_content_types(&pool, 3).await?, observed(&["8"]));
+    run(&pool, 16, None, RunMode::Normal).await?;
+    assert_eq!(abi_content_types(&pool, 3).await?, observed(&["8"]));
+    db.cleanup().await?;
+    Ok(())
+}
+
+fn observed(types: &[&str]) -> bigname_storage::AbiContentTypes {
+    bigname_storage::AbiContentTypes::Observed(types.iter().map(|v| (*v).to_owned()).collect())
+}
+
+async fn abi_content_types(pool: &PgPool, id: i64) -> Result<bigname_storage::AbiContentTypes> {
+    let (support, provenance, positions): (String, Value, Value) = sqlx::query_as(
+        "SELECT support_status, provenance, chain_positions FROM record_inventory_current WHERE resource_id=$1::uuid",
+    )
+    .bind(resource(id))
+    .fetch_one(pool)
+    .await?;
+    let mut answers = bigname_storage::load_record_inventory_abi_content_types(
+        pool,
+        &[bigname_storage::AbiContentTypesInput {
+            authoritative: support == "supported",
+            provenance: &provenance,
+            chain_positions: &positions,
+        }],
+    )
+    .await?;
+    Ok(answers.remove(0))
+}
+
+async fn abi(
+    pool: &PgPool,
+    identity: &str,
+    block: i64,
+    log: i64,
+    record: i64,
+    content_type: &str,
+) -> Result<()> {
+    event(pool,identity,block,log,"RecordChanged",None,json!({"source_event":"ABIUpdated","storage_model":"resolver_record_id","resolver":RESOLVER,"resolver_record_id":record.to_string(),"record_key":format!("abi:{content_type}"),"record_family":"abi","selector_key":content_type,"content_type":content_type,"value_retained":false})).await
+}
+
 // The overview's link section follows the latest `Linked` per node: record 0 drops the node,
 // the empty-name node is the default record, and a name is attached only when a surface knows it.
 #[tokio::test]
@@ -958,6 +1020,14 @@ async fn official_sepolia_direct_resolver_projects_ensip19_default_for_missing_e
     );
     assert_eq!(answer.status, IndexedRecordStatus::Success);
     assert_eq!(answer.value, Some(json!(value)));
+    // A supported direct PublicResolverV2 inventory still has no admitted ABI event: the list is
+    // unavailable, not empty.
+    assert_eq!(
+        abi_content_types(&pool, 1).await?,
+        bigname_storage::AbiContentTypes::Unavailable(
+            bigname_storage::AbiContentTypesUnavailable::ObservationsNotSupported
+        )
+    );
     db.cleanup().await?;
     Ok(())
 }
