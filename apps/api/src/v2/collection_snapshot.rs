@@ -73,6 +73,14 @@ impl CollectionSnapshot {
         Ok(snapshot)
     }
 
+    /// Records that the request carried a cursor that this snapshot did not decode, for
+    /// routes whose cursors have their own layout and validate the publication token
+    /// themselves. A continuation must be told to restart, not to retry.
+    pub(crate) fn continuing_from_request_cursor(mut self, present: bool) -> Self {
+        self.continues_cursor |= present;
+        self
+    }
+
     pub(crate) fn evaluated_at(&self) -> OffsetDateTime {
         self.evaluated_at
     }
@@ -116,6 +124,8 @@ impl CollectionSnapshot {
     }
 
     pub(crate) async fn finish(&self, state: &AppState) -> V2Result<Meta> {
+        #[cfg(test)]
+        finish_test_hooks::run(&state.pool).await?;
         revalidate_collection_namespace_set(state, &self.namespaces, self.namespace.as_deref())
             .await
             .map_err(|error| {
@@ -141,4 +151,70 @@ fn restart_required() -> V2Error {
 /// publication.
 fn changed_during_read() -> V2Error {
     V2Error::stale("collection publication changed during the read; retry the request")
+}
+
+/// Pauses the next `finish()` for one test database so a test can republish between a
+/// handler's last generation check and the publication revalidation.
+#[cfg(test)]
+pub(crate) mod finish_test_hooks {
+    use std::sync::Arc;
+
+    use anyhow::Result;
+    use bigname_test_support::{
+        ScopedTestHookGuard, ScopedTestHookRegistry, current_test_database,
+    };
+    use sqlx::PgPool;
+    use tokio::sync::Barrier;
+
+    use super::{V2Error, V2Result};
+
+    #[derive(Clone)]
+    pub(crate) struct FinishHook {
+        reached: Arc<Barrier>,
+        resume: Arc<Barrier>,
+    }
+
+    pub(crate) struct FinishControl {
+        reached: Arc<Barrier>,
+        resume: Arc<Barrier>,
+    }
+
+    impl FinishControl {
+        pub(crate) async fn wait_until_reached(&self) {
+            self.reached.wait().await;
+        }
+
+        pub(crate) async fn resume(&self) {
+            self.resume.wait().await;
+        }
+    }
+
+    static HOOKS: ScopedTestHookRegistry<String, FinishHook> = ScopedTestHookRegistry::new();
+
+    pub(crate) async fn install(
+        pool: &PgPool,
+    ) -> Result<(ScopedTestHookGuard<String, FinishHook>, FinishControl)> {
+        let database = current_test_database(pool).await?;
+        let reached = Arc::new(Barrier::new(2));
+        let resume = Arc::new(Barrier::new(2));
+        let guard = HOOKS.install(
+            database,
+            FinishHook {
+                reached: Arc::clone(&reached),
+                resume: Arc::clone(&resume),
+            },
+        );
+        Ok((guard, FinishControl { reached, resume }))
+    }
+
+    pub(super) async fn run(pool: &PgPool) -> V2Result<()> {
+        let database = current_test_database(pool)
+            .await
+            .map_err(|_| V2Error::internal_error("failed to run collection finish test hook"))?;
+        if let Some(hook) = HOOKS.take(&database) {
+            hook.reached.wait().await;
+            hook.resume.wait().await;
+        }
+        Ok(())
+    }
 }

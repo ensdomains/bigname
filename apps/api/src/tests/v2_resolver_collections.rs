@@ -453,3 +453,121 @@ async fn v2_resolver_collection_overview_cursor_rejects_same_height_republish() 
     assert_eq!(response.status(), StatusCode::CONFLICT);
     database.cleanup().await
 }
+
+/// Runs one request, republishes the collection publication once the handler reaches
+/// `finish()` (after its last generation check), and returns the stale error message.
+async fn resolver_publication_replaced_before_finish(
+    database: &TestDatabase,
+    uri: String,
+) -> Result<String> {
+    let (_guard, control) =
+        crate::v2::collection_snapshot::finish_test_hooks::install(&database.pool).await?;
+    let state = database.app_state();
+    let request = tokio::spawn(async move {
+        app_router(state)
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .body(Body::empty())
+                    .expect("request must build"),
+            )
+            .await
+    });
+    tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        control.wait_until_reached(),
+    )
+    .await
+    .context("request never reached the collection publication finish")?;
+    sqlx::query("UPDATE bigname_phase.chain_phase_state SET updated_at = now() WHERE phase_name = 'project' AND chain_id = 'ethereum-mainnet'")
+        .execute(&database.pool).await?;
+    control.resume().await;
+    let response = request
+        .await
+        .context("resolver request task panicked")?
+        .context("resolver request failed")?;
+    let status = response.status();
+    let payload: Value = read_json(response).await?;
+    assert_eq!(status, StatusCode::CONFLICT, "{payload:#}");
+    assert_eq!(payload["error"]["code"], "stale");
+    Ok(payload["error"]["message"].as_str().unwrap().to_owned())
+}
+
+const RESTART_WITHOUT_CURSOR: &str =
+    "collection publication is no longer available; restart pagination without a cursor";
+const RETRY_REQUEST: &str = "collection publication changed during the read; retry the request";
+
+#[tokio::test]
+async fn v2_resolver_overview_continuation_restarts_when_publication_changes_before_finish()
+-> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_resolver_bound_names_fixture(&database).await?;
+    upsert_test_resolver_current_rows(
+        &database,
+        &[resolver_current_row(
+            "ethereum-mainnet",
+            V2_RESOLVER_ADDRESS,
+        )],
+    )
+    .await?;
+    let base = format!("/v1/resolvers/1/{V2_RESOLVER_ADDRESS}?page_size=1");
+    let first = v2_resolver_payload_for_database(&database, &base).await?;
+    let cursor = first["data"]["bound_names"]["page"]["next_cursor"]
+        .as_str()
+        .expect("overview first page carries a cursor")
+        .to_owned();
+    let continued =
+        resolver_publication_replaced_before_finish(&database, format!("{base}&cursor={cursor}"))
+            .await?;
+    assert_eq!(continued, RESTART_WITHOUT_CURSOR);
+    let cursorless = resolver_publication_replaced_before_finish(&database, base).await?;
+    assert_eq!(cursorless, RETRY_REQUEST);
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_resolver_collection_continuation_restarts_when_publication_changes_before_finish()
+-> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let resolver = resolver_current_row("ethereum-mainnet", V2_RESOLVER_ADDRESS);
+    database
+        .seed_snapshot_selector_chain_positions(&resolver.chain_positions)
+        .await?;
+    upsert_test_resolver_current_rows(&database, &[resolver]).await?;
+    let resources = (0..3)
+        .map(|i| resource(Uuid::from_u128(0x5600 + i)))
+        .collect::<Vec<_>>();
+    upsert_test_resources(&database.pool, &resources).await?;
+    let permissions = resources
+        .iter()
+        .enumerate()
+        .map(|(index, resource)| {
+            let mut permission = permission_current_row(
+                resource.resource_id,
+                &format!("0x{:040x}", index + 1),
+                PermissionScope::Resolver {
+                    chain_id: "ethereum-mainnet".to_owned(),
+                    resolver_address: V2_RESOLVER_ADDRESS.to_owned(),
+                },
+                7,
+                160,
+            );
+            permission.provenance["normalized_event_ids"] = json!([]);
+            permission
+        })
+        .collect::<Vec<_>>();
+    upsert_phase_permissions_current_rows(&database.pool, &permissions).await?;
+    let base = format!("/v1/resolvers/1/{V2_RESOLVER_ADDRESS}/roles?page_size=1");
+    let first = v2_resolver_payload_for_database(&database, &base).await?;
+    let cursor = first["page"]["next_cursor"]
+        .as_str()
+        .expect("roles first page carries a cursor")
+        .to_owned();
+    let continued =
+        resolver_publication_replaced_before_finish(&database, format!("{base}&cursor={cursor}"))
+            .await?;
+    assert_eq!(continued, RESTART_WITHOUT_CURSOR);
+    let cursorless = resolver_publication_replaced_before_finish(&database, base).await?;
+    assert_eq!(cursorless, RETRY_REQUEST);
+    database.cleanup().await
+}
