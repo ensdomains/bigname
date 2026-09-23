@@ -1291,13 +1291,15 @@ A recognized namespace with no available publication returns retryable `409 stal
   are not reproduced, so the address's read loses that name's events: an
   ENSv1 `.eth` registry controller from `AuthorityTransferred` on a
   token-backed resource, a token holder whose only evidence is the grant, an
-  effective controller that fell back to the token holder, and an ENSv2
-  controller from `PermissionChanged`. A relation that ended after the
-  published block and began again before the current row was written counts as
-  ended: its current row cites the transfer that restored it. Wrapper
-  grace-period and expiry
-  transitions have no cited event of their own, so a relation row gated by
-  them can appear or vanish between pages of the same read.
+  effective controller that fell back to the token holder, and an ENSv1
+  effective controller from the NameWrapper holder's resource-scoped
+  `PermissionChanged` grant. ENSv2 `PermissionChanged` rows carry registry or
+  resolver scopes, so they never set this controller. A relation that ended
+  after the published block and began again before the current row was
+  written counts as ended: its current row cites the transfer that restored
+  it. Wrapper grace-period and expiry transitions have no cited event of their
+  own, so a relation row gated by them can appear or vanish between pages of
+  the same read.
 - Cursors bind the order and every filter above. The cursor `sort` token
   encodes the direction, and its filters carry the canonical `type` set and
   the canonical UTC spelling of each timestamp bound, so a cursor issued by one

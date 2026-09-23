@@ -210,23 +210,185 @@ async fn lost_controller_from_the_token_holder_fallback_keeps_its_bounded_histor
     Ok(())
 }
 
+const WRAPPER_CONTRACT: &str = "0x00000000000000000000000000000000000b0a0e";
+
+/// The NameWrapper holder powers the adapter grants with the ERC-1155 token, in its order.
+const WRAPPER_HOLDER_POWERS: [&str; 10] = [
+    "resource_control",
+    "set_resolver",
+    "set_ttl",
+    "create_subnames",
+    "transfer",
+    "unwrap",
+    "burn_fuses",
+    "approve",
+    "extend_subname_expiry",
+    "extend_expiry",
+];
+
+/// The holder grant the ENSv1 adapter writes when the NameWrapper token moves to `subject`: a
+/// resource-scoped `PermissionChanged` carrying `resource_control`, the shape the controller fold
+/// sets a controller from.
+fn wrapper_holder_grant(logical_name_id: &str, resource: Uuid, subject: &str) -> NormalizedEvent {
+    let mut event = v2_history_event(
+        &format!("{logical_name_id}-wrapper-holder-grant"),
+        Some(logical_name_id),
+        Some(resource),
+        "PermissionChanged",
+        205,
+    );
+    event.source_family = "ens_v1_wrapper_l1".to_owned();
+    event.log_index = Some(1);
+    event.derivation_kind = V1_DERIVATION.to_owned();
+    let node = logical_name_id.rsplit(':').next().unwrap_or_default();
+    let state = |powers: Value, grant_source: Value| {
+        json!({
+            "subject": subject,
+            "scope": {"kind": "resource"},
+            "effective_powers": powers,
+            "grant_source": grant_source,
+            "revocation_source": null,
+            "inheritance_path": [],
+            "transfer_behavior": "replace_on_authority_change",
+        })
+    };
+    event.before_state = state(json!([]), Value::Null);
+    event.after_state = state(
+        json!(WRAPPER_HOLDER_POWERS),
+        json!({
+            "kind": "ens_v1_authority",
+            "authority_kind": "wrapper",
+            "authority_key": "wrapper:ethereum-mainnet:history",
+            "authority_contract": WRAPPER_CONTRACT,
+            "relation_kind": "holder",
+            "node": node,
+            "source_event_kind": "TransferSingle",
+        }),
+    );
+    event
+}
+
+/// An ENSv1 controller set by the NameWrapper holder grant: Project writes the controller row from
+/// the grant, and the address loses it after the bound. No historical shape reproduces a
+/// `PermissionChanged` controller, so the read at the bound loses the name.
 #[tokio::test]
-#[ignore = "docs/api-v2-routes.md history known limitation: an ENSv2 PermissionChanged \
-            controller is not reproduced"]
-async fn lost_controller_from_a_permission_change_keeps_its_bounded_history() -> Result<()> {
-    let (held, lost) = lost_relation_history(
-        "lost-permission-controller.eth",
+#[ignore = "docs/api-v2-routes.md history known limitation: an ENSv1 controller from a \
+            NameWrapper holder PermissionChanged is not reproduced"]
+async fn lost_controller_from_a_wrapper_holder_grant_keeps_its_bounded_history() -> Result<()> {
+    const NAME: &str = "lost-wrapper-controller.eth";
+    let database = TestDatabase::new_migrated().await?;
+    seed_bounded_membership_blocks(&database, 240).await?;
+    let (logical_name_id, resource) = seed_bounded_name(
+        &database,
+        NAME,
         0xb0a_6700,
+        BOUNDED_ADDRESS,
         bigname_storage::AddressNameRelation::EffectiveController,
-        Some(bigname_storage::AddressNameRelation::EffectiveController),
-        relation_event(
-            "PermissionChanged",
-            json!({"subject": BOUNDED_ADDRESS, "resource_control": true}),
-            V2_DERIVATION,
-        ),
+        205,
     )
     .await?;
-    assert_relation_survives_loss(&held, &lost);
+    // Project writes the relation rows below from the events, not from the identity fixture. The
+    // fixture's binding opens at the identity blocks' 2024 timestamps; open it before the events'
+    // 2023 timestamps so the lease's events fall inside it.
+    sqlx::query("DELETE FROM bigname_phase.address_names_current WHERE logical_name_id = $1")
+        .bind(&logical_name_id)
+        .execute(&database.pool)
+        .await?;
+    sqlx::query(
+        "UPDATE bigname_phase.surface_bindings SET active_from = '2023-11-14T00:00:00Z'
+         WHERE logical_name_id = $1",
+    )
+    .bind(&logical_name_id)
+    .execute(&database.pool)
+    .await?;
+    // The lease registered through the NameWrapper: the registrar token belongs to the wrapper
+    // contract, and the address holds the wrapper token that the holder grant stands for.
+    let mut registered = v2_history_event(
+        &format!("{NAME}-registered"),
+        Some(&logical_name_id),
+        Some(resource),
+        "RegistrationGranted",
+        205,
+    );
+    registered.after_state["registrant"] = json!(WRAPPER_CONTRACT);
+    let mut renewed = v2_history_event(
+        &format!("{NAME}-renewed"),
+        Some(&logical_name_id),
+        Some(resource),
+        "RegistrationRenewed",
+        210,
+    );
+    renewed.log_index = Some(1);
+    let mut lost = v2_history_event(
+        &format!("{NAME}-lost"),
+        Some(&logical_name_id),
+        Some(resource),
+        "TokenControlTransferred",
+        241,
+    );
+    lost.after_state = json!({ "to": LOST_OTHER });
+    bigname_storage::insert_normalized_event_fixtures(
+        &database.pool,
+        &[
+            registered,
+            wrapper_holder_grant(&logical_name_id, resource, BOUNDED_ADDRESS),
+            renewed,
+            lost,
+        ],
+    )
+    .await?;
+    bigname_project::Engine::new(database.pool.clone())
+        .run_batch(bigname_project::BatchRequest {
+            chain_id: BOUNDED_CHAIN.to_owned(),
+            target_block: 240,
+            affected_from_block: 200,
+            affected_to_block: 240,
+            resume_current: None,
+            mode: bigname_project::RunMode::Normal,
+        })
+        .await?;
+    let cited: (i64, i64) = sqlx::query_as(
+        "SELECT (anc.provenance ->> 'normalized_event_id')::bigint,
+                (anc.chain_positions ->> 'block_number')::bigint
+         FROM bigname_phase.address_names_current anc
+         WHERE anc.address = $1 AND anc.logical_name_id = $2
+           AND anc.relation = 'effective_controller'",
+    )
+    .bind(BOUNDED_ADDRESS)
+    .bind(&logical_name_id)
+    .fetch_one(&database.pool)
+    .await?;
+    let grant: i64 = sqlx::query_scalar(
+        "SELECT normalized_event_id FROM normalized_events WHERE event_identity = $1",
+    )
+    .bind(format!("{logical_name_id}-wrapper-holder-grant"))
+    .fetch_one(&database.pool)
+    .await?;
+    assert_eq!(cited, (grant, 205), "Project cites the holder grant for the controller");
+
+    publish_bounded_membership_at(&database, 240).await?;
+    let filter = Some(bigname_storage::AddressNameRelation::EffectiveController);
+    let held = bounded_address_history_hashes(&database, filter, 240).await?;
+    sqlx::query(
+        "DELETE FROM bigname_phase.address_names_current
+         WHERE address = $1 AND logical_name_id = $2",
+    )
+    .bind(BOUNDED_ADDRESS)
+    .bind(&logical_name_id)
+    .execute(&database.pool)
+    .await?;
+    let lost = bounded_address_history_hashes(&database, filter, 240).await?;
+    database.cleanup().await?;
+    // The registration and the holder grant share the wrapper's registration transaction.
+    assert_eq!(
+        held,
+        ["0xtx210", "0xtx205", "0xtx205"],
+        "the relation held at 240 admits the name"
+    );
+    assert_eq!(
+        lost, held,
+        "losing the relation at 241 changed what a read bound at 240 admits"
+    );
     Ok(())
 }
 
