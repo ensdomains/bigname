@@ -673,6 +673,75 @@ no-ops when the indexes already exist, and it ends with the same check, so
 `sqlx migrate run` stops without recording it if either index is missing,
 invalid, not ready, on another table, not an index, or has another definition.
 
+The release containing `20260922010000_project_node_history_idx.sql`,
+`20260922010100_project_mirror_scope_indexes.sql` and
+`20260923140000_project_name_surfaces_label_indexes.sql` adds the five indexes
+Project's scoped node history and progressive mirror dependency traversal read.
+On an initialized production namespace, build them in step 3 by running
+[`ops/project-progressive/install.sql`](../../ops/project-progressive/install.sql)
+through `psql -X -v ON_ERROR_STOP=1`, then
+[`ops/project-progressive/validate.sql`](../../ops/project-progressive/validate.sql),
+as [their runbook](../../ops/project-progressive/README.md) describes. This
+runbook carries no copy of the five statements; `install.sql` is the only
+source. The builds are concurrent and permit writes, so they can finish while
+the existing runner is still processing, before the stop/start window opens;
+step 3 then only runs `install.sql` again as the check. `install.sql` refuses
+before building anything when a name is taken by an invalid index, an index on
+another table, a relation that is not an index, or, for the two label-hash
+indexes and their `label_hashes` function, another definition. It never drops
+an index, and it ends with `ANALYZE bigname_phase.name_surfaces`, because
+expression indexes have no statistics until the table is analyzed and the
+mirror lookups depend on them. `validate.sql` fails unless all five names are
+valid and ready indexes on their own tables and the label-hash indexes and function have their
+reviewed definitions; compare the other three `pg_get_indexdef` outputs with
+`install.sql`. It allows the earlier `name_surfaces_project_labels_idx` and
+`name_surfaces_project_suffix_idx` label-array indexes to exist, because the
+running binary's lookups can only use those. An interrupted build leaves an
+invalid index; confirm in `pg_stat_progress_create_index` that no build is
+still running, drop only the index the error names with
+`DROP INDEX CONCURRENTLY`, and rerun `install.sql`. Keep all outputs with their
+start and end times in the release record. Then apply the schema-migrations in
+step 4: `20260923140000_project_name_surfaces_label_indexes.sql` drops the two
+earlier label-array indexes inside the stop window, its `IF NOT EXISTS` builds
+are no-ops when the indexes already exist, and it refuses a function or index
+under a reviewed name with another definition. The schema-migrations must not
+perform the first build against a populated production table, because an
+ordinary index build blocks writes. After the new binary starts in step 9, run
+`validate.sql` again and then
+[`ops/project-progressive/validate-after-switch.sql`](../../ops/project-progressive/validate-after-switch.sql),
+which fails while either earlier label-array index still exists.
+
+This release also edits Project SQL under `crates/project/src/scope/`, a
+covered input of the
+[interpreter content hash](../glossary.md#interpreter-content-hash), so the new
+binary's hash differs from the running one's and it must re-walk the complete
+retained range before normal derived writes continue: run the full-history
+Interpret and Project redos of steps 7 and 8 before step 9, and record the new
+hash in the release record.
+
+On a deployment that already recorded
+`20260922010100_project_mirror_scope_indexes.sql` (Sepolia), update its recorded
+checksum after step 1 and before the schema-migrations in step 4. An earlier
+version of that file also built the two whole-array label indexes; the file no
+longer does, so its SHA-384 checksum changed, and `sqlx migrate run` refuses a
+recorded checksum that differs. The schema the earlier version
+applied is otherwise unchanged, and
+`20260923140000_project_name_surfaces_label_indexes.sql` drops the two indexes it
+built. Confirm that
+`SELECT encode(checksum, 'hex') FROM _sqlx_migrations WHERE version = 20260922010100;`
+returns `de4b8fb9bd900be8a4524f26f41deb3557d2cd04cc77309a2a1ebddf45769679e0b9be22f4a8a9bbc71ec3601b25c6be`, then run
+`UPDATE _sqlx_migrations SET checksum = decode('ba87c9cfc8c0ff508240e4e31d0038512dcdf07dce55cb638fabe4936785f7e084b907a7b7d91ea91bc0320824f0ac63', 'hex') WHERE version = 20260922010100 AND checksum = decode('de4b8fb9bd900be8a4524f26f41deb3557d2cd04cc77309a2a1ebddf45769679e0b9be22f4a8a9bbc71ec3601b25c6be', 'hex');`
+and require `UPDATE 1`. A database that has not recorded that version skips
+this. Before running `sqlx migrate run` from a rolled-back checkout whose
+`20260922010100` still has the earlier bytes, set the checksum back with
+`UPDATE _sqlx_migrations SET checksum = decode('de4b8fb9bd900be8a4524f26f41deb3557d2cd04cc77309a2a1ebddf45769679e0b9be22f4a8a9bbc71ec3601b25c6be', 'hex') WHERE checksum = decode('ba87c9cfc8c0ff508240e4e31d0038512dcdf07dce55cb638fabe4936785f7e084b907a7b7d91ea91bc0320824f0ac63', 'hex') AND version = 20260922010100;`
+and require `UPDATE 1`; a binary-only rollback needs nothing, because the
+binary does not run schema-migrations. Both UPDATEs are guarded against repeats
+but not idempotent: a repeated run reports `UPDATE 0`, so on `UPDATE 0` rerun the
+SELECT to see which checksum is stored before treating it as a failure. [The index runbook](../../ops/project-progressive/README.md#recorded-checksum-of-20260922010100)
+carries the same statements, and `schema-v2/apply-check.sh` proves both carry
+the checksum of the file as checked in.
+
 The release containing
 `20260923120000_normalized_events_address_match_indexes.sql` adds the three
 partial expression indexes the address history read uses to find the names and
@@ -1134,6 +1203,14 @@ indexes are additive; rollback may leave them in place.
    `20260923130000_normalized_events_chain_block_number_desc_idx.sql`, run
    `ops/events-order-index/install.sql` as described above and require it to
    exit zero;
+   for the release containing `20260922010000_project_node_history_idx.sql`,
+   `20260922010100_project_mirror_scope_indexes.sql` or
+   `20260923140000_project_name_surfaces_label_indexes.sql`, run
+   `ops/project-progressive/install.sql` then
+   `ops/project-progressive/validate.sql` as described above and require both
+   to exit zero, and after step 9 run `validate.sql` and
+   `ops/project-progressive/validate-after-switch.sql` and require both to exit
+   zero;
    otherwise skip this step;
    For the release containing
    `20260814130000_surface_binding_authority_arm.sql`, a populated phase schema

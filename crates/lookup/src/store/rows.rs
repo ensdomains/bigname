@@ -87,35 +87,36 @@ pub(super) async fn load_inventory(
     resource_id: &str,
     boundary: &Value,
 ) -> Result<InventoryRow> {
-    sqlx::query_as::<_, InventoryRow>(
+    sqlx::query_as::<_, InventoryRow>(&format!(
         r#"
-        SELECT inventory.resource_id::text AS resource_id,
-               inventory.record_version_boundary_key, inventory.entries,
-               inventory.provenance,
-               CASE WHEN inventory.support_status = 'supported'
+        SELECT ric.resource_id::text AS resource_id,
+               ric.record_version_boundary_key, {entries} AS entries,
+               ric.provenance,
+               CASE WHEN ric.support_status = 'supported'
                    THEN jsonb_build_object('status', 'projected', 'exhaustiveness', 'not_asserted')
                    ELSE jsonb_build_object(
                        'status', 'unsupported', 'exhaustiveness', 'not_asserted',
-                       'unsupported_reason', inventory.unsupported_reason
+                       'unsupported_reason', ric.unsupported_reason
                    )
                END AS coverage,
-               inventory.chain_positions, inventory.xmin::text AS row_xmin
-        FROM record_inventory_current inventory
+               ric.chain_positions, ric.xmin::text AS row_xmin
+        FROM record_inventory_current ric
         JOIN resources resource
-          ON resource.resource_id = inventory.resource_id
+          ON resource.resource_id = ric.resource_id
         JOIN chain_lineage resource_lineage
           ON resource_lineage.chain_id = resource.chain_id
          AND resource_lineage.block_hash = resource.block_hash
-        WHERE inventory.resource_id = $1::uuid
-          AND inventory.record_version_boundary = $2
+        WHERE ric.resource_id = $1::uuid
+          AND ric.record_version_boundary = $2
           -- A cleared registration's history-only row serves no records. Its boundary anchors on
           -- the clearing ResolverChanged, so no caller boundary can equal it; the guard keeps the
           -- rule uniform with the record-serving read filter rather than resting on that.
-          AND inventory.provenance ->> 'record_serving' IS DISTINCT FROM 'false'
+          AND ric.provenance ->> 'record_serving' IS DISTINCT FROM 'false'
           AND resource.canonicality_state IN ('canonical', 'safe', 'finalized')
           AND resource_lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
         "#,
-    )
+        entries = bigname_storage::READABLE_RECORD_INVENTORY_ENTRIES,
+    ))
     .bind(resource_id)
     .bind(boundary)
     .fetch_optional(&mut **transaction)

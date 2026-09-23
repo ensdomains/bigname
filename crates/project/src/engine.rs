@@ -57,34 +57,7 @@ impl Engine {
             })?;
         revalidate_target(&mut transaction, &request.chain_id, &target).await?;
 
-        let full_rebuild =
-            matches!(request.mode, RunMode::Normal) && request.resume_current.is_none();
-        stage::prepare(&mut transaction, &request.chain_id, &target).await?;
-        scope::initialize(
-            &mut transaction,
-            &request.chain_id,
-            &target,
-            scope::Window {
-                previous: request.resume_current.as_ref(),
-                from_block: request.affected_from_block,
-                to_block: request.affected_to_block,
-                full_rebuild,
-                retain_retracted: matches!(request.mode, RunMode::Redo),
-            },
-        )
-        .await?;
-        stage::inputs(&mut transaction, &request.chain_id, &target, full_rebuild).await?;
-        builders::build_all(&mut transaction, &request.chain_id, &target, full_rebuild).await?;
-        integrity::assert_publishable(&mut transaction, &request.chain_id, &target).await?;
-        let row_count = publish::swap(&mut transaction, &request.chain_id, full_rebuild).await?
-            + builders::child_registrations::publish(
-                &mut transaction,
-                &request.chain_id,
-                full_rebuild,
-                request.affected_from_block,
-                request.affected_to_block,
-            )
-            .await?;
+        let row_count = derive(&mut transaction, &request, &target).await?;
         transaction.commit().await.map_err(|error| {
             ProjectError::database("failed to commit atomic project publication", error)
         })?;
@@ -96,6 +69,77 @@ impl Engine {
             estimated_write_bytes: row_count.saturating_mul(1_024),
         })
     }
+}
+
+async fn derive(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    request: &BatchRequest,
+    target: &Marker,
+) -> Result<u64> {
+    let mut stage_start = std::time::Instant::now();
+    let full_rebuild = matches!(request.mode, RunMode::Normal) && request.resume_current.is_none();
+    stage::prepare(transaction, &request.chain_id, target).await?;
+    tracing::debug!(
+        stage = "prepare",
+        elapsed_ms = stage_start.elapsed().as_millis() as u64,
+        "Project stage completed"
+    );
+    stage_start = std::time::Instant::now();
+    scope::initialize(
+        transaction,
+        &request.chain_id,
+        target,
+        scope::Window {
+            previous: request.resume_current.as_ref(),
+            from_block: request.affected_from_block,
+            to_block: request.affected_to_block,
+            full_rebuild,
+            retain_retracted: matches!(request.mode, RunMode::Redo),
+        },
+    )
+    .await?;
+    tracing::debug!(
+        stage = "scope",
+        elapsed_ms = stage_start.elapsed().as_millis() as u64,
+        "Project stage completed"
+    );
+    stage_start = std::time::Instant::now();
+    stage::inputs(transaction, &request.chain_id, target, full_rebuild).await?;
+    tracing::debug!(
+        stage = "inputs",
+        elapsed_ms = stage_start.elapsed().as_millis() as u64,
+        "Project stage completed"
+    );
+    stage_start = std::time::Instant::now();
+    builders::build_all(transaction, &request.chain_id, target, full_rebuild).await?;
+    tracing::debug!(
+        stage = "builders",
+        elapsed_ms = stage_start.elapsed().as_millis() as u64,
+        "Project stage completed"
+    );
+    stage_start = std::time::Instant::now();
+    integrity::assert_publishable(transaction, &request.chain_id, target).await?;
+    tracing::debug!(
+        stage = "integrity",
+        elapsed_ms = stage_start.elapsed().as_millis() as u64,
+        "Project stage completed"
+    );
+    stage_start = std::time::Instant::now();
+    let row_count = publish::swap(transaction, &request.chain_id, full_rebuild).await?
+        + builders::child_registrations::publish(
+            transaction,
+            &request.chain_id,
+            full_rebuild,
+            request.affected_from_block,
+            request.affected_to_block,
+        )
+        .await?;
+    tracing::debug!(
+        stage = "publish",
+        elapsed_ms = stage_start.elapsed().as_millis() as u64,
+        "Project stage completed"
+    );
+    Ok(row_count)
 }
 
 fn validate_request(request: &BatchRequest) -> Result<()> {
@@ -187,3 +231,11 @@ async fn revalidate_target(
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "engine_benchmark.rs"]
+mod benchmark;
+
+#[cfg(test)]
+#[path = "engine_contract_compare.rs"]
+pub(crate) mod contract_compare;

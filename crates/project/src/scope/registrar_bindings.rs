@@ -50,17 +50,19 @@ pub(super) async fn include_unnamed_lease_resources_for_scoped_names(
            )
          ON CONFLICT DO NOTHING"
     );
-    sqlx::query(&statement)
-        .bind(chain_id)
-        .bind(target_block)
-        .execute(&mut **transaction)
-        .await
-        .map_err(|error| {
-            ProjectError::database(
-                "failed to scope registrar resources that hold lease rows without a name",
-                error,
-            )
-        })?;
+    sqlx::query(
+        &super::frontier::query(transaction, "unnamed_leases_from_names", &statement).await?,
+    )
+    .bind(chain_id)
+    .bind(target_block)
+    .execute(&mut **transaction)
+    .await
+    .map_err(|error| {
+        ProjectError::database(
+            "failed to scope registrar resources that hold lease rows without a name",
+            error,
+        )
+    })?;
     Ok(())
 }
 
@@ -71,22 +73,27 @@ pub(super) async fn include_names_for_scoped_unnamed_lease_rows(
     chain_id: &str,
     target_block: i64,
 ) -> Result<()> {
+    // Closed bindings remain candidates. The history match is existential: repeated lifecycle
+    // events cannot add another name, and must not multiply the binding/lineage work.
     let statement = format!(
-        "INSERT INTO project_scope_names
-         SELECT DISTINCT binding.logical_name_id
-         FROM project_scope_resources scope
-         JOIN normalized_events registrar USING (resource_id)
-         JOIN surface_bindings binding USING (resource_id)
-         JOIN name_surfaces surface
-           ON surface.logical_name_id = binding.logical_name_id
-         JOIN chain_lineage lineage
-           ON lineage.chain_id = binding.chain_id
-          AND lineage.block_hash = binding.block_hash
-          AND lineage.block_number = binding.block_number
-         WHERE {CANONICAL_BINDING}
-           AND {UNNAMED_LEASE_ROW}
-         ON CONFLICT DO NOTHING"
+        include_str!("names_from_unnamed_leases.sql"),
+        CANONICAL_BINDING = CANONICAL_BINDING,
+        UNNAMED_LEASE_ROW = UNNAMED_LEASE_ROW,
     );
+    let statement =
+        super::frontier::query(transaction, "names_from_unnamed_leases", &statement).await?;
+    #[cfg(test)]
+    if crate::profile::execute(
+        transaction,
+        chain_id,
+        target_block,
+        &statement,
+        crate::profile::Stage::UnnamedLeaseNames,
+    )
+    .await?
+    {
+        return Ok(());
+    }
     sqlx::query(&statement)
         .bind(chain_id)
         .bind(target_block)

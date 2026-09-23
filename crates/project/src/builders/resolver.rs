@@ -12,7 +12,7 @@ use sqlx::{Postgres, Transaction};
 use crate::{
     Marker, ProjectError, Result, resolver_address::PERMISSION_CHANGED_RESOLVER_ADDRESS_VALUES,
 };
-use declaration_precedence::DISCOVERY_CTES;
+use declaration_precedence::discovery_ctes;
 pub(super) use link_summary::DEFAULT_RECORD_NODE;
 pub(crate) use link_summary::LINK_DIGEST_SQL;
 use mirror::{DIRECT_MIRROR_DECLARED, MIRROR_CLASSIFICATION, MIRROR_ROLE};
@@ -33,545 +33,44 @@ pub(super) async fn build(
     link_summary::stage(transaction, chain_id, SUMMARY_SAMPLE_LIMIT, target.number).await?;
     permission_summary::stage(transaction, chain_id, SUMMARY_SAMPLE_LIMIT, full_rebuild).await?;
 
+    let discovery = discovery_ctes(full_rebuild);
+    #[cfg(test)]
+    let discovery = if crate::reference::enabled(transaction).await? {
+        std::borrow::Cow::Borrowed(include_str!(
+            "../../testdata/sql/builders/resolver/declaration_precedence_previous.sql"
+        ))
+    } else {
+        discovery
+    };
     let resolver_build = format!(
-        r#"
-        WITH {DISCOVERY_CTES},
-        resolver_event_candidates AS (
-            SELECT lower(CASE
-                       WHEN event.event_kind = 'Upgraded'
-                           THEN event.after_state ->> 'proxy_address'
-                       WHEN event.event_kind = 'AliasChanged'
-                           THEN COALESCE(
-                               event.after_state ->> 'resolver',
-                               event.before_state ->> 'resolver',
-                               event.raw_fact_ref ->> 'emitting_address'
-                           )
-                   END) AS resolver_address,
-                   event.source_family,
-                   NULL::text AS classification_role,
-                   3 AS priority
-            FROM project_events event
-            WHERE (
-                      event.event_kind = 'Upgraded'
-                  AND event.source_family = 'ens_v2_resolver_l1'
-                  AND event.after_state ->> 'proxy_address' IS NOT NULL
-                  AND btrim(event.after_state ->> 'proxy_address') <> ''
-              ) OR (
-                      event.event_kind = 'AliasChanged'
-                  AND event.source_family IN (
-                      'ens_v1_resolver_l1', 'ens_v2_resolver_l1',
-                      'basenames_base_resolver'
-                  )
-                  AND COALESCE(
-                      event.after_state ->> 'resolver',
-                      event.before_state ->> 'resolver',
-                      event.raw_fact_ref ->> 'emitting_address'
-                  ) IS NOT NULL
-                  AND btrim(COALESCE(
-                      event.after_state ->> 'resolver',
-                      event.before_state ->> 'resolver',
-                      event.raw_fact_ref ->> 'emitting_address'
-                  )) <> ''
-              )
-            UNION ALL
-            SELECT lower(candidate.resolver_address),
-                   CASE
-                       WHEN event.source_family LIKE 'ens_v2_%'
-                           THEN 'ens_v2_resolver_l1'
-                       WHEN event.source_family LIKE 'basenames_%'
-                           THEN 'basenames_base_resolver'
-                       ELSE 'ens_v1_resolver_l1'
-                   END,
-                   NULL::text,
-                   4
-            FROM project_events event
-            CROSS JOIN LATERAL (VALUES
-                {PERMISSION_CHANGED_RESOLVER_ADDRESS_VALUES}
-            ) candidate(resolver_address)
-            WHERE event.event_kind = 'PermissionChanged'
-              AND candidate.resolver_address IS NOT NULL
-              AND btrim(candidate.resolver_address) <> ''
-            UNION ALL
-            SELECT lower(candidate.resolver_address),
-                   CASE
-                       WHEN event.source_family LIKE 'ens_v2_%'
-                           THEN 'ens_v2_resolver_l1'
-                       WHEN event.source_family LIKE 'basenames_%'
-                           THEN 'basenames_base_resolver'
-                       ELSE 'ens_v1_resolver_l1'
-                   END,
-                   NULL::text,
-                   3
-            FROM project_events event
-            CROSS JOIN LATERAL (
-                VALUES (event.after_state ->> 'resolver'),
-                       (event.before_state ->> 'resolver')
-            ) candidate(resolver_address)
-            WHERE event.event_kind = 'ResolverChanged'
-              AND candidate.resolver_address IS NOT NULL
-              AND btrim(candidate.resolver_address) <> ''
-        ),
-        observed AS (
-            SELECT resolver_address, source_family,
-                   NULL::text AS classification_role, 2 AS priority
-            FROM project_resolver_binding_summary
-            UNION ALL
-            SELECT * FROM resolver_event_candidates
-        ),
-        retained_permission_evidence AS (
-            SELECT permission.resolver_address, permission.resource_id,
-                   CASE
-                       WHEN evidence.item ->> 'source_family' LIKE 'ens_v2_%'
-                           THEN 'ens_v2_resolver_l1'
-                       WHEN evidence.item ->> 'source_family' LIKE 'basenames_%'
-                           THEN 'basenames_base_resolver'
-                       ELSE 'ens_v1_resolver_l1'
-                   END AS source_family,
-                   citation.event_id::bigint AS normalized_event_id
-            FROM project_resolver_permission_rows permission
-            CROSS JOIN LATERAL jsonb_array_elements_text(COALESCE(
-                permission.provenance -> 'normalized_event_ids', '[]'::jsonb
-            )) WITH ORDINALITY citation(event_id, ordinality)
-            JOIN LATERAL jsonb_array_elements(COALESCE(
-                permission.provenance -> 'permission_manifest_versions', '[]'::jsonb
-            )) WITH ORDINALITY evidence(item, ordinality)
-              ON evidence.ordinality = citation.ordinality
-            WHERE NOT $4
-        ),
-        retained_permission_candidates AS (
-            SELECT evidence.resolver_address, evidence.source_family,
-                   NULL::text AS classification_role,
-                   4 AS priority
-            FROM retained_permission_evidence evidence
-            WHERE NOT EXISTS (
-                  SELECT 1 FROM project_scope_resources scope
-                  WHERE scope.resource_id = evidence.resource_id
-              )
-            -- A retained permission may be the only surviving resolver evidence during redo.
-            -- Reconstruct family candidates from its PermissionChanged provenance; current
-            -- manifests and readable upgrade history below determine the role without copying
-            -- prior classification.
-        ),
-        permission_citation_events AS (
-            SELECT DISTINCT lower(candidate.resolver_address) AS resolver_address,
-                   CASE
-                       WHEN event.source_family LIKE 'ens_v2_%'
-                           THEN 'ens_v2_resolver_l1'
-                       WHEN event.source_family LIKE 'basenames_%'
-                           THEN 'basenames_base_resolver'
-                       ELSE 'ens_v1_resolver_l1'
-                   END AS source_family,
-                   event.normalized_event_id
-            FROM project_events event
-            CROSS JOIN LATERAL (VALUES
-                {PERMISSION_CHANGED_RESOLVER_ADDRESS_VALUES}
-            ) candidate(resolver_address)
-            WHERE event.event_kind = 'PermissionChanged'
-              AND candidate.resolver_address IS NOT NULL
-              AND btrim(candidate.resolver_address) <> ''
-        ),
-        permission_citation_representatives AS (
-            -- Candidate provenance is display evidence, not redo state. One representative per
-            -- family and evidence kind is enough because family presence is the candidate input.
-            SELECT resolver_address, source_family,
-                   'PermissionChanged'::text AS evidence_kind,
-                   min(normalized_event_id) AS normalized_event_id
-            FROM permission_citation_events
-            GROUP BY resolver_address, source_family
-        ),
-        retained_permission_citations AS (
-            SELECT resolver_address, source_family,
-                   'PermissionChanged'::text AS evidence_kind,
-                   min(normalized_event_id) AS normalized_event_id
-            FROM retained_permission_evidence
-            GROUP BY resolver_address, source_family
-        ),
-        pointer_citation_representatives AS (
-            SELECT lower(candidate.resolver_address) AS resolver_address,
-                   CASE
-                       WHEN event.source_family LIKE 'ens_v2_%'
-                           THEN 'ens_v2_resolver_l1'
-                       WHEN event.source_family LIKE 'basenames_%'
-                           THEN 'basenames_base_resolver'
-                       ELSE 'ens_v1_resolver_l1'
-                   END AS source_family,
-                   'ResolverChanged'::text AS evidence_kind,
-                   min(event.normalized_event_id) AS normalized_event_id
-            FROM project_events event
-            CROSS JOIN LATERAL (
-                VALUES (event.after_state ->> 'resolver'),
-                       (event.before_state ->> 'resolver')
-            ) candidate(resolver_address)
-            WHERE event.event_kind = 'ResolverChanged'
-              AND candidate.resolver_address IS NOT NULL
-              AND btrim(candidate.resolver_address) <> ''
-            GROUP BY lower(candidate.resolver_address),
-                     CASE
-                         WHEN event.source_family LIKE 'ens_v2_%'
-                             THEN 'ens_v2_resolver_l1'
-                         WHEN event.source_family LIKE 'basenames_%'
-                             THEN 'basenames_base_resolver'
-                         ELSE 'ens_v1_resolver_l1'
-                     END
-        ),
-        alias_citation_events AS (
-            SELECT lower(COALESCE(
-                       event.after_state ->> 'resolver',
-                       event.before_state ->> 'resolver',
-                       event.raw_fact_ref ->> 'emitting_address'
-                   )) AS resolver_address,
-                   event.source_family,
-                   COALESCE(
-                       event.logical_name_id,
-                       event.after_state ->> 'from_logical_name_id',
-                       event.before_state ->> 'from_logical_name_id',
-                       event.after_state ->> 'from_namehash',
-                       event.before_state ->> 'from_namehash',
-                       event.after_state ->> 'from_dns_encoded_name',
-                       event.before_state ->> 'from_dns_encoded_name',
-                       event.after_state ->> 'from_name',
-                       event.before_state ->> 'from_name',
-                       event.event_identity
-                   ) AS alias_identity,
-                   event.block_number,
-                   event.transaction_index,
-                   event.log_index,
-                   event.normalized_event_id
-            FROM project_events event
-            WHERE event.event_kind = 'AliasChanged'
-              AND event.source_family IN (
-                  'ens_v1_resolver_l1', 'ens_v2_resolver_l1',
-                  'basenames_base_resolver'
-              )
-        ),
-        alias_family_citations AS (
-            SELECT resolver_address, source_family,
-                   'AliasChanged'::text AS evidence_kind,
-                   min(normalized_event_id) AS normalized_event_id
-            FROM alias_citation_events
-            WHERE resolver_address IS NOT NULL
-            GROUP BY resolver_address, source_family
-        ),
-        candidate_citation_events AS (
-            SELECT * FROM permission_citation_representatives
-            UNION ALL SELECT * FROM retained_permission_citations
-            UNION ALL SELECT * FROM pointer_citation_representatives
-            UNION ALL SELECT * FROM alias_family_citations
-        ),
-        candidate_citation_representatives AS (
-            SELECT resolver_address, min(normalized_event_id) AS normalized_event_id
-            FROM candidate_citation_events
-            GROUP BY resolver_address, source_family, evidence_kind
-        ),
-        resolver_candidate_citations AS (
-            SELECT resolver_address,
-                   jsonb_agg(
-                       to_jsonb(normalized_event_id) ORDER BY normalized_event_id
-                   ) AS event_ids
-            FROM candidate_citation_representatives
-            GROUP BY resolver_address
-        ),
-        candidates AS (
-            SELECT DISTINCT ON (combined.resolver_address)
-                   combined.resolver_address,
-                   combined.source_family,
-                   combined.classification_role,
-                   combined.classification_manifest_id,
-                   combined.classification_admission_namespace
-            FROM (
-                SELECT * FROM discovered WHERE source_family IS NOT NULL
-                UNION ALL SELECT observed.*, NULL::bigint, NULL::text,
-                                 NULL::bigint, NULL::bigint FROM observed
-                UNION ALL SELECT retained.*, NULL::bigint, NULL::text,
-                                 NULL::bigint, NULL::bigint
-                FROM retained_permission_candidates retained
-            ) combined
-            WHERE combined.resolver_address <>
-                  '0x0000000000000000000000000000000000000000'
-              AND (
-                  $4 OR EXISTS (
-                      SELECT 1 FROM project_scope_resolvers scope
-                      WHERE lower(scope.resolver_address) =
-                            lower(combined.resolver_address)
-                  )
-              )
-              AND NOT EXISTS (
-                  SELECT 1 FROM project_scope_resolver_passthrough passthrough
-                  WHERE lower(passthrough.resolver_address) =
-                        lower(combined.resolver_address)
-              )
-            ORDER BY combined.resolver_address,
-                     combined.priority,
-                     combined.source_family,
-                     combined.classification_manifest_id NULLS LAST,
-                     COALESCE(combined.classification_declaration_start_block, 0) DESC,
-                     combined.classification_declaration_ordinality DESC NULLS LAST,
-                     combined.classification_role
-        ),
-        upgrade_ranked AS (
-            SELECT event.*,
-                   lower(event.after_state ->> 'proxy_address') AS resolver_address,
-                   row_number() OVER (
-                       PARTITION BY event.source_family,
-                                    lower(event.after_state ->> 'proxy_address')
-                       ORDER BY event.block_number DESC NULLS LAST,
-                                event.transaction_index DESC NULLS LAST,
-                                event.log_index DESC NULLS LAST,
-                                event.normalized_event_id DESC
-                   ) AS latest_rank
-            FROM project_events event
-            WHERE event.event_kind = 'Upgraded'
-              AND event.after_state ->> 'proxy_address' IS NOT NULL
-        ),
-        latest_upgrades AS (
-            SELECT * FROM upgrade_ranked WHERE latest_rank = 1
-        ),
-        classified AS (
-            SELECT candidate.resolver_address,
-                   candidate.source_family,
-                   candidate.classification_admission_namespace,
-                   manifest.manifest_id,
-                   manifest.manifest_version,
-                   manifest.manifest_payload,
-                   manifest.manifest_event_id,
-                   upgrade.normalized_event_id AS upgrade_event_id,
-                   upgrade.block_number AS upgrade_block_number,
-                   upgrade.block_hash AS upgrade_block_hash,
-                   upgrade.after_state ->> 'implementation' AS implementation,
-                   {DECLARED_READ_FEATURES} AS declared_read_features,
-                   {IMPLEMENTATION_READ_FEATURES} AS implementation_read_features,
-                   COALESCE(
-                       candidate.classification_role,
-                       (
-                           SELECT declaration ->> 'role'
-                           FROM jsonb_array_elements(COALESCE(
-                               manifest.manifest_payload -> 'contracts', '[]'::jsonb
-                           )) WITH ORDINALITY
-                              declarations(declaration, declaration_ordinality)
-                           WHERE lower(declaration ->> 'address') = candidate.resolver_address
-                             AND (
-                                 declaration ->> 'start_block' IS NULL
-                                 OR (declaration ->> 'start_block')::bigint <= $2
-                             )
-                           ORDER BY COALESCE((declaration ->> 'start_block')::bigint, 0) DESC,
-                                    declaration_ordinality DESC
-                           LIMIT 1
-                       ),
-                       (
-                           SELECT implementation ->> 'role'
-                           FROM jsonb_array_elements(COALESCE(
-                               manifest.manifest_payload -> 'resolver_implementations', '[]'::jsonb
-                           )) WITH ORDINALITY implementations(implementation, implementation_ordinality)
-                           WHERE lower(implementation ->> 'address') = lower(upgrade.after_state ->> 'implementation')
-                           ORDER BY implementation_ordinality DESC
-                           LIMIT 1
-                       )
-                   ) AS classification_role,
-                   EXISTS (
-                       SELECT 1
-                       FROM jsonb_array_elements(COALESCE(
-                           manifest.manifest_payload -> 'contracts', '[]'::jsonb
-                       )) declaration
-                       WHERE lower(declaration ->> 'address') = candidate.resolver_address
-                         AND (declaration ->> 'role' <> 'public_resolver_v2'
-                              OR declaration ->> 'proxy_kind' = 'none')
-                         AND (
-                             declaration ->> 'start_block' IS NULL
-                             OR (declaration ->> 'start_block')::bigint <= $2
-                         )
-                   ) AS exact_declared,
-                   EXISTS (SELECT 1 FROM project_declared_resolver_addresses direct
-                           WHERE direct.manifest_id = manifest.manifest_id
-                             AND direct.resolver_address = candidate.resolver_address
-                             AND direct.classification_role = 'public_resolver_v2'
-                             AND direct.source_family = 'ens_v2_resolver_l1') AS direct_public_v2,
-                   {DIRECT_MIRROR_DECLARED} AS direct_mirror,
-                   EXISTS (
-                       SELECT 1
-                       FROM jsonb_array_elements(COALESCE(
-                           manifest.manifest_payload -> 'resolver_implementations',
-                           '[]'::jsonb
-                       )) implementation
-                       WHERE lower(implementation ->> 'address') =
-                             lower(upgrade.after_state ->> 'implementation')
-                   ) AS upgraded_to_declared,
-                   EXISTS (
-                       SELECT 1
-                       FROM jsonb_array_elements(COALESCE(
-                           manifest.manifest_payload -> 'abi' -> 'events', '[]'::jsonb
-                       )) abi_event
-                       WHERE abi_event -> 'normalized_events' ? 'ResolverRecordLinked'
-                   ) AS record_links_declared
-            FROM candidates candidate
-            JOIN project_manifests manifest
-              ON (
-                  candidate.classification_manifest_id IS NOT NULL
-                  AND manifest.manifest_id = candidate.classification_manifest_id
-              ) OR (
-                  candidate.classification_manifest_id IS NULL
-                  AND manifest.source_family = candidate.source_family
-              )
-            LEFT JOIN latest_upgrades upgrade
-              ON upgrade.source_family = candidate.source_family
-             AND upgrade.resolver_address = candidate.resolver_address
-        ),
-        supported AS (
-            SELECT classified.*,
-                   CASE WHEN source_family = 'ens_v2_resolver_l1'
-                             AND classification_role = 'public_resolver_v2'
-                            THEN direct_public_v2
-                        WHEN source_family = 'ens_v2_resolver_l1'
-                             AND classification_role = '{MIRROR_ROLE}' THEN direct_mirror
-                        WHEN source_family = 'ens_v2_resolver_l1'
-                        THEN upgraded_to_declared ELSE exact_declared END AS supported,
-                   CASE
-                       WHEN source_family = 'ens_v2_resolver_l1'
-                        AND classification_role = 'public_resolver_v2'
-                           THEN CASE WHEN NOT direct_public_v2 THEN 'resolver_not_declared' END
-                       WHEN source_family = 'ens_v2_resolver_l1'
-                        AND classification_role = '{MIRROR_ROLE}'
-                           THEN CASE WHEN NOT direct_mirror THEN 'resolver_not_declared' END
-                       WHEN source_family = 'ens_v2_resolver_l1'
-                        AND upgrade_event_id IS NULL
-                           THEN 'resolver_implementation_unknown'
-                       WHEN source_family = 'ens_v2_resolver_l1'
-                        AND NOT upgraded_to_declared
-                           THEN 'resolver_implementation_not_declared'
-                       WHEN source_family <> 'ens_v2_resolver_l1'
-                        AND NOT exact_declared
-                           THEN 'resolver_not_declared'
-                   END AS support_reason
-            FROM classified
-        ),
-        summarized AS (
-            SELECT supported.*,
-                   supported.supported
-                       AND supported.source_family <> 'ens_v1_resolver_l1'
-                       AND supported.classification_role IS DISTINCT FROM 'public_resolver_v2'
-                           AS enumeration_supported,
-                   CASE
-                       WHEN supported.supported
-                        AND (supported.source_family = 'ens_v1_resolver_l1'
-                             OR supported.classification_role = 'public_resolver_v2')
-                           THEN 'resolver_binding_enumeration_not_projected'
-                       ELSE support_reason
-                   END AS enumeration_reason,
-                   COALESCE(binding.item_count, 0) AS binding_count,
-                   COALESCE(binding.items, '[]'::jsonb) AS binding_items,
-                   COALESCE(binding.alias_item_count, 0) +
-                       COALESCE(alias.event_count, 0) AS alias_count,
-                   jsonb_path_query_array(
-                       COALESCE(binding.alias_items, '[]'::jsonb) ||
-                           COALESCE(alias.items, '[]'::jsonb),
-                       format('$[0 to %s]', $5::integer - 1)::jsonpath
-                   ) AS alias_items,
-                   -- Record links exist only on the record-ID generation: an ERC-1967
-                   -- proxy whose admitted implementation's manifest declares `Linked`.
-                   -- PermissionedResolver keeps node-to-record links and emits `Linked`
-                   -- from `_link` (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L97-L100 @ ens_v2@a971bd64;
-                   -- upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L363-L367 @ ens_v2@a971bd64).
-                   -- PublicResolverV2 is node-keyed and has no record or link storage
-                   -- (upstream: .refs/ens_v2/contracts/src/resolver/PublicResolverV2.sol:L23-L59 @ ens_v2@a971bd64),
-                   -- and ENSV1Resolver forwards each name to the ENSv1 registry's resolver
-                   -- (upstream: .refs/ens_v2/contracts/src/resolver/ENSV1Resolver.sol:L13-L41 @ ens_v2@a971bd64;
-                   -- upstream: .refs/ens_v2/contracts/src/resolver/AbstractMirrorResolver.sol:L67-L81 @ ens_v2@a971bd64).
-                   supported.supported
-                       AND supported.source_family = 'ens_v2_resolver_l1'
-                       AND supported.upgrade_event_id IS NOT NULL
-                       AND COALESCE(supported.classification_role, '')
-                           NOT IN ('public_resolver_v2', '{MIRROR_ROLE}')
-                       AND supported.record_links_declared AS links_supported,
-                   COALESCE(link.link_count, 0) AS link_count,
-                   COALESCE(link.record_count, 0) AS linked_record_count,
-                   COALESCE(link.digest, md5('')) AS link_digest,
-                   COALESCE(link.items, '[]'::jsonb) AS link_items,
-                   COALESCE(permission.item_count, 0) AS permission_count,
-                   COALESCE(permission.items, '[]'::jsonb) AS permission_items,
-                   COALESCE(permission.role_count, 0) AS role_count,
-                   COALESCE(permission.role_items, '[]'::jsonb) AS role_items,
-                   COALESCE(alias.event_count, 0) AS alias_event_count,
-                   COALESCE(permission.event_count, 0) AS permission_event_count,
-                   COALESCE(citation.event_ids, '[]'::jsonb) AS candidate_event_ids
-            FROM supported
-            LEFT JOIN project_resolver_binding_summary binding USING (resolver_address)
-            LEFT JOIN project_resolver_alias_summary alias USING (resolver_address)
-            LEFT JOIN project_resolver_link_summary link USING (resolver_address)
-            LEFT JOIN project_resolver_permission_summary permission USING (resolver_address)
-            LEFT JOIN resolver_candidate_citations citation USING (resolver_address)
-        )
-        INSERT INTO project_stage_resolver_current (
-            chain_id, resolver_address, declared_summary, support_status,
-            unsupported_reason, provenance, chain_positions,
-            canonicality_summary, manifest_version
-        )
-        SELECT $1,
-               resolver_address,
-               jsonb_build_object(
-                   'classification', jsonb_strip_nulls(jsonb_build_object(
-                       'source_family', source_family,
-                       'role', classification_role,
-                       'basis', CASE WHEN source_family = 'ens_v2_resolver_l1'
-                            AND COALESCE(classification_role, '') NOT IN ('public_resolver_v2', '{MIRROR_ROLE}')
-                           THEN 'erc1967_upgraded_history'
-                           ELSE 'manifest_declared_address' END,
-                       'implementation', implementation,
-                       'read_features', CASE
-                           WHEN NOT supported THEN '[]'::jsonb
-                           WHEN source_family = 'ens_v2_resolver_l1'
-                            AND COALESCE(classification_role, '') NOT IN ('public_resolver_v2', '{MIRROR_ROLE}')
-                               THEN implementation_read_features
-                           ELSE declared_read_features
-                       END,
-                       'mirror', {MIRROR_CLASSIFICATION}
-                   )),
-                   {SECTION_SUMMARIES},
-                   'summary_version', {SUMMARY_VERSION}
-               ),
-               CASE WHEN supported THEN 'supported' ELSE 'unsupported' END,
-               support_reason,
-               jsonb_strip_nulls(jsonb_build_object(
-                   'chain_id', $1, 'manifest_id', manifest_id,
-                   'manifest_event_id', manifest_event_id,
-                   'classification_admission_namespace',
-                       classification_admission_namespace,
-                   'upgrade_event_id', upgrade_event_id,
-                   'candidate_event_ids', NULLIF(candidate_event_ids, '[]'::jsonb)
-               )),
-               jsonb_strip_nulls(jsonb_build_object(
-                   'block_number', upgrade_block_number,
-                   'block_hash', upgrade_block_hash,
-                   'target_block_number', $2, 'target_block_hash', $3
-               )),
-               jsonb_build_object(
-                   'state', 'canonical_lineage',
-                   'target_block_number', $2, 'target_block_hash', $3
-               ),
-               manifest_version
-        FROM summarized
-        UNION ALL
-        SELECT current.chain_id,
-               current.resolver_address,
-               current.declared_summary,
-               current.support_status,
-               current.unsupported_reason,
-               current.provenance,
-               current.chain_positions || jsonb_build_object(
-                   'target_block_number', $2,
-                   'target_block_hash', $3
-               ),
-               current.canonicality_summary || jsonb_build_object(
-                   'state', 'canonical_lineage',
-                   'target_block_number', $2,
-                   'target_block_hash', $3
-               ),
-               current.manifest_version
-        FROM resolver_current current
-        JOIN project_scope_resolver_passthrough passthrough
-          ON lower(passthrough.resolver_address) = lower(current.resolver_address)
-        WHERE current.chain_id = $1
-        ORDER BY resolver_address
-        "#,
+        include_str!("resolver/build.sql"),
+        discovery = discovery,
+        PERMISSION_CHANGED_RESOLVER_ADDRESS_VALUES = PERMISSION_CHANGED_RESOLVER_ADDRESS_VALUES,
+        DIRECT_MIRROR_DECLARED = DIRECT_MIRROR_DECLARED,
+        MIRROR_CLASSIFICATION = MIRROR_CLASSIFICATION,
+        MIRROR_ROLE = MIRROR_ROLE,
+        DECLARED_READ_FEATURES = DECLARED_READ_FEATURES,
+        IMPLEMENTATION_READ_FEATURES = IMPLEMENTATION_READ_FEATURES,
+        SECTION_SUMMARIES = SECTION_SUMMARIES,
+        SUMMARY_VERSION = SUMMARY_VERSION,
     );
+    #[cfg(test)]
+    if crate::profile::execute_bound(
+        transaction,
+        &resolver_build,
+        crate::profile::Stage::Resolver,
+        &[
+            crate::profile::Parameter::Text(chain_id),
+            crate::profile::Parameter::I64(target.number),
+            crate::profile::Parameter::Text(&target.hash),
+            crate::profile::Parameter::Bool(full_rebuild),
+            crate::profile::Parameter::I32(SUMMARY_SAMPLE_LIMIT),
+        ],
+    )
+    .await?
+    {
+        return Ok(());
+    }
     sqlx::query(&resolver_build)
         .bind(chain_id)
         .bind(target.number)
@@ -583,3 +82,7 @@ pub(super) async fn build(
         .map_err(|error| ProjectError::database("failed to build resolver_current", error))?;
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "resolver/discovery_tests.rs"]
+mod discovery_tests;

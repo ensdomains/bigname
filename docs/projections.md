@@ -133,6 +133,27 @@ After event-derived publication, configured Ethereum
 - supported ENSv1 `text:<key>` entries whose normalized event retained the key
   but not the value.[^ensnode-legacy-revresolver-l311][^ensnode-legacy-revresolver-l316][^ensnode-legacy-text-l356]
 
+Text hydration is restricted to supported inventory entries on the four
+manifest-admitted legacy public resolvers `0x4976fb03…`, `0xDaaF96c3…`,
+`0x226159d5…`, and `0x5FfC0143…`, whose admitted text profiles are recorded by
+the pinned ENS app metadata (upstream: .refs/ens_app_v3/src/constants/resolverAddressData.ts:L71 @ ens_app_v3@7175858)
+(upstream: .refs/ens_app_v3/src/constants/resolverAddressData.ts:L88 @ ens_app_v3@7175858)
+(upstream: .refs/ens_app_v3/src/constants/resolverAddressData.ts:L105 @ ens_app_v3@7175858)
+(upstream: .refs/ens_app_v3/src/constants/resolverAddressData.ts:L121 @ ens_app_v3@7175858).
+A successful text read, including an empty value, is retained while its read
+block remains canonical. Merely advancing the head does not reread it. A scoped
+Project rebuild replaces inventory entries with their event-derived state;
+missing values in that replacement are hydrated again. This includes changes
+to record values, resolver pointers and record-version boundaries. A read from
+an orphaned block is retried at the current canonical head; failure restores
+the missing-value baseline. Previously hydrated entries that become unsupported
+or fall outside the admitted resolver list are restored without an RPC call.
+Every record-inventory reader (the snapshot and batch reads, the identity name
+records behind lookup, and the GraphQL record loader) exposes the event-derived
+baseline immediately when a hydration block is orphaned, even before a retry
+runs. This text policy does not change the bounded refresh of event-silent
+reverse claims described below.
+
 Hydration uses the exact number and hash from `chain_heads`, revalidates that
 head in the publication transaction, and never calls provider `latest`.
 Failed calls restore the event-derived baseline and keep Project retryable. It
@@ -1362,16 +1383,50 @@ namespace), the resolver's own unsupported reason, `mirrored_resolver_is_mirror`
 answer for a descendant is resolver-defined), alongside the selected node. A
 mirror whose own classification is unsupported or belongs to another namespace
 keeps the ordinary resolver reason or `resolver_classification_missing`. The
-derivation is a pure function of the staged events: incremental scope pairs a
-mirror-pointer resource with the names (and any pointer resources) of every node
-its walk consults, pairs a scoped consulted name, pointer resource, or changed
-node-keyed ENSv1 pointer with the mirror-pointer resources of every name whose
-walk consults that node, stages a scoped name's node-keyed ENSv1 pointers and the
-queried node's writes on every declared ENSv1 resolver, and re-scopes a mirrored
-row when the resolver it was derived from writes. An ancestor's resolver change or clear and a write for the
-queried node therefore rebuild the mirrored row in the same publication, and
-full, incremental, and redo builds converge. `address_records_current` and
+derivation uses staged event history and the explicitly reusable resolver classification
+fields described below. During ordinary forward incremental work, a mirror-pointer
+resource requires the surfaces and historical registry pointers of every node its
+walk consults as **inputs**. Reading an unchanged ancestor does not put that ancestor,
+its pointer resource, or unrelated mirror subscribers into the affected publication
+scope. Unchanged rows retain their stored provenance and target timestamps,
+including the name API's fallback `created_at` when no creation event is available.
+An absent ancestor output stays absent when that ancestor is only read; a new or
+changed surface still enters the ordinary affected scope.
+
+An independently affected consulted name or pointer resource, or a changed node-keyed
+ENSv1 pointer, still invalidates every mirror-pointer resource whose walk consults
+that node. Ancestor resolver changes and clears, queried-node record writes, resolver
+classification changes, and newly admitted name/path evidence must therefore rebuild
+their affected mirrors in the same publication. Inputs discovered while rebuilding one
+mirror do not become independent invalidation seeds. Full rebuild and redo/retraction
+work retain the conservative bidirectional closure.
+
+Mirror computation stages eligible historical registry pointers for consulted nodes,
+including clears and pointers without a logical name or resource, and queried-node
+writes on every declared ENSv1 resolver. It may reuse only the retained resolver's
+`declared_summary.classification`, `support_status`, `unsupported_reason`,
+`manifest_version`, and `provenance.manifest_id` as classification inputs when that
+resolver is outside the affected resolver scope and its retained target is on the
+current canonical lineage at or before the selected target. Missing, future, or
+noncanonical retained classification requires
+an ordinary resolver rebuild, bypassing unchanged-row carry-forward, and invalidates
+its retained direct and mirrored dependents. These input fields never supply a new publication
+target or permit reuse of record values. A classification change uses the newly
+rebuilt resolver instead. Full, incremental, and redo builds agree on affected record
+values and event provenance; unchanged forward-incremental rows intentionally retain
+their earlier publication targets. `address_records_current` and
 name-side record reads consume mirrored rows like any other supported inventory.
+
+The mirror dependency expansion creates its 13 per-pass temporary work tables once
+per publication and empties them with `TRUNCATE` after each pass instead of dropping
+and recreating them. PostgreSQL holds the lock of every relation created, dropped or
+truncated until the publication transaction commits, and a truncated table keeps its
+identity, so each further pass reuses locks the publication already holds. A
+publication therefore holds a few hundred relation locks however many passes its
+closure needs, well under the default lock table that production PostgreSQL runs
+with (`max_locks_per_transaction`). The mirror stage still creates and drops its
+per-publication tables once, so tests that restage the mirror for many cases in one
+transaction roll each case back to a savepoint to release those locks.
 
 For ENSv1, an admitted current resolver may contribute supported address, text,
 and contenthash inventory. An unlisted or unsupported resolver family stays

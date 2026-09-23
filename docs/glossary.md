@@ -1518,6 +1518,21 @@ row is unsupported with `mirrored_resolver_not_projected`. See
 [manifest declarations](manifests.md#ensv1-mirror-resolver-declarations) and
 [projections](projections.md#resolver-and-records).
 
+## Mirror walk and mirror seed
+
+the two lookups by label that keep Project's
+[ENSv1 mirror resolver](#ensv1-mirror-resolver-ensv1_mirror_resolver) rows
+current. The **mirror walk** is the list of ENSv1 registry nodes a mirror
+consults for one queried name: the name itself and each ancestor below the
+root, found as the surfaces whose labels equal each label suffix of the queried
+name in the same namespace. A **mirror seed** is the label array of a name that an
+incremental Project batch has in scope, or of a node whose ENSv1 registry
+resolver pointer is in scope; every name whose labels end with the seed's labels
+(the seed itself and its descendants) may have a walk that consults it, so those
+names are rechecked.
+Both lookups use label-hash indexes and then compare the labels themselves; see
+[the Project scope index runbook](../ops/project-progressive/README.md).
+
 ## Exact-name profile (`exact_name_profile`)
 
 the per-manifest capability

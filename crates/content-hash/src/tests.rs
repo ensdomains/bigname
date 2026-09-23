@@ -14,6 +14,8 @@ use crate::compute::{
 };
 use crate::lockfile::{semantic_crate_fingerprints, semantic_crate_lists};
 
+mod project_sql;
+
 const SAMPLE_DECODE_PACKAGES: &[(&str, &str, &str)] = &[
     ("alloy-dyn-abi", "1.5.7", "aa"),
     ("alloy-primitives", "1.5.7", "bb"),

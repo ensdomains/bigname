@@ -8,6 +8,7 @@ mod authority;
 mod binding_closure;
 mod classification;
 mod expiry;
+mod frontier;
 mod inventory;
 mod labels;
 mod primary;
@@ -81,6 +82,10 @@ pub(crate) async fn initialize(
     }
     classification::include_scope(transaction, chain_id, window.previous, target.number).await?;
     resolver_dependents::include(transaction, chain_id).await?;
+    if !window.retain_retracted {
+        crate::stage::mirror_evidence::invalidate_resolver_dependents(transaction, chain_id)
+            .await?;
+    }
     close_binding_scope(transaction, chain_id, target).await?;
     include_alias_and_wildcard_scope(transaction, chain_id, target).await?;
     close_binding_scope(transaction, chain_id, target).await?;
@@ -88,7 +93,7 @@ pub(crate) async fn initialize(
     include_topology_scope(transaction, chain_id, target.number).await?;
     authority::include_topology_dependents(transaction, chain_id, target.number).await?;
     close_binding_scope(transaction, chain_id, target).await?;
-    inventory::close(transaction, chain_id, target).await?;
+    inventory::close(transaction, chain_id, target, !window.retain_retracted).await?;
     resolver::include_resource_pointers(transaction, chain_id, target.number).await?;
     resolver::include_link_targets(transaction, chain_id, target.number).await?;
     resolver::classify_unchanged(transaction, chain_id).await?;
@@ -99,6 +104,10 @@ pub(crate) async fn initialize(
 
 async fn create_scope_tables(transaction: &mut Transaction<'_, Postgres>) -> Result<()> {
     for statement in [
+        "CREATE TEMP TABLE project_binding_frontier_names (logical_name_id text PRIMARY KEY) ON COMMIT DROP",
+        "CREATE TEMP TABLE project_binding_frontier_resources (resource_id uuid PRIMARY KEY) ON COMMIT DROP",
+        "CREATE TEMP TABLE project_binding_seen_names (operator text, logical_name_id text, PRIMARY KEY(operator, logical_name_id)) ON COMMIT DROP",
+        "CREATE TEMP TABLE project_binding_seen_resources (operator text, resource_id uuid, PRIMARY KEY(operator, resource_id)) ON COMMIT DROP",
         "CREATE TEMP TABLE project_scope_names (logical_name_id text PRIMARY KEY) ON COMMIT DROP",
         "CREATE TEMP TABLE project_scope_expiry_names (logical_name_id text PRIMARY KEY) ON COMMIT DROP",
         "CREATE TEMP TABLE project_scope_children (logical_name_id text PRIMARY KEY) ON COMMIT DROP",
