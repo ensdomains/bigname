@@ -16,9 +16,10 @@ On an existing large database, in this order:
    then builds whatever is missing, runs `ANALYZE bigname_phase.name_surfaces`
    (expression indexes have no statistics until then, and the planner needs them
    to choose the label-hash indexes), and runs the same check again, requiring
-   everything to exist. It never drops an index.
+   everything to exist. It never drops an index. The `ANALYZE` runs again on every
+   rerun of the script.
 2. **Validate.** Run `validate.sql`. It fails unless all five indexes are valid and
-   ready, and the two label-hash indexes and `label_hashes` have their reviewed
+   ready on their own tables, and the two label-hash indexes and `label_hashes` have their reviewed
    definitions. It allows the earlier label-array indexes to exist, because the
    running binary still uses them. Also compare the other three `pg_get_indexdef`
    outputs with `install.sql`; an existing name is not proof of a matching index.

@@ -519,7 +519,7 @@ migration_application_log="$(
 # Future entries must use basename|one-line reason.
 intentional_phase_migration_skips=()
 refusal_assertions_passed=0
-expected_refusal_assertions=229
+expected_refusal_assertions=237
 predecessor_shape_proof_count=0
 expected_predecessor_shape_proof_count=41
 refusal_probe_seconds=0
@@ -2245,6 +2245,12 @@ SQL
 DROP INDEX $label_hash_index_name;
 CREATE INDEX $label_hash_index_name ON name_surfaces ${label_hash_wrong_keys[$label_hash_index_name]};
 SQL
+    assert_migration_refusal "other-table-$label_hash_index_name" \
+        "$label_hash_migration" \
+        "$label_hash_index_name exists but is not a valid and ready index on $scratch_schema.name_surfaces; $label_hash_recovery" <<SQL
+DROP INDEX $label_hash_index_name;
+CREATE INDEX $label_hash_index_name ON discovery_edges (chain_id);
+SQL
 done
 # The live prebuild in ops/project-progressive/install.sql must build the
 # baseline definition of each label-hash index from the shape without it, pass
@@ -2304,7 +2310,19 @@ END \$\$;"
         "$scratch_schema.$label_hash_index_name is a table, not an index, so the index was never built; remove or rename that relation, then follow $label_hash_readme before retrying"
     {
         printf 'SET search_path TO "%s";\n' "$scratch_schema"
-        printf '%s\n' "DROP TABLE $label_hash_index_name;"
+        printf '%s\n' \
+            "DROP TABLE $label_hash_index_name;" \
+            "CREATE INDEX $label_hash_index_name ON discovery_edges (chain_id);"
+    } | run_psql >/dev/null
+    assert_index_install_refusal "label-hash-$label_hash_index_name-index-on-another-table" \
+        "$label_hash_install" \
+        "$label_hash_index_name is missing from $scratch_schema.name_surfaces or is not valid and ready; $label_hash_install_recovery"
+    assert_index_install_hint "label-hash-$label_hash_index_name-index-on-another-table-hint" \
+        "$label_hash_install" \
+        "An index on $scratch_schema.discovery_edges holds this name. Rename or remove it, then rerun this script."
+    {
+        printf 'SET search_path TO "%s";\n' "$scratch_schema"
+        printf '%s\n' "DROP INDEX $label_hash_index_name;"
         render_phase_migration "$label_hash_install"
         printf '%s\n' "$label_hash_matches_baseline" "DROP TABLE expected_installed_label_hash_index;"
     } | run_psql >/dev/null
@@ -2352,6 +2370,34 @@ DROP INDEX name_surfaces_project_label_hashes_idx;
 SQL
     render_phase_migration "$label_hash_install"
 } | run_psql >/dev/null
+# After the schema-migration, ops/project-progressive/validate.sql and
+# validate-after-switch.sql both pass. Before the switch validate.sql also passes
+# while an old label-array index still exists; validate-after-switch.sql must
+# refuse that, and validate.sql must refuse an index of a reviewed name on
+# another table. Each setup runs in a transaction that rolls back.
+label_hash_validate="$ROOT/ops/project-progressive/validate.sql"
+label_hash_validate_after_switch="$ROOT/ops/project-progressive/validate-after-switch.sql"
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    render_phase_migration "$label_hash_validate"
+    render_phase_migration "$label_hash_validate_after_switch"
+    printf '%s\n' \
+        "BEGIN;" \
+        "CREATE INDEX name_surfaces_project_suffix_idx ON name_surfaces (namespace, raw_labels);"
+    render_phase_migration "$label_hash_validate"
+    printf '%s\n' "ROLLBACK;"
+} | run_psql >/dev/null
+assert_migration_refusal validate-after-switch-old-index \
+    "$label_hash_validate_after_switch" \
+    "Project progressive label-array indexes still exist after the switch: name_surfaces_project_suffix_idx; check that 20260923140000_project_name_surfaces_label_indexes.sql was applied" <<SQL
+CREATE INDEX name_surfaces_project_suffix_idx ON name_surfaces (namespace, raw_labels);
+SQL
+assert_migration_refusal validate-index-on-another-table \
+    "$label_hash_validate" \
+    "Project progressive indexes missing, invalid, or on another table: name_surfaces_project_node_idx" <<SQL
+DROP INDEX name_surfaces_project_node_idx;
+CREATE INDEX name_surfaces_project_node_idx ON discovery_edges (chain_id);
+SQL
 # Exercise reverse_hydration_attempt_state_upgrade from the exact predecessor
 # shape, then validate the additive tuple invariant independently. Both files
 # must remain idempotent after the upgrade completes.

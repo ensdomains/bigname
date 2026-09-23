@@ -175,6 +175,7 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_project_v1_pointer_nod
 
 -- Expression indexes have no statistics until the table is analyzed, and the
 -- planner needs them to choose the label-hash indexes for the mirror lookups.
+-- This ANALYZE runs on every rerun of this script, including the step 3 check run.
 ANALYZE bigname_phase.name_surfaces;
 
 -- Printed first so the receipt shows the flags even when the check below fails.

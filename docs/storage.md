@@ -1606,6 +1606,9 @@ log word decodes into a persisted event body; serde, serde-core, serde-derive,
 and serde-json can change the final projected-topology serialization. The rest
 of the lockfile stays
 outside, so an unrelated dependency bump does not force a re-derivation.
+Every `.sql` file under `crates/project/src` is a hash input, test fixtures
+such as `crates/project/src/scope/mirror_fixture.sql` included, because the
+hash reads those files whole without asking which code loads them.
 Interpret's persistence stage is covered on the
 same rule: which interpreted row wins a conflict, how a redo range reopens and
 reanchors bindings, and which surfaces a normalizer-version recompute

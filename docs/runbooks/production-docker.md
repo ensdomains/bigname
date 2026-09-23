@@ -692,7 +692,7 @@ indexes and their `label_hashes` function, another definition. It never drops
 an index, and it ends with `ANALYZE bigname_phase.name_surfaces`, because
 expression indexes have no statistics until the table is analyzed and the
 mirror lookups depend on them. `validate.sql` fails unless all five names are
-valid and ready indexes and the label-hash indexes and function have their
+valid and ready indexes on their own tables and the label-hash indexes and function have their
 reviewed definitions; compare the other three `pg_get_indexdef` outputs with
 `install.sql`. It allows the earlier `name_surfaces_project_labels_idx` and
 `name_surfaces_project_suffix_idx` label-array indexes to exist, because the

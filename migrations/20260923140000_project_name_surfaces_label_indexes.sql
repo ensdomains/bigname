@@ -7,8 +7,10 @@
 -- themselves, so a hash collision never changes a result.
 --
 -- Prebuild both indexes concurrently with ops/project-progressive/install.sql on a large
--- database; it also drops the two old indexes concurrently. The statements below then
--- recognise the prebuilt indexes by name, and the check at the end refuses a name that
+-- database. The installer only builds: the running binary still reads the two old
+-- indexes, so this schema-migration drops them, with an ordinary quick drop inside the
+-- stop/start window. The statements below then recognise the prebuilt indexes by
+-- name, and the check at the end refuses a name that
 -- is missing, invalid, not an index, on another table, or built with another
 -- definition. It compares definitions as pg_get_indexdef prints them, with search_path
 -- set to pg_catalog so PostgreSQL always prints schema names and quote_all_identifiers
