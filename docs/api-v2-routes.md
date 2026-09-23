@@ -1929,8 +1929,10 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
   an unbounded list. The bound caps each row's aggregated matches and response
   size, not the stored rows the read scans to count them. With `dedupe=registration`,
   `resolutions` is the union of the matches of every name in the registration
-  group. The reverse index is built so that every name in a group reads the
-  same record inventory, so the union equals each member's own matches. The row's name
+  group. The reverse index is built so that every name in a group is expected
+  to read the same record inventory, so the union normally equals each
+  member's own matches. When it does not, `is_primary` still counts only the
+  representative name's own matches. The row's name
   fields, `include=counts`, and `is_primary` belong to the
   [representative name](glossary.md#representative-name), the group member
   that sorts first by name text, then by namespace and namehash. Rows also

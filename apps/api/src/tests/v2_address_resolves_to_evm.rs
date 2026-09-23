@@ -572,6 +572,10 @@ const V2_EVM_BOUNDED_ADDRESS: &str = "0x0000000000000000000000000000000000000e0b
 /// An address other fixtures leave empty, holding one name past the per-row coin-type limit.
 const V2_EVM_WIDE_ADDRESS: &str = "0x0000000000000000000000000000000000000e0a";
 
+/// An address other fixtures leave empty, where one registration's members each stay within the
+/// per-row coin-type limit but their union exceeds it.
+const V2_EVM_SPLIT_ADDRESS: &str = "0x0000000000000000000000000000000000000e0c";
+
 /// The `count` lowest ENSIP-11 coin types above the default coin type, ascending.
 fn v2_evm_wide_coin_types(count: u64) -> Vec<u64> {
     (1..=count).map(|offset| 2_147_483_648 + offset).collect()
@@ -669,6 +673,40 @@ async fn v2_resolves_to_evm_rejects_a_row_past_the_coin_type_limit() -> Result<(
             "{uri}"
         );
     }
+    // shared-one and shared-two form one registration group. Each matches 60 coin types, within
+    // the limit, but together they match 120: each is served by name, and the group is rejected.
+    let limit_usize = usize::try_from(limit)?;
+    let split = v2_evm_wide_coin_types(120);
+    seed_v2_evm_wide_rows(&database, V2_EVM_SPLIT_ADDRESS, "shared-one.eth", &split[..60]).await?;
+    seed_v2_evm_wide_rows(&database, V2_EVM_SPLIT_ADDRESS, "shared-two.eth", &split[60..]).await?;
+    assert!(split.len() > limit_usize && 60 <= limit_usize);
+    let base = format!(
+        "/v1/addresses/{V2_EVM_SPLIT_ADDRESS}/names?relation=resolves_to&coin_type=evm"
+    );
+    let by_name =
+        v2_address_names_payload_for_database(&database, &format!("{base}&dedupe=name")).await?;
+    let by_name_rows = by_name["data"].as_array().expect("data array");
+    assert_eq!(names(by_name_rows), vec!["shared-one.eth", "shared-two.eth"]);
+    for (name, coins) in [("shared-one.eth", &split[..60]), ("shared-two.eth", &split[60..])] {
+        let served = resolutions(row_named(by_name_rows, name))
+            .into_iter()
+            .map(|(coin_type, _)| coin_type)
+            .collect::<Vec<_>>();
+        assert_eq!(served, coins, "{name}");
+    }
+    let uri = format!("{base}&dedupe=registration");
+    let response = v2_address_names_response_for_database(&database, &uri).await?;
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY, "{uri}");
+    let payload: Value = read_json(response).await?;
+    assert_eq!(payload["error"]["code"], json!("unsupported"), "{uri}");
+    assert_eq!(
+        payload["error"]["message"],
+        json!(format!(
+            "coin_type=evm matched more than {limit} EVM coin types on one row; request a single decimal coin_type instead"
+        )),
+        "{uri}"
+    );
+
     // A single coin type still serves the same names.
     let single = v2_address_names_payload_for_database(
         &database,
