@@ -186,6 +186,10 @@ async fn mirror_bulk_handles_full_scope_shared_ancestor_and_late_growth() -> Res
     sqlx::raw_sql(include_str!("mirror_fixture.sql"))
         .execute(&mut *tx)
         .await?;
+    // 400 scale names put the broad scenarios (the full scope, the shared ancestor, late
+    // growth, and the changed ancestor) above the 256-row keyed limit, so their broad passes
+    // use the set-based plan. A preliminary pass or the final fixed-point pass can still be
+    // small and keyed.
     sqlx::raw_sql("TRUNCATE project_changed_events;
         INSERT INTO name_surfaces
         SELECT 'scale-'||i,'ens','scale-'||i,'bench',10,'block','canonical',

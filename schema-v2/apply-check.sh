@@ -537,7 +537,8 @@ cleanup() {
     if [ -n "${migration_application_log:-}" ]; then
         rm -f -- "$migration_application_log"
     fi
-    printf 'DROP SCHEMA IF EXISTS "%s" CASCADE;\n' "$scratch_schema" \
+    printf 'DROP SCHEMA IF EXISTS "%s" CASCADE;\nDROP SCHEMA IF EXISTS "%s_foreign" CASCADE;\n' \
+        "$scratch_schema" "$scratch_schema" \
         | run_psql >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
@@ -2429,11 +2430,24 @@ BEGIN
 END \$\$;"
 label_chain_no_legacy="DO \$\$
 BEGIN
-    IF to_regclass('name_surfaces_project_labels_idx') IS NOT NULL
-        OR to_regclass('name_surfaces_project_suffix_idx') IS NOT NULL THEN
+    IF to_regclass('$scratch_schema.name_surfaces_project_labels_idx') IS NOT NULL
+        OR to_regclass('$scratch_schema.name_surfaces_project_suffix_idx') IS NOT NULL THEN
         RAISE EXCEPTION 'Project label upgrade chain built a whole-array label index';
     END IF;
 END \$\$;"
+# A same-named index in another schema of the test database must neither
+# break the capture's exact count nor be touched by the chain. Create one in a
+# throwaway schema, run the proof, then require that index unchanged.
+label_chain_foreign_schema="${scratch_schema}_foreign"
+{
+    printf '%s\n' \
+        "CREATE SCHEMA \"$label_chain_foreign_schema\";" \
+        "CREATE TABLE \"$label_chain_foreign_schema\".example (id integer);" \
+        "CREATE INDEX name_surfaces_project_node_idx ON \"$label_chain_foreign_schema\".example (id);" \
+        "CREATE TABLE \"$label_chain_foreign_schema\".snapshot AS" \
+        "SELECT pg_index.indexrelid, pg_get_indexdef(pg_index.indexrelid) AS definition" \
+        "FROM pg_index WHERE indexrelid = '\"$label_chain_foreign_schema\".name_surfaces_project_node_idx'::regclass;"
+} | run_psql >/dev/null
 {
     printf 'SET search_path TO "%s";\n' "$scratch_schema"
     cat <<'SQL'
@@ -2449,7 +2463,8 @@ WHERE index_class.relname IN (
     'name_surfaces_project_node_idx',
     'name_surfaces_project_suffix_hash_idx',
     'name_surfaces_project_label_hashes_idx'
-);
+)
+  AND pg_index.indrelid IN ('name_surfaces'::regclass, 'normalized_events'::regclass);
 DO $$
 BEGIN
     IF (SELECT count(*) FROM expected_label_chain_indexes) <> 5 THEN
@@ -2512,6 +2527,22 @@ DELETE FROM name_surfaces WHERE chain_id = 'label-chain';
 DELETE FROM chain_lineage WHERE chain_id = 'label-chain';
 DROP TABLE expected_label_chain_indexes;
 SQL
+} | run_psql >/dev/null
+{
+    printf '%s\n' \
+        "DO \$\$" \
+        "BEGIN" \
+        "    IF NOT EXISTS (" \
+        "        SELECT 1 FROM \"$label_chain_foreign_schema\".snapshot snap" \
+        "        JOIN pg_index ON pg_index.indexrelid = snap.indexrelid" \
+        "        WHERE pg_index.indexrelid = to_regclass('\"$label_chain_foreign_schema\".name_surfaces_project_node_idx')" \
+        "          AND pg_index.indisvalid AND pg_index.indisready" \
+        "          AND pg_get_indexdef(pg_index.indexrelid) = snap.definition" \
+        "    ) THEN" \
+        "        RAISE EXCEPTION 'Project label upgrade chain changed a same-named index in another schema';" \
+        "    END IF;" \
+        "END \$\$;" \
+        "DROP SCHEMA \"$label_chain_foreign_schema\" CASCADE;"
 } | run_psql >/dev/null
 assert_migration_context_count "${label_chain_migrations[0]}" preceding-shape 1
 assert_migration_context_count "${label_chain_migrations[1]}" preceding-shape 1

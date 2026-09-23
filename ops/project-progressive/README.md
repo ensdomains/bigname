@@ -84,6 +84,10 @@ UPDATE _sqlx_migrations SET checksum = decode('de4b8fb9bd900be8a4524f26f41deb355
 It must report `UPDATE 1`. A rollback of the binary alone needs nothing, because
 the binary does not run schema-migrations.
 
+Both UPDATEs are guarded against repeats but not idempotent: after one successful
+run the same statement reports `UPDATE 0`. If you see `UPDATE 0`, rerun the SELECT
+above to see which checksum is stored before treating it as a failure.
+
 ## Full re-walk
 
 This release changes Project SQL under `crates/project/src/scope/`, which is a

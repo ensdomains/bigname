@@ -736,7 +736,9 @@ this. Before running `sqlx migrate run` from a rolled-back checkout whose
 `20260922010100` still has the earlier bytes, set the checksum back with
 `UPDATE _sqlx_migrations SET checksum = decode('de4b8fb9bd900be8a4524f26f41deb3557d2cd04cc77309a2a1ebddf45769679e0b9be22f4a8a9bbc71ec3601b25c6be', 'hex') WHERE checksum = decode('ba87c9cfc8c0ff508240e4e31d0038512dcdf07dce55cb638fabe4936785f7e084b907a7b7d91ea91bc0320824f0ac63', 'hex') AND version = 20260922010100;`
 and require `UPDATE 1`; a binary-only rollback needs nothing, because the
-binary does not run schema-migrations. [The index runbook](../../ops/project-progressive/README.md#recorded-checksum-of-20260922010100)
+binary does not run schema-migrations. Both UPDATEs are guarded against repeats
+but not idempotent: a repeated run reports `UPDATE 0`, so on `UPDATE 0` rerun the
+SELECT to see which checksum is stored before treating it as a failure. [The index runbook](../../ops/project-progressive/README.md#recorded-checksum-of-20260922010100)
 carries the same statements, and `schema-v2/apply-check.sh` proves both carry
 the checksum of the file as checked in.
 
