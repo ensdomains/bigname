@@ -1943,6 +1943,16 @@ should say so where it is documented, so a reader does not mistake it for
 coverage. Don't add fixtures or exemplars that make reserved surface look
 produced.
 
+## Representative name
+
+the one name that stands for a group of rows when an address-name
+read collapses several names into one row, as `dedupe=registration` does for
+names that share a registration resource. It is the group member whose name
+text sorts first, with ties broken by namespace and namehash. The row's name
+fields, counts, and primary-name flag describe that member; fields defined as
+group facets, such as `relations` or `resolutions`, still cover every member.
+See [`GET /v1/addresses/{address}/names`](api-v2-routes.md#get-v1addressesaddressnames).
+
 ## Resolver profile
 
 a declared resolver classification. ENSv1 and

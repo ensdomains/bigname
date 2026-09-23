@@ -24,11 +24,14 @@ pub use resolves_to::{
     AddressRecordCurrentEntry, AddressRecordsCurrentPage, ENSIP19_DEFAULT_ADDRESS_RECORD_KEY,
     load_address_records_current_page,
 };
-#[cfg(any(test, feature = "test-support"))]
-pub use resolves_to_evm::explain_address_records_current_evm_page_for_test;
 pub use resolves_to_evm::{
     AddressRecordCoinMatch, AddressRecordEvmEntry, AddressRecordsCurrentEvmPage,
     load_address_records_current_evm_page,
+};
+#[cfg(any(test, feature = "test-support"))]
+pub use resolves_to_evm::{
+    address_records_current_evm_page_sql_for_test,
+    explain_address_records_current_evm_page_for_test,
 };
 pub use types::{
     AddressNameCurrentEntry, AddressNameCurrentRow, AddressNameRelation, AddressNamesCurrentCursor,

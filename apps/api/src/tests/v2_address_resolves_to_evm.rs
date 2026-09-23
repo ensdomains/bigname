@@ -242,17 +242,15 @@ async fn v2_resolves_to_evm_parameter_spelling() -> Result<()> {
     database.cleanup().await
 }
 
-#[tokio::test]
-async fn v2_resolves_to_evm_paginates_and_binds_cursor_to_the_selector() -> Result<()> {
-    let database = TestDatabase::new_migrated().await?;
-    seed_v2_address_names_fixture(&database).await?;
-    seed_v2_resolves_to_evm_records(&database).await?;
-
+/// Walk `coin_type=evm` with `page_size=1` for each covered sort and order and require the pages,
+/// concatenated, to equal the unpaged read: nothing repeated or skipped when a name or group
+/// matches several coin types.
+async fn assert_v2_resolves_to_evm_page_walks(database: &TestDatabase, dedupe: &str) -> Result<()> {
     for (sort, order) in [("name", "asc"), ("name", "desc"), ("expires_at", "asc")] {
         let base = format!(
-            "/v1/addresses/{V2_ADDRESS}/names?relation=resolves_to&coin_type=evm&sort={sort}&order={order}"
+            "/v1/addresses/{V2_ADDRESS}/names?relation=resolves_to&coin_type=evm&dedupe={dedupe}&sort={sort}&order={order}"
         );
-        let full = v2_address_names_payload_for_database(&database, &base).await?;
+        let full = v2_address_names_payload_for_database(database, &base).await?;
         let expected = full["data"].as_array().expect("full page").clone();
         let mut paged = Vec::new();
         let mut cursor: Option<String> = None;
@@ -261,7 +259,7 @@ async fn v2_resolves_to_evm_paginates_and_binds_cursor_to_the_selector() -> Resu
                 Some(cursor) => format!("{base}&page_size=1&cursor={cursor}"),
                 None => format!("{base}&page_size=1"),
             };
-            let page = v2_address_names_payload_for_database(&database, &uri).await?;
+            let page = v2_address_names_payload_for_database(database, &uri).await?;
             let rows = page["data"].as_array().expect("page rows");
             assert_eq!(rows.len(), 1, "{uri}: {page}");
             paged.push(rows[0].clone());
@@ -270,10 +268,21 @@ async fn v2_resolves_to_evm_paginates_and_binds_cursor_to_the_selector() -> Resu
                 None => break,
             }
         }
-        // Every page carries the whole row, matched coin types included; nothing is repeated or
-        // skipped when a name matches several coin types.
-        assert_eq!(paged, expected, "{sort} {order}");
+        let paged_names = names(&paged);
+        let distinct = paged_names.iter().collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(distinct.len(), paged_names.len(), "{dedupe} {sort} {order}");
+        assert_eq!(paged, expected, "{dedupe} {sort} {order}");
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_resolves_to_evm_paginates_and_binds_cursor_to_the_selector() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_address_names_fixture(&database).await?;
+    seed_v2_resolves_to_evm_records(&database).await?;
+
+    assert_v2_resolves_to_evm_page_walks(&database, "name").await?;
 
     let first = v2_address_names_payload_for_database(
         &database,
@@ -392,6 +401,41 @@ async fn v2_resolves_to_evm_registration_dedupe_keeps_the_group_matches() -> Res
         row_named(&by_registration, "shared-one.eth")["is_primary"],
         json!(true)
     );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_resolves_to_evm_registration_dedupe_paginates() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_address_names_fixture(&database).await?;
+    seed_v2_resolves_to_evm_records(&database).await?;
+    // shared-one and shared-two form one registration group through their shared inventory;
+    // alpha matches coin 60 and Base.
+    let shared_two = v2_address_name_specs()
+        .into_iter()
+        .find(|spec| spec.name == "shared-two.eth")
+        .expect("shared-two spec");
+    upsert_phase_address_records_current_row(
+        &database.pool,
+        V2_ADDRESS,
+        "ens",
+        shared_two.name,
+        shared_two.surface_binding_id,
+        shared_two.resource_id,
+        V2_ENSIP19_DEFAULT_COIN,
+        "addr:2147483648",
+        json!({"ensip19_default_address": true, "shadowed_coin_types": ["60"]}),
+    )
+    .await?;
+    let rows = v2_resolves_to_evm_rows(&database, "&dedupe=registration").await?;
+    assert_eq!(
+        names(&rows),
+        vec!["alpha.eth", "beta.eth", "gamma.eth", "shared-one.eth"]
+    );
+    assert_eq!(resolutions(row_named(&rows, "alpha.eth")).len(), 2);
+
+    assert_v2_resolves_to_evm_page_walks(&database, "registration").await?;
 
     database.cleanup().await
 }

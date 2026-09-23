@@ -33,8 +33,6 @@ mod snapshot_selection;
 pub mod sql_row;
 mod time;
 
-#[cfg(any(test, feature = "test-support"))]
-pub use address_names::explain_address_records_current_evm_page_for_test;
 pub use address_names::{
     AddressNameCurrentEntry, AddressNameCurrentRow, AddressNameRelation,
     AddressNamesCurrentCountFilter, AddressNamesCurrentCursor, AddressNamesCurrentDedupe,
@@ -50,6 +48,11 @@ pub use address_names::{
     load_address_names_current_page, load_address_names_current_page_filtered,
     load_address_names_current_page_sorted_for_relations, load_address_records_current_evm_page,
     load_address_records_current_page,
+};
+#[cfg(any(test, feature = "test-support"))]
+pub use address_names::{
+    address_records_current_evm_page_sql_for_test,
+    explain_address_records_current_evm_page_for_test,
 };
 pub use api_preflight::{
     ApiLookupDdlKind, ApiLookupDdlObject, load_missing_api_lookup_ddl, phase_schema_exists,

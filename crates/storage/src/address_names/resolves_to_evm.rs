@@ -137,6 +137,29 @@ pub async fn explain_address_records_current_evm_page_for_test(
     Ok(plans)
 }
 
+/// Test support: the text of the first-page `coin_type=evm` statement, so a test can pin its
+/// shape (for example the materialized address fence) independently of any plan.
+#[cfg(any(test, feature = "test-support"))]
+pub fn address_records_current_evm_page_sql_for_test(
+    address: &str,
+    dedupe_by: AddressNamesCurrentDedupe,
+    sort: AddressNamesCurrentSort,
+    order: AddressNamesCurrentOrder,
+) -> String {
+    use super::resolves_to::push_page_statement;
+    let filter = AddressRecordsFilter {
+        address,
+        coins: AddressRecordsCoinSelector::Evm,
+        namespaces: None,
+        dedupe_by,
+        q: None,
+        authority_arm: None,
+    };
+    let mut builder = QueryBuilder::<Postgres>::new("");
+    push_page_statement(&mut builder, &filter, sort, order, None, 51);
+    builder.sql().to_owned()
+}
+
 pub(super) struct EvmFacets {
     pub(super) resolutions: Vec<AddressRecordCoinMatch>,
     pub(super) representative_coin_types: Vec<String>,

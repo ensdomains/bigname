@@ -1917,9 +1917,9 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
   `resolutions` is the union of the matches of every name in the registration
   group. The reverse index is built so that every name in a group reads the
   same record inventory, so the union equals each member's own matches. The row's name
-  fields, `include=counts`, and `is_primary` belong to the representative
-  name, the group member that sorts first by name text, then by namespace and
-  namehash. Rows also
+  fields, `include=counts`, and `is_primary` belong to the
+  [representative name](glossary.md#representative-name), the group member
+  that sorts first by name text, then by namespace and namehash. Rows also
   carry `authority` and `migrated_at` with the same meaning as on
   `GET /v1/names/{name}`: the selected `ens_v1`/`ens_v2` arm, and the block time
   of the migration boundary that proved an `ens_v2` arm. `is_primary` is
@@ -1931,7 +1931,8 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
   claim for any coin type in that row's own matches names it; a claim for a
   coin type the row did not match never counts, and under
   `dedupe=registration` only the representative name's own matches count. The
-  claims are read with the same canonicality and hydration-fallback rules as
+  claims are read with the same [canonicality](glossary.md#canonicality) and
+  [hydration](glossary.md#hydration) fallback rules as
   `GET /v1/addresses/{address}/primary-name`. The claim is compared in the same normalized
   form the indexed answer from `GET /v1/addresses/{address}/primary-name`
   publishes, so a successful claim recorded in a non-normalized spelling still

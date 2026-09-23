@@ -206,6 +206,21 @@ async fn v2_resolves_to_evm_page_reads_only_the_address_rows() -> Result<()> {
     assert!(coins.contains(&2_147_483_648) && coins.contains(&4_294_967_295));
     assert!(!coins.contains(&2_147_483_647) && !coins.contains(&4_294_967_296));
 
+    // The address fence is part of the statement text, so removing it fails here before any
+    // plan is inspected.
+    for dedupe in [Dedupe::Surface, Dedupe::Resource] {
+        let sql = bigname_storage::address_records_current_evm_page_sql_for_test(
+            V2_ADDRESS,
+            dedupe,
+            Sort::Name,
+            Order::Asc,
+        );
+        assert!(
+            sql.contains("evm_address_rows AS MATERIALIZED"),
+            "evm page statement lost its address fence:\n{sql}"
+        );
+    }
+
     for (label, dedupe, sort, order, page_size) in [
         ("first page, name, 50", Dedupe::Surface, Sort::Name, Order::Asc, 50),
         ("first page, name, 200", Dedupe::Surface, Sort::Name, Order::Asc, 200),
