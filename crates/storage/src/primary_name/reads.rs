@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use super::rows::decode_primary_name_current_snapshot;
 use super::types::{PrimaryNameCurrentRow, PrimaryNameCurrentSnapshot, normalize_address};
 use anyhow::{Context, Result};
@@ -18,28 +20,10 @@ pub const DEFAULT_PRIMARY_NAME_CURRENT_READ_FILTER: &str = r#"
   )
 "#;
 
-/// Load one declared primary-name claim-state row by exact address, namespace, and coin_type.
-pub async fn load_primary_name_current(
-    pool: &PgPool,
-    address: &str,
-    namespace: &str,
-    coin_type: &str,
-) -> Result<Option<PrimaryNameCurrentRow>> {
-    load_primary_name_current_snapshot(pool, address, namespace, coin_type)
-        .await
-        .map(|snapshot| snapshot.map(|snapshot| snapshot.row))
-}
-
-/// Load one declared primary-name claim snapshot by exact address, namespace, and coin_type.
-pub async fn load_primary_name_current_snapshot(
-    pool: &PgPool,
-    address: &str,
-    namespace: &str,
-    coin_type: &str,
-) -> Result<Option<PrimaryNameCurrentSnapshot>> {
-    let normalized_address = normalize_address(address);
-    let row = sqlx::query(&format!(
-        r#"
+/// The claim-state columns every primary-name snapshot read selects. When the row carries a
+/// canonical-head hydration that is no longer on canonical lineage, the retained event baseline is
+/// read instead; callers append a `WHERE` on `pnc` and [`DEFAULT_PRIMARY_NAME_CURRENT_READ_FILTER`].
+const PRIMARY_NAME_CURRENT_SNAPSHOT_SELECT: &str = r#"
         SELECT
             pnc.address,
             pnc.namespace,
@@ -81,6 +65,31 @@ pub async fn load_primary_name_current_snapshot(
                       )
                 ) AS readable
         ) hydration
+"#;
+
+/// Load one declared primary-name claim-state row by exact address, namespace, and coin_type.
+pub async fn load_primary_name_current(
+    pool: &PgPool,
+    address: &str,
+    namespace: &str,
+    coin_type: &str,
+) -> Result<Option<PrimaryNameCurrentRow>> {
+    load_primary_name_current_snapshot(pool, address, namespace, coin_type)
+        .await
+        .map(|snapshot| snapshot.map(|snapshot| snapshot.row))
+}
+
+/// Load one declared primary-name claim snapshot by exact address, namespace, and coin_type.
+pub async fn load_primary_name_current_snapshot(
+    pool: &PgPool,
+    address: &str,
+    namespace: &str,
+    coin_type: &str,
+) -> Result<Option<PrimaryNameCurrentSnapshot>> {
+    let normalized_address = normalize_address(address);
+    let row = sqlx::query(&format!(
+        r#"
+        {PRIMARY_NAME_CURRENT_SNAPSHOT_SELECT}
         WHERE pnc.address = $1
           AND pnc.namespace = $2
           AND pnc.coin_type = $3
@@ -99,4 +108,58 @@ pub async fn load_primary_name_current_snapshot(
     })?;
 
     row.map(decode_primary_name_current_snapshot).transpose()
+}
+
+/// Load the declared primary-name claim snapshots for one address and several exact
+/// `(namespace, coin_type)` keys in one statement, with the same canonicality, hydration-fallback,
+/// and decoding rules as [`load_primary_name_current_snapshot`]. Keys without a readable row are
+/// absent from the result.
+pub async fn load_primary_name_current_snapshots(
+    pool: &PgPool,
+    address: &str,
+    keys: &[(String, String)],
+) -> Result<BTreeMap<(String, String), PrimaryNameCurrentSnapshot>> {
+    if keys.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let normalized_address = normalize_address(address);
+    let (namespaces, coin_types): (Vec<&str>, Vec<&str>) = keys
+        .iter()
+        .map(|(namespace, coin_type)| (namespace.as_str(), coin_type.as_str()))
+        .unzip();
+    let rows = sqlx::query(&format!(
+        r#"
+        {PRIMARY_NAME_CURRENT_SNAPSHOT_SELECT}
+        WHERE pnc.address = $1
+          AND (pnc.namespace, pnc.coin_type) IN (
+              SELECT requested.namespace, requested.coin_type
+              FROM UNNEST($2::text[], $3::text[]) AS requested(namespace, coin_type)
+          )
+          {DEFAULT_PRIMARY_NAME_CURRENT_READ_FILTER}
+        "#,
+    ))
+    .bind(&normalized_address)
+    .bind(&namespaces)
+    .bind(&coin_types)
+    .fetch_all(pool)
+    .await
+    .with_context(|| {
+        format!(
+            "failed to load primary_names_current snapshots for address {normalized_address} and {} keys",
+            keys.len()
+        )
+    })?;
+
+    rows.into_iter()
+        .map(|row| {
+            let snapshot = decode_primary_name_current_snapshot(row)?;
+            Ok((
+                (
+                    snapshot.row.namespace.clone(),
+                    snapshot.row.coin_type.clone(),
+                ),
+                snapshot,
+            ))
+        })
+        .collect()
 }

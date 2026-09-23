@@ -234,7 +234,9 @@ collection route carry neither header.
   matches. `relation=resolves_to` stands alone and answers the names whose
   current `addr:<coin_type>` resolver record resolves to the input address for
   the input `coin_type`, with the same matching rule, ENSIP-19 default-address
-  fallback, and exclusions as `GET /v1/addresses/{address}/names?relation=resolves_to`;
+  fallback, and exclusions as `GET /v1/addresses/{address}/names?relation=resolves_to`
+  for one decimal coin type (lookup inputs take a numeric `coin_type` only and
+  have no `evm` form);
   combining it with an authority relation or `any` returns `400
   invalid_input`, and `any` never includes it. Batch limit is 1000 and is
   configurable with `BIGNAME_API_LOOKUP_BATCH_LIMIT`.
@@ -1924,20 +1926,50 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
   relations. It stands alone: `resolves_to` combined with `owner`, `manager`,
   `registrant`, or `any` returns `400 invalid_input`, and `any` never includes
   it, because it is coin-type scoped and its rows are not authority claims.
-  `coin_type` (decimal ENSIP-9/SLIP-44 coin type, default `60`) is accepted
-  only with `relation=resolves_to`; supplying it with any other relation
-  returns `400 invalid_input`. A name matches when its serving resolver's
-  indexed inventory answers `addr:<coin_type>` with a 20-byte non-zero EVM
-  address equal to the path address, using the same rule as
-  `GET /v1/names/{name}/records`: the exact entry, or for an EVM coin type
-  (`60`, or an ENSIP-11 coin type `0x80000000 | chain_id`) the ENSIP-19 default
-  EVM address `addr:2147483648` when the resolver declares that read feature
-  and no exact entry for the coin type shadows it. Zero-address and cleared
-  records never match. Names with a retained serving resource can match without
-  a current owner or registration; the result does not invent authority for them.
-  For such names, `dedupe=registration` and cursor identity use the serving
-  resource as the grouping key while registration fields remain absent.
-  records never match. `namespace`, `authority`, `q`, `sort`, `order`, `dedupe`,
+  `coin_type` is accepted only with `relation=resolves_to`; supplying it with
+  any other relation returns `400 invalid_input`. It takes one of two forms.
+  A decimal ENSIP-9/SLIP-44 coin type (default `60`) reads that one coin type.
+  A name matches when its serving resolver's indexed inventory answers
+  `addr:<coin_type>` with a 20-byte non-zero value equal to the path address,
+  using the same rule as `GET /v1/names/{name}/records`: the exact entry, or
+  for an EVM coin type (`60`, or an ENSIP-11 coin type `0x80000000 | chain_id`)
+  the ENSIP-19 default EVM address `addr:2147483648` when the resolver declares
+  that read feature and no exact entry for the coin type shadows it.
+  `coin_type=evm` reads every EVM coin type in one request, so a caller can
+  find names that resolve to the address on chains it does not know in
+  advance. For example, a name whose only matching record is Base's
+  `addr:2147492101` is absent from the default coin-60 read but present here.
+  The EVM coin types are exactly `60` and every coin type from `2147483648`
+  (`0x80000000`, the ENSIP-19 default) through `4294967295` (`0xffffffff`),
+  the set ENSIP-19 treats as EVM
+  (upstream: .refs/ens_v1/contracts/utils/ENSIP19.sol:L9-L38 @ ens_v1@91c966f).
+  A name matches when at least one of its stored `addr:<coin_type>` records for
+  a coin type in that set holds exactly the path address. The path address is
+  parsed as a `0x`-prefixed 20-byte hexadecimal address and normalised to
+  lowercase, so mixed-case and checksummed spellings are accepted (the
+  checksum is not validated). Matching compares the exact 20-byte value: it
+  establishes the same 20-byte value, not common ownership of an account
+  across chains, and padded values or other encodings are not accepted. The
+  read enumerates stored
+  records rather than per-chain answers, so the ENSIP-19 default record is
+  never expanded into the chains it would answer: it matches once, as coin
+  type `2147483648`, whenever its own value matches, including when exact
+  entries shadow it for some chains. Coin types outside the set are never
+  matched by `evm`, even when their stored value is 20 bytes; this includes
+  legacy SLIP-44 coin types of EVM-compatible chains such as `61`. Read them
+  with a decimal `coin_type`. `evm` is therefore a deliberate narrowing: it
+  does not discover every stored coin type. The value is spelled exactly
+  `evm`. Boundary whitespace is trimmed as for every query value, so
+  `coin_type=evm ` is `evm`; `EVM` or any other spelling returns
+  `400 invalid_input`, as `relation=ANY` does. An empty or whitespace-only
+  `coin_type` is treated as omitted and reads coin type `60`. A comma list is
+  not a supported form and returns `400 invalid_input`.
+  Zero-address and cleared records never match. Names with a retained serving
+  resource can match without a current owner or registration; the result does
+  not invent authority for them. For such names, `dedupe=registration` and
+  cursor identity use the serving resource as the grouping key while
+  registration fields remain absent. `namespace`, `authority`, `q`, `sort`,
+  `order`, `dedupe`,
   and `include=role_summary` apply as for the authority relations.
 - Response shape: `data` is an array of record-shaped rows with `name`,
   `display_name`, `namespace`, `namehash`, `owner`, `registrant`,
@@ -1961,14 +1993,47 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
   `["resolves_to"]` on a `relation=resolves_to` read. A `resolves_to` row also
   carries `resolution: {coin_type, record_key}`: the coin type asked about and
   the resolver record key that answered (`addr:<coin_type>`, or
-  `addr:2147483648` when the ENSIP-19 default EVM address answered). Rows also
+  `addr:2147483648` when the ENSIP-19 default EVM address answered). On a
+  `coin_type=evm` read the row omits `resolution` and instead carries
+  `resolutions: [{coin_type, record_key}]`, one entry per EVM coin type whose
+  stored record matched the address, ascending by coin type, where
+  `record_key` is the stored record that matched (`addr:<coin_type>`). The
+  list names matches only. It is not every coin type the name's resolver has
+  records for, and it is not a claim about live resolution on chains the
+  stored records do not name. One row is still returned per name (or per
+  registration), never one per coin type. A row carries at most 100
+  `resolutions`. When a row on the returned page matched more than 100
+  distinct EVM coin types, whether by its name or, with `dedupe=registration`,
+  across its registration group, the whole request returns `422 unsupported`
+  with no partial data or truncation, even with `page_size=1`; read that
+  address one decimal `coin_type` at a time instead. A coin type that several
+  names in one registration group matched counts once. Whoever controls a
+  name's resolver can store records that hold any address, so without this
+  bound one name could make every `coin_type=evm` page for that address carry
+  an unbounded list. The bound caps each row's aggregated matches and response
+  size, not the stored rows the read scans to count them. With `dedupe=registration`,
+  `resolutions` is the union of the matches of every name in the registration
+  group. The reverse index is built so that every name in a group is expected
+  to read the same record inventory, so the union normally equals each
+  member's own matches. When it does not, `is_primary` still counts only the
+  representative name's own matches. The row's name
+  fields, `include=counts`, and `is_primary` belong to the
+  [representative name](glossary.md#representative-name), the group member
+  that sorts first by name text, then by namespace and namehash. Rows also
   carry `authority` and `migrated_at` with the same meaning as on
   `GET /v1/names/{name}`: the selected `ens_v1`/`ens_v2` arm, and the block time
   of the migration boundary that proved an `ens_v2` arm. `is_primary` is
   evaluated against that row namespace's coin-type-60 primary-name claim, not a
   route-wide namespace shortcut; a `resolves_to` row evaluates it against the
   requested `coin_type`'s claim instead, so a name resolving to the address on
-  another EVM chain is marked primary by that chain's claim. The claim is compared in the same normalized
+  another EVM chain is marked primary by that chain's claim. On a
+  `coin_type=evm` read a row is primary when the row namespace's successful
+  claim for any coin type in that row's own matches names it; a claim for a
+  coin type the row did not match never counts, and under
+  `dedupe=registration` only the representative name's own matches count. The
+  claims are read with the same [canonicality](glossary.md#canonicality) and
+  [hydration](glossary.md#hydration) fallback rules as
+  `GET /v1/addresses/{address}/primary-name`. The claim is compared in the same normalized
   form the indexed answer from `GET /v1/addresses/{address}/primary-name`
   publishes, so a successful claim recorded in a non-normalized spelling still
   marks its name primary. A spelling the projection already recorded as its
@@ -2014,7 +2079,10 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
 - Pagination behavior: standard collection pagination. Cursors are bound to
   address, optional namespace filter, normalized relation set, `authority`, `is_migrated`,
   `q`, dedupe mode, sort, and order; a `resolves_to` cursor additionally binds
-  the coin type, and a cursor minted for one relation set never resumes another.
+  the coin-type selector (the canonical decimal coin type, or `evm`), so a
+  single-coin cursor never resumes an `evm` read or the reverse, and a cursor
+  minted for one relation set never resumes another. `resolves_to` reads
+  return `page.total_count: null`.
 - Snapshot behavior: the page and its counts use the captured current
   publication. The response discloses `meta.as_of`; continuation cursors bind
   the publication and return `409 stale` requiring a restart when it changes.
@@ -2025,7 +2093,8 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
   uses the same publication fence as the base collection, and current-state
   publication changes produce `409 stale`. The grant-budget `422 unsupported`
   is returned only after that fence passes, so a publication change during an
-  overflowing read is also `409 stale`. The expansion batch-loads
+  overflowing read is also `409 stale`. The same holds for the
+  `coin_type=evm` `422 unsupported` for a row past 100 matched coin types. The expansion batch-loads
   projection-owned permission summaries for every
   registration on the served page. A page with any unlisted permission surface
   returns `meta.completeness=partial`,

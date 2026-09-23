@@ -579,11 +579,17 @@ resolver records: one row per (lower-cased address the record resolves to, coin
 type, current name). It is derived from the published record inventory of
 the name's record-serving resource (`name_current.serving_resource_id`, else
 `resource_id`), never from record events directly, so a row exists exactly when
-the forward indexed read of that record answers `success` with a 20-byte
-non-zero EVM address, including names that have a serving resource but no current
+the forward indexed read of that record answers `success` with a non-zero value
+shaped like a 20-byte EVM address (`0x` and 40 hex digits, stored lowercase),
+including names that have a serving resource but no current
 authority. Their `surface_binding_id`, `resource_id`, and `binding_kind` stay null;
 `record_resource_id` remains required. Zero-address values and cleared (`not_found`) entries
-produce no row; non-EVM-shaped payloads produce no row. `record_key` names the
+produce no row, and neither do values of any other length. The producer checks
+the value's shape, not the coin type: any decimal coin type of up to 30 digits
+whose stored value is exactly 20 bytes produces a row, including a non-EVM coin
+type whose binary address encoding happens to be 20 bytes. Readers that need
+only EVM coin types, such as `relation=resolves_to&coin_type=evm`, restrict the
+coin type at read time. `record_key` names the
 entry the row came from. The ENSIP-19 default EVM address (`addr:2147483648`)
 publishes one row under its own coin type; when the serving resolver declares
 the `ensip19_default_address` read feature that row carries
