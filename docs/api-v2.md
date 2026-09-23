@@ -689,7 +689,7 @@ Rows classified as `registration_status=unregistered`, including ownerless
 ENSv2 reservations, have no current registration, so product name detail and
 batch lookup always omit `registration_id`. Resolver and record fields are also
 omitted, the records route exposes no resolver, record values, or audit-only
-inventory, and resolver `bound_names` omits the row unless it carries an
+inventory (without `keys` its `records` is `{}`), and resolver `bound_names` omits the row unless it carries an
 event-linked registry resolver pointer (a
 [serving resource](glossary.md#serving-resource)): an ownerless ENSv1 or
 Basenames registry row whose current registry resolver pointer is retained, or
@@ -1083,7 +1083,8 @@ retain their stored values. Raw facts and normalized events remain unchanged; Pr
 row.
 
 A records route may then apply a documented derived-record rule, such as the
-ENSIP-19 default-address rule; the keyed answer and convenience field follow it.
+ENSIP-19 default-address rule; the keyed answer on `GET /v1/names/{name}/records`
+and the convenience field on name detail and lookup follow it.
 A selected exact zero20 `addr:60` remains `not_found` in indexed, auto, and
 verified reads even when a nonzero default exists. No value or default-derived
 convenience field is returned. Empty or missing eligible exact records retain
@@ -1094,10 +1095,13 @@ change public response fields or grant authority to incomplete inventory.
 (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L81-L84 @ ens_v1@91c966f)
 (upstream: .refs/basenames/lib/ens-contracts/contracts/resolvers/profiles/AddrResolver.sol:L57-L62 @ basenames@1809bbc)
 
-The `addresses` convenience map uses the same scalar hex string for each
-decimal coin type, and `content_hash` uses the same contenthash scalar string.
-Cleared exact values are omitted from both convenience fields unless a
-documented derived-record rule supplies a replacement answer. Diagnostics and
+On `GET /v1/names/{name}` and `POST /v1/lookup` with `profile=detail`, the
+`addresses` convenience map uses the same scalar hex string for each decimal
+coin type, and `content_hash` uses the same contenthash scalar string. Cleared
+exact values are omitted from both convenience fields unless a documented
+derived-record rule supplies a replacement answer. `GET /v1/names/{name}/records`
+has no convenience maps: its per-key `records` answers are its only value
+shape. Diagnostics and
 Project use the internal status `success` for a retained value; product routes
 publish that status as `ok`.
 
@@ -1556,8 +1560,9 @@ Rules:
 - The verified-execution rate limit, when enabled, and all in-flight ceilings
   reject work before it waits for execution capacity. The rate-limit key is an
   IPv4 address or IPv6 `/64`; `/healthz` passes only through the health-specific
-  ceiling. `GET /v1/names/{name}/records?source=auto` with omitted or empty
-  `keys` and `GET /v1/addresses/{address}/primary-name?source=indexed` are
+  ceiling. `GET /v1/names/{name}/records?source=auto` with omitted, empty, or
+  whitespace-only `keys` (an indexed read of the inventory-derived default key
+  set) and `GET /v1/addresses/{address}/primary-name?source=indexed` are
   indexed reads and do not enter verified-execution admission.
 - Single-resource GETs return `404 not_found` when no answer exists.
 - Collections return `200` with empty `data`.

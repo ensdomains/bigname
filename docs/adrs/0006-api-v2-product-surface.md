@@ -6,7 +6,43 @@ Accepted: 2026-06-12
 Amended: 2026-08-13 (status readiness for removed chains); 2026-08-25
 (Issue #411 [source-role](../glossary.md#source-role) and ordering-based readiness
 enforcement); 2026-08-26 (issue #449 request-scoped lookup and search
-`meta.as_of` coverage)
+`meta.as_of` coverage); 2026-09-23 (records route serves only per-key
+`records`)
+
+## 2026-09-23 Amendment: One Value Shape On The Records Route
+
+`GET /v1/names/{name}/records` now returns per-key `records` answers
+(`{status, value?, unsupported_reason?, failure_reason?, meta?}`) as its only
+value shape. `records` is always present in a successful response, and the
+`addresses`, `text_records`, and `content_hash` maps are removed from this
+route with no compatibility parameter. Two value paths had disagreed: the
+unkeyed maps did not apply the ENSIP-19 default-address rule, did not
+lowercase addresses, and could not report `not_found`, `unsupported`, or
+`failed` keys.
+
+- Default key set: when `keys` is omitted, empty, or only whitespace, the route
+  answers every product record key (`addr:<coin_type>`, `text:<key>`,
+  `avatar`, `contenthash`) parsed from the served inventory row's selectors,
+  entries, and explicit gaps, deduplicated (the phase inventory reader currently
+  records no explicit gaps). Rows the name may not serve, such
+  as reservation or audit-only inventory, contribute no keys, and `records` is
+  `{}` when there is no key to answer.
+- Limit: explicit and default sets are both limited to 200 keys. A default set
+  above 200 is `422 unsupported` on every source before any lookup; the set is
+  never truncated. More than 200 explicit keys stays `400 invalid_input`.
+- `source=auto` without `keys` stays an indexed read of the default set, with no
+  verified fallback and `meta.source=indexed`. With `keys` it keeps the
+  per-key blend.
+- Inventory loading: every source on this route reads the same served
+  inventory row (any indexed chain, snapshot checked) for the default set and
+  `include=inventory`. Verified execution admission is unchanged, so reading
+  inventory never authorizes a verified call.
+
+The flat record shape below is unchanged for `GET /v1/names/{name}` and
+`POST /v1/lookup` with `profile=detail`, including their `addresses`,
+`text_records`, `content_hash`, `primary_address`, and `unsupported_fields`
+contracts. Route details live in
+[`api-v2-routes.md`](../api-v2-routes.md#get-v1namesnamerecords).
 
 ## 2026-08-06 Amendment: Schema-v2 Serving Boundary
 

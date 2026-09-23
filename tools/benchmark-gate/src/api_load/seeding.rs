@@ -196,28 +196,21 @@ pub(super) fn requested_records_are_populated(request: &RequestSpec, body: &Valu
     let Some(records) = body.pointer("/data/records").and_then(Value::as_object) else {
         return false;
     };
-    requested_keys.split(',').any(|key| {
-        records
-            .get(key)
-            .is_some_and(|record| record.get("status").and_then(Value::as_str) == Some("ok"))
-    })
+    requested_keys
+        .split(',')
+        .any(|key| records.get(key).is_some_and(record_answer_is_ok))
 }
 
+/// An unkeyed records read answers the name's inventory-derived default key set in
+/// `data.records`; it is populated when at least one of those answers is `ok`.
 pub(super) fn aggregate_records_are_populated(body: &Value) -> bool {
-    body.get("data")
+    body.pointer("/data/records")
         .and_then(Value::as_object)
-        .is_some_and(|data| {
-            data.get("addresses")
-                .and_then(Value::as_object)
-                .is_some_and(|rows| !rows.is_empty())
-                || data
-                    .get("text_records")
-                    .and_then(Value::as_object)
-                    .is_some_and(|rows| !rows.is_empty())
-                || data
-                    .get("content_hash")
-                    .is_some_and(|value| !value.is_null())
-        })
+        .is_some_and(|records| records.values().any(record_answer_is_ok))
+}
+
+fn record_answer_is_ok(record: &Value) -> bool {
+    record.get("status").and_then(Value::as_str) == Some("ok")
 }
 
 fn same_request(left: &RequestSpec, right: &RequestSpec) -> bool {

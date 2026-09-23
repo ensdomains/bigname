@@ -13,11 +13,15 @@ use crate::v2::vocab::{
 use super::super::{
     SnapshotReadResource, Source, Status, V2Result, default_requested_records,
     name_records::{
-        RecordAnswer, VERIFIED_NOT_SUPPORTED_REASON, build_verified_name_records,
-        ensure_verified_record_limit, load_verified_record_lookup_for_resource,
+        RecordAnswer, RecordSelection, VERIFIED_NOT_SUPPORTED_REASON, build_verified_name_records,
+        ensure_default_record_limit, load_verified_record_lookup_for_resource,
     },
 };
 use super::{NameRecord, build_name_record, row_has_current_registration, string_field};
+
+#[path = "verified/record_values.rs"]
+mod record_values;
+use record_values::VerifiedRecordValues;
 
 pub(super) async fn build_name_record_for_source(
     state: &AppState,
@@ -110,23 +114,23 @@ async fn build_verified_name_record(
         SnapshotReadResource::Name,
     )
     .await?;
-    let mut verified_records = build_verified_name_records(
+    let verified_records = build_verified_name_records(
         row,
         record_inventory,
-        Some(&requested_records),
+        RecordSelection::requested(&requested_records),
         verified_lookup,
         false,
         false,
     )?;
-    let answers = verified_records
-        .records
-        .as_ref()
-        .expect("verified profile requested records must produce an answer map");
+    let answers = &verified_records.records;
 
     let mut record = build_name_record(row, record_inventory, chain_id, Status::Ok)?;
-    let addresses = std::mem::take(&mut verified_records.addresses);
-    let text_records = std::mem::take(&mut verified_records.text_records);
-    let content_hash = verified_records.content_hash.take();
+    // The flat fields reflect the verified answers, never indexed values.
+    let VerifiedRecordValues {
+        addresses,
+        text_records,
+        content_hash,
+    } = VerifiedRecordValues::from_answers(&requested_records, answers);
     let primary_address = addresses.get("60").cloned();
     let addresses_unserved = field_could_not_serve(&requested_records, answers, is_address_record);
     let text_records_unserved = field_could_not_serve(&requested_records, answers, is_text_record);
@@ -168,7 +172,7 @@ fn profile_verified_requested_records(
         .map(|record| (record.record_key.clone(), record))
         .collect::<BTreeMap<_, _>>();
     let requested_records = records.values().cloned().collect::<Vec<_>>();
-    ensure_verified_record_limit(&requested_records)?;
+    ensure_default_record_limit(&requested_records)?;
     if should_use_profile_fallback_records(record_inventory) {
         let fallbacks = if records.is_empty() {
             profile_fallback_requested_records()
