@@ -709,6 +709,13 @@ to the applicable entries below.
 > **Why**: coverage must be explicit. Reading a resolver's record events from its first block keeps its history complete, but serving reads from an address whose implementation is unobserved would present unverified code as a supported resolver, and treating an announcement as a name binding would invent topology that only `ResolverUpdated` and `SubregistryUpdated` carry.
 > **Since**: `2026-09-17` (#905)
 
+<a id="resolves-to-matched-coin-types"></a>
+> **Names resolving to an address: EVM-wide discovery with matched coin types.** `GET /v1/addresses/{address}/names?relation=resolves_to&coin_type=evm` returns the names whose stored `addr:<coin_type>` record for any EVM coin type (`60`, or `2147483648` through `4294967295`) holds exactly the path address, and each row's `resolutions` lists only the EVM coin types whose record matched. The pinned subgraph differs in two ways. Its per-domain `resolvedAddress`, the subgraph's field for the address a name resolves to, is written only by the coin-60 `AddrChanged` handler, so a name set only for another chain never appears. Its multicoin handler adds each observed coin type to `Resolver.coinTypes` without comparing the new value with any address, so that list is every coin type the resolver has records for, not the coin types that point at the queried address.
+> **Upstream**: `(upstream: .refs/ens_subgraph/src/resolver.ts:L45-L48 @ ens_subgraph@723f1b6)` `(upstream: .refs/ens_subgraph/src/resolver.ts:L59-L79 @ ens_subgraph@723f1b6)` `(upstream: .refs/ens_subgraph/schema.graphql:L294-L295 @ ens_subgraph@723f1b6)`. The EVM coin-type set is ENSIP-19's `(upstream: .refs/ens_v1/contracts/utils/ENSIP19.sol:L9-L38 @ ens_v1@91c966f)`.
+> **Our rule**: `docs/api-v2-routes.md` § `GET /v1/addresses/{address}/names` and `docs/api-v2.md` § Naming Dictionary (`resolutions`).
+> **Why**: an address page must find names set for chains the client does not know in advance, and every coin type shown for a name must be one whose record holds the address. `evm` is also narrower than every stored coin type: legacy SLIP-44 coin types of EVM-compatible chains and non-EVM coin types stay reachable only through a decimal `coin_type`. This is not complete parity with the subgraph's `coinTypes`, and the numeric lookup input of `POST /v1/lookup` keeps its single-coin meaning.
+> **Since**: `2026-09-23`
+
 Per-entry format:
 
 > **Surface** — one-line description of what differs.
