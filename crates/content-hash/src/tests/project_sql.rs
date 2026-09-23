@@ -61,12 +61,17 @@ fn project_sql_under_the_hashed_root_is_loaded_by_production_code() {
 fn include_scanner_separates_cfg_test_items_from_production_code() {
     let source = r#####"
         const A: &str = include_str!("production.sql");
+        const RAW: &str = include_str!(r"raw_production.sql");
+        const SPACED: &str = std::include_str! ( "spaced_production.sql" );
         fn build(x: bool) -> u8 {
             #[cfg(test)]
             if x {
                 let _ = include_str!("gated_if.sql");
+                let _ = include_str!(r#"raw_gated.sql"#);
                 return 1;
             }
+            let _ = "include_str!(\"in_string.sql\")";
+            let _ = my_include_str!("other_macro.sql");
             #[cfg(test)]
             let y = if x { include_str!("gated_let.sql") } else { "}" };
             let _ = '{';
@@ -92,7 +97,10 @@ fn include_scanner_separates_cfg_test_items_from_production_code() {
         found,
         vec![
             ("production.sql".to_owned(), false),
+            ("raw_production.sql".to_owned(), false),
+            ("spaced_production.sql".to_owned(), false),
             ("gated_if.sql".to_owned(), true),
+            ("raw_gated.sql".to_owned(), true),
             ("gated_let.sql".to_owned(), true),
             ("after_lifetime.sql".to_owned(), false),
             ("after_module.sql".to_owned(), false),
@@ -143,7 +151,7 @@ fn project_sql_references(workspace_root: &Path) -> BTreeMap<String, References>
     references
 }
 
-/// Returns each `include_str!("…")` literal in `source`, and whether it sits inside an item or
+/// Returns each `include_str!` path literal in `source`, and whether it sits inside an item or
 /// statement marked `#[cfg(test)]`. The scan skips comments, string literals, and character
 /// literals, and tracks delimiter depth: a marked region ends at the `;` or `,` that ends it at
 /// its own depth, at the `}` that closes its block (unless `else` follows), or when its
@@ -168,18 +176,23 @@ fn include_sites(source: &str) -> Vec<(String, bool)> {
                 index = skip_block_comment(&chars, index);
                 continue;
             }
+            'i' if !is_ident_char(previous(&chars, index)) => {
+                if let Some((literal, after_bang)) = include_argument(&chars, index) {
+                    sites.push((literal, gate.is_some()));
+                    // Resume after the `!` so the argument's delimiters and literal are scanned
+                    // like any other tokens.
+                    index = after_bang;
+                    continue;
+                }
+            }
             'r' | 'b' if !is_ident_char(previous(&chars, index)) => {
-                if let Some(end) = skip_prefixed_string(&chars, index) {
+                if let Some((_, end)) = read_prefixed_string(&chars, index) {
                     index = end;
                     continue;
                 }
             }
             '"' => {
-                let (literal, end) = read_string(&chars, index);
-                if preceded_by(&chars, index, "include_str!(") {
-                    sites.push((literal, gate.is_some()));
-                }
-                index = end;
+                index = read_string(&chars, index).1;
                 continue;
             }
             '\'' => {
@@ -218,13 +231,44 @@ fn include_sites(source: &str) -> Vec<(String, bool)> {
     sites
 }
 
-fn preceded_by(chars: &[char], index: usize, text: &str) -> bool {
-    let mut end = index;
-    while end > 0 && chars[end - 1].is_whitespace() {
-        end -= 1;
+/// Recognizes an `include_str!` invocation starting at `start`: the macro name, `!`, `(`, and
+/// an ordinary or raw string literal, with optional whitespace between them. Returns the literal
+/// and the index just after the `!`.
+fn include_argument(chars: &[char], start: usize) -> Option<(String, usize)> {
+    const NAME: &str = "include_str";
+    let mut index = start;
+    for expected in NAME.chars() {
+        if chars.get(index) != Some(&expected) {
+            return None;
+        }
+        index += 1;
     }
-    let text: Vec<char> = text.chars().collect();
-    end >= text.len() && chars[end - text.len()..end] == text[..]
+    if chars.get(index).copied().is_some_and(is_ident_char) {
+        return None;
+    }
+    index = skip_whitespace(chars, index);
+    if chars.get(index) != Some(&'!') {
+        return None;
+    }
+    let after_bang = index + 1;
+    index = skip_whitespace(chars, after_bang);
+    if chars.get(index) != Some(&'(') {
+        return None;
+    }
+    index = skip_whitespace(chars, index + 1);
+    let literal = match chars.get(index) {
+        Some('"') => read_string(chars, index).0,
+        Some('r') => read_prefixed_string(chars, index)?.0,
+        _ => return None,
+    };
+    Some((literal, after_bang))
+}
+
+fn skip_whitespace(chars: &[char], mut index: usize) -> usize {
+    while chars.get(index).is_some_and(|c| c.is_whitespace()) {
+        index += 1;
+    }
+    index
 }
 
 fn previous(chars: &[char], index: usize) -> char {
@@ -255,14 +299,15 @@ fn skip_block_comment(chars: &[char], start: usize) -> usize {
     chars.len()
 }
 
-/// Skips `r"…"`, `r#"…"#`, `b"…"`, `br#"…"#` and `b'…'`; returns `None` for an identifier.
-fn skip_prefixed_string(chars: &[char], start: usize) -> Option<usize> {
+/// Reads `r"…"`, `r#"…"#`, `b"…"`, `br#"…"#` and `b'…'`, returning the contents (empty for a
+/// byte character) and the index after the literal; returns `None` for an identifier.
+fn read_prefixed_string(chars: &[char], start: usize) -> Option<(String, usize)> {
     let mut index = start;
     if chars[index] == 'b' {
         index += 1;
         match chars.get(index) {
-            Some('"') => return Some(read_string(chars, index).1),
-            Some('\'') => return Some(skip_char_or_lifetime(chars, index)),
+            Some('"') => return Some(read_string(chars, index)),
+            Some('\'') => return Some((String::new(), skip_char_or_lifetime(chars, index))),
             Some('r') => {}
             _ => return None,
         }
@@ -277,15 +322,17 @@ fn skip_prefixed_string(chars: &[char], start: usize) -> Option<usize> {
         return None;
     }
     index += 1;
+    let contents_start = index;
     while index < chars.len() {
         if chars[index] == '"'
             && (0..hashes).all(|offset| chars.get(index + 1 + offset) == Some(&'#'))
         {
-            return Some(index + 1 + hashes);
+            let literal = chars[contents_start..index].iter().collect();
+            return Some((literal, index + 1 + hashes));
         }
         index += 1;
     }
-    Some(chars.len())
+    Some((chars[contents_start..].iter().collect(), chars.len()))
 }
 
 fn read_string(chars: &[char], start: usize) -> (String, usize) {
