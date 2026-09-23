@@ -52,8 +52,8 @@ An earlier version of `20260922010100_project_mirror_scope_indexes.sql` also bui
 the two whole-array label indexes. The file no longer builds them, because an
 upgrade must never build an index whose entries can exceed the btree or GIN entry
 limit, so its checksum changed. sqlx stores the SHA-384 of each applied migration
-file in `_sqlx_migrations.checksum` and refuses to run (`sqlx migrate run`, and the
-binary at startup) when a recorded checksum differs from the file. The schema that
+file in `_sqlx_migrations.checksum`, and `sqlx migrate run` refuses to run when a
+recorded checksum differs from the file. The schema that
 the earlier version applied is otherwise the same, and
 `20260923140000_project_name_surfaces_label_indexes.sql` drops the two indexes it
 built. So, before the schema-migrations in step 5, on a deployment that already
@@ -73,6 +73,16 @@ UPDATE _sqlx_migrations SET checksum = decode('ba87c9cfc8c0ff508240e4e31d0038512
 It must report `UPDATE 1`. Stop if the first query shows any other value.
 `schema-v2/apply-check.sh` proves that the new checksum here and in the production
 runbook is the SHA-384 of the file as checked in.
+
+To roll back to a checkout whose `20260922010100` still has the earlier bytes and
+then run `sqlx migrate run` from it, first set the recorded checksum back:
+
+```sql
+UPDATE _sqlx_migrations SET checksum = decode('de4b8fb9bd900be8a4524f26f41deb3557d2cd04cc77309a2a1ebddf45769679e0b9be22f4a8a9bbc71ec3601b25c6be', 'hex') WHERE checksum = decode('ba87c9cfc8c0ff508240e4e31d0038512dcdf07dce55cb638fabe4936785f7e084b907a7b7d91ea91bc0320824f0ac63', 'hex') AND version = 20260922010100;
+```
+
+It must report `UPDATE 1`. A rollback of the binary alone needs nothing, because
+the binary does not run schema-migrations.
 
 ## Full re-walk
 
