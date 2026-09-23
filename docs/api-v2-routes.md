@@ -1506,7 +1506,8 @@ one cursor. It adds rows, not fields. A child row has exactly the fields any
 way.
 
 A direct child registration is a product-visible `registration` row (stored
-kind `RegistrationGranted`) that meets all of these conditions:
+kind `RegistrationGranted` or `LabelRegistered`) that meets all of these
+conditions:
 
 - The name the row carries, as attributed when the event happened, is exactly
   one label below the requested name, in the same namespace and on the same

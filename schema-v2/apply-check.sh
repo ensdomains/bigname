@@ -521,7 +521,7 @@ intentional_phase_migration_skips=()
 refusal_assertions_passed=0
 expected_refusal_assertions=213
 predecessor_shape_proof_count=0
-expected_predecessor_shape_proof_count=40
+expected_predecessor_shape_proof_count=41
 refusal_probe_seconds=0
 timing_started=$SECONDS
 

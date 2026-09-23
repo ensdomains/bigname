@@ -601,8 +601,9 @@ async fn v2_name_history_child_registrations_keep_the_scope_of_the_name_rows() -
     database.cleanup().await
 }
 
-/// A child grant above the served publication bound is not in the page or the count, exactly as
-/// the name's own rows above the bound are not.
+/// The API bounds every name history read by a block window at the served publication. A child
+/// grant above that window is not in the page or the count, exactly as the name's own rows above
+/// it are not.
 #[tokio::test]
 async fn v2_name_history_child_registrations_stop_at_the_publication_bound() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
@@ -616,10 +617,6 @@ async fn v2_name_history_child_registrations_stop_at_the_publication_bound() -> 
                 to_block: Some(108),
             }],
         }),
-        publication_block_bounds: Some(std::collections::BTreeMap::from([(
-            "ethereum-mainnet".to_owned(),
-            108,
-        )])),
         ..bigname_storage::HistoryPageOptions::default()
     };
     let page = bigname_storage::load_name_history_page_with_child_registrations(
