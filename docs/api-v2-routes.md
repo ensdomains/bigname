@@ -1041,9 +1041,14 @@ collection route carry neither header.
   so decode each item as a big integer. A listed content type means a write
   was observed, not that its ABI is currently non-empty. ENS removes an ABI by
   storing empty bytes and emits the same event as for a set, so a caller that
-  needs the bytes reads them with the resolver's `ABI(node, contentType)` and
-  treats an empty answer as unset.
-  (upstream: .refs/ens_v1/contracts/resolvers/profiles/ABIResolver.sol:L10-L26 @ ens_v1@91c966f)
+  needs the bytes reads them through the resolver's resolution interface and
+  treats a successfully decoded empty value as unset, not as a failed call. A
+  node-keyed ENSv1 resolver exposes `ABI(node, contentType)` directly
+  (upstream: .refs/ens_v1/contracts/resolvers/profiles/ABIResolver.sol:L10-L26 @ ens_v1@91c966f);
+  an ENSv2 record resolver and an ENSv1 mirror answer the encoded `ABI` call
+  only through `resolve(dnsEncodedName, data)` and do not expose the getter
+  (upstream: .refs/ens_v2/contracts/src/resolver/AbstractRecordResolver.sol:L110-L145 @ ens_v2@a971bd64)
+  (upstream: .refs/ens_v2/contracts/src/resolver/AbstractMirrorResolver.sol:L67 @ ens_v2@a971bd64).
   (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L150-L161 @ ens_v2@a971bd64)
   An empty list means the selected resolver storage has an ABI event bigname
   indexes and none of the selected writes is an ABI write. It is not proof
