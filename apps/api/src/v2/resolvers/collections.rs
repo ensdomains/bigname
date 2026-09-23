@@ -80,7 +80,8 @@ async fn collection(
         None,
         Some(super::resolver_namespace(slug)?),
     )
-    .await?;
+    .await?
+    .continuing_from_request_cursor(params.cursor.is_some());
     if let Some(cursor) = &cursor {
         publication.validate_token(cursor.last_item.get("publication").map(String::as_str))?;
     }

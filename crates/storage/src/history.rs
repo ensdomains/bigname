@@ -10,6 +10,7 @@ mod event_page;
 mod filters;
 #[cfg(any(test, feature = "test-support"))]
 pub mod history_anchor_read_test_hooks;
+mod keyset;
 mod lineage;
 mod options;
 mod paging;

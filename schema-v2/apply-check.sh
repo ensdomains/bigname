@@ -324,7 +324,9 @@ assert_index_install_refusal() {
 # each JSON key literal, which a check that strips the schema name from the
 # printed definition would accept.
 # The optional fifth argument names the indexed table (default discovery_edges)
-# and the sixth the columns of the wrong-keys stand-in index.
+# and the sixth the columns of the wrong-keys stand-in index. A seventh argument
+# of no-json-key-literal skips the schema-name-in-literal step for an index
+# whose reviewed definition has no JSON key literal to alter.
 assert_concurrent_index_installer() {
     local label="$1"
     local index_name="$2"
@@ -332,6 +334,7 @@ assert_concurrent_index_installer() {
     local readme_path="$4"
     local table_name="${5:-discovery_edges}"
     local wrong_key_columns="${6:-active_from_block_number, chain_id}"
+    local json_key_literals="${7:-json-key-literals}"
     local reviewed_definition
     local schema_in_literal_definition
     local matches_baseline_sql="DO \$\$
@@ -393,17 +396,24 @@ END \$\$;"
     # A valid, ready index on the right table whose JSON key literals start with
     # the schema name and a dot indexes other values, so it must be refused too.
     # Removing the schema name from the printed definition would hide that.
-    schema_in_literal_definition="${reviewed_definition//->> \'/->> \'$scratch_schema.}"
-    if [ "$schema_in_literal_definition" = "$reviewed_definition" ]; then
-        printf '%s\n' "$label: reviewed definition has no JSON key literal to alter" >&2
-        exit 1
+    if [ "$json_key_literals" = no-json-key-literal ]; then
+        if [[ "$reviewed_definition" == *"->> '"* ]]; then
+            printf '%s\n' "$label: reviewed definition has a JSON key literal; do not skip its check" >&2
+            exit 1
+        fi
+    else
+        schema_in_literal_definition="${reviewed_definition//->> \'/->> \'$scratch_schema.}"
+        if [ "$schema_in_literal_definition" = "$reviewed_definition" ]; then
+            printf '%s\n' "$label: reviewed definition has no JSON key literal to alter" >&2
+            exit 1
+        fi
+        {
+            printf 'SET search_path TO "%s";\n' "$scratch_schema"
+            printf '%s\n' "DROP INDEX $index_name;" "$schema_in_literal_definition;"
+        } | run_psql >/dev/null
+        assert_index_install_refusal "$label-schema-name-in-literal-prebuild" "$install_file" \
+            "$index_name exists but does not have the reviewed definition; found \"$schema_in_literal_definition\", expected \"$reviewed_definition\"; follow the recovery steps in $readme_path before retrying"
     fi
-    {
-        printf 'SET search_path TO "%s";\n' "$scratch_schema"
-        printf '%s\n' "DROP INDEX $index_name;" "$schema_in_literal_definition;"
-    } | run_psql >/dev/null
-    assert_index_install_refusal "$label-schema-name-in-literal-prebuild" "$install_file" \
-        "$index_name exists but does not have the reviewed definition; found \"$schema_in_literal_definition\", expected \"$reviewed_definition\"; follow the recovery steps in $readme_path before retrying"
     # IF NOT EXISTS also skips a table under this name.
     {
         printf 'SET search_path TO "%s";\n' "$scratch_schema"
@@ -519,9 +529,9 @@ migration_application_log="$(
 # Future entries must use basename|one-line reason.
 intentional_phase_migration_skips=()
 refusal_assertions_passed=0
-expected_refusal_assertions=213
+expected_refusal_assertions=227
 predecessor_shape_proof_count=0
-expected_predecessor_shape_proof_count=41
+expected_predecessor_shape_proof_count=42
 refusal_probe_seconds=0
 timing_started=$SECONDS
 
@@ -620,6 +630,7 @@ for migration_file in \
     "$ROOT/migrations/20260917160000_discovery_edges_index_validity_check.sql" \
     "$ROOT/migrations/20260917161000_project_scoped_history_index_validity_check.sql" \
     "$ROOT/migrations/20260923120000_normalized_events_address_match_indexes.sql" \
+    "$ROOT/migrations/20260923130000_normalized_events_chain_block_number_desc_idx.sql" \
     "$ROOT/migrations/20260923150000_child_registration_events.sql"
 do
     emit_phase_migration "$migration_file" empty-schema | run_psql
@@ -2171,6 +2182,161 @@ SQL
         "$address_match_index_name exists but does not have the reviewed definition; found \"$address_match_found_definition\", expected \"$address_match_reviewed_definition\"; $address_match_recovery" <<SQL
 DROP INDEX $address_match_index_name;
 $address_match_found_definition;
+SQL
+done
+# Recreate the event page order index from its preceding schema shape. Compare
+# the resulting catalog definition to the fresh baseline, then prove a rerun
+# leaves it unchanged.
+events_order_migration="$ROOT/migrations/20260923130000_normalized_events_chain_block_number_desc_idx.sql"
+events_order_install="$ROOT/ops/events-order-index/install.sql"
+events_order_readme=ops/events-order-index/README.md
+events_order_index=normalized_events_chain_block_number_desc_idx
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    cat <<'SQL'
+CREATE TEMP TABLE expected_events_order_index AS
+SELECT pg_get_indexdef(indexrelid) AS definition
+FROM pg_index
+WHERE indexrelid = 'normalized_events_chain_block_number_desc_idx'::regclass;
+DROP INDEX normalized_events_chain_block_number_desc_idx;
+SQL
+    emit_phase_migration "$events_order_migration" preceding-shape
+    emit_phase_migration "$events_order_migration" baseline-first
+    cat <<'SQL'
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_index, expected_events_order_index expected
+        WHERE indexrelid = 'normalized_events_chain_block_number_desc_idx'::regclass
+          AND indrelid = 'normalized_events'::regclass
+          AND indisvalid AND indisready AND indpred IS NULL
+          AND pg_get_indexdef(indexrelid) = expected.definition
+    ) THEN
+        RAISE EXCEPTION 'event page order index upgrade differs from the baseline';
+    END IF;
+END $$;
+DROP TABLE expected_events_order_index;
+SQL
+} | run_psql
+# The schema-migration adopts an existing relation by name alone, so its check
+# must accept the index it just rebuilt, under the phase schema and under
+# public as sqlx runs it, leave the search_path as it found it in the session
+# and inside one transaction, and give a caller with quote_all_identifiers on
+# the same answer while keeping that setting.
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    emit_phase_migration "$events_order_migration" baseline-first
+    assert_search_path_sql "$scratch_schema"
+    printf 'SET search_path TO public;\n'
+    emit_phase_migration "$events_order_migration" baseline-first
+    assert_search_path_sql public
+    printf 'BEGIN;\nSET LOCAL search_path TO "%s", public;\n' "$scratch_schema"
+    render_phase_migration "$events_order_migration"
+    assert_search_path_sql "$scratch_schema, public"
+    printf 'COMMIT;\n'
+    assert_search_path_sql public
+    emit_quote_all_identifiers_probe "$events_order_migration" in-transaction
+} | run_psql
+assert_migration_context_count "$events_order_migration" empty-schema 1
+assert_migration_context_count "$events_order_migration" preceding-shape 1
+assert_migration_context_count "$events_order_migration" baseline-first 3
+# The live prebuild in ops/events-order-index/install.sql must build the
+# baseline definition, refuse an invalid index, a valid index with other keys,
+# and a table under the name, and recover as its README says. The definition
+# has no JSON key literal.
+assert_concurrent_index_installer events-order \
+    "$events_order_index" \
+    "$events_order_install" \
+    "$events_order_readme" \
+    normalized_events \
+    "block_number, chain_id" \
+    no-json-key-literal
+# An invalid index must be refused with the drop-and-rerun hint, and an index on
+# another table under the name with its own hint.
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    printf '%s\n' \
+        "UPDATE pg_index SET indisvalid = false" \
+        "WHERE indexrelid = '$events_order_index'::regclass;"
+} | run_psql >/dev/null
+assert_index_install_hint events-order-invalid-index-hint \
+    "$events_order_install" \
+    "An interrupted concurrent build leaves an invalid index. Confirm in pg_stat_progress_create_index that no build is still running, run DROP INDEX CONCURRENTLY $scratch_schema.$events_order_index, then rerun this script."
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    printf '%s\n' \
+        "DROP INDEX CONCURRENTLY $events_order_index;" \
+        "CREATE INDEX $events_order_index ON discovery_edges (chain_id);"
+} | run_psql >/dev/null
+assert_index_install_refusal events-order-index-on-another-table \
+    "$events_order_install" \
+    "$events_order_index is missing from $scratch_schema.normalized_events or is not valid and ready; follow the recovery steps in $events_order_readme before retrying"
+assert_index_install_hint events-order-index-on-another-table-hint \
+    "$events_order_install" \
+    "An index on $scratch_schema.discovery_edges holds this name. Rename or remove it, then rerun this script."
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    printf '%s\n' "DROP INDEX $events_order_index;"
+    render_phase_migration "$events_order_install"
+} | run_psql >/dev/null
+# Put the index into every shape CREATE INDEX IF NOT EXISTS skips, inside a
+# transaction that rolls back, and require the schema-migration to fail rather
+# than record success. The expected definition it names must be how the
+# fresh-baseline index prints, read under search_path pg_catalog.
+events_order_recovery="follow the recovery steps in $events_order_readme, then run the schema-migrations again"
+assert_migration_refusal "invalid-$events_order_index" \
+    "$events_order_migration" \
+    "$events_order_index exists but is not a valid and ready index on $scratch_schema.normalized_events; $events_order_recovery" <<SQL
+UPDATE pg_index SET indisvalid = false
+WHERE indexrelid = '$events_order_index'::regclass;
+SQL
+assert_migration_refusal "not-ready-$events_order_index" \
+    "$events_order_migration" \
+    "$events_order_index exists but is not a valid and ready index on $scratch_schema.normalized_events; $events_order_recovery" <<SQL
+UPDATE pg_index SET indisready = false
+WHERE indexrelid = '$events_order_index'::regclass;
+SQL
+assert_migration_refusal "table-named-$events_order_index" \
+    "$events_order_migration" \
+    "$scratch_schema.$events_order_index is a table, not an index, so the index was never built; remove or rename that relation, then run the schema-migrations again" <<SQL
+DROP INDEX $events_order_index;
+CREATE TABLE $events_order_index ();
+SQL
+assert_migration_refusal "view-named-$events_order_index" \
+    "$events_order_migration" \
+    "$scratch_schema.$events_order_index is a view, not an index, so the index was never built; remove or rename that relation, then run the schema-migrations again" <<SQL
+DROP INDEX $events_order_index;
+CREATE VIEW $events_order_index AS SELECT 1 AS occupied;
+SQL
+assert_migration_refusal "other-table-$events_order_index" \
+    "$events_order_migration" \
+    "$events_order_index exists but is not a valid and ready index on $scratch_schema.normalized_events; $events_order_recovery" <<SQL
+DROP INDEX $events_order_index;
+CREATE INDEX $events_order_index ON discovery_edges (chain_id);
+SQL
+events_order_reviewed_definition="$(
+    {
+        printf 'SET search_path TO "%s";\n' "$scratch_schema"
+        printf '%s\n' \
+            '\pset tuples_only on' \
+            '\pset format unaligned' \
+            "SET search_path TO pg_catalog;" \
+            "SELECT pg_get_indexdef('$scratch_schema.$events_order_index'::regclass);"
+    } | run_psql
+)"
+# The keys alone are not enough: the ascending index, which read backward puts
+# rows without a block first, and a descending index with the default NULLS
+# FIRST cannot serve the page order, so both must be refused.
+for events_order_wrong_keys in \
+    "block_number, chain_id" \
+    "chain_id, block_number" \
+    "chain_id, block_number DESC"
+do
+    assert_migration_refusal "wrong-keys-$events_order_wrong_keys" \
+        "$events_order_migration" \
+        "$events_order_index exists but does not have the reviewed definition; found \"CREATE INDEX $events_order_index ON $scratch_schema.normalized_events USING btree ($events_order_wrong_keys)\", expected \"$events_order_reviewed_definition\"; $events_order_recovery" <<SQL
+DROP INDEX $events_order_index;
+CREATE INDEX $events_order_index ON normalized_events ($events_order_wrong_keys);
 SQL
 done
 # Exercise reverse_hydration_attempt_state_upgrade from the exact predecessor

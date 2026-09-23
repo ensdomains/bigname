@@ -48,7 +48,10 @@ same-height replacement) and manifest revisions. Counts and rows use the same
 filters; time-dependent expiry filtering retains the first page's evaluation
 time. These reads revalidate the publication before returning and disclose
 `meta.as_of`. A changed or unavailable publication, or an older unbound cursor,
-returns `409 stale` and requires restarting without a cursor. No historical
+returns `409 stale` and requires restarting without a cursor. A first page,
+which has no cursor to drop, whose publication changed while it was read
+returns the same `409 stale` with a message saying so; retrying the same
+request reads the new publication. No historical
 projection is retained by a pagination token. The binding conservatively covers
 the requested namespace, or all active public namespaces when none is selected.
 A count spanning namespaces requires readable publications for all of them;
@@ -546,6 +549,8 @@ collection route carry neither header.
 - Snapshot behavior: the page and its counts use the captured current
   publication. The response discloses `meta.as_of`; continuation cursors bind
   the publication and return `409 stale` requiring a restart when it changes.
+  A first page whose publication changes during the read returns `409 stale`
+  too and can simply be retried.
   Historical replay through `at` is not supported.
 - Status semantics: an empty window returns `200` with empty `data`.
 
@@ -1257,7 +1262,9 @@ to the product and record-diagnostic routes; a family outside it is rejected as
 - Snapshot behavior: the parent, child rows and filtered count use one
   revalidated publication, disclosed in `meta.as_of`. Continuations retain its
   identity and expiry evaluation time. A changed publication returns `409 stale`
-  requiring a restart. Historical child enumeration is not supported.
+  requiring a restart without the cursor; a first page whose publication changes
+  during the read can simply be retried. Historical child enumeration is not
+  supported.
 - Status semantics: no direct subnames returns `200` with empty `data`.
   Missing parent names return `404 not_found`. Each child appears at most once,
   from the relation its own selected authority names. ENSv1 relations that are
@@ -1538,6 +1545,8 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
 - Snapshot behavior: the page and its counts use the captured current
   publication. The response discloses `meta.as_of`; continuation cursors bind
   the publication and return `409 stale` requiring a restart when it changes.
+  A first page whose publication changes during the read returns `409 stale`
+  too and can simply be retried.
   Historical replay through `at` is not supported.
 - Status semantics: no product-visible matches return `200` with empty `data`,
   `page.next_cursor=null`, and `page.has_more=false`. Missing names return `404
@@ -1850,8 +1859,10 @@ introduces it rebuilds Project from full history before serving the option; see
 - Snapshot behavior: a `name` filter resolves its current registration anchor
   and permission rows under the same revalidated publication, disclosed in
   `meta.as_of`. Completeness metadata remains available. Continuations bind the
-  publication; a change returns `409 stale` requiring a restart. Historical
-  permission enumeration is not supported.
+  publication; a change returns `409 stale` requiring a restart without the
+  cursor. A first page whose publication changes during the read returns
+  `409 stale` too and can simply be retried. Historical permission enumeration
+  is not supported.
 - Status semantics: no matching permission rows returns `200` with empty
   `data`, including when a `name` filter has no registration anchor in the
   current state. Unsupported filter combinations return `422 unsupported`;
@@ -2210,6 +2221,8 @@ introduces it rebuilds Project from full history before serving the option; see
 - Snapshot behavior: the page and its counts use the captured current
   publication. The response discloses `meta.as_of`; continuation cursors bind
   the publication and return `409 stale` requiring a restart when it changes.
+  A first page whose publication changes during the read returns `409 stale`
+  too and can simply be retried.
   Historical replay through `at` is not supported.
 - Status semantics: no related names returns `200` with empty `data`.
   Malformed addresses return `400 invalid_input`. Unsupported public namespaces
@@ -2496,6 +2509,8 @@ introduces it rebuilds Project from full history before serving the option; see
 - Snapshot behavior: the page and its counts use the captured current
   publication. The response discloses `meta.as_of`; continuation cursors bind
   the publication and return `409 stale` requiring a restart when it changes.
+  A first page whose publication changes during the read returns `409 stale`
+  too and can simply be retried.
   Historical replay through `at` is not supported.
 - Pagination behavior: product event-type filtering, including an explicit
   `type` set, runs before keyset page construction (newest first unless
@@ -2706,6 +2721,8 @@ For a registrar lease first identified by a later readable observation, registra
 - Snapshot behavior: the page and its counts use the captured current
   publication. The response discloses `meta.as_of`; continuation cursors bind
   the publication and return `409 stale` requiring a restart when it changes.
+  A first page whose publication changes during the read returns `409 stale`
+  too and can simply be retried.
   Historical replay through `at` is not supported.
 - Status semantics: no product-visible matches return `200` with empty `data`,
   `page.next_cursor=null`, and `page.has_more=false`. Filter and cursor-binding
@@ -2876,7 +2893,10 @@ For a registrar lease first identified by a later readable observation, registra
   target may precede the selected position when the row was unchanged by later
   incremental publications; it may not be ahead, and a same-height target must
   match the selected hash. The projection-phase generation is revalidated after the
-  read, and an invalid target or changed generation returns `409 stale`.
+  read, and an invalid target or changed generation returns `409 stale`. A
+  publication change during a continuation returns `409 stale` and requires
+  restarting without a cursor; a request without a cursor whose publication
+  changes during the read returns `409 stale` too and can simply be retried.
 - Status semantics: only a request without `at` and with `finality=latest`
   applies the latest served-head Interpret-redo check and returns retryable `409
   stale` while its selected chain is undergoing a redo. Historical `at` reads
@@ -2946,7 +2966,10 @@ For a registrar lease first identified by a later readable observation, registra
   `400 invalid_input`; a generation no longer available is `409 stale` and the
   client must restart. These routes read current projections, so they do not
   synthesize historical permission/binding tables. A same-height rebuild also
-  invalidates prior cursors. The generation is checked again after reading.
+  invalidates prior cursors. The generation is checked again after reading. A
+  publication change during a continuation returns `409 stale` and requires
+  restarting without a cursor; a request without a cursor whose publication
+  changes during the read returns `409 stale` too and can simply be retried.
 - Alias and link events come from activated canonical normalized events
   bounded to the selected height; bindings and permissions come from current
   projections using their existing canonical-lineage predicates. Resolver classification
@@ -3015,7 +3038,9 @@ For a registrar lease first identified by a later readable observation, registra
   `referenced_by.page` object; its cursor binds the chain and registry. The
   top-level response has no `page`. Continuations bind both the selected block
   and the current publication; a publication change returns `409 stale` and
-  requires restarting without a cursor.
+  requires restarting without a cursor. A request without a cursor whose
+  publication changes during the read returns `409 stale` too and can simply be
+  retried.
 - Snapshot behavior: the route selects the chain's served position like the
   resolver overview and reports `meta.as_of` and `meta.as_of_token`. The
   creation, pointer, and event-count evidence is bounded to that position, so
@@ -3061,7 +3086,9 @@ For a registrar lease first identified by a later readable observation, registra
   registry.
 - Snapshot behavior: rows and totals come from one revalidated current
   publication, reported in `meta.as_of`. Cursors bind that publication; if it
-  changes, return `409 stale` and restart pagination.
+  changes, return `409 stale` and restart pagination without the cursor. A first
+  page whose publication changes during the read returns `409 stale` too and can
+  simply be retried.
 - Status semantics: an unknown registry returns `404 not_found`; a known
   registry with no labels returns `200` with empty `data`. Malformed
   `chain_id`, `address`, `include`, or cursor values return `400 invalid_input`.

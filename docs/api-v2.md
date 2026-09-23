@@ -617,7 +617,8 @@ Rules:
   permission and history collections disclose `meta.as_of` and bind cursors to
   the current publication; they omit `meta.as_of_token` because old publications
   are not retained for collection replay. A changed publication returns `409 stale`
-  requiring a restart. `/v1/search` reports request-scoped `meta.as_of` as
+  requiring a restart without the cursor; a first page, sent without one, is
+  simply retried. `/v1/search` reports request-scoped `meta.as_of` as
   staleness attribution without a publication-bound cursor. Diagnostic event
   collections retain their separately documented latest-state behavior.
   Control-plane routes (`/v1/status`, `/v1/namespaces/{namespace}`) omit both.

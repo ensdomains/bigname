@@ -20,10 +20,8 @@ use super::{
     columns::push_history_columns,
     decoders::decode_history_event,
     duplicates::push_product_history_duplicate_filter,
-    paging::{
-        push_history_cursor_after, push_history_cursor_cte, push_history_filters,
-        push_history_order, push_history_order_terms,
-    },
+    keyset::{push_history_cursor_after, push_history_cursor_cte},
+    paging::{push_history_filters, push_history_order, push_history_order_terms},
     redo::{InterpretRedoFence, ensure_interpret_redo_fence},
     selectors::{HistorySelector, name_history_selector},
     source::push_history_source_for_filter,

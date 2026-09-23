@@ -694,6 +694,24 @@ indexes already exist, and it ends with the same check. The indexes change no
 stored row and no interpreter content hash input.
 
 The release containing
+`20260923130000_normalized_events_chain_block_number_desc_idx.sql` adds the
+index history and event pages read in chain-position order. On an initialized
+production namespace, build it in step 3 by running
+[`ops/events-order-index/install.sql`](../../ops/events-order-index/install.sql)
+as [its runbook](../../ops/events-order-index/README.md) describes. This runbook
+carries no copy of the statement; `install.sql` is the only source, and
+`schema-v2/apply-check.sh` proves it builds what the fresh baseline and the
+schema-migration build. The build is concurrent and permits writes, so it can
+finish while the existing runner is still processing, before the stop/start
+window opens; step 3 then only runs `install.sql` again as the check. Keep the
+`install.sql` output with its start and end times in the release record. Then
+apply the schema-migrations in step 4; the schema-migration's `IF NOT EXISTS`
+build is a no-op when the index already exists, and it ends with the same check,
+so `sqlx migrate run` stops without recording it if the index is missing,
+invalid, not ready, on another table, not an index, or has another definition.
+No `ANALYZE` is needed: the index is on plain columns.
+
+The release containing
 `20260904120000_project_redo_child_registration_history.sql` adds the bounded
 Interpret-to-Project handoff for child and registry identifiers from deleted
 ENSv1→ENSv2 [migration-registry](../glossary.md#migration-registry-wrapperregistry)
@@ -1112,6 +1130,10 @@ indexes are additive; rollback may leave them in place.
    `20260923120000_normalized_events_address_match_indexes.sql`, run
    `ops/address-history-indexes/install.sql` as described above, require it to
    exit zero, then run `ANALYZE bigname_phase.normalized_events`;
+   for the release containing
+   `20260923130000_normalized_events_chain_block_number_desc_idx.sql`, run
+   `ops/events-order-index/install.sql` as described above and require it to
+   exit zero;
    otherwise skip this step;
    For the release containing
    `20260814130000_surface_binding_authority_arm.sql`, a populated phase schema
