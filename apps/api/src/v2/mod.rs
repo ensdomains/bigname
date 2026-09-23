@@ -2,6 +2,7 @@ mod address_history;
 mod address_names;
 mod cache_headers;
 mod chains;
+pub(crate) mod collection_binding;
 pub(crate) mod collection_snapshot;
 mod cursor;
 mod diag_events;
@@ -57,7 +58,6 @@ pub(crate) use diagnostics::{
     get_name_records_diagnostic,
 };
 pub(crate) use envelope::{AsOfCompleteness, Envelope, Meta, Page};
-#[cfg(test)]
 pub(crate) use error::ErrorCode;
 pub(crate) use error::{V2Error, V2Result};
 pub(crate) use event_data::{

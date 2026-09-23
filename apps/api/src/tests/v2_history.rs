@@ -2627,10 +2627,15 @@ async fn v2_history_continuation_excludes_unpublished_interpret_events() -> Resu
         "chain_id": "ethereum-mainnet", "block_number": 21_000_004,
         "block_hash": "0xhistory21000004", "timestamp": "2026-04-17T00:00:04Z"
     }})).await?;
-    let response = v2_history_response_for_database(&database, &format!("{base}&cursor={cursor}")).await?;
-    assert_eq!(response.status(), StatusCode::CONFLICT);
-    let failure: Value = read_json(response).await?;
-    assert_eq!(failure["error"]["code"], json!("stale"));
+    // Once Project publishes that block, the continuation still reads at its first page's
+    // block; only a fresh first page sees the new row.
+    let continued =
+        v2_history_payload_for_database(&database, &format!("{base}&cursor={cursor}")).await?;
+    assert_eq!(continued["page"]["total_count"], first["page"]["total_count"]);
+    assert_eq!(continued["meta"]["as_of"], first["meta"]["as_of"]);
+    assert!(history_blocks(&continued).iter().all(|block| *block <= 21_000_003));
+    let fresh = v2_history_payload_for_database(&database, base).await?;
+    assert_eq!(history_blocks(&fresh), vec![21_000_004]);
     database.cleanup().await
 }
 

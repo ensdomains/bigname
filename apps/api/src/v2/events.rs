@@ -105,27 +105,22 @@ pub(crate) async fn get_events(
     }
     let order = parsed.storage_filter.order;
 
-    let snapshot = super::collection_snapshot::CollectionSnapshot::capture_for_namespace(
+    let cursor = params.cursor.as_deref().map(decode).transpose()?;
+    let storage_cursor = cursor
+        .as_ref()
+        .map(|payload| events_storage_cursor(payload, &parsed.cursor_filters, order))
+        .transpose()?;
+    let history = super::collection_binding::HistoryCollection::capture(
         &state,
-        params.cursor.as_deref(),
+        cursor.as_ref(),
         namespace.as_deref(),
     )
     .await?;
-    let storage_cursor = params
-        .cursor
-        .as_deref()
-        .map(|cursor| {
-            let payload = decode(cursor)?;
-            let cursor = events_storage_cursor(&payload, &parsed.cursor_filters, order)?;
-            snapshot.validate_cursor(&payload)?;
-            Ok(cursor)
-        })
-        .transpose()?;
     parsed.storage_filter.block_window = Some(super::history::bound_history_block_window(
         resolve_history_block_window(&state.pool, &params).await?,
-        &snapshot.block_bounds(),
+        &history.block_bounds(),
     ));
-    parsed.storage_filter.publication_block_bounds = Some(snapshot.block_bounds());
+    parsed.storage_filter.publication_block_bounds = Some(history.block_bounds());
     let summary_mode = if parsed.anchored {
         if params.include.iter().any(|v| v == "total_count") {
             HistorySummaryMode::Count
@@ -136,7 +131,7 @@ pub(crate) async fn get_events(
         HistorySummaryMode::None
     };
 
-    let storage_page = bigname_storage::load_event_history_page_with_redo_policy(
+    let storage_page = match bigname_storage::load_event_history_page_with_redo_policy(
         &state.pool,
         parsed.storage_filter,
         true,
@@ -147,7 +142,13 @@ pub(crate) async fn get_events(
         true,
     )
     .await
-    .map_err(|error| map_history_page_error(error, "failed to load events"))?;
+    {
+        Ok(page) => page,
+        Err(error) => {
+            let error = map_history_page_error(error, "failed to load events");
+            return Err(history.fail(&state, error).await);
+        }
+    };
 
     #[cfg(test)]
     bigname_storage::history_anchor_read_test_hooks::run(
@@ -158,7 +159,7 @@ pub(crate) async fn get_events(
     .map_err(|_| V2Error::internal_error("failed to run history read test hook"))?;
 
     let next_cursor = storage_page.next_cursor.as_ref().map(|cursor| {
-        encode(&snapshot.bind_cursor(events_cursor_payload(cursor, &parsed.cursor_filters, order)))
+        encode(&history.bind_cursor(events_cursor_payload(cursor, &parsed.cursor_filters, order)))
     });
     let has_more = next_cursor.is_some();
     let total_count = if params.include.iter().any(|v| v == "total_count") {
@@ -208,7 +209,7 @@ pub(crate) async fn get_events(
             total_count,
             has_more,
         }),
-        meta: snapshot.finish(&state).await?,
+        meta: history.finish(&state).await?,
     }))
 }
 

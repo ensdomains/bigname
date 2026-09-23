@@ -1,6 +1,8 @@
 #[path = "collection_publication.rs"]
 mod collections;
-pub(crate) use collections::revalidate_collection_namespace_set;
+pub(crate) use collections::{
+    reload_collection_namespace_set, revalidate_collection_namespace_set,
+};
 
 use super::*;
 use std::sync::Arc;

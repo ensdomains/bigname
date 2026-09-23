@@ -7,7 +7,9 @@ use super::support::{
 };
 use super::{CursorPayload, Meta, V2Error, V2Result, api_error_to_v2};
 
-/// Current projections are not retained after publication. Continuations must restart then.
+/// Current-state collections: current projections are not retained after publication, so
+/// continuations must restart then. History collections bind a block instead
+/// (`collection_binding`).
 pub(crate) struct CollectionSnapshot {
     namespaces: PublicNamespaceSet,
     token: String,
@@ -42,9 +44,7 @@ impl CollectionSnapshot {
                 .iter()
                 .any(|scope| scope.selected().is_none())
         {
-            return Err(V2Error::stale(
-                "collection publication is not available; retry after indexing is ready",
-            ));
+            return Err(not_available());
         }
         let token = namespaces.collection_fingerprint();
 
@@ -141,7 +141,11 @@ impl CollectionSnapshot {
     }
 }
 
-fn restart_required() -> V2Error {
+pub(super) fn not_available() -> V2Error {
+    V2Error::stale("collection publication is not available; retry after indexing is ready")
+}
+
+pub(super) fn restart_required() -> V2Error {
     V2Error::stale(
         "collection publication is no longer available; restart pagination without a cursor",
     )
@@ -149,7 +153,7 @@ fn restart_required() -> V2Error {
 
 /// A request without a cursor has nothing to restart: the next attempt reads the new
 /// publication.
-fn changed_during_read() -> V2Error {
+pub(super) fn changed_during_read() -> V2Error {
     V2Error::stale("collection publication changed during the read; retry the request")
 }
 
@@ -207,7 +211,7 @@ pub(crate) mod finish_test_hooks {
         Ok((guard, FinishControl { reached, resume }))
     }
 
-    pub(super) async fn run(pool: &PgPool) -> V2Result<()> {
+    pub(crate) async fn run(pool: &PgPool) -> V2Result<()> {
         let database = current_test_database(pool)
             .await
             .map_err(|_| V2Error::internal_error("failed to run collection finish test hook"))?;

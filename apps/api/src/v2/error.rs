@@ -98,7 +98,6 @@ impl V2Error {
         self
     }
 
-    #[cfg(test)]
     pub(crate) fn code(&self) -> ErrorCode {
         self.code
     }

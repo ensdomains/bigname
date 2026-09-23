@@ -84,30 +84,25 @@ pub(crate) async fn get_address_history(
         order: history_storage_order(params.order),
         params: Some(&params),
     };
-    let snapshot = super::collection_snapshot::CollectionSnapshot::capture_for_namespace(
+    let cursor = params.cursor.as_deref().map(decode).transpose()?;
+    let storage_cursor = cursor
+        .as_ref()
+        .map(|payload| address_history_storage_cursor(payload, &cursor_binding))
+        .transpose()?;
+    let history = super::collection_binding::HistoryCollection::capture(
         &state,
-        params.cursor.as_deref(),
+        cursor.as_ref(),
         Some(&namespace),
     )
     .await?;
-    let storage_cursor = params
-        .cursor
-        .as_deref()
-        .map(|cursor| {
-            let payload = decode(cursor)?;
-            let cursor = address_history_storage_cursor(&payload, &cursor_binding)?;
-            snapshot.validate_cursor(&payload)?;
-            Ok(cursor)
-        })
-        .transpose()?;
     let block_window = Some(super::history::bound_history_block_window(
         resolve_history_block_window(&state.pool, &params).await?,
-        &snapshot.block_bounds(),
+        &history.block_bounds(),
     ));
     let mut options = history_page_options(&params, block_window);
-    options.publication_block_bounds = Some(snapshot.block_bounds());
+    options.publication_block_bounds = Some(history.block_bounds());
 
-    let storage_page = bigname_storage::load_address_history_page_for_relations(
+    let storage_page = match bigname_storage::load_address_history_page_for_relations(
         &state.pool,
         &normalized_address,
         Some(&namespace),
@@ -125,7 +120,13 @@ pub(crate) async fn get_address_history(
         true,
     )
     .await
-    .map_err(|error| map_history_page_error(error, "failed to load address history"))?;
+    {
+        Ok(page) => page,
+        Err(error) => {
+            let error = map_history_page_error(error, "failed to load address history");
+            return Err(history.fail(&state, error).await);
+        }
+    };
 
     #[cfg(test)]
     bigname_storage::history_anchor_read_test_hooks::run(
@@ -136,7 +137,7 @@ pub(crate) async fn get_address_history(
     .map_err(|_| V2Error::internal_error("failed to run history read test hook"))?;
 
     let next_cursor = storage_page.next_cursor.as_ref().map(|cursor| {
-        encode(&snapshot.bind_cursor(address_history_cursor_payload(cursor, &cursor_binding)))
+        encode(&history.bind_cursor(address_history_cursor_payload(cursor, &cursor_binding)))
     });
     let has_more = next_cursor.is_some();
     let total_count = if params.include.iter().any(|v| v == "total_count") {
@@ -186,7 +187,7 @@ pub(crate) async fn get_address_history(
             total_count,
             has_more,
         }),
-        meta: snapshot.finish(&state).await?,
+        meta: history.finish(&state).await?,
     }))
 }
 

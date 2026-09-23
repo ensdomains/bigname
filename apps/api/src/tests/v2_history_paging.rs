@@ -78,7 +78,7 @@ async fn v2_events_rejects_foreign_kind_anchor_for_explicit_type() -> Result<()>
     let database = TestDatabase::new_migrated().await?;
     seed_v2_history_fixture(&database).await?;
     let state = database.app_state_with_public_namespaces(&["ens"]);
-    let snapshot = crate::v2::collection_snapshot::CollectionSnapshot::capture_for_namespace(
+    let snapshot = crate::v2::collection_binding::HistoryCollection::capture(
         &state, None, Some("ens"),
     ).await.expect("fixture publication must be ready");
     let encode = |payload| crate::v2::encode(&snapshot.bind_cursor(payload));
@@ -116,7 +116,7 @@ async fn v2_history_routes_continue_from_bound_non_product_cursor() -> Result<()
     let database = TestDatabase::new_migrated().await?;
     seed_v2_history_fixture(&database).await?;
     let state = database.app_state_with_public_namespaces(&["ens"]);
-    let snapshot = crate::v2::collection_snapshot::CollectionSnapshot::capture_for_namespace(
+    let snapshot = crate::v2::collection_binding::HistoryCollection::capture(
         &state, None, Some("ens"),
     ).await.expect("fixture publication must be ready");
     let encode = |payload| crate::v2::encode(&snapshot.bind_cursor(payload));

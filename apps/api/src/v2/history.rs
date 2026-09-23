@@ -111,31 +111,26 @@ pub(crate) async fn get_history(
         params: &params,
         child_registrations,
     };
-    let snapshot = super::collection_snapshot::CollectionSnapshot::capture_for_namespace(
+    let cursor = params.cursor.as_deref().map(decode).transpose()?;
+    let storage_cursor = cursor
+        .as_ref()
+        .map(|payload| history_storage_cursor(payload, &cursor_binding))
+        .transpose()?;
+    let history = super::collection_binding::HistoryCollection::capture(
         &state,
-        params.cursor.as_deref(),
+        cursor.as_ref(),
         Some(&namespace),
     )
     .await?;
-    let storage_cursor = params
-        .cursor
-        .as_deref()
-        .map(|cursor| {
-            let payload = decode(cursor)?;
-            let cursor = history_storage_cursor(&payload, &cursor_binding)?;
-            snapshot.validate_cursor(&payload)?;
-            Ok(cursor)
-        })
-        .transpose()?;
     let block_window = Some(bound_history_block_window(
         resolve_history_block_window(&state.pool, &params).await?,
-        &snapshot.block_bounds(),
+        &history.block_bounds(),
     ));
     let interpret_redo_fence = bigname_storage::capture_interpret_redo_fence(&state.pool)
         .await
         .map_err(|error| map_history_page_error(error, "failed to load name history"))?;
     // The first page proves the name exists. A continuation does not look it up again: its cursor
-    // binds the name, and its rows come only from evidence at or below the published block.
+    // binds the name, and its rows come only from evidence at or below the cursor's bound.
     if storage_cursor.is_none() {
         let parent = bigname_storage::load_name_current(&state.pool, &logical_name_id)
             .await
@@ -153,28 +148,29 @@ pub(crate) async fn get_history(
             if current_fence != interpret_redo_fence {
                 return Err(history_redo_stale_error());
             }
-            return Err(V2Error::not_found(format!(
+            let missing = V2Error::not_found(format!(
                 "name {} was not found in namespace {namespace}",
                 normalized.normalized_name
-            )));
+            ));
+            return Err(history.fail(&state, missing).await);
         }
     }
 
     let resource_ids = if matches!(params.scope, HistoryScope::Name) {
         Vec::new()
     } else {
-        registration_resource_ids(&state.pool, &logical_name_id, &snapshot.block_bounds()).await?
+        registration_resource_ids(&state.pool, &logical_name_id, &history.block_bounds()).await?
     };
     let storage_scope = history_storage_scope(params.scope);
     let mut options = history_page_options(&params, block_window);
-    options.publication_block_bounds = Some(snapshot.block_bounds());
+    options.publication_block_bounds = Some(history.block_bounds());
 
     let summary_mode = if params.include.iter().any(|v| v == "total_count") {
         HistorySummaryMode::Count
     } else {
         HistorySummaryMode::CappedCount(HISTORY_TOTAL_COUNT_CAP)
     };
-    let storage_page = children::load_page(
+    let storage_page = match children::load_page(
         &state,
         children::PageRequest {
             logical_name_id: &logical_name_id,
@@ -190,10 +186,14 @@ pub(crate) async fn get_history(
         },
         child_registrations,
     )
-    .await?;
+    .await
+    {
+        Ok(page) => page,
+        Err(error) => return Err(history.fail(&state, error).await),
+    };
 
     let next_cursor = storage_page.next_cursor.as_ref().map(|cursor| {
-        encode(&snapshot.bind_cursor(history_cursor_payload(cursor, &cursor_binding)))
+        encode(&history.bind_cursor(history_cursor_payload(cursor, &cursor_binding)))
     });
     let has_more = next_cursor.is_some();
     let total_count = if params.include.iter().any(|v| v == "total_count") {
@@ -210,7 +210,7 @@ pub(crate) async fn get_history(
             total_count,
             has_more,
         }),
-        meta: snapshot.finish(&state).await?,
+        meta: history.finish(&state).await?,
     }))
 }
 
@@ -422,7 +422,7 @@ pub(crate) fn map_history_page_error(
     }
 }
 
-fn history_redo_stale_error() -> V2Error {
+pub(crate) fn history_redo_stale_error() -> V2Error {
     V2Error::stale("history is temporarily unavailable while Interpret redo is in progress")
 }
 

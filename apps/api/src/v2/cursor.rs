@@ -15,6 +15,65 @@ pub(crate) struct Payload {
     pub(crate) snapshot: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) evaluated_at: Option<String>,
+    /// What the continuation is bound to; absent on cursors issued before position-bound
+    /// pagination and on routes that still bind a publication token in `snapshot`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) binding: Option<Binding>,
+}
+
+/// The continuation contract a cursor follows (docs/api-v2-routes.md, "Shared Route Rules").
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) enum BindingPolicy {
+    /// A history walk bound to one block per chain.
+    #[serde(rename = "history-bound-v1")]
+    HistoryBound,
+    /// A position in a sort order over live current state.
+    #[serde(rename = "keyset-v1")]
+    Keyset,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Binding {
+    pub(crate) policy: BindingPolicy,
+    /// `0x`-prefixed keccak256 of the manifest revisions the request scope was read under.
+    pub(crate) manifests: String,
+    /// The block bound and redo counters of every chain in the request scope; present exactly
+    /// for [`BindingPolicy::HistoryBound`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) chains: Option<BTreeMap<String, BoundChain>>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct BoundChain {
+    pub(crate) block_number: i64,
+    pub(crate) block_hash: String,
+    pub(crate) interpret_generation: i64,
+    pub(crate) project_generation: i64,
+}
+
+impl Binding {
+    fn is_well_formed(&self) -> bool {
+        let digest = self.manifests.strip_prefix("0x").is_some_and(|hex| {
+            hex.len() == 64
+                && hex
+                    .bytes()
+                    .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+        });
+        let chains = match (self.policy, self.chains.as_ref()) {
+            (BindingPolicy::HistoryBound, Some(chains)) => chains.iter().all(|(chain, bound)| {
+                !chain.trim().is_empty()
+                    && !bound.block_hash.trim().is_empty()
+                    && bound.block_number >= 0
+                    && bound.interpret_generation >= 0
+                    && bound.project_generation >= 0
+            }),
+            (BindingPolicy::Keyset, None) => true,
+            _ => false,
+        };
+        digest && chains
+    }
 }
 
 impl Payload {
@@ -31,6 +90,7 @@ impl Payload {
             last_item,
             snapshot,
             evaluated_at: None,
+            binding: None,
         }
     }
 }
@@ -43,7 +103,12 @@ pub(crate) fn decode(cursor: &str) -> V2Result<Payload> {
     let decoded = hex::decode(cursor).map_err(|_| invalid_cursor_error())?;
     let payload: Payload = serde_json::from_slice(&decoded).map_err(|_| invalid_cursor_error())?;
 
-    if payload.version != V2_CURSOR_VERSION {
+    if payload.version != V2_CURSOR_VERSION
+        || payload
+            .binding
+            .as_ref()
+            .is_some_and(|binding| !binding.is_well_formed())
+    {
         return Err(invalid_cursor_error());
     }
 
@@ -113,6 +178,55 @@ mod tests {
         let error = decode("not-a-hex-cursor").expect_err("malformed cursor must fail");
 
         assert_eq!(error.code(), ErrorCode::InvalidInput);
+    }
+
+    #[test]
+    fn cursor_decode_checks_the_binding_shape() {
+        let mut payload = sample_payload();
+        payload.snapshot = None;
+        payload.binding = Some(Binding {
+            policy: BindingPolicy::HistoryBound,
+            manifests: format!("0x{}", "ab".repeat(32)),
+            chains: Some(BTreeMap::from([(
+                "ethereum-mainnet".to_owned(),
+                BoundChain {
+                    block_number: 100,
+                    block_hash: "0x64".to_owned(),
+                    interpret_generation: 3,
+                    project_generation: 4,
+                },
+            )])),
+        });
+        assert_eq!(decode(&encode(&payload)).expect("well formed"), payload);
+
+        let malformed = |edit: fn(&mut Binding)| {
+            let mut payload = payload.clone();
+            edit(payload.binding.as_mut().expect("binding"));
+            decode(&encode(&payload))
+                .expect_err("malformed binding")
+                .code()
+        };
+        assert_eq!(
+            malformed(|b| b.manifests = "0xAB".to_owned()),
+            ErrorCode::InvalidInput
+        );
+        assert_eq!(
+            malformed(|b| b.policy = BindingPolicy::Keyset),
+            ErrorCode::InvalidInput
+        );
+        assert_eq!(malformed(|b| b.chains = None), ErrorCode::InvalidInput);
+        assert_eq!(
+            malformed(|b| {
+                let chain = b
+                    .chains
+                    .as_mut()
+                    .unwrap()
+                    .get_mut("ethereum-mainnet")
+                    .unwrap();
+                chain.interpret_generation = -1;
+            }),
+            ErrorCode::InvalidInput
+        );
     }
 
     #[test]
