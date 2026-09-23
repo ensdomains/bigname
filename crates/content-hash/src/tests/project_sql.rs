@@ -10,9 +10,9 @@ use std::{
 
 use proc_macro2::{TokenStream, TokenTree};
 use syn::{
-    Arm, Attribute, BareFnArg, Block, ConstParam, Expr, Field, FieldPat, FieldValue, ForeignItem,
-    ImplItem, Item, LifetimeParam, LitStr, Local, Macro, Meta, PatType, Receiver, StmtMacro, Token,
-    TraitItem, TypeParam, Variadic, Variant,
+    Arm, Attribute, BareFnArg, Block, ConstParam, Expr, ExprLit, Field, FieldPat, FieldValue,
+    ForeignItem, ImplItem, Item, LifetimeParam, Lit, LitStr, Local, Macro, Meta, PatType, Receiver,
+    StmtMacro, Token, TraitItem, TypeParam, Variadic, Variant,
     ext::IdentExt,
     parse::{ParseStream, Parser},
     punctuated::Punctuated,
@@ -287,12 +287,15 @@ fn current_tree_keeps_computed_includes_in_test_code() {
 /// A scanner fixture: name, source, and the expected `(path, test-only)` sites.
 type ScannerCase = (&'static str, String, Vec<(String, bool)>);
 
-/// An inventory fixture: name, `(path, contents)` files, and the expected failures.
+/// An inventory fixture with literal expected failures: name, `(path, contents)` files, and the expected failures.
 type InventoryCase = (
     &'static str,
     Vec<(&'static str, &'static str)>,
     Vec<&'static str>,
 );
+
+/// An inventory fixture whose expected failures are built at run time.
+type InventoryFailureCase = (&'static str, Vec<(&'static str, &'static str)>, Vec<String>);
 
 #[test]
 fn include_scanner_follows_rust_tokens_and_statement_boundaries() {
@@ -356,6 +359,22 @@ fn include_scanner_follows_rust_tokens_and_statement_boundaries() {
         (
             "quoted and uninvoked includes are not loaders",
             "const _: &str = stringify!(include_str!(\"orphan.sql\"));\nmacro_rules! m { () => { include_str!(\"orphan.sql\") }; }\nfn q() { let _ = quote!(include_str!(\"orphan.sql\")); }\n"
+                .to_owned(),
+            vec![],
+        ),
+        (
+            "audited macros, qualified built-ins and crate paths, expand their arguments",
+            "fn f() {\n    ::std::assert!(include_str!(\"a.sql\").len() > 0);\n    let _ = core::format_args!(\"{}\", include_str!(\"b.sql\"));\n    tracing::debug!(sql = include_str!(\"c.sql\"));\n}\n"
+                .to_owned(),
+            vec![
+                ("a.sql".to_owned(), false),
+                ("b.sql".to_owned(), false),
+                ("c.sql".to_owned(), false),
+            ],
+        ),
+        (
+            "unaudited macros never count, even when their body parses",
+            "use tracing::debug;\nfn f() {\n    debug!(sql = include_str!(\"bare.sql\"));\n    my::assert!(include_str!(\"custom.sql\").len() > 0);\n    ::assert!(include_str!(\"rooted.sql\").len() > 0);\n}\n"
                 .to_owned(),
             vec![],
         ),
@@ -491,6 +510,102 @@ fn inventory_takes_loader_evidence_only_from_expanded_includes() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+#[test]
+fn inventory_admits_only_audited_macros_and_inherited_file_gates() {
+    let opaque = |file: &str, line: usize| unsupported_message(file, line, UnsupportedKind::Opaque);
+    let cases: Vec<InventoryFailureCase> = vec![
+        (
+            "a parseable argument to an unknown macro is not a loader",
+            vec![
+                ("crates/project/src/lib.rs", "mod discard;\n"),
+                (
+                    "crates/project/src/discard.rs",
+                    "#[macro_export]\nmacro_rules! discard {\n    ($value:expr) => { \"\" };\n}\n\nconst _: &str = crate::discard!(include_str!(\"orphan.sql\"));\n\n#[cfg(test)]\nconst _: &str = include_str!(\"orphan.sql\");\n",
+                ),
+                ("crates/project/src/orphan.sql", "SELECT 1;\n"),
+            ],
+            vec![
+                opaque("crates/project/src/discard.rs", 6),
+                "crates/project/src/orphan.sql (loaded only by test code: crates/project/src/discard.rs)"
+                    .to_owned(),
+            ],
+        ),
+        (
+            "a macro that adds a gate in its transcription is not a loader",
+            vec![
+                (
+                    "crates/project/src/gate.rs",
+                    "macro_rules! gate {\n    ($value:expr) => { #[cfg(test)] const _: &str = $value; };\n}\n\ngate!(include_str!(\"orphan.sql\"));\n",
+                ),
+                ("crates/project/src/orphan.sql", "SELECT 1;\n"),
+            ],
+            vec![
+                opaque("crates/project/src/gate.rs", 5),
+                "crates/project/src/orphan.sql (not loaded by any Rust source)".to_owned(),
+            ],
+        ),
+        (
+            "an inner file gate reaches an external child module",
+            vec![
+                ("crates/project/src/lib.rs", "mod fixture;\n"),
+                ("crates/project/src/fixture.rs", "#![cfg(test)]\nmod nested;\n"),
+                (
+                    "crates/project/src/fixture/nested.rs",
+                    "const _: &str = include_str!(\"orphan.sql\");\n",
+                ),
+                ("crates/project/src/fixture/orphan.sql", "SELECT 1;\n"),
+            ],
+            vec![
+                "crates/project/src/fixture/orphan.sql (loaded only by test code: crates/project/src/fixture/nested.rs)"
+                    .to_owned(),
+            ],
+        ),
+        (
+            "a crate-qualified stringify! is not the built-in",
+            vec![
+                (
+                    "crates/project/src/forward.rs",
+                    "const _: &str = crate::stringify!(include_str!(\"loaded.sql\"));\n",
+                ),
+                ("crates/project/src/loaded.sql", "SELECT 1;\n"),
+            ],
+            vec![
+                opaque("crates/project/src/forward.rs", 1),
+                "crates/project/src/loaded.sql (not loaded by any Rust source)".to_owned(),
+            ],
+        ),
+        (
+            "quote_spanned! evaluates its span expression",
+            vec![
+                (
+                    "crates/project/src/spanned.rs",
+                    "fn sample() {\n    let _ = quote::quote_spanned!(\n        {\n            let _ = include_str!(\"loaded.sql\");\n            proc_macro2::Span::call_site()\n        } => include_str!(\"quoted.sql\")\n    );\n}\n",
+                ),
+                ("crates/project/src/loaded.sql", "SELECT 1;\n"),
+            ],
+            vec![
+                opaque("crates/project/src/spanned.rs", 4),
+                opaque("crates/project/src/spanned.rs", 6),
+                "crates/project/src/loaded.sql (not loaded by any Rust source)".to_owned(),
+            ],
+        ),
+    ];
+    let mut failures = Vec::new();
+    for (name, files, expected) in cases {
+        let tree = super::SampleTree::empty();
+        for (path, contents) in files {
+            tree.write(path, contents);
+        }
+        let found = inventory_failures(tree.path());
+        if found != expected {
+            failures.push(format!(
+                "{name}:\n  found    {found:?}\n  expected {expected:?}"
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 /// What the guard learned about one tree: each `.sql` path's loaders, every `include_str!` it
 /// could not read (message, and whether it is in test code), and every Rust file that does not
 /// parse.
@@ -548,25 +663,34 @@ fn project_sql_inventory(root: &Path) -> Inventory {
     collect_files(&root.join("crates/project/tests"), "rs", &mut rust_files);
 
     let mut inventory = Inventory::default();
+    let mut parsed = BTreeMap::new();
     for path in rust_files {
         let key = relative_key(root, &path);
-        let test_file =
-            cfg_test_modules.contains(&key) || !key.starts_with(&format!("{PROJECT_SOURCE_ROOT}/"));
         let source = fs::read_to_string(&path).expect("Project source must be readable");
-        let scan = match scan_includes(&source) {
-            Ok(scan) => scan,
-            Err(error) => {
-                inventory
-                    .unparsable
-                    .push(format!("{key}: does not parse as Rust: {error}"));
-                continue;
+        match parse_source(&source) {
+            Ok(file) => {
+                parsed.insert(normalize(&path), file);
             }
-        };
+            Err(error) => inventory
+                .unparsable
+                .push(format!("{key}: does not parse as Rust: {error}")),
+        }
+    }
+    let gates = module_gates(root, &parsed);
+
+    for (path, file) in &parsed {
+        let key = relative_key(root, path);
+        // A file reached only through `#[cfg(test)]` modules or inner `#![cfg(test)]` gates is
+        // test code; so is a file the content hash's own scanner excludes, and anything under
+        // crates/project/tests. A file no `mod` declaration reaches keeps the scanner's verdict.
+        let test_file = gates.get(path).copied().unwrap_or(false)
+            || cfg_test_modules.contains(&key)
+            || !key.starts_with(&format!("{PROJECT_SOURCE_ROOT}/"));
+        let scan = scan_file(file, test_file);
         for site in scan.unsupported {
-            inventory.unsupported.push((
-                unsupported_message(&key, site.line, site.kind),
-                test_file || site.gated,
-            ));
+            inventory
+                .unsupported
+                .push((unsupported_message(&key, site.line, site.kind), site.gated));
         }
         for (literal, gated) in scan.sites {
             if !literal.ends_with(".sql") {
@@ -575,7 +699,7 @@ fn project_sql_inventory(root: &Path) -> Inventory {
             let target = normalize(&path.parent().expect("file has a parent").join(&literal));
             let target_key = relative_key(root, &target);
             let entry = inventory.references.entry(target_key).or_default();
-            if test_file || gated {
+            if gated {
                 entry.test.insert(key.clone());
             } else {
                 entry.production.insert(key.clone());
@@ -583,6 +707,99 @@ fn project_sql_inventory(root: &Path) -> Inventory {
         }
     }
     inventory
+}
+
+/// Walks the Project crate's module tree from `lib.rs`, resolving each `mod x;` to `x.rs` or
+/// `x/mod.rs` in the declaring module's directory (or to its `#[path]`), and returns, for every
+/// file reached, whether it is test-only: every route to it passes an outer `#[cfg(test)]` on a
+/// module or an inner `#![cfg(test)]` in a file.
+fn module_gates(root: &Path, parsed: &BTreeMap<PathBuf, syn::File>) -> BTreeMap<PathBuf, bool> {
+    let mut gates: BTreeMap<PathBuf, bool> = BTreeMap::new();
+    let crate_root = normalize(&root.join(PROJECT_SOURCE_ROOT).join("lib.rs"));
+    let mut pending = vec![(crate_root, false)];
+    while let Some((path, inherited)) = pending.pop() {
+        let Some(file) = parsed.get(&path) else {
+            continue;
+        };
+        match gates.get(&path) {
+            // Already reached from production, or reached gated and this route is gated too.
+            Some(false) => continue,
+            Some(true) if inherited => continue,
+            _ => {}
+        }
+        gates.insert(path.clone(), inherited);
+        let gated = inherited || file.attrs.iter().any(is_cfg_test);
+        let directory = path.parent().expect("file has a parent").to_owned();
+        let mod_rs = path
+            .file_name()
+            .is_some_and(|name| name == "mod.rs" || name == "lib.rs" || name == "main.rs");
+        let module_directory = if mod_rs {
+            directory.clone()
+        } else {
+            directory.join(path.file_stem().expect("file has a stem"))
+        };
+        collect_module_files(
+            &file.items,
+            &directory,
+            &module_directory,
+            false,
+            gated,
+            &mut pending,
+        );
+    }
+    gates
+}
+
+fn collect_module_files(
+    items: &[Item],
+    file_directory: &Path,
+    module_directory: &Path,
+    inline: bool,
+    gated: bool,
+    pending: &mut Vec<(PathBuf, bool)>,
+) {
+    for item in items {
+        let Item::Mod(module) = item else {
+            continue;
+        };
+        let gated = gated || module.attrs.iter().any(is_cfg_test);
+        let path_attr = module.attrs.iter().find_map(path_attribute);
+        let name = module.ident.unraw().to_string();
+        match &module.content {
+            Some((_, items)) => {
+                let directory = module_directory.join(path_attr.as_deref().unwrap_or(&name));
+                collect_module_files(items, file_directory, &directory, true, gated, pending);
+            }
+            None => {
+                let candidates = match path_attr {
+                    // A top-level #[path] is relative to the declaring file's directory; inside
+                    // an inline module it is relative to that module's directory.
+                    Some(explicit) if inline => vec![module_directory.join(explicit)],
+                    Some(explicit) => vec![file_directory.join(explicit)],
+                    None => vec![
+                        module_directory.join(format!("{name}.rs")),
+                        module_directory.join(&name).join("mod.rs"),
+                    ],
+                };
+                for candidate in candidates {
+                    pending.push((normalize(&candidate), gated));
+                }
+            }
+        }
+    }
+}
+
+fn path_attribute(attr: &Attribute) -> Option<String> {
+    match &attr.meta {
+        Meta::NameValue(value) if value.path.is_ident("path") => match &value.value {
+            Expr::Lit(ExprLit {
+                lit: Lit::Str(path),
+                ..
+            }) => Some(path.value()),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 fn unsupported_message(file: &str, line: usize, kind: UnsupportedKind) -> String {
@@ -634,11 +851,22 @@ fn include_sites(source: &str) -> Vec<(String, bool)> {
 /// whose argument is not exactly one string literal. Includes nested in the bodies of other
 /// macros are found at token level.
 fn scan_includes(source: &str) -> syn::Result<IncludeScan> {
+    Ok(scan_file(&parse_source(source)?, false))
+}
+
+fn parse_source(source: &str) -> syn::Result<syn::File> {
     // The compiler reads CRLF line endings as LF before it tokenizes.
-    let file = syn::parse_file(&source.replace("\r\n", "\n"))?;
-    let mut visitor = IncludeVisitor::default();
-    visitor.visit_file(&file);
-    Ok(visitor.scan)
+    syn::parse_file(&source.replace("\r\n", "\n"))
+}
+
+/// Scans a parsed file; `gated` is true when the whole file is test code.
+fn scan_file(file: &syn::File, gated: bool) -> IncludeScan {
+    let mut visitor = IncludeVisitor {
+        gated: usize::from(gated),
+        ..IncludeVisitor::default()
+    };
+    visitor.visit_file(file);
+    visitor.scan
 }
 
 #[derive(Default)]
@@ -773,15 +1001,22 @@ impl<'ast> Visit<'ast> for IncludeVisitor {
     }
 
     fn visit_macro(&mut self, node: &'ast Macro) {
-        if is_include_str(&node.path) {
-            let line = node
-                .path
-                .segments
-                .last()
-                .map_or(0, |segment| segment.ident.span().start().line);
-            self.record(line, node.tokens.clone());
-        } else if !never_expands_body(&node.path) && !self.visit_macro_body(node.tokens.clone()) {
-            self.report_opaque(node.tokens.clone());
+        match macro_kind(&node.path) {
+            MacroKind::Include => {
+                let line = node
+                    .path
+                    .segments
+                    .last()
+                    .map_or(0, |segment| segment.ident.span().start().line);
+                self.record(line, node.tokens.clone());
+            }
+            MacroKind::Skip => {}
+            MacroKind::Expands => {
+                if !self.visit_macro_body(node.tokens.clone()) {
+                    self.report_opaque(node.tokens.clone());
+                }
+            }
+            MacroKind::Opaque => self.report_opaque(node.tokens.clone()),
         }
     }
 
@@ -834,18 +1069,87 @@ impl<'ast> Visit<'ast> for IncludeVisitor {
     }
 }
 
-/// Macros whose body is quoted or defined rather than expanded as code: an `include_str!` in
-/// it loads nothing and is neither loader evidence nor a diagnostic. `concat!` is not one of
-/// them: it expands a nested `include_str!` eagerly, and `name_current/query.rs` loads
-/// `build.sql` that way.
-fn never_expands_body(path: &syn::Path) -> bool {
-    path.segments.last().is_some_and(|segment| {
-        let name = segment.ident.unraw().to_string();
-        matches!(
-            name.as_str(),
-            "stringify" | "quote" | "quote_spanned" | "macro_rules"
-        )
-    })
+/// How the guard treats a macro invocation, decided from its full path (after `unraw`), never
+/// from its last segment alone.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum MacroKind {
+    /// `include_str!`: its literal argument is loader evidence.
+    Include,
+    /// The built-in `stringify!` or a `macro_rules!` definition: its tokens are never expanded
+    /// as code here, so they are neither loader evidence nor a diagnostic.
+    Skip,
+    /// An audited macro known to expand its arguments as code; its body is visited when it parses
+    /// as expressions or statements.
+    Expands,
+    /// Any other macro. An `include_str!` in its body is reported, never counted, because the
+    /// guard cannot tell whether or how the macro transcribes it.
+    Opaque,
+}
+
+/// Built-in macros audited to expand their arguments as code. `concat!` expands a nested
+/// `include_str!` eagerly; `crates/project/src/builders/name_current/query.rs` relies on it.
+const EXPANDING_BUILTINS: &[&str] = &[
+    "concat",
+    "assert",
+    "assert_eq",
+    "assert_ne",
+    "debug_assert",
+    "debug_assert_eq",
+    "debug_assert_ne",
+    "format",
+    "format_args",
+    "write",
+    "writeln",
+    "print",
+    "println",
+    "eprint",
+    "eprintln",
+    "panic",
+    "unreachable",
+    "todo",
+    "vec",
+    "matches",
+    "dbg",
+];
+
+/// Crate-qualified macros audited to expand their arguments as code.
+const EXPANDING_CRATE_MACROS: &[(&str, &[&str])] = &[
+    ("sqlx", &["query", "query_as", "query_scalar"]),
+    ("tracing", &["trace", "debug", "info", "warn", "error"]),
+    ("tokio", &["select"]),
+    ("serde_json", &["json"]),
+    ("anyhow", &["anyhow", "bail", "ensure"]),
+];
+
+fn macro_kind(path: &syn::Path) -> MacroKind {
+    let segments = path
+        .segments
+        .iter()
+        .map(|segment| segment.ident.unraw().to_string())
+        .collect::<Vec<_>>();
+    // A built-in: bare, or `std::`/`core::` with an optional leading `::`.
+    let builtin = match segments.as_slice() {
+        [name] if path.leading_colon.is_none() => Some(name.as_str()),
+        [krate, name] if krate == "std" || krate == "core" => Some(name.as_str()),
+        _ => None,
+    };
+    match builtin {
+        Some("include_str") => return MacroKind::Include,
+        Some("stringify") => return MacroKind::Skip,
+        Some(name) if EXPANDING_BUILTINS.contains(&name) => return MacroKind::Expands,
+        _ => {}
+    }
+    match segments.as_slice() {
+        [name] if name == "macro_rules" && path.leading_colon.is_none() => MacroKind::Skip,
+        [krate, name]
+            if EXPANDING_CRATE_MACROS
+                .iter()
+                .any(|(known, names)| krate == known && names.contains(&name.as_str())) =>
+        {
+            MacroKind::Expands
+        }
+        _ => MacroKind::Opaque,
+    }
 }
 
 /// Decodes a macro body that is exactly one string literal, optionally followed by a comma.
@@ -858,20 +1162,6 @@ fn include_path(tokens: TokenStream) -> Option<String> {
         Ok(path)
     };
     parser.parse2(tokens).ok().map(|path| path.value())
-}
-
-/// `include_str`, `std::include_str`, `core::include_str`, each optionally with a leading `::`.
-fn is_include_str(path: &syn::Path) -> bool {
-    let segments = path
-        .segments
-        .iter()
-        .map(|segment| segment.ident.unraw().to_string())
-        .collect::<Vec<_>>();
-    match segments.as_slice() {
-        [name] => name == "include_str",
-        [krate, name] => (krate == "std" || krate == "core") && name == "include_str",
-        _ => false,
-    }
 }
 
 /// True when the tokens before an `include_str` ident leave it unqualified or qualified by
