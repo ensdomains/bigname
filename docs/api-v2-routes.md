@@ -1352,22 +1352,30 @@ A recognized namespace with no available publication returns retryable `409 stal
   event for the registrant, token holder and fallback controller relations, so
   a transfer from the holder to itself moves the cited event without changing
   the holder, and the earliest transfer in the range names the address as its
-  sender, so the address held the name at the published block. Such a transfer
-  is valid upstream: the Basenames registrar inherits Solady's ERC-721
+  sender, so the address held the name at the published block. The rule reads
+  only the `TokenControlTransferred` rows the adapters emit: an ENSv1 or
+  Basenames registrar `Transfer` with a nonzero sender and recipient becomes
+  such a row carrying both as logged
+  (bigname: `crates/adapters/src/schema_v2/protocol/v1/registrar.rs:136-140`)
+  (bigname: `crates/adapters/src/schema_v2/protocol/v1/registrar.rs:197-203`)
+  (bigname: `crates/adapters/src/schema_v2/protocol/v1/registrar.rs:216-222`).
+  For Basenames the self-transfer is valid upstream: the registrar inherits
+  Solady's ERC-721
   (upstream: .refs/basenames/src/L2/BaseRegistrar.sol:L5 @ basenames@1809bbc),
   whose `transferFrom` checks only that `from` is the current owner and does
   not reject `to == from`
   (upstream: .refs/basenames/lib/solady/src/tokens/ERC721.sol:L252-L309 @ basenames@1809bbc).
-  The ENSv1 BaseRegistrar authorizes a transfer through its owner, approved or
-  operator check
+  The ENSv1 pin does not vendor the OpenZeppelin ERC-721 the BaseRegistrar
+  inherits, so the ENSv1 evidence covers authorization and expiry only: the
+  BaseRegistrar authorizes a transfer through its owner, approved or operator
+  check
   (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L42-L50 @ ens_v1@91c966f),
   whose `ownerOf` call rejects an expired name and otherwise returns the owner
-  (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L71-L76 @ ens_v1@91c966f);
-  the ENSv1 pin does not vendor OpenZeppelin's ERC-721, so the pinned
-  Basenames analogue shows the transfer shape. A relation that began after the
-  published block has a grant or a transfer to the address in the range and is
-  not admitted. The probe also refuses an ENSv2 `RegistrationReserved` in the
-  range: reserving an expired name burns the previous holder's token
+  (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L71-L76 @ ens_v1@91c966f).
+  A relation that began after the published block has a grant or a transfer to
+  the address in the range and is not admitted. The probe also refuses an ENSv2
+  `RegistrationReserved` in the range: reserving an expired name burns the
+  previous holder's token
   (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registry/PermissionedRegistry.sol:L481-L486 @ ens_v2_sepolia_20260916@366de741)
   and emits `LabelReserved` with no owner and no mint
   (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registry/PermissionedRegistry.sol:L490-L491 @ ens_v2_sepolia_20260916@366de741),
@@ -1388,12 +1396,22 @@ A recognized namespace with no available publication returns retryable `409 stal
   controller that fell back to the token holder, and an ENSv1 effective
   controller from a resource-scoped `PermissionChanged` grant (registrar
   registration, transfer or surface snapshot, registry owner, or NameWrapper
-  holder). ENSv2 `PermissionChanged` rows carry registry or resolver scopes,
-  so they never set this controller. A relation that ended after the published
-  block and began again before the current row was written counts as ended:
-  its current row cites the transfer that restored it. Wrapper grace-period
-  and expiry transitions have no cited event of their own, so a relation row
-  gated by them can appear or vanish between pages of the same read.
+  holder). The controller is set only by a `PermissionChanged` whose scope is
+  the name's resource
+  (bigname: `crates/project/src/builders/address_names.rs:238-248`). Upstream
+  reports an ENSv2 role change as an account's roles within an access control
+  resource of the emitting contract
+  (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/access-control/interfaces/IEnhancedAccessControl.sol:L17-L27 @ ens_v2_sepolia_20260916@366de741),
+  and bigname normalizes every such change to a registry, registry root or
+  resolver scope keyed by that contract
+  (bigname: `crates/adapters/src/schema_v2/protocol/permissions.rs:35-46`), so
+  ENSv2 `PermissionChanged` rows never set this controller. This is a bigname
+  normalization rule, not an upstream one. A relation that ended after the
+  published block and began again before the current row was written counts as
+  ended: its current row cites the transfer that restored it. Wrapper
+  grace-period and expiry transitions have no cited event of their own, so a
+  relation row gated by them can appear or vanish between pages of the same
+  read.
 - Cursors bind the order and every filter above. The cursor `sort` token
   encodes the direction, and its filters carry the canonical `type` set and
   the canonical UTC spelling of each timestamp bound, so a cursor issued by one

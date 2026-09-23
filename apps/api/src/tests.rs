@@ -400,6 +400,8 @@ include!("tests/v2_address_resolves_to.rs");
 include!("tests/v2_address_resolves_to_evm.rs");
 include!("tests/v2_address_resolves_to_evm_plan.rs");
 include!("tests/v2_permissions.rs");
+#[path = "tests/v2_history_bounded_rebinding.rs"]
+mod v2_history_bounded_rebinding;
 #[path = "tests/v2_history_bounded_regeneration.rs"]
 mod v2_history_bounded_regeneration;
 #[path = "tests/v2_registry_permission_identity.rs"]
