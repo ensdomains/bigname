@@ -420,7 +420,8 @@ test-only slice-1 re-walk, `/v1/diagnostics/events` reads a page and saves its
 `next_cursor`. After the full Interpret and Project re-walk publishes, that
 pre-rewalk cursor is submitted to the post-rewalk test publication. Product
 history cursors hold positions rather than normalized-event row IDs and follow
-the history walk rule in [api-v2.md](api-v2.md#cursors-and-pagination).
+the [history walk](glossary.md#history-walk) rule in
+[api-v2.md](api-v2.md#cursors-and-pagination).
 `/v1/diagnostics/events` must accept its old cursor and continue from the same
 stable normalized-event anchor, but its remaining rows and fields may include
 the expected new candidate diagnostics. A pre-existing diagnostic row's numeric

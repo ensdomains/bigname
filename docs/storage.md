@@ -914,8 +914,9 @@ an intake gap in the restart, historical-replay, and live-follow boundary
 fixtures.
 
 Product history cursors hold a position in the history order rather than a
-normalized-event row ID, so the slice-1 test re-walk leaves them to the history
-walk rule in [api-v2.md](api-v2.md#cursors-and-pagination). A diagnostic-events
+normalized-event row ID, so the slice-1 test re-walk leaves them to the
+[history walk](glossary.md#history-walk) rule in
+[api-v2.md](api-v2.md#cursors-and-pagination). A diagnostic-events
 cursor issued before the re-walk at a fixed readable chain head must remain
 valid and continue from the same stable normalized-event anchor, although its remaining rows and fields
 may reflect candidate admission. A pre-existing diagnostic row's numeric

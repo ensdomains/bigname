@@ -751,7 +751,8 @@ already published.
 
 For a slice-1 test re-walk that must not change product behavior at a fixed
 readable chain head, product history cursors hold positions rather than
-normalized-event row IDs and follow the history walk rule in
+normalized-event row IDs and follow the
+[history walk](glossary.md#history-walk) rule in
 [api-v2.md](api-v2.md#cursors-and-pagination). A diagnostic-events cursor must
 remain valid and continue from the
 same stable normalized-event anchor, but its subsequent diagnostic rows and

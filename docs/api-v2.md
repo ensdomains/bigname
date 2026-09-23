@@ -1161,12 +1161,16 @@ from `chain_heads`, project progress from the `project` row in
 `chain_phase_state`, and both timestamps from the matching readable
 `chain_lineage` rows.
 
-Top-level collections page over mutable latest-state tables. They therefore
-omit `meta.as_of` and `meta.as_of_token`, except that search reports
-request-scoped `meta.as_of` for staleness attribution while still omitting
-`meta.as_of_token`. Their cursors do not claim a snapshot bound. Newly issued collection cursors carry no snapshot token; a
-legacy cursor's snapshot component is ignored rather than treated as a
-validity condition. Omitted `finality` and explicit `finality=latest` are accepted.
+Top-level collections page over mutable latest-state tables. They omit
+`meta.as_of_token`, because old publications are not retained for replay
+through `at`. Product name, subname, ownership, and permission collections
+report in `meta.as_of` the publication their cursors are bound to; history
+collections report the publication each page read, as a
+[history walk](glossary.md#history-walk) whose cursor holds only a position; search reports request-scoped `meta.as_of` for staleness
+attribution. No collection cursor claims a snapshot bound that `at` could
+replay. A history cursor carries no publication token, and the token of a
+history cursor issued before the walk rule is ignored rather than treated as
+a validity condition. Omitted `finality` and explicit `finality=latest` are accepted.
 An `at` selector returns `400 invalid_input` with
 `at is not supported because collection routes read latest state`.
 `finality=safe` and `finality=finalized` return `400 invalid_input` with
@@ -1221,7 +1225,8 @@ Snapshot-bound cursor semantics remain on single-resource responses with nested
 pagination where documented.
 
 History collections (`/v1/events`, name history including
-`include=child_registrations`, and address history) are walks, not snapshots.
+`include=child_registrations`, and address history) are
+[history walks](glossary.md#history-walk), not snapshots.
 A history cursor holds the position of the last row it returned in the history
 order: block number, chain, block hash, transaction hash, log index, and the
 row's `event_identity` as the final tiebreaker. It carries no publication token
@@ -1231,8 +1236,10 @@ still exist. A later page can therefore include rows published after the first
 page, a row can move or disappear after an Interpret redo, and `total_count`
 can change between pages. `meta.as_of` reports the publication each page was
 read at. None of this returns `409 stale`, and neither does a publication that
-lands while a page is being read: that page can mix rows from the publication
-it reports with rows the publication did not have yet. Because `event_identity`
+lands while a page is being read. That page is still capped at the publication
+it reports, so no row above it can appear; but when the new publication
+rewrites rows at or below it, for example after a reorg, the page can mix rows
+from before and after that rewrite. Because `event_identity`
 is only the final tiebreaker, a re-derivation that changes the identities of
 events sharing one log position can skip or repeat a row at that position,
 which the same walk rule covers. A history cursor returns `400 invalid_input`
@@ -1277,7 +1284,7 @@ unstable.
 
 A full Interpret and Project re-walk does not invalidate a history cursor: the
 cursor holds a position, not a normalized-event row ID, and continues under the
-walk rule above. The diagnostic-events
+[history walk](glossary.md#history-walk) rule above. The diagnostic-events
 route must accept its pre-re-walk cursor and continue from the same stable
 normalized-event anchor, but its remaining diagnostic rows and fields may
 reflect newly admitted candidate data. A pre-existing diagnostic row's numeric

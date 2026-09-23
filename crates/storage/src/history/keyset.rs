@@ -227,20 +227,35 @@ pub(super) fn history_cursor_from_row(row: &HistoryEvent) -> HistoryCursor {
 }
 
 /// The history position of the event named `event_identity`, for a cursor that carries only its
-/// anchor, or `None` when no such event exists.
+/// anchor, or `None` when no such event exists. It reads under the same Interpret redo check as a
+/// history page, in one snapshot: during a redo it fails with `InterpretRedoInProgress` instead of
+/// reporting an anchor the redo may have removed.
 pub async fn load_history_anchor_position(
     pool: &PgPool,
     event_identity: &str,
 ) -> Result<Option<HistoryPosition>> {
+    let mut transaction = pool
+        .begin()
+        .await
+        .context("failed to begin a history cursor anchor read")?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+        .execute(&mut *transaction)
+        .await
+        .context("failed to configure a history cursor anchor read")?;
+    super::redo::ensure_interpret_not_redo(&mut transaction).await?;
     let row = sqlx::query(
         "SELECT block_number, chain_id, block_hash, transaction_hash, log_index
              FROM bigname_phase.normalized_events
              WHERE event_identity = $1",
     )
     .bind(event_identity)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *transaction)
     .await
     .context("failed to load a history cursor anchor")?;
+    transaction
+        .commit()
+        .await
+        .context("failed to commit a history cursor anchor read")?;
     row.map(|row| {
         Ok(HistoryPosition {
             block_number: sqlx::Row::try_get(&row, "block_number")?,

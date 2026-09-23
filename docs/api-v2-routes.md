@@ -59,7 +59,8 @@ otherwise it returns `409 stale` rather than a misleading partial total. Registr
 in addition to their documented selected-chain position.
 
 The history collections, `/v1/events`, name history (with or without
-`include=child_registrations`), and address history, are walks, not snapshots.
+`include=child_registrations`), and address history, are
+[history walks](glossary.md#history-walk), not snapshots.
 A history cursor holds the position of the last row it returned in the history
 order: block number, chain, block hash, transaction hash, log index, and the
 row's `event_identity` as the final tiebreaker. It binds the route's anchors,
@@ -70,8 +71,10 @@ A later page can therefore include rows published after the first page, a row
 can move or disappear after an Interpret redo, and `total_count` can change
 between pages. Each page reports the publication it read in `meta.as_of`. None
 of this returns `409 stale`. A publication that lands while a page is being
-read does not refuse the page either: the page can mix rows from the
-publication it reports with rows that publication did not have yet. Because
+read does not refuse the page either. The page is still capped at the
+publication it reports, so no row above it can appear; but when the new
+publication rewrites rows at or below it, for example after a reorg, the page
+can mix rows from before and after that rewrite. Because
 `event_identity` is only the final tiebreaker, a re-derivation that changes the
 identities of events sharing one log position can skip or repeat a row at that
 position; that is the same walk rule, not an error. A history cursor returns
@@ -114,7 +117,8 @@ and publishes the full Interpret and Project re-walk, and submits that old
 cursor to the post-re-walk test publication. The control and candidate test
 runs hold every other shared-boundary input constant, including PR #391's
 topology serializer. Product history cursors hold positions, not row IDs, so
-the re-walk leaves them to the history walk rule above.
+the re-walk leaves them to the [history walk](glossary.md#history-walk) rule
+above.
 `/v1/diagnostics/events` must accept its old cursor
 and continue from the same stable normalized-event anchor, but its remaining
 rows and fields may include the expected new candidate diagnostics.
@@ -1707,8 +1711,8 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
   that page is read, and the response discloses it in `meta.as_of`. The
   continuation cursor holds the last row's position, not a publication, so a
   later page can include newer rows and never returns `409 stale` because the
-  publication changed; see the history walk rule in
-  [Shared Route Rules](#shared-route-rules).
+  publication changed; see the [history walk](glossary.md#history-walk) rule
+  in [Shared Route Rules](#shared-route-rules).
   Historical replay through `at` is not supported.
 - Status semantics: no product-visible matches return `200` with empty `data`,
   `page.next_cursor=null`, and `page.has_more=false`. Missing names return
@@ -2686,8 +2690,8 @@ introduces it rebuilds Project from full history before serving the option; see
   that page is read, and the response discloses it in `meta.as_of`. The
   continuation cursor holds the last row's position, not a publication, so a
   later page can include newer rows and never returns `409 stale` because the
-  publication changed; see the history walk rule in
-  [Shared Route Rules](#shared-route-rules).
+  publication changed; see the [history walk](glossary.md#history-walk) rule
+  in [Shared Route Rules](#shared-route-rules).
   Historical replay through `at` is not supported.
 - Pagination behavior: product event-type filtering, including an explicit
   `type` set, runs before keyset page construction (newest first unless
@@ -2899,8 +2903,8 @@ For a registrar lease first identified by a later readable observation, registra
   that page is read, and the response discloses it in `meta.as_of`. The
   continuation cursor holds the last row's position, not a publication, so a
   later page can include newer rows and never returns `409 stale` because the
-  publication changed; see the history walk rule in
-  [Shared Route Rules](#shared-route-rules).
+  publication changed; see the [history walk](glossary.md#history-walk) rule
+  in [Shared Route Rules](#shared-route-rules).
   Historical replay through `at` is not supported.
 - Status semantics: no product-visible matches return `200` with empty `data`,
   `page.next_cursor=null`, and `page.has_more=false`. Filter and cursor-binding

@@ -258,6 +258,9 @@ pub(crate) fn events_cursor_payload(
         BTreeMap::from([
             (
                 NORMALIZED_EVENT_ID_CURSOR_KEY.to_owned(),
+                // Every cursor this layout encodes comes from a storage page, whose next cursor
+                // always names its row (`history_cursor_from_row`), or from this decoder, which
+                // requires the id; a `None` here cannot occur.
                 cursor.normalized_event_id.unwrap_or_default().to_string(),
             ),
             (

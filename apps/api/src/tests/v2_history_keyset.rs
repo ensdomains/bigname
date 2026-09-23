@@ -6,15 +6,20 @@
 
 const HK_ADDRESS: &str = "0x00000000000000000000000000000000000000cc";
 const HK_CHAIN: &str = "ethereum-mainnet";
+/// A chain outside the `ens` publication scope, for a redo only the collection-wide check sees.
+const HK_OTHER_CHAIN: &str = "base-mainnet";
 /// The fixture's publication: `seed_default_ens_snapshot_selector_position`.
 const HK_PUBLISHED_BLOCK: i64 = 21_000_003;
 const HK_RESTART: &str =
     "collection publication is no longer available; restart pagination without a cursor";
+const HK_REDO_RETRY: &str = "history is temporarily unavailable while Interpret redo is in progress";
 
-fn hk_routes() -> [String; 3] {
+fn hk_routes() -> [String; 4] {
     [
         "/v1/events?name=history.eth".to_owned(),
         "/v1/names/history.eth/history?scope=both".to_owned(),
+        // The child arm keeps its own copy of the cursor position.
+        "/v1/names/history.eth/history?scope=both&include=child_registrations".to_owned(),
         format!("/v1/addresses/{HK_ADDRESS}/history?scope=both"),
     ]
 }
@@ -102,7 +107,15 @@ async fn hk_publish_block(database: &TestDatabase, block: i64, with_row: bool) -
 
 /// A redo of `phase` begins and finishes, moving the phase row as the phase runner does.
 async fn hk_phase_redo(database: &TestDatabase, phase: &str) -> Result<()> {
-    for statement in [
+    hk_begin_redo(database, HK_CHAIN, phase).await?;
+    hk_finish_redo(database, HK_CHAIN, phase).await
+}
+
+async fn hk_begin_redo(database: &TestDatabase, chain: &str, phase: &str) -> Result<()> {
+    hk_phase_state(
+        database,
+        chain,
+        phase,
         "UPDATE bigname_phase.chain_phase_state
          SET phase_status = 'running',
              redo_in_progress = true,
@@ -118,6 +131,15 @@ async fn hk_phase_redo(database: &TestDatabase, phase: &str) -> Result<()> {
              finished_at = NULL,
              updated_at = now()
          WHERE chain_id = $1 AND phase_name = $2",
+    )
+    .await
+}
+
+async fn hk_finish_redo(database: &TestDatabase, chain: &str, phase: &str) -> Result<()> {
+    hk_phase_state(
+        database,
+        chain,
+        phase,
         "UPDATE bigname_phase.chain_phase_state
          SET phase_status = redo_previous_phase_status,
              last_error = redo_previous_last_error,
@@ -133,14 +155,22 @@ async fn hk_phase_redo(database: &TestDatabase, phase: &str) -> Result<()> {
              redo_to_block_number = NULL,
              updated_at = now()
          WHERE chain_id = $1 AND phase_name = $2 AND redo_in_progress",
-    ] {
-        let result = sqlx::query(statement)
-            .bind(HK_CHAIN)
-            .bind(phase)
-            .execute(&database.lookup_pool)
-            .await?;
-        anyhow::ensure!(result.rows_affected() == 1, "{phase} phase state");
-    }
+    )
+    .await
+}
+
+async fn hk_phase_state(
+    database: &TestDatabase,
+    chain: &str,
+    phase: &str,
+    statement: &str,
+) -> Result<()> {
+    let result = sqlx::query(statement)
+        .bind(chain)
+        .bind(phase)
+        .execute(&database.lookup_pool)
+        .await?;
+    anyhow::ensure!(result.rows_affected() == 1, "{phase} phase state");
     Ok(())
 }
 
@@ -232,33 +262,32 @@ async fn v2_history_continuation_resumes_after_its_anchor() -> Result<()> {
     database.cleanup().await
 }
 
-/// A redo that rotates every normalized-event id leaves a continuation where it was.
+/// A redo that rotates every normalized-event id and drops the anchor row leaves a
+/// continuation where it was.
 #[tokio::test]
 async fn v2_history_continuation_survives_a_redo() -> Result<()> {
-    let database = TestDatabase::new_migrated().await?;
-    seed_v2_history_fixture(&database).await?;
-    let mut walks = Vec::new();
     for route in hk_routes() {
+        let database = TestDatabase::new_migrated().await?;
+        seed_v2_history_fixture(&database).await?;
         let base = format!("{route}&page_size=1");
         let cursor = hk_next_cursor(&hk_ok(&database, &base).await?)?;
         let pages = hk_walk(&database, &base, cursor.clone()).await?;
-        walks.push((base, cursor, pages));
-    }
-    sqlx::query("UPDATE normalized_events SET normalized_event_id = DEFAULT")
-        .execute(&database.pool)
-        .await?;
-    for phase in ["interpret", "project"] {
-        hk_phase_redo(&database, phase).await?;
-    }
-    for (base, cursor, pages) in walks {
+        hk_begin_redo(&database, HK_CHAIN, "interpret").await?;
+        sqlx::query("UPDATE bigname_phase.normalized_events SET normalized_event_id = DEFAULT")
+            .execute(&database.pool)
+            .await?;
+        hk_delete_event(&database, &hk_anchor(&cursor)?).await?;
+        hk_finish_redo(&database, HK_CHAIN, "interpret").await?;
+        hk_phase_redo(&database, "project").await?;
         let after = hk_walk(&database, &base, cursor).await?;
         assert_eq!(
             after.iter().map(|(ids, _)| ids).collect::<Vec<_>>(),
             pages.iter().map(|(ids, _)| ids).collect::<Vec<_>>(),
             "{base}"
         );
+        database.cleanup().await?;
     }
-    database.cleanup().await
+    Ok(())
 }
 
 /// A continuation whose anchor row was deleted continues after the anchor's position.
@@ -298,6 +327,47 @@ async fn v2_history_legacy_cursor_resumes_through_its_anchor() -> Result<()> {
 
         hk_delete_event(&database, &hk_anchor(&cursor)?).await?;
         let (status, payload) = hk_get(&database, &format!("{base}&cursor={legacy}")).await?;
+        assert_eq!(status, StatusCode::CONFLICT, "{base}: {payload}");
+        assert_eq!(payload["error"]["message"], json!(HK_RESTART), "{base}");
+        database.cleanup().await?;
+    }
+    Ok(())
+}
+
+/// A redo that removes a legacy cursor's anchor answers with the redo retry while it runs, as
+/// the redo check comes before the anchor is looked up; once it finishes, the same cursor gets
+/// the one-time restart. The redo runs on a chain outside the request's publication scope, so
+/// admission still finds its publication and only the collection-wide redo check can refuse.
+#[tokio::test]
+async fn v2_history_legacy_cursor_retries_a_redo_before_restarting() -> Result<()> {
+    for route in hk_routes() {
+        let database = TestDatabase::new_migrated().await?;
+        seed_v2_history_fixture(&database).await?;
+        let base = format!("{route}&page_size=1");
+        let cursor = hk_next_cursor(&hk_ok(&database, &base).await?)?;
+        let legacy = hk_legacy_cursor(&database, &cursor).await?;
+        let uri = format!("{base}&cursor={legacy}");
+
+        sqlx::query(
+            "INSERT INTO bigname_phase.chain_phase_state
+                 (chain_id, phase_name, phase_status, current_block_number,
+                  current_block_hash, target_block_number, target_block_hash,
+                  input_content_hash, started_at, finished_at)
+             VALUES ($1, 'interpret', 'completed', 1, '0xother1', 1, '0xother1', $2, now(), now())
+             ON CONFLICT (chain_id, phase_name) DO NOTHING",
+        )
+        .bind(HK_OTHER_CHAIN)
+        .bind(bigname_content_hash::INTERPRETER_CONTENT_HASH)
+        .execute(&database.lookup_pool)
+        .await?;
+        hk_begin_redo(&database, HK_OTHER_CHAIN, "interpret").await?;
+        hk_delete_event(&database, &hk_anchor(&cursor)?).await?;
+        let (status, payload) = hk_get(&database, &uri).await?;
+        assert_eq!(status, StatusCode::CONFLICT, "{base}: {payload}");
+        assert_eq!(payload["error"]["message"], json!(HK_REDO_RETRY), "{base}");
+
+        hk_finish_redo(&database, HK_OTHER_CHAIN, "interpret").await?;
+        let (status, payload) = hk_get(&database, &uri).await?;
         assert_eq!(status, StatusCode::CONFLICT, "{base}: {payload}");
         assert_eq!(payload["error"]["message"], json!(HK_RESTART), "{base}");
         database.cleanup().await?;

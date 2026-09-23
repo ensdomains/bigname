@@ -13,7 +13,7 @@ use crate::AppState;
 
 use super::collection_snapshot::restart_required;
 use super::cursor::invalid_cursor_error;
-use super::{CursorPayload, V2Error, V2Result};
+use super::{CursorPayload, V2Result, map_history_page_error};
 
 const EVENT_IDENTITY_KEY: &str = "event_identity";
 const NORMALIZED_EVENT_ID_KEY: &str = "normalized_event_id";
@@ -131,7 +131,9 @@ fn decode_last_item(payload: &CursorPayload) -> V2Result<RequestCursor> {
 }
 
 /// The storage cursor for a decoded request cursor. A legacy cursor continues from its anchor
-/// row's position; when that row is gone the client restarts without the cursor.
+/// row's position; when that row is gone the client restarts without the cursor. The anchor is
+/// read behind the Interpret redo check, so a redo refuses the page with its retry before a row
+/// the redo removed can turn into a restart.
 pub(crate) async fn resolve(state: &AppState, cursor: RequestCursor) -> V2Result<HistoryCursor> {
     match cursor {
         RequestCursor::Position(cursor) => Ok(cursor),
@@ -139,10 +141,7 @@ pub(crate) async fn resolve(state: &AppState, cursor: RequestCursor) -> V2Result
             let position =
                 bigname_storage::load_history_anchor_position(&state.pool, &event_identity)
                     .await
-                    .map_err(|error| {
-                        tracing::error!(error = ?error, "failed to load a history cursor anchor");
-                        V2Error::internal_error("failed to load history")
-                    })?
+                    .map_err(|error| map_history_page_error(error, "failed to load history"))?
                     .ok_or_else(restart_required)?;
             Ok(HistoryCursor {
                 normalized_event_id: None,
