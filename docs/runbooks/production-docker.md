@@ -682,7 +682,12 @@ build them in step 3 by running
 as [its runbook](../../ops/address-history-indexes/README.md) describes, then run
 `ANALYZE bigname_phase.normalized_events`. The builds are concurrent, permit
 writes, and can finish before the stop/start window opens; `install.sql` is its
-own readiness check and never drops or rebuilds an index. Keep its output with
+own readiness check and never drops or rebuilds an index. If this step is
+skipped, the schema-migration builds the three indexes without `CONCURRENTLY`
+inside the SQLx transaction, and each build holds a `SHARE` lock on
+`normalized_events` that blocks Interpret's writes until it finishes. An index
+prebuilt by hand under another name is not detected and leaves a duplicate, so
+build only through `install.sql`, which uses the three names exactly. Keep its output with
 its start and end times in the release record. Then apply the schema-migrations
 in step 4; the schema-migration's `IF NOT EXISTS` builds are no-ops when the
 indexes already exist, and it ends with the same check. The indexes change no

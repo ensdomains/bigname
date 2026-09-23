@@ -31,6 +31,13 @@ and ready, an index on another table, an index whose `pg_get_indexdef` text is
 not the reviewed one, or a relation that is not an index. Retain its output in the
 deployment receipt.
 
+Do not skip the prebuild on a large database. Without it the schema-migration
+runs the three `CREATE INDEX` statements without `CONCURRENTLY`, inside the SQLx
+transaction, and each holds a `SHARE` lock on `normalized_events` that blocks
+Interpret's writes until the build finishes. The checks find an index by name
+only: an index built by hand under any other name is not detected, and the
+migration then builds a duplicate beside it, so use these three names exactly.
+
 To recover from an interrupted build or a refused index, first confirm in
 `pg_stat_progress_create_index` that no build is still running. Then drop only
 the named index with `DROP INDEX CONCURRENTLY bigname_phase.<index name>`, as the

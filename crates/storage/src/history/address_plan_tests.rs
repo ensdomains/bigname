@@ -26,6 +26,16 @@ const UNRELATED_NAMES: i64 = 300;
 /// transfer on its resource with no name, and one node-keyed record write attributed to its
 /// resource through the record inventory.
 const TARGET_ROWS: i64 = 4;
+const ANCHOR_INDEXES: [&str; 3] = [
+    "normalized_events_address_registrant_match_idx",
+    "normalized_events_address_token_holder_match_idx",
+    "normalized_events_address_registry_owner_match_idx",
+];
+const SELECTOR_INDEXES: [&str; 3] = [
+    "normalized_events_name_history_idx",
+    "normalized_events_resource_history_idx",
+    "normalized_events_pkey",
+];
 
 #[tokio::test]
 async fn address_history_selector_plans_use_history_indexes() -> Result<()> {
@@ -156,17 +166,15 @@ async fn check_anchor_plan(connection: &mut PgConnection) -> Result<()> {
 fn assert_anchor_uses_address_match_indexes(plan: &Value) -> Result<()> {
     let nodes = main_plan_nodes(plan);
     let indexes = index_names(&nodes);
-    for expected in [
-        "normalized_events_address_registrant_match_idx",
-        "normalized_events_address_token_holder_match_idx",
-        "normalized_events_address_registry_owner_match_idx",
-    ] {
+    // The keyed-scan check runs first so it alone catches a regressed shape.
+    assert_no_unkeyed_event_scan("anchor", &nodes, plan, &ANCHOR_INDEXES)?;
+    for expected in ANCHOR_INDEXES {
         ensure!(
             indexes.contains(&expected),
             "anchor lookup does not use {expected}: {plan}"
         );
     }
-    assert_no_unkeyed_event_scan("anchor", &nodes, plan)
+    Ok(())
 }
 
 /// The selector ORs names, resources and attributed record writes. Every branch must be an
@@ -175,11 +183,9 @@ fn assert_anchor_uses_address_match_indexes(plan: &Value) -> Result<()> {
 fn assert_selector_uses_history_indexes(statement: &str, plan: &Value) -> Result<()> {
     let nodes = main_plan_nodes(plan);
     let indexes = index_names(&nodes);
-    for expected in [
-        "normalized_events_name_history_idx",
-        "normalized_events_resource_history_idx",
-        "normalized_events_pkey",
-    ] {
+    // The keyed-scan check runs first so it alone catches a regressed shape.
+    assert_no_unkeyed_event_scan(statement, &nodes, plan, &SELECTOR_INDEXES)?;
+    for expected in SELECTOR_INDEXES {
         ensure!(
             indexes.contains(&expected),
             "{statement} does not use {expected}: {plan}"
@@ -189,21 +195,96 @@ fn assert_selector_uses_history_indexes(statement: &str, plan: &Value) -> Result
         !indexes.contains(&"normalized_events_projection_idx"),
         "{statement} scans normalized_events_projection_idx: {plan}"
     );
-    assert_no_unkeyed_event_scan(statement, &nodes, plan)
+    Ok(())
 }
 
-fn assert_no_unkeyed_event_scan(statement: &str, nodes: &[&Value], plan: &Value) -> Result<()> {
+/// Every read of `ne` must be keyed by the statement's own indexes. A bitmap heap scan counts
+/// only when every index under it (through BitmapAnd and BitmapOr) is one of `keyed_indexes`, or
+/// its recheck condition compares a row key; a bitmap scan of an unrelated index with the
+/// selector left as a filter is still a scan of every candidate row.
+fn assert_no_unkeyed_event_scan(
+    statement: &str,
+    nodes: &[&Value],
+    plan: &Value,
+    keyed_indexes: &[&str],
+) -> Result<()> {
+    const ROW_KEYS: [&str; 3] = ["normalized_event_id", "logical_name_id", "resource_id"];
+    let references_row_key = |condition: &Value| {
+        condition
+            .as_str()
+            .is_some_and(|condition| ROW_KEYS.iter().any(|key| condition.contains(key)))
+    };
     for node in nodes {
         if node["Relation Name"] != "normalized_events" || node["Alias"] != "ne" {
             continue;
         }
-        let keyed = node["Node Type"] == "Bitmap Heap Scan" || node.get("Index Cond").is_some();
+        let keyed = if node["Node Type"] == "Bitmap Heap Scan" {
+            let mut bitmap_indexes = Vec::new();
+            bitmap_index_names(node, &mut bitmap_indexes);
+            (!bitmap_indexes.is_empty()
+                && bitmap_indexes
+                    .iter()
+                    .all(|index| keyed_indexes.contains(index)))
+                || references_row_key(&node["Recheck Cond"])
+        } else {
+            node.get("Index Cond").is_some()
+                && (node["Index Name"]
+                    .as_str()
+                    .is_some_and(|index| keyed_indexes.contains(&index))
+                    || references_row_key(&node["Index Cond"]))
+        };
         ensure!(
             keyed,
             "{statement} reads normalized_events without an index key: {node}\n{plan}"
         );
     }
     Ok(())
+}
+
+fn bitmap_index_names<'a>(node: &'a Value, output: &mut Vec<&'a str>) {
+    for child in node["Plans"].as_array().into_iter().flatten() {
+        match child["Node Type"].as_str() {
+            Some("Bitmap Index Scan") => output.extend(child["Index Name"].as_str()),
+            Some("BitmapAnd" | "BitmapOr") => bitmap_index_names(child, output),
+            _ => {}
+        }
+    }
+}
+
+/// The reverted `IN (SELECT ...)` selector can plan as a bitmap heap scan of an unrelated index
+/// with the selector as a hashed sub-plan filter; that is not keyed. A bitmap OR of the
+/// selector's own indexes is.
+#[test]
+fn bitmap_heap_scan_is_keyed_only_by_the_statement_indexes() {
+    let scan = |bitmap: Value, recheck: &str| {
+        serde_json::json!([{"Plan": {
+            "Node Type": "Bitmap Heap Scan",
+            "Relation Name": "normalized_events",
+            "Alias": "ne",
+            "Recheck Cond": recheck,
+            "Filter": "((logical_name_id = ANY ($1)) OR (hashed SubPlan 1))",
+            "Plans": [bitmap],
+        }}])
+    };
+    let index =
+        |name: &str| serde_json::json!({"Node Type": "Bitmap Index Scan", "Index Name": name});
+    let unkeyed = scan(
+        index("normalized_events_projection_idx"),
+        "(canonicality_state = ANY ('{canonical,safe,finalized}'))",
+    );
+    let nodes = main_plan_nodes(&unkeyed);
+    assert!(assert_no_unkeyed_event_scan("probe", &nodes, &unkeyed, &SELECTOR_INDEXES).is_err());
+
+    let keyed = scan(
+        serde_json::json!({"Node Type": "BitmapOr", "Plans": [
+            index("normalized_events_name_history_idx"),
+            index("normalized_events_resource_history_idx"),
+            index("normalized_events_pkey"),
+        ]}),
+        "((logical_name_id = ANY ($1)) OR (resource_id = ANY ($2)))",
+    );
+    let nodes = main_plan_nodes(&keyed);
+    assert!(assert_no_unkeyed_event_scan("probe", &nodes, &keyed, &SELECTOR_INDEXES).is_ok());
 }
 
 /// Plan the statement twice: as PostgreSQL's generic prepared-statement plan, which sqlx's

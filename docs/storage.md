@@ -289,6 +289,12 @@ event ids do not depend on the row, so the filter computes them once as an array
 `normalized_events_name_history_idx`, `normalized_events_resource_history_idx`, and the primary
 key and combines the results. Written as `IN (SELECT ...)`, the branch cannot be an index
 condition inside the OR, and the planner reads every canonical row to keep the few that match.
+The three indexes cover only activated rows in readable canonicality states, so an anchor read
+that drops either condition cannot use them and falls back to a broad scan, such as
+`normalized_events_projection_idx` without the address as a key: a read with `canonical_only=false` (possible only through the
+storage functions `load_address_history_for_relations` and
+`load_address_history_page_for_relations`, which the public route always calls with `true`), and
+`GET /v1/diagnostics/events` with an address filter, which also reads candidate rows.
 `GET /v1/names/{name}/history` with `scope=both` uses the same filter. The registration-scoped
 read keeps a correlated `IN` because its attribution check refers to the row. These are access
 paths only: no stored row, response, or [interpreter content
