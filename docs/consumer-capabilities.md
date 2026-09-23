@@ -26,7 +26,7 @@ it does not preserve the deleted v1 DTOs.
 | Batched forward and reverse lookup | `POST /v1/lookup` | `profile=feed` is the field-budgeted path; `profile=detail` returns the documented full record shape, and with `include=inventory` each name result carries the records route's `inventory` container (known, unset, and unsupported product keys), so a caller holding many names reads their key inventories in one request instead of one records read per name. |
 | Indexing readiness | `GET /v1/status` | Per-chain projection progress, stored head, indexing-process liveness, network-head readiness, and required Sepolia completed-Ingest state plus [verification-level evidence](glossary.md#verification-level). |
 | Exact name profile | `GET /v1/names/{name}` | Indexed or verified name and record fields, plus [expiry-effective](glossary.md#expiry-effective-namewrapper-fuse-word) ENSv1 NameWrapper lifecycle and fuse data when backed, subject to the route's source rules. |
-| Resolver records | `GET /v1/names/{name}/records` | Key-selected record reads plus inventory metadata. |
+| Resolver records | `GET /v1/names/{name}/records` | Per-key record answers for the requested `keys` or, when `keys` is omitted, for the inventory-derived default key set (at most 200 keys), plus inventory metadata. The flat `addresses`, `text_records`, and `content_hash` maps are on name detail and `profile=detail` lookup, not this route. |
 | Direct subnames | `GET /v1/names/{name}/subnames` | Latest-state direct-subname collection. |
 | Name history | `GET /v1/names/{name}/history` | Name, registration, or combined history scope. |
 | Names by address | `GET /v1/addresses/{address}/names` | Owner, manager, and registrant relations with optional expansions. Inline role summaries allow 1,000 total grant rows; overflow returns 422. Each row exposes `permission_resource_id` for existing cursor-paginated permissions reads, including when the include is omitted. It is the handle `GET /v1/permissions?registration_id=` resolves to the row's permission resource: the same value as name detail's `registration_id` while the name retains a current registration identity, including unsupported name coverage, so for a wrapped `.eth` name it is the BaseRegistrar lease and not the NameWrapper resource; otherwise it is the resource itself. (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L240-L305 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L390-L414 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L118-L152 @ ens_v1@91c966f) |
@@ -84,8 +84,8 @@ When the selected resolver has the manifest-authorized
 [resolver read feature](glossary.md#resolver-read-feature), an eligible EVM
 coin-type request whose exact entry is empty or missing reads the projected
 default entry instead. The records route identifies per-key derived results in
-`records[key].meta`; values-only address maps contain the value without adding
-provenance fields. Derived values use the requested getter's verified decode:
+`records[key].meta`; the values-only address maps on exact-name detail and
+batch lookup contain the value without adding provenance fields. Derived values use the requested getter's verified decode:
 coin type `60` treats a 20-byte zero default as `not_found`, while EVM-range
 multicoin selectors retain that non-empty byte value. Exact stored records are
 not normalized by this rule. Completeness remains request-relative. ENSIP-19 defines the

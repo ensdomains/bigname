@@ -727,18 +727,41 @@ collection route carry neither header.
 - Purpose: resolver records.
 - Request parameters: path `name`; query `namespace`, `at`, `finality`,
   `source=indexed|verified|auto`, `keys`, `include=inventory`.
-- Response shape: `data` returns resolver record values using `namespace`,
-  `resolver`, `addresses`, `text_records`, and `content_hash`. `keys` is a
-  comma-separated
-  record-key allowlist using the existing app key grammar: `addr:<coin_type>`,
-  `text:<key>`, `avatar`, and `contenthash`. Requested-key outcomes are also
-  returned in route-local `records`, keyed by the requested key; each value is
-  `{status, value?, unsupported_reason?, failure_reason?, meta?}`. Exact indexed
-  and verified answers omit `meta`. An indexed ENSIP-19 answer derived from the
-  projected default-address rule includes
+- Response shape: `data` returns `namespace`, `resolver`, and route-local
+  `records`, plus `inventory` with `include=inventory`. `records` is the only
+  value shape on this route and is always present in a successful response:
+  an object keyed by record key whose values are
+  `{status, value?, unsupported_reason?, failure_reason?, meta?}`. This route
+  does not serve the flat `addresses`, `text_records`, or `content_hash` maps;
+  they remain on `GET /v1/names/{name}` and on `POST /v1/lookup` with
+  `profile=detail`. `keys` is a comma-separated record-key allowlist using the
+  existing app key grammar: `addr:<coin_type>`, `text:<key>`, `avatar`, and
+  `contenthash`. With `keys`, `records` holds one answer per requested key.
+  When `keys` is omitted, empty, or only whitespace, `records` answers the
+  default key set: every record key in that grammar found in the served record
+  inventory row's selectors, entries, and explicit gaps, parsed and
+  deduplicated. Only an inventory row the name may serve contributes (the
+  current-registration rule below). Coverage is not consulted while the set is
+  derived: an `unsupported` row still contributes its keys, which
+  `source=indexed` and unkeyed `source=auto` answer with the row's reason and
+  `source=verified` answers from verified execution. A record family listed only as unsupported
+  names no key, so it never enters the set; request its keys with `keys` to
+  read the per-key reason. The default set adds no derived keys: an ENSIP-19
+  derived `addr:<coin_type>` answer appears without `keys` only when the
+  inventory itself enumerates that key. `records` is `{}` when the request has
+  no key to answer, that is, no served inventory row or a row with no key in
+  the grammar. `{}` does not prove that the resolver has no records, that an
+  inventory row exists, or that verified reads are supported. Explicitly
+  requested keys are always answered, never replaced by `{}`. Answers
+  serialize in lexicographic byte order of the record key, so
+  `addr:2147483648` precedes `addr:60`. That order is the server's
+  deterministic serialization; JSON object member order carries no meaning and
+  clients need not preserve it. Exact indexed and verified answers omit
+  `meta`. An indexed ENSIP-19 answer derived from the projected
+  default-address rule includes
   `meta={basis:"derived", rule:"ensip19_default_address",
   source_record_key:"addr:2147483648"}` for both `ok` and authoritative
-  `not_found`. Values-only convenience maps continue to contain only values.
+  `not_found`.
   `source=verified`
   and verified fallback from `source=auto` execute a fresh schema-v2 lookup on
   every request. They do not read or write the legacy execution cache. A direct
@@ -770,7 +793,11 @@ collection route carry neither header.
   reservation does not meet this exception unless it is a root-registry TLD
   reservation served through the root-registry resolver pointer above.
   `include=inventory` does not expose
-  inventory retained for a former or audit-only resource. This intentionally
+  inventory retained for a former or audit-only resource, and such inventory
+  contributes no default keys: without `keys` the response carries
+  `records: {}` even when that retained inventory lists more than 200
+  selectors, while explicitly requested keys still receive their per-key
+  answers. This intentionally
   omits the resolver that ENSv2 can store and return for an unexpired
   reservation.
   See [registration status](api-v2.md#status-vocabulary) for the upstream
@@ -790,21 +817,23 @@ collection route carry neither header.
   mapped through the shared name-level vocabulary: a reason this build does not
   recognize or that carries pipeline wording becomes
   `unsupported_reason_unrecognized`, and a row naming no reason reports
-  `indexed_record_inventory_not_authoritative`. `addresses` and `text_records`
-  are `{}`, `content_hash` carries no value, and `resolver` still reports the
+  `indexed_record_inventory_not_authoritative`. Without `keys`, every key of
+  the default set receives that same answer. `resolver` still reports the
   declared registry pointer, which is registry evidence rather than a record.
   `include=inventory` lists every product key the row knows about (selectors,
   entries, explicit gaps, and the requested keys) under `unsupported_keys`;
   `known_keys` and `unset_keys` are empty because an unsupported row can assert
-  neither presence nor absence. `source=auto` treats those keys as unsatisfied
-  and executes verified lookup for them; `source=verified` is unaffected by
+  neither presence nor absence. With `keys`, `source=auto` treats those keys
+  as unsatisfied and executes verified lookup for them; without `keys` it
+  stays an indexed read and returns the `unsupported` answers above.
+  `source=verified` is unaffected by
   indexed coverage. The divergence ledger applies the same refusal: a verified
   answer over an unsupported inventory is compared against an `unsupported`
   indexed result, never against a retained entry value.
   A name whose current ENSv2 resolver is a declared
   [ENSv1 mirror resolver](glossary.md#ensv1-mirror-resolver-ensv1_mirror_resolver)
-  keeps that mirror as `data.resolver`, and its indexed `records`, `addresses`,
-  `text_records`, `content_hash`, and `include=inventory` come from the ENSv1
+  keeps that mirror as `data.resolver`, and its indexed `records` and
+  `include=inventory` come from the ENSv1
   resolver the mirror's registry walk selects for the name (the exact node's,
   else the nearest ancestor's), read for the queried node exactly as Project
   derived it ([`projections.md`](projections.md#resolver-and-records)); the
@@ -812,17 +841,13 @@ collection route carry neither header.
   empty because it is the ancestor resolver's storage for this node. When no
   consulted node has a projected resolver, or the selected ancestor resolver is
   declared `ensip10_extended_resolver`, the inventory is unsupported with
-  `mirrored_resolver_not_projected`, and `source=auto` falls back to verified
-  lookup as for any unsupported inventory.
+  `mirrored_resolver_not_projected`, and `source=auto` with `keys` falls back
+  to verified lookup as for any unsupported inventory.
 
-  Representative keyed answers and convenience fields are:
+  Representative keyed answers are:
 
   ```json
   {
-    "addresses": {
-      "0": "0x001122"
-    },
-    "content_hash": "0xe3010170",
     "records": {
       "contenthash": {
         "status": "ok",
@@ -839,20 +864,23 @@ collection route carry neither header.
   }
   ```
 
-  Coin types in record keys and the `addresses` map are decimal strings.
+  Coin types in record keys are decimal strings.
   Contenthash and address answers are scalar lowercase, `0x`-prefixed hex.
   This route flattens both projected `{encoding,bytes}` address values and
   projected scalar address values to that same public string; the exact-name
   detail route, `profile=detail` lookup, and GraphQL resolver address fields
   apply the same normalization.
   A zero-length byte payload makes the exact stored answer `not_found` and
-  omits `value`. Cleared exact values are absent from `addresses` and
-  `content_hash` unless a documented derived-record rule supplies a replacement
-  answer. The ENSIP-19 default-address rule below is one such rule.
-  `source=auto` blends per key: indexed answers are used where they satisfy the
-  requested key, and only the remaining supported keys fall back to verified
-  lookup. A verified read has two closed refusal reasons of its own, reported
-  per key on this route and as `data.unsupported_reason` on the verified
+  omits `value`, so a cleared exact value answers `not_found` unless a
+  documented derived-record rule supplies a replacement answer. The ENSIP-19
+  default-address rule below is one such rule.
+  With `keys`, `source=auto` blends per key: indexed answers are used where
+  they satisfy the requested key, and only the remaining supported keys fall
+  back to verified lookup. Without `keys` (omitted, empty, or only
+  whitespace), `source=auto` is an indexed read of the default key set: it
+  makes no verified fallback, reports `meta.source=indexed`, and returns the
+  same answers as `source=indexed`. A verified read has two closed refusal
+  reasons of its own, reported per key on this route and as `data.unsupported_reason` on the verified
   exact-name detail route: `verified_records_not_supported` when the projected
   row carries no topology the engine admits (a bound name without a record
   inventory row, a null-resolver row outside the discovery shape below, an
@@ -924,8 +952,8 @@ collection route carry neither header.
   attribution, another coin type, another nonempty byte length, and nonzero addresses retain
   their values. The exact entry remains but omits `value`. Indexed and auto
   retain exact `not_found` even when an authorized nonzero default exists;
-  verified returns the same absence. `addresses["60"]`, `primary_address`, and
-  default derivation metadata remain absent. Empty or missing exact data keeps
+  verified returns the same absence. Name detail's `addresses["60"]` and
+  `primary_address`, and default derivation metadata, remain absent. Empty or missing exact data keeps
   permitted fallback. The private observation marker and inventory provenance
   do not appear in product responses or record diagnostics.
   (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L22-L24 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L47-L70 @ ens_v1@91c966f)
@@ -999,10 +1027,15 @@ collection route carry neither header.
   will attempt that verified fallback. If projection movement removes the last
   fallback key while the expanded snapshot is being selected, the request
   returns `409 stale` so a retry can return an indexed Base-scoped response.
-  Explicit `keys` and the inventory-derived default verified selector set are
-  both limited to 200 record keys. When omitted `keys` would derive more than
-  200 keys, `source=verified` returns `422 unsupported` before any provider call;
-  callers can supply `keys` to select a smaller set. For the verified flat
+  Explicit `keys` and the default key set are both limited to 200 record keys.
+  More than 200 explicit keys is `400 invalid_input`. The limit applies to the
+  default set after parsing and deduplication, so a key repeated across
+  selectors, entries, and explicit gaps counts once and an inventory key
+  outside the grammar does not count. When the default set would hold more
+  than 200 keys, every source (`indexed`, `verified`, and `auto`) returns
+  `422 unsupported` before any lookup or provider call; a set of exactly 200
+  keys is served. The route never truncates the set; callers can supply `keys`
+  to select a smaller one. For the verified flat
   name-profile, the limit applies to inventory-derived selectors before the
   route adds its synthetic primary-address request. A 200-selector inventory
   may therefore produce 201 provider keys when `addr:60` was absent; an
@@ -1011,9 +1044,23 @@ collection route carry neither header.
   `inventory: {known_keys, unset_keys, unsupported_keys}`, the container
   `POST /v1/lookup` also serves per name with the same meaning. Deep inventory
   internals stay on diagnostics.
+  All three sources read the same record inventory row for the default key
+  set and `include=inventory`: the served inventory at the selected snapshot
+  on whichever chain the deployment indexes, with the same binding,
+  serving-resource, chain-position, record-version-boundary, and snapshot
+  checks for every source. Reading inventory does not admit verified
+  execution. `source=verified` and verified fallback still pass the lookup
+  engine's topology, authority-arm, admitted-position, and provider checks, so
+  a name those checks refuse answers each default key with the same per-key
+  refusal it gives the same explicit keys (`verified_records_not_supported` or
+  `exact_name_authority_not_verifiable`), and those checks may refuse before
+  any provider call. A
+  verified request with explicit `keys` reads the same inventory, so
+  `include=inventory` carries its lists, and inventory that is ahead of the
+  selected snapshot fails the request as it does an indexed read.
 - Pagination behavior: none.
 - Status semantics: a missing name returns `404 not_found`. Missing, unset, or
-  unsupported requested record values are reported with the common result
+  unsupported requested or default record values are reported with the common result
   `status` vocabulary inside the record answer rather than by changing the
   envelope. A proven migration uses
   only the selected ENSv2 resolver; the retained ENSv1 resolver is historical.
@@ -1151,8 +1198,9 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   bigname cannot name is absent from the page instead. Neither form is
   addressable, and neither may be fed
   back into a name-shaped route. Resolver records are not included here;
-  use `GET /v1/names/{name}/records` for `resolver`, `addresses`,
-  `text_records`, and `content_hash`.
+  use `GET /v1/names/{name}` for `resolver`, `addresses`, `text_records`, and
+  `content_hash`, or `GET /v1/names/{name}/records` for per-key record
+  answers.
   `include=counts` adds `subname_count`, the row's direct subname count.
   `subregistry` is `{chain_id, address}` of the ENSv2 registry the child's
   current subregistry pointer targets, omitted when there is none.
