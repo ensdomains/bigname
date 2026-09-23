@@ -1175,7 +1175,9 @@ to the product and record-diagnostic routes; a family outside it is rejected as
 - Snapshot behavior: the parent, child rows and filtered count use one
   revalidated publication, disclosed in `meta.as_of`. Continuations retain its
   identity and expiry evaluation time. A changed publication returns `409 stale`
-  requiring a restart. Historical child enumeration is not supported.
+  requiring a restart without the cursor; a first page whose publication changes
+  during the read can simply be retried. Historical child enumeration is not
+  supported.
 - Status semantics: no direct subnames returns `200` with empty `data`.
   Missing parent names return `404 not_found`. Each child appears at most once,
   from the relation its own selected authority names. ENSv1 relations that are
@@ -1646,8 +1648,10 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
 - Snapshot behavior: a `name` filter resolves its current registration anchor
   and permission rows under the same revalidated publication, disclosed in
   `meta.as_of`. Completeness metadata remains available. Continuations bind the
-  publication; a change returns `409 stale` requiring a restart. Historical
-  permission enumeration is not supported.
+  publication; a change returns `409 stale` requiring a restart without the
+  cursor. A first page whose publication changes during the read returns
+  `409 stale` too and can simply be retried. Historical permission enumeration
+  is not supported.
 - Status semantics: no matching permission rows returns `200` with empty
   `data`, including when a `name` filter has no registration anchor in the
   current state. Unsupported filter combinations return `422 unsupported`;
@@ -2750,7 +2754,9 @@ For a registrar lease first identified by a later readable observation, registra
   `referenced_by.page` object; its cursor binds the chain and registry. The
   top-level response has no `page`. Continuations bind both the selected block
   and the current publication; a publication change returns `409 stale` and
-  requires restarting without a cursor.
+  requires restarting without a cursor. A request without a cursor whose
+  publication changes during the read returns `409 stale` too and can simply be
+  retried.
 - Snapshot behavior: the route selects the chain's served position like the
   resolver overview and reports `meta.as_of` and `meta.as_of_token`. The
   creation, pointer, and event-count evidence is bounded to that position, so
@@ -2796,7 +2802,9 @@ For a registrar lease first identified by a later readable observation, registra
   registry.
 - Snapshot behavior: rows and totals come from one revalidated current
   publication, reported in `meta.as_of`. Cursors bind that publication; if it
-  changes, return `409 stale` and restart pagination.
+  changes, return `409 stale` and restart pagination without the cursor. A first
+  page whose publication changes during the read returns `409 stale` too and can
+  simply be retried.
 - Status semantics: an unknown registry returns `404 not_found`; a known
   registry with no labels returns `200` with empty `data`. Malformed
   `chain_id`, `address`, `include`, or cursor values return `400 invalid_input`.

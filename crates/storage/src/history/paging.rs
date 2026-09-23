@@ -145,13 +145,21 @@ pub(super) async fn load_history_page(
         page_limit,
     );
 
-    // Unprepared, so PostgreSQL plans every page with its bound values. A prepared statement
-    // may switch to a generic plan after five runs, and without the values PostgreSQL guesses
-    // that a block range between the cursor and the window bound holds 0.5% of the rows, which
-    // can make sorting every matching row look cheaper than reading the order index.
+    // An unanchored page is sent unprepared, so PostgreSQL plans it with its bound block
+    // values. A prepared statement may switch to a generic plan after five runs, which guesses
+    // 0.5% of the rows for a range between two unknown block bounds (an oldest-first cursor, or
+    // a newest-first window with a lower bound) and 33% for each lone `<=` bound. On the test
+    // fixture the generic plan still reads the order index from the cursor block
+    // (`generic_plans_still_read_the_order_index_from_the_cursor_block`); planning with the
+    // real values keeps that choice from resting on the guesses. Only an unanchored page is
+    // driven by the order index, so only it pays the planning, about 16 to 19 ms per page on
+    // the test machine; anchored pages keep their cached plans.
+    // sqlx looks its statement cache up by SQL text before it consults `persistent`, so a
+    // persistent execution of byte-identical text on the same connection would make this one
+    // reuse that prepared statement.
     let rows = builder
         .build()
-        .persistent(false)
+        .persistent(!order_index_drives_page(&filter))
         .fetch_all(&mut *transaction)
         .await
         .context("failed to fetch normalized-event history page")?;
@@ -172,6 +180,15 @@ pub(super) async fn load_history_page(
         summary,
         interpret_redo_fence: interpret_redo_fence.cloned(),
     })
+}
+
+/// Whether nothing anchors the page to a name, registration, address, resolver or contract,
+/// so the chain-position order index, not an anchor's index, drives the read.
+pub(super) fn order_index_drives_page(filter: &EventHistoryReadFilter) -> bool {
+    filter.selectors.is_empty()
+        && filter.registration_id.is_none()
+        && filter.resolver.is_none()
+        && filter.contract_address.is_none()
 }
 
 /// One keyset page of history rows: the rows after the keyset's cursor in `filter.order`, at

@@ -1892,14 +1892,19 @@ unfiltered `/v1/events` page, on one chain,
 `(chain_id, block_number DESC NULLS LAST)` returns rows in the page order: read
 forward newest first and backward oldest first. PostgreSQL stops after one page
 instead of sorting every matching event; the remaining sort keys only order the
-events of one block. Anchored reads start from their anchor's own indexes. The older ascending `(chain_id, block_number)` index read
-backward puts events without a block first, so it cannot serve this order. A
-continued page also bounds the scan at the cursor event's block, read in the
+events of one block. Anchored reads start from their anchor's own indexes. The
+older ascending `(chain_id, block_number)` index read backward puts events
+without a block first, so it cannot serve this order.
+
+A continued page also bounds the scan at the cursor event's block, read in the
 same transaction that validates the cursor, so page N does not reread the rows
 of earlier pages. That bound is added only when the read already excludes
-events without a block. The page query is sent unprepared, so PostgreSQL plans
-each page with the actual block values; a cached generic plan would guess the
-size of the block range. Planning takes a few milliseconds per page.
+events without a block. An unanchored page query is sent unprepared, so
+PostgreSQL plans each page with the actual block values instead of a cached
+generic plan's guess at the size of the block range. On the test fixture the
+generic plan also reads the index from the cursor block, so this is a margin,
+not a requirement. Planning an unanchored page takes about 16 to 19 ms on the
+test machine. Anchored pages keep their cached prepared plans.
 
 A window that spans several chains, such as an unanchored read over a namespace
 published on two chains, still reads and sorts every matching event, because no

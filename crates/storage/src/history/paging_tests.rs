@@ -1,14 +1,14 @@
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use bigname_test_support::{TestDatabase, TestDatabaseConfig};
 use serde_json::Value;
-use sqlx::{PgPool, Postgres, QueryBuilder};
+use sqlx::{Arguments, Execute, PgConnection, PgPool, Postgres, QueryBuilder};
 
 use super::super::keyset::load_history_keyset;
 use super::super::{
     ChainBlockRange, EventHistoryReadFilter, HistoryBlockWindow, HistoryCursor, HistoryOrder,
     HistorySummaryMode,
 };
-use super::{load_history_page, push_history_page_query};
+use super::{load_history_page, order_index_drives_page, push_history_page_query};
 
 const ORDER_INDEX: &str = "normalized_events_chain_block_number_desc_idx";
 
@@ -216,62 +216,128 @@ const PLAN_FIXTURE: &str = r#"
 
 const PLAN_PAGE_LIMIT: i64 = 21;
 
+/// How the page query reaches PostgreSQL in a plan check.
+#[derive(Clone, Copy, Debug)]
+enum PlanMode {
+    /// As `load_history_page` sends an unanchored page: unprepared, planned with its values.
+    Unprepared,
+    /// A prepared statement on its generic plan, which does not see the bound values.
+    Generic,
+}
+
 #[tokio::test]
 async fn events_pages_read_the_order_index_from_the_cursor_block() -> Result<()> {
     let database = phase_database("history_keyset_plan", PLAN_FIXTURE).await?;
-    let result = assert_order_index_plans(database.pool()).await;
+    let result = async {
+        let mut connection = database.pool().acquire().await?;
+        let failures = order_index_plan_failures(&mut connection, PlanMode::Unprepared).await?;
+        ensure!(failures.is_empty(), "{}", failures.join("\n"));
+        Ok(())
+    }
+    .await;
     database.cleanup().await?;
     result
 }
 
-async fn assert_order_index_plans(pool: &PgPool) -> Result<()> {
+/// Evidence for sending only unanchored pages unprepared: a generic plan, which guesses the
+/// size of the block range, still reads the order index from the cursor block.
+#[tokio::test]
+async fn generic_plans_still_read_the_order_index_from_the_cursor_block() -> Result<()> {
+    let database = phase_database("history_keyset_generic_plan", PLAN_FIXTURE).await?;
+    let result = async {
+        let mut connection = database.pool().acquire().await?;
+        sqlx::query("SET plan_cache_mode = force_generic_plan")
+            .execute(&mut *connection)
+            .await?;
+        let failures = order_index_plan_failures(&mut connection, PlanMode::Generic).await?;
+        ensure!(failures.is_empty(), "{}", failures.join("\n"));
+        Ok(())
+    }
+    .await;
+    database.cleanup().await?;
+    result
+}
+
+/// The plan check fails without the index, so the index is what makes the pages cheap.
+#[tokio::test]
+async fn plan_check_fails_without_the_order_index() -> Result<()> {
+    let database = phase_database("history_keyset_no_index", PLAN_FIXTURE).await?;
+    let result = async {
+        let mut transaction = database.pool().begin().await?;
+        sqlx::query(&format!("DROP INDEX {ORDER_INDEX}"))
+            .execute(&mut *transaction)
+            .await?;
+        let failures = order_index_plan_failures(&mut transaction, PlanMode::Unprepared).await?;
+        transaction.rollback().await?;
+        for page in PLAN_PAGES {
+            ensure!(
+                failures
+                    .iter()
+                    .any(|failure| failure.starts_with(&format!("{page}: the page must read"))),
+                "{page} passed the plan check without {ORDER_INDEX}: {failures:?}"
+            );
+        }
+        Ok(())
+    }
+    .await;
+    database.cleanup().await?;
+    result
+}
+
+const PLAN_PAGES: [&str; 4] = [
+    "newest-first first page",
+    "oldest-first first page",
+    "newest-first deep page",
+    "oldest-first deep page",
+];
+
+/// Plan each unanchored events page and report every page that does not read the order index
+/// or visits more than a few blocks' events.
+async fn order_index_plan_failures(
+    connection: &mut PgConnection,
+    mode: PlanMode,
+) -> Result<Vec<String>> {
     let block_window = Some(window(&[("ethereum-sepolia", None, Some(10_000))]));
     // Each cursor sits 15,000 rows into its order, 5,000 rows from the other end.
-    let newest_first_cursor = cursor_at(pool, "fixture:ethereum-sepolia:2500:0").await?;
-    let oldest_first_cursor = cursor_at(pool, "fixture:ethereum-sepolia:7500:0").await?;
+    let newest_first_cursor = cursor_at(connection, "fixture:ethereum-sepolia:2500:0").await?;
+    let oldest_first_cursor = cursor_at(connection, "fixture:ethereum-sepolia:7500:0").await?;
     let mut failures = Vec::new();
-    for (order, cursor, label) in [
-        (HistoryOrder::Desc, None, "newest-first first page"),
-        (HistoryOrder::Asc, None, "oldest-first first page"),
+    for (order, cursor, page) in [
+        (HistoryOrder::Desc, None, PLAN_PAGES[0]),
+        (HistoryOrder::Asc, None, PLAN_PAGES[1]),
         (
             HistoryOrder::Desc,
             Some(&newest_first_cursor),
-            "newest-first deep page",
+            PLAN_PAGES[2],
         ),
-        (
-            HistoryOrder::Asc,
-            Some(&oldest_first_cursor),
-            "oldest-first deep page",
-        ),
+        (HistoryOrder::Asc, Some(&oldest_first_cursor), PLAN_PAGES[3]),
     ] {
         let filter = events_filter(order, block_window.clone());
-        let mut connection = pool.acquire().await?;
+        ensure!(
+            order_index_drives_page(&filter),
+            "{page}: the plan fixture must read an unanchored page"
+        );
         let keyset = match cursor {
             Some(cursor) => {
-                Some(load_history_keyset(&mut connection, &filter, true, cursor, false).await?)
+                Some(load_history_keyset(connection, &filter, true, cursor, false).await?)
             }
             None => None,
         };
-        let mut explain = QueryBuilder::<Postgres>::new("EXPLAIN (ANALYZE, FORMAT JSON) ");
+        let mut query = QueryBuilder::<Postgres>::new("");
         push_history_page_query(
-            &mut explain,
+            &mut query,
             &filter,
             true,
             keyset.as_ref(),
             false,
             PLAN_PAGE_LIMIT,
         );
-        // Unprepared, as load_history_page sends the page query.
-        let plan: Value = explain
-            .build_query_scalar()
-            .persistent(false)
-            .fetch_one(&mut *connection)
-            .await?;
+        let plan = explain_page(connection, query, mode).await?;
         let mut scans = Vec::new();
         page_scans(&plan[0]["Plan"], &mut scans);
         ensure!(
             scans.len() == 1,
-            "{label}: expected one scan of the page's events, found {}: {plan}",
+            "{page}: expected one scan of the page's events, found {}: {plan}",
             scans.len()
         );
         let scan = scans[0];
@@ -279,33 +345,88 @@ async fn assert_order_index_plans(pool: &PgPool) -> Result<()> {
             + scan["Rows Removed by Filter"].as_f64().unwrap_or(0.0))
             * scan["Actual Loops"].as_f64().unwrap_or(1.0);
         let summary = format!(
-            "{} {} {} cond {} visited {visited}",
+            "{mode:?} {} {} {} cond {} visited {visited}",
             scan["Node Type"], scan["Scan Direction"], scan["Index Name"], scan["Index Cond"]
         );
-        eprintln!("{label}: {summary}");
+        eprintln!("{page}: {summary}");
         if scan["Index Name"] != ORDER_INDEX {
             failures.push(format!(
-                "{label}: the page must read {ORDER_INDEX}; read {summary}"
+                "{page}: the page must read {ORDER_INDEX}; read {summary}"
             ));
         }
         // A page of 21 reads the few rows of the blocks it spans. Reading from the newest or
         // oldest row instead of the cursor block visits 15,000.
         if visited > (3 * PLAN_PAGE_LIMIT) as f64 {
             failures.push(format!(
-                "{label}: the page visited {visited} events instead of starting at the cursor block; {summary}"
+                "{page}: the page visited {visited} events instead of starting at the cursor block; {summary}"
             ));
         }
     }
-    ensure!(failures.is_empty(), "{}", failures.join("\n"));
-    Ok(())
+    Ok(failures)
 }
 
-async fn cursor_at(pool: &PgPool, event_identity: &str) -> Result<HistoryCursor> {
+/// `EXPLAIN ANALYZE` the page query. A bound `EXPLAIN` plans with the values as constants
+/// whatever `plan_cache_mode` says, so the generic mode prepares the query and explains an
+/// `EXECUTE` of it with the same values.
+async fn explain_page(
+    connection: &mut PgConnection,
+    mut query: QueryBuilder<'_, Postgres>,
+    mode: PlanMode,
+) -> Result<Value> {
+    match mode {
+        PlanMode::Unprepared => {
+            let mut explain = QueryBuilder::<Postgres>::new("EXPLAIN (ANALYZE, FORMAT JSON) ");
+            explain.push(query.sql());
+            let sql = explain.into_sql();
+            let mut built = query.build();
+            let arguments = built.take_arguments().map_err(anyhow::Error::from_boxed)?;
+            Ok(sqlx::query_scalar_with(&sql, arguments.unwrap_or_default())
+                .persistent(false)
+                .fetch_one(&mut *connection)
+                .await?)
+        }
+        PlanMode::Generic => {
+            sqlx::raw_sql(&format!("PREPARE history_page AS {}", query.sql()))
+                .execute(&mut *connection)
+                .await
+                .context("failed to prepare the page query")?;
+            let mut built = query.build();
+            let arguments = built
+                .take_arguments()
+                .map_err(anyhow::Error::from_boxed)?
+                .unwrap_or_default();
+            // EXECUTE takes no protocol parameters, so PostgreSQL renders each bound value as a
+            // quoted literal for it.
+            let placeholders = (1..=arguments.len())
+                .map(|index| format!("quote_nullable(${index})"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let literals: Vec<String> =
+                sqlx::query_scalar_with(&format!("SELECT ARRAY[{placeholders}]"), arguments)
+                    .persistent(false)
+                    .fetch_one(&mut *connection)
+                    .await?;
+            let plan = sqlx::query_scalar(&format!(
+                "EXPLAIN (ANALYZE, FORMAT JSON) EXECUTE history_page({})",
+                literals.join(", ")
+            ))
+            .persistent(false)
+            .fetch_one(&mut *connection)
+            .await;
+            sqlx::raw_sql("DEALLOCATE history_page")
+                .execute(&mut *connection)
+                .await?;
+            Ok(plan?)
+        }
+    }
+}
+
+async fn cursor_at(connection: &mut PgConnection, event_identity: &str) -> Result<HistoryCursor> {
     let normalized_event_id = sqlx::query_scalar(
         "SELECT normalized_event_id FROM normalized_events WHERE event_identity = $1",
     )
     .bind(event_identity)
-    .fetch_one(pool)
+    .fetch_one(&mut *connection)
     .await?;
     Ok(HistoryCursor {
         normalized_event_id,
