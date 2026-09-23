@@ -169,6 +169,7 @@ async fn api_lookup_ddl_inventory_matches_every_serving_path_phase_object() -> R
         "relation: bigname_phase.chain_heads",
         "relation: bigname_phase.chain_lineage",
         "relation: bigname_phase.chain_phase_state",
+        "relation: bigname_phase.child_registration_events",
         "relation: bigname_phase.children_current",
         "relation: bigname_phase.contract_instance_addresses",
         "relation: bigname_phase.manifest_contract_instances",
@@ -192,7 +193,7 @@ async fn api_lookup_ddl_inventory_matches_every_serving_path_phase_object() -> R
     .map(str::to_owned));
 
     assert_eq!(actual, expected);
-    assert_eq!(actual.len(), 28);
+    assert_eq!(actual.len(), 29);
     database.cleanup().await
 }
 

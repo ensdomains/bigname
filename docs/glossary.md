@@ -404,6 +404,18 @@ logs, and a resource-scoped `PermissionChanged` for the NameWrapper per-token
 `Approval`; declared registrar and resolver approvals still decode without
 normalized output.
 
+## Direct child registration
+
+a registration row of a name exactly one label below another name, in the same
+namespace and on the same chain, as the event attributed it when it happened.
+Name history lists these rows for the parent with
+[`include=child_registrations`](api-v2-routes.md#direct-child-registrations-includechild_registrations).
+The rule is historical: a child released since, or registered under a registry
+the parent no longer links, still counts. It is a stored grant row, not one
+registration action, so one registration can contribute several rows. The
+Project table [`child_registration_events`](projections.md#child-registration-events)
+records which events qualify for which parent.
+
 ## Discovery graph / discovery edge
 
 the time-versioned indexability and

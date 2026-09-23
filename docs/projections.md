@@ -245,6 +245,7 @@ outcomes, or durable traces.
 | `address_names_current` | `(address, logical_name_id, relation)` | address-to-names and reverse lookup |
 | `address_records_current` | `(address, coin_type, logical_name_id)` | names whose current `addr:<coin_type>` record resolves to an address (`relation=resolves_to`) |
 | `children_current` | parent/child identity plus class | direct and classified child collections |
+| `child_registration_events` | `(parent_logical_name_id, event_identity)` | direct child registration rows in name history ([below](#child-registration-events)) |
 | `permissions_current` | resource, subject, and scope | resource permissions and role summaries |
 | `account_permission_state_current` | (`chain_id`, `authority_kind`, `authority_contract`, `owner`, `subject`, `relation_kind`) | effective registry-operator permissions by account or resource |
 | `permissions_current_resource_summary` | `resource_id` | permission support and authority summary |
@@ -668,7 +669,53 @@ type filtering, keyset pagination, page-size limiting, or cursor construction,
 so neither candidate admission nor the extra resource link can broaden, shorten,
 or reorder a product page. Projection rows may supply readable names for result
 decoration, but the API does not synthesize history from current state.
+Name history's `include=child_registrations` selects its extra rows through
+the historical [`child_registration_events`](#child-registration-events)
+membership; the rows it returns are still normalized events.
 (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L89-L94 @ ens_v1@91c966f)
+
+### Child registration events
+
+`child_registration_events` lists, for each name, the normalized events that
+are registrations of its direct children. It is historical membership, not a
+current child list: one row per parent logical name and event identity, with
+the event's chain position. Name history reads it for
+[`include=child_registrations`](api-v2-routes.md#direct-child-registrations-includechild_registrations);
+event payloads and public event IDs still come from `normalized_events`.
+
+Project derives each row from one staged event and the event's own name
+surface, nothing else:
+
+- The event is an activated, readable canonical `RegistrationGranted` (or
+  `LabelRegistered`) row with a chain position and a logical name, and it is
+  not a state-derived registrar surface snapshot, the one registration row
+  product history already suppresses as a duplicate.
+- The event's name surface is `active` and has at least two labels.
+- The parent is the name one label up: its identity is the event's namespace
+  and the namehash of the surface's label hashes without the first one. The
+  parent's own surface is not consulted, so the row does not depend on when or
+  whether the parent was surfaced. Serving requires the row's chain to equal
+  the requested name's surface chain.
+- Rows whose parent is `eth` or `base.eth` are not stored. Name history refuses
+  the option for those two names, and every second-level registrar grant would
+  otherwise be copied here.
+
+The event's logical name is the one Interpret attributed when the event
+happened, so the rule never borrows eligibility from `children_current`,
+`name_current`, the parent's current subregistry, or a current contract
+address range. Rows therefore survive a child's release, the parent unlinking
+or replacing its subregistry, and a registry moving under another parent: the
+registry's earlier grants keep their earlier parent and its later grants get
+the new one.
+
+A full rebuild replaces every row of the chain from the staged history.
+Because a row depends only on its event and that event's surface, an
+incremental or redo publication deletes the chain's rows in the affected block
+range, rows above the target, and rows at or above the range start whose block
+is no longer readable canonical lineage, then inserts the rows derived from
+the range's staged changed events. The publication is part of the same
+transaction as every other projection. Rows keep the target of the publication
+that wrote them, like other rows outside an incremental scope.
 
 For a slice-1 test re-walk that must not change product behavior at a fixed
 readable chain head, an outstanding product cursor backed by normalized-event
@@ -1393,7 +1440,8 @@ permission-resource references, while `project_redo_expiry_roots` retains
 logical names and permission resources from state-derived ENSv2 path-expiry
 releases. `project_redo_child_registration_history` retains affected child and
 registry identifiers for removed migration-registry entry history. None is
-serving data. Project consumes a row only when its
+serving data. `child_registration_events` needs no handoff: its rows are keyed
+by block range, so the affected range itself says which rows to replace. Project consumes a row only when its
 publication range covers the recorded block; an operator redo ending below an
 already recorded Project head can therefore leave later rows for a covering
 redo or full rebuild.
