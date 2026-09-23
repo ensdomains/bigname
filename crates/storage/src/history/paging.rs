@@ -5,10 +5,11 @@ use super::redo::{InterpretRedoFence, ensure_interpret_redo_fence};
 use super::{
     EventHistoryReadFilter, HistoryCursor, HistoryEvent, HistoryOrder, HistoryPage,
     HistorySummaryMode, InvalidHistoryCursor,
+    columns::push_history_select,
     decoders::decode_history_event,
     duplicates::push_product_history_duplicate_filter,
     filters::{push_history_block_window, push_selector_filter, push_string_filter},
-    registration_identity::{push_product_registration_id, push_registration_filter},
+    registration_identity::push_registration_filter,
     selectors::HistorySelector,
     source::{push_history_canonicality_filter, push_history_source_for_filter},
     summary::load_history_summary,
@@ -216,112 +217,6 @@ async fn load_history_internal(
     rows.into_iter().map(decode_history_event).collect()
 }
 
-pub(super) fn push_history_select<'a>(
-    builder: &mut QueryBuilder<'a, Postgres>,
-    filter: &'a EventHistoryReadFilter,
-    canonical_only: bool,
-    include_cursor_row: bool,
-    include_candidates: bool,
-) {
-    builder.push(
-        r#"
-        SELECT
-            ne.normalized_event_id,
-            ne.event_identity,
-            ne.namespace,
-            ne.logical_name_id,
-            ne.resource_id,
-        "#,
-    );
-    push_product_registration_id(builder, canonical_only);
-    builder.push(
-        r#" AS registration_id,
-            ne.event_kind,
-            ne.source_family,
-            ne.manifest_version,
-            ne.source_manifest_id,
-            ne.chain_id,
-            ne.block_number,
-            ne.block_hash,
-            rb.block_timestamp,
-            ne.transaction_hash,
-            ne.log_index,
-            ne.raw_fact_ref,
-            ne.derivation_kind,
-            ne.canonicality_state::TEXT AS canonicality_state,
-            ne.before_state,
-            ne.after_state,
-        "#,
-    );
-    if include_candidates {
-        builder.push(
-            r#"
-            ne.migration_correlation_ids,
-            ne.consumer_visibility,
-            COALESCE(
-                (
-                    SELECT jsonb_agg(
-                        jsonb_build_object(
-                            'migration_correlation_ids',
-                            ARRAY[association.migration_correlation_id],
-                            'correlation_kind', association.correlation_kind,
-                            'consumer_visibility', association.consumer_visibility
-                        )
-                        ORDER BY association.migration_correlation_id,
-                                 association.correlation_kind,
-                                 association.consumer_visibility
-                    )
-                    FROM migration_event_associations AS association
-                    WHERE association.event_identity = ne.event_identity
-                ),
-                '[]'::jsonb
-            ) AS migration_associations,
-            "#,
-        );
-    } else {
-        builder.push(
-            r#"
-            ARRAY[]::text[] AS migration_correlation_ids,
-            'activated'::text AS consumer_visibility,
-            '[]'::jsonb AS migration_associations,
-            "#,
-        );
-    }
-    builder.push(
-        r#"
-            COALESCE(
-                CASE
-                    WHEN jsonb_typeof(ne.after_state -> 'provenance') = 'object'
-                        THEN ne.after_state -> 'provenance'
-                END,
-                CASE
-                    WHEN jsonb_typeof(ne.before_state -> 'provenance') = 'object'
-                        THEN ne.before_state -> 'provenance'
-                END,
-                '{}'::jsonb
-            ) AS provenance,
-            COALESCE(
-                CASE
-                    WHEN jsonb_typeof(ne.after_state -> 'coverage') = 'object'
-                        THEN ne.after_state -> 'coverage'
-                END,
-                CASE
-                    WHEN jsonb_typeof(ne.before_state -> 'coverage') = 'object'
-                        THEN ne.before_state -> 'coverage'
-                END,
-                '{}'::jsonb
-            ) AS coverage
-        "#,
-    );
-    push_history_source_for_filter(
-        builder,
-        filter,
-        canonical_only,
-        include_cursor_row,
-        include_candidates,
-    );
-}
-
 pub(super) fn push_history_filters<'a>(
     builder: &mut QueryBuilder<'a, Postgres>,
     filter: &'a EventHistoryReadFilter,
@@ -485,7 +380,7 @@ async fn ensure_history_cursor_exists(
     }
 }
 
-fn push_history_cursor_cte<'a>(
+pub(super) fn push_history_cursor_cte<'a>(
     builder: &mut QueryBuilder<'a, Postgres>,
     cursor: &'a HistoryCursor,
 ) {
@@ -510,7 +405,10 @@ fn push_history_cursor_cte<'a>(
 /// Keyset continuation predicate. `later` sorts after `earlier` in the canonical
 /// descending order; the ascending direction swaps the two rows because it is
 /// the exact reverse of that order.
-fn push_history_cursor_after(builder: &mut QueryBuilder<'_, Postgres>, order: HistoryOrder) {
+pub(super) fn push_history_cursor_after(
+    builder: &mut QueryBuilder<'_, Postgres>,
+    order: HistoryOrder,
+) {
     let (later, earlier) = match order {
         HistoryOrder::Desc => ("ne", "cursor_row"),
         HistoryOrder::Asc => ("cursor_row", "ne"),

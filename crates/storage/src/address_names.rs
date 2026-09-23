@@ -4,6 +4,8 @@ mod page;
 mod query;
 mod read;
 mod resolves_to;
+mod resolves_to_evm;
+mod resolves_to_filter;
 mod types;
 pub use count::{AddressNamesCurrentCountFilter, count_address_names_current_for_app_filter};
 pub use page::{
@@ -24,6 +26,15 @@ pub use read::{
 pub use resolves_to::{
     AddressRecordCurrentEntry, AddressRecordsCurrentPage, ENSIP19_DEFAULT_ADDRESS_RECORD_KEY,
     load_address_records_current_page,
+};
+pub use resolves_to_evm::{
+    AddressRecordCoinMatch, AddressRecordEvmEntry, AddressRecordsCurrentEvmPage,
+    EVM_MATCHED_COIN_TYPES_PER_ROW_LIMIT, load_address_records_current_evm_page,
+};
+#[cfg(any(test, feature = "test-support"))]
+pub use resolves_to_evm::{
+    address_records_current_evm_page_sql_for_test,
+    explain_address_records_current_evm_page_for_test,
 };
 pub use types::{
     AddressNameCurrentEntry, AddressNameCurrentRow, AddressNameRelation, AddressNamesCurrentCursor,

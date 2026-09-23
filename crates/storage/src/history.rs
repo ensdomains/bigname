@@ -2,6 +2,9 @@ mod address_matches;
 mod attribution;
 mod binding_anchors;
 mod block_window;
+mod child_arm;
+mod child_registrations;
+mod columns;
 mod decoders;
 mod duplicates;
 mod event_page;
@@ -35,6 +38,12 @@ use selectors::{name_history_selector, resource_history_selector};
 
 pub use attribution::load_bounded_record_attribution;
 pub use block_window::resolve_chain_block_ranges;
+#[cfg(any(test, feature = "test-support"))]
+pub use child_registrations::explain_name_history_page_with_child_registrations_for_test;
+pub use child_registrations::{
+    HistorySubject, NameHistoryPage, NameHistoryRow,
+    load_name_history_page_with_child_registrations,
+};
 pub use event_page::{load_event_history_page, load_event_history_page_with_redo_policy};
 pub use options::{
     ChainBlockRange, HistoryBlockWindow, HistoryOrder, HistoryPageOptions, HistoryScope,

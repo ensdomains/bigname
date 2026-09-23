@@ -229,24 +229,41 @@ async fn v2_history_lists_pointer_attributed_record_writes_for_the_registration(
     )
     .await?;
 
-    for (scope, listed) in [("both", true), ("registration", true), ("name", false)] {
-        let payload = v2_history_payload_for_database(
-            &database,
-            &format!("/v1/names/attributed-record.eth/history?scope={scope}&page_size=20"),
-        )
-        .await?;
-        let rows = payload["data"].as_array().expect("history data");
-        let attributed = rows.iter().find(|row| row["transaction_hash"] == json!("0xtx131"));
-        assert_eq!(attributed.is_some(), listed, "scope={scope}: {rows:?}");
-        if let Some(row) = attributed {
-            assert_eq!(row["type"], json!("record"), "scope={scope}");
-            assert_eq!(row["block_number"], json!(131), "scope={scope}");
-            assert_eq!(row["registration_id"], Value::Null, "scope={scope}");
+    // With `include=child_registrations` the name arm reads the same attributed writes.
+    for include in ["", "&include=child_registrations"] {
+        for (scope, listed) in [("both", true), ("registration", true), ("name", false)] {
+            let payload = v2_history_payload_for_database(
+                &database,
+                &format!(
+                    "/v1/names/attributed-record.eth/history?scope={scope}&page_size=20{include}"
+                ),
+            )
+            .await?;
+            let rows = payload["data"].as_array().expect("history data");
+            let attributed = rows
+                .iter()
+                .find(|row| row["transaction_hash"] == json!("0xtx131"));
+            assert_eq!(
+                attributed.is_some(),
+                listed,
+                "scope={scope}{include}: {rows:?}"
+            );
+            if let Some(row) = attributed {
+                assert_eq!(row["type"], json!("record"), "scope={scope}{include}");
+                assert_eq!(row["block_number"], json!(131), "scope={scope}{include}");
+                assert_eq!(
+                    row["registration_id"],
+                    Value::Null,
+                    "scope={scope}{include}"
+                );
+            }
+            assert!(
+                !rows
+                    .iter()
+                    .any(|row| row["transaction_hash"] == json!("0xtx132")),
+                "scope={scope}{include}: an unattributed node write must not appear: {rows:?}"
+            );
         }
-        assert!(
-            !rows.iter().any(|row| row["transaction_hash"] == json!("0xtx132")),
-            "scope={scope}: an unattributed node write must not appear: {rows:?}"
-        );
     }
 
     // The registration filter on the events feed lists the same attributed write.

@@ -16,8 +16,9 @@ use super::super::attribution::{
 };
 use super::super::{
     EventHistoryReadFilter,
+    columns::push_history_select,
     duplicates::push_product_history_duplicate_filter,
-    paging::{push_history_filters, push_history_order, push_history_select},
+    paging::{push_history_filters, push_history_order},
     selectors::HistorySelector,
     summary::push_history_count_query,
 };

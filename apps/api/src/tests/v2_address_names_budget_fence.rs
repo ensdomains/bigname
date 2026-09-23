@@ -1,7 +1,11 @@
 // The role-summary grant read is not pinned to the captured publication. These tests hold a
 // request between membership selection and that read, so a publication change lands mid-request.
 
-const ADDRESS_NAME_FENCE_ROUTES: [&str; 2] = ["q=alpha", "relation=resolves_to&q=alpha"];
+const ADDRESS_NAME_FENCE_ROUTES: [&str; 3] = [
+    "q=alpha",
+    "relation=resolves_to&q=alpha",
+    "relation=resolves_to&coin_type=evm&q=alpha",
+];
 
 /// Runs one `include=role_summary` request paused before its grant read. `republish_with`
 /// replaces the resource's grants and advances the Project publication during the pause.
@@ -85,6 +89,12 @@ async fn v2_address_names_grant_budget_overflow_after_publication_change_is_stal
 #[tokio::test]
 async fn v2_resolves_to_grant_budget_overflow_after_publication_change_is_stale() -> Result<()> {
     assert_overflow_after_publication_change_is_stale(ADDRESS_NAME_FENCE_ROUTES[1]).await
+}
+
+#[tokio::test]
+async fn v2_resolves_to_evm_grant_budget_overflow_after_publication_change_is_stale() -> Result<()>
+{
+    assert_overflow_after_publication_change_is_stale(ADDRESS_NAME_FENCE_ROUTES[2]).await
 }
 
 #[tokio::test]

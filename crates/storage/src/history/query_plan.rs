@@ -3,8 +3,9 @@ use sqlx::{PgPool, Postgres, QueryBuilder};
 
 use super::{
     EventHistoryReadFilter,
+    columns::push_history_select,
     duplicates::push_product_history_duplicate_filter,
-    paging::{push_history_filters, push_history_order, push_history_select},
+    paging::{push_history_filters, push_history_order},
     wrapped_registrar::{
         ResourceNamehashAnchor, push_namehash_surfaces_query, push_registrar_grant_resources_query,
         push_registrar_namehash_anchors_query, push_wrapped_registrar_resources_query,
