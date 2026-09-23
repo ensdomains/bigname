@@ -284,7 +284,8 @@ is a same-holder token transfer: the cited event (`provenance.normalized_event_i
 key) is a `TokenControlTransferred` whose `before_state.from` and `after_state.to` both equal the
 address, and every activated, canonical `RegistrationGranted`, `RegistrationReleased` and
 `TokenControlTransferred` row on the cited event's resource with a block above the bound and at or
-below the cited block is such a transfer too; an effective-controller row also needs no
+below the cited block is such a transfer too, with no ENSv2 `RegistrationReserved` row in that
+range; an effective-controller row also needs no
 `AuthorityTransferred`, `SurfaceBound` or `PermissionChanged` row in that range. The range is read
 from `normalized_events_resource_history_idx`. Project cites the latest registration event for the
 registrant, token holder and fallback controller rows, so a transfer from the holder to itself

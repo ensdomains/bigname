@@ -8252,6 +8252,11 @@ async fn self_transfer_rows(pool: &PgPool) -> Result<Vec<(String, serde_json::Va
 /// latest registration event for the registrant, token holder and fallback controller rows, so the
 /// self-transfer moves their cited event and block and changes nothing else. The history reader
 /// relies on this shape to keep such a row at a bound between the grant and the self-transfer.
+///
+/// The registrant and token-holder rows are the production shape. The controller row is a fixture
+/// shape: production ENSv1 emits a resource-scoped `PermissionChanged` grant with every
+/// registration, so the controller row keeps citing that grant, and the fallback to the token
+/// event seen here is a corner case of a fixture without the grant.
 #[tokio::test]
 async fn self_transfer_moves_only_the_cited_event_of_the_holder_rows() -> Result<()> {
     let (database, pool) = migrated_pool().await?;

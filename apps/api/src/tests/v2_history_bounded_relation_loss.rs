@@ -487,6 +487,81 @@ async fn self_transfer_above_the_bound_keeps_the_held_token_holder() -> Result<(
     database.cleanup().await
 }
 
+// The same for a relation that begins above the bound with a grant or an ENSv2 reservation of the
+// token to the address, followed by a self-transfer that Project then cites: the grant or the
+// reservation lies between the bound and the self-transfer, so the row stays out of a read at 240.
+#[tokio::test]
+async fn self_transfer_after_a_later_grant_or_reservation_admits_no_older_events() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_bounded_membership_blocks(&database, 240).await?;
+    let mut expected_absent = Vec::new();
+    for (name, seed, began) in [
+        ("granted-then-self.eth", 0xb0a_6b00_u128, "RegistrationGranted"),
+        ("reserved-then-self.eth", 0xb0a_6c00_u128, "RegistrationReserved"),
+    ] {
+        let (logical_name_id, resource) = seed_bounded_name(
+            &database,
+            name,
+            seed,
+            BOUNDED_ADDRESS,
+            bigname_storage::AddressNameRelation::TokenHolder,
+            205,
+        )
+        .await?;
+        // Older history on the resource that names no relation of the address.
+        let mut older = v2_history_event(
+            &format!("{name}-older"),
+            Some(&logical_name_id),
+            Some(resource),
+            "RegistrationRenewed",
+            205,
+        );
+        older.transaction_hash = Some(format!("0x{name}-205"));
+        let mut begun = v2_history_event(
+            &format!("{name}-began"),
+            Some(&logical_name_id),
+            Some(resource),
+            began,
+            241,
+        );
+        if began == "RegistrationGranted" {
+            begun.after_state["registrant"] = json!(BOUNDED_ADDRESS);
+        } else {
+            begun.derivation_kind = "ens_v2_registry_resource_surface".to_owned();
+            begun.after_state = json!({ "status": "reserved", "expiry": 1_900_000_000_i64 });
+        }
+        let mut self_transfer = v2_history_event(
+            &format!("{name}-self"),
+            Some(&logical_name_id),
+            Some(resource),
+            "TokenControlTransferred",
+            241,
+        );
+        self_transfer.log_index = Some(1);
+        self_transfer.before_state = json!({ "from": BOUNDED_ADDRESS });
+        self_transfer.after_state = json!({ "source_event": "Transfer", "to": BOUNDED_ADDRESS });
+        bigname_storage::insert_normalized_event_fixtures(
+            &database.pool,
+            &[older, begun, self_transfer],
+        )
+        .await?;
+        cite_holder_event(&database, &logical_name_id, &format!("{name}-self")).await?;
+        expected_absent.push(format!("0x{name}-205"));
+    }
+    publish_bounded_membership_at(&database, 240).await?;
+    let hashes = bounded_address_history_hashes(
+        &database,
+        Some(bigname_storage::AddressNameRelation::TokenHolder),
+        240,
+    )
+    .await?;
+    assert!(
+        !hashes.iter().any(|hash| expected_absent.contains(hash)),
+        "a relation begun above the bound admitted older events: {hashes:?}"
+    );
+    database.cleanup().await
+}
+
 /// Point the address's current row for `logical_name_id` at the event Project cites for it, the
 /// event `event_identity`, as `provenance.normalized_event_id` and `chain_positions.block_number`.
 async fn cite_holder_event(

@@ -89,7 +89,53 @@ async fn load_address_names_current_internal(
     include_noncanonical: bool,
     published: Option<&BTreeMap<String, i64>>,
 ) -> Result<Vec<AddressNameCurrentRow>> {
-    let mut builder = QueryBuilder::<Postgres>::new(
+    let mut builder = QueryBuilder::<Postgres>::new("");
+    push_address_names_current_query(
+        &mut builder,
+        address,
+        namespace,
+        relations,
+        include_noncanonical,
+        published,
+    );
+    let rows = builder.build().fetch_all(pool).await.with_context(|| {
+        let mut parts = vec![format!("address {address}")];
+        if let Some(namespace) = namespace {
+            parts.push(format!("namespace {namespace}"));
+        }
+        if let Some(relations) = relations.filter(|relations| !relations.is_empty()) {
+            parts.push(format!(
+                "relations {}",
+                relations
+                    .iter()
+                    .map(|relation| relation.as_str())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ));
+        }
+        format!(
+            "failed to load address_names_current rows for {}",
+            parts.join(" ")
+        )
+    })?;
+
+    rows.into_iter()
+        .map(decode_address_name_current_row)
+        .collect()
+}
+
+/// The current-row read: the address's rows, optionally narrowed by namespace and relations,
+/// through the default canonical read set unless `include_noncanonical`, and bounded by
+/// `published` when given.
+pub(crate) fn push_address_names_current_query<'a>(
+    builder: &mut QueryBuilder<'a, Postgres>,
+    address: &'a str,
+    namespace: Option<&'a str>,
+    relations: Option<&[AddressNameRelation]>,
+    include_noncanonical: bool,
+    published: Option<&BTreeMap<String, i64>>,
+) {
+    builder.push(
         r#"
         SELECT
             anc.address,
@@ -139,7 +185,7 @@ async fn load_address_names_current_internal(
         builder.push(DEFAULT_ADDRESS_NAMES_CURRENT_READ_FILTER);
     }
     if let Some(published) = published {
-        push_cited_event_bound(&mut builder, published);
+        push_cited_event_bound(builder, published);
     }
 
     builder.push(
@@ -155,31 +201,6 @@ async fn load_address_names_current_internal(
             END ASC
         "#,
     );
-
-    let rows = builder.build().fetch_all(pool).await.with_context(|| {
-        let mut parts = vec![format!("address {address}")];
-        if let Some(namespace) = namespace {
-            parts.push(format!("namespace {namespace}"));
-        }
-        if let Some(relations) = relations.filter(|relations| !relations.is_empty()) {
-            parts.push(format!(
-                "relations {}",
-                relations
-                    .iter()
-                    .map(|relation| relation.as_str())
-                    .collect::<Vec<_>>()
-                    .join(",")
-            ));
-        }
-        format!(
-            "failed to load address_names_current rows for {}",
-            parts.join(" ")
-        )
-    })?;
-
-    rows.into_iter()
-        .map(decode_address_name_current_row)
-        .collect()
 }
 
 fn push_cited_event_bound(
@@ -215,8 +236,9 @@ fn push_cited_event_bound(
 /// such a transfer, and every registration event on its resource between the bound and it must be
 /// one too. The earliest of them names the address as its sender, so the address held the token
 /// just before it, and no event in the range changed the holder, so it held the token at the
-/// bound. A relation that began after the bound has a grant or a transfer to it in the range and
-/// stays excluded. A controller row also refuses any controller event in the range.
+/// bound. A relation that began after the bound has a grant, an ENSv2 reservation or a transfer to
+/// it in the range and stays excluded. A controller row also refuses any controller event in the
+/// range.
 fn push_same_holder_since_bound(
     builder: &mut QueryBuilder<'_, Postgres>,
     chain_id: &str,
@@ -265,8 +287,8 @@ fn push_same_holder_since_bound(
                     AND moved.consumer_visibility = 'activated'
                     AND (
                         moved.event_kind IN (
-                            'RegistrationGranted', 'RegistrationReleased',
-                            'TokenControlTransferred'
+                            'RegistrationGranted', 'RegistrationReserved',
+                            'RegistrationReleased', 'TokenControlTransferred'
                         )
                         OR (
                             anc.relation = 'effective_controller'

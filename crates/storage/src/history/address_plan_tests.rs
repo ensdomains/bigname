@@ -22,6 +22,7 @@ use super::super::{
     summary::push_history_count_query,
 };
 use super::push_historical_address_matches_query;
+use crate::address_names::push_address_names_current_query;
 
 const TARGET: &str = "0x0000000000000000000000000000000000000a11";
 const TARGET_RESOLVER: &str = "0x0000000000000000000000000000000000000c11";
@@ -54,6 +55,15 @@ async fn address_history_anchor_plan_uses_address_match_indexes() -> Result<()> 
 #[tokio::test]
 async fn bounded_record_attribution_plans_do_not_scan_normalized_events() -> Result<()> {
     with_fixture("bounded_attribution_plan", check_attribution_plans).await
+}
+
+#[tokio::test]
+async fn bounded_current_relation_plan_probes_the_cited_resource() -> Result<()> {
+    with_fixture(
+        "bounded_current_relation_plan",
+        check_bounded_current_relation_plan,
+    )
+    .await
 }
 
 async fn with_fixture(
@@ -215,6 +225,140 @@ async fn check_attribution_plans(connection: &mut PgConnection) -> Result<()> {
         plan_failures.is_empty(),
         "bounded attribution plans:\n{}",
         plan_failures.join("\n\n")
+    );
+    Ok(())
+}
+
+/// The bounded current-row read (`load_address_names_current_at_bound`) for a token-holder row
+/// that Project cites at a self-transfer above the bound. The name is granted to the target below
+/// the bound and transferred from the target to itself twice above it, while most of the chain's
+/// events lie above the bound too. The cited event is read by primary key and the range between
+/// the bound and it from the resource history index; no read of `normalized_events` is
+/// sequential, and the row is admitted.
+async fn check_bounded_current_relation_plan(connection: &mut PgConnection) -> Result<()> {
+    let bound = 10;
+    let cited = UNRELATED_NAMES + 7;
+    sqlx::raw_sql(&format!(
+        r#"
+        INSERT INTO name_surfaces
+            (logical_name_id, namespace, raw_name, raw_labels, dns_encoded_name, namehash,
+             labelhashes, normalizer_version, visibility_state, chain_id, block_hash,
+             block_number, canonicality_state)
+        VALUES ('ens:{held_hash}', 'ens', 'held.eth', ARRAY['held', 'eth'], '\x00'::bytea,
+                '{held_hash}', ARRAY['{held_hash}', 'eth'], 'test', 'active',
+                'ethereum-mainnet', 'block-1', 1, 'canonical'::canonicality_state);
+
+        INSERT INTO resources (resource_id, chain_id, block_hash, block_number, canonicality_state)
+        VALUES ('{held_resource}', 'ethereum-mainnet', 'block-1', 1, 'canonical'::canonicality_state);
+
+        INSERT INTO surface_bindings
+            (surface_binding_id, logical_name_id, resource_id, binding_kind, authority_arm,
+             active_from, chain_id, block_hash, block_number, canonicality_state)
+        VALUES ('{binding}', 'ens:{held_hash}', '{held_resource}', 'declared_registry_path',
+                'ens_v2', to_timestamp(1), 'ethereum-mainnet', 'block-1', 1,
+                'canonical'::canonicality_state);
+
+        INSERT INTO normalized_events
+            (event_identity, namespace, logical_name_id, resource_id, event_kind, source_family,
+             manifest_version, chain_id, block_hash, block_number, transaction_hash,
+             transaction_index, log_index, derivation_kind, canonicality_state, before_state,
+             after_state)
+        SELECT identity, 'ens', 'ens:{held_hash}', '{held_resource}'::uuid, kind,
+               'ens_v2_registry_l1', 1, 'ethereum-mainnet', 'block-' || block, block,
+               'tx-' || identity, 0, 0, 'ens_v2_registry_resource_surface',
+               'canonical'::canonicality_state, before, after
+        FROM (VALUES
+            ('held:grant', 'RegistrationGranted', 5, '{{}}'::jsonb,
+             jsonb_build_object('registrant', '{TARGET}')),
+            ('held:self-1', 'TokenControlTransferred', 200,
+             jsonb_build_object('from', '{TARGET}'), jsonb_build_object('to', '{TARGET}')),
+            ('held:self-2', 'TokenControlTransferred', {cited},
+             jsonb_build_object('from', '{TARGET}'), jsonb_build_object('to', '{TARGET}'))
+        ) held(identity, kind, block, before, after);
+
+        INSERT INTO address_names_current
+            (address, logical_name_id, relation, namespace, raw_name, namehash,
+             surface_binding_id, resource_id, binding_kind, support_status, provenance,
+             chain_positions, canonicality_summary, manifest_version)
+        SELECT '{TARGET}', 'ens:{held_hash}', 'token_holder', 'ens', 'held.eth', '{held_hash}',
+               '{binding}', '{held_resource}', 'declared_registry_path', 'supported',
+               jsonb_build_object('chain_id', 'ethereum-mainnet',
+                                  'normalized_event_id', normalized_event_id),
+               jsonb_build_object('block_number', {cited}, 'block_hash', 'block-{cited}',
+                                  'target_block_number', {cited},
+                                  'target_block_hash', 'block-{cited}'),
+               jsonb_build_object('state', 'canonical_lineage'), 1
+        FROM normalized_events
+        WHERE event_identity = 'held:self-2';
+
+        ANALYZE;
+        "#,
+        held_hash = format!("0x{:064x}", 0xa12),
+        held_resource = Uuid::from_u128(0xa12),
+        binding = Uuid::from_u128(0xa12b),
+    ))
+    .execute(&mut *connection)
+    .await?;
+    let published: &'static std::collections::BTreeMap<String, i64> = Box::leak(Box::new(
+        std::collections::BTreeMap::from([("ethereum-mainnet".to_owned(), bound)]),
+    ));
+    let push_current = |builder: &mut QueryBuilder<'static, Postgres>| {
+        push_address_names_current_query(builder, TARGET, None, None, false, Some(published));
+    };
+    let mut plan_failures = Vec::new();
+    for plan in explain_both(connection, push_current).await? {
+        if let Err(error) = assert_cited_probe_is_keyed(&plan) {
+            plan_failures.push(error.to_string());
+        }
+    }
+    let mut current = QueryBuilder::<Postgres>::new("");
+    push_current(&mut current);
+    let rows = current.build().fetch_all(&mut *connection).await?;
+    ensure!(
+        rows.len() == 1,
+        "the row held at the bound returned {} rows",
+        rows.len()
+    );
+    ensure!(
+        plan_failures.is_empty(),
+        "bounded current relation plans:\n{}",
+        plan_failures.join("\n\n")
+    );
+    Ok(())
+}
+
+/// The cited event is read through the primary key, the range through the resource history
+/// index, and nothing reads `normalized_events` sequentially.
+fn assert_cited_probe_is_keyed(plan: &Value) -> Result<()> {
+    assert_no_event_seq_scan("bounded current relation", plan)?;
+    fn walk<'a>(node: &'a Value, output: &mut Vec<&'a Value>) {
+        output.push(node);
+        for child in node["Plans"].as_array().into_iter().flatten() {
+            walk(child, output);
+        }
+    }
+    let mut nodes = Vec::new();
+    walk(&plan[0]["Plan"], &mut nodes);
+    let indexes_for = |alias: &str| {
+        let mut indexes = Vec::new();
+        for node in nodes
+            .iter()
+            .filter(|node| node["Relation Name"] == "normalized_events" && node["Alias"] == alias)
+        {
+            indexes.extend(node["Index Name"].as_str());
+            bitmap_index_names(node, &mut indexes);
+        }
+        indexes
+    };
+    let cited = indexes_for("cited");
+    ensure!(
+        cited == ["normalized_events_pkey"],
+        "the cited event is not read by primary key ({cited:?}): {plan}"
+    );
+    let moved = indexes_for("moved");
+    ensure!(
+        moved == ["normalized_events_resource_history_idx"],
+        "the range probe does not use the resource history index ({moved:?}): {plan}"
     );
     Ok(())
 }
