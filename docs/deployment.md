@@ -119,6 +119,11 @@ reads `normalized_events` through two partial expression indexes. Follow their
 the matching schema-migration on a large initialized database, and before
 starting a release that contains the loader.
 
+The address history read looks up an address's past names and resources
+through three partial expression indexes on `normalized_events`. Follow their
+[online index runbook](../ops/address-history-indexes/README.md) before applying
+the matching schema-migration on a large initialized database.
+
 The API binds to the configured `BIGNAME_API_HOST` and
 `BIGNAME_API_PORT`; `/healthz` remains its local readiness endpoint. Current
 runtime configuration is documented in
