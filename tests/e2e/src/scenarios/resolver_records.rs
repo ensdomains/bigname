@@ -143,8 +143,14 @@ fn assert_addr60_not_found(body: &Value) {
         "addr:60 should be absent: {body}"
     );
     assert!(body.pointer("/data/records/addr:60/value").is_none());
-    assert!(body.pointer("/data/addresses/60").is_none());
-    assert!(body.pointer("/data/primary_address").is_none());
+    for removed in [
+        "addresses",
+        "text_records",
+        "content_hash",
+        "primary_address",
+    ] {
+        assert!(body["data"].get(removed).is_none(), "{removed}: {body}");
+    }
 }
 
 fn addr60_observation(body: &Value) -> Value {
@@ -153,8 +159,6 @@ fn addr60_observation(body: &Value) -> Value {
             "status": body.pointer("/data/records/addr:60/status"),
             "value": body.pointer("/data/records/addr:60/value"),
         },
-        "address": body.pointer("/data/addresses/60"),
-        "primary_address": body.pointer("/data/primary_address"),
     })
 }
 
@@ -1285,10 +1289,10 @@ async fn exact_zero_addr60_uses_stubbed_verified_transport() -> Result<()> {
             "divergence_before": before, "divergence_after": after
         }),
         json!({
-            "indexed":{"record":{"status":"not_found", "value":null}, "address":null, "primary_address":null},
-            "verified":{"record":{"status":"not_found", "value":null}, "address":null, "primary_address":null},
-            "verified_repeat":{"record":{"status":"not_found", "value":null}, "address":null, "primary_address":null},
-            "auto":{"record":{"status":"not_found", "value":null}, "address":null, "primary_address":null},
+            "indexed":{"record":{"status":"not_found", "value":null}},
+            "verified":{"record":{"status":"not_found", "value":null}},
+            "verified_repeat":{"record":{"status":"not_found", "value":null}},
+            "auto":{"record":{"status":"not_found", "value":null}},
             "divergence_before":[0,0], "divergence_after":[0,0]
         })
     );
@@ -1425,22 +1429,9 @@ pub(super) async fn assert_zero_api_shapes(
         ));
         let selected_source = if source == "auto" { "indexed" } else { source };
         let body = zero_api_response(request, Some(selected_source)).await?;
-        assert_keys(
-            &body["data"],
-            &[
-                "namespace",
-                "resolver",
-                "addresses",
-                "text_records",
-                "content_hash",
-                "records",
-            ],
-        );
+        assert_keys(&body["data"], &["namespace", "resolver", "records"]);
         assert_keys(&body["data"]["resolver"], &["chain_id", "address"]);
         assert_eq!(body["data"]["namespace"], namespace);
-        assert_eq!(body["data"]["addresses"], json!({}));
-        assert_eq!(body["data"]["text_records"], json!({}));
-        assert_eq!(body["data"]["content_hash"], Value::Null);
         let expected = if source == "verified" {
             json!({"addr:60":{"status":"not_found", "failure_reason":"no_addr_record"}})
         } else {
@@ -1448,6 +1439,36 @@ pub(super) async fn assert_zero_api_shapes(
         };
         assert_eq!(body["data"]["records"], expected);
         assert_addr60_not_found(&body);
+    }
+    // Without `keys` the route answers the inventory's default key set from the index: the
+    // retained nonzero default address is an `ok` answer and the cleared `addr:60` stays absent.
+    for source in ["indexed", "auto"] {
+        let body = zero_api_response(
+            api.client.get(format!(
+                "{}/v1/names/{name}/records?namespace={namespace}&source={source}",
+                api.base_url,
+            )),
+            Some("indexed"),
+        )
+        .await?;
+        assert_keys(&body["data"], &["namespace", "resolver", "records"]);
+        assert_addr60_not_found(&body);
+        assert_eq!(
+            body["data"]["records"]["addr:60"],
+            json!({"status":"not_found"})
+        );
+        let default = &body["data"]["records"]["addr:2147483648"];
+        assert_eq!(default["status"], "ok", "unkeyed default answer: {body}");
+        let value = default["value"]
+            .as_str()
+            .context("unkeyed default address value")?;
+        assert!(
+            value.len() == 42
+                && value.starts_with("0x")
+                && value == value.to_ascii_lowercase()
+                && value != format!("{:#x}", Address::ZERO),
+            "unkeyed default address value: {body}"
+        );
     }
     for source in ["indexed", "verified"] {
         let body = zero_api_response(

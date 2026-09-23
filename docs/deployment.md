@@ -124,6 +124,12 @@ through three partial expression indexes on `normalized_events`. Follow their
 [online index runbook](../ops/address-history-indexes/README.md) before applying
 the matching schema-migration on a large initialized database.
 
+History and event pages read `normalized_events` in chain-position order through
+`normalized_events_chain_block_number_desc_idx`. Follow its
+[online index runbook](../ops/events-order-index/README.md) before applying the
+matching schema-migration on a large initialized database; without the prebuild
+that schema-migration blocks writes to `normalized_events` while it builds.
+
 The API binds to the configured `BIGNAME_API_HOST` and
 `BIGNAME_API_PORT`; `/healthz` remains its local readiness endpoint. Current
 runtime configuration is documented in

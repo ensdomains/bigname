@@ -1259,12 +1259,8 @@ async fn v2_null_exact_resolver_auto_and_verified_execute_universal_resolver() -
     assert_eq!(verified_payload["meta"]["source"], json!("verified"));
     assert_eq!(verified_payload["data"]["resolver"], Value::Null);
     assert_eq!(
-        verified_payload["data"]["addresses"]["60"],
-        json!(executed_address)
-    );
-    assert_eq!(
-        verified_payload["data"]["records"]["addr:60"]["status"],
-        json!("ok")
+        verified_payload["data"]["records"]["addr:60"],
+        json!({"status": "ok", "value": executed_address})
     );
     let missing_response = app_router(state.clone())
         .oneshot(
@@ -1298,8 +1294,9 @@ async fn v2_null_exact_resolver_auto_and_verified_execute_universal_resolver() -
         .context("v2 null-resolver summary request failed")?;
     assert_eq!(summary_response.status(), StatusCode::OK);
     let summary_payload: Value = read_json(summary_response).await?;
+    // No inventory row: the default key set is empty, and unkeyed auto makes no provider call.
     assert_eq!(summary_payload["meta"]["source"], json!("indexed"));
-    assert!(summary_payload["data"].get("records").is_none());
+    assert_eq!(summary_payload["data"]["records"], json!({}));
 
     sqlx::query(
         "UPDATE manifest_versions
@@ -1823,67 +1820,70 @@ async fn v2_get_name_records_withholds_retained_inventory_for_reservation() -> R
 
     let data = payload["data"].as_object().expect("data must be an object");
     assert_eq!(data.get("resolver"), Some(&Value::Null));
-    assert_eq!(data.get("addresses"), Some(&json!({})));
-    assert_eq!(data.get("text_records"), Some(&json!({})));
-    assert_eq!(data.get("content_hash"), Some(&Value::Null));
+    assert_eq!(data.get("records"), Some(&json!({})));
+    assert!(data.get("addresses").is_none());
     assert!(data.get("inventory").is_none());
     Ok(())
 }
 
 #[tokio::test]
-async fn v2_get_name_records_verified_ignores_reservation_audit_selectors() -> Result<()> {
-    let payload = v2_name_records_payload_with_row_and_setup(
-        "/v1/names/Alice.eth/records?source=verified&include=inventory",
-        |row| {
-            row.declared_summary["registration"] = json!({
-                "status": "reserved",
-                "expiry": 4_000_000_000_u64,
-                "latest_event_kind": "RegistrationReserved"
-            });
-            row.declared_summary["control"] = json!({"status": "reserved"});
-        },
-        |_, _, inventory| {
-            inventory.selectors = Value::Array(
-                (0..=200)
-                    .map(|index| {
-                        json!({
-                            "record_key": format!("text:audit-{index}"),
-                            "record_family": "text",
-                            "selector_key": format!("audit-{index}"),
-                            "cacheable": true
+async fn v2_get_name_records_ignores_reservation_audit_selectors_on_every_source() -> Result<()> {
+    for source in ["indexed", "auto", "verified"] {
+        let payload = v2_name_records_payload_with_row_and_setup(
+            &format!("/v1/names/Alice.eth/records?source={source}&include=inventory"),
+            |row| {
+                row.declared_summary["registration"] = json!({
+                    "status": "reserved",
+                    "expiry": 4_000_000_000_u64,
+                    "latest_event_kind": "RegistrationReserved"
+                });
+                row.declared_summary["control"] = json!({"status": "reserved"});
+            },
+            |_, _, inventory| {
+                inventory.selectors = Value::Array(
+                    (0..=200)
+                        .map(|index| {
+                            json!({
+                                "record_key": format!("text:audit-{index}"),
+                                "record_family": "text",
+                                "selector_key": format!("audit-{index}"),
+                                "cacheable": true
+                            })
                         })
-                    })
-                    .collect(),
-            );
-        },
-    )
-    .await?;
+                        .collect(),
+                );
+            },
+        )
+        .await?;
 
-    let data = payload["data"].as_object().expect("data must be an object");
-    assert_eq!(data.get("resolver"), Some(&Value::Null));
-    assert_eq!(data.get("addresses"), Some(&json!({})));
-    assert_eq!(data.get("text_records"), Some(&json!({})));
-    assert_eq!(data.get("content_hash"), Some(&Value::Null));
-    assert!(data.get("records").is_none());
-    assert!(data.get("inventory").is_none());
+        // Retained audit selectors are not served inventory: no default keys and no 422, even
+        // above the 200-key limit.
+        let data = payload["data"].as_object().expect("data must be an object");
+        assert_eq!(data.get("resolver"), Some(&Value::Null), "{source}");
+        assert_eq!(data.get("records"), Some(&json!({})), "{source}");
+        assert!(data.get("addresses").is_none(), "{source}");
+        assert!(data.get("inventory").is_none(), "{source}");
+    }
     Ok(())
 }
 
 #[tokio::test]
-async fn v2_get_name_records_verified_keeps_empty_records_for_active_name() -> Result<()> {
-    let payload = v2_name_records_payload_with_row_and_setup(
-        "/v1/names/Alice.eth/records?source=verified",
-        |_| {},
-        |_, _, inventory| {
-            inventory.selectors = json!([]);
-            inventory.entries = json!([]);
-            inventory.explicit_gaps = json!([]);
-            inventory.unsupported_families = json!([]);
-        },
-    )
-    .await?;
+async fn v2_get_name_records_keeps_empty_records_for_active_name_on_every_source() -> Result<()> {
+    for source in ["indexed", "auto", "verified"] {
+        let payload = v2_name_records_payload_with_row_and_setup(
+            &format!("/v1/names/Alice.eth/records?source={source}"),
+            |_| {},
+            |_, _, inventory| {
+                inventory.selectors = json!([]);
+                inventory.entries = json!([]);
+                inventory.explicit_gaps = json!([]);
+                inventory.unsupported_families = json!([]);
+            },
+        )
+        .await?;
 
-    assert_eq!(payload["data"]["records"], json!({}));
+        assert_eq!(payload["data"]["records"], json!({}), "{source}");
+    }
     Ok(())
 }
 
@@ -2304,10 +2304,9 @@ async fn v2_get_name_timestamp_at_uses_sepolia_when_only_sepolia_phase_head_exis
 }
 
 #[tokio::test]
-async fn v2_get_name_records_returns_indexed_values() -> Result<()> {
+async fn v2_get_name_records_returns_indexed_values_for_the_default_key_set() -> Result<()> {
     let payload = v2_name_records_payload("/v1/names/Alice.eth/records").await?;
 
-    assert!(payload["data"].get("records").is_none());
     assert_eq!(payload["meta"]["source"], json!("indexed"));
     assert_eq!(payload["data"]["namespace"], json!("ens"));
     assert_eq!(
@@ -2318,19 +2317,17 @@ async fn v2_get_name_records_returns_indexed_values() -> Result<()> {
         })
     );
     assert_eq!(
-        payload["data"]["addresses"],
+        payload["data"]["records"],
         json!({
-            "60": "0x0000000000000000000000000000000000000def"
+            "addr:60": {"status": "ok", "value": "0x0000000000000000000000000000000000000def"},
+            "avatar": {"status": "ok", "value": "https://example.test/avatar.png"},
+            "contenthash": {"status": "ok", "value": "ipfs://alice"},
+            "text:description": {"status": "ok", "value": "Alice profile"}
         })
     );
-    assert_eq!(
-        payload["data"]["text_records"],
-        json!({
-            "avatar": "https://example.test/avatar.png",
-            "description": "Alice profile"
-        })
-    );
-    assert_eq!(payload["data"]["content_hash"], json!("ipfs://alice"));
+    for field in ["addresses", "text_records", "content_hash"] {
+        assert!(payload["data"].get(field).is_none(), "{field}: {payload}");
+    }
 
     Ok(())
 }
@@ -2341,19 +2338,6 @@ async fn v2_get_name_records_keys_filter_values_and_per_key_answers() -> Result<
         v2_name_records_payload("/v1/names/Alice.eth/records?keys=addr:60,text:description")
             .await?;
 
-    assert_eq!(
-        payload["data"]["addresses"],
-        json!({
-            "60": "0x0000000000000000000000000000000000000def"
-        })
-    );
-    assert_eq!(
-        payload["data"]["text_records"],
-        json!({
-            "description": "Alice profile"
-        })
-    );
-    assert_eq!(payload["data"]["content_hash"], Value::Null);
     assert_eq!(
         payload["data"]["records"],
         json!({
@@ -2393,7 +2377,6 @@ async fn v2_get_name_records_flattens_projected_byte_address_values() -> Result<
     )
     .await?;
 
-    assert_eq!(payload["data"]["addresses"]["0"], json!("0x001122"));
     assert_eq!(
         payload["data"]["records"]["addr:0"],
         json!({
@@ -2589,11 +2572,6 @@ async fn v2_ensip19_zero_default_matches_each_requested_getter() -> Result<()> {
         let payload: Value = read_json(response).await?;
         assert_eq!(payload["meta"]["source"], "indexed");
         assert_eq!(payload["data"]["records"], expected_records);
-        assert!(payload["data"]["addresses"].get("60").is_none());
-        assert_eq!(
-            payload["data"]["addresses"]["2147483649"],
-            "0x0000000000000000000000000000000000000000"
-        );
     }
 
     let response = app_router(state)
@@ -2968,7 +2946,6 @@ async fn v2_get_name_records_reports_unset_and_unsupported_per_key() -> Result<(
     )
     .await?;
 
-    assert_eq!(payload["data"]["content_hash"], Value::Null);
     assert_eq!(
         payload["data"]["records"],
         json!({
@@ -3196,7 +3173,6 @@ async fn v2_get_name_records_withholds_unproven_authority_without_verified_looku
             .await?;
 
             assert_eq!(payload["data"]["resolver"], Value::Null);
-            assert_eq!(payload["data"]["addresses"], json!({}));
             assert_eq!(
                 payload["data"]["records"]["addr:60"],
                 json!({
@@ -3263,9 +3239,6 @@ async fn v2_unknown_pipeline_unsupported_reason_stays_in_band() -> Result<()> {
     .await?;
 
     assert_eq!(records["data"]["resolver"], Value::Null);
-    assert_eq!(records["data"]["addresses"], json!({}));
-    assert_eq!(records["data"]["text_records"], json!({}));
-    assert_eq!(records["data"]["content_hash"], Value::Null);
     assert_eq!(
         records["data"]["records"]["addr:60"],
         json!({
@@ -3348,7 +3321,7 @@ async fn v2_verified_name_reads_reject_oversized_inventory_derived_selector_sets
         assert_eq!(payload["error"]["code"], json!("unsupported"));
         assert_eq!(
             payload["error"]["message"],
-            json!("verified record reads support at most 200 record keys")
+            json!("inventory-derived record key sets support at most 200 record keys")
         );
     }
 
@@ -3459,7 +3432,10 @@ async fn v2_get_basenames_records_source_auto_stays_base_scoped_without_fallback
         assert_eq!(payload["meta"]["source"], json!("indexed"));
         assert!(payload["meta"]["as_of"].get("1").is_none());
         assert_eq!(payload["meta"]["as_of"]["8453"]["block_hash"], json!("0xbase-binding"));
-        assert_eq!(payload["data"]["addresses"]["60"], json!(indexed_address));
+        assert_eq!(
+            payload["data"]["records"]["addr:60"],
+            json!({"status": "ok", "value": indexed_address})
+        );
     }
 
     database.cleanup().await?;
@@ -3938,12 +3914,6 @@ async fn v2_get_name_records_source_auto_blends_indexed_and_verified_per_key() -
 
     assert_eq!(payload["meta"]["source"], json!("verified"));
     assert_eq!(
-        payload["data"]["addresses"],
-        json!({
-            "60": "0x0000000000000000000000000000000000000def"
-        })
-    );
-    assert_eq!(
         payload["data"]["records"],
         json!({
             "addr:60": {
@@ -4022,9 +3992,6 @@ async fn v2_get_name_records_withholds_values_from_unsupported_inventory() -> Re
             "address": "0x0000000000000000000000000000000000000abc"
         })
     );
-    assert_eq!(payload["data"]["addresses"], json!({}));
-    assert_eq!(payload["data"]["text_records"], json!({}));
-    assert_eq!(payload["data"]["content_hash"], Value::Null);
     let refused = json!({
         "status": "unsupported",
         "unsupported_reason": "resolver_implementation_unknown"
@@ -4052,17 +4019,22 @@ async fn v2_get_name_records_withholds_values_from_unsupported_inventory() -> Re
 }
 
 #[tokio::test]
-async fn v2_get_name_records_convenience_maps_skip_unsupported_inventory() -> Result<()> {
+async fn v2_get_name_records_default_set_refuses_unsupported_inventory() -> Result<()> {
     let payload = v2_name_records_payload_with_setup(
         "/v1/names/Alice.eth/records",
         |_, _, inventory| unsupported_resolver_inventory(inventory),
     )
     .await?;
 
-    assert!(payload["data"].get("records").is_none());
-    assert_eq!(payload["data"]["addresses"], json!({}));
-    assert_eq!(payload["data"]["text_records"], json!({}));
-    assert_eq!(payload["data"]["content_hash"], Value::Null);
+    // Retained entries are not answers: each default key carries the row's reason, no value.
+    let refused = json!({
+        "status": "unsupported",
+        "unsupported_reason": "resolver_implementation_unknown"
+    });
+    assert_eq!(
+        payload["data"]["records"],
+        json!({"addr:60": refused, "text:description": refused})
+    );
 
     Ok(())
 }
@@ -4079,7 +4051,6 @@ async fn v2_get_name_records_source_auto_does_not_satisfy_from_unsupported_inven
     // The retained entry does not satisfy auto; the key goes to verified lookup, which this
     // fixture cannot execute, so no value is served either way.
     assert_eq!(payload["meta"]["source"], json!("verified"));
-    assert_eq!(payload["data"]["addresses"], json!({}));
     assert_eq!(payload["data"]["records"]["addr:60"]["status"], json!("unsupported"));
     assert_eq!(
         payload["data"]["records"]["addr:60"]["unsupported_reason"],
@@ -7243,10 +7214,6 @@ async fn v2_get_name_records_serves_inventory_mirrored_from_ensv1() -> Result<()
     assert_eq!(
         payload["data"]["records"]["text:description"],
         json!({"status": "ok", "value": "Alice profile"})
-    );
-    assert_eq!(
-        payload["data"]["addresses"],
-        json!({"60": "0x0000000000000000000000000000000000000def"})
     );
     let known = payload["data"]["inventory"]["known_keys"]
         .as_array()

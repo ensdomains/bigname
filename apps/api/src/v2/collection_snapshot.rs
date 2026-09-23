@@ -13,6 +13,8 @@ pub(crate) struct CollectionSnapshot {
     token: String,
     evaluated_at: OffsetDateTime,
     namespace: Option<String>,
+    /// Whether the request continued an earlier page with a cursor.
+    continues_cursor: bool,
 }
 
 impl CollectionSnapshot {
@@ -63,11 +65,20 @@ impl CollectionSnapshot {
             token,
             evaluated_at,
             namespace: namespace.map(str::to_owned),
+            continues_cursor: cursor.is_some(),
         };
         if let Some(cursor) = cursor.as_ref() {
             snapshot.validate_cursor(cursor)?;
         }
         Ok(snapshot)
+    }
+
+    /// Records that the request carried a cursor that this snapshot did not decode, for
+    /// routes whose cursors have their own layout and validate the publication token
+    /// themselves. A continuation must be told to restart, not to retry.
+    pub(crate) fn continuing_from_request_cursor(mut self, present: bool) -> Self {
+        self.continues_cursor |= present;
+        self
     }
 
     pub(crate) fn evaluated_at(&self) -> OffsetDateTime {
@@ -113,13 +124,17 @@ impl CollectionSnapshot {
     }
 
     pub(crate) async fn finish(&self, state: &AppState) -> V2Result<Meta> {
+        #[cfg(test)]
+        finish_test_hooks::run(&state.pool).await?;
         revalidate_collection_namespace_set(state, &self.namespaces, self.namespace.as_deref())
             .await
             .map_err(|error| {
-                if error.status == axum::http::StatusCode::CONFLICT {
+                if error.status != axum::http::StatusCode::CONFLICT {
+                    api_error_to_v2(error)
+                } else if self.continues_cursor {
                     restart_required()
                 } else {
-                    api_error_to_v2(error)
+                    changed_during_read()
                 }
             })?;
         request_scope_meta(self.namespaces.request_scope())
@@ -130,4 +145,76 @@ fn restart_required() -> V2Error {
     V2Error::stale(
         "collection publication is no longer available; restart pagination without a cursor",
     )
+}
+
+/// A request without a cursor has nothing to restart: the next attempt reads the new
+/// publication.
+fn changed_during_read() -> V2Error {
+    V2Error::stale("collection publication changed during the read; retry the request")
+}
+
+/// Pauses the next `finish()` for one test database so a test can republish between a
+/// handler's last generation check and the publication revalidation.
+#[cfg(test)]
+pub(crate) mod finish_test_hooks {
+    use std::sync::Arc;
+
+    use anyhow::Result;
+    use bigname_test_support::{
+        ScopedTestHookGuard, ScopedTestHookRegistry, current_test_database,
+    };
+    use sqlx::PgPool;
+    use tokio::sync::Barrier;
+
+    use super::{V2Error, V2Result};
+
+    #[derive(Clone)]
+    pub(crate) struct FinishHook {
+        reached: Arc<Barrier>,
+        resume: Arc<Barrier>,
+    }
+
+    pub(crate) struct FinishControl {
+        reached: Arc<Barrier>,
+        resume: Arc<Barrier>,
+    }
+
+    impl FinishControl {
+        pub(crate) async fn wait_until_reached(&self) {
+            self.reached.wait().await;
+        }
+
+        pub(crate) async fn resume(&self) {
+            self.resume.wait().await;
+        }
+    }
+
+    static HOOKS: ScopedTestHookRegistry<String, FinishHook> = ScopedTestHookRegistry::new();
+
+    pub(crate) async fn install(
+        pool: &PgPool,
+    ) -> Result<(ScopedTestHookGuard<String, FinishHook>, FinishControl)> {
+        let database = current_test_database(pool).await?;
+        let reached = Arc::new(Barrier::new(2));
+        let resume = Arc::new(Barrier::new(2));
+        let guard = HOOKS.install(
+            database,
+            FinishHook {
+                reached: Arc::clone(&reached),
+                resume: Arc::clone(&resume),
+            },
+        );
+        Ok((guard, FinishControl { reached, resume }))
+    }
+
+    pub(super) async fn run(pool: &PgPool) -> V2Result<()> {
+        let database = current_test_database(pool)
+            .await
+            .map_err(|_| V2Error::internal_error("failed to run collection finish test hook"))?;
+        if let Some(hook) = HOOKS.take(&database) {
+            hook.reached.wait().await;
+            hook.resume.wait().await;
+        }
+        Ok(())
+    }
 }

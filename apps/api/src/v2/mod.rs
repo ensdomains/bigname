@@ -82,8 +82,8 @@ pub(crate) use lookup::served_head_initial_validation_test_hooks as lookup_serve
 pub(crate) use lookup::served_head_revalidation_test_hooks as lookup_served_head_revalidation_test_hooks;
 pub(crate) use name_record::{NameRecord, build_name_record, get_name_record};
 pub(crate) use name_records::{
-    RecordAnswer, build_indexed_name_records, build_verified_name_records, get_name_records,
-    load_ephemeral_verified_record_lookup, parse_record_keys,
+    RecordAnswer, RecordSelection, build_indexed_name_records, build_verified_name_records,
+    get_name_records, load_ephemeral_verified_record_lookup, parse_record_keys,
 };
 pub(crate) use name_records_inventory::{default_requested_records, validate_product_record};
 pub(crate) use names::get_names;

@@ -38,3 +38,38 @@ pub(crate) fn parse_record_keys(keys: Option<&str>) -> V2Result<Option<Vec<Resol
 
     Ok(Some(parsed))
 }
+
+/// The record keys one records-route read answers, and whether the caller chose them.
+///
+/// Without `keys` the route answers the inventory-derived default set, but that set is not a
+/// caller selection: it must not make an unkeyed `source=auto` read eligible for verified
+/// fallback, and the `include=inventory` container keeps listing only what the row itself
+/// carries (`docs/api-v2-routes.md` § `GET /v1/names/{name}/records`).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct RecordSelection<'a> {
+    pub(crate) records: &'a [ResolutionRecordKey],
+    pub(crate) explicit: bool,
+}
+
+impl<'a> RecordSelection<'a> {
+    /// Keys the caller, or an internal caller such as name detail or diagnostics, asked for.
+    pub(crate) fn requested(records: &'a [ResolutionRecordKey]) -> Self {
+        Self {
+            records,
+            explicit: true,
+        }
+    }
+
+    /// The inventory-derived default set answered when the caller supplied no keys.
+    pub(crate) fn inventory_default(records: &'a [ResolutionRecordKey]) -> Self {
+        Self {
+            records,
+            explicit: false,
+        }
+    }
+
+    /// The keys the `include=inventory` container reports as requested.
+    pub(crate) fn inventory_request(self) -> Option<&'a [ResolutionRecordKey]> {
+        self.explicit.then_some(self.records)
+    }
+}
