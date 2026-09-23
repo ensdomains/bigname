@@ -183,9 +183,10 @@ async fn retracted_evidence_and_multi_bit_writes_withhold_the_list() -> Result<(
 }
 
 /// A route loads its inventory row, then Project publishes a newer target that reclassifies the
-/// row's resolver (here to the direct PublicResolverV2 profile, which admits no ABI event) and, as
-/// every classification change does, republishes the inventory rows that point at it. The ABI read
-/// for the held row must not combine the older row with the newer classification.
+/// row's resolver (here to the direct PublicResolverV2 classification (role public_resolver_v2),
+/// which admits no ABI event) and, as a declaration change does, republishes the inventory rows
+/// that point at it. The ABI read for the held row must not combine the older row with the newer
+/// classification.
 #[tokio::test]
 async fn a_resolver_reclassified_after_the_row_was_loaded_is_stale_not_unsupported() -> Result<()> {
     let fixture = Fixture::new("abi_reclassified").await?;
@@ -280,8 +281,10 @@ async fn a_resolver_restamped_by_another_names_write_keeps_the_answer() -> Resul
     fixture.cleanup().await
 }
 
+#[derive(sqlx::FromRow)]
 struct HeldInventory {
     resource_id: uuid::Uuid,
+    record_version_boundary_key: String,
     support_status: String,
     provenance: Value,
     chain_positions: Value,
@@ -540,23 +543,15 @@ impl Fixture {
 
     /// The published row as a route holds it after loading it.
     async fn held(&self, resource: &str) -> Result<HeldInventory> {
-        let (resource_id, support_status, provenance, chain_positions, last_recomputed_at) =
-            sqlx::query_as(
-                "SELECT resource_id, support_status, provenance, chain_positions, \
-                        last_recomputed_at \
-                 FROM record_inventory_current WHERE resource_id = $1::uuid",
-            )
-            .bind(resource)
-            .fetch_optional(&self.pool)
-            .await?
-            .with_context(|| format!("no inventory row for {resource}"))?;
-        Ok(HeldInventory {
-            resource_id,
-            support_status,
-            provenance,
-            chain_positions,
-            last_recomputed_at,
-        })
+        sqlx::query_as(
+            "SELECT resource_id, record_version_boundary_key, support_status, provenance, \
+                    chain_positions, last_recomputed_at \
+             FROM record_inventory_current WHERE resource_id = $1::uuid",
+        )
+        .bind(resource)
+        .fetch_optional(&self.pool)
+        .await?
+        .with_context(|| format!("no inventory row for {resource}"))
     }
 
     /// The storage read the records and lookup routes serve, over the published row.
@@ -572,6 +567,7 @@ impl Fixture {
             &[AbiContentTypesInput {
                 authoritative: held.support_status == "supported",
                 resource_id: held.resource_id,
+                record_version_boundary_key: &held.record_version_boundary_key,
                 provenance: &held.provenance,
                 chain_positions: &held.chain_positions,
                 last_recomputed_at: held.last_recomputed_at,

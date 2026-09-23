@@ -217,8 +217,8 @@ async fn abi_content_types_distinguish_unavailable_from_observed_empty() -> Resu
     assert_eq!(inventory["abi_content_types"], json!([]), "{inventory}");
     assert!(inventory.get("abi_unsupported_reason").is_none());
 
-    // The same supported inventory behind the direct PublicResolverV2 profile has no admitted
-    // ABI event: unavailable, not empty.
+    // The same supported inventory behind the direct PublicResolverV2 classification (role
+    // public_resolver_v2) has no admitted ABI event: unavailable, not empty.
     seed_abi_resolver(&database, "ens_v2_resolver_l1", "public_resolver_v2").await?;
     let inventory = abi_inventory_on_both_routes(&database, "abi-empty.eth").await?;
     assert_eq!(inventory["abi_content_types"], Value::Null, "{inventory}");

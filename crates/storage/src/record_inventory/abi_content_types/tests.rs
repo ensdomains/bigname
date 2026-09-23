@@ -179,6 +179,7 @@ fn planned(authoritative: bool, provenance: Value) -> Plan {
     plan(&AbiContentTypesInput {
         authoritative,
         resource_id: uuid::Uuid::nil(),
+        record_version_boundary_key: "",
         provenance: &provenance,
         chain_positions: &json!({"target_block_number": 100}),
         last_recomputed_at: sqlx::types::time::OffsetDateTime::UNIX_EPOCH,

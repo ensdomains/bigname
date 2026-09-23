@@ -3,7 +3,7 @@
 
 use bigname_storage::{
     AbiContentTypes, AbiContentTypesInput, AbiContentTypesUnavailable, IdentityRecordInventoryRow,
-    RecordInventoryCurrentRow,
+    RecordInventoryCurrentRow, record_version_boundary_storage_key,
 };
 use sqlx::PgPool;
 use tracing::error;
@@ -21,10 +21,15 @@ impl RecordInventory {
 }
 
 /// The records route's row; authority follows the same serving decision as its other keys.
-pub(crate) fn abi_input_for_row(row: &RecordInventoryCurrentRow) -> AbiContentTypesInput<'_> {
+/// `boundary_key` is the row's stored key, which decoding the row already checked.
+pub(crate) fn abi_input_for_row<'a>(
+    row: &'a RecordInventoryCurrentRow,
+    boundary_key: &'a str,
+) -> AbiContentTypesInput<'a> {
     AbiContentTypesInput {
         authoritative: serving_record_inventory(Some(row)).is_some(),
         resource_id: row.resource_id,
+        record_version_boundary_key: boundary_key,
         provenance: &row.provenance,
         chain_positions: &row.chain_positions,
         last_recomputed_at: row.last_recomputed_at,
@@ -38,6 +43,7 @@ pub(crate) fn abi_input_for_identity_row(
     AbiContentTypesInput {
         authoritative: row.support_status == "supported",
         resource_id: row.resource_id,
+        record_version_boundary_key: &row.record_version_boundary_key,
         provenance: &row.provenance,
         chain_positions: &row.chain_positions,
         last_recomputed_at: row.last_recomputed_at,
@@ -55,10 +61,20 @@ pub(crate) async fn fill_records_route_abi_content_types(
         return Ok(());
     };
     let answer = match row {
-        Some(row) => load_abi_content_types(pool, &[abi_input_for_row(row)])
-            .await?
-            .pop()
-            .expect("one ABI answer per inventory row"),
+        Some(row) => {
+            let boundary_key = record_version_boundary_storage_key(
+                &row.record_version_boundary,
+                row.resource_id,
+            )
+            .map_err(|key_error| {
+                error!(service = "api", error = ?key_error, "record inventory boundary key");
+                V2Error::internal_error("failed to load record inventory ABI content types")
+            })?;
+            load_abi_content_types(pool, &[abi_input_for_row(row, &boundary_key)])
+                .await?
+                .pop()
+                .expect("one ABI answer per inventory row")
+        }
         None => AbiContentTypes::Unavailable(AbiContentTypesUnavailable::InventoryNotAvailable),
     };
     inventory.set_abi_content_types(answer);

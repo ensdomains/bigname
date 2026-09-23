@@ -1027,11 +1027,15 @@ collection route carry neither header.
   selected storage has an ABI event bigname indexes comes from the selected
   resolver's classification in the resolver projection, read in the same
   statement that confirms the inventory row the route loaded (same resource,
-  chain positions, and recompute time) is still the published row. Project
-  republishes every inventory row that points at a resolver whose
-  classification changes, so the classification read this way is the one the
-  inventory row was built with; a resolver row stamped at a newer target than
-  the inventory row is expected and does not change the answer. Each item is a
+  record version boundary key, chain positions, and recompute time) is still
+  the published row. A change to the classification's manifest, declaration,
+  admission namespace, or upgrade evidence makes Project republish every
+  inventory row that depends on the resolver, so while the row is still
+  published the classification read with it decides admission the same way
+  it did when the row was built; the remaining family changes do not change
+  whether ABI observations are admitted, so the answer is unaffected. A
+  resolver row stamped at a newer target than the inventory row is expected
+  and does not change the answer either. Each item is a
   canonical unsigned decimal string of a single-bit `uint256` content type,
   listed once, in ascending numeric order; content types can exceed 64 bits,
   so decode each item as a big integer. A listed content type means a write
@@ -1053,8 +1057,9 @@ collection route carry neither header.
     cannot speak for the resolver's storage.
   - `abi_observations_not_supported`: the selected resolver storage has no
     ABI-change event that bigname admits. The declared direct
-    PublicResolverV2 profile admits only address, text, contenthash, and
-    version events, and the Basenames resolver manifests declare no
+    PublicResolverV2 classification (role `public_resolver_v2`) admits only
+    address, text, contenthash, and version events, and the Basenames
+    resolver manifests declare no
     `ABIChanged`, so both answer this way even when their inventory is
     supported and the other keys are served. Both contracts inherit ENS's
     ABI resolver and do emit `ABIChanged` on chain; the gap is bigname's

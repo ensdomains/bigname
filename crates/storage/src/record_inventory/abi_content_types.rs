@@ -5,12 +5,14 @@
 //! read dereferences those ids instead of re-deriving resolver history, so the resolver
 //! selection, record-version reset, record-link, mirror, and canonicality rules stay Project's.
 //!
-//! The admitted-ABI-event check needs the resolver's classification from `resolver_current`.
-//! Project republishes every inventory row pointing at a reclassified resolver, but re-stamps an
-//! unchanged resolver at newer targets without republishing them, so target blocks cannot be
-//! compared. Instead the classification is read in the statement that confirms the held row (same
-//! resource, chain positions, and recompute time) is still published; a replaced row answers
-//! `abi_observations_stale` instead of pairing the older row with a newer classification.
+//! The admitted-ABI-event check needs the resolver's classification from `resolver_current`. A
+//! change to the classification's manifest, declaration, admission namespace, or upgrade evidence
+//! makes Project republish every dependent inventory row; the remaining family flips do not change
+//! whether ABI observations are admitted. Project also re-stamps an unchanged resolver at newer
+//! targets without republishing those rows, so target blocks cannot be compared. Instead the
+//! classification is read in the statement that confirms the held row (same resource, record
+//! version boundary key, chain positions, and recompute time) is still published; a replaced row
+//! answers `abi_observations_stale` instead of pairing the older row with a newer classification.
 //! The public meaning is documented under `GET /v1/names/{name}/records` in
 //! `docs/api-v2-routes.md`.
 
@@ -63,11 +65,12 @@ pub enum AbiContentTypes {
 
 /// One serving record inventory row as the caller loaded it. `authoritative` is the caller's
 /// serving decision (supported coverage); the row's supported flag alone never implies an ABI
-/// observation path. `resource_id`, `chain_positions`, and `last_recomputed_at` identify the row.
+/// observation path. The resource, boundary key, chain positions, and recompute time identify it.
 #[derive(Clone, Copy, Debug)]
 pub struct AbiContentTypesInput<'a> {
     pub authoritative: bool,
     pub resource_id: Uuid,
+    pub record_version_boundary_key: &'a str,
     pub provenance: &'a Value,
     pub chain_positions: &'a Value,
     pub last_recomputed_at: OffsetDateTime,
@@ -85,7 +88,8 @@ pub struct AbiContentTypesInput<'a> {
 /// `ABIChanged` on chain
 /// (upstream: .refs/ens_v2/contracts/src/resolver/PublicResolverV2.sol:L23-L26 @ ens_v2@a971bd64)
 /// (upstream: .refs/basenames/src/L2/L2Resolver.sol:L29-L31 @ basenames@1809bbc),
-/// but bigname does not admit it for them: the direct PublicResolverV2 profile admits only its
+/// but bigname does not admit it for them: the direct PublicResolverV2 classification (role
+/// `public_resolver_v2`) admits only its
 /// address, text, contenthash, and version events
 /// (`crates/adapters/src/schema_v2/protocol/v2_resolver.rs`), and the Basenames resolver
 /// manifests declare no ABI event. The manifest-agreement test in `tests.rs` pins this table.
@@ -200,16 +204,7 @@ pub async fn load_record_inventory_abi_content_types(
                     // A mirror reads the ENSv1 resolver its registry walk selects; Project already
                     // attributed that resolver's writes to this row, and the row names its family.
                     Some(family) => Ok(admits_abi_observations(&family, None)),
-                    None => match classifications.get(&index) {
-                        Some(read) if !read.row_still_published => {
-                            Err(AbiContentTypesUnavailable::ObservationsStale)
-                        }
-                        read => Ok(read
-                            .and_then(|read| read.classification.as_ref())
-                            .is_some_and(|(family, role)| {
-                                admits_abi_observations(family, role.as_deref())
-                            })),
-                    },
+                    None => classifications.get(&index).copied().unwrap_or(Ok(false)),
                 };
                 match admitted {
                     Ok(true) => {
@@ -292,12 +287,6 @@ fn content_types_from_evidence(
     AbiContentTypes::Observed(content_types.iter().map(U256::to_string).collect())
 }
 
-/// A held row's resolver classification, and whether that row is still the published one.
-struct ClassificationRead {
-    row_still_published: bool,
-    classification: Option<(String, Option<String>)>,
-}
-
 /// The statement behind [`load_classifications`]. One statement sees one committed Project publish,
 /// so while the held row is still published the resolver row read here is the one it was built on.
 const ABI_CLASSIFICATION_QUERY: &str = r#"
@@ -306,14 +295,16 @@ const ABI_CLASSIFICATION_QUERY: &str = r#"
                SELECT 1
                FROM bigname_phase.record_inventory_current inventory
                WHERE inventory.resource_id = requested.resource_id
+                 AND inventory.record_version_boundary_key = requested.boundary_key
                  AND inventory.chain_positions = requested.chain_positions
                  AND inventory.last_recomputed_at = requested.last_recomputed_at
            ) AS row_still_published,
            resolver.source_family,
            resolver.role
-    FROM unnest($1::BIGINT[], $2::UUID[], $3::JSONB[], $4::TIMESTAMPTZ[], $5::TEXT[], $6::TEXT[])
-        AS requested(ordinal, resource_id, chain_positions, last_recomputed_at, chain_id,
-                     resolver_address)
+    FROM unnest($1::BIGINT[], $2::UUID[], $3::TEXT[], $4::JSONB[], $5::TIMESTAMPTZ[], $6::TEXT[],
+                $7::TEXT[])
+        AS requested(ordinal, resource_id, boundary_key, chain_positions, last_recomputed_at,
+                     chain_id, resolver_address)
     LEFT JOIN LATERAL (
         SELECT resolver.declared_summary #>> '{classification,source_family}' AS source_family,
                resolver.declared_summary #>> '{classification,role}' AS role
@@ -324,13 +315,16 @@ const ABI_CLASSIFICATION_QUERY: &str = r#"
     ) resolver ON TRUE
 "#;
 
+/// Per input index: whether the held row's resolver admits ABI observations, or stale when the
+/// held row is no longer the published one.
 async fn load_classifications(
     pool: &PgPool,
     inputs: &[AbiContentTypesInput<'_>],
     plans: &[Plan],
-) -> Result<BTreeMap<usize, ClassificationRead>> {
+) -> Result<BTreeMap<usize, std::result::Result<bool, AbiContentTypesUnavailable>>> {
     let mut ordinals = Vec::new();
     let mut resource_ids = Vec::new();
+    let mut boundary_keys = Vec::new();
     let mut chain_positions = Vec::new();
     let mut recomputed_at = Vec::new();
     let mut chain_ids = Vec::new();
@@ -345,6 +339,7 @@ async fn load_classifications(
         {
             ordinals.push(i64::try_from(index).context("ABI input index overflows BIGINT")?);
             resource_ids.push(input.resource_id);
+            boundary_keys.push(input.record_version_boundary_key);
             chain_positions.push(input.chain_positions.clone());
             recomputed_at.push(input.last_recomputed_at);
             chain_ids.push(chain_id.clone());
@@ -360,6 +355,7 @@ async fn load_classifications(
     ))
     .bind(ordinals)
     .bind(resource_ids)
+    .bind(boundary_keys)
     .bind(chain_positions)
     .bind(recomputed_at)
     .bind(chain_ids)
@@ -373,11 +369,12 @@ async fn load_classifications(
             .context("ABI classification ordinal is negative")?;
         let family: Option<String> = row.try_get("source_family")?;
         let role: Option<String> = row.try_get("role")?;
-        let read = ClassificationRead {
-            row_still_published: row.try_get("row_still_published")?,
-            classification: family.map(|family| (family, role)),
+        let admitted = if row.try_get("row_still_published")? {
+            Ok(family.is_some_and(|family| admits_abi_observations(&family, role.as_deref())))
+        } else {
+            Err(AbiContentTypesUnavailable::ObservationsStale)
         };
-        classifications.insert(index, read);
+        classifications.insert(index, admitted);
     }
     Ok(classifications)
 }

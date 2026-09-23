@@ -1071,11 +1071,15 @@ read a name's ABI content types back from those ids
 limiting that list to the served families would silently drop them. Those
 routes take the selected resolver's source family and role from
 `resolver_current`, in the same statement that confirms the inventory row they
-loaded (same `resource_id`, `chain_positions`, and `last_recomputed_at`) is
-still published, and answer `abi_observations_stale` when it is not. That is
-sound because a classification change puts the resolver in
-`project_scope_resolver_dependents`, which republishes every inventory row that
-points at it, while an unchanged resolver row may be re-stamped at a newer
+loaded (same `resource_id`, `record_version_boundary_key`, `chain_positions`,
+and `last_recomputed_at`) is still published, and answer `abi_observations_stale`
+when it is not. That is sound because a change to the classification's
+manifest, declaration, admission namespace, or upgrade evidence puts the
+resolver in `project_scope_resolver_dependents`, which republishes every
+dependent inventory row; the remaining family changes, such as a rebuild
+scoped only through `project_scope_resolvers`, do not change whether ABI
+observations are admitted, so the answer is unaffected. An unchanged resolver
+row may also be re-stamped at a newer
 target (for example after a record write for another name on the same
 resolver) without republishing those inventory rows, so comparing the two rows'
 target blocks would not be. The record event need
