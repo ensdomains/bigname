@@ -62,13 +62,16 @@ impl Binding {
                     .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
         });
         let chains = match (self.policy, self.chains.as_ref()) {
-            (BindingPolicy::HistoryBound, Some(chains)) => chains.iter().all(|(chain, bound)| {
-                !chain.trim().is_empty()
-                    && !bound.block_hash.trim().is_empty()
-                    && bound.block_number >= 0
-                    && bound.interpret_generation >= 0
-                    && bound.project_generation >= 0
-            }),
+            (BindingPolicy::HistoryBound, Some(chains)) => {
+                !chains.is_empty()
+                    && chains.iter().all(|(chain, bound)| {
+                        !chain.trim().is_empty()
+                            && !bound.block_hash.trim().is_empty()
+                            && bound.block_number >= 0
+                            && bound.interpret_generation >= 0
+                            && bound.project_generation >= 0
+                    })
+            }
             (BindingPolicy::Keyset, None) => true,
             _ => false,
         };
@@ -215,6 +218,10 @@ mod tests {
             ErrorCode::InvalidInput
         );
         assert_eq!(malformed(|b| b.chains = None), ErrorCode::InvalidInput);
+        assert_eq!(
+            malformed(|b| b.chains = Some(BTreeMap::new())),
+            ErrorCode::InvalidInput
+        );
         assert_eq!(
             malformed(|b| {
                 let chain = b

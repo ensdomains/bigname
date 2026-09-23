@@ -1263,17 +1263,19 @@ Which `409 stale` message a redo produces depends on when it is seen. An
 Interpret redo already in progress on a requested chain when the request
 starts makes that chain's publication unservable, so the route answers
 `collection publication is not available; retry after indexing is ready`,
-like any unservable publication. A Project redo already in progress on a chain
-in scope answers `history is temporarily unavailable while Project redo is in
-progress`, and an Interpret redo in progress only on another chain answers
-`history is temporarily unavailable while Interpret redo is in progress`. A
-redo that begins after the request started keeps the existing behavior: the
-Interpret checks around the page transaction answer with the Interpret
-message, and the final check answers a first page with `collection publication
-changed during the read; retry the request` and a continuation with
-`collection publication is no longer available; restart pagination without a
-cursor`. A continuation whose redo counters changed since its first page gets
-that restart message as soon as its counters are compared. Product
+like any unservable publication. On a first page, a Project redo already in
+progress on a chain in scope answers `history is temporarily unavailable while
+Project redo is in progress`, and an Interpret redo in progress only on a chain
+outside the request scope answers `history is temporarily unavailable while
+Interpret redo is in progress`. A continuation compares its redo counters
+before it looks at the redo flags, and a redo raises its chain's counter when it
+begins, so a continuation meeting a redo that began after its first page, on a
+chain in scope, gets `collection publication is no longer available; restart
+pagination without a cursor` instead. A redo that begins after the request
+started keeps the existing behavior: the Interpret checks around the page
+transaction answer with the Interpret message, and the final check answers a
+first page with `collection publication changed during the read; retry the
+request` and a continuation with the restart message. Product
 event-type filtering precedes keyset pagination, so page rows and continuation
 metadata describe only product-visible events. For requests without an explicit
 `type`, cursor anchor validation omits the implicit product event-type filter,

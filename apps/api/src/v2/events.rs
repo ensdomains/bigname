@@ -11,14 +11,14 @@ use sqlx::types::Uuid;
 use crate::AppState;
 
 use super::cursor::{cursor_value, invalid_cursor_error};
-use super::support::normalize_inferred_route_name;
+use super::support::{ensure_public_namespace, normalize_inferred_route_name};
 use super::{
     CursorPayload, Envelope, EventDetail, HISTORY_TOTAL_COUNT_CAP, HistoryEventType,
     HistoryInclude, Page, QueryParamAllowlist, QueryParams, StrictQueryParams, V2Error, V2Result,
-    build_event_detail, decode, encode, format_timestamp, history_event_type, history_include,
-    history_sort_token, history_storage_order, history_total_count, insert_history_filter_keys,
-    map_history_page_error, product_history_event_kinds, raw_event_kind,
-    resolve_history_block_window, validate_latest_collection_selectors,
+    api_error_to_v2, build_event_detail, decode, encode, format_timestamp, history_event_type,
+    history_include, history_sort_token, history_storage_order, history_total_count,
+    insert_history_filter_keys, map_history_page_error, product_history_event_kinds,
+    raw_event_kind, resolve_history_block_window, validate_latest_collection_selectors,
 };
 
 const NAMESPACE_FILTER_KEY: &str = "namespace";
@@ -105,6 +105,10 @@ pub(crate) async fn get_events(
     }
     let order = parsed.storage_filter.order;
 
+    // An unknown namespace is `404` before the cursor is decoded.
+    if let Some(namespace) = namespace.as_deref() {
+        ensure_public_namespace(namespace).map_err(api_error_to_v2)?;
+    }
     let cursor = params.cursor.as_deref().map(decode).transpose()?;
     let storage_cursor = cursor
         .as_ref()

@@ -18,7 +18,8 @@ use crate::AppState;
 
 use super::cursor::invalid_cursor_error;
 use super::support::{
-    ExactNameSnapshotSelector, exact_name_snapshot_scope, normalize_inferred_route_name,
+    ExactNameSnapshotSelector, ensure_public_namespace, exact_name_snapshot_scope,
+    normalize_inferred_route_name,
 };
 use super::{
     AtSelector, Envelope, EventDetail, HistoryEventType, HistoryInclude, HistoryScope, Page,
@@ -111,6 +112,8 @@ pub(crate) async fn get_history(
         params: &params,
         child_registrations,
     };
+    // An unknown namespace is `404` before the cursor is decoded.
+    ensure_public_namespace(&namespace).map_err(api_error_to_v2)?;
     let cursor = params.cursor.as_deref().map(decode).transpose()?;
     let storage_cursor = cursor
         .as_ref()

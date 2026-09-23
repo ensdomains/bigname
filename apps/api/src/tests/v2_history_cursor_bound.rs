@@ -329,20 +329,41 @@ async fn v2_history_expires_cursor_after_interpret_redo() -> Result<()> {
 /// anchors are resolved, before the page transaction). The page still answers at its bound.
 #[tokio::test]
 async fn v2_history_pages_survive_a_publication_during_the_read() -> Result<()> {
+    hb_publication_during_the_read(
+        &hb_routes(),
+        bigname_storage::history_anchor_read_test_hooks::HistoryReadHookPoint::AfterAnchors,
+    )
+    .await
+}
+
+/// The same, with the publication landing after the page transaction and before the final
+/// check. Events and address history pause there; name history has no read after its page.
+#[tokio::test]
+async fn v2_history_pages_survive_a_publication_after_the_page() -> Result<()> {
+    let [events, _, address] = hb_routes();
+    hb_publication_during_the_read(
+        &[events, address],
+        bigname_storage::history_anchor_read_test_hooks::HistoryReadHookPoint::AfterPage,
+    )
+    .await
+}
+
+async fn hb_publication_during_the_read(
+    routes: &[String],
+    hook: bigname_storage::history_anchor_read_test_hooks::HistoryReadHookPoint,
+) -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_history_fixture(&database).await?;
     let mut block = HB_PUBLISHED_BLOCK;
-    for route in hb_routes() {
+    for route in routes {
         let base = format!("{route}&page_size=2&include=total_count");
         let first = hb_ok(&database, &base).await?;
         let cursor = hb_next_cursor(&first)?;
         for uri in [base.clone(), format!("{base}&cursor={cursor}")] {
             let expected_as_of = hb_ok(&database, &base).await?["meta"]["as_of"].clone();
-            let (_guard, control) = bigname_storage::history_anchor_read_test_hooks::install(
-                &database.lookup_pool,
-                bigname_storage::history_anchor_read_test_hooks::HistoryReadHookPoint::AfterAnchors,
-            )
-            .await?;
+            let (_guard, control) =
+                bigname_storage::history_anchor_read_test_hooks::install(&database.lookup_pool, hook)
+                    .await?;
             let state = database.app_state_with_public_namespaces(&["ens"]);
             let request_uri = uri.clone();
             let request = tokio::spawn(async move {
@@ -502,7 +523,7 @@ async fn v2_history_cursor_expires_on_reorg() -> Result<()> {
     database.cleanup().await
 }
 
-/// Edited bindings: the chain set must be the server's, a bound above the publication or on
+/// Edited bindings: the chain set must be the server's (and must not be empty), a bound above the publication or on
 /// an unknown block is refused, a bound below the cursor row is a malformed cursor, and a lower
 /// bound that still holds the cursor row answers at that bound.
 #[tokio::test]
@@ -542,9 +563,13 @@ async fn v2_history_checks_edited_bindings() -> Result<()> {
         });
         let raised = set_bound(&cursor, upper + 1, "0xunpublished");
         let unknown = set_bound(&cursor, upper, "0xnot-a-block");
-        for edited in [dropped, added, raised, unknown] {
+        for edited in [added, raised, unknown] {
             hb_expect_stale(&database, &format!("{desc}&cursor={edited}"), HB_RESTART).await?;
         }
+        // Dropping the scope's only chain leaves a binding without chains, which no server
+        // mints: a malformed cursor.
+        let (status, payload) = hb_get(&database, &format!("{desc}&cursor={dropped}")).await?;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{desc}: {payload}");
 
         // The cursor row sits at `upper`: a bound at `lower` cannot contain it.
         let below_anchor = set_bound(&cursor, lower, "0xbinding");
@@ -664,5 +689,204 @@ async fn v2_history_cursor_expires_on_manifest_change() -> Result<()> {
         .execute(&database.pool)
         .await?;
     }
+    database.cleanup().await
+}
+
+/// Namespace validation precedes cursor decoding: an unknown namespace is `404` even when the
+/// cursor is garbage too, as it was before cursors carried a block binding.
+#[tokio::test]
+async fn v2_history_unknown_namespace_precedes_a_bad_cursor() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_history_fixture(&database).await?;
+    let mut statuses = Vec::new();
+    for uri in [
+        "/v1/events?namespace=unknown&cursor=garbage",
+        "/v1/names/history.eth/history?namespace=unknown&cursor=garbage",
+        "/v1/addresses/0x00000000000000000000000000000000000000cc/history?namespace=unknown&cursor=garbage",
+    ] {
+        let (status, payload) = hb_get(&database, uri).await?;
+        statuses.push((uri, status, payload));
+    }
+    for (uri, status, payload) in statuses {
+        assert_eq!(status, StatusCode::NOT_FOUND, "{uri}: {payload}");
+        assert_eq!(payload["error"]["code"], json!("not_found"), "{uri}");
+    }
+    database.cleanup().await
+}
+
+/// A cursor whose block and hash are valid but whose redo counter was edited expires: the
+/// counters are compared, not trusted.
+#[tokio::test]
+async fn v2_history_rejects_an_edited_generation() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_history_fixture(&database).await?;
+    for route in hb_routes() {
+        let base = format!("{route}&page_size=2");
+        let cursor = hb_next_cursor(&hb_ok(&database, &base).await?)?;
+        for field in ["interpret_generation", "project_generation"] {
+            let edited = hb_edit_cursor(&cursor, |object| {
+                let chain = &mut object["binding"]["chains"][HB_CHAIN];
+                chain[field] = json!(chain[field].as_i64().unwrap() + 1);
+            });
+            hb_expect_stale(&database, &format!("{base}&cursor={edited}"), HB_RESTART).await?;
+        }
+        hb_ok(&database, &format!("{base}&cursor={cursor}")).await?;
+    }
+    database.cleanup().await
+}
+
+/// A reorg strictly below the bound replaces the bound block's ancestors, and with them the
+/// bound block itself: the continuation must restart.
+#[tokio::test]
+async fn v2_history_cursor_expires_on_reorg_below_the_bound() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_history_fixture(&database).await?;
+    let base = format!("{}&page_size=2", hb_routes()[0]);
+    let below = HB_PUBLISHED_BLOCK + 1;
+    let bound = HB_PUBLISHED_BLOCK + 2;
+    hb_publish_block(&database, below, false).await?;
+    hb_publish_block(&database, bound, false).await?;
+    let first = hb_ok(&database, &base).await?;
+    assert_eq!(first["meta"]["as_of"]["1"]["block_number"], json!(bound));
+    let cursor = hb_next_cursor(&first)?;
+
+    // The chain forks at `below`: the head steps back to the fixture block, both old blocks are
+    // orphaned, and the new branch is published up to the same height.
+    sqlx::query(
+        "UPDATE bigname_phase.chain_heads
+         SET latest_block_hash = '0xbinding', latest_block_number = $2
+         WHERE chain_id = $1",
+    )
+    .bind(HB_CHAIN)
+    .bind(HB_PUBLISHED_BLOCK)
+    .execute(&database.lookup_pool)
+    .await?;
+    for block in [bound, below] {
+        sqlx::query(
+            "UPDATE bigname_phase.chain_lineage SET canonicality_state = 'orphaned'
+             WHERE chain_id = $1 AND block_hash = $2",
+        )
+        .bind(HB_CHAIN)
+        .bind(format!("0xhistory{block}"))
+        .execute(&database.lookup_pool)
+        .await?;
+    }
+    for block in [below, bound] {
+        let hash = format!("0xhistory{block}-fork");
+        upsert_phase_raw_blocks(
+            &database.pool,
+            &[raw_block(HB_CHAIN, &hash, None, block, hb_timestamp(block))],
+        )
+        .await?;
+        let timestamp =
+            sqlx::types::time::OffsetDateTime::from_unix_timestamp(hb_timestamp(block))?;
+        seed_schema_v2_ens_lookup_head(
+            &database.pool,
+            block,
+            &hash,
+            &crate::v2::format_timestamp(timestamp),
+        )
+        .await?;
+    }
+    hb_bump_generations(&database).await?;
+    hb_expect_stale(&database, &format!("{base}&cursor={cursor}"), HB_RESTART).await?;
+    database.cleanup().await
+}
+
+/// A chain in scope that loses its Interpret or Project phase row has unknown redo state. The
+/// check after the page refuses it as unavailable rather than comparing a shorter state.
+#[tokio::test]
+async fn v2_history_refuses_a_missing_phase_row() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_history_fixture(&database).await?;
+    let (_guard, control) =
+        crate::v2::collection_snapshot::finish_test_hooks::install(&database.lookup_pool).await?;
+    let state = database.app_state_with_public_namespaces(&["ens"]);
+    let request = tokio::spawn(async move {
+        app_router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/events?name=history.eth&page_size=2")
+                    .body(Body::empty())
+                    .expect("history request must build"),
+            )
+            .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(10), control.wait_until_reached())
+        .await
+        .context("history request never reached its final check")?;
+    sqlx::query(
+        "DELETE FROM bigname_phase.chain_phase_state
+         WHERE chain_id = $1 AND phase_name = 'interpret'",
+    )
+    .bind(HB_CHAIN)
+    .execute(&database.lookup_pool)
+    .await?;
+    control.resume().await;
+    let response = request.await.context("request task")?.context("request")?;
+    let status = response.status();
+    let payload: Value = read_json(response).await?;
+    assert_eq!(status, StatusCode::CONFLICT, "{payload}");
+    assert_eq!(
+        payload["error"]["message"],
+        json!("collection publication is not available; retry after indexing is ready")
+    );
+    database.cleanup().await
+}
+
+/// An Interpret redo that begins on another chain of the request scope after capture is seen
+/// by the collection-wide check inside the page transaction.
+#[tokio::test]
+async fn v2_history_refuses_interpret_redo_on_another_scope_chain() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_history_fixture(&database).await?;
+    database
+        .seed_snapshot_selector_chain_positions(&json!({
+            "base": {
+                "chain_id": "base-mainnet",
+                "block_number": 1,
+                "block_hash": "0xbase1",
+                "timestamp": "2026-04-17T00:00:01Z"
+            }
+        }))
+        .await?;
+    // A bare `resolver` filter reads every public namespace, so both chains are in scope.
+    let uri = "/v1/events?resolver=1:0x0000000000000000000000000000000000000abc&page_size=2";
+    let get = |uri: &'static str| {
+        let state = database.app_state_with_public_namespaces(&["ens", "basenames"]);
+        async move {
+            app_router(state)
+                .oneshot(Request::builder().uri(uri).body(Body::empty()).expect("request"))
+                .await
+        }
+    };
+    let response = get(uri).await?;
+    let status = response.status();
+    let first: Value = read_json(response).await?;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    assert!(first["meta"]["as_of"]["8453"].is_object(), "{first}");
+    assert!(first["meta"]["as_of"]["1"].is_object(), "{first}");
+
+    let (_guard, control) = bigname_storage::history_anchor_read_test_hooks::install(
+        &database.lookup_pool,
+        bigname_storage::history_anchor_read_test_hooks::HistoryReadHookPoint::AfterAnchors,
+    )
+    .await?;
+    let request = tokio::spawn(get(uri));
+    tokio::time::timeout(std::time::Duration::from_secs(10), control.wait_until_reached())
+        .await
+        .context("history request did not reach its read hook")?;
+    database
+        .simulate_interpret_redo_begin("base-mainnet", "recompute_flags")
+        .await?;
+    control.resume().await;
+    let response = request.await.context("request task")?.context("request")?;
+    let status = response.status();
+    let payload: Value = read_json(response).await?;
+    assert_eq!(status, StatusCode::CONFLICT, "{payload}");
+    assert_eq!(
+        payload["error"]["message"],
+        json!("history is temporarily unavailable while Interpret redo is in progress")
+    );
     database.cleanup().await
 }

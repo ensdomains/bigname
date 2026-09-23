@@ -2632,6 +2632,7 @@ async fn v2_history_continuation_excludes_unpublished_interpret_events() -> Resu
     let continued =
         v2_history_payload_for_database(&database, &format!("{base}&cursor={cursor}")).await?;
     assert_eq!(continued["page"]["total_count"], first["page"]["total_count"]);
+    assert_eq!(continued["data"], next["data"]);
     assert_eq!(continued["meta"]["as_of"], first["meta"]["as_of"]);
     assert!(history_blocks(&continued).iter().all(|block| *block <= 21_000_003));
     let fresh = v2_history_payload_for_database(&database, base).await?;
