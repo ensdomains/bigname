@@ -275,17 +275,22 @@ anchors into registration history.
 Address history (`GET /v1/addresses/{address}/history`) runs three statements in
 `crates/storage/src/history/`. The anchor lookup (`address_matches.rs`) finds the names and
 resources the address holds now in `address_names_current` and held in the past from three kinds
-of activated, canonical events: a `RegistrationGranted` whose `registrant` is the address, a
+of activated, canonical events. A current relation row counts only when the event Project cites
+for it (`provenance.chain_id` and `chain_positions.block_number`) lies at or below the read's
+published block of that chain, so a relation acquired after that block cannot admit the
+resource's older events; a row without a cited block does not count under a bound. The three
+kinds of historical events are: a `RegistrationGranted` whose `registrant` is the address, a
 `TokenControlTransferred` whose `to` is the address, and an `AuthorityTransferred` whose `owner`
 is the address, each compared lowercased. One partial expression index per kind keys those rows
 by the lowercased value: `normalized_events_address_registrant_match_idx`,
 `normalized_events_address_token_holder_match_idx`, and
 `normalized_events_address_registry_owner_match_idx`. Their expressions and predicates must stay
 identical to the query text. The capped count and the page then read the rows of those names and
-resources plus the resolver record writes attributed to the resources (`filters.rs`). That filter
-is an OR of `logical_name_id`, `resource_id`, and `normalized_event_id` conditions. The attributed
-event ids do not depend on the row, so the filter computes them once as an array
-(`= ANY(ARRAY(SELECT ...))`); PostgreSQL then answers each branch from
+resources plus the resolver record writes attributed to the resources (`attribution.rs`,
+described below). That filter is an OR of `logical_name_id`, `resource_id`, and
+`normalized_event_id` conditions. The attributed event ids do not depend on the row, so the read
+loads them once, inside the page's repeatable-read transaction, and binds them as an array
+(`= ANY($ids)`); PostgreSQL then answers each branch from
 `normalized_events_name_history_idx`, `normalized_events_resource_history_idx`, and the primary
 key and combines the results. Written as `IN (SELECT ...)`, the branch cannot be an index
 condition inside the OR, and the planner reads every canonical row to keep the few that match.
@@ -302,6 +307,31 @@ hash](glossary.md#interpreter-content-hash) input changes. Existing installation
 three indexes through `20260923120000_normalized_events_address_match_indexes.sql`; prebuild
 them concurrently on a large database with
 [`ops/address-history-indexes/install.sql`](../ops/address-history-indexes/README.md) first.
+
+Node-keyed resolver record writes carry neither a name nor a resource, so history reaches them
+through the registration's resolver pointers (`attribution.rs`). The reader evaluates the same
+evidence Project uses to publish `record_inventory_current.provenance.attributed_event_ids`, but
+only the evidence at or below the read's published block of each chain: the resource's
+`ResolverChanged` pointers (each paired with its name's `name_surfaces.namehash`), the
+node-keyed `RecordChanged` and `RecordVersionChanged` writes on each pointer's resolver before
+the next pointer (through `normalized_events_ens_v1_record_node_resolver_idx` and
+`normalized_events_basenames_record_node_resolver_idx`), the `ResolverRecordLinked` rows that
+split a pointer's window on a record-ID resolver, and, for a latest pointer at a declared ENSv1
+mirror resolver, the ENSv1 resolver the mirror would call as the ENSv1 registry stood at that
+block. A pointer or link above the published block neither attributes an older write nor closes
+an earlier pointer's window, so a resolver selected after the block cannot pull an older write
+into a read bound to it. Superseded pointers keep their windows and a clear closes the previous
+window without opening one, exactly as the producer attributes them, so the reader does not need
+the history-only row Project publishes for a cleared name. It also reproduces the empty
+attribution Project publishes for a resource whose latest pointer is a mirror resolver that
+Project cannot follow to an ENSv1 resolver. One input is
+read from a current projection row because the producer reads it there: whether a resolver is a
+supported, manifest-declared ENSv1, `public_resolver_v2`, or mirror resolver comes from
+`resolver_current.declared_summary.classification`. The ids the reader returns at the current
+publication equal the published `attributed_event_ids`; a test in the Project suite checks this
+for every inventory row its fixtures publish, so a change to the producer's attribution fails that
+test instead of drifting from history. Reads without publication bounds (the unbounded storage
+loaders and diagnostics reads that pass none) evaluate every readable pointer and write.
 
 History loaders called with `canonical_only=false` also return rows of activated losing
 branches. For those reads every binding, grant and wrapper-link witness must lie on the event's

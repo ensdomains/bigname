@@ -1075,8 +1075,10 @@ classifying manifest's namespace matches the pointer's namespace. Incremental
 staging applies the same guarded exception. Every `RecordChanged` or
 `RecordVersionChanged` event that joins without a logical name of its own is
 listed in the row's `provenance.attributed_event_ids`, whether or not it is
-the current value for its record key, so `registration`- and `both`-scope name
-history can read those node-keyed writes back; retracting one of those events
+the current value for its record key. `registration`- and `both`-scope name
+history list the same node-keyed writes by evaluating this attribution from the
+pointer evidence at or below the read's published block (`docs/storage.md`); a
+Project test checks that the two agree at the current publication. Retracting one of those events
 restages the row like any other cited event. Attribution spans every resolver
 pointer the resource has selected, not only the current one: each pointer
 attributes the node-keyed writes on its resolver at chain positions before the

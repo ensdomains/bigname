@@ -1242,10 +1242,21 @@ A recognized namespace with no available publication returns retryable `409 stal
   greater than `to_timestamp`, or a value that is not RFC 3339, returns `400
   invalid_input`. On `/v1/events` the resolved window intersects an explicit
   `from_block`/`to_block` range.
-- History anchor expansion is bounded to the captured publication too:
-  later name/resource bindings and historical ownership matches cannot introduce
-  older events into an unchanged page. Bindings and ownership before
-  `from_timestamp` remain valid anchors; the timestamp window filters event rows.
+- History anchor expansion is bounded to the captured publication too: every
+  input that decides which events belong to the read is judged from evidence at
+  or below the published block of its chain, so evidence recorded after that
+  block cannot introduce older events into an unchanged page. That covers name
+  and resource bindings, NameWrapper links, registrar grants, historical
+  ownership matches, an address's current relations (a relation counts only
+  when the event Project cites for it lies at or below the published block),
+  and resolver record writes attributed to a registration through its resolver
+  pointers (a pointer or record link above the published block neither
+  attributes an older write nor closes an earlier pointer's window). One input
+  is read from current state: whether a resolver address is a manifest-declared
+  resolver, which decides whether an ENSv2 resolver pointer attributes
+  node-keyed writes, comes from the current resolver classification. Bindings
+  and ownership before `from_timestamp` remain valid anchors; the timestamp
+  window filters event rows.
 - Cursors bind the order and every filter above. The cursor `sort` token
   encodes the direction, and its filters carry the canonical `type` set and
   the canonical UTC spelling of each timestamp bound, so a cursor issued by one
@@ -1432,7 +1443,10 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
   Historical replay through `at` is not supported.
 - Status semantics: no product-visible matches return `200` with empty `data`,
   `page.next_cursor=null`, and `page.has_more=false`. Missing names return `404
-  not_found`. Request and cursor-binding validation precede the first
+  not_found` on the first page. A continuation does not look the name up in
+  current state again: the cursor already binds the name, and its rows come only
+  from the name's bindings, NameWrapper links, and registrar grants at or below
+  the published block. Request and cursor-binding validation precede the first
   `redo_in_progress` check, so malformed requests retain `400`. The route
   captures the collection-wide check before parent lookup, then checks it again
   inside the repeatable-read page transaction. A missing parent returns `404`
