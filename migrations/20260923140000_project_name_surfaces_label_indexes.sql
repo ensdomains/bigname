@@ -58,7 +58,7 @@ BEGIN
         OR found_function.proparallel <> 's'
         OR found_function.prorettype <> 'bigint[]'::regtype THEN
         RAISE EXCEPTION
-            'bigname_phase.label_hashes(text[]) exists with another definition; follow ops/project-progressive/README.md, then run the schema-migrations again';
+            'bigname_phase.label_hashes(text[]) exists but does not have the reviewed definition; follow the recovery steps in ops/project-progressive/README.md, then run the schema-migrations again';
     END IF;
 
     DROP INDEX IF EXISTS bigname_phase.name_surfaces_project_suffix_idx;
@@ -81,14 +81,30 @@ BEGIN
              'CREATE INDEX name_surfaces_project_label_hashes_idx ON bigname_phase.name_surfaces USING gin (bigname_phase.label_hashes(raw_labels))')
         ) AS reviewed(index_name, definition)
     LOOP
-        SELECT CASE relkind WHEN 'i' THEN 'index' ELSE 'relation of kind ' || relkind::text END
+        SELECT CASE relkind
+                   WHEN 'i' THEN 'index'
+                   WHEN 'I' THEN 'partitioned index'
+                   WHEN 'r' THEN 'table'
+                   WHEN 'p' THEN 'partitioned table'
+                   WHEN 'v' THEN 'view'
+                   WHEN 'm' THEN 'materialized view'
+                   WHEN 'S' THEN 'sequence'
+                   WHEN 'f' THEN 'foreign table'
+                   WHEN 'c' THEN 'composite type'
+                   ELSE 'relation of kind ' || relkind::text
+               END
         INTO found_kind
         FROM pg_class
         WHERE oid = to_regclass('bigname_phase.' || checked_index);
-        IF found_kind IS DISTINCT FROM 'index' THEN
+        IF found_kind IS NULL THEN
             RAISE EXCEPTION
-                'bigname_phase.% is missing or is a %, not an index; follow ops/project-progressive/README.md, then run the schema-migrations again',
-                checked_index, COALESCE(found_kind, 'missing relation');
+                '% does not exist although bigname_phase.name_surfaces does; build it with ops/project-progressive/install.sql as ops/project-progressive/README.md describes, then run the schema-migrations again',
+                checked_index;
+        END IF;
+        IF found_kind <> 'index' THEN
+            RAISE EXCEPTION
+                'bigname_phase.% is a %, not an index, so the index was never built; remove or rename that relation, then run the schema-migrations again',
+                checked_index, found_kind;
         END IF;
         IF NOT EXISTS (
             SELECT 1

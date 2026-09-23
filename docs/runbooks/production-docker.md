@@ -675,28 +675,49 @@ invalid, not ready, on another table, not an index, or has another definition.
 
 The release containing `20260922010000_project_node_history_idx.sql`,
 `20260922010100_project_mirror_scope_indexes.sql` and
-`20260923140000_project_name_surfaces_label_indexes.sql` adds the five indexes Project's
-scoped node history and progressive mirror dependency traversal read. On an
-initialized production namespace, build them in step 3 by running
+`20260923140000_project_name_surfaces_label_indexes.sql` adds the five indexes
+Project's scoped node history and progressive mirror dependency traversal read.
+On an initialized production namespace, build them in step 3 by running
 [`ops/project-progressive/install.sql`](../../ops/project-progressive/install.sql)
-through an autocommit SQL client, then
+through `psql -X -v ON_ERROR_STOP=1`, then
 [`ops/project-progressive/validate.sql`](../../ops/project-progressive/validate.sql),
 as [their runbook](../../ops/project-progressive/README.md) describes. This
 runbook carries no copy of the five statements; `install.sql` is the only
 source. The builds are concurrent and permit writes, so they can finish while
-the existing runner is still processing, before the stop/start window opens.
-`validate.sql` fails unless all five names are valid and ready indexes, the
-two label-hash indexes and their `label_hashes` function have their reviewed
-definitions, and the earlier `name_surfaces_project_labels_idx` and
-`name_surfaces_project_suffix_idx` label-array indexes (which `install.sql`
-drops) are gone; an existing name is not proof of a valid or matching index,
-so also compare each other `pg_get_indexdef` with `install.sql`. An interrupted build leaves an invalid
-index; confirm in `pg_stat_progress_create_index` that no build is still
-running, then review before an explicitly authorized retry. Keep both outputs
-with their start and end times in the release record. Then apply the
-schema-migrations in step 4; their `IF NOT EXISTS` builds are no-ops when the
-indexes already exist, and they must not perform the first build against a
-populated production table, because an ordinary index build blocks writes.
+the existing runner is still processing, before the stop/start window opens;
+step 3 then only runs `install.sql` again as the check. `install.sql` refuses
+before building anything when a name is taken by an invalid index, an index on
+another table, a relation that is not an index, or, for the two label-hash
+indexes and their `label_hashes` function, another definition. It never drops
+an index, and it ends with `ANALYZE bigname_phase.name_surfaces`, because
+expression indexes have no statistics until the table is analyzed and the
+mirror lookups depend on them. `validate.sql` fails unless all five names are
+valid and ready indexes and the label-hash indexes and function have their
+reviewed definitions; compare the other three `pg_get_indexdef` outputs with
+`install.sql`. It allows the earlier `name_surfaces_project_labels_idx` and
+`name_surfaces_project_suffix_idx` label-array indexes to exist, because the
+running binary's lookups can only use those. An interrupted build leaves an
+invalid index; confirm in `pg_stat_progress_create_index` that no build is
+still running, drop only the index the error names with
+`DROP INDEX CONCURRENTLY`, and rerun `install.sql`. Keep all outputs with their
+start and end times in the release record. Then apply the schema-migrations in
+step 4: `20260923140000_project_name_surfaces_label_indexes.sql` drops the two
+earlier label-array indexes inside the stop window, its `IF NOT EXISTS` builds
+are no-ops when the indexes already exist, and it refuses a function or index
+under a reviewed name with another definition. The schema-migrations must not
+perform the first build against a populated production table, because an
+ordinary index build blocks writes. After the new binary starts in step 9, run
+`validate.sql` again and then
+[`ops/project-progressive/validate-after-switch.sql`](../../ops/project-progressive/validate-after-switch.sql),
+which fails while either earlier label-array index still exists.
+
+This release also edits Project SQL under `crates/project/src/scope/`, a
+covered input of the
+[interpreter content hash](../glossary.md#interpreter-content-hash), so the new
+binary's hash differs from the running one's and it must re-walk the complete
+retained range before normal derived writes continue: run the full-history
+Interpret and Project redos of steps 7 and 8 before step 9, and record the new
+hash in the release record.
 
 The release containing
 `20260923120000_normalized_events_address_match_indexes.sql` adds the three
@@ -1137,11 +1158,14 @@ indexes are additive; rollback may leave them in place.
    `20260923120000_normalized_events_address_match_indexes.sql`, run
    `ops/address-history-indexes/install.sql` as described above, require it to
    exit zero, then run `ANALYZE bigname_phase.normalized_events`;
-   for the release containing `20260922010000_project_node_history_idx.sql`
-   or `20260922010100_project_mirror_scope_indexes.sql`, run
+   for the release containing `20260922010000_project_node_history_idx.sql`,
+   `20260922010100_project_mirror_scope_indexes.sql` or
+   `20260923140000_project_name_surfaces_label_indexes.sql`, run
    `ops/project-progressive/install.sql` then
    `ops/project-progressive/validate.sql` as described above and require both
-   to exit zero;
+   to exit zero, and after step 9 run `validate.sql` and
+   `ops/project-progressive/validate-after-switch.sql` and require both to exit
+   zero;
    otherwise skip this step;
    For the release containing
    `20260814130000_surface_binding_authority_arm.sql`, a populated phase schema

@@ -1,7 +1,10 @@
+-- Run after install.sql, before the switch. The earlier label-array indexes
+-- (name_surfaces_project_labels_idx and name_surfaces_project_suffix_idx) may still
+-- exist here: the running binary uses them, and the schema-migration drops them in the
+-- stop/start window. After the new binary starts, also run validate-after-switch.sql.
 DO $validation$
 DECLARE
     missing text;
-    stale text;
     checked_index text;
     expected_definition text;
     found_definition text;
@@ -20,15 +23,6 @@ BEGIN
     );
     IF missing IS NOT NULL THEN
         RAISE EXCEPTION 'Project progressive indexes missing or invalid: %', missing;
-    END IF;
-
-    -- The earlier label-array indexes have no entry size bound: a long enough label
-    -- would fail its name_surfaces insert. install.sql drops them.
-    SELECT string_agg(old.name, ', ' ORDER BY old.name) INTO stale
-    FROM unnest(ARRAY['name_surfaces_project_labels_idx','name_surfaces_project_suffix_idx']) old(name)
-    WHERE to_regclass('bigname_phase.' || old.name) IS NOT NULL;
-    IF stale IS NOT NULL THEN
-        RAISE EXCEPTION 'Project progressive label-array indexes still exist: %; rerun install.sql', stale;
     END IF;
 
     SELECT btrim(regexp_replace(prosrc, '\s+', ' ', 'g')) INTO found_body

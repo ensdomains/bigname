@@ -3,26 +3,70 @@
 These indexes support scoped node history and progressive mirror dependency
 traversal. They do not change normalized events, projection contents or admission.
 
-For an existing large database, run `install.sql` through an autocommit SQL client
-against the intended database before starting a binary containing the accompanying
-schema-migrations. Concurrent index builds cannot run inside a transaction.
-Then run `validate.sql` and compare `pg_get_indexdef` with `install.sql` for all five
-indexes. An existing name is not proof of a valid or matching index. Stop on any
-failure; an interrupted concurrent build can leave an invalid index and must be
-reviewed before an explicitly authorized retry.
+## Release sequence
 
-Two of the indexes serve lookups by label on `name_surfaces`. Labels come from
-chain data and have no length limit, and an index entry larger than about 2.7 KB
-makes the `name_surfaces` insert fail, so neither index stores label text:
+On an existing large database, in this order:
+
+1. **Install, while the current runner is still processing.** Run `install.sql`
+   with `psql -X -v ON_ERROR_STOP=1` against the intended database, outside any
+   transaction (concurrent index builds cannot run inside one). It refuses before
+   building anything when one of the five names is already taken by an invalid
+   index, an index on another table, a relation that is not an index, or (for the
+   two label-hash indexes and the `label_hashes` function) another definition. It
+   then builds whatever is missing, runs `ANALYZE bigname_phase.name_surfaces`
+   (expression indexes have no statistics until then, and the planner needs them
+   to choose the label-hash indexes), and runs the same check again, requiring
+   everything to exist. It never drops an index.
+2. **Validate.** Run `validate.sql`. It fails unless all five indexes are valid and
+   ready, and the two label-hash indexes and `label_hashes` have their reviewed
+   definitions. It allows the earlier label-array indexes to exist, because the
+   running binary still uses them. Also compare the other three `pg_get_indexdef`
+   outputs with `install.sql`; an existing name is not proof of a matching index.
+3. **Stop the runner**, as the production runbook's release steps describe.
+4. **Apply the schema-migrations.**
+   `20260923140000_project_name_surfaces_label_indexes.sql` drops the earlier
+   label-array indexes (a quick, ordinary drop inside the stop window), finds the
+   prebuilt hash indexes by name, and refuses a function or index under a reviewed
+   name with another definition.
+5. **Start the new binary**, after the full re-walk described below.
+6. **Validate after the switch.** Run `validate.sql` again, then
+   `validate-after-switch.sql`, which fails while either earlier label-array index
+   still exists.
+
+Stop on any failure. An interrupted concurrent build leaves an invalid index that
+`CREATE INDEX CONCURRENTLY IF NOT EXISTS` would skip by name. To recover, confirm
+in `pg_stat_progress_create_index` that no build is still running, drop only the
+index the error names with `DROP INDEX CONCURRENTLY`, and rerun `install.sql`.
+Never drop a valid index with the reviewed definition. `bigname_phase.label_hashes`
+is never replaced: if it has another definition, no index can depend on the
+reviewed one yet, so drop it (and any index that depends on it) and rerun
+`install.sql`, after review.
+
+## Full re-walk
+
+This release changes Project SQL under `crates/project/src/scope/`, which is a
+covered input of the
+[interpreter content hash](../../docs/glossary.md#interpreter-content-hash). The
+new binary's hash therefore differs from the running one's, and it must re-walk
+the complete retained range before normal derived writes continue. Plan the stop
+window for that re-walk and record the new hash in the release record.
+
+## Label-hash indexes
+
+Two of the indexes serve lookups by label on `name_surfaces` for the
+[mirror walk and mirror seeds](../../docs/glossary.md#mirror-walk-and-mirror-seed).
+Labels come from chain data and have no length limit, and an index entry larger
+than about 2.7 KB makes the `name_surfaces` insert fail, so neither index stores
+label text:
 
 - `name_surfaces_project_label_hashes_idx` is a GIN index on
-  `bigname_phase.label_hashes(raw_labels)`, one 64-bit hash per label. The mirror
-  seed lookup finds the names that contain a seed's labels with
+  `bigname_phase.label_hashes(raw_labels)`, one 64-bit hash per label. The seed
+  lookup finds the names whose labels contain a seed's labels with
   `label_hashes(raw_labels) @> label_hashes(seed.raw_labels)`.
 - `name_surfaces_project_suffix_hash_idx` is a btree on
   `(namespace, hash_array_extended(raw_labels, 0))`, one 64-bit hash of the whole
-  array. The mirror walk looks up the surface of each label suffix of a name (the
-  name itself, then each ancestor below the root) by that hash.
+  array. The walk looks up the surface of each label suffix of a name (the name
+  itself, then each ancestor below the root) by that hash.
 
 Both queries also compare the label arrays themselves (`raw_labels @> ...` and
 `raw_labels = ...`), so a hash collision never changes a result; the hashes only
@@ -32,22 +76,19 @@ SQL function over `hashtextextended` that `install.sql` and the schema-migration
 create. The array-to-text functions are not immutable and cannot be indexed. The
 queries spell the same expressions as the indexes so the planner can use them.
 
-An earlier version of this package built `name_surfaces_project_labels_idx`
-(GIN on `raw_labels`) and `name_surfaces_project_suffix_idx` (btree on
-`(namespace, raw_labels)`). `install.sql` builds the two hash indexes first and
-then drops the old two concurrently, so the lookups always have an index.
-`validate.sql` fails while either old index exists, when `label_hashes` has
-another definition, or when either hash index has another definition.
-`20260923140000_project_name_surfaces_label_indexes.sql` does the same on the
-schema-migration path: it drops the old indexes (an ordinary, quick drop when
-`install.sql` was not rerun first), builds any missing hash index, and refuses a
-function or index under the reviewed name with another definition.
+An earlier version of this package built `name_surfaces_project_labels_idx` (GIN
+on `raw_labels`) and `name_surfaces_project_suffix_idx` (btree on
+`(namespace, raw_labels)`). Only the running binary's lookups can use them, so
+they stay until the schema-migration drops them in step 4.
+
+## Schema-migrations
 
 The ordinary schema-migrations (`20260922010000_project_node_history_idx.sql`,
 `20260922010100_project_mirror_scope_indexes.sql` and
-`20260923140000_project_name_surfaces_label_indexes.sql`) cover empty/test installations
-and recognise indexes prebuilt under the same names. They are not a substitute for
-the concurrent prebuild on a large database. Keep the `install.sql` and
-`validate.sql` output with start and end times in the release record. Each
-deployment still requires its own reviewed migration, capacity and rollback checks;
-see [the production runbook](../../docs/runbooks/production-docker.md).
+`20260923140000_project_name_surfaces_label_indexes.sql`) cover empty/test
+installations and recognise indexes prebuilt under the same names. They are not a
+substitute for the concurrent prebuild on a large database. Keep the `install.sql`,
+`validate.sql` and `validate-after-switch.sql` output with start and end times in
+the release record. Each deployment still requires its own reviewed migration,
+capacity and rollback checks; see
+[the production runbook](../../docs/runbooks/production-docker.md).
