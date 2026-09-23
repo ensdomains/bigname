@@ -62,7 +62,11 @@ expire when that happens. `meta.as_of` on every page,
 the first included, is the bound: its block number, hash, and timestamp per
 chain, not the API's current progress. The one current-state field on these
 pages is the display name on `/v1/events` and address history rows, which is
-read from current name state after the page.
+read from current name state after the page. Cursor fields are not
+authenticated, so a client can edit the binding, for example to an older
+readable bound block. An edited binding is validated exactly like a minted
+one, and a binding that passes serves a consistent read at that bound while
+every expiry rule below still applies.
 
 A history cursor expires, returning `409 stale` with a message to restart
 without a cursor, when any of these holds: the bound block is no longer

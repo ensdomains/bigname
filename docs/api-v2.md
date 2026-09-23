@@ -1234,8 +1234,13 @@ rules](api-v2-routes.md#shared-route-rules)). The one exception is the address
 history [known limitation](api-v2-routes.md#history-collection-filters): when
 one of the relation kinds listed there ends after the bound block, a
 continuation loses that name's remaining rows and reports a smaller
-`page.total_count`, and the cursor does not expire. Current-state product collection
-cursors bind the current publication instead. A bare search cursor uses the
+`page.total_count`, and the cursor does not expire. Cursor fields are not
+authenticated: a client can edit a history cursor's binding, for example to an
+older readable bound block. An edited binding is validated exactly like a
+minted one, and a binding that passes serves a consistent read at that bound,
+the same kind of read a continuation gets, while every expiry rule above still
+applies. Current-state product collection cursors bind the current publication
+instead. A bare search cursor uses the
 request's derived namespace set as its namespace anchor and fails closed if
 that set has changed; search cursors preserve keyset position across requests
 without claiming that the mutable dataset is frozen. A history cursor issued
