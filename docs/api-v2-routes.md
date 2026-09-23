@@ -740,7 +740,9 @@ collection route carry neither header.
   When `keys` is omitted, empty, or only whitespace, `records` answers the
   default key set: every record key in that grammar found in the served record
   inventory row's selectors, entries, and explicit gaps, parsed and
-  deduplicated. Only an inventory row the name may serve contributes (the
+  deduplicated. The phase inventory reader currently records no explicit gaps,
+  so in practice the set comes from selectors and entries and `unset_keys` is
+  empty. Only an inventory row the name may serve contributes (the
   current-registration rule below). Coverage is not consulted while the set is
   derived: an `unsupported` row still contributes its keys, which
   `source=indexed` and unkeyed `source=auto` answer with the row's reason and

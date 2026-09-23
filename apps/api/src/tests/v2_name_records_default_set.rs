@@ -604,6 +604,9 @@ async fn v2_get_name_records_source_auto_without_keys_stays_indexed_over_default
         let selectors = inventory.selectors.as_array_mut().expect("selectors array");
         selectors.push(text_selector("email", false));
         // text:email has no entry, so the family refusal makes it unsatisfiable by the index.
+        // Project never lists a product family here (it records non-product families and
+        // the resolver classification), so this row is synthetic; the test only needs a key
+        // that explicit auto sends to the fallback and unkeyed auto does not.
         inventory.unsupported_families = json!([{
             "record_family": "text",
             "unsupported_reason": "resolver_family_pending"

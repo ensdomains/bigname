@@ -23,7 +23,8 @@ lowercase addresses, and could not report `not_found`, `unsupported`, or
 - Default key set: when `keys` is omitted, empty, or only whitespace, the route
   answers every product record key (`addr:<coin_type>`, `text:<key>`,
   `avatar`, `contenthash`) parsed from the served inventory row's selectors,
-  entries, and explicit gaps, deduplicated. Rows the name may not serve, such
+  entries, and explicit gaps, deduplicated (the phase inventory reader currently
+  records no explicit gaps). Rows the name may not serve, such
   as reservation or audit-only inventory, contribute no keys, and `records` is
   `{}` when there is no key to answer.
 - Limit: explicit and default sets are both limited to 200 keys. A default set
