@@ -219,8 +219,14 @@ fn observed(types: &[&str]) -> bigname_storage::AbiContentTypes {
 }
 
 async fn abi_content_types(pool: &PgPool, id: i64) -> Result<bigname_storage::AbiContentTypes> {
-    let (support, provenance, positions): (String, Value, Value) = sqlx::query_as(
-        "SELECT support_status, provenance, chain_positions FROM record_inventory_current WHERE resource_id=$1::uuid",
+    let (resource_id, support, provenance, positions, recomputed): (
+        uuid::Uuid,
+        String,
+        Value,
+        Value,
+        time::OffsetDateTime,
+    ) = sqlx::query_as(
+        "SELECT resource_id, support_status, provenance, chain_positions, last_recomputed_at FROM record_inventory_current WHERE resource_id=$1::uuid",
     )
     .bind(resource(id))
     .fetch_one(pool)
@@ -229,8 +235,10 @@ async fn abi_content_types(pool: &PgPool, id: i64) -> Result<bigname_storage::Ab
         pool,
         &[bigname_storage::AbiContentTypesInput {
             authoritative: support == "supported",
+            resource_id,
             provenance: &provenance,
             chain_positions: &positions,
+            last_recomputed_at: recomputed,
         }],
     )
     .await?;

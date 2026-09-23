@@ -1023,7 +1023,15 @@ collection route carry neither header.
   and canonicality rules that decide the other keys also decide which ABI
   writes count: a write made before the resolver was selected counts, a write
   on a resolver the name has since left does not (until the name selects it
-  again), and a write before a `VersionChanged` reset does not. Each item is a
+  again), and a write before a `VersionChanged` reset does not. Whether the
+  selected storage has an ABI event bigname indexes comes from the selected
+  resolver's classification in the resolver projection, read in the same
+  statement that confirms the inventory row the route loaded (same resource,
+  chain positions, and recompute time) is still the published row. Project
+  republishes every inventory row that points at a resolver whose
+  classification changes, so the classification read this way is the one the
+  inventory row was built with; a resolver row stamped at a newer target than
+  the inventory row is expected and does not change the answer. Each item is a
   canonical unsigned decimal string of a single-bit `uint256` content type,
   listed once, in ascending numeric order; content types can exceed 64 bits,
   so decode each item as a big integer. A listed content type means a write
@@ -1056,7 +1064,11 @@ collection route carry neither header.
   - `abi_observations_stale`: a write the inventory selected is no longer
     retained as canonical, activated evidence, for example after a
     reorganization or an Interpret redo removed it; the list is withheld
-    rather than shortened until Project rebuilds the inventory.
+    rather than shortened until Project rebuilds the inventory. The same
+    reason covers an inventory row that Project replaced after the route
+    loaded it and before it read the resolver's classification: the answer is
+    withheld rather than computed from the older row and the newer
+    classification, and a retry reads the new row.
   - `abi_content_type_not_single_bit`: a selected ABI write names a content
     type that is zero or has more than one bit set. The ENS setters reject
     such types, so only a nonstandard resolver emits them; bigname neither

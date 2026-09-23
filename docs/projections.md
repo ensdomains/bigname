@@ -1068,7 +1068,17 @@ selectors nor entries, followed by the selecting link ids that
 `provenance.record_link_event_ids` also lists. The records and lookup routes
 read a name's ABI content types back from those ids
 ([`api-v2-routes.md`](api-v2-routes.md), `GET /v1/names/{name}/records`), so
-limiting that list to the served families would silently drop them. The record event need
+limiting that list to the served families would silently drop them. Those
+routes take the selected resolver's source family and role from
+`resolver_current`, in the same statement that confirms the inventory row they
+loaded (same `resource_id`, `chain_positions`, and `last_recomputed_at`) is
+still published, and answer `abi_observations_stale` when it is not. That is
+sound because a classification change puts the resolver in
+`project_scope_resolver_dependents`, which republishes every inventory row that
+points at it, while an unchanged resolver row may be re-stamped at a newer
+target (for example after a record write for another name on the same
+resolver) without republishing those inventory rows, so comparing the two rows'
+target blocks would not be. The record event need
 not carry that resource: Project normally joins its `logical_name_id` and
 emitting resolver to the pointer without restricting either event's source
 family. An `ens_v1_resolver_l1` event whose `logical_name_id` is null may join

@@ -24,8 +24,10 @@ impl RecordInventory {
 pub(crate) fn abi_input_for_row(row: &RecordInventoryCurrentRow) -> AbiContentTypesInput<'_> {
     AbiContentTypesInput {
         authoritative: serving_record_inventory(Some(row)).is_some(),
+        resource_id: row.resource_id,
         provenance: &row.provenance,
         chain_positions: &row.chain_positions,
+        last_recomputed_at: row.last_recomputed_at,
     }
 }
 
@@ -35,8 +37,10 @@ pub(crate) fn abi_input_for_identity_row(
 ) -> AbiContentTypesInput<'_> {
     AbiContentTypesInput {
         authoritative: row.support_status == "supported",
+        resource_id: row.resource_id,
         provenance: &row.provenance,
         chain_positions: &row.chain_positions,
+        last_recomputed_at: row.last_recomputed_at,
     }
 }
 
@@ -84,7 +88,9 @@ pub(crate) async fn load_abi_content_types(
         })
 }
 
-/// Records the input count of each batched read so a test can assert one read per request.
+/// Records the input count of each batched read so a test can assert one read per request, and
+/// can run one statement after the route loaded its inventory rows and before the ABI read, so a
+/// test can publish a newer projection in that window.
 #[cfg(test)]
 pub(crate) mod abi_content_types_test_hooks {
     use std::sync::{Arc, Mutex};
@@ -98,6 +104,7 @@ pub(crate) mod abi_content_types_test_hooks {
     type Calls = Arc<Mutex<Vec<usize>>>;
 
     static HOOKS: ScopedTestHookRegistry<String, Calls> = ScopedTestHookRegistry::new();
+    static INTERLEAVED: ScopedTestHookRegistry<String, String> = ScopedTestHookRegistry::new();
 
     pub(crate) async fn install(
         pool: &PgPool,
@@ -107,12 +114,26 @@ pub(crate) mod abi_content_types_test_hooks {
         Ok((guard, calls))
     }
 
+    /// Run `statement` once, just before the next ABI read on this test database.
+    pub(crate) async fn interleave(
+        pool: &PgPool,
+        statement: &str,
+    ) -> Result<ScopedTestHookGuard<String, String>> {
+        Ok(INTERLEAVED.install(current_test_database(pool).await?, statement.to_owned()))
+    }
+
     pub(super) async fn record(pool: &PgPool, inputs: usize) {
         let Ok(database) = current_test_database(pool).await else {
             return;
         };
         if let Some(calls) = HOOKS.get_cloned(&database) {
             calls.lock().expect("ABI read calls").push(inputs);
+        }
+        if let Some(statement) = INTERLEAVED.take(&database) {
+            sqlx::raw_sql(&statement)
+                .execute(pool)
+                .await
+                .expect("interleaved ABI test statement");
         }
     }
 }

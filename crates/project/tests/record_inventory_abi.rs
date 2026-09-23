@@ -182,6 +182,112 @@ async fn retracted_evidence_and_multi_bit_writes_withhold_the_list() -> Result<(
     fixture.cleanup().await
 }
 
+/// A route loads its inventory row, then Project publishes a newer target that reclassifies the
+/// row's resolver (here to the direct PublicResolverV2 profile, which admits no ABI event) and, as
+/// every classification change does, republishes the inventory rows that point at it. The ABI read
+/// for the held row must not combine the older row with the newer classification.
+#[tokio::test]
+async fn a_resolver_reclassified_after_the_row_was_loaded_is_stale_not_unsupported() -> Result<()> {
+    let fixture = Fixture::new("abi_reclassified").await?;
+    fixture.v1_pointer("pointer-a", 10, 0, RESOLVER_A).await?;
+    fixture.abi("abi-one", RESOLVER_A, 10, 1, "1").await?;
+    fixture.run(11, None, RunMode::Normal).await?;
+    let held = fixture.held(V1_RESOURCE).await?;
+    assert_eq!(fixture.abi_content_types_of(&held).await?, observed(&["1"]));
+
+    // The publish at block 12, in the shape Project writes it.
+    sqlx::raw_sql(&format!(
+        "UPDATE resolver_current
+         SET declared_summary = jsonb_set(declared_summary, '{{classification}}',
+                 declared_summary -> 'classification' || jsonb_build_object(
+                     'source_family', 'ens_v2_resolver_l1', 'role', 'public_resolver_v2')),
+             chain_positions = chain_positions || jsonb_build_object(
+                 'target_block_number', 12, 'target_block_hash', '{hash}'),
+             canonicality_summary = canonicality_summary || jsonb_build_object(
+                 'target_block_number', 12, 'target_block_hash', '{hash}')
+         WHERE chain_id = '{CHAIN}' AND resolver_address = '{RESOLVER_A}';
+         UPDATE record_inventory_current
+         SET chain_positions = chain_positions || jsonb_build_object(
+                 'target_block_number', 12, 'target_block_hash', '{hash}'),
+             canonicality_summary = canonicality_summary || jsonb_build_object(
+                 'target_block_number', 12, 'target_block_hash', '{hash}'),
+             last_recomputed_at = now()
+         WHERE resource_id = '{V1_RESOURCE}'::uuid",
+        hash = block_hash(12),
+    ))
+    .execute(&fixture.pool)
+    .await?;
+
+    assert_eq!(
+        fixture.abi_content_types_of(&held).await?,
+        AbiContentTypes::Unavailable(AbiContentTypesUnavailable::ObservationsStale)
+    );
+    // The republished row is read with the classification it was built with.
+    assert_eq!(
+        fixture.abi_content_types(V1_RESOURCE).await?,
+        AbiContentTypes::Unavailable(AbiContentTypesUnavailable::ObservationsNotSupported)
+    );
+    fixture.cleanup().await
+}
+
+/// A record write on a shared resolver for another node re-stamps the resolver's row at the new
+/// target without republishing this name's inventory row, so a resolver row newer than the
+/// inventory row is ordinary and must not make the answer stale.
+#[tokio::test]
+async fn a_resolver_restamped_by_another_names_write_keeps_the_answer() -> Result<()> {
+    let fixture = Fixture::new("abi_restamped").await?;
+    fixture.v1_pointer("pointer-a", 10, 0, RESOLVER_A).await?;
+    fixture.abi("abi-one", RESOLVER_A, 10, 1, "1").await?;
+    fixture.run(11, None, RunMode::Normal).await?;
+    let held = fixture.held(V1_RESOURCE).await?;
+    let other_node = bigname_lookup::ens_namehash_hex("other.fixture")?;
+    fixture
+        .insert(
+            "other-text",
+            None,
+            "RecordChanged",
+            "ens_v1_resolver_l1",
+            Some(fixture.v1_manifest),
+            12,
+            0,
+            RESOLVER_A,
+            json!({
+                "source_event": "TextChanged", "resolver": RESOLVER_A, "node": other_node,
+                "record_key": "text:url", "record_family": "text", "selector_key": "url",
+                "value_retained": true, "value": "https://other.example"
+            }),
+        )
+        .await?;
+    fixture.run(12, Some(11), RunMode::Normal).await?;
+
+    assert_eq!(
+        fixture
+            .target_block("resolver_current", "resolver_address", RESOLVER_A)
+            .await?,
+        Some(12)
+    );
+    assert_eq!(
+        fixture
+            .target_block("record_inventory_current", "resource_id", V1_RESOURCE)
+            .await?,
+        Some(11)
+    );
+    assert_eq!(fixture.abi_content_types_of(&held).await?, observed(&["1"]));
+    assert_eq!(
+        fixture.abi_content_types(V1_RESOURCE).await?,
+        observed(&["1"])
+    );
+    fixture.cleanup().await
+}
+
+struct HeldInventory {
+    resource_id: uuid::Uuid,
+    support_status: String,
+    provenance: Value,
+    chain_positions: Value,
+    last_recomputed_at: time::OffsetDateTime,
+}
+
 struct Fixture {
     id: &'static str,
     database: TestDatabase,
@@ -432,19 +538,57 @@ impl Fixture {
         .with_context(|| format!("no inventory row for {resource}"))
     }
 
+    /// The published row as a route holds it after loading it.
+    async fn held(&self, resource: &str) -> Result<HeldInventory> {
+        let (resource_id, support_status, provenance, chain_positions, last_recomputed_at) =
+            sqlx::query_as(
+                "SELECT resource_id, support_status, provenance, chain_positions, \
+                        last_recomputed_at \
+                 FROM record_inventory_current WHERE resource_id = $1::uuid",
+            )
+            .bind(resource)
+            .fetch_optional(&self.pool)
+            .await?
+            .with_context(|| format!("no inventory row for {resource}"))?;
+        Ok(HeldInventory {
+            resource_id,
+            support_status,
+            provenance,
+            chain_positions,
+            last_recomputed_at,
+        })
+    }
+
     /// The storage read the records and lookup routes serve, over the published row.
     async fn abi_content_types(&self, resource: &str) -> Result<AbiContentTypes> {
-        let row = self.inventory(resource).await?;
+        let held = self.held(resource).await?;
+        self.abi_content_types_of(&held).await
+    }
+
+    /// The same read over a row the caller loaded earlier.
+    async fn abi_content_types_of(&self, held: &HeldInventory) -> Result<AbiContentTypes> {
         let mut answers = load_record_inventory_abi_content_types(
             &self.pool,
             &[AbiContentTypesInput {
-                authoritative: row["support_status"] == "supported",
-                provenance: &row["provenance"],
-                chain_positions: &row["chain_positions"],
+                authoritative: held.support_status == "supported",
+                resource_id: held.resource_id,
+                provenance: &held.provenance,
+                chain_positions: &held.chain_positions,
+                last_recomputed_at: held.last_recomputed_at,
             }],
         )
         .await?;
         Ok(answers.remove(0))
+    }
+
+    async fn target_block(&self, table: &str, key: &str, value: &str) -> Result<Option<i64>> {
+        Ok(sqlx::query_scalar(&format!(
+            "SELECT (chain_positions ->> 'target_block_number')::bigint FROM {table} \
+             WHERE {key}::text = $1"
+        ))
+        .bind(value)
+        .fetch_one(&self.pool)
+        .await?)
     }
 
     async fn cleanup(self) -> Result<()> {

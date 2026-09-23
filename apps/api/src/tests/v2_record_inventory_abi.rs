@@ -386,3 +386,73 @@ async fn abi_content_types_for_a_full_lookup_batch_use_one_batched_read() -> Res
     assert!(!plan.contains("Seq Scan"), "{plan}");
     database.cleanup().await
 }
+
+/// Project can publish after the records route loaded its inventory row and before the ABI read.
+/// A publish that reclassifies the resolver also republishes every inventory row that points at
+/// it, so the row the route holds is no longer the published one and the answer is stale, never
+/// the older row read with the newer classification. A publish that only re-stamps the resolver
+/// at a newer target, as any record write on a shared resolver does, leaves the held row current
+/// and its answer unchanged.
+#[tokio::test]
+async fn abi_content_types_never_mix_a_newer_resolver_publish_into_a_held_row() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_abi_name(&database, "abi-race.eth", 0x5ab400).await?;
+    seed_abi_resolver(&database, "ens_v1_resolver_l1", "public_resolver").await?;
+    let ids = seed_abi_writes(&database, &[abi_write("race", "8")]).await?;
+    point_inventory_at_abi_writes(&database, "abi-race.eth", &ids).await?;
+    let (_, head) = abi_head(&database).await?;
+    let next = head + 1;
+    let next_hash = format!("0x{next:064x}");
+    sqlx::query(
+        "INSERT INTO bigname_phase.chain_lineage
+             (chain_id, block_hash, block_number, block_timestamp, canonicality_state)
+         VALUES ($1, $2, $3, now(), 'canonical')",
+    )
+    .bind(ABI_CHAIN)
+    .bind(&next_hash)
+    .bind(next)
+    .execute(&database.lookup_pool)
+    .await?;
+    let path = "/v1/names/abi-race.eth/records?include=inventory";
+    let restamp_resolver = format!(
+        "UPDATE bigname_phase.resolver_current
+         SET chain_positions = chain_positions || jsonb_build_object(
+                 'target_block_number', {next}, 'target_block_hash', '{next_hash}')
+         WHERE chain_id = '{ABI_CHAIN}' AND resolver_address = '{ABI_RESOLVER}'"
+    );
+
+    let _restamp = crate::v2::abi_content_types_test_hooks::interleave(
+        &database.lookup_pool,
+        &restamp_resolver,
+    )
+    .await?;
+    let records = v2_get_json(&database, path).await?;
+    assert_eq!(records["data"]["inventory"]["abi_content_types"], json!(["8"]), "{records:#}");
+
+    let reclassify_and_republish = format!(
+        "UPDATE bigname_phase.resolver_current
+         SET declared_summary = jsonb_build_object('classification', jsonb_build_object(
+                 'source_family', 'ens_v2_resolver_l1', 'role', 'public_resolver_v2'))
+         WHERE chain_id = '{ABI_CHAIN}' AND resolver_address = '{ABI_RESOLVER}';
+         UPDATE bigname_phase.record_inventory_current inventory
+         SET chain_positions = inventory.chain_positions || jsonb_build_object(
+                 'target_block_number', {next}, 'target_block_hash', '{next_hash}'),
+             last_recomputed_at = inventory.last_recomputed_at + interval '1 second'
+         FROM bigname_phase.name_current name
+         WHERE name.resource_id = inventory.resource_id AND name.raw_name = 'abi-race.eth'"
+    );
+    let _republish = crate::v2::abi_content_types_test_hooks::interleave(
+        &database.lookup_pool,
+        &reclassify_and_republish,
+    )
+    .await?;
+    let records = v2_get_json(&database, path).await?;
+    let inventory = &records["data"]["inventory"];
+    assert_eq!(inventory["abi_content_types"], Value::Null, "{records:#}");
+    assert_eq!(
+        inventory["abi_unsupported_reason"],
+        json!("abi_observations_stale"),
+        "{records:#}"
+    );
+    database.cleanup().await
+}
