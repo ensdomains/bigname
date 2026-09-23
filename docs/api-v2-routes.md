@@ -1365,28 +1365,35 @@ A recognized namespace with no available publication returns retryable `409 stal
   (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L71-L76 @ ens_v1@91c966f);
   the ENSv1 pin does not vendor OpenZeppelin's ERC-721, so the pinned
   Basenames analogue shows the transfer shape. A relation that began after the
-  published block has a grant or a transfer to the address in the range, or an
-  ENSv2 reservation, and is not admitted. A relation that ended after that
-  block has no current row, so it is reproduced only from the three historical
-  shapes the ownership matcher knows: a `RegistrationGranted` registrant and a
-  `TokenControlTransferred` recipient on a token-backed, Basenames or ENSv2
-  resource, and an `AuthorityTransferred` owner on a registry-only or ENSv2
-  resource. The second current input is the resolver's current classification
-  row, which decides whether an ENSv2 resolver pointer attributes node-keyed
-  writes on that resolver.
+  published block has a grant or a transfer to the address in the range and is
+  not admitted. The probe also refuses an ENSv2 `RegistrationReserved` in the
+  range: reserving an expired name burns the previous holder's token
+  (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registry/PermissionedRegistry.sol:L481-L486 @ ens_v2_sepolia_20260916@366de741)
+  and emits `LabelReserved` with no owner and no mint
+  (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registry/PermissionedRegistry.sol:L490-L491 @ ens_v2_sepolia_20260916@366de741),
+  and bigname keeps no `TokenControlTransferred` row for a burn, so the
+  reservation is the only row that marks the end of that holding. A relation
+  that ended after that block has no current row, so it is reproduced only
+  from the three historical shapes the ownership matcher knows: a
+  `RegistrationGranted` registrant and a `TokenControlTransferred` recipient
+  on a token-backed, Basenames or ENSv2 resource, and an
+  `AuthorityTransferred` owner on a registry-only or ENSv2 resource. The
+  second current input is the resolver's current classification row, which
+  decides whether an ENSv2 resolver pointer attributes node-keyed writes on
+  that resolver.
 - Known limitation: four relation kinds that ended after the published block
   are not reproduced, so the address's read loses that name's events: an ENSv1
   `.eth` registry controller from `AuthorityTransferred` on a token-backed
   resource, a token holder whose only evidence is the grant, an effective
   controller that fell back to the token holder, and an ENSv1 effective
   controller from a resource-scoped `PermissionChanged` grant (registrar
-  registration or transfer, registry owner, or NameWrapper holder). ENSv2
-  `PermissionChanged` rows carry registry or resolver scopes, so they never
-  set this controller. A relation that ended after the published block and
-  began again before the current row was written counts as ended: its current
-  row cites the transfer that restored it. Wrapper grace-period and expiry
-  transitions have no cited event of their own, so a relation row gated by
-  them can appear or vanish between pages of the same read.
+  registration, transfer or surface snapshot, registry owner, or NameWrapper
+  holder). ENSv2 `PermissionChanged` rows carry registry or resolver scopes,
+  so they never set this controller. A relation that ended after the published
+  block and began again before the current row was written counts as ended:
+  its current row cites the transfer that restored it. Wrapper grace-period
+  and expiry transitions have no cited event of their own, so a relation row
+  gated by them can appear or vanish between pages of the same read.
 - Cursors bind the order and every filter above. The cursor `sort` token
   encodes the direction, and its filters carry the canonical `type` set and
   the canonical UTC spelling of each timestamp bound, so a cursor issued by one
@@ -1595,23 +1602,25 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
   the publication and return `409 stale` requiring a restart when it changes.
   Historical replay through `at` is not supported.
 - Status semantics: no product-visible matches return `200` with empty `data`,
-  `page.next_cursor=null`, and `page.has_more=false`. Missing names return `404
-  not_found` on the first page. A continuation does not look the name up in
-  current state again: the cursor already binds the name, and its rows come only
-  from the name's bindings, NameWrapper links, and registrar grants at or below
-  the published block. `include=child_registrations` on `eth` or `base.eth`
-  returns `400 invalid_input` before the name is looked up. Request and
-  cursor-binding validation precede the first
-  `redo_in_progress` check, so malformed requests retain `400`. The route
-  captures the collection-wide check before parent lookup, then checks it again
-  inside the repeatable-read page transaction. A missing parent returns `404`
-  only when no redo is active and the captured generations are unchanged;
-  otherwise the route returns retryable `409 stale`. Because the check is
-  collection-wide, an active Interpret redo on any chain returns `409 stale`
-  regardless of the requested namespace or name. The same response applies
-  when either check sees an active redo or a redo began between the checks. A
-  well-formed cursor whose event anchor is gone returns `400 invalid_input` when
-  no redo intervened and `stale` when the redo check takes precedence.
+  `page.next_cursor=null`, and `page.has_more=false`. Missing names return
+  `404 not_found` on the first page. A continuation does not look the name up
+  in current state again: the cursor already binds the name, and its rows come
+  only from the name's bindings, NameWrapper links, and registrar grants at or
+  below the published block, and with `include=child_registrations` also from
+  the name's child membership rows at or below it.
+  `include=child_registrations` on `eth` or `base.eth` returns `400
+  invalid_input` before the name is looked up. Request and cursor-binding
+  validation precede the first `redo_in_progress` check, so malformed requests
+  retain `400`. The route captures the collection-wide check before parent
+  lookup, then checks it again inside the repeatable-read page transaction. A
+  missing parent returns `404` only when no redo is active and the captured
+  generations are unchanged; otherwise the route returns retryable `409
+  stale`. Because the check is collection-wide, an active Interpret redo on
+  any chain returns `409 stale` regardless of the requested namespace or name.
+  The same response applies when either check sees an active redo or a redo
+  began between the checks. A well-formed cursor whose event anchor is gone
+  returns `400 invalid_input` when no redo intervened and `stale` when the
+  redo check takes precedence.
 - Replaces (v1): `GET /v1/history/names/{namespace}/{name}`.
   Registration-id anchored history from `GET /v1/history/resources/{resource_id}`
   moves to `GET /v1/events?registration_id=...`. `scope=registration` on this

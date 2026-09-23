@@ -236,9 +236,11 @@ fn push_cited_event_bound(
 /// such a transfer, and every registration event on its resource between the bound and it must be
 /// one too. The earliest of them names the address as its sender, so the address held the token
 /// just before it, and no event in the range changed the holder, so it held the token at the
-/// bound. A relation that began after the bound has a grant, an ENSv2 reservation or a transfer to
-/// it in the range and stays excluded. A controller row also refuses any controller event in the
-/// range.
+/// bound. A relation that began after the bound has a grant or a transfer to it in the range and
+/// stays excluded. An ENSv2 reservation in the range also refuses the row: reserving an expired
+/// name burns the previous holder's token, and bigname keeps no transfer row for a burn, so the
+/// reservation is the only row that marks the end of that holding. A controller row also refuses
+/// any controller event in the range.
 fn push_same_holder_since_bound(
     builder: &mut QueryBuilder<'_, Postgres>,
     chain_id: &str,
