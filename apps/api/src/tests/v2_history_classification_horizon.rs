@@ -1,0 +1,289 @@
+// A history cursor across a resolver declaration that starts above its bound. Project picks a
+// resolver's classification among its manifest's declarations by `start_block` at the Project
+// target, so ordinary advancement past a later-start declaration changes the classification the
+// bounded record attribution joins, with no manifest change, redo, or reorg. The manifest comes
+// from the manifest producer, the classification from real Project batches, and the events have
+// the shape the ENSv2 registry and resolver adapters write.
+
+const CH_NAME: &str = "horizon-v2.eth";
+const CH_RESOLVER: &str = "0x00000000000000000000000000000000000c0a2c";
+const CH_BOUND: i64 = 240;
+
+/// The Sepolia ENSv2 resolver manifest moved to the test chain, declaring `CH_RESOLVER` as
+/// `public_resolver_v2` from block 200 and as the ENSv1 mirror resolver from `mirror_start`.
+fn ch_manifest(mirror_start: i64) -> Result<String> {
+    let source = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../manifests/sepolia/ethereum/ens/ens_v2_resolver_l1/v1.toml"),
+    )?;
+    let (header, rest) = source
+        .split_once("\n[[contracts]]")
+        .context("manifest contracts")?;
+    let abi = rest.find("\n[[abi.events]]").context("manifest abi")?;
+    Ok(format!(
+        r#"{header}
+[[contracts]]
+role = "public_resolver_v2"
+address = "{CH_RESOLVER}"
+proxy_kind = "none"
+start_block = 200
+
+[[contracts]]
+role = "ensv1_mirror_resolver"
+address = "{CH_RESOLVER}"
+proxy_kind = "none"
+start_block = {mirror_start}
+{abi}"#,
+        header = header.replace(
+            r#"chain = "ethereum-sepolia""#,
+            &format!(r#"chain = "{BOUNDED_CHAIN}""#)
+        ),
+        abi = &rest[abi..],
+    ))
+}
+
+/// Blocks 200..=241, the synced manifest, the name with its ENSv2 pointer to `CH_RESOLVER`, and
+/// node-keyed writes at 220 and 225 that only the resolver's classification attributes to it.
+/// Project runs to the bound and the bound is published.
+async fn ch_seed(database: &TestDatabase, mirror_start: i64) -> Result<Uuid> {
+    seed_bounded_membership_blocks(database, CH_BOUND).await?;
+    let root = std::env::temp_dir().join(format!("bigname-classification-horizon-{}", Uuid::new_v4()));
+    let directory = root.join("ethereum/ens/ens_v2_resolver_l1");
+    std::fs::create_dir_all(&directory)?;
+    std::fs::write(directory.join("v1.toml"), ch_manifest(mirror_start)?)?;
+    let synced = bigname_manifests::sync_schema_v2_repository(
+        &database.pool,
+        &bigname_manifests::load_repository(&root)?,
+    )
+    .await;
+    std::fs::remove_dir_all(&root)?;
+    synced?;
+    let manifest_id: i64 = sqlx::query_scalar(
+        "SELECT manifest_id FROM bigname_phase.manifest_versions
+         WHERE source_family = 'ens_v2_resolver_l1' AND chain_id = $1",
+    )
+    .bind(BOUNDED_CHAIN)
+    .fetch_one(&database.pool)
+    .await?;
+
+    let (logical_name_id, resource) = seed_bounded_name(
+        database,
+        CH_NAME,
+        0xc0a_7000,
+        "0x00000000000000000000000000000000000c0a07",
+        bigname_storage::AddressNameRelation::EffectiveController,
+        205,
+    )
+    .await?;
+    let mut pointer = v2_history_event(
+        "ch-pointer-210",
+        Some(&logical_name_id),
+        Some(resource),
+        "ResolverChanged",
+        210,
+    );
+    pointer.source_family = "ens_v2_registry_l1".to_owned();
+    pointer.derivation_kind = "ens_v2_registry_resource_surface".to_owned();
+    pointer.after_state = json!({"resolver": CH_RESOLVER});
+    pointer.log_index = Some(1);
+    let node_write = |identity: &str, block: i64| -> Result<NormalizedEvent> {
+        let mut event = v2_history_event(identity, None, None, "RecordChanged", block);
+        event.source_family = "ens_v2_resolver_l1".to_owned();
+        event.derivation_kind = "ens_v2_resolver".to_owned();
+        event.source_manifest_id = Some(manifest_id);
+        event.manifest_version = 1;
+        event.after_state = json!({
+            "source_event": "TextChanged",
+            "node": bigname_lookup::ens_namehash_hex(CH_NAME)?,
+            "resolver": CH_RESOLVER,
+            "record_key": "text:url",
+            "record_family": "text",
+            "selector_key": "url",
+            "value_retained": true,
+            "value": identity,
+        });
+        Ok(event)
+    };
+    bigname_storage::insert_normalized_event_fixtures(
+        &database.pool,
+        &[
+            v2_history_event(
+                "ch-grant",
+                Some(&logical_name_id),
+                Some(resource),
+                "RegistrationGranted",
+                205,
+            ),
+            pointer,
+            node_write("ch-write-220", 220)?,
+            node_write("ch-write-225", 225)?,
+        ],
+    )
+    .await?;
+    ch_project_to(database, CH_BOUND).await?;
+    Ok(resource)
+}
+
+/// One ordinary Project batch to `target`, then its publication.
+async fn ch_project_to(database: &TestDatabase, target: i64) -> Result<()> {
+    bigname_project::Engine::new(database.pool.clone())
+        .run_batch(bigname_project::BatchRequest {
+            chain_id: BOUNDED_CHAIN.into(),
+            target_block: target,
+            affected_from_block: 200,
+            affected_to_block: target,
+            resume_current: None,
+            mode: bigname_project::RunMode::Normal,
+        })
+        .await?;
+    publish_bounded_membership_at(database, target).await
+}
+
+async fn ch_get(database: &TestDatabase, uri: &str) -> Result<(StatusCode, Value)> {
+    let state = AppState::new_with_rpc_urls(
+        database.lookup_pool.clone(),
+        bigname_lookup::ChainRpcUrls::default(),
+    );
+    let response = app_router(state)
+        .oneshot(Request::builder().uri(uri).body(Body::empty())?)
+        .await?;
+    let status = response.status();
+    Ok((status, read_json(response).await?))
+}
+
+async fn ch_ok(database: &TestDatabase, uri: &str) -> Result<Value> {
+    let (status, payload) = ch_get(database, uri).await?;
+    anyhow::ensure!(status == StatusCode::OK, "{uri}: {status} {payload}");
+    Ok(payload)
+}
+
+/// The cursor's manifest digest and the redo counters of every chain it binds.
+fn ch_binding_identity(cursor: &str) -> Result<Value> {
+    let payload: Value = serde_json::from_slice(&hex::decode(cursor)?)?;
+    let binding = &payload["binding"];
+    let counters = binding["chains"]
+        .as_object()
+        .context("cursor chains")?
+        .iter()
+        .map(|(chain, bound)| {
+            (
+                chain.clone(),
+                json!([bound["interpret_generation"], bound["project_generation"]]),
+            )
+        })
+        .collect::<serde_json::Map<_, _>>();
+    Ok(json!({"manifests": binding["manifests"], "counters": counters}))
+}
+
+fn ch_routes(resource: Uuid) -> [String; 2] {
+    [
+        format!("/v1/names/{CH_NAME}/history?scope=registration&include=total_count"),
+        format!("/v1/events?registration_id={resource}&include=total_count"),
+    ]
+}
+
+/// Crossing the later declaration's start flips the resolver's classification during ordinary
+/// Project advancement. Neither the manifests nor the redo counters change, so without the
+/// classification horizon a saved cursor would continue with the attributed writes gone: a
+/// changed page and count when its anchor is unaffected, `400` when its anchor is such a write.
+#[tokio::test]
+async fn v2_history_cursor_expires_at_the_classification_horizon() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let resource = ch_seed(&database, CH_BOUND + 1).await?;
+    let mut saved = Vec::new();
+    for route in ch_routes(resource) {
+        // Newest first: the write at 225 anchors page size 1; page size 3 anchors the grant
+        // side of the walk on the pointer at 210.
+        for page_size in [1, 3] {
+            let base = format!("{route}&page_size={page_size}");
+            let first = ch_ok(&database, &base).await?;
+            assert_eq!(
+                bounded_route_hashes(&first)[0],
+                "0xtx225",
+                "{base}: {first}"
+            );
+            assert_eq!(first["page"]["total_count"], json!(4), "{base}: {first}");
+            saved.push((route.clone(), base, hb_next_cursor(&first)?));
+        }
+    }
+
+    ch_project_to(&database, CH_BOUND + 1).await?;
+    for (route, base, cursor) in &saved {
+        let fresh = ch_ok(&database, &format!("{route}&page_size=1")).await?;
+        assert!(
+            !bounded_route_hashes(&fresh).contains(&"0xtx225".to_owned()),
+            "the later declaration must change the classification: {base}: {fresh}"
+        );
+        assert_eq!(
+            ch_binding_identity(&hb_next_cursor(&fresh)?)?,
+            ch_binding_identity(cursor)?,
+            "{base}: the manifests and redo counters must not change"
+        );
+        let (status, payload) = ch_get(&database, &format!("{base}&cursor={cursor}")).await?;
+        assert_eq!(status, StatusCode::CONFLICT, "{base}: {payload}");
+        assert_eq!(payload["error"]["message"], json!(HB_RESTART), "{base}");
+    }
+    database.cleanup().await
+}
+
+/// A later declaration that Project has not reached leaves the classification alone, so the
+/// saved cursors walk the same rows and count across the advance.
+#[tokio::test]
+async fn v2_history_cursor_continues_below_the_classification_horizon() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let resource = ch_seed(&database, 10_000).await?;
+    let mut walks = Vec::new();
+    for route in ch_routes(resource) {
+        for page_size in [1, 3] {
+            let base = format!("{route}&page_size={page_size}");
+            let first = ch_ok(&database, &base).await?;
+            let cursor = hb_next_cursor(&first)?;
+            let second = ch_ok(&database, &format!("{base}&cursor={cursor}")).await?;
+            walks.push((base, cursor, second));
+        }
+    }
+
+    ch_project_to(&database, CH_BOUND + 1).await?;
+    for (base, cursor, second) in walks {
+        let continued = ch_ok(&database, &format!("{base}&cursor={cursor}")).await?;
+        assert_eq!(continued["data"], second["data"], "{base}");
+        assert_eq!(continued["page"], second["page"], "{base}");
+        assert_eq!(continued["meta"]["as_of"], second["meta"]["as_of"], "{base}");
+    }
+    database.cleanup().await
+}
+
+/// The cursor carries the horizon it was issued under. A horizon at or below the bound block is
+/// malformed; any other value that differs from the one the manifests give for the bound
+/// expires the cursor, as an edited redo counter does.
+#[tokio::test]
+async fn v2_history_cursor_checks_its_classification_horizon() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let resource = ch_seed(&database, CH_BOUND + 1).await?;
+    for route in ch_routes(resource) {
+        let base = format!("{route}&page_size=1");
+        let cursor = hb_next_cursor(&ch_ok(&database, &base).await?)?;
+        let horizon = |value: Value| {
+            hb_edit_cursor(&cursor, |payload| {
+                payload["binding"]["chains"][BOUNDED_CHAIN]["classification_horizon"] = value;
+            })
+        };
+        assert_eq!(
+            serde_json::from_slice::<Value>(&hex::decode(&cursor)?)?["binding"]["chains"]
+                [BOUNDED_CHAIN]["classification_horizon"],
+            json!(CH_BOUND + 1),
+            "{base}"
+        );
+        let (status, payload) =
+            ch_get(&database, &format!("{base}&cursor={}", horizon(json!(CH_BOUND)))).await?;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{base}: {payload}");
+        for edited in [json!(null), json!(CH_BOUND + 2)] {
+            let (status, payload) =
+                ch_get(&database, &format!("{base}&cursor={}", horizon(edited))).await?;
+            assert_eq!(status, StatusCode::CONFLICT, "{base}: {payload}");
+            assert_eq!(payload["error"]["message"], json!(HB_RESTART), "{base}");
+        }
+        ch_ok(&database, &format!("{base}&cursor={cursor}")).await?;
+    }
+    database.cleanup().await
+}

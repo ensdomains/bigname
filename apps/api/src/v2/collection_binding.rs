@@ -1,9 +1,9 @@
 //! History collections bound to a block (docs/api-v2-routes.md, "Shared Route Rules"). The first
 //! page binds, for every chain in the request scope, the block the served publication stood at
-//! and that chain's Interpret and Project redo counters, plus a digest of the manifest revisions.
-//! Every page reads the history at or below that block, so new blocks never break the walk; a
-//! changed counter, an active redo, a changed manifest, or a bound block that is no longer
-//! readable expires it.
+//! and that chain's Interpret and Project redo counters and classification horizon, plus a digest
+//! of the manifest revisions. Every page reads the history at or below that block, so new blocks
+//! below the horizon never break the walk; a changed counter, an active redo, a changed manifest,
+//! a bound block that is no longer readable, or a publication at the horizon expires it.
 
 use std::collections::BTreeMap;
 
@@ -71,6 +71,19 @@ impl HistoryCollection {
                 .collect(),
         };
         let captured = capture_bound_state(state, &bound_blocks).await?;
+        let block_numbers = match binding {
+            Some(binding) => binding
+                .chains
+                .iter()
+                .flatten()
+                .map(|(chain, bound)| (chain.clone(), bound.block_number))
+                .collect(),
+            None => published
+                .iter()
+                .map(|(chain, position)| (chain.clone(), position.block_number))
+                .collect(),
+        };
+        let horizons = classification_horizons(state, &block_numbers).await?;
         let continues_cursor = binding.is_some();
         let bound = match binding {
             Some(binding) => binding.chains.clone().ok_or_else(invalid_cursor_error)?,
@@ -85,6 +98,7 @@ impl HistoryCollection {
                             block_hash: position.block_hash.clone(),
                             interpret_generation: redo.interpret.generation,
                             project_generation: redo.project.generation,
+                            classification_horizon: horizons.get(chain).copied(),
                         },
                     ))
                 })
@@ -99,15 +113,17 @@ impl HistoryCollection {
             as_of: BTreeMap::new(),
             continues_cursor,
         };
-        collection.admit(&published)?;
+        collection.admit(&published, &horizons)?;
         Ok(collection)
     }
 
     /// The captured state must still serve the bound: the counters the cursor carries, no redo
-    /// in progress, a readable bound block, and a publication at or above it.
+    /// in progress, a readable bound block, a publication at or above it, and the same
+    /// classification horizon with the publication still below it.
     fn admit(
         &mut self,
         published: &BTreeMap<String, bigname_storage::ChainPosition>,
+        horizons: &BTreeMap<String, i64>,
     ) -> V2Result<()> {
         if self.bound.iter().any(|(chain, bound)| {
             self.captured.redo.get(chain).is_none_or(|redo| {
@@ -136,6 +152,11 @@ impl HistoryCollection {
             if published
                 .get(chain)
                 .is_none_or(|position| position.block_number < bound.block_number)
+            {
+                return Err(self.changed());
+            }
+            if bound.classification_horizon != horizons.get(chain).copied()
+                || crossed_horizon(bound, published.get(chain))
             {
                 return Err(self.changed());
             }
@@ -246,6 +267,13 @@ impl HistoryCollection {
         {
             return Err(self.changed());
         }
+        let horizons = classification_horizons(state, &self.block_bounds()).await?;
+        if self.bound.iter().any(|(chain, bound)| {
+            bound.classification_horizon != horizons.get(chain).copied()
+                || crossed_horizon(bound, published.get(chain))
+        }) {
+            return Err(self.changed());
+        }
         Ok(())
     }
 
@@ -302,6 +330,27 @@ fn published_positions(
         }
     }
     Some(positions)
+}
+
+/// Whether the served publication reached the bound's classification horizon: Project may then
+/// classify a resolver differently than it did at the bound, which the bounded reads cannot see.
+fn crossed_horizon(bound: &BoundChain, published: Option<&bigname_storage::ChainPosition>) -> bool {
+    bound
+        .classification_horizon
+        .zip(published)
+        .is_some_and(|(horizon, position)| position.block_number >= horizon)
+}
+
+async fn classification_horizons(
+    state: &AppState,
+    block_bounds: &BTreeMap<String, i64>,
+) -> V2Result<BTreeMap<String, i64>> {
+    bigname_storage::load_classification_horizons(&state.pool, block_bounds)
+        .await
+        .map_err(|error| {
+            tracing::error!(error = ?error, "failed to load classification horizons");
+            V2Error::internal_error("failed to load history")
+        })
 }
 
 async fn capture_bound_state(

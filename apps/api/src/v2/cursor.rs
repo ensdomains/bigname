@@ -51,6 +51,10 @@ pub(crate) struct BoundChain {
     pub(crate) block_hash: String,
     pub(crate) interpret_generation: i64,
     pub(crate) project_generation: i64,
+    /// The lowest declaration `start_block` above `block_number` among the manifests Project
+    /// reads for the chain, or `None` when no declaration starts above it. Resolver
+    /// classification may change once Project reaches it.
+    pub(crate) classification_horizon: Option<i64>,
 }
 
 impl Binding {
@@ -70,6 +74,9 @@ impl Binding {
                             && bound.block_number >= 0
                             && bound.interpret_generation >= 0
                             && bound.project_generation >= 0
+                            && bound
+                                .classification_horizon
+                                .is_none_or(|horizon| horizon > bound.block_number)
                     })
             }
             (BindingPolicy::Keyset, None) => true,
@@ -197,6 +204,7 @@ mod tests {
                     block_hash: "0x64".to_owned(),
                     interpret_generation: 3,
                     project_generation: 4,
+                    classification_horizon: Some(101),
                 },
             )])),
         });
@@ -231,6 +239,19 @@ mod tests {
                     .get_mut("ethereum-mainnet")
                     .unwrap();
                 chain.interpret_generation = -1;
+            }),
+            ErrorCode::InvalidInput
+        );
+        // A horizon is a declaration start above the bound block, never at or below it.
+        assert_eq!(
+            malformed(|b| {
+                let chain = b
+                    .chains
+                    .as_mut()
+                    .unwrap()
+                    .get_mut("ethereum-mainnet")
+                    .unwrap();
+                chain.classification_horizon = Some(100);
             }),
             ErrorCode::InvalidInput
         );

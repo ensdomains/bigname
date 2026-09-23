@@ -4,6 +4,7 @@ mod binding_anchors;
 mod block_window;
 mod child_arm;
 mod child_registrations;
+mod classification_horizon;
 mod columns;
 mod decoders;
 mod duplicates;
@@ -47,6 +48,7 @@ pub use child_registrations::{
     HistorySubject, NameHistoryPage, NameHistoryRow,
     load_name_history_page_with_child_registrations,
 };
+pub use classification_horizon::load_classification_horizons;
 pub use event_page::{load_event_history_page, load_event_history_page_with_redo_policy};
 pub use name_at_bound::name_surface_observed_above_bound;
 pub use options::{

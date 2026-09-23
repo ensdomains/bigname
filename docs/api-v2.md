@@ -1223,7 +1223,14 @@ so route evolution does not invalidate outstanding cursors. Top-level
 collection cursors bind the collection anchor, namespace, filters, and sort.
 History collection cursors also bind a [cursor bound](glossary.md#cursor-bound)
 per chain, so every page of one walk reads the same frozen history at or below
-that block while new blocks are published. The one exception is the address
+that block while new blocks are published. They also bind each chain's
+classification horizon, the lowest declaration `start_block` above the bound
+among the manifests Project reads for that chain, and expire with the `409
+stale` restart once the served publication reaches it: resolver
+classification is read as Project last wrote it, and Project changes it at a
+declaration's start without a manifest change or redo (see the [shared route
+rules](api-v2-routes.md#shared-route-rules)). Evaluating the classification at
+the bound would remove that expiry and is a follow-up. The one exception is the address
 history [known limitation](api-v2-routes.md#history-collection-filters): when
 one of the relation kinds listed there ends after the bound block, a
 continuation loses that name's remaining rows and reports a smaller
@@ -1251,7 +1258,8 @@ lookup. Each route checks the Interpret state again inside the repeatable-read
 page transaction. After the page transaction, and after the display-name read
 on events and address history, each route repeats the whole check in a fresh
 transaction: the same counters, no redo in progress, a readable bound block,
-unchanged manifest revisions, and a publication at or above the bound. It runs
+unchanged manifest revisions, the same classification horizon, and a
+publication at or above the bound and below that horizon. It runs
 in a fresh transaction because the page's repeatable-read snapshot cannot see
 a redo committed after it began. A missing parent returns `404 not_found` only
 when that final check passes; otherwise it returns `409 stale`. With

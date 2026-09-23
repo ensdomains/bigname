@@ -68,11 +68,23 @@ A history cursor expires, returning `409 stale` with a message to restart
 without a cursor, when any of these holds: the bound block is no longer
 readable on some chain (a reorg replaced it), an Interpret or Project redo
 counter of a chain in scope changed, the manifest revisions changed, the
-served publication is behind the bound, or the scope's chain set changed. This
-is conservative: a reorg or redo entirely above the bound also expires the
-cursor, because the redo counters do not say which blocks were rewritten. New
-blocks, a Project run in progress, and a Project publication that lands during
-the read never expire it. An Interpret or Project redo in progress returns
+served publication is behind the bound, the scope's chain set changed, or the
+served publication reached the walk's classification horizon on some chain.
+The classification horizon is the lowest `start_block` above the bound among
+the contract declarations of every manifest Project reads for that chain; the
+cursor records it per chain, and a cursor whose recorded horizon differs from
+the one the manifests give for its bound also expires, while one at or below
+the bound block is malformed and returns `400 invalid_input`. Project chooses
+a resolver's classification among its declarations by `start_block` at its
+target block, and the history reads join that classification as Project last
+wrote it, so ordinary advancement past such a start could otherwise change
+which record writes a walk holds without any manifest change or redo. Judging
+the classification at the bound instead would keep those walks alive; it is a
+follow-up. This is conservative: a reorg or redo entirely above the bound also
+expires the cursor, because the redo counters do not say which blocks were
+rewritten. New blocks, a Project run in progress, and a Project publication
+that lands during the read never expire it while the publication stays below
+the classification horizon. An Interpret or Project redo in progress returns
 `409 stale` without data; once it finishes, a cursor issued before it has a
 changed counter and must restart. Each request checks all of this before it
 reads and again, in a fresh transaction, after its page transaction. A first
@@ -1779,7 +1791,8 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
   stale`. The route checks the Interpret state again inside the
   repeatable-read page transaction, and after the page repeats the whole check
   in a fresh transaction: both redo counters and flags, the bound block, the
-  manifest revisions, and a publication at or above the bound. A missing
+  manifest revisions, the classification horizon, and a publication at or above
+  the bound and below that horizon. A missing
   parent returns `404` only when that check passes; otherwise the route
   returns `409 stale`. A well-formed cursor whose event anchor is gone returns
   `400 invalid_input` when the check passes and `409 stale` when it does not.

@@ -368,9 +368,12 @@ collection from evidence at or below that block, and reports the block as
 except for the address-history relations listed as a known limitation in the
 [history collection filters](api-v2-routes.md#history-collection-filters). It
 is not the [served head](#served-head), which keeps moving. The cursor also
-records each chain's Interpret and Project redo counters, and the walk expires
-when the bound block is no longer readable (see
-[canonicality](#canonicality)), a counter changes, or the manifests change. A
+records each chain's Interpret and Project redo counters and classification
+horizon, the lowest manifest declaration `start_block` above the bound, and
+the walk expires when the bound block is no longer readable (see
+[canonicality](#canonicality)), a counter changes, the manifests change, or
+the served publication reaches the horizon, where Project may classify a
+resolver differently than at the bound. A
 new [interpreter content hash](#interpreter-content-hash) is adopted only
 through a full Interpret and Project redo, so it expires the walk the same way
 (bigname: `apps/phase-runner/src/redo_state.rs:86-102`).
