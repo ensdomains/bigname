@@ -356,6 +356,23 @@ registration. It is the counterpart of the
 that the row is the requested name's current authority, while `resource_audit`
 makes no current-name claim.
 
+## Cursor bound
+
+the block, one per chain, that a history collection walk (`/v1/events`, name
+history, or address history) reads at: its number and hash, taken from the
+served Project publication when the walk's first page was read. Every page of
+the walk reads normalized events and decides which of them belong to the
+collection from evidence at or below that block, and reports the block as
+`meta.as_of`, so later blocks and later
+[projection generations](#projection-generation) do not change the walk. It
+is not the [served head](#served-head), which keeps moving. The cursor also
+records each chain's Interpret and Project redo counters, and the walk expires
+when the bound block is no longer readable (see
+[canonicality](#canonicality)), a counter changes, or the manifests change. A
+new [interpreter content hash](#interpreter-content-hash) is adopted only
+through a full Interpret and Project redo, so it expires the walk the same way
+(bigname: `apps/phase-runner/src/redo_state.rs:86-102`).
+
 ## Declared vs verified
 
 *declared* state is what protocol-side observation

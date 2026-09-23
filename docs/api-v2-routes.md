@@ -41,27 +41,64 @@ with no claim, unsupported verification, or mismatched verification return
 All collection routes use the standard `page` object: `cursor`,
 `next_cursor`, `page_size`, nullable `total_count`, and `has_more`.
 
-The product collections `GET /v1/names`, subnames, name/address history,
-address names, permissions, and `/v1/events` read current state. Their cursors
-bind anchors, filters, sorting, the served project publication (including
-same-height replacement) and manifest revisions. Counts and rows use the same
-filters; time-dependent expiry filtering retains the first page's evaluation
-time. These reads revalidate the publication before returning and disclose
-`meta.as_of`. A changed or unavailable publication, or an older unbound cursor,
-returns `409 stale` and requires restarting without a cursor. A first page,
-which has no cursor to drop, whose publication changed while it was read
-returns the same `409 stale` with a message saying so; retrying the same
-request reads the new publication. No historical
-projection is retained by a pagination token. The binding conservatively covers
-the requested namespace, or all active public namespaces when none is selected.
-A count spanning namespaces requires readable publications for all of them;
-otherwise it returns `409 stale` rather than a misleading partial total. Registry and resolver collections use the same publication fence
-in addition to their documented selected-chain position.
+The history collections, `/v1/events`, name history (with or without
+`include=child_registrations`), and address history, read history as it stood
+at one block. The first page records, for every chain in the request scope,
+the block the served Project publication stood at, by number and hash. That
+block is the walk's [cursor bound](glossary.md#cursor-bound). The cursor also
+carries each of those chains' Interpret and Project redo counters and a digest
+of the active manifest revisions. The request scope is the requested
+namespace's chains, or the chains of every active public namespace when none
+is selected. Every page of the walk reads events at or below the bound and
+judges which events belong to the collection from evidence at or below it, so
+the rows, their order, and `page.total_count` stay the same on every page,
+however many blocks are published during the walk. `meta.as_of` on every page,
+the first included, is the bound: its block number, hash, and timestamp per
+chain, not the API's current progress. The one current-state field on these
+pages is the display name on `/v1/events` and address history rows, which is
+read from current name state after the page.
 
-These current-state collections still reject `at`, `finality=safe`, and
+A history cursor expires, returning `409 stale` with a message to restart
+without a cursor, when any of these holds: the bound block is no longer
+readable on some chain (a reorg replaced it), an Interpret or Project redo
+counter of a chain in scope changed, the manifest revisions changed, the
+served publication is behind the bound, or the scope's chain set changed. This
+is conservative: a reorg or redo entirely above the bound also expires the
+cursor, because the redo counters do not say which blocks were rewritten. New
+blocks, a Project run in progress, and a Project publication that lands during
+the read never expire it. An Interpret or Project redo in progress returns
+`409 stale` without data; once it finishes, a cursor issued before it has a
+changed counter and must restart. Each request checks all of this before it
+reads and again, in a fresh transaction, after its page transaction. A first
+page whose check after the read fails returns `409 stale` with a message to
+retry the same request, since it has no cursor to drop. A cursor issued before
+this rule returns `409 stale` with a message saying so and must be restarted;
+a cursor carrying both the older publication token and a block binding is
+malformed and returns `400 invalid_input`.
+
+The other product collections, `GET /v1/names`, subnames, address names, and
+permissions, read current state. Their cursors bind anchors, filters, sorting,
+the served project publication (including same-height replacement) and
+manifest revisions. Counts and rows use the same filters; time-dependent
+expiry filtering retains the first page's evaluation time. These reads
+revalidate the publication before returning and disclose `meta.as_of`. A
+changed or unavailable publication, or an older unbound cursor, returns `409
+stale` and requires restarting without a cursor. A first page, which has no
+cursor to drop, whose publication changed while it was read returns the same
+`409 stale` with a message saying so; retrying the same request reads the new
+publication. No historical projection is retained by a pagination token.
+
+Both kinds of binding conservatively cover the requested namespace, or all
+active public namespaces when none is selected. A count spanning namespaces
+requires readable publications for all of them; otherwise it returns `409
+stale` rather than a misleading partial total. Registry and resolver
+collections use the current-state publication fence in addition to their
+documented selected-chain position.
+
+These collections still reject `at`, `finality=safe`, and
 `finality=finalized` with `400 invalid_input`; omitted or explicit
-`finality=latest` is accepted. `meta.as_of_token` is omitted because these
-collection publications cannot be replayed through `at`.
+`finality=latest` is accepted. `meta.as_of_token` is omitted because neither
+kind of cursor can be replayed through `at`.
 
 Search and diagnostic-event cursors retain their existing latest-state behavior
 without a publication-validity claim. Search discloses request-scope `meta.as_of`
@@ -144,6 +181,17 @@ If an ended resource retains a resolver pointer to the emitter, its rebuildable
 record-inventory projection may change. The event remains resource-less and
 does not restore `name_current.resource_id`, so the released or expired name's
 name and record routes still expose no current record inventory.
+
+Position-bound history cursors are a client-visible boundary too. A
+`/v1/events`, name history, or address history cursor issued before them
+carries the older publication token and no block binding. The route answers it
+once with `409 stale` and a message saying it was issued before
+position-bound pagination; the client restarts without a cursor, and the new
+cursor keeps working as blocks are published. During a rolling deploy an
+instance without this change refuses the new cursors in the same way, so a
+client may be asked to restart more than once until every instance runs it.
+The current-state collections keep their publication-bound cursors and are
+unchanged by this boundary.
 
 Field ownership:
 
@@ -1385,37 +1433,40 @@ A recognized namespace with no available publication returns retryable `409 stal
   greater than `to_timestamp`, or a value that is not RFC 3339, returns `400
   invalid_input`. On `/v1/events` the resolved window intersects an explicit
   `from_block`/`to_block` range.
-- History anchor expansion is bounded to the captured publication too:
-  bindings, NameWrapper links, registrar grants, historical ownership matches,
-  and resolver record writes attributed to a registration through its resolver
-  pointers are judged from evidence at or below the published block of their
+- Every read is bound to one block per chain: the served publication's block
+  on a first page, and the [cursor bound](glossary.md#cursor-bound) on a
+  continuation, which is the same block the first page read. Rows stop at that
+  block, and history anchor expansion is bounded to it too: bindings,
+  NameWrapper links, registrar grants, historical ownership matches, and
+  resolver record writes attributed to a registration through its resolver
+  pointers are judged from evidence at or below the bound block of their
   chain, so evidence recorded after that block cannot introduce older events
-  into an unchanged page. A pointer or record link above the published block
-  neither attributes an older write nor closes an earlier pointer's window.
+  into a later page of the same walk. A pointer or record link above the bound
+  block neither attributes an older write nor closes an earlier pointer's window.
   Bindings and ownership before `from_timestamp` remain valid anchors; the
   timestamp window filters event rows.
 - Two inputs are read from current state. An address's relations are read from
   the current relation rows, and a row is admitted when the event Project
-  cites for it lies at or below the published block. The name's attachment to
-  the row's resource is judged at or below the published block too: the row is
+  cites for it lies at or below the bound block. The name's attachment to
+  the row's resource is judged at or below the bound block too: the row is
   admitted only when some [surface binding](glossary.md#surface-binding) of
   that name to that resource on the row's chain was written at or below the
-  published block, whatever event the row cites and including the same-holder
+  bound block, whatever event the row cites and including the same-holder
   case below. The row's current binding may be newer: a registry owner moved
   away and restored rebinds the name to the same resource. A current row cited
-  above the published block is also admitted when every registration event
-  between the published block and the cited one is a same-holder token
+  above the bound block is also admitted when every registration event
+  between the bound block and the cited one is a same-holder token
   transfer: the cited event is a `TokenControlTransferred` whose sender and
   recipient are both the address, every `RegistrationGranted`,
   `RegistrationReleased` and `TokenControlTransferred` on that event's resource
-  after the published block and up to it is such a transfer too, and no ENSv2
+  after the bound block and up to it is such a transfer too, and no ENSv2
   `RegistrationReserved` on that resource lies in the range. For an effective controller, no
   `AuthorityTransferred`, `SurfaceBound` or `PermissionChanged` on that
   resource may lie in the range either. Project cites the latest registration
   event for the registrant, token holder and fallback controller relations, so
   a transfer from the holder to itself moves the cited event without changing
   the holder, and the earliest transfer in the range names the address as its
-  sender, so the address held the name at the published block. The rule reads
+  sender, so the address held the name at the bound block. The rule reads
   only the `TokenControlTransferred` rows the adapters emit: an ENSv1 or
   Basenames registrar `Transfer` with a nonzero sender and recipient becomes
   such a row carrying both as logged
@@ -1435,7 +1486,7 @@ A recognized namespace with no available publication returns retryable `409 stal
   (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L42-L50 @ ens_v1@91c966f),
   whose `ownerOf` call rejects an expired name and otherwise returns the owner
   (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L71-L76 @ ens_v1@91c966f).
-  A relation that began after the published block has a grant or a transfer to
+  A relation that began after the bound block has a grant or a transfer to
   the address in the range and is not admitted. The probe also refuses an ENSv2
   `RegistrationReserved` in the range: reserving an expired name burns the
   previous holder's token
@@ -1452,7 +1503,7 @@ A recognized namespace with no available publication returns retryable `409 stal
   second current input is the resolver's current classification row, which
   decides whether an ENSv2 resolver pointer attributes node-keyed writes on
   that resolver.
-- Known limitation: four relation kinds that ended after the published block
+- Known limitation: four relation kinds that ended after the bound block
   are not reproduced, so the address's read loses that name's events: an ENSv1
   `.eth` registry controller from `AuthorityTransferred` on a token-backed
   resource, a token holder whose only evidence is the grant, an effective
@@ -1474,9 +1525,9 @@ A recognized namespace with no available publication returns retryable `409 stal
   (bigname: `crates/adapters/src/schema_v2/protocol/migration.rs:224-245`). So
   ENSv2 `PermissionChanged` rows never set this controller. This is a bigname
   normalization rule, not an upstream one. A relation that ended after the
-  published block and began again before the current row was written counts as
+  bound block and began again before the current row was written counts as
   ended: its current row cites the transfer, grant or state-derived
-  `SurfaceBound` that restored it, above the published block. Wrapper grace-period and expiry transitions have no
+  `SurfaceBound` that restored it, above the bound block. Wrapper grace-period and expiry transitions have no
   cited event of their own, so a relation row gated by them can appear or
   vanish between pages of the same read.
 - Cursors bind the order and every filter above. The cursor `sort` token
@@ -1493,7 +1544,9 @@ A recognized namespace with no available publication returns retryable `409 stal
   `address`, or `resolver` bounds the read. The count runs inside the same repeatable-read
   transaction as the page over exactly the page's filters (scope, type set,
   block and timestamp windows, product visibility, and duplicate suppression),
-  so it agrees with what paging would enumerate. With
+  so it agrees with what paging would enumerate. Every page reads at the
+  walk's [cursor bound](glossary.md#cursor-bound), so the count is the count at
+  that block and is the same on every page of one walk. With
   `include=child_registrations`, the count covers the combined collection of
   name rows and direct child registration rows, each event counted once. It is capped: counting stops
   after 10,000 product-visible rows and a larger result reports
@@ -1682,32 +1735,37 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
   the rows `scope` selects plus the direct child registrations, under
   `scope=name`, `scope=registration`, and `scope=both` alike, and child rows
   are returned even when the scope selects no rows of the name itself.
-- Snapshot behavior: the page and its counts use the captured current
-  publication. The response discloses `meta.as_of`; continuation cursors bind
-  the publication and return `409 stale` requiring a restart when it changes.
-  A first page whose publication changes during the read returns `409 stale`
-  too and can simply be retried.
+- Snapshot behavior: the first page reads at the served publication and binds
+  its block as the walk's [cursor bound](glossary.md#cursor-bound). Every page
+  reads at that bound, counts at it, and discloses it as `meta.as_of`, as the
+  [shared history rule](#shared-route-rules) describes. A continuation keeps
+  working while new blocks are published and returns `409 stale` requiring a
+  restart when the bound no longer holds. A first page whose check after the
+  read fails returns `409 stale` too and can simply be retried.
   Historical replay through `at` is not supported.
 - Status semantics: no product-visible matches return `200` with empty `data`,
   `page.next_cursor=null`, and `page.has_more=false`. Missing names return
   `404 not_found` on the first page. A continuation does not look the name up
   in current state again: the cursor already binds the name, and its rows come
   only from the name's bindings, NameWrapper links, and registrar grants at or
-  below the published block, and with `include=child_registrations` also from
-  the name's child membership rows at or below it.
+  below the [cursor bound](glossary.md#cursor-bound), and with
+  `include=child_registrations` also from the name's child membership rows at
+  or below it.
   `include=child_registrations` on `eth` or `base.eth` returns `400
-  invalid_input` before the name is looked up. Request and cursor-binding
-  validation precede the first `redo_in_progress` check, so malformed requests
-  retain `400`. The route captures the collection-wide check before parent
-  lookup, then checks it again inside the repeatable-read page transaction. A
-  missing parent returns `404` only when no redo is active and the captured
-  generations are unchanged; otherwise the route returns retryable `409
-  stale`. Because the check is collection-wide, an active Interpret redo on
-  any chain returns `409 stale` regardless of the requested namespace or name.
-  The same response applies when either check sees an active redo or a redo
-  began between the checks. A well-formed cursor whose event anchor is gone
-  returns `400 invalid_input` when no redo intervened and `stale` when the
-  redo check takes precedence.
+  invalid_input` before the name is looked up. Request and cursor validation,
+  including the cursor's binding, precede the first `redo_in_progress` check,
+  so malformed requests retain `400`; a cursor issued before position-bound
+  pagination then returns `409 stale` requiring a restart. The route captures
+  the redo state before parent lookup. An Interpret redo in progress on any
+  chain (the check is collection-wide, regardless of the requested namespace
+  or name) or a Project redo in progress on a chain in scope returns `409
+  stale`. The route checks the Interpret state again inside the
+  repeatable-read page transaction, and after the page repeats the whole check
+  in a fresh transaction: both redo counters and flags, the bound block, the
+  manifest revisions, and a publication at or above the bound. A missing
+  parent returns `404` only when that check passes; otherwise the route
+  returns `409 stale`. A well-formed cursor whose event anchor is gone returns
+  `400 invalid_input` when the check passes and `409 stale` when it does not.
 - Replaces (v1): `GET /v1/history/names/{namespace}/{name}`.
   Registration-id anchored history from `GET /v1/history/resources/{resource_id}`
   moves to `GET /v1/events?registration_id=...`. `scope=registration` on this
@@ -1786,13 +1844,14 @@ Excluded:
   stream. The check compares the resolved name, not a suffix, so
   `alice.eth` and `alice.base.eth` are served normally.
 
-Child rows follow the same publication bound as the name's own rows: the
-option reads only membership rows at or below the published block of the
-parent's chain, inside any `from_timestamp`/`to_timestamp` window. Membership
+Child rows follow the same bound as the name's own rows: the option reads only
+membership rows at or below the bound block of the parent's chain (the served
+publication on a first page, the [cursor bound](glossary.md#cursor-bound) on
+a continuation), inside any `from_timestamp`/`to_timestamp` window. Membership
 comes from each event's own name at its own position, so evidence recorded
-after the published block cannot add an older child row. The name's own rows
-are the rows the read returns without the option, including the resolver record
-writes attributed at the published block.
+after the bound block cannot add an older child row. The name's own rows are
+the rows the read returns without the option, including the resolver record
+writes attributed at the bound block.
 
 In practice the rows come from ENSv2 registries. A row is a stored grant
 observation, not one registration action, and each keeps its own `id` and
@@ -2660,11 +2719,13 @@ introduces it rebuilds Project from full history before serving the option; see
   both. Without a distinct control resource, the sole registry-resource row
   remains visible.
   (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L89-L94 @ ens_v1@91c966f)
-- Snapshot behavior: the page and its counts use the captured current
-  publication. The response discloses `meta.as_of`; continuation cursors bind
-  the publication and return `409 stale` requiring a restart when it changes.
-  A first page whose publication changes during the read returns `409 stale`
-  too and can simply be retried.
+- Snapshot behavior: the first page reads at the served publication and binds
+  its block as the walk's [cursor bound](glossary.md#cursor-bound). Every page
+  reads at that bound, counts at it, and discloses it as `meta.as_of`, as the
+  [shared history rule](#shared-route-rules) describes. A continuation keeps
+  working while new blocks are published and returns `409 stale` requiring a
+  restart when the bound no longer holds. A first page whose check after the
+  read fails returns `409 stale` too and can simply be retried.
   Historical replay through `at` is not supported.
 - Pagination behavior: product event-type filtering, including an explicit
   `type` set, runs before keyset page construction (newest first unless
@@ -2678,16 +2739,19 @@ introduces it rebuilds Project from full history before serving the option; see
   `page.next_cursor=null`, and `page.has_more=false`. Address, namespace, and
   cursor-binding validation precede the first `redo_in_progress` check, so
   malformed addresses retain `400 invalid_input` and unsupported public
-  namespaces retain `404 not_found`. The route checks `redo_in_progress` before
-  deriving address relation anchors and rechecks it inside the repeatable-read
-  page transaction. After the transaction commits, the route resolves display
-  names and revalidates the captured redo state before returning data. This
-  check is collection-wide: an active Interpret redo on
-  any chain returns retryable `409 stale` with no `data` page, regardless of the
-  requested namespace. The same response applies when a redo began between the
-  checks. A well-formed cursor
-  whose event anchor is gone returns `400 invalid_input` when no redo intervened
-  and `stale` when the redo check takes precedence.
+  namespaces retain `404 not_found`; a cursor issued before position-bound
+  pagination then returns `409 stale` requiring a restart. The route checks
+  `redo_in_progress` before deriving address relation anchors and rechecks the
+  Interpret state inside the repeatable-read page transaction. After the
+  transaction commits, the route resolves display names, revalidates the
+  captured Interpret redo state, and repeats the whole check of the
+  [shared history rule](#shared-route-rules) in a fresh transaction before
+  returning data. The Interpret check is collection-wide: an active Interpret
+  redo on any chain returns `409 stale` with no `data` page, regardless of the
+  requested namespace; an active Project redo on a chain in scope does too.
+  The same response applies when a redo began between the checks. A
+  well-formed cursor whose event anchor is gone returns `400 invalid_input`
+  when the whole check passes and `409 stale` when it does not.
 - Replaces (v1): `GET /v1/history/addresses/{address}`.
 
 ### `GET /v1/search`
@@ -2872,25 +2936,30 @@ For a registrar lease first identified by a later readable observation, registra
   rule: populated (exact up to 10,000 rows, `null` beyond) when `name`,
   `registration_id`, `address`, or `resolver` anchors the read; opting into
   `include=total_count` removes that cap. It is always `null` for unanchored reads.
-- Snapshot behavior: the page and its counts use the captured current
-  publication. The response discloses `meta.as_of`; continuation cursors bind
-  the publication and return `409 stale` requiring a restart when it changes.
-  A first page whose publication changes during the read returns `409 stale`
-  too and can simply be retried.
+- Snapshot behavior: the first page reads at the served publication and binds
+  its block as the walk's [cursor bound](glossary.md#cursor-bound). Every page
+  reads at that bound, counts at it, and discloses it as `meta.as_of`, as the
+  [shared history rule](#shared-route-rules) describes. A continuation keeps
+  working while new blocks are published and returns `409 stale` requiring a
+  restart when the bound no longer holds. A first page whose check after the
+  read fails returns `409 stale` too and can simply be retried.
   Historical replay through `at` is not supported.
 - Status semantics: no product-visible matches return `200` with empty `data`,
   `page.next_cursor=null`, and `page.has_more=false`. Filter and cursor-binding
   validation precede the first `redo_in_progress` check, so malformed requests
-  retain `400 invalid_input`. The route checks `redo_in_progress` before deriving
-  name, registration, or address anchors and rechecks it inside the
-  repeatable-read page transaction. After that transaction commits, the route
-  resolves display names and revalidates the captured redo state before
-  returning data. This check is collection-wide: an active
-  Interpret redo on any chain returns retryable `409 stale` with no `data` page,
-  regardless of the requested filters or namespace. The same response applies
-  when a redo began between the checks. A
+  retain `400 invalid_input`; a cursor issued before position-bound pagination
+  then returns `409 stale` requiring a restart. The route checks
+  `redo_in_progress` before deriving name, registration, or address anchors and
+  rechecks the Interpret state inside the repeatable-read page transaction.
+  After that transaction commits, the route resolves display names, revalidates
+  the captured Interpret redo state, and repeats the whole check of the
+  [shared history rule](#shared-route-rules) in a fresh transaction before
+  returning data. The Interpret check is collection-wide: an active Interpret
+  redo on any chain returns `409 stale` with no `data` page, regardless of the
+  requested filters or namespace; an active Project redo on a chain in scope
+  does too. The same response applies when a redo began between the checks. A
   well-formed cursor whose event anchor is gone returns `400 invalid_input` when
-  no redo intervened and `stale` when the redo check takes precedence.
+  the whole check passes and `409 stale` when it does not.
 - Replaces (v1): `GET /v1/events` compact event search.
 
 ### `GET /v1/resolvers/{chain_id}/{address}`

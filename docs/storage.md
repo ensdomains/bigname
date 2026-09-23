@@ -1928,7 +1928,20 @@ Every selection also requires the current Project generation to be complete at
 the newest stored head with the API's compiled interpreter content hash. The
 API reads only projections eligible for the selected positions and revalidates
 the Project generation before returning. A concurrent head or generation
-change returns `409 stale`.
+change returns `409 stale`. The history collections are the exception: they
+read normalized events at or below a per-chain [cursor
+bound](glossary.md#cursor-bound), so a new head or Project publication does not
+make them stale. Before and after each read they compare the bound instead,
+in one `REPEATABLE READ` snapshot of `chain_phase_state` and `chain_lineage`:
+the Interpret and Project `redo_attempt_generation` and `redo_in_progress` of
+every chain in scope (both rows must exist), the collection-wide Interpret
+redo flag, and the lineage row stored under the bound block hash, which must
+be canonical, safe, or finalized at the bound height. The phase runner raises
+`redo_attempt_generation` whenever a redo begins or widens and never lowers it
+(bigname: `apps/phase-runner/src/redo_state.rs:181`)
+(bigname: `apps/phase-runner/src/redo_stamp.rs:164`)
+(bigname: `apps/phase-runner/src/redo_stamp.rs:198`), so an unchanged counter
+with the flag clear means no redo of that phase ran in between.
 
 GraphQL carries the selected ENS head from the root operation into nested record
 inventory reads, scopes list and count queries to the same selected chains, and
@@ -1941,9 +1954,10 @@ Name history, address history, and `/v1/events` pages sort normalized events by
 chain position: block number newest first with events without a block last,
 then chain, block hash, transaction hash, log index, and event identity.
 `order=asc` is the exact reverse. The served reads always carry a block window,
-the published block of each chain, so the events they return always have a
-block number, although the column itself allows NULL for events such as
-manifest updates.
+the bound block of each chain (the served publication on a first page, the
+[cursor bound](glossary.md#cursor-bound) on a continuation), so the events
+they return always have a block number, although the column itself allows
+NULL for events such as manifest updates.
 
 For a read that no name, registration, address, or resolver anchors, such as an
 unfiltered `/v1/events` page, on one chain,

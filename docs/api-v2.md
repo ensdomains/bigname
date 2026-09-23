@@ -613,12 +613,16 @@ Rules:
   otherwise run unconditional full counts on the request path.
 - `meta` is always present. Single-resource routes that read chain-derived state
   include `meta.as_of` and `meta.as_of_token` when they can attribute at least
-  one served snapshot-pinned chain position. Product name, subname, ownership,
-  permission and history collections disclose `meta.as_of` and bind cursors to
-  the current publication; they omit `meta.as_of_token` because old publications
-  are not retained for collection replay. A changed publication returns `409 stale`
-  requiring a restart without the cursor; a first page, sent without one, is
-  simply retried. `/v1/search` reports request-scoped `meta.as_of` as
+  one served snapshot-pinned chain position. The history collections
+  (`/v1/events`, name history, address history) bind cursors to the block each
+  walk's first page was served at, its [cursor bound](glossary.md#cursor-bound),
+  and disclose that bound as `meta.as_of` on every page. Product name, subname,
+  ownership and permission collections disclose `meta.as_of` and bind cursors
+  to the current publication. All of them omit `meta.as_of_token` because
+  neither kind of cursor can be replayed through `at`. A history cursor whose
+  bound no longer holds, or a current-state cursor whose publication changed,
+  returns `409 stale` requiring a restart without the cursor; a first page,
+  sent without one, is simply retried. `/v1/search` reports request-scoped `meta.as_of` as
   staleness attribution without a publication-bound cursor. Diagnostic event
   collections retain their separately documented latest-state behavior.
   Control-plane routes (`/v1/status`, `/v1/namespaces/{namespace}`) omit both.
@@ -1158,22 +1162,29 @@ from `chain_heads`, project progress from the `project` row in
 `chain_phase_state`, and both timestamps from the matching readable
 `chain_lineage` rows.
 
-Top-level collections page over mutable latest-state tables. They therefore
-omit `meta.as_of` and `meta.as_of_token`, except that search reports
-request-scoped `meta.as_of` for staleness attribution while still omitting
-`meta.as_of_token`. Their cursors do not claim a snapshot bound. Newly issued collection cursors carry no snapshot token; a
-legacy cursor's snapshot component is ignored rather than treated as a
-validity condition. Omitted `finality` and explicit `finality=latest` are accepted.
+Top-level collections omit `meta.as_of_token`. The product collections
+disclose `meta.as_of`, and search reports request-scoped `meta.as_of` for
+staleness attribution. History collection cursors bind a
+[cursor bound](glossary.md#cursor-bound) per chain, the Interpret and Project
+redo counters of those chains, and a digest of the manifest revisions; the
+other product collection cursors bind the current Project publication and
+manifest revisions (see the [shared route
+rules](api-v2-routes.md#shared-route-rules)). A cursor whose binding no longer
+holds returns `409 stale` requiring a restart; it is a validity condition, not
+something the server ignores. Omitted `finality` and explicit `finality=latest` are accepted.
 An `at` selector returns `400 invalid_input` with
 `at is not supported because collection routes read latest state`.
 `finality=safe` and `finality=finalized` return `400 invalid_input` with
 `finality must be latest because collection routes read latest state`.
 
-This is issue #188 option 2. Option 1 is the storage follow-up: bind every page
-to an immutable publication revision and return explicit cursor-expired
-semantics when that revision is no longer available. Once revision-bound
-cursors and row reads land, the collection `at` and historical `finality`
-restrictions lift and collection snapshot metadata can be restored.
+This is issue #188 option 2. The history collections now deliver part of
+option 1 differently: instead of an immutable publication revision, their
+cursors bind a block per chain and read history at or below it, with explicit
+cursor-expired semantics (`409 stale` requiring a restart) when that block, the
+redo counters, or the manifests no longer hold. The rest of option 1 stays
+deferred: current-state collections still bind the current publication and
+cannot be continued across a new one, and no collection accepts `at` or a
+historical `finality`, so none returns `meta.as_of_token`.
 
 `POST /v1/lookup` is a current-state read. It does not accept `at` or
 `finality`; when a served head is available, its `meta.as_of` and
@@ -1209,34 +1220,60 @@ The `chain_positions` query parameter from `v1` does not exist in `v2`.
 
 Cursors are opaque and versioned. They are not bound to the route path string,
 so route evolution does not invalidate outstanding cursors. Top-level
-collection cursors bind the collection anchor, namespace, filters, and sort,
-but not a snapshot. A bare search cursor uses the request's derived namespace
-set as its namespace anchor and fails closed if that set has changed. Cursors
-preserve keyset position across requests without claiming that the mutable
-dataset is frozen. A legacy collection cursor's snapshot component is ignored.
-Snapshot-bound cursor semantics remain on single-resource responses with nested
-pagination where documented.
+collection cursors bind the collection anchor, namespace, filters, and sort.
+History collection cursors also bind a [cursor bound](glossary.md#cursor-bound)
+per chain, so every page of one walk reads the same frozen history at or below
+that block while new blocks are published. Current-state product collection
+cursors bind the current publication instead. A bare search cursor uses the
+request's derived namespace set as its namespace anchor and fails closed if
+that set has changed; search cursors preserve keyset position across requests
+without claiming that the mutable dataset is frozen. A history cursor issued
+before position-bound pagination returns `409 stale` requiring a restart, and
+one carrying both the older publication token and a block binding returns
+`400 invalid_input`. Snapshot-bound cursor semantics remain on single-resource
+responses with nested pagination where documented.
 
 The `/v1/events`, name-history, and address-history collections use a
 collection-wide `redo_in_progress` check. An active Interpret redo on any chain
-returns retryable `409 stale` for all three collections, regardless of the
-requested namespace or name. Events validates the request and cursor binding
-before its first check, while address history also validates its namespace
-first. Name history validates the request and cursor binding, then captures the
-check before parent lookup. A missing parent returns `404
-not_found` only when no redo is active and the captured generations are
-unchanged; otherwise it returns `409 stale`. Each route checks before deriving
-identity and event anchors written by Interpret and checks again inside the
-repeatable-read page transaction. Events and address history then resolve
-display names and revalidate the captured redo state before returning data;
-name history has no post-transaction display-name read. With
+returns `409 stale` for all three collections, regardless of the
+requested namespace or name. An active Project redo on a chain in the request
+scope does too, because a Project redo rewrites the projections that decide
+which events a history collection holds. Events validates the request and cursor
+binding before its first check, while address history also validates its
+namespace first. Each route then captures, in one read-only snapshot, both
+redo counters and flags of every chain in scope, the collection-wide Interpret
+flag, and the lineage row of each chain's [cursor
+bound](glossary.md#cursor-bound). Name history captures it before parent
+lookup. Each route checks the Interpret state again inside the repeatable-read
+page transaction. After the page transaction, and after the display-name read
+on events and address history, each route repeats the whole check in a fresh
+transaction: the same counters, no redo in progress, a readable bound block,
+unchanged manifest revisions, and a publication at or above the bound. It runs
+in a fresh transaction because the page's repeatable-read snapshot cannot see
+a redo committed after it began. A missing parent returns `404 not_found` only
+when that final check passes; otherwise it returns `409 stale`. With
 `include=child_registrations`, a child row's name comes from the child's name
-surface, read inside the same page transaction. An active redo at any
-check, or a redo
-that began between them, returns `409 stale` instead of exposing a partially
-reconstructed normalized-event range. A
-well-formed cursor whose event anchor is gone therefore returns `stale` when the
-redo check takes precedence and `400 invalid_input` otherwise. Product
+surface, read inside the same page transaction. An active redo at any check,
+or a redo that began between them, returns `409 stale` instead of exposing a
+partially reconstructed normalized-event range. A well-formed cursor whose
+event anchor is gone therefore returns `stale` when the final check fails and
+`400 invalid_input` otherwise.
+
+Which `409 stale` message a redo produces depends on when it is seen. An
+Interpret redo already in progress on a requested chain when the request
+starts makes that chain's publication unservable, so the route answers
+`collection publication is not available; retry after indexing is ready`,
+like any unservable publication. A Project redo already in progress on a chain
+in scope answers `history is temporarily unavailable while Project redo is in
+progress`, and an Interpret redo in progress only on another chain answers
+`history is temporarily unavailable while Interpret redo is in progress`. A
+redo that begins after the request started keeps the existing behavior: the
+Interpret checks around the page transaction answer with the Interpret
+message, and the final check answers a first page with `collection publication
+changed during the read; retry the request` and a continuation with
+`collection publication is no longer available; restart pagination without a
+cursor`. A continuation whose redo counters changed since its first page gets
+that restart message as soon as its counters are compared. Product
 event-type filtering precedes keyset pagination, so page rows and continuation
 metadata describe only product-visible events. For requests without an explicit
 `type`, cursor anchor validation omits the implicit product event-type filter,
