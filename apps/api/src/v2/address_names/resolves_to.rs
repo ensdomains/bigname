@@ -28,6 +28,9 @@ use crate::v2::{
 use super::cursor::{
     ADDRESS_FILTER_KEY, ORDER_FILTER_KEY, cursor_last_item, cursor_sort_value, option_filter,
 };
+use super::resolves_to_evm::{
+    ResolvesToCoins, ResolvesToMatches, ResolvesToRow, evm_primary_flags, parse_resolves_to_coins,
+};
 use super::{
     AddressName, address_names_include, build_address_name_role_summary, dedupe_to_storage,
     load_address_name_record_counts, name_registration_fields, order_to_storage, sort_to_storage,
@@ -79,7 +82,7 @@ pub(super) async fn get_address_resolves_to(
     normalized_address: &str,
     params: &QueryParams,
 ) -> V2Result<Json<Envelope<Vec<AddressName>>>> {
-    let (coin_type, numeric_coin_type) = parse_resolves_to_coin_type(params.coin_type.as_deref())?;
+    let coins = parse_resolves_to_coins(params.coin_type.as_deref())?;
     if params.is_migrated.is_some() {
         return Err(V2Error::invalid_input(
             "is_migrated requires an ownership relation",
@@ -101,7 +104,7 @@ pub(super) async fn get_address_resolves_to(
     let cursor_binding = ResolvesToCursorBinding {
         address: normalized_address,
         namespace: params.namespace.as_deref(),
-        coin_type: &coin_type,
+        coin_type: coins.cursor_value(),
         dedupe: params.dedupe,
         q: normalized_q.as_deref(),
         authority: params.authority,
@@ -125,21 +128,7 @@ pub(super) async fn get_address_resolves_to(
         })
         .transpose()?;
 
-    let storage_page = bigname_storage::load_address_records_current_page(
-        &state.pool,
-        normalized_address,
-        &coin_type,
-        namespaces.as_deref(),
-        dedupe_to_storage(params.dedupe),
-        normalized_q.as_deref(),
-        params.authority.map(Authority::as_str),
-        sort_to_storage(params.sort),
-        order_to_storage(order),
-        storage_cursor.as_ref(),
-        params.page_size,
-    )
-    .await
-    .map_err(|error| {
+    let load_error = |error: anyhow::Error| {
         if storage_cursor.is_some()
             && error
                 .to_string()
@@ -150,9 +139,51 @@ pub(super) async fn get_address_resolves_to(
         V2Error::internal_error(format!(
             "failed to load names resolving to {normalized_address}"
         ))
-    })?;
+    };
+    let (rows, next_storage_cursor) = match &coins {
+        ResolvesToCoins::Single { coin_type, numeric } => {
+            let page = bigname_storage::load_address_records_current_page(
+                &state.pool,
+                normalized_address,
+                coin_type,
+                namespaces.as_deref(),
+                dedupe_to_storage(params.dedupe),
+                normalized_q.as_deref(),
+                params.authority.map(Authority::as_str),
+                sort_to_storage(params.sort),
+                order_to_storage(order),
+                storage_cursor.as_ref(),
+                params.page_size,
+            )
+            .await
+            .map_err(load_error)?;
+            let rows = page.entries.into_iter().map(|entry| ResolvesToRow {
+                matches: ResolvesToMatches::Single(address_name_resolution(&entry, *numeric)),
+                entry,
+            });
+            (rows.collect::<Vec<_>>(), page.next_cursor)
+        }
+        ResolvesToCoins::Evm => {
+            let page = bigname_storage::load_address_records_current_evm_page(
+                &state.pool,
+                normalized_address,
+                namespaces.as_deref(),
+                dedupe_to_storage(params.dedupe),
+                normalized_q.as_deref(),
+                params.authority.map(Authority::as_str),
+                sort_to_storage(params.sort),
+                order_to_storage(order),
+                storage_cursor.as_ref(),
+                params.page_size,
+            )
+            .await
+            .map_err(load_error)?;
+            let rows = page.entries.into_iter().map(ResolvesToRow::from_evm);
+            (rows.collect::<V2Result<Vec<_>>>()?, page.next_cursor)
+        }
+    };
 
-    let entries = &storage_page.entries;
+    let entries = rows.iter().map(|row| &row.entry).collect::<Vec<_>>();
     let logical_name_ids = entries
         .iter()
         .map(|entry| entry.logical_name_id.clone())
@@ -175,13 +206,27 @@ pub(super) async fn get_address_resolves_to(
         .map(|row| row.logical_name_id.clone())
         .collect::<Vec<_>>();
     let migrated_at_by_name = load_migrated_at(&state.pool, &migrated_logical_name_ids).await?;
-    let primary_names_by_namespace = load_primary_names_by_namespace(
-        &state.pool,
-        normalized_address,
-        &coin_type,
-        entries.iter().map(|entry| entry.namespace.as_str()),
-    )
-    .await?;
+    let primary_flags = match &coins {
+        ResolvesToCoins::Single { coin_type, .. } => {
+            let primary_names_by_namespace = load_primary_names_by_namespace(
+                &state.pool,
+                normalized_address,
+                coin_type,
+                entries.iter().map(|entry| entry.namespace.as_str()),
+            )
+            .await?;
+            entries
+                .iter()
+                .map(|entry| {
+                    primary_names_by_namespace
+                        .get(&entry.namespace)
+                        .and_then(Option::as_deref)
+                        == Some(entry.normalized_name.as_str())
+                })
+                .collect::<Vec<_>>()
+        }
+        ResolvesToCoins::Evm => evm_primary_flags(&state.pool, normalized_address, &rows).await?,
+    };
     let role_resource_ids = include_role_summary.then(|| {
         entries
             .iter()
@@ -256,14 +301,16 @@ pub(super) async fn get_address_resolves_to(
         BTreeMap::new()
     };
 
-    let next_cursor = storage_page.next_cursor.as_ref().map(|cursor| {
+    let next_cursor = next_storage_cursor.as_ref().map(|cursor| {
         encode(&snapshot.bind_cursor(resolves_to_cursor_payload(cursor, &cursor_binding)))
     });
     let has_more = next_cursor.is_some();
-    let data = storage_page
-        .entries
+    let data = rows
         .iter()
-        .map(|entry| {
+        .zip(primary_flags)
+        .map(|(resolves_to_row, is_primary)| {
+            let entry = &resolves_to_row.entry;
+            let (resolution, resolutions) = resolves_to_row.resolution_fields();
             let role_summary = if include_role_summary {
                 Some(build_address_name_role_summary(
                     entry
@@ -294,11 +341,9 @@ pub(super) async fn get_address_resolves_to(
                 authority: name_row.and_then(|row| Authority::from_provenance(&row.provenance)),
                 migrated_at: migrated_at_by_name.get(&entry.logical_name_id).cloned(),
                 relations: vec![Relation::ResolvesTo],
-                is_primary: primary_names_by_namespace
-                    .get(&entry.namespace)
-                    .and_then(Option::as_deref)
-                    == Some(entry.normalized_name.as_str()),
-                resolution: Some(address_name_resolution(entry, numeric_coin_type)),
+                is_primary,
+                resolution,
+                resolutions,
                 subname_count: include.counts.then(|| {
                     subname_counts_by_name
                         .get(&entry.logical_name_id)

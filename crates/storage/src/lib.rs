@@ -33,19 +33,23 @@ mod snapshot_selection;
 pub mod sql_row;
 mod time;
 
+#[cfg(any(test, feature = "test-support"))]
+pub use address_names::explain_address_records_current_evm_page_for_test;
 pub use address_names::{
     AddressNameCurrentEntry, AddressNameCurrentRow, AddressNameRelation,
     AddressNamesCurrentCountFilter, AddressNamesCurrentCursor, AddressNamesCurrentDedupe,
     AddressNamesCurrentOrder, AddressNamesCurrentPage, AddressNamesCurrentProvenanceSummary,
     AddressNamesCurrentSort, AddressNamesCurrentSortedCursor, AddressNamesCurrentSortedCursorValue,
-    AddressNamesCurrentSortedPage, AddressNamesCurrentSummary, AddressRecordCurrentEntry,
+    AddressNamesCurrentSortedPage, AddressNamesCurrentSummary, AddressRecordCoinMatch,
+    AddressRecordCurrentEntry, AddressRecordEvmEntry, AddressRecordsCurrentEvmPage,
     AddressRecordsCurrentPage, DEFAULT_ADDRESS_NAMES_CURRENT_IDENTITY_JOINS,
     DEFAULT_ADDRESS_NAMES_CURRENT_READ_FILTER, ENSIP19_DEFAULT_ADDRESS_RECORD_KEY,
     count_address_names_current_for_app_filter, load_address_names_current,
     load_address_names_current_for_relations, load_address_names_current_including_noncanonical,
     load_address_names_current_including_noncanonical_for_relations,
     load_address_names_current_page, load_address_names_current_page_filtered,
-    load_address_names_current_page_sorted_for_relations, load_address_records_current_page,
+    load_address_names_current_page_sorted_for_relations, load_address_records_current_evm_page,
+    load_address_records_current_page,
 };
 pub use api_preflight::{
     ApiLookupDdlKind, ApiLookupDdlObject, load_missing_api_lookup_ddl, phase_schema_exists,
@@ -158,7 +162,7 @@ pub use phase_projection_reads::{
 pub use primary_name::{
     DEFAULT_PRIMARY_NAME_CURRENT_READ_FILTER, PrimaryNameClaimStatus, PrimaryNameCurrentRow,
     PrimaryNameCurrentSnapshot, load_primary_name_current, load_primary_name_current_snapshot,
-    normalized_claim_name,
+    load_primary_name_current_snapshots, normalized_claim_name,
 };
 pub use record_inventory::{
     RECORD_INVENTORY_CANONICALITY_SUMMARY_FILTER, RECORD_INVENTORY_PROJECTION_LINEAGE_FILTER,

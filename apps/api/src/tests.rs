@@ -393,6 +393,8 @@ include!("tests/v2_address_names.rs");
 include!("tests/v2_address_names_budget.rs");
 include!("tests/v2_address_names_budget_fence.rs");
 include!("tests/v2_address_resolves_to.rs");
+include!("tests/v2_address_resolves_to_evm.rs");
+include!("tests/v2_address_resolves_to_evm_plan.rs");
 include!("tests/v2_permissions.rs");
 #[path = "tests/v2_registry_permission_identity.rs"]
 mod v2_registry_permission_identity;
