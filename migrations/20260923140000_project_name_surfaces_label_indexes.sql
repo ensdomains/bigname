@@ -1,5 +1,6 @@
--- Replace the two label-array indexes that 20260922010100_project_mirror_scope_indexes.sql
--- built on bigname_phase.name_surfaces. Labels are chain data with no length limit, and
+-- Replace the two label-array indexes that an earlier version of
+-- 20260922010100_project_mirror_scope_indexes.sql built on bigname_phase.name_surfaces
+-- (the current version no longer builds them). Labels are chain data with no length limit, and
 -- both indexes stored label text in their entries: the btree on (namespace, raw_labels)
 -- holds the whole array, and the GIN on raw_labels holds each label. An entry larger
 -- than about 2.7 KB makes the name_surfaces insert fail. The replacements index

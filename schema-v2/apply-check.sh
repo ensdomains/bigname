@@ -521,7 +521,7 @@ intentional_phase_migration_skips=()
 refusal_assertions_passed=0
 expected_refusal_assertions=237
 predecessor_shape_proof_count=0
-expected_predecessor_shape_proof_count=41
+expected_predecessor_shape_proof_count=43
 refusal_probe_seconds=0
 timing_started=$SECONDS
 
@@ -2109,8 +2109,8 @@ $address_match_found_definition;
 SQL
 done
 # Rebuild the two Project label-hash indexes and their label_hashes function
-# from the shape 20260922010100_project_mirror_scope_indexes.sql left: the
-# label-array GIN and btree indexes and no function. The schema-migration must
+# from the shape an earlier version of 20260922010100_project_mirror_scope_indexes.sql
+# left on Sepolia: the label-array GIN and btree indexes and no function. The schema-migration must
 # drop the old two and build what the fresh baseline builds, and a rerun must
 # leave that unchanged.
 label_hash_migration="$ROOT/migrations/20260923140000_project_name_surfaces_label_indexes.sql"
@@ -2398,6 +2398,146 @@ assert_migration_refusal validate-index-on-another-table \
 DROP INDEX name_surfaces_project_node_idx;
 CREATE INDEX name_surfaces_project_node_idx ON discovery_edges (chain_id);
 SQL
+# Upgrade a database from main's shape, without this release's five Project
+# indexes or label_hashes, holding both long-label shapes the mirror tests use:
+# a 34-label array of about 4 KiB and a single 2,880-character label. A
+# whole-array btree or GIN entry for either row exceeds the index entry limit,
+# so any step that builds one fails here. The installer and both validators
+# run first, as on a live deployment, then the whole pending chain
+# 20260922010000 -> 20260922010100 -> 20260923140000 through the ordinary
+# schema-migration path. It must leave the fresh baseline's five indexes and
+# no legacy label-array index after every step, and an installer rerun must
+# change nothing.
+label_chain_migrations=(
+    "$ROOT/migrations/20260922010000_project_node_history_idx.sql"
+    "$ROOT/migrations/20260922010100_project_mirror_scope_indexes.sql"
+    "$label_hash_migration"
+)
+label_chain_matches_baseline="DO \$\$
+BEGIN
+    IF (
+        SELECT count(*)
+        FROM expected_label_chain_indexes expected
+        JOIN pg_class index_class ON index_class.relname = expected.index_name
+        JOIN pg_index ON pg_index.indexrelid = index_class.oid
+        WHERE pg_index.indrelid = expected.table_oid
+          AND pg_index.indisvalid AND pg_index.indisready
+          AND pg_get_indexdef(pg_index.indexrelid) = expected.definition
+    ) <> 5 THEN
+        RAISE EXCEPTION 'Project label upgrade chain does not match the fresh baseline';
+    END IF;
+END \$\$;"
+label_chain_no_legacy="DO \$\$
+BEGIN
+    IF to_regclass('name_surfaces_project_labels_idx') IS NOT NULL
+        OR to_regclass('name_surfaces_project_suffix_idx') IS NOT NULL THEN
+        RAISE EXCEPTION 'Project label upgrade chain built a whole-array label index';
+    END IF;
+END \$\$;"
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    cat <<'SQL'
+CREATE TEMP TABLE expected_label_chain_indexes AS
+SELECT index_class.relname AS index_name,
+       pg_index.indrelid AS table_oid,
+       pg_get_indexdef(pg_index.indexrelid) AS definition
+FROM pg_index
+JOIN pg_class index_class ON index_class.oid = pg_index.indexrelid
+WHERE index_class.relname IN (
+    'normalized_events_project_node_history_idx',
+    'normalized_events_project_v1_pointer_node_idx',
+    'name_surfaces_project_node_idx',
+    'name_surfaces_project_suffix_hash_idx',
+    'name_surfaces_project_label_hashes_idx'
+);
+DO $$
+BEGIN
+    IF (SELECT count(*) FROM expected_label_chain_indexes) <> 5 THEN
+        RAISE EXCEPTION 'fresh baseline does not define all five Project progressive indexes';
+    END IF;
+END $$;
+DROP INDEX
+    normalized_events_project_node_history_idx,
+    normalized_events_project_v1_pointer_node_idx,
+    name_surfaces_project_node_idx,
+    name_surfaces_project_suffix_hash_idx,
+    name_surfaces_project_label_hashes_idx;
+DROP FUNCTION label_hashes(text[]);
+INSERT INTO chain_lineage (
+    chain_id, block_hash, block_number, block_timestamp, canonicality_state
+) VALUES ('label-chain', '0x01', 1, to_timestamp(1), 'canonical');
+WITH shapes(namehash, raw_labels) AS (
+    VALUES
+        ('0xlong-array',
+         ARRAY(SELECT md5(i || 'a') || md5(i || 'b') || md5(i || 'c') || md5(i || 'd')
+               FROM generate_series(1, 32) i ORDER BY i) || ARRAY['label-1', 'eth']),
+        ('0xlong-label',
+         ARRAY[(SELECT string_agg(md5(i::text), '' ORDER BY i) FROM generate_series(1, 90) i), 'eth'])
+)
+INSERT INTO name_surfaces (
+    logical_name_id, namespace, raw_name, raw_labels, dns_encoded_name,
+    namehash, labelhashes, normalizer_version, visibility_state,
+    chain_id, block_hash, block_number, canonicality_state
+)
+SELECT 'label-chain:' || namehash, 'label-chain', array_to_string(raw_labels, '.'),
+       raw_labels, '\x'::bytea, namehash,
+       ARRAY(SELECT '0x' || position FROM generate_series(1, cardinality(raw_labels)) position),
+       'test', 'active', 'label-chain', '0x01', 1, 'canonical'
+FROM shapes;
+DO $$
+BEGIN
+    IF (SELECT max(octet_length(array_to_string(raw_labels, ''))) FROM name_surfaces
+        WHERE chain_id = 'label-chain') <= 2712
+        OR (SELECT max(octet_length(raw_labels[1])) FROM name_surfaces
+            WHERE chain_id = 'label-chain') <= 2712 THEN
+        RAISE EXCEPTION 'long-label rows do not exceed the index entry limit';
+    END IF;
+END $$;
+SQL
+    render_phase_migration "$label_hash_install"
+    render_phase_migration "$label_hash_validate"
+    render_phase_migration "$label_hash_validate_after_switch"
+    printf '%s\n' "$label_chain_matches_baseline" "$label_chain_no_legacy"
+    for label_chain_migration in "${label_chain_migrations[@]}"; do
+        emit_phase_migration "$label_chain_migration" preceding-shape
+        printf '%s\n' "$label_chain_no_legacy"
+    done
+    printf '%s\n' "$label_chain_matches_baseline"
+    render_phase_migration "$label_hash_validate"
+    render_phase_migration "$label_hash_validate_after_switch"
+    render_phase_migration "$label_hash_install"
+    printf '%s\n' "$label_chain_matches_baseline" "$label_chain_no_legacy"
+    cat <<'SQL'
+DELETE FROM name_surfaces WHERE chain_id = 'label-chain';
+DELETE FROM chain_lineage WHERE chain_id = 'label-chain';
+DROP TABLE expected_label_chain_indexes;
+SQL
+} | run_psql >/dev/null
+assert_migration_context_count "${label_chain_migrations[0]}" preceding-shape 1
+assert_migration_context_count "${label_chain_migrations[1]}" preceding-shape 1
+assert_migration_context_count "$label_hash_migration" preceding-shape 2
+# A deployment that recorded the earlier 20260922010100 updates its recorded
+# checksum to the one sqlx stores for the current file: the SHA-384 of the file
+# bytes. Both documents that carry the UPDATE must name exactly that value.
+label_chain_checksum="$(
+    {
+        printf '%s\n' '\pset tuples_only on' '\pset format unaligned'
+        printf "SELECT encode(sha384(decode('%s', 'hex')), 'hex');\n" \
+            "$(od -An -v -tx1 "${label_chain_migrations[1]}" | tr -d ' \n')"
+    } | run_psql
+)"
+for label_chain_doc in ops/project-progressive/README.md docs/runbooks/production-docker.md; do
+    label_chain_documented="$(
+        grep -o "SET checksum = decode('[0-9a-f]*', 'hex') WHERE version = 20260922010100" \
+            "$ROOT/$label_chain_doc" | sed "s/.*decode('\([0-9a-f]*\)'.*/\1/" | sort -u
+    )"
+    if [ "$label_chain_documented" != "$label_chain_checksum" ]; then
+        printf '%s\n' \
+            "$label_chain_doc: documented checksum for 20260922010100 is \"$label_chain_documented\"," \
+            "but the checked-in file's SHA-384 is \"$label_chain_checksum\"" >&2
+        exit 1
+    fi
+done
 # Exercise reverse_hydration_attempt_state_upgrade from the exact predecessor
 # shape, then validate the additive tuple invariant independently. Both files
 # must remain idempotent after the upgrade completes.

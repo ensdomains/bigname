@@ -24,13 +24,16 @@ On an existing large database, in this order:
    running binary still uses them. Also compare the other three `pg_get_indexdef`
    outputs with `install.sql`; an existing name is not proof of a matching index.
 3. **Stop the runner**, as the production runbook's release steps describe.
-4. **Apply the schema-migrations.**
+4. **Update the recorded checksum of `20260922010100`, only where it is recorded.**
+   See [Recorded checksum of 20260922010100](#recorded-checksum-of-20260922010100).
+   Skip this step on a database that has not recorded that version.
+5. **Apply the schema-migrations.**
    `20260923140000_project_name_surfaces_label_indexes.sql` drops the earlier
    label-array indexes (a quick, ordinary drop inside the stop window), finds the
    prebuilt hash indexes by name, and refuses a function or index under a reviewed
    name with another definition.
-5. **Start the new binary**, after the full re-walk described below.
-6. **Validate after the switch.** Run `validate.sql` again, then
+6. **Start the new binary**, after the full re-walk described below.
+7. **Validate after the switch.** Run `validate.sql` again, then
    `validate-after-switch.sql`, which fails while either earlier label-array index
    still exists.
 
@@ -42,6 +45,34 @@ Never drop a valid index with the reviewed definition. `bigname_phase.label_hash
 is never replaced: if it has another definition, no index can depend on the
 reviewed one yet, so drop it (and any index that depends on it) and rerun
 `install.sql`, after review.
+
+## Recorded checksum of 20260922010100
+
+An earlier version of `20260922010100_project_mirror_scope_indexes.sql` also built
+the two whole-array label indexes. The file no longer builds them, because an
+upgrade must never build an index whose entries can exceed the btree or GIN entry
+limit, so its checksum changed. sqlx stores the SHA-384 of each applied migration
+file in `_sqlx_migrations.checksum` and refuses to run (`sqlx migrate run`, and the
+binary at startup) when a recorded checksum differs from the file. The schema that
+the earlier version applied is otherwise the same, and
+`20260923140000_project_name_surfaces_label_indexes.sql` drops the two indexes it
+built. So, before the schema-migrations in step 5, on a deployment that already
+recorded `20260922010100` (Sepolia), confirm the earlier checksum:
+
+```sql
+SELECT encode(checksum, 'hex') FROM _sqlx_migrations WHERE version = 20260922010100;
+-- expected: de4b8fb9bd900be8a4524f26f41deb3557d2cd04cc77309a2a1ebddf45769679e0b9be22f4a8a9bbc71ec3601b25c6be
+```
+
+then record the current file's checksum:
+
+```sql
+UPDATE _sqlx_migrations SET checksum = decode('ba87c9cfc8c0ff508240e4e31d0038512dcdf07dce55cb638fabe4936785f7e084b907a7b7d91ea91bc0320824f0ac63', 'hex') WHERE version = 20260922010100 AND checksum = decode('de4b8fb9bd900be8a4524f26f41deb3557d2cd04cc77309a2a1ebddf45769679e0b9be22f4a8a9bbc71ec3601b25c6be', 'hex');
+```
+
+It must report `UPDATE 1`. Stop if the first query shows any other value.
+`schema-v2/apply-check.sh` proves that the new checksum here and in the production
+runbook is the SHA-384 of the file as checked in.
 
 ## Full re-walk
 
@@ -80,7 +111,7 @@ queries spell the same expressions as the indexes so the planner can use them.
 An earlier version of this package built `name_surfaces_project_labels_idx` (GIN
 on `raw_labels`) and `name_surfaces_project_suffix_idx` (btree on
 `(namespace, raw_labels)`). Only the running binary's lookups can use them, so
-they stay until the schema-migration drops them in step 4.
+they stay until the schema-migration drops them in step 5.
 
 ## Schema-migrations
 

@@ -118,7 +118,11 @@ Project's scoped node history and progressive mirror dependency traversal read
 concurrently on a large initialized database following
 [their index runbook](../ops/project-progressive/README.md) before applying the
 matching schema-migrations, and run its `validate.sql` before recording the
-release.
+release. A deployment that already recorded
+`20260922010100_project_mirror_scope_indexes.sql` (Sepolia) must first update
+that version's recorded checksum, as the runbook's
+[checksum section](../ops/project-progressive/README.md#recorded-checksum-of-20260922010100)
+describes, because the file no longer builds two obsolete label indexes.
 
 Interpret's per-batch ENSv1 [lookahead loader](glossary.md#lookahead-loader)
 reads `normalized_events` through two partial expression indexes. Follow their

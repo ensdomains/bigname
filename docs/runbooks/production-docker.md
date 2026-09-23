@@ -719,6 +719,23 @@ retained range before normal derived writes continue: run the full-history
 Interpret and Project redos of steps 7 and 8 before step 9, and record the new
 hash in the release record.
 
+On a deployment that already recorded
+`20260922010100_project_mirror_scope_indexes.sql` (Sepolia), update its recorded
+checksum after step 1 and before the schema-migrations in step 4. An earlier
+version of that file also built the two whole-array label indexes; the file no
+longer does, so its SHA-384 checksum changed, and `sqlx migrate run` and the
+binary refuse a recorded checksum that differs. The schema the earlier version
+applied is otherwise unchanged, and
+`20260923140000_project_name_surfaces_label_indexes.sql` drops the two indexes it
+built. Confirm that
+`SELECT encode(checksum, 'hex') FROM _sqlx_migrations WHERE version = 20260922010100;`
+returns `de4b8fb9bd900be8a4524f26f41deb3557d2cd04cc77309a2a1ebddf45769679e0b9be22f4a8a9bbc71ec3601b25c6be`, then run
+`UPDATE _sqlx_migrations SET checksum = decode('ba87c9cfc8c0ff508240e4e31d0038512dcdf07dce55cb638fabe4936785f7e084b907a7b7d91ea91bc0320824f0ac63', 'hex') WHERE version = 20260922010100 AND checksum = decode('de4b8fb9bd900be8a4524f26f41deb3557d2cd04cc77309a2a1ebddf45769679e0b9be22f4a8a9bbc71ec3601b25c6be', 'hex');`
+and require `UPDATE 1`. A database that has not recorded that version skips
+this. [The index runbook](../../ops/project-progressive/README.md#recorded-checksum-of-20260922010100)
+carries the same statements, and `schema-v2/apply-check.sh` proves both carry
+the checksum of the file as checked in.
+
 The release containing
 `20260923120000_normalized_events_address_match_indexes.sql` adds the three
 partial expression indexes the address history read uses to find the names and
