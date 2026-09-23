@@ -228,6 +228,13 @@ impl HistoryCollection {
     /// no redo in progress, the same manifests, and a publication still at or above the bound.
     /// A publication that advanced is fine: it did not change rows at or below the bound.
     async fn recheck(&self, state: &AppState) -> V2Result<()> {
+        // The namespace set and the horizons are read first and the bound state last, in its own
+        // snapshot: a redo stamped or a bound block reorged away after an earlier read is then
+        // still seen. The comparisons run afterwards, in the order admission uses.
+        let namespaces =
+            reload_collection_namespace_set(state, &self.namespaces, self.namespace.as_deref())
+                .await;
+        let horizons = classification_horizons(state, &self.block_bounds()).await?;
         let bound_blocks = self
             .bound
             .iter()
@@ -245,16 +252,13 @@ impl HistoryCollection {
         {
             return Err(self.changed());
         }
-        let namespaces =
-            reload_collection_namespace_set(state, &self.namespaces, self.namespace.as_deref())
-                .await
-                .map_err(|error| {
-                    if error.status == axum::http::StatusCode::CONFLICT {
-                        self.changed()
-                    } else {
-                        api_error_to_v2(error)
-                    }
-                })?;
+        let namespaces = namespaces.map_err(|error| {
+            if error.status == axum::http::StatusCode::CONFLICT {
+                self.changed()
+            } else {
+                api_error_to_v2(error)
+            }
+        })?;
         if namespaces.manifest_digest() != self.manifests {
             return Err(self.changed());
         }
@@ -267,7 +271,6 @@ impl HistoryCollection {
         {
             return Err(self.changed());
         }
-        let horizons = classification_horizons(state, &self.block_bounds()).await?;
         if self.bound.iter().any(|(chain, bound)| {
             bound.classification_horizon != horizons.get(chain).copied()
                 || crossed_horizon(bound, published.get(chain), &current, chain)

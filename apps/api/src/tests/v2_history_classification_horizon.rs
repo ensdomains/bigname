@@ -415,8 +415,15 @@ async fn v2_history_cursor_expires_when_the_swap_precedes_the_position() -> Resu
                 bigname_lookup::ChainRpcUrls::default(),
             );
             let uri = saved[0].clone();
+            // The request waits at its hook while a real Project batch runs, which can take
+            // longer than the default request time limit on a slow runner.
+            let bounds = ApiBoundsConfig {
+                request_timeout_ms: 600_000,
+                ..ApiBoundsConfig::default()
+            };
+            let health_pool = state.pool.clone();
             tokio::spawn(async move {
-                let response = app_router(state)
+                let response = app_router_with_bounds(state, health_pool, &bounds)
                     .oneshot(Request::builder().uri(uri).body(Body::empty())?)
                     .await?;
                 let status = response.status();
