@@ -72,14 +72,7 @@ pub(super) async fn load_history_page(
     include_candidates: bool,
     interpret_redo_fence: Option<&InterpretRedoFence>,
 ) -> Result<HistoryPage> {
-    let mut transaction = pool
-        .begin()
-        .await
-        .context("failed to begin normalized-event history page transaction")?;
-    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
-        .execute(&mut *transaction)
-        .await
-        .context("failed to configure normalized-event history page transaction")?;
+    let mut transaction = begin_history_snapshot(pool, "page").await?;
 
     if let Some(interpret_redo_fence) = interpret_redo_fence {
         ensure_interpret_redo_fence(&mut transaction, interpret_redo_fence)
@@ -192,11 +185,10 @@ async fn load_history_internal(
     {
         return Ok(Vec::new());
     }
-    let mut connection = pool
-        .acquire()
-        .await
-        .context("failed to acquire a normalized-event history connection")?;
-    let filter = filter.with_attributed_records(&mut connection).await?;
+    // The attribution reads and the row read share one snapshot, so a publication between them
+    // cannot filter rows against attribution from another database state.
+    let mut transaction = begin_history_snapshot(pool, "row").await?;
+    let filter = filter.with_attributed_records(&mut transaction).await?;
 
     let mut builder = QueryBuilder::<Postgres>::new("");
     push_history_select(&mut builder, &filter, canonical_only, false, false);
@@ -210,11 +202,34 @@ async fn load_history_internal(
 
     let rows = builder
         .build()
-        .fetch_all(&mut *connection)
+        .fetch_all(&mut *transaction)
         .await
         .context("failed to fetch normalized-event history rows")?;
+    transaction
+        .commit()
+        .await
+        .context("failed to commit normalized-event history row transaction")?;
 
     rows.into_iter().map(decode_history_event).collect()
+}
+
+/// A read-only transaction with one snapshot for every statement of a history read: the
+/// attribution reads, the cursor and summary reads, and the row read.
+async fn begin_history_snapshot(
+    pool: &PgPool,
+    read: &str,
+) -> Result<sqlx::Transaction<'static, Postgres>> {
+    let mut transaction = pool
+        .begin()
+        .await
+        .with_context(|| format!("failed to begin normalized-event history {read} transaction"))?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+        .execute(&mut *transaction)
+        .await
+        .with_context(|| {
+            format!("failed to configure normalized-event history {read} transaction")
+        })?;
+    Ok(transaction)
 }
 
 pub(super) fn push_history_filters<'a>(
