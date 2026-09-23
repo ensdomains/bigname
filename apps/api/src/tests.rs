@@ -403,6 +403,7 @@ include!("tests/v2_registries_manifest_history.rs");
 include!("tests/v2_interpret_redo_loaders.rs");
 include!("tests/v2_primary_name.rs");
 include!("tests/v2_lookup.rs");
+include!("tests/v2_record_inventory_abi.rs");
 include!("tests/v2_search.rs");
 include!("tests/v2_names.rs");
 include!("tests/v2_query_params.rs");
