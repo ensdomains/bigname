@@ -57,9 +57,10 @@ pub async fn load_address_names_current_including_noncanonical_for_relations(
 }
 
 /// Current address-name relation rows the address held at `published`: the relation's
-/// `provenance.chain_id` is a bound chain and either its `chain_positions.block_number` is at or
-/// below that chain's bound, or the event it cites is a token transfer from the address to itself
-/// and every registration event between the bound and it is one too. Any other relation Project
+/// `provenance.chain_id` is a bound chain, its surface binding was written at or below that
+/// chain's bound, and either its `chain_positions.block_number` is at or below that bound, or the
+/// event it cites is a token transfer from the address to itself and every registration event
+/// between the bound and it is one too. Any other relation Project
 /// cites at a later block, or without a block, is not returned. History reads use this so a
 /// relation acquired after the block a read is bound to cannot admit older events.
 pub(crate) async fn load_address_names_current_at_bound(
@@ -185,7 +186,7 @@ pub(crate) fn push_address_names_current_query<'a>(
         builder.push(DEFAULT_ADDRESS_NAMES_CURRENT_READ_FILTER);
     }
     if let Some(published) = published {
-        push_cited_event_bound(builder, published);
+        push_cited_event_bound(builder, published, include_noncanonical);
     }
 
     builder.push(
@@ -203,9 +204,16 @@ pub(crate) fn push_address_names_current_query<'a>(
     );
 }
 
+/// Bounds a current row by the published block of its chain on two counts: the row's surface
+/// binding must have been written at or below that block, and the event Project cites for the
+/// row must lie at or below it or be a same-holder transfer admitted by
+/// `push_same_holder_since_bound`. The binding bound applies to both, so a same-holder row on a
+/// binding written above the bound is refused too. The canonical read joins the binding as
+/// `binding`; the noncanonical read has no identity joins and probes the binding by key.
 fn push_cited_event_bound(
     builder: &mut QueryBuilder<'_, Postgres>,
     published: &BTreeMap<String, i64>,
+    include_noncanonical: bool,
 ) {
     if published.is_empty() {
         builder.push(" AND FALSE");
@@ -218,6 +226,24 @@ fn push_cited_event_bound(
         }
         builder.push("(anc.provenance ->> 'chain_id' = ");
         builder.push_bind(chain_id.clone());
+        if include_noncanonical {
+            builder.push(
+                " AND EXISTS (
+                    SELECT 1
+                    FROM bigname_phase.surface_bindings bound_binding
+                    WHERE bound_binding.surface_binding_id = anc.surface_binding_id
+                      AND bound_binding.chain_id = ",
+            );
+            builder.push_bind(chain_id.clone());
+            builder.push(" AND bound_binding.block_number <= ");
+            builder.push_bind(*block_number);
+            builder.push(")");
+        } else {
+            builder.push(" AND binding.chain_id = ");
+            builder.push_bind(chain_id.clone());
+            builder.push(" AND binding.block_number <= ");
+            builder.push_bind(*block_number);
+        }
         builder.push(
             " AND (CASE WHEN jsonb_typeof(anc.chain_positions -> 'block_number') = 'number'
                         THEN (anc.chain_positions ->> 'block_number')::bigint END <= ",

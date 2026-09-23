@@ -447,15 +447,21 @@ async fn owner_rows(pool: &PgPool) -> Result<Vec<(String, Uuid, i64, String, i64
     .await?)
 }
 
-/// The owner's history at `block`, as `kind@block` for each row.
+/// The owner's canonical history at `block`, as `kind:resource@block` for each row.
 async fn owner_history_at(pool: &PgPool, block: i64) -> Result<Vec<String>> {
+    owner_history(pool, block, true).await
+}
+
+/// The owner's history at `block`, through the canonical read or the read that includes
+/// noncanonical identity rows.
+async fn owner_history(pool: &PgPool, block: i64, canonical_only: bool) -> Result<Vec<String>> {
     let page = bigname_storage::load_address_history_page_for_relations(
         pool,
         OWNER,
         None,
         None,
         bigname_storage::HistoryScope::Both,
-        true,
+        canonical_only,
         None,
         50,
         bigname_storage::HistorySummaryMode::None,
@@ -550,6 +556,147 @@ async fn rebinding_above_the_bound_leaves_the_history_at_the_bound_unchanged() -
     assert_eq!(
         after, held,
         "a rebinding above the bound changed the owner's history at the bound"
+    );
+    Ok(())
+}
+
+/// A resource the owner's rows are moved onto by hand, and the event it carries at
+/// `REGISTERED`. The event names no address, so only a current row on the resource reads it into
+/// the owner's history.
+const MOVED_RESOURCE: Uuid = Uuid::from_u128(0x0b0a_6d10);
+const MOVED_RESOURCE_TX: &str = "0xmoved-resource-event";
+
+/// Moves the owner's rows onto a new binding at `block` of a resource that has an event at
+/// `REGISTERED`, leaving every cited event where it is.
+async fn move_owner_rows_to_a_binding_at(pool: &PgPool, block: i64) -> Result<()> {
+    let moved = Uuid::from_u128(0x0b0a_6d12);
+    let active_from = timestamp(1_700_000_000 + block);
+    let previous: Uuid = sqlx::query_scalar(
+        "SELECT DISTINCT surface_binding_id FROM bigname_phase.address_names_current
+         WHERE address = $1",
+    )
+    .bind(OWNER)
+    .fetch_one(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO resources (
+             resource_id, token_lineage_id, chain_id, block_hash, block_number, provenance,
+             canonicality_state
+         ) VALUES ($1, NULL, $2, $3, $4, '{}'::jsonb, 'canonical')",
+    )
+    .bind(MOVED_RESOURCE)
+    .bind(CHAIN)
+    .bind(format!("0xhistory{REGISTERED}"))
+    .bind(REGISTERED)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO normalized_events (
+             event_identity, namespace, logical_name_id, resource_id, event_kind,
+             source_family, manifest_version, source_manifest_id, chain_id, block_number,
+             block_hash, transaction_hash, transaction_index, log_index, raw_fact_ref,
+             derivation_kind, canonicality_state, before_state, after_state,
+             migration_correlation_ids, consumer_visibility
+         )
+         SELECT 'moved-resource-event', namespace, NULL, $1, 'ResolverChanged', source_family,
+                manifest_version, source_manifest_id, chain_id, block_number, block_hash, $2,
+                transaction_index, 99, raw_fact_ref, derivation_kind, canonicality_state,
+                '{}'::jsonb, '{}'::jsonb, migration_correlation_ids, consumer_visibility
+         FROM normalized_events
+         WHERE event_kind = 'SubregistryChanged' AND block_number = $3
+         LIMIT 1",
+    )
+    .bind(MOVED_RESOURCE)
+    .bind(MOVED_RESOURCE_TX)
+    .bind(REGISTERED)
+    .execute(pool)
+    .await?;
+    sqlx::query("UPDATE surface_bindings SET active_to = $2 WHERE surface_binding_id = $1")
+        .bind(previous)
+        .bind(active_from)
+        .execute(pool)
+        .await?;
+    sqlx::query(
+        "INSERT INTO surface_bindings (
+             surface_binding_id, logical_name_id, resource_id, binding_kind, authority_arm,
+             active_from, chain_id, block_hash, block_number, provenance, canonicality_state
+         )
+         SELECT $2, logical_name_id, $3, binding_kind, authority_arm, $4, chain_id, $5, $6,
+                provenance, canonicality_state
+         FROM surface_bindings
+         WHERE surface_binding_id = $1",
+    )
+    .bind(previous)
+    .bind(moved)
+    .bind(MOVED_RESOURCE)
+    .bind(active_from)
+    .bind(format!("0xhistory{block}"))
+    .bind(block)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "UPDATE bigname_phase.address_names_current
+         SET surface_binding_id = $2, resource_id = $3, token_lineage_id = NULL
+         WHERE address = $1",
+    )
+    .bind(OWNER)
+    .bind(moved)
+    .bind(MOVED_RESOURCE)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// The reader's own guarantee, independent of Project: a row whose binding was written above the
+/// bound is not held at the bound, even when the event it cites lies at or below it. Project
+/// re-cites a rebound row at the new binding (the test above), so no adapter output has this
+/// shape and it is built by hand: the owner's rows are moved onto a binding at `REBOUND` of a
+/// resource with an older event, while the events they cite stay at `REGISTERED`.
+#[tokio::test]
+async fn a_row_bound_above_the_bound_is_not_held_at_the_bound() -> Result<()> {
+    let (registered_output, _) = interpret(REGISTERED, registration(), None)?;
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_history_blocks(&database, REGISTERED..=REBOUND).await?;
+    persist(&database.pool, &registered_output).await?;
+    project_to(&database.pool, REGISTERED, None).await?;
+    move_owner_rows_to_a_binding_at(&database.pool, REBOUND).await?;
+    let rows = owner_rows(&database.pool).await?;
+    let at_bound = owner_history_at(&database.pool, REGISTERED).await?;
+    let at_binding = owner_history_at(&database.pool, REBOUND).await?;
+    // The read that includes noncanonical identity rows has no binding join and probes the
+    // binding by key instead.
+    let noncanonical_at_bound = owner_history(&database.pool, REGISTERED, false).await?;
+    let noncanonical_at_binding = owner_history(&database.pool, REBOUND, false).await?;
+    database.cleanup().await?;
+
+    // Anti-vacuity: every row sits on the moved binding and still cites the registration block.
+    assert_eq!(rows.len(), 3, "{rows:?}");
+    assert!(
+        rows.iter()
+            .all(|row| row.1 == MOVED_RESOURCE && row.2 == REBOUND && row.4 == REGISTERED),
+        "{rows:?}"
+    );
+    let moved = MOVED_RESOURCE.to_string();
+    assert!(
+        at_bound.iter().all(|row| !row.contains(&moved)),
+        "a row bound above the bound was held at the bound: {at_bound:?}"
+    );
+    assert!(
+        at_binding.iter().any(|row| row.contains(&moved)),
+        "the row is held once the bound reaches its binding: {at_binding:?}"
+    );
+    assert!(
+        noncanonical_at_bound
+            .iter()
+            .all(|row| !row.contains(&moved)),
+        "the noncanonical read held a row bound above the bound: {noncanonical_at_bound:?}"
+    );
+    assert!(
+        noncanonical_at_binding
+            .iter()
+            .any(|row| row.contains(&moved)),
+        "the noncanonical read holds the row once the bound reaches its binding: \
+         {noncanonical_at_binding:?}"
     );
     Ok(())
 }

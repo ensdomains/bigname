@@ -279,10 +279,14 @@ resources the address holds now in `address_names_current` and held in the past 
 of activated, canonical events. A current relation row counts only when the event Project cites
 for it (`provenance.chain_id` and `chain_positions.block_number`) lies at or below the read's
 published block of that chain, so a relation acquired after that block cannot admit the
-resource's older events; a row without a cited block does not count under a bound. A row cited
-above that block still counts when every registration event between the bound and the cited one
-is a same-holder token transfer: the cited event (`provenance.normalized_event_id`, read by primary
-key) is a `TokenControlTransferred` whose `before_state.from` and `after_state.to` both equal the
+resource's older events; a row without a cited block does not count under a bound. The row's
+surface binding is judged at or below the published block too: its `surface_bindings` row must be
+on that chain with a `block_number` at or below the bound, whatever block the row cites, so a row
+moved onto a binding written above the bound does not count. The canonical read checks the binding
+it already joins by key; the read that includes noncanonical identity rows probes it by key. A row
+cited above that block still counts when every registration event between the bound and the cited
+one is a same-holder token transfer: the cited event (`provenance.normalized_event_id`, read by
+primary key) is a `TokenControlTransferred` whose `before_state.from` and `after_state.to` both equal the
 address, and every activated, canonical `RegistrationGranted`, `RegistrationReleased` and
 `TokenControlTransferred` row on the cited event's resource with a block above the bound and at or
 below the cited block is such a transfer too, with no ENSv2 `RegistrationReserved` row in that

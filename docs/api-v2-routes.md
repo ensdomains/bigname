@@ -1339,9 +1339,12 @@ A recognized namespace with no available publication returns retryable `409 stal
   timestamp window filters event rows.
 - Two inputs are read from current state. An address's relations are read from
   the current relation rows, and a row is admitted when the event Project
-  cites for it lies at or below the published block. A current row cited above
-  the published block is also admitted when every registration event between
-  the published block and the cited one is a same-holder token transfer: the
+  cites for it lies at or below the published block. The row's surface binding
+  is judged at or below the published block too: a row whose binding was
+  written above it is not admitted, whatever event it cites and including the
+  same-holder case below. A current row cited above the published block is
+  also admitted when every registration event between the published block and
+  the cited one is a same-holder token transfer: the
   cited event is a `TokenControlTransferred` whose sender and recipient are
   both the address, every `RegistrationGranted`, `RegistrationReleased` and
   `TokenControlTransferred` on that event's resource after the published block
