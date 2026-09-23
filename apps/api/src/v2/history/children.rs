@@ -147,21 +147,25 @@ pub(super) async fn load_page(
     )
     .await
     .map_err(|error| map_history_page_error(error, "failed to load name history"))?;
-    let rows = page
-        .rows
-        .iter()
-        .filter_map(|row| {
-            let mut event = build_history_event(&row.event, request.anchor_name, request.include)?;
-            event.subject = Some(match row.subject {
-                HistorySubject::Name => HistoryRowSubject::Name,
-                HistorySubject::Child => {
-                    event.name = row.child_name.clone()?;
-                    HistoryRowSubject::Child
-                }
-            });
-            Some(event)
-        })
-        .collect();
+    let mut rows = Vec::with_capacity(page.rows.len());
+    for row in &page.rows {
+        let Some(mut event) = build_history_event(&row.event, request.anchor_name, request.include)
+        else {
+            continue;
+        };
+        event.subject = Some(match row.subject {
+            HistorySubject::Name => HistoryRowSubject::Name,
+            HistorySubject::Child => {
+                // Counted rows and page rows must match, so a nameless child row is an error,
+                // not a silent drop.
+                event.name = row.child_name.clone().ok_or_else(|| {
+                    V2Error::internal_error("a child registration row has no child name")
+                })?;
+                HistoryRowSubject::Child
+            }
+        });
+        rows.push(event);
+    }
     Ok(NameHistoryPageData {
         rows,
         next_cursor: page.next_cursor,

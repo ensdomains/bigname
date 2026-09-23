@@ -684,7 +684,10 @@ the event's chain position. Name history reads it for
 event payloads and public event IDs still come from `normalized_events`.
 
 Project derives each row from one staged event and the event's own name
-surface, nothing else:
+surface. The surface's current `visibility_state` is the one input that can
+change without a new event: a `recompute-flags` run can flip it, and the
+Project redo that run stamps rebuilds the affected rows (see
+[`deployment.md`](deployment.md)). The rules:
 
 - The event is an activated, readable canonical `RegistrationGranted` (or
   `LabelRegistered`) row with a chain position and a logical name, and it is
@@ -711,11 +714,13 @@ the new one.
 A full rebuild replaces every row of the chain from the staged history.
 Because a row depends only on its event and that event's surface, an
 incremental or redo publication deletes the chain's rows in the affected block
-range, rows above the target, and rows at or above the range start whose block
-is no longer readable canonical lineage, then inserts the rows derived from
+range and rows above the range whose block is no longer readable canonical
+lineage, then inserts the rows derived from
 the range's staged changed events. The publication is part of the same
 transaction as every other projection. Rows keep the target of the publication
-that wrote them, like other rows outside an incremental scope.
+that wrote them, like other rows outside an incremental scope. Readable rows
+above the range stay, because an operator redo can end below a target that is
+already published.
 
 For a slice-1 test re-walk that must not change product behavior at a fixed
 readable chain head, an outstanding product cursor backed by normalized-event

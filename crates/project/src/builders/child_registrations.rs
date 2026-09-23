@@ -5,7 +5,9 @@
 //! on that event and the event's own name surface: never on the parent's current subregistry,
 //! `children_current`, `name_current`, or current contract address ranges. A released child, an
 //! unlinked registry, or a registry that later moved under another parent therefore keeps every
-//! row it had. See docs/projections.md, "Child registration events".
+//! row it had. The surface's current `visibility_state` is the one input that can change without
+//! a new event: a normalizer recompute can flip it, and the Project redo that recompute stamps
+//! rebuilds the rows. See docs/projections.md, "Child registration events".
 
 use alloy_primitives::{B256, keccak256};
 use sqlx::{Postgres, QueryBuilder, Transaction};
@@ -110,7 +112,7 @@ pub(super) async fn build(
 }
 
 /// Replaces the published rows the batch covers. A full rebuild replaces the chain. Otherwise a
-/// row depends only on its own event, so the batch replaces the affected block range, plus rows
+/// row depends only on its own event and that event's surface, so the batch replaces the affected block range, plus rows
 /// at or above the range start whose block is no longer readable canonical lineage. Rows above
 /// the range stay: an operator redo may end below an already published target.
 pub(crate) async fn publish(

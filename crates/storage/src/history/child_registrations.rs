@@ -102,7 +102,7 @@ pub async fn load_name_history_page_with_child_registrations(
     if let Some(cursor) = cursor {
         ensure_cursor_in_collection(&mut transaction, logical_name_id, &filter, cursor).await?;
     }
-    let arm = ChildArm::resolve(&mut transaction, logical_name_id, &filter, true).await?;
+    let arm = ChildArm::resolve(&mut transaction, logical_name_id, &filter).await?;
     let summary = match summary_mode {
         HistorySummaryMode::None => None,
         HistorySummaryMode::Count => {
@@ -206,7 +206,7 @@ pub async fn explain_name_history_page_with_child_registrations_for_test(
         "history page_size exceeds SQL limit",
     )?;
     let mut transaction = pool.begin().await?;
-    let arm = ChildArm::resolve(&mut transaction, logical_name_id, &filter, true).await?;
+    let arm = ChildArm::resolve(&mut transaction, logical_name_id, &filter).await?;
     let bound = child_arm_bound(&mut transaction, arm.as_ref(), cursor, filter.order).await?;
     let mut builder = QueryBuilder::<Postgres>::new("EXPLAIN (ANALYZE, FORMAT JSON) ");
     push_page_query(
@@ -379,7 +379,7 @@ async fn ensure_cursor_in_collection(
     if !cursor_filter.bind_cursor_anchor_to_event_kinds {
         cursor_filter.event_kinds.clear();
     }
-    let arm = ChildArm::resolve(&mut *connection, parent, &cursor_filter, true).await?;
+    let arm = ChildArm::resolve(&mut *connection, parent, &cursor_filter).await?;
     let mut builder = QueryBuilder::<Postgres>::new("SELECT EXISTS (SELECT 1");
     push_history_source_for_filter(&mut builder, &cursor_filter, true, false, false);
     push_history_filters(&mut builder, &cursor_filter, true);

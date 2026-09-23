@@ -1098,7 +1098,7 @@ adds the Project-owned table
 [`child_registration_events`](projections.md#child-registration-events) and
 changes `crates/project/src`, so it rotates the
 [interpreter content hash](glossary.md#interpreter-content-hash) for every
-chain. Schema-migration `20260923120000_child_registration_events.sql` creates
+chain. Schema-migration `20260923150000_child_registration_events.sql` creates
 the empty table on an existing phase schema, and `init-schema` installs it on a
 fresh one. The table fills only when Project rebuilds, so an existing
 deployment applies the schema-migration, reapplies the API role's SELECT grant

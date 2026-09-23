@@ -29,15 +29,14 @@ pub(super) struct ChildArm {
 impl ChildArm {
     /// The arm for `parent`, or `None` when it can hold no row of this read: the parent has no
     /// surface, the block window leaves out its chain, or an explicit type set excludes
-    /// `registration`. `kinds_apply` is false for cursor validation without an explicit type.
+    /// `registration`. Cursor validation without an explicit type passes a filter whose
+    /// `event_kinds` it has cleared, so the type check never excludes the arm there.
     pub(super) async fn resolve(
         connection: &mut PgConnection,
         parent: &str,
         filter: &EventHistoryReadFilter,
-        kinds_apply: bool,
     ) -> anyhow::Result<Option<Self>> {
-        if kinds_apply
-            && !filter.event_kinds.is_empty()
+        if !filter.event_kinds.is_empty()
             && !filter
                 .event_kinds
                 .iter()

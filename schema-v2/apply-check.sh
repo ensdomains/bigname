@@ -620,7 +620,7 @@ for migration_file in \
     "$ROOT/migrations/20260917160000_discovery_edges_index_validity_check.sql" \
     "$ROOT/migrations/20260917161000_project_scoped_history_index_validity_check.sql" \
     "$ROOT/migrations/20260923120000_normalized_events_address_match_indexes.sql" \
-    "$ROOT/migrations/20260923120000_child_registration_events.sql"
+    "$ROOT/migrations/20260923150000_child_registration_events.sql"
 do
     emit_phase_migration "$migration_file" empty-schema | run_psql
 done
@@ -869,8 +869,8 @@ for migration_file in \
     "$ROOT/migrations/20260914120000_lookup_publication_revalidation.sql" \
     "$ROOT/migrations/20260914120100_address_records_current_comments.sql" \
     "$ROOT/migrations/20260914120100_address_records_current_comments.sql" \
-    "$ROOT/migrations/20260923120000_child_registration_events.sql" \
-    "$ROOT/migrations/20260923120000_child_registration_events.sql"
+    "$ROOT/migrations/20260923150000_child_registration_events.sql" \
+    "$ROOT/migrations/20260923150000_child_registration_events.sql"
 do
     emit_phase_migration "$migration_file" baseline-first | run_psql
 done
@@ -977,7 +977,7 @@ JOIN pg_index ON indexrelid = objoid
 WHERE classoid = 'pg_class'::regclass AND indrelid = 'child_registration_events'::regclass;
 DROP TABLE child_registration_events;
 SQL
-    emit_phase_migration "$ROOT/migrations/20260923120000_child_registration_events.sql" preceding-shape
+    emit_phase_migration "$ROOT/migrations/20260923150000_child_registration_events.sql" preceding-shape
     cat <<'SQL'
 CREATE TEMP TABLE actual_child_registration_shape AS
 SELECT 'column' AS kind, attname::text AS name,
@@ -1017,11 +1017,11 @@ $$;
 DROP TABLE expected_child_registration_shape;
 DROP TABLE actual_child_registration_shape;
 SQL
-    emit_phase_migration "$ROOT/migrations/20260923120000_child_registration_events.sql" baseline-first
+    emit_phase_migration "$ROOT/migrations/20260923150000_child_registration_events.sql" baseline-first
 } | run_psql
-assert_migration_context_count "$ROOT/migrations/20260923120000_child_registration_events.sql" empty-schema 1
-assert_migration_context_count "$ROOT/migrations/20260923120000_child_registration_events.sql" preceding-shape 1
-assert_migration_context_count "$ROOT/migrations/20260923120000_child_registration_events.sql" baseline-first 3
+assert_migration_context_count "$ROOT/migrations/20260923150000_child_registration_events.sql" empty-schema 1
+assert_migration_context_count "$ROOT/migrations/20260923150000_child_registration_events.sql" preceding-shape 1
+assert_migration_context_count "$ROOT/migrations/20260923150000_child_registration_events.sql" baseline-first 3
 # The reverse index previously required authority identity even when a name had
 # a readable serving resource. Prove that exact predecessor upgrades and that
 # repeat application preserves the required record-resource identity.

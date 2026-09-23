@@ -514,3 +514,134 @@ async fn v2_name_history_child_arm_reads_a_bounded_index_range() -> Result<()> {
 
     database.cleanup().await
 }
+
+#[tokio::test]
+async fn v2_name_history_child_registrations_keep_the_scope_of_the_name_rows() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_child_registration_fixture(&database).await?;
+
+    let children = [
+        row(110, "registration", "d.parent.eth", "child"),
+        row(109, "registration", "c.parent.eth", "child"),
+        row(107, "registration", "a.parent.eth", "child"),
+        row(105, "registration", "b.parent.eth", "child"),
+        row(103, "registration", "a.parent.eth", "child"),
+    ];
+    let name_scope = v2_history_payload_for_database(
+        &database,
+        &format!("{CHILD_COUNT_ROUTE}&scope=name"),
+    )
+    .await?;
+    assert_eq!(
+        history_rows(&name_scope),
+        vec![
+            children[0].clone(),
+            children[1].clone(),
+            row(108, "resolver", "parent.eth", "name"),
+            children[2].clone(),
+            children[3].clone(),
+            children[4].clone(),
+            row(102, "record", "parent.eth", "name"),
+        ]
+    );
+    assert_eq!(name_scope["page"]["total_count"], json!(7));
+
+    let registration_scope = v2_history_payload_for_database(
+        &database,
+        &format!("{CHILD_COUNT_ROUTE}&scope=registration"),
+    )
+    .await?;
+    let mut expected = vec![row(113, "renewal", "parent.eth", "name")];
+    expected.extend(children.iter().cloned());
+    expected.push(row(101, "registration", "parent.eth", "name"));
+    assert_eq!(history_rows(&registration_scope), expected);
+    assert_eq!(registration_scope["page"]["total_count"], json!(7));
+
+    // A name whose own scope holds no rows still serves its child rows.
+    let quiet = v2_history_payload_for_database(
+        &database,
+        "/v1/names/a.parent.eth/history?include=child_registrations,total_count&scope=registration",
+    )
+    .await?;
+    assert_eq!(
+        history_rows(&quiet),
+        vec![row(104, "registration", "x.a.parent.eth", "child")]
+    );
+    assert_eq!(quiet["page"]["total_count"], json!(1));
+
+    // With no resources at all the name arm is the empty selector; the child arm still reads.
+    let parent = bigname_storage::logical_name_id_for_name("ens", "parent.eth");
+    let page = bigname_storage::load_name_history_page_with_child_registrations(
+        &database.pool,
+        &parent,
+        &[],
+        bigname_storage::HistoryScope::Resource,
+        None,
+        10,
+        bigname_storage::HistorySummaryMode::Count,
+        &bigname_storage::HistoryPageOptions::default(),
+        None,
+    )
+    .await?;
+    assert_eq!(
+        page.rows
+            .iter()
+            .map(|row| (row.event.event_identity.as_str(), row.subject))
+            .collect::<Vec<_>>(),
+        vec![
+            ("d-grant", bigname_storage::HistorySubject::Child),
+            ("c-grant", bigname_storage::HistorySubject::Child),
+            ("a-regrant", bigname_storage::HistorySubject::Child),
+            ("b-grant", bigname_storage::HistorySubject::Child),
+            ("a-grant", bigname_storage::HistorySubject::Child),
+        ]
+    );
+    assert_eq!(page.summary.map(|summary| summary.total_count), Some(5));
+
+    database.cleanup().await
+}
+
+/// A child grant above the served publication bound is not in the page or the count, exactly as
+/// the name's own rows above the bound are not.
+#[tokio::test]
+async fn v2_name_history_child_registrations_stop_at_the_publication_bound() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_child_registration_fixture(&database).await?;
+    let parent = bigname_storage::logical_name_id_for_name("ens", "parent.eth");
+    let options = bigname_storage::HistoryPageOptions {
+        block_window: Some(bigname_storage::HistoryBlockWindow {
+            ranges: vec![bigname_storage::ChainBlockRange {
+                chain_id: "ethereum-mainnet".to_owned(),
+                from_block: None,
+                to_block: Some(108),
+            }],
+        }),
+        publication_block_bounds: Some(std::collections::BTreeMap::from([(
+            "ethereum-mainnet".to_owned(),
+            108,
+        )])),
+        ..bigname_storage::HistoryPageOptions::default()
+    };
+    let page = bigname_storage::load_name_history_page_with_child_registrations(
+        &database.pool,
+        &parent,
+        &[Uuid::from_u128(CHILD_PARENT_RESOURCE)],
+        bigname_storage::HistoryScope::Both,
+        None,
+        10,
+        bigname_storage::HistorySummaryMode::Count,
+        &options,
+        None,
+    )
+    .await?;
+    assert_eq!(
+        page.rows
+            .iter()
+            .map(|row| row.event.event_identity.as_str())
+            .collect::<Vec<_>>(),
+        vec!["p-resolver", "a-regrant", "b-grant", "a-grant", "p-record", "p-grant"]
+    );
+    assert_eq!(page.summary.map(|summary| summary.total_count), Some(6));
+
+    database.cleanup().await
+}

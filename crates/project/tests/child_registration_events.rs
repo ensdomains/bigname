@@ -383,3 +383,38 @@ async fn an_operator_redo_below_the_head_keeps_later_rows() -> Result<()> {
     assert_eq!(rows(&pool).await?, before);
     database.cleanup().await
 }
+
+/// A redo whose range ends below a reorged block still removes that block's rows: the orphaned
+/// row lies above `affected_to_block`, so only the readable-lineage check can reach it.
+#[tokio::test]
+async fn a_redo_below_a_reorged_block_drops_its_orphaned_rows() -> Result<()> {
+    let (database, pool) = database("child_registration_orphan_above_range").await?;
+    seed(&pool).await?;
+    project(&pool, 13, None, RunMode::Normal).await?;
+    sqlx::query("UPDATE chain_lineage SET canonicality_state = 'orphaned' WHERE chain_id = $1 AND block_number = 13")
+        .bind(CHAIN).execute(&pool).await?;
+    sqlx::query(
+        "UPDATE normalized_events SET canonicality_state = 'orphaned' WHERE block_number = 13",
+    )
+    .execute(&pool)
+    .await?;
+    Engine::new(pool.clone())
+        .run_batch(BatchRequest {
+            chain_id: CHAIN.into(),
+            target_block: 11,
+            affected_from_block: 11,
+            affected_to_block: 11,
+            resume_current: Some(Marker {
+                number: 10,
+                hash: hash(10),
+            }),
+            mode: RunMode::Redo,
+        })
+        .await?;
+    let expected = seeded_rows()
+        .into_iter()
+        .filter(|row| row.1 != "a-p-regrant")
+        .collect::<Vec<_>>();
+    assert_eq!(rows(&pool).await?, expected);
+    database.cleanup().await
+}
