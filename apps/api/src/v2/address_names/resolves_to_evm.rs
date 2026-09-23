@@ -1,6 +1,7 @@
 //! `coin_type=evm` on `relation=resolves_to`: one read across every EVM coin type (`60` and
-//! `[2^31, 2^32)`, the ENSIP-19 EVM set including the default coin type), one row per name with
-//! the matched coin types in `resolutions`.
+//! `[2^31, 2^32)`, the ENSIP-19 EVM set including the default coin type; upstream:
+//! .refs/ens_v1/contracts/utils/ENSIP19.sol:L9-L38 @ ens_v1@91c966f), one row per name with the
+//! matched coin types in `resolutions`.
 //!
 //! The single-coin read keeps its parser, cursor value, `resolution` field, and per-namespace
 //! primary lookup; this module only adds the selector, the row matches, and the batched

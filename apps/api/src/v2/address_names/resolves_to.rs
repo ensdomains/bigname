@@ -51,7 +51,8 @@ const DEFAULT_COIN_TYPE: &str = "60";
 
 /// Why a `resolves_to` row matched: the coin type the caller asked about and the inventory
 /// record key that answered it (`addr:<coin_type>`, or `addr:2147483648` when the ENSIP-19
-/// default EVM address answered).
+/// default EVM address answered; upstream: .refs/ens_v1/contracts/utils/ENSIP19.sol:L10 @
+/// ens_v1@91c966f).
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct AddressNameResolution {
     pub(crate) coin_type: u64,
