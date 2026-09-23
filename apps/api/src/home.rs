@@ -12,9 +12,8 @@ static HOME_HTML: LazyLock<String> = LazyLock::new(|| {
         .replace("__BIGNAME_BUILD_SHA__", BUILD_SHA)
 });
 
-/// Serve the static landing page. Like the API reference it is
-/// self-contained and calls the same origin for its status pill and its
-/// try-it line.
+/// Serve the static landing page. It loads no third-party resources and
+/// calls the same origin for its status pill and its try-it line.
 pub(crate) async fn home() -> impl IntoResponse {
     Html(HOME_HTML.as_str())
 }
