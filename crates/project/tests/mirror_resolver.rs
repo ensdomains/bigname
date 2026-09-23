@@ -3,6 +3,9 @@
 //! resolver first, else the nearest ancestor's (`docs/projections.md` § Resolver and records,
 //! ENSv1 mirror resolver).
 
+#[path = "support/bounded_attribution.rs"]
+mod bounded_attribution;
+
 use anyhow::{Context, Result};
 use bigname_project::{BatchOutcome, BatchRequest, Engine, Marker, RunMode};
 use bigname_test_support::{TestDatabase, TestDatabaseConfig};
@@ -1331,6 +1334,7 @@ async fn run(
         .await?;
     assert!(outcome.complete);
     assert_eq!(outcome.target.number, target_block);
+    bounded_attribution::assert_bounded_record_attribution_matches_inventory(pool).await?;
     Ok(outcome)
 }
 

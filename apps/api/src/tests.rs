@@ -387,6 +387,9 @@ include!("tests/v2_diagnostics_names.rs");
 include!("tests/v2_history.rs");
 include!("tests/v2_history_registration_identity.rs");
 include!("tests/v2_history_publication_bounds.rs");
+include!("tests/v2_history_bounded_membership.rs");
+include!("tests/v2_history_bounded_registration.rs");
+include!("tests/v2_history_bounded_relation_loss.rs");
 include!("tests/v2_history_redo.rs");
 include!("tests/v2_history_paging.rs");
 include!("tests/v2_history_child_registrations.rs");
@@ -398,6 +401,10 @@ include!("tests/v2_address_resolves_to.rs");
 include!("tests/v2_address_resolves_to_evm.rs");
 include!("tests/v2_address_resolves_to_evm_plan.rs");
 include!("tests/v2_permissions.rs");
+#[path = "tests/v2_history_bounded_rebinding.rs"]
+mod v2_history_bounded_rebinding;
+#[path = "tests/v2_history_bounded_regeneration.rs"]
+mod v2_history_bounded_regeneration;
 #[path = "tests/v2_registry_permission_identity.rs"]
 mod v2_registry_permission_identity;
 include!("tests/v2_resolvers.rs");

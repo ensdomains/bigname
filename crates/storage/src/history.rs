@@ -1,4 +1,5 @@
 mod address_matches;
+mod attribution;
 mod binding_anchors;
 mod block_window;
 mod child_arm;
@@ -36,6 +37,7 @@ use paging::{load_event_history_rows, load_history, load_history_head};
 use read_filter::{EventHistoryReadFilter, event_history_read_filter};
 use selectors::{name_history_selector, resource_history_selector};
 
+pub use attribution::load_bounded_record_attribution;
 pub use block_window::resolve_chain_block_ranges;
 #[cfg(any(test, feature = "test-support"))]
 pub use child_registrations::explain_name_history_page_with_child_registrations_for_test;
@@ -53,7 +55,7 @@ pub use redo::{
 };
 pub use redo::{SelectedInterpretRedoState, load_selected_interpret_redo_state};
 pub use wrapped_registrar::{
-    load_registrar_grant_resource_ids_by_logical_name_id,
+    load_bounded_registration_resource_ids, load_registrar_grant_resource_ids_by_logical_name_id,
     load_wrapped_registrar_resource_ids_by_logical_name_id,
 };
 

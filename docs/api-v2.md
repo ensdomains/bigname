@@ -1294,11 +1294,12 @@ no logical name or resource of its own, such as an exact direct
 `public_resolver_v2` write. Project attributes that observation to a registration
 through its selected resolver pointer and publishes the attributed event ids in
 the record inventory provenance; `registration` and `both` scope name history
-read them back so history lists the writes the name's records serve, while
+derive the same attribution from the pointer evidence at or below the read's
+published block, so history lists the writes the name's records serve, while
 `name` scope does not because the observation has no surface link. The row's
-`registration_id` stays null. The attribution follows the current pointer
-exactly as the inventory does: switching the pointer away hides those rows and
-switching back restores them. `GET /v1/events?registration_id=...` lists such
+`registration_id` stays null. The attribution spans every resolver pointer the
+registration has selected, so a later switch or clear leaves the earlier writes
+attributed. `GET /v1/events?registration_id=...` lists such
 a write only when Project attributed it to that registration's own records or
 to the records of a NameWrapper resource whose `NameWrapped` row recorded that
 lease; a write attributed only to another registration of the same name is not

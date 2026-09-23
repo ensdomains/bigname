@@ -3,6 +3,9 @@
 //! name history reads them back from there. A later resolver switch or clear changes which
 //! records the name serves, but it must not erase the fact that the earlier write happened:
 //! history attribution has to be retained independently of the current pointer selection.
+#[path = "support/bounded_attribution.rs"]
+mod bounded_attribution;
+
 use anyhow::{Context, Result};
 use bigname_project::{BatchRequest, Engine, Marker, RunMode};
 use bigname_test_support::{TestDatabase, TestDatabaseConfig};
@@ -223,6 +226,7 @@ async fn run(
             mode,
         })
         .await?;
+    bounded_attribution::assert_bounded_record_attribution_matches_inventory(pool).await?;
     Ok(())
 }
 

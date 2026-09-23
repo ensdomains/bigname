@@ -1,3 +1,6 @@
+#[path = "support/bounded_attribution.rs"]
+mod bounded_attribution;
+
 use anyhow::Result;
 use bigname_project::{BatchRequest, Engine, Marker, RunMode};
 use bigname_test_support::{TestDatabase, TestDatabaseConfig};
@@ -694,6 +697,7 @@ async fn run(pool: &PgPool, target: i64, previous: Option<i64>, mode: RunMode) -
             mode,
         })
         .await?;
+    bounded_attribution::assert_bounded_record_attribution_matches_inventory(pool).await?;
     Ok(())
 }
 async fn inventory(pool: &PgPool, id: i64) -> Result<Value> {

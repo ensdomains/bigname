@@ -177,8 +177,9 @@ a reset excludes older-version values, and later writes contribute only to the
 new version. Incremental staging and replay apply the same declaration and
 pointer guards without creating a new surface or binding from record events.
 The inventory row publishes the attributed event ids in
-`provenance.attributed_event_ids`, and registration-scoped name history reads
-them back so the history lists the same writes; `name` scope does not, because
+`provenance.attributed_event_ids`, and registration-scoped name history derives
+the same attribution from the pointer evidence at or below its published block
+(`docs/storage.md`), so the history lists the same writes; `name` scope does not, because
 the observation has no surface link of its own. Those ids are retained across
 the registration's whole pointer chain, not just its current pointer: each
 pointer attributes the writes on its resolver before the pointer that superseded
