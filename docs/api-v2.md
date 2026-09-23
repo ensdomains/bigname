@@ -1226,8 +1226,11 @@ per chain, so every page of one walk reads the same frozen history at or below
 that block while new blocks are published. They also bind each chain's
 [classification horizon](glossary.md#classification-horizon), the next
 declaration start at which Project may classify a resolver differently, and
-expire with the `409 stale` restart once the served publication reaches it
-(see the [shared route rules](api-v2-routes.md#shared-route-rules)). The one exception is the address
+expire with the `409 stale` restart once the chain's readable head reaches it,
+which is at or before Project publishes there. The head rule is needed because
+Project's publications become visible before its recorded position moves, so a
+cursor just below a horizon can expire one block early (see the [shared route
+rules](api-v2-routes.md#shared-route-rules)). The one exception is the address
 history [known limitation](api-v2-routes.md#history-collection-filters): when
 one of the relation kinds listed there ends after the bound block, a
 continuation loses that name's remaining rows and reports a smaller
@@ -1256,8 +1259,9 @@ lookup. Each route checks the Interpret state again inside the repeatable-read
 page transaction. After the page transaction, and after the display-name read
 on events and address history, each route repeats the whole check in a fresh
 transaction: the same counters, no redo in progress, a readable bound block,
-unchanged manifest revisions, the same classification horizon, and a
-publication at or above the bound and below that horizon. It runs
+unchanged manifest revisions, the same classification horizon, a publication
+at or above the bound, and both that publication and the readable head below
+the horizon. It runs
 in a fresh transaction because the page's repeatable-read snapshot cannot see
 a redo committed after it began. A missing parent returns `404 not_found` only
 when that final check passes; otherwise it returns `409 stale`. With

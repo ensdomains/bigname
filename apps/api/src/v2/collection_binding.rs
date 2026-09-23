@@ -156,7 +156,7 @@ impl HistoryCollection {
                 return Err(self.changed());
             }
             if bound.classification_horizon != horizons.get(chain).copied()
-                || crossed_horizon(bound, published.get(chain))
+                || crossed_horizon(bound, published.get(chain), &self.captured, chain)
             {
                 return Err(self.changed());
             }
@@ -270,7 +270,7 @@ impl HistoryCollection {
         let horizons = classification_horizons(state, &self.block_bounds()).await?;
         if self.bound.iter().any(|(chain, bound)| {
             bound.classification_horizon != horizons.get(chain).copied()
-                || crossed_horizon(bound, published.get(chain))
+                || crossed_horizon(bound, published.get(chain), &current, chain)
         }) {
             return Err(self.changed());
         }
@@ -332,13 +332,27 @@ fn published_positions(
     Some(positions)
 }
 
-/// Whether the served publication reached the bound's classification horizon: Project may then
-/// classify a resolver differently than it did at the bound, which the bounded reads cannot see.
-fn crossed_horizon(bound: &BoundChain, published: Option<&bigname_storage::ChainPosition>) -> bool {
+/// Whether Project may already classify a resolver differently than it did at the bound, which
+/// the bounded reads cannot see: the served publication or the chain's readable head reached the
+/// bound's classification horizon. Project commits its projection swap before the phase runner
+/// records the new position, and after a crash in that gap recovery labels the old position
+/// completed again, so the served position can lag the classification the reads join
+/// (bigname: `crates/project/src/engine.rs:79-90`, `apps/phase-runner/src/runner_batch.rs:160-163`,
+/// `apps/phase-runner/src/runner_recovery.rs:96-135`). Project's normal target is the readable
+/// head, so no swap reaches the horizon before the head does.
+fn crossed_horizon(
+    bound: &BoundChain,
+    published: Option<&bigname_storage::ChainPosition>,
+    state: &HistoryBoundState,
+    chain: &str,
+) -> bool {
+    let reached = published
+        .map(|position| position.block_number)
+        .max(state.readable_heads.get(chain).copied());
     bound
         .classification_horizon
-        .zip(published)
-        .is_some_and(|(horizon, position)| position.block_number >= horizon)
+        .zip(reached)
+        .is_some_and(|(horizon, reached)| reached >= horizon)
 }
 
 async fn classification_horizons(

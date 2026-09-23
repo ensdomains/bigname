@@ -42,11 +42,14 @@ start_block = {mirror_start}
     ))
 }
 
-/// Blocks 200..=241, the synced manifest, the name with its ENSv2 pointer to `CH_RESOLVER`, and
+/// Blocks 200..=240, the synced manifest, the name with its ENSv2 pointer to `CH_RESOLVER`, and
 /// node-keyed writes at 220 and 225 that only the resolver's classification attributes to it.
 /// Project runs to the bound and the bound is published.
 async fn ch_seed(database: &TestDatabase, mirror_start: i64) -> Result<Uuid> {
-    seed_bounded_membership_blocks(database, CH_BOUND).await?;
+    for block in 200..=CH_BOUND {
+        ch_head_to(database, block).await?;
+    }
+    publish_bounded_membership_at(database, CH_BOUND).await?;
     ch_sync(database, &[("v1.toml", ch_manifest(mirror_start)?)]).await?;
     let manifest_id: i64 = sqlx::query_scalar(
         "SELECT manifest_id FROM bigname_phase.manifest_versions
@@ -153,8 +156,35 @@ start_block = {start}
     ))
 }
 
+/// Ingest adds the canonical block `block` on top of `block - 1`: the chain's readable head.
+async fn ch_head_to(database: &TestDatabase, block: i64) -> Result<()> {
+    let parent = (block > 200).then(|| format!("0xhistory{}", block - 1));
+    upsert_phase_raw_blocks(
+        &database.pool,
+        &[raw_block(
+            BOUNDED_CHAIN,
+            &format!("0xhistory{block}"),
+            parent.as_deref(),
+            block,
+            1_700_000_000 + block,
+        )],
+    )
+    .await?;
+    Ok(())
+}
+
 /// One ordinary Project batch to `target`, then its publication.
 async fn ch_project_to(database: &TestDatabase, target: i64) -> Result<()> {
+    ch_swap_to(database, target).await?;
+    publish_bounded_membership_at(database, target).await
+}
+
+/// The head reaches `target` and Project's batch commits its projection swap there, but the
+/// phase runner has not yet recorded the new position, which it writes afterwards in its own
+/// transaction (bigname: `crates/project/src/engine.rs:79-90`,
+/// `apps/phase-runner/src/runner_batch.rs:160-163`).
+async fn ch_swap_to(database: &TestDatabase, target: i64) -> Result<()> {
+    ch_head_to(database, target).await?;
     bigname_project::Engine::new(database.pool.clone())
         .run_batch(bigname_project::BatchRequest {
             chain_id: BOUNDED_CHAIN.into(),
@@ -165,7 +195,7 @@ async fn ch_project_to(database: &TestDatabase, target: i64) -> Result<()> {
             mode: bigname_project::RunMode::Normal,
         })
         .await?;
-    publish_bounded_membership_at(database, target).await
+    Ok(())
 }
 
 async fn ch_get(database: &TestDatabase, uri: &str) -> Result<(StatusCode, Value)> {
@@ -353,4 +383,67 @@ async fn v2_history_horizon_ignores_manifests_project_does_not_stage() -> Result
         assert_eq!(continued["page"], second["page"], "{base}");
     }
     database.cleanup().await
+}
+
+/// Project's swap to the horizon is visible before its recorded position moves: while the phase
+/// row still says `running` at the bound, and after a crash in that gap, when recovery labels the
+/// row `completed` at the bound again (bigname: `apps/phase-runner/src/runner_recovery.rs:96-135`).
+/// The attributed writes are already gone from the live classification, so a continuation must
+/// restart rather than return changed rows, both when the swap lands before the request and
+/// when it lands during the read.
+#[tokio::test]
+async fn v2_history_cursor_expires_when_the_swap_precedes_the_position() -> Result<()> {
+    for crashed in [false, true] {
+        let database = TestDatabase::new_migrated().await?;
+        let resource = ch_seed(&database, CH_BOUND + 1).await?;
+        let mut saved = Vec::new();
+        for route in ch_routes(resource) {
+            let base = format!("{route}&page_size=3");
+            let first = ch_ok(&database, &base).await?;
+            saved.push(format!("{base}&cursor={}", hb_next_cursor(&first)?));
+        }
+
+        // The swap lands during the read of the first continuation, after its admission.
+        let (guard, control) = bigname_storage::history_anchor_read_test_hooks::install(
+            &database.lookup_pool,
+            bigname_storage::history_anchor_read_test_hooks::HistoryReadHookPoint::AfterAnchors,
+        )
+        .await?;
+        let request = {
+            let state = AppState::new_with_rpc_urls(
+                database.lookup_pool.clone(),
+                bigname_lookup::ChainRpcUrls::default(),
+            );
+            let uri = saved[0].clone();
+            tokio::spawn(async move {
+                let response = app_router(state)
+                    .oneshot(Request::builder().uri(uri).body(Body::empty())?)
+                    .await?;
+                let status = response.status();
+                anyhow::Ok((status, read_json::<Value>(response).await?))
+            })
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(10), control.wait_until_reached())
+            .await
+            .context("history request did not reach its read hook")?;
+        ch_swap_to(&database, CH_BOUND + 1).await?;
+        if !crashed {
+            hb_project_running(&database).await?;
+        }
+        control.resume().await;
+        let (status, payload) = request.await.context("request task")??;
+        drop(guard);
+        let shape = if crashed { "crashed" } else { "running" };
+        assert_eq!(status, StatusCode::CONFLICT, "{shape} during the read: {payload}");
+        assert_eq!(payload["error"]["message"], json!(HB_RESTART), "{shape}");
+
+        // The swap already landed when the continuation arrives.
+        for uri in &saved {
+            let (status, payload) = ch_get(&database, uri).await?;
+            assert_eq!(status, StatusCode::CONFLICT, "{shape}: {uri}: {payload}");
+            assert_eq!(payload["error"]["message"], json!(HB_RESTART), "{shape}");
+        }
+        database.cleanup().await?;
+    }
+    Ok(())
 }

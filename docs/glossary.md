@@ -286,7 +286,10 @@ manifest. Project chooses a resolver's classification among its manifest's
 declarations by `start_block` at its target block, and bounded history reads
 join the classification as Project last wrote it, so once Project reaches the
 horizon a walk's rows could change with no manifest change or redo. The walk
-therefore expires there (see [Shared Route
+therefore expires once the chain's readable head reaches the horizon, which is
+at or before Project publishes there: Project's publications become visible
+before its recorded position moves, and it only targets the readable head, so
+a walk just below a horizon can expire one block early (see [Shared Route
 Rules](api-v2-routes.md#shared-route-rules))
 (bigname: `crates/project/src/stage.rs:67-161`,
 `crates/project/src/builders/resolver.rs:343-387`,
@@ -388,7 +391,7 @@ is not the [served head](#served-head), which keeps moving. The cursor also
 records each chain's Interpret and Project redo counters and [classification
 horizon](#classification-horizon), and the walk expires when the bound block
 is no longer readable (see [canonicality](#canonicality)), a counter changes,
-the manifests change, or the served publication reaches that horizon. A
+the manifests change, or the chain's readable head reaches that horizon. A
 new [interpreter content hash](#interpreter-content-hash) is adopted only
 through a full Interpret and Project redo, so it expires the walk the same way
 (bigname: `apps/phase-runner/src/redo_state.rs:86-102`).

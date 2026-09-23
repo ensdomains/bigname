@@ -1,6 +1,6 @@
 //! The state a history cursor is bound to, read from one snapshot: each chain's Interpret and
-//! Project redo counters and flags, whether an Interpret redo is active anywhere, and the lineage
-//! row of the block the cursor is bound to on each chain.
+//! Project redo counters and flags, whether an Interpret redo is active anywhere, the lineage
+//! row of the block the cursor is bound to on each chain, and each chain's readable head.
 
 use std::collections::BTreeMap;
 
@@ -50,6 +50,11 @@ pub struct HistoryBoundState {
     /// Whether an Interpret redo is active on any chain, as the history fence has always
     /// checked (`ensure_interpret_not_redo`).
     pub interpret_redo_active: bool,
+    /// The highest readable (canonical, safe, or finalized) lineage block number of each
+    /// requested chain that has one. Project's normal target is that block, so Project cannot
+    /// have swapped its projections past it (bigname: `apps/phase-runner/src/heads.rs:159-167`,
+    /// `apps/phase-runner/src/project_phase.rs:107-109`).
+    pub readable_heads: BTreeMap<String, i64>,
     bound_blocks: BTreeMap<String, Option<ChainLineageBlock>>,
 }
 
@@ -76,8 +81,9 @@ impl HistoryBoundState {
     }
 }
 
-/// Read, in one `REPEATABLE READ` snapshot, the redo state of every chain in `bound` and the
-/// lineage row stored under each chain's bound block hash. `bound` maps chain to block hash.
+/// Read, in one `REPEATABLE READ` snapshot, the redo state of every chain in `bound`, the
+/// lineage row stored under each chain's bound block hash, and each chain's readable head.
+/// `bound` maps chain to block hash.
 pub async fn capture_history_bound_state(
     pool: &PgPool,
     bound: &BTreeMap<String, String>,
@@ -93,6 +99,19 @@ pub async fn capture_history_bound_state(
     let chain_ids = bound.keys().cloned().collect::<Vec<_>>();
     let redo = load_phase_redo_state(&mut transaction, &chain_ids).await?;
     let interpret_redo_active = interpret_redo_active(&mut transaction).await?;
+    let readable_heads = sqlx::query_as::<_, (String, i64)>(
+        "SELECT chain_id, MAX(block_number)
+         FROM bigname_phase.chain_lineage
+         WHERE chain_id = ANY($1)
+           AND canonicality_state IN ('canonical', 'safe', 'finalized')
+         GROUP BY chain_id",
+    )
+    .bind(&chain_ids)
+    .fetch_all(&mut *transaction)
+    .await
+    .context("failed to load readable chain heads")?
+    .into_iter()
+    .collect();
     let mut bound_blocks = BTreeMap::new();
     for (chain_id, block_hash) in bound {
         let block =
@@ -106,6 +125,7 @@ pub async fn capture_history_bound_state(
     Ok(HistoryBoundState {
         redo,
         interpret_redo_active,
+        readable_heads,
         bound_blocks,
     })
 }
