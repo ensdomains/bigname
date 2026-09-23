@@ -88,6 +88,10 @@ pub use history::{
     load_resource_history_page, load_wrapped_registrar_resource_ids_by_logical_name_id,
     resolve_chain_block_ranges, revalidate_interpret_redo_fence,
 };
+pub use history::{
+    ChainRedoState, HistoryBoundState, PhaseRedoState, PhaseRedoStateMissing,
+    capture_history_bound_state,
+};
 pub use history::{SelectedInterpretRedoState, load_selected_interpret_redo_state};
 #[cfg(any(test, feature = "test-support"))]
 pub use history::{

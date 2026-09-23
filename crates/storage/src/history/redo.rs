@@ -82,7 +82,15 @@ pub async fn load_selected_interpret_redo_state(
 }
 
 pub(super) async fn ensure_interpret_not_redo(connection: &mut PgConnection) -> Result<()> {
-    let redo_in_progress: bool = sqlx::query_scalar(
+    if interpret_redo_active(connection).await? {
+        return Err(InterpretRedoInProgress.into());
+    }
+    Ok(())
+}
+
+/// Whether an Interpret redo is active on any chain. The history fence is collection-wide.
+pub(super) async fn interpret_redo_active(connection: &mut PgConnection) -> Result<bool> {
+    Ok(sqlx::query_scalar(
         "SELECT EXISTS (
              SELECT 1
              FROM bigname_phase.chain_phase_state
@@ -91,11 +99,7 @@ pub(super) async fn ensure_interpret_not_redo(connection: &mut PgConnection) -> 
          )",
     )
     .fetch_one(connection)
-    .await?;
-    if redo_in_progress {
-        return Err(InterpretRedoInProgress.into());
-    }
-    Ok(())
+    .await?)
 }
 
 pub(super) async fn ensure_interpret_redo_fence(

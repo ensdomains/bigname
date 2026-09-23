@@ -2,6 +2,7 @@ mod decode;
 mod reads;
 mod types;
 
+pub(crate) use reads::load_chain_lineage_block_internal;
 pub use reads::{
     chain_lineage_contains_ancestor, chain_lineage_contains_ancestor_at_block,
     chain_lineage_contains_canonical_ancestor_position, load_chain_lineage_block,

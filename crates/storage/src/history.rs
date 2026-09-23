@@ -19,6 +19,7 @@ mod paging;
 mod query_plan;
 mod read_filter;
 mod redo;
+mod redo_phases;
 mod registration_identity;
 mod selectors;
 mod source;
@@ -54,6 +55,10 @@ pub use redo::{
     revalidate_interpret_redo_fence,
 };
 pub use redo::{SelectedInterpretRedoState, load_selected_interpret_redo_state};
+pub use redo_phases::{
+    ChainRedoState, HistoryBoundState, PhaseRedoState, PhaseRedoStateMissing,
+    capture_history_bound_state,
+};
 pub use wrapped_registrar::{
     load_bounded_registration_resource_ids, load_registrar_grant_resource_ids_by_logical_name_id,
     load_wrapped_registrar_resource_ids_by_logical_name_id,
