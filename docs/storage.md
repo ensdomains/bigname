@@ -328,10 +328,18 @@ Project cannot follow to an ENSv1 resolver. One input is
 read from a current projection row because the producer reads it there: whether a resolver is a
 supported, manifest-declared ENSv1, `public_resolver_v2`, or mirror resolver comes from
 `resolver_current.declared_summary.classification`. The ids the reader returns at the current
-publication equal the published `attributed_event_ids`; a test in the Project suite checks this
-for every inventory row its fixtures publish, so a change to the producer's attribution fails that
-test instead of drifting from history. Reads without publication bounds (the unbounded storage
-loaders and diagnostics reads that pass none) evaluate every readable pointer and write.
+publication equal the published `attributed_event_ids`; a guard wired into the Project suites
+that run the record inventory builder checks this after each of their Project runs, so a change to
+the producer's attribution those fixtures exercise fails that guard instead of drifting from
+history. Reads without publication bounds (the unbounded storage loaders and diagnostics reads
+that pass none) evaluate every readable pointer and write. The ENSv1 and Basenames node-keyed arms
+use the node and resolver expression indexes on `normalized_events`. Three paths have no
+supporting index and read through the broad `normalized_events_projection_idx` or a block-range
+index instead: the ENSv2 declared-resolver arm (ENSv2 resolver writes), the
+`ResolverRecordLinked` scan for record-ID link spans, and the mirror lookup of the ENSv1 registry
+pointer by `lower(node)`. All three are reached only by Sepolia deployments today. A plan test in
+`history/address_plan_tests.rs` checks that neither statement reads `normalized_events`
+sequentially.
 
 History loaders called with `canonical_only=false` also return rows of activated losing
 branches. For those reads every binding, grant and wrapper-link witness must lie on the event's

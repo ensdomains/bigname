@@ -190,6 +190,15 @@ fn suffix_namehash(raw_labels: &[String], labelhashes: &[String]) -> String {
     format!("{node:#x}")
 }
 
+#[cfg(test)]
+pub(super) fn push_empty_mirror_writes_for_test(
+    builder: &mut QueryBuilder<'static, Postgres>,
+    published: Option<&BTreeMap<String, i64>>,
+) {
+    let walk: &'static MirrorWalk = Box::leak(Box::default());
+    push_mirror_writes(builder, walk, published);
+}
+
 /// `SELECT resource_id, normalized_event_id`: one row with a null id for every followed mirror,
 /// and one per node-keyed write of the ENSv1 resolver it follows for the queried node.
 fn push_mirror_writes<'a>(

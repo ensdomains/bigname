@@ -26,6 +26,25 @@ use uuid::Uuid;
 
 use super::selectors::HistorySelector;
 
+/// The attribution statement for `resource_ids`, for plan tests.
+#[cfg(test)]
+pub(in crate::history) fn push_pointer_window_attribution_for_test<'a>(
+    builder: &mut QueryBuilder<'a, Postgres>,
+    resource_ids: &'a [Uuid],
+    published: Option<&BTreeMap<String, i64>>,
+) {
+    sql::push_pointer_window_attribution(builder, resource_ids, published);
+}
+
+/// The mirror substitution statement with an empty walk, for plan tests.
+#[cfg(test)]
+pub(in crate::history) fn push_empty_mirror_writes_for_test(
+    builder: &mut QueryBuilder<'static, Postgres>,
+    published: Option<&BTreeMap<String, i64>>,
+) {
+    mirror::push_empty_mirror_writes_for_test(builder, published);
+}
+
 /// The attributed writes of a read's candidate resources, as `(resource, event)` pairs.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(in crate::history) struct AttributedRecords {

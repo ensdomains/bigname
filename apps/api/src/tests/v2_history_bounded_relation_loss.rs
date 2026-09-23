@@ -1,11 +1,11 @@
-// Open item 1 of the cursor-stability work: a relation the address held at the bound and lost
-// after it. Project's current row for the relation is gone by then, so a read bound below the loss
+// A relation the address held at the bound and lost after it. Project's current row for the relation is gone by then, so a read bound below the loss
 // can admit the name's older events only if the historical event matcher reproduces the relation
 // from the event that created it. The matcher knows three shapes: a `RegistrationGranted`
 // registrant and a `TokenControlTransferred` recipient on a token-backed resource, and an
 // `AuthorityTransferred` owner on a registry-only resource or an ENSv2 registry resource. Each
-// test below loses one relation kind; the ignored ones are kinds the matcher does not reproduce,
-// which stay on the current-row path bounded by the cited block.
+// test below loses one relation kind; the ignored ones are the known limitation listed under
+// "Known limitation" in the history anchor section of docs/api-v2-routes.md: kinds the matcher
+// does not reproduce, which stay on the current-row path bounded by the cited block.
 
 const LOST_OTHER: &str = "0x00000000000000000000000000000000000b0aff";
 
@@ -151,8 +151,8 @@ async fn lost_ens_v2_controller_from_an_authority_transfer_keeps_its_bounded_his
 }
 
 #[tokio::test]
-#[ignore = "open item 1: the matcher reads AuthorityTransferred owners only on registry-only or \
-            ENSv2 resources, not on an ENSv1 token-backed resource"]
+#[ignore = "docs/api-v2-routes.md history known limitation: an ENSv1 .eth registry controller \
+            from AuthorityTransferred on a token-backed resource is not reproduced"]
 async fn lost_ens_v1_controller_of_a_token_backed_name_keeps_its_bounded_history() -> Result<()> {
     let (held, lost) = lost_relation_history(
         "lost-v1-token-controller.eth",
@@ -171,8 +171,8 @@ async fn lost_ens_v1_controller_of_a_token_backed_name_keeps_its_bounded_history
 }
 
 #[tokio::test]
-#[ignore = "open item 1: the matcher reads token holders only from TokenControlTransferred, not \
-            from the grant that minted the token"]
+#[ignore = "docs/api-v2-routes.md history known limitation: a token holder whose only evidence \
+            is the grant is not reproduced"]
 async fn lost_token_holder_from_a_grant_keeps_its_bounded_history() -> Result<()> {
     let (held, lost) = lost_relation_history(
         "lost-grant-holder.eth",
@@ -191,28 +191,8 @@ async fn lost_token_holder_from_a_grant_keeps_its_bounded_history() -> Result<()
 }
 
 #[tokio::test]
-#[ignore = "open item 1: the matcher reads registrants only from RegistrationGranted, not from a \
-            later token transfer"]
-async fn lost_registrant_from_a_transfer_keeps_its_bounded_history() -> Result<()> {
-    let (held, lost) = lost_relation_history(
-        "lost-transfer-registrant.eth",
-        0xb0a_6500,
-        bigname_storage::AddressNameRelation::Registrant,
-        Some(bigname_storage::AddressNameRelation::Registrant),
-        relation_event(
-            "TokenControlTransferred",
-            json!({"to": BOUNDED_ADDRESS}),
-            V1_DERIVATION,
-        ),
-    )
-    .await?;
-    assert_relation_survives_loss(&held, &lost);
-    Ok(())
-}
-
-#[tokio::test]
-#[ignore = "open item 1: an effective controller that falls back to the token holder is not an \
-            AuthorityTransferred owner, so the matcher does not reproduce it"]
+#[ignore = "docs/api-v2-routes.md history known limitation: an effective controller that fell \
+            back to the token holder is not reproduced"]
 async fn lost_controller_from_the_token_holder_fallback_keeps_its_bounded_history() -> Result<()> {
     let (held, lost) = lost_relation_history(
         "lost-fallback-controller.eth",
@@ -231,7 +211,8 @@ async fn lost_controller_from_the_token_holder_fallback_keeps_its_bounded_histor
 }
 
 #[tokio::test]
-#[ignore = "open item 1: PermissionChanged is outside the matcher's event kinds"]
+#[ignore = "docs/api-v2-routes.md history known limitation: an ENSv2 PermissionChanged \
+            controller is not reproduced"]
 async fn lost_controller_from_a_permission_change_keeps_its_bounded_history() -> Result<()> {
     let (held, lost) = lost_relation_history(
         "lost-permission-controller.eth",

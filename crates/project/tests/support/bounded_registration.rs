@@ -4,8 +4,8 @@
 //! Name history no longer adds `name_current.declared_summary.registration.resource_id` to the
 //! resources it reads: that field is current state. It follows only the bindings, `NameWrapped`
 //! links and registrar grants recorded at or below the read's bound
-//! (`bigname_storage::load_bounded_registration_resource_ids`). At a row's own publication the
-//! selected registration must be one of them. Every Project run in the including test files ends
+//! (`bigname_storage::load_bounded_registration_resource_ids`). Bound at the block of each entry in
+//! the row's own `chain_positions`, the selected registration must be one of them. Every Project run in the including test files ends
 //! with this check, so a producer change that selects a registration the bounded readers cannot
 //! reach fails here instead of silently dropping that lease's rows from history.
 
@@ -16,8 +16,9 @@ use serde_json::Value;
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
-/// For every published name with a selected registration, the bounded registration set at the
-/// row's publication contains it. Returns how many rows were checked.
+/// For every published name with a selected registration, the bounded registration set contains
+/// it when bound at the `block_number` of each entry in the row's own `chain_positions`, per chain.
+/// Returns how many rows were checked.
 pub async fn assert_selected_registrations_are_bounded(pool: &PgPool) -> Result<usize> {
     let rows = sqlx::query(
         "SELECT logical_name_id, declared_summary, chain_positions

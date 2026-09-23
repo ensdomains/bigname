@@ -11,6 +11,9 @@ use serde_json::Value;
 use sqlx::{PgConnection, Postgres, QueryBuilder, Row};
 use uuid::Uuid;
 
+use super::super::attribution::{
+    push_empty_mirror_writes_for_test, push_pointer_window_attribution_for_test,
+};
 use super::super::{
     EventHistoryReadFilter,
     duplicates::push_product_history_duplicate_filter,
@@ -46,6 +49,11 @@ async fn address_history_selector_plans_use_history_indexes() -> Result<()> {
 #[tokio::test]
 async fn address_history_anchor_plan_uses_address_match_indexes() -> Result<()> {
     with_fixture("address_history_anchor_plan", check_anchor_plan).await
+}
+
+#[tokio::test]
+async fn bounded_record_attribution_plans_do_not_scan_normalized_events() -> Result<()> {
+    with_fixture("bounded_attribution_plan", check_attribution_plans).await
 }
 
 async fn with_fixture(
@@ -169,6 +177,78 @@ async fn check_anchor_plan(connection: &mut PgConnection) -> Result<()> {
         "address history anchor plans:\n{}",
         plan_failures.join("\n\n")
     );
+    Ok(())
+}
+
+/// The bounded attribution reader's two statements: the pointer-window attribution for the
+/// target's resource, and the mirror substitution with an empty walk (no mirror pointer, the
+/// common case on Mainnet). Neither may read `normalized_events` sequentially. The ENSv2
+/// declared-resolver arm, the `ResolverRecordLinked` scan and the mirror registry lookup have no
+/// dedicated index (docs/storage.md), so this checks only that each read is an index read.
+async fn check_attribution_plans(connection: &mut PgConnection) -> Result<()> {
+    let resource_ids: &'static [Uuid] = Box::leak(Box::new([target_resource()]));
+    let published =
+        std::collections::BTreeMap::from([("ethereum-mainnet".to_owned(), UNRELATED_NAMES + 10)]);
+    let mut plan_failures = Vec::new();
+    let push_attribution = |builder: &mut QueryBuilder<'static, Postgres>| {
+        push_pointer_window_attribution_for_test(builder, resource_ids, Some(&published));
+    };
+    for plan in explain_both(connection, push_attribution).await? {
+        if let Err(error) = assert_no_event_seq_scan("attribution", &plan) {
+            plan_failures.push(error.to_string());
+        }
+    }
+    let mut attribution = QueryBuilder::<Postgres>::new("");
+    push_attribution(&mut attribution);
+    let rows = attribution.build().fetch_all(&mut *connection).await?;
+    ensure!(rows.len() == 1, "attribution returned {} rows", rows.len());
+
+    let push_mirror = |builder: &mut QueryBuilder<'static, Postgres>| {
+        push_empty_mirror_writes_for_test(builder, Some(&published));
+    };
+    for plan in explain_both(connection, push_mirror).await? {
+        if let Err(error) = assert_no_event_seq_scan("mirror", &plan) {
+            plan_failures.push(error.to_string());
+        }
+    }
+    ensure!(
+        plan_failures.is_empty(),
+        "bounded attribution plans:\n{}",
+        plan_failures.join("\n\n")
+    );
+    Ok(())
+}
+
+/// Every read of `normalized_events`, sub-plans included, is an index read.
+fn assert_no_event_seq_scan(statement: &str, plan: &Value) -> Result<()> {
+    fn walk<'a>(node: &'a Value, output: &mut Vec<&'a Value>) {
+        output.push(node);
+        for child in node["Plans"].as_array().into_iter().flatten() {
+            walk(child, output);
+        }
+    }
+    let mut nodes = Vec::new();
+    walk(&plan[0]["Plan"], &mut nodes);
+    let event_reads = nodes
+        .iter()
+        .filter(|node| node["Relation Name"] == "normalized_events")
+        .map(|node| {
+            let mut indexes = node["Index Name"].as_str().into_iter().collect::<Vec<_>>();
+            bitmap_index_names(node, &mut indexes);
+            format!(
+                "{} {} {}",
+                node["Alias"].as_str().unwrap_or("?"),
+                node["Node Type"].as_str().unwrap_or("?"),
+                indexes.join("+"),
+            )
+        })
+        .collect::<Vec<_>>();
+    for node in nodes {
+        ensure!(
+            node["Relation Name"] != "normalized_events" || node["Node Type"] != "Seq Scan",
+            "{statement} reads normalized_events sequentially ({event_reads:?}): {node}\n{plan}"
+        );
+    }
     Ok(())
 }
 

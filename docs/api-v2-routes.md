@@ -1242,21 +1242,33 @@ A recognized namespace with no available publication returns retryable `409 stal
   greater than `to_timestamp`, or a value that is not RFC 3339, returns `400
   invalid_input`. On `/v1/events` the resolved window intersects an explicit
   `from_block`/`to_block` range.
-- History anchor expansion is bounded to the captured publication too: every
-  input that decides which events belong to the read is judged from evidence at
-  or below the published block of its chain, so evidence recorded after that
-  block cannot introduce older events into an unchanged page. That covers name
-  and resource bindings, NameWrapper links, registrar grants, historical
-  ownership matches, an address's current relations (a relation counts only
-  when the event Project cites for it lies at or below the published block),
+- History anchor expansion is bounded to the captured publication too:
+  bindings, NameWrapper links, registrar grants, historical ownership matches,
   and resolver record writes attributed to a registration through its resolver
-  pointers (a pointer or record link above the published block neither
-  attributes an older write nor closes an earlier pointer's window). One input
-  is read from current state: whether a resolver address is a manifest-declared
-  resolver, which decides whether an ENSv2 resolver pointer attributes
-  node-keyed writes, comes from the current resolver classification. Bindings
-  and ownership before `from_timestamp` remain valid anchors; the timestamp
-  window filters event rows.
+  pointers are judged from evidence at or below the published block of their
+  chain, so evidence recorded after that block cannot introduce older events
+  into an unchanged page. A pointer or record link above the published block
+  neither attributes an older write nor closes an earlier pointer's window.
+  Bindings and ownership before `from_timestamp` remain valid anchors; the
+  timestamp window filters event rows.
+- Two inputs are read from current state. An address's relations are read from
+  the current relation rows, and a row is admitted only when the event Project
+  cites for it lies at or below the published block. A relation that ended
+  after that block has no current row, so it is reproduced only from the three
+  historical shapes the ownership matcher knows: a `RegistrationGranted`
+  registrant and a `TokenControlTransferred` recipient on a token-backed,
+  Basenames or ENSv2 resource, and an `AuthorityTransferred` owner on a
+  registry-only or ENSv2 resource. The second current input is the resolver's
+  current classification row, which decides whether an ENSv2 resolver pointer
+  attributes node-keyed writes on that resolver.
+- Known limitation: four relation kinds that ended after the published block
+  are not reproduced, so the address's read loses that name's events: an
+  ENSv1 `.eth` registry controller from `AuthorityTransferred` on a
+  token-backed resource, a token holder whose only evidence is the grant, an
+  effective controller that fell back to the token holder, and an ENSv2
+  controller from `PermissionChanged`. Wrapper grace-period and expiry
+  transitions have no cited event of their own, so a relation row gated by
+  them can appear or vanish between pages of the same read.
 - Cursors bind the order and every filter above. The cursor `sort` token
   encodes the direction, and its filters carry the canonical `type` set and
   the canonical UTC spelling of each timestamp bound, so a cursor issued by one

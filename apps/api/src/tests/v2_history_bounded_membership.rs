@@ -456,3 +456,155 @@ async fn resolver_pointer_above_the_bound_attributes_no_older_write() -> Result<
     }
     database.cleanup().await
 }
+
+// The ENSv2 arm of the bounded attribution: an ENSv2 registry pointer attributes the node-keyed
+// writes of a resolver classified as a manifest-declared `public_resolver_v2`, when the declaring
+// manifest is active in the pointer's namespace at the bound. The writes carry no logical name or
+// resource, so only this arm lists them.
+#[tokio::test]
+async fn ens_v2_pointer_attributes_public_resolver_v2_writes() -> Result<()> {
+    const NAME: &str = "v2-pointed.eth";
+    const RESOLVER_V2: &str = "0x00000000000000000000000000000000000b0a2c";
+    let database = TestDatabase::new_migrated().await?;
+    seed_bounded_membership_blocks(&database, 240).await?;
+    let (logical_name_id, resource) = seed_bounded_name(
+        &database,
+        NAME,
+        0xb0a_7000,
+        "0x00000000000000000000000000000000000b0a07",
+        bigname_storage::AddressNameRelation::EffectiveController,
+        205,
+    )
+    .await?;
+    let manifest_id: i64 = sqlx::query_scalar(
+        "INSERT INTO bigname_phase.manifest_versions
+            (manifest_version, namespace, source_family, chain_id, deployment_label,
+             rollout_status, normalizer_version, file_path, manifest_payload)
+         VALUES (1, 'ens', 'ens_v2_resolver_l1', $1, 'bounded-v2', 'shadow', 'test',
+                 'test/ens/bounded-v2-resolver.toml', '{}'::jsonb)
+         RETURNING manifest_id",
+    )
+    .bind(BOUNDED_CHAIN)
+    .fetch_one(&database.pool)
+    .await?;
+
+    let mut declaration =
+        v2_history_event("v2-declaration", None, None, "SourceManifestUpdated", 201);
+    declaration.source_family = "ens_v2_resolver_l1".to_owned();
+    declaration.derivation_kind = "manifest_sync".to_owned();
+    declaration.source_manifest_id = Some(manifest_id);
+    declaration.manifest_version = 1;
+    declaration.after_state = json!({"rollout_status": "active", "manifest_payload": {}});
+    let mut pointer = v2_history_event(
+        "v2-pointer-210",
+        Some(&logical_name_id),
+        Some(resource),
+        "ResolverChanged",
+        210,
+    );
+    pointer.source_family = "ens_v2_registry_l1".to_owned();
+    pointer.derivation_kind = "ens_v2_registry_resource_surface".to_owned();
+    pointer.after_state = json!({"resolver": RESOLVER_V2});
+    pointer.log_index = Some(1);
+    let node_write = |identity: &str, block: i64, name: &str| -> Result<NormalizedEvent> {
+        let mut event = v2_history_event(identity, None, None, "RecordChanged", block);
+        event.source_family = "ens_v2_resolver_l1".to_owned();
+        event.derivation_kind = "ens_v2_resolver".to_owned();
+        event.source_manifest_id = Some(manifest_id);
+        event.manifest_version = 1;
+        event.after_state = json!({
+            "source_event": "TextChanged",
+            "node": bigname_lookup::ens_namehash_hex(name)?,
+            "resolver": RESOLVER_V2,
+            "record_key": "text:url",
+            "record_family": "text",
+            "selector_key": "url",
+            "value_retained": true,
+            "value": identity,
+        });
+        Ok(event)
+    };
+    bigname_storage::insert_normalized_event_fixtures(
+        &database.pool,
+        &[
+            declaration,
+            v2_history_event(
+                "v2-grant",
+                Some(&logical_name_id),
+                Some(resource),
+                "RegistrationGranted",
+                205,
+            ),
+            pointer,
+            node_write("v2-write-220", 220, NAME)?,
+            node_write("v2-write-other-225", 225, "other-v2.eth")?,
+        ],
+    )
+    .await?;
+    let mut resolver = resolver_current_row(BOUNDED_CHAIN, RESOLVER_V2);
+    resolver.declared_summary["classification"] = json!({
+        "source_family": "ens_v2_resolver_l1",
+        "role": "public_resolver_v2",
+        "basis": "manifest_declared_address",
+    });
+    resolver.provenance["manifest_id"] = json!(manifest_id);
+    upsert_phase_resolver_current_rows(&database.pool, &[resolver]).await?;
+    sqlx::query(
+        "UPDATE bigname_phase.resolver_current
+         SET support_status = 'supported', unsupported_reason = NULL
+         WHERE chain_id = $1 AND resolver_address = $2",
+    )
+    .bind(BOUNDED_CHAIN)
+    .bind(RESOLVER_V2)
+    .execute(&database.pool)
+    .await?;
+    publish_bounded_membership_at(&database, 240).await?;
+    let write = bounded_event_id(&database, "v2-write-220").await?;
+
+    let attributed = bigname_storage::load_bounded_record_attribution(
+        &database.pool,
+        &[resource],
+        Some(&bounded_at(240)),
+    )
+    .await?;
+    assert_eq!(
+        attributed.get(&resource).cloned().unwrap_or_default(),
+        std::collections::BTreeSet::from([write]),
+        "the ENSv2 pointer must attribute exactly the write for its own node"
+    );
+    for (scope, listed) in [("registration", true), ("both", true), ("name", false)] {
+        let route = format!("/v1/names/{NAME}/history?scope={scope}&page_size=20");
+        let payload = v2_history_payload_for_database(&database, &route).await?;
+        let hashes = bounded_route_hashes(&payload);
+        assert_eq!(
+            hashes.iter().any(|hash| hash == "0xtx220"),
+            listed,
+            "{route}: {payload}"
+        );
+        assert!(
+            !hashes.iter().any(|hash| hash == "0xtx225"),
+            "{route}: {payload}"
+        );
+    }
+
+    // A resolver that is not a declared public_resolver_v2 attributes nothing through this arm.
+    sqlx::query(
+        "UPDATE bigname_phase.resolver_current
+         SET declared_summary = jsonb_set(
+             declared_summary, '{classification,role}', '\"permissioned_resolver\"'
+         )
+         WHERE chain_id = $1 AND resolver_address = $2",
+    )
+    .bind(BOUNDED_CHAIN)
+    .bind(RESOLVER_V2)
+    .execute(&database.pool)
+    .await?;
+    let attributed = bigname_storage::load_bounded_record_attribution(
+        &database.pool,
+        &[resource],
+        Some(&bounded_at(240)),
+    )
+    .await?;
+    assert!(attributed.is_empty(), "{attributed:?}");
+    database.cleanup().await
+}
