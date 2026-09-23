@@ -1,6 +1,50 @@
 //! Every `.sql` file under `crates/project/src` is a hash input, whatever code loads it. SQL
 //! that only tests load (fixtures, reference oracles) belongs in `crates/project/testdata/sql/`,
 //! so that editing it does not rotate the interpreter content hash.
+//!
+//! # Contract
+//!
+//! The guard fails unless every `.sql` file under `crates/project/src` has at least one
+//! production loader. A production loader is an `include_str!` call that meets all of these:
+//!
+//! - It is the built-in `include_str!`, spelled bare, as `std::include_str!` or
+//!   `core::include_str!` (with or without a leading `::`, raw identifiers allowed), and its
+//!   argument is a single string literal. The literal is resolved against the directory of the
+//!   file that contains it.
+//! - It sits in ordinary code, or inside the arguments of a macro on the audited list, matched
+//!   by its full path: the listed `std`/`core` built-ins (bare or qualified) and the listed
+//!   `sqlx`, `tracing`, `tokio`, `serde_json` and `anyhow` macros. Anything inside `stringify!`
+//!   or a `macro_rules!` definition is text, not a call.
+//! - No `#[cfg(test)]` gates it: not on any enclosing node (item, statement, expression, field,
+//!   match arm, parameter and the like), not as an inner `#![cfg(test)]` on its file, and not
+//!   on any module declaration along the route to its file.
+//! - Its file is reached from `crates/project/src/lib.rs` through the module tree, where
+//!   `mod x;` resolves to `x.rs` or `x/mod.rs` in the declaring module's directory and
+//!   `#[path = "..."]` resolves against the declaring file's directory. A file reached by any
+//!   ungated route is production, even if another route to it is gated.
+//!
+//! Loaders in files under `crates/project/tests`, or in files reached only through gated
+//! routes, are test loaders. A `.rs` file that no module declaration reaches is scanned for
+//! diagnostics only: its includes are named as "not reached from the crate root" and never
+//! count as loader evidence.
+//!
+//! The guard also fails, before it reports missing loaders, on any Rust file that does not
+//! parse, and on each production `include_str!` it cannot read: a computed path (anything but
+//! one string literal, such as `concat!(...)`), or an include inside a macro that is not on the
+//! audited list. Such spellings in test code are recorded but do not fail the guard.
+//!
+//! # Known limitations
+//!
+//! Both are tracked in Linear TYR-15.
+//!
+//! - Macro identity shadowing: a local `macro_rules!` named `stringify`, `assert`,
+//!   `include_str` or another recognised name is still treated as the built-in.
+//! - `#[path]` module-resolution context: rustc resolves the ordinary child modules of a file
+//!   loaded through `#[path]` beside that file, while this guard looks for them under a
+//!   directory named after the file's stem. In a non-`mod.rs` file, rustc applies an inline
+//!   module's `#[path]` relative to the file's own directory, before the file-stem component;
+//!   this guard applies it after. A file missed this way is treated as not reached, so its
+//!   includes never count as production loaders.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -27,6 +71,20 @@ const PROJECT_SOURCE_ROOT: &str = "crates/project/src";
 struct References {
     production: BTreeSet<String>,
     test: BTreeSet<String>,
+    /// Files no module declaration reaches from `lib.rs`: named in the failure, never counted.
+    unreached: BTreeSet<String>,
+}
+
+/// How the Project crate's module graph reaches a Rust file.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Reach {
+    /// At least one route from `lib.rs` passes no `#[cfg(test)]` gate.
+    Production,
+    /// Every route from `lib.rs` passes a `#[cfg(test)]` gate, or the file is an integration test
+    /// under `crates/project/tests`.
+    TestOnly,
+    /// No module declaration leads to the file from `lib.rs`.
+    NotReached,
 }
 
 #[test]
@@ -227,6 +285,11 @@ fn inventory_reports_an_unreadable_production_spelling_before_the_loader_it_hide
     );
     tree.write("crates/project/src/scope/mirror.sql", "SELECT 1;\n");
     tree.write("crates/project/src/scope/broken.rs", "fn broken( {\n");
+    tree.write("crates/project/src/lib.rs", "mod scope;\n");
+    tree.write(
+        "crates/project/src/scope/mod.rs",
+        "mod broken;\nmod mirror;\n",
+    );
     let failures = inventory_failures(tree.path());
     assert_eq!(failures.len(), 3, "{failures:#?}");
     assert!(
@@ -449,20 +512,26 @@ fn inventory_takes_loader_evidence_only_from_expanded_includes() {
     let cases: Vec<InventoryCase> = vec![
         (
             "quoted include in production plus a gated real include",
-            vec![(
-                "crates/project/src/scope/quoted.rs",
-                "const _: &str = stringify!(include_str!(\"orphan.sql\"));\n#[cfg(test)]\nconst _: &str = include_str!(\"orphan.sql\");\n",
-            )],
+            vec![
+                ("crates/project/src/scope/mod.rs", "mod quoted;\n"),
+                (
+                    "crates/project/src/scope/quoted.rs",
+                    "const _: &str = stringify!(include_str!(\"orphan.sql\"));\n#[cfg(test)]\nconst _: &str = include_str!(\"orphan.sql\");\n",
+                ),
+            ],
             vec![
                 "crates/project/src/scope/orphan.sql (loaded only by test code: crates/project/src/scope/quoted.rs)",
             ],
         ),
         (
             "gate inside a parsed macro body",
-            vec![(
-                "crates/project/src/scope/bodies.rs",
-                "pub fn sample() {\n    let _ = vec![{\n        #[cfg(test)]\n        let _ = include_str!(\"orphan.sql\");\n        0\n    }];\n}\n",
-            )],
+            vec![
+                ("crates/project/src/scope/mod.rs", "mod bodies;\n"),
+                (
+                    "crates/project/src/scope/bodies.rs",
+                    "pub fn sample() {\n    let _ = vec![{\n        #[cfg(test)]\n        let _ = include_str!(\"orphan.sql\");\n        0\n    }];\n}\n",
+                ),
+            ],
             vec![
                 "crates/project/src/scope/orphan.sql (loaded only by test code: crates/project/src/scope/bodies.rs)",
             ],
@@ -470,6 +539,10 @@ fn inventory_takes_loader_evidence_only_from_expanded_includes() {
         (
             "quoted computed include is not a diagnostic",
             vec![
+                (
+                    "crates/project/src/scope/mod.rs",
+                    "mod loader;\nmod quoted;\n",
+                ),
                 (
                     "crates/project/src/scope/quoted.rs",
                     "const _: &str = stringify!(include_str!(concat!(\"x\", \".sql\")));\n",
@@ -499,6 +572,7 @@ fn inventory_takes_loader_evidence_only_from_expanded_includes() {
     for (name, files, expected) in cases {
         let tree = super::SampleTree::empty();
         tree.write("crates/project/src/scope/orphan.sql", "SELECT 1;\n");
+        tree.write("crates/project/src/lib.rs", "mod scope;\n");
         for (path, contents) in files {
             tree.write(path, contents);
         }
@@ -533,6 +607,7 @@ fn inventory_admits_only_audited_macros_and_inherited_file_gates() {
         (
             "a macro that adds a gate in its transcription is not a loader",
             vec![
+                ("crates/project/src/lib.rs", "mod gate;\n"),
                 (
                     "crates/project/src/gate.rs",
                     "macro_rules! gate {\n    ($value:expr) => { #[cfg(test)] const _: &str = $value; };\n}\n\ngate!(include_str!(\"orphan.sql\"));\n",
@@ -563,6 +638,7 @@ fn inventory_admits_only_audited_macros_and_inherited_file_gates() {
         (
             "a crate-qualified stringify! is not the built-in",
             vec![
+                ("crates/project/src/lib.rs", "mod forward;\n"),
                 (
                     "crates/project/src/forward.rs",
                     "const _: &str = crate::stringify!(include_str!(\"loaded.sql\"));\n",
@@ -577,6 +653,7 @@ fn inventory_admits_only_audited_macros_and_inherited_file_gates() {
         (
             "quote_spanned! evaluates its span expression",
             vec![
+                ("crates/project/src/lib.rs", "mod spanned;\n"),
                 (
                     "crates/project/src/spanned.rs",
                     "fn sample() {\n    let _ = quote::quote_spanned!(\n        {\n            let _ = include_str!(\"loaded.sql\");\n            proc_macro2::Span::call_site()\n        } => include_str!(\"quoted.sql\")\n    );\n}\n",
@@ -587,6 +664,59 @@ fn inventory_admits_only_audited_macros_and_inherited_file_gates() {
                 opaque("crates/project/src/spanned.rs", 4),
                 opaque("crates/project/src/spanned.rs", 6),
                 "crates/project/src/loaded.sql (not loaded by any Rust source)".to_owned(),
+            ],
+        ),
+    ];
+    let mut failures = Vec::new();
+    for (name, files, expected) in cases {
+        let tree = super::SampleTree::empty();
+        for (path, contents) in files {
+            tree.write(path, contents);
+        }
+        let found = inventory_failures(tree.path());
+        if found != expected {
+            failures.push(format!(
+                "{name}:\n  found    {found:?}\n  expected {expected:?}"
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn inventory_trusts_the_module_graph_for_reachability() {
+    let cases: Vec<InventoryCase> = vec![
+        (
+            "a file reached by a production route and a gated route is production",
+            vec![
+                (
+                    "crates/project/src/lib.rs",
+                    "#[path = \"shared.rs\"]\nmod production;\n\n#[cfg(test)]\n#[path = \"shared.rs\"]\nmod tests;\n",
+                ),
+                (
+                    "crates/project/src/shared.rs",
+                    "pub const SQL: &str = include_str!(\"shared.sql\");\n",
+                ),
+                ("crates/project/src/shared.sql", "SELECT 1;\n"),
+            ],
+            vec![],
+        ),
+        (
+            "a file no declaration reaches is not a loader",
+            vec![
+                (
+                    "crates/project/src/lib.rs",
+                    "#[cfg(test)]\nconst _: &str = include_str!(\"orphan.sql\");\n",
+                ),
+                (
+                    "crates/project/src/unused.rs",
+                    "const _: &str = include_str!(\"orphan.sql\");\n",
+                ),
+                ("crates/project/src/orphan.sql", "SELECT 1;\n"),
+            ],
+            vec![
+                "crates/project/src/orphan.sql (loaded only by test code: crates/project/src/lib.rs; \
+                 not reached from the crate root: crates/project/src/unused.rs)",
             ],
         ),
     ];
@@ -638,26 +768,33 @@ fn inventory_failures(root: &Path) -> Vec<String> {
         if entry.is_some_and(|entry| !entry.production.is_empty()) {
             continue;
         }
-        let loaders = entry
-            .map(|entry| entry.test.iter().cloned().collect::<Vec<_>>().join(", "))
+        let join = |files: &BTreeSet<String>| files.iter().cloned().collect::<Vec<_>>().join(", ");
+        let loaders = entry.map(|entry| join(&entry.test)).unwrap_or_default();
+        let unreached = entry
+            .map(|entry| join(&entry.unreached))
             .unwrap_or_default();
-        failures.push(if loaders.is_empty() {
-            format!("{key} (not loaded by any Rust source)")
+        let mut failure = if loaders.is_empty() {
+            format!("{key} (not loaded by any Rust source")
         } else {
-            format!("{key} (loaded only by test code: {loaders})")
-        });
+            format!("{key} (loaded only by test code: {loaders}")
+        };
+        if !unreached.is_empty() {
+            failure.push_str(&format!("; not reached from the crate root: {unreached}"));
+        }
+        failure.push(')');
+        failures.push(failure);
     }
     failures
 }
 
 /// Maps each `.sql` file under the Project source root to the Rust files that load it with
-/// `include_str!`, split into production loaders and test-only loaders. A loader is test-only
-/// when its file is a `#[cfg(test)]` module (the content hash's own scanner decides which), is
-/// under `crates/project/tests`, or the `include_str!` sits inside an item, statement,
-/// expression, or other node marked `#[cfg(test)]`.
+/// `include_str!`, split into production loaders, test-only loaders, and files the module graph
+/// does not reach. The module graph from `lib.rs` is authoritative: a loader is test-only when
+/// every route to its file is gated (see [`module_reach`]), when its file is under
+/// `crates/project/tests`, or when the `include_str!` sits inside an item, statement,
+/// expression, or other node marked `#[cfg(test)]`. A file no declaration reaches is scanned
+/// for diagnostics only; its includes are listed but never count as loader evidence.
 fn project_sql_inventory(root: &Path) -> Inventory {
-    let cfg_test_modules = crate::source_paths::cfg_test_sources(root, &[PROJECT_SOURCE_ROOT])
-        .expect("cfg(test) module scan must succeed");
     let mut rust_files = Vec::new();
     collect_files(&root.join(PROJECT_SOURCE_ROOT), "rs", &mut rust_files);
     collect_files(&root.join("crates/project/tests"), "rs", &mut rust_files);
@@ -676,17 +813,20 @@ fn project_sql_inventory(root: &Path) -> Inventory {
                 .push(format!("{key}: does not parse as Rust: {error}")),
         }
     }
-    let gates = module_gates(root, &parsed);
+    let gates = module_reach(root, &parsed);
 
     for (path, file) in &parsed {
         let key = relative_key(root, path);
-        // A file reached only through `#[cfg(test)]` modules or inner `#![cfg(test)]` gates is
-        // test code; so is a file the content hash's own scanner excludes, and anything under
-        // crates/project/tests. A file no `mod` declaration reaches keeps the scanner's verdict.
-        let test_file = gates.get(path).copied().unwrap_or(false)
-            || cfg_test_modules.contains(&key)
-            || !key.starts_with(&format!("{PROJECT_SOURCE_ROOT}/"));
-        let scan = scan_file(file, test_file);
+        let reach = if !key.starts_with(&format!("{PROJECT_SOURCE_ROOT}/")) {
+            Reach::TestOnly
+        } else {
+            match gates.get(path) {
+                Some(false) => Reach::Production,
+                Some(true) => Reach::TestOnly,
+                None => Reach::NotReached,
+            }
+        };
+        let scan = scan_file(file, reach != Reach::Production);
         for site in scan.unsupported {
             inventory
                 .unsupported
@@ -699,7 +839,9 @@ fn project_sql_inventory(root: &Path) -> Inventory {
             let target = normalize(&path.parent().expect("file has a parent").join(&literal));
             let target_key = relative_key(root, &target);
             let entry = inventory.references.entry(target_key).or_default();
-            if gated {
+            if reach == Reach::NotReached {
+                entry.unreached.insert(key.clone());
+            } else if gated {
                 entry.test.insert(key.clone());
             } else {
                 entry.production.insert(key.clone());
@@ -712,8 +854,9 @@ fn project_sql_inventory(root: &Path) -> Inventory {
 /// Walks the Project crate's module tree from `lib.rs`, resolving each `mod x;` to `x.rs` or
 /// `x/mod.rs` in the declaring module's directory (or to its `#[path]`), and returns, for every
 /// file reached, whether it is test-only: every route to it passes an outer `#[cfg(test)]` on a
-/// module or an inner `#![cfg(test)]` in a file.
-fn module_gates(root: &Path, parsed: &BTreeMap<PathBuf, syn::File>) -> BTreeMap<PathBuf, bool> {
+/// module or an inner `#![cfg(test)]` in a file. One ungated route makes the file production.
+/// A file absent from the result is not reached from the crate root.
+fn module_reach(root: &Path, parsed: &BTreeMap<PathBuf, syn::File>) -> BTreeMap<PathBuf, bool> {
     let mut gates: BTreeMap<PathBuf, bool> = BTreeMap::new();
     let crate_root = normalize(&root.join(PROJECT_SOURCE_ROOT).join("lib.rs"));
     let mut pending = vec![(crate_root, false)];
