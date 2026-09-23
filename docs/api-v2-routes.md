@@ -157,7 +157,8 @@ Field ownership:
 - Record-answer containers are route-local: `records` and `value` are the
   per-key answer shape for one resolver-record route, not shared domain
   vocabulary. The inventory container `inventory: {known_keys, unset_keys,
-  unsupported_keys}` has one shape on the two routes that serve it,
+  unsupported_keys, abi_content_types, abi_unsupported_reason?}` has one shape
+  on the two routes that serve it,
   `GET /v1/names/{name}/records?include=inventory` and `POST /v1/lookup` with
   `include=inventory`; the records route defines its meaning and the lookup
   route serves it unchanged, per name, so a batch of names is one request.
@@ -282,12 +283,15 @@ collection route carry neither header.
   With `include=inventory`, each `profile=detail` name result whose record
   has a current registration and a record inventory row on its serving
   resource also carries `record.inventory: {known_keys, unset_keys,
-  unsupported_keys}`, the records route's container with the records route's
-  meaning: `known_keys` and `unset_keys` come from a record inventory whose
-  coverage is authoritative, and an `unsupported` inventory row lists every
-  product key it knows about under `unsupported_keys` with the other two
-  empty. No `keys` allowlist applies, so `unsupported_keys` holds only keys the
-  row itself carries. The container is omitted, not empty, on a record with no
+  unsupported_keys, abi_content_types, abi_unsupported_reason?}`, the records
+  route's container with the records route's meaning: `known_keys` and
+  `unset_keys` come from a record inventory whose coverage is authoritative,
+  and an `unsupported` inventory row lists every product key it knows about
+  under `unsupported_keys` with the other two empty. No `keys` allowlist
+  applies, so `unsupported_keys` holds only keys the row itself carries.
+  `abi_content_types` and `abi_unsupported_reason` have the records route's
+  meaning too, and the whole batch reads their evidence at once rather than
+  once per name. The container is omitted, not empty, on a record with no
   serving inventory: a `status=unsupported` or `unregistered` record, a
   reservation, or a name whose serving resource has no inventory row; the
   four value fields are then listed in `unsupported_fields` as before. This
@@ -796,7 +800,9 @@ collection route carry neither header.
   `include=inventory` lists every product key the row knows about (selectors,
   entries, explicit gaps, and the requested keys) under `unsupported_keys`;
   `known_keys` and `unset_keys` are empty because an unsupported row can assert
-  neither presence nor absence. `source=auto` treats those keys as unsatisfied
+  neither presence nor absence, and `abi_content_types` is `null` with
+  `abi_unsupported_reason=inventory_not_authoritative` for the same reason.
+  `source=auto` treats those keys as unsatisfied
   and executes verified lookup for them; `source=verified` is unaffected by
   indexed coverage. The divergence ledger applies the same refusal: a verified
   answer over an unsupported inventory is compared against an `unsupported`
@@ -1008,9 +1014,87 @@ collection route carry neither header.
   may therefore produce 201 provider keys when `addr:60` was absent; an
   inventory with more than 200 selectors still returns `422 unsupported`.
   `include=inventory` adds
-  `inventory: {known_keys, unset_keys, unsupported_keys}`, the container
-  `POST /v1/lookup` also serves per name with the same meaning. Deep inventory
-  internals stay on diagnostics.
+  `inventory: {known_keys, unset_keys, unsupported_keys, abi_content_types,
+  abi_unsupported_reason?}`, the container `POST /v1/lookup` also serves per
+  name with the same meaning. Deep inventory internals stay on diagnostics.
+  `abi_content_types` lists the ABI content types written to the name's
+  current resolver storage. They come from the ABI-change events among the
+  record writes the inventory already selects for the name, so the resolver
+  selection, record-version reset, exact or default record link, ENSv1 mirror,
+  and canonicality rules that decide the other keys also decide which ABI
+  writes count: a write made before the resolver was selected counts, a write
+  on a resolver the name has since left does not (until the name selects it
+  again), and a write before a `VersionChanged` reset does not. Whether the
+  selected storage has an ABI event bigname indexes comes from the selected
+  resolver's classification in the resolver projection, read in the same
+  statement that confirms the inventory row the route loaded (same resource,
+  record version boundary key, chain positions, and recompute time) is still
+  the published row. A change to the classification's manifest, declaration,
+  admission namespace, or upgrade evidence makes Project republish every
+  inventory row that depends on the resolver, so while the row is still
+  published the classification read with it decides admission the same way
+  it did when the row was built; the remaining family changes do not change
+  whether ABI observations are admitted, so the answer is unaffected. A
+  resolver row stamped at a newer target than the inventory row is expected
+  and does not change the answer either. Each item is a
+  canonical unsigned decimal string of a single-bit `uint256` content type,
+  listed once, in ascending numeric order; content types can exceed 64 bits,
+  so decode each item as a big integer. A listed content type means a write
+  was observed, not that its ABI is currently non-empty. ENS removes an ABI by
+  storing empty bytes and emits the same event as for a set, so a caller that
+  needs the bytes reads them through the resolver's resolution interface and
+  treats a successfully decoded empty value as unset, not as a failed call. A
+  node-keyed ENSv1 resolver exposes `ABI(node, contentType)` directly
+  (upstream: .refs/ens_v1/contracts/resolvers/profiles/ABIResolver.sol:L10-L26 @ ens_v1@91c966f);
+  an ENSv2 record resolver and an ENSv1 mirror answer the encoded `ABI` call
+  only through `resolve(dnsEncodedName, data)` and do not expose the getter
+  (upstream: .refs/ens_v2/contracts/src/resolver/AbstractRecordResolver.sol:L110-L145 @ ens_v2@a971bd64)
+  (upstream: .refs/ens_v2/contracts/src/resolver/AbstractMirrorResolver.sol:L67 @ ens_v2@a971bd64).
+  (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L150-L161 @ ens_v2@a971bd64)
+  An empty list means the selected resolver storage has an ABI event bigname
+  indexes and none of the selected writes is an ABI write. It is not proof
+  that no ABI is stored. When the index cannot list the content types,
+  `abi_content_types` is `null` and `abi_unsupported_reason` names the cause;
+  a caller must not read `null` as an empty list:
+  - `inventory_not_available`: the name has no record inventory on its
+    serving resource. Only this route serves it; the lookup route omits the
+    whole container instead.
+  - `inventory_not_authoritative`: the inventory row is `unsupported`, so it
+    cannot speak for the resolver's storage.
+  - `abi_observations_not_supported`: the selected resolver storage has no
+    ABI-change event that bigname admits. The declared direct
+    PublicResolverV2 classification (role `public_resolver_v2`) admits only
+    address, text, contenthash, and version events, and the Basenames
+    resolver manifests declare no
+    `ABIChanged`, so both answer this way even when their inventory is
+    supported and the other keys are served. Both contracts inherit ENS's
+    ABI resolver and do emit `ABIChanged` on chain; the gap is bigname's
+    admission, not the contracts.
+    (upstream: .refs/ens_v2/contracts/src/resolver/PublicResolverV2.sol:L23-L26 @ ens_v2@a971bd64)
+    (upstream: .refs/basenames/src/L2/L2Resolver.sol:L29-L31 @ basenames@1809bbc)
+  - `abi_observations_stale`: a write the inventory selected is no longer
+    retained as canonical, activated evidence, for example after a
+    reorganization or an Interpret redo removed it; the list is withheld
+    rather than shortened until Project rebuilds the inventory. The same
+    reason covers an inventory row that Project replaced after the route
+    loaded it and before it read the resolver's classification: the answer is
+    withheld rather than computed from the older row and the newer
+    classification, and a retry reads the new row.
+  - `abi_content_type_not_single_bit`: a selected ABI write names a content
+    type that is zero or has more than one bit set. The ENS setters reject
+    such types, so only a nonstandard resolver emits them; bigname neither
+    splits such a mask into single-bit types nor lists the remaining types
+    without it. The same reason covers a selected write whose content type
+    cannot be read as a canonical unsigned decimal of at most 256 bits: a
+    missing, non-text, non-decimal, or zero-padded value, or one above the
+    uint256 range.
+    (upstream: .refs/ens_v1/contracts/resolvers/profiles/ABIResolver.sol:L21-L22 @ ens_v1@91c966f)
+    (upstream: .refs/ens_v2/contracts/src/resolver/AbstractRecordResolver.sol:L211-L216 @ ens_v2@a971bd64)
+
+  `abi_unsupported_reason` is omitted whenever `abi_content_types` is a list.
+  ABI records stay outside the record-key grammar: `known_keys` never lists
+  them, `keys=abi:<content_type>` is still rejected, and record counts do not
+  include them.
 - Pagination behavior: none.
 - Status semantics: a missing name returns `404 not_found`. Missing, unset, or
   unsupported requested record values are reported with the common result
@@ -1079,7 +1163,7 @@ to the product and record-diagnostic routes; a family outside it is rejected as
 | Registry TTL | Validated and discarded | `NewTTL` is decoded to validate admitted logs but produces no normalized event or public record key. The LLL-era low-byte validation exception is documented in the [registry-word divergence](upstream.md#ensv1-lll-era-registry-word-decoding). ENS declares the TTL event and getter as `uint64`. (upstream: .refs/ens_v1/contracts/registry/ENS.sol:L14-L15 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/registry/ENS.sol:L49-L57 @ ens_v1@91c966f) |
 | Registry owner | Served outside the grammar | No record key. `NewOwner` and `Transfer` are retained as normalized authority events. `GET /v1/names/{name}` carries the selected current owner in its optional `owner` field; its history route exposes a retained authority change as `type=authority`. Ownership is never requestable as a record key. (upstream: .refs/ens_v1/contracts/registry/ENS.sol:L6-L9 @ ens_v1@91c966f) |
 | Registry resolver | Served outside the grammar | No record key. `NewResolver` is retained as the node's resolver-binding event. `GET /v1/names/{name}` carries a serveable current binding in its optional `resolver` object (`chain_id` and `address`); its history route exposes a retained change as `type=resolver`. A resolver address is not itself a requestable record. (upstream: .refs/ens_v1/contracts/registry/ENS.sol:L11-L12 @ ens_v1@91c966f) |
-| ABI records | Outside the grammar | No public key. ENS defines ABI records by node and accepted content-type mask. (upstream: .refs/ens_v1/contracts/resolvers/profiles/IABIResolver.sol:L4-L16 @ ens_v1@91c966f) |
+| ABI records | Content types served outside the grammar | No record key and no value. With `include=inventory`, the records and lookup routes list the content types of the name's selected ABI writes as `abi_content_types` (see the records route above); the ABI bytes are never served, and `keys=abi:<content_type>` is rejected. ENS defines ABI records by node and accepted content-type mask, and each write names one single-bit content type. (upstream: .refs/ens_v1/contracts/resolvers/profiles/IABIResolver.sol:L4-L16 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/profiles/ABIResolver.sol:L16-L26 @ ens_v1@91c966f) |
 | Public keys | Outside the grammar | No public key. ENS defines a secp256k1 public-key record. (upstream: .refs/ens_v1/contracts/resolvers/profiles/IPubkeyResolver.sol:L4-L12 @ ens_v1@91c966f) |
 | Interface declarations | Outside the grammar | No public key. ENS defines an interface-ID-to-implementer lookup. (upstream: .refs/ens_v1/contracts/resolvers/profiles/IInterfaceResolver.sol:L4-L22 @ ens_v1@91c966f) |
 | Reverse-claim name records | Served outside the grammar | No record key. The primary-name projection takes an indexed claim value from one of two event paths, chosen by the event that keys the address, coin type, and namespace tuple. (1) When the reverse-registrar adapter interprets `NameForAddrChanged`, it emits the tuple's `ReverseChanged` and a `RecordChanged` row carrying `primary_claim_source`; the claim attaches to that tuple. ENSv1's standalone reverse registrar emits `NameForAddrChanged` when it stores an address's name. (upstream: .refs/ens_v1/contracts/reverseRegistrar/StandaloneReverseRegistrar.sol:L28-L30 @ ens_v1@91c966f) (2) The ENSv1 `addr.reverse` ReverseRegistrar declared by the Mainnet and canonical `sepolia` [deployment profiles](glossary.md#deployment-profile) emits no name: it emits `ReverseClaimed` with the reverse node, sets that node's registry resolver, and calls the resolver's `setName`, which emits `NameChanged`. (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L76-L84 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L123-L131 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/profiles/NameResolver.sol:L13-L19 @ ens_v1@91c966f) For such a tuple the projection joins the `ReverseClaimed` reverse node to the latest retained `NameChanged` or record-version reset on the node's current registry resolver, as described in [projections.md](projections.md#primary-names). A Sepolia or Mainnet `setName` through an admitted event-emitting PublicResolver therefore yields an indexed `claim_status = success` with the claimed name; a blank name or a version reset yields `not_found`. The joined `RecordChanged` row itself still carries no `primary_claim_source`. When the reverse node's resolver is [event-silent](glossary.md#event-silent) (it stores the name without emitting `NameChanged`), there is nothing to join, so the indexed answer is `not_found` unless reverse-resolver [hydration](glossary.md#hydration) is admitted for that resolver; the canonical `sepolia` profile admits none. Either way the indexed value is a declared claim only: forward verification stays on the request-scoped [verified lookup](glossary.md#verified-lookup) path. |
@@ -2926,6 +3010,9 @@ so there is no persisted artifact to explain. See
   `{record_version_boundary, enumeration_basis, selectors, explicit_gaps,
   unsupported_families, last_change}` using the existing diagnostic selector
   row fields `record_key`, `record_family`, `selector_key`, and `cacheable`.
+  An `unsupported_families` item for `abi` says that ABI record values are
+  not served as records; it does not mean ABI content types are unavailable,
+  which `include=inventory` on the product routes reports on its own terms.
   `record_cache` is `{record_version_boundary, entries}` where each entry is
   `{record_key, record_family, selector_key, status, value?,
   unsupported_reason?, failure_reason?}`. `value_sources` summarizes the

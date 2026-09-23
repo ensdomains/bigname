@@ -1061,7 +1061,28 @@ resolver may keep that resource reachable through `name_current.serving_resource
 control resource and binding stay null. This evidence is derived entirely from normalized events;
 Project and API serving perform no live registry or resolver read. It
 also records the selected resolver's record boundary, explicit gaps,
-unsupported families, and any retained indexed values. The record event need
+unsupported families, and any retained indexed values.
+`provenance.record_event_ids` lists the current write of every selected record
+key in every family, ABI writes included even though ABI records are neither
+selectors nor entries, followed by the selecting link ids that
+`provenance.record_link_event_ids` also lists. The records and lookup routes
+read a name's ABI content types back from those ids
+([`api-v2-routes.md`](api-v2-routes.md), `GET /v1/names/{name}/records`), so
+limiting that list to the served families would silently drop them. Those
+routes take the selected resolver's source family and role from
+`resolver_current`, in the same statement that confirms the inventory row they
+loaded (same `resource_id`, `record_version_boundary_key`, `chain_positions`,
+and `last_recomputed_at`) is still published, and answer `abi_observations_stale`
+when it is not. That is sound because a change to the classification's
+manifest, declaration, admission namespace, or upgrade evidence puts the
+resolver in `project_scope_resolver_dependents`, which republishes every
+dependent inventory row; the remaining family changes, such as a rebuild
+scoped only through `project_scope_resolvers`, do not change whether ABI
+observations are admitted, so the answer is unaffected. An unchanged resolver
+row may also be re-stamped at a newer
+target (for example after a record write for another name on the same
+resolver) without republishing those inventory rows, so comparing the two rows'
+target blocks would not be. The record event need
 not carry that resource: Project normally joins its `logical_name_id` and
 emitting resolver to the pointer without restricting either event's source
 family. An `ens_v1_resolver_l1` event whose `logical_name_id` is null may join
