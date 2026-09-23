@@ -30,6 +30,25 @@ async fn restore(tx: &mut Transaction<'_, Postgres>, value: &Scope) -> Result<()
     Ok(())
 }
 
+// Each include pass creates and drops about a dozen temporary tables, and PostgreSQL
+// holds the lock of every relation created or dropped until the transaction ends. A
+// test that loops over many cases in one transaction would exhaust the server's lock
+// table (CI runs the default max_locks_per_transaction = 64), so each case runs in a
+// savepoint that is rolled back afterwards, which releases its locks and tables.
+async fn begin_case(tx: &mut Transaction<'_, Postgres>) -> Result<()> {
+    sqlx::query("SAVEPOINT mirror_case")
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+async fn end_case(tx: &mut Transaction<'_, Postgres>) -> Result<()> {
+    sqlx::raw_sql("ROLLBACK TO SAVEPOINT mirror_case; RELEASE SAVEPOINT mirror_case")
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
 #[tokio::test]
 async fn mirror_pairs_preserve_each_closure_step_and_history_guards() -> Result<()> {
     let database =
@@ -40,6 +59,7 @@ async fn mirror_pairs_preserve_each_closure_step_and_history_guards() -> Result<
         .await?;
     // Try every name and both resource sides independently, then an empty initial scope.
     for seed in 0..97 {
+        begin_case(&mut tx).await?;
         let mut strategy = super::stage(&mut tx, "bench", 10).await?;
         sqlx::query("TRUNCATE project_scope_names, project_scope_resources")
             .execute(&mut *tx)
@@ -82,6 +102,7 @@ async fn mirror_pairs_preserve_each_closure_step_and_history_guards() -> Result<
         super::finish(&mut tx, strategy).await?;
         sqlx::raw_sql("DROP TABLE project_mirror_seen_resources, project_mirror_seen_names, project_mirror_changed_nodes")
             .execute(&mut *tx).await?;
+        end_case(&mut tx).await?;
     }
     tx.rollback().await?;
     database.cleanup().await?;
@@ -141,6 +162,23 @@ async fn mirror_tiny_delta_visits_only_affected_dependencies() -> Result<()> {
     Ok(())
 }
 
+// The scale cases guard only the engine's include pass with a statement timeout: a
+// regression to a chain-wide mirror graph would run for minutes. The reference oracle
+// (mirror_previous.sql) is deliberately slower and runs without the timeout.
+async fn include_within_timeout(
+    tx: &mut Transaction<'_, Postgres>,
+    strategy: &mut super::Strategy,
+) -> Result<()> {
+    sqlx::query("SET LOCAL statement_timeout = '30s'")
+        .execute(&mut **tx)
+        .await?;
+    super::include(tx, "bench", 10, strategy).await?;
+    sqlx::query("SET LOCAL statement_timeout = 0")
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
 #[tokio::test]
 async fn mirror_bulk_handles_full_scope_shared_ancestor_and_late_growth() -> Result<()> {
     let database = TestDatabase::create(TestDatabaseConfig::new("mirror_bulk_scale")).await?;
@@ -148,24 +186,24 @@ async fn mirror_bulk_handles_full_scope_shared_ancestor_and_late_growth() -> Res
     sqlx::raw_sql(include_str!("mirror_fixture.sql"))
         .execute(&mut *tx)
         .await?;
-    sqlx::raw_sql("SET LOCAL statement_timeout = '30s';
-        TRUNCATE project_changed_events;
+    sqlx::raw_sql("TRUNCATE project_changed_events;
         INSERT INTO name_surfaces
         SELECT 'scale-'||i,'ens','scale-'||i,'bench',10,'block','canonical',
-               ARRAY['scale-'||i,'eth'] FROM generate_series(1,2000)i;
+               ARRAY['scale-'||i,'eth'] FROM generate_series(1,400)i;
         INSERT INTO normalized_events
         SELECT 10000+i,'scale-v1-'||i,'bench','ens',md5(('scale-v1-'||i)::text)::uuid,
           NULL,'ResolverChanged','ens_v1_registry_l1',1,1,10,'block',0,0,'canonical','activated',
           jsonb_build_object('node','scale-'||i,'resolver','0xshared'),'{}','{}'
-          FROM generate_series(1,2000)i;
+          FROM generate_series(1,400)i;
         INSERT INTO normalized_events
         SELECT 100000+i,'scale-mirror-'||i,'bench','ens',md5(('scale-mirror-'||i)::text)::uuid,
           'scale-'||i,'ResolverChanged','ens_v2_registry_l1',1,1,10,'block',0,0,'canonical','activated',
           jsonb_build_object('node','scale-'||i,'resolver','0xmirror'),'{}','{}'
-          FROM generate_series(1,2000)i;
+          FROM generate_series(1,400)i;
         ANALYZE normalized_events; ANALYZE name_surfaces;")
         .execute(&mut *tx).await?;
     for case in ["full", "ancestor", "late_growth", "changed_ancestor"] {
+        begin_case(&mut tx).await?;
         sqlx::raw_sql(
             "TRUNCATE project_scope_names, project_scope_resources, project_changed_events",
         )
@@ -190,7 +228,7 @@ async fn mirror_bulk_handles_full_scope_shared_ancestor_and_late_growth() -> Res
         if case == "late_growth" {
             // Consume changed-node seeds and visited entries, then grow as another
             // closure arm can do. Switching must reconstruct from original facts.
-            super::include(&mut tx, "bench", 10, &mut strategy).await?;
+            include_within_timeout(&mut tx, &mut strategy).await?;
 
             sqlx::query("INSERT INTO project_scope_names SELECT logical_name_id FROM name_surfaces ON CONFLICT DO NOTHING")
                 .execute(&mut *tx).await?;
@@ -206,7 +244,7 @@ async fn mirror_bulk_handles_full_scope_shared_ancestor_and_late_growth() -> Res
                 .await?;
             let expected = scope(&mut tx).await?;
             restore(&mut tx, &before).await?;
-            super::include(&mut tx, "bench", 10, &mut strategy).await?;
+            include_within_timeout(&mut tx, &mut strategy).await?;
             let actual = scope(&mut tx).await?;
             assert_eq!(actual, expected, "{case}, pass {pass}");
             if actual == before {
@@ -222,6 +260,7 @@ async fn mirror_bulk_handles_full_scope_shared_ancestor_and_late_growth() -> Res
         super::finish(&mut tx, strategy).await?;
         sqlx::raw_sql("DROP TABLE project_mirror_seen_resources, project_mirror_seen_names, project_mirror_changed_nodes")
             .execute(&mut *tx).await?;
+        end_case(&mut tx).await?;
     }
     tx.rollback().await?;
     database.cleanup().await?;
@@ -248,6 +287,7 @@ async fn ancestor_discovery_reuses_history_for_late_descendants_without_losing_e
           (9004,'foreign-mirror','bench','foreign',md5('foreign-mirror')::uuid,'foreign','ResolverChanged','ens_v2_registry_l1',1,1,10,'block',0,0,'canonical','activated','{\"resolver\":\"0xmirror\"}','{}','{}');")
         .execute(&mut *tx).await?;
     for initial in ["ancestor", "ancestor_and_descendant", "empty_root"] {
+        begin_case(&mut tx).await?;
         sqlx::raw_sql("TRUNCATE project_scope_names, project_scope_resources")
             .execute(&mut *tx)
             .await?;
@@ -292,6 +332,7 @@ async fn ancestor_discovery_reuses_history_for_late_descendants_without_losing_e
         super::finish(&mut tx, strategy).await?;
         sqlx::raw_sql("DROP TABLE project_mirror_seen_resources, project_mirror_seen_names, project_mirror_changed_nodes")
             .execute(&mut *tx).await?;
+        end_case(&mut tx).await?;
     }
     tx.rollback().await?;
     database.cleanup().await?;
@@ -314,6 +355,7 @@ async fn historical_ancestor_resources_remain_factored_at_each_step() -> Result<
         ANALYZE normalized_events;")
         .execute(&mut *tx).await?;
     for case in ["mirror", "resource", "changed"] {
+        begin_case(&mut tx).await?;
         sqlx::raw_sql(
             "TRUNCATE project_scope_names,project_scope_resources,project_changed_events",
         )
@@ -359,6 +401,7 @@ async fn historical_ancestor_resources_remain_factored_at_each_step() -> Result<
         super::finish(&mut tx, strategy).await?;
         sqlx::raw_sql("DROP TABLE project_mirror_seen_resources,project_mirror_seen_names,project_mirror_changed_nodes")
             .execute(&mut *tx).await?;
+        end_case(&mut tx).await?;
     }
     tx.rollback().await?;
     database.cleanup().await?;

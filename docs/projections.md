@@ -1334,6 +1334,14 @@ values and event provenance; unchanged forward-incremental rows intentionally re
 their earlier publication targets. `address_records_current` and
 name-side record reads consume mirrored rows like any other supported inventory.
 
+Each pass of the mirror dependency expansion creates and drops 13 temporary tables,
+and PostgreSQL holds the lock of every relation created or dropped until the
+publication transaction commits. The production loop stops at a fixed point after a
+few passes (about 750 relation locks per publication were measured), which fits the
+default `max_locks_per_transaction` that production PostgreSQL runs with. Tests that
+loop over many cases in one transaction roll each case back to a savepoint to release
+those locks.
+
 For ENSv1, an admitted current resolver may contribute supported address, text,
 and contenthash inventory. An unlisted or unsupported resolver family stays
 explicitly unsupported. For ENSv2, current-emitter version evidence may define a
