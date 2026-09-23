@@ -1777,6 +1777,8 @@ name = "bigname-content-hash"
 version = "0.1.0"
 dependencies = [
  "alloy-primitives",
+ "proc-macro2",
+ "syn 2.0.117",
 ]
 
 [[package]]

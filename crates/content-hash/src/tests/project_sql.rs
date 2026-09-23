@@ -8,6 +8,14 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
+use proc_macro2::{TokenStream, TokenTree};
+use syn::{
+    Arm, Attribute, Expr, Field, FieldValue, ImplItem, Item, LitStr, Local, Macro, Meta, StmtMacro,
+    Token, TraitItem, Variant,
+    parse::{ParseStream, Parser},
+    visit::{self, Visit},
+};
+
 use super::workspace_root;
 
 const PROJECT_SOURCE_ROOT: &str = "crates/project/src";
@@ -20,54 +28,19 @@ struct References {
 
 #[test]
 fn project_sql_under_the_hashed_root_is_loaded_by_production_code() {
-    let workspace_root = workspace_root();
-    let (references, unsupported) = project_sql_references(&workspace_root);
+    let root = workspace_root();
     let mut sql_files = Vec::new();
-    collect_files(
-        &workspace_root.join(PROJECT_SOURCE_ROOT),
-        "sql",
-        &mut sql_files,
-    );
+    collect_files(&root.join(PROJECT_SOURCE_ROOT), "sql", &mut sql_files);
     assert!(
         !sql_files.is_empty(),
         "expected production SQL under {PROJECT_SOURCE_ROOT}"
     );
-
-    let mut violations = Vec::new();
-    for path in sql_files {
-        let key = relative_key(&workspace_root, &path);
-        let entry = references.get(&key);
-        if entry.is_some_and(|entry| !entry.production.is_empty()) {
-            continue;
-        }
-        let loaders = entry
-            .map(|entry| entry.test.iter().cloned().collect::<Vec<_>>().join(", "))
-            .unwrap_or_default();
-        violations.push(if loaders.is_empty() {
-            format!("{key} (not loaded by any Rust source)")
-        } else {
-            format!("{key} (loaded only by test code: {loaders})")
-        });
-    }
+    let failures = inventory_failures(&root);
     assert!(
-        violations.is_empty(),
-        "SQL under {PROJECT_SOURCE_ROOT} is a content-hash input; move test-only SQL to \
-         crates/project/testdata/sql/:\n{}",
-        violations.join("\n")
-    );
-    // Only a production loader can satisfy the rule above, so a production include_str! this
-    // scanner cannot read must fail here with its own message rather than surface later as a
-    // file "not loaded by any Rust source". An unreadable spelling in test code cannot hide a
-    // violation, because test loaders never count.
-    let production_unsupported = unsupported
-        .iter()
-        .filter(|(_, test)| !test)
-        .map(|(message, _)| message.as_str())
-        .collect::<Vec<_>>();
-    assert!(
-        production_unsupported.is_empty(),
-        "{}",
-        production_unsupported.join("\n")
+        failures.is_empty(),
+        "SQL under {PROJECT_SOURCE_ROOT} is a content-hash input; every file there needs a \
+         production loader, and test-only SQL belongs in crates/project/testdata/sql/:\n{}",
+        failures.join("\n")
     );
 }
 
@@ -178,16 +151,17 @@ fn include_scanner_accepts_every_literal_spelling() {
 fn include_scanner_reports_spellings_it_cannot_read() {
     let source = r#####"
         const A: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/computed.sql"));
-        const B: &str = include_str!("bad_escape\q.sql");
-        const C: &str = include_str! "no_delimiter.sql";
         const D: &str = include_str!(PATH);
         const E: &str = include_str!("two" "literals.sql");
+        const F: &str = include_str!(b"bytes.sql");
+        const G: &str = std::include_str!(c"c_string.sql");
         #[cfg(test)]
-        const F: &str = include_str!(concat!("gated", ".sql"));
-        const G: &str = include_str!("still_read.sql");
-        const H: bool = include_str != 0;
+        const H: &str = include_str!(concat!("gated", ".sql"));
+        const I: &str = include_str!("still_read.sql");
+        const J: bool = include_str != 0;
+        const K: &str = my::include_str!(concat!("other", ".sql"));
     "#####;
-    let scan = scan_includes(source);
+    let scan = scan_includes(source).expect("fixture must parse as Rust");
     assert_eq!(scan.sites, vec![("still_read.sql".to_owned(), false)]);
     assert_eq!(
         scan.unsupported,
@@ -231,39 +205,141 @@ fn include_scanner_reports_spellings_it_cannot_read() {
     }
 }
 
+#[test]
+fn inventory_reports_an_unreadable_production_spelling_before_the_loader_it_hides() {
+    let tree = super::SampleTree::empty();
+    tree.write(
+        "crates/project/src/scope/mirror.rs",
+        "pub fn stage() -> &'static str {\n    include_str!(concat!(\"mirror\", \".sql\"))\n}\n",
+    );
+    tree.write("crates/project/src/scope/mirror.sql", "SELECT 1;\n");
+    tree.write("crates/project/src/scope/broken.rs", "fn broken( {\n");
+    let failures = inventory_failures(tree.path());
+    assert_eq!(failures.len(), 3, "{failures:#?}");
+    assert!(
+        failures[0].starts_with("crates/project/src/scope/broken.rs: does not parse as Rust"),
+        "{failures:#?}"
+    );
+    assert_eq!(
+        failures[1],
+        unsupported_message("crates/project/src/scope/mirror.rs", 2)
+    );
+    assert_eq!(
+        failures[2],
+        "crates/project/src/scope/mirror.sql (not loaded by any Rust source)"
+    );
+}
+
+#[test]
+fn current_tree_keeps_computed_includes_in_test_code() {
+    let root = workspace_root();
+    let inventory = project_sql_inventory(&root);
+    assert!(
+        inventory.unparsable.is_empty(),
+        "{:#?}",
+        inventory.unparsable
+    );
+    // Project tests load migrations through include_str!(concat!(env!(...), ...)), which the
+    // guard cannot read; they must all be recognized as test code.
+    assert!(
+        !inventory.unsupported.is_empty(),
+        "expected the computed migration includes in Project tests to be reported"
+    );
+    for (message, test) in &inventory.unsupported {
+        eprintln!("unsupported (test code: {test}): {message}");
+        assert!(test, "{message}");
+    }
+    let mut sql_files = Vec::new();
+    collect_files(&root.join(PROJECT_SOURCE_ROOT), "sql", &mut sql_files);
+    let loaded = sql_files
+        .iter()
+        .filter(|path| {
+            inventory
+                .references
+                .get(&relative_key(&root, path))
+                .is_some_and(|entry| !entry.production.is_empty())
+        })
+        .count();
+    eprintln!(
+        "production SQL files with a production loader: {loaded}/{}",
+        sql_files.len()
+    );
+    assert_eq!(loaded, sql_files.len());
+}
+
+/// What the guard learned about one tree: each `.sql` path's loaders, every `include_str!` it
+/// could not read (message, and whether it is in test code), and every Rust file that does not
+/// parse.
+#[derive(Default)]
+struct Inventory {
+    references: BTreeMap<String, References>,
+    unsupported: Vec<(String, bool)>,
+    unparsable: Vec<String>,
+}
+
+/// Every reason the tree under `root` breaks the rule, in one list: Rust files that do not
+/// parse, then production `include_str!` spellings the guard cannot read, then SQL under the
+/// hashed root without a production loader. Reporting them together keeps an unreadable
+/// production spelling from being masked by the missing loader it causes.
+fn inventory_failures(root: &Path) -> Vec<String> {
+    let inventory = project_sql_inventory(root);
+    let mut failures = inventory.unparsable;
+    failures.extend(
+        inventory
+            .unsupported
+            .into_iter()
+            .filter(|(_, test)| !test)
+            .map(|(message, _)| message),
+    );
+    let mut sql_files = Vec::new();
+    collect_files(&root.join(PROJECT_SOURCE_ROOT), "sql", &mut sql_files);
+    for path in sql_files {
+        let key = relative_key(root, &path);
+        let entry = inventory.references.get(&key);
+        if entry.is_some_and(|entry| !entry.production.is_empty()) {
+            continue;
+        }
+        let loaders = entry
+            .map(|entry| entry.test.iter().cloned().collect::<Vec<_>>().join(", "))
+            .unwrap_or_default();
+        failures.push(if loaders.is_empty() {
+            format!("{key} (not loaded by any Rust source)")
+        } else {
+            format!("{key} (loaded only by test code: {loaders})")
+        });
+    }
+    failures
+}
+
 /// Maps each `.sql` file under the Project source root to the Rust files that load it with
 /// `include_str!`, split into production loaders and test-only loaders. A loader is test-only
-/// when its file is a `#[cfg(test)]` module (the content hash's own scanner decides which) or
-/// the `include_str!` sits inside an item or statement marked `#[cfg(test)]`. Also returns every
-/// `include_str!` invocation the scanner cannot read, with whether it is in test code.
-fn project_sql_references(
-    workspace_root: &Path,
-) -> (BTreeMap<String, References>, Vec<(String, bool)>) {
-    let cfg_test_modules =
-        crate::source_paths::cfg_test_sources(workspace_root, &[PROJECT_SOURCE_ROOT])
-            .expect("cfg(test) module scan must succeed");
+/// when its file is a `#[cfg(test)]` module (the content hash's own scanner decides which), is
+/// under `crates/project/tests`, or the `include_str!` sits inside an item, statement,
+/// expression, or other node marked `#[cfg(test)]`.
+fn project_sql_inventory(root: &Path) -> Inventory {
+    let cfg_test_modules = crate::source_paths::cfg_test_sources(root, &[PROJECT_SOURCE_ROOT])
+        .expect("cfg(test) module scan must succeed");
     let mut rust_files = Vec::new();
-    collect_files(
-        &workspace_root.join(PROJECT_SOURCE_ROOT),
-        "rs",
-        &mut rust_files,
-    );
-    collect_files(
-        &workspace_root.join("crates/project/tests"),
-        "rs",
-        &mut rust_files,
-    );
+    collect_files(&root.join(PROJECT_SOURCE_ROOT), "rs", &mut rust_files);
+    collect_files(&root.join("crates/project/tests"), "rs", &mut rust_files);
 
-    let mut references: BTreeMap<String, References> = BTreeMap::new();
-    let mut unsupported = Vec::new();
+    let mut inventory = Inventory::default();
     for path in rust_files {
-        let key = relative_key(workspace_root, &path);
+        let key = relative_key(root, &path);
         let test_file =
             cfg_test_modules.contains(&key) || !key.starts_with(&format!("{PROJECT_SOURCE_ROOT}/"));
         let source = fs::read_to_string(&path).expect("Project source must be readable");
-        let scan = scan_includes(&source);
+        let scan = match scan_includes(&source) {
+            Ok(scan) => scan,
+            Err(error) => {
+                inventory
+                    .unparsable
+                    .push(format!("{key}: does not parse as Rust: {error}"));
+                continue;
+            }
+        };
         for site in scan.unsupported {
-            unsupported.push((
+            inventory.unsupported.push((
                 unsupported_message(&key, site.line),
                 test_file || site.gated,
             ));
@@ -273,8 +349,8 @@ fn project_sql_references(
                 continue;
             }
             let target = normalize(&path.parent().expect("file has a parent").join(&literal));
-            let target_key = relative_key(workspace_root, &target);
-            let entry = references.entry(target_key).or_default();
+            let target_key = relative_key(root, &target);
+            let entry = inventory.references.entry(target_key).or_default();
             if test_file || gated {
                 entry.test.insert(key.clone());
             } else {
@@ -282,7 +358,7 @@ fn project_sql_references(
             }
         }
     }
-    (references, unsupported)
+    inventory
 }
 
 fn unsupported_message(file: &str, line: usize) -> String {
@@ -308,431 +384,249 @@ struct IncludeScan {
 }
 
 fn include_sites(source: &str) -> Vec<(String, bool)> {
-    scan_includes(source).sites
+    scan_includes(source)
+        .expect("fixture must parse as Rust")
+        .sites
 }
 
-/// Returns each `include_str!` path literal in `source`, and whether it sits inside an item or
-/// statement marked `#[cfg(test)]`, plus every `include_str!` invocation whose argument is not a
-/// single string literal. The scan skips comments, string literals, and character literals, and
-/// tracks delimiter depth: a marked region ends at the `;` or `,` that ends it at its own depth,
-/// at the `}` that closes its block (unless `else` follows), or when its enclosing block closes.
-/// The braces of a brace-delimited macro call never end a region.
-fn scan_includes(source: &str) -> IncludeScan {
-    let chars: Vec<char> = source.chars().collect();
-    let mut scan = IncludeScan::default();
-    let mut depth = 0usize;
-    let mut gate: Option<usize> = None;
-    let mut macro_braces = BTreeSet::new();
-    let mut braces: Vec<bool> = Vec::new();
-    let mut index = 0;
-    while index < chars.len() {
-        let c = chars[index];
-        let next = chars.get(index + 1).copied();
-        match c {
-            '/' if next == Some('/') => {
-                while index < chars.len() && chars[index] != '\n' {
-                    index += 1;
-                }
-                continue;
-            }
-            '/' if next == Some('*') => {
-                index = skip_block_comment(&chars, index);
-                continue;
-            }
-            'i' if !is_ident_char(previous(&chars, index)) => {
-                if let Some(invocation) = include_invocation(&chars, index) {
-                    match invocation.argument {
-                        Some(literal) => scan.sites.push((literal, gate.is_some())),
-                        None => scan.unsupported.push(UnsupportedSite {
-                            line: chars[..index].iter().filter(|c| **c == '\n').count() + 1,
-                            gated: gate.is_some(),
-                        }),
-                    }
-                    if let Some(open) = invocation.brace {
-                        macro_braces.insert(open);
-                    }
-                    // Resume after the `!` so the argument's delimiters and literal are scanned
-                    // like any other tokens.
-                    index = invocation.after_bang;
-                    continue;
-                }
-            }
-            'r' | 'b' if !is_ident_char(previous(&chars, index)) => {
-                if let Some((_, end)) = read_prefixed_string(&chars, index) {
-                    index = end;
-                    continue;
-                }
-            }
-            '"' => {
-                index = read_string(&chars, index).end;
-                continue;
-            }
-            '\'' => {
-                index = skip_char_or_lifetime(&chars, index);
-                continue;
-            }
-            '#' if next == Some('[') => {
-                let end = matching_bracket(&chars, index + 1);
-                let attribute: String = chars[index..end]
-                    .iter()
-                    .filter(|c| !c.is_whitespace())
-                    .collect();
-                if attribute == "#[cfg(test)]" && gate.is_none() {
-                    gate = Some(depth);
-                }
-                index = end;
-                continue;
-            }
-            '{' => {
-                depth += 1;
-                braces.push(macro_braces.contains(&index) || follows_macro_bang(&chars, index));
-            }
-            '(' | '[' => depth += 1,
-            '}' | ')' | ']' => {
-                depth = depth.saturating_sub(1);
-                let macro_brace = c == '}' && braces.pop().unwrap_or(false);
-                if let Some(start) = gate {
-                    let enclosing_closed = depth < start;
-                    let block_ended = depth == start
-                        && c == '}'
-                        && !macro_brace
-                        && !next_word_is(&chars, index + 1, "else");
-                    if enclosing_closed || block_ended {
-                        gate = None;
+/// Parses `source` as a Rust file and returns each `include_str!` path, decoded as the compiler
+/// decodes it, with whether it sits under a `#[cfg(test)]` attribute, plus every `include_str!`
+/// whose argument is not exactly one string literal. Includes nested in the bodies of other
+/// macros are found at token level.
+fn scan_includes(source: &str) -> syn::Result<IncludeScan> {
+    // The compiler reads CRLF line endings as LF before it tokenizes.
+    let file = syn::parse_file(&source.replace("\r\n", "\n"))?;
+    let mut visitor = IncludeVisitor::default();
+    visitor.visit_file(&file);
+    Ok(visitor.scan)
+}
+
+#[derive(Default)]
+struct IncludeVisitor {
+    gated: usize,
+    scan: IncludeScan,
+}
+
+impl IncludeVisitor {
+    fn within(&mut self, attrs: &[Attribute], visit: impl FnOnce(&mut Self)) {
+        let gated = attrs.iter().any(is_cfg_test);
+        self.gated += usize::from(gated);
+        visit(self);
+        self.gated -= usize::from(gated);
+    }
+
+    fn record(&mut self, line: usize, tokens: TokenStream) {
+        let gated = self.gated > 0;
+        match include_path(tokens) {
+            Some(path) => self.scan.sites.push((path, gated)),
+            None => self.scan.unsupported.push(UnsupportedSite { line, gated }),
+        }
+    }
+
+    /// Finds `include_str ! (…)` (optionally `std::`, `core::`, or `::`-qualified) inside the
+    /// token body of another macro, and recurses into every group.
+    fn scan_tokens(&mut self, tokens: TokenStream) {
+        let tokens = tokens.into_iter().collect::<Vec<_>>();
+        for (index, token) in tokens.iter().enumerate() {
+            match token {
+                TokenTree::Ident(ident) if ident == "include_str" => {
+                    let bang = matches!(
+                        tokens.get(index + 1),
+                        Some(TokenTree::Punct(punct)) if punct.as_char() == '!'
+                    );
+                    if let (true, Some(TokenTree::Group(group))) = (bang, tokens.get(index + 2))
+                        && builtin_qualifier(&tokens[..index])
+                    {
+                        self.record(ident.span().start().line, group.stream());
                     }
                 }
+                TokenTree::Group(group) => self.scan_tokens(group.stream()),
+                _ => {}
             }
-            ';' | ',' if gate == Some(depth) => gate = None,
-            _ => {}
         }
-        index += 1;
     }
-    scan
 }
 
-struct Invocation {
-    /// The path literal, or `None` when the argument is not a single string literal.
-    argument: Option<String>,
-    after_bang: usize,
-    /// Index of the opening `{` of a brace-delimited call.
-    brace: Option<usize>,
-}
+impl<'ast> Visit<'ast> for IncludeVisitor {
+    fn visit_item(&mut self, node: &'ast Item) {
+        self.within(item_attrs(node), |this| visit::visit_item(this, node));
+    }
 
-/// Recognizes an `include_str!` invocation starting at `start`: the macro name, `!`, an opening
-/// `(`, `[` or `{`, one ordinary or raw string literal, an optional trailing comma, and the
-/// matching closing delimiter, with whitespace and non-doc comments allowed between them.
-/// Returns `None` when `start` does not begin an invocation, and an invocation without an
-/// argument when the name and `!` are there but the rest cannot be read.
-fn include_invocation(chars: &[char], start: usize) -> Option<Invocation> {
-    const NAME: &str = "include_str";
-    let mut index = start;
-    for expected in NAME.chars() {
-        if chars.get(index) != Some(&expected) {
-            return None;
-        }
-        index += 1;
+    fn visit_impl_item(&mut self, node: &'ast ImplItem) {
+        let attrs: &[Attribute] = match node {
+            ImplItem::Const(item) => &item.attrs,
+            ImplItem::Fn(item) => &item.attrs,
+            ImplItem::Type(item) => &item.attrs,
+            ImplItem::Macro(item) => &item.attrs,
+            _ => &[],
+        };
+        self.within(attrs, |this| visit::visit_impl_item(this, node));
     }
-    if chars.get(index).copied().is_some_and(is_ident_char) {
-        return None;
-    }
-    index = skip_trivia(chars, index);
-    if chars.get(index) != Some(&'!') || chars.get(index + 1) == Some(&'=') {
-        return None;
-    }
-    let after_bang = index + 1;
-    let unreadable = Invocation {
-        argument: None,
-        after_bang,
-        brace: None,
-    };
-    index = skip_trivia(chars, after_bang);
-    let open = index;
-    let close = match chars.get(open) {
-        Some('(') => ')',
-        Some('[') => ']',
-        Some('{') => '}',
-        _ => return Some(unreadable),
-    };
-    let brace = (close == '}').then_some(open);
-    let unreadable = Invocation {
-        brace,
-        ..unreadable
-    };
-    index = skip_trivia(chars, open + 1);
-    let (literal, end) = match chars.get(index) {
-        Some('"') => {
-            let string = read_string(chars, index);
-            match string.decoded {
-                Some(literal) => (literal, string.end),
-                None => return Some(unreadable),
-            }
-        }
-        Some('r') => match read_prefixed_string(chars, index) {
-            Some(raw) => raw,
-            None => return Some(unreadable),
-        },
-        _ => return Some(unreadable),
-    };
-    index = skip_trivia(chars, end);
-    if chars.get(index) == Some(&',') {
-        index = skip_trivia(chars, index + 1);
-    }
-    if chars.get(index) != Some(&close) {
-        return Some(unreadable);
-    }
-    Some(Invocation {
-        argument: Some(literal),
-        after_bang,
-        brace,
-    })
-}
 
-/// Skips whitespace, `//` line comments and `/* */` block comments, but not doc comments.
-fn skip_trivia(chars: &[char], mut index: usize) -> usize {
-    loop {
-        while chars.get(index).is_some_and(|c| c.is_whitespace()) {
-            index += 1;
-        }
-        let at = |offset: usize| chars.get(index + offset).copied();
-        if at(0) == Some('/') && at(1) == Some('/') {
-            let doc = at(2) == Some('!') || (at(2) == Some('/') && at(3) != Some('/'));
-            if doc {
-                return index;
-            }
-            while index < chars.len() && chars[index] != '\n' {
-                index += 1;
-            }
-        } else if at(0) == Some('/') && at(1) == Some('*') {
-            let doc = at(2) == Some('!')
-                || (at(2) == Some('*') && !matches!(at(3), Some('*') | Some('/')));
-            if doc {
-                return index;
-            }
-            index = skip_block_comment(chars, index);
+    fn visit_trait_item(&mut self, node: &'ast TraitItem) {
+        let attrs: &[Attribute] = match node {
+            TraitItem::Const(item) => &item.attrs,
+            TraitItem::Fn(item) => &item.attrs,
+            TraitItem::Type(item) => &item.attrs,
+            TraitItem::Macro(item) => &item.attrs,
+            _ => &[],
+        };
+        self.within(attrs, |this| visit::visit_trait_item(this, node));
+    }
+
+    fn visit_local(&mut self, node: &'ast Local) {
+        self.within(&node.attrs, |this| visit::visit_local(this, node));
+    }
+
+    fn visit_stmt_macro(&mut self, node: &'ast StmtMacro) {
+        self.within(&node.attrs, |this| visit::visit_stmt_macro(this, node));
+    }
+
+    fn visit_expr(&mut self, node: &'ast Expr) {
+        self.within(expr_attrs(node), |this| visit::visit_expr(this, node));
+    }
+
+    fn visit_arm(&mut self, node: &'ast Arm) {
+        self.within(&node.attrs, |this| visit::visit_arm(this, node));
+    }
+
+    fn visit_field(&mut self, node: &'ast Field) {
+        self.within(&node.attrs, |this| visit::visit_field(this, node));
+    }
+
+    fn visit_field_value(&mut self, node: &'ast FieldValue) {
+        self.within(&node.attrs, |this| visit::visit_field_value(this, node));
+    }
+
+    fn visit_variant(&mut self, node: &'ast Variant) {
+        self.within(&node.attrs, |this| visit::visit_variant(this, node));
+    }
+
+    fn visit_macro(&mut self, node: &'ast Macro) {
+        if is_include_str(&node.path) {
+            let line = node
+                .path
+                .segments
+                .last()
+                .map_or(0, |segment| segment.ident.span().start().line);
+            self.record(line, node.tokens.clone());
         } else {
-            return index;
+            self.scan_tokens(node.tokens.clone());
         }
     }
 }
 
-/// True when the `{` at `index` directly follows `name!`, which makes it a macro delimiter.
-fn follows_macro_bang(chars: &[char], index: usize) -> bool {
-    let mut before = index;
-    while before > 0 && chars[before - 1].is_whitespace() {
-        before -= 1;
-    }
-    before >= 2 && chars[before - 1] == '!' && is_ident_char(chars[before - 2])
-}
-
-fn previous(chars: &[char], index: usize) -> char {
-    if index == 0 { ' ' } else { chars[index - 1] }
-}
-
-fn is_ident_char(c: char) -> bool {
-    c.is_alphanumeric() || c == '_'
-}
-
-fn skip_block_comment(chars: &[char], start: usize) -> usize {
-    let mut nesting = 0;
-    let mut index = start;
-    while index + 1 < chars.len() {
-        if chars[index] == '/' && chars[index + 1] == '*' {
-            nesting += 1;
-            index += 2;
-        } else if chars[index] == '*' && chars[index + 1] == '/' {
-            nesting -= 1;
-            index += 2;
-            if nesting == 0 {
-                return index;
-            }
-        } else {
-            index += 1;
+/// Decodes a macro body that is exactly one string literal, optionally followed by a comma.
+fn include_path(tokens: TokenStream) -> Option<String> {
+    let parser = |input: ParseStream| {
+        let path: LitStr = input.parse()?;
+        if input.peek(Token![,]) {
+            input.parse::<Token![,]>()?;
         }
-    }
-    chars.len()
+        Ok(path)
+    };
+    parser.parse2(tokens).ok().map(|path| path.value())
 }
 
-/// Reads `r"…"`, `r#"…"#`, `b"…"`, `br#"…"#` and `b'…'`, returning the contents (verbatim for a
-/// raw string, empty for a byte character) and the index after the literal; returns `None` for
-/// an identifier.
-fn read_prefixed_string(chars: &[char], start: usize) -> Option<(String, usize)> {
-    let mut index = start;
-    if chars[index] == 'b' {
-        index += 1;
-        match chars.get(index) {
-            Some('"') => {
-                let string = read_string(chars, index);
-                return Some((string.decoded.unwrap_or_default(), string.end));
-            }
-            Some('\'') => return Some((String::new(), skip_char_or_lifetime(chars, index))),
-            Some('r') => {}
-            _ => return None,
-        }
-    }
-    index += 1;
-    let mut hashes = 0;
-    while chars.get(index) == Some(&'#') {
-        hashes += 1;
-        index += 1;
-    }
-    if chars.get(index) != Some(&'"') {
-        return None;
-    }
-    index += 1;
-    let contents_start = index;
-    while index < chars.len() {
-        if chars[index] == '"'
-            && (0..hashes).all(|offset| chars.get(index + 1 + offset) == Some(&'#'))
-        {
-            let literal = chars[contents_start..index].iter().collect();
-            return Some((literal, index + 1 + hashes));
-        }
-        index += 1;
-    }
-    Some((chars[contents_start..].iter().collect(), chars.len()))
-}
-
-struct StringLiteral {
-    /// The value with escapes decoded, or `None` when an escape is not a valid string escape.
-    decoded: Option<String>,
-    end: usize,
-}
-
-/// Reads the ordinary string literal whose opening quote is at `start`, decoding `\"`, `\\`,
-/// `\'`, `\n`, `\r`, `\t`, `\0`, `\xNN` (up to `\x7F`), `\u{…}` and the backslash-newline
-/// continuation, which drops the newline and the whitespace after it.
-fn read_string(chars: &[char], start: usize) -> StringLiteral {
-    let mut literal = String::new();
-    let mut valid = true;
-    let mut index = start + 1;
-    while index < chars.len() {
-        match chars[index] {
-            '"' => {
-                return StringLiteral {
-                    decoded: valid.then_some(literal),
-                    end: index + 1,
-                };
-            }
-            '\\' => {
-                let (decoded, next) = read_escape(chars, index);
-                match decoded {
-                    Some(Some(c)) => literal.push(c),
-                    Some(None) => {}
-                    None => valid = false,
-                }
-                index = next;
-            }
-            c => {
-                literal.push(c);
-                index += 1;
-            }
-        }
-    }
-    StringLiteral {
-        decoded: None,
-        end: chars.len(),
-    }
-}
-
-/// Decodes the escape whose backslash is at `start`. Returns `Some(Some(c))` for a character,
-/// `Some(None)` for a line continuation, `None` for an invalid escape, and the index after it.
-/// An invalid escape never consumes the closing quote.
-fn read_escape(chars: &[char], start: usize) -> (Option<Option<char>>, usize) {
-    let simple = |c: char| (Some(Some(c)), start + 2);
-    match chars.get(start + 1) {
-        Some('"') => simple('"'),
-        Some('\\') => simple('\\'),
-        Some('\'') => simple('\''),
-        Some('n') => simple('\n'),
-        Some('r') => simple('\r'),
-        Some('t') => simple('\t'),
-        Some('0') => simple('\0'),
-        Some('x') => {
-            let digits: String = chars.iter().skip(start + 2).take(2).collect();
-            match u8::from_str_radix(&digits, 16) {
-                Ok(value) if digits.len() == 2 && value <= 0x7f => {
-                    (Some(Some(char::from(value))), start + 4)
-                }
-                _ => (None, start + 2),
-            }
-        }
-        Some('u') if chars.get(start + 2) == Some(&'{') => {
-            let mut index = start + 3;
-            let mut digits = String::new();
-            while let Some(&c) = chars.get(index) {
-                if c == '}' || c == '"' {
-                    break;
-                }
-                if c != '_' {
-                    digits.push(c);
-                }
-                index += 1;
-            }
-            let decoded = (chars.get(index) == Some(&'}') && (1..=6).contains(&digits.len()))
-                .then(|| u32::from_str_radix(&digits, 16).ok())
-                .flatten()
-                .and_then(char::from_u32);
-            match decoded {
-                Some(c) => (Some(Some(c)), index + 1),
-                None => (None, index),
-            }
-        }
-        Some('\n') | Some('\r') => {
-            let mut index = start + 1;
-            while chars.get(index).is_some_and(|c| c.is_whitespace()) {
-                index += 1;
-            }
-            (Some(None), index)
-        }
-        Some('u') | Some(_) => (None, start + 2),
-        None => (None, start + 1),
-    }
-}
-
-fn skip_char_or_lifetime(chars: &[char], start: usize) -> usize {
-    match chars.get(start + 1) {
-        Some('\\') => {
-            let mut index = start + 2;
-            while index < chars.len() && chars[index] != '\'' {
-                index += 1;
-            }
-            index + 1
-        }
-        Some(_) if chars.get(start + 2) == Some(&'\'') => start + 3,
-        _ => start + 1,
-    }
-}
-
-fn matching_bracket(chars: &[char], open: usize) -> usize {
-    let mut nesting = 0;
-    let mut index = open;
-    while index < chars.len() {
-        match chars[index] {
-            '[' => nesting += 1,
-            ']' => {
-                nesting -= 1;
-                if nesting == 0 {
-                    return index + 1;
-                }
-            }
-            '"' => {
-                index = read_string(chars, index).end;
-                continue;
-            }
-            _ => {}
-        }
-        index += 1;
-    }
-    chars.len()
-}
-
-fn next_word_is(chars: &[char], start: usize, word: &str) -> bool {
-    let rest: String = chars[start..]
+/// `include_str`, `std::include_str`, `core::include_str`, each optionally with a leading `::`.
+fn is_include_str(path: &syn::Path) -> bool {
+    let segments = path
+        .segments
         .iter()
-        .skip_while(|c| c.is_whitespace())
-        .take(word.len() + 1)
-        .collect();
-    rest.starts_with(word) && !rest[word.len()..].starts_with(is_ident_char)
+        .map(|segment| segment.ident.to_string())
+        .collect::<Vec<_>>();
+    match segments.as_slice() {
+        [name] => name == "include_str",
+        [krate, name] => (krate == "std" || krate == "core") && name == "include_str",
+        _ => false,
+    }
+}
+
+/// True when the tokens before an `include_str` ident leave it unqualified or qualified by
+/// `std::`/`core::` (with an optional leading `::`).
+fn builtin_qualifier(before: &[TokenTree]) -> bool {
+    let is_colon = |token: Option<&TokenTree>| matches!(token, Some(TokenTree::Punct(punct)) if punct.as_char() == ':');
+    let count = before.len();
+    if !(count >= 2 && is_colon(before.get(count - 1)) && is_colon(before.get(count - 2))) {
+        return true;
+    }
+    matches!(
+        count.checked_sub(3).and_then(|index| before.get(index)),
+        Some(TokenTree::Ident(krate)) if krate == "std" || krate == "core"
+    )
+}
+
+fn is_cfg_test(attr: &Attribute) -> bool {
+    match &attr.meta {
+        Meta::List(list) => list.path.is_ident("cfg") && list.tokens.to_string() == "test",
+        _ => false,
+    }
+}
+
+fn item_attrs(item: &Item) -> &[Attribute] {
+    match item {
+        Item::Const(item) => &item.attrs,
+        Item::Enum(item) => &item.attrs,
+        Item::ExternCrate(item) => &item.attrs,
+        Item::Fn(item) => &item.attrs,
+        Item::ForeignMod(item) => &item.attrs,
+        Item::Impl(item) => &item.attrs,
+        Item::Macro(item) => &item.attrs,
+        Item::Mod(item) => &item.attrs,
+        Item::Static(item) => &item.attrs,
+        Item::Struct(item) => &item.attrs,
+        Item::Trait(item) => &item.attrs,
+        Item::TraitAlias(item) => &item.attrs,
+        Item::Type(item) => &item.attrs,
+        Item::Union(item) => &item.attrs,
+        Item::Use(item) => &item.attrs,
+        _ => &[],
+    }
+}
+
+fn expr_attrs(expr: &Expr) -> &[Attribute] {
+    match expr {
+        Expr::Array(expr) => &expr.attrs,
+        Expr::Assign(expr) => &expr.attrs,
+        Expr::Async(expr) => &expr.attrs,
+        Expr::Await(expr) => &expr.attrs,
+        Expr::Binary(expr) => &expr.attrs,
+        Expr::Block(expr) => &expr.attrs,
+        Expr::Break(expr) => &expr.attrs,
+        Expr::Call(expr) => &expr.attrs,
+        Expr::Cast(expr) => &expr.attrs,
+        Expr::Closure(expr) => &expr.attrs,
+        Expr::Const(expr) => &expr.attrs,
+        Expr::Continue(expr) => &expr.attrs,
+        Expr::Field(expr) => &expr.attrs,
+        Expr::ForLoop(expr) => &expr.attrs,
+        Expr::Group(expr) => &expr.attrs,
+        Expr::If(expr) => &expr.attrs,
+        Expr::Index(expr) => &expr.attrs,
+        Expr::Infer(expr) => &expr.attrs,
+        Expr::Let(expr) => &expr.attrs,
+        Expr::Lit(expr) => &expr.attrs,
+        Expr::Loop(expr) => &expr.attrs,
+        Expr::Macro(expr) => &expr.attrs,
+        Expr::Match(expr) => &expr.attrs,
+        Expr::MethodCall(expr) => &expr.attrs,
+        Expr::Paren(expr) => &expr.attrs,
+        Expr::Path(expr) => &expr.attrs,
+        Expr::Range(expr) => &expr.attrs,
+        Expr::RawAddr(expr) => &expr.attrs,
+        Expr::Reference(expr) => &expr.attrs,
+        Expr::Repeat(expr) => &expr.attrs,
+        Expr::Return(expr) => &expr.attrs,
+        Expr::Struct(expr) => &expr.attrs,
+        Expr::Try(expr) => &expr.attrs,
+        Expr::TryBlock(expr) => &expr.attrs,
+        Expr::Tuple(expr) => &expr.attrs,
+        Expr::Unary(expr) => &expr.attrs,
+        Expr::Unsafe(expr) => &expr.attrs,
+        Expr::While(expr) => &expr.attrs,
+        Expr::Yield(expr) => &expr.attrs,
+        _ => &[],
+    }
 }
 
 fn collect_files(directory: &Path, extension: &str, files: &mut Vec<PathBuf>) {
