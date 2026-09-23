@@ -66,6 +66,57 @@ mod tests {
         );
     }
 
+    // The page is self-contained: opening it must not reach any other origin
+    // (no web fonts, preconnects, external stylesheets, or scripts).
+    #[test]
+    fn home_page_loads_no_third_party_resources() {
+        let home = include_str!("home.html");
+        for banned in [
+            "fonts.googleapis.com",
+            "fonts.gstatic.com",
+            "rel=\"preconnect\"",
+            "rel=\"stylesheet\"",
+            "@import",
+            "src=\"http",
+            "src=\"//",
+            "url(http",
+        ] {
+            assert!(!home.contains(banned), "home.html must not load {banned}");
+        }
+        for link in home.split("<link").skip(1) {
+            let tag = link.split('>').next().unwrap_or_default();
+            assert!(
+                tag.contains("href=\"data:"),
+                "home.html <link> must be inline: <link{tag}>"
+            );
+        }
+    }
+
+    // Grep-level guards for the try-it line: one request at a time, only the
+    // newest request writes the output, and the curl command is shell-quoted
+    // with a visible fallback when the clipboard is unavailable.
+    #[test]
+    fn try_it_line_is_single_flight_and_curl_is_safe() {
+        let home = include_str!("home.html");
+        assert!(home.contains("function setTryBusy(on)"));
+        assert!(home.contains("if (tryBusy) return;"));
+        assert!(home.contains("querySelectorAll('input, .run, [data-view]')"));
+        assert!(
+            home.matches("if (gen !== tryGen) return;").count() >= 2,
+            "both the success and the error path must drop stale responses"
+        );
+        assert!(home.contains("finally { if (gen === tryGen) setTryBusy(false); }"));
+
+        assert!(home.contains("const curlCmd = () => `curl -s ${shq("));
+        assert!(
+            !home.contains("curl -s '${"),
+            "curl URL must go through shq"
+        );
+        assert!(!home.contains("navigator.clipboard.writeText"));
+        assert!(home.contains("typeof clip.writeText !== 'function'"));
+        assert!(home.contains("clip.writeText(cmd).then(copied, () => showCmd(cmd))"));
+    }
+
     #[tokio::test]
     async fn root_serves_the_home_page_with_the_build_version() {
         let response = router()
