@@ -1,12 +1,19 @@
 use super::*;
 use crate::v2::RawQueryParams;
-use bigname_storage::HistoryCursor;
+use crate::v2::history_keyset::RequestCursor;
+use bigname_storage::{HistoryCursor, HistoryPosition};
 
 fn sample_cursor() -> HistoryCursor {
     HistoryCursor {
-        normalized_event_id: Some(42),
+        normalized_event_id: None,
         event_identity: "event:42".to_owned(),
-        position: None,
+        position: Some(HistoryPosition {
+            block_number: Some(21_000_000),
+            chain_id: Some("ethereum-mainnet".to_owned()),
+            block_hash: Some("0xb1".to_owned()),
+            transaction_hash: Some("0xt1".to_owned()),
+            log_index: Some(4),
+        }),
     }
 }
 
@@ -44,7 +51,7 @@ fn history_cursor_payload_round_trips_storage_cursor() {
 
     assert_eq!(
         history_storage_cursor(&payload, &binding).expect("cursor must decode"),
-        cursor
+        RequestCursor::Position(cursor)
     );
     assert!(payload.snapshot.is_none());
 }
@@ -79,7 +86,7 @@ fn history_cursor_binds_order_type_set_and_timestamp_window() {
     );
     assert_eq!(
         history_storage_cursor(&payload, &filtered_binding).expect("cursor must decode"),
-        cursor
+        RequestCursor::Position(cursor)
     );
 
     let unfiltered = params(RawQueryParams::default());
@@ -132,7 +139,7 @@ fn history_cursor_ignores_legacy_snapshot_component() {
     assert_eq!(
         history_storage_cursor(&payload, &both)
             .expect("legacy snapshot component must not bind a latest-state cursor"),
-        cursor
+        RequestCursor::Position(cursor)
     );
 }
 
@@ -257,7 +264,7 @@ fn history_cursor_binds_the_child_registrations_option_in_both_directions() {
     );
     assert_eq!(
         history_storage_cursor(&children_payload, &with_children).expect("cursor must decode"),
-        cursor
+        RequestCursor::Position(cursor)
     );
     assert!(history_storage_cursor(&children_payload, &plain).is_err());
     assert!(history_storage_cursor(&plain_payload, &with_children).is_err());

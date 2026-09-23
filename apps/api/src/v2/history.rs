@@ -35,8 +35,6 @@ const SCOPE_FILTER_KEY: &str = "scope";
 const TYPE_FILTER_KEY: &str = "type";
 const FROM_TIMESTAMP_FILTER_KEY: &str = "from_timestamp";
 const TO_TIMESTAMP_FILTER_KEY: &str = "to_timestamp";
-const NORMALIZED_EVENT_ID_CURSOR_KEY: &str = "normalized_event_id";
-const EVENT_IDENTITY_CURSOR_KEY: &str = "event_identity";
 
 /// Anchored history counts are exact up to this many product-visible rows;
 /// larger results report `total_count=null` instead of scanning further.
@@ -111,22 +109,21 @@ pub(crate) async fn get_history(
         params: &params,
         child_registrations,
     };
-    let snapshot = super::collection_snapshot::CollectionSnapshot::capture_for_namespace(
+    let snapshot = super::collection_snapshot::CollectionSnapshot::capture_history(
         &state,
         params.cursor.as_deref(),
         Some(&namespace),
     )
     .await?;
-    let storage_cursor = params
+    let request_cursor = params
         .cursor
         .as_deref()
-        .map(|cursor| {
-            let payload = decode(cursor)?;
-            let cursor = history_storage_cursor(&payload, &cursor_binding)?;
-            snapshot.validate_cursor(&payload)?;
-            Ok(cursor)
-        })
+        .map(|cursor| history_storage_cursor(&decode(cursor)?, &cursor_binding))
         .transpose()?;
+    let storage_cursor = match request_cursor {
+        Some(cursor) => Some(super::history_keyset::resolve(&state, cursor).await?),
+        None => None,
+    };
     let block_window = Some(bound_history_block_window(
         resolve_history_block_window(&state.pool, &params).await?,
         &snapshot.block_bounds(),
@@ -192,9 +189,10 @@ pub(crate) async fn get_history(
     )
     .await?;
 
-    let next_cursor = storage_page.next_cursor.as_ref().map(|cursor| {
-        encode(&snapshot.bind_cursor(history_cursor_payload(cursor, &cursor_binding)))
-    });
+    let next_cursor = storage_page
+        .next_cursor
+        .as_ref()
+        .map(|cursor| encode(&history_cursor_payload(cursor, &cursor_binding)));
     let has_more = next_cursor.is_some();
     let total_count = if params.include.iter().any(|v| v == "total_count") {
         storage_page.summary.as_ref().map(|s| s.total_count)
@@ -210,7 +208,7 @@ pub(crate) async fn get_history(
             total_count,
             has_more,
         }),
-        meta: snapshot.finish(&state).await?,
+        meta: snapshot.finish_history(&state).await?,
     }))
 }
 

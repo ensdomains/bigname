@@ -28,6 +28,31 @@ impl CollectionSnapshot {
         cursor: Option<&str>,
         namespace: Option<&str>,
     ) -> V2Result<Self> {
+        let (snapshot, cursor) = Self::capture_scope(state, cursor, namespace, false).await?;
+        if let Some(cursor) = cursor.as_ref() {
+            snapshot.validate_cursor(cursor)?;
+        }
+        Ok(snapshot)
+    }
+
+    /// Admission for the history collections, whose cursors are keyset anchors that no
+    /// publication binds (`history_keyset`). The namespace must be served and every scope must
+    /// have a publication; a request cursor must decode, but its publication token, if any, is
+    /// not checked.
+    pub(crate) async fn capture_history(
+        state: &AppState,
+        cursor: Option<&str>,
+        namespace: Option<&str>,
+    ) -> V2Result<Self> {
+        Ok(Self::capture_scope(state, cursor, namespace, true).await?.0)
+    }
+
+    async fn capture_scope(
+        state: &AppState,
+        cursor: Option<&str>,
+        namespace: Option<&str>,
+        history: bool,
+    ) -> V2Result<(Self, Option<CursorPayload>)> {
         if let Some(namespace) = namespace {
             ensure_public_namespace(namespace).map_err(api_error_to_v2)?;
         }
@@ -49,14 +74,14 @@ impl CollectionSnapshot {
         let token = namespaces.collection_fingerprint();
 
         let evaluated_at = match cursor.as_ref() {
-            Some(cursor) => bigname_storage::parse_rfc3339_utc_timestamp(
+            Some(cursor) if !history => bigname_storage::parse_rfc3339_utc_timestamp(
                 cursor
                     .evaluated_at
                     .as_deref()
                     .ok_or_else(restart_required)?,
             )
             .map_err(|_| super::cursor::invalid_cursor_error())?,
-            None => OffsetDateTime::now_utc()
+            _ => OffsetDateTime::now_utc()
                 .replace_nanosecond(0)
                 .expect("zero nanoseconds are valid"),
         };
@@ -67,10 +92,7 @@ impl CollectionSnapshot {
             namespace: namespace.map(str::to_owned),
             continues_cursor: cursor.is_some(),
         };
-        if let Some(cursor) = cursor.as_ref() {
-            snapshot.validate_cursor(cursor)?;
-        }
-        Ok(snapshot)
+        Ok((snapshot, cursor))
     }
 
     /// Records that the request carried a cursor that this snapshot did not decode, for
@@ -139,9 +161,19 @@ impl CollectionSnapshot {
             })?;
         request_scope_meta(self.namespaces.request_scope())
     }
+
+    /// The `meta` of a history page: the publication captured when the request was admitted. A
+    /// history page is not a snapshot, so a publication during the read does not refuse it.
+    pub(crate) async fn finish_history(&self, state: &AppState) -> V2Result<Meta> {
+        #[cfg(test)]
+        finish_test_hooks::run(&state.pool).await?;
+        #[cfg(not(test))]
+        let _ = state;
+        request_scope_meta(self.namespaces.request_scope())
+    }
 }
 
-fn restart_required() -> V2Error {
+pub(super) fn restart_required() -> V2Error {
     V2Error::stale(
         "collection publication is no longer available; restart pagination without a cursor",
     )
