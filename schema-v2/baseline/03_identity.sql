@@ -553,5 +553,7 @@ COMMENT ON COLUMN surface_bindings.inserted_at IS
     'This time records row creation.';
 
 CREATE INDEX IF NOT EXISTS name_surfaces_project_labels_idx ON name_surfaces USING gin(raw_labels);
-CREATE INDEX IF NOT EXISTS name_surfaces_project_suffix_idx ON name_surfaces(namespace, raw_labels);
+-- Labels are chain data of any length, so the label-suffix lookup indexes a fixed-size
+-- hash of the array and rechecks the array itself; see ops/project-progressive/README.md.
+CREATE INDEX IF NOT EXISTS name_surfaces_project_suffix_hash_idx ON name_surfaces(namespace, hash_array_extended(raw_labels, 0));
 CREATE INDEX IF NOT EXISTS name_surfaces_project_node_idx ON name_surfaces(namespace, lower(namehash));

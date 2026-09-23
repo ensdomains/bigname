@@ -10,7 +10,9 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_project_node_history_i
                AND source_family IN ('ens_v1_registry_l1', 'ens_v1_registrar_l1', 'ens_v1_wrapper_l1')));
 
 CREATE INDEX CONCURRENTLY IF NOT EXISTS name_surfaces_project_labels_idx ON bigname_phase.name_surfaces USING gin(raw_labels);
-CREATE INDEX CONCURRENTLY IF NOT EXISTS name_surfaces_project_suffix_idx ON bigname_phase.name_surfaces(namespace, raw_labels);
+-- Replaces the earlier (namespace, raw_labels) array index, whose entries have no size bound.
+DROP INDEX CONCURRENTLY IF EXISTS bigname_phase.name_surfaces_project_suffix_idx;
+CREATE INDEX CONCURRENTLY IF NOT EXISTS name_surfaces_project_suffix_hash_idx ON bigname_phase.name_surfaces(namespace, hash_array_extended(raw_labels, 0));
 CREATE INDEX CONCURRENTLY IF NOT EXISTS name_surfaces_project_node_idx ON bigname_phase.name_surfaces(namespace, lower(namehash));
 CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_project_v1_pointer_node_idx
     ON bigname_phase.normalized_events(chain_id, namespace, lower(after_state ->> 'node'), block_number)

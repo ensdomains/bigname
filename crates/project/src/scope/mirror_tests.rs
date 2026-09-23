@@ -418,6 +418,82 @@ async fn profiled_mirror_substages_preserve_each_nonempty_closure_step() -> Resu
     Ok(())
 }
 
+/// Label bytes come from chain data, so a name can be far longer than one btree index entry
+/// (about 2.7 KB). The suffix index must accept its surface, and the keyed suffix probe must
+/// still find that surface through the index.
+#[tokio::test]
+async fn long_labels_fit_the_suffix_index_that_serves_the_keyed_walk() -> Result<()> {
+    const SUFFIX_INDEX: &str = "name_surfaces_project_suffix_hash_idx";
+    let database = TestDatabase::create(TestDatabaseConfig::new("mirror_suffix_index")).await?;
+    let mut tx = database.pool().begin().await?;
+    sqlx::raw_sql(include_str!("mirror_fixture.sql"))
+        .execute(&mut *tx)
+        .await?;
+    // 32 labels of 128 hex characters: 4 KB that does not compress, so a btree entry holding the
+    // whole array cannot shrink below the limit, while each label stays small.
+    sqlx::raw_sql(
+        "INSERT INTO name_surfaces VALUES('long','ens','long','bench',10,'block','canonical',
+             ARRAY(SELECT md5(i||'a')||md5(i||'b')||md5(i||'c')||md5(i||'d')
+                   FROM generate_series(1, 32) i ORDER BY i) || ARRAY['label-1','eth']);
+         INSERT INTO normalized_events VALUES(300,'mirror-long','bench','ens',md5('mirror-long')::uuid,'long',
+             'ResolverChanged','ens_v2_registry_l1',1,1,10,'block',0,0,'canonical','activated',
+             '{\"node\":\"long\",\"resolver\":\"0xmirror\"}','{}','{}');
+         INSERT INTO name_surfaces SELECT 'filler-'||i,'ens','filler-'||i,'bench',10,'block','canonical',
+             ARRAY['filler-'||i,'test'] FROM generate_series(1, 20000) i;
+         ANALYZE name_surfaces; ANALYZE normalized_events",
+    )
+    .execute(&mut *tx)
+    .await?;
+    let session = crate::profile::Session::create(&std::env::temp_dir())?;
+    let mut strategy = super::stage(&mut tx, "bench", 10).await?;
+    sqlx::query("INSERT INTO project_scope_resources VALUES(md5('mirror-long')::uuid)")
+        .execute(&mut *tx)
+        .await?;
+    session
+        .scope(super::include(&mut tx, "bench", 10, &mut strategy))
+        .await?;
+    let consulted: Vec<String> = sqlx::query_scalar(
+        "SELECT consulted_logical_name_id FROM project_mirror_links
+         WHERE mirror_resource_id = md5('mirror-long')::uuid ORDER BY 1",
+    )
+    .fetch_all(&mut *tx)
+    .await?;
+    assert_eq!(consulted, ["eth", "long", "name-1"]);
+    fn inspect(node: &serde_json::Value, probes: &mut f64, suffixes: &mut f64) {
+        let loops = node["Actual Loops"].as_f64().unwrap_or_default();
+        if node["Relation Name"] == "name_surfaces" && node["Index Name"] == SUFFIX_INDEX {
+            *probes += loops;
+        }
+        if node["Relation Name"] == "project_mirror_suffixes" {
+            *suffixes += loops * node["Actual Rows"].as_f64().unwrap_or_default();
+        }
+        for child in node["Plans"].as_array().into_iter().flatten() {
+            inspect(child, probes, suffixes);
+        }
+    }
+    let (mut probes, mut suffixes) = (0.0, 0.0);
+    let mut plans = 0;
+    for entry in std::fs::read_dir(session.directory())? {
+        let path = entry?.path();
+        if path.to_string_lossy().contains("-project_mirror_surfaces-") {
+            let plan: serde_json::Value = serde_json::from_slice(&std::fs::read(&path)?)?;
+            inspect(&plan[0]["Plan"], &mut probes, &mut suffixes);
+            plans += 1;
+        }
+    }
+    assert_eq!(plans, 1);
+    assert!(suffixes >= 34.0, "the long name alone walks 34 suffixes");
+    assert_eq!(
+        probes, suffixes,
+        "each walked suffix probes {SUFFIX_INDEX} once"
+    );
+    std::fs::remove_dir_all(session.directory())?;
+    super::finish(&mut tx, strategy).await?;
+    tx.rollback().await?;
+    database.cleanup().await?;
+    Ok(())
+}
+
 #[cfg(test)]
 #[path = "mirror_dependency_repro.rs"]
 mod dependency_repro;

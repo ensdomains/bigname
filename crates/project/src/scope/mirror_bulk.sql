@@ -136,7 +136,12 @@ CREATE TEMP TABLE project_mirror_surfaces ON COMMIT DROP AS
            lower(surface.namehash) AS namehash
     FROM project_mirror_suffixes walk JOIN LATERAL (
         SELECT * FROM name_surfaces
-        WHERE namespace = walk.namespace AND raw_labels = walk.suffix OFFSET 0
+        -- The hash equality matches name_surfaces_project_suffix_hash_idx and the array
+        -- equality decides the match, so a hash collision never changes the result.
+        -- The statements in this file are split on semicolons, so comments have none.
+        WHERE namespace = walk.namespace
+          AND hash_array_extended(raw_labels, 0) = hash_array_extended(walk.suffix, 0)
+          AND raw_labels = walk.suffix OFFSET 0
     ) surface ON TRUE
     JOIN chain_lineage lineage USING(chain_id, block_number, block_hash)
     WHERE surface.chain_id = $1 AND surface.block_number <= $2

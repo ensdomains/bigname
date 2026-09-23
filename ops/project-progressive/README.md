@@ -11,6 +11,23 @@ indexes. An existing name is not proof of a valid or matching index. Stop on any
 failure; an interrupted concurrent build can leave an invalid index and must be
 reviewed before an explicitly authorized retry.
 
+The mirror walk looks up the surface of each label suffix of a name (the name
+itself, then each ancestor below the root). `name_surfaces_project_suffix_hash_idx`
+serves that lookup on `(namespace, hash_array_extended(raw_labels, 0))` instead of
+on the label array itself. Labels come from chain data and have no length limit,
+and a btree entry cannot exceed about 2.7 KB, so indexing the array would make
+the `name_surfaces` insert fail for a long enough name. The 64-bit hash has a fixed
+size; the query compares the hash and then the exact label array, so a hash
+collision never changes the result. `hash_array_extended` is a built-in immutable
+PostgreSQL function (the array-to-text functions are not immutable and cannot be
+indexed); the query spells the same expression so the planner can use the index.
+
+An earlier version of this package built `name_surfaces_project_suffix_idx` on
+`(namespace, raw_labels)`. `install.sql` drops that index concurrently before it
+builds the hash index, and `validate.sql` fails while it still exists or when the
+hash index has another definition. The schema-migration drops it too, which is an
+ordinary (blocking, but quick) index drop when `install.sql` was not rerun first.
+
 The ordinary schema-migrations (`20260922010000_project_node_history_idx.sql` and
 `20260922010100_project_mirror_scope_indexes.sql`) cover empty/test installations
 and recognise indexes prebuilt under the same names. They are not a substitute for

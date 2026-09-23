@@ -684,9 +684,11 @@ as [their runbook](../../ops/project-progressive/README.md) describes. This
 runbook carries no copy of the five statements; `install.sql` is the only
 source. The builds are concurrent and permit writes, so they can finish while
 the existing runner is still processing, before the stop/start window opens.
-`validate.sql` fails unless all five names are valid and ready indexes; an
-existing name is not proof of a valid or matching index, so also compare each
-`pg_get_indexdef` with `install.sql`. An interrupted build leaves an invalid
+`validate.sql` fails unless all five names are valid and ready indexes, the
+label-suffix index has its reviewed hash-expression definition, and the earlier
+`name_surfaces_project_suffix_idx` array index (which `install.sql` drops) is
+gone; an existing name is not proof of a valid or matching index, so also
+compare each other `pg_get_indexdef` with `install.sql`. An interrupted build leaves an invalid
 index; confirm in `pg_stat_progress_create_index` that no build is still
 running, then review before an explicitly authorized retry. Keep both outputs
 with their start and end times in the release record. Then apply the
