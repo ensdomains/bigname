@@ -14,10 +14,16 @@ use uuid::Uuid;
 
 use super::{
     query::{
-        push_address_names_current_cursor_after, push_address_names_current_cursor_identity_match,
+        escape_like_pattern, push_address_names_current_cursor_after,
+        push_address_names_current_cursor_identity_match,
         push_address_names_current_cursor_sort_value_match, push_address_names_current_order,
         push_address_names_current_sortable_entries_cte,
     },
+    resolves_to_evm::{
+        EVM_OUTER_COLUMNS, EvmFacets, decode_evm_facets, push_evm_address_rows_cte,
+        push_evm_entries_ctes,
+    },
+    resolves_to_filter::ADDRESS_RECORDS_CURRENT_READ_FILTER,
     types::{
         AddressNamesCurrentDedupe, AddressNamesCurrentOrder, AddressNamesCurrentSort,
         AddressNamesCurrentSortedCursor, AddressNamesCurrentSortedCursorValue,
@@ -49,7 +55,8 @@ pub struct AddressRecordCurrentEntry {
     pub resource_id: Option<Uuid>,
     pub record_resource_id: Uuid,
     pub binding_kind: Option<SurfaceBindingKind>,
-    /// The requested coin type, not the stored row's coin type.
+    /// The requested coin type, not the stored row's coin type. On a `coin_type=evm` read it is
+    /// the representative row's stored coin type; the matches are carried beside the entry.
     pub coin_type: String,
     pub record_key: String,
     pub provenance: Value,
@@ -86,6 +93,31 @@ pub async fn load_address_records_current_page(
     cursor: Option<&AddressNamesCurrentSortedCursor>,
     page_size: u64,
 ) -> Result<AddressRecordsCurrentPage> {
+    let filter = AddressRecordsFilter {
+        address,
+        coins: AddressRecordsCoinSelector::Single(coin_type),
+        namespaces,
+        dedupe_by,
+        q,
+        authority_arm,
+    };
+    let (rows, next_cursor) =
+        load_sorted_entries(pool, &filter, sort, order, cursor, page_size).await?;
+    Ok(AddressRecordsCurrentPage {
+        entries: rows.into_iter().map(|row| row.entry).collect(),
+        next_cursor,
+    })
+}
+
+/// Run one page statement (after validating a continuation cursor) and split the keyset page.
+pub(super) async fn load_sorted_entries(
+    pool: &PgPool,
+    filter: &AddressRecordsFilter<'_>,
+    sort: AddressNamesCurrentSort,
+    order: AddressNamesCurrentOrder,
+    cursor: Option<&AddressNamesCurrentSortedCursor>,
+    page_size: u64,
+) -> Result<(Vec<SortedEntry>, Option<AddressNamesCurrentSortedCursor>)> {
     let page_size = checked_page_size_usize(
         page_size,
         "address_records_current page_size must be positive",
@@ -96,23 +128,56 @@ pub async fn load_address_records_current_page(
         "address_records_current page_size is too large",
         "address_records_current page_size exceeds SQL limit",
     )?;
-    let filter = AddressRecordsFilter {
-        address,
-        coin_type,
-        namespaces,
-        dedupe_by,
-        q,
-        authority_arm,
-    };
 
     if let Some(cursor) = cursor {
         ensure_cursor_matches_sort(sort, cursor)?;
-        ensure_cursor_exists(pool, &filter, sort, cursor).await?;
+        ensure_cursor_exists(pool, filter, sort, cursor).await?;
     }
 
     let mut builder = QueryBuilder::<Postgres>::new("");
-    push_entries_cte(&mut builder, &filter);
-    push_address_names_current_sortable_entries_cte(&mut builder, sort);
+    push_page_statement(&mut builder, filter, sort, order, cursor, page_limit);
+    let rows = builder.build().fetch_all(pool).await.with_context(|| {
+        format!(
+            "failed to load address_records_current page for {} sort {} order {}",
+            filter.context(),
+            sort.as_str(),
+            order.as_str()
+        )
+    })?;
+    let rows = rows
+        .into_iter()
+        .map(|row| decode_sorted_entry(row, filter.coins, sort))
+        .collect::<Result<Vec<_>>>()?;
+    Ok(split_keyset_page(rows, page_size, |row| {
+        AddressNamesCurrentSortedCursor {
+            sort_value: match sort {
+                AddressNamesCurrentSort::Name => AddressNamesCurrentSortedCursorValue::Name(
+                    row.entry.canonical_display_name.clone(),
+                ),
+                AddressNamesCurrentSort::ExpiresAt | AddressNamesCurrentSort::RegisteredAt => {
+                    AddressNamesCurrentSortedCursorValue::Timestamp(row.sort_timestamp)
+                }
+            },
+            logical_name_id: row.entry.logical_name_id.clone(),
+            resource_id: row
+                .entry
+                .resource_id
+                .unwrap_or(row.entry.record_resource_id),
+        }
+    }))
+}
+
+/// The page statement: the filtered and grouped entries, the cursor predicate, order, and limit.
+pub(super) fn push_page_statement<'a>(
+    builder: &mut QueryBuilder<'a, Postgres>,
+    filter: &AddressRecordsFilter<'a>,
+    sort: AddressNamesCurrentSort,
+    order: AddressNamesCurrentOrder,
+    cursor: Option<&'a AddressNamesCurrentSortedCursor>,
+    page_limit: i64,
+) {
+    push_entries_cte(builder, filter);
+    push_address_names_current_sortable_entries_cte(builder, sort);
     builder.push(
         r#"
         SELECT
@@ -136,6 +201,9 @@ pub async fn load_address_records_current_page(
             last_recomputed_at,
         "#,
     );
+    if filter.coins == AddressRecordsCoinSelector::Evm {
+        builder.push(EVM_OUTER_COLUMNS);
+    }
     if sort.is_timestamp() {
         builder.push("sort_timestamp");
     } else {
@@ -149,61 +217,44 @@ pub async fn load_address_records_current_page(
     });
     builder.push(" WHERE TRUE ");
     if let Some(cursor) = cursor {
-        push_address_names_current_cursor_after(&mut builder, sort, order, cursor);
+        push_address_names_current_cursor_after(builder, sort, order, cursor);
     }
-    push_address_names_current_order(&mut builder, sort, order);
+    push_address_names_current_order(builder, sort, order);
     builder.push(" LIMIT ");
     builder.push_bind(page_limit);
-
-    let rows = builder.build().fetch_all(pool).await.with_context(|| {
-        format!(
-            "failed to load address_records_current page for {} sort {} order {}",
-            filter.context(),
-            sort.as_str(),
-            order.as_str()
-        )
-    })?;
-    let rows = rows
-        .into_iter()
-        .map(|row| decode_sorted_entry(row, coin_type, sort))
-        .collect::<Result<Vec<_>>>()?;
-    let (rows, next_cursor) =
-        split_keyset_page(rows, page_size, |row| AddressNamesCurrentSortedCursor {
-            sort_value: match sort {
-                AddressNamesCurrentSort::Name => AddressNamesCurrentSortedCursorValue::Name(
-                    row.entry.canonical_display_name.clone(),
-                ),
-                AddressNamesCurrentSort::ExpiresAt | AddressNamesCurrentSort::RegisteredAt => {
-                    AddressNamesCurrentSortedCursorValue::Timestamp(row.sort_timestamp)
-                }
-            },
-            logical_name_id: row.entry.logical_name_id.clone(),
-            resource_id: row
-                .entry
-                .resource_id
-                .unwrap_or(row.entry.record_resource_id),
-        });
-
-    Ok(AddressRecordsCurrentPage {
-        entries: rows.into_iter().map(|row| row.entry).collect(),
-        next_cursor,
-    })
 }
 
-struct AddressRecordsFilter<'a> {
-    address: &'a str,
-    coin_type: &'a str,
-    namespaces: Option<&'a [String]>,
-    dedupe_by: AddressNamesCurrentDedupe,
-    q: Option<&'a str>,
-    authority_arm: Option<&'a str>,
+/// Which stored rows a read matches: one requested coin type with the ENSIP-19 default-address
+/// fallback, or every stored row whose coin type is an EVM coin type.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum AddressRecordsCoinSelector<'a> {
+    Single(&'a str),
+    Evm,
+}
+
+impl AddressRecordsCoinSelector<'_> {
+    fn as_str(&self) -> &str {
+        match self {
+            Self::Single(coin_type) => coin_type,
+            Self::Evm => "evm",
+        }
+    }
+}
+
+pub(super) struct AddressRecordsFilter<'a> {
+    pub(super) address: &'a str,
+    pub(super) coins: AddressRecordsCoinSelector<'a>,
+    pub(super) namespaces: Option<&'a [String]>,
+    pub(super) dedupe_by: AddressNamesCurrentDedupe,
+    pub(super) q: Option<&'a str>,
+    pub(super) authority_arm: Option<&'a str>,
 }
 
 impl AddressRecordsFilter<'_> {
     fn context(&self) -> String {
         let mut parts = vec![
             format!("address {}", self.address),
-            format!("coin_type {}", self.coin_type),
+            format!("coin_type {}", self.coins.as_str()),
         ];
         if let Some(namespaces) = self.namespaces {
             parts.push(format!("namespaces {}", namespaces.join(",")));
@@ -232,9 +283,12 @@ fn push_entries_cte<'a>(
     builder: &mut QueryBuilder<'a, Postgres>,
     filter: &AddressRecordsFilter<'a>,
 ) {
+    builder.push("\n        WITH ");
+    if filter.coins == AddressRecordsCoinSelector::Evm {
+        push_evm_address_rows_cte(builder, filter.address);
+    }
     builder.push(
-        r#"
-        WITH filtered AS (
+        r#"filtered AS (
             SELECT
                 arc.address,
                 arc.logical_name_id,
@@ -261,12 +315,26 @@ fn push_entries_cte<'a>(
                 arc.canonicality_summary,
                 arc.manifest_version,
                 arc.last_recomputed_at,
-                CASE WHEN arc.coin_type = "#,
+                "#,
     );
-    builder.push_bind(filter.coin_type);
+    match filter.coins {
+        AddressRecordsCoinSelector::Single(coin_type) => {
+            builder.push("CASE WHEN arc.coin_type = ");
+            builder.push_bind(coin_type);
+            builder.push(" THEN 0 ELSE 1 END AS record_rank");
+        }
+        AddressRecordsCoinSelector::Evm => {
+            builder.push("arc.coin_type AS matched_coin_type");
+        }
+    }
+    builder.push(match filter.coins {
+        AddressRecordsCoinSelector::Single(_) => {
+            "\n            FROM bigname_phase.address_records_current arc"
+        }
+        AddressRecordsCoinSelector::Evm => "\n            FROM evm_address_rows arc",
+    });
     builder.push(
-        r#" THEN 0 ELSE 1 END AS record_rank
-            FROM bigname_phase.address_records_current arc
+        r#"
             JOIN bigname_phase.name_surfaces surface
               ON surface.logical_name_id = arc.logical_name_id
             LEFT JOIN bigname_phase.resources resource
@@ -295,20 +363,26 @@ fn push_entries_cte<'a>(
         builder.push_bind(namespaces);
         builder.push(")");
     }
-    // Exact entry for the requested coin type, or the ENSIP-19 default EVM address when the
-    // serving resolver declares that read feature and no exact entry shadows this coin type.
-    builder.push(" AND (arc.coin_type = ");
-    builder.push_bind(filter.coin_type);
-    builder.push(" OR (");
-    builder.push_bind(ensip19_default_address_may_answer(filter.coin_type));
-    builder.push(" AND arc.record_key = ");
-    builder.push_bind(ENSIP19_DEFAULT_ADDRESS_RECORD_KEY);
-    builder.push(
-        " AND arc.provenance ->> 'ensip19_default_address' = 'true' \
-          AND NOT COALESCE(arc.provenance -> 'shadowed_coin_types' ? ",
-    );
-    builder.push_bind(filter.coin_type);
-    builder.push(", false)))");
+    match filter.coins {
+        // Exact entry for the requested coin type, or the ENSIP-19 default EVM address when the
+        // serving resolver declares that read feature and no exact entry shadows this coin type.
+        AddressRecordsCoinSelector::Single(coin_type) => {
+            builder.push(" AND (arc.coin_type = ");
+            builder.push_bind(coin_type);
+            builder.push(" OR (");
+            builder.push_bind(ensip19_default_address_may_answer(coin_type));
+            builder.push(" AND arc.record_key = ");
+            builder.push_bind(ENSIP19_DEFAULT_ADDRESS_RECORD_KEY);
+            builder.push(
+                " AND arc.provenance ->> 'ensip19_default_address' = 'true' \
+                  AND NOT COALESCE(arc.provenance -> 'shadowed_coin_types' ? ",
+            );
+            builder.push_bind(coin_type);
+            builder.push(", false)))");
+        }
+        // Applied while reading `evm_address_rows`.
+        AddressRecordsCoinSelector::Evm => {}
+    }
     if let Some(prefix) = filter.q {
         builder.push(" AND arc.raw_name LIKE ");
         builder.push_bind(format!("{}%", escape_like_pattern(prefix)));
@@ -325,63 +399,17 @@ fn push_entries_cte<'a>(
         builder.push_bind(authority_arm);
         builder.push(")");
     }
+    builder.push(ADDRESS_RECORDS_CURRENT_READ_FILTER);
     builder.push(
         r#"
-              AND arc.canonicality_summary ->> 'state' = 'canonical_lineage'
-              AND EXISTS (
-                  SELECT 1
-                  FROM bigname_phase.chain_lineage projection_lineage
-                  WHERE projection_lineage.chain_id = arc.provenance ->> 'chain_id'
-                    AND projection_lineage.block_hash = arc.chain_positions ->> 'target_block_hash'
-                    AND projection_lineage.canonicality_state IN (
-                        'canonical'::bigname_phase.canonicality_state,
-                        'safe'::bigname_phase.canonicality_state,
-                        'finalized'::bigname_phase.canonicality_state
-                    )
-              )
-              AND surface.canonicality_state IN (
-                  'canonical'::bigname_phase.canonicality_state,
-                  'safe'::bigname_phase.canonicality_state,
-                  'finalized'::bigname_phase.canonicality_state
-              )
-              AND surface_lineage.canonicality_state IN (
-                  'canonical'::bigname_phase.canonicality_state,
-                  'safe'::bigname_phase.canonicality_state,
-                  'finalized'::bigname_phase.canonicality_state
-              )
-              AND (arc.resource_id IS NULL OR (resource.canonicality_state IN (
-                  'canonical'::bigname_phase.canonicality_state,
-                  'safe'::bigname_phase.canonicality_state,
-                  'finalized'::bigname_phase.canonicality_state
-              )
-              AND resource_lineage.canonicality_state IN (
-                  'canonical'::bigname_phase.canonicality_state,
-                  'safe'::bigname_phase.canonicality_state,
-                  'finalized'::bigname_phase.canonicality_state
-              )
-              ))
-              AND record_resource.canonicality_state IN (
-                  'canonical'::bigname_phase.canonicality_state,
-                  'safe'::bigname_phase.canonicality_state,
-                  'finalized'::bigname_phase.canonicality_state
-              )
-              AND record_resource_lineage.canonicality_state IN (
-                  'canonical'::bigname_phase.canonicality_state,
-                  'safe'::bigname_phase.canonicality_state,
-                  'finalized'::bigname_phase.canonicality_state
-              )
-              AND (arc.surface_binding_id IS NULL OR (binding.canonicality_state IN (
-                  'canonical'::bigname_phase.canonicality_state,
-                  'safe'::bigname_phase.canonicality_state,
-                  'finalized'::bigname_phase.canonicality_state
-              )
-              AND binding_lineage.canonicality_state IN (
-                  'canonical'::bigname_phase.canonicality_state,
-                  'safe'::bigname_phase.canonicality_state,
-                  'finalized'::bigname_phase.canonicality_state
-              )
-              ))
-        ),
+        )"#,
+    );
+    if filter.coins == AddressRecordsCoinSelector::Evm {
+        push_evm_entries_ctes(builder, filter.dedupe_by);
+        return;
+    }
+    builder.push(
+        r#",
         entries AS (
             SELECT DISTINCT ON ("#,
     );
@@ -428,19 +456,7 @@ async fn ensure_cursor_exists(
     cursor: &AddressNamesCurrentSortedCursor,
 ) -> Result<()> {
     let mut builder = QueryBuilder::<Postgres>::new("");
-    push_entries_cte(&mut builder, filter);
-    push_address_names_current_sortable_entries_cte(&mut builder, sort);
-    builder.push(" SELECT EXISTS (SELECT 1 FROM ");
-    builder.push(if sort.is_timestamp() {
-        "sortable_entries"
-    } else {
-        "entries"
-    });
-    builder.push(" WHERE ");
-    push_address_names_current_cursor_identity_match(&mut builder, cursor);
-    push_address_names_current_cursor_sort_value_match(&mut builder, sort, cursor);
-    builder.push(") AS cursor_exists");
-
+    push_cursor_exists_statement(&mut builder, filter, sort, cursor);
     let row = builder.build().fetch_one(pool).await.with_context(|| {
         format!(
             "failed to validate address_records_current page cursor for {} sort {}",
@@ -453,6 +469,27 @@ async fn ensure_cursor_exists(
     } else {
         bail!("address_records_current page cursor does not match a grouped entry")
     }
+}
+
+/// The continuation check: the cursor row must still be one of the grouped entries.
+pub(super) fn push_cursor_exists_statement<'a>(
+    builder: &mut QueryBuilder<'a, Postgres>,
+    filter: &AddressRecordsFilter<'a>,
+    sort: AddressNamesCurrentSort,
+    cursor: &'a AddressNamesCurrentSortedCursor,
+) {
+    push_entries_cte(builder, filter);
+    push_address_names_current_sortable_entries_cte(builder, sort);
+    builder.push(" SELECT EXISTS (SELECT 1 FROM ");
+    builder.push(if sort.is_timestamp() {
+        "sortable_entries"
+    } else {
+        "entries"
+    });
+    builder.push(" WHERE ");
+    push_address_names_current_cursor_identity_match(builder, cursor);
+    push_address_names_current_cursor_sort_value_match(builder, sort, cursor);
+    builder.push(") AS cursor_exists");
 }
 
 fn ensure_cursor_matches_sort(
@@ -472,16 +509,26 @@ fn ensure_cursor_matches_sort(
     }
 }
 
-struct SortedEntry {
-    entry: AddressRecordCurrentEntry,
+pub(super) struct SortedEntry {
+    pub(super) entry: AddressRecordCurrentEntry,
     sort_timestamp: Option<OffsetDateTime>,
+    pub(super) evm: Option<EvmFacets>,
 }
 
 fn decode_sorted_entry(
     row: PgRow,
-    coin_type: &str,
+    coins: AddressRecordsCoinSelector<'_>,
     sort: AddressNamesCurrentSort,
 ) -> Result<SortedEntry> {
+    // A single-coin row reports the requested coin type; an evm row reports its representative's
+    // own stored coin type beside the group's facets.
+    let (coin_type, evm) = match coins {
+        AddressRecordsCoinSelector::Single(coin_type) => (coin_type.to_owned(), None),
+        AddressRecordsCoinSelector::Evm => {
+            let (coin_type, facets) = decode_evm_facets(&row)?;
+            (coin_type, Some(facets))
+        }
+    };
     let sort_timestamp = sort
         .is_timestamp()
         .then(|| crate::sql_row::get::<Option<OffsetDateTime>>(&row, "sort_timestamp"))
@@ -499,7 +546,7 @@ fn decode_sorted_entry(
         resource_id: crate::sql_row::get(&row, "authority_resource_id")?,
         record_resource_id: crate::sql_row::get(&row, "record_resource_id")?,
         binding_kind,
-        coin_type: coin_type.to_owned(),
+        coin_type,
         record_key: crate::sql_row::get(&row, "record_key")?,
         provenance: crate::sql_row::get(&row, "provenance")?,
         coverage: crate::sql_row::get(&row, "coverage")?,
@@ -511,14 +558,8 @@ fn decode_sorted_entry(
     Ok(SortedEntry {
         entry,
         sort_timestamp,
+        evm,
     })
-}
-
-fn escape_like_pattern(value: &str) -> String {
-    value
-        .replace('\\', r"\\")
-        .replace('%', r"\%")
-        .replace('_', r"\_")
 }
 
 #[cfg(test)]

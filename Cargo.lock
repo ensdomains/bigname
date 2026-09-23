@@ -1911,6 +1911,7 @@ dependencies = [
  "anyhow",
  "bigname-content-hash",
  "bigname-domain",
+ "bigname-manifests",
  "bigname-test-support",
  "clap",
  "futures-util",

@@ -359,7 +359,7 @@ async fn load_phase_inventories<'a>(
     }
     let query = format!(
         r#"
-        SELECT ric.resource_id, ric.record_version_boundary,
+        SELECT ric.resource_id, ric.record_version_boundary, ric.record_version_boundary_key,
                ric.selectors, {READABLE_RECORD_INVENTORY_ENTRIES} AS entries,
                ric.provenance, ric.unsupported_families,
                ric.support_status, ric.unsupported_reason,
@@ -385,6 +385,7 @@ async fn load_phase_inventories<'a>(
             boundary,
             IdentityRecordInventoryRow {
                 resource_id,
+                record_version_boundary_key: row.try_get("record_version_boundary_key")?,
                 support_status: row.try_get("support_status")?,
                 unsupported_reason: row.try_get("unsupported_reason")?,
                 selectors: row.try_get("selectors")?,

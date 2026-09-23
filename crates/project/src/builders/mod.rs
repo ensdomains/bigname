@@ -1,6 +1,7 @@
 mod account_permissions;
 mod address_names;
 mod address_records;
+pub(crate) mod child_registrations;
 mod children;
 mod linked_records;
 mod name_authority;
@@ -114,6 +115,13 @@ pub(crate) async fn build_all(
     primary_names::build(transaction, chain_id, target).await?;
     tracing::debug!(
         builder = "primary_names",
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "Project builder completed"
+    );
+    let started = std::time::Instant::now();
+    child_registrations::build(transaction, target, full_rebuild).await?;
+    tracing::debug!(
+        builder = "child_registrations",
         elapsed_ms = started.elapsed().as_millis() as u64,
         "Project builder completed"
     );

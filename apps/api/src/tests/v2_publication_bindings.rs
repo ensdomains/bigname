@@ -30,6 +30,7 @@ async fn v2_published_bindings_survive_later_interpret_closures() -> Result<()> 
     let routes = [
         format!("/v1/addresses/{V2_ADDRESS}/names"),
         format!("/v1/addresses/{V2_ADDRESS}/names?relation=resolves_to"),
+        format!("/v1/addresses/{V2_ADDRESS}/names?relation=resolves_to&coin_type=evm"),
         "/v1/names/alpha.eth".to_owned(),
     ];
     let mut before = Vec::new();

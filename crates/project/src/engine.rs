@@ -125,7 +125,15 @@ async fn derive(
         "Project stage completed"
     );
     stage_start = std::time::Instant::now();
-    let row_count = publish::swap(transaction, &request.chain_id, full_rebuild).await?;
+    let row_count = publish::swap(transaction, &request.chain_id, full_rebuild).await?
+        + builders::child_registrations::publish(
+            transaction,
+            &request.chain_id,
+            full_rebuild,
+            request.affected_from_block,
+            request.affected_to_block,
+        )
+        .await?;
     tracing::debug!(
         stage = "publish",
         elapsed_ms = stage_start.elapsed().as_millis() as u64,

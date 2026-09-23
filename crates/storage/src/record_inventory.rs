@@ -1,3 +1,4 @@
+mod abi_content_types;
 mod boundary_key;
 mod canonicality;
 mod counts;
@@ -5,6 +6,12 @@ mod row_decode;
 mod snapshot_reads;
 mod validation;
 
+#[cfg(any(test, feature = "test-support"))]
+pub use abi_content_types::explain_record_inventory_abi_evidence_for_test;
+pub use abi_content_types::{
+    AbiContentTypes, AbiContentTypesInput, AbiContentTypesUnavailable,
+    load_record_inventory_abi_content_types,
+};
 pub use boundary_key::record_version_boundary_storage_key;
 
 pub(crate) use canonicality::DEFAULT_RECORD_INVENTORY_CURRENT_READ_FILTER;

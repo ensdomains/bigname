@@ -38,14 +38,22 @@ pub use address_names::{
     AddressNamesCurrentCountFilter, AddressNamesCurrentCursor, AddressNamesCurrentDedupe,
     AddressNamesCurrentOrder, AddressNamesCurrentPage, AddressNamesCurrentProvenanceSummary,
     AddressNamesCurrentSort, AddressNamesCurrentSortedCursor, AddressNamesCurrentSortedCursorValue,
-    AddressNamesCurrentSortedPage, AddressNamesCurrentSummary, AddressRecordCurrentEntry,
+    AddressNamesCurrentSortedPage, AddressNamesCurrentSummary, AddressRecordCoinMatch,
+    AddressRecordCurrentEntry, AddressRecordEvmEntry, AddressRecordsCurrentEvmPage,
     AddressRecordsCurrentPage, DEFAULT_ADDRESS_NAMES_CURRENT_IDENTITY_JOINS,
     DEFAULT_ADDRESS_NAMES_CURRENT_READ_FILTER, ENSIP19_DEFAULT_ADDRESS_RECORD_KEY,
-    count_address_names_current_for_app_filter, load_address_names_current,
-    load_address_names_current_for_relations, load_address_names_current_including_noncanonical,
+    EVM_MATCHED_COIN_TYPES_PER_ROW_LIMIT, count_address_names_current_for_app_filter,
+    load_address_names_current, load_address_names_current_for_relations,
+    load_address_names_current_including_noncanonical,
     load_address_names_current_including_noncanonical_for_relations,
     load_address_names_current_page, load_address_names_current_page_filtered,
-    load_address_names_current_page_sorted_for_relations, load_address_records_current_page,
+    load_address_names_current_page_sorted_for_relations, load_address_records_current_evm_page,
+    load_address_records_current_page,
+};
+#[cfg(any(test, feature = "test-support"))]
+pub use address_names::{
+    address_records_current_evm_page_sql_for_test,
+    explain_address_records_current_evm_page_for_test,
 };
 pub use api_preflight::{
     ApiLookupDdlKind, ApiLookupDdlObject, load_missing_api_lookup_ddl, phase_schema_exists,
@@ -63,24 +71,28 @@ pub use evm_primitives::{
     ens_namehash_label_bytes, logical_name_id_for_name, normalize_evm_address, normalize_evm_b256,
 };
 #[cfg(any(test, feature = "test-support"))]
-pub use history::explain_registration_history_filter_for_test;
-#[cfg(any(test, feature = "test-support"))]
 pub use history::history_anchor_read_test_hooks;
 pub use history::{
     ChainBlockRange, EventHistoryAddressFilter, EventHistoryFilter, EventHistoryResolverFilter,
     HistoryBlockWindow, HistoryChainPositionSample, HistoryCursor, HistoryEvent, HistoryOrder,
-    HistoryPage, HistoryPageOptions, HistoryScope, HistorySummary, HistorySummaryMode,
-    InterpretRedoFence, InterpretRedoInProgress, InvalidHistoryCursor,
-    capture_interpret_redo_fence, load_address_history, load_address_history_for_relations,
-    load_address_history_page, load_address_history_page_for_relations,
-    load_candidate_logical_name_ids_for_registration_id, load_event_history,
-    load_event_history_page, load_event_history_page_with_redo_policy, load_history_events_by_ids,
-    load_name_history, load_name_history_head, load_name_history_page,
+    HistoryPage, HistoryPageOptions, HistoryScope, HistorySubject, HistorySummary,
+    HistorySummaryMode, InterpretRedoFence, InterpretRedoInProgress, InvalidHistoryCursor,
+    NameHistoryPage, NameHistoryRow, capture_interpret_redo_fence, load_address_history,
+    load_address_history_for_relations, load_address_history_page,
+    load_address_history_page_for_relations, load_candidate_logical_name_ids_for_registration_id,
+    load_event_history, load_event_history_page, load_event_history_page_with_redo_policy,
+    load_history_events_by_ids, load_name_history, load_name_history_head, load_name_history_page,
+    load_name_history_page_with_child_registrations,
     load_registrar_grant_resource_ids_by_logical_name_id, load_resource_history,
     load_resource_history_page, load_wrapped_registrar_resource_ids_by_logical_name_id,
     resolve_chain_block_ranges, revalidate_interpret_redo_fence,
 };
 pub use history::{SelectedInterpretRedoState, load_selected_interpret_redo_state};
+#[cfg(any(test, feature = "test-support"))]
+pub use history::{
+    explain_name_history_page_with_child_registrations_for_test,
+    explain_registration_history_filter_for_test,
+};
 pub use identity::{
     NameSurface, Resource, SurfaceBinding, SurfaceBindingKind, TokenLineage,
     ens_v2_registry_resource_id, load_name_surface, load_name_surface_including_noncanonical,
@@ -158,16 +170,20 @@ pub use phase_projection_reads::{
 pub use primary_name::{
     DEFAULT_PRIMARY_NAME_CURRENT_READ_FILTER, PrimaryNameClaimStatus, PrimaryNameCurrentRow,
     PrimaryNameCurrentSnapshot, load_primary_name_current, load_primary_name_current_snapshot,
-    normalized_claim_name,
+    load_primary_name_current_snapshots, normalized_claim_name,
 };
+#[cfg(any(test, feature = "test-support"))]
+pub use record_inventory::explain_record_inventory_abi_evidence_for_test;
 pub use record_inventory::{
+    AbiContentTypes, AbiContentTypesInput, AbiContentTypesUnavailable,
     READABLE_RECORD_INVENTORY_ENTRIES, RECORD_INVENTORY_CANONICALITY_SUMMARY_FILTER,
     RECORD_INVENTORY_PROJECTION_LINEAGE_FILTER, RECORD_INVENTORY_RECORD_SERVING_FILTER,
     RECORD_INVENTORY_RESOURCE_CANONICALITY_FILTER, RECORD_INVENTORY_RESOURCE_LINEAGE_FILTER,
     RESOURCE_CANONICALITY_JOINS, RecordInventoryCurrentRow,
-    count_record_inventory_selectors_by_lookup_keys, load_record_inventory_current,
-    load_record_inventory_current_batch, load_record_inventory_current_for_snapshot,
-    load_record_inventory_current_with_anchor_fallback, record_version_boundary_storage_key,
+    count_record_inventory_selectors_by_lookup_keys, load_record_inventory_abi_content_types,
+    load_record_inventory_current, load_record_inventory_current_batch,
+    load_record_inventory_current_for_snapshot, load_record_inventory_current_with_anchor_fallback,
+    record_version_boundary_storage_key,
 };
 pub use registries::{
     RegistryContractRow, RegistryCreation, RegistryCreationBasis, RegistryReferenceKeysetCursor,

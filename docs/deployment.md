@@ -501,7 +501,8 @@ The interpreter content hash and the manifest-authority fingerprint are independ
 The interpreter hash covers inputs that can change
 Interpret or Project output, including manifest `[[abi.events]]` declarations;
 when it changes, complete the full-history Interpret redo and the stamped
-Project redo before deploying the matching API.
+Project redo before deploying the matching API. A new Project-owned table is
+such a change: see [child registration events](#child-registration-events-in-name-history).
 `read_features` can change the manifest-authority fingerprint while the interpreter content hash remains byte-identical.
 On an initialized chain, that authority change still blocks
 ordinary derived work until the exact token-attested full-range Interpret redo
@@ -734,6 +735,7 @@ GRANT SELECT ON TABLE
     bigname_phase.address_names_current,
     bigname_phase.address_records_current,
     bigname_phase.children_current,
+    bigname_phase.child_registration_events,
     bigname_phase.permissions_current,
     bigname_phase.account_permission_state_current,
     bigname_phase.permissions_current_resource_summary,
@@ -1098,3 +1100,20 @@ this collision. Keep the existing read-only data mounts and writable MDBX lock
 file; do not disable MDBX locking to work around it.
 
 This build rotates the [interpreter content hash](glossary.md#interpreter-content-hash), for every chain and whether or not direct reads are used: the Reth v2.5.0 update moves the seven Alloy crates the hash fingerprints from 1.5.7 to 1.7.3 in `Cargo.lock` (`crates/content-hash/src/lockfile.rs`), and the Rust 1.98 update edits `crates/interpret/src/recompute.rs`, a hashed source file (`crates/content-hash/src/compute.rs`). An existing deployment must therefore finish the full-history Interpret redo and the Project redo it installs, as [interpretation replay](storage.md#interpretation-replay) requires for any rotation, before the matching API serves; follow the runbook's [planned migration and fingerprint boundary](runbooks/production-docker.md#planned-migration-and-fingerprint-boundary). A full Interpret replay that is already required for another reason discharges this obligation when it runs under the new binary; it must not be bypassed. The source transport change itself neither requires nor performs that redo.
+
+### Child registration events in name history
+
+The build that adds name history's
+[`include=child_registrations`](api-v2-routes.md#direct-child-registrations-includechild_registrations)
+adds the Project-owned table
+[`child_registration_events`](projections.md#child-registration-events) and
+changes `crates/project/src`, so it rotates the
+[interpreter content hash](glossary.md#interpreter-content-hash) for every
+chain. Schema-migration `20260923150000_child_registration_events.sql` creates
+the empty table on an existing phase schema, and `init-schema` installs it on a
+fresh one. The table fills only when Project rebuilds, so an existing
+deployment applies the schema-migration, reapplies the API role's SELECT grant
+above, and finishes the full-history Interpret redo and the Project redo it
+installs before the matching API serves, as for any rotation. Until then the
+API refuses to serve the new build's snapshots, as described above, so no
+request sees an empty table as a complete answer.

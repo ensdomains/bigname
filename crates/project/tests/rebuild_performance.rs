@@ -31,6 +31,7 @@ const PROJECTIONS: &[&str] = &[
     "address_names_current",
     "address_records_current",
     "primary_names_current",
+    "child_registration_events",
 ];
 
 #[tokio::test]
