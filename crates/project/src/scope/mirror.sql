@@ -28,3 +28,21 @@ CREATE TEMP TABLE project_mirror_seen_nodes(namespace text, namehash text, PRIMA
 CREATE TEMP TABLE project_mirror_cached_nodes(namespace text, namehash text, resource_id uuid,
     UNIQUE NULLS NOT DISTINCT(namespace, namehash, resource_id)) ON COMMIT DROP;
 CREATE INDEX ON project_mirror_cached_nodes(resource_id);
+
+-- Per-pass work tables for mirror_bulk.sql. They are created once per publication and
+-- truncated after each pass instead of being dropped and recreated: PostgreSQL holds the
+-- lock of every relation created or dropped until the transaction ends, so recreating them
+-- on every closure pass would grow the lock footprint with the hop count.
+CREATE TEMP TABLE IF NOT EXISTS project_mirror_frontier_resources(resource_id uuid) ON COMMIT DROP;
+CREATE TEMP TABLE IF NOT EXISTS project_mirror_frontier_names(logical_name_id text) ON COMMIT DROP;
+CREATE TEMP TABLE IF NOT EXISTS project_mirror_frontier_changed(namespace text, namehash text, resource_id uuid) ON COMMIT DROP;
+CREATE TEMP TABLE IF NOT EXISTS project_mirror_resource_nodes(namespace text, namehash text) ON COMMIT DROP;
+CREATE TEMP TABLE IF NOT EXISTS project_mirror_seeds(namespace text, raw_labels text[]) ON COMMIT DROP;
+CREATE TEMP TABLE IF NOT EXISTS project_mirror_queried_names(logical_name_id text) ON COMMIT DROP;
+CREATE TEMP TABLE IF NOT EXISTS project_mirror_pointer_candidates(resource_id uuid, logical_name_id text) ON COMMIT DROP;
+CREATE TEMP TABLE IF NOT EXISTS project_mirror_new_pointers(resource_id uuid, logical_name_id text) ON COMMIT DROP;
+CREATE TEMP TABLE IF NOT EXISTS project_mirror_walks(mirror_resource_id uuid, namespace text, suffix text[]) ON COMMIT DROP;
+CREATE TEMP TABLE IF NOT EXISTS project_mirror_suffixes(namespace text, suffix text[]) ON COMMIT DROP;
+CREATE TEMP TABLE IF NOT EXISTS project_mirror_surfaces(suffix text[], logical_name_id text, namespace text, namehash text) ON COMMIT DROP;
+CREATE TEMP TABLE IF NOT EXISTS project_mirror_consulted(mirror_resource_id uuid, logical_name_id text, namespace text, namehash text) ON COMMIT DROP;
+CREATE TEMP TABLE IF NOT EXISTS project_mirror_wanted(namespace text, namehash text) ON COMMIT DROP;

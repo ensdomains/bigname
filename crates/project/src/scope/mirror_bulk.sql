@@ -1,21 +1,27 @@
-CREATE TEMP TABLE project_mirror_frontier_resources ON COMMIT DROP AS
+-- The work tables are created once per publication in mirror.sql and truncated after
+-- each pass (mirror_batch_finish.sql), so the relation locks a publication holds stay
+-- constant however many closure passes it runs.
 WITH added AS (
     INSERT INTO project_mirror_seen_resources SELECT scope.resource_id FROM project_scope_resources scope
     WHERE NOT EXISTS (SELECT 1 FROM project_mirror_seen_resources seen WHERE seen.resource_id = scope.resource_id)
     ON CONFLICT DO NOTHING RETURNING resource_id
-) SELECT * FROM added;
+)
+INSERT INTO project_mirror_frontier_resources
+SELECT * FROM added;
 ANALYZE project_mirror_frontier_resources;
-CREATE TEMP TABLE project_mirror_frontier_names ON COMMIT DROP AS
 WITH added AS (
     INSERT INTO project_mirror_seen_names SELECT scope.logical_name_id FROM project_scope_names scope
     WHERE NOT EXISTS (SELECT 1 FROM project_mirror_seen_names seen WHERE seen.logical_name_id = scope.logical_name_id)
     ON CONFLICT DO NOTHING RETURNING logical_name_id
-) SELECT * FROM added;
+)
+INSERT INTO project_mirror_frontier_names
+SELECT * FROM added;
 ANALYZE project_mirror_frontier_names;
-CREATE TEMP TABLE project_mirror_frontier_changed ON COMMIT DROP AS
-WITH changed AS (DELETE FROM project_mirror_changed_nodes RETURNING *) SELECT * FROM changed;
+WITH changed AS (DELETE FROM project_mirror_changed_nodes RETURNING *)
+INSERT INTO project_mirror_frontier_changed
+SELECT * FROM changed;
 ANALYZE project_mirror_frontier_changed;
-CREATE TEMP TABLE project_mirror_resource_nodes ON COMMIT DROP AS
+INSERT INTO project_mirror_resource_nodes
     SELECT DISTINCT event.namespace, lower(event.after_state ->> 'node') AS namehash
     FROM project_mirror_frontier_resources scope JOIN LATERAL (
         SELECT * FROM normalized_events WHERE resource_id = scope.resource_id
@@ -32,7 +38,6 @@ CREATE TEMP TABLE project_mirror_resource_nodes ON COMMIT DROP AS
       AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
     UNION SELECT namespace, namehash FROM project_mirror_frontier_changed;
 ANALYZE project_mirror_resource_nodes;
-CREATE TEMP TABLE project_mirror_seeds ON COMMIT DROP AS
 WITH candidates AS (    SELECT surface.namespace, surface.raw_labels
     FROM project_mirror_frontier_names scope JOIN name_surfaces surface USING(logical_name_id)
     JOIN chain_lineage lineage USING(chain_id, block_number, block_hash)
@@ -72,9 +77,11 @@ WITH candidates AS (    SELECT surface.namespace, surface.raw_labels
         WHERE cardinality(seen.raw_labels) > 0
     )
     RETURNING namespace, raw_labels
-) SELECT * FROM added;
+)
+INSERT INTO project_mirror_seeds
+SELECT * FROM added;
 ANALYZE project_mirror_seeds;
-CREATE TEMP TABLE project_mirror_queried_names ON COMMIT DROP AS
+INSERT INTO project_mirror_queried_names
     SELECT DISTINCT surface.logical_name_id
     FROM project_mirror_seeds seed JOIN LATERAL (
         SELECT * FROM name_surfaces
@@ -90,7 +97,7 @@ CREATE TEMP TABLE project_mirror_queried_names ON COMMIT DROP AS
     WHERE surface.chain_id = $1 AND surface.block_number <= $2
       AND surface.canonicality_state IN ('canonical', 'safe', 'finalized');
 ANALYZE project_mirror_queried_names;
-CREATE TEMP TABLE project_mirror_pointer_candidates ON COMMIT DROP AS
+INSERT INTO project_mirror_pointer_candidates
 SELECT DISTINCT event.resource_id, event.logical_name_id
 FROM project_mirror_frontier_resources scope JOIN LATERAL (
     SELECT event.resource_id, event.logical_name_id
@@ -125,13 +132,14 @@ FROM project_mirror_queried_names scope JOIN LATERAL (
       AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized') OFFSET 0
 ) event ON TRUE;
 ANALYZE project_mirror_pointer_candidates;
-CREATE TEMP TABLE project_mirror_new_pointers ON COMMIT DROP AS
 WITH added AS (
     INSERT INTO project_mirror_seen_pointers SELECT resource_id, logical_name_id FROM project_mirror_pointer_candidates
     ON CONFLICT DO NOTHING RETURNING resource_id, logical_name_id
-) SELECT * FROM added;
+)
+INSERT INTO project_mirror_new_pointers
+SELECT * FROM added;
 ANALYZE project_mirror_new_pointers;
-CREATE TEMP TABLE project_mirror_walks ON COMMIT DROP AS
+INSERT INTO project_mirror_walks
     SELECT DISTINCT mirror.resource_id AS mirror_resource_id, surface.namespace,
            surface.raw_labels[position:cardinality(surface.raw_labels)] AS suffix
     FROM project_mirror_new_pointers mirror JOIN name_surfaces surface USING(logical_name_id)
@@ -141,10 +149,10 @@ CREATE TEMP TABLE project_mirror_walks ON COMMIT DROP AS
       AND surface.canonicality_state IN ('canonical', 'safe', 'finalized')
       AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized');
 ANALYZE project_mirror_walks;
-CREATE TEMP TABLE project_mirror_suffixes ON COMMIT DROP AS
+INSERT INTO project_mirror_suffixes
 SELECT DISTINCT namespace, suffix FROM project_mirror_walks;
 ANALYZE project_mirror_suffixes;
-CREATE TEMP TABLE project_mirror_surfaces ON COMMIT DROP AS
+INSERT INTO project_mirror_surfaces
     SELECT DISTINCT walk.suffix, surface.logical_name_id, surface.namespace,
            lower(surface.namehash) AS namehash
     FROM project_mirror_suffixes walk JOIN LATERAL (
@@ -161,15 +169,16 @@ CREATE TEMP TABLE project_mirror_surfaces ON COMMIT DROP AS
       AND surface.canonicality_state IN ('canonical', 'safe', 'finalized')
       AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized');
 ANALYZE project_mirror_surfaces;
-CREATE TEMP TABLE project_mirror_consulted ON COMMIT DROP AS
+INSERT INTO project_mirror_consulted
 SELECT DISTINCT walk.mirror_resource_id, surface.logical_name_id, surface.namespace, surface.namehash
 FROM project_mirror_walks walk JOIN project_mirror_surfaces surface USING(namespace, suffix);
 ANALYZE project_mirror_consulted;
-CREATE TEMP TABLE project_mirror_wanted ON COMMIT DROP AS
 WITH added AS (
     INSERT INTO project_mirror_seen_nodes SELECT DISTINCT namespace, namehash FROM project_mirror_consulted
     ON CONFLICT DO NOTHING RETURNING namespace, namehash
-) SELECT * FROM added;
+)
+INSERT INTO project_mirror_wanted
+SELECT * FROM added;
 ANALYZE project_mirror_wanted;
 INSERT INTO project_mirror_cached_nodes
     SELECT DISTINCT event.namespace, lower(event.after_state ->> 'node') AS namehash, event.resource_id

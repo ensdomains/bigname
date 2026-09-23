@@ -30,11 +30,12 @@ async fn restore(tx: &mut Transaction<'_, Postgres>, value: &Scope) -> Result<()
     Ok(())
 }
 
-// Each include pass creates and drops about a dozen temporary tables, and PostgreSQL
-// holds the lock of every relation created or dropped until the transaction ends. A
-// test that loops over many cases in one transaction would exhaust the server's lock
-// table (CI runs the default max_locks_per_transaction = 64), so each case runs in a
-// savepoint that is rolled back afterwards, which releases its locks and tables.
+// Include passes reuse the mirror work tables, but each case restages the mirror:
+// stage() creates and finish() drops its per-publication tables and indexes, and
+// PostgreSQL holds the lock of every relation created or dropped until the transaction
+// ends. A test that loops over many cases in one transaction would exhaust the server's
+// lock table (CI runs the default max_locks_per_transaction = 64), so each case runs in
+// a savepoint that is rolled back afterwards, which releases its locks and tables.
 async fn begin_case(tx: &mut Transaction<'_, Postgres>) -> Result<()> {
     sqlx::query("SAVEPOINT mirror_case")
         .execute(&mut **tx)

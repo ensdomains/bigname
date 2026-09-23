@@ -203,5 +203,9 @@ pub(super) async fn finish(
 mod tests;
 
 #[cfg(test)]
+#[path = "mirror_lock_tests.rs"]
+mod lock_tests;
+
+#[cfg(test)]
 #[path = "mirror_reference.rs"]
 mod deployed_reference;
