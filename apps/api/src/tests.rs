@@ -392,6 +392,7 @@ include!("tests/v2_history_bounded_registration.rs");
 include!("tests/v2_history_bounded_relation_loss.rs");
 include!("tests/v2_history_redo.rs");
 include!("tests/v2_history_paging.rs");
+include!("tests/v2_history_keyset.rs");
 include!("tests/v2_history_child_registrations.rs");
 include!("tests/v2_diag_events.rs");
 include!("tests/v2_address_names.rs");

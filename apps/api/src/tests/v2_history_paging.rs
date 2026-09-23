@@ -74,40 +74,34 @@ async fn v2_history_routes_treat_internal_only_matches_as_no_product_matches() -
 }
 
 #[tokio::test]
-async fn v2_events_rejects_foreign_kind_anchor_for_explicit_type() -> Result<()> {
+async fn v2_events_continues_from_a_foreign_kind_position_for_explicit_type() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_history_fixture(&database).await?;
-    let state = database.app_state_with_public_namespaces(&["ens"]);
-    let snapshot = crate::v2::collection_snapshot::CollectionSnapshot::capture_for_namespace(
-        &state, None, Some("ens"),
-    ).await.expect("fixture publication must be ready");
-    let encode = |payload| crate::v2::encode(&snapshot.bind_cursor(payload));
     let anchor = bigname_storage::HistoryCursor {
-        position: None,
-        normalized_event_id: sqlx::query_scalar(
-            "SELECT normalized_event_id FROM bigname_phase.normalized_events WHERE event_identity = 'history-renewal'",
-        )
-        .fetch_one(&database.pool)
-        .await
-        .map(Some)?,
+        position: bigname_storage::load_history_anchor_position(&database.pool, "history-renewal")
+            .await?,
+        normalized_event_id: None,
         event_identity: "history-renewal".to_owned(),
     };
-    let cursor = encode(crate::v2::events_cursor_payload(
+    let cursor = crate::v2::encode(&crate::v2::history_keyset::cursor_payload(
         &anchor,
-        &std::collections::BTreeMap::from([
+        crate::v2::history_sort_token(bigname_storage::HistoryOrder::Desc),
+        std::collections::BTreeMap::from([
             ("name".to_owned(), bigname_storage::logical_name_id_for_name("ens", "history.eth")),
             ("namespace".to_owned(), "ens".to_owned()),
             ("type".to_owned(), "registration".to_owned()),
         ]),
-        bigname_storage::HistoryOrder::Desc,
     ));
-    let response = v2_history_response_for_database(
+    // A renewal is outside `type=registration`, but its position still orders the walk.
+    let payload = v2_history_payload_for_database(
         &database,
         &format!("/v1/events?name=history.eth&type=registration&cursor={cursor}"),
     )
     .await?;
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    assert_eq!(read_json::<Value>(response).await?["error"]["code"], json!("invalid_input"));
+    assert_eq!(
+        history_types(payload["data"].as_array().context("history data")?),
+        vec!["registration"]
+    );
     database.cleanup().await
 }
 
@@ -117,21 +111,11 @@ async fn v2_history_routes_continue_from_bound_non_product_cursor() -> Result<()
     const EVENT: &str = "history-surface-bound";
     let database = TestDatabase::new_migrated().await?;
     seed_v2_history_fixture(&database).await?;
-    let state = database.app_state_with_public_namespaces(&["ens"]);
-    let snapshot = crate::v2::collection_snapshot::CollectionSnapshot::capture_for_namespace(
-        &state, None, Some("ens"),
-    ).await.expect("fixture publication must be ready");
-    let encode = |payload| crate::v2::encode(&snapshot.bind_cursor(payload));
+    let encode = |payload| crate::v2::encode(&payload);
     let logical_name_id = bigname_storage::logical_name_id_for_name("ens", "history.eth");
     let anchor = bigname_storage::HistoryCursor {
-        position: None,
-        normalized_event_id: sqlx::query_scalar(
-            "SELECT normalized_event_id FROM bigname_phase.normalized_events WHERE event_identity = $1",
-        )
-        .bind(EVENT)
-        .fetch_one(&database.pool)
-        .await
-        .map(Some)?,
+        position: bigname_storage::load_history_anchor_position(&database.pool, EVENT).await?,
+        normalized_event_id: None,
         event_identity: EVENT.to_owned(),
     };
     let address_binding = crate::v2::AddressHistoryCursorBinding {
@@ -155,13 +139,13 @@ async fn v2_history_routes_continue_from_bound_non_product_cursor() -> Result<()
     let routes = [
         (
             "/v1/events?name=history.eth&page_size=2",
-            encode(crate::v2::events_cursor_payload(
+            encode(crate::v2::history_keyset::cursor_payload(
                 &anchor,
-                &std::collections::BTreeMap::from([
+                crate::v2::history_sort_token(bigname_storage::HistoryOrder::Desc),
+                std::collections::BTreeMap::from([
                     ("name".to_owned(), logical_name_id.clone()),
                     ("namespace".to_owned(), "ens".to_owned()),
                 ]),
-                bigname_storage::HistoryOrder::Desc,
             )),
             vec!["renewal", "expiry"],
         ),
@@ -210,16 +194,17 @@ async fn v2_history_routes_continue_from_bound_non_product_cursor() -> Result<()
         .bind(EVENT)
         .execute(&database.pool)
         .await?;
-    let response = v2_history_response_for_database(
-        &database,
-        &format!("{}&cursor={}", routes[0].0, routes[0].1),
-    )
-    .await?;
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    assert_eq!(
-        read_json::<Value>(response).await?["error"]["code"],
-        json!("invalid_input")
-    );
+    // The cursor holds its anchor's position, so the continuation does not need the row.
+    for (route, cursor, expected) in &routes {
+        let payload =
+            v2_history_payload_for_database(&database, &format!("{route}&cursor={cursor}"))
+                .await?;
+        assert_eq!(
+            history_types(payload["data"].as_array().context("history data")?),
+            expected.as_slice(),
+            "{route}"
+        );
+    }
 
     database.cleanup().await
 }
