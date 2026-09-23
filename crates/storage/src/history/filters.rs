@@ -105,16 +105,26 @@ pub(super) fn push_selector_filter<'a>(
 /// attributes them to a resource through its selected resolver pointer and publishes the
 /// attributed event ids in the record inventory provenance. Resource-scoped history reads them
 /// back through that provenance so a name's history lists the same writes its records serve.
+///
+/// The id list does not depend on the outer row, so it is computed once as an array. PostgreSQL
+/// can then key this branch on the primary key and combine it with index scans for the other
+/// branches of the selector's OR; an `IN (SELECT ...)` branch inside an OR cannot be an index
+/// condition and forces a scan of every candidate row.
 pub(super) fn push_attributed_record_filter<'a>(
     builder: &mut QueryBuilder<'a, Postgres>,
     row_alias: &str,
     resource_ids: &'a [Uuid],
 ) {
-    push_attributed_record_filter_where(builder, row_alias, resource_ids, |_| {});
+    builder.push(" OR ");
+    builder.push(row_alias);
+    builder.push(".normalized_event_id = ANY(ARRAY(");
+    push_attributed_record_ids(builder, resource_ids);
+    builder.push("))");
 }
 
 /// [`push_attributed_record_filter`] with a further predicate on the attributing `inventory`
-/// row, for readers that admit attribution through some of the candidate resources only.
+/// row, for readers that admit attribution through some of the candidate resources only. The
+/// predicate may refer to the outer row, so the subquery stays a correlated `IN`.
 pub(super) fn push_attributed_record_filter_where<'a>(
     builder: &mut QueryBuilder<'a, Postgres>,
     row_alias: &str,
@@ -123,8 +133,20 @@ pub(super) fn push_attributed_record_filter_where<'a>(
 ) {
     builder.push(" OR ");
     builder.push(row_alias);
+    builder.push(".normalized_event_id IN (");
+    push_attributed_record_ids(builder, resource_ids);
+    push_inventory_predicate(builder);
+    builder.push(")");
+}
+
+/// `SELECT` of the event ids the record inventories of `resource_ids` attribute; open-ended so
+/// a caller can add predicates on `inventory`.
+fn push_attributed_record_ids<'a>(
+    builder: &mut QueryBuilder<'a, Postgres>,
+    resource_ids: &'a [Uuid],
+) {
     builder.push(
-        r#".normalized_event_id IN (
+        r#"
             SELECT attributed.event_id::bigint
             FROM bigname_phase.record_inventory_current inventory
             CROSS JOIN LATERAL jsonb_array_elements_text(
@@ -139,8 +161,6 @@ pub(super) fn push_attributed_record_filter_where<'a>(
         r#"::uuid[])
               AND attributed.event_id ~ '^[0-9]+$'"#,
     );
-    push_inventory_predicate(builder);
-    builder.push(")");
 }
 
 /// The `inventory` predicate of a registration-scoped read: the record inventory that attributes

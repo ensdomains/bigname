@@ -751,6 +751,30 @@ CREATE INDEX IF NOT EXISTS normalized_events_v1_direct_node_probe_idx
     WHERE canonicality_state IN ('canonical','safe','finalized')
       AND source_family LIKE 'ens\_v1\_%';
 
+-- The address history read finds the names and resources an address held in the past from
+-- three kinds of events: a registration granted to it, a token transferred to it, and a
+-- registry ownership transfer to it. Each partial index keys one kind by the lowercased new
+-- holder. The expressions and predicates must stay identical to the arms in
+-- crates/storage/src/history/address_matches.rs; the values are addresses the interpreter
+-- decoded, so the keys stay small.
+CREATE INDEX IF NOT EXISTS normalized_events_address_registrant_match_idx
+    ON normalized_events (lower(COALESCE(after_state ->> 'registrant', '')))
+    WHERE event_kind = 'RegistrationGranted'
+      AND consumer_visibility = 'activated'
+      AND canonicality_state IN ('canonical', 'safe', 'finalized');
+
+CREATE INDEX IF NOT EXISTS normalized_events_address_token_holder_match_idx
+    ON normalized_events (lower(COALESCE(after_state ->> 'to', '')))
+    WHERE event_kind = 'TokenControlTransferred'
+      AND consumer_visibility = 'activated'
+      AND canonicality_state IN ('canonical', 'safe', 'finalized');
+
+CREATE INDEX IF NOT EXISTS normalized_events_address_registry_owner_match_idx
+    ON normalized_events (lower(COALESCE(after_state ->> 'owner', '')))
+    WHERE event_kind = 'AuthorityTransferred'
+      AND consumer_visibility = 'activated'
+      AND canonicality_state IN ('canonical', 'safe', 'finalized');
+
 CREATE INDEX IF NOT EXISTS normalized_events_projection_idx
     ON normalized_events (
         event_kind,

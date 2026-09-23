@@ -51,26 +51,12 @@ async fn load_history_total_count(
     canonical_only: bool,
     cap: Option<u64>,
 ) -> Result<u64> {
-    let mut builder = QueryBuilder::<Postgres>::new(
-        r#"
-        SELECT COUNT(*)::BIGINT AS total_count
-        "#,
-    );
-    if let Some(cap) = cap {
-        let limit = i64::try_from(cap.saturating_add(1))
-            .context("history total_count cap exceeds SQL limit")?;
-        builder.push(" FROM (SELECT 1 ");
-        push_history_source_for_filter(&mut builder, filter, canonical_only, false, false);
-        push_history_filters(&mut builder, filter, canonical_only);
-        push_product_history_duplicate_filter(&mut builder, filter, canonical_only);
-        builder.push(" LIMIT ");
-        builder.push_bind(limit);
-        builder.push(") capped");
-    } else {
-        push_history_source_for_filter(&mut builder, filter, canonical_only, false, false);
-        push_history_filters(&mut builder, filter, canonical_only);
-        push_product_history_duplicate_filter(&mut builder, filter, canonical_only);
-    }
+    let limit = cap
+        .map(|cap| i64::try_from(cap.saturating_add(1)))
+        .transpose()
+        .context("history total_count cap exceeds SQL limit")?;
+    let mut builder = QueryBuilder::<Postgres>::new("");
+    push_history_count_query(&mut builder, filter, canonical_only, limit);
 
     let total_count = builder
         .build_query_scalar::<i64>()
@@ -78,6 +64,31 @@ async fn load_history_total_count(
         .await
         .context("failed to count normalized-event history rows")?;
     u64::try_from(total_count).context("negative normalized-event history total_count")
+}
+
+/// The history count statement; with `limit`, it stops after that many matching rows.
+pub(super) fn push_history_count_query<'a>(
+    builder: &mut QueryBuilder<'a, Postgres>,
+    filter: &'a EventHistoryReadFilter,
+    canonical_only: bool,
+    limit: Option<i64>,
+) {
+    builder.push(
+        r#"
+        SELECT COUNT(*)::BIGINT AS total_count
+        "#,
+    );
+    if limit.is_some() {
+        builder.push(" FROM (SELECT 1 ");
+    }
+    push_history_source_for_filter(builder, filter, canonical_only, false, false);
+    push_history_filters(builder, filter, canonical_only);
+    push_product_history_duplicate_filter(builder, filter, canonical_only);
+    if let Some(limit) = limit {
+        builder.push(" LIMIT ");
+        builder.push_bind(limit);
+        builder.push(") capped");
+    }
 }
 
 async fn load_history_full_summary(
