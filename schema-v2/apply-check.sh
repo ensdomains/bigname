@@ -3091,13 +3091,14 @@ migration_application_log="$(
 # Future entries must use basename|one-line reason.
 intentional_phase_migration_skips=()
 refusal_assertions_passed=0
-# Base 173, main added 90, this branch 241 (158 of them the backslash-command,
+# Base 173, main added 90, this branch 255 (172 of them the backslash-command,
 # psql-variable, schema-owner, parameter-privilege, installer-race,
 # other-database setting and attribute, outside-definition and membership,
 # exercised-row, identity-row, dropped-fact, lost-column, sequence-position,
 # server-statement, server-file read, shared-object and configuration-file,
 # administration-function, tablespace and access-method, replication and
-# sequence-statement, catalog-write, comment-spacing, CASCADE,
+# sequence-statement, catalog-write, comment-spacing, CASCADE, language,
+# file-function, dblink, event-trigger, quoted-name,
 # SET-spelling, session-residue, session-identity (database, connection and
 # temporary namespace included), recorded-history, ambiguous foreign key,
 # assembled password, literal-name branch and column-order, baseline-residue,
@@ -3107,7 +3108,7 @@ refusal_assertions_passed=0
 # the merges fold main's five address-match, event-order and mirror-pointer
 # not-ready probes into their invalid ones (-5); predecessor proofs base 39,
 # main +7, this branch +1.
-expected_refusal_assertions=499
+expected_refusal_assertions=513
 predecessor_shape_proof_count=0
 expected_predecessor_shape_proof_count=47
 refusal_probe_seconds=0
@@ -3349,7 +3350,7 @@ session_state_scanner='
             print file ": " hit; t = substr(t, RSTART + RLENGTH)
         }
         t = toupper(text)
-        while (match(t, /SET_CONFIG *\(/)) {
+        while (match(t, /SET_CONFIG"? *\(/)) {
             start = RSTART; depth = 0; i = RSTART
             while (i <= length(t)) {
                 c = substr(t, i, 1)
@@ -3385,13 +3386,13 @@ session_state_scanner='
         # WAL and recovery control, configuration reload, the backends of
         # other sessions, and statistics resets.
         t = toupper(text) " "
-        while (match(t, /(^|[^A-Z0-9_])(ALTER SYSTEM[^A-Z0-9_]|COPY [^;]*[^A-Z0-9_](TO|FROM) ?(PROGRAM[^A-Z0-9_]|E?'"'"'|\$|%)|LO_(IMPORT|EXPORT) *\(|(PG_REPLICATION_[A-Z_]+|PG_[A-Z_]*REPLICATION_SLOT[A-Z_]*|PG_LOGICAL_[A-Z_]+|PG_SWITCH_WAL|PG_CREATE_RESTORE_POINT|PG_PROMOTE|PG_WAL_REPLAY_[A-Z_]+|PG_BACKUP_(START|STOP)|PG_LOG_STANDBY_SNAPSHOT|PG_RELOAD_CONF|PG_ROTATE_LOGFILE|PG_TERMINATE_BACKEND|PG_CANCEL_BACKEND|PG_STAT_RESET[A-Z_]*) *\()/)) {
+        while (match(t, /(^|[^A-Z0-9_])(ALTER SYSTEM[^A-Z0-9_]|COPY [^;]*[^A-Z0-9_](TO|FROM) ?(PROGRAM[^A-Z0-9_]|E?'"'"'|\$|%)|LO_(IMPORT|EXPORT)"? *\(|(PG_REPLICATION_[A-Z_]+|PG_[A-Z_]*REPLICATION_SLOT[A-Z_]*|PG_LOGICAL_[A-Z_]+|PG_SWITCH_WAL|PG_CREATE_RESTORE_POINT|PG_PROMOTE|PG_WAL_REPLAY_[A-Z_]+|PG_BACKUP_(START|STOP)|PG_LOG_STANDBY_SNAPSHOT|PG_RELOAD_CONF|PG_ROTATE_LOGFILE|PG_TERMINATE_BACKEND|PG_CANCEL_BACKEND|PG_STAT_RESET[A-Z_]*)"? *\()/)) {
             hit = substr(t, RSTART, RLENGTH); sub(/^[^A-Z]*/, "", hit)
             print file ": [server outside the database: " hit "]"; t = substr(t, RSTART + RLENGTH)
         }
-        # Replication and sequences, which a production database can hold
-        # outside the phase schema where no replay database does: publication
-        # and subscription DDL; setval, ALTER SEQUENCE, TRUNCATE ... RESTART
+        # Replication, event triggers and sequences, which a production
+        # database can hold outside the phase schema where no replay database
+        # does: publication, subscription and event trigger DDL; setval, ALTER SEQUENCE, TRUNCATE ... RESTART
         # IDENTITY and an identity column RESTART, sequence option or DROP
         # IDENTITY; and SET LOGGED or UNLOGGED, which ALTER TABLE applies to a
         # sequence too and which takes a table out of a publication for all
@@ -3402,14 +3403,25 @@ session_state_scanner='
         # ALTER COLUMN x reads as ALTER x, its other spelling.
         code = toupper(code) " "; gsub(/\\[NRT]/, " ", code); gsub(/  +/, " ", code); gsub(/ALTER COLUMN /, "ALTER ", code)
         t = code
-        while (match(t, /(^|[^A-Z0-9_])((CREATE|ALTER|DROP) (PUBLICATION|SUBSCRIPTION)[^A-Z0-9_]|"?SETVAL"? *\(|ALTER SEQUENCE[^A-Z0-9_]|ALTER ("[^"]*"|[A-Z_][A-Z0-9_$]*) (SET GENERATED (ALWAYS|BY DEFAULT) )?(RESTART|SET (INCREMENT|MINVALUE|MAXVALUE|NO MINVALUE|NO MAXVALUE|START|CACHE|CYCLE|NO CYCLE)|DROP IDENTITY)[^A-Z0-9_]|SET (UN)?LOGGED *([;,)$]|'"'"'|$))|RESTART IDENTITY/)) {
+        while (match(t, /(^|[^A-Z0-9_])((CREATE|ALTER|DROP) (PUBLICATION|SUBSCRIPTION|EVENT TRIGGER)[^A-Z0-9_]|"?SETVAL"? *\(|ALTER SEQUENCE[^A-Z0-9_]|ALTER ("[^"]*"|[A-Z_][A-Z0-9_$]*) (SET GENERATED (ALWAYS|BY DEFAULT) )?(RESTART|SET (INCREMENT|MINVALUE|MAXVALUE|NO MINVALUE|NO MAXVALUE|START|CACHE|CYCLE|NO CYCLE)|DROP IDENTITY)[^A-Z0-9_]|SET (UN)?LOGGED *([;,)$]|'"'"'|$))|RESTART IDENTITY/)) {
             hit = substr(t, RSTART, RLENGTH); sub(/^[^A-Z"]*/, "", hit)
-            print file ": [replication or sequence: " hit "]"; t = substr(t, RSTART + RLENGTH)
+            print file ": [operator object: " hit "]"; t = substr(t, RSTART + RLENGTH)
         }
         t = code
         while (match(t, /(^|[^A-Z0-9_])(UPDATE|INSERT INTO|DELETE FROM|MERGE INTO)( ONLY)? ("?PG_CATALOG"? *\. *)?"?PG_[A-Z0-9_]*"?([^A-Z0-9_."]|$)/)) {
             hit = substr(t, RSTART, RLENGTH); sub(/^[^A-Z]*/, "", hit)
             print file ": [system catalog write: " hit "]"; t = substr(t, RSTART + RLENGTH)
+        }
+        # Code that reaches past the database: a routine or DO block in any
+        # language but plpgsql or sql, since an untrusted one such as
+        # plpython3u, or C, can write the server files and open connections;
+        # the adminpack file functions; and dblink, which runs SQL on another
+        # connection. A language supplied by a format() slot or a concatenation
+        # counts as another language, and a quoted function name as the name.
+        t = code
+        while (match(t, /(^|[^A-Z0-9_"])LANGUAGE *('"'"' *\|\||'"'"'?"?[A-Z0-9_%]+)|(^|[^A-Z0-9_])(PG_FILE_[A-Z_]+|PG_LOGDIR_LS|DBLINK[A-Z_]*)"? *\(/)) {
+            hit = substr(t, RSTART, RLENGTH); sub(/^[^A-Z]*/, "", hit); t = substr(t, RSTART + RLENGTH)
+            if (hit !~ /^LANGUAGE *'"'"'?"?(PLPGSQL|SQL)$/) print file ": [server outside the database: " hit "]"
         }
     }
 '
@@ -3430,10 +3442,10 @@ assert_no_session_state_statements() {
                 printf '%s\n' "${hits//$'\n'/; }: the replay's psql runs a backslash command on the client, but sqlx sends the file to the server, which rejects it, so remove it" >&2
                 exit 1 ;;
             *'[server outside the database'*)
-                printf '%s\n' "${hits//$'\n'/; }: ALTER SYSTEM rewrites the configuration of every database on the server, COPY to or from a file or a program, lo_import and lo_export read or write files on the database server or run a program there, and the administration functions for replication slots and origins, logical decoding, WAL and recovery, configuration reload, other sessions' backends and statistics change the server; no catalog this check compares holds any of it and a schema-migration has no use for it, so remove it (ADR 0008)" >&2
+                printf '%s\n' "${hits//$'\n'/; }: ALTER SYSTEM rewrites the configuration of every database on the server, COPY to or from a file or a program, lo_import and lo_export read or write files on the database server or run a program there, the administration functions for replication slots and origins, logical decoding, WAL and recovery, configuration reload, other sessions' backends and statistics change the server, and a routine or DO block in a language other than plpgsql or sql, the adminpack file functions and dblink reach the server's files or other connections; no catalog this check compares holds any of it and a schema-migration has no use for it, so remove it (ADR 0008)" >&2
                 exit 1 ;;
-            *'[replication or sequence'*)
-                printf '%s\n' "${hits//$'\n'/; }: a production database can hold a publication, a subscription or a sequence outside the phase schema that no replay database has, so a change to one passes every comparison here and still changes what production replicates or which values the sequence hands out; no current file uses these statements, since the row rule keeps every phase sequence where it was and the frozen catalog records how each one counts and every table's persistence, so remove it, or extend this rule under an ADR 0008 carve-out if a phase change truly needs one" >&2
+            *'[operator object'*)
+                printf '%s\n' "${hits//$'\n'/; }: a production database can hold a publication, a subscription, an event trigger or a sequence outside the phase schema that no replay database has, so a change to one passes every comparison here and still changes what production replicates, which DDL its event triggers see or which values the sequence hands out; no current file uses these statements, since the row rule keeps every phase sequence where it was and the frozen catalog records how each one counts and every table's persistence, so remove it, or extend this rule under an ADR 0008 carve-out if a phase change truly needs one" >&2
                 exit 1 ;;
             *'[system catalog write'*)
                 printf '%s\n' "${hits//$'\n'/; }: a direct write to a system catalog changes an object without the statement that names the change, so no text rule sees it, and on an object only production holds no comparison sees it either; no schema-migration needs one, so write the DDL statement instead (ADR 0008)" >&2
@@ -3507,6 +3519,20 @@ assert_session_state_rule_holds() {
         'SELECT pg_reload_conf();'
         'SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE pid <> pg_backend_pid();'
         'SELECT pg_stat_reset();'
+        'DO LANGUAGE plpython3u $$ import os $$;'
+        'CREATE FUNCTION bigname_phase.f() RETURNS int AS $$ return 1 $$ LANGUAGE plperlu;'
+        'CREATE FUNCTION bigname_phase.g() RETURNS int LANGUAGE "c" AS $$planted$$;'
+        'SELECT pg_catalog.pg_file_write('"'"'postgresql.auto.conf'"'"', '"'"'x'"'"', true);'
+        'SELECT pg_file_unlink('"'"'planted'"'"');'
+        'SELECT dblink_exec('"'"'dbname=postgres'"'"', '"'"'SELECT 1'"'"');'
+        'ALTER EVENT TRIGGER operator_audit DISABLE;'
+        'DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_event_trigger) THEN EXECUTE '"'"'DROP EVENT TRIGGER operator_audit'"'"'; END IF; END $$;'
+        'CREATE EVENT TRIGGER planted ON ddl_command_start EXECUTE FUNCTION bigname_phase.f();'
+        'SELECT pg_catalog."pg_reload_conf"();'
+        'DO $$ BEGIN PERFORM "set_config"('"'"'search_path'"'"', '"'"'pg_catalog'"'"', false); END $$;'
+        'SELECT "dblink_exec"('"'"'dbname=postgres'"'"', '"'"'SELECT 1'"'"');'
+        'DO $$ BEGIN EXECUTE format('"'"'CREATE FUNCTION bigname_phase.f() RETURNS int LANGUAGE %s AS $f$ return 1 $f$'"'"', '"'"'plperlu'"'"'); END $$;'
+        'DO $$ DECLARE lang text := '"'"'plperlu'"'"'; BEGIN EXECUTE '"'"'CREATE FUNCTION bigname_phase.f() RETURNS int LANGUAGE '"'"' || lang || '"'"' AS $f$ return 1 $f$'"'"'; END $$;'
         'ALTER PUBLICATION operator_changes ADD TABLE bigname_phase.normalized_events;'
         'DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_publication) THEN EXECUTE format('"'"'alter publication %I set (publish = %L)'"'"', '"'"'operator_changes'"'"', '"'"'insert'"'"'); END IF; END $$;'
         'CREATE PUBLICATION bigname_changes FOR TABLES IN SCHEMA bigname_phase;'
@@ -3556,6 +3582,7 @@ assert_session_state_rule_holds() {
         'ALTER TABLE bigname_phase.t ADD COLUMN restart boolean, ADD CONSTRAINT t_state CHECK (state IN ('"'"'running'"'"', '"'"'restart'"'"')), ALTER COLUMN redo_mode SET DEFAULT '"'"'restart'"'"', ALTER COLUMN restart SET DEFAULT false;'
         'DELETE FROM pg_temp.scratch_rows; UPDATE bigname_phase.pg_style_rows SET a = 1; COMMENT ON TABLE t IS '"'"'Set logged-in readers apart'"'"';'
         'COMMENT ON TABLE t IS '"'"'A generation is published before readers switch, so drop publication state only after the switch; never reset its id with setval() or ALTER SEQUENCE.'"'"';'
+        'CREATE FUNCTION bigname_phase.h() RETURNS int LANGUAGE '"'"'plpgsql'"'"' AS $$ BEGIN RETURN 1; END $$; CREATE FUNCTION bigname_phase.k() RETURNS int LANGUAGE sql AS $$ SELECT 1 $$; CREATE TABLE bigname_phase.labels (label text, "language" text, pg_file_count int, dblink_url text); COMMENT ON TABLE bigname_phase.labels IS '"'"'The language of each label'"'"';'
     )
     planted_dir="$(mktemp -d "${TMPDIR:-/tmp}/schema-v2-session-state-rule.XXXXXX")"
     for planted in "${refused[@]}"; do
@@ -3800,6 +3827,20 @@ if [ "$login_password_checked" = 0 ] && ! password_verifiers_readable; then
     printf '%s\n' \
         "this run could not see a schema-migration change a password: the configured user cannot read pg_authid and the server accepts the check's login without its password; run the check as a superuser or against a server that authenticates the login by password" >&2
     exit 1
+fi
+# Without pg_authid the check sees a password change only as its login or the
+# configured user failing to reconnect, so a role the configured user may
+# re-password is out of its sight. PostgreSQL 16 lets a CREATEROLE user do
+# that only on a role it holds ADMIN OPTION on; older servers, on any role
+# that is not a superuser.
+if ! password_verifiers_readable; then
+    administered_roles="$(printf '\\pset tuples_only on\n\\pset format unaligned\nSELECT string_agg(quote_ident(r.rolname), %s ORDER BY r.rolname) FROM pg_roles r WHERE r.rolname NOT IN (current_user, %s) AND CASE WHEN current_setting(%s)::int >= 160000 THEN pg_has_role(current_user, r.oid, %s) ELSE (SELECT rolcreaterole FROM pg_roles WHERE rolname = current_user) AND NOT r.rolsuper END;\n' \
+        "', '" "'$apply_check_role'" "'server_version_num'" "'MEMBER WITH ADMIN OPTION'" | run_psql_as_owner)"
+    if [ -n "$administered_roles" ]; then
+        printf '%s\n' \
+            "the configured user can change the password of $administered_roles, and this run could not see a schema-migration do so: it cannot read pg_authid and reconnects only as its login and the configured user; run the check as a superuser or as a user that holds ADMIN OPTION on no other role" >&2
+        exit 1
+    fi
 fi
 # Proved on the form no text rule sees, a statement assembled at run time:
 # every read this run has must see it. The configured user then restores the
