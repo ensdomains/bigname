@@ -13,6 +13,8 @@ pub(crate) struct CollectionSnapshot {
     token: String,
     evaluated_at: OffsetDateTime,
     namespace: Option<String>,
+    /// Whether the request continued an earlier page with a cursor.
+    continues_cursor: bool,
 }
 
 impl CollectionSnapshot {
@@ -63,6 +65,7 @@ impl CollectionSnapshot {
             token,
             evaluated_at,
             namespace: namespace.map(str::to_owned),
+            continues_cursor: cursor.is_some(),
         };
         if let Some(cursor) = cursor.as_ref() {
             snapshot.validate_cursor(cursor)?;
@@ -116,10 +119,12 @@ impl CollectionSnapshot {
         revalidate_collection_namespace_set(state, &self.namespaces, self.namespace.as_deref())
             .await
             .map_err(|error| {
-                if error.status == axum::http::StatusCode::CONFLICT {
+                if error.status != axum::http::StatusCode::CONFLICT {
+                    api_error_to_v2(error)
+                } else if self.continues_cursor {
                     restart_required()
                 } else {
-                    api_error_to_v2(error)
+                    changed_during_read()
                 }
             })?;
         request_scope_meta(self.namespaces.request_scope())
@@ -130,4 +135,10 @@ fn restart_required() -> V2Error {
     V2Error::stale(
         "collection publication is no longer available; restart pagination without a cursor",
     )
+}
+
+/// A request without a cursor has nothing to restart: the next attempt reads the new
+/// publication.
+fn changed_during_read() -> V2Error {
+    V2Error::stale("collection publication changed during the read; retry the request")
 }

@@ -485,6 +485,49 @@ async fn v2_collection_revalidates_publication_after_reads() -> Result<()> {
         .await
         .expect_err("republished state cannot finish prior read");
     assert_eq!(error.code(), crate::v2::ErrorCode::Stale);
+    // A first page carried no cursor, so there is none to drop: the request is retried.
+    assert_eq!(
+        error.envelope().error.message,
+        "collection publication changed during the read; retry the request"
+    );
+
+    // A continued page must restart without its cursor.
+    let first = crate::v2::collection_snapshot::CollectionSnapshot::capture_for_namespace(
+        &state,
+        None,
+        Some("ens"),
+    )
+    .await
+    .expect("capture republished publication");
+    let cursor = crate::v2::encode(&first.bind_cursor(crate::v2::CursorPayload::new(
+        "test",
+        Default::default(),
+        Default::default(),
+        None,
+    )));
+    let continued = crate::v2::collection_snapshot::CollectionSnapshot::capture_for_namespace(
+        &state,
+        Some(&cursor),
+        Some("ens"),
+    )
+    .await
+    .expect("cursor bound to the current publication");
+    seed_schema_v2_ens_lookup_head(
+        &database.pool,
+        100,
+        "0xcollection-head",
+        "2026-06-10T00:00:00Z",
+    )
+    .await?;
+    let error = continued
+        .finish(&state)
+        .await
+        .expect_err("republished state cannot finish a continued read");
+    assert_eq!(error.code(), crate::v2::ErrorCode::Stale);
+    assert_eq!(
+        error.envelope().error.message,
+        "collection publication is no longer available; restart pagination without a cursor"
+    );
     database.cleanup().await
 }
 

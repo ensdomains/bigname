@@ -47,7 +47,10 @@ same-height replacement) and manifest revisions. Counts and rows use the same
 filters; time-dependent expiry filtering retains the first page's evaluation
 time. These reads revalidate the publication before returning and disclose
 `meta.as_of`. A changed or unavailable publication, or an older unbound cursor,
-returns `409 stale` and requires restarting without a cursor. No historical
+returns `409 stale` and requires restarting without a cursor. A first page,
+which has no cursor to drop, whose publication changed while it was read
+returns the same `409 stale` with a message saying so; retrying the same
+request reads the new publication. No historical
 projection is retained by a pagination token. The binding conservatively covers
 the requested namespace, or all active public namespaces when none is selected.
 A count spanning namespaces requires readable publications for all of them;
@@ -539,6 +542,8 @@ collection route carry neither header.
 - Snapshot behavior: the page and its counts use the captured current
   publication. The response discloses `meta.as_of`; continuation cursors bind
   the publication and return `409 stale` requiring a restart when it changes.
+  A first page whose publication changes during the read returns `409 stale`
+  too and can simply be retried.
   Historical replay through `at` is not supported.
 - Status semantics: an empty window returns `200` with empty `data`.
 
@@ -1428,6 +1433,8 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
 - Snapshot behavior: the page and its counts use the captured current
   publication. The response discloses `meta.as_of`; continuation cursors bind
   the publication and return `409 stale` requiring a restart when it changes.
+  A first page whose publication changes during the read returns `409 stale`
+  too and can simply be retried.
   Historical replay through `at` is not supported.
 - Status semantics: no product-visible matches return `200` with empty `data`,
   `page.next_cursor=null`, and `page.has_more=false`. Missing names return `404
@@ -1933,6 +1940,8 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
 - Snapshot behavior: the page and its counts use the captured current
   publication. The response discloses `meta.as_of`; continuation cursors bind
   the publication and return `409 stale` requiring a restart when it changes.
+  A first page whose publication changes during the read returns `409 stale`
+  too and can simply be retried.
   Historical replay through `at` is not supported.
 - Status semantics: no related names returns `200` with empty `data`.
   Malformed addresses return `400 invalid_input`. Unsupported public namespaces
@@ -2218,6 +2227,8 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
 - Snapshot behavior: the page and its counts use the captured current
   publication. The response discloses `meta.as_of`; continuation cursors bind
   the publication and return `409 stale` requiring a restart when it changes.
+  A first page whose publication changes during the read returns `409 stale`
+  too and can simply be retried.
   Historical replay through `at` is not supported.
 - Pagination behavior: product event-type filtering, including an explicit
   `type` set, runs before keyset page construction (newest first unless
@@ -2428,6 +2439,8 @@ For a registrar lease first identified by a later readable observation, registra
 - Snapshot behavior: the page and its counts use the captured current
   publication. The response discloses `meta.as_of`; continuation cursors bind
   the publication and return `409 stale` requiring a restart when it changes.
+  A first page whose publication changes during the read returns `409 stale`
+  too and can simply be retried.
   Historical replay through `at` is not supported.
 - Status semantics: no product-visible matches return `200` with empty `data`,
   `page.next_cursor=null`, and `page.has_more=false`. Filter and cursor-binding
