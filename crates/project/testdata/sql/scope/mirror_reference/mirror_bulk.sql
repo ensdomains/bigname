@@ -38,7 +38,7 @@ SELECT DISTINCT mirror.resource_id AS mirror_resource_id, queried.namespace,
 FROM mirror_pointers mirror JOIN surfaces queried USING(logical_name_id)
 CROSS JOIN generate_series(1, cardinality(queried.raw_labels)) position;
 ANALYZE project_mirror_walk;
-CREATE TEMP TABLE project_mirror_consulted ON COMMIT DROP AS
+CREATE TEMP TABLE project_mirror_reference_consulted ON COMMIT DROP AS
 SELECT DISTINCT walk.mirror_resource_id, surface.logical_name_id, surface.namespace,
        lower(surface.namehash) AS namehash
 FROM project_mirror_walk walk
@@ -48,9 +48,9 @@ JOIN chain_lineage lineage ON lineage.chain_id=surface.chain_id
 WHERE surface.chain_id=$1 AND surface.block_number <= $2
 AND surface.canonicality_state IN ('canonical','safe','finalized')
 AND lineage.canonicality_state IN ('canonical','safe','finalized');
-ANALYZE project_mirror_consulted;
+ANALYZE project_mirror_reference_consulted;
 CREATE TEMP TABLE project_mirror_pairs ON COMMIT DROP AS
-WITH wanted AS MATERIALIZED (SELECT DISTINCT namespace,namehash FROM project_mirror_consulted),
+WITH wanted AS MATERIALIZED (SELECT DISTINCT namespace,namehash FROM project_mirror_reference_consulted),
 v1_nodes AS (
              SELECT event.namespace, lower(event.after_state ->> 'node') AS namehash,
                     event.resource_id,
@@ -77,9 +77,9 @@ v1_nodes AS (
 )
 SELECT DISTINCT consulted.mirror_resource_id, consulted.logical_name_id AS consulted_logical_name_id,
        node.resource_id AS consulted_resource_id, node.changed
-FROM project_mirror_consulted consulted JOIN v1_nodes node USING(namespace,namehash);
+FROM project_mirror_reference_consulted consulted JOIN v1_nodes node USING(namespace,namehash);
 CREATE INDEX ON project_mirror_pairs(mirror_resource_id);
 CREATE INDEX ON project_mirror_pairs(consulted_resource_id);
 CREATE INDEX ON project_mirror_pairs(consulted_logical_name_id);
 ANALYZE project_mirror_pairs;
-DROP TABLE project_mirror_walk, project_mirror_consulted;
+DROP TABLE project_mirror_walk, project_mirror_reference_consulted;

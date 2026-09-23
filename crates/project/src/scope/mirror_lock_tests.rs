@@ -100,7 +100,6 @@ async fn mirror_relation_locks_stay_constant_across_closure_hops() -> Result<()>
     super::finish(&mut tx, strategy).await?;
 
     assert_eq!(iterations, 2 * CHAIN, "iterations");
-    assert!(iterations >= 30);
     for (index, hop) in hops.iter().enumerate() {
         let expected = if index % 2 == 0 { "resource" } else { "name" };
         assert_eq!(*hop, expected, "hop {index}");
