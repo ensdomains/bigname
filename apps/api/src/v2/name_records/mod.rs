@@ -15,7 +15,7 @@ use serde_json::Value;
 use crate::AppState;
 use crate::v2::support::{
     ResolutionLookupError, ResolutionRecordKey, load_name_current_for_selected_snapshot,
-    load_record_inventory_for_source, map_internal_api_error, normalize_inferred_route_name,
+    load_records_route_inventory, map_internal_api_error, normalize_inferred_route_name,
     snapshot_selection_api_error,
 };
 
@@ -37,7 +37,7 @@ pub(crate) use build::{
     build_verified_name_records, ens_universal_resolver_discovery_candidate,
     indexed_records_requiring_verified_fallback,
 };
-pub(crate) use keys::parse_record_keys;
+pub(crate) use keys::{RecordSelection, parse_record_keys};
 
 pub(crate) const MAX_RECORD_KEYS: usize = MAX_PAGE_SIZE as usize;
 const VERIFIED_ANSWER_STALE_FOR_SNAPSHOT_REASON: &str = "verified_answer_stale_for_snapshot";
@@ -119,15 +119,14 @@ impl QueryParamAllowlist for NameRecordsQueryParams {
 
 pub(crate) type NameRecordsQuery = StrictQueryParams<NameRecordsQueryParams>;
 
+/// The records route's response data. `records` is its only value shape: one answer per
+/// requested key, or per inventory-derived default key when `keys` is omitted, serialized in
+/// record-key byte order. The flat value maps live on name detail and lookup only.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub(crate) struct NameRecords {
     pub(crate) namespace: String,
     pub(crate) resolver: Option<Resolver>,
-    pub(crate) addresses: BTreeMap<String, String>,
-    pub(crate) text_records: BTreeMap<String, String>,
-    pub(crate) content_hash: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) records: Option<BTreeMap<String, RecordAnswer>>,
+    pub(crate) records: BTreeMap<String, RecordAnswer>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) inventory: Option<RecordInventory>,
 }
@@ -175,7 +174,7 @@ pub(crate) async fn get_name_records(
         .namespace
         .clone()
         .unwrap_or_else(|| normalized.namespace.to_owned());
-    let requested_records = parse_record_keys(params.keys.as_deref())?;
+    let explicit_records = parse_record_keys(params.keys.as_deref())?;
     let include_inventory = records_include_inventory(&params.include)?;
 
     let include_resolution_auxiliary =
@@ -187,26 +186,27 @@ pub(crate) async fn get_name_records(
         params.at.as_ref(),
         params.finality,
         include_resolution_auxiliary,
-        params.source,
     )
     .await?;
 
+    // Without `keys`, every source answers the inventory-derived default set. Inventory is loaded
+    // only for a row the name may serve, so reservation and audit-only rows derive no keys. The
+    // limit is checked before any lookup can run.
     let default_records;
-    let requested_records = match requested_records.as_deref() {
-        Some(records) => Some(records),
-        None if params.source == RequestSource::Verified => {
+    let selection = match explicit_records.as_deref() {
+        Some(records) => RecordSelection::requested(records),
+        None => {
             default_records = default_requested_records(record_inventory.as_ref());
-            ensure_verified_record_limit(&default_records)?;
-            (super::name_record::row_has_current_registration(&row) || !default_records.is_empty())
-                .then_some(default_records.as_slice())
+            ensure_default_record_limit(&default_records)?;
+            RecordSelection::inventory_default(&default_records)
         }
-        None => None,
     };
+    let requested_records = selection.records;
 
     let authority_unsupported = build_authority_unsupported_name_records(
         &row,
         record_inventory.as_ref(),
-        requested_records,
+        selection,
         include_inventory,
     )?;
     let (route_source, data) = if let Some(data) = authority_unsupported {
@@ -222,7 +222,7 @@ pub(crate) async fn get_name_records(
                 build_indexed_name_records(
                     &row,
                     record_inventory.as_ref(),
-                    requested_records,
+                    selection,
                     include_inventory,
                     false,
                 )?,
@@ -235,7 +235,7 @@ pub(crate) async fn get_name_records(
                 let verified_lookup = load_verified_record_lookup(
                     &state,
                     &row,
-                    requested_records.unwrap_or_default(),
+                    requested_records,
                     &mut selected_snapshot,
                 )
                 .await?;
@@ -248,7 +248,7 @@ pub(crate) async fn get_name_records(
                     build_verified_name_records(
                         &row,
                         record_inventory.as_ref(),
-                        requested_records,
+                        selection,
                         verified_lookup,
                         include_inventory,
                         false,
@@ -256,14 +256,16 @@ pub(crate) async fn get_name_records(
                 )
             }
             RequestSource::Auto => {
-                let records = requested_records.unwrap_or_default();
-                if records.is_empty() {
+                let records = requested_records;
+                if !selection.explicit {
+                    // An unkeyed auto read stays indexed over the default set: the default keys
+                    // are not a caller selection and never enter verified fallback.
                     (
                         Source::Indexed,
                         build_indexed_name_records(
                             &row,
                             record_inventory.as_ref(),
-                            requested_records,
+                            selection,
                             include_inventory,
                             false,
                         )?,
@@ -290,7 +292,6 @@ pub(crate) async fn get_name_records(
                                 params.at.as_ref(),
                                 params.finality,
                                 true,
-                                RequestSource::Verified,
                             )
                             .await?;
                         let refreshed_fallback_records =
@@ -304,7 +305,7 @@ pub(crate) async fn get_name_records(
                             || build_authority_unsupported_name_records(
                                 &row,
                                 record_inventory.as_ref(),
-                                requested_records,
+                                selection,
                                 include_inventory,
                             )?
                             .is_some()
@@ -382,7 +383,6 @@ async fn load_name_records_snapshot_state(
     at: Option<&AtSelector>,
     finality: Finality,
     include_resolution_auxiliary: bool,
-    source: RequestSource,
 ) -> V2Result<(
     SelectedSnapshot,
     NameCurrentRow,
@@ -424,7 +424,7 @@ async fn load_name_records_snapshot_state(
     })?;
 
     let record_inventory = if super::name_record::row_has_current_registration(&row) {
-        load_record_inventory_for_source(&state.pool, &row, &selected_snapshot, source)
+        load_records_route_inventory(&state.pool, &row, &selected_snapshot)
             .await
             .map_err(|error| {
                 api_error_to_v2_for_resource(
@@ -438,10 +438,12 @@ async fn load_name_records_snapshot_state(
     Ok((selected_snapshot, row, record_inventory))
 }
 
-pub(crate) fn ensure_verified_record_limit(records: &[ResolutionRecordKey]) -> V2Result<()> {
+/// Refuse an inventory-derived key set above the record-key limit. The set is never truncated;
+/// callers narrow it with explicit `keys` (more than 200 explicit keys is a request error).
+pub(crate) fn ensure_default_record_limit(records: &[ResolutionRecordKey]) -> V2Result<()> {
     if records.len() > MAX_RECORD_KEYS {
         return Err(V2Error::unsupported(format!(
-            "verified record reads support at most {MAX_RECORD_KEYS} record keys"
+            "inventory-derived record key sets support at most {MAX_RECORD_KEYS} record keys"
         )));
     }
     Ok(())

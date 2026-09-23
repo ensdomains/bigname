@@ -17,15 +17,12 @@ use super::super::vocab::{
 };
 use super::super::{
     PRODUCT_PIPELINE_TERMS, Source, Status, V2Error, V2Result, contains_boundary_vocabulary,
-    name_record::{
-        record_addresses, record_content_hash, record_text_records, resolver, string_field,
-        value_to_string,
-    },
+    name_record::{resolver, string_field, value_to_string},
     name_records_inventory::{
         inventory_item_for_record, inventory_summary, unsupported_family_reason,
     },
 };
-use super::{NameRecords, RecordAnswer, RecordAnswerMeta, VerifiedRecordLookup};
+use super::{NameRecords, RecordAnswer, RecordAnswerMeta, RecordSelection, VerifiedRecordLookup};
 
 mod discovery;
 pub(crate) use discovery::ens_universal_resolver_discovery_candidate;
@@ -41,7 +38,7 @@ pub(crate) const EXACT_NAME_AUTHORITY_NOT_VERIFIABLE: &str = "exact_name_authori
 pub(crate) fn build_authority_unsupported_name_records(
     row: &NameCurrentRow,
     record_inventory: Option<&RecordInventoryCurrentRow>,
-    requested_records: Option<&[ResolutionRecordKey]>,
+    selection: RecordSelection<'_>,
     include_inventory: bool,
 ) -> V2Result<Option<NameRecords>> {
     let has_current_registration = row_has_current_registration(row);
@@ -49,23 +46,17 @@ pub(crate) fn build_authority_unsupported_name_records(
     let Some(reason) = authority_unsupported_reason(row)? else {
         return Ok(None);
     };
-    let records = requested_records
-        .map(|records| {
-            records
-                .iter()
-                .map(|record| Ok((record.record_key.clone(), unsupported_answer(&reason)?)))
-                .collect::<V2Result<BTreeMap<_, _>>>()
-        })
-        .transpose()?;
+    let records = selection
+        .records
+        .iter()
+        .map(|record| Ok((record.record_key.clone(), unsupported_answer(&reason)?)))
+        .collect::<V2Result<BTreeMap<_, _>>>()?;
     Ok(Some(NameRecords {
         namespace: row.namespace.clone(),
         resolver: None,
-        addresses: BTreeMap::new(),
-        text_records: BTreeMap::new(),
-        content_hash: None,
         records,
         inventory: (include_inventory && has_current_registration)
-            .then(|| inventory_summary(record_inventory, requested_records)),
+            .then(|| inventory_summary(record_inventory, selection.inventory_request())),
     }))
 }
 
@@ -97,55 +88,31 @@ fn authority_unsupported_reason(row: &NameCurrentRow) -> V2Result<Option<String>
 pub(crate) fn build_indexed_name_records(
     row: &NameCurrentRow,
     record_inventory: Option<&RecordInventoryCurrentRow>,
-    requested_records: Option<&[ResolutionRecordKey]>,
+    selection: RecordSelection<'_>,
     include_inventory: bool,
     retain_audit_state: bool,
 ) -> V2Result<NameRecords> {
     let has_current_registration = retain_audit_state || row_has_current_registration(row);
     let record_inventory = record_inventory.filter(|_| has_current_registration);
-    let record_answers = requested_records
-        .map(|records| {
-            records
-                .iter()
-                .map(|record| {
-                    Ok((
-                        record.record_key.clone(),
-                        indexed_record_answer(record_inventory, record)?,
-                    ))
-                })
-                .collect::<V2Result<BTreeMap<_, _>>>()
+    let records = selection
+        .records
+        .iter()
+        .map(|record| {
+            Ok((
+                record.record_key.clone(),
+                indexed_record_answer(record_inventory, record)?,
+            ))
         })
-        .transpose()?;
-    let values = match requested_records {
-        Some(records) => RecordValues::from_answers(
-            records,
-            record_answers
-                .as_ref()
-                .expect("requested indexed records must build an answer map"),
-        ),
-        None => {
-            // Convenience maps read entries directly, so they apply the evaluator's coverage gate
-            // themselves: an unsupported row contributes no values.
-            let value_inventory = serving_record_inventory(record_inventory);
-            RecordValues {
-                addresses: record_addresses(value_inventory),
-                text_records: record_text_records(value_inventory),
-                content_hash: record_content_hash(value_inventory),
-            }
-        }
-    };
+        .collect::<V2Result<BTreeMap<_, _>>>()?;
 
     Ok(NameRecords {
         namespace: row.namespace.clone(),
         resolver: has_current_registration
             .then(|| resolver(&row.declared_summary))
             .flatten(),
-        addresses: values.addresses,
-        text_records: values.text_records,
-        content_hash: values.content_hash,
-        records: record_answers,
+        records,
         inventory: (include_inventory && has_current_registration)
-            .then(|| inventory_summary(record_inventory, requested_records)),
+            .then(|| inventory_summary(record_inventory, selection.inventory_request())),
     })
 }
 
@@ -216,7 +183,6 @@ pub(crate) fn build_auto_name_records(
         }
         Source::Verified
     };
-    let values = RecordValues::from_answers(requested_records, &answers);
 
     Ok((
         source,
@@ -225,10 +191,7 @@ pub(crate) fn build_auto_name_records(
             resolver: has_current_registration
                 .then(|| resolver(&row.declared_summary))
                 .flatten(),
-            addresses: values.addresses,
-            text_records: values.text_records,
-            content_hash: values.content_hash,
-            records: Some(answers),
+            records: answers,
             inventory: (include_inventory && has_current_registration)
                 .then(|| inventory_summary(record_inventory, Some(requested_records))),
         },
@@ -238,87 +201,29 @@ pub(crate) fn build_auto_name_records(
 pub(crate) fn build_verified_name_records(
     row: &NameCurrentRow,
     record_inventory: Option<&RecordInventoryCurrentRow>,
-    requested_records: Option<&[ResolutionRecordKey]>,
+    selection: RecordSelection<'_>,
     verified_lookup: Option<VerifiedRecordLookup>,
     include_inventory: bool,
     retain_audit_state: bool,
 ) -> V2Result<NameRecords> {
     let has_current_registration = retain_audit_state || row_has_current_registration(row);
     let record_inventory = record_inventory.filter(|_| has_current_registration);
-    let records = requested_records
-        .map(|records| {
-            verified_record_answers(
-                row,
-                records,
-                verified_lookup,
-                ens_universal_resolver_discovery_candidate(row),
-            )
-        })
-        .transpose()?;
-    let values = requested_records
-        .zip(records.as_ref())
-        .map(|(records, answers)| RecordValues::from_answers(records, answers))
-        .unwrap_or_default();
+    let records = verified_record_answers(
+        row,
+        selection.records,
+        verified_lookup,
+        ens_universal_resolver_discovery_candidate(row),
+    )?;
 
     Ok(NameRecords {
         namespace: row.namespace.clone(),
         resolver: has_current_registration
             .then(|| resolver(&row.declared_summary))
             .flatten(),
-        addresses: values.addresses,
-        text_records: values.text_records,
-        content_hash: values.content_hash,
         records,
         inventory: (include_inventory && has_current_registration)
-            .then(|| inventory_summary(record_inventory, requested_records)),
+            .then(|| inventory_summary(record_inventory, selection.inventory_request())),
     })
-}
-
-#[derive(Default)]
-struct RecordValues {
-    addresses: BTreeMap<String, String>,
-    text_records: BTreeMap<String, String>,
-    content_hash: Option<String>,
-}
-
-impl RecordValues {
-    fn from_answers(
-        records: &[ResolutionRecordKey],
-        answers: &BTreeMap<String, RecordAnswer>,
-    ) -> Self {
-        let mut values = Self::default();
-        for record in records {
-            let Some(value) = answers
-                .get(&record.record_key)
-                .filter(|answer| answer.status == Status::Ok)
-                .and_then(|answer| answer.value.as_ref())
-                .and_then(value_to_string)
-            else {
-                continue;
-            };
-
-            match record.record_family.as_str() {
-                "addr" => {
-                    if let Some(coin_type) = record.selector_key.clone() {
-                        values.addresses.insert(coin_type, value);
-                    }
-                }
-                "text" => {
-                    if let Some(key) = record.selector_key.clone() {
-                        values.text_records.insert(key, value);
-                    }
-                }
-                "avatar" => {
-                    values.text_records.insert("avatar".to_owned(), value);
-                }
-                "contenthash" => {
-                    values.content_hash = Some(value);
-                }
-                _ => {}
-            }
-        }
-        values
-    }
 }
 
 fn indexed_record_answer(

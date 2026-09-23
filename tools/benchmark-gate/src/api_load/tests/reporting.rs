@@ -60,6 +60,44 @@ fn records_probe_requires_a_found_requested_record() {
     ));
 }
 
+#[test]
+fn keyless_records_are_populated_only_by_an_ok_default_answer() {
+    assert!(aggregate_records_are_populated(&json!({
+        "data": {
+            "records": {
+                "addr:60": {"status": "not_found"},
+                "text:avatar": {"status": "ok", "value": "ipfs://avatar"}
+            }
+        }
+    })));
+    for unpopulated in [
+        json!({"data": {"records": {}}}),
+        json!({
+            "data": {
+                "records": {
+                    "addr:60": {"status": "not_found"},
+                    "avatar": {"status": "unsupported", "unsupported_reason": "resolver_family_pending"},
+                    "contenthash": {"status": "failed", "failure_reason": "verified_record_read_failed"}
+                }
+            }
+        }),
+        // The records route no longer serves the convenience maps; a maps-only body is empty.
+        json!({
+            "data": {
+                "addresses": {"60": "0x0000000000000000000000000000000000000001"},
+                "text_records": {"avatar": "ipfs://avatar"},
+                "content_hash": "0xe301"
+            }
+        }),
+        json!({"error": {"code": "not_found"}}),
+    ] {
+        assert!(
+            !aggregate_records_are_populated(&unpopulated),
+            "{unpopulated}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn timed_keyless_record_aggregates_do_not_satisfy_the_requested_key_floor() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -68,7 +106,7 @@ async fn timed_keyless_record_aggregates_do_not_satisfy_the_requested_key_floor(
         let (mut stream, _) = listener.accept().await.unwrap();
         let mut request = [0u8; 1024];
         let _ = stream.read(&mut request).await.unwrap();
-        let body = r#"{"data":{"addresses":{"60":"0x0000000000000000000000000000000000000001"},"text_records":{},"content_hash":null}}"#;
+        let body = r#"{"data":{"records":{"addr:60":{"status":"ok","value":"0x0000000000000000000000000000000000000001"}}}}"#;
         let response = format!(
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
             body.len()
