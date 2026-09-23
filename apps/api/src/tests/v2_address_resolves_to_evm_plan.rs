@@ -219,6 +219,18 @@ async fn v2_resolves_to_evm_page_reads_only_the_address_rows() -> Result<()> {
             sql.contains("evm_address_rows AS MATERIALIZED"),
             "evm page statement lost its address fence:\n{sql}"
         );
+        // The group and name facets aggregate only rows ranked within the per-row limit.
+        let limit = bigname_storage::EVM_MATCHED_COIN_TYPES_PER_ROW_LIMIT;
+        for bound in [
+            format!("WHERE evm_group_coin_row = 1 AND evm_group_coin_rank <= {limit}"),
+            format!("WHERE evm_name_coin_rank <= {limit}"),
+        ] {
+            assert_eq!(
+                sql.matches(&bound).count(),
+                if bound.contains("group") { 2 } else { 1 },
+                "evm page statement lost its aggregation bound {bound}:\n{sql}"
+            );
+        }
     }
 
     for (label, dedupe, sort, order, page_size) in [
@@ -307,6 +319,81 @@ async fn v2_resolves_to_evm_page_reads_only_the_address_rows() -> Result<()> {
             "evm cost gate route {query}: first page {first_elapsed:?}, continuation {:?}",
             started.elapsed()
         );
+    }
+
+    database.cleanup().await
+}
+
+/// The storage read aggregates at most the per-row limit of coin types for a group, whatever the
+/// group matched, and reports the full distinct count beside the bounded facets.
+#[tokio::test]
+async fn v2_resolves_to_evm_storage_bounds_the_group_aggregation() -> Result<()> {
+    use bigname_storage::{
+        AddressNamesCurrentDedupe as Dedupe, AddressNamesCurrentOrder as Order,
+        AddressNamesCurrentSort as Sort,
+    };
+    let limit = bigname_storage::EVM_MATCHED_COIN_TYPES_PER_ROW_LIMIT;
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_address_names_fixture(&database).await?;
+    seed_v2_evm_bound_fixture(&database).await?;
+    let lowest = v2_evm_wide_coin_types(limit)
+        .into_iter()
+        .map(|coin_type| coin_type.to_string())
+        .collect::<Vec<_>>();
+
+    for (dedupe, page_size, first_name) in [
+        (Dedupe::Surface, 1, "beta.eth"),
+        (Dedupe::Surface, 50, "beta.eth"),
+        (Dedupe::Resource, 50, "beta.eth"),
+    ] {
+        let page = bigname_storage::load_address_records_current_evm_page(
+            &database.pool,
+            V2_EVM_WIDE_ADDRESS,
+            None,
+            dedupe,
+            None,
+            None,
+            Sort::Name,
+            Order::Asc,
+            None,
+            page_size,
+        )
+        .await?;
+        assert_eq!(page.entries[0].entry.normalized_name, first_name);
+        for row in &page.entries {
+            let label = format!("{dedupe:?} {page_size} {}", row.entry.normalized_name);
+            assert_eq!(row.matched_coin_type_count, limit + 1, "{label}");
+            assert_eq!(
+                row.resolutions
+                    .iter()
+                    .map(|matched| matched.coin_type.clone())
+                    .collect::<Vec<_>>(),
+                lowest,
+                "{label}"
+            );
+            assert_eq!(row.representative_coin_types, lowest, "{label}");
+        }
+    }
+
+    // At the limit nothing is dropped, and a registration group's repeated coin types count once.
+    for dedupe in [Dedupe::Surface, Dedupe::Resource] {
+        let page = bigname_storage::load_address_records_current_evm_page(
+            &database.pool,
+            V2_EVM_BOUNDED_ADDRESS,
+            None,
+            dedupe,
+            None,
+            None,
+            Sort::Name,
+            Order::Asc,
+            None,
+            50,
+        )
+        .await?;
+        for row in &page.entries {
+            assert_eq!(row.matched_coin_type_count, limit, "{dedupe:?}");
+            assert_eq!(row.resolutions.len(), lowest.len(), "{dedupe:?}");
+        }
     }
 
     database.cleanup().await

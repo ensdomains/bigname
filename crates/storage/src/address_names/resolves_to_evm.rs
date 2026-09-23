@@ -1,6 +1,6 @@
 //! The `coin_type=evm` read over `address_records_current`: names whose stored `addr:<coin_type>`
 //! record for any EVM coin type holds the address, one row per dedupe group, with every matched
-//! coin type retained.
+//! coin type retained up to [`EVM_MATCHED_COIN_TYPES_PER_ROW_LIMIT`] per row.
 //!
 //! The EVM coin types are `60` and `[2^31, 2^32)`, the set ENSIP-19 treats as EVM, including the
 //! default coin type `2^31` itself
@@ -8,8 +8,9 @@
 //! The read enumerates stored rows: the ENSIP-19 default record matches once, under its own coin
 //! type, and is never expanded into the chains it would answer.
 //!
-//! Matches are aggregated from the full filtered set before the representative row is chosen,
-//! so a representative never hides another coin type the group matched.
+//! Matches are ranked and counted over the full filtered set before the representative row is
+//! chosen, so a representative never hides another coin type the group matched, and a group past
+//! the limit is always reported by its count.
 
 use anyhow::Result;
 use bigname_domain::resolver_read::{ENSIP19_DEFAULT_COIN_TYPE, ETH_COIN_TYPE};
@@ -29,6 +30,11 @@ use super::{
 /// Exclusive upper bound of the ENSIP-11 coin-type range (`2^32`).
 const EVM_COIN_TYPE_END: u64 = 1 << 32;
 
+/// Most matched coin types one `coin_type=evm` row aggregates. A group matching more is still
+/// counted (`matched_coin_type_count`) but its facets stop at the lowest this many coin types; the
+/// API rejects such a page with 422 rather than serve a truncated `resolutions` list.
+pub const EVM_MATCHED_COIN_TYPES_PER_ROW_LIMIT: u64 = 100;
+
 /// One EVM coin type whose stored record matched the address, and the stored record key.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AddressRecordCoinMatch {
@@ -47,6 +53,10 @@ pub struct AddressRecordEvmEntry {
     pub entry: AddressRecordCurrentEntry,
     pub resolutions: Vec<AddressRecordCoinMatch>,
     pub representative_coin_types: Vec<String>,
+    /// How many distinct EVM coin types the group matched. When it exceeds
+    /// [`EVM_MATCHED_COIN_TYPES_PER_ROW_LIMIT`], `resolutions` and `representative_coin_types`
+    /// hold only the lowest coin types up to that limit.
+    pub matched_coin_type_count: u64,
 }
 
 /// Bounded sorted page of names resolving to an address on any EVM coin type.
@@ -92,6 +102,7 @@ pub async fn load_address_records_current_evm_page(
                 entry: row.entry,
                 resolutions: facets.resolutions,
                 representative_coin_types: facets.representative_coin_types,
+                matched_coin_type_count: facets.matched_coin_type_count,
             })
         })
         .collect::<Result<Vec<_>>>()?;
@@ -163,6 +174,7 @@ pub fn address_records_current_evm_page_sql_for_test(
 pub(super) struct EvmFacets {
     pub(super) resolutions: Vec<AddressRecordCoinMatch>,
     pub(super) representative_coin_types: Vec<String>,
+    pub(super) matched_coin_type_count: u64,
 }
 
 /// The EVM coin-type predicate on `arc`. The bounds are domain constants, not caller input.
@@ -193,10 +205,15 @@ pub(super) fn push_evm_address_rows_cte<'a>(
     builder.push("\n        ),\n        ");
 }
 
-/// One window pass over the whole `filtered` set: every match is aggregated before the
+/// Two window passes over the whole `filtered` set: every match is ranked and counted before the
 /// representative is chosen, and no self-join can multiply the work by the number of groups.
-/// The group facet may repeat a coin type under `dedupe=registration` when several names in the
-/// group matched it; the decoder keeps the first (lowest record key) of each.
+///
+/// The aggregation is bounded: a group feeds its facets only its lowest
+/// [`EVM_MATCHED_COIN_TYPES_PER_ROW_LIMIT`] distinct coin types (the first, lowest record key, row
+/// of each), and a name its lowest that many, so no page row carries an unbounded array whatever
+/// one resource stores. `resolution_coin_type_count` is the group's full distinct count, which the
+/// API compares with the limit. Under `dedupe=registration` several names in one group can match
+/// the same coin type; that coin type counts once.
 pub(super) fn push_evm_entries_ctes(
     builder: &mut QueryBuilder<'_, Postgres>,
     dedupe_by: AddressNamesCurrentDedupe,
@@ -210,16 +227,38 @@ pub(super) fn push_evm_entries_ctes(
             "canonical_display_name ASC, logical_name_id ASC, matched_coin_type::numeric ASC",
         ),
     };
+    let limit = EVM_MATCHED_COIN_TYPES_PER_ROW_LIMIT;
     builder.push(format!(
         r#",
-        evm_ranked AS (
+        evm_numbered AS (
             SELECT filtered.*,
                 row_number() OVER (PARTITION BY {group_key} ORDER BY {tie_break})
                     AS evm_representative_rank,
-                array_agg(matched_coin_type) OVER evm_group AS resolution_coin_types,
-                array_agg(record_key) OVER evm_group AS resolution_record_keys,
-                array_agg(matched_coin_type) OVER evm_name AS representative_coin_types
+                dense_rank() OVER (
+                    PARTITION BY {group_key} ORDER BY matched_coin_type::numeric ASC
+                ) AS evm_group_coin_rank,
+                row_number() OVER (
+                    PARTITION BY {group_key}, matched_coin_type ORDER BY record_key ASC
+                ) AS evm_group_coin_row,
+                row_number() OVER (
+                    PARTITION BY address, resource_id, logical_name_id
+                    ORDER BY matched_coin_type::numeric ASC
+                ) AS evm_name_coin_rank
             FROM filtered
+        ),
+        evm_ranked AS (
+            SELECT evm_numbered.*,
+                max(evm_group_coin_rank) OVER evm_group AS resolution_coin_type_count,
+                array_agg(matched_coin_type) FILTER (
+                    WHERE evm_group_coin_row = 1 AND evm_group_coin_rank <= {limit}
+                ) OVER evm_group AS resolution_coin_types,
+                array_agg(record_key) FILTER (
+                    WHERE evm_group_coin_row = 1 AND evm_group_coin_rank <= {limit}
+                ) OVER evm_group AS resolution_record_keys,
+                array_agg(matched_coin_type) FILTER (
+                    WHERE evm_name_coin_rank <= {limit}
+                ) OVER evm_name AS representative_coin_types
+            FROM evm_numbered
             WINDOW
                 evm_group AS (
                     PARTITION BY {group_key}
@@ -239,7 +278,7 @@ pub(super) fn push_evm_entries_ctes(
                 record_resource_id, binding_kind, matched_coin_type, record_key, provenance,
                 coverage, chain_positions, canonicality_summary, manifest_version,
                 last_recomputed_at, resolution_coin_types, resolution_record_keys,
-                representative_coin_types
+                representative_coin_types, resolution_coin_type_count
             FROM evm_ranked
             WHERE evm_representative_rank = 1
         )
@@ -248,7 +287,7 @@ pub(super) fn push_evm_entries_ctes(
 }
 
 pub(super) const EVM_OUTER_COLUMNS: &str = "matched_coin_type, resolution_coin_types, \
-    resolution_record_keys, representative_coin_types, ";
+    resolution_record_keys, representative_coin_types, resolution_coin_type_count, ";
 
 pub(super) fn decode_evm_facets(row: &PgRow) -> Result<(String, EvmFacets)> {
     let coin_types = crate::sql_row::get::<Vec<String>>(row, "resolution_coin_types")?;
@@ -256,22 +295,23 @@ pub(super) fn decode_evm_facets(row: &PgRow) -> Result<(String, EvmFacets)> {
     if coin_types.len() != record_keys.len() || coin_types.is_empty() {
         anyhow::bail!("address_records_current evm row has mismatched resolution facets");
     }
-    let mut resolutions = Vec::<AddressRecordCoinMatch>::with_capacity(coin_types.len());
-    for (coin_type, record_key) in coin_types.into_iter().zip(record_keys) {
-        if resolutions
-            .last()
-            .is_some_and(|previous| previous.coin_type == coin_type)
-        {
-            continue;
-        }
-        resolutions.push(AddressRecordCoinMatch {
+    // The statement already keeps one row per coin type in a group, so the facets zip directly.
+    let resolutions = coin_types
+        .into_iter()
+        .zip(record_keys)
+        .map(|(coin_type, record_key)| AddressRecordCoinMatch {
             coin_type,
             record_key,
-        });
-    }
+        })
+        .collect::<Vec<_>>();
+    let matched_coin_type_count = u64::try_from(crate::sql_row::get::<i64>(
+        row,
+        "resolution_coin_type_count",
+    )?)?;
     Ok((
         crate::sql_row::get(row, "matched_coin_type")?,
         EvmFacets {
+            matched_coin_type_count,
             resolutions,
             representative_coin_types: crate::sql_row::get(row, "representative_coin_types")?,
         },

@@ -566,3 +566,122 @@ async fn v2_resolves_to_evm_is_primary_counts_only_the_row_matched_coins() -> Re
 
     database.cleanup().await
 }
+
+/// An address other fixtures leave empty, holding one name at exactly the per-row coin-type limit.
+const V2_EVM_BOUNDED_ADDRESS: &str = "0x0000000000000000000000000000000000000e0b";
+/// An address other fixtures leave empty, holding one name past the per-row coin-type limit.
+const V2_EVM_WIDE_ADDRESS: &str = "0x0000000000000000000000000000000000000e0a";
+
+/// The `count` lowest ENSIP-11 coin types above the default coin type, ascending.
+fn v2_evm_wide_coin_types(count: u64) -> Vec<u64> {
+    (1..=count).map(|offset| 2_147_483_648 + offset).collect()
+}
+
+/// Stores `name` as resolving to `address` under each of `coin_types`.
+async fn seed_v2_evm_wide_rows(
+    database: &TestDatabase,
+    address: &str,
+    name: &str,
+    coin_types: &[u64],
+) -> Result<()> {
+    let spec = v2_address_name_specs()
+        .into_iter()
+        .find(|spec| spec.name == name)
+        .expect("fixture name");
+    for coin_type in coin_types {
+        upsert_phase_address_records_current_row(
+            &database.pool,
+            address,
+            "ens",
+            spec.name,
+            spec.surface_binding_id,
+            spec.resource_id,
+            &coin_type.to_string(),
+            &format!("addr:{coin_type}"),
+            json!({}),
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+/// Seeds the bound fixture: at `V2_EVM_BOUNDED_ADDRESS`, alpha matches exactly the limit and
+/// shared-one and shared-two (one registration) each match the same limit coin types; at
+/// `V2_EVM_WIDE_ADDRESS`, beta and both shared names match one coin type past the limit.
+async fn seed_v2_evm_bound_fixture(database: &TestDatabase) -> Result<()> {
+    let limit = bigname_storage::EVM_MATCHED_COIN_TYPES_PER_ROW_LIMIT;
+    let at_limit = v2_evm_wide_coin_types(limit);
+    let past_limit = v2_evm_wide_coin_types(limit + 1);
+    for name in ["alpha.eth", "shared-one.eth", "shared-two.eth"] {
+        seed_v2_evm_wide_rows(database, V2_EVM_BOUNDED_ADDRESS, name, &at_limit).await?;
+    }
+    for name in ["beta.eth", "shared-one.eth", "shared-two.eth"] {
+        seed_v2_evm_wide_rows(database, V2_EVM_WIDE_ADDRESS, name, &past_limit).await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_resolves_to_evm_rejects_a_row_past_the_coin_type_limit() -> Result<()> {
+    let limit = bigname_storage::EVM_MATCHED_COIN_TYPES_PER_ROW_LIMIT;
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_address_names_fixture(&database).await?;
+    seed_v2_evm_bound_fixture(&database).await?;
+
+    // A row at exactly the limit is served whole, under either dedupe; the registration group's
+    // two members repeat each coin type, which counts once.
+    let at_limit = v2_evm_wide_coin_types(limit);
+    for (dedupe, name) in [("name", "alpha.eth"), ("registration", "shared-one.eth")] {
+        let payload = v2_address_names_payload_for_database(
+            &database,
+            &format!(
+                "/v1/addresses/{V2_EVM_BOUNDED_ADDRESS}/names?relation=resolves_to&coin_type=evm&dedupe={dedupe}"
+            ),
+        )
+        .await?;
+        let rows = payload["data"].as_array().expect("data array");
+        let coins = resolutions(row_named(rows, name))
+            .into_iter()
+            .map(|(coin_type, _)| coin_type)
+            .collect::<Vec<_>>();
+        assert_eq!(coins, at_limit, "{dedupe}");
+    }
+
+    // One coin type past the limit is rejected, even for a one-row page, rather than served
+    // truncated.
+    for query in ["&page_size=1", "&dedupe=registration&page_size=1", ""] {
+        let uri = format!(
+            "/v1/addresses/{V2_EVM_WIDE_ADDRESS}/names?relation=resolves_to&coin_type=evm{query}"
+        );
+        let response = v2_address_names_response_for_database(&database, &uri).await?;
+        assert_eq!(
+            response.status(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{uri}"
+        );
+        let payload: Value = read_json(response).await?;
+        assert_eq!(payload["error"]["code"], json!("unsupported"), "{uri}");
+        assert_eq!(
+            payload["error"]["message"],
+            json!(format!(
+                "coin_type=evm matched more than {limit} EVM coin types on one row; request a single decimal coin_type instead"
+            )),
+            "{uri}"
+        );
+    }
+    // A single coin type still serves the same names.
+    let single = v2_address_names_payload_for_database(
+        &database,
+        &format!(
+            "/v1/addresses/{V2_EVM_WIDE_ADDRESS}/names?relation=resolves_to&coin_type={}",
+            2_147_483_648 + limit + 1
+        ),
+    )
+    .await?;
+    assert_eq!(
+        names(single["data"].as_array().expect("data array")),
+        vec!["beta.eth", "shared-one.eth", "shared-two.eth"]
+    );
+
+    database.cleanup().await
+}

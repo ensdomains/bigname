@@ -26,7 +26,7 @@ pub use resolves_to::{
 };
 pub use resolves_to_evm::{
     AddressRecordCoinMatch, AddressRecordEvmEntry, AddressRecordsCurrentEvmPage,
-    load_address_records_current_evm_page,
+    EVM_MATCHED_COIN_TYPES_PER_ROW_LIMIT, load_address_records_current_evm_page,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use resolves_to_evm::{

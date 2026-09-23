@@ -30,6 +30,7 @@ use super::cursor::{
 };
 use super::resolves_to_evm::{
     ResolvesToCoins, ResolvesToMatches, ResolvesToRow, evm_primary_flags, parse_resolves_to_coins,
+    reject_rows_past_coin_type_limit,
 };
 use super::{
     AddressName, address_names_include, build_address_name_role_summary, dedupe_to_storage,
@@ -178,6 +179,7 @@ pub(super) async fn get_address_resolves_to(
             )
             .await
             .map_err(load_error)?;
+            reject_rows_past_coin_type_limit(state, &snapshot, &page.entries).await?;
             let rows = page.entries.into_iter().map(ResolvesToRow::from_evm);
             (rows.collect::<V2Result<Vec<_>>>()?, page.next_cursor)
         }

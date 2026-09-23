@@ -1917,7 +1917,17 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
   list names matches only. It is not every coin type the name's resolver has
   records for, and it is not a claim about live resolution on chains the
   stored records do not name. One row is still returned per name (or per
-  registration), never one per coin type. With `dedupe=registration`,
+  registration), never one per coin type. A row carries at most 100
+  `resolutions`. When a row on the returned page matched more than 100
+  distinct EVM coin types, whether by its name or, with `dedupe=registration`,
+  across its registration group, the whole request returns `422 unsupported`
+  with no partial data or truncation, even with `page_size=1`; read that
+  address one decimal `coin_type` at a time instead. A coin type that several
+  names in one registration group matched counts once. Whoever controls a
+  name's resolver can store records that hold any address, so without this
+  bound one name could make every `coin_type=evm` page for that address carry
+  an unbounded list. The bound caps each row's aggregated matches and response
+  size, not the stored rows the read scans to count them. With `dedupe=registration`,
   `resolutions` is the union of the matches of every name in the registration
   group. The reverse index is built so that every name in a group reads the
   same record inventory, so the union equals each member's own matches. The row's name
@@ -1997,7 +2007,8 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
   uses the same publication fence as the base collection, and current-state
   publication changes produce `409 stale`. The grant-budget `422 unsupported`
   is returned only after that fence passes, so a publication change during an
-  overflowing read is also `409 stale`. The expansion batch-loads
+  overflowing read is also `409 stale`. The same holds for the
+  `coin_type=evm` `422 unsupported` for a row past 100 matched coin types. The expansion batch-loads
   projection-owned permission summaries for every
   registration on the served page. A page with any unlisted permission surface
   returns `meta.completeness=partial`,

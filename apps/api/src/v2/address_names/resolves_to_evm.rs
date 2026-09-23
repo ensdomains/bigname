@@ -8,10 +8,14 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use bigname_storage::{AddressRecordCurrentEntry, AddressRecordEvmEntry, PrimaryNameClaimStatus};
+use bigname_storage::{
+    AddressRecordCurrentEntry, AddressRecordEvmEntry, EVM_MATCHED_COIN_TYPES_PER_ROW_LIMIT,
+    PrimaryNameClaimStatus,
+};
 
 use super::resolves_to::{AddressNameResolution, parse_resolves_to_coin_type};
-use crate::v2::{V2Error, V2Result};
+use crate::AppState;
+use crate::v2::{V2Error, V2Result, collection_snapshot::CollectionSnapshot};
 
 /// The only non-numeric `coin_type` spelling. It is matched exactly after the shared query-value
 /// trim, so `EVM` is rejected like any other non-numeric value.
@@ -44,6 +48,27 @@ pub(super) fn parse_resolves_to_coins(value: Option<&str>) -> V2Result<ResolvesT
     }
     let (coin_type, numeric) = parse_resolves_to_coin_type(value)?;
     Ok(ResolvesToCoins::Single { coin_type, numeric })
+}
+
+/// Reject an `evm` page when a served row's group matched more coin types than the storage read
+/// aggregates (`EVM_MATCHED_COIN_TYPES_PER_ROW_LIMIT`): such a row is never served with a
+/// truncated `resolutions` list. As with the inline role-summary budget, the overflow is reported
+/// only for a publication that is still the captured one.
+pub(super) async fn reject_rows_past_coin_type_limit(
+    state: &AppState,
+    snapshot: &CollectionSnapshot,
+    rows: &[AddressRecordEvmEntry],
+) -> V2Result<()> {
+    if rows
+        .iter()
+        .all(|row| row.matched_coin_type_count <= EVM_MATCHED_COIN_TYPES_PER_ROW_LIMIT)
+    {
+        return Ok(());
+    }
+    snapshot.finish(state).await?;
+    Err(V2Error::unsupported(format!(
+        "coin_type=evm matched more than {EVM_MATCHED_COIN_TYPES_PER_ROW_LIMIT} EVM coin types on one row; request a single decimal coin_type instead"
+    )))
 }
 
 /// One served `resolves_to` row and what it matched.
