@@ -1,13 +1,17 @@
 use anyhow::{Context, Result};
-use sqlx::{PgConnection, PgPool, Postgres, QueryBuilder};
+use sqlx::{PgPool, Postgres, QueryBuilder};
 
 use super::redo::{InterpretRedoFence, ensure_interpret_redo_fence};
 use super::{
     EventHistoryReadFilter, HistoryCursor, HistoryEvent, HistoryOrder, HistoryPage,
-    HistorySummaryMode, InvalidHistoryCursor,
+    HistorySummaryMode,
     decoders::decode_history_event,
     duplicates::push_product_history_duplicate_filter,
     filters::{push_history_block_window, push_selector_filter, push_string_filter},
+    keyset::{
+        HistoryKeyset, history_cursor_from_row, load_history_keyset, push_history_cursor_after,
+        push_history_cursor_block_bound, push_history_cursor_cte,
+    },
     registration_identity::{push_product_registration_id, push_registration_filter},
     selectors::HistorySelector,
     source::{push_history_canonicality_filter, push_history_source_for_filter},
@@ -86,16 +90,19 @@ pub(super) async fn load_history_page(
             .context("normalized-event history page refused during Interpret redo")?;
     }
 
-    if let Some(cursor) = cursor {
-        ensure_history_cursor_exists(
-            &mut transaction,
-            &filter,
-            canonical_only,
-            cursor,
-            include_candidates,
-        )
-        .await?;
-    }
+    let keyset = match cursor {
+        Some(cursor) => Some(
+            load_history_keyset(
+                &mut transaction,
+                &filter,
+                canonical_only,
+                cursor,
+                include_candidates,
+            )
+            .await?,
+        ),
+        None => None,
+    };
 
     let summary =
         load_history_summary(&mut transaction, &filter, canonical_only, summary_mode).await?;
@@ -129,32 +136,22 @@ pub(super) async fn load_history_page(
     )?;
 
     let mut builder = QueryBuilder::<Postgres>::new("");
-    if let Some(cursor) = cursor {
-        push_history_cursor_cte(&mut builder, cursor);
-    }
-    push_history_select(
+    push_history_page_query(
         &mut builder,
         &filter,
         canonical_only,
-        cursor.is_some(),
+        keyset.as_ref(),
         include_candidates,
+        page_limit,
     );
-    push_history_filters(&mut builder, &filter, canonical_only);
-    if !include_candidates {
-        push_product_history_duplicate_filter(&mut builder, &filter, canonical_only);
-    }
 
-    if cursor.is_some() {
-        builder.push(" AND ");
-        push_history_cursor_after(&mut builder, filter.order);
-    }
-
-    push_history_order(&mut builder, filter.order);
-    builder.push(" LIMIT ");
-    builder.push_bind(page_limit);
-
+    // Unprepared, so PostgreSQL plans every page with its bound values. A prepared statement
+    // may switch to a generic plan after five runs, and without the values PostgreSQL guesses
+    // that a block range between the cursor and the window bound holds 0.5% of the rows, which
+    // can make sorting every matching row look cheaper than reading the order index.
     let rows = builder
         .build()
+        .persistent(false)
         .fetch_all(&mut *transaction)
         .await
         .context("failed to fetch normalized-event history page")?;
@@ -175,6 +172,42 @@ pub(super) async fn load_history_page(
         summary,
         interpret_redo_fence: interpret_redo_fence.cloned(),
     })
+}
+
+/// One keyset page of history rows: the rows after the keyset's cursor in `filter.order`, at
+/// most `page_limit` of them.
+pub(super) fn push_history_page_query<'a>(
+    builder: &mut QueryBuilder<'a, Postgres>,
+    filter: &'a EventHistoryReadFilter,
+    canonical_only: bool,
+    keyset: Option<&HistoryKeyset<'a>>,
+    include_candidates: bool,
+    page_limit: i64,
+) {
+    if let Some(keyset) = keyset {
+        push_history_cursor_cte(builder, keyset.cursor);
+    }
+    push_history_select(
+        builder,
+        filter,
+        canonical_only,
+        keyset.is_some(),
+        include_candidates,
+    );
+    push_history_filters(builder, filter, canonical_only);
+    if !include_candidates {
+        push_product_history_duplicate_filter(builder, filter, canonical_only);
+    }
+
+    if let Some(keyset) = keyset {
+        builder.push(" AND ");
+        push_history_cursor_after(builder, filter.order);
+        push_history_cursor_block_bound(builder, filter, keyset);
+    }
+
+    push_history_order(builder, filter.order);
+    builder.push(" LIMIT ");
+    builder.push_bind(page_limit);
 }
 
 async fn load_history_internal(
@@ -404,8 +437,13 @@ pub(super) fn push_history_order(builder: &mut QueryBuilder<'_, Postgres>, order
 }
 
 /// `Asc` is the exact reverse of the canonical `Desc` sort, including null
-/// placement, so a backward scan of the same index serves it and the keyset
-/// predicate can be derived by swapping the compared rows.
+/// placement, so the keyset predicate can be derived by swapping the compared
+/// rows. For a read bound to one chain, `normalized_events_chain_block_number_desc_idx`
+/// on `(chain_id, block_number DESC NULLS LAST)` serves the leading key of both:
+/// `Desc` reads it forward and `Asc` reads it backward (`ASC NULLS FIRST`). The
+/// remaining keys only break ties within a block. The ascending
+/// `normalized_events_chain_block_number_idx` read backward gives `DESC NULLS FIRST`,
+/// which does not match, so it cannot serve these pages.
 pub(super) fn push_history_order_terms(
     builder: &mut QueryBuilder<'_, Postgres>,
     order: HistoryOrder,
@@ -434,153 +472,6 @@ pub(super) fn push_history_order_terms(
     };
 }
 
-async fn ensure_history_cursor_exists(
-    connection: &mut PgConnection,
-    filter: &EventHistoryReadFilter,
-    canonical_only: bool,
-    cursor: &HistoryCursor,
-    include_candidates: bool,
-) -> Result<()> {
-    let mut builder = QueryBuilder::<Postgres>::new(
-        r#"
-        SELECT EXISTS (
-            SELECT 1
-        "#,
-    );
-    let mut cursor_filter = filter.clone();
-    if !cursor_filter.bind_cursor_anchor_to_event_kinds {
-        cursor_filter.event_kinds.clear();
-    }
-    push_history_source_for_filter(
-        &mut builder,
-        &cursor_filter,
-        canonical_only,
-        false,
-        include_candidates,
-    );
-    push_history_filters(&mut builder, &cursor_filter, canonical_only);
-    if !include_candidates {
-        push_product_history_duplicate_filter(&mut builder, &cursor_filter, canonical_only);
-    }
-    builder.push(" AND ne.event_identity = ");
-    builder.push_bind(&cursor.event_identity);
-    builder.push(" LIMIT 1)");
-
-    let exists = builder
-        .build_query_scalar::<bool>()
-        .fetch_one(&mut *connection)
-        .await
-        .context("failed to validate normalized-event history cursor")?;
-
-    if exists {
-        Ok(())
-    } else {
-        Err(InvalidHistoryCursor.into())
-    }
-}
-
-fn push_history_cursor_cte<'a>(
-    builder: &mut QueryBuilder<'a, Postgres>,
-    cursor: &'a HistoryCursor,
-) {
-    builder.push(
-        r#"
-        WITH history_cursor_row AS (
-            SELECT
-                block_number,
-                chain_id,
-                block_hash,
-                transaction_hash,
-                log_index,
-                event_identity
-            FROM normalized_events
-            WHERE event_identity =
-        "#,
-    );
-    builder.push_bind(&cursor.event_identity);
-    builder.push(") ");
-}
-
-/// Keyset continuation predicate. `later` sorts after `earlier` in the canonical
-/// descending order; the ascending direction swaps the two rows because it is
-/// the exact reverse of that order.
-fn push_history_cursor_after(builder: &mut QueryBuilder<'_, Postgres>, order: HistoryOrder) {
-    let (later, earlier) = match order {
-        HistoryOrder::Desc => ("ne", "cursor_row"),
-        HistoryOrder::Asc => ("cursor_row", "ne"),
-    };
-    builder.push(format!(
-        r#"
-        (
-            CASE WHEN {later}.block_number IS NULL THEN 1 ELSE 0 END
-                > CASE WHEN {earlier}.block_number IS NULL THEN 1 ELSE 0 END
-            OR (
-                CASE WHEN {later}.block_number IS NULL THEN 1 ELSE 0 END
-                    = CASE WHEN {earlier}.block_number IS NULL THEN 1 ELSE 0 END
-                AND (
-                    {later}.block_number < {earlier}.block_number
-                    OR (
-                        {later}.block_number IS NOT DISTINCT FROM {earlier}.block_number
-                        AND (
-                            CASE WHEN {later}.chain_id IS NULL THEN 1 ELSE 0 END
-                                > CASE WHEN {earlier}.chain_id IS NULL THEN 1 ELSE 0 END
-                            OR (
-                                CASE WHEN {later}.chain_id IS NULL THEN 1 ELSE 0 END
-                                    = CASE WHEN {earlier}.chain_id IS NULL THEN 1 ELSE 0 END
-                                AND (
-                                    {later}.chain_id > {earlier}.chain_id
-                                    OR (
-                                        {later}.chain_id IS NOT DISTINCT FROM {earlier}.chain_id
-                                        AND (
-                                            CASE WHEN {later}.block_hash IS NULL THEN 1 ELSE 0 END
-                                                > CASE WHEN {earlier}.block_hash IS NULL THEN 1 ELSE 0 END
-                                            OR (
-                                                CASE WHEN {later}.block_hash IS NULL THEN 1 ELSE 0 END
-                                                    = CASE WHEN {earlier}.block_hash IS NULL THEN 1 ELSE 0 END
-                                                AND (
-                                                    {later}.block_hash < {earlier}.block_hash
-                                                    OR (
-                                                        {later}.block_hash IS NOT DISTINCT FROM {earlier}.block_hash
-                                                        AND (
-                                                            CASE WHEN {later}.transaction_hash IS NULL THEN 1 ELSE 0 END
-                                                                > CASE WHEN {earlier}.transaction_hash IS NULL THEN 1 ELSE 0 END
-                                                            OR (
-                                                                CASE WHEN {later}.transaction_hash IS NULL THEN 1 ELSE 0 END
-                                                                    = CASE WHEN {earlier}.transaction_hash IS NULL THEN 1 ELSE 0 END
-                                                                AND (
-                                                                    {later}.transaction_hash < {earlier}.transaction_hash
-                                                                    OR (
-                                                                        {later}.transaction_hash IS NOT DISTINCT FROM {earlier}.transaction_hash
-                                                                        AND (
-                                                                            COALESCE({later}.log_index, -1) < COALESCE({earlier}.log_index, -1)
-                                                                            OR (
-                                                                                COALESCE({later}.log_index, -1) = COALESCE({earlier}.log_index, -1)
-                                                                                AND {later}.event_identity < {earlier}.event_identity
-                                                                            )
-                                                                        )
-                                                                    )
-                                                                )
-                                                            )
-                                                        )
-                                                    )
-                                                )
-                                            )
-                                        )
-                                    )
-                                )
-                            )
-                        )
-                    )
-                )
-            )
-        )
-        "#,
-    ));
-}
-
-fn history_cursor_from_row(row: &HistoryEvent) -> HistoryCursor {
-    HistoryCursor {
-        normalized_event_id: row.normalized_event_id,
-        event_identity: row.event_identity.clone(),
-    }
-}
+#[cfg(test)]
+#[path = "paging_tests.rs"]
+mod tests;
