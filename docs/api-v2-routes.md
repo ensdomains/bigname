@@ -1339,17 +1339,20 @@ A recognized namespace with no available publication returns retryable `409 stal
   timestamp window filters event rows.
 - Two inputs are read from current state. An address's relations are read from
   the current relation rows, and a row is admitted when the event Project
-  cites for it lies at or below the published block. The row's surface binding
-  is judged at or below the published block too: a row whose binding was
-  written above it is not admitted, whatever event it cites and including the
-  same-holder case below. A current row cited above the published block is
-  also admitted when every registration event between the published block and
-  the cited one is a same-holder token transfer: the
-  cited event is a `TokenControlTransferred` whose sender and recipient are
-  both the address, every `RegistrationGranted`, `RegistrationReleased` and
-  `TokenControlTransferred` on that event's resource after the published block
-  and up to it is such a transfer too, and no ENSv2 `RegistrationReserved` on
-  that resource lies in the range. For an effective controller, no
+  cites for it lies at or below the published block. The name's attachment to
+  the row's resource is judged at or below the published block too: the row is
+  admitted only when some [surface binding](glossary.md#surface-binding) of
+  that name to that resource on the row's chain was written at or below the
+  published block, whatever event the row cites and including the same-holder
+  case below. The row's current binding may be newer: a registry owner moved
+  away and restored rebinds the name to the same resource. A current row cited
+  above the published block is also admitted when every registration event
+  between the published block and the cited one is a same-holder token
+  transfer: the cited event is a `TokenControlTransferred` whose sender and
+  recipient are both the address, every `RegistrationGranted`,
+  `RegistrationReleased` and `TokenControlTransferred` on that event's resource
+  after the published block and up to it is such a transfer too, and no ENSv2
+  `RegistrationReserved` on that resource lies in the range. For an effective controller, no
   `AuthorityTransferred`, `SurfaceBound` or `PermissionChanged` on that
   resource may lie in the range either. Project cites the latest registration
   event for the registrant, token holder and fallback controller relations, so
@@ -1407,14 +1410,18 @@ A recognized namespace with no available publication returns retryable `409 stal
   (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/access-control/interfaces/IEnhancedAccessControl.sol:L17-L27 @ ens_v2_sepolia_20260916@366de741),
   and bigname normalizes every such change to a registry, registry root or
   resolver scope keyed by that contract
-  (bigname: `crates/adapters/src/schema_v2/protocol/permissions.rs:35-46`), so
+  (bigname: `crates/adapters/src/schema_v2/protocol/permissions.rs:35-46`). The
+  other `PermissionChanged` rows with ENSv2 provenance come from the
+  `ens_v2_migration_l1` reading of BaseRegistrar `ControllerAdded` and
+  `ControllerRemoved`, and carry a `registrar_controller` scope with no resource
+  (bigname: `crates/adapters/src/schema_v2/protocol/migration.rs:224-245`). So
   ENSv2 `PermissionChanged` rows never set this controller. This is a bigname
   normalization rule, not an upstream one. A relation that ended after the
   published block and began again before the current row was written counts as
-  ended: its current row cites the transfer that restored it. Wrapper
-  grace-period and expiry transitions have no cited event of their own, so a
-  relation row gated by them can appear or vanish between pages of the same
-  read.
+  ended: its current row cites the transfer or grant that restored it, above
+  the published block. Wrapper grace-period and expiry transitions have no
+  cited event of their own, so a relation row gated by them can appear or
+  vanish between pages of the same read.
 - Cursors bind the order and every filter above. The cursor `sort` token
   encodes the direction, and its filters carry the canonical `type` set and
   the canonical UTC spelling of each timestamp bound, so a cursor issued by one

@@ -235,7 +235,9 @@ async fn check_attribution_plans(connection: &mut PgConnection) -> Result<()> {
 /// the bound and transferred from the target to itself twice above it, while most of the chain's
 /// events lie above the bound too. The cited event is read by primary key and the range between
 /// the bound and it from the resource history index; no read of `normalized_events` is
-/// sequential, and the row is admitted.
+/// sequential, the attachment probe reads `surface_bindings` by name, and the row is admitted.
+/// Both read paths are checked: the canonical read and the read that includes noncanonical
+/// identity rows.
 async fn check_bounded_current_relation_plan(connection: &mut PgConnection) -> Result<()> {
     let bound = 10;
     let cited = UNRELATED_NAMES + 7;
@@ -303,27 +305,83 @@ async fn check_bounded_current_relation_plan(connection: &mut PgConnection) -> R
     let published: &'static std::collections::BTreeMap<String, i64> = Box::leak(Box::new(
         std::collections::BTreeMap::from([("ethereum-mainnet".to_owned(), bound)]),
     ));
-    let push_current = |builder: &mut QueryBuilder<'static, Postgres>| {
-        push_address_names_current_query(builder, TARGET, None, None, false, Some(published));
-    };
     let mut plan_failures = Vec::new();
-    for plan in explain_both(connection, push_current).await? {
-        if let Err(error) = assert_cited_probe_is_keyed(&plan) {
-            plan_failures.push(error.to_string());
+    // Both read paths: the canonical read with its identity joins and the read that includes
+    // noncanonical identity rows, which has none.
+    for include_noncanonical in [false, true] {
+        let push_current = move |builder: &mut QueryBuilder<'static, Postgres>| {
+            push_address_names_current_query(
+                builder,
+                TARGET,
+                None,
+                None,
+                include_noncanonical,
+                Some(published),
+            );
+        };
+        for plan in explain_both(connection, push_current).await? {
+            if let Err(error) = assert_cited_probe_is_keyed(&plan)
+                .and_then(|()| assert_attachment_probe_is_keyed(&plan))
+            {
+                plan_failures.push(format!(
+                    "include_noncanonical={include_noncanonical}: {error}"
+                ));
+            }
         }
+        let mut current = QueryBuilder::<Postgres>::new("");
+        push_current(&mut current);
+        let rows = current.build().fetch_all(&mut *connection).await?;
+        ensure!(
+            rows.len() == 1,
+            "include_noncanonical={include_noncanonical}: the row held at the bound returned {} \
+             rows",
+            rows.len()
+        );
     }
-    let mut current = QueryBuilder::<Postgres>::new("");
-    push_current(&mut current);
-    let rows = current.build().fetch_all(&mut *connection).await?;
-    ensure!(
-        rows.len() == 1,
-        "the row held at the bound returned {} rows",
-        rows.len()
-    );
     ensure!(
         plan_failures.is_empty(),
         "bounded current relation plans:\n{}",
         plan_failures.join("\n\n")
+    );
+    Ok(())
+}
+
+/// The attachment probe reads `surface_bindings` through an index keyed by the name or the
+/// resource, never sequentially. `surface_bindings_no_overlap` is the canonical bindings'
+/// exclusion index, keyed by chain and name first.
+fn assert_attachment_probe_is_keyed(plan: &Value) -> Result<()> {
+    fn walk<'a>(node: &'a Value, output: &mut Vec<&'a Value>) {
+        output.push(node);
+        for child in node["Plans"].as_array().into_iter().flatten() {
+            walk(child, output);
+        }
+    }
+    let mut nodes = Vec::new();
+    walk(&plan[0]["Plan"], &mut nodes);
+    let mut indexes = Vec::new();
+    for node in nodes
+        .iter()
+        .filter(|node| node["Relation Name"] == "surface_bindings" && node["Alias"] == "attached")
+    {
+        ensure!(
+            node["Node Type"] != "Seq Scan",
+            "the attachment probe reads surface_bindings sequentially: {plan}"
+        );
+        indexes.extend(node["Index Name"].as_str());
+        bitmap_index_names(node, &mut indexes);
+    }
+    ensure!(
+        !indexes.is_empty()
+            && indexes.iter().all(|index| {
+                matches!(
+                    *index,
+                    "surface_bindings_name_idx"
+                        | "surface_bindings_no_overlap"
+                        | "surface_bindings_chain_name_history_idx"
+                        | "surface_bindings_resource_idx"
+                )
+            }),
+        "the attachment probe is not keyed by name or resource ({indexes:?}): {plan}"
     );
     Ok(())
 }

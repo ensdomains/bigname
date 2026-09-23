@@ -57,12 +57,12 @@ pub async fn load_address_names_current_including_noncanonical_for_relations(
 }
 
 /// Current address-name relation rows the address held at `published`: the relation's
-/// `provenance.chain_id` is a bound chain, its surface binding was written at or below that
-/// chain's bound, and either its `chain_positions.block_number` is at or below that bound, or the
-/// event it cites is a token transfer from the address to itself and every registration event
-/// between the bound and it is one too. Any other relation Project
-/// cites at a later block, or without a block, is not returned. History reads use this so a
-/// relation acquired after the block a read is bound to cannot admit older events.
+/// `provenance.chain_id` is a bound chain, the name was attached to the relation's resource at or
+/// below that chain's bound, and either its `chain_positions.block_number` is at or below that
+/// bound, or the event it cites is a token transfer from the address to itself and every
+/// registration event between the bound and it is one too. Any other relation Project cites at a
+/// later block, or without a block, is not returned. History reads use this so a relation acquired
+/// after the block a read is bound to cannot admit older events.
 pub(crate) async fn load_address_names_current_at_bound(
     pool: &PgPool,
     address: &str,
@@ -204,12 +204,14 @@ pub(crate) fn push_address_names_current_query<'a>(
     );
 }
 
-/// Bounds a current row by the published block of its chain on two counts: the row's surface
-/// binding must have been written at or below that block, and the event Project cites for the
-/// row must lie at or below it or be a same-holder transfer admitted by
-/// `push_same_holder_since_bound`. The binding bound applies to both, so a same-holder row on a
-/// binding written above the bound is refused too. The canonical read joins the binding as
-/// `binding`; the noncanonical read has no identity joins and probes the binding by key.
+/// Bounds a current row by the published block of its chain on two counts: the name must have
+/// been attached to the row's resource at or below that block, and the event Project cites for
+/// the row must lie at or below it or be a same-holder transfer admitted by
+/// `push_same_holder_since_bound`. The attachment is any `surface_bindings` row for the row's name
+/// and resource on that chain, not only the row's current binding: a registry owner moved away and
+/// restored rebinds the name to the same resource above the bound, and the holder still held it at
+/// the bound. A resource first attached above the bound has no such row, and the attachment bound
+/// applies to the same-holder case too. The canonical read counts canonical bindings only.
 fn push_cited_event_bound(
     builder: &mut QueryBuilder<'_, Postgres>,
     published: &BTreeMap<String, i64>,
@@ -226,24 +228,27 @@ fn push_cited_event_bound(
         }
         builder.push("(anc.provenance ->> 'chain_id' = ");
         builder.push_bind(chain_id.clone());
-        if include_noncanonical {
+        builder.push(
+            " AND EXISTS (
+                SELECT 1
+                FROM bigname_phase.surface_bindings attached
+                WHERE attached.logical_name_id = anc.logical_name_id
+                  AND attached.resource_id = anc.resource_id
+                  AND attached.chain_id = ",
+        );
+        builder.push_bind(chain_id.clone());
+        builder.push(" AND attached.block_number <= ");
+        builder.push_bind(*block_number);
+        if !include_noncanonical {
             builder.push(
-                " AND EXISTS (
-                    SELECT 1
-                    FROM bigname_phase.surface_bindings bound_binding
-                    WHERE bound_binding.surface_binding_id = anc.surface_binding_id
-                      AND bound_binding.chain_id = ",
+                " AND attached.canonicality_state IN (
+                    'canonical'::bigname_phase.canonicality_state,
+                    'safe'::bigname_phase.canonicality_state,
+                    'finalized'::bigname_phase.canonicality_state
+                )",
             );
-            builder.push_bind(chain_id.clone());
-            builder.push(" AND bound_binding.block_number <= ");
-            builder.push_bind(*block_number);
-            builder.push(")");
-        } else {
-            builder.push(" AND binding.chain_id = ");
-            builder.push_bind(chain_id.clone());
-            builder.push(" AND binding.block_number <= ");
-            builder.push_bind(*block_number);
         }
+        builder.push(")");
         builder.push(
             " AND (CASE WHEN jsonb_typeof(anc.chain_positions -> 'block_number') = 'number'
                         THEN (anc.chain_positions ->> 'block_number')::bigint END <= ",

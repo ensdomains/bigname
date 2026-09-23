@@ -455,11 +455,21 @@ async fn owner_history_at(pool: &PgPool, block: i64) -> Result<Vec<String>> {
 /// The owner's history at `block`, through the canonical read or the read that includes
 /// noncanonical identity rows.
 async fn owner_history(pool: &PgPool, block: i64, canonical_only: bool) -> Result<Vec<String>> {
+    owner_history_for(pool, block, canonical_only, None).await
+}
+
+/// The owner's history at `block`, optionally narrowed to some relations.
+async fn owner_history_for(
+    pool: &PgPool,
+    block: i64,
+    canonical_only: bool,
+    relations: Option<&[bigname_storage::AddressNameRelation]>,
+) -> Result<Vec<String>> {
     let page = bigname_storage::load_address_history_page_for_relations(
         pool,
         OWNER,
         None,
-        None,
+        relations,
         bigname_storage::HistoryScope::Both,
         canonical_only,
         None,
@@ -697,6 +707,102 @@ async fn a_row_bound_above_the_bound_is_not_held_at_the_bound() -> Result<()> {
             .any(|row| row.contains(&moved)),
         "the noncanonical read holds the row once the bound reaches its binding: \
          {noncanonical_at_binding:?}"
+    );
+    Ok(())
+}
+
+const OTHER: &str = "0x00000000000000000000000000000000000000ef";
+const MOVED_AWAY: i64 = 131;
+const RESTORED: i64 = 132;
+
+/// `reclaim` from the token holder, which makes the registrar set the registry owner of the name
+/// through `setSubnodeOwner`, so the registry emits `NewOwner`
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L175 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L75-L84 @ ens_v1@91c966f).
+fn reclaim(block: i64, owner: &str) -> Vec<RawLogInput> {
+    vec![raw(
+        NewOwner {
+            node: eth_node(),
+            label: keccak256(LABEL.as_bytes()),
+            owner: owner.parse().unwrap(),
+        }
+        .encode_log_data(),
+        block,
+        0,
+        REGISTRY,
+    )]
+}
+
+/// The holder's history at `bound`, unfiltered and narrowed to the token-holder relation.
+async fn holder_views(pool: &PgPool, bound: i64) -> Result<(Vec<String>, Vec<String>)> {
+    Ok((
+        owner_history_for(pool, bound, true, None).await?,
+        owner_history_for(
+            pool,
+            bound,
+            true,
+            Some(&[bigname_storage::AddressNameRelation::TokenHolder]),
+        )
+        .await?,
+    ))
+}
+
+/// A registry owner moved away from the token holder and restored by `reclaim` re-attaches the
+/// registrar resource with a fresh binding at the restore, with no registrar transfer, so the
+/// holder's rows keep citing the registration. The holder held the token throughout, so its
+/// history at the registration block must not change when the restore is projected.
+#[tokio::test]
+async fn a_restored_registry_owner_keeps_the_holder_at_the_bound() -> Result<()> {
+    let (registered_output, session) = interpret(REGISTERED, registration(), None)?;
+    let (away_output, session) = interpret(MOVED_AWAY, reclaim(MOVED_AWAY, OTHER), Some(session))?;
+    let (restored_output, _) = interpret(RESTORED, reclaim(RESTORED, OWNER), Some(session))?;
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_history_blocks(&database, REGISTERED..=RESTORED).await?;
+    persist(&database.pool, &registered_output).await?;
+    project_to(&database.pool, REGISTERED, None).await?;
+    let held = holder_views(&database.pool, REGISTERED).await?;
+    persist(&database.pool, &away_output).await?;
+    project_to(&database.pool, MOVED_AWAY, Some(REGISTERED)).await?;
+    persist(&database.pool, &restored_output).await?;
+    project_to(&database.pool, RESTORED, Some(MOVED_AWAY)).await?;
+    let restored_rows = owner_rows(&database.pool).await?;
+    let restored = holder_views(&database.pool, REGISTERED).await?;
+    database.cleanup().await?;
+
+    // Anti-vacuity: the restore rebinds the registrar resource at `RESTORED` and the holder's
+    // rows keep citing the registration below the bound.
+    let registrar_resource = restored_rows
+        .iter()
+        .find(|row| row.0 == "token_holder")
+        .map(|row| row.1)
+        .context("the restore keeps a token-holder row")?;
+    assert!(
+        restored_output
+            .surface_bindings
+            .iter()
+            .any(|binding| binding.resource_id == registrar_resource
+                && binding.block_number == RESTORED),
+        "the restore writes a binding of the registrar resource"
+    );
+    assert!(
+        restored_rows
+            .iter()
+            .filter(|row| row.0 != "effective_controller")
+            .all(|row| row.1 == registrar_resource && row.2 == RESTORED && row.4 == REGISTERED),
+        "{restored_rows:?}"
+    );
+    assert!(
+        held.1
+            .iter()
+            .any(|row| row.starts_with("RegistrationGranted:")),
+        "the holder's token-holder history at the bound holds the registration: {held:?}"
+    );
+    // While the registry owner is away the holder has no current row, and a token holder whose
+    // only evidence is the grant is a documented loss, so the comparison is with the read before
+    // the owner moved away.
+    assert_eq!(
+        restored, held,
+        "the restore above the bound changed the holder's history at the bound"
     );
     Ok(())
 }
