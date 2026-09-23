@@ -969,9 +969,11 @@ async fn v2_get_history_paginates_with_anchor_bound_cursor() -> Result<()> {
 }
 
 /// A behavior-preserving full re-walk rotates normalized-event row ids and runs as an
-/// Interpret and Project redo. The redo raises the counters a history cursor carries, so a
-/// saved `/v1/events`, name history, or address history cursor must restart, while fresh
-/// cursors walk the same pages. The diagnostic-events cursor binds no counters and continues.
+/// Interpret and Project redo. The test rotates the ids and then moves the redo phase rows by
+/// hand (`hb_phase_redo_begin` and `hb_phase_redo_finish` for each phase), which raises the
+/// counters a history cursor carries, so a saved `/v1/events`, name history, or address history
+/// cursor must restart, while fresh cursors walk the same pages. The diagnostic-events cursor
+/// binds no counters and continues.
 #[tokio::test]
 async fn rewalk_expires_history_cursors_and_keeps_diagnostic_cursors() -> Result<()> {
     const ADDRESS: &str = "0x00000000000000000000000000000000000000cc";

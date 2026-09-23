@@ -788,6 +788,9 @@ async fn v2_history_cursor_expires_on_reorg_below_the_bound() -> Result<()> {
         )
         .await?;
     }
+    // The replaced bound block alone expires the cursor; the counters a real reorg repair moves
+    // expire it as well.
+    hb_expect_stale(&database, &format!("{base}&cursor={cursor}"), HB_RESTART).await?;
     hb_bump_generations(&database).await?;
     hb_expect_stale(&database, &format!("{base}&cursor={cursor}"), HB_RESTART).await?;
     database.cleanup().await
@@ -971,6 +974,54 @@ async fn v2_history_continuation_restarts_when_its_manifest_is_gone() -> Result<
             json!("collection publication is not available; retry after indexing is ready"),
             "{base}"
         );
+    }
+    database.cleanup().await
+}
+
+/// A continuation meeting an Interpret redo still in progress. On a chain in scope, the redo
+/// makes that chain's publication unservable, so the continuation gets the not-available retry
+/// message before its counters are compared; only once the redo finishes does it get the restart.
+/// On a chain outside the scope, the collection-wide check answers with the Interpret message.
+#[tokio::test]
+async fn v2_history_continuation_during_an_interpret_redo() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_history_fixture(&database).await?;
+    database
+        .seed_snapshot_selector_chain_positions(&json!({
+            "base": {
+                "chain_id": "base-mainnet",
+                "block_number": 1,
+                "block_hash": "0xbase1",
+                "timestamp": "2026-04-17T00:00:01Z"
+            }
+        }))
+        .await?;
+    for route in hb_routes() {
+        let base = format!("{route}&page_size=2");
+        let uri = format!("{base}&cursor={}", hb_next_cursor(&hb_ok(&database, &base).await?)?);
+
+        database
+            .simulate_interpret_redo_begin("base-mainnet", "recompute_flags")
+            .await?;
+        hb_expect_stale(
+            &database,
+            &uri,
+            "history is temporarily unavailable while Interpret redo is in progress",
+        )
+        .await?;
+        database.simulate_interpret_redo_finish("base-mainnet").await?;
+
+        database
+            .simulate_interpret_redo_begin(HB_CHAIN, "recompute_flags")
+            .await?;
+        hb_expect_stale(
+            &database,
+            &uri,
+            "collection publication is not available; retry after indexing is ready",
+        )
+        .await?;
+        database.simulate_interpret_redo_finish(HB_CHAIN).await?;
+        hb_expect_stale(&database, &uri, HB_RESTART).await?;
     }
     database.cleanup().await
 }

@@ -1224,13 +1224,10 @@ collection cursors bind the collection anchor, namespace, filters, and sort.
 History collection cursors also bind a [cursor bound](glossary.md#cursor-bound)
 per chain, so every page of one walk reads the same frozen history at or below
 that block while new blocks are published. They also bind each chain's
-classification horizon, the lowest declaration `start_block` above the bound
-among the manifests Project reads for that chain, and expire with the `409
-stale` restart once the served publication reaches it: resolver
-classification is read as Project last wrote it, and Project changes it at a
-declaration's start without a manifest change or redo (see the [shared route
-rules](api-v2-routes.md#shared-route-rules)). Evaluating the classification at
-the bound would remove that expiry and is a follow-up. The one exception is the address
+[classification horizon](glossary.md#classification-horizon), the next
+declaration start at which Project may classify a resolver differently, and
+expire with the `409 stale` restart once the served publication reaches it
+(see the [shared route rules](api-v2-routes.md#shared-route-rules)). The one exception is the address
 history [known limitation](api-v2-routes.md#history-collection-filters): when
 one of the relation kinds listed there ends after the bound block, a
 continuation loses that name's remaining rows and reports a smaller
@@ -1249,9 +1246,10 @@ collection-wide `redo_in_progress` check. An active Interpret redo on any chain
 returns `409 stale` for all three collections, regardless of the
 requested namespace or name. An active Project redo on a chain in the request
 scope does too, because a Project redo rewrites the projections that decide
-which events a history collection holds. Each route validates its namespace,
-then the request and cursor binding, before its first check. Each route then captures, in one read-only snapshot, both
-redo counters and flags of every chain in scope, the collection-wide Interpret
+which events a history collection holds. Each route validates its query
+parameters (`400 invalid_input`), then its namespace (`404 not_found`), then its
+cursor and binding (`400 invalid_input`), before its first check. Each route
+then captures, in one read-only snapshot, both redo counters and flags of every chain in scope, the collection-wide Interpret
 flag, and the lineage row of each chain's [cursor
 bound](glossary.md#cursor-bound). Name history captures it before parent
 lookup. Each route checks the Interpret state again inside the repeatable-read
@@ -1270,23 +1268,28 @@ partially reconstructed normalized-event range. A well-formed cursor whose
 event anchor is gone therefore returns `stale` when the final check fails and
 `400 invalid_input` otherwise.
 
-Which `409 stale` message a redo produces depends on when it is seen. An
-Interpret redo already in progress on a requested chain when the request
-starts makes that chain's publication unservable, so the route answers
-`collection publication is not available; retry after indexing is ready`,
-like any unservable publication. A namespace that lost its manifests answers a
-first page the same way, but a continuation compares its manifest digest
-before that availability check and answers with the restart message below,
-because retrying the cursor cannot recover. On a first page, a Project redo already in
+Which `409 stale` message a redo produces depends on when it is seen and on
+which chain it runs. An Interpret redo already in progress on a chain in the
+request scope when the request starts makes that chain's publication
+unservable, so the route answers `collection publication is not available;
+retry after indexing is ready`, like any unservable publication. That holds for
+a continuation too: the availability check runs before the cursor's counters
+are compared, so the continuation gets the restart message only once the redo
+has finished and its raised counter is visible. A namespace that lost its
+manifests answers a first page with the not-available message as well, but a
+continuation compares its manifest digest before that availability check and
+answers with the restart message, because retrying the cursor cannot recover.
+An Interpret redo in progress only on a chain outside the request scope answers
+first pages and continuations alike with `history is temporarily unavailable
+while Interpret redo is in progress`. On a first page, a Project redo already in
 progress on a chain in scope answers `history is temporarily unavailable while
-Project redo is in progress`, and an Interpret redo in progress only on a chain
-outside the request scope answers `history is temporarily unavailable while
-Interpret redo is in progress`. A continuation compares its redo counters
-before it looks at the redo flags, and a redo raises its chain's counter when it
-begins, so a continuation meeting a redo that began after its first page, on a
-chain in scope, gets `collection publication is no longer available; restart
-pagination without a cursor` instead. A redo that begins after the request
-started keeps the existing behavior: the Interpret checks around the page
+Project redo is in progress`. A continuation compares its redo counters before
+it looks at the Project redo flag, and a redo raises its chain's counter when it
+begins, so a continuation meeting a Project redo on a chain in scope that began
+after its first page gets `collection publication is no longer available;
+restart pagination without a cursor` instead, whether or not the redo has
+finished. A redo that begins after the request started keeps the existing
+behavior: the Interpret checks around the page
 transaction answer with the Interpret message, and the final check answers a
 first page with `collection publication changed during the read; retry the
 request` and a continuation with the restart message. Product

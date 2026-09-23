@@ -6,16 +6,23 @@ use anyhow::{Context, Result};
 use sqlx::PgPool;
 
 /// Per chain of `block_bounds`, the lowest declaration `start_block` above that chain's bound
-/// across every manifest Project stages for the chain, or no entry when none starts above it.
+/// across the manifests Project stages for the chain, or no entry when none starts above it.
 ///
 /// Project recomputes resolver classification against its target block, choosing among a
 /// manifest's declarations by `start_block`, so a declaration that starts above the bound can
 /// change which history events a bounded read attributes once Project reaches it, with no
 /// manifest change (bigname: `crates/project/src/stage.rs:122-161`,
-/// `crates/project/src/builders/resolver.rs:343-387`). Every declaration of every readable
-/// manifest update counts, not only resolver ones, so the horizon errs early. Project stages
-/// the Basenames execution manifest of `ethereum-mainnet` for `base-mainnet` too
-/// (bigname: `crates/project/src/stage.rs:92-99`).
+/// `crates/project/src/builders/resolver.rs:343-387`). The manifests are the ones Project
+/// stages at the bound: the latest readable `SourceManifestUpdated` event of each manifest at or
+/// below it, when it is active and carries a payload, on the chain or, for `base-mainnet`, the
+/// Basenames execution manifest of `ethereum-mainnet`
+/// (bigname: `crates/project/src/stage.rs:67-112`). Every declaration of a staged manifest
+/// counts, not only resolver ones, so the horizon errs early.
+///
+/// The manifest digest a cursor binds names only finalized manifest events, while Project and
+/// this read also take canonical ones. Manifest sync writes every event finalized
+/// (bigname: `crates/manifests/src/schema_v2_event_history.rs:170-179`) and no other non-test
+/// code writes them, so that difference has no effect today.
 pub async fn load_classification_horizons(
     pool: &PgPool,
     block_bounds: &BTreeMap<String, i64>,
@@ -25,27 +32,51 @@ pub async fn load_classification_horizons(
         .map(|(chain_id, block)| (chain_id.clone(), *block))
         .unzip();
     let rows = sqlx::query_as::<_, (String, i64)>(
-        "SELECT bound.chain_id, MIN((declaration ->> 'start_block')::bigint)
-         FROM unnest($1::text[], $2::bigint[]) AS bound(chain_id, block_number)
-         JOIN bigname_phase.normalized_events event
-           ON event.chain_id = bound.chain_id
-           OR (
-               bound.chain_id = 'base-mainnet'
-               AND event.namespace = 'basenames'
-               AND event.source_family = 'basenames_execution'
-               AND event.chain_id = 'ethereum-mainnet'
-           )
+        "WITH bound AS (
+             SELECT * FROM unnest($1::text[], $2::bigint[]) AS bound(chain_id, block_number)
+         ),
+         latest AS (
+             SELECT DISTINCT ON (bound.chain_id, event.source_manifest_id)
+                    bound.chain_id,
+                    bound.block_number,
+                    event.after_state ->> 'rollout_status' AS rollout_status,
+                    event.after_state -> 'manifest_payload' AS manifest_payload
+             FROM bound
+             JOIN bigname_phase.normalized_events event
+               ON event.chain_id = bound.chain_id
+               OR (
+                   bound.chain_id = 'base-mainnet'
+                   AND event.namespace = 'basenames'
+                   AND event.source_family = 'basenames_execution'
+                   AND event.chain_id = 'ethereum-mainnet'
+               )
+             LEFT JOIN bigname_phase.chain_lineage lineage
+               ON lineage.chain_id = event.chain_id
+              AND lineage.block_hash = event.block_hash
+              AND lineage.block_number = event.block_number
+             WHERE event.event_kind = 'SourceManifestUpdated'
+               AND event.source_manifest_id IS NOT NULL
+               AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
+               AND (
+                   event.block_hash IS NULL
+                   OR lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+               )
+               AND (event.block_number IS NULL OR event.block_number <= bound.block_number)
+             ORDER BY bound.chain_id, event.source_manifest_id, event.normalized_event_id DESC
+         )
+         SELECT latest.chain_id, MIN((declaration ->> 'start_block')::bigint)
+         FROM latest
          CROSS JOIN LATERAL jsonb_array_elements(
-             CASE jsonb_typeof(event.after_state -> 'manifest_payload' -> 'contracts')
-                 WHEN 'array' THEN event.after_state -> 'manifest_payload' -> 'contracts'
+             CASE jsonb_typeof(latest.manifest_payload -> 'contracts')
+                 WHEN 'array' THEN latest.manifest_payload -> 'contracts'
                  ELSE '[]'::jsonb
              END
          ) AS declarations(declaration)
-         WHERE event.event_kind = 'SourceManifestUpdated'
-           AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
+         WHERE latest.rollout_status = 'active'
+           AND latest.manifest_payload IS NOT NULL
            AND jsonb_typeof(declaration -> 'start_block') = 'number'
-           AND (declaration ->> 'start_block')::bigint > bound.block_number
-         GROUP BY bound.chain_id",
+           AND (declaration ->> 'start_block')::bigint > latest.block_number
+         GROUP BY latest.chain_id",
     )
     .bind(&chain_ids)
     .bind(&blocks)

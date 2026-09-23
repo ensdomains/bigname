@@ -277,6 +277,23 @@ markers after proving block lineage and fetch coverage. Distinct from
 capability promotion above; avoid bare "promotion" where the two could be
 confused.
 
+## Classification horizon
+
+per chain of a history walk, the lowest `start_block` above its [cursor
+bound](#cursor-bound) among the contract declarations of the manifests
+Project stages for that chain at the bound: the latest update of each active
+manifest. Project chooses a resolver's classification among its manifest's
+declarations by `start_block` at its target block, and bounded history reads
+join the classification as Project last wrote it, so once Project reaches the
+horizon a walk's rows could change with no manifest change or redo. The walk
+therefore expires there (see [Shared Route
+Rules](api-v2-routes.md#shared-route-rules))
+(bigname: `crates/project/src/stage.rs:67-161`,
+`crates/project/src/builders/resolver.rs:343-387`,
+`crates/storage/src/history/classification_horizon.rs`). Judging the
+classification at the bound instead would remove this expiry and is a
+follow-up. Not to be confused with the [rewind horizon](#rewind-horizon).
+
 ## Claim anchor
 
 the `primary_names_current` row for an exact
@@ -368,12 +385,10 @@ collection from evidence at or below that block, and reports the block as
 except for the address-history relations listed as a known limitation in the
 [history collection filters](api-v2-routes.md#history-collection-filters). It
 is not the [served head](#served-head), which keeps moving. The cursor also
-records each chain's Interpret and Project redo counters and classification
-horizon, the lowest manifest declaration `start_block` above the bound, and
-the walk expires when the bound block is no longer readable (see
-[canonicality](#canonicality)), a counter changes, the manifests change, or
-the served publication reaches the horizon, where Project may classify a
-resolver differently than at the bound. A
+records each chain's Interpret and Project redo counters and [classification
+horizon](#classification-horizon), and the walk expires when the bound block
+is no longer readable (see [canonicality](#canonicality)), a counter changes,
+the manifests change, or the served publication reaches that horizon. A
 new [interpreter content hash](#interpreter-content-hash) is adopted only
 through a full Interpret and Project redo, so it expires the walk the same way
 (bigname: `apps/phase-runner/src/redo_state.rs:86-102`).

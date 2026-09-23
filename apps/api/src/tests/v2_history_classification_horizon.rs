@@ -47,20 +47,10 @@ start_block = {mirror_start}
 /// Project runs to the bound and the bound is published.
 async fn ch_seed(database: &TestDatabase, mirror_start: i64) -> Result<Uuid> {
     seed_bounded_membership_blocks(database, CH_BOUND).await?;
-    let root = std::env::temp_dir().join(format!("bigname-classification-horizon-{}", Uuid::new_v4()));
-    let directory = root.join("ethereum/ens/ens_v2_resolver_l1");
-    std::fs::create_dir_all(&directory)?;
-    std::fs::write(directory.join("v1.toml"), ch_manifest(mirror_start)?)?;
-    let synced = bigname_manifests::sync_schema_v2_repository(
-        &database.pool,
-        &bigname_manifests::load_repository(&root)?,
-    )
-    .await;
-    std::fs::remove_dir_all(&root)?;
-    synced?;
+    ch_sync(database, &[("v1.toml", ch_manifest(mirror_start)?)]).await?;
     let manifest_id: i64 = sqlx::query_scalar(
         "SELECT manifest_id FROM bigname_phase.manifest_versions
-         WHERE source_family = 'ens_v2_resolver_l1' AND chain_id = $1",
+         WHERE source_family = 'ens_v2_resolver_l1' AND chain_id = $1 AND manifest_version = 1",
     )
     .bind(BOUNDED_CHAIN)
     .fetch_one(&database.pool)
@@ -122,6 +112,45 @@ async fn ch_seed(database: &TestDatabase, mirror_start: i64) -> Result<Uuid> {
     .await?;
     ch_project_to(database, CH_BOUND).await?;
     Ok(resource)
+}
+
+/// Run the manifest producer over a repository holding exactly `files` of the ENSv2 resolver
+/// family.
+async fn ch_sync(database: &TestDatabase, files: &[(&str, String)]) -> Result<()> {
+    let root =
+        std::env::temp_dir().join(format!("bigname-classification-horizon-{}", Uuid::new_v4()));
+    let directory = root.join("ethereum/ens/ens_v2_resolver_l1");
+    std::fs::create_dir_all(&directory)?;
+    for (file, text) in files {
+        std::fs::write(directory.join(file), text)?;
+    }
+    let synced = match bigname_manifests::load_repository(&root) {
+        Ok(repository) => {
+            bigname_manifests::sync_schema_v2_repository(&database.pool, &repository)
+                .await
+                .map(|_| ())
+        }
+        Err(error) => Err(error),
+    };
+    std::fs::remove_dir_all(&root)?;
+    synced
+}
+
+/// `manifest` with one more ENSv1 mirror resolver declaration, for another address, starting
+/// at `start`.
+fn ch_with_declaration(manifest: &str, start: i64) -> Result<String> {
+    let abi = manifest.find("\n[[abi.events]]").context("manifest abi")?;
+    Ok(format!(
+        r#"{head}
+[[contracts]]
+role = "ensv1_mirror_resolver"
+address = "0x00000000000000000000000000000000000c0a3c"
+proxy_kind = "none"
+start_block = {start}
+{tail}"#,
+        head = &manifest[..abi],
+        tail = &manifest[abi..],
+    ))
 }
 
 /// One ordinary Project batch to `target`, then its publication.
@@ -284,6 +313,44 @@ async fn v2_history_cursor_checks_its_classification_horizon() -> Result<()> {
             assert_eq!(payload["error"]["message"], json!(HB_RESTART), "{base}");
         }
         ch_ok(&database, &format!("{base}&cursor={cursor}")).await?;
+    }
+    database.cleanup().await
+}
+
+/// The horizon counts only what Project stages: the latest update of each active manifest. A
+/// shadow manifest whose declaration starts between the bound and the recorded horizon leaves
+/// the digest alone and must leave a saved cursor walking the same pages. (A superseded revision
+/// that dropped such a declaration cannot be produced: manifest sync refuses to retire a
+/// declaration before its start block.)
+#[tokio::test]
+async fn v2_history_horizon_ignores_manifests_project_does_not_stage() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let resource = ch_seed(&database, 10_000).await?;
+    let active = ch_manifest(10_000)?;
+    let shadow = ch_with_declaration(&active, 5_000)?
+        .replace("manifest_version = 1", "manifest_version = 2")
+        .replace(r#"rollout_status = "active""#, r#"rollout_status = "shadow""#);
+
+    let mut walks = Vec::new();
+    for route in ch_routes(resource) {
+        let base = format!("{route}&page_size=1");
+        let cursor = hb_next_cursor(&ch_ok(&database, &base).await?)?;
+        let second = ch_ok(&database, &format!("{base}&cursor={cursor}")).await?;
+        walks.push((base, cursor, second));
+    }
+    ch_sync(&database, &[("v1.toml", active), ("v2.toml", shadow)]).await?;
+    let shadow_events: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM bigname_phase.normalized_events
+         WHERE event_kind = 'SourceManifestUpdated'
+           AND after_state ->> 'rollout_status' = 'shadow'",
+    )
+    .fetch_one(&database.pool)
+    .await?;
+    assert_eq!(shadow_events, 1, "the producer must record the shadow manifest");
+    for (base, cursor, second) in &walks {
+        let continued = ch_ok(&database, &format!("{base}&cursor={cursor}")).await?;
+        assert_eq!(continued["data"], second["data"], "{base}");
+        assert_eq!(continued["page"], second["page"], "{base}");
     }
     database.cleanup().await
 }

@@ -69,18 +69,13 @@ without a cursor, when any of these holds: the bound block is no longer
 readable on some chain (a reorg replaced it), an Interpret or Project redo
 counter of a chain in scope changed, the manifest revisions changed, the
 served publication is behind the bound, the scope's chain set changed, or the
-served publication reached the walk's classification horizon on some chain.
-The classification horizon is the lowest `start_block` above the bound among
-the contract declarations of every manifest Project reads for that chain; the
-cursor records it per chain, and a cursor whose recorded horizon differs from
-the one the manifests give for its bound also expires, while one at or below
-the bound block is malformed and returns `400 invalid_input`. Project chooses
-a resolver's classification among its declarations by `start_block` at its
-target block, and the history reads join that classification as Project last
-wrote it, so ordinary advancement past such a start could otherwise change
-which record writes a walk holds without any manifest change or redo. Judging
-the classification at the bound instead would keep those walks alive; it is a
-follow-up. This is conservative: a reorg or redo entirely above the bound also
+served publication reached the walk's [classification
+horizon](glossary.md#classification-horizon) on some chain, the next
+declaration start at which Project may classify a resolver differently. The
+cursor records the horizon per chain; one that differs from the horizon the
+manifests give for its bound also expires the cursor, and one at or below the
+bound block is malformed and returns `400 invalid_input`. This is
+conservative: a reorg or redo entirely above the bound also
 expires the cursor, because the redo counters do not say which blocks were
 rewritten. New blocks, a Project run in progress, and a Project publication
 that lands during the read never expire it while the publication stays below
