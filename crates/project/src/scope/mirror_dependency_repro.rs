@@ -8,7 +8,7 @@ async fn trace(
 ) -> Result<Vec<Scope>> {
     let database = TestDatabase::create(TestDatabaseConfig::new("mirror_dependency_repro")).await?;
     let mut tx = database.pool().begin().await?;
-    sqlx::raw_sql(include_str!("mirror_fixture.sql"))
+    sqlx::raw_sql(include_str!("../../testdata/sql/scope/mirror_fixture.sql"))
         .execute(&mut *tx)
         .await?;
     sqlx::raw_sql(

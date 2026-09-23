@@ -79,7 +79,7 @@ async fn create_linked_index(tx: &mut Transaction<'_, Postgres>) -> Result<()> {
     sqlx::query("SET LOCAL lock_timeout='5s'")
         .execute(&mut **tx)
         .await?;
-    let statement = include_str!("stage/linked_records_index_candidate.sql")
+    let statement = include_str!("../testdata/sql/stage/linked_records_index_candidate.sql")
         .replace("ON normalized_events", "ON bigname_phase.normalized_events");
     sqlx::query(&statement).execute(&mut **tx).await?;
     let (valid, needs_new_snapshot): (bool, bool) = sqlx::query_as(

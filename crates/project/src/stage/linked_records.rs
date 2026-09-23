@@ -14,7 +14,7 @@ pub(super) async fn include(
     let statement = INCLUDE_SQL;
     #[cfg(test)]
     let statement = if crate::reference::enabled(transaction).await? {
-        include_str!("linked_records_previous.sql")
+        include_str!("../../testdata/sql/stage/linked_records_previous.sql")
     } else {
         statement
     };

@@ -4,9 +4,11 @@ use serde_json::Value;
 use sqlx::{Postgres, Transaction};
 
 async fn fixture(tx: &mut Transaction<'_, Postgres>) -> Result<()> {
-    sqlx::raw_sql(include_str!("linked_records_fixture.sql"))
-        .execute(&mut **tx)
-        .await?;
+    sqlx::raw_sql(include_str!(
+        "../../testdata/sql/stage/linked_records_fixture.sql"
+    ))
+    .execute(&mut **tx)
+    .await?;
     sqlx::raw_sql(
         r#"DROP TABLE project_events, project_staged_event_ids;
         ALTER TABLE normalized_events ADD COLUMN logical_name_id text;
@@ -52,7 +54,8 @@ async fn staged_events_preserve_full_rows_admission_and_linked_repeats() -> Resu
             } else {
                 "normalized_events event JOIN project_event_ids scope USING(normalized_event_id)"
             };
-            let old = include_str!("events_previous.sql").replace("{event_source}", source);
+            let old = include_str!("../../testdata/sql/stage/events_previous.sql")
+                .replace("{event_source}", source);
             sqlx::query(&old)
                 .bind(chain)
                 .bind(target)
@@ -93,11 +96,13 @@ async fn staged_events_preserve_full_rows_admission_and_linked_repeats() -> Resu
                     sqlx::query("SAVEPOINT linked_reference")
                         .execute(&mut *tx)
                         .await?;
-                    sqlx::query(include_str!("linked_records_previous.sql"))
-                        .bind(linked_chain)
-                        .bind(linked_target)
-                        .execute(&mut *tx)
-                        .await?;
+                    sqlx::query(include_str!(
+                        "../../testdata/sql/stage/linked_records_previous.sql"
+                    ))
+                    .bind(linked_chain)
+                    .bind(linked_target)
+                    .execute(&mut *tx)
+                    .await?;
                     let expected = rows(&mut tx).await?;
                     sqlx::query("ROLLBACK TO SAVEPOINT linked_reference")
                         .execute(&mut *tx)

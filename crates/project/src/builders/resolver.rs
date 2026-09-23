@@ -36,7 +36,9 @@ pub(super) async fn build(
     let discovery = discovery_ctes(full_rebuild);
     #[cfg(test)]
     let discovery = if crate::reference::enabled(transaction).await? {
-        std::borrow::Cow::Borrowed(include_str!("resolver/declaration_precedence_previous.sql"))
+        std::borrow::Cow::Borrowed(include_str!(
+            "../../testdata/sql/builders/resolver/declaration_precedence_previous.sql"
+        ))
     } else {
         discovery
     };

@@ -50,7 +50,7 @@ async fn scope_size(tx: &mut Transaction<'_, Postgres>) -> Result<(i64, i64)> {
 async fn mirror_relation_locks_stay_constant_across_closure_hops() -> Result<()> {
     let database = TestDatabase::create(TestDatabaseConfig::new("mirror_scope_locks")).await?;
     let mut tx = database.pool().begin().await?;
-    sqlx::raw_sql(include_str!("mirror_fixture.sql"))
+    sqlx::raw_sql(include_str!("../../testdata/sql/scope/mirror_fixture.sql"))
         .execute(&mut *tx)
         .await?;
     for statement in CHAIN_FIXTURE

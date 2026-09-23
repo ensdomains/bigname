@@ -55,7 +55,7 @@ async fn mirror_pairs_preserve_each_closure_step_and_history_guards() -> Result<
     let database =
         TestDatabase::create(TestDatabaseConfig::new("mirror_scope_differential")).await?;
     let mut tx = database.pool().begin().await?;
-    sqlx::raw_sql(include_str!("mirror_fixture.sql"))
+    sqlx::raw_sql(include_str!("../../testdata/sql/scope/mirror_fixture.sql"))
         .execute(&mut *tx)
         .await?;
     // Try every name and both resource sides independently, then an empty initial scope.
@@ -84,7 +84,7 @@ async fn mirror_pairs_preserve_each_closure_step_and_history_guards() -> Result<
         let mut converged = false;
         for pass in 0..12 {
             let before = scope(&mut tx).await?;
-            sqlx::query(include_str!("mirror_previous.sql"))
+            sqlx::query(include_str!("../../testdata/sql/scope/mirror_previous.sql"))
                 .bind("bench")
                 .bind(10_i64)
                 .execute(&mut *tx)
@@ -115,7 +115,7 @@ async fn mirror_tiny_delta_visits_only_affected_dependencies() -> Result<()> {
     use anyhow::ensure;
     let database = TestDatabase::create(TestDatabaseConfig::new("mirror_tiny_delta")).await?;
     let mut tx = database.pool().begin().await?;
-    sqlx::raw_sql(include_str!("mirror_fixture.sql"))
+    sqlx::raw_sql(include_str!("../../testdata/sql/scope/mirror_fixture.sql"))
         .execute(&mut *tx)
         .await?;
     sqlx::raw_sql("SET LOCAL statement_timeout = '30s';
@@ -138,7 +138,7 @@ async fn mirror_tiny_delta_visits_only_affected_dependencies() -> Result<()> {
         ANALYZE project_scope_names; ANALYZE project_scope_resources;")
         .execute(&mut *tx).await?;
     let initial = scope(&mut tx).await?;
-    sqlx::query(include_str!("mirror_previous.sql"))
+    sqlx::query(include_str!("../../testdata/sql/scope/mirror_previous.sql"))
         .bind("bench")
         .bind(10_i64)
         .execute(&mut *tx)
@@ -184,7 +184,7 @@ async fn include_within_timeout(
 async fn mirror_bulk_handles_full_scope_shared_ancestor_and_late_growth() -> Result<()> {
     let database = TestDatabase::create(TestDatabaseConfig::new("mirror_bulk_scale")).await?;
     let mut tx = database.pool().begin().await?;
-    sqlx::raw_sql(include_str!("mirror_fixture.sql"))
+    sqlx::raw_sql(include_str!("../../testdata/sql/scope/mirror_fixture.sql"))
         .execute(&mut *tx)
         .await?;
     // 400 scale names put the broad scenarios (the full scope, the shared ancestor, late
@@ -242,7 +242,7 @@ async fn mirror_bulk_handles_full_scope_shared_ancestor_and_late_growth() -> Res
         let started = std::time::Instant::now();
         for pass in 0..12 {
             let before = scope(&mut tx).await?;
-            sqlx::query(include_str!("mirror_previous.sql"))
+            sqlx::query(include_str!("../../testdata/sql/scope/mirror_previous.sql"))
                 .bind("bench")
                 .bind(10_i64)
                 .execute(&mut *tx)
@@ -277,7 +277,7 @@ async fn ancestor_discovery_reuses_history_for_late_descendants_without_losing_e
 {
     let database = TestDatabase::create(TestDatabaseConfig::new("mirror_ancestor_reuse")).await?;
     let mut tx = database.pool().begin().await?;
-    sqlx::raw_sql(include_str!("mirror_fixture.sql"))
+    sqlx::raw_sql(include_str!("../../testdata/sql/scope/mirror_fixture.sql"))
         .execute(&mut *tx)
         .await?;
     sqlx::raw_sql("TRUNCATE project_changed_events;
@@ -318,7 +318,7 @@ async fn ancestor_discovery_reuses_history_for_late_descendants_without_losing_e
                     .execute(&mut *tx).await?;
             }
             let before = scope(&mut tx).await?;
-            sqlx::query(include_str!("mirror_previous.sql"))
+            sqlx::query(include_str!("../../testdata/sql/scope/mirror_previous.sql"))
                 .bind("bench")
                 .bind(10_i64)
                 .execute(&mut *tx)
@@ -348,7 +348,7 @@ async fn ancestor_discovery_reuses_history_for_late_descendants_without_losing_e
 async fn historical_ancestor_resources_remain_factored_at_each_step() -> Result<()> {
     let database = TestDatabase::create(TestDatabaseConfig::new("mirror_history_fanout")).await?;
     let mut tx = database.pool().begin().await?;
-    sqlx::raw_sql(include_str!("mirror_fixture.sql"))
+    sqlx::raw_sql(include_str!("../../testdata/sql/scope/mirror_fixture.sql"))
         .execute(&mut *tx)
         .await?;
     sqlx::raw_sql("SET LOCAL statement_timeout='60s';
@@ -383,7 +383,7 @@ async fn historical_ancestor_resources_remain_factored_at_each_step() -> Result<
         let mut converged = false;
         for pass in 0..12 {
             let before = scope(&mut tx).await?;
-            sqlx::query(include_str!("mirror_previous.sql"))
+            sqlx::query(include_str!("../../testdata/sql/scope/mirror_previous.sql"))
                 .bind("bench")
                 .bind(10_i64)
                 .execute(&mut *tx)
@@ -417,7 +417,7 @@ async fn historical_ancestor_resources_remain_factored_at_each_step() -> Result<
 async fn profiled_mirror_substages_preserve_each_nonempty_closure_step() -> Result<()> {
     let database = TestDatabase::create(TestDatabaseConfig::new("mirror_profile")).await?;
     let mut tx = database.pool().begin().await?;
-    sqlx::raw_sql(include_str!("mirror_fixture.sql"))
+    sqlx::raw_sql(include_str!("../../testdata/sql/scope/mirror_fixture.sql"))
         .execute(&mut *tx)
         .await?;
     let session = crate::profile::Session::create(&std::env::temp_dir())?;
@@ -474,7 +474,7 @@ async fn long_labels_fit_the_suffix_index_that_serves_the_keyed_walk() -> Result
     const SUFFIX_INDEX: &str = "name_surfaces_project_suffix_hash_idx";
     let database = TestDatabase::create(TestDatabaseConfig::new("mirror_suffix_index")).await?;
     let mut tx = database.pool().begin().await?;
-    sqlx::raw_sql(include_str!("mirror_fixture.sql"))
+    sqlx::raw_sql(include_str!("../../testdata/sql/scope/mirror_fixture.sql"))
         .execute(&mut *tx)
         .await?;
     // 32 labels of 128 hex characters: 4 KB that does not compress, so a btree entry holding the
@@ -549,7 +549,7 @@ async fn one_long_label_fits_the_label_index_that_serves_the_keyed_seed_lookup()
     const LABEL_INDEX: &str = "name_surfaces_project_label_hashes_idx";
     let database = TestDatabase::create(TestDatabaseConfig::new("mirror_label_index")).await?;
     let mut tx = database.pool().begin().await?;
-    sqlx::raw_sql(include_str!("mirror_fixture.sql"))
+    sqlx::raw_sql(include_str!("../../testdata/sql/scope/mirror_fixture.sql"))
         .execute(&mut *tx)
         .await?;
     // 2,880 hex characters in one label do not compress below the GIN entry limit.

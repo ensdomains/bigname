@@ -213,7 +213,7 @@ async fn contract_audit_distinguishes_forward_inputs_late_keys_and_same_value_ch
     let database =
         TestDatabase::create(TestDatabaseConfig::new("contract_audit_directions")).await?;
     let mut tx = database.pool().begin().await?;
-    sqlx::raw_sql(include_str!("scope/mirror_fixture.sql"))
+    sqlx::raw_sql(include_str!("../testdata/sql/scope/mirror_fixture.sql"))
         .execute(&mut *tx)
         .await?;
     sqlx::query("TRUNCATE project_changed_events")
@@ -496,7 +496,7 @@ async fn contract_audit_rejects_unmodeled_classification_and_invalid_input_targe
     use bigname_test_support::{TestDatabase, TestDatabaseConfig};
     let database = TestDatabase::create(TestDatabaseConfig::new("contract_input_guards")).await?;
     let mut tx = database.pool().begin().await?;
-    sqlx::raw_sql(include_str!("scope/mirror_fixture.sql"))
+    sqlx::raw_sql(include_str!("../testdata/sql/scope/mirror_fixture.sql"))
         .execute(&mut *tx)
         .await?;
     sqlx::raw_sql("TRUNCATE project_changed_events;

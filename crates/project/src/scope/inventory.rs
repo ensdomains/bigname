@@ -334,7 +334,7 @@ async fn include_pointer_names(
             chain_id,
             target_block,
             None,
-            include_str!("inventory_pointer_previous.sql"),
+            include_str!("../../testdata/sql/scope/inventory_pointer_previous.sql"),
         )
         .await;
     }

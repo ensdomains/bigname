@@ -25,7 +25,7 @@ pub(crate) async fn mirror_stage(
     target: i64,
 ) -> crate::Result<()> {
     // Literal deployed full graph, independently constructed without candidate frontiers.
-    for sql in [include_str!("scope/mirror_reference/mirror.sql"), include_str!("scope/mirror_reference/mirror_bulk.sql"),
+    for sql in [include_str!("../testdata/sql/scope/mirror_reference/mirror.sql"), include_str!("../testdata/sql/scope/mirror_reference/mirror_bulk.sql"),
         "CREATE TEMP TABLE project_contract_audit_input_names(logical_name_id text PRIMARY KEY) ON COMMIT DROP;
          CREATE TEMP TABLE project_contract_audit_input_resources(resource_id uuid PRIMARY KEY) ON COMMIT DROP;
          CREATE TEMP TABLE project_contract_audit_changed_nodes ON COMMIT DROP AS SELECT * FROM project_mirror_changed_nodes"] {

@@ -10,7 +10,7 @@ async fn compare(
 ) -> Result<Vec<(String, String)>> {
     let old = format!(
         "SELECT logical_name_id, resource_id::text FROM ({}) result ORDER BY 1, 2",
-        include_str!("changed_node_tests/baseline.sql")
+        include_str!("../../testdata/sql/scope/changed_node_tests/baseline.sql")
     );
     let expected: Vec<(String, String)> = sqlx::query_as(&old)
         .bind("bench")
@@ -51,9 +51,11 @@ async fn compare(
 async fn changed_node_dependents_preserve_exact_pointer_and_all_guards() -> Result<()> {
     let database = TestDatabase::create(TestDatabaseConfig::new("changed_node_guards")).await?;
     let mut tx = database.pool().begin().await?;
-    raw_sql(include_str!("changed_node_tests/schema.sql"))
-        .execute(&mut *tx)
-        .await?;
+    raw_sql(include_str!(
+        "../../testdata/sql/scope/changed_node_tests/schema.sql"
+    ))
+    .execute(&mut *tx)
+    .await?;
     let cases = [
         (
             "unrelated_malformed_resolver_manifest",
@@ -333,9 +335,11 @@ async fn changed_node_dependents_preserve_exact_pointer_and_all_guards() -> Resu
         ),
     ];
     for (label, mutation, present) in cases {
-        raw_sql(include_str!("changed_node_tests/seed.sql"))
-            .execute(&mut *tx)
-            .await?;
+        raw_sql(include_str!(
+            "../../testdata/sql/scope/changed_node_tests/seed.sql"
+        ))
+        .execute(&mut *tx)
+        .await?;
         if !mutation.is_empty() {
             raw_sql(mutation).execute(&mut *tx).await?;
         }
@@ -355,13 +359,17 @@ async fn changed_node_dependents_preserve_exact_pointer_and_all_guards() -> Resu
 async fn changed_node_dependents_match_original_for_mixed_histories() -> Result<()> {
     let database = TestDatabase::create(TestDatabaseConfig::new("changed_node_mixed")).await?;
     let mut tx = database.pool().begin().await?;
-    raw_sql(include_str!("changed_node_tests/schema.sql"))
+    raw_sql(include_str!(
+        "../../testdata/sql/scope/changed_node_tests/schema.sql"
+    ))
+    .execute(&mut *tx)
+    .await?;
+    for seed in 0..48 {
+        raw_sql(include_str!(
+            "../../testdata/sql/scope/changed_node_tests/seed.sql"
+        ))
         .execute(&mut *tx)
         .await?;
-    for seed in 0..48 {
-        raw_sql(include_str!("changed_node_tests/seed.sql"))
-            .execute(&mut *tx)
-            .await?;
         raw_sql(&format!(r#"
             TRUNCATE project_changed_events,name_surfaces,normalized_events,record_inventory_current;
             INSERT INTO normalized_events(normalized_event_id,chain_id,logical_name_id,resource_id,event_kind,source_family,namespace,canonicality_state,after_state)
@@ -396,18 +404,24 @@ async fn changed_node_dependents_match_original_for_mixed_histories() -> Result<
 async fn changed_node_dependents_still_reject_relevant_malformed_pointer_ids() -> Result<()> {
     let database = TestDatabase::create(TestDatabaseConfig::new("changed_node_bad_id")).await?;
     let mut tx = database.pool().begin().await?;
-    raw_sql(include_str!("changed_node_tests/schema.sql"))
-        .execute(&mut *tx)
-        .await?;
-    raw_sql(include_str!("changed_node_tests/seed.sql"))
-        .execute(&mut *tx)
-        .await?;
+    raw_sql(include_str!(
+        "../../testdata/sql/scope/changed_node_tests/schema.sql"
+    ))
+    .execute(&mut *tx)
+    .await?;
+    raw_sql(include_str!(
+        "../../testdata/sql/scope/changed_node_tests/seed.sql"
+    ))
+    .execute(&mut *tx)
+    .await?;
     raw_sql("UPDATE record_inventory_current SET provenance=jsonb_set(provenance,'{resolver_pointer_event_id}','\"not-a-bigint\"'); SAVEPOINT invalid_id").execute(&mut *tx).await?;
-    let old = sqlx::query(include_str!("changed_node_tests/baseline.sql"))
-        .bind("bench")
-        .fetch_all(&mut *tx)
-        .await
-        .unwrap_err();
+    let old = sqlx::query(include_str!(
+        "../../testdata/sql/scope/changed_node_tests/baseline.sql"
+    ))
+    .bind("bench")
+    .fetch_all(&mut *tx)
+    .await
+    .unwrap_err();
     assert_eq!(
         old.as_database_error()
             .and_then(|error| error.code())
@@ -430,9 +444,11 @@ async fn changed_node_dependents_skip_unrelated_malformed_inventory() -> Result<
     let database =
         TestDatabase::create(TestDatabaseConfig::new("changed_node_unrelated_bad_id")).await?;
     let mut tx = database.pool().begin().await?;
-    raw_sql(include_str!("changed_node_tests/unrelated_malformed.sql"))
-        .execute(&mut *tx)
-        .await?;
+    raw_sql(include_str!(
+        "../../testdata/sql/scope/changed_node_tests/unrelated_malformed.sql"
+    ))
+    .execute(&mut *tx)
+    .await?;
     let actual = compare(&mut tx, "unrelated malformed inventory").await?;
     assert_eq!(actual.len(), 1);
     tx.rollback().await?;

@@ -3,7 +3,7 @@ use bigname_test_support::{TestDatabase, TestDatabaseConfig};
 use serde_json::Value;
 use sqlx::{Postgres, Transaction};
 
-const PREVIOUS: &str = include_str!("linked_records_previous.sql");
+const PREVIOUS: &str = include_str!("../../testdata/sql/stage/linked_records_previous.sql");
 
 async fn snapshot(tx: &mut Transaction<'_, Postgres>) -> Result<Vec<Value>> {
     Ok(sqlx::query_scalar(
@@ -17,9 +17,11 @@ async fn snapshot(tx: &mut Transaction<'_, Postgres>) -> Result<Vec<Value>> {
 async fn profiled_linked_inputs_match_literal_history_and_execute_once() -> Result<()> {
     let database = TestDatabase::create(TestDatabaseConfig::new("linked_input_profile")).await?;
     let mut tx = database.pool().begin().await?;
-    sqlx::raw_sql(include_str!("linked_records_fixture.sql"))
-        .execute(&mut *tx)
-        .await?;
+    sqlx::raw_sql(include_str!(
+        "../../testdata/sql/stage/linked_records_fixture.sql"
+    ))
+    .execute(&mut *tx)
+    .await?;
     let session = crate::profile::Session::create(&std::env::temp_dir())?;
     for (step, (chain, target)) in [
         ("bench", 9_i64),
@@ -96,9 +98,11 @@ async fn profiled_linked_inputs_match_literal_history_and_execute_once() -> Resu
 async fn profiled_linked_inputs_preserve_database_error_classification() -> Result<()> {
     let database = TestDatabase::create(TestDatabaseConfig::new("linked_input_error")).await?;
     let mut tx = database.pool().begin().await?;
-    sqlx::raw_sql(include_str!("linked_records_fixture.sql"))
-        .execute(&mut *tx)
-        .await?;
+    sqlx::raw_sql(include_str!(
+        "../../testdata/sql/stage/linked_records_fixture.sql"
+    ))
+    .execute(&mut *tx)
+    .await?;
     // Case-equivalent scopes create duplicate IDs within one INSERT; preserve that error.
     sqlx::query("ALTER TABLE project_events ADD PRIMARY KEY(normalized_event_id)")
         .execute(&mut *tx)
@@ -130,9 +134,11 @@ async fn profiled_linked_inputs_preserve_database_error_classification() -> Resu
 async fn linked_partial_index_and_narrow_ids_avoid_unrelated_history() -> Result<()> {
     let database = TestDatabase::create(TestDatabaseConfig::new("linked_input_index")).await?;
     let mut tx = database.pool().begin().await?;
-    sqlx::raw_sql(include_str!("linked_records_fixture.sql"))
-        .execute(&mut *tx)
-        .await?;
+    sqlx::raw_sql(include_str!(
+        "../../testdata/sql/stage/linked_records_fixture.sql"
+    ))
+    .execute(&mut *tx)
+    .await?;
     sqlx::raw_sql("INSERT INTO normalized_events
         SELECT 1000+i,'bench','RecordChanged',10,'current','canonical','activated',
                jsonb_build_object('resolver','0xShared','storage_model','node','value',repeat('wide-row',128)),
@@ -160,9 +166,11 @@ async fn linked_partial_index_and_narrow_ids_avoid_unrelated_history() -> Result
     sqlx::query("CLUSTER normalized_events USING normalized_events_pkey")
         .execute(&mut *tx)
         .await?;
-    sqlx::raw_sql(include_str!("linked_records_index_candidate.sql"))
-        .execute(&mut *tx)
-        .await?;
+    sqlx::raw_sql(include_str!(
+        "../../testdata/sql/stage/linked_records_index_candidate.sql"
+    ))
+    .execute(&mut *tx)
+    .await?;
     sqlx::query("ANALYZE normalized_events")
         .execute(&mut *tx)
         .await?;

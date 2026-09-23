@@ -17,7 +17,7 @@ async fn scope(tx: &mut Transaction<'_, Postgres>) -> Result<(Vec<String>, Vec<S
 async fn each_binding_operator_preserves_full_scope_closure_and_late_keys() -> Result<()> {
     let database = TestDatabase::create(TestDatabaseConfig::new("binding_frontiers")).await?;
     let mut tx = database.pool().begin().await?;
-    sqlx::raw_sql(include_str!("binding_fixture.sql"))
+    sqlx::raw_sql(include_str!("../../testdata/sql/scope/binding_fixture.sql"))
         .execute(&mut *tx)
         .await?;
     let target = crate::Marker {
@@ -65,7 +65,7 @@ async fn each_binding_operator_preserves_full_scope_closure_and_late_keys() -> R
                 .execute(&mut *tx)
                 .await?;
             // Execute the actual pre-optimization SQL, including its original joins and guards.
-            for statement in include_str!("binding_previous.sql")
+            for statement in include_str!("../../testdata/sql/scope/binding_previous.sql")
                 .split(';')
                 .filter(|sql| !sql.trim().is_empty())
             {
@@ -110,7 +110,7 @@ async fn each_binding_operator_preserves_full_scope_closure_and_late_keys() -> R
 async fn profiled_binding_frontiers_preserve_each_nonempty_closure_step() -> Result<()> {
     let database = TestDatabase::create(TestDatabaseConfig::new("binding_profile")).await?;
     let mut tx = database.pool().begin().await?;
-    sqlx::raw_sql(include_str!("binding_fixture.sql"))
+    sqlx::raw_sql(include_str!("../../testdata/sql/scope/binding_fixture.sql"))
         .execute(&mut *tx)
         .await?;
     sqlx::raw_sql("INSERT INTO project_scope_names SELECT logical_name_id FROM name_surfaces;
@@ -164,7 +164,7 @@ async fn changed_operator(tx: &mut Transaction<'_, Postgres>, operator: usize) -
 }
 
 async fn old_operator(tx: &mut Transaction<'_, Postgres>, operator: usize) -> Result<()> {
-    let statement = include_str!("binding_previous.sql")
+    let statement = include_str!("../../testdata/sql/scope/binding_previous.sql")
         .split(';')
         .filter(|s| !s.trim().is_empty())
         .nth(operator)
@@ -183,7 +183,7 @@ async fn binding_history_probes_preserve_null_visibility_namespace_and_closed_hi
     let database =
         TestDatabase::create(TestDatabaseConfig::new("binding_history_variants")).await?;
     let mut tx = database.pool().begin().await?;
-    sqlx::raw_sql(include_str!("binding_fixture.sql"))
+    sqlx::raw_sql(include_str!("../../testdata/sql/scope/binding_fixture.sql"))
         .execute(&mut *tx)
         .await?;
     sqlx::query("INSERT INTO project_scope_resources VALUES(md5('lease-1')::uuid)")
@@ -243,7 +243,7 @@ async fn binding_history_probes_preserve_null_visibility_namespace_and_closed_hi
 async fn broad_binding_history_uses_bounded_probes_and_matches_literal_old_sql() -> Result<()> {
     let database = TestDatabase::create(TestDatabaseConfig::new("binding_history_broad")).await?;
     let mut tx = database.pool().begin().await?;
-    sqlx::raw_sql(include_str!("binding_fixture.sql"))
+    sqlx::raw_sql(include_str!("../../testdata/sql/scope/binding_fixture.sql"))
         .execute(&mut *tx)
         .await?;
     sqlx::raw_sql("CREATE INDEX ON chain_lineage(chain_id,block_number,block_hash);

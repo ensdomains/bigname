@@ -176,7 +176,7 @@ pub(super) async fn include_resource_pointers(
             chain_id,
             target_block,
             None,
-            include_str!("resolver_pointers_previous.sql"),
+            include_str!("../../testdata/sql/scope/resolver_pointers_previous.sql"),
         )
         .await;
     }

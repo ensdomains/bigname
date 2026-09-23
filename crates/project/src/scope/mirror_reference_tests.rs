@@ -35,7 +35,7 @@ async fn deployed_targeted_and_bulk_paths_match_independent_semantic_oracle() ->
     let database =
         TestDatabase::create(TestDatabaseConfig::new("mirror_scope_differential")).await?;
     let mut tx = database.pool().begin().await?;
-    sqlx::raw_sql(include_str!("mirror_fixture.sql"))
+    sqlx::raw_sql(include_str!("../../testdata/sql/scope/mirror_fixture.sql"))
         .execute(&mut *tx)
         .await?;
     // Try every name and both resource sides independently, then an empty initial scope.
@@ -69,7 +69,7 @@ async fn deployed_targeted_and_bulk_paths_match_independent_semantic_oracle() ->
         let mut converged = false;
         for pass in 0..12 {
             let before = scope(&mut tx).await?;
-            sqlx::query(include_str!("mirror_previous.sql"))
+            sqlx::query(include_str!("../../testdata/sql/scope/mirror_previous.sql"))
                 .bind("bench")
                 .bind(10_i64)
                 .execute(&mut *tx)
@@ -99,7 +99,7 @@ async fn deployed_reference_switches_after_targeted_pass_and_reuses_bulk_for_lat
 -> Result<()> {
     let database = TestDatabase::create(TestDatabaseConfig::new("mirror_reference_switch")).await?;
     let mut tx = database.pool().begin().await?;
-    sqlx::raw_sql(include_str!("mirror_fixture.sql"))
+    sqlx::raw_sql(include_str!("../../testdata/sql/scope/mirror_fixture.sql"))
         .execute(&mut *tx)
         .await?;
     sqlx::query("TRUNCATE project_changed_events")
@@ -122,7 +122,7 @@ async fn deployed_reference_switches_after_targeted_pass_and_reuses_bulk_for_lat
         let mut converged = false;
         for pass in 0..12 {
             let before = scope(&mut tx).await?;
-            sqlx::query(include_str!("mirror_previous.sql"))
+            sqlx::query(include_str!("../../testdata/sql/scope/mirror_previous.sql"))
                 .bind("bench")
                 .bind(10_i64)
                 .execute(&mut *tx)

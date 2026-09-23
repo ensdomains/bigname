@@ -5,7 +5,7 @@ use bigname_test_support::{TestDatabase, TestDatabaseConfig};
 async fn pointer_frontiers_match_original_for_small_broad_and_late_resources() -> Result<()> {
     let database = TestDatabase::create(TestDatabaseConfig::new("inventory_frontier")).await?;
     let mut tx = database.pool().begin().await?;
-    sqlx::raw_sql(include_str!("mirror_fixture.sql"))
+    sqlx::raw_sql(include_str!("../../testdata/sql/scope/mirror_fixture.sql"))
         .execute(&mut *tx)
         .await?;
     sqlx::raw_sql(
@@ -32,11 +32,13 @@ async fn pointer_frontiers_match_original_for_small_broad_and_late_resources() -
             sqlx::query("SAVEPOINT inventory_reference")
                 .execute(&mut *tx)
                 .await?;
-            sqlx::query(include_str!("inventory_pointer_previous.sql"))
-                .bind("bench")
-                .bind(10_i64)
-                .execute(&mut *tx)
-                .await?;
+            sqlx::query(include_str!(
+                "../../testdata/sql/scope/inventory_pointer_previous.sql"
+            ))
+            .bind("bench")
+            .bind(10_i64)
+            .execute(&mut *tx)
+            .await?;
             let expected: Vec<String> =
                 sqlx::query_scalar("SELECT logical_name_id FROM project_scope_names ORDER BY 1")
                     .fetch_all(&mut *tx)
@@ -64,7 +66,7 @@ async fn pointer_frontiers_match_original_for_small_broad_and_late_resources() -
 async fn profiled_inventory_names_preserve_history_and_execute_once() -> Result<()> {
     let database = TestDatabase::create(TestDatabaseConfig::new("inventory_profile")).await?;
     let mut tx = database.pool().begin().await?;
-    sqlx::raw_sql(include_str!("mirror_fixture.sql"))
+    sqlx::raw_sql(include_str!("../../testdata/sql/scope/mirror_fixture.sql"))
         .execute(&mut *tx)
         .await?;
     sqlx::raw_sql("CREATE TEMP TABLE project_inventory_seen_resources(resource_id uuid PRIMARY KEY);

@@ -18,7 +18,7 @@ pub(super) async fn stage(
     chain_id: &str,
     target_block: i64,
 ) -> Result<Strategy> {
-    for statement in include_str!("mirror_reference/mirror.sql")
+    for statement in include_str!("../../testdata/sql/scope/mirror_reference/mirror.sql")
         .split(';')
         .filter(|sql| !sql.trim().is_empty())
     {
@@ -43,22 +43,26 @@ pub(super) async fn include(
     strategy: &mut Strategy,
 ) -> Result<()> {
     if !strategy.bulk {
-        let broad: bool = sqlx::query_scalar(include_str!("mirror_reference/mirror_broad.sql"))
-            .bind(chain_id)
-            .bind(target_block)
-            .fetch_one(&mut **transaction)
-            .await
-            .map_err(|error| ProjectError::database("failed to assess mirror scope size", error))?;
+        let broad: bool = sqlx::query_scalar(include_str!(
+            "../../testdata/sql/scope/mirror_reference/mirror_broad.sql"
+        ))
+        .bind(chain_id)
+        .bind(target_block)
+        .fetch_one(&mut **transaction)
+        .await
+        .map_err(|error| ProjectError::database("failed to assess mirror scope size", error))?;
         if broad {
             stage_bulk(transaction, chain_id, target_block).await?;
             strategy.bulk = true;
         }
     }
     if strategy.bulk {
-        sqlx::query(include_str!("mirror_reference/mirror_bulk_include.sql"))
-            .execute(&mut **transaction)
-            .await
-            .map_err(|error| ProjectError::database("failed to scope bulk mirror pairs", error))?;
+        sqlx::query(include_str!(
+            "../../testdata/sql/scope/mirror_reference/mirror_bulk_include.sql"
+        ))
+        .execute(&mut **transaction)
+        .await
+        .map_err(|error| ProjectError::database("failed to scope bulk mirror pairs", error))?;
         return Ok(());
     }
     for statement in [
@@ -70,12 +74,14 @@ pub(super) async fn include(
             .await
             .map_err(|error| ProjectError::database("failed to analyze mirror frontier", error))?;
     }
-    sqlx::query(include_str!("mirror_reference/mirror_include.sql"))
-        .bind(chain_id)
-        .bind(target_block)
-        .execute(&mut **transaction)
-        .await
-        .map_err(|error| ProjectError::database("failed to scope mirror resolver pairs", error))?;
+    sqlx::query(include_str!(
+        "../../testdata/sql/scope/mirror_reference/mirror_include.sql"
+    ))
+    .bind(chain_id)
+    .bind(target_block)
+    .execute(&mut **transaction)
+    .await
+    .map_err(|error| ProjectError::database("failed to scope mirror resolver pairs", error))?;
     Ok(())
 }
 
@@ -86,7 +92,7 @@ async fn stage_bulk(
 ) -> Result<()> {
     // Reconstruct from original changed events, not the consumed frontier. This
     // also preserves changed-node dependencies when switching after a small pass.
-    for statement in include_str!("mirror_reference/mirror_bulk.sql")
+    for statement in include_str!("../../testdata/sql/scope/mirror_reference/mirror_bulk.sql")
         .split(';')
         .filter(|s| !s.trim().is_empty())
     {

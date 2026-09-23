@@ -14,7 +14,7 @@ pub(super) async fn close_binding_scope(
             chain_id,
             target.number,
             Some(&target.hash),
-            include_str!("binding_previous.sql"),
+            include_str!("../../testdata/sql/scope/binding_previous.sql"),
         )
         .await;
     }

@@ -2,7 +2,8 @@ use anyhow::{Result, ensure};
 use bigname_test_support::{TestDatabase, TestDatabaseConfig};
 use sqlx::{Postgres, Transaction};
 
-const OLD: &str = include_str!("declaration_precedence_previous.sql");
+const OLD: &str =
+    include_str!("../../../testdata/sql/builders/resolver/declaration_precedence_previous.sql");
 const CHAIN: &str = "ethereum-sepolia";
 
 async fn rows(tx: &mut Transaction<'_, Postgres>, ctes: &str, full: bool) -> Result<Vec<String>> {
@@ -26,9 +27,11 @@ async fn discovery_admission_scope_preserves_multisets_and_activation_precedence
     let database =
         TestDatabase::create(TestDatabaseConfig::new("resolver_admission_scope")).await?;
     let mut tx = database.pool().begin().await?;
-    sqlx::raw_sql(include_str!("discovery_fixture.sql"))
-        .execute(&mut *tx)
-        .await?;
+    sqlx::raw_sql(include_str!(
+        "../../../testdata/sql/builders/resolver/discovery_fixture.sql"
+    ))
+    .execute(&mut *tx)
+    .await?;
     for (count, passthrough, full) in [
         (0, false, false),
         (1, false, false),
