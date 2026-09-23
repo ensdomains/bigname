@@ -181,7 +181,7 @@ async fn ch_project_to(database: &TestDatabase, target: i64) -> Result<()> {
 
 /// The head reaches `target` and Project's batch commits its projection swap there, but the
 /// phase runner has not yet recorded the new position, which it writes afterwards in its own
-/// transaction (bigname: `crates/project/src/engine.rs:79-90`,
+/// transaction (bigname: `crates/project/src/engine.rs:44-63`,
 /// `apps/phase-runner/src/runner_batch.rs:160-163`).
 async fn ch_swap_to(database: &TestDatabase, target: i64) -> Result<()> {
     ch_head_to(database, target).await?;

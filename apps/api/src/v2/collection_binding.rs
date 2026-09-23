@@ -337,7 +337,7 @@ fn published_positions(
 /// bound's classification horizon. Project commits its projection swap before the phase runner
 /// records the new position, and after a crash in that gap recovery labels the old position
 /// completed again, so the served position can lag the classification the reads join
-/// (bigname: `crates/project/src/engine.rs:79-90`, `apps/phase-runner/src/runner_batch.rs:160-163`,
+/// (bigname: `crates/project/src/engine.rs:44-63`, `apps/phase-runner/src/runner_batch.rs:160-163`,
 /// `apps/phase-runner/src/runner_recovery.rs:96-135`). Project's normal target is the readable
 /// head, so no swap reaches the horizon before the head does.
 fn crossed_horizon(

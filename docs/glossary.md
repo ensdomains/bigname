@@ -291,8 +291,8 @@ at or before Project publishes there: Project's publications become visible
 before its recorded position moves, and it only targets the readable head, so
 a walk just below a horizon can expire one block early (see [Shared Route
 Rules](api-v2-routes.md#shared-route-rules))
-(bigname: `crates/project/src/stage.rs:67-161`,
-`crates/project/src/builders/resolver.rs:343-387`,
+(bigname: `crates/project/src/stage.rs:66-170`,
+`crates/project/src/builders/resolver/build.sql:307-351`,
 `crates/storage/src/history/classification_horizon.rs`). Judging the
 classification at the bound instead would remove this expiry and is a
 follow-up. Not to be confused with the [rewind horizon](#rewind-horizon).

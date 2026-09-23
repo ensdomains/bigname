@@ -11,12 +11,12 @@ use sqlx::PgPool;
 /// Project recomputes resolver classification against its target block, choosing among a
 /// manifest's declarations by `start_block`, so a declaration that starts above the bound can
 /// change which history events a bounded read attributes once Project reaches it, with no
-/// manifest change (bigname: `crates/project/src/stage.rs:122-161`,
-/// `crates/project/src/builders/resolver.rs:343-387`). The manifests are the ones Project
+/// manifest change (bigname: `crates/project/src/stage.rs:123-170`,
+/// `crates/project/src/builders/resolver/build.sql:307-351`). The manifests are the ones Project
 /// stages at the bound: the latest readable `SourceManifestUpdated` event of each manifest at or
 /// below it, when it is active and carries a payload, on the chain or, for `base-mainnet`, the
 /// Basenames execution manifest of `ethereum-mainnet`
-/// (bigname: `crates/project/src/stage.rs:67-112`). Every declaration of a staged manifest
+/// (bigname: `crates/project/src/stage.rs:66-121`). Every declaration of a staged manifest
 /// counts, not only resolver ones, so the horizon errs early.
 ///
 /// The manifest digest a cursor binds names only finalized manifest events, while Project and
