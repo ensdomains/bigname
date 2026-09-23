@@ -4,6 +4,9 @@
 //! `resolver_implementation_unknown`. Declaration precedence pairs a manifest declaration with
 //! a same-namespace `resolver` edge; a creation self-edge is one.
 
+#[path = "support/bounded_attribution.rs"]
+mod bounded_attribution;
+
 use anyhow::Result;
 use bigname_project::{BatchRequest, Engine, RunMode};
 use bigname_test_support::{TestDatabase, TestDatabaseConfig};
@@ -41,6 +44,7 @@ async fn announced_implementation_supports_the_proxy_and_silence_is_unknown() ->
             mode: RunMode::Normal,
         })
         .await?;
+    bounded_attribution::assert_bounded_record_attribution_matches_inventory(&pool).await?;
 
     let rows: Vec<(String, String, Option<String>, Option<String>)> = sqlx::query_as(
         "SELECT lower(resolver_address), support_status, unsupported_reason,
@@ -134,6 +138,7 @@ async fn run(pool: &PgPool) -> Result<()> {
             mode: RunMode::Normal,
         })
         .await?;
+    bounded_attribution::assert_bounded_record_attribution_matches_inventory(pool).await?;
     Ok(())
 }
 

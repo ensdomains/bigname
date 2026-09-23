@@ -3,7 +3,10 @@ use std::collections::BTreeMap;
 use sqlx::{Postgres, QueryBuilder};
 use uuid::Uuid;
 
-use super::{HistoryBlockWindow, lineage::same_fork_predicate, selectors::HistorySelector};
+use super::{
+    HistoryBlockWindow, attribution::AttributedRecords, lineage::same_fork_predicate,
+    selectors::HistorySelector,
+};
 
 /// Keep `alias` at or below the published block of its chain. A row on a chain the bounds do
 /// not name lies above every publication, as does every row when the bounds are empty; without
@@ -69,6 +72,7 @@ pub(super) fn push_history_block_window<'a>(
 pub(super) fn push_selector_filter<'a>(
     builder: &mut QueryBuilder<'a, Postgres>,
     selector: &'a HistorySelector,
+    attributed: &AttributedRecords,
 ) {
     match selector {
         HistorySelector::LogicalNames(logical_name_ids) => {
@@ -77,7 +81,7 @@ pub(super) fn push_selector_filter<'a>(
         HistorySelector::Resources(resource_ids) => {
             builder.push("(");
             push_uuid_filter(builder, "ne.resource_id", resource_ids);
-            push_attributed_record_filter(builder, "ne", resource_ids);
+            push_attributed_record_filter(builder, "ne", attributed, resource_ids);
             builder.push(")");
         }
         HistorySelector::LogicalNamesOrResources {
@@ -88,7 +92,7 @@ pub(super) fn push_selector_filter<'a>(
             push_string_filter(builder, "ne.logical_name_id", logical_name_ids);
             builder.push(" OR ");
             push_uuid_filter(builder, "ne.resource_id", resource_ids);
-            push_attributed_record_filter(builder, "ne", resource_ids);
+            push_attributed_record_filter(builder, "ne", attributed, resource_ids);
             builder.push(")");
         }
         // The history source already holds exactly this selector's candidate rows.
@@ -101,88 +105,79 @@ pub(super) fn push_selector_filter<'a>(
     }
 }
 
-/// Node-keyed record observations carry no logical name or resource of their own; Project
-/// attributes them to a resource through its selected resolver pointer and publishes the
-/// attributed event ids in the record inventory provenance. Resource-scoped history reads them
-/// back through that provenance so a name's history lists the same writes its records serve.
+/// Node-keyed record observations carry no logical name or resource of their own; a resolver
+/// pointer attributes them to a resource. Resource-scoped history lists the writes attributed to
+/// its resources at the read's published block (`attribution.rs`), so a name's history lists the
+/// writes its records served.
 ///
-/// The id list does not depend on the outer row, so it is computed once as an array. PostgreSQL
-/// can then key this branch on the primary key and combine it with index scans for the other
-/// branches of the selector's OR; an `IN (SELECT ...)` branch inside an OR cannot be an index
-/// condition and forces a scan of every candidate row.
-pub(super) fn push_attributed_record_filter<'a>(
-    builder: &mut QueryBuilder<'a, Postgres>,
+/// The read loads the ids before the statement and binds them as an array. PostgreSQL can then
+/// key this branch on the primary key and combine it with index scans for the other branches of
+/// the selector's OR; an `IN (SELECT ...)` branch inside an OR cannot be an index condition and
+/// forces a scan of every candidate row.
+pub(super) fn push_attributed_record_filter(
+    builder: &mut QueryBuilder<'_, Postgres>,
     row_alias: &str,
-    resource_ids: &'a [Uuid],
+    attributed: &AttributedRecords,
+    resource_ids: &[Uuid],
 ) {
     builder.push(" OR ");
     builder.push(row_alias);
-    builder.push(".normalized_event_id = ANY(ARRAY(");
-    push_attributed_record_ids(builder, resource_ids);
-    builder.push("))");
+    builder.push(".normalized_event_id = ANY(");
+    builder.push_bind(attributed.event_ids_for(resource_ids));
+    builder.push("::bigint[])");
 }
 
-/// [`push_attributed_record_filter`] with a further predicate on the attributing `inventory`
-/// row, for readers that admit attribution through some of the candidate resources only. The
-/// predicate may refer to the outer row, so the subquery stays a correlated `IN`.
+/// [`push_attributed_record_filter`] with a further predicate on the attributing resource
+/// (`attribution.resource_id`), for readers that admit attribution through some of the candidate
+/// resources only. The predicate may refer to the outer row, so the subquery stays a correlated
+/// `IN`.
 pub(super) fn push_attributed_record_filter_where<'a>(
     builder: &mut QueryBuilder<'a, Postgres>,
     row_alias: &str,
+    attributed: &'a AttributedRecords,
     resource_ids: &'a [Uuid],
-    push_inventory_predicate: impl FnOnce(&mut QueryBuilder<'a, Postgres>),
+    push_attribution_predicate: impl FnOnce(&mut QueryBuilder<'a, Postgres>),
 ) {
     builder.push(" OR ");
     builder.push(row_alias);
-    builder.push(".normalized_event_id IN (");
-    push_attributed_record_ids(builder, resource_ids);
-    push_inventory_predicate(builder);
+    builder.push(
+        ".normalized_event_id IN (
+            SELECT attribution.normalized_event_id
+            FROM unnest(",
+    );
+    builder.push_bind(attributed.resource_ids());
+    builder.push("::uuid[], ");
+    builder.push_bind(attributed.event_ids());
+    builder.push(
+        "::bigint[]) AS attribution(resource_id, normalized_event_id)
+            WHERE attribution.resource_id = ANY(",
+    );
+    builder.push_bind(resource_ids);
+    builder.push("::uuid[])");
+    push_attribution_predicate(builder);
     builder.push(")");
 }
 
-/// `SELECT` of the event ids the record inventories of `resource_ids` attribute; open-ended so
-/// a caller can add predicates on `inventory`.
-fn push_attributed_record_ids<'a>(
-    builder: &mut QueryBuilder<'a, Postgres>,
-    resource_ids: &'a [Uuid],
-) {
-    builder.push(
-        r#"
-            SELECT attributed.event_id::bigint
-            FROM bigname_phase.record_inventory_current inventory
-            CROSS JOIN LATERAL jsonb_array_elements_text(
-                CASE WHEN jsonb_typeof(inventory.provenance -> 'attributed_event_ids') = 'array'
-                     THEN inventory.provenance -> 'attributed_event_ids'
-                     ELSE '[]'::jsonb END
-            ) attributed(event_id)
-            WHERE inventory.resource_id = ANY("#,
-    );
-    builder.push_bind(resource_ids);
-    builder.push(
-        r#"::uuid[])
-              AND attributed.event_id ~ '^[0-9]+$'"#,
-    );
-}
-
-/// The `inventory` predicate of a registration-scoped read: the record inventory that attributes
-/// a write proves membership only when it is the registration's own, or belongs to a NameWrapper
-/// resource whose `NameWrapped` row on the write's fork recorded this registration as the lease
-/// it wrapped. The `NameWrapped` row must lie at or below the read's published block.
-pub(super) fn push_attributing_inventory_is_registration(
+/// The attribution predicate of a registration-scoped read: the resource that attributes a write
+/// proves membership only when it is the registration itself, or a NameWrapper resource whose
+/// `NameWrapped` row on the write's fork recorded this registration as the lease it wrapped. The
+/// `NameWrapped` row must lie at or below the read's published block.
+pub(super) fn push_attributing_resource_is_registration(
     builder: &mut QueryBuilder<'_, Postgres>,
     registration_id: Uuid,
     canonical_only: bool,
     published: Option<&BTreeMap<String, i64>>,
 ) {
-    builder.push(" AND (inventory.resource_id = ");
+    builder.push(" AND (attribution.resource_id = ");
     builder.push_bind(registration_id);
-    // The derived table keeps the lookup keyed by the inventory's resource; without it the
+    // The derived table keeps the lookup keyed by the attributing resource; without it the
     // planner rewrites the EXISTS into a per-row hash of every NameWrapped row on the chain.
     builder.push(
         " OR EXISTS (
             SELECT 1
             FROM (
                 SELECT * FROM bigname_phase.normalized_events wrapper_binding
-                WHERE wrapper_binding.resource_id = inventory.resource_id
+                WHERE wrapper_binding.resource_id = attribution.resource_id
                   AND wrapper_binding.resource_id IS NOT NULL
                   AND wrapper_binding.consumer_visibility = 'activated'",
     );

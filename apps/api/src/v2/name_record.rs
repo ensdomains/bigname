@@ -38,9 +38,7 @@ mod verified;
 #[path = "name_record/wrapper.rs"]
 mod wrapper;
 
-pub(crate) use declared::{
-    LapsedRegistration, lapsed_registration, projected_registration_resource_id, registration_id,
-};
+pub(crate) use declared::{LapsedRegistration, lapsed_registration, registration_id};
 use declared::{
     chain_positions_created_at, declared_created_at, declared_expires_at, declared_owner,
     declared_registered_at, declared_registrant, declared_registration,

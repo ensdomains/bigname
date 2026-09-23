@@ -640,5 +640,66 @@ async fn v2_name_history_child_registrations_stop_at_the_publication_bound() -> 
     );
     assert_eq!(page.summary.map(|summary| summary.total_count), Some(6));
 
+    // A cursor anchored on a child grant above the window is not in the collection; one anchored
+    // on a child grant inside it continues the page. The child arm reads its range from the
+    // window alone, so the API must keep supplying a window capped at the publication.
+    let cursor_for = |identity: &'static str| {
+        let pool = database.pool.clone();
+        async move {
+            let normalized_event_id: i64 = sqlx::query_scalar(
+                "SELECT normalized_event_id FROM bigname_phase.normalized_events
+                 WHERE event_identity = $1",
+            )
+            .bind(identity)
+            .fetch_one(&pool)
+            .await?;
+            anyhow::Ok(bigname_storage::HistoryCursor {
+                normalized_event_id,
+                event_identity: identity.to_owned(),
+            })
+        }
+    };
+    let above = cursor_for("c-grant").await?;
+    let refused = bigname_storage::load_name_history_page_with_child_registrations(
+        &database.pool,
+        &parent,
+        &[Uuid::from_u128(CHILD_PARENT_RESOURCE)],
+        bigname_storage::HistoryScope::Both,
+        Some(&above),
+        10,
+        bigname_storage::HistorySummaryMode::None,
+        &options,
+        None,
+    )
+    .await
+    .expect_err("a child grant above the window cannot anchor a cursor");
+    assert!(
+        refused
+            .downcast_ref::<bigname_storage::InvalidHistoryCursor>()
+            .is_some(),
+        "{refused:?}"
+    );
+    let inside = cursor_for("b-grant").await?;
+    let continued = bigname_storage::load_name_history_page_with_child_registrations(
+        &database.pool,
+        &parent,
+        &[Uuid::from_u128(CHILD_PARENT_RESOURCE)],
+        bigname_storage::HistoryScope::Both,
+        Some(&inside),
+        10,
+        bigname_storage::HistorySummaryMode::None,
+        &options,
+        None,
+    )
+    .await?;
+    assert_eq!(
+        continued
+            .rows
+            .iter()
+            .map(|row| row.event.event_identity.as_str())
+            .collect::<Vec<_>>(),
+        vec!["a-grant", "p-record", "p-grant"]
+    );
+
     database.cleanup().await
 }

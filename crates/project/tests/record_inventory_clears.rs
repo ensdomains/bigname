@@ -1,3 +1,6 @@
+#[path = "support/bounded_attribution.rs"]
+mod bounded_attribution;
+
 use anyhow::{Context, Result};
 use bigname_domain::resolver_read::{IndexedRecordStatus, evaluate_indexed_record};
 use bigname_project::{BatchRequest, Engine, Marker, RunMode};
@@ -194,6 +197,7 @@ async fn run(
             mode,
         })
         .await?;
+    bounded_attribution::assert_bounded_record_attribution_matches_inventory(pool).await?;
     Ok(())
 }
 

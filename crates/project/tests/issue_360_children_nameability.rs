@@ -1,3 +1,6 @@
+#[path = "support/bounded_registration.rs"]
+mod bounded_registration;
+
 use anyhow::Result;
 use bigname_project::{BatchRequest, Engine, Marker, RunMode};
 use bigname_storage::load_children_current;
@@ -312,6 +315,7 @@ async fn run_project(pool: &PgPool) -> Result<()> {
             mode: RunMode::Normal,
         })
         .await?;
+    bounded_registration::assert_selected_registrations_are_bounded(pool).await?;
     Ok(())
 }
 
@@ -501,6 +505,7 @@ async fn run_project_at(pool: &PgPool, target: i64, resume: Option<i64>) -> Resu
             mode: RunMode::Normal,
         })
         .await?;
+    bounded_registration::assert_selected_registrations_are_bounded(pool).await?;
     Ok(())
 }
 

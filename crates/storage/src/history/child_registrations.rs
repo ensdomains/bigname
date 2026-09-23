@@ -97,6 +97,10 @@ pub async fn load_name_history_page_with_child_registrations(
             .await
             .context("name history page refused during Interpret redo")?;
     }
+    // The name arm reads the resolver record writes attributed to the name's resources at the
+    // published block, from the same snapshot as the rows, exactly as name history without the
+    // option does.
+    let filter = filter.with_attributed_records(&mut transaction).await?;
     if let Some(cursor) = cursor {
         ensure_cursor_in_collection(&mut transaction, logical_name_id, &filter, cursor).await?;
     }
@@ -204,6 +208,7 @@ pub async fn explain_name_history_page_with_child_registrations_for_test(
         "history page_size exceeds SQL limit",
     )?;
     let mut transaction = pool.begin().await?;
+    let filter = filter.with_attributed_records(&mut transaction).await?;
     let arm = ChildArm::resolve(&mut transaction, logical_name_id, &filter).await?;
     let bound = child_arm_bound(&mut transaction, arm.as_ref(), cursor, filter.order).await?;
     let mut builder = QueryBuilder::<Postgres>::new("EXPLAIN (ANALYZE, FORMAT JSON) ");

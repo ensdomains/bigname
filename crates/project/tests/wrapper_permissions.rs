@@ -7,6 +7,9 @@
 //! (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1058-L1068 @ ens_v1@91c966f)
 //! (upstream: .refs/ens_v1/contracts/wrapper/ERC1155Fuse.sol:L105-L117 @ ens_v1@91c966f)
 
+#[path = "support/bounded_registration.rs"]
+mod bounded_registration;
+
 use anyhow::Result;
 use bigname_project::{BatchRequest, Engine, Marker, RunMode};
 use bigname_test_support::{TestDatabase, TestDatabaseConfig};
@@ -354,7 +357,7 @@ async fn seed(pool: &PgPool) -> Result<()> {
 }
 
 async fn run(pool: &PgPool, target: i64, resume: Option<Marker>) -> Result<Marker> {
-    Ok(Engine::new(pool.clone())
+    let current = Engine::new(pool.clone())
         .run_batch(BatchRequest {
             chain_id: CHAIN.to_owned(),
             target_block: target,
@@ -364,7 +367,9 @@ async fn run(pool: &PgPool, target: i64, resume: Option<Marker>) -> Result<Marke
             mode: RunMode::Normal,
         })
         .await?
-        .current)
+        .current;
+    bounded_registration::assert_selected_registrations_are_bounded(pool).await?;
+    Ok(current)
 }
 
 async fn redo(pool: &PgPool, target: i64, block: i64) -> Result<()> {
@@ -378,6 +383,7 @@ async fn redo(pool: &PgPool, target: i64, block: i64) -> Result<()> {
             mode: RunMode::Redo,
         })
         .await?;
+    bounded_registration::assert_selected_registrations_are_bounded(pool).await?;
     Ok(())
 }
 
