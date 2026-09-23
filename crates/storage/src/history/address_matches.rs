@@ -5,7 +5,8 @@ use sqlx::{PgPool, Postgres, QueryBuilder};
 use uuid::Uuid;
 
 use crate::address_names::{
-    AddressNameRelation, load_address_names_current_for_relations,
+    AddressNameRelation, load_address_names_current_at_bound,
+    load_address_names_current_for_relations,
     load_address_names_current_including_noncanonical_for_relations,
 };
 
@@ -48,13 +49,29 @@ pub(super) async fn load_address_history_selector(
     include_candidates: bool,
     published: Option<&std::collections::BTreeMap<String, i64>>,
 ) -> Result<HistorySelector> {
-    let current_rows = if canonical_only {
-        load_address_names_current_for_relations(pool, address, namespace, relations).await
-    } else {
-        load_address_names_current_including_noncanonical_for_relations(
-            pool, address, namespace, relations,
-        )
-        .await
+    // A current relation counts only when the event Project cites for it lies at or below the
+    // read's published block; one acquired later must not admit the resource's older events.
+    let current_rows = match published {
+        Some(published) => {
+            load_address_names_current_at_bound(
+                pool,
+                address,
+                namespace,
+                relations,
+                !canonical_only,
+                published,
+            )
+            .await
+        }
+        None if canonical_only => {
+            load_address_names_current_for_relations(pool, address, namespace, relations).await
+        }
+        None => {
+            load_address_names_current_including_noncanonical_for_relations(
+                pool, address, namespace, relations,
+            )
+            .await
+        }
     }
     .with_context(|| {
         let mut parts = vec![format!("address {address}")];

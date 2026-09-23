@@ -4,6 +4,9 @@
 //! same shape a zero-owner transition produces, and must never publish the
 //! masked low-20-byte tail as a controller.
 
+#[path = "support/bounded_registration.rs"]
+mod bounded_registration;
+
 use anyhow::Result;
 use bigname_project::{BatchRequest, Engine, RunMode};
 use bigname_storage::load_record_inventory_current_with_anchor_fallback;
@@ -126,6 +129,7 @@ async fn run_project(
             mode: RunMode::Normal,
         })
         .await?;
+    bounded_registration::assert_selected_registrations_are_bounded(pool).await?;
     Ok(())
 }
 
@@ -140,6 +144,7 @@ async fn run_project_redo(pool: &PgPool, target_block: i64, affected_block: i64)
             mode: RunMode::Redo,
         })
         .await?;
+    bounded_registration::assert_selected_registrations_are_bounded(pool).await?;
     Ok(())
 }
 

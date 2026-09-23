@@ -24,6 +24,7 @@ pub(super) async fn explain_history_filter_for_test(
     sqlx::query("SET LOCAL enable_seqscan = off")
         .execute(&mut *transaction)
         .await?;
+    let filter = filter.with_attributed_records(&mut transaction).await?;
 
     let mut forward = QueryBuilder::<Postgres>::new("EXPLAIN (COSTS OFF) ");
     push_wrapped_registrar_resources_query(&mut forward, lookup.logical_name_id, canonical_only);

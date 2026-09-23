@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use anyhow::{Context, Result};
 use sqlx::{PgPool, Postgres, QueryBuilder};
 
@@ -41,7 +43,7 @@ pub async fn load_address_names_current_for_relations(
     namespace: Option<&str>,
     relations: Option<&[AddressNameRelation]>,
 ) -> Result<Vec<AddressNameCurrentRow>> {
-    load_address_names_current_internal(pool, address, namespace, relations, false).await
+    load_address_names_current_internal(pool, address, namespace, relations, false, None).await
 }
 
 /// Load current address-name relation rows, including noncanonical supporting identity rows.
@@ -51,7 +53,31 @@ pub async fn load_address_names_current_including_noncanonical_for_relations(
     namespace: Option<&str>,
     relations: Option<&[AddressNameRelation]>,
 ) -> Result<Vec<AddressNameCurrentRow>> {
-    load_address_names_current_internal(pool, address, namespace, relations, true).await
+    load_address_names_current_internal(pool, address, namespace, relations, true, None).await
+}
+
+/// Current address-name relation rows whose cited event lies at or below `published`: the
+/// relation's `provenance.chain_id` is a bound chain and its `chain_positions.block_number` is at
+/// or below that chain's bound. A relation Project cites at a later block, or without a block,
+/// is not returned. History reads use this so a relation acquired after the block a read is bound
+/// to cannot admit older events.
+pub(crate) async fn load_address_names_current_at_bound(
+    pool: &PgPool,
+    address: &str,
+    namespace: Option<&str>,
+    relations: Option<&[AddressNameRelation]>,
+    include_noncanonical: bool,
+    published: &BTreeMap<String, i64>,
+) -> Result<Vec<AddressNameCurrentRow>> {
+    load_address_names_current_internal(
+        pool,
+        address,
+        namespace,
+        relations,
+        include_noncanonical,
+        Some(published),
+    )
+    .await
 }
 
 async fn load_address_names_current_internal(
@@ -60,6 +86,7 @@ async fn load_address_names_current_internal(
     namespace: Option<&str>,
     relations: Option<&[AddressNameRelation]>,
     include_noncanonical: bool,
+    published: Option<&BTreeMap<String, i64>>,
 ) -> Result<Vec<AddressNameCurrentRow>> {
     let mut builder = QueryBuilder::<Postgres>::new(
         r#"
@@ -110,6 +137,9 @@ async fn load_address_names_current_internal(
     if !include_noncanonical {
         builder.push(DEFAULT_ADDRESS_NAMES_CURRENT_READ_FILTER);
     }
+    if let Some(published) = published {
+        push_cited_event_bound(&mut builder, published);
+    }
 
     builder.push(
         r#"
@@ -149,4 +179,29 @@ async fn load_address_names_current_internal(
     rows.into_iter()
         .map(decode_address_name_current_row)
         .collect()
+}
+
+fn push_cited_event_bound(
+    builder: &mut QueryBuilder<'_, Postgres>,
+    published: &BTreeMap<String, i64>,
+) {
+    if published.is_empty() {
+        builder.push(" AND FALSE");
+        return;
+    }
+    builder.push(" AND (");
+    for (index, (chain_id, block_number)) in published.iter().enumerate() {
+        if index > 0 {
+            builder.push(" OR ");
+        }
+        builder.push("(anc.provenance ->> 'chain_id' = ");
+        builder.push_bind(chain_id.clone());
+        builder.push(
+            " AND CASE WHEN jsonb_typeof(anc.chain_positions -> 'block_number') = 'number'
+                       THEN (anc.chain_positions ->> 'block_number')::bigint END <= ",
+        );
+        builder.push_bind(*block_number);
+        builder.push(")");
+    }
+    builder.push(")");
 }

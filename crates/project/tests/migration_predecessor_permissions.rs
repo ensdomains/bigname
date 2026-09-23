@@ -22,6 +22,9 @@
 //! (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L172-L175 @ ens_v1@91c966f)
 //! (upstream: .refs/ens_v2/contracts/src/migration/UnlockedMigrationController.sol:L111-L119 @ ens_v2@a971bd64)
 
+#[path = "support/bounded_registration.rs"]
+mod bounded_registration;
+
 use anyhow::Result;
 use bigname_project::{BatchRequest, Engine, Marker, RunMode};
 use bigname_test_support::{TestDatabase, TestDatabaseConfig};
@@ -772,6 +775,7 @@ async fn run(pool: &PgPool, target: i64, resume: Option<i64>) -> Result<()> {
             mode: RunMode::Normal,
         })
         .await?;
+    bounded_registration::assert_selected_registrations_are_bounded(pool).await?;
     Ok(())
 }
 

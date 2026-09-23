@@ -176,28 +176,41 @@ async fn v2_history_lists_pointer_attributed_record_writes_for_the_registration(
     .await?;
     seed_v2_history_blocks(&database, 130..=132).await?;
 
-    // PublicResolverV2 writes stay node-keyed at interpretation: no logical name, no resource.
-    // Project attributes the first one to this registration through its resolver pointer and
-    // publishes that attribution in the record inventory provenance; the second write targets
+    // Resolver writes stay node-keyed at interpretation: no logical name, no resource. The
+    // registration's resolver pointer attributes the first one to it; the second write targets
     // another node and stays unattributed.
-    let node_write = |event_identity: &str, block_number: i64, node: &str| {
+    let node_write = |event_identity: &str, block_number: i64, name: &str| -> Result<_> {
         let mut event =
             v2_history_event(event_identity, None, None, "RecordChanged", block_number);
-        event.source_family = "ens_v2_resolver_l1".to_owned();
-        event.derivation_kind = "ens_v2_resolver".to_owned();
+        event.source_family = "ens_v1_resolver_l1".to_owned();
+        event.raw_fact_ref["emitting_address"] = json!(RESOLVER);
         event.after_state = json!({
             "source_event": "TextChanged",
             "resolver": RESOLVER,
-            "node": node,
+            "node": bigname_lookup::ens_namehash_hex(name)?,
             "record_key": "text:post-migration",
             "record_family": "text",
             "selector_key": "post-migration",
             "value_retained": true,
             "value": "current",
         });
-        event
+        Ok(event)
     };
-    let attributed_identity = "ens_v2_resolver:2:ethereum-mainnet:0xhistory131:0xtx131:0:RecordChanged:0";
+    let real_logical_name_id =
+        bigname_storage::logical_name_id_for_name("ens", "attributed-record.eth");
+    let mut pointer = v2_history_event(
+        "attributed-record-pointer",
+        Some(&real_logical_name_id),
+        Some(resource_id),
+        "ResolverChanged",
+        130,
+    );
+    pointer.source_family = "ens_v1_registry_l1".to_owned();
+    pointer.after_state = json!({
+        "node": bigname_lookup::ens_namehash_hex("attributed-record.eth")?,
+        "resolver": RESOLVER,
+    });
+    pointer.log_index = Some(1);
     bigname_storage::insert_normalized_event_fixtures(
         &database.pool,
         &[
@@ -209,30 +222,11 @@ async fn v2_history_lists_pointer_attributed_record_writes_for_the_registration(
                 "RegistrationGranted",
                 130,
             ),
-            node_write(attributed_identity, 131, "node:attributed-record.eth"),
-            node_write(
-                "ens_v2_resolver:2:ethereum-mainnet:0xhistory132:0xtx132:0:RecordChanged:0",
-                132,
-                "node:other.eth",
-            ),
+            pointer,
+            node_write("attributed-record-write", 131, "attributed-record.eth")?,
+            node_write("unattributed-record-write", 132, "other.eth")?,
         ],
     )
-    .await?;
-    let attributed_event_id: i64 = sqlx::query_scalar(
-        "SELECT normalized_event_id FROM bigname_phase.normalized_events WHERE event_identity = $1",
-    )
-    .bind(attributed_identity)
-    .fetch_one(&database.pool)
-    .await?;
-    sqlx::query(
-        "UPDATE bigname_phase.record_inventory_current
-         SET provenance = provenance
-             || jsonb_build_object('attributed_event_ids', jsonb_build_array($2::bigint))
-         WHERE resource_id = $1",
-    )
-    .bind(resource_id)
-    .bind(attributed_event_id)
-    .execute(&database.pool)
     .await?;
 
     for (scope, listed) in [("both", true), ("registration", true), ("name", false)] {

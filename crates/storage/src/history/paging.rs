@@ -85,6 +85,7 @@ pub(super) async fn load_history_page(
             .await
             .context("normalized-event history page refused during Interpret redo")?;
     }
+    let filter = filter.with_attributed_records(&mut transaction).await?;
 
     if let Some(cursor) = cursor {
         ensure_history_cursor_exists(
@@ -190,6 +191,11 @@ async fn load_history_internal(
     {
         return Ok(Vec::new());
     }
+    let mut connection = pool
+        .acquire()
+        .await
+        .context("failed to acquire a normalized-event history connection")?;
+    let filter = filter.with_attributed_records(&mut connection).await?;
 
     let mut builder = QueryBuilder::<Postgres>::new("");
     push_history_select(&mut builder, &filter, canonical_only, false, false);
@@ -203,7 +209,7 @@ async fn load_history_internal(
 
     let rows = builder
         .build()
-        .fetch_all(pool)
+        .fetch_all(&mut *connection)
         .await
         .context("failed to fetch normalized-event history rows")?;
 
@@ -323,7 +329,7 @@ pub(super) fn push_history_filters<'a>(
 ) {
     for selector in &filter.selectors {
         builder.push(" AND ");
-        push_selector_filter(builder, selector);
+        push_selector_filter(builder, selector, &filter.attributed_records);
     }
 
     if let Some(namespace) = filter.namespace.as_ref() {

@@ -1,3 +1,6 @@
+#[path = "support/bounded_registration.rs"]
+mod bounded_registration;
+
 use anyhow::Result;
 use bigname_project::{BatchRequest, Engine, Marker, RunMode};
 use bigname_test_support::{TestDatabase, TestDatabaseConfig};
@@ -375,6 +378,7 @@ async fn run_chain(
             mode: RunMode::Normal,
         })
         .await?;
+    bounded_registration::assert_selected_registrations_are_bounded(pool).await?;
     Ok(())
 }
 

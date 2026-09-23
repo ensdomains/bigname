@@ -21,11 +21,12 @@ use super::super::{
 use super::push_historical_address_matches_query;
 
 const TARGET: &str = "0x0000000000000000000000000000000000000a11";
+const TARGET_RESOLVER: &str = "0x0000000000000000000000000000000000000c11";
 const UNRELATED_NAMES: i64 = 300;
 /// The target's rows: a registrant grant and a registry owner transfer on its name, a token
-/// transfer on its resource with no name, and one node-keyed record write attributed to its
-/// resource through the record inventory.
-const TARGET_ROWS: i64 = 4;
+/// transfer on its resource with no name, a resolver pointer on both, and one node-keyed record
+/// write that pointer attributes to its resource.
+const TARGET_ROWS: i64 = 5;
 const ANCHOR_INDEXES: [&str; 3] = [
     "normalized_events_address_registrant_match_idx",
     "normalized_events_address_token_holder_match_idx",
@@ -72,7 +73,14 @@ async fn check_selector_plans(connection: &mut PgConnection) -> Result<()> {
             vec![target_resource()],
         )],
         ..EventHistoryReadFilter::default()
-    };
+    }
+    .with_attributed_records(&mut *connection)
+    .await?;
+    ensure!(
+        filter.attributed_records.event_ids().len() == 1,
+        "the target's pointer must attribute its record write: {:?}",
+        filter.attributed_records
+    );
     // Plan failures are collected so one run reports every statement that regressed.
     let mut plan_failures = Vec::new();
 
@@ -115,6 +123,7 @@ async fn check_selector_plans(connection: &mut PgConnection) -> Result<()> {
     ensure!(
         identities
             == [
+                "target:pointer",
                 "target:record",
                 "target:owner",
                 "target:transfer",
@@ -357,8 +366,9 @@ async fn install_fixture(connection: &mut PgConnection) -> Result<()> {
         sqlx::raw_sql(baseline).execute(&mut *connection).await?;
     }
     // Unrelated names each hold a resource and one grant, token transfer or registry owner
-    // transfer to another address, plus a record write attributed to their resource. The
-    // target (name 0xa11, resource 0xa11) holds TARGET_ROWS rows.
+    // transfer to another address, plus a resolver pointer and a node-keyed record write that
+    // pointer attributes to their resource. The target (name 0xa11, resource 0xa11) holds
+    // TARGET_ROWS rows.
     sqlx::raw_sql(&format!(
         r#"
         INSERT INTO chain_lineage
@@ -402,7 +412,17 @@ async fn install_fixture(connection: &mut PgConnection) -> Result<()> {
         UNION ALL
         SELECT 'unrelated:record:' || n, 'ens', NULL, NULL, 'RecordChanged',
                'ens_v1_resolver_l1', 1, 'ethereum-mainnet', 'block-' || n, n,
-               'tx-record-' || n, 0, 0, 'ens_v2_resolver', 'canonical'::canonicality_state, '{{}}'::jsonb
+               'tx-record-' || n, 0, 0, 'ens_v1_unwrapped_authority', 'canonical'::canonicality_state,
+               jsonb_build_object('node', '0x' || lpad(to_hex(n), 64, '0'),
+                                  'resolver', '0x' || lpad(to_hex(n), 40, 'e'))
+        FROM generate_series(1, {names}) n
+        UNION ALL
+        SELECT 'unrelated:pointer:' || n, 'ens', 'ens:0x' || lpad(to_hex(n), 64, '0'),
+               lpad(to_hex(n), 32, '0')::uuid, 'ResolverChanged', 'ens_v1_registry_l1', 1,
+               'ethereum-mainnet', 'block-' || n, n, 'tx-pointer-' || n, 0, 0,
+               'ens_v1_unwrapped_authority', 'canonical'::canonicality_state,
+               jsonb_build_object('node', '0x' || lpad(to_hex(n), 64, '0'),
+                                  'resolver', '0x' || lpad(to_hex(n), 40, 'e'))
         FROM generate_series(1, {names}) n
         UNION ALL
         SELECT identity, 'ens', name, resource, kind, 'ens_v2_registry_l1', 1,
@@ -419,23 +439,14 @@ async fn install_fixture(connection: &mut PgConnection) -> Result<()> {
         UNION ALL
         SELECT 'target:record', 'ens', NULL, NULL, 'RecordChanged', 'ens_v1_resolver_l1', 1,
                'ethereum-mainnet', 'block-{fourth}', {fourth}, 'tx-target-record', 0, 0,
-               'ens_v2_resolver', 'canonical'::canonicality_state, '{{}}'::jsonb;
-
-        INSERT INTO record_inventory_current
-            (resource_id, record_version_boundary_key, support_status, provenance,
-             manifest_version)
-        SELECT attributed.resource_id, 'boundary', 'supported',
-               jsonb_build_object('attributed_event_ids',
-                   jsonb_build_array(event.normalized_event_id::text)),
-               1
-        FROM (
-            SELECT lpad(to_hex(n), 32, '0')::uuid AS resource_id,
-                   'unrelated:record:' || n AS identity
-            FROM generate_series(1, {names}) n
-            UNION ALL
-            SELECT '{target_resource}'::uuid, 'target:record'
-        ) attributed
-        JOIN normalized_events event ON event.event_identity = attributed.identity;
+               'ens_v1_unwrapped_authority', 'canonical'::canonicality_state,
+               jsonb_build_object('node', '{target_hash}', 'resolver', '{TARGET_RESOLVER}')
+        UNION ALL
+        SELECT 'target:pointer', 'ens', '{target_name}', '{target_resource}'::uuid,
+               'ResolverChanged', 'ens_v1_registry_l1', 1, 'ethereum-mainnet',
+               'block-{fifth}', {fifth}, 'tx-target-pointer', 0, 0,
+               'ens_v1_unwrapped_authority', 'canonical'::canonicality_state,
+               jsonb_build_object('node', '{target_hash}', 'resolver', '{TARGET_RESOLVER}');
 
         ANALYZE;
         SET enable_seqscan = off;
@@ -450,6 +461,7 @@ async fn install_fixture(connection: &mut PgConnection) -> Result<()> {
         second = UNRELATED_NAMES + 2,
         third = UNRELATED_NAMES + 3,
         fourth = UNRELATED_NAMES + 4,
+        fifth = UNRELATED_NAMES + 5,
     ))
     .execute(&mut *connection)
     .await?;

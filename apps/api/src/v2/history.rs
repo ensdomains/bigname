@@ -17,7 +17,6 @@ use sqlx::types::{
 use crate::AppState;
 
 use super::cursor::invalid_cursor_error;
-use super::name_record::projected_registration_resource_id;
 use super::support::{
     ExactNameSnapshotSelector, exact_name_snapshot_scope, normalize_inferred_route_name,
 };
@@ -130,18 +129,19 @@ pub(crate) async fn get_history(
     let interpret_redo_fence = bigname_storage::capture_interpret_redo_fence(&state.pool)
         .await
         .map_err(|error| map_history_page_error(error, "failed to load name history"))?;
-    let parent = bigname_storage::load_name_current(&state.pool, &logical_name_id)
-        .await
-        .map_err(|error| {
-            tracing::error!(error = ?error, "failed to load history parent projection");
-            V2Error::internal_error(format!(
-                "failed to load history for {}/{}",
-                namespace, normalized.normalized_name
-            ))
-        })?;
-    let parent = match parent {
-        Some(parent) => parent,
-        None => {
+    // The first page proves the name exists. A continuation does not look it up again: its cursor
+    // binds the name, and its rows come only from evidence at or below the published block.
+    if storage_cursor.is_none() {
+        let parent = bigname_storage::load_name_current(&state.pool, &logical_name_id)
+            .await
+            .map_err(|error| {
+                tracing::error!(error = ?error, "failed to load history parent projection");
+                V2Error::internal_error(format!(
+                    "failed to load history for {}/{}",
+                    namespace, normalized.normalized_name
+                ))
+            })?;
+        if parent.is_none() {
             let current_fence = bigname_storage::capture_interpret_redo_fence(&state.pool)
                 .await
                 .map_err(|error| map_history_page_error(error, "failed to load name history"))?;
@@ -153,39 +153,12 @@ pub(crate) async fn get_history(
                 normalized.normalized_name
             )));
         }
-    };
+    }
 
     let resource_ids = if matches!(params.scope, HistoryScope::Name) {
         Vec::new()
     } else {
-        bigname_storage::load_surface_bindings_by_logical_name_id(
-            &state.pool,
-            &parent.logical_name_id,
-        )
-        .await
-        .map_err(|error| {
-            tracing::error!(
-                logical_name_id = %parent.logical_name_id,
-                error = ?error,
-                "failed to load history registration bindings"
-            );
-            V2Error::internal_error(format!(
-                "failed to load history for {}/{}",
-                namespace, normalized.normalized_name
-            ))
-        })?
-        .into_iter()
-        .filter(|binding| {
-            snapshot
-                .block_bounds()
-                .get(&binding.chain_id)
-                .is_some_and(|block| binding.block_number <= *block)
-        })
-        .map(|binding| binding.resource_id)
-        .chain(registration_lease_resource_ids(&state, &parent, &snapshot.block_bounds()).await?)
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect()
+        registration_resource_ids(&state.pool, &logical_name_id, &snapshot.block_bounds()).await?
     };
     let storage_scope = history_storage_scope(params.scope);
     let mut options = history_page_options(&params, block_window);
@@ -193,7 +166,7 @@ pub(crate) async fn get_history(
 
     let storage_page = bigname_storage::load_name_history_page(
         &state.pool,
-        &parent.logical_name_id,
+        &logical_name_id,
         &resource_ids,
         storage_scope,
         true,
@@ -237,63 +210,27 @@ pub(crate) async fn get_history(
     }))
 }
 
-/// The BaseRegistrar leases behind a name that its surface bindings do not reach. A wrapped
-/// name is bound to its NameWrapper resource, so its lease rows are reached through the link
-/// each `NameWrapped` row recorded. A lease granted with `registerOnly` while the name stayed
-/// bound to a registry-only resource (a registrar token transferred without `reclaim`) has no
-/// binding or link at all, so every published registrar grant carrying the name's namehash is
-/// followed too, together with the registration resource Project selected.
+/// The registration resources of a name as they stood at `block_bounds`: the resources its surface
+/// bindings reached at or below the published block, and the BaseRegistrar leases those bindings
+/// do not reach. A wrapped name is bound to its NameWrapper resource, so its lease rows are
+/// reached through the link each `NameWrapped` row recorded. A lease granted with `registerOnly`
+/// while the name stayed bound to a registry-only resource (a registrar token transferred without
+/// `reclaim`) has no binding or link at all, so every published registrar grant carrying the
+/// name's namehash is followed too. The registration Project selected for the name is not read:
+/// it is current state, and the grants above already reach it.
 /// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L118-L152 @ ens_v1@91c966f)
 /// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L240-L305 @ ens_v1@91c966f)
-async fn registration_lease_resource_ids(
-    state: &AppState,
-    parent: &bigname_storage::NameCurrentRow,
+async fn registration_resource_ids(
+    pool: &sqlx::PgPool,
+    logical_name_id: &str,
     block_bounds: &BTreeMap<String, i64>,
 ) -> V2Result<Vec<Uuid>> {
-    let mut resource_ids = bigname_storage::load_wrapped_registrar_resource_ids_by_logical_name_id(
-        &state.pool,
-        &parent.logical_name_id,
-        Some(block_bounds),
-    )
-    .await
-    .map_err(|error| {
-        tracing::error!(
-            logical_name_id = %parent.logical_name_id,
-            error = ?error,
-            "failed to load history wrapped registrar resources"
-        );
-        V2Error::internal_error("failed to load name history")
-    })?;
-    resource_ids.extend(
-        bigname_storage::load_registrar_grant_resource_ids_by_logical_name_id(
-            &state.pool,
-            &parent.logical_name_id,
-            Some(block_bounds),
-        )
+    bigname_storage::load_bounded_registration_resource_ids(pool, logical_name_id, block_bounds)
         .await
         .map_err(|error| {
-            tracing::error!(
-                logical_name_id = %parent.logical_name_id,
-                error = ?error,
-                "failed to load history registrar grant resources"
-            );
+            tracing::error!(logical_name_id, error = ?error, "failed to load history registrations");
             V2Error::internal_error("failed to load name history")
-        })?,
-    );
-    if let Some(resource_id) = projected_registration_resource_id(&parent.declared_summary) {
-        resource_ids.push(Uuid::parse_str(resource_id).map_err(|error| {
-            tracing::error!(
-                logical_name_id = %parent.logical_name_id,
-                resource_id,
-                error = ?error,
-                "projected registration resource id is invalid"
-            );
-            V2Error::internal_error("failed to load name history")
-        })?);
-    }
-    resource_ids.sort_unstable();
-    resource_ids.dedup();
-    Ok(resource_ids)
+        })
 }
 
 /// History routes default to newest-first; `order=asc` is the exact reverse.
