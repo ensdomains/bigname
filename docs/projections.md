@@ -1061,7 +1061,14 @@ resolver may keep that resource reachable through `name_current.serving_resource
 control resource and binding stay null. This evidence is derived entirely from normalized events;
 Project and API serving perform no live registry or resolver read. It
 also records the selected resolver's record boundary, explicit gaps,
-unsupported families, and any retained indexed values. The record event need
+unsupported families, and any retained indexed values.
+`provenance.record_event_ids` lists the current write of every selected record
+key in every family, ABI writes included even though ABI records are neither
+selectors nor entries, followed by the selecting link ids that
+`provenance.record_link_event_ids` also lists. The records and lookup routes
+read a name's ABI content types back from those ids
+([`api-v2-routes.md`](api-v2-routes.md), `GET /v1/names/{name}/records`), so
+limiting that list to the served families would silently drop them. The record event need
 not carry that resource: Project normally joins its `logical_name_id` and
 emitting resolver to the pointer without restricting either event's source
 family. An `ens_v1_resolver_l1` event whose `logical_name_id` is null may join

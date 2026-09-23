@@ -23,7 +23,8 @@ it does not preserve the deleted v1 DTOs.
 
 | Capability | Route owner | Notes |
 | --- | --- | --- |
-| Batched forward and reverse lookup | `POST /v1/lookup` | `profile=feed` is the field-budgeted path; `profile=detail` returns the documented full record shape, and with `include=inventory` each name result carries the records route's `inventory` container (known, unset, and unsupported product keys), so a caller holding many names reads their key inventories in one request instead of one records read per name. |
+| Batched forward and reverse lookup | `POST /v1/lookup` | `profile=feed` is the field-budgeted path; `profile=detail` returns the documented full record shape, and with `include=inventory` each name result carries the records route's `inventory` container (known, unset, and unsupported product keys, plus the observed ABI content types), so a caller holding many names reads their key inventories in one request instead of one records read per name. |
+| ENSv1→ENSv2 migration profile replay | `POST /v1/lookup` with `profile=detail` and `include=inventory` | Serves the profile-key read that the ENS manager's ENSv1→ENSv2 migration flow needs before it replays a name's resolver profile: text keys and coin types in `known_keys`, the content hash key, and the ABI content types in `abi_content_types`, for up to 1,000 names per request. The ABI list names content types whose writes the index observed on the selected resolver storage; the caller still reads each ABI's bytes on chain and drops an empty answer, because a removal emits the same event as a set (upstream: .refs/ens_v1/contracts/resolvers/profiles/ABIResolver.sol:L10-L26 @ ens_v1@91c966f). A `null` list with `abi_unsupported_reason` means the index cannot list them for that name, and the caller must not treat it as an empty profile. ABI records remain outside the record-key grammar, and ABI bytes are not served. |
 | Indexing readiness | `GET /v1/status` | Per-chain projection progress, stored head, indexing-process liveness, network-head readiness, and required Sepolia completed-Ingest state plus [verification-level evidence](glossary.md#verification-level). |
 | Exact name profile | `GET /v1/names/{name}` | Indexed or verified name and record fields, plus [expiry-effective](glossary.md#expiry-effective-namewrapper-fuse-word) ENSv1 NameWrapper lifecycle and fuse data when backed, subject to the route's source rules. |
 | Resolver records | `GET /v1/names/{name}/records` | Key-selected record reads plus inventory metadata. |
@@ -631,7 +632,11 @@ materialization remains `#670/T6` work and event history remains `#670/T9`
 (upstream: .refs/ens_subgraph/src/ensRegistry.ts:L167-L201 @ ens_subgraph@723f1b6)
 (upstream: .refs/ens_subgraph/src/resolver.ts:L233-L248 @ ens_subgraph@723f1b6).
 `Resolver.addr`, `Resolver.coinTypes`, `Resolver.events`, and `Resolver.domain`
-remain deferred to `#670/T6`. `Resolver.contentHash` remains the existing local
+remain deferred to `#670/T6`. The ENS subgraph exposes ABI writes only as
+immutable `AbiChanged` event entities
+(upstream: .refs/ens_subgraph/schema.graphql:L352-L363 @ ens_subgraph@723f1b6);
+the compatibility surface does not serve them, and callers that need a name's
+ABI content types read `abi_content_types` from the REST inventory instead. `Resolver.contentHash` remains the existing local
 `String` divergence under its existing `#670/T2` disposition rather than
 changing to upstream `Bytes` in this slice.
 
