@@ -282,8 +282,18 @@ fn push_mirror_writes<'a>(
         "nearest.chain_id",
         published,
     );
-    // An extended ENSv1 resolver found on an ancestor answers by its own logic, so Project does
-    // not derive records through it.
+    // The mirror keeps a resolver found on an ancestor only when it is an ENSIP-10 extended
+    // resolver, and calls an extended resolver's `resolve(name, data)`, so an ancestor's answer
+    // for a descendant is that resolver's own logic, not node-keyed storage bigname can read.
+    // (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/resolver/ENSV1Resolver.sol:L40-L43 @ ens_v2_sepolia_20260916@366de741)
+    // (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/universalResolver/libraries/LibResolution.sol:L39-L48 @ ens_v2_sepolia_20260916@366de741)
+    // (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/resolver/AbstractMirrorResolver.sol:L67-L68 @ ens_v2_sepolia_20260916@366de741)
+    // (upstream: .refs/ens_v1/contracts/universalResolver/ResolverCaller.sol:L66-L87 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v1/contracts/universalResolver/ResolverCaller.sol:L108-L117 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v1/contracts/universalResolver/ResolverCaller.sol:L175-L187 @ ens_v1@91c966f)
+    // Excluding it is bigname's attribution rule, mirroring the Project producer that marks such
+    // a row `ensip10_extended_resolver`
+    // (bigname: `crates/project/src/builders/record_inventory/mirror.rs:156-161`).
     builder.push(
         "
               ON declaration.active

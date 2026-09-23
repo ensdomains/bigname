@@ -733,18 +733,16 @@ fn reclaim(block: i64, owner: &str) -> Vec<RawLogInput> {
     )]
 }
 
-/// The holder's history at `bound`, unfiltered and narrowed to the token-holder relation.
-async fn holder_views(pool: &PgPool, bound: i64) -> Result<(Vec<String>, Vec<String>)> {
-    Ok((
-        owner_history_for(pool, bound, true, None).await?,
-        owner_history_for(
-            pool,
-            bound,
-            true,
-            Some(&[bigname_storage::AddressNameRelation::TokenHolder]),
-        )
-        .await?,
-    ))
+/// The holder's history at `bound`, unfiltered and narrowed to the token-holder relation, through
+/// the canonical read and through the read that includes noncanonical identity rows.
+async fn holder_views(pool: &PgPool, bound: i64) -> Result<Vec<Vec<String>>> {
+    let token_holder = [bigname_storage::AddressNameRelation::TokenHolder];
+    let mut views = Vec::new();
+    for canonical_only in [true, false] {
+        views.push(owner_history_for(pool, bound, canonical_only, None).await?);
+        views.push(owner_history_for(pool, bound, canonical_only, Some(&token_holder)).await?);
+    }
+    Ok(views)
 }
 
 /// A registry owner moved away from the token holder and restored by `reclaim` re-attaches the
@@ -791,12 +789,25 @@ async fn a_restored_registry_owner_keeps_the_holder_at_the_bound() -> Result<()>
             .all(|row| row.1 == registrar_resource && row.2 == RESTORED && row.4 == REGISTERED),
         "{restored_rows:?}"
     );
-    assert!(
-        held.1
-            .iter()
-            .any(|row| row.starts_with("RegistrationGranted:")),
-        "the holder's token-holder history at the bound holds the registration: {held:?}"
+    // The controller relation ended when the registry owner moved away and began again at the
+    // restore, so its row cites the grant at the restore, above the bound, and is not admitted
+    // there: the relation counts as ended.
+    let controller = restored_rows
+        .iter()
+        .find(|row| row.0 == "effective_controller")
+        .context("the restore keeps a controller row")?;
+    assert_eq!(
+        (controller.1, controller.3.as_str(), controller.4),
+        (registrar_resource, "PermissionChanged", RESTORED),
+        "{restored_rows:?}"
     );
+    for view in [&held[1], &held[3]] {
+        assert!(
+            view.iter()
+                .any(|row| row.starts_with("RegistrationGranted:")),
+            "the holder's token-holder history at the bound holds the registration: {held:?}"
+        );
+    }
     // While the registry owner is away the holder has no current row, and a token holder whose
     // only evidence is the grant is a documented loss, so the comparison is with the read before
     // the owner moved away.

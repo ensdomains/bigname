@@ -269,9 +269,12 @@ fn push_cited_event_bound(
 /// just before it, and no event in the range changed the holder, so it held the token at the
 /// bound. A relation that began after the bound has a grant or a transfer to it in the range and
 /// stays excluded. An ENSv2 reservation in the range also refuses the row: reserving an expired
-/// name burns the previous holder's token, and bigname keeps no transfer row for a burn, so the
-/// reservation is the only row that marks the end of that holding. A controller row also refuses
-/// any controller event in the range.
+/// name burns the previous holder's token
+/// (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registry/PermissionedRegistry.sol:L481-L486 @ ens_v2_sepolia_20260916@366de741)
+/// and emits `LabelReserved` with no owner and no mint
+/// (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registry/PermissionedRegistry.sol:L490-L491 @ ens_v2_sepolia_20260916@366de741),
+/// and bigname keeps no transfer row for a burn, so the reservation is the only row that marks the
+/// end of that holding. A controller row also refuses any controller event in the range.
 fn push_same_holder_since_bound(
     builder: &mut QueryBuilder<'_, Postgres>,
     chain_id: &str,

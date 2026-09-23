@@ -195,6 +195,12 @@ pub(super) fn push_pointer_window_attribution<'a>(
     // source family literally so it matches that family's node and resolver index.
     // (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L137 @ ens_v1@91c966f)
     // (upstream: .refs/ens_v1/contracts/resolvers/profiles/TextResolver.sol:L28 @ ens_v1@91c966f)
+    // Basenames stores the current resolver by node and emits `NewResolver` when it changes, and
+    // its L2Resolver keeps text by record version, node and key.
+    // (upstream: .refs/basenames/src/L2/Registry.sol:L132-L135 @ basenames@1809bbc)
+    // (upstream: .refs/basenames/src/L2/Registry.sol:L173-L180 @ basenames@1809bbc)
+    // (upstream: .refs/basenames/src/L2/L2Resolver.sol:L29-L38 @ basenames@1809bbc)
+    // (upstream: .refs/basenames/lib/ens-contracts/contracts/resolvers/profiles/TextResolver.sol:L7-L36 @ basenames@1809bbc)
     for (record_family, pointer_families) in [
         ("ens_v1_resolver_l1", ENS_V1_POINTER_FAMILIES),
         ("basenames_base_resolver", "('basenames_base_registry')"),

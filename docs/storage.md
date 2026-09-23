@@ -286,14 +286,14 @@ attachment to the row's resource is judged at or below the published block too: 
 current [surface binding](glossary.md#surface-binding): a registry owner moved away and restored
 rebinds the name to the same resource above the bound while the holder held it throughout. A
 resource first attached above the bound has no such row, so it does not count. The canonical read
-counts canonical bindings only; the probe reads `surface_bindings` by name. A row cited above
-that block still counts when every registration event between the bound and the cited one is a
-same-holder token transfer: the cited event (`provenance.normalized_event_id`, read by primary
-key) is a `TokenControlTransferred` whose `before_state.from` and `after_state.to` both equal the
-address, and every activated, canonical `RegistrationGranted`, `RegistrationReleased` and
-`TokenControlTransferred` row on the cited event's resource with a block above the bound and at or
-below the cited block is such a transfer too, with no ENSv2 `RegistrationReserved` row in that
-range; an effective-controller row also needs no
+counts canonical bindings only; the probe reads `surface_bindings` by name or resource. A row
+cited above that block still counts when every registration event between the bound and the cited
+one is a same-holder token transfer: the cited event (`provenance.normalized_event_id`, read by
+primary key) is a `TokenControlTransferred` whose `before_state.from` and `after_state.to` both
+equal the address, and every activated, canonical `RegistrationGranted`, `RegistrationReleased`
+and `TokenControlTransferred` row on the cited event's resource with a block above the bound and
+at or below the cited block is such a transfer too, with no ENSv2 `RegistrationReserved` row in
+that range; an effective-controller row also needs no
 `AuthorityTransferred`, `SurfaceBound` or `PermissionChanged` row in that range. The range is read
 from `normalized_events_resource_history_idx`. Project cites the latest registration event for the
 registrant, token holder and fallback controller rows, so a transfer from the holder to itself

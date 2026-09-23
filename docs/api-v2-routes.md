@@ -1418,8 +1418,8 @@ A recognized namespace with no available publication returns retryable `409 stal
   ENSv2 `PermissionChanged` rows never set this controller. This is a bigname
   normalization rule, not an upstream one. A relation that ended after the
   published block and began again before the current row was written counts as
-  ended: its current row cites the transfer or grant that restored it, above
-  the published block. Wrapper grace-period and expiry transitions have no
+  ended: its current row cites the transfer, grant or state-derived
+  `SurfaceBound` that restored it, above the published block. Wrapper grace-period and expiry transitions have no
   cited event of their own, so a relation row gated by them can appear or
   vanish between pages of the same read.
 - Cursors bind the order and every filter above. The cursor `sort` token

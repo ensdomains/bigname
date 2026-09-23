@@ -49,9 +49,9 @@ pub(super) async fn load_address_history_selector(
     include_candidates: bool,
     published: Option<&std::collections::BTreeMap<String, i64>>,
 ) -> Result<HistorySelector> {
-    // A current relation counts only when its binding and the event Project cites for it lie at
-    // or below the read's published block; one acquired later must not admit the resource's older
-    // events.
+    // A current relation counts only when some binding of the name to the row's resource and the
+    // event Project cites for the row lie at or below the read's published block; one acquired
+    // later must not admit the resource's older events.
     let current_rows = match published {
         Some(published) => {
             load_address_names_current_at_bound(
