@@ -2615,7 +2615,10 @@ For a registrar lease first identified by a later readable observation, registra
   target may precede the selected position when the row was unchanged by later
   incremental publications; it may not be ahead, and a same-height target must
   match the selected hash. The projection-phase generation is revalidated after the
-  read, and an invalid target or changed generation returns `409 stale`.
+  read, and an invalid target or changed generation returns `409 stale`. A
+  publication change during a continuation returns `409 stale` and requires
+  restarting without a cursor; a request without a cursor whose publication
+  changes during the read returns `409 stale` too and can simply be retried.
 - Status semantics: only a request without `at` and with `finality=latest`
   applies the latest served-head Interpret-redo check and returns retryable `409
   stale` while its selected chain is undergoing a redo. Historical `at` reads
@@ -2685,7 +2688,10 @@ For a registrar lease first identified by a later readable observation, registra
   `400 invalid_input`; a generation no longer available is `409 stale` and the
   client must restart. These routes read current projections, so they do not
   synthesize historical permission/binding tables. A same-height rebuild also
-  invalidates prior cursors. The generation is checked again after reading.
+  invalidates prior cursors. The generation is checked again after reading. A
+  publication change during a continuation returns `409 stale` and requires
+  restarting without a cursor; a request without a cursor whose publication
+  changes during the read returns `409 stale` too and can simply be retried.
 - Alias and link events come from activated canonical normalized events
   bounded to the selected height; bindings and permissions come from current
   projections using their existing canonical-lineage predicates. Resolver classification
