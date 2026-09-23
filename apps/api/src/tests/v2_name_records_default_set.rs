@@ -175,7 +175,9 @@ async fn v2_get_name_records_without_keys_answers_the_inventory_default_set() ->
             json!({
                 "known_keys": ["addr:60", "contenthash", "text:description", "text:url"],
                 "unset_keys": [],
-                "unsupported_keys": ["avatar"]
+                "unsupported_keys": ["avatar"],
+                "abi_content_types": null,
+                "abi_unsupported_reason": "abi_observations_not_supported"
             }),
             "{uri}"
         );
@@ -390,7 +392,9 @@ async fn v2_get_name_records_default_set_reports_unsupported_inventory_per_key()
             json!({
                 "known_keys": [],
                 "unset_keys": [],
-                "unsupported_keys": ["addr:60", "text:description"]
+                "unsupported_keys": ["addr:60", "text:description"],
+                "abi_content_types": null,
+                "abi_unsupported_reason": "inventory_not_authoritative"
             }),
             "{uri}"
         );
@@ -432,13 +436,24 @@ async fn v2_get_name_records_default_set_is_empty_without_enumerable_keys() -> R
         inventory.selectors = sorted_selectors(non_product_selectors());
         inventory.entries = json!([]);
     };
-    for (label, configure, delete_inventory) in [
-        ("no inventory row", authoritative_empty, true),
-        ("authoritative empty inventory", authoritative_empty, false),
+    for (label, configure, delete_inventory, abi_unsupported_reason) in [
+        (
+            "no inventory row",
+            authoritative_empty,
+            true,
+            "inventory_not_available",
+        ),
+        (
+            "authoritative empty inventory",
+            authoritative_empty,
+            false,
+            "abi_observations_not_supported",
+        ),
         (
             "non-authoritative inventory with no product keys",
             non_authoritative_without_product_keys,
             false,
+            "inventory_not_authoritative",
         ),
     ] {
         let database = TestDatabase::new_with_schemas(false, true).await?;
@@ -456,7 +471,13 @@ async fn v2_get_name_records_default_set_is_empty_without_enumerable_keys() -> R
             assert_eq!(payload["data"]["records"], json!({}), "{label} {uri}");
             assert_eq!(
                 payload["data"]["inventory"],
-                json!({"known_keys": [], "unset_keys": [], "unsupported_keys": []}),
+                json!({
+                    "known_keys": [],
+                    "unset_keys": [],
+                    "unsupported_keys": [],
+                    "abi_content_types": null,
+                    "abi_unsupported_reason": abi_unsupported_reason
+                }),
                 "{label} {uri}"
             );
         }
