@@ -56,11 +56,12 @@ pub async fn load_address_names_current_including_noncanonical_for_relations(
     load_address_names_current_internal(pool, address, namespace, relations, true, None).await
 }
 
-/// Current address-name relation rows whose cited event lies at or below `published`: the
-/// relation's `provenance.chain_id` is a bound chain and its `chain_positions.block_number` is at
-/// or below that chain's bound. A relation Project cites at a later block, or without a block,
-/// is not returned. History reads use this so a relation acquired after the block a read is bound
-/// to cannot admit older events.
+/// Current address-name relation rows the address held at `published`: the relation's
+/// `provenance.chain_id` is a bound chain and either its `chain_positions.block_number` is at or
+/// below that chain's bound, or the event it cites is a token transfer from the address to itself
+/// and every registration event between the bound and it is one too. Any other relation Project
+/// cites at a later block, or without a block, is not returned. History reads use this so a
+/// relation acquired after the block a read is bound to cannot admit older events.
 pub(crate) async fn load_address_names_current_at_bound(
     pool: &PgPool,
     address: &str,
@@ -197,11 +198,89 @@ fn push_cited_event_bound(
         builder.push("(anc.provenance ->> 'chain_id' = ");
         builder.push_bind(chain_id.clone());
         builder.push(
-            " AND CASE WHEN jsonb_typeof(anc.chain_positions -> 'block_number') = 'number'
-                       THEN (anc.chain_positions ->> 'block_number')::bigint END <= ",
+            " AND (CASE WHEN jsonb_typeof(anc.chain_positions -> 'block_number') = 'number'
+                        THEN (anc.chain_positions ->> 'block_number')::bigint END <= ",
         );
         builder.push_bind(*block_number);
-        builder.push(")");
+        builder.push(" OR ");
+        push_same_holder_since_bound(builder, chain_id, *block_number);
+        builder.push("))");
     }
     builder.push(")");
+}
+
+/// A row cited above the bound still held at the bound: Project cites the latest registration
+/// event for the registrant, token holder and fallback controller rows, and a token transfer from
+/// the holder to itself moves that citation without changing the holder. The cited event must be
+/// such a transfer, and every registration event on its resource between the bound and it must be
+/// one too. The earliest of them names the address as its sender, so the address held the token
+/// just before it, and no event in the range changed the holder, so it held the token at the
+/// bound. A relation that began after the bound has a grant or a transfer to it in the range and
+/// stays excluded. A controller row also refuses any controller event in the range.
+fn push_same_holder_since_bound(
+    builder: &mut QueryBuilder<'_, Postgres>,
+    chain_id: &str,
+    block_number: i64,
+) {
+    builder.push(
+        r#"EXISTS (
+            SELECT 1
+            FROM normalized_events cited
+            WHERE cited.normalized_event_id = CASE
+                      WHEN jsonb_typeof(anc.provenance -> 'normalized_event_id') = 'number'
+                      THEN (anc.provenance ->> 'normalized_event_id')::bigint END
+              AND cited.chain_id = "#,
+    );
+    builder.push_bind(chain_id.to_owned());
+    builder.push(" AND cited.block_number > ");
+    builder.push_bind(block_number);
+    builder.push(
+        r#"
+              AND cited.resource_id IS NOT NULL
+              AND cited.consumer_visibility = 'activated'
+              AND cited.canonicality_state IN (
+                  'canonical'::bigname_phase.canonicality_state,
+                  'safe'::bigname_phase.canonicality_state,
+                  'finalized'::bigname_phase.canonicality_state
+              )
+              AND cited.event_kind = 'TokenControlTransferred'
+              AND lower(cited.after_state ->> 'to') = anc.address
+              AND lower(cited.before_state ->> 'from') = anc.address
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM normalized_events moved
+                  WHERE moved.resource_id = cited.resource_id
+                    AND moved.canonicality_state IN (
+                        'canonical'::bigname_phase.canonicality_state,
+                        'safe'::bigname_phase.canonicality_state,
+                        'finalized'::bigname_phase.canonicality_state
+                    )
+                    AND moved.block_number > "#,
+    );
+    builder.push_bind(block_number);
+    builder.push(
+        r#"
+                    AND moved.block_number <= cited.block_number
+                    AND moved.chain_id = cited.chain_id
+                    AND moved.consumer_visibility = 'activated'
+                    AND (
+                        moved.event_kind IN (
+                            'RegistrationGranted', 'RegistrationReleased',
+                            'TokenControlTransferred'
+                        )
+                        OR (
+                            anc.relation = 'effective_controller'
+                            AND moved.event_kind IN (
+                                'AuthorityTransferred', 'SurfaceBound', 'PermissionChanged'
+                            )
+                        )
+                    )
+                    AND NOT (
+                        moved.event_kind = 'TokenControlTransferred'
+                        AND lower(moved.after_state ->> 'to') IS NOT DISTINCT FROM anc.address
+                        AND lower(moved.before_state ->> 'from') IS NOT DISTINCT FROM anc.address
+                    )
+              )
+        )"#,
+    );
 }

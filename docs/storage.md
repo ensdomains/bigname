@@ -278,7 +278,18 @@ resources the address holds now in `address_names_current` and held in the past 
 of activated, canonical events. A current relation row counts only when the event Project cites
 for it (`provenance.chain_id` and `chain_positions.block_number`) lies at or below the read's
 published block of that chain, so a relation acquired after that block cannot admit the
-resource's older events; a row without a cited block does not count under a bound. The three
+resource's older events; a row without a cited block does not count under a bound. A row cited
+above that block still counts when every registration event between the bound and the cited one
+is a same-holder token transfer: the cited event (`provenance.normalized_event_id`, read by primary
+key) is a `TokenControlTransferred` whose `before_state.from` and `after_state.to` both equal the
+address, and every activated, canonical `RegistrationGranted`, `RegistrationReleased` and
+`TokenControlTransferred` row on the cited event's resource with a block above the bound and at or
+below the cited block is such a transfer too; an effective-controller row also needs no
+`AuthorityTransferred`, `SurfaceBound` or `PermissionChanged` row in that range. The range is read
+from `normalized_events_resource_history_idx`. Project cites the latest registration event for the
+registrant, token holder and fallback controller rows, so a transfer from the holder to itself
+moves the citation without changing the holder; the earliest transfer in the range names the
+address as its sender, which proves the address held the name at the bound. The three
 kinds of historical events are: a `RegistrationGranted` whose `registrant` is the address, a
 `TokenControlTransferred` whose `to` is the address, and an `AuthorityTransferred` whose `owner`
 is the address, each compared lowercased. One partial expression index per kind keys those rows

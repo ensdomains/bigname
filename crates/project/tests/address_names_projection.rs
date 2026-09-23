@@ -8218,3 +8218,171 @@ async fn registry_rows_without_a_name_stay_out_of_the_names_origin() -> Result<(
     database.cleanup().await?;
     Ok(())
 }
+
+const SELF_TRANSFER_NAMEHASH: &str =
+    "0x5e1f5e1f5e1f5e1f5e1f5e1f5e1f5e1f5e1f5e1f5e1f5e1f5e1f5e1f5e1f5e1f";
+const SELF_TRANSFER_RESOURCE: &str = "5e1f0000-0000-0000-0000-000000000001";
+const SELF_TRANSFER_BINDING: &str = "5e1f0000-0000-0000-0000-000000000002";
+const SELF_TRANSFER_LINEAGE: &str = "5e1f0000-0000-0000-0000-000000000003";
+
+/// The address's relation rows for the self-transfer name: the relation, the address, the
+/// identity columns, and separately the event and block each row cites.
+async fn self_transfer_rows(pool: &PgPool) -> Result<Vec<(String, serde_json::Value, i64, i64)>> {
+    Ok(sqlx::query_as(
+        "SELECT relation::text,
+                jsonb_build_object(
+                    'address', address, 'logical_name_id', logical_name_id,
+                    'resource_id', resource_id, 'token_lineage_id', token_lineage_id,
+                    'surface_binding_id', surface_binding_id, 'support_status', support_status,
+                    'chain_id', provenance ->> 'chain_id'
+                ),
+                (provenance ->> 'normalized_event_id')::bigint,
+                (chain_positions ->> 'block_number')::bigint
+         FROM address_names_current
+         WHERE logical_name_id = $1
+         ORDER BY relation::text",
+    )
+    .bind(format!("ens:{SELF_TRANSFER_NAMEHASH}"))
+    .fetch_all(pool)
+    .await?)
+}
+
+/// A registrar `Transfer(A, A)` is a valid token transfer that the adapters keep as a
+/// `TokenControlTransferred` whose sender and recipient are both the holder. Project cites the
+/// latest registration event for the registrant, token holder and fallback controller rows, so the
+/// self-transfer moves their cited event and block and changes nothing else. The history reader
+/// relies on this shape to keep such a row at a bound between the grant and the self-transfer.
+#[tokio::test]
+async fn self_transfer_moves_only_the_cited_event_of_the_holder_rows() -> Result<()> {
+    let (database, pool) = migrated_pool().await?;
+    seed_chain(&pool).await?;
+    sqlx::query(
+        "INSERT INTO token_lineages (token_lineage_id, chain_id, block_hash, block_number,
+             canonicality_state)
+         VALUES ($1::uuid, $2, $3, 8, 'canonical')",
+    )
+    .bind(SELF_TRANSFER_LINEAGE)
+    .bind(CHAIN)
+    .bind(block_hash(8))
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO resources (resource_id, token_lineage_id, chain_id, block_hash, block_number,
+             canonicality_state)
+         VALUES ($1::uuid, $2::uuid, $3, $4, 8, 'canonical')",
+    )
+    .bind(SELF_TRANSFER_RESOURCE)
+    .bind(SELF_TRANSFER_LINEAGE)
+    .bind(CHAIN)
+    .bind(block_hash(8))
+    .execute(&pool)
+    .await?;
+    seed_surface(
+        &pool,
+        SELF_TRANSFER_NAMEHASH,
+        "selftransfer.eth",
+        SELF_TRANSFER_RESOURCE,
+        SELF_TRANSFER_BINDING,
+    )
+    .await?;
+    let logical_name_id = format!("ens:{SELF_TRANSFER_NAMEHASH}");
+    seed_normalized_event(
+        &pool,
+        "fixture:self-transfer-grant",
+        Some(&logical_name_id),
+        Some(SELF_TRANSFER_RESOURCE),
+        "RegistrationGranted",
+        "ens_v1_registrar_l1",
+        8,
+        1,
+        json!({
+            "source_event": "NameRegistered",
+            "authority_kind": "registrar",
+            "authority_key": "registrar:fixture",
+            "registrant": CONTROL_OWNER,
+            "expiry": 1_900_000_000_i64,
+            "namehash": SELF_TRANSFER_NAMEHASH,
+        }),
+        json!({}),
+    )
+    .await?;
+    run_project(&pool, 8, 8, None).await?;
+    let granted = self_transfer_rows(&pool).await?;
+    let grant_id: i64 = sqlx::query_scalar(
+        "SELECT normalized_event_id FROM normalized_events WHERE event_identity = $1",
+    )
+    .bind("fixture:self-transfer-grant")
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        granted
+            .iter()
+            .map(|(relation, _, _, _)| relation.as_str())
+            .collect::<Vec<_>>(),
+        ["effective_controller", "registrant", "token_holder"],
+        "the grant projects the three holder rows: {granted:?}"
+    );
+    for (relation, identity, event, block) in &granted {
+        assert_eq!(
+            identity["address"],
+            json!(CONTROL_OWNER.to_lowercase()),
+            "{relation}"
+        );
+        assert_eq!(
+            (*event, *block),
+            (grant_id, 8),
+            "{relation} cites the grant"
+        );
+    }
+
+    seed_normalized_event(
+        &pool,
+        "fixture:self-transfer",
+        Some(&logical_name_id),
+        Some(SELF_TRANSFER_RESOURCE),
+        "TokenControlTransferred",
+        "ens_v1_registrar_l1",
+        9,
+        1,
+        json!({
+            "source_event": "Transfer",
+            "to": CONTROL_OWNER.to_lowercase(),
+            "token_id": "0x0000000000000000000000000000000000000000000000000000000000000001",
+            "namehash": SELF_TRANSFER_NAMEHASH,
+            "token_lineage_id": SELF_TRANSFER_LINEAGE,
+        }),
+        json!({}),
+    )
+    .await?;
+    let transfer_id: i64 = sqlx::query_scalar(
+        "UPDATE normalized_events SET before_state = jsonb_build_object('from', $2::text)
+         WHERE event_identity = $1
+         RETURNING normalized_event_id",
+    )
+    .bind("fixture:self-transfer")
+    .bind(CONTROL_OWNER.to_lowercase())
+    .fetch_one(&pool)
+    .await?;
+    run_project(&pool, 9, 9, Some(8)).await?;
+    let transferred = self_transfer_rows(&pool).await?;
+    assert_eq!(
+        transferred
+            .iter()
+            .map(|(relation, identity, _, _)| (relation, identity))
+            .collect::<Vec<_>>(),
+        granted
+            .iter()
+            .map(|(relation, identity, _, _)| (relation, identity))
+            .collect::<Vec<_>>(),
+        "the self-transfer changed a relation row beyond its cited event"
+    );
+    for (relation, _, event, block) in &transferred {
+        assert_eq!(
+            (*event, *block),
+            (transfer_id, 9),
+            "{relation} cites the self-transfer"
+        );
+    }
+    database.cleanup().await?;
+    Ok(())
+}

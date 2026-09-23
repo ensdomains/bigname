@@ -1252,9 +1252,35 @@ A recognized namespace with no available publication returns retryable `409 stal
   Bindings and ownership before `from_timestamp` remain valid anchors; the
   timestamp window filters event rows.
 - Two inputs are read from current state. An address's relations are read from
-  the current relation rows, and a row is admitted only when the event Project
-  cites for it lies at or below the published block. A relation that ended
-  after that block has no current row, so it is reproduced only from the three
+  the current relation rows, and a row is admitted when the event Project cites
+  for it lies at or below the published block. A current row cited above the
+  published block is also admitted when every registration event between the
+  published block and the cited one is a same-holder token transfer: the cited
+  event is a `TokenControlTransferred` whose sender and recipient are both the
+  address, and every `RegistrationGranted`, `RegistrationReleased` and
+  `TokenControlTransferred` on that event's resource after the published block
+  and up to it is such a transfer too. For an effective controller, no
+  `AuthorityTransferred`, `SurfaceBound` or `PermissionChanged` on that resource
+  may lie in the range either. Project cites the latest registration event for
+  the registrant, token holder and fallback controller relations, so a transfer
+  from the holder to itself moves the cited event without changing the holder,
+  and the earliest transfer in the range names the address as its sender, so the
+  address held the name at the published block. Such a transfer is valid
+  upstream: the Basenames registrar inherits Solady's ERC-721 (upstream:
+  .refs/basenames/src/L2/BaseRegistrar.sol:L5 @ basenames@1809bbc), whose
+  `transferFrom` checks only that `from` is the current owner and does not
+  reject `to == from` (upstream:
+  .refs/basenames/lib/solady/src/tokens/ERC721.sol:L252-L309 @
+  basenames@1809bbc). The ENSv1 BaseRegistrar lets the live owner transfer
+  (upstream:
+  .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L42-L50 @
+  ens_v1@91c966f) and ends that ownership only at expiry (upstream:
+  .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L71-L76 @
+  ens_v1@91c966f); the ENSv1 pin does not vendor OpenZeppelin's ERC-721, so the
+  pinned Basenames analogue shows the transfer shape. A relation that began
+  after the published block has a grant or a transfer to the address in the
+  range and is not admitted. A relation that ended after that block has no
+  current row, so it is reproduced only from the three
   historical shapes the ownership matcher knows: a `RegistrationGranted`
   registrant and a `TokenControlTransferred` recipient on a token-backed,
   Basenames or ENSv2 resource, and an `AuthorityTransferred` owner on a
@@ -1266,7 +1292,10 @@ A recognized namespace with no available publication returns retryable `409 stal
   ENSv1 `.eth` registry controller from `AuthorityTransferred` on a
   token-backed resource, a token holder whose only evidence is the grant, an
   effective controller that fell back to the token holder, and an ENSv2
-  controller from `PermissionChanged`. Wrapper grace-period and expiry
+  controller from `PermissionChanged`. A relation that ended after the
+  published block and began again before the current row was written counts as
+  ended: its current row cites the transfer that restored it. Wrapper
+  grace-period and expiry
   transitions have no cited event of their own, so a relation row gated by
   them can appear or vanish between pages of the same read.
 - Cursors bind the order and every filter above. The cursor `sort` token
