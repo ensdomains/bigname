@@ -1048,7 +1048,11 @@ collection route carry neither header.
     PublicResolverV2 profile admits only address, text, contenthash, and
     version events, and the Basenames resolver manifests declare no
     `ABIChanged`, so both answer this way even when their inventory is
-    supported and the other keys are served.
+    supported and the other keys are served. Both contracts inherit ENS's
+    ABI resolver and do emit `ABIChanged` on chain; the gap is bigname's
+    admission, not the contracts.
+    (upstream: .refs/ens_v2/contracts/src/resolver/PublicResolverV2.sol:L23-L26 @ ens_v2@a971bd64)
+    (upstream: .refs/basenames/src/L2/L2Resolver.sol:L29-L31 @ basenames@1809bbc)
   - `abi_observations_stale`: a write the inventory selected is no longer
     retained as canonical, activated evidence, for example after a
     reorganization or an Interpret redo removed it; the list is withheld
@@ -1057,7 +1061,10 @@ collection route carry neither header.
     type that is zero or has more than one bit set. The ENS setters reject
     such types, so only a nonstandard resolver emits them; bigname neither
     splits such a mask into single-bit types nor lists the remaining types
-    without it.
+    without it. The same reason covers a selected write whose content type
+    cannot be read as a canonical unsigned decimal of at most 256 bits: a
+    missing, non-text, non-decimal, or zero-padded value, or one above the
+    uint256 range.
     (upstream: .refs/ens_v1/contracts/resolvers/profiles/ABIResolver.sol:L21-L22 @ ens_v1@91c966f)
     (upstream: .refs/ens_v2/contracts/src/resolver/AbstractRecordResolver.sol:L211-L216 @ ens_v2@a971bd64)
 

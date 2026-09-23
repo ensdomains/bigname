@@ -62,10 +62,21 @@ pub struct AbiContentTypesInput<'a> {
 }
 
 /// Whether bigname admits an ABI-change event for resolver storage of this classification.
-/// ENSv1-family resolvers emit `ABIChanged` and ENSv2 record-ID resolvers emit `ABIUpdated`; the
-/// direct PublicResolverV2 profile admits only its address, text, contenthash, and version events
-/// (`crates/adapters/src/schema_v2/protocol/v2_resolver.rs`), a mirror stores nothing itself, and
-/// the Basenames resolver manifests declare no ABI event.
+/// ENSv1-family resolvers emit `ABIChanged` and ENSv2 record-ID resolvers emit `ABIUpdated`
+/// (upstream: .refs/ens_v1/contracts/resolvers/profiles/IABIResolver.sol:L5 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/resolvers/profiles/ABIResolver.sol:L25 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v2/contracts/src/resolver/interfaces/setters/IABISetter.sol:L13 @ ens_v2@a971bd64)
+/// (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L160 @ ens_v2@a971bd64).
+/// A mirror stores no records of its own
+/// (upstream: .refs/ens_v2/contracts/src/resolver/AbstractMirrorResolver.sol:L15-L21 @ ens_v2@a971bd64).
+/// PublicResolverV2 and the Basenames L2Resolver both inherit ENS's `ABIResolver` and so emit
+/// `ABIChanged` on chain
+/// (upstream: .refs/ens_v2/contracts/src/resolver/PublicResolverV2.sol:L23-L26 @ ens_v2@a971bd64)
+/// (upstream: .refs/basenames/src/L2/L2Resolver.sol:L29-L31 @ basenames@1809bbc),
+/// but bigname does not admit it for them: the direct PublicResolverV2 profile admits only its
+/// address, text, contenthash, and version events
+/// (`crates/adapters/src/schema_v2/protocol/v2_resolver.rs`), and the Basenames resolver
+/// manifests declare no ABI event. The manifest-agreement test in `tests.rs` pins this table.
 pub(crate) fn admits_abi_observations(source_family: &str, role: Option<&str>) -> bool {
     match source_family {
         "ens_v1_resolver_l1" => true,
@@ -405,8 +416,8 @@ async fn load_evidence(
     Ok(evidence)
 }
 
-/// The plan of the evidence read for `ids` on `chain_id`, with sequential scans disabled the way
-/// the history plan checks do, so a caller can assert the read is keyed lookups by primary key.
+/// The plan of the evidence read for `ids` on `chain_id`, with the planner's default settings, so
+/// a caller can assert the read is keyed lookups by primary key.
 #[cfg(any(test, feature = "test-support"))]
 pub async fn explain_record_inventory_abi_evidence_for_test(
     pool: &PgPool,
@@ -414,9 +425,6 @@ pub async fn explain_record_inventory_abi_evidence_for_test(
     chain_id: &str,
 ) -> Result<String> {
     let mut transaction = pool.begin().await?;
-    sqlx::query("SET LOCAL enable_seqscan = off")
-        .execute(&mut *transaction)
-        .await?;
     let plan =
         sqlx::query_scalar::<_, String>(&format!("EXPLAIN (COSTS OFF) {ABI_EVIDENCE_QUERY}"))
             .bind(ids)

@@ -369,6 +369,8 @@ async fn abi_content_types_for_a_full_lookup_batch_use_one_batched_read() -> Res
             .all(|line| line.contains("Index Scan using normalized_events_pkey")),
         "{plan}"
     );
+    // `requested` is the statement's alias for the unnested id list, so renaming it changes this
+    // pinned text as well as the plan shape.
     assert!(
         plan.contains("Index Cond: (normalized_event_id = requested.normalized_event_id)"),
         "{plan}"
@@ -380,6 +382,7 @@ async fn abi_content_types_for_a_full_lookup_batch_use_one_batched_read() -> Res
                 || line.contains("block_hash = candidate.block_hash"))),
         "{plan}"
     );
+    // The plan is taken with sequential scans enabled, so this is the planner's own choice.
     assert!(!plan.contains("Seq Scan"), "{plan}");
     database.cleanup().await
 }

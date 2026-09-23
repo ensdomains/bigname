@@ -41,6 +41,12 @@ fn observed(ids: &[i64], links: &[i64], items: &[(i64, Option<&str>)]) -> AbiCon
 #[test]
 fn single_bit_content_types_decode_from_the_selector_key_only() {
     let wide = format!("{}", alloy_primitives::U256::from(1_u8) << 200);
+    // 2^255, the highest single-bit uint256.
+    let top_bit = "57896044618658097711785492504343953926634992332820282019728792003956564819968";
+    assert_eq!(
+        single_bit_content_type(&json!(top_bit)),
+        Some(alloy_primitives::U256::from(1_u8) << 255)
+    );
     for accepted in [
         "1",
         "2",
@@ -48,6 +54,7 @@ fn single_bit_content_types_decode_from_the_selector_key_only() {
         "9223372036854775808",
         "18446744073709551616",
         &wide,
+        top_bit,
     ] {
         assert_eq!(
             single_bit_content_type(&json!(accepted)).map(|value| value.to_string()),
@@ -56,7 +63,10 @@ fn single_bit_content_types_decode_from_the_selector_key_only() {
         );
     }
     let overflow = format!("1{}", "0".repeat(80));
+    // 2^256, one past the uint256 range.
+    let past_top = "115792089237316195423570985008687907853269984665640564039457584007913129639936";
     for rejected in [
+        json!(past_top),
         json!("0"),
         json!("3"),
         json!("6"),
@@ -257,53 +267,118 @@ fn unavailable_reasons_are_product_vocabulary() {
     }
 }
 
-/// The classification rule mirrors manifest admission: every ENSv1 resolver-family manifest
-/// declares `ABIChanged`, every ENSv2 resolver-family manifest declares `ABIUpdated`, and no
-/// Basenames resolver manifest declares either.
+/// The classification table must equal what the checked-in manifests admit, per source family
+/// and emitter role, so a new role or a changed ABI declaration fails the build instead of being
+/// silently treated as eligible.
+///
+/// For each manifest and each role it can select (no role, every `[[contracts]].role`, every
+/// `resolver_implementations` role, and every role named in `emitter_roles`), a role admits an ABI
+/// observation when some `ABIChanged` or `ABIUpdated` entry that is not `unsupported` is admitted
+/// for it (empty `emitter_roles`, or `emitter_roles` naming it) and is keyed like the role's own
+/// record events. A role with role-scoped `RecordChanged` events decodes records by their first
+/// parameter (PublicResolverV2's `bytes32 node`), so a role-independent record-ID event does not
+/// describe its storage. The ENSv1 mirror role stores no records of its own and admits nothing.
 #[test]
 fn observation_paths_agree_with_the_checked_in_manifests() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../manifests");
-    let mut seen = BTreeMap::<String, usize>::new();
-    let mut stack = vec![root];
-    while let Some(dir) = stack.pop() {
-        for entry in std::fs::read_dir(&dir).expect("manifest directory") {
-            let path = entry.expect("manifest entry").path();
-            if path.is_dir() {
-                stack.push(path);
-                continue;
-            }
-            if path.extension().and_then(|ext| ext.to_str()) != Some("toml") {
-                continue;
-            }
-            let family = path
-                .parent()
-                .and_then(Path::file_name)
-                .and_then(|name| name.to_str())
-                .unwrap_or_default()
-                .to_owned();
-            let text = std::fs::read_to_string(&path).expect("manifest text");
-            let declares = |event: &str| text.contains(&format!("event {event}("));
-            match family.as_str() {
-                "ens_v1_resolver_l1" => assert!(declares("ABIChanged"), "{}", path.display()),
-                "ens_v2_resolver_l1" => assert!(declares("ABIUpdated"), "{}", path.display()),
-                "basenames_base_resolver" => assert!(
-                    !declares("ABIChanged") && !declares("ABIUpdated"),
-                    "{} now declares an ABI event; revisit admits_abi_observations",
-                    path.display()
-                ),
-                _ => continue,
-            }
-            *seen.entry(family).or_default() += 1;
+    let mut loaded_manifests = Vec::new();
+    for profile in std::fs::read_dir(&root).expect("manifest profiles") {
+        let profile = profile.expect("manifest profile").path();
+        if profile.is_dir() {
+            let repository =
+                bigname_manifests::load_repository(&profile).expect("manifest repository");
+            loaded_manifests.extend(repository.manifests().iter().cloned());
         }
     }
-    for family in [
-        "ens_v1_resolver_l1",
-        "ens_v2_resolver_l1",
-        "basenames_base_resolver",
+    assert!(!loaded_manifests.is_empty(), "no manifests loaded");
+
+    let first_input = |event: &bigname_manifests::ManifestAbiEvent| {
+        event
+            .parsed_event()
+            .expect("manifest event fragment")
+            .inputs
+            .first()
+            .map(|input| input.ty.clone())
+    };
+    let mut derived = BTreeMap::<(String, Option<String>), (bool, String)>::new();
+    for loaded in &loaded_manifests {
+        let manifest = &loaded.manifest;
+        let events = &manifest.abi.events;
+        let mut roles = BTreeSet::<Option<String>>::from([None]);
+        roles.extend(manifest.contracts.iter().map(|c| Some(c.role.clone())));
+        roles.extend(
+            manifest
+                .resolver_implementations
+                .iter()
+                .map(|implementation| Some(implementation.role.clone())),
+        );
+        roles.extend(
+            events
+                .iter()
+                .flat_map(|event| event.emitter_roles.iter().cloned().map(Some)),
+        );
+        for role in roles {
+            let admitted_for = |event: &bigname_manifests::ManifestAbiEvent| {
+                event.emitter_roles.is_empty()
+                    || role
+                        .as_deref()
+                        .is_some_and(|role| event.emitter_roles.iter().any(|r| r == role))
+            };
+            let role_record_keys = events
+                .iter()
+                .filter(|event| {
+                    role.as_deref()
+                        .is_some_and(|role| event.emitter_roles.iter().any(|r| r == role))
+                        && event.normalized_events.iter().any(|n| n == "RecordChanged")
+                })
+                .filter_map(first_input)
+                .collect::<BTreeSet<_>>();
+            let admits = role.as_deref() != Some(bigname_manifests::ENSV1_MIRROR_RESOLVER_ROLE)
+                && events.iter().any(|event| {
+                    matches!(event.name.as_str(), "ABIChanged" | "ABIUpdated")
+                        && event.status
+                            != Some(bigname_manifests::CapabilitySupportStatus::Unsupported)
+                        && admitted_for(event)
+                        && (role_record_keys.is_empty()
+                            || first_input(event)
+                                .is_some_and(|key| role_record_keys.contains(&key)))
+                });
+            let key = (manifest.source_family.clone(), role);
+            let source = loaded.path.display().to_string();
+            if let Some((previous, previous_source)) = derived.get(&key) {
+                assert_eq!(
+                    *previous, admits,
+                    "{key:?}: {previous_source} and {source} disagree on ABI admission"
+                );
+            } else {
+                derived.insert(key, (admits, source));
+            }
+        }
+    }
+
+    for ((family, role), (admits, source)) in &derived {
+        assert_eq!(
+            admits_abi_observations(family, role.as_deref()),
+            *admits,
+            "admits_abi_observations({family}, {role:?}) disagrees with {source}"
+        );
+    }
+    // The derivation must reach the cases the table distinguishes, or the comparison is vacuous.
+    for (family, role, expected) in [
+        ("ens_v1_resolver_l1", None, true),
+        ("ens_v1_resolver_l1", Some("public_resolver"), true),
+        ("ens_v2_resolver_l1", None, true),
+        ("ens_v2_resolver_l1", Some("permissioned_resolver"), true),
+        ("ens_v2_resolver_l1", Some("public_resolver_v2"), false),
+        ("ens_v2_resolver_l1", Some("ensv1_mirror_resolver"), false),
+        ("basenames_base_resolver", None, false),
+        ("basenames_base_resolver", Some("resolver"), false),
     ] {
-        assert!(
-            seen.get(family).copied().unwrap_or_default() > 0,
-            "{family}"
+        let key = (family.to_owned(), role.map(str::to_owned));
+        assert_eq!(
+            derived.get(&key).map(|(admits, _)| *admits),
+            Some(expected),
+            "{key:?}"
         );
     }
 }
