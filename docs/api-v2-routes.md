@@ -1859,10 +1859,13 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
   the set ENSIP-19 treats as EVM
   (upstream: .refs/ens_v1/contracts/utils/ENSIP19.sol:L9-L38 @ ens_v1@91c966f).
   A name matches when at least one of its stored `addr:<coin_type>` records for
-  a coin type in that set holds exactly the path address. The comparison is
-  byte equality of the lowercase 20-byte hex value: it establishes the same
-  20-byte value, not common ownership of an account across chains, and no
-  checksum, padded, or other encoding is accepted. The read enumerates stored
+  a coin type in that set holds exactly the path address. The path address is
+  parsed as a `0x`-prefixed 20-byte hexadecimal address and normalised to
+  lowercase, so mixed-case and checksummed spellings are accepted (the
+  checksum is not validated). Matching compares the exact 20-byte value: it
+  establishes the same 20-byte value, not common ownership of an account
+  across chains, and padded values or other encodings are not accepted. The
+  read enumerates stored
   records rather than per-chain answers, so the ENSIP-19 default record is
   never expanded into the chains it would answer: it matches once, as coin
   type `2147483648`, whenever its own value matches, including when exact
