@@ -1882,6 +1882,45 @@ inventory reads, scopes list and count queries to the same selected chains, and
 excludes unsupported name rows. An unsupported inventory maps to the existing
 empty compatibility shape.
 
+### History page order
+
+Name history, address history, and `/v1/events` pages sort normalized events by
+chain position: block number newest first with events without a block last,
+then chain, block hash, transaction hash, log index, and event identity.
+`order=asc` is the exact reverse. The served reads always carry a block window,
+the published block of each chain, so the events they return always have a
+block number, although the column itself allows NULL for events such as
+manifest updates.
+
+For a read that no name, registration, address, or resolver anchors, such as an
+unfiltered `/v1/events` page, on one chain,
+`normalized_events_chain_block_number_desc_idx` on
+`(chain_id, block_number DESC NULLS LAST)` returns rows in the page order: read
+forward newest first and backward oldest first. PostgreSQL stops after one page
+instead of sorting every matching event; the remaining sort keys only order the
+events of one block. Anchored reads start from their anchor's own indexes. The
+older ascending `(chain_id, block_number)` index read backward puts events
+without a block first, so it cannot serve this order.
+
+A continued page built by the ordinary history page builder also bounds the
+scan at the cursor event's block, read in the same transaction that validates
+the cursor, so page N does not reread the rows of earlier pages. Name history
+with `include=child_registrations` does not get this bound. It builds its own
+query with two parts, the name's own events and its direct child registrations
+from `child_registration_events`, and continues each part from the cursor
+through that part's own index. That bound is added only when the read already
+excludes events without a block. An unanchored page query is sent unprepared, so
+PostgreSQL plans each page with the actual block values instead of a cached
+generic plan's guess at the size of the block range. On the test fixture the
+generic plan also reads the index from the cursor block, so this is a margin,
+not a requirement. Planning an unanchored page takes about 16 to 19 ms on the
+test machine. Anchored pages keep their cached prepared plans.
+
+A window that spans several chains, such as an unanchored read over a namespace
+published on two chains, still reads and sorts every matching event, because no
+single index returns block order across chains. The prebuild procedure for the
+index is in [`ops/events-order-index/README.md`](../ops/events-order-index/README.md).
+
 ## Verified lookup storage
 
 Schema-v2 verified lookup has no execution cache, durable trace, reusable

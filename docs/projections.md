@@ -1436,8 +1436,9 @@ values only from a `supported` row. Entries retained on an `unsupported` row are
 diagnostics for operators, never answers
 ([api-v2-routes.md](api-v2-routes.md#get-v1namesnamerecords)).
 
-`GET /v1/names/{name}/records` reads this inventory for `indexed` behavior.
-`verified` and `auto` may use fresh schema-v2 lookup as described in
+`GET /v1/names/{name}/records` reads this inventory for `indexed` behavior,
+and for every source to derive its default key set and `include=inventory`
+container. `verified` and `auto` may use fresh schema-v2 lookup as described in
 [`execution.md`](execution.md); they never read a legacy execution cache.
 
 ## Primary names

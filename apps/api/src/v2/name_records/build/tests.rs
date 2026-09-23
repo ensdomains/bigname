@@ -151,10 +151,7 @@ fn auto_null_resolver_falls_through_only_for_the_ens_mainnet_discovery_shape() {
     )
     .expect("unavailable execution must stay explicit");
     assert_eq!(source, Source::Verified);
-    assert_eq!(
-        records.records.expect("requested records")["addr:60"].status,
-        Status::Unsupported
-    );
+    assert_eq!(records.records["addr:60"].status, Status::Unsupported);
 
     let mut rejected = Vec::new();
     let mut basenames = row.clone();
@@ -249,10 +246,7 @@ fn sepolia_null_resolver_admission_matches_executed_discovery_and_rejects_route_
             true,
         )
         .expect("unadmitted execution must remain explicit");
-        assert_eq!(
-            unavailable.records.unwrap()["addr:60"].status,
-            Status::Unsupported
-        );
+        assert_eq!(unavailable.records["addr:60"].status, Status::Unsupported);
     }
 
     let mut rejected = Vec::new();
@@ -295,10 +289,7 @@ fn null_resolver_discovery_keeps_avatar_stale_without_a_record_boundary() {
     )
     .expect("stale discovery answer must build");
 
-    assert_eq!(
-        records.records.expect("requested record map")["avatar"].status,
-        Status::Stale
-    );
+    assert_eq!(records.records["avatar"].status, Status::Stale);
 }
 
 fn null_resolver_discovery_row() -> NameCurrentRow {

@@ -13,7 +13,11 @@ pub(super) fn push_product_history_duplicate_filter<'a>(
     // Filter before keyset pagination; diagnostics bypasses this product-only filter.
     builder.push(" AND NOT (ne.after_state @> '{\"state_derived\":true,\"registrar_surface_snapshot\":true}'::jsonb)");
     // Registry read copies retain the original control-resource representation.
-    builder.push(" AND strpos(ne.event_identity, ':ResolverChanged:registry-read:') = 0");
+    // NOT LIKE rather than strpos(...) = 0: PostgreSQL has no statistics for the strpos
+    // result and estimates the equality at 0.5% of rows, so a page read looked 200 times
+    // smaller than it is and the planner sorted every matching row instead of reading the
+    // order index up to the page limit. The marker has no LIKE wildcard or escape character.
+    builder.push(" AND ne.event_identity NOT LIKE '%:ResolverChanged:registry-read:%'");
     // Handoffs have no separate original. Pick one matching copy, retaining the
     // sole clear in a resource-scoped request and keeping selection before paging.
     // NOT LIKE also exposes marker selectivity to the global lineage-join planner.

@@ -37,10 +37,13 @@ pub fn resolution_record_inventory_lookup_key(row: &NameCurrentRow) -> Option<(U
 }
 
 /// Like [`resolution_record_inventory_lookup_key`], but without the mainnet-profile chain gate:
-/// any single declared chain position is admitted for a name with a supported binding. Backs the
-/// subgraph GraphQL surface, which serves declared record inventory on whatever chain the
-/// deployment indexes (e.g. Sepolia v2), while the verified-resolution REST surface stays scoped
-/// to the mainnet profiles.
+/// any single declared chain position is admitted for a name with a supported binding. This is an
+/// inventory readback key, not an execution admission. It backs the subgraph GraphQL surface and
+/// the REST records route's inventory for every source (default key set, indexed answers, and
+/// `include=inventory`), which serve declared record inventory on whatever chain the deployment
+/// indexes (e.g. Sepolia v2). Verified execution keeps its own admission in the lookup engine, and
+/// the chain-gated [`resolution_record_inventory_lookup_key`] stays the supported readback key for
+/// verified name detail and diagnostics, which remain scoped to the mainnet profiles.
 pub fn resolution_record_inventory_lookup_key_any_chain(
     row: &NameCurrentRow,
 ) -> Option<(Uuid, Value)> {
