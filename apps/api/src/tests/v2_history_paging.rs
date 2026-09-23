@@ -83,11 +83,13 @@ async fn v2_events_rejects_foreign_kind_anchor_for_explicit_type() -> Result<()>
     ).await.expect("fixture publication must be ready");
     let encode = |payload| crate::v2::encode(&snapshot.bind_cursor(payload));
     let anchor = bigname_storage::HistoryCursor {
+        position: None,
         normalized_event_id: sqlx::query_scalar(
             "SELECT normalized_event_id FROM bigname_phase.normalized_events WHERE event_identity = 'history-renewal'",
         )
         .fetch_one(&database.pool)
-        .await?,
+        .await
+        .map(Some)?,
         event_identity: "history-renewal".to_owned(),
     };
     let cursor = encode(crate::v2::events_cursor_payload(
@@ -122,12 +124,14 @@ async fn v2_history_routes_continue_from_bound_non_product_cursor() -> Result<()
     let encode = |payload| crate::v2::encode(&snapshot.bind_cursor(payload));
     let logical_name_id = bigname_storage::logical_name_id_for_name("ens", "history.eth");
     let anchor = bigname_storage::HistoryCursor {
+        position: None,
         normalized_event_id: sqlx::query_scalar(
             "SELECT normalized_event_id FROM bigname_phase.normalized_events WHERE event_identity = $1",
         )
         .bind(EVENT)
         .fetch_one(&database.pool)
-        .await?,
+        .await
+        .map(Some)?,
         event_identity: EVENT.to_owned(),
     };
     let address_binding = crate::v2::AddressHistoryCursorBinding {

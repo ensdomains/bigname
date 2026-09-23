@@ -212,7 +212,7 @@ pub(crate) fn address_history_cursor_payload(
         BTreeMap::from([
             (
                 NORMALIZED_EVENT_ID_CURSOR_KEY.to_owned(),
-                cursor.normalized_event_id.to_string(),
+                cursor.normalized_event_id.unwrap_or_default().to_string(),
             ),
             (
                 EVENT_IDENTITY_CURSOR_KEY.to_owned(),
@@ -247,8 +247,9 @@ pub(crate) fn address_history_storage_cursor(
     let event_identity = cursor_value(payload, EVENT_IDENTITY_CURSOR_KEY, invalid_cursor_error)?;
 
     Ok(HistoryCursor {
-        normalized_event_id,
+        normalized_event_id: Some(normalized_event_id),
         event_identity,
+        position: None,
     })
 }
 
@@ -285,8 +286,9 @@ mod tests {
 
     fn sample_cursor() -> HistoryCursor {
         HistoryCursor {
-            normalized_event_id: 42,
+            normalized_event_id: Some(42),
             event_identity: "event:42".to_owned(),
+            position: None,
         }
     }
 

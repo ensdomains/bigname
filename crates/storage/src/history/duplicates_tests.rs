@@ -260,7 +260,7 @@ async fn registrar_snapshots_are_omitted_before_product_paging_but_remain_in_dia
         assert_eq!(diagnostic.rows.len(),8);
         let snapshot=diagnostic.rows.iter().find(|row|row.event_identity=="history-7").unwrap();
         assert_eq!(snapshot.after_state,states[6]);
-        let marked_cursor=HistoryCursor {normalized_event_id:snapshot.normalized_event_id,event_identity:snapshot.event_identity.clone()};
+        let marked_cursor=HistoryCursor {normalized_event_id:Some(snapshot.normalized_event_id),event_identity:snapshot.event_identity.clone(),position:None};
         let error=load_event_history_page(pool,EventHistoryFilter::default(),true,Some(&marked_cursor),1,HistorySummaryMode::None,false).await.unwrap_err();
         assert!(error.downcast_ref::<InvalidHistoryCursor>().is_some(),"marked snapshot became a product cursor: {error:#}");
         let original=diagnostic.rows.iter().find(|row|row.event_identity=="history-1").unwrap();

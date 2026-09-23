@@ -4,8 +4,9 @@ use bigname_storage::HistoryCursor;
 
 fn sample_cursor() -> HistoryCursor {
     HistoryCursor {
-        normalized_event_id: 42,
+        normalized_event_id: Some(42),
         event_identity: "event:42".to_owned(),
+        position: None,
     }
 }
 
