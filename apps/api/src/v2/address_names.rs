@@ -39,6 +39,7 @@ pub(crate) use self::cursor::{
 
 mod cursor;
 mod resolves_to;
+mod resolves_to_evm;
 mod role_summary;
 mod storage_mapping;
 
@@ -105,6 +106,10 @@ pub(crate) struct AddressName {
     /// key that answered it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) resolution: Option<AddressNameResolution>,
+    /// Present only on `relation=resolves_to&coin_type=evm` rows: every EVM coin type whose
+    /// stored record matched, ascending, with the record key that matched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) resolutions: Option<Vec<AddressNameResolution>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) subname_count: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -495,6 +500,7 @@ pub(crate) fn build_address_name(
             .collect(),
         is_primary: primary_name == Some(entry.normalized_name.as_str()),
         resolution: None,
+        resolutions: None,
         subname_count,
         record_count,
         role_summary,

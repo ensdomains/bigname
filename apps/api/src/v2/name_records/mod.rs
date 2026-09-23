@@ -25,8 +25,8 @@ use super::{
     AtSelector, Envelope, Finality, MAX_PAGE_SIZE, QueryParamAllowlist, RequestSource, Resolver,
     SnapshotReadResource, Source, Status, StrictQueryParams, V2Error, V2Result,
     api_error_to_v2_for_resource, default_requested_records,
-    name_records_inventory::RecordInventory, resolve_v2_snapshot_for, snapshot_meta,
-    v2_exact_name_snapshot_scope_with_resolution_auxiliary,
+    name_records_inventory::{RecordInventory, fill_records_route_abi_content_types},
+    resolve_v2_snapshot_for, snapshot_meta, v2_exact_name_snapshot_scope_with_resolution_auxiliary,
 };
 
 mod build;
@@ -209,7 +209,7 @@ pub(crate) async fn get_name_records(
         selection,
         include_inventory,
     )?;
-    let (route_source, data) = if let Some(data) = authority_unsupported {
+    let (route_source, mut data) = if let Some(data) = authority_unsupported {
         let source = match params.source {
             RequestSource::Verified => Source::Verified,
             RequestSource::Indexed | RequestSource::Auto => Source::Indexed,
@@ -340,6 +340,12 @@ pub(crate) async fn get_name_records(
         }
     };
 
+    fill_records_route_abi_content_types(
+        &state.pool,
+        data.inventory.as_mut(),
+        record_inventory.as_ref(),
+    )
+    .await?;
     let mut meta = snapshot_meta(&selected_snapshot)?;
     meta.source = Some(route_source);
 

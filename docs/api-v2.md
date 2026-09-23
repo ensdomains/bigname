@@ -70,9 +70,10 @@ step-3-gate vocabulary needed by the route schemas:
 | `owner` | token/registry owner | `token_holder`, `owner`, `owner_address`, `registry_owner` |
 | `manager` | controller/manager | `effective_controller`, `manager_address` |
 | `registrant` | registrant | `registrant` (unchanged) |
-| `relation` | address-to-name relation filter: one or more of the authority relations `owner`, `manager`, `registrant` (comma-separated set); `any` = all three; or, on its own, the resolver-record relation `resolves_to` (names whose current `addr:<coin_type>` record resolves to the address, coin type from `coin_type`, default `60`). `resolves_to` is not part of `any` and cannot be combined with an authority relation | four divergent relation/role enums incl. `owned`/`managed`/`both` (partner `BOTH` = `owner,manager`); ensjs `resolvedAddress` |
+| `relation` | address-to-name relation filter: one or more of the authority relations `owner`, `manager`, `registrant` (comma-separated set); `any` = all three; or, on its own, the resolver-record relation `resolves_to` (names whose current `addr:<coin_type>` record resolves to the address, coin type from `coin_type`, default `60`, or every EVM coin type with `coin_type=evm`). `resolves_to` is not part of `any` and cannot be combined with an authority relation | four divergent relation/role enums incl. `owned`/`managed`/`both` (partner `BOTH` = `owner,manager`); ensjs `resolvedAddress` |
 | `relations` | address-to-name relations that matched a row, using `owner`, `manager`, `registrant`, and `resolves_to` values | `relation_facets`, role-specific match arrays |
-| `resolution` | on a `resolves_to` row only: `{coin_type, record_key}`, the coin type asked about and the resolver record key that answered it (`addr:<coin_type>`, or `addr:2147483648` when the ENSIP-19 default EVM address answered) | subgraph `resolver.coinTypes` |
+| `resolution` | on a `resolves_to` row read for one decimal coin type only: `{coin_type, record_key}`, the coin type asked about and the resolver record key that answered it (`addr:<coin_type>`, or `addr:2147483648` when the ENSIP-19 default EVM address answered (upstream: .refs/ens_v1/contracts/utils/ENSIP19.sol:L10 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L68-L85 @ ens_v1@91c966f)) | subgraph `resolver.coinTypes` |
+| `resolutions` | on a `resolves_to` row read with `coin_type=evm` only: `[{coin_type, record_key}]`, one entry per EVM coin type (`60`, or `2147483648` through `4294967295`, the set ENSIP-19 treats as EVM (upstream: .refs/ens_v1/contracts/utils/ENSIP19.sol:L9-L38 @ ens_v1@91c966f)) whose stored resolver record matched the address, ascending by coin type, each with the stored record key that matched. The ENSIP-19 default record appears once, as coin type `2147483648` (upstream: .refs/ens_v1/contracts/utils/ENSIP19.sol:L10 @ ens_v1@91c966f) (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L68-L85 @ ens_v1@91c966f). A row carries at most 100 entries; a row that matched more returns `422 unsupported` for the whole request; read one decimal `coin_type` at a time instead. It lists matches only, not every coin type the resolver has records for; see the [known divergence](upstream.md#resolves-to-matched-coin-types) | subgraph `resolver.coinTypes`, which lists every coin type the resolver has observed whatever its value (upstream: .refs/ens_subgraph/schema.graphql:L294-L295 @ ens_subgraph@723f1b6) (upstream: .refs/ens_subgraph/src/resolver.ts:L59-L79 @ ens_subgraph@723f1b6) |
 | `expires_at` | expiry, RFC 3339: the registrar lease for registrar-backed names; for a wrapped ENSv1 name with no registrar lease (a wrapped subname) the NameWrapper entry's expiry, which is the only expiry the chain holds for it (zero means the parent set none and the field is omitted) | `expiry_date`, `expiration` (unix), `expiry` |
 | `registered_at` | current registration start, RFC 3339 | `registration_date` |
 | `created_at` | first observation of the name, RFC 3339 | `created_at` (now defined and distinguished from `registered_at`) |
@@ -90,7 +91,7 @@ step-3-gate vocabulary needed by the route schemas:
 | `is_primary` | whether an address-name row is the selected primary answer for that address/coin tuple | `is_primary` (unchanged) |
 | `addresses` | coin-type-to-address map, string keys | `coin_addresses`, `coin_type_addresses` |
 | `address` | EVM address used as a subject, filter, or single-address answer | `account`, `subject`, single-address fields named `address` |
-| `coin_type` | ENS/SLIP-44 coin type number | `coin_type` (unchanged; now used consistently for reverse and record lookups) |
+| `coin_type` | ENS/SLIP-44 coin type number. As a request parameter of `GET /v1/addresses/{address}/names?relation=resolves_to` it also accepts the literal `evm`, which selects every EVM coin type | `coin_type` (unchanged; now used consistently for reverse and record lookups) |
 | `text_records` | text-key-to-value map | `text_records` (unchanged) |
 | `content_hash` | contenthash value | `content_hash` (unchanged) |
 | `resolver` | `{chain_id, address}` | `resolver_address`, `current_resolver`, declared resolver summaries |
@@ -109,10 +110,11 @@ step-3-gate vocabulary needed by the route schemas:
 | `as_of_completeness` | per-chain positions suppressed from `as_of`, keyed by `chain_id`, with `{completeness, unsupported_reason}` | inferring request coverage from whichever rows happened to be returned |
 | `as_of_token` | opaque URL-safe snapshot token for replaying the exact served positions with `at` | reconstructing `at` from `chain_positions` |
 | `at` | snapshot selector parameter for routes that support point-in-time reads | `chain_positions` query parameter and timestamp-specific ad hoc selectors |
-| `include` | route-documented expansion allowlist; on `POST /v1/lookup` a body field with the same comma-separated grammar | comma-separated expansion flags, `meta` knobs, and route-specific include flags |
+| `include` | route-documented expansion allowlist; on `POST /v1/lookup` a body field with the same comma-separated grammar. One value selects rows instead of expanding them: name history's `child_registrations` adds direct child registration rows | comma-separated expansion flags, `meta` knobs, and route-specific include flags |
 | `sort` | route-documented sort field | `sort` (unchanged; allowed fields are now route-documented) |
 | `order` | sort direction, `asc` or `desc`; history collections default to `desc` (newest first) and treat `asc` as the exact reverse | `order` (unchanged) |
 | `scope` (history) | `name`, `registration`, `both` | `surface`, `resource`, `both` |
+| `subject` (history) | on name history with `include=child_registrations` only: the row's relation to the requested name, `name` for the name's own rows and `child` for a [direct child registration](api-v2-routes.md#direct-child-registrations-includechild_registrations) | comparing a row's `name` with the requested name |
 | `grant_scope` | the protocol scope of a permission row: `root`, `registry`, `registration`, `resolver`, `record_manager`, or [`account`](glossary.md#account-permission-scope) | permission-row `scope` (renamed so history `scope` and permission scope are two names for two concepts) |
 | `grant_relation` | optional explicit [grant relation](glossary.md#grant-relation); `operator` identifies a registry-wide approval, while direct permission rows omit the field | new in v2 |
 | `verification` | typed checked-answer summary for claimed-vs-verified answers | `verified_state`, `verified_primary_name` section wrappers |
@@ -600,7 +602,9 @@ Rules:
   anchor) populate
   it with a capped count over the page's exact filters: exact up to 10,000
   product-visible rows and `null` beyond by default; `include=total_count`
-  requests an exact uncapped count on anchored history. It is always `null` for unanchored event
+  requests an exact uncapped count on anchored history. On name history with
+  `include=child_registrations` the count covers the name's rows and its direct
+  child registration rows together, each event once. It is always `null` for unanchored event
   reads. `GET /v1/names/{name}/subnames` populates it with the parent's direct
   readable subname count, applying the same optional prefix and expiry filters
   as the page before its cursor.
@@ -1224,7 +1228,9 @@ unchanged; otherwise it returns `409 stale`. Each route checks before deriving
 identity and event anchors written by Interpret and checks again inside the
 repeatable-read page transaction. Events and address history then resolve
 display names and revalidate the captured redo state before returning data;
-name history has no post-transaction display-name read. An active redo at any
+name history has no post-transaction display-name read. With
+`include=child_registrations`, a child row's name comes from the child's name
+surface, read inside the same page transaction. An active redo at any
 check, or a redo
 that began between them, returns `409 stale` instead of exposing a partially
 reconstructed normalized-event range. A
@@ -1238,7 +1244,8 @@ row. An explicit `type` (one label or a set) remains part of anchor validation.
 History cursors also encode the direction in their sort token and the
 canonical `type` set and timestamp bounds in their filters, so `order=asc`,
 `type`, `from_timestamp`, and `to_timestamp` each fail closed when a cursor is
-replayed against a different query; see the [history collection
+replayed against a different query. Name history cursors also record
+`include=child_registrations`; see the [history collection
 filters](api-v2-routes.md#history-collection-filters). Cursor bytes remain
 unstable.
 

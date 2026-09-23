@@ -19,6 +19,8 @@ mod name_records;
 #[cfg(test)]
 pub(crate) use name_records::auto_fallback_test_hooks as name_records_auto_fallback_test_hooks;
 mod name_records_inventory;
+#[cfg(test)]
+pub(crate) use name_records_inventory::abi_content_types_test_hooks;
 mod names;
 mod namespaces;
 mod params;

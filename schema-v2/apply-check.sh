@@ -521,7 +521,7 @@ intentional_phase_migration_skips=()
 refusal_assertions_passed=0
 expected_refusal_assertions=213
 predecessor_shape_proof_count=0
-expected_predecessor_shape_proof_count=40
+expected_predecessor_shape_proof_count=41
 refusal_probe_seconds=0
 timing_started=$SECONDS
 
@@ -619,7 +619,8 @@ for migration_file in \
     "$ROOT/migrations/20260917150000_normalized_events_v1_lookahead_indexes.sql" \
     "$ROOT/migrations/20260917160000_discovery_edges_index_validity_check.sql" \
     "$ROOT/migrations/20260917161000_project_scoped_history_index_validity_check.sql" \
-    "$ROOT/migrations/20260923120000_normalized_events_address_match_indexes.sql"
+    "$ROOT/migrations/20260923120000_normalized_events_address_match_indexes.sql" \
+    "$ROOT/migrations/20260923150000_child_registration_events.sql"
 do
     emit_phase_migration "$migration_file" empty-schema | run_psql
 done
@@ -867,7 +868,9 @@ for migration_file in \
     "$ROOT/migrations/20260914120000_lookup_publication_revalidation.sql" \
     "$ROOT/migrations/20260914120000_lookup_publication_revalidation.sql" \
     "$ROOT/migrations/20260914120100_address_records_current_comments.sql" \
-    "$ROOT/migrations/20260914120100_address_records_current_comments.sql"
+    "$ROOT/migrations/20260914120100_address_records_current_comments.sql" \
+    "$ROOT/migrations/20260923150000_child_registration_events.sql" \
+    "$ROOT/migrations/20260923150000_child_registration_events.sql"
 do
     emit_phase_migration "$migration_file" baseline-first | run_psql
 done
@@ -944,6 +947,81 @@ $$;
 DROP TABLE expected_address_record_comments;
 SQL
 } | run_psql
+# The child-registration membership table is additive. Drop the fresh baseline
+# table, recreate it from the schema-migration, and require the same columns,
+# constraints, indexes, and comments as the baseline; then prove a rerun keeps it.
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    cat <<'SQL'
+CREATE TEMP TABLE expected_child_registration_shape AS
+SELECT 'column' AS kind, attname::text AS name,
+       format_type(atttypid, atttypmod) || CASE WHEN attnotnull THEN ' not null' ELSE '' END
+           || COALESCE(' default ' || pg_get_expr(adbin, adrelid), '') AS definition
+FROM pg_attribute
+LEFT JOIN pg_attrdef ON adrelid = attrelid AND adnum = attnum
+WHERE attrelid = 'child_registration_events'::regclass AND attnum > 0 AND NOT attisdropped
+UNION ALL
+SELECT 'constraint', conname::text, pg_get_constraintdef(oid)
+FROM pg_constraint WHERE conrelid = 'child_registration_events'::regclass
+UNION ALL
+SELECT 'index', indexrelid::regclass::text, pg_get_indexdef(indexrelid)
+FROM pg_index WHERE indrelid = 'child_registration_events'::regclass
+UNION ALL
+SELECT 'comment', objsubid::text, description
+FROM pg_description
+WHERE classoid = 'pg_class'::regclass AND objoid = 'child_registration_events'::regclass
+UNION ALL
+SELECT 'index comment', objoid::regclass::text, description
+FROM pg_description
+JOIN pg_index ON indexrelid = objoid
+WHERE classoid = 'pg_class'::regclass AND indrelid = 'child_registration_events'::regclass;
+DROP TABLE child_registration_events;
+SQL
+    emit_phase_migration "$ROOT/migrations/20260923150000_child_registration_events.sql" preceding-shape
+    cat <<'SQL'
+CREATE TEMP TABLE actual_child_registration_shape AS
+SELECT 'column' AS kind, attname::text AS name,
+       format_type(atttypid, atttypmod) || CASE WHEN attnotnull THEN ' not null' ELSE '' END
+           || COALESCE(' default ' || pg_get_expr(adbin, adrelid), '') AS definition
+FROM pg_attribute
+LEFT JOIN pg_attrdef ON adrelid = attrelid AND adnum = attnum
+WHERE attrelid = 'child_registration_events'::regclass AND attnum > 0 AND NOT attisdropped
+UNION ALL
+SELECT 'constraint', conname::text, pg_get_constraintdef(oid)
+FROM pg_constraint WHERE conrelid = 'child_registration_events'::regclass
+UNION ALL
+SELECT 'index', indexrelid::regclass::text, pg_get_indexdef(indexrelid)
+FROM pg_index WHERE indrelid = 'child_registration_events'::regclass
+UNION ALL
+SELECT 'comment', objsubid::text, description
+FROM pg_description
+WHERE classoid = 'pg_class'::regclass AND objoid = 'child_registration_events'::regclass
+UNION ALL
+SELECT 'index comment', objoid::regclass::text, description
+FROM pg_description
+JOIN pg_index ON indexrelid = objoid
+WHERE classoid = 'pg_class'::regclass AND indrelid = 'child_registration_events'::regclass;
+DO $$
+BEGIN
+    IF EXISTS (
+        (SELECT * FROM expected_child_registration_shape
+         EXCEPT SELECT * FROM actual_child_registration_shape)
+        UNION ALL
+        (SELECT * FROM actual_child_registration_shape
+         EXCEPT SELECT * FROM expected_child_registration_shape)
+    ) THEN
+        RAISE EXCEPTION 'child-registration membership migration differs from the baseline';
+    END IF;
+END
+$$;
+DROP TABLE expected_child_registration_shape;
+DROP TABLE actual_child_registration_shape;
+SQL
+    emit_phase_migration "$ROOT/migrations/20260923150000_child_registration_events.sql" baseline-first
+} | run_psql
+assert_migration_context_count "$ROOT/migrations/20260923150000_child_registration_events.sql" empty-schema 1
+assert_migration_context_count "$ROOT/migrations/20260923150000_child_registration_events.sql" preceding-shape 1
+assert_migration_context_count "$ROOT/migrations/20260923150000_child_registration_events.sql" baseline-first 3
 # The reverse index previously required authority identity even when a name had
 # a readable serving resource. Prove that exact predecessor upgrades and that
 # repeat application preserves the required record-resource identity.
@@ -3251,6 +3329,7 @@ BEGIN
             ('chain_header_audit'),
             ('chain_lineage'),
             ('chain_phase_state'),
+            ('child_registration_events'),
             ('children_current'),
             ('contract_instance_addresses'),
             ('contract_instances'),
@@ -3318,6 +3397,7 @@ BEGIN
             ('chain_header_audit'),
             ('chain_lineage'),
             ('chain_phase_state'),
+            ('child_registration_events'),
             ('children_current'),
             ('contract_instance_addresses'),
             ('contract_instances'),
