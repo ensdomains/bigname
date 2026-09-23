@@ -63,24 +63,28 @@ pub use evm_primitives::{
     ens_namehash_label_bytes, logical_name_id_for_name, normalize_evm_address, normalize_evm_b256,
 };
 #[cfg(any(test, feature = "test-support"))]
-pub use history::explain_registration_history_filter_for_test;
-#[cfg(any(test, feature = "test-support"))]
 pub use history::history_anchor_read_test_hooks;
 pub use history::{
     ChainBlockRange, EventHistoryAddressFilter, EventHistoryFilter, EventHistoryResolverFilter,
     HistoryBlockWindow, HistoryChainPositionSample, HistoryCursor, HistoryEvent, HistoryOrder,
-    HistoryPage, HistoryPageOptions, HistoryScope, HistorySummary, HistorySummaryMode,
-    InterpretRedoFence, InterpretRedoInProgress, InvalidHistoryCursor,
-    capture_interpret_redo_fence, load_address_history, load_address_history_for_relations,
-    load_address_history_page, load_address_history_page_for_relations,
-    load_candidate_logical_name_ids_for_registration_id, load_event_history,
-    load_event_history_page, load_event_history_page_with_redo_policy, load_history_events_by_ids,
-    load_name_history, load_name_history_head, load_name_history_page,
+    HistoryPage, HistoryPageOptions, HistoryScope, HistorySubject, HistorySummary,
+    HistorySummaryMode, InterpretRedoFence, InterpretRedoInProgress, InvalidHistoryCursor,
+    NameHistoryPage, NameHistoryRow, capture_interpret_redo_fence, load_address_history,
+    load_address_history_for_relations, load_address_history_page,
+    load_address_history_page_for_relations, load_candidate_logical_name_ids_for_registration_id,
+    load_event_history, load_event_history_page, load_event_history_page_with_redo_policy,
+    load_history_events_by_ids, load_name_history, load_name_history_head, load_name_history_page,
+    load_name_history_page_with_child_registrations,
     load_registrar_grant_resource_ids_by_logical_name_id, load_resource_history,
     load_resource_history_page, load_wrapped_registrar_resource_ids_by_logical_name_id,
     resolve_chain_block_ranges, revalidate_interpret_redo_fence,
 };
 pub use history::{SelectedInterpretRedoState, load_selected_interpret_redo_state};
+#[cfg(any(test, feature = "test-support"))]
+pub use history::{
+    explain_name_history_page_with_child_registrations_for_test,
+    explain_registration_history_filter_for_test,
+};
 pub use identity::{
     NameSurface, Resource, SurfaceBinding, SurfaceBindingKind, TokenLineage,
     ens_v2_registry_resource_id, load_name_surface, load_name_surface_including_noncanonical,

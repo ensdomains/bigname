@@ -20,6 +20,7 @@ fn binding<'a>(params: &'a QueryParams, scope: HistoryScope) -> HistoryCursorBin
         scope,
         order: history_storage_order(params.order),
         params,
+        child_registrations: false,
     }
 }
 
@@ -234,4 +235,29 @@ fn history_publication_window_intersects_each_chain_and_excludes_future_ranges()
     assert_eq!(bounded.ranges.len(), 1);
     assert_eq!(bounded.ranges[0].from_block, Some(50));
     assert_eq!(bounded.ranges[0].to_block, Some(100));
+}
+
+#[test]
+fn history_cursor_binds_the_child_registrations_option_in_both_directions() {
+    let cursor = sample_cursor();
+    let params = params(RawQueryParams::default());
+    let plain = binding(&params, HistoryScope::Both);
+    let with_children = HistoryCursorBinding {
+        child_registrations: true,
+        ..binding(&params, HistoryScope::Both)
+    };
+
+    let plain_payload = history_cursor_payload(&cursor, &plain);
+    let children_payload = history_cursor_payload(&cursor, &with_children);
+    assert!(!plain_payload.filters.contains_key("children"));
+    assert_eq!(
+        children_payload.filters.get("children").map(String::as_str),
+        Some("registrations")
+    );
+    assert_eq!(
+        history_storage_cursor(&children_payload, &with_children).expect("cursor must decode"),
+        cursor
+    );
+    assert!(history_storage_cursor(&children_payload, &plain).is_err());
+    assert!(history_storage_cursor(&plain_payload, &with_children).is_err());
 }

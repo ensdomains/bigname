@@ -1251,13 +1251,18 @@ A recognized namespace with no available publication returns retryable `409 stal
   the canonical UTC spelling of each timestamp bound, so a cursor issued by one
   query cannot continue a query with a different direction, type set, or
   window; the mismatch returns `400 invalid_input`. Equivalent spellings of the
-  same bound (`+01:00` versus `Z`) continue the same query.
+  same bound (`+01:00` versus `Z`) continue the same query. Name history also
+  binds [`include=child_registrations`](#direct-child-registrations-includechild_registrations),
+  which changes which rows the collection holds; the payload flags
+  `include=data` and `include=raw` are not bound.
 - `page.total_count` is populated for anchored history reads: name history and
   address history always, and `/v1/events` when `name`, `registration_id`,
   `address`, or `resolver` bounds the read. The count runs inside the same repeatable-read
   transaction as the page over exactly the page's filters (scope, type set,
   block and timestamp windows, product visibility, and duplicate suppression),
-  so it agrees with what paging would enumerate. It is capped: counting stops
+  so it agrees with what paging would enumerate. With
+  `include=child_registrations`, the count covers the combined collection of
+  name rows and direct child registration rows, each event counted once. It is capped: counting stops
   after 10,000 product-visible rows and a larger result reports
   `total_count=null`. With `include=total_count`, anchored history reads instead
   run an exact, uncapped count in the same read transaction and return that total.
@@ -1270,7 +1275,10 @@ A recognized namespace with no available publication returns retryable `409 stal
 
 The same three collections accept independent payload flags `include=data`
 and `include=raw`, alongside the exact count flag `include=total_count`.
-They can be combined in any order. Other values return `400 invalid_input`.
+They can be combined in any order. Name history also accepts
+[`include=child_registrations`](#direct-child-registrations-includechild_registrations),
+which adds rows rather than fields; address history and `/v1/events` reject
+it. Other values return `400 invalid_input`.
 Without either payload flag, rows keep their lean shape and carry none of the
 fields below; requesting an exact total does not expand event rows.
 
@@ -1357,16 +1365,24 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
 - Purpose: name history.
 - Request parameters: path `name`; query `namespace`,
   `scope=name|registration|both`, `type`, `order=asc|desc`, `from_timestamp`,
-  `to_timestamp`, `include=data|raw|total_count`, `cursor`, `page_size`, and optional
+  `to_timestamp`, `include=data|raw|total_count|child_registrations`, `cursor`, `page_size`, and optional
   `finality=latest`. `at` and historical `finality` values are rejected by the
   shared latest-state collection rule. `type`, `order`, and the timestamp
   window follow the [history collection filters](#history-collection-filters);
   `include=data` and `include=raw` add the [history event
-  payloads](#history-event-payloads-includedata-includeraw).
+  payloads](#history-event-payloads-includedata-includeraw);
+  `include=child_registrations` adds the [direct child
+  registrations](#direct-child-registrations-includechild_registrations).
 - Response shape: `data` is an array of dedicated lean event rows:
   `{id, type, name, namespace, registration_id, block_number, timestamp,
   transaction_hash, log_index}`, `id` being the opaque row identity of the
-  [shared payload contract](#history-event-payloads-includedata-includeraw). `registration_id` carries actual registration
+  [shared payload contract](#history-event-payloads-includedata-includeraw).
+  Without `include=child_registrations`, `name` is always the requested name,
+  including on a row that the registration scope reached through a resource
+  whose event carries a different name or none. With it, every row also
+  carries `subject` (`name` or `child`) and a child row's `name` is the
+  child's name; see [direct child
+  registrations](#direct-child-registrations-includechild_registrations). `registration_id` carries actual registration
   lifecycle identity and is `null` when the event is not associated with a
   registration; reservation facts never carry one. The shared event-identity
   contract, including the committed companion change that adds `resource_id`
@@ -1404,7 +1420,10 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
   (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L89-L94 @ ens_v1@91c966f)
 - Pagination behavior: keyset pagination by chain position, newest first
   unless `order=asc`. The cursor is bound to the resolved namespace, parent
-  name, scope, direction, `type` set, and timestamp window. Product event-type
+  name, scope, direction, `type` set, timestamp window, and whether
+  `include=child_registrations` was requested, so a cursor from a request with
+  the option returns `400 invalid_input` on a request without it, and the
+  reverse. Product event-type
   filtering, including an explicit `type` set, is applied before page
   construction, so `page_size`, `next_cursor`, and `has_more` describe
   product-visible events. A nonterminal page contains `page_size` rows; only
@@ -1426,13 +1445,18 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
   reachable through `GET /v1/diagnostics/events` via the registry resource
   recorded internally at
   `name_current.provenance.read_reachability.serving_resource_id`.
+  `include=child_registrations` is independent of `scope`: the collection is
+  the rows `scope` selects plus the direct child registrations, under
+  `scope=name`, `scope=registration`, and `scope=both` alike, and child rows
+  are returned even when the scope selects no rows of the name itself.
 - Snapshot behavior: the page and its counts use the captured current
   publication. The response discloses `meta.as_of`; continuation cursors bind
   the publication and return `409 stale` requiring a restart when it changes.
   Historical replay through `at` is not supported.
 - Status semantics: no product-visible matches return `200` with empty `data`,
   `page.next_cursor=null`, and `page.has_more=false`. Missing names return `404
-  not_found`. Request and cursor-binding validation precede the first
+  not_found`. `include=child_registrations` on `eth` or `base.eth` returns `400
+  invalid_input` before the name is looked up. Request and cursor-binding validation precede the first
   `redo_in_progress` check, so malformed requests retain `400`. The route
   captures the collection-wide check before parent lookup, then checks it again
   inside the repeatable-read page transaction. A missing parent returns `404`
@@ -1471,6 +1495,105 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
   lease only while the registry-only binding is active and the lease exists at
   the record's position. The same selection governs row IDs, registration filters,
   counts and cursor anchors.
+
+#### Direct child registrations (`include=child_registrations`)
+
+`include=child_registrations` merges the registrations of the requested name's
+direct children (its [direct child
+registrations](glossary.md#direct-child-registration)) into its history: one collection, one chain-position order,
+one cursor. It adds rows, not fields. A child row has exactly the fields any
+`registration` row has, and `include=data` and `include=raw` expand it the same
+way.
+
+A direct child registration is a product-visible `registration` row (stored
+kind `RegistrationGranted`) that meets all of these conditions:
+
+- The name the row carries, as attributed when the event happened, is exactly
+  one label below the requested name, in the same namespace and on the same
+  chain.
+- That child name passes normalization. A label that fails normalization
+  still has an identity row in bigname, but it is not served as a name, so
+  its registrations are excluded.
+
+The test is structural and historical. It uses the name each event carries and
+the child's label path. It never uses the parent's current subregistry, the
+current child list of `GET /v1/names/{name}/subnames`, or current name state.
+So the collection keeps:
+
+- children that were released or expired since;
+- grants made under a registry that the parent has since unlinked or replaced.
+  When a registry moves from one parent to another, its earlier grants stay in
+  the earlier parent's history and its later grants belong to the new parent;
+- every registration of a child, including a registration after a release.
+
+Excluded:
+
+- grandchildren and deeper descendants;
+- ENSv1 and Basenames registry subnames created through `setSubnodeOwner`.
+  That call emits `NewOwner`, which bigname stores as `subregistry` and
+  `authority` rows, not as a registration, so these subnames have no
+  `registration` row to include. They remain visible in the child's own
+  history.
+  (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L75-L84 @ ens_v1@91c966f)
+- the children of `eth` and `base.eth`. Every second-level registration of the
+  `.eth` registrar or the Basenames registrar is a child of one of these two
+  names, so the option returns `400 invalid_input` when the requested name is
+  `eth` or `base.eth`, in either namespace. This is a scope limit of the
+  option, not missing data: bigname indexes those registrations, including
+  ENSv2 `.eth` registry grants, but does not offer them as one parent's
+  stream. The check compares the resolved name, not a suffix, so
+  `alice.eth` and `alice.base.eth` are served normally.
+
+In practice the rows come from ENSv2 registries. A row is a stored grant
+observation, not one registration action, and each keeps its own `id` and
+position. One ENSv2 registration can produce several rows: the grant from the
+registry's `LabelRegistered` log, a linked copy when the registry later emits
+`TokenResource` for that token, and a reachability grant each time the label
+becomes reachable under this name, for example when the parent links a registry
+that already holds the label, or when `ParentUpdated` completes the link.
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registry/interfaces/IRegistryEvents.sol:L18 @ ens_v2_sepolia_20260916@366de741)
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registry/interfaces/IPermissionedRegistry.sol:L45 @ ens_v2_sepolia_20260916@366de741)
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registry/PermissionedRegistry.sol:L145-L150 @ ens_v2_sepolia_20260916@366de741)
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registry/PermissionedRegistry.sol:L172-L179 @ ens_v2_sepolia_20260916@366de741)
+A label registered before its registry was reachable under this name appears
+at the position where it became reachable; its original grant keeps its own
+position and the name it had then. `total_count` counts rows, so it can exceed
+the number of distinct children or of registration transactions, and grouping
+rows by transaction does not reproduce it.
+
+Row shape with the option:
+
+- Every row carries `subject`: `child` for a direct child registration and
+  `name` for every other row.
+- A child row's `name` is the child's name. A `subject=name` row keeps the
+  requested name, as without the option.
+- `id`, `registration_id` (the child's own registration), and every other field
+  are the same values the row has in the child's own history and on
+  `GET /v1/events`.
+
+One event can qualify both ways. The registration scope follows a name's
+resources through history, so a grant made to a former child that later
+became this name's own resource is both a child registration and a row of the
+name's scope. The collection is a set of events: such an event appears once,
+with `subject=child`. The same rule decides page rows, `total_count`, and
+cursor validation.
+
+The option does not change the meaning of the other controls:
+
+- `type` and the timestamp window apply to the combined collection. Child rows
+  are `registration` rows, so a `type` set without `registration` returns no
+  child rows.
+- `order` reverses the combined order exactly.
+- `total_count` counts the combined collection, capped or exact as described
+  under the [history collection filters](#history-collection-filters).
+- The cursor binds the option.
+- Responses carry no `ETag` or `Cache-Control`, as on every history
+  collection.
+
+The rows come from a Project-maintained list of each name's historical child
+registration events, published with the other projections. A deployment that
+introduces it rebuilds Project from full history before serving the option; see
+[`projections.md`](projections.md#child-registration-events).
 
 ### `GET /v1/permissions`
 

@@ -473,12 +473,14 @@ const P = {
   toTimestamp: { name: 'to_timestamp', in: 'query', desc: 'Inclusive RFC 3339 upper timestamp bound. A window outside indexed history returns an empty page.' },
   historyOrder: { name: 'order', in: 'query', type: 'enum', values: ['desc', 'asc'], default: 'desc', desc: 'Newest first or oldest first over the same chain-position order. Bound into the cursor.' },
   historyInclude: { name: 'include', in: 'query', type: 'set', desc: 'Comma-separated <code>data</code>, <code>raw</code>, and <code>total_count</code>. The payload flags add fields described below; <code>total_count</code> requests an exact uncapped count for an anchored read. Unanchored events never count.' },
+  nameHistoryInclude: { name: 'include', in: 'query', type: 'set', desc: 'Comma-separated <code>data</code>, <code>raw</code>, <code>total_count</code>, and <code>child_registrations</code>. The payload flags add fields described below; <code>total_count</code> requests an exact uncapped count. <code>child_registrations</code> adds the registrations of the name\'s direct children to the same stream (see the note below).' },
   fromBlock: { name: 'from_block', in: 'query', type: 'integer', desc: 'The lowest block to include.' },
   toBlock: { name: 'to_block', in: 'query', type: 'integer', desc: 'The highest block to include.' },
 };
 const EVENT_FIELDS = [
   ['type', 'The product event category: <code>registration</code>, <code>renewal</code>, <code>release</code>, <code>expiry</code>, <code>transfer</code>, <code>authority</code>, <code>resolver</code>, <code>record</code>, <code>primary_name</code>, or <code>permission</code>.'],
   ['name, namespace', 'The name the row belongs to.'],
+  ['subject', 'Name history with <code>include=child_registrations</code> only: <code>child</code> for a direct child registration, <code>name</code> for any other row. Absent otherwise.'],
   ['registration_id', 'The registration lifecycle the event belongs to, or <code>null</code> when it is not attached to one.'],
   ['block_number, timestamp, transaction_hash, log_index', 'Where the event sits on chain.'],
   ['contract_address, data', 'With <code>include=data</code>: the lowercase emitting contract address (null for state-derived rows) and a friendly event payload. Only retained fields are present, so <code>data</code> may be <code>{}</code>. Full stored before/after state remains on <a href="#diag-events">diag-events(2)</a>.'],
@@ -699,12 +701,13 @@ const ROUTES = [
 {
   id: 'history', method: 'GET', path: '/v1/names/{name}/history', title: 'Name history',
   summary: 'Lists the events for a name and every registration it has had, newest first. History survives release, so a name that is no longer registered still has one.',
-  keywords: ['events', 'scope', 'lifecycle', 'timeline'],
+  keywords: ['events', 'scope', 'lifecycle', 'timeline', 'child_registrations', 'subject', 'children'],
   sample: { name: 'taytems.eth' },
-  params: [P.name, P.namespace, P.scope, P.eventType, P.fromTimestamp, P.toTimestamp, P.historyOrder, P.historyInclude, P.cursor, P.pageSize, P.finalityLatest],
+  params: [P.name, P.namespace, P.scope, P.eventType, P.fromTimestamp, P.toTimestamp, P.historyOrder, P.nameHistoryInclude, P.cursor, P.pageSize, P.finalityLatest],
   response: { fields: EVENT_FIELDS, sample: { data: [ { type: 'renewal', name: 'taytems.eth', namespace: 'ens', registration_id: '…', block_number: 21100310, timestamp: '2025-01-03T14:20:59Z', transaction_hash: '0x…', log_index: 118 }, { type: 'registration', name: 'taytems.eth', namespace: 'ens', registration_id: '…', block_number: 13556001, timestamp: '2021-11-04T09:31:19Z', transaction_hash: '0x…', log_index: 260 } ], page: { cursor: null, next_cursor: null, page_size: 50, total_count: null, has_more: false }, meta: {} } },
-  outcomes: [['200', 'The events, or an empty page.'], ['400 invalid_input', 'The name is invalid, the cursor is bad, a parameter is unknown, or a snapshot selector was given.'], ['404 not_found', 'The name is unknown and no redo is interfering.'], ['409 stale', 'An Interpret redo is active on some chain.']],
+  outcomes: [['200', 'The events, or an empty page.'], ['400 invalid_input', 'The name is invalid, the cursor is bad or was issued with a different <code>child_registrations</code> choice, a parameter is unknown, a snapshot selector was given, or <code>include=child_registrations</code> was requested for <code>eth</code> or <code>base.eth</code>.'], ['404 not_found', 'The name is unknown and no redo is interfering.'], ['409 stale', 'An Interpret redo is active on some chain.']],
   notes: [
+    { h: 'Direct child registrations', html: `<p><code>include=child_registrations</code> merges the <code>registration</code> rows of the name's direct children (names exactly one label below it) into its history, in one order with one cursor. Every row then carries <code>subject</code>: <code>child</code> for a child registration, whose <code>name</code> is the child's name, and <code>name</code> for every other row. A child row is the same event, with the same <code>id</code> and <code>registration_id</code>, that the child's own history serves.</p><p>The test uses the name each event carried when it happened, so released children and grants made under a registry the name no longer links stay listed. Grandchildren are not listed, and neither are ENSv1 or Basenames subnames created with <code>setSubnodeOwner</code>, which have no registration row. <code>eth</code> and <code>base.eth</code> refuse the option. An event that is both a child registration and a row of the name's own registration scope appears once, as a child. <code>type</code>, the timestamp window, <code>order</code>, and <code>total_count</code> apply to the combined stream, and the cursor records the option.</p>` },
     { h: 'What each scope includes', html: `<dl class="fields">
 <dt>name</dt><dd>Events attached to the name surface.</dd>
 <dt>registration</dt><dd>Events on the registrations and resources associated with the name, including owner events on a registry resource from before it was bound to the name.</dd>
