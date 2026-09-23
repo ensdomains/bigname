@@ -272,6 +272,31 @@ inside) also lie at or below the read's published block, so a grant Interpret ha
 the publication a read is bound to does not turn that publication's older rows, count, or cursor
 anchors into registration history.
 
+Address history (`GET /v1/addresses/{address}/history`) runs three statements in
+`crates/storage/src/history/`. The anchor lookup (`address_matches.rs`) finds the names and
+resources the address holds now in `address_names_current` and held in the past from three kinds
+of activated, canonical events: a `RegistrationGranted` whose `registrant` is the address, a
+`TokenControlTransferred` whose `to` is the address, and an `AuthorityTransferred` whose `owner`
+is the address, each compared lowercased. One partial expression index per kind keys those rows
+by the lowercased value: `normalized_events_address_registrant_match_idx`,
+`normalized_events_address_token_holder_match_idx`, and
+`normalized_events_address_registry_owner_match_idx`. Their expressions and predicates must stay
+identical to the query text. The capped count and the page then read the rows of those names and
+resources plus the resolver record writes attributed to the resources (`filters.rs`). That filter
+is an OR of `logical_name_id`, `resource_id`, and `normalized_event_id` conditions. The attributed
+event ids do not depend on the row, so the filter computes them once as an array
+(`= ANY(ARRAY(SELECT ...))`); PostgreSQL then answers each branch from
+`normalized_events_name_history_idx`, `normalized_events_resource_history_idx`, and the primary
+key and combines the results. Written as `IN (SELECT ...)`, the branch cannot be an index
+condition inside the OR, and the planner reads every canonical row to keep the few that match.
+`GET /v1/names/{name}/history` with `scope=both` uses the same filter. The registration-scoped
+read keeps a correlated `IN` because its attribution check refers to the row. These are access
+paths only: no stored row, response, or [interpreter content
+hash](glossary.md#interpreter-content-hash) input changes. Existing installations receive the
+three indexes through `20260923120000_normalized_events_address_match_indexes.sql`; prebuild
+them concurrently on a large database with
+[`ops/address-history-indexes/install.sql`](../ops/address-history-indexes/README.md) first.
+
 History loaders called with `canonical_only=false` also return rows of activated losing
 branches. For those reads every binding, grant and wrapper-link witness must lie on the event's
 own parent-hash path in `chain_lineage`; matching block numbers or canonicality states do not

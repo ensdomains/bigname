@@ -674,6 +674,21 @@ no-ops when the indexes already exist, and it ends with the same check, so
 invalid, not ready, on another table, not an index, or has another definition.
 
 The release containing
+`20260923120000_normalized_events_address_match_indexes.sql` adds the three
+partial expression indexes the address history read uses to find the names and
+resources an address held in the past. On an initialized production namespace,
+build them in step 3 by running
+[`ops/address-history-indexes/install.sql`](../../ops/address-history-indexes/install.sql)
+as [its runbook](../../ops/address-history-indexes/README.md) describes, then run
+`ANALYZE bigname_phase.normalized_events`. The builds are concurrent, permit
+writes, and can finish before the stop/start window opens; `install.sql` is its
+own readiness check and never drops or rebuilds an index. Keep its output with
+its start and end times in the release record. Then apply the schema-migrations
+in step 4; the schema-migration's `IF NOT EXISTS` builds are no-ops when the
+indexes already exist, and it ends with the same check. The indexes change no
+stored row and no interpreter content hash input.
+
+The release containing
 `20260904120000_project_redo_child_registration_history.sql` adds the bounded
 Interpret-to-Project handoff for child and registry identifiers from deleted
 ENSv1→ENSv2 [migration-registry](../glossary.md#migration-registry-wrapperregistry)
@@ -1087,6 +1102,10 @@ indexes are additive; rollback may leave them in place.
    for the release containing
    `20260917150000_normalized_events_v1_lookahead_indexes.sql`, run
    `ops/v1-lookahead-indexes/install.sql` as described above, require it to
+   exit zero, then run `ANALYZE bigname_phase.normalized_events`;
+   for the release containing
+   `20260923120000_normalized_events_address_match_indexes.sql`, run
+   `ops/address-history-indexes/install.sql` as described above, require it to
    exit zero, then run `ANALYZE bigname_phase.normalized_events`;
    otherwise skip this step;
    For the release containing

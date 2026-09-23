@@ -519,9 +519,9 @@ migration_application_log="$(
 # Future entries must use basename|one-line reason.
 intentional_phase_migration_skips=()
 refusal_assertions_passed=0
-expected_refusal_assertions=173
+expected_refusal_assertions=213
 predecessor_shape_proof_count=0
-expected_predecessor_shape_proof_count=39
+expected_predecessor_shape_proof_count=40
 refusal_probe_seconds=0
 timing_started=$SECONDS
 
@@ -618,7 +618,8 @@ for migration_file in \
     "$ROOT/migrations/20260917141000_discovery_self_edge_check_name.sql" \
     "$ROOT/migrations/20260917150000_normalized_events_v1_lookahead_indexes.sql" \
     "$ROOT/migrations/20260917160000_discovery_edges_index_validity_check.sql" \
-    "$ROOT/migrations/20260917161000_project_scoped_history_index_validity_check.sql"
+    "$ROOT/migrations/20260917161000_project_scoped_history_index_validity_check.sql" \
+    "$ROOT/migrations/20260923120000_normalized_events_address_match_indexes.sql"
 do
     emit_phase_migration "$migration_file" empty-schema | run_psql
 done
@@ -1864,6 +1865,234 @@ SQL
         "$v1_lookahead_index_name exists but does not have the reviewed definition; found \"$v1_lookahead_found_definition\", expected \"$v1_lookahead_reviewed_definition\"; $v1_lookahead_recovery" <<SQL
 DROP INDEX $v1_lookahead_index_name;
 $v1_lookahead_found_definition;
+SQL
+done
+# Recreate the three address-history match indexes from their preceding schema
+# shape. Compare each resulting catalog definition to the fresh baseline, then
+# prove a rerun leaves them unchanged.
+address_match_migration="$ROOT/migrations/20260923120000_normalized_events_address_match_indexes.sql"
+address_match_install="$ROOT/ops/address-history-indexes/install.sql"
+address_match_readme=ops/address-history-indexes/README.md
+address_match_index_names=(
+    normalized_events_address_registrant_match_idx
+    normalized_events_address_token_holder_match_idx
+    normalized_events_address_registry_owner_match_idx
+)
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    cat <<'SQL'
+CREATE TEMP TABLE expected_address_match_indexes AS
+SELECT index_class.relname AS index_name,
+       pg_get_indexdef(pg_index.indexrelid) AS definition
+FROM pg_index
+JOIN pg_class index_class ON index_class.oid = pg_index.indexrelid
+WHERE pg_index.indrelid = 'normalized_events'::regclass
+  AND index_class.relname IN (
+      'normalized_events_address_registrant_match_idx',
+      'normalized_events_address_token_holder_match_idx',
+      'normalized_events_address_registry_owner_match_idx'
+  );
+DO $$
+BEGIN
+    IF (SELECT count(*) FROM expected_address_match_indexes) <> 3 THEN
+        RAISE EXCEPTION 'fresh baseline does not define all three address-history match indexes';
+    END IF;
+END $$;
+DROP INDEX
+    normalized_events_address_registrant_match_idx,
+    normalized_events_address_token_holder_match_idx,
+    normalized_events_address_registry_owner_match_idx;
+SQL
+    emit_phase_migration "$address_match_migration" preceding-shape
+    emit_phase_migration "$address_match_migration" baseline-first
+    cat <<'SQL'
+DO $$
+BEGIN
+    IF (
+        SELECT count(*)
+        FROM expected_address_match_indexes expected
+        JOIN pg_class index_class ON index_class.relname = expected.index_name
+        JOIN pg_index ON pg_index.indexrelid = index_class.oid
+        WHERE pg_index.indrelid = 'normalized_events'::regclass
+          AND pg_index.indisvalid AND pg_index.indisready
+          AND pg_index.indpred IS NOT NULL
+          AND pg_get_indexdef(pg_index.indexrelid) = expected.definition
+    ) <> 3 THEN
+        RAISE EXCEPTION 'address-history match index upgrade differs from the baseline';
+    END IF;
+END $$;
+DROP TABLE expected_address_match_indexes;
+SQL
+} | run_psql
+# The schema-migration adopts an existing relation by name alone, so its check
+# must accept the three indexes it just rebuilt. sqlx runs schema-migrations
+# without the phase schema on search_path, which makes PostgreSQL print the
+# enum type in each predicate with its schema name unless the check controls
+# search_path itself, so prove both session settings. The check must also
+# leave the search_path as it found it, in the session and inside one
+# transaction, and give a caller with quote_all_identifiers on the same answer
+# while keeping that setting.
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    emit_phase_migration "$address_match_migration" baseline-first
+    assert_search_path_sql "$scratch_schema"
+    printf 'SET search_path TO public;\n'
+    emit_phase_migration "$address_match_migration" baseline-first
+    assert_search_path_sql public
+    printf 'BEGIN;\nSET LOCAL search_path TO "%s", public;\n' "$scratch_schema"
+    render_phase_migration "$address_match_migration"
+    assert_search_path_sql "$scratch_schema, public"
+    printf 'COMMIT;\n'
+    assert_search_path_sql public
+    emit_quote_all_identifiers_probe "$address_match_migration" in-transaction
+} | run_psql
+assert_migration_context_count "$address_match_migration" empty-schema 1
+assert_migration_context_count "$address_match_migration" preceding-shape 1
+assert_migration_context_count "$address_match_migration" baseline-first 3
+# The live prebuild in ops/address-history-indexes/install.sql builds all three
+# indexes in one file. For each in turn it must build the baseline definition, refuse
+# an invalid index, a valid index with other keys, a valid index whose JSON
+# key literals start with the schema name, and a table under the name, and
+# recover as its README says.
+for address_match_index_name in "${address_match_index_names[@]}"; do
+    assert_concurrent_index_installer "address-match-$address_match_index_name" \
+        "$address_match_index_name" \
+        "$address_match_install" \
+        "$address_match_readme" \
+        normalized_events \
+        "block_number, chain_id"
+done
+# The installer refuses before it builds anything. With the last index
+# invalid and the first one absent, it must stop on the invalid one, tell the
+# operator how to drop it, and leave the first one unbuilt.
+address_match_first_index="${address_match_index_names[0]}"
+address_match_last_index="${address_match_index_names[2]}"
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    printf '%s\n' \
+        "DROP INDEX $address_match_first_index;" \
+        "UPDATE pg_index SET indisvalid = false" \
+        "WHERE indexrelid = '$address_match_last_index'::regclass;"
+} | run_psql >/dev/null
+assert_index_install_refusal address-match-refuses-before-building \
+    "$address_match_install" \
+    "$address_match_last_index is missing from $scratch_schema.normalized_events or is not valid and ready; follow the recovery steps in $address_match_readme before retrying"
+assert_index_install_hint address-match-invalid-index-hint \
+    "$address_match_install" \
+    "An interrupted concurrent build leaves an invalid index. Confirm in pg_stat_progress_create_index that no build is still running, run DROP INDEX CONCURRENTLY $scratch_schema.$address_match_last_index, then rerun this script."
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    cat <<SQL
+DO \$\$
+BEGIN
+    IF to_regclass('$address_match_first_index') IS NOT NULL THEN
+        RAISE EXCEPTION 'address-history match installer built an index before refusing an invalid one';
+    END IF;
+END \$\$;
+DROP INDEX CONCURRENTLY $address_match_last_index;
+SQL
+    render_phase_migration "$address_match_install"
+    # An index on another table under the name is not the index either.
+    printf '%s\n' \
+        "DROP INDEX $address_match_first_index;" \
+        "CREATE INDEX $address_match_first_index ON discovery_edges (chain_id);"
+} | run_psql >/dev/null
+assert_index_install_refusal address-match-index-on-another-table \
+    "$address_match_install" \
+    "$address_match_first_index is missing from $scratch_schema.normalized_events or is not valid and ready; follow the recovery steps in $address_match_readme before retrying"
+assert_index_install_hint address-match-index-on-another-table-hint \
+    "$address_match_install" \
+    "An index on $scratch_schema.discovery_edges holds this name. Rename or remove it, then rerun this script."
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    printf '%s\n' "DROP INDEX $address_match_first_index;"
+    render_phase_migration "$address_match_install"
+} | run_psql >/dev/null
+# Put each index in turn into every shape CREATE INDEX IF NOT EXISTS skips,
+# inside a transaction that rolls back, and require the schema-migration to
+# fail rather than record success. The expected definition it names must be how
+# the fresh-baseline index prints, read under search_path pg_catalog.
+address_match_recovery="follow the recovery steps in $address_match_readme, then run the schema-migrations again"
+for address_match_index_name in "${address_match_index_names[@]}"; do
+    assert_migration_refusal "invalid-$address_match_index_name" \
+        "$address_match_migration" \
+        "$address_match_index_name exists but is not a valid and ready index on $scratch_schema.normalized_events; $address_match_recovery" <<SQL
+UPDATE pg_index SET indisvalid = false
+WHERE indexrelid = '$address_match_index_name'::regclass;
+SQL
+    assert_migration_refusal "not-ready-$address_match_index_name" \
+        "$address_match_migration" \
+        "$address_match_index_name exists but is not a valid and ready index on $scratch_schema.normalized_events; $address_match_recovery" <<SQL
+UPDATE pg_index SET indisready = false
+WHERE indexrelid = '$address_match_index_name'::regclass;
+SQL
+    # CREATE INDEX IF NOT EXISTS also skips a table or view under the name.
+    assert_migration_refusal "table-named-$address_match_index_name" \
+        "$address_match_migration" \
+        "$scratch_schema.$address_match_index_name is a table, not an index, so the index was never built; remove or rename that relation, then run the schema-migrations again" <<SQL
+DROP INDEX $address_match_index_name;
+CREATE TABLE $address_match_index_name ();
+SQL
+    assert_migration_refusal "view-named-$address_match_index_name" \
+        "$address_match_migration" \
+        "$scratch_schema.$address_match_index_name is a view, not an index, so the index was never built; remove or rename that relation, then run the schema-migrations again" <<SQL
+DROP INDEX $address_match_index_name;
+CREATE VIEW $address_match_index_name AS SELECT 1 AS occupied;
+SQL
+    assert_migration_refusal "other-table-$address_match_index_name" \
+        "$address_match_migration" \
+        "$address_match_index_name exists but is not a valid and ready index on $scratch_schema.normalized_events; $address_match_recovery" <<SQL
+DROP INDEX $address_match_index_name;
+CREATE INDEX $address_match_index_name ON discovery_edges (chain_id);
+SQL
+    # A wrong manual prebuild leaves a valid index with other keys under the
+    # name. The expected text is how the fresh-baseline index prints with
+    # search_path set to pg_catalog: the table and the enum type both carry the
+    # schema name.
+    address_match_reviewed_definition="$(
+        {
+            printf 'SET search_path TO "%s";\n' "$scratch_schema"
+            printf '%s\n' \
+                '\pset tuples_only on' \
+                '\pset format unaligned' \
+                "SET search_path TO pg_catalog;" \
+                "SELECT pg_get_indexdef('$scratch_schema.$address_match_index_name'::regclass);"
+        } | run_psql
+    )"
+    assert_migration_refusal "wrong-keys-$address_match_index_name" \
+        "$address_match_migration" \
+        "$address_match_index_name exists but does not have the reviewed definition; found \"CREATE INDEX $address_match_index_name ON $scratch_schema.normalized_events USING btree (block_number, chain_id)\", expected \"$address_match_reviewed_definition\"; $address_match_recovery" <<SQL
+DROP INDEX $address_match_index_name;
+CREATE INDEX $address_match_index_name ON normalized_events (block_number, chain_id);
+SQL
+    # The right keys are not enough: the predicate is part of the reviewed
+    # definition too.
+    address_match_found_definition="${address_match_reviewed_definition/\'safe\'::$scratch_schema.canonicality_state, /}"
+    if [ "$address_match_found_definition" = "$address_match_reviewed_definition" ]; then
+        printf '%s\n' "$address_match_index_name: reviewed definition has no safe canonicality state to remove" >&2
+        exit 1
+    fi
+    assert_migration_refusal "wrong-predicate-$address_match_index_name" \
+        "$address_match_migration" \
+        "$address_match_index_name exists but does not have the reviewed definition; found \"$address_match_found_definition\", expected \"$address_match_reviewed_definition\"; $address_match_recovery" <<SQL
+DROP INDEX $address_match_index_name;
+$address_match_found_definition;
+SQL
+    # Nor is a printed definition that matches once the schema name is removed:
+    # with the schema name and a dot at the start of each JSON key literal, the
+    # index is valid, ready, and on the right table, but it indexes
+    # after_state ->> '<schema>.registrant' and the like, which is NULL for
+    # every real row.
+    address_match_found_definition="${address_match_reviewed_definition//->> \'/->> \'$scratch_schema.}"
+    if [ "$address_match_found_definition" = "$address_match_reviewed_definition" ]; then
+        printf '%s\n' "$address_match_index_name: reviewed definition has no JSON key literal to alter" >&2
+        exit 1
+    fi
+    assert_migration_refusal "schema-name-in-literal-$address_match_index_name" \
+        "$address_match_migration" \
+        "$address_match_index_name exists but does not have the reviewed definition; found \"$address_match_found_definition\", expected \"$address_match_reviewed_definition\"; $address_match_recovery" <<SQL
+DROP INDEX $address_match_index_name;
+$address_match_found_definition;
 SQL
 done
 # Exercise reverse_hydration_attempt_state_upgrade from the exact predecessor

@@ -126,7 +126,40 @@ async fn load_historical_address_history_matches(
     include_candidates: bool,
     published: Option<&std::collections::BTreeMap<String, i64>>,
 ) -> Result<Vec<AddressHistoryAnchor>> {
-    let mut builder = QueryBuilder::<Postgres>::new(
+    let mut builder = QueryBuilder::<Postgres>::new("");
+    push_historical_address_matches_query(
+        &mut builder,
+        address,
+        namespace,
+        relations,
+        canonical_only,
+        include_candidates,
+        published,
+    );
+    let rows = builder
+        .build()
+        .fetch_all(pool)
+        .await
+        .context("failed to fetch historical address-history anchors")?;
+
+    rows.into_iter()
+        .map(decode_address_history_anchor)
+        .collect()
+}
+
+/// The names and resources an address held in history: registrant grants, token transfers
+/// and registry ownership transfers whose new holder is `address`. Each arm matches one partial
+/// expression index on `normalized_events` (`normalized_events_address_*_match_idx`).
+pub(super) fn push_historical_address_matches_query<'a>(
+    builder: &mut QueryBuilder<'a, Postgres>,
+    address: &'a str,
+    namespace: Option<&'a str>,
+    relations: Option<&'a [AddressNameRelation]>,
+    canonical_only: bool,
+    include_candidates: bool,
+    published: Option<&'a std::collections::BTreeMap<String, i64>>,
+) {
+    builder.push(
         r#"
         SELECT DISTINCT
             ne.logical_name_id,
@@ -139,7 +172,7 @@ async fn load_historical_address_history_matches(
          AND resource_lineage.block_hash = r.block_hash
         "#,
     );
-    push_history_lineage_join(&mut builder);
+    push_history_lineage_join(builder);
     if include_candidates {
         builder.push(" WHERE ne.derivation_kind IN (");
     } else {
@@ -156,10 +189,10 @@ async fn load_historical_address_history_matches(
     }
     separated.push_unseparated(")");
 
-    push_history_canonicality_filter(&mut builder, canonical_only);
+    push_history_canonicality_filter(builder, canonical_only);
     if canonical_only {
         builder.push(" AND (ne.resource_id IS NULL OR (TRUE ");
-        push_readable_anchored_row_filter(&mut builder, "r", "resource_lineage");
+        push_readable_anchored_row_filter(builder, "r", "resource_lineage");
         builder.push("))");
     }
 
@@ -187,17 +220,7 @@ async fn load_historical_address_history_matches(
         }
     }
     builder.push(" AND ");
-    push_address_match_filter(&mut builder, address, relations);
-
-    let rows = builder
-        .build()
-        .fetch_all(pool)
-        .await
-        .context("failed to fetch historical address-history anchors")?;
-
-    rows.into_iter()
-        .map(decode_address_history_anchor)
-        .collect()
+    push_address_match_filter(builder, address, relations);
 }
 
 fn push_address_match_filter<'a>(
@@ -324,3 +347,7 @@ fn push_registry_owner_match_filter<'a>(
     builder.push_bind(address);
     builder.push(")");
 }
+
+#[cfg(test)]
+#[path = "address_plan_tests.rs"]
+mod plan_tests;
