@@ -2,13 +2,14 @@
 //! registration filter validated, ready for the SQL builders.
 
 use anyhow::{Context, Result};
-use sqlx::PgPool;
+use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
 
 use super::{
     EventHistoryFilter, EventHistoryResolverFilter, HistoryBlockWindow, HistoryOrder,
     HistoryPageOptions, HistoryScope,
     address_matches::load_address_history_selector,
+    attribution::{AttributedRecords, load_attributed_records, selector_resource_ids},
     binding_anchors::{
         load_logical_name_ids_for_resource_id, load_resource_ids_for_logical_name_id,
     },
@@ -42,15 +43,39 @@ pub(in crate::history) struct EventHistoryReadFilter {
     pub(in crate::history) order: HistoryOrder,
     pub(in crate::history) block_window: Option<HistoryBlockWindow>,
     pub(in crate::history) resolver: Option<EventHistoryResolverFilter>,
+    /// The resolver record writes attributed to the selectors' resources at
+    /// `publication_block_bounds`, loaded by [`EventHistoryReadFilter::with_attributed_records`].
+    pub(in crate::history) attributed_records: AttributedRecords,
 }
 
 impl EventHistoryReadFilter {
     pub(in crate::history) fn with_page_options(mut self, options: &HistoryPageOptions) -> Self {
+        if options.publication_block_bounds.is_some() {
+            self.publication_block_bounds = options.publication_block_bounds.clone();
+        }
         self.event_kinds = options.event_kinds.clone();
         self.bind_cursor_anchor_to_event_kinds = options.bind_cursor_anchor_to_event_kinds;
         self.order = options.order;
         self.block_window = options.block_window.clone();
         self
+    }
+
+    /// Load the resolver record writes the selectors' resources had attributed at the read's
+    /// published block. Called on the connection that then reads the page, so the attribution
+    /// and the rows come from the same snapshot.
+    pub(in crate::history) async fn with_attributed_records(
+        mut self,
+        connection: &mut PgConnection,
+    ) -> Result<Self> {
+        let resource_ids = selector_resource_ids(&self.selectors);
+        self.attributed_records = load_attributed_records(
+            connection,
+            &resource_ids,
+            self.publication_block_bounds.as_ref(),
+        )
+        .await
+        .context("failed to load resolver record attribution for history")?;
+        Ok(self)
     }
 
     /// The candidate rows of a registration-scoped product read, when this is one.
@@ -203,5 +228,6 @@ pub(in crate::history) async fn event_history_read_filter(
             chain_id: resolver.chain_id,
             address: resolver.address.to_ascii_lowercase(),
         }),
+        attributed_records: AttributedRecords::default(),
     })
 }

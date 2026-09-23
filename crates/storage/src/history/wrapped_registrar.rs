@@ -16,6 +16,49 @@ use anyhow::{Context, Result};
 use sqlx::{PgPool, Postgres, QueryBuilder};
 use uuid::Uuid;
 
+/// The registration resources of one exact name as they stood at `published`: the resources its
+/// canonical surface bindings reached at or below each chain's published block, the leases
+/// `NameWrapped` links recorded by then, and the leases registrar grants carrying the name's
+/// namehash created by then. Every input is historical evidence; the registration Project selected
+/// for the name now is not read, so the set cannot grow when a later publication selects a
+/// different lease.
+pub async fn load_bounded_registration_resource_ids(
+    pool: &PgPool,
+    logical_name_id: &str,
+    published: &BTreeMap<String, i64>,
+) -> Result<Vec<Uuid>> {
+    let mut resource_ids = crate::load_surface_bindings_by_logical_name_id(pool, logical_name_id)
+        .await
+        .with_context(|| format!("failed to load registration bindings for {logical_name_id}"))?
+        .into_iter()
+        .filter(|binding| {
+            published
+                .get(&binding.chain_id)
+                .is_some_and(|block| binding.block_number <= *block)
+        })
+        .map(|binding| binding.resource_id)
+        .collect::<Vec<_>>();
+    resource_ids.extend(
+        load_wrapped_registrar_resource_ids_by_logical_name_id(
+            pool,
+            logical_name_id,
+            Some(published),
+        )
+        .await?,
+    );
+    resource_ids.extend(
+        load_registrar_grant_resource_ids_by_logical_name_id(
+            pool,
+            logical_name_id,
+            Some(published),
+        )
+        .await?,
+    );
+    resource_ids.sort_unstable();
+    resource_ids.dedup();
+    Ok(resource_ids)
+}
+
 /// Load the BaseRegistrar lease resources that canonical `NameWrapped` rows link to one exact
 /// name. `published` keeps only links recorded at or below each chain's published block.
 pub async fn load_wrapped_registrar_resource_ids_by_logical_name_id(

@@ -2951,15 +2951,17 @@ async fn v2_history_ignores_an_unpublished_name_wrapped_link() -> Result<()> {
 }
 
 // A name's older and later BaseRegistrar leases are separate registrations. A node-keyed
-// record write that Project attributed only to the later lease's records is not part of the
-// older lease's history, its count, or its cursor anchors, while a write attributed to the
-// NameWrapper resource whose `NameWrapped` row recorded the older lease is.
+// record write that only the later lease's resolver pointer attributes is not part of the older
+// lease's history, its count, or its cursor anchors, while a write the pointer of the NameWrapper
+// resource whose `NameWrapped` row recorded the older lease attributes is.
 #[tokio::test]
 async fn registration_history_excludes_record_writes_attributed_to_another_lease() -> Result<()> {
     const NAME: &str = "two-leases.eth";
     const SEED_LOGICAL_NAME_ID: &str = "ens:two-leases.eth";
     const HOLDER: &str = "0x0000000000000000000000000000000000007160";
-    const RESOLVER: &str = "0x00000000000000000000000000000000000000c3";
+    // The wrapped era selected one resolver and the later lease another.
+    const WRAPPED_RESOLVER: &str = "0x00000000000000000000000000000000000000c3";
+    const LATER_RESOLVER: &str = "0x00000000000000000000000000000000000000c4";
     let database = TestDatabase::new_migrated().await?;
     // The name is currently bound to its later, unwrapped lease.
     let later_lease_id = Uuid::from_u128(0x7160);
@@ -3009,13 +3011,13 @@ async fn registration_history_excludes_record_writes_attributed_to_another_lease
     .execute(&database.pool)
     .await?;
 
-    let node_write = |event_identity: &str, block_number: i64| {
+    let node_write = |event_identity: &str, block_number: i64, resolver: &str| {
         let mut event = v2_history_event(event_identity, None, None, "RecordChanged", block_number);
-        event.source_family = "ens_v2_resolver_l1".to_owned();
-        event.derivation_kind = "ens_v2_resolver".to_owned();
+        event.source_family = "ens_v1_resolver_l1".to_owned();
+        event.raw_fact_ref["emitting_address"] = json!(resolver);
         event.after_state = json!({
             "source_event": "TextChanged",
-            "resolver": RESOLVER,
+            "resolver": resolver,
             "node": namehash,
             "record_key": "text:lease",
             "record_family": "text",
@@ -3046,10 +3048,22 @@ async fn registration_history_excludes_record_writes_attributed_to_another_lease
         "node": namehash,
         "wrapped_registrar_resource_id": older_lease_id,
     });
-    let older_write_identity =
-        "ens_v2_resolver:2:ethereum-mainnet:0xhistory122:0xtx122:0:RecordChanged:0";
-    let later_write_identity =
-        "ens_v2_resolver:2:ethereum-mainnet:0xhistory125:0xtx125:0:RecordChanged:0";
+    let older_write_identity = "two-leases-wrapped-era-write";
+    let later_write_identity = "two-leases-later-write";
+    // Each resource's registry pointer selects its era's resolver.
+    let pointer = |event_identity: &str, resource: Uuid, resolver: &str, block_number: i64| {
+        let mut event = v2_history_event(
+            event_identity,
+            Some(&logical_name_id),
+            Some(resource),
+            "ResolverChanged",
+            block_number,
+        );
+        event.source_family = "ens_v1_registry_l1".to_owned();
+        event.after_state = json!({"node": namehash, "resolver": resolver});
+        event.log_index = Some(1);
+        event
+    };
     let mut later_grant = v2_history_event(
         "two-leases-later-grant",
         Some(&logical_name_id),
@@ -3063,46 +3077,13 @@ async fn registration_history_excludes_record_writes_attributed_to_another_lease
         &[
             older_grant,
             wrapper_binding,
-            node_write(older_write_identity, 122),
+            pointer("two-leases-wrapped-pointer", wrapper_resource_id, WRAPPED_RESOLVER, 121),
+            node_write(older_write_identity, 122, WRAPPED_RESOLVER),
             later_grant,
-            node_write(later_write_identity, 125),
+            pointer("two-leases-later-pointer", later_lease_id, LATER_RESOLVER, 124),
+            node_write(later_write_identity, 125, LATER_RESOLVER),
         ],
     )
-    .await?;
-
-    // Project attributes the older write to the NameWrapper resource's records and the later
-    // write to the later lease's records.
-    let event_id = |identity: &str| {
-        let pool = database.pool.clone();
-        let identity = identity.to_owned();
-        async move {
-            sqlx::query_scalar::<_, i64>(
-                "SELECT normalized_event_id FROM bigname_phase.normalized_events
-                 WHERE event_identity = $1",
-            )
-            .bind(identity)
-            .fetch_one(&pool)
-            .await
-        }
-    };
-    let older_write_id = event_id(older_write_identity).await?;
-    let later_write_id = event_id(later_write_identity).await?;
-    let mut wrapper_inventory =
-        compact_records_inventory_current_row(&logical_name_id, wrapper_resource_id);
-    wrapper_inventory.provenance =
-        json!({ "attributed_event_ids": [older_write_id.to_string()] });
-    database
-        .insert_record_inventory_current_row(wrapper_inventory)
-        .await?;
-    sqlx::query(
-        "UPDATE bigname_phase.record_inventory_current
-         SET provenance = provenance
-             || jsonb_build_object('attributed_event_ids', jsonb_build_array($2::bigint))
-         WHERE resource_id = $1",
-    )
-    .bind(later_lease_id)
-    .bind(later_write_id)
-    .execute(&database.pool)
     .await?;
 
     let older_route = format!("/v1/events?registration_id={older_lease_id}&page_size=20");

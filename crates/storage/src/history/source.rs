@@ -37,15 +37,20 @@ pub(super) fn push_history_source_for_filter<'a>(
         builder.push(")");
         push_bounded_candidate_canonicality(builder, canonical_only);
         push_not_in_name_arm(builder, logical_name_ids);
-        // Node-keyed record writes carry neither a name nor a resource; Project attributes
-        // them to a resource in the record inventory provenance.
+        // Node-keyed record writes carry neither a name nor a resource; a resolver pointer at or
+        // below the read's published block attributes them to a resource (`attribution.rs`).
         builder.push(
             "\nUNION ALL\n\
              SELECT candidate.*\n\
              FROM bigname_phase.normalized_events candidate\n\
              WHERE candidate.resource_id IS NULL AND (FALSE",
         );
-        push_attributed_record_filter(builder, "candidate", resource_ids);
+        push_attributed_record_filter(
+            builder,
+            "candidate",
+            &filter.attributed_records,
+            resource_ids,
+        );
         builder.push(")");
         push_bounded_candidate_canonicality(builder, canonical_only);
         push_not_in_name_arm(builder, logical_name_ids);

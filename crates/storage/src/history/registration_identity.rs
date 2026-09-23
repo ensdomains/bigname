@@ -9,7 +9,7 @@ mod registry_registration;
 use super::{
     EventHistoryReadFilter,
     filters::{
-        push_attributed_record_filter_where, push_attributing_inventory_is_registration,
+        push_attributed_record_filter_where, push_attributing_resource_is_registration,
         push_publication_bound,
     },
     lineage::{same_fork_as, same_fork_predicate},
@@ -72,9 +72,9 @@ pub(super) async fn is_public_registration_id(
 
 /// Keep only the rows of one registration. A row on a resource belongs to it when its
 /// registration identity is that registration; a row with no resource (a record write) belongs
-/// to it while one of the registration's bindings is active, or when Project attributed the
-/// write to the registration's own records or to those of a NameWrapper resource that wrapped
-/// it. The candidate rows also hold the writes of the name's other registrations, so attribution
+/// to it while one of the registration's bindings is active, or when a resolver pointer at or
+/// below the read's published block attributed the write to the registration itself or to a
+/// NameWrapper resource that wrapped it. The candidate rows also hold the writes of the name's other registrations, so attribution
 /// to a candidate resource alone is not membership. Every binding, grant and wrapper-link
 /// witness lies at or below the read's published block of its chain.
 pub(super) fn push_registration_filter<'a>(
@@ -93,8 +93,9 @@ pub(super) fn push_registration_filter<'a>(
     builder.push(" AND (");
     push_registration_binding_at_event(builder, registration_id, canonical_only, published);
     if let Some((_, resource_ids)) = filter.product_registration() {
-        push_attributed_record_filter_where(builder, "ne", resource_ids, |builder| {
-            push_attributing_inventory_is_registration(
+        let attributed = &filter.attributed_records;
+        push_attributed_record_filter_where(builder, "ne", attributed, resource_ids, |builder| {
+            push_attributing_resource_is_registration(
                 builder,
                 registration_id,
                 canonical_only,

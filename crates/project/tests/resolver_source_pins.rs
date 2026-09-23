@@ -1,3 +1,6 @@
+#[path = "support/bounded_attribution.rs"]
+mod bounded_attribution;
+
 use bigname_project::{BatchRequest, Engine, Marker, RunMode};
 use bigname_test_support::{TestDatabase, TestDatabaseConfig};
 use serde_json::{Value, json};
@@ -208,6 +211,7 @@ async fn duplicate_declarations_project_latest_role_and_features_together() -> T
             mode: RunMode::Normal,
         })
         .await?;
+    bounded_attribution::assert_bounded_record_attribution_matches_inventory(&pool).await?;
     let classification: Value = sqlx::query_scalar(
         "SELECT declared_summary -> 'classification'
          FROM resolver_current
@@ -235,6 +239,7 @@ async fn duplicate_declarations_project_latest_role_and_features_together() -> T
             mode: RunMode::Normal,
         })
         .await?;
+    bounded_attribution::assert_bounded_record_attribution_matches_inventory(&pool).await?;
     let resumed_classification: Value = sqlx::query_scalar(
         "SELECT declared_summary -> 'classification'
          FROM resolver_current
@@ -285,6 +290,7 @@ async fn public_v2_requires_direct_declaration_and_does_not_enumerate() -> TestR
                 mode: RunMode::Normal,
             })
             .await?;
+        bounded_attribution::assert_bounded_record_attribution_matches_inventory(&pool).await?;
         let (status, summary): (String, Value) = sqlx::query_as(
             "SELECT support_status, declared_summary FROM resolver_current WHERE resolver_address = $1",
         ).bind(RESOLVER).fetch_one(&pool).await?;
