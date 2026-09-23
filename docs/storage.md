@@ -337,8 +337,9 @@ use the node and resolver expression indexes on `normalized_events`. Three paths
 supporting index and read through the broad `normalized_events_projection_idx` or a block-range
 index instead: the ENSv2 declared-resolver arm (ENSv2 resolver writes), the
 `ResolverRecordLinked` scan for record-ID link spans, and the mirror lookup of the ENSv1 registry
-pointer by `lower(node)`. All three are reached only by Sepolia deployments today. A plan test in
-`history/address_plan_tests.rs` checks that neither statement reads `normalized_events`
+pointer by `lower(node)`. All three are reached only by Sepolia deployments today. The lookup of
+the declaring manifest also reads through the projection index, on every deployment. A plan test
+in `history/address_plan_tests.rs` checks that neither statement reads `normalized_events`
 sequentially.
 
 History loaders called with `canonical_only=false` also return rows of activated losing
