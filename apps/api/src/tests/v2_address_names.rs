@@ -647,6 +647,11 @@ async fn v2_get_address_names_treats_an_out_of_range_expiry_as_unknown() -> Resu
         (json!("0"), json!("1970-01-01T00:00:00Z"), first_known),
         (json!("253402300799"), json!("9999-12-31T23:59:59Z"), last_known),
         (json!("253402300800"), Value::Null, None),
+        (
+            json!("1735689600.5"),
+            json!("2025-01-01T00:00:00Z"),
+            Some("2025-01-01T00:00:00Z"),
+        ),
         (Value::Null, json!("2030-01-02T00:00:00Z"), Some("2030-01-02T00:00:00Z")),
     ] {
         set_address_name_expiry(&database, "alpha.eth", &registration, &control).await?;
@@ -669,13 +674,38 @@ async fn v2_get_address_names_treats_an_out_of_range_expiry_as_unknown() -> Resu
             .expect("alpha.eth stays listed");
         // An unknown expiry leaves the key out; a known one is an RFC 3339 string.
         assert_eq!(alpha.get("expires_at"), expected.map(Value::from).as_ref(), "{case}");
-        let (asc_position, desc_position) = if expected == first_known {
-            (0, asc.len() - 1)
-        } else {
-            (asc.len() - 1, 0)
-        };
+        // Every other row expires in 2026 or later, so an earlier known expiry sorts first.
+        let (asc_position, desc_position) =
+            if expected.is_some_and(|expiry| expiry < "2026-01-02T00:00:00Z") {
+                (0, asc.len() - 1)
+            } else {
+                (asc.len() - 1, 0)
+            };
         assert_eq!(names(asc)[asc_position], "alpha.eth", "{case}: {:?}", names(asc));
         assert_eq!(names(desc)[desc_position], "alpha.eth", "{case}: {:?}", names(desc));
+    }
+    database.cleanup().await
+}
+
+// A fractional seconds expiry keeps whole seconds for sorting too, as Project presents it. Half a
+// second past alpha.eth's expiry, beta.eth ties with it, so the collection's tie-break orders
+// them (beta.eth first, as it does for any equal expiry here), not the half second.
+#[tokio::test]
+async fn v2_get_address_names_sorts_a_fractional_expiry_by_whole_seconds() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_address_names_fixture(&database).await?;
+    let formatted = json!("2025-01-01T00:00:00Z");
+    set_address_name_expiry(&database, "alpha.eth", &json!("1735689600"), &formatted).await?;
+    set_address_name_expiry(&database, "beta.eth", &json!("1735689600.5"), &formatted).await?;
+    let payload = v2_address_names_payload_for_database(
+        &database,
+        &format!("/v1/addresses/{V2_ADDRESS}/names?sort=expires_at&order=asc"),
+    )
+    .await?;
+    let rows = payload["data"].as_array().expect("expires asc data");
+    assert_eq!(&names(rows)[..2], ["beta.eth", "alpha.eth"], "{payload}");
+    for row in &rows[..2] {
+        assert_eq!(row.get("expires_at"), Some(&formatted), "{row}");
     }
     database.cleanup().await
 }
