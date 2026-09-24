@@ -755,7 +755,7 @@ async fn child_authority_selects_arm_after_parent_reachability_filter() -> Resul
 }
 
 #[rustfmt::skip]
-visibility_test!(unsupported_both_arm_child_is_omitted_after_reachability, false,
+visibility_test!(both_arm_child_follows_its_v2_registration_after_reachability, true,
     path = None, fuses = 0, v2 = true, child_arms = &["ens_v1", "ens_v2"]);
 #[rustfmt::skip]
 visibility_test!(unreachable_v1_arm_does_not_suppress_reachable_v2_arm, true,

@@ -870,6 +870,86 @@ fn diagnostic_text_record_entries(count: usize) -> Vec<Value> {
         .collect()
 }
 
+// Project writes the covered source classes and enumeration basis into
+// `declared_summary.coverage` from the selected arm; the coverage route serves them.
+#[tokio::test]
+async fn v2_diagnostics_name_coverage_serves_the_projected_source_classes() -> Result<()> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    let cases = [
+        (
+            "v1-selected.eth",
+            0x7100_u128,
+            json!(["ensv1_registry_path"]),
+            "exact_name",
+        ),
+        (
+            "v2-selected.eth",
+            0x7200_u128,
+            json!(["ens_v2_root_l1", "ens_v2_registry_l1", "ens_v2_registrar_l1"]),
+            "exact_name_profile",
+        ),
+    ];
+    for (name, base, source_classes, basis) in &cases {
+        let logical_name_id = format!("ens:{name}");
+        let (resource_id, token_lineage_id, surface_binding_id) = (
+            Uuid::from_u128(base + 1),
+            Uuid::from_u128(base + 2),
+            Uuid::from_u128(base + 3),
+        );
+        database
+            .seed_name_current_binding(
+                &logical_name_id,
+                "ens",
+                name,
+                name,
+                &format!("namehash:{name}"),
+                resource_id,
+                token_lineage_id,
+                surface_binding_id,
+            )
+            .await?;
+        let mut row = diagnostic_name_current_row(
+            &logical_name_id,
+            21_000_004,
+            resource_id,
+            token_lineage_id,
+            surface_binding_id,
+        );
+        row.coverage = json!({"status": "projected", "exhaustiveness": "not_asserted"});
+        row.declared_summary["coverage"] = json!({
+            "status": "projected",
+            "exhaustiveness": "not_asserted",
+            "source_classes_considered": source_classes,
+            "enumeration_basis": basis,
+            "unsupported_reason": null
+        });
+        database.insert_name_current_row(row).await?;
+    }
+
+    for (name, _, source_classes, basis) in &cases {
+        let payload = request_v2_diagnostics_json(
+            &database,
+            &format!("/v1/diagnostics/names/{name}/coverage"),
+            StatusCode::OK,
+        )
+        .await?;
+        assert_eq!(
+            payload["data"],
+            json!({
+                "status": "projected",
+                "exhaustiveness": "not_asserted",
+                "source_classes_considered": source_classes,
+                "enumeration_basis": basis,
+                "unsupported_reason": null
+            }),
+            "{name}"
+        );
+    }
+
+    database.cleanup().await?;
+    Ok(())
+}
+
 async fn seed_v2_diagnostics_name_fixture(
     database: &TestDatabase,
     logical_name_id: &str,

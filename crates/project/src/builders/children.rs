@@ -2,12 +2,12 @@ use sqlx::{Postgres, Transaction};
 
 use crate::{Marker, ProjectError, Result};
 
-/// Builds the parent-child relations each authority arm currently states, then publishes the one
-/// the child's own authority selects.
+/// Builds each authority arm's current parent-child relations and publishes the one the child's
+/// own authority selects, after parent ENSv1→ENSv2 migration reachability filters the ENSv1 arm.
 ///
-/// Parent ENSv1→ENSv2 migration reachability filters the ENSv1 arm before the child's authority
-/// selects an arm. A released ENSv2 child publishes nothing and never falls back to ENSv1, and a
-/// pair whose arms cannot be told apart is omitted as unsupported rather than ranked.
+/// A released ENSv2 child held by a migration proof or a qualifying ENSv2 release tombstone or
+/// regime publishes nothing and never falls back to ENSv1; any other child follows its selected
+/// arm, and a pair with no selected authority whose arms disagree is omitted, not ranked.
 pub(super) async fn build(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,

@@ -238,12 +238,19 @@ pub async fn load_name_current(
             nc.binding_kind,
             nc.declared_summary,
             nc.provenance,
+            -- Status and reason come from the support columns; the source classes and
+            -- enumeration basis Project derived from the selected arm come from the summary.
             CASE WHEN nc.support_status = 'supported'
                  THEN jsonb_build_object('status', 'projected', 'exhaustiveness', 'not_asserted')
                  ELSE jsonb_build_object(
                      'status', 'unsupported', 'exhaustiveness', 'not_asserted',
                      'unsupported_reason', nc.unsupported_reason
-                 ) END AS coverage,
+                 ) END || jsonb_strip_nulls(jsonb_build_object(
+                     'source_classes_considered',
+                     nc.declared_summary #> '{{coverage,source_classes_considered}}',
+                     'enumeration_basis',
+                     nc.declared_summary #> '{{coverage,enumeration_basis}}'
+                 )) AS coverage,
             nc.chain_positions,
             nc.canonicality_summary,
             nc.manifest_version,

@@ -781,6 +781,24 @@ invalid, not ready, on another table, not an index, or has another definition.
 No `ANALYZE` is needed: the index is on plain columns.
 
 The release containing
+`20260924120000_normalized_events_project_v1_pointer_addressed_node_idx.sql`
+adds the index Project's ENSv1 mirror lookups and the history reader use to find
+ENSv1 registry resolver pointers by the node each event addresses. On an
+initialized production namespace, build it in step 3 by running
+[`ops/mirror-pointer-index/install.sql`](../../ops/mirror-pointer-index/install.sql)
+as [its runbook](../../ops/mirror-pointer-index/README.md) describes. This
+runbook carries no copy of the statement; `install.sql` is the only source, and
+`schema-v2/apply-check.sh` proves it builds what the fresh baseline and the
+schema-migration build. The build is concurrent and permits writes, so it can
+finish while the existing runner is still processing; step 3 then only runs
+`install.sql` again as the check. The script ends with
+`ANALYZE bigname_phase.normalized_events`, because the index is on an
+expression. Keep the `install.sql` output with its start and end times in the
+release record. Then apply the schema-migrations in step 4; the
+schema-migration's `IF NOT EXISTS` build is a no-op when the index already
+exists, and it ends with the same check.
+
+The release containing
 `20260904120000_project_redo_child_registration_history.sql` adds the bounded
 Interpret-to-Project handoff for child and registry identifiers from deleted
 ENSv1→ENSv2 [migration-registry](../glossary.md#migration-registry-wrapperregistry)
@@ -1203,6 +1221,10 @@ indexes are additive; rollback may leave them in place.
    `20260923130000_normalized_events_chain_block_number_desc_idx.sql`, run
    `ops/events-order-index/install.sql` as described above and require it to
    exit zero;
+   for the release containing
+   `20260924120000_normalized_events_project_v1_pointer_addressed_node_idx.sql`,
+   run `ops/mirror-pointer-index/install.sql` as described above and require
+   it to exit zero;
    for the release containing `20260922010000_project_node_history_idx.sql`,
    `20260922010100_project_mirror_scope_indexes.sql` or
    `20260923140000_project_name_surfaces_label_indexes.sql`, run

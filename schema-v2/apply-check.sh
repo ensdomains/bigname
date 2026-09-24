@@ -529,9 +529,9 @@ migration_application_log="$(
 # Future entries must use basename|one-line reason.
 intentional_phase_migration_skips=()
 refusal_assertions_passed=0
-expected_refusal_assertions=251
+expected_refusal_assertions=263
 predecessor_shape_proof_count=0
-expected_predecessor_shape_proof_count=45
+expected_predecessor_shape_proof_count=46
 refusal_probe_seconds=0
 timing_started=$SECONDS
 
@@ -635,7 +635,8 @@ for migration_file in \
     "$ROOT/migrations/20260923120000_normalized_events_address_match_indexes.sql" \
     "$ROOT/migrations/20260923130000_normalized_events_chain_block_number_desc_idx.sql" \
     "$ROOT/migrations/20260923140000_project_name_surfaces_label_indexes.sql" \
-    "$ROOT/migrations/20260923150000_child_registration_events.sql"
+    "$ROOT/migrations/20260923150000_child_registration_events.sql" \
+    "$ROOT/migrations/20260924120000_normalized_events_project_v1_pointer_addressed_node_idx.sql"
 do
     emit_phase_migration "$migration_file" empty-schema | run_psql
 done
@@ -2813,6 +2814,133 @@ DROP INDEX $events_order_index;
 CREATE INDEX $events_order_index ON normalized_events ($events_order_wrong_keys);
 SQL
 done
+# Recreate the mirror pointer index from its preceding schema shape. Compare the
+# resulting catalog definition to the fresh baseline, then prove a rerun leaves
+# it unchanged. The same proofs as the event page order index above.
+mirror_pointer_migration="$ROOT/migrations/20260924120000_normalized_events_project_v1_pointer_addressed_node_idx.sql"
+mirror_pointer_install="$ROOT/ops/mirror-pointer-index/install.sql"
+mirror_pointer_readme=ops/mirror-pointer-index/README.md
+mirror_pointer_index=normalized_events_project_v1_pointer_addressed_node_idx
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    cat <<'SQL'
+CREATE TEMP TABLE expected_mirror_pointer_index AS
+SELECT pg_get_indexdef(indexrelid) AS definition
+FROM pg_index
+WHERE indexrelid = 'normalized_events_project_v1_pointer_addressed_node_idx'::regclass;
+DROP INDEX normalized_events_project_v1_pointer_addressed_node_idx;
+SQL
+    emit_phase_migration "$mirror_pointer_migration" preceding-shape
+    emit_phase_migration "$mirror_pointer_migration" baseline-first
+    cat <<'SQL'
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_index, expected_mirror_pointer_index expected
+        WHERE indexrelid = 'normalized_events_project_v1_pointer_addressed_node_idx'::regclass
+          AND indrelid = 'normalized_events'::regclass
+          AND indisvalid AND indisready
+          AND pg_get_indexdef(indexrelid) = expected.definition
+    ) THEN
+        RAISE EXCEPTION 'mirror pointer index upgrade differs from the baseline';
+    END IF;
+END $$;
+DROP TABLE expected_mirror_pointer_index;
+SQL
+} | run_psql
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    emit_phase_migration "$mirror_pointer_migration" baseline-first
+    assert_search_path_sql "$scratch_schema"
+    printf 'SET search_path TO public;\n'
+    emit_phase_migration "$mirror_pointer_migration" baseline-first
+    assert_search_path_sql public
+    printf 'BEGIN;\nSET LOCAL search_path TO "%s", public;\n' "$scratch_schema"
+    render_phase_migration "$mirror_pointer_migration"
+    assert_search_path_sql "$scratch_schema, public"
+    printf 'COMMIT;\n'
+    assert_search_path_sql public
+    emit_quote_all_identifiers_probe "$mirror_pointer_migration" in-transaction
+} | run_psql
+assert_migration_context_count "$mirror_pointer_migration" empty-schema 1
+assert_migration_context_count "$mirror_pointer_migration" preceding-shape 1
+assert_migration_context_count "$mirror_pointer_migration" baseline-first 3
+assert_concurrent_index_installer mirror-pointer \
+    "$mirror_pointer_index" \
+    "$mirror_pointer_install" \
+    "$mirror_pointer_readme" \
+    normalized_events \
+    "block_number, chain_id"
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    printf '%s\n' \
+        "UPDATE pg_index SET indisvalid = false" \
+        "WHERE indexrelid = '$mirror_pointer_index'::regclass;"
+} | run_psql >/dev/null
+assert_index_install_hint mirror-pointer-invalid-index-hint \
+    "$mirror_pointer_install" \
+    "An interrupted concurrent build leaves an invalid index. Confirm in pg_stat_progress_create_index that no build is still running, run DROP INDEX CONCURRENTLY $scratch_schema.$mirror_pointer_index, then rerun this script."
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    printf '%s\n' \
+        "DROP INDEX CONCURRENTLY $mirror_pointer_index;" \
+        "CREATE INDEX $mirror_pointer_index ON discovery_edges (chain_id);"
+} | run_psql >/dev/null
+assert_index_install_refusal mirror-pointer-index-on-another-table \
+    "$mirror_pointer_install" \
+    "$mirror_pointer_index is missing from $scratch_schema.normalized_events or is not valid and ready; follow the recovery steps in $mirror_pointer_readme before retrying"
+assert_index_install_hint mirror-pointer-index-on-another-table-hint \
+    "$mirror_pointer_install" \
+    "An index on $scratch_schema.discovery_edges holds this name. Rename or remove it, then rerun this script."
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    printf '%s\n' "DROP INDEX $mirror_pointer_index;"
+    render_phase_migration "$mirror_pointer_install"
+} | run_psql >/dev/null
+mirror_pointer_recovery="follow the recovery steps in $mirror_pointer_readme, then run the schema-migrations again"
+assert_migration_refusal "invalid-$mirror_pointer_index" \
+    "$mirror_pointer_migration" \
+    "$mirror_pointer_index exists but is not a valid and ready index on $scratch_schema.normalized_events; $mirror_pointer_recovery" <<SQL
+UPDATE pg_index SET indisvalid = false
+WHERE indexrelid = '$mirror_pointer_index'::regclass;
+SQL
+assert_migration_refusal "not-ready-$mirror_pointer_index" \
+    "$mirror_pointer_migration" \
+    "$mirror_pointer_index exists but is not a valid and ready index on $scratch_schema.normalized_events; $mirror_pointer_recovery" <<SQL
+UPDATE pg_index SET indisready = false
+WHERE indexrelid = '$mirror_pointer_index'::regclass;
+SQL
+assert_migration_refusal "table-named-$mirror_pointer_index" \
+    "$mirror_pointer_migration" \
+    "$scratch_schema.$mirror_pointer_index is a table, not an index, so the index was never built; remove or rename that relation, then run the schema-migrations again" <<SQL
+DROP INDEX $mirror_pointer_index;
+CREATE TABLE $mirror_pointer_index ();
+SQL
+assert_migration_refusal "other-table-$mirror_pointer_index" \
+    "$mirror_pointer_migration" \
+    "$mirror_pointer_index exists but is not a valid and ready index on $scratch_schema.normalized_events; $mirror_pointer_recovery" <<SQL
+DROP INDEX $mirror_pointer_index;
+CREATE INDEX $mirror_pointer_index ON discovery_edges (chain_id);
+SQL
+mirror_pointer_reviewed_definition="$(
+    {
+        printf 'SET search_path TO "%s";\n' "$scratch_schema"
+        printf '%s\n' \
+            '\pset tuples_only on' \
+            '\pset format unaligned' \
+            "SET search_path TO pg_catalog;" \
+            "SELECT pg_get_indexdef('$scratch_schema.$mirror_pointer_index'::regclass);"
+    } | run_psql
+)"
+# The earlier node-only key is the index this one replaces for the mirror
+# lookups, so a prebuild with that key under this name must be refused.
+mirror_pointer_node_only_keys="chain_id, namespace, lower((after_state ->> 'node'::text)), block_number"
+assert_migration_refusal "node-only-keys-$mirror_pointer_index" \
+    "$mirror_pointer_migration" \
+    "$mirror_pointer_index exists but does not have the reviewed definition; found \"CREATE INDEX $mirror_pointer_index ON $scratch_schema.normalized_events USING btree ($mirror_pointer_node_only_keys)\", expected \"$mirror_pointer_reviewed_definition\"; $mirror_pointer_recovery" <<SQL
+DROP INDEX $mirror_pointer_index;
+CREATE INDEX $mirror_pointer_index ON normalized_events ($mirror_pointer_node_only_keys);
+SQL
 # Exercise reverse_hydration_attempt_state_upgrade from the exact predecessor
 # shape, then validate the additive tuple invariant independently. Both files
 # must remain idempotent after the upgrade completes.

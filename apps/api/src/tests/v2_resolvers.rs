@@ -629,6 +629,44 @@ async fn v2_get_resolver_omits_names_without_projected_authority() -> Result<()>
     Ok(())
 }
 
+/// Bound-name membership follows the name's selected resolver in `name_current`, never the
+/// record inventory. A mirror row that Project refused because the nearest ENSv1 resolver is a
+/// non-extended ancestor leaves the listing unchanged.
+#[tokio::test]
+async fn v2_get_resolver_bound_names_ignore_an_ancestor_rejected_mirror_inventory() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_resolver_bound_names_fixture(&database).await?;
+    upsert_test_resolver_current_rows(
+        &database,
+        &[resolver_current_row("ethereum-mainnet", V2_RESOLVER_ADDRESS)],
+    )
+    .await?;
+    let uri = format!("/v1/resolvers/1/{V2_RESOLVER_ADDRESS}");
+    let before = v2_resolver_payload_for_database(&database, &uri).await?;
+
+    let spec = v2_address_name_specs()
+        .into_iter()
+        .find(|spec| spec.name == "alpha.eth")
+        .expect("fixture seeds alpha.eth");
+    let mut inventory = address_name_record_inventory_current_row(&spec);
+    ancestor_rejected_mirror_inventory(V2_RESOLVER_ADDRESS, &mut inventory);
+    database.insert_record_inventory_current_row(inventory).await?;
+    let after = v2_resolver_payload_for_database(&database, &uri).await?;
+
+    assert!(
+        after["data"]["bound_names"]["data"]
+            .as_array()
+            .expect("bound names must be an array")
+            .iter()
+            .any(|row| row["name"] == "alpha.eth"),
+        "{after}"
+    );
+    assert_eq!(after["data"]["bound_names"], before["data"]["bound_names"]);
+
+    database.cleanup().await?;
+    Ok(())
+}
+
 /// A `.eth` lease that lapsed under a registry-only binding is released like any other lapse, so
 /// the resolver its registry owner set no longer lists the name among its bound names.
 #[tokio::test]

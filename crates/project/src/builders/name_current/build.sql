@@ -171,8 +171,13 @@
                    'coverage', jsonb_build_object(
                        'status', 'projected',
                        'exhaustiveness', 'not_asserted',
+                       -- Coverage describes the selected arm. A name with no selected arm keeps
+                       -- reading its corpus, so refused and unsupported rows report as before.
                        'source_classes_considered', CASE
-                           WHEN corpus.has_ens_v2 THEN jsonb_build_array(
+                           WHEN COALESCE(
+                               selected_authority.selected_authority_arm = 'ens_v2',
+                               corpus.has_ens_v2
+                           ) THEN jsonb_build_array(
                                'ens_v2_root_l1', 'ens_v2_registry_l1', 'ens_v2_registrar_l1'
                            )
                            WHEN surface.namespace IN ('ens', 'basenames')
@@ -183,7 +188,10 @@
                        'enumeration_basis', CASE
                            WHEN serving.serving_resource_id IS NOT NULL
                                THEN 'event_linked_registry_resolver'
-                           WHEN corpus.has_ens_v2 THEN 'exact_name_profile'
+                           WHEN COALESCE(
+                               selected_authority.selected_authority_arm = 'ens_v2',
+                               corpus.has_ens_v2
+                           ) THEN 'exact_name_profile'
                            ELSE 'exact_name'
                        END
                    )

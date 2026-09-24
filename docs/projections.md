@@ -290,7 +290,11 @@ as a [released v1 authority](glossary.md#released-v1-authority) tombstone. The e
 exception selects a current ENSv2 arm when ENSv1 evidence is current or
 historical, without establishing an authority epoch, so its epoch start and
 proof fields remain null. Historical ENSv2 evidence without a current ENSv2
-binding does not qualify.
+binding does not qualify. An ordinary name without a proof follows the chain
+([ADR 0007](adrs/0007-follow-the-chain-ens-authority.md)): a current ENSv2
+binding selects ENSv2, with its epoch starting at that binding and null proof
+fields, and otherwise ENSv1 decides unless a qualifying ENSv2 release tombstone
+or regime applies.
 
 ## Exact-name projection
 
@@ -1351,38 +1355,47 @@ Project models the call the mirror makes instead. The mirror finds the resolver
 with `RegistryUtils.findResolver` over the ENSv1 registry its declaration names:
 the walk reads the DNS-encoded name toward the root and selects the nearest
 node, the exact node first, whose registry resolver is nonzero; the root node is
-never consulted. It then calls that resolver with the caller's calldata: an
-immediate resolver receives the queried node's getter call and answers from its
-own storage for the queried node, while an `IExtendedResolver` receives
-`resolve(name, data)` and answers by its own logic.
-(upstream: .refs/ens_v2/contracts/src/resolver/ENSV1Resolver.sol:L38-L41 @ ens_v2@a971bd64)
+never consulted. It then keeps that resolver only when it was found at the
+queried node or supports `IExtendedResolver`, and otherwise answers with no
+resolver. It does not continue the walk past a rejected ancestor to look for a
+farther one. A kept resolver is called with the caller's calldata: an immediate
+resolver at the queried node receives the queried node's getter call and
+answers from its own storage for that node, while an `IExtendedResolver`
+receives `resolve(name, data)` and answers by its own logic.
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/resolver/ENSV1Resolver.sol:L40-L43 @ ens_v2_sepolia_20260916@366de741)
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/universalResolver/libraries/LibResolution.sol:L39-L48 @ ens_v2_sepolia_20260916@366de741)
 (upstream: .refs/ens_v1/contracts/universalResolver/RegistryUtils.sol:L25-L38 @ ens_v1@91c966f)
-(upstream: .refs/ens_v2/contracts/src/resolver/AbstractMirrorResolver.sol:L66-L69 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/resolver/AbstractMirrorResolver.sol:L66-L74 @ ens_v2_sepolia_20260916@366de741)
 (upstream: .refs/ens_v1/contracts/universalResolver/ResolverCaller.sol:L66-L70 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/universalResolver/ResolverCaller.sol:L88-L96 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/universalResolver/ResolverCaller.sol:L108-L127 @ ens_v1@91c966f)
 
 Project reproduces this from the staged events at the target. The registry's
 resolver per node is the latest canonical `ens_v1_registry_l1`,
-`ens_v1_registrar_l1`, or `ens_v1_wrapper_l1` `ResolverChanged` whose
-`after_state.node` is that namehash, clears included and whether or not the
-event is linked to a logical name or resource (the registry sets resolvers for
-nodes nobody owns in ENSv1, whose [pre-surface](glossary.md#pre-surface) pointer
-keeps both null); the consulted nodes are the queried name's surface
-and each proper ancestor surface below the root, matched by label suffix in the
-same namespace; the nearest consulted node with a nonzero resolver is selected.
+`ens_v1_registrar_l1`, or `ens_v1_wrapper_l1` `ResolverChanged` that addresses
+that namehash, clears included and whether or not the event is linked to a
+logical name or resource (the registry sets resolvers for nodes nobody owns in
+ENSv1, whose [pre-surface](glossary.md#pre-surface) pointer keeps both null).
+The addressed name is read in the adapters' shared ENSv1 node order:
+`after_state.child_node`, then `after_state.namehash`, then `after_state.node`.
+A state-derived pointer for a newly linked child keeps the `NewOwner`
+observation, whose `node` is the parent and whose `child_node` is the child, so
+it is the child's pointer, not the parent's. Scope expansion, evidence staging,
+the builder and the history reader all use this one identity. The consulted
+nodes are the queried name's surface and each proper ancestor surface below the
+root, matched by label suffix in the same namespace; the nearest consulted node
+with a nonzero resolver is selected.
 When the selected resolver is a supported, same-namespace `ens_v1_resolver_l1`
-declaration that is not itself a mirror and, for an ancestor selection, is not
-declared
-[`ensip10_extended_resolver`](manifests.md#required-fields), the mirrored
-resource is re-pointed at that resolver for the queried node and the ordinary
-node-keyed attribution above computes its `selectors`, `entries`,
+declaration that is not itself a mirror and the selection is the exact node,
+the mirrored resource is re-pointed at that resolver for the queried node and
+the ordinary node-keyed attribution above computes its `selectors`, `entries`,
 `unsupported_families`, `last_change`, record version boundary,
 `provenance.record_event_ids`, `provenance.attributed_event_ids`,
 `provenance.read_rules`, and `exact_nonempty_not_found_record_keys` exactly as
-for an ENSv1 name served by that resolver. An ancestor selection therefore
-serves the ancestor resolver's storage for the queried node, which is usually
-empty, never the ancestor's own records. `provenance.resolver_address` and
+for an ENSv1 name served by that resolver. An ancestor selection is never
+derived through, so the queried name never serves the ancestor's records or the
+ancestor resolver's storage for the queried node.
+`provenance.resolver_address` and
 `provenance.resolver_pointer_event_id` stay the name's own mirror pointer, and
 `provenance.mirror = {resolver_address, mirrored_source_family:
 "ens_v1_resolver_l1", mirrored_registry_source_family: "ens_v1_registry_l1",
@@ -1393,17 +1406,30 @@ mirrored_pointer_event_id, mirrored_pointer_source_family}` records the walk
 `mirrored_node` and `mirrored_name` are the selected registry node and its raw
 name, `ancestor_depth` is `0` for the exact node and otherwise the number of
 leading labels the walk stripped, and `forwarding` is `direct_call` or
-`extended_resolve` per the selected resolver's declared read features.
+`extended_resolve` per the selected resolver's declared read features. That
+mode is inferred from the declaration alone. It does not claim that a call
+happened or that the selected resolver passed the mirror's check; an unsupported
+row's `mirrored_unsupported_reason` records a rejection.
 
 Otherwise the row is `unsupported` with `mirrored_resolver_not_projected`, no
-entries, and no read rules. Either no consulted node has a nonzero resolver
+selectors, no entries, no record, link or attributed event ids, and no read
+rules. Either no consulted node has a nonzero resolver
 (`provenance.mirror` then carries only the registry fields and `queried_node`),
 or the selected resolver cannot be derived through:
 `provenance.mirror.mirrored_unsupported_reason` is
 `resolver_classification_missing` (unclassified, or declared in another
 namespace), the resolver's own unsupported reason, `mirrored_resolver_is_mirror`,
-`mirrored_resolver_not_ensv1`, or `ensip10_extended_resolver` (an ancestor whose
-answer for a descendant is resolver-defined), alongside the selected node. A
+`mirrored_resolver_not_ensv1`, `ensip10_extended_resolver` (an ancestor whose
+answer for a descendant is resolver-defined), or `ancestor_resolver_not_extended`
+(an ancestor the mirror rejects because it does not support
+`IExtendedResolver`), alongside the selected node. The classification reasons
+come first, so an ancestor reason only marks an ancestor that would otherwise be
+eligible. The row keeps the name's own mirror pointer as its boundary and
+`provenance.resolver_address`, and the selected ancestor's address and pointer
+event stay in `provenance.mirror`. This marker is persisted projection
+provenance only: the API's `include=inventory` and name-record diagnostics do
+not serialize it, `data.resolver` stays the mirror, and an explicit live
+fallback follows the ordinary verified-execution contract. A
 mirror whose own classification is unsupported or belongs to another namespace
 keeps the ordinary resolver reason or `resolver_classification_missing`. The
 derivation uses staged event history and the explicitly reusable resolver classification
@@ -1416,8 +1442,8 @@ including the name API's fallback `created_at` when no creation event is availab
 An absent ancestor output stays absent when that ancestor is only read; a new or
 changed surface still enters the ordinary affected scope.
 
-An independently affected consulted name or pointer resource, or a changed node-keyed
-ENSv1 pointer, still invalidates every mirror-pointer resource whose walk consults
+An independently affected consulted name or pointer resource, or a changed ENSv1
+pointer for a consulted node, still invalidates every mirror-pointer resource whose walk consults
 that node. Ancestor resolver changes and clears, queried-node record writes, resolver
 classification changes, and newly admitted name/path evidence must therefore rebuild
 their affected mirrors in the same publication. Inputs discovered while rebuilding one
