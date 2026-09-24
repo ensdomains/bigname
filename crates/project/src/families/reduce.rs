@@ -47,6 +47,7 @@ pub(crate) async fn apply(
     super::wrapper::apply(transaction, context, events, rows).await?;
     super::permissions::apply(transaction, context, events, rows).await?;
     super::topology::apply(transaction, context, events, rows).await?;
+    super::reverse::apply(transaction, context, events, rows).await?;
     Ok(())
 }
 

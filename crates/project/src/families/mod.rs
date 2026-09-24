@@ -20,6 +20,7 @@ mod reduce;
 mod registry;
 mod repair;
 mod resolver;
+mod reverse;
 mod store;
 mod tables;
 mod topology;
