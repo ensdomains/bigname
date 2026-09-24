@@ -370,19 +370,17 @@ collection route carry neither header.
   misses return `status=ok` with an empty `records`
   array for the input. Lookup record-level reason values are mapped to product
   vocabulary before serialization; current values include `read_failed`,
-  `exact_name_profile_not_supported`, `mixed_exact_name_corpus`, and
-  `unsupported_reason_missing`. The contracted per-name authority replacement
-  is documented in
+  `mixed_exact_name_corpus`, and `unsupported_reason_missing`. The contracted
+  per-name authority replacement is documented in
   [`architecture.md`](architecture.md#ensv1ensv2-current-authority). A name
   with facts on both ENSv1 and ENSv2 follows the chain
   ([ADR 0007](adrs/0007-follow-the-chain-ens-authority.md)): a current ENSv2
   registration is selected without a migration proof, and otherwise ENSv1
   decides unless a qualifying ENSv2 release tombstone or regime
   ([released ENSv2 authority](glossary.md#released-v2-authority)) applies, so
-  such a name is no longer refused. A selected ENSv2 registration
-  still needs the exact-name profile qualification; without it Project records
-  `ensv2_exact_name_profile_shadow`, which the API exposes as
-  `exact_name_profile_not_supported`. The earlier reasons
+  such a name is no longer refused. A selected ENSv2 registration with no
+  authority refusal is served; it needs no `ETHRegistrar` event, ENSv1→ENSv2
+  migration proof or child-registration proof. The earlier reasons
   `conflicting_current_ens_authority` (Mainnet) and
   `independent_ens_deployments_overlap` (Sepolia) are no longer produced. A
   `name_current` row derived with either reason by an earlier Project generation,
@@ -565,7 +563,18 @@ collection route carry neither header.
   installed before the baseline carried it). A row whose only expiry is stored
   in another form (an RFC 3339 string at `control.expiry`, or no expiry at all)
   is outside this listing by design; `GET /v1/names/{name}` still serves its
-  `expires_at`.
+  `expires_at`. A negative numeric expiry, or one after 9999-12-31T23:59:59Z,
+  is outside this listing too and has no `expires_at` on any route; Project
+  writes no formatted `control.expiry` for it, so no fallback revives it.
+  The Sepolia root registry registers `eth` and `reverse` with the largest
+  uint64 expiry
+  (upstream: .refs/ens_v2_sepolia_20260916/contracts/script/deploy-constants.ts:L1 @ ens_v2_sepolia_20260916@366de741)
+  (upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ETHRegistry.ts:L46 @ ens_v2_sepolia_20260916@366de741)
+  (upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ReverseMirror.ts:L35 @ ens_v2_sepolia_20260916@366de741).
+  Search and address collections treat such an expiry, or the same value as a
+  quoted number, as unknown the same way: the row has no `expires_at` and
+  address names with `sort=expires_at` place it with the other unknown expiries, last ascending
+  and first descending.
 - Released names: the listing means "registrations whose expiry falls in this
   window", whether the registration is live, in grace or released. A released
   name keeps the lapsed registration's expiry, so it appears in every window
@@ -714,8 +723,7 @@ collection route carry neither header.
   unsupported reason downgrades, including the retired
   `conflicting_current_ens_authority` and
   `independent_ens_deployments_overlap` on a row derived before the
-  follow-the-chain redo, and `ensv2_exact_name_profile_shadow`, which
-  reaches consumers as `exact_name_profile_not_supported`. The rule fails closed
+  follow-the-chain redo. The rule fails closed
   at both edges: an unsupported row that names no reason downgrades, and so does
   an unsupported reason this build does not recognize, so a reason added to the
   projection later serves `unsupported` by default rather than silently serving
@@ -1597,7 +1605,9 @@ every id, so it is a merge key, not a durable reference to store.
   Contract pointers use the `{chain_id, address}` shape with the row's own
   numeric `chain_id`; a zero-address pointer means "cleared" and is omitted, so
   a `resolver` row whose `data` has no `resolver` records a clearing. Unix
-  expiry values become RFC 3339 `expires_at`.
+  expiry values become RFC 3339 `expires_at` under the same rule as every
+  other route: a value before 1970 or after 9999-12-31T23:59:59Z is omitted,
+  and a value inside that range keeps its whole seconds.
 
 `include=raw` is a separate, explicit opt-in for explorer and diagnostic use.
 It adds one field:
@@ -2682,9 +2692,14 @@ introduces it rebuilds Project from full history before serving the option; see
   projection supports whose selected authority arm is not listed in the
   selected `ens_execution` manifest's `verified_authority_arms` returns that
   same reason. Mainnet lists only `ens_v1`; the official Sepolia manifest
-  lists both arms and therefore admits an `ens_v2`-selected claim. The refusal case needs a deployment profile that can support an
-  ENSv2 selection at all; where the deployment profile shadows the ENSv2 arm,
-  the name is already unsupported and takes the first case instead. None of the
+  lists both arms and therefore admits an `ens_v2`-selected claim. An
+  `ens_v2`-selected name is supported whenever its authority selection carries
+  no refusal, whichever registry or registrar recorded it and whatever the
+  `exact_name_profile` flag says, so such a claim reaches the arm check: it
+  proceeds to verification where the manifest lists `ens_v2` and returns
+  `exact_name_authority_not_verifiable` where it does not. Only an authority
+  refusal such as `current_authority_not_projected` makes the name unsupported
+  and sends the claim to the first case. None of the
   three cases dispatches a forward resolver call. A live reverse claim has
   already used its two reverse-leg provider calls before the name-level refusal
   is known. A consumer reads `unsupported_reason` to distinguish a projected
@@ -2773,11 +2788,9 @@ introduces it rebuilds Project from full history before serving the option; see
   expiry. A name whose exact-name projection is unsupported is omitted from
   search results whatever the reason. Today that is a name with no selected
   current binding (`current_authority_not_projected`, for example when both
-  arms have only history and nothing is open), a selected ENSv2 registration
-  without the exact-name profile qualification
-  (`ensv2_exact_name_profile_shadow`), or a row an earlier Project generation
-  derived with a retired reason. A mixed-history name is served like any other
-  name when its selected exact-name projection is supported.
+  arms have only history and nothing is open), or a row an earlier Project
+  generation derived with a retired reason. A mixed-history name is served like
+  any other name when its selected exact-name projection is supported.
   Search carries no row-local status or
   unsupported-reason field, so it omits such a name rather than serving
   registration fields no selected authority backs; callers use name detail or
@@ -2998,8 +3011,9 @@ For a registrar lease first identified by a later readable observation, registra
   `current_authority_not_projected` is absent from `bound_names` unless its
   serving resource is a TLD's root-registry resolver pointer; otherwise
   retained resolver-pointer evidence does not establish listing membership.
-  Other unsupported rows, such as `ensv2_exact_name_profile_shadow`, are
-  listed under the resolver their selected registration declares. The
+  Other unsupported rows, such as a row an earlier Project generation derived
+  with a retired reason, are listed under the resolver their selected
+  registration declares. The
   exception is an ENSv2 TLD whose current
   [root-registry resolver pointer](glossary.md#root-registry-resolver-pointer)
   is its serving resource: like the ownerless ENSv1 or Basenames row below, it

@@ -355,14 +355,14 @@ fn verified_primary_name_unsupported_reason_is_required_and_mapped() {
     let mapped = verified_answer_from_value(
         &json!({
             "status": "unsupported",
-            "unsupported_reason": "ensv2_exact_name_profile_shadow"
+            "unsupported_reason": "mixed_ensv1_ensv2_exact_name_corpus"
         }),
         &lookup_state,
     )
     .expect("known stored reason must map to product vocabulary");
     assert_eq!(
         mapped.unsupported_reason,
-        Some("exact_name_profile_not_supported".to_owned())
+        Some("mixed_exact_name_corpus".to_owned())
     );
 }
 
