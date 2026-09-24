@@ -153,9 +153,27 @@ fn updates_failure_freshness_lag_verification_and_redo_signals() -> Result<()> {
     Ok(())
 }
 
+#[tokio::test]
+async fn a_failed_refresh_after_a_commit_reports_refresh_failure() -> Result<()> {
+    let metrics = PipelineMetrics::new(
+        900,
+        RunnerLoopHeartbeat::default(),
+        RunnerPhaseProgress::default(),
+    )?;
+    metrics.refresh_success.set(1);
+    let unreachable = sqlx::postgres::PgPoolOptions::new()
+        .acquire_timeout(Duration::from_millis(200))
+        .connect_lazy("postgres://bigname@127.0.0.1:1/bigname")?;
+
+    assert!(metrics.refresh_after_commit(&unreachable).await.is_err());
+    assert_eq!(metrics.refresh_success.get(), 0);
+    Ok(())
+}
+
 #[test]
 fn served_lag_is_unavailable_without_both_sides() {
     assert_eq!(served_lag::served_lag(Some(104), Some(100)), 4);
+    assert_eq!(served_lag::served_lag(Some(99), Some(100)), 0);
     assert_eq!(served_lag::served_lag(Some(100), Some(100)), 0);
     assert_eq!(served_lag::served_lag(None, Some(100)), -1);
     assert_eq!(served_lag::served_lag(Some(104), None), -1);

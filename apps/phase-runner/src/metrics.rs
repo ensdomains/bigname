@@ -287,6 +287,14 @@ impl PipelineMetrics {
         Ok(())
     }
 
+    async fn refresh_after_commit(&self, pool: &PgPool) -> Result<()> {
+        let result = self.refresh_served_lag(pool).await;
+        if result.is_err() {
+            self.refresh_success.set(0);
+        }
+        result
+    }
+
     fn apply_phase_progress(&self) {
         for sample in self.phase_progress.snapshot() {
             let labels = &[sample.chain.as_str(), sample.phase.as_str(), sample.mode];
@@ -464,7 +472,7 @@ async fn refresh_loop(
         let result = tokio::select! {
             () = cancellation.cancelled() => return,
             _ = ticks.tick() => metrics.refresh(&pool).await,
-            () = feed.committed() => metrics.refresh_served_lag(&pool).await,
+            () = feed.committed() => metrics.refresh_after_commit(&pool).await,
         };
         if let Err(error) = result {
             tracing::error!(error = %format!("{error:#}"), "phase metrics refresh failed");
