@@ -13,13 +13,16 @@ mod driver;
 mod input;
 mod keys;
 mod marker;
+mod permissions;
 mod records;
 mod reduce;
 mod repair;
 mod resolver;
 mod store;
 mod tables;
+mod topology;
 mod undo;
+mod wrapper;
 
 pub use input::{InputToken, input_token};
 
