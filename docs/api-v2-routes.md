@@ -2744,8 +2744,14 @@ introduces it rebuilds Project from full history before serving the option; see
   dictionary vocabulary. Each result is built only from the selected current
   registration: a migrated name uses its ENSv2 owner, registrant, status, and
   expiry. A name whose exact-name projection is unsupported is omitted from
-  search results whatever the reason, including a mixed-history name with no
-  provable current authority. Search carries no row-local status or
+  search results whatever the reason. Today that is a name with no selected
+  current binding (`current_authority_not_projected`, for example when both
+  arms have only history and nothing is open), a selected ENSv2 registration
+  without the exact-name profile qualification
+  (`ensv2_exact_name_profile_shadow`), or a row an earlier Project generation
+  derived with a retired reason. A mixed-history name whose selected arm has a
+  current registration is supported and is served like any other name.
+  Search carries no row-local status or
   unsupported-reason field, so it omits such a name rather than serving
   registration fields no selected authority backs; callers use name detail or
   batch lookup when they need an omitted name's explicit coverage reason. The
@@ -2957,13 +2963,16 @@ For a registrar lease first identified by a later readable observation, registra
   ENSv1 NameWrapper registration at the served projection timestamp.
   Once exact-name authority is activated, `bound_names` includes a logical
   name only under the resolver selected by its current registration. A
-  migrated name is absent from its superseded ENSv1 resolver's listing; a
-  mixed-history name with no provable current authority is omitted from all
-  resolver listings rather than forced to `ok`. This nested collection adds no
-  row-local mixed-authority status, so callers use name detail or batch lookup
-  for the explicit coverage reason. A row classified as
-  `current_authority_not_projected` is also absent from `bound_names`; retained
-  resolver-pointer evidence does not establish listing membership. The
+  migrated name is absent from its superseded ENSv1 resolver's listing, and a
+  mixed-history name whose selected arm has a current registration is listed
+  like any other name. This nested collection adds no row-local
+  mixed-authority status, so callers use name detail or batch lookup for the
+  explicit coverage reason. A row classified as
+  `current_authority_not_projected` is absent from `bound_names` unless its
+  serving resource is a TLD's root-registry resolver pointer; otherwise
+  retained resolver-pointer evidence does not establish listing membership.
+  Other unsupported rows, such as `ensv2_exact_name_profile_shadow`, are
+  listed under the resolver their selected registration declares. The
   exception is an ENSv2 TLD whose current
   [root-registry resolver pointer](glossary.md#root-registry-resolver-pointer)
   is its serving resource: like the ownerless ENSv1 or Basenames row below, it
