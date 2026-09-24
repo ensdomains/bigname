@@ -35,6 +35,14 @@ fn build_name_authority_diagnostic_data(row: &NameCurrentRow) -> JsonValue {
 
     if let Some(object) = data.as_object_mut() {
         object.insert("permission_lineage".to_owned(), permission_lineage);
+        if let Some(block_number) =
+            bigname_storage::name_current_registry_handoff_block_number(&row.provenance)
+        {
+            object.insert(
+                "registry_handoff".to_owned(),
+                json!({ "block_number": block_number }),
+            );
+        }
     }
     data
 }
@@ -116,6 +124,25 @@ mod tests {
                 "status": "unsupported",
                 "unsupported_reason": "permission_lineage_not_projected_on_name_current"
             })
+        );
+    }
+
+    #[test]
+    fn authority_diagnostic_data_reports_the_registry_handoff_only_once_recorded() {
+        let mut row = super::super::test_name_row();
+        assert!(
+            build_name_authority_diagnostic_data(&row)
+                .get("registry_handoff")
+                .is_none()
+        );
+        row.provenance["authority_selection"] = json!({
+            "authority_arm": "ens_v1",
+            "registry_generation": "current",
+            "registry_handoff_block_number": 9_380_380,
+        });
+        assert_eq!(
+            build_name_authority_diagnostic_data(&row)["registry_handoff"],
+            json!({"block_number": 9_380_380})
         );
     }
 

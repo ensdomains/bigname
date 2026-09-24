@@ -751,6 +751,44 @@
                          candidate.surface_binding_id DESC
                 LIMIT 1
             ) binding ON TRUE
+        ), registry_records AS (
+            -- The ownership records the two ENSv1 registries hold for each ENS name's node: whether
+            -- the 2017 registry recorded an owner, and the block of the first record in the current
+            -- registry, which answers from the 2017 registry until it holds one. A node's first
+            -- current-registry write is always its parent's setSubnodeOwner, because setOwner is
+            -- authorised by the current registry's own record; its NewOwner derives
+            -- SubregistryChanged. Only NewOwner and Transfer derive SubregistryChanged or
+            -- AuthorityTransferred (the ens_v1_registry_l1 manifests' normalized_events). Reading
+            -- Transfer too is defensive: Interpret forces AuthorityTransferred for a first-write
+            -- Transfer only when no old-registry resolver link is retired, and the chain does not
+            -- produce that shape. A NewOwner names its child node and a Transfer its own. The filter
+            -- stays on columns with statistics so the join to the names below is estimated from
+            -- real row counts. Same-transaction registration reconciliation keeps the
+            -- transaction's last current-registry ownership write, so a registration it marks
+            -- `registry_migrated` has such a write beside it and the marker adds nothing here. The
+            -- root is left out: the constructor writes its record without an event.
+            -- (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L17-L21 @ ens_v1@91c966f)
+            -- (upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L18-L46 @ ens_v1@91c966f)
+            -- (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L23-L26 @ ens_v1@91c966f)
+            -- (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L60-L84 @ ens_v1@91c966f)
+            SELECT surface.logical_name_id,
+                   bool_or(record.emitter_role = 'registry_old') AS has_old_record,
+                   min(record.block_number) FILTER (WHERE record.emitter_role = 'registry')
+                       AS current_record_block
+            FROM (
+                SELECT lower(COALESCE(event.after_state ->> 'child_node',
+                                      event.after_state ->> 'node')) AS node,
+                       event.after_state ->> 'emitter_role' AS emitter_role,
+                       event.block_number
+                FROM project_events event
+                WHERE event.namespace = 'ens'
+                  AND event.source_family = 'ens_v1_registry_l1'
+                  AND event.event_kind IN ('SubregistryChanged', 'AuthorityTransferred')
+            ) record
+            JOIN project_surfaces surface
+              ON surface.namespace = 'ens' AND lower(surface.namehash) = record.node
+            WHERE record.node <> '0x0000000000000000000000000000000000000000000000000000000000000000'
+            GROUP BY surface.logical_name_id
         )
         SELECT selected.logical_name_id, selected.selected_authority_arm,
                selected.selected_resource_id, selected.selected_binding_id,
@@ -774,6 +812,11 @@
                    WHEN ownerless_profile.eligible THEN NULL
                    WHEN selected.selected_binding_id IS NULL THEN 'current_authority_not_projected'
                END AS unsupported_reason,
+               CASE WHEN selected.selected_authority_arm = 'ens_v1' THEN
+                   CASE WHEN records.has_old_record AND records.current_record_block IS NULL
+                       THEN 'old' ELSE 'current' END
+               END AS registry_generation,
+               records.current_record_block AS registry_handoff_block_number,
                selected.deployment_profile,
                jsonb_strip_nulls(jsonb_build_object('authority_arm',
                    selected.selected_authority_arm, 'binding_kind', selected.selected_binding_kind,
@@ -784,6 +827,7 @@
                        THEN 'ens_v1' END)) AS resource_authority_context
         FROM selected
         LEFT JOIN project_latest_registry_owner ownerless USING (logical_name_id)
+        LEFT JOIN registry_records records USING (logical_name_id)
         -- The ownerless-registry profile serves an ENSv1 or Basenames registry row, so it never
         -- applies under ENSv2 authority: a released ENSv2 regime keeps retained or later ENSv1
         -- registry facts as history (docs/glossary.md#released-v2-authority).

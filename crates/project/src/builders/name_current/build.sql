@@ -239,7 +239,12 @@
                        'lifecycle_state', selected_authority.lifecycle_state,
                        'deployment_profile', selected_authority.deployment_profile,
                        'resource_authority_context', selected_authority.resource_authority_context,
-                       'unsupported_reason', selected_authority.unsupported_reason
+                       'unsupported_reason', selected_authority.unsupported_reason,
+                       'registry_generation', selected_authority.registry_generation,
+                       'registry_handoff_block_number',
+                           selected_authority.registry_handoff_block_number,
+                       'ownerless_registry',
+                           CASE WHEN selected_authority.known_ownerless_registry THEN true END
                    )),
                    'read_reachability', jsonb_strip_nulls(jsonb_build_object(
                        'serving_resource_id', serving.serving_resource_id,

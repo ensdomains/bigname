@@ -9,6 +9,9 @@ pub(crate) use wrapper_fuses::WrapperFuses;
 mod wrapper_state;
 pub(crate) use wrapper_state::WrapperState;
 
+#[path = "vocab/authority.rs"]
+mod authority;
+pub(crate) use authority::Authority;
 #[path = "vocab/unsupported_reason.rs"]
 mod unsupported_reason;
 pub(crate) use unsupported_reason::{
@@ -48,38 +51,6 @@ pub(crate) enum Completeness {
 pub(crate) enum Source {
     Indexed,
     Verified,
-}
-
-/// The protocol arm that supplies a name's current registration fields; see
-/// [authority epoch](../../../../docs/glossary.md#authority-epoch).
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum Authority {
-    EnsV1,
-    EnsV2,
-}
-
-impl Authority {
-    pub(crate) const fn as_str(self) -> &'static str {
-        match self {
-            Self::EnsV1 => "ens_v1",
-            Self::EnsV2 => "ens_v2",
-        }
-    }
-
-    pub(crate) fn from_wire(value: &str) -> Option<Self> {
-        match value {
-            "ens_v1" => Some(Self::EnsV1),
-            "ens_v2" => Some(Self::EnsV2),
-            _ => None,
-        }
-    }
-
-    /// The arm Project selected for a current name row; Basenames rows have no ENSv1/ENSv2 era
-    /// split and yield `None`.
-    pub(crate) fn from_provenance(provenance: &serde_json::Value) -> Option<Self> {
-        bigname_storage::name_current_authority_arm(provenance).and_then(Self::from_wire)
-    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]

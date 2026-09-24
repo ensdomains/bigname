@@ -117,14 +117,17 @@ const SEED: &str = "
     FROM generate_series(1, 3600) AS nameless(value);
     ANALYZE";
 
-/// The plan Postgres chooses for the real staged statement over a seeded database, staged the way
-/// a full rebuild stages it. The events-to-names join must read each side once: a nested loop
-/// there re-reads one relation per row of the other, which is what a rebuild over all of mainnet
-/// cannot afford.
-#[tokio::test]
-async fn authority_events_joins_names_with_a_hash_or_merge_join() -> Result<()> {
-    let database =
-        TestDatabase::create(TestDatabaseConfig::new("name_authority_events_plan")).await?;
+/// A database seeded with [`SEED`] plus `extra`, staged the way a full rebuild stages it, up to
+/// the point where `build.sql` runs.
+async fn staged(
+    prefix: &str,
+    extra: &str,
+) -> Result<(
+    TestDatabase,
+    sqlx::Transaction<'static, sqlx::Postgres>,
+    Marker,
+)> {
+    let database = TestDatabase::create(TestDatabaseConfig::new(prefix)).await?;
     let mut transaction = database.pool().begin().await?;
     raw_sql("CREATE SCHEMA bigname_phase; SET LOCAL search_path TO bigname_phase, public")
         .execute(&mut *transaction)
@@ -133,6 +136,7 @@ async fn authority_events_joins_names_with_a_hash_or_merge_join() -> Result<()> 
         raw_sql(script).execute(&mut *transaction).await?;
     }
     raw_sql(SEED).execute(&mut *transaction).await?;
+    raw_sql(extra).execute(&mut *transaction).await?;
 
     let target = Marker {
         number: 11,
@@ -154,6 +158,17 @@ async fn authority_events_joins_names_with_a_hash_or_merge_join() -> Result<()> 
     .await?;
     stage::inputs(&mut transaction, CHAIN, &target, true).await?;
     super::stage::prepare(&mut transaction).await?;
+    Ok((database, transaction, target))
+}
+
+/// The plan Postgres chooses for the real staged statement over a seeded database, staged the way
+/// a full rebuild stages it. The events-to-names join must read each side once: a nested loop
+/// there re-reads one relation per row of the other, which is what a rebuild over all of mainnet
+/// cannot afford.
+#[tokio::test]
+async fn authority_events_joins_names_with_a_hash_or_merge_join() -> Result<()> {
+    let (database, mut transaction, target) =
+        staged("name_authority_events_plan", "SELECT 1").await?;
     sqlx::query(include_str!("build.sql"))
         .bind(CHAIN)
         .bind(target.number)
@@ -203,6 +218,105 @@ async fn authority_events_joins_names_with_a_hash_or_merge_join() -> Result<()> 
     transaction.rollback().await?;
     database.cleanup().await?;
     Ok(())
+}
+
+/// Registry ownership rows for the seeded names: every name recorded by the 2017 registry, and
+/// every even-numbered name recorded by the current registry too.
+const REGISTRY_RECORDS: &str = "
+    INSERT INTO normalized_events (
+        event_identity, namespace, event_kind, source_family, manifest_version, chain_id,
+        block_number, block_hash, transaction_hash, transaction_index, log_index,
+        derivation_kind, canonicality_state, after_state, raw_fact_ref
+    )
+    SELECT 'plan:registry:' || name || ':' || record.role, 'ens', 'AuthorityTransferred',
+           'ens_v1_registry_l1', 1, 'authority-events-plan', 9, '0x' || lpad('9', 64, '0'),
+           '0x' || lpad(to_hex(200000 + name * 2 + record.log), 64, '0'), 2, record.log,
+           'ens_v1_unwrapped_authority', 'canonical',
+           jsonb_build_object(
+               'source_event', 'NewOwner', 'node', '0x' || lpad('e', 64, '0'),
+               'child_node', namehash, 'emitter_role', record.role,
+               'owner', '0x7777777777777777777777777777777777777777'
+           ),
+           '{}'::jsonb
+    FROM plan_names CROSS JOIN (VALUES ('registry_old', 0), ('registry', 1)) AS record(role, log)
+    WHERE record.role = 'registry_old' OR name % 2 = 0;
+    ANALYZE";
+
+/// The registry records are joined to the staged names by namehash. That join must read each
+/// side once, for the same reason as the events-to-names join.
+#[tokio::test]
+async fn registry_records_join_names_with_a_hash_or_merge_join() -> Result<()> {
+    let (database, mut transaction, target) =
+        staged("name_authority_registry_records_plan", REGISTRY_RECORDS).await?;
+    let plan: Value = sqlx::query_scalar(&format!(
+        "EXPLAIN (FORMAT JSON) {}",
+        include_str!("build.sql")
+    ))
+    .bind(CHAIN)
+    .bind(target.number)
+    .bind(&target.hash)
+    .fetch_one(&mut *transaction)
+    .await?;
+    let joins = namehash_joins(&plan[0]["Plan"]);
+    assert!(
+        !joins.is_empty(),
+        "no join on the namehash:\n{}",
+        outline(&plan[0]["Plan"], 0)
+    );
+    for join in joins {
+        let node_type = join["Node Type"].as_str().unwrap_or_default();
+        assert!(
+            matches!(node_type, "Hash Join" | "Merge Join"),
+            "registry records are joined to names by a {node_type}:\n{}",
+            outline(&plan[0]["Plan"], 0)
+        );
+    }
+
+    // The plan is of a statement that does its work.
+    sqlx::query(include_str!("build.sql"))
+        .bind(CHAIN)
+        .bind(target.number)
+        .bind(&target.hash)
+        .execute(&mut *transaction)
+        .await?;
+    let generations: Vec<(Option<String>, Option<i64>, i64)> = sqlx::query_as(
+        "SELECT registry_generation, registry_handoff_block_number, count(*)
+         FROM project_name_authority GROUP BY 1, 2 ORDER BY 1, 2",
+    )
+    .fetch_all(&mut *transaction)
+    .await?;
+    assert_eq!(
+        generations,
+        [
+            (Some("current".to_owned()), Some(9), NAMES / 2),
+            (Some("old".to_owned()), None, NAMES / 2),
+        ]
+    );
+
+    transaction.rollback().await?;
+    database.cleanup().await?;
+    Ok(())
+}
+
+/// Every join whose own condition compares a registry record's node to a surface's namehash.
+fn namehash_joins(node: &Value) -> Vec<&Value> {
+    let mut joins = node["Plans"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(namehash_joins)
+        .collect::<Vec<_>>();
+    let compares_namehash = ["Hash Cond", "Merge Cond", "Join Filter"]
+        .iter()
+        .any(|key| {
+            node[*key].as_str().is_some_and(|condition| {
+                condition.contains("namehash") && condition.contains("child_node")
+            })
+        });
+    if compares_namehash {
+        joins.push(node);
+    }
+    joins
 }
 
 /// The lowest join that has both the staged events and the selected authorities beneath it,

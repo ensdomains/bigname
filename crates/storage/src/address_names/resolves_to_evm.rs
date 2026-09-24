@@ -76,7 +76,7 @@ pub async fn load_address_records_current_evm_page(
     namespaces: Option<&[String]>,
     dedupe_by: AddressNamesCurrentDedupe,
     q: Option<&str>,
-    authority_arm: Option<&str>,
+    authority: Option<&str>,
     sort: AddressNamesCurrentSort,
     order: AddressNamesCurrentOrder,
     cursor: Option<&AddressNamesCurrentSortedCursor>,
@@ -88,7 +88,7 @@ pub async fn load_address_records_current_evm_page(
         namespaces,
         dedupe_by,
         q,
-        authority_arm,
+        authority,
     };
     let (rows, next_cursor) =
         load_sorted_entries(pool, &filter, sort, order, cursor, page_size).await?;
@@ -133,7 +133,7 @@ pub async fn explain_address_records_current_evm_page_for_test(
         namespaces: None,
         dedupe_by,
         q: None,
-        authority_arm: None,
+        authority: None,
     };
     let mut plans = Vec::new();
     if let Some(cursor) = cursor {
@@ -164,7 +164,7 @@ pub fn address_records_current_evm_page_sql_for_test(
         namespaces: None,
         dedupe_by,
         q: None,
-        authority_arm: None,
+        authority: None,
     };
     let mut builder = QueryBuilder::<Postgres>::new("");
     push_page_statement(&mut builder, &filter, sort, order, None, 51);

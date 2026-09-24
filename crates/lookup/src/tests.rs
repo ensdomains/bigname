@@ -3342,6 +3342,48 @@ async fn ens_v2_arm_is_refused_before_rpc_by_an_ens_v1_only_entrypoint() -> AnyR
     Ok(())
 }
 
+/// A name the 2017 registry still records serves `authority: "ens_v0"`, but its selected arm is
+/// `ens_v1`, and the verified-read gate reads the arm. An entrypoint that admits only `ens_v1`
+/// executes it.
+#[tokio::test]
+async fn a_2017_registry_name_executes_through_an_ens_v1_only_entrypoint() -> AnyResult<()> {
+    let fixture = setup_fixture(FixtureKind::Ens, INDEXED_VALUE).await?;
+    sqlx::query(
+        "UPDATE manifest_versions
+         SET manifest_payload = manifest_payload || '{\"verified_authority_arms\": [\"ens_v1\"]}'::jsonb
+         WHERE source_family = 'ens_execution'",
+    )
+    .execute(fixture.pool())
+    .await?;
+    sqlx::query(
+        "UPDATE name_current SET provenance = provenance || jsonb_build_object(
+             'authority_selection',
+             COALESCE(provenance -> 'authority_selection', '{}'::jsonb)
+                 || '{\"authority_arm\": \"ens_v1\", \"registry_generation\": \"old\"}'::jsonb)",
+    )
+    .execute(fixture.pool())
+    .await?;
+    let provenance: serde_json::Value = sqlx::query_scalar("SELECT provenance FROM name_current")
+        .fetch_one(fixture.pool())
+        .await?;
+    assert_eq!(
+        bigname_storage::name_current_public_authority(&provenance),
+        Some("ens_v0")
+    );
+    let (rpc_url, rpc_handle) = spawn_mock_rpc(vec![RpcResponse::Result(encoded_text_result(
+        INDEXED_VALUE,
+    ))])
+    .await?;
+    let response = run_lookup(&fixture, &rpc_url).await?;
+    assert_eq!(
+        response.records[0].status,
+        crate::LookupRecordStatus::Success
+    );
+    fixture.cleanup().await?;
+    join_rpc(rpc_handle).await?;
+    Ok(())
+}
+
 #[tokio::test]
 async fn admitted_verified_authority_arms_follow_the_selected_entrypoint_declaration()
 -> AnyResult<()> {
