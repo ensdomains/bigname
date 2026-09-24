@@ -104,7 +104,14 @@ pub(super) fn json_timestamp_at_paths(value: &Value, paths: &[&[&str]]) -> Optio
             continue;
         };
         match value {
-            Value::String(value) if !value.trim().is_empty() => return Some(value.clone()),
+            Value::String(value) if !value.trim().is_empty() => match quoted_seconds(value) {
+                Some(seconds) => {
+                    if let Some(timestamp) = seconds.and_then(format_unix_timestamp) {
+                        return Some(timestamp);
+                    }
+                }
+                None => return Some(value.clone()),
+            },
             Value::Number(number) => {
                 if let Some(timestamp) = number.as_i64().and_then(format_unix_timestamp) {
                     return Some(timestamp);
@@ -137,7 +144,32 @@ pub(super) fn json_value_present(value: &Value) -> bool {
     }
 }
 
+/// A quoted seconds value (`"1735689600"`, `"-1"`) reads like the number it spells: `Some(None)`
+/// when it is out of `i64` range, `None` when the string is not a number at all.
+fn quoted_seconds(value: &str) -> Option<Option<i64>> {
+    let unsigned = value.strip_prefix('-').unwrap_or(value);
+    let (whole, fraction) = unsigned.split_once('.').unwrap_or((unsigned, ""));
+    let digits = |part: &str| part.bytes().all(|byte| byte.is_ascii_digit());
+    if whole.is_empty()
+        || !digits(whole)
+        || (unsigned.contains('.') && (fraction.is_empty() || !digits(fraction)))
+    {
+        return None;
+    }
+    let seconds = whole.parse::<i64>().ok();
+    Some(if value.starts_with('-') {
+        seconds.map(|seconds| -seconds)
+    } else {
+        seconds
+    })
+}
+
+/// A seconds value outside 1970..=9999 reads as unknown, the same rule the collection routes'
+/// expiry reads and Project's formatted `control.expiry` apply.
 fn format_unix_timestamp(timestamp: i64) -> Option<String> {
+    if !(0..=253_402_300_799).contains(&timestamp) {
+        return None;
+    }
     let value = OffsetDateTime::from_unix_timestamp(timestamp).ok()?;
     Some(format_timestamp(value))
 }

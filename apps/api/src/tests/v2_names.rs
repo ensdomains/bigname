@@ -169,21 +169,51 @@ fn v2_names_listed(payload: &Value) -> Vec<String> {
 async fn v2_get_names_skips_an_expiry_beyond_the_timestamp_range() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_names_fixture(&database).await?;
-    sqlx::query(
-        "UPDATE bigname_phase.name_current
-         SET declared_summary = jsonb_set(
-             declared_summary, '{registration,expiry}', '18446744073709551615'::jsonb, true)
-         WHERE raw_name = 'alpha.eth'",
-    )
-    .execute(&database.pool)
-    .await?;
+    for (expiry, control, listed, alpha_expires_at) in [
+        (json!(u64::MAX), Value::Null, vec!["gamma.eth", "beta.eth"], None),
+        (json!(253_402_300_800_i64), Value::Null, vec!["gamma.eth", "beta.eth"], None),
+        (json!(-1), Value::Null, vec!["gamma.eth", "beta.eth"], None),
+        (
+            json!(253_402_300_799_i64),
+            json!("9999-12-31T23:59:59Z"),
+            vec!["gamma.eth", "beta.eth", "alpha.eth"],
+            Some("9999-12-31T23:59:59Z"),
+        ),
+        (
+            json!(0),
+            json!("1970-01-01T00:00:00Z"),
+            vec!["alpha.eth", "gamma.eth", "beta.eth"],
+            Some("1970-01-01T00:00:00Z"),
+        ),
+    ] {
+        sqlx::query(
+            "UPDATE bigname_phase.name_current
+             SET declared_summary = jsonb_set(jsonb_set(
+                 declared_summary, '{registration,expiry}', $1, true), '{control,expiry}', $2, true)
+             WHERE raw_name = 'alpha.eth'",
+        )
+        .bind(&expiry)
+        .bind(&control)
+        .execute(&database.pool)
+        .await?;
 
-    let payload = v2_names_payload(
-        &database,
-        "/v1/names?namespace=ens&expires_after=2025-01-01T00:00:00Z&sort=expires_at&order=asc",
-    )
-    .await?;
-    assert_eq!(v2_names_listed(&payload), vec!["gamma.eth", "beta.eth"]);
+        let payload = v2_names_payload(
+            &database,
+            "/v1/names?namespace=ens&expires_after=1969-01-01T00:00:00Z&sort=expires_at&order=asc",
+        )
+        .await?;
+        assert_eq!(v2_names_listed(&payload), listed, "{expiry}");
+        let alpha = payload["data"]
+            .as_array()
+            .expect("names data")
+            .iter()
+            .find(|row| row["name"] == "alpha.eth");
+        assert_eq!(
+            alpha.and_then(|row| row.get("expires_at")).and_then(Value::as_str),
+            alpha_expires_at,
+            "{expiry}"
+        );
+    }
     database.cleanup().await?;
     Ok(())
 }

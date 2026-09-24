@@ -112,13 +112,16 @@
                                ELSE COALESCE(status.after_state ->> 'status',
                                    selected_registration.after_state ->> 'status')
                            END,
+                           -- A seconds value outside 1970..=9999 has no timestamp here, the same
+                           -- rule the API's expiry reads apply, so a formatted copy never
+                           -- revives an expiry those reads treat as unknown.
                            'expiry', CASE
                                WHEN COALESCE(expiry.expiry_seconds, CASE
                                         WHEN wrapper.wrapper_state IS NOT NULL
                                          AND NOT COALESCE(selected_registration.is_v2_lifecycle, false)
                                             THEN wrapper_expiry.servable_expiry_seconds END)
-                                    IS NULL THEN NULL
-                               ELSE to_jsonb(to_char(to_timestamp(COALESCE(expiry.expiry_seconds,
+                                    BETWEEN 0 AND 253402300799
+                                   THEN to_jsonb(to_char(to_timestamp(COALESCE(expiry.expiry_seconds,
                                         wrapper_expiry.servable_expiry_seconds))
                                    AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))
                            END,

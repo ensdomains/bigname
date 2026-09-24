@@ -1747,6 +1747,49 @@ async fn expiry_fold_ignores_malformed_updates_and_clears_unrepresentable_number
     scratch.cleanup().await
 }
 
+// `registration.expiry` keeps the chain's seconds value, while `control.expiry` formats it only
+// inside 1970..=9999, the same range the API's expiry reads accept. A value outside it has no
+// formatted copy for those reads to fall back to.
+#[tokio::test]
+async fn formatted_control_expiry_follows_the_timestamp_range() -> Result<()> {
+    for (expiry, registration, control) in [
+        (-1_i64, json!(-1), Value::Null),
+        (0, json!(0), json!("1970-01-01T00:00:00Z")),
+        (
+            253_402_300_799,
+            json!(253_402_300_799_i64),
+            json!("9999-12-31T23:59:59Z"),
+        ),
+        (253_402_300_800, Value::Null, Value::Null),
+    ] {
+        let scratch = ScratchDatabase::create("production_project_control_expiry_range").await?;
+        seed_project_fixture(scratch.pool()).await?;
+        insert_event(
+            scratch.pool(),
+            CHAIN,
+            2,
+            Some("ens:0xalice"),
+            Some(RESOURCE),
+            "ExpiryChanged",
+            "ens_v1_registrar_l1",
+            json!({ "expiry": expiry }),
+            json!({}),
+        )
+        .await?;
+        run_project(scratch.pool(), CHAIN, None, RunMode::Normal, 0, 3).await?;
+        let summary: Value = sqlx::query_scalar(
+            "SELECT declared_summary
+             FROM name_current WHERE logical_name_id = 'ens:0xalice'",
+        )
+        .fetch_one(scratch.pool())
+        .await?;
+        assert_eq!(summary["registration"]["expiry"], registration, "{expiry}");
+        assert_eq!(summary["control"]["expiry"], control, "{expiry}");
+        scratch.cleanup().await?;
+    }
+    Ok(())
+}
+
 #[tokio::test]
 async fn permission_support_marks_approvals_partial_without_hiding_known_controllers() -> Result<()>
 {

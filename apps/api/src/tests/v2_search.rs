@@ -1741,29 +1741,29 @@ async fn v2_search_omits_every_unsupported_exact_name() -> Result<()> {
 async fn v2_search_serves_a_name_whose_expiry_exceeds_the_timestamp_range() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_search_fixture(&database).await?;
-    sqlx::query(
-        "UPDATE bigname_phase.name_current
-         SET declared_summary = jsonb_set(
-             declared_summary, '{registration,expiry}', '18446744073709551615'::jsonb, true)
-         WHERE raw_name = 'alpha.eth'",
-    )
-    .execute(&database.pool)
-    .await?;
-    sqlx::query(
-        "UPDATE bigname_phase.name_current
-         SET declared_summary = jsonb_set(
-             declared_summary, '{registration,expiry}', '-300000000000'::jsonb, true)
-         WHERE raw_name = 'alpine.eth'",
-    )
-    .execute(&database.pool)
-    .await?;
+    // Project writes no formatted `control.expiry` for an out-of-range value, so none is left
+    // for the read to fall back to.
+    for (name, expiry) in [("alpha.eth", "18446744073709551615"), ("alpine.eth", "-300000000000")] {
+        sqlx::query(
+            "UPDATE bigname_phase.name_current
+             SET declared_summary = jsonb_set(jsonb_set(
+                 declared_summary, '{registration,expiry}', $2::jsonb, true),
+                 '{control,expiry}', 'null'::jsonb, true)
+             WHERE raw_name = $1",
+        )
+        .bind(name)
+        .bind(expiry)
+        .execute(&database.pool)
+        .await?;
+    }
 
     let payload =
         v2_search_payload_for_database(&database, "/v1/search?q=al&namespace=ens").await?;
-    assert_eq!(
-        v2_search_names(payload["data"].as_array().expect("search data must be an array")),
-        vec!["alpha.eth", "alpine.eth"]
-    );
+    let rows = payload["data"].as_array().expect("search data must be an array");
+    assert_eq!(v2_search_names(rows), vec!["alpha.eth", "alpine.eth"]);
+    for row in rows {
+        assert_eq!(row.get("expires_at").and_then(Value::as_str), None, "{row}");
+    }
     database.cleanup().await?;
     Ok(())
 }

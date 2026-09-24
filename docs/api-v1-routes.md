@@ -564,13 +564,17 @@ collection route carry neither header.
   in another form (an RFC 3339 string at `control.expiry`, or no expiry at all)
   is outside this listing by design; `GET /v1/names/{name}` still serves its
   `expires_at`. A negative numeric expiry, or one after 9999-12-31T23:59:59Z,
-  is outside this listing too, and the latter has no `expires_at`;
-  the Sepolia root registry registers `eth` and `reverse` with the largest
+  is outside this listing too and has no `expires_at` on any route; Project
+  writes no formatted `control.expiry` for it, so no fallback revives it.
+  The Sepolia root registry registers `eth` and `reverse` with the largest
   uint64 expiry
   (upstream: .refs/ens_v2_sepolia_20260916/contracts/script/deploy-constants.ts:L1 @ ens_v2_sepolia_20260916@366de741)
   (upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ETHRegistry.ts:L46 @ ens_v2_sepolia_20260916@366de741)
   (upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ReverseMirror.ts:L35 @ ens_v2_sepolia_20260916@366de741).
-  Search and address collections treat such an expiry as unknown the same way.
+  Search and address collections treat such an expiry, or the same value as a
+  quoted number, as unknown the same way: the row has no `expires_at` and
+  address names with `sort=expires_at` place it with the other unknown expiries, last ascending
+  and first descending.
 - Released names: the listing means "registrations whose expiry falls in this
   window", whether the registration is live, in grace or released. A released
   name keeps the lapsed registration's expiry, so it appears in every window
