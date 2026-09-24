@@ -1232,7 +1232,7 @@ History collections (`/v1/events`, name history including
 `include=child_registrations`, and address history) are
 [history walks](glossary.md#history-walk), not snapshots.
 A history cursor holds the position of the last row it returned in the history
-order: block number, chain, block hash, transaction hash, log index, and the
+order: block number, chain, block hash, transaction index, log index, and the
 row's `event_identity` as the final tiebreaker. It carries no publication token
 and no evaluation time. A continuation reads whatever is published when it runs
 and returns the rows after that position; the row the cursor came from need not

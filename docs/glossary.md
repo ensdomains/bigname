@@ -1455,7 +1455,7 @@ current authority.
 
 how `/v1/events`, name history, and address history page: a walk through the
 history order, not a snapshot. The cursor holds the position of the last row
-returned (block number, chain, block hash, transaction hash, log index, and
+returned (block number, chain, block hash, transaction index, log index, and
 `event_identity` as the final tiebreaker) and no publication. Each page reads
 the publication captured when it is admitted, reported in `meta.as_of`, so
 later pages can include newer rows, rows can move or disappear after an

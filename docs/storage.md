@@ -1950,8 +1950,10 @@ empty compatibility shape.
 
 Name history, address history, and `/v1/events` pages sort normalized events by
 chain position: block number newest first with events without a block last,
-then chain, block hash, transaction hash, log index, and event identity.
-`order=asc` is the exact reverse. The served reads always carry a block window,
+then chain, block hash, transaction index, log index, and event identity, with
+an event that has no transaction position before every transaction of its
+block. The transaction hash is not an ordering key. `order=asc` is the exact
+reverse. The served reads always carry a block window,
 the published block of each chain, so the events they return always have a
 block number, although the column itself allows NULL for events such as
 manifest updates.
