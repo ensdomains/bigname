@@ -522,6 +522,9 @@ fn push_json_timestamp_expr(builder: &mut QueryBuilder<'_, Postgres>, path: &[&s
     builder.push(path_literal.as_str());
     // A seconds value outside 1970..=9999 (the ENSv2 root registry's uint64 max expiry) reads as
     // unknown instead of failing the whole query.
+    // (upstream: .refs/ens_v2_sepolia_20260916/contracts/script/deploy-constants.ts:L1 @ ens_v2_sepolia_20260916@366de741)
+    // (upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ETHRegistry.ts:L46 @ ens_v2_sepolia_20260916@366de741)
+    // (upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ReverseMirror.ts:L35 @ ens_v2_sepolia_20260916@366de741)
     builder.push(") = 'number' THEN CASE WHEN (nc.declared_summary #>> ");
     builder.push(path_literal.as_str());
     builder

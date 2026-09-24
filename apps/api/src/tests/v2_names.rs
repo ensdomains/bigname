@@ -162,6 +162,9 @@ fn v2_names_listed(payload: &Value) -> Vec<String> {
 // The ENSv2 root registry registers `eth` and `reverse` with the largest uint64 expiry, which no
 // timestamp can hold. The listing treats that expiry as unknown and leaves the name out instead
 // of failing.
+// (upstream: .refs/ens_v2_sepolia_20260916/contracts/script/deploy-constants.ts:L1 @ ens_v2_sepolia_20260916@366de741)
+// (upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ETHRegistry.ts:L46 @ ens_v2_sepolia_20260916@366de741)
+// (upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ReverseMirror.ts:L35 @ ens_v2_sepolia_20260916@366de741)
 #[tokio::test]
 async fn v2_get_names_skips_an_expiry_beyond_the_timestamp_range() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;

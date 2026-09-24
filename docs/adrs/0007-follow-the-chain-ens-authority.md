@@ -15,8 +15,10 @@ discovery admits) is a registration; no `ETHRegistrar` event, ENSv1→ENSv2
 migration successor proof or child registration proof is needed. The reason
 `ensv2_exact_name_profile_shadow` and its public name
 `exact_name_profile_not_supported` are no longer produced or mapped. On Sepolia
-the root-registry names `eth` and `reverse` become supported. Admitting a
-chain's ENSv2 source families is therefore the decision that exposes its names:
+the root-registry names `eth` and `reverse` become supported
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ETHRegistry.ts:L46 @ ens_v2_sepolia_20260916@366de741)
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ReverseMirror.ts:L35 @ ens_v2_sepolia_20260916@366de741). Admitting a
+chain's ENSv2 [source families](../glossary.md#source-family) is therefore the decision that exposes its names:
 the `exact_name_profile` flag stays a namespace summary for `/v1/namespaces` and
 no longer gates serving, so a future Mainnet ENSv2 admission serves each
 selected name as soon as its manifests are active. See

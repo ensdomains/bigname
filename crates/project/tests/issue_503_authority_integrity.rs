@@ -1254,6 +1254,8 @@ async fn shared_infrastructure_without_proof_is_not_integrity_fatal() -> Result<
 // On Sepolia `eth` and `reverse` are registered in the ENSv2 root registry, so their ENSv2 facts come
 // from the root family and no ETHRegistrar event exists for them. A registration in the admitted
 // root registry is served like any other, with no proof fabricated for it.
+// (upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ETHRegistry.ts:L46 @ ens_v2_sepolia_20260916@366de741)
+// (upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ReverseMirror.ts:L35 @ ens_v2_sepolia_20260916@366de741)
 #[tokio::test]
 async fn root_registry_eth_and_reverse_serve_without_a_registrar_event() -> Result<()> {
     let (db, pool) = database("issue503_root_family").await?;
