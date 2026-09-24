@@ -379,8 +379,8 @@ collection route carry neither header.
   decides unless a qualifying ENSv2 release tombstone or regime
   ([released ENSv2 authority](glossary.md#released-v2-authority)) applies, so
   such a name is no longer refused. A selected ENSv2 registration with no
-  authority refusal is served; it needs no `ETHRegistrar` event, migration or
-  child-registration proof. The earlier reasons
+  authority refusal is served; it needs no `ETHRegistrar` event, ENSv1→ENSv2
+  migration proof or child-registration proof. The earlier reasons
   `conflicting_current_ens_authority` (Mainnet) and
   `independent_ens_deployments_overlap` (Sepolia) are no longer produced. A
   `name_current` row derived with either reason by an earlier Project generation,
@@ -563,7 +563,14 @@ collection route carry neither header.
   installed before the baseline carried it). A row whose only expiry is stored
   in another form (an RFC 3339 string at `control.expiry`, or no expiry at all)
   is outside this listing by design; `GET /v1/names/{name}` still serves its
-  `expires_at`.
+  `expires_at`. A numeric expiry beyond the timestamp range (after
+  9999-12-31T23:59:59Z) has no `expires_at` and is outside this listing too;
+  the Sepolia root registry registers `eth` and `reverse` with the largest
+  uint64 expiry
+  (upstream: .refs/ens_v2_sepolia_20260916/contracts/script/deploy-constants.ts:L1 @ ens_v2_sepolia_20260916@366de741)
+  (upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ETHRegistry.ts:L46 @ ens_v2_sepolia_20260916@366de741)
+  (upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ReverseMirror.ts:L35 @ ens_v2_sepolia_20260916@366de741).
+  Search and address collections treat such an expiry as unknown the same way.
 - Released names: the listing means "registrations whose expiry falls in this
   window", whether the registration is live, in grace or released. A released
   name keeps the lapsed registration's expiry, so it appears in every window

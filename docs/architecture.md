@@ -260,7 +260,7 @@ else. When Project selects the ENSv2 arm for a name and that selection carries n
 refusal, the name is supported. A registration in an admitted ENSv2 registry is
 enough: the root registry, the ETH registry declared in the manifest, and any
 registry that [discovery](manifests.md) admits from them. No `ETHRegistrar`
-event, activated migration or positive child-registration proof is needed to call
+event, activated ENSv1→ENSv2 migration or positive child-registration proof is needed to call
 the name supported. The registrar is a caller of the registry: it calls
 `ETH_REGISTRY.register` with the owner, subregistry, resolver and expiry before it
 emits its own `NameRegistered`
@@ -271,7 +271,7 @@ Registrar events still feed name history and renewal expiry; they are no longer 
 condition for support. The rule is the same on every chain: admitting a chain's
 ENSv2 source families in its manifests is the decision that makes its names
 servable. The `exact_name_profile` capability flag is a separate, hand-declared
-namespace summary that `/v1/namespaces` reports; it does not gate serving. Migration and child-registration proofs keep their role in
+namespace summary that `/v1/namespaces` reports; it does not gate serving. ENSv1→ENSv2 migration and child-registration proofs keep their role in
 authority selection below. Candidate and noncanonical events remain excluded by
 Project staging. This changes no resolver feature admission or read routing.
 

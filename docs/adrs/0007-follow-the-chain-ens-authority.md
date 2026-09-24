@@ -11,11 +11,15 @@ arm is ENSv2, and whose selection carries no refusal such as
 `current_authority_not_projected`, is now supported without any further
 qualification. A registration in an admitted
 ENSv2 registry (the root registry, the declared ETH registry, or a registry
-discovery admits) is a registration; no `ETHRegistrar` event, migration
-successor proof or child registration proof is needed. The reason
+discovery admits) is a registration; no `ETHRegistrar` event, ENSv1→ENSv2
+migration successor proof or child registration proof is needed. The reason
 `ensv2_exact_name_profile_shadow` and its public name
 `exact_name_profile_not_supported` are no longer produced or mapped. On Sepolia
-the root-registry names `eth` and `reverse` become supported. See
+the root-registry names `eth` and `reverse` become supported. Admitting a
+chain's ENSv2 source families is therefore the decision that exposes its names:
+the `exact_name_profile` flag stays a namespace summary for `/v1/namespaces` and
+no longer gates serving, so a future Mainnet ENSv2 admission serves each
+selected name as soon as its manifests are active. See
 [architecture](../architecture.md#ensv1ensv2-current-authority). Linear TYR-20.
 
 ## Context
@@ -166,8 +170,8 @@ snapshot. The difference is listed in
   including as a released ENSv1 registration. On Sepolia this covers all 652
   names refused on 2026-09-23. When this ADR was accepted, a name whose
   selected arm is ENSv2 also needed a per-name exact-name profile
-  qualification (an admitted `ETHRegistrar` event, a proven migration
-  successor, or a positive child registration proof) and otherwise stayed
+  qualification (an admitted `ETHRegistrar` event, a proven ENSv1→ENSv2
+  migration successor, or a positive child registration proof) and otherwise stayed
   identity-only. The 2026-09-25 amendment above removes that qualification.
 - A name registered on ENSv1 after the premigration snapshot and then registered
   on ENSv2 is served from ENSv2, which is also what the Universal Resolver

@@ -192,7 +192,7 @@ name-scoped view.
 An exact-name read is supported when the name's selected authority carries no
 refusal. For ENSv2 that means a current registration in an admitted registry:
 the root registry, the declared ETH registry, or a registry discovery admits.
-No `ETHRegistrar` event, activated migration or positive child-registration
+No `ETHRegistrar` event, activated ENSv1→ENSv2 migration or positive child-registration
 proof is required for support, and none is fabricated; registrar events keep
 feeding name history and renewal expiry. An activated `MigrationApplied`
 boundary still decides authority where it applies, as described below. Resolver
@@ -257,7 +257,7 @@ were identity-only with `independent_ens_deployments_overlap` (Sepolia) or
 `conflicting_current_ens_authority` (Mainnet) now select ENSv2 when their ENSv2
 registration is current and ENSv1 otherwise. A name whose selected arm is
 ENSv2 and carries no refusal is served from its ENSv2 registration without a
-further registrar, migration or child-registration qualification. The
+further registrar, ENSv1→ENSv2 migration or child-registration qualification. The
 ENS root, `eth`, `reverse`, and `addr.reverse` are the four exact
 [shared ENS infrastructure](glossary.md#shared-ens-infrastructure) names. They
 select ENSv2 when the ENSv2 arm is current and ENSv1 evidence, current or
