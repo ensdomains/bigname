@@ -150,6 +150,28 @@ async fn v2_history_walks_equal_their_unpaged_collection() -> Result<()> {
             hkw_seed(&database).await?;
             let base = format!("{route}&order={order}");
 
+            // The unpaged order is itself checked where only `event_identity` separates rows:
+            // the three rows at block 106's one log position sort by identity in the direction
+            // asked for.
+            if !route.starts_with("/v1/addresses/") {
+                let (unpaged, _) = hkw_baseline(&database, &base).await?;
+                let tied = unpaged
+                    .iter()
+                    .filter(|id| {
+                        ["hk-tie-a", "hk-tie-b", "history-record"]
+                            .iter()
+                            .any(|identity| hkw_id(identity) == **id)
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let expected = if order == "desc" {
+                    ["hk-tie-b", "hk-tie-a", "history-record"]
+                } else {
+                    ["history-record", "hk-tie-a", "hk-tie-b"]
+                };
+                assert_eq!(tied, expected.map(hkw_id).to_vec(), "{base}: identity tiebreaker");
+            }
+
             // A fixed dataset: the walk is the collection, with the capped and the exact count.
             let exact = if base.contains("include=child_registrations") {
                 base.replace("include=child_registrations", "include=child_registrations,total_count")

@@ -1217,12 +1217,14 @@ The `chain_positions` query parameter from `v1` does not exist in `v2`.
 
 Cursors are opaque and versioned. They are not bound to the route path string,
 so route evolution does not invalidate outstanding cursors. Top-level
-collection cursors bind the collection anchor, namespace, filters, and sort,
-but not a snapshot. A bare search cursor uses the request's derived namespace
+collection cursors bind the collection anchor, namespace, filters, and sort.
+Current-state product collection cursors also bind the publication they read,
+as described under `meta` above. History collection cursors bind no snapshot or
+publication, and the publication token of a history cursor issued before the
+walk rule is ignored. A bare search cursor uses the request's derived namespace
 set as its namespace anchor and fails closed if that set has changed. Cursors
 preserve keyset position across requests without claiming that the mutable
-dataset is frozen. A legacy collection cursor's snapshot component is ignored.
-Snapshot-bound cursor semantics remain on single-resource responses with nested
+dataset is frozen. Snapshot-bound cursor semantics remain on single-resource responses with nested
 pagination where documented.
 
 History collections (`/v1/events`, name history including

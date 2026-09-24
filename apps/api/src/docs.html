@@ -491,7 +491,7 @@ const EVENT_FIELDS = [
 ];
 const AS_OF = { as_of: { '1': { block_number: 23400118, block_hash: '0x…', timestamp: '2026-09-11T00:00:00Z' } }, as_of_token: '…' };
 const EVENT_SAMPLE = { data: [ { type: 'transfer', name: 'taytems.eth', namespace: 'ens', registration_id: '…', block_number: 23399000, timestamp: '2026-09-10T20:11:47Z', transaction_hash: '0x…', log_index: 42 } ], page: { cursor: null, next_cursor: 'opaque-token', page_size: 50, total_count: null, has_more: true }, meta: { as_of: AS_OF.as_of } };
-const REDO = { h: 'Behaviour while a redo is rewriting history', html: `<p>Name history, address history, and events share one check. While an Interpret redo is rewriting history on any chain, all three answer <code>409 stale</code> regardless of the namespace asked for, and the answer is safe to retry: once the redo finishes, the same cursor continues. The check runs before the anchor is derived, inside the page transaction, and again after it, so a partially rebuilt page is never served.</p>` };
+const REDO = { h: 'Behaviour while a redo is rewriting history', html: `<p>Name history, address history, and events share one check. While an Interpret redo is rewriting history on any chain, all three answer <code>409 stale</code> regardless of the namespace asked for. Name history checks before deriving its anchors and inside its page transaction. Events and address history check at the same two points and check again after resolving current display names. A redo seen by any of these checks means a partially rebuilt page is never served. The answer is safe to retry and does not expire a position cursor: once the redo finishes, the same cursor continues.</p>` };
 
 const ROUTES = [
 {
