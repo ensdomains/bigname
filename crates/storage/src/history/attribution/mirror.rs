@@ -204,6 +204,28 @@ pub(super) fn push_empty_mirror_writes_for_test(
     push_mirror_writes(builder, walk, published);
 }
 
+/// The mirror substitution statement over one consulted node, the queried name itself, for plan
+/// tests that need the registry pointer lookup to run.
+#[cfg(test)]
+pub(super) fn push_exact_node_mirror_writes_for_test(
+    builder: &mut QueryBuilder<'static, Postgres>,
+    resource_id: Uuid,
+    node: &str,
+    raw_labels: &[&str],
+    published: Option<&BTreeMap<String, i64>>,
+) {
+    let walk: &'static MirrorWalk = Box::leak(Box::new(MirrorWalk {
+        resource_ids: vec![resource_id],
+        chain_ids: vec!["ethereum-mainnet".to_owned()],
+        namespaces: vec!["ens".to_owned()],
+        depths: vec![0],
+        nodes: vec![node.to_owned()],
+        labels: vec![Value::from(raw_labels.to_vec())],
+        queried_nodes: vec![node.to_owned()],
+    }));
+    push_mirror_writes(builder, walk, published);
+}
+
 /// `SELECT resource_id, normalized_event_id`: one row with a null id for every followed mirror,
 /// and one per node-keyed write of the ENSv1 resolver it follows for the queried node.
 fn push_mirror_writes<'a>(

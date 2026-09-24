@@ -364,9 +364,10 @@ index instead: the ENSv2 declared-resolver arm (ENSv2 resolver writes) and the
 today. The mirror lookup of the ENSv1 registry pointer by addressed node uses
 `normalized_events_project_v1_pointer_addressed_node_idx`
 ([`ops/mirror-pointer-index`](../ops/mirror-pointer-index/README.md)). The lookup of
-the declaring manifest also reads through the projection index, on every deployment. A plan test
-in `history/address_plan_tests.rs` checks that neither statement reads `normalized_events`
-sequentially.
+the declaring manifest also reads through the projection index, on every deployment. Plan tests
+in `history/address_plan_tests.rs` check that neither statement reads `normalized_events`
+sequentially, and that the mirror lookup, run over a non-empty walk, reads registry pointers
+through `normalized_events_project_v1_pointer_addressed_node_idx`.
 
 History loaders called with `canonical_only=false` also return rows of activated losing
 branches. For those reads every binding, grant and wrapper-link witness must lie on the event's
