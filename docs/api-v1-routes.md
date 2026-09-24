@@ -291,7 +291,7 @@ collection route carry neither header.
   dictionary order. `profile=feed` returns a documented core-field subset of
   the same record object; it does not introduce another DTO.
   `profile=detail` records carry `authority` (`ens_v0`, `ens_v1` or `ens_v2`,
-  as defined in the [naming dictionary](api-v2.md#naming-dictionary)) when the
+  as defined in the [naming dictionary](api-v1.md#naming-dictionary)) when the
   projection selected an ENSv1/ENSv2 arm for the name, and `migrated_at` when
   that `ens_v2` authority was proven by an ENSv1→ENSv2 migration transition;
   both apply to name results and reverse rows alike and are omitted on feed

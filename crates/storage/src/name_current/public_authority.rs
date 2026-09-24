@@ -1,6 +1,6 @@
 //! The public `authority` value of a `name_current` row, from the selection Project stored in
 //! `provenance.authority_selection`. The Rust mapping and the address-name filter's SQL
-//! expression below must agree; see `docs/api-v2.md` § Naming Dictionary.
+//! expression below must agree; see `docs/api-v1.md` § Naming Dictionary.
 
 use serde_json::Value;
 use sqlx::{Postgres, QueryBuilder};
