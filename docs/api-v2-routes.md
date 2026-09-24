@@ -339,27 +339,23 @@ collection route carry neither header.
   `exact_name_profile_not_supported`, `mixed_exact_name_corpus`, and
   `unsupported_reason_missing`. The contracted per-name authority replacement
   is documented in
-  [`architecture.md`](architecture.md#ensv1ensv2-current-authority). When its
-  exact-name consumer slice is activated, `conflicting_current_ens_authority`
-  covers Mainnet overlap without a provable boundary.
-  `independent_ens_deployments_overlap` covers
-  ordinary Sepolia overlap without a proven ENSv1→ENSv2 migration boundary; a proven
-  Sepolia boundary follows the same per-name authority rule. The exact
-  [shared ENS infrastructure](glossary.md#shared-ens-infrastructure) names—root,
-  `eth`, `reverse`, and `addr.reverse`—instead select ENSv2 when the ENSv2 arm is
-  current and ENSv1 evidence, current or historical, exists without proof.
-  When that shared-infrastructure rule selects ENSv2, it overrides the ordinary
-  no-proof handling below, so those names carry neither Mainnet's
-  `conflicting_current_ens_authority` nor Sepolia's
-  `independent_ens_deployments_overlap`.
+  [`architecture.md`](architecture.md#ensv1ensv2-current-authority). A name
+  with facts on both ENSv1 and ENSv2 follows the chain
+  ([ADR 0007](adrs/0007-follow-the-chain-ens-authority.md)): a current ENSv2
+  registration is served from ENSv2 without a migration proof, and otherwise
+  ENSv1 decides, so such a name is served rather than unsupported. The earlier
+  reasons `conflicting_current_ens_authority` (Mainnet) and
+  `independent_ens_deployments_overlap` (Sepolia) are no longer produced. A row
+  an earlier interpreter derived with either reason before the required Project
+  redo still returns the unsupported result below. The exact
+  [shared ENS infrastructure](glossary.md#shared-ens-infrastructure) names (root,
+  `eth`, `reverse`, and `addr.reverse`) select a current ENSv2 arm without an
+  authority epoch when ENSv1 evidence, current or historical, exists.
   Historical ENSv2 evidence alone does not qualify, and `.reverse` descendants
-  do not inherit the exception. These values replace the
-  blanket mixed-corpus reason; intake from the planned [ENSv2 migration source
-  family](glossary.md#source-family) alone does not add them. An address lookup
+  do not inherit the exception. An address lookup
   returns `409 conflict` when the deployment has no ready public namespace.
-  After the authority replacement is activated, an unsupported mixed-history
-  name result retains `input`, `kind`, and a `record` containing only `name`,
-  `display_name`, `namespace`, `namehash`, `status`, and
+  An unsupported name result retains `input`, `kind`, and a `record` containing
+  only `name`, `display_name`, `namespace`, `namehash`, `status`, and
   `unsupported_reason`. It omits registration, control, lifecycle, resolver,
   record, relation, permission, and primary-name fields from both source
   families rather than presenting either binding as current.
@@ -664,10 +660,10 @@ collection route carry neither header.
   `200` with `status=unsupported` and the minimal identity-only object below.
   The single exception is `current_authority_not_projected`, which keeps the
   ratified partial `status=ok` described at the end of this section. Every other
-  unsupported reason downgrades, including
+  unsupported reason downgrades, including the retired
   `conflicting_current_ens_authority` and
-  `independent_ens_deployments_overlap` for a mixed-history read with no
-  provable current authority, and `ensv2_exact_name_profile_shadow`, which
+  `independent_ens_deployments_overlap` on a row derived before the
+  follow-the-chain redo, and `ensv2_exact_name_profile_shadow`, which
   reaches consumers as `exact_name_profile_not_supported`. The rule fails closed
   at both edges: an unsupported row that names no reason downgrades, and so does
   an unsupported reason this build does not recognize, so a reason added to the
@@ -1161,11 +1157,11 @@ collection route carry neither header.
   Every unsupported reason except `current_authority_not_projected`
   short-circuits `source=indexed`, `source=verified`, and `source=auto` before
   provider execution and reports each requested or inventory-derived key as
-  `status=unsupported` with the name-level reason:
-  `conflicting_current_ens_authority` or
-  `independent_ens_deployments_overlap` for a mixed-history name with no
-  provable current authority, and otherwise the same public reason name detail
-  serves for that row. The reason reaches this route through the shared
+  `status=unsupported` with the name-level reason, the same public reason name
+  detail serves for that row (including the retired
+  `conflicting_current_ens_authority` and
+  `independent_ens_deployments_overlap` on a row derived before the
+  follow-the-chain redo). The reason reaches this route through the shared
   name-level vocabulary name detail uses, so one projection reason yields one
   public reason on every route. Verified execution does not choose a resolver
   for an unsupported name. `current_authority_not_projected` also

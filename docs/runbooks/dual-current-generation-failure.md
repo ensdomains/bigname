@@ -14,7 +14,7 @@ This is a
 [projection generation failure](../glossary.md#projection-generation-failure):
 Project rolls back the whole attempted publication, and the phase runner then
 attempts to write durable evidence. The assertion runs before publication
-([`crates/project/src/engine.rs:62-82`](../../crates/project/src/engine.rs#L62-L82)),
+([`crates/project/src/engine.rs:120-130`](../../crates/project/src/engine.rs#L120-L130)),
 and only the phase runner writes the post-rollback audit
 ([`apps/phase-runner/src/project_phase.rs:143-163`](../../apps/phase-runner/src/project_phase.rs#L143-L163)).
 
@@ -1002,17 +1002,18 @@ while the pinned ENSv2 RootRegistry and ETHRegistry of the
 (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/ETHRegistry.json:L2 @ ens_v2_sepolia_20260916@366de741).
 The removed June deployment's `0x11b5…` and `0x67b7…` registries are not in the current corpus.
 
-Genuine Sepolia overlap therefore means that the same logical name has readable
-ENSv1 and ENSv2 evidence **without** an
-activated `MigrationApplied` boundary connecting that name. Project leaves that
-shape unsupported with `independent_ens_deployments_overlap`; it does not raise
-this halt. The exact
-[shared ENS infrastructure](../glossary.md#shared-ens-infrastructure) names—root,
-`eth`, `reverse`, and `addr.reverse`—instead select a current ENSv2 arm when
-ENSv1 evidence is current or historical, without fabricating a proof, so they
-also do not raise this halt
-([`crates/project/src/builders/name_authority.rs:459-480`](../../crates/project/src/builders/name_authority.rs#L459-L480),
-[`crates/project/src/builders/name_authority.rs:619-630`](../../crates/project/src/builders/name_authority.rs#L619-L630)).
+A Sepolia name can therefore have readable ENSv1 and ENSv2 evidence **without**
+an activated `MigrationApplied` boundary connecting that name. Project follows
+the chain for such a name
+([ADR 0007](../adrs/0007-follow-the-chain-ens-authority.md)): a current ENSv2
+registration selects ENSv2, and otherwise ENSv1 decides. A live ENSv1 binding
+next to a current ENSv2 registration is then ordinary chain state. The name has
+no authority proof, so it never raises this halt. The exact
+[shared ENS infrastructure](../glossary.md#shared-ens-infrastructure) names (root,
+`eth`, `reverse`, and `addr.reverse`) select a current ENSv2 arm when ENSv1
+evidence is current or historical, without fabricating a proof, so they also do
+not raise this halt (the `shared_ens_infrastructure` and `decision` steps of
+[`crates/project/src/builders/name_authority/build.sql`](../../crates/project/src/builders/name_authority/build.sql)).
 Do not interpret mere cross-era Sepolia evidence as a missed ENSv1→ENSv2
 migration.
 

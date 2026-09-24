@@ -290,7 +290,10 @@ as a [released v1 authority](glossary.md#released-v1-authority) tombstone. The e
 exception selects a current ENSv2 arm when ENSv1 evidence is current or
 historical, without establishing an authority epoch, so its epoch start and
 proof fields remain null. Historical ENSv2 evidence without a current ENSv2
-binding does not qualify.
+binding does not qualify. An ordinary name without a proof follows the chain
+([ADR 0007](adrs/0007-follow-the-chain-ens-authority.md)): a current ENSv2
+binding selects ENSv2, with its epoch starting at that binding and null proof
+fields, and otherwise ENSv1 decides.
 
 ## Exact-name projection
 

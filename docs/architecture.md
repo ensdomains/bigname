@@ -275,8 +275,8 @@ the wrapper receiver serve the exact profile instead of
 `ensv2_exact_name_profile_shadow`. Candidate and noncanonical events remain
 excluded by Project staging.
 Historical boundary evidence cannot qualify an unrelated later current resource.
-The existing ordinary registry-plus-registrar path and every authority refusal
-remain intact. This changes no resolver feature admission or read routing.
+The existing ordinary registry-plus-registrar path remains intact. This changes
+no resolver feature admission or read routing.
 
 
 Canonical ENS history may contain both ENSv1 and ENSv2 facts for one logical
@@ -440,7 +440,7 @@ Unlocked ENSv1→ENSv2 migration registers the parent in ENSv2 without deploying
 Project accepts the current ENSv2 `SubregistryChanged` pointer only when its exact instance and address match a readable canonical `migration_registry_creation` association whose non-empty evidence references are contained in the activated boundary, and its active ordinary announcement. A replacement or empty-evidence association fails closed. `successor_registry_contract_instance_id` instead identifies the registry that received the parent; the locked controller registers the parent there with its new `WrapperRegistry` as subregistry. (upstream: .refs/ens_v2/contracts/src/migration/LockedMigrationController.sol:L103-L109 @ ens_v2@a971bd64)
 An entry in that migration registry is historical, not merely current: `RegistrationReserved`, `RegistrationGranted`, and `RegistrationRenewed` each show that `getExpiry(labelId)` has been positive, which makes the child non-migratable even after the entry lapses. Unregistering an entry records the current timestamp as its expiry rather than clearing it. (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L195-L207 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L410-L480 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L212-L227 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L293-L307 @ ens_v2@a971bd64) An activated `MigrationApplied` path outside the five values above is a data integrity failure rather than a silently hidden child relation.
 
-Parent reachability filters only the ENSv1 candidate arm. Project then unions it with the ENSv2 candidate, applies the child's selected [authority epoch](glossary.md#authority-epoch), and ranks only within that arm. A released ENSv2 child does not fall back; reachable arms that disagree without proof are omitted. Recency orders only within one arm by block, transaction, log, then stable `event_identity`; generated IDs and cross-era recency never choose the arm.
+Parent reachability filters only the ENSv1 candidate arm. Project then unions it with the ENSv2 candidate, applies the child's selected [authority epoch](glossary.md#authority-epoch), and ranks only within that arm. A released ENSv2 child does not fall back; reachable arms that disagree for a child with no selected authority are omitted. Recency orders only within one arm by block, transaction, log, then stable `event_identity`; generated IDs and cross-era recency never choose the arm.
 
 Both arms stating a relation for the same parent-child pair is not itself the
 failure condition. Neither ENSv1→ENSv2 migration branch retracts the ENSv1
@@ -518,18 +518,40 @@ generation never advances the resume cursor, so the window holding the conflict
 is re-derived until it is repaired. An operator redo over a range that excludes
 the conflicted name still publishes. Reorgs retain the row and make its stored
 block hashes explicitly orphaned through lineage; a later successful generation
-does not erase the failure. Neither slice chooses by recency. A mixed Mainnet
-corpus with no provable boundary is explicit `unsupported` with
-`conflicting_current_ens_authority`; the equivalent Sepolia corpus remains
-explicit `unsupported` with `independent_ens_deployments_overlap`. Configured
-ingest start blocks that omit proof events are not authority evidence and do
-not weaken either refusal. The ENS
-root, `eth`, `reverse`, and `addr.reverse` are the four exact
+does not erase the failure. Neither slice chooses by recency.
+
+A name without an authority proof follows the chain
+([ADR 0007](adrs/0007-follow-the-chain-ens-authority.md)). Only an arm that
+holds the name now, through a binding open at the target block, is a candidate.
+When the name has an open ENSv2 binding, which only a registered ENSv2 entry
+creates, Project selects ENSv2 whatever ENSv1 holds; its authority epoch starts
+at that binding and no proof fields are published. Without one, ENSv1 decides:
+its open binding is selected. A name with no open binding on either arm follows
+its ENSv1 authority events when it has any, and its ENSv2 events otherwise; that
+selects a released ENSv1 lease as a
+[released v1 authority](glossary.md#released-v1-authority) tombstone, or leaves
+the name `current_authority_not_projected`. This matches the ENSv2 Universal
+Resolver, which reads only ENSv2 registries: a registered ENSv2 entry answers
+from its own resolver, and a reserved entry answers through `ENSV1Resolver`,
+which reads the ENSv1 registry.
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/universalResolver/libraries/LibResolution.sol:L58-L85 @ ens_v2_sepolia_20260916@366de741)
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/resolver/ENSV1Resolver.sol:L40-L43 @ ens_v2_sepolia_20260916@366de741)
+A `.eth` label with no live ENSv2 entry is the one difference: the Universal
+Resolver finds no resolver for it, while bigname lets ENSv1 decide; see
+[`upstream.md`](upstream.md#ensv1-authority-without-an-ensv2-entry). No name is
+refused for holding facts on both arms, so Project no longer produces the
+earlier `conflicting_current_ens_authority` (Mainnet) or
+`independent_ens_deployments_overlap` (Sepolia) reasons. Configured ingest start
+blocks that omit proof events establish no proof; they only decide which facts
+the selection sees.
+
+The ENS root, `eth`, `reverse`, and `addr.reverse` are the four exact
 [shared ENS infrastructure](glossary.md#shared-ens-infrastructure) names. When
 the ENSv2 arm is current and ENSv1 evidence exists as a current binding or
 historical events, they select ENSv2 without fabricating a proof or authority
-epoch. Historical ENSv2 evidence without a current ENSv2 binding does not
-qualify. The pinned ENSv2 deployment establishes
+epoch: unlike an ordinary name, their epoch start stays null. Historical ENSv2
+evidence without a current ENSv2 binding does not qualify, and such a name
+follows the ordinary rule above. The pinned ENSv2 deployment establishes
 root, `eth`, and `reverse`. The pinned ENSv1 contract defines `addr.reverse` as
 its reverse registrar node, and its deployment assigns that node directly on
 testnets; bigname intentionally preserves this exact four-name classification
@@ -541,12 +563,13 @@ across configured ENS deployment profiles.
 (upstream: .refs/ens_v1/deploy/reverseregistrar/00_deploy_reverse_registrar.ts:L30-L48 @ ens_v1@91c966f)
 Descendants, including `alice.addr.reverse`, are not exceptions. Existing ENSv1→ENSv2 migration proof, qualifying
 release, and deployment-wide ENSv2 release-threshold branches retain precedence.
-An ordinary no-proof overlap is refused rather than fatal; a dual-current contradiction
-after a proven activated boundary aborts projection generation for both
-configured Mainnet and Sepolia ENS deployment profiles. Before the exact-name
-slice, a corpus containing both families retained the historical
-`mixed_exact_name_corpus` product reason. The current per-name rule and its two
-reasons are the contracted replacement for that blanket refusal.
+A live ENSv1 binding next to a current ENSv2 registration is ordinary chain state
+when the name has no proof. The dual-current contradiction keeps its post-proof
+scope: only after a proven activated boundary does it abort projection generation
+for both configured Mainnet and Sepolia ENS deployment profiles. Before the
+exact-name slice, a corpus containing both families retained the historical
+`mixed_exact_name_corpus` product reason; the per-name rule replaced that blanket
+refusal.
 
 Resolver-bearing ENSv2 reservations, their expiry maintenance, and their
 release are retained facts, but they do not establish ENSv2 authority.
@@ -564,10 +587,13 @@ remains ENSv2 era evidence.
 (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L195-L206 @ ens_v2@a971bd64)
 (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L428-L471 @ ens_v2@a971bd64)
 A real ENSv2 registration or binding still establishes ENSv2 authority.
-Therefore a live ENSv1 name plus only a premigration reservation selects ENSv1;
-a live ENSv1 name plus an actual ENSv2 registration remains unsupported without
-a proven boundary. This does not introduce a recency bridge between independent
-deployments: genuine overlap remains unsupported regardless of event age.
+Therefore a live ENSv1 name plus only a premigration reservation selects ENSv1,
+and a live ENSv1 name plus a current ENSv2 registration selects ENSv2. Neither
+choice compares the ages of the two arms' facts.
+An ENSv1 lease that stays live under a name ENSv2 holds keeps the visibility it
+has after a proven migration: its events stay in name history and its
+permission rows stay in the permission views, but it supplies no current field
+of the name.
 
 ## Source families
 

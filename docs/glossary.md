@@ -131,10 +131,12 @@ capture](manifests.md#resolver-creation-capture).
 the exact ENS root, `eth`, `reverse`, and `addr.reverse` names. When an active
 surface has a current ENSv2 arm and ENSv1 evidence from a current binding or
 historical events, but no higher-precedence authority evidence, Project selects
-the ENSv2 arm for these four names without creating an authority proof or epoch.
-Historical ENSv2 evidence without a current ENSv2 binding does not qualify, and
-descendants are not included in the exception. A current ENSv2 binding with no
-ENSv1 evidence remains the ordinary single-arm ENSv2 case.
+the ENSv2 arm for these four names without creating an authority proof or epoch:
+their epoch start stays null, where an ordinary name selected by its current
+ENSv2 registration starts its epoch at that binding. Historical ENSv2 evidence
+without a current ENSv2 binding does not qualify, and descendants are not
+included in the exception. A current ENSv2 binding with no ENSv1 evidence
+remains the ordinary single-arm ENSv2 case.
 
 ## Authority proof
 
@@ -151,7 +153,11 @@ establish authority by itself. Once the positive registration establishes the
 child epoch, later topology or manifest changes do not erase it. That child proof does not synthesize
 `MigrationApplied`, ENSv1→ENSv2 migration history, or a binding transition. Candidate
 events, reservations, event recency, binding UUID order, and `active_from`
-order are not authority proof.
+order are not authority proof. A proof is not needed for ENSv2 to hold a name:
+a current ENSv2 registration selects ENSv2 without one, following the chain
+([ADR 0007](adrs/0007-follow-the-chain-ens-authority.md)). A proof decides
+where the authority epoch starts, and it is what arms the dual-current
+generation checks.
 
 ## Backfill coverage fact
 
@@ -2093,14 +2099,15 @@ registration lifecycle is unregistered, but its authority epoch remains
 registration, owner, resolver, expiry, or control. A later positive ENSv2
 registration continues within that v2 authority regime when the release's
 regime evidence is unambiguous. If earlier ENSv2 grants on other resources
-leave the release's lifecycle epoch ambiguous, a later re-registration
-combined with post-release ENSv1 residue resolves to an explicit
-mixed-authority conflict rather than continuing the regime.
+leave the release's lifecycle epoch ambiguous, the regime does not continue;
+a later re-registration that is current is still selected as the name's
+current ENSv2 registration.
 Without an [authority proof](#authority-proof), this tombstone is established
 only by a qualifying release boundary — a release of the then-current ENSv2
 registration with no ENSv1 activity at or before it — and later ENSv1 facts do
 not retroactively validate a non-qualifying release. A release that does not
-qualify leaves no tombstone: the name resolves to explicit
+qualify leaves no ENSv2 tombstone: ENSv1 then decides the name when it holds the
+name or has history for it, and the name is otherwise explicit
 `current_authority_not_projected`.
 
 <a id="released-v1-authority"></a>

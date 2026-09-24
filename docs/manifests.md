@@ -462,23 +462,23 @@ No ENSv1 registrar-controller contract is admitted on this deployment profile. T
 The pins also carry a tracked Sepolia v1-reference address for `WrappedETHRegistrarController`, `0xFED6a969AaA60E4961FCD3EBF1A2e8913ac65B72`, and the ENSv2 `ETHRenewerV1` constructor data names the same controller. That reference artifact contains only the address and ABI, however: it has no deployment transaction, receipt, or historical start block. The ENS subgraph and ENSNode cross-check references both pair the address with block `3790244`, but those references do not supply authoritative deployment provenance. Unlike the explicit BaseRegistrar exception above, bigname does not elevate that cross-check metadata into a controller watch-plan floor, so the controller remains unadmitted and its admission remains deferred.[^v1-sepolia-wrapped-controller-gap]
 Registrar-controller coverage remains a known asymmetry against the mainnet deployment profile; resolver-log coverage for the approved four-address set is no longer one.
 
-An ordinary active name that carries both current ENSv1 and ENSv2 arms on this
-deployment profile, without an admitted authority proof, qualifying release, or
-deployment-wide ENSv2 release-threshold decision, is
-[`independent_ens_deployments_overlap`](architecture.md) rather than a chosen
-authority. The runtime admits evidence from both protocol eras, but only an
-admitted ENSv1→ENSv2 migration boundary establishes per-name authority between
-them.
+An ordinary active name with facts on both ENSv1 and ENSv2 on this deployment
+profile, and no admitted authority proof, qualifying release, or
+deployment-wide ENSv2 release-threshold decision, follows the chain
+([ADR 0007](adrs/0007-follow-the-chain-ens-authority.md) and
+[architecture](architecture.md#ensv1ensv2-current-authority)): a current ENSv2
+registration selects ENSv2, and otherwise ENSv1 decides. A premigration
+reservation is not a registration and defers to ENSv1. Only an admitted
+ENSv1→ENSv2 migration boundary sets an authority epoch at the boundary itself.
 The exact [shared ENS infrastructure](glossary.md#shared-ens-infrastructure)
-names—root, `eth`, `reverse`, and `addr.reverse`—instead select ENSv2 when the
-ENSv2 arm is current, ENSv1 evidence exists as either a current binding or
-historical events, and none of those higher-precedence decisions applies.
-Historical ENSv2 evidence alone does not qualify, and descendants do not
-inherit the exception. A current ENSv2 arm without ENSv1 evidence remains the
-ordinary single-arm ENSv2 case.
-Admitting ENSv1 sources here
-makes ordinary overlap reachable in production for the first time; it does not
-establish an ENSv1→ENSv2 migration boundary.
+names (root, `eth`, `reverse`, and `addr.reverse`) select a current ENSv2 arm
+without publishing an authority epoch when ENSv1 evidence exists as either a
+current binding or historical events and none of those higher-precedence
+decisions applies. Historical ENSv2 evidence alone does not qualify, and
+descendants do not inherit the exception. A current ENSv2 arm without ENSv1
+evidence remains the ordinary single-arm ENSv2 case.
+Admitting ENSv1 sources here makes names with facts on both arms reachable in
+production; it does not establish an ENSv1→ENSv2 migration boundary.
 
 `exact_name_profile` [capability promotion](glossary.md) is deployment-profile-scoped: only `exact_name_profile = "supported"` on the active `ens_v2_registrar_l1` version in the `sepolia` root promotes `.eth` exact-name declared reads to supported, backed by `ETHRegistry` resource/token state and `ETHRegistrar` lifecycle facts.[^v2-iperm-l22][^v2-events-l15][^v2-iethreg-l32] The admitted ENSv1 registrar remains `shadow` because registrar-controller label coverage is absent, so the product namespace route aggregates the two declarations as `name_profile.completeness = "partial"`; this does not demote the ENSv2 family-level support. The capability promotion does not apply to mainnet, another deployment profile, or any runtime that has not selected `manifests/sepolia`. Names that reach ENSv2 through a validated migration, or through a positive child registration under a migrated parent, qualify without a registrar event when their registry is declared in the `ens_v2_registry_l1` manifest or was created and announced by the migration itself (the per-name `WrapperRegistry` of the locked path, proven by its `migration_registry_creation` association and admitted `registry_announcement` edge); see [architecture](architecture.md). Active rollout, raw preimage observations, resolver admission, or backfill completion promote no other capability.
 
@@ -1019,8 +1019,8 @@ and the generated watch plans remain byte-for-byte unchanged. The new
 requires one complete retained-range Interpret re-walk followed by Project,
 with publication blocked until the completed generation is coherent. The
 dual-current integrity assertions apply to activated proofs on the configured
-Mainnet and Sepolia ENS deployment profiles. Ordinary unproven Sepolia
-ENSv1/ENSv2 overlap remains a per-name refusal rather than a publication block.
+Mainnet and Sepolia ENS deployment profiles. A Sepolia name with facts on both
+arms and no proof follows the chain per name and never blocks publication.
 [PR #852](https://github.com/ensdomains/bigname/pull/852) supplies the connected
 wrapped and locked Interpret-to-Project publication proof. There is no
 production interval serving candidate-only data.
