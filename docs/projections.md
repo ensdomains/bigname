@@ -753,20 +753,18 @@ above the range stay, because an operator redo can end below a target that is
 already published.
 
 For a slice-1 test re-walk that must not change product behavior at a fixed
-readable chain head, an outstanding product cursor backed by normalized-event
-identity must continue against the post-re-walk test publication. It resumes at
-the same
-normalized-event keyset anchor and preserves all remaining product rows, pages,
-fields, `has_more`, and summary behavior. The anchor may be an unmapped event,
-so an interleaved non-product event at a page boundary must not skip or duplicate
-visible rows. A diagnostic-events cursor must remain valid and continue from the
+readable chain head, product history cursors hold positions rather than
+normalized-event row IDs and follow the
+[history walk](glossary.md#history-walk) rule in
+[api-v2.md](api-v2.md#cursors-and-pagination). A diagnostic-events cursor must
+remain valid and continue from the
 same stable normalized-event anchor, but its subsequent diagnostic rows and
 fields may reflect candidate admission. A pre-existing diagnostic row's numeric
 `normalized_event_id` may change while its `event_identity` and pre-existing
 semantic fields remain stable. Storage may preserve the numeric
 normalized-event ID or resolve the old token through stable `event_identity` and
 its stored sort tuple; these are alternative strategies. Fresh post-re-walk
-cursor bytes may differ, and fresh cursors must also continue normally. The
+diagnostic cursor bytes may differ, and fresh cursors must also continue normally. The
 control and candidate test runs hold every other shared-boundary input
 constant, including PR #391's topology serializer.
 

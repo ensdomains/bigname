@@ -46,6 +46,7 @@ pub use child_registrations::{
     load_name_history_page_with_child_registrations,
 };
 pub use event_page::{load_event_history_page, load_event_history_page_with_redo_policy};
+pub use keyset::load_history_anchor_position;
 pub use options::{
     ChainBlockRange, HistoryBlockWindow, HistoryOrder, HistoryPageOptions, HistoryScope,
 };
@@ -90,10 +91,28 @@ pub struct HistoryEvent {
     pub coverage: Value,
 }
 
+/// Where a history page continues: after `event_identity` in the history order.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HistoryCursor {
-    pub normalized_event_id: i64,
+    /// The anchor's numeric id, which a redo may rotate. Only cursors that resume through the
+    /// anchor row carry it.
+    pub normalized_event_id: Option<i64>,
+    /// The anchor's identity, the final key of the history order.
     pub event_identity: String,
+    /// The anchor's other ordering values. With them the page continues after that position
+    /// whether or not the anchor row still exists; without them it resumes through the anchor
+    /// row, which must still be one of the rows the filter reads.
+    pub position: Option<HistoryPosition>,
+}
+
+/// Every key of the history order but the final `event_identity`, as one row holds them.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct HistoryPosition {
+    pub block_number: Option<i64>,
+    pub chain_id: Option<String>,
+    pub block_hash: Option<String>,
+    pub transaction_hash: Option<String>,
+    pub log_index: Option<i64>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

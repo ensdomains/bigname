@@ -913,14 +913,12 @@ target chain for ENSv1→ENSv2 migration. The ordinary announcement edge prevent
 an intake gap in the restart, historical-replay, and live-follow boundary
 fixtures.
 
-For normalized-event-backed product collections, the slice-1 test re-walk must
-also preserve outstanding cursor continuation at a fixed readable chain head.
-A cursor issued before the re-walk must resume after publication at the same
-normalized-event keyset anchor and preserve every remaining product row, page,
-field, `has_more`, and summary result. The anchor may be an unmapped event, so an
-interleaved non-product event at a page boundary must not skip or duplicate a
-visible row. A diagnostic-events cursor must also remain valid and continue from
-the same stable normalized-event anchor, although its remaining rows and fields
+Product history cursors hold a position in the history order rather than a
+normalized-event row ID, so the slice-1 test re-walk leaves them to the
+[history walk](glossary.md#history-walk) rule in
+[api-v2.md](api-v2.md#cursors-and-pagination). A diagnostic-events
+cursor issued before the re-walk at a fixed readable chain head must remain
+valid and continue from the same stable normalized-event anchor, although its remaining rows and fields
 may reflect candidate admission. A pre-existing diagnostic row's numeric
 `normalized_event_id` may change while its `event_identity` and pre-existing
 semantic fields remain stable. Storage may preserve the numeric normalized-

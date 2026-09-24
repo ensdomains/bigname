@@ -2196,7 +2196,10 @@ async fn noncanonical_registration_history_keeps_resource_less_events_on_their_f
                 assert_eq!(next.rows.len(), 1);
                 assert_eq!(next.rows[0].event_identity, format!("fork-{branch}-grant"));
                 assert!(next.next_cursor.is_none());
-                let error = bigname_storage::load_event_history_page(
+                // A cursor is a position in the history order, so another fork's record
+                // continues this registration from that position: same-block rows of the other
+                // fork sort by block hash.
+                let other = bigname_storage::load_event_history_page(
                     &database.pool,
                     bigname_storage::EventHistoryFilter {
                         resource_id: Some(other_resource),
@@ -2208,12 +2211,15 @@ async fn noncanonical_registration_history_keeps_resource_less_events_on_their_f
                     summary_mode,
                     false,
                 )
-                .await
-                .expect_err("another fork's record must not anchor this registration");
-                assert!(
-                    error
-                        .downcast_ref::<bigname_storage::InvalidHistoryCursor>()
-                        .is_some()
+                .await?;
+                let expected = if branch == "a" { "fork-b-grant" } else { "fork-a-record" };
+                assert_eq!(
+                    other
+                        .rows
+                        .iter()
+                        .map(|row| row.event_identity.as_str())
+                        .collect::<Vec<_>>(),
+                    vec![expected]
                 );
             }
         }
@@ -3116,7 +3122,8 @@ async fn registration_history_excludes_record_writes_attributed_to_another_lease
     assert!(later_hashes.contains(&"0xtx125"), "{later_hashes:?}");
     assert!(!later_hashes.contains(&"0xtx122"), "{later_hashes:?}");
 
-    // The later lease's write cannot anchor a page of the older lease's history.
+    // A cursor holding the later lease's write continues the older lease's walk from that
+    // position; the later lease's write does not join the older lease's rows.
     let later_first = v2_history_payload_for_database(
         &database,
         &format!("/v1/events?registration_id={later_lease_id}&page_size=1"),
@@ -3141,11 +3148,9 @@ async fn registration_history_excludes_record_writes_attributed_to_another_lease
         ),
     )
     .await?;
-    assert_eq!(
-        response.status(),
-        StatusCode::BAD_REQUEST,
-        "a write of the later lease anchored a page of the older lease"
-    );
+    assert_eq!(response.status(), StatusCode::OK);
+    let continued = read_json::<Value>(response).await?;
+    assert_eq!(continued["data"], json!([older["data"][0].clone()]));
 
     database.cleanup().await
 }

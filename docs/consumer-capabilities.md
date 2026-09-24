@@ -421,23 +421,19 @@ resolver and record reads, primary-name and search reads, `/v1/events`, and
 name- and address-history reads, plus every GraphQL compatibility operation.
 The comparison covers ordered pages, page membership, every REST and Manager
 DTO field, summary/count fields, `has_more`, and point responses. Before the
-test-only slice-1 re-walk, each normalized-event-backed cursor surface reads a
-page and saves its `next_cursor`. After the full Interpret and Project re-walk
-publishes, that pre-rewalk cursor is submitted to the post-rewalk test
-publication.
-For `/v1/events`, name history, address history, and every other product cursor
-surface backed by normalized-event row identity, it must resume from the same
-normalized-event keyset anchor with identical remaining product rows, pages,
-fields, `has_more`, and summary behavior. The anchor may be an unmapped event
-absent from the product response, so the corpus interleaves an unmapped event at
-a product-page boundary and proves that no visible row is skipped or duplicated.
+test-only slice-1 re-walk, `/v1/diagnostics/events` reads a page and saves its
+`next_cursor`. After the full Interpret and Project re-walk publishes, that
+pre-rewalk cursor is submitted to the post-rewalk test publication. Product
+history cursors hold positions rather than normalized-event row IDs and follow
+the [history walk](glossary.md#history-walk) rule in
+[api-v2.md](api-v2.md#cursors-and-pagination).
 `/v1/diagnostics/events` must accept its old cursor and continue from the same
 stable normalized-event anchor, but its remaining rows and fields may include
 the expected new candidate diagnostics. A pre-existing diagnostic row's numeric
 `normalized_event_id` may change, while its `event_identity` and pre-existing
 semantic fields remain stable apart from those allowed candidate additions.
-Fresh post-rewalk cursors are tested
-separately on every covered route and must continue normally.
+Fresh post-rewalk diagnostic cursors are tested
+separately and must continue normally.
 Implementations may preserve numeric `normalized_event_id` values or resolve an
 old token through stable `event_identity` plus its stored sort tuple; freshly
 issued cursor bytes may differ. Raw facts, candidate
