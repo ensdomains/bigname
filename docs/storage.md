@@ -338,7 +338,11 @@ the next pointer (through `normalized_events_ens_v1_record_node_resolver_idx` an
 `normalized_events_basenames_record_node_resolver_idx`), the `ResolverRecordLinked` rows that
 split a pointer's window on a record-ID resolver, and, for a latest pointer at a declared ENSv1
 mirror resolver, the ENSv1 resolver the mirror would call as the ENSv1 registry stood at that
-block. A pointer or link above the published block neither attributes an older write nor closes
+block. The reader follows that resolver only when the walk selects it at the name's own node
+(`ancestor_depth = 0`), and it reads each registry pointer by the node the event addresses
+(`child_node`, then `namehash`, then `node`), matching Project's mirror builder. A nearest
+resolver on an ancestor attributes nothing, and the reader does not look past it for a farther
+one. A pointer or link above the published block neither attributes an older write nor closes
 an earlier pointer's window, so a resolver selected after the block cannot pull an older write
 into a read bound to it. Superseded pointers keep their windows and a clear closes the previous
 window without opening one, exactly as the producer attributes them, so the reader does not need
@@ -353,14 +357,17 @@ that run the record inventory builder checks this after each of their Project ru
 the producer's attribution those fixtures exercise fails that guard instead of drifting from
 history. Reads without publication bounds (the unbounded storage loaders and diagnostics reads
 that pass none) evaluate every readable pointer and write. The ENSv1 and Basenames node-keyed arms
-use the node and resolver expression indexes on `normalized_events`. Three paths have no
+use the node and resolver expression indexes on `normalized_events`. Two paths have no
 supporting index and read through the broad `normalized_events_projection_idx` or a block-range
-index instead: the ENSv2 declared-resolver arm (ENSv2 resolver writes), the
-`ResolverRecordLinked` scan for record-ID link spans, and the mirror lookup of the ENSv1 registry
-pointer by `lower(node)`. All three are reached only by Sepolia deployments today. The lookup of
-the declaring manifest also reads through the projection index, on every deployment. A plan test
-in `history/address_plan_tests.rs` checks that neither statement reads `normalized_events`
-sequentially.
+index instead: the ENSv2 declared-resolver arm (ENSv2 resolver writes) and the
+`ResolverRecordLinked` scan for record-ID link spans. Both are reached only by Sepolia deployments
+today. The mirror lookup of the ENSv1 registry pointer by addressed node uses
+`normalized_events_project_v1_pointer_addressed_node_idx`
+([`ops/mirror-pointer-index`](../ops/mirror-pointer-index/README.md)). The lookup of
+the declaring manifest also reads through the projection index, on every deployment. Plan tests
+in `history/address_plan_tests.rs` check that neither statement reads `normalized_events`
+sequentially, and that the mirror lookup, run over a non-empty walk, reads registry pointers
+through `normalized_events_project_v1_pointer_addressed_node_idx`.
 
 History loaders called with `canonical_only=false` also return rows of activated losing
 branches. For those reads every binding, grant and wrapper-link witness must lie on the event's

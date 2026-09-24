@@ -1024,8 +1024,8 @@ Rules:
   [ENSv1 mirror resolver](glossary.md#ensv1-mirror-resolver-ensv1_mirror_resolver)
   while the ENSv1 resolver the mirror's registry walk selects for the name (the
   exact node's, else the nearest ancestor's) is not projected, or is an
-  ancestor's declared `ensip10_extended_resolver`; it crosses the serving
-  boundary unchanged wherever a route exposes the inventory reason.
+  ancestor's resolver, which Project never derives through; it crosses the
+  serving boundary unchanged wherever a route exposes the inventory reason.
 - A read over a projected row keys `unsupported` on that row's own coverage
   status, not on a list of known reasons: an unsupported row serves
   `status=unsupported` even when it names no reason or names a reason the build

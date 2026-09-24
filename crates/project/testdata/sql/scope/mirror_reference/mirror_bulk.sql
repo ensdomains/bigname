@@ -52,11 +52,11 @@ ANALYZE project_mirror_reference_consulted;
 CREATE TEMP TABLE project_mirror_pairs ON COMMIT DROP AS
 WITH wanted AS MATERIALIZED (SELECT DISTINCT namespace,namehash FROM project_mirror_reference_consulted),
 v1_nodes AS (
-             SELECT event.namespace, lower(event.after_state ->> 'node') AS namehash,
+             SELECT event.namespace, lower(COALESCE(event.after_state ->> 'child_node', event.after_state ->> 'namehash', event.after_state ->> 'node')) AS namehash,
                     event.resource_id,
                     bool_or(changed.normalized_event_id IS NOT NULL) AS changed
              FROM wanted JOIN normalized_events event
- ON event.namespace=wanted.namespace AND lower(event.after_state ->> 'node')=wanted.namehash
+ ON event.namespace=wanted.namespace AND lower(COALESCE(event.after_state ->> 'child_node', event.after_state ->> 'namehash', event.after_state ->> 'node'))=wanted.namehash
              JOIN chain_lineage lineage
                ON lineage.chain_id = event.chain_id
               AND lineage.block_hash = event.block_hash
@@ -68,11 +68,11 @@ v1_nodes AS (
                AND event.source_family IN (
                    'ens_v1_registry_l1', 'ens_v1_registrar_l1', 'ens_v1_wrapper_l1'
                )
-               AND event.after_state ->> 'node' IS NOT NULL
+               AND COALESCE(event.after_state ->> 'child_node', event.after_state ->> 'namehash', event.after_state ->> 'node') IS NOT NULL
                AND event.consumer_visibility = 'activated'
                AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
                AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
-             GROUP BY event.namespace, lower(event.after_state ->> 'node'), event.resource_id
+             GROUP BY event.namespace, lower(COALESCE(event.after_state ->> 'child_node', event.after_state ->> 'namehash', event.after_state ->> 'node')), event.resource_id
 
 )
 SELECT DISTINCT consulted.mirror_resource_id, consulted.logical_name_id AS consulted_logical_name_id,

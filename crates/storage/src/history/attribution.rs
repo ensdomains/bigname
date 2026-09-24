@@ -45,6 +45,24 @@ pub(in crate::history) fn push_empty_mirror_writes_for_test(
     mirror::push_empty_mirror_writes_for_test(builder, published);
 }
 
+/// The mirror substitution statement over the queried node alone, for plan tests.
+#[cfg(test)]
+pub(in crate::history) fn push_exact_node_mirror_writes_for_test(
+    builder: &mut QueryBuilder<'static, Postgres>,
+    resource_id: Uuid,
+    node: &str,
+    raw_labels: &[&str],
+    published: Option<&BTreeMap<String, i64>>,
+) {
+    mirror::push_exact_node_mirror_writes_for_test(
+        builder,
+        resource_id,
+        node,
+        raw_labels,
+        published,
+    );
+}
+
 /// The attributed writes of a read's candidate resources, as `(resource, event)` pairs.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(in crate::history) struct AttributedRecords {
