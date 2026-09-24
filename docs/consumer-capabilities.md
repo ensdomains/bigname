@@ -189,21 +189,15 @@ summaries. A superseded ENSv1 registration is therefore never selected, while a
 current registration queried by resource can still contribute in a separate
 name-scoped view.
 
-For the post-audit Sepolia profile, an exact-name read may qualify through
-an activated migration instead of a V2 registrar event. The existing ordinary
-registry-plus-registrar qualification remains unchanged. The migration alternative
-requires the selected current ENSv2 binding and resource to match the exact
-successor of the selected `MigrationApplied` proof, with no authority-selection
-refusal. The boundary and successor-resource registry evidence must identify the
-same ENS name and chain and join their admitted active manifests. The registry
-must be explicitly declared for the post-audit Sepolia profile at that evidence
-position. This does not admit the historical registry model, custom undeclared
-registries, candidate or orphaned boundaries, mismatched successors, or a stale
-migration proof whose successor is no longer current. It does not fabricate a
-registrar registration or grant resolver read features; resolver-specific feature
-admission is unchanged. Later ordinary registrations continue to use the existing
-registrar qualification. Runtime acceptance of this alternative is tracked with
-the connected #822 proof and is not implied by this contract statement.
+An exact-name read is supported when the name's selected authority carries no
+refusal. For ENSv2 that means a current registration in an admitted registry:
+the root registry, the declared ETH registry, or a registry discovery admits.
+No `ETHRegistrar` event, activated migration or positive child-registration
+proof is required for support, and none is fabricated; registrar events keep
+feeding name history and renewal expiry. An activated `MigrationApplied`
+boundary still decides authority where it applies, as described below. Resolver
+feature admission is unchanged: support for the name grants no resolver read
+feature.
 
 The final activation re-derives a [complete
 group](glossary.md#complete-group) through
@@ -262,8 +256,8 @@ selects an arm per name under the same rule and is no longer refused. Names that
 were identity-only with `independent_ens_deployments_overlap` (Sepolia) or
 `conflicting_current_ens_authority` (Mainnet) now select ENSv2 when their ENSv2
 registration is current and ENSv1 otherwise. A name whose selected arm is
-ENSv2 still needs the name's exact-name profile qualification and otherwise
-reports `ensv2_exact_name_profile_shadow`. The
+ENSv2 and carries no refusal is served from its ENSv2 registration without a
+further registrar, migration or child-registration qualification. The
 ENS root, `eth`, `reverse`, and `addr.reverse` are the four exact
 [shared ENS infrastructure](glossary.md#shared-ens-infrastructure) names. They
 select ENSv2 when the ENSv2 arm is current and ENSv1 evidence, current or

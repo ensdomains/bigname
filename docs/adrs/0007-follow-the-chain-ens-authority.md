@@ -2,6 +2,19 @@
 
 Status: Accepted
 Date: 2026-09-24
+Amended: 2026-09-25 (support follows the authority decision without a registrar qualification)
+
+## 2026-09-25 Amendment: Support Follows The Authority Decision
+
+A name whose selected arm is ENSv2 and whose selection carries no refusal is
+now supported without any further qualification. A registration in an admitted
+ENSv2 registry (the root registry, the declared ETH registry, or a registry
+discovery admits) is a registration; no `ETHRegistrar` event, migration
+successor proof or child registration proof is needed. The reason
+`ensv2_exact_name_profile_shadow` and its public name
+`exact_name_profile_not_supported` are no longer produced or mapped. On Sepolia
+the root-registry names `eth` and `reverse` become supported. See
+[architecture](../architecture.md#ensv1ensv2-current-authority). Linear TYR-20.
 
 ## Context
 
@@ -149,15 +162,11 @@ snapshot. The difference is listed in
   `conflicting_current_ens_authority` get a selected authority. A name with a
   current ENSv2 registration selects ENSv2; any other such name selects ENSv1,
   including as a released ENSv1 registration. On Sepolia this covers all 652
-  names refused on 2026-09-23. Selection is not the same as full service: a
-  name whose selected arm is ENSv2 still needs the existing exact-name profile
-  qualification under the promoted deployment profile. That qualification is
-  per logical name: an admitted `ETHRegistrar` event for the name, a proven
-  migration successor for the selected registration, or a positive child
-  registration proof. A name without one reports
-  `ensv2_exact_name_profile_shadow` and stays identity-only, like any other
-  such ENSv2 name. Matching the registrar event to the selected registration
-  is tracked in a follow-up ticket.
+  names refused on 2026-09-23. When this ADR was accepted, a name whose
+  selected arm is ENSv2 also needed a per-name exact-name profile
+  qualification (an admitted `ETHRegistrar` event, a proven migration
+  successor, or a positive child registration proof) and otherwise stayed
+  identity-only. The 2026-09-25 amendment above removes that qualification.
 - A name registered on ENSv1 after the premigration snapshot and then registered
   on ENSv2 is served from ENSv2, which is also what the Universal Resolver
   returns.

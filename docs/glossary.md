@@ -1522,16 +1522,17 @@ Both lookups use label-hash indexes and then compare the labels themselves; see
 
 ## Exact-name profile (`exact_name_profile`)
 
-the per-manifest capability
-flag that, when `supported`, makes declared exact-name reads authoritative for
-that deployment profile. Today the only family whose active manifest carries
-`supported` is the ENSv2 Sepolia registrar; the flag also exists in `shadow`
-elsewhere (for example the mainnet ENSv1 registrar). It promotes nothing else.
-A name whose current ENSv2 authority comes from a validated migration, or from
-a positive child registration under a migrated parent, qualifies without a
-registrar event when its registry is either declared in the post-audit registry
-manifest or was created and announced by the migration itself (the per-name
-`WrapperRegistry` of the locked path); see [architecture](architecture.md).
+a per-manifest capability flag that declares whether a source family's
+exact-name reads are supported for the namespace. `/v1/namespaces` aggregates the
+declarations into the `name_profile` capability and its completeness. Today the
+only family whose active manifest carries `supported` is the ENSv2 Sepolia
+registrar; the flag also exists in `shadow` elsewhere (for example the Mainnet
+ENSv1 registrar). The flag does not decide whether an individual name is served:
+a name's support follows its authority decision, so an ENSv2 name selected
+without a refusal is supported whether or not a registrar event exists for it;
+see [architecture](architecture.md#ensv1ensv2-current-authority). The coverage
+value `enumeration_basis = "exact_name_profile"` is a separate field that only
+names the ENSv2 corpus a row was built from.
 
 ## Generation (raw-log retention generation)
 

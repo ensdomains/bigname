@@ -1156,3 +1156,23 @@ release is recorded, recount the mirror rows by support status and
 `provenance.mirror.mirrored_unsupported_reason` at the published Project target,
 separating inventory resources from the resources names currently serve, and
 check `address_records_current` for the withdrawn rows.
+
+### ENSv2 support without a registrar event
+
+The build that serves a selected ENSv2 registration without a registrar event
+([architecture](architecture.md#ensv1ensv2-current-authority)) edits
+`crates/project/src/builders/name_current/build.sql`, so it rotates the
+[interpreter content hash](glossary.md#interpreter-content-hash) for every
+chain. It needs no schema-migration, no watch-plan widening and no historical
+ingest fetch. It also rewords the notes of the `exact_name_profile` flag in the
+Sepolia `ens_v2_registrar_l1` manifest without changing its status. That changes
+the Sepolia manifest payload, so manifest synchronization records a manifest
+authority change for Sepolia and its full-history Interpret redo runs with
+`--attest-watch-set-coverage`, attesting that no watch-plan range widened. An
+existing deployment finishes that Interpret redo and the Project redo it
+installs before the matching API serves, as for any rotation. When the Project
+redo publishes on Sepolia, `eth` and `reverse`, the only rows that carried
+`ensv2_exact_name_profile_shadow` on 2026-09-24, become supported with no
+unsupported reason; their selected authority and projected values do not
+change. Before the release is recorded, confirm that no `name_current` row still
+carries that reason at the published Project target.

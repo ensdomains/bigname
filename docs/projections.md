@@ -607,10 +607,13 @@ at a [re-derivation boundary](glossary.md#re-derivation-boundary) restores the
 child; [#835](https://github.com/ensdomains/bigname/issues/835) tracks the
 missing bounded replay seed.
 
-For the ENSv2 post-audit Sepolia deployment profile, declared exact-name rows
-come from the admitted registry and registrar families. Out-of-profile resolver,
-reverse, primary-name, mainnet, and execution behavior does not become exact-name
-truth.
+Declared ENSv2 exact-name rows come from the admitted root and registry
+families, with registrar events adding history and renewal expiry. A name whose
+selected ENSv2 registration carries no authority refusal is supported without a
+registrar event; see
+[architecture](architecture.md#ensv1ensv2-current-authority). Out-of-profile
+resolver, reverse, primary-name, and execution behavior does not become
+exact-name truth.
 
 Within the selected ENSv2 registration lifecycle, `control.registry_owner`
 follows the latest canonical ownership event, including

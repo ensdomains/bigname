@@ -370,19 +370,17 @@ collection route carry neither header.
   misses return `status=ok` with an empty `records`
   array for the input. Lookup record-level reason values are mapped to product
   vocabulary before serialization; current values include `read_failed`,
-  `exact_name_profile_not_supported`, `mixed_exact_name_corpus`, and
-  `unsupported_reason_missing`. The contracted per-name authority replacement
-  is documented in
+  `mixed_exact_name_corpus`, and `unsupported_reason_missing`. The contracted
+  per-name authority replacement is documented in
   [`architecture.md`](architecture.md#ensv1ensv2-current-authority). A name
   with facts on both ENSv1 and ENSv2 follows the chain
   ([ADR 0007](adrs/0007-follow-the-chain-ens-authority.md)): a current ENSv2
   registration is selected without a migration proof, and otherwise ENSv1
   decides unless a qualifying ENSv2 release tombstone or regime
   ([released ENSv2 authority](glossary.md#released-v2-authority)) applies, so
-  such a name is no longer refused. A selected ENSv2 registration
-  still needs the exact-name profile qualification; without it Project records
-  `ensv2_exact_name_profile_shadow`, which the API exposes as
-  `exact_name_profile_not_supported`. The earlier reasons
+  such a name is no longer refused. A selected ENSv2 registration with no
+  authority refusal is served; it needs no `ETHRegistrar` event, migration or
+  child-registration proof. The earlier reasons
   `conflicting_current_ens_authority` (Mainnet) and
   `independent_ens_deployments_overlap` (Sepolia) are no longer produced. A
   `name_current` row derived with either reason by an earlier Project generation,
@@ -714,8 +712,7 @@ collection route carry neither header.
   unsupported reason downgrades, including the retired
   `conflicting_current_ens_authority` and
   `independent_ens_deployments_overlap` on a row derived before the
-  follow-the-chain redo, and `ensv2_exact_name_profile_shadow`, which
-  reaches consumers as `exact_name_profile_not_supported`. The rule fails closed
+  follow-the-chain redo. The rule fails closed
   at both edges: an unsupported row that names no reason downgrades, and so does
   an unsupported reason this build does not recognize, so a reason added to the
   projection later serves `unsupported` by default rather than silently serving
@@ -2773,11 +2770,9 @@ introduces it rebuilds Project from full history before serving the option; see
   expiry. A name whose exact-name projection is unsupported is omitted from
   search results whatever the reason. Today that is a name with no selected
   current binding (`current_authority_not_projected`, for example when both
-  arms have only history and nothing is open), a selected ENSv2 registration
-  without the exact-name profile qualification
-  (`ensv2_exact_name_profile_shadow`), or a row an earlier Project generation
-  derived with a retired reason. A mixed-history name is served like any other
-  name when its selected exact-name projection is supported.
+  arms have only history and nothing is open), or a row an earlier Project
+  generation derived with a retired reason. A mixed-history name is served like
+  any other name when its selected exact-name projection is supported.
   Search carries no row-local status or
   unsupported-reason field, so it omits such a name rather than serving
   registration fields no selected authority backs; callers use name detail or
@@ -2998,8 +2993,9 @@ For a registrar lease first identified by a later readable observation, registra
   `current_authority_not_projected` is absent from `bound_names` unless its
   serving resource is a TLD's root-registry resolver pointer; otherwise
   retained resolver-pointer evidence does not establish listing membership.
-  Other unsupported rows, such as `ensv2_exact_name_profile_shadow`, are
-  listed under the resolver their selected registration declares. The
+  Other unsupported rows, such as a row an earlier Project generation derived
+  with a retired reason, are listed under the resolver their selected
+  registration declares. The
   exception is an ENSv2 TLD whose current
   [root-registry resolver pointer](glossary.md#root-registry-resolver-pointer)
   is its serving resource: like the ownerless ENSv1 or Basenames row below, it
