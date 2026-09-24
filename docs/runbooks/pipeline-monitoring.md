@@ -197,7 +197,10 @@ ops dashboards tracked in Linear TYR-34.
 The observed head is the head the latest Live batch read from the execution
 client, which the runner stores as the Live phase's target. When the published
 chain head is newer, for example while Ingest catches up after a restart and
-before Live runs again, the published chain head is used instead. The metrics
+before Live runs again, the published chain head is used instead. Two cases
+make it briefly inexact: a Live batch that finds no common ancestor with the
+node stores the published head as its target, and after a rewind the Live
+target stays at the old, higher head until the next Live batch. The metrics
 code never asks the execution client itself. Live, Interpret and Project run in
 turn, so the observed head does not move while a Project batch runs: a slow
 Project batch reads zero at its commit and shows its real lag once the next
