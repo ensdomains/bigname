@@ -637,8 +637,12 @@ async fn endpoint_exports_what_each_project_batch_scoped_and_wrote() -> Result<(
     };
     // The seed spreads the names over blocks 1 to 40: a full rebuild to block 30, then one batch
     // for blocks 31 to 40.
+    // Each batch is followed by the owned key families, as the runner does once it has recorded
+    // the batch's progress.
     project.run_batch(context(30, None)?).await?;
+    project.after_progress_recorded(chain).await;
     project.run_batch(context(40, Some(30))?).await?;
+    project.after_progress_recorded(chain).await;
     feed.batch_committed();
 
     let chain_label = format!("chain=\"{chain}\"");
@@ -657,6 +661,27 @@ async fn endpoint_exports_what_each_project_batch_scoped_and_wrote() -> Result<(
         );
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     };
+    ensure!(
+        sample(
+            &body,
+            "phase_runner_project_family_lag_blocks",
+            &[&chain_label]
+        )? == 0.0,
+        "the families follow the served marker"
+    );
+    sample(
+        &body,
+        "phase_runner_project_families_seconds",
+        &[&chain_label],
+    )?;
+    ensure!(
+        sample(
+            &body,
+            "phase_runner_project_family_skips_total",
+            &[&chain_label]
+        )? == 0.0,
+        "no family loop was skipped"
+    );
     for gauge in [
         "phase_runner_project_changed_events",
         "phase_runner_project_staged_events",

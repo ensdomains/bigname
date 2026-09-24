@@ -1,6 +1,7 @@
 //! What each Project batch read and wrote. The gauges hold the newest committed batch of each
 //! chain, so a scrape answers "what did the last block cost"; the counter adds up the rows every
-//! batch wrote to each served table.
+//! batch wrote to each served table. The owned key families that follow each batch report their
+//! own wall time, lag and skips, apart from the batch's stages.
 use std::{
     collections::BTreeMap,
     sync::{Arc, Mutex},
@@ -8,7 +9,7 @@ use std::{
 
 use anyhow::Result;
 use bigname_metrics::{GaugeVec, IntCounterVec, IntGaugeVec, MetricsRegistry};
-use bigname_project::WriteSummary;
+use bigname_project::{WriteSummary, families::FamilyOutcome};
 
 /// Batches Project reported that the metrics task has not applied yet: the newest summary of each
 /// chain, and the rows written since the last apply. Both stay bounded however long the task waits.
@@ -21,6 +22,8 @@ pub(super) struct PendingProjectWrites {
 pub(super) struct Pending {
     latest: BTreeMap<String, WriteSummary>,
     rows: BTreeMap<(String, &'static str, &'static str), u64>,
+    families: BTreeMap<String, (f64, u64)>,
+    family_skips: BTreeMap<String, u64>,
 }
 
 impl PendingProjectWrites {
@@ -41,6 +44,16 @@ impl PendingProjectWrites {
         pending.latest.insert(chain.to_owned(), summary.clone());
     }
 
+    pub(super) fn record_families(&self, chain: &str, outcome: &FamilyOutcome) {
+        let mut pending = lock(&self.inner);
+        pending.families.insert(
+            chain.to_owned(),
+            (outcome.elapsed_ms as f64 / 1_000.0, outcome.lag_blocks()),
+        );
+        let skips = pending.family_skips.entry(chain.to_owned()).or_default();
+        *skips += u64::from(outcome.skipped.is_some());
+    }
+
     pub(super) fn take(&self) -> Pending {
         std::mem::take(&mut *lock(&self.inner))
     }
@@ -54,6 +67,9 @@ pub(super) struct ProjectWriteGauges {
     batch_blocks: IntGaugeVec,
     rows_written: IntCounterVec,
     stage_duration: GaugeVec,
+    families_seconds: GaugeVec,
+    family_lag: IntGaugeVec,
+    family_skips: IntCounterVec,
 }
 
 impl ProjectWriteGauges {
@@ -91,10 +107,39 @@ impl ProjectWriteGauges {
                 "Elapsed time of each derivation stage in the newest committed Project batch.",
                 &["chain", "stage"],
             )?,
+            families_seconds: registry.gauge_vec(
+                "phase_runner_project_families_seconds",
+                "Wall time of the owned key family loop that followed the newest committed Project \
+                 batch, in its own transactions after the batch's progress was recorded.",
+                &["chain"],
+            )?,
+            family_lag: registry.int_gauge_vec(
+                "phase_runner_project_family_lag_blocks",
+                "Served Project marker minus the owned key family marker after the newest family \
+                 loop; 0 when the families are current.",
+                &["chain"],
+            )?,
+            family_skips: registry.int_counter_vec(
+                "phase_runner_project_family_skips_total",
+                "Family loops that stopped on a failing block and left the families behind the \
+                 served marker.",
+                &["chain"],
+            )?,
         })
     }
 
     pub(super) fn apply(&self, pending: Pending) {
+        for (chain, (seconds, lag)) in pending.families {
+            self.families_seconds
+                .with_label_values(&[&chain])
+                .set(seconds);
+            self.family_lag
+                .with_label_values(&[&chain])
+                .set(gauge_value(lag));
+        }
+        for (chain, skips) in pending.family_skips {
+            self.family_skips.with_label_values(&[&chain]).inc_by(skips);
+        }
         for ((chain, table, kind), rows) in pending.rows {
             self.rows_written
                 .with_label_values(&[&chain, table, kind])

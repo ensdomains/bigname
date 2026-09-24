@@ -122,7 +122,12 @@ impl Phase for ProjectPhase {
                 return;
             };
             let options = FamilyOptions::new(bigname_content_hash::INTERPRETER_CONTENT_HASH);
-            bigname_project::families::apply(&self.pool, &chain_id, &target, mode, &options).await;
+            let outcome =
+                bigname_project::families::apply(&self.pool, &chain_id, &target, mode, &options)
+                    .await;
+            if let Some(feed) = &self.metrics_feed {
+                feed.project_families(&chain_id, &outcome);
+            }
         })
     }
 
