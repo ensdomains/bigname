@@ -12367,8 +12367,8 @@ async fn reservation_release_cannot_borrow_a_later_same_resource_registration() 
             "supported".into(),
             None,
         ),
-        "the later registration decides as the current ENSv2 registration, without \
-         retroactively qualifying the reservation release",
+        "the later registration decides as the current ENSv2 registration, and the reservation \
+         release does not leave the name unregistered",
     );
 
     scratch.cleanup().await

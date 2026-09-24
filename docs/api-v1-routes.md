@@ -563,8 +563,8 @@ collection route carry neither header.
   installed before the baseline carried it). A row whose only expiry is stored
   in another form (an RFC 3339 string at `control.expiry`, or no expiry at all)
   is outside this listing by design; `GET /v1/names/{name}` still serves its
-  `expires_at`. A numeric expiry beyond the timestamp range (after
-  9999-12-31T23:59:59Z) has no `expires_at` and is outside this listing too;
+  `expires_at`. A negative numeric expiry, or one after 9999-12-31T23:59:59Z,
+  is outside this listing too, and the latter has no `expires_at`;
   the Sepolia root registry registers `eth` and `reverse` with the largest
   uint64 expiry
   (upstream: .refs/ens_v2_sepolia_20260916/contracts/script/deploy-constants.ts:L1 @ ens_v2_sepolia_20260916@366de741)

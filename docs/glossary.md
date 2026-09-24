@@ -277,6 +277,10 @@ the deliberate, doc-first act of
 moving a capability from `shadow`/`unsupported` to publicly `supported`.
 Nothing else promotes a capability: backfill completion, conformance passes,
 and manifest presence are necessary evidence, never the promotion itself.
+Serving an individual exact name is not a capability promotion: a name whose
+selected authority carries no refusal is served once its source families are
+admitted, and `exact_name_profile` only reports the namespace-level declaration
+([ADR 0007](adrs/0007-follow-the-chain-ens-authority.md)).
 
 ## Checkpoint promotion
 
