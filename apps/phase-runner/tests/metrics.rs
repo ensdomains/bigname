@@ -193,6 +193,10 @@ async fn endpoint_exports_served_lag_against_the_readable_project_publication() 
         "failed",
         "published-head",
         "ingest-ahead",
+        "running",
+        "same-height-fork",
+        "ahead-of-head",
+        "no-head-row",
         "unobserved",
     ] {
         store.initialize_chain(chain).await?;
@@ -229,12 +233,49 @@ async fn endpoint_exports_served_lag_against_the_readable_project_publication() 
     )
     .execute(scratch.pool())
     .await?;
-    sqlx::query("DELETE FROM chain_heads WHERE chain_id = 'unobserved'")
+    sqlx::query(
+        "UPDATE chain_phase_state SET phase_status = 'running', finished_at = NULL
+         WHERE chain_id = 'running' AND phase_name = 'project'",
+    )
+    .execute(scratch.pool())
+    .await?;
+    // The published block is a same-height fork of the readable block 90.
+    sqlx::query(
+        "INSERT INTO chain_lineage (
+             chain_id, block_hash, block_number, block_timestamp, canonicality_state
+         ) VALUES ('same-height-fork', 'same-height-fork-90b', 90, now(), 'orphaned')",
+    )
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET current_block_hash = 'same-height-fork-90b', target_block_hash = 'same-height-fork-90b'
+         WHERE chain_id = 'same-height-fork' AND phase_name = 'project'",
+    )
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query(
+        "UPDATE chain_heads
+         SET latest_block_number = 90, latest_block_hash = 'ahead-of-head-90'
+         WHERE chain_id = 'ahead-of-head'",
+    )
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET current_block_number = 100, current_block_hash = 'ahead-of-head-100',
+             target_block_number = 100, target_block_hash = 'ahead-of-head-100'
+         WHERE chain_id = 'ahead-of-head' AND phase_name = 'project'",
+    )
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query("DELETE FROM chain_heads WHERE chain_id IN ('no-head-row', 'unobserved')")
         .execute(scratch.pool())
         .await?;
 
     let cancellation = CancellationToken::new();
     let feed = RunnerMetricsFeed::default();
+    feed.seed_chain("configured-without-rows");
     let address = phase_runner::metrics::start(
         "127.0.0.1:0".parse()?,
         scratch.pool().clone(),
@@ -251,14 +292,20 @@ async fn endpoint_exports_served_lag_against_the_readable_project_publication() 
         .context("phase metrics scrape task panicked")??;
     let body = parse_http_scrape(&response)?;
 
+    // Observed head 104, stored head 100, publication 90 unless a case changes it.
     for (chain, lag, publication) in [
         ("served", 14.0, 90.0),
+        ("running", 14.0, 90.0),
+        ("same-height-fork", -1.0, -1.0),
+        ("ahead-of-head", -1.0, -1.0),
+        ("no-head-row", -1.0, -1.0),
         ("orphaned", -1.0, -1.0),
         ("older-hash", -1.0, -1.0),
         ("failed", -1.0, -1.0),
         ("published-head", 10.0, 90.0),
         ("ingest-ahead", 10.0, 90.0),
-        ("unobserved", -1.0, 90.0),
+        ("unobserved", -1.0, -1.0),
+        ("configured-without-rows", -1.0, -1.0),
     ] {
         let label = format!("chain=\"{chain}\"");
         let labels = [label.as_str()];

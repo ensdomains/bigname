@@ -1,4 +1,7 @@
-use std::sync::Arc;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::{Arc, Mutex},
+};
 
 use anyhow::{Context, Result};
 use bigname_metrics::{IntGaugeVec, MetricsRegistry};
@@ -12,15 +15,34 @@ use tokio::sync::Notify;
 #[derive(Clone, Default)]
 pub struct RunnerMetricsFeed {
     committed: Arc<Notify>,
+    configured_chains: Arc<Mutex<BTreeSet<String>>>,
 }
 
 impl RunnerMetricsFeed {
+    /// Configured chains export both gauges as -1 from startup, before any refresh.
+    pub fn seed_chain(&self, chain: &str) {
+        self.configured_chains
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(chain.to_owned());
+    }
+
     pub fn batch_committed(&self) {
         self.committed.notify_one();
     }
 
-    pub(super) async fn committed(&self) {
+    /// Waits for the next `batch_committed`; a signal sent while nobody waits is kept.
+    pub async fn committed(&self) {
         self.committed.notified().await;
+    }
+
+    pub(super) fn configured_chains(&self) -> Vec<String> {
+        self.configured_chains
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .iter()
+            .cloned()
+            .collect()
     }
 }
 
@@ -35,6 +57,7 @@ pub(super) struct ServedLagRow {
 pub(super) struct ServedLagGauges {
     lag_blocks: IntGaugeVec,
     publication_block: IntGaugeVec,
+    incoherent: Arc<Mutex<BTreeMap<String, (i64, i64)>>>,
 }
 
 impl ServedLagGauges {
@@ -51,11 +74,33 @@ impl ServedLagGauges {
                 "Block of the newest readable Project publication, or -1 when there is none.",
                 &["chain"],
             )?,
+            incoherent: Arc::default(),
         })
+    }
+
+    pub(super) fn seed(&self, chains: &[String]) {
+        for chain in chains {
+            self.lag_blocks.with_label_values(&[chain]).set(-1);
+            self.publication_block.with_label_values(&[chain]).set(-1);
+        }
     }
 
     pub(super) fn apply(&self, rows: &[ServedLagRow]) {
         for row in rows {
+            let incoherent = row
+                .observed_head_block_number
+                .zip(row.publication_block_number)
+                .filter(|(head, publication)| head < publication);
+            if self.incoherent_changed(&row.chain_id, incoherent)
+                && let Some((observed_head, publication)) = incoherent
+            {
+                tracing::warn!(
+                    chain_id = row.chain_id,
+                    observed_head,
+                    publication,
+                    "observed head is below the Project publication; served lag reports -1"
+                );
+            }
             let chain = &[row.chain_id.as_str()];
             self.lag_blocks.with_label_values(chain).set(served_lag(
                 row.observed_head_block_number,
@@ -67,25 +112,48 @@ impl ServedLagGauges {
         }
     }
 
+    /// True the first time a chain reports this incoherent pair.
+    pub(super) fn incoherent_changed(&self, chain: &str, pair: Option<(i64, i64)>) -> bool {
+        let mut incoherent = self
+            .incoherent
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match pair {
+            Some(pair) => incoherent.insert(chain.to_owned(), pair) != Some(pair),
+            None => {
+                incoherent.remove(chain);
+                false
+            }
+        }
+    }
+
     pub(super) fn remove_chain(&self, chain: &str) {
         let _ = self.lag_blocks.remove_label_values(&[chain]);
         let _ = self.publication_block.remove_label_values(&[chain]);
     }
 }
 
+/// -1 means unavailable, never caught up: either side is missing, or the observed
+/// head is below the publication, which the retained head cannot explain.
 pub(super) fn served_lag(observed_head: Option<i64>, publication: Option<i64>) -> i64 {
     match (observed_head, publication) {
-        (Some(head), Some(publication)) => head.saturating_sub(publication).max(0),
+        (Some(head), Some(publication)) if head >= publication => head - publication,
         _ => -1,
     }
 }
 
 /// The observed head is the newer of the head the latest Live batch saw at the
 /// execution client (the Live row's target) and the published chain head, which
-/// Ingest moves while it catches up before Live runs. The publication repeats the
-/// conditions of `load_current_project_publication` in `bigname-storage`; it leaves
-/// out the API's one-block lag tolerance, so large lags show, and the Interpret-redo
-/// refusal some routes add.
+/// Ingest moves while it catches up before Live runs.
+///
+/// The publication is the one `load_served_project_generation` in `bigname-storage`
+/// would accept, with one relaxation and two gates set aside:
+/// - it drops only the upper one-block lag fence, so large lags show; the stored
+///   head must still exist and must not be below the publication;
+/// - it ignores the requested-position gate, which for a per-chain gauge would only
+///   compare the publication with itself;
+/// - it ignores the Interpret-redo gate: the redo gauges already show that state,
+///   and this gauge measures Project publication eligibility only.
 pub(super) async fn load(pool: &PgPool) -> Result<Vec<ServedLagRow>> {
     sqlx::query_as(
         "SELECT project.chain_id,
@@ -100,6 +168,7 @@ pub(super) async fn load(pool: &PgPool) -> Result<Vec<ServedLagRow>> {
          LEFT JOIN chain_lineage lineage
            ON project.phase_status IN ('completed', 'running')
           AND project.input_content_hash = $1
+          AND project.current_block_number <= head.latest_block_number
           AND lineage.chain_id = project.chain_id
           AND lineage.block_number = project.current_block_number
           AND lineage.block_hash = project.current_block_hash

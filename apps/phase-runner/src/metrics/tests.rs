@@ -171,9 +171,29 @@ async fn a_failed_refresh_after_a_commit_reports_refresh_failure() -> Result<()>
 }
 
 #[test]
+fn an_incoherent_observed_head_warns_once_per_change() -> Result<()> {
+    let metrics = PipelineMetrics::new(
+        900,
+        RunnerLoopHeartbeat::default(),
+        RunnerPhaseProgress::default(),
+    )?;
+    let lag = &metrics.served_lag;
+    assert!(lag.incoherent_changed("chain", Some((99, 100))));
+    assert!(!lag.incoherent_changed("chain", Some((99, 100))));
+    assert!(lag.incoherent_changed("chain", Some((98, 100))));
+    assert!(!lag.incoherent_changed("chain", None));
+    assert!(lag.incoherent_changed("chain", Some((98, 100))));
+    Ok(())
+}
+
+#[test]
 fn served_lag_is_unavailable_without_both_sides() {
     assert_eq!(served_lag::served_lag(Some(104), Some(100)), 4);
-    assert_eq!(served_lag::served_lag(Some(99), Some(100)), 0);
+    assert_eq!(
+        served_lag::served_lag(Some(99), Some(100)),
+        -1,
+        "an observed head below the publication is unavailable, not caught up"
+    );
     assert_eq!(served_lag::served_lag(Some(100), Some(100)), 0);
     assert_eq!(served_lag::served_lag(None, Some(100)), -1);
     assert_eq!(served_lag::served_lag(Some(104), None), -1);

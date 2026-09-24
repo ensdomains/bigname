@@ -319,13 +319,14 @@ async fn start_metrics<'a>(
             .try_into()
             .expect("validated threshold"),
     ));
+    let metrics_feed = phase_runner::metrics::RunnerMetricsFeed::default();
     for chain_id in chain_ids {
         if seed_loop_heartbeats {
             loop_heartbeat.record_progress(chain_id);
         }
         phase_progress.seed_chain(chain_id);
+        metrics_feed.seed_chain(chain_id);
     }
-    let metrics_feed = phase_runner::metrics::RunnerMetricsFeed::default();
     let bound_addr = phase_runner::metrics::start(
         bind_addr,
         database.pool().clone(),
