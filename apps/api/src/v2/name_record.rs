@@ -47,8 +47,8 @@ use inventory::load_name_record_inventory;
 pub(super) use values::{
     chain_id_from_positions, declared_token_id, identity_declared_token_id,
     identity_row_has_current_registration, identity_row_serves_resolver, json_string_at_paths,
-    network_from_parts, row_has_current_registration, row_serves_resolver, string_field,
-    value_to_string,
+    network_from_parts, row_has_current_registration, row_serves_resolver, seconds_timestamp,
+    string_field, value_to_string,
 };
 use values::{
     has_name_binding, json_chain_id, json_value_present, network, object_field, response_chain_id,

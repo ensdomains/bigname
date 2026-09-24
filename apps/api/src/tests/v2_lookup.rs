@@ -441,8 +441,8 @@ async fn v2_lookup_withholds_fields_for_unsupported_name_authority() -> Result<(
             "independent_ens_deployments_overlap",
         ),
         (
-            "ensv2_exact_name_profile_shadow",
-            "exact_name_profile_not_supported",
+            "mixed_ensv1_ensv2_exact_name_corpus",
+            "mixed_exact_name_corpus",
         ),
         (
             "a_reason_this_build_has_never_seen",

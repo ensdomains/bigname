@@ -1696,7 +1696,7 @@ async fn v2_search_omits_every_unsupported_exact_name() -> Result<()> {
     for reason in [
         "conflicting_current_ens_authority",
         "independent_ens_deployments_overlap",
-        "ensv2_exact_name_profile_shadow",
+        "a_reason_this_build_has_never_seen",
         "current_authority_not_projected",
     ] {
         let database = TestDatabase::new_migrated().await?;
@@ -1728,6 +1728,43 @@ async fn v2_search_omits_every_unsupported_exact_name() -> Result<()> {
         );
         database.cleanup().await?;
     }
+    Ok(())
+}
+
+// The Sepolia root registry registers `eth` and `reverse` with the largest uint64 expiry, which no
+// timestamp can hold. Such a supported name is still searchable; its expiry reads as unknown, as
+// does a negative one.
+// (upstream: .refs/ens_v2_sepolia_20260916/contracts/script/deploy-constants.ts:L1 @ ens_v2_sepolia_20260916@366de741)
+// (upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ETHRegistry.ts:L46 @ ens_v2_sepolia_20260916@366de741)
+// (upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ReverseMirror.ts:L35 @ ens_v2_sepolia_20260916@366de741)
+#[tokio::test]
+async fn v2_search_serves_a_name_whose_expiry_exceeds_the_timestamp_range() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_search_fixture(&database).await?;
+    // Project writes no formatted `control.expiry` for an out-of-range value, so none is left
+    // for the read to fall back to.
+    for (name, expiry) in [("alpha.eth", "18446744073709551615"), ("alpine.eth", "-300000000000")] {
+        sqlx::query(
+            "UPDATE bigname_phase.name_current
+             SET declared_summary = jsonb_set(jsonb_set(
+                 declared_summary, '{registration,expiry}', $2::jsonb, true),
+                 '{control,expiry}', 'null'::jsonb, true)
+             WHERE raw_name = $1",
+        )
+        .bind(name)
+        .bind(expiry)
+        .execute(&database.pool)
+        .await?;
+    }
+
+    let payload =
+        v2_search_payload_for_database(&database, "/v1/search?q=al&namespace=ens").await?;
+    let rows = payload["data"].as_array().expect("search data must be an array");
+    assert_eq!(v2_search_names(rows), vec!["alpha.eth", "alpine.eth"]);
+    for row in rows {
+        assert_eq!(row.get("expires_at"), None, "an unknown expiry leaves the key out: {row}");
+    }
+    database.cleanup().await?;
     Ok(())
 }
 

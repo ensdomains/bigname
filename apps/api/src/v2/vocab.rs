@@ -428,10 +428,6 @@ pub(crate) fn contains_boundary_vocabulary(candidate: &str, terms: &[&str]) -> b
 const SHARED_PRODUCT_REASON_MAP: &[(&str, &str)] = &[
     ("projection_read_failed", "read_failed"),
     (
-        "ensv2_exact_name_profile_shadow",
-        "exact_name_profile_not_supported",
-    ),
-    (
         "mixed_ensv1_ensv2_exact_name_corpus",
         "mixed_exact_name_corpus",
     ),
