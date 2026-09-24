@@ -1,22 +1,31 @@
-//! Every statement Project sends to PostgreSQL starts with a `/* project:<name> */` comment, so the
-//! slow log, `pg_stat_activity` and `pg_stat_statements` name the statement that did the work.
+//! Every statement Project sends to PostgreSQL should start with a `/* project:<name> */`
+//! comment, so the slow log, `pg_stat_activity` and `pg_stat_statements` name the statement that
+//! did the work.
 //!
-//! The guard reads the production sources of `crates/project/src` as text, and finds statements
-//! without relying on the identifiers it checks for:
+//! The guard reads the production sources of `crates/project/src` as text, and checks, without
+//! relying on the identifiers it checks for:
 //!
 //! - every `.sql` file: with `--` comments removed, each `;`-separated statement starts with an
 //!   identifier, and the file's first line is one;
-//! - every Rust string literal outside test code that is a statement start: after any leading
-//!   comments, its first word is an SQL command keyword in any letter case. It must carry an
-//!   identifier among those leading comments. Fragments spliced into a larger statement carry one
-//!   too; PostgreSQL treats the nested comment as whitespace;
-//! - every execution site: each `sqlx::query`, `query_as`, `query_scalar`, `query_with` and
-//!   `raw_sql` call, and each executor call given a string literal. A site given a literal, or a
-//!   `format!` of one, must name it whatever its first word; a site given `include_str!` must
-//!   include a `.sql` file under `src`, which the first rule checks. A site given a value built
-//!   elsewhere (a constant, a loop variable, a `format!` bound earlier) is counted: that value's
-//!   text comes from literals and `.sql` files the first two rules check. Importing the sqlx
-//!   constructors unqualified is refused, so no site can hide from this search.
+//! - every Rust string literal outside test code that begins, after any leading comments, with an
+//!   SQL command keyword in any letter case or with an identifier: it must carry an identifier
+//!   among those leading comments. Fragments spliced into a larger statement carry one too;
+//!   PostgreSQL treats the nested comment as whitespace;
+//! - every literal, `format!` of a literal, or `include_str!` passed directly to a sqlx statement
+//!   constructor (`sqlx::query`, `query_as`, `query_scalar`, their `_with` forms and `raw_sql`),
+//!   to `QueryBuilder::new`, or to an executor method (`execute`, `fetch` and its `fetch_*`
+//!   forms): a literal must be named whatever its first word, and an `include_str!` must include
+//!   a `.sql` file under `src`, which the first rule checks. `QueryBuilder::new` must be given one
+//!   of these, since the fragments pushed after it need not start with a keyword.
+//!
+//! A value built elsewhere is counted, not checked: a constant, a loop variable or a bound
+//! `format!` passed to a constructor, or `<name>.as_str()` or `&<name>` passed to an executor. Its
+//! text is checked only when it also comes from a literal the second rule matches or from a `.sql`
+//! file. The known ways past the guard are pinned by tests below, so a tightening shows: a bound
+//! value whose text starts with neither a keyword nor an identifier, `concat!`, a constant bound
+//! to `include_str!` of a file outside `src`, and a call a macro assembles from its arguments.
+//! Importing the sqlx constructors unqualified is refused, so a direct constructor call cannot
+//! hide from the search.
 //!
 //! Test code is a file reached through a `#[cfg(test)]` module declaration, or an item or statement
 //! under `#[cfg(test)]` inside a production file. Names are unique across the crate; a name built
@@ -79,7 +88,7 @@ fn every_production_statement_starts_with_an_identifier() {
     println!(
         "statement identifiers: {} Rust statement sites, {} statements in {} .sql files, {} \
          identified, {} identifiers in the text; {} execution sites, {} of them given a value \
-         built elsewhere",
+         built elsewhere (counted, not checked)",
         report.rust_sites,
         report.sql_statements,
         sql_files.len(),
@@ -149,6 +158,68 @@ fn a_site_passes_only_a_named_literal_or_an_included_sql_file() {
     // Test code is out of scope.
     let report = check_one("#[cfg(test)]\nmod tests { fn f() { sqlx::query(\"select 1\"); } }");
     assert!(report.failures.is_empty(), "{:?}", report.failures);
+}
+
+#[test]
+fn a_query_builder_starts_with_a_named_fragment() {
+    // Started with a fragment that is not a keyword, the builder would hide the statement it
+    // builds from the literal rule.
+    let report = check_one(
+        "fn f() {
+             let mut builder = QueryBuilder::<Postgres>::new(\"sel\");
+             builder.push(\"ect 1\");
+             builder.build().execute(pool);
+         }",
+    );
+    assert_eq!(report.failures.len(), 1, "{:?}", report.failures);
+    let report = check_one("fn f() { let builder = sqlx::QueryBuilder::new(fragment); }");
+    assert_eq!(report.failures.len(), 1, "{:?}", report.failures);
+    let report = check_one(
+        "fn f() {
+             QueryBuilder::<Postgres>::new(\"/* project:a.one */ select 1\");
+             QueryBuilder::new(format!(\"/* project:a.two */ {prefix}UPDATE t\"));
+             QueryBuilder::new(include_str!(\"a/three.sql\"));
+         }",
+    );
+    assert!(report.failures.is_empty(), "{:?}", report.failures);
+    assert_eq!((report.execution_sites, report.indirect_sites), (3, 0));
+}
+
+/// Known gaps: each example executes an unnamed statement and passes. The guard does not resolve
+/// constants, evaluate `concat!` or follow a bound `include_str!`; it counts the site as given a
+/// value built elsewhere. A tightening that closes one of these should change its assertion.
+#[test]
+fn a_value_built_elsewhere_is_counted_not_checked() {
+    for text in [
+        // A bound `format!` whose text starts with a parenthesis, given to an executor.
+        "fn f() { let sql = format!(\"(select {})\", 1); connection.execute(sql.as_str()); }",
+        "fn f() { let sql = format!(\"(select {})\", 1); connection.execute(&sql); }",
+        // A constant that starts with a parenthesis.
+        "const SQL: &str = \"(select 1)\"; fn f() { sqlx::query(SQL); }",
+        "fn f() { sqlx::query(concat!(\"sel\", \"ect 1\")); }",
+        // A constant bound to a file outside `src`, which the `.sql` rule never reads.
+        "const SQL: &str = include_str!(\"../../outside.sql\"); fn f() { sqlx::query(SQL); }",
+    ] {
+        let report = check_one(text);
+        assert!(report.failures.is_empty(), "{text}: {:?}", report.failures);
+        assert_eq!(
+            (report.execution_sites, report.indirect_sites),
+            (1, 1),
+            "{text}"
+        );
+    }
+}
+
+/// Known gap: a macro that assembles the constructor from its arguments is not expanded, so the
+/// call it generates is neither checked nor counted.
+#[test]
+fn a_call_a_macro_assembles_is_missed() {
+    let report = check_one(
+        "macro_rules! run { ($c:ident) => { sqlx::$c(concat!(\"sel\", \"ect 1\")) }; }
+         fn f() { run!(query).execute(pool); }",
+    );
+    assert!(report.failures.is_empty(), "{:?}", report.failures);
+    assert_eq!((report.execution_sites, report.indirect_sites), (0, 0));
 }
 
 fn check_one(text: &str) -> Report {
@@ -302,8 +373,8 @@ impl Report {
             } else {
                 literal_at(argument_offset + usize::from(argument.starts_with('&')))
             };
-            match direct {
-                Some(literal) => {
+            match (direct, site.kind) {
+                (Some(literal), _) => {
                     self.execution_sites += 1;
                     if Leading::of(&literal.text).marker.is_none() {
                         self.failures.push(format!(
@@ -313,9 +384,17 @@ impl Report {
                         ));
                     }
                 }
-                // Executor calls take a connection unless given a literal.
-                None if site.executor => {}
-                None => {
+                (None, SiteKind::Builder) => {
+                    self.execution_sites += 1;
+                    self.failures.push(format!(
+                        "{place}:{}: QueryBuilder::new must start with a named literal or an \
+                         included .sql file",
+                        line(site.offset)
+                    ));
+                }
+                // An executor usually takes a connection; a string it is given by name counts.
+                (None, SiteKind::Executor) if !names_a_string(&code[site.argument..]) => {}
+                (None, _) => {
                     self.execution_sites += 1;
                     self.indirect_sites += 1;
                 }
@@ -376,16 +455,89 @@ impl Leading {
     }
 }
 
+#[derive(Clone, Copy)]
+enum SiteKind {
+    /// A sqlx statement constructor.
+    Constructor,
+    /// `QueryBuilder::new`.
+    Builder,
+    /// An executor method.
+    Executor,
+}
+
 struct Site {
     /// Where the call's name starts.
     offset: usize,
     /// Just after the call's opening parenthesis.
     argument: usize,
-    executor: bool,
+    kind: SiteKind,
 }
 
-/// Calls of the sqlx statement constructors and executor methods in code with literals and
-/// comments blanked out.
+/// Whether an executor's argument, in blanked code, is `<name>.as_str()` or `&<name>`: a string
+/// bound elsewhere rather than a connection expression such as `&mut *transaction` or `pool`.
+fn names_a_string(argument: &str) -> bool {
+    let argument = argument.trim_start();
+    let (reference, rest) = match argument.strip_prefix('&') {
+        Some(rest) => (true, rest.trim_start()),
+        None => (false, argument),
+    };
+    let length = rest
+        .bytes()
+        .take_while(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+        .count();
+    if length == 0 || rest.as_bytes()[0].is_ascii_digit() || &rest[..length] == "mut" {
+        return false;
+    }
+    let after = rest[length..].trim_start();
+    let after = if reference {
+        after
+    } else {
+        match after.strip_prefix(".as_str()") {
+            Some(after) => after.trim_start(),
+            None => return false,
+        }
+    };
+    after.starts_with(')')
+}
+
+/// Whether `before`, the code ending just before `new`, ends with `QueryBuilder::` or
+/// `QueryBuilder::<..>::`.
+fn follows_query_builder(before: &str) -> bool {
+    let Some(mut path) = before.strip_suffix("::").map(str::trim_end) else {
+        return false;
+    };
+    if path.ends_with('>') {
+        let mut depth = 0_i32;
+        let mut open = None;
+        for (offset, character) in path.char_indices().rev() {
+            match character {
+                '>' => depth += 1,
+                '<' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        open = Some(offset);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let Some(turbofish) = open.and_then(|open| path[..open].trim_end().strip_suffix("::"))
+        else {
+            return false;
+        };
+        path = turbofish.trim_end();
+    }
+    path.strip_suffix("QueryBuilder").is_some_and(|prefix| {
+        !prefix
+            .bytes()
+            .last()
+            .is_some_and(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    })
+}
+
+/// Calls of the sqlx statement constructors, `QueryBuilder::new` and executor methods in code
+/// with literals and comments blanked out.
 fn execution_sites(code: &str) -> Vec<Site> {
     let mut sites = Vec::new();
     let bytes = code.as_bytes();
@@ -403,9 +555,16 @@ fn execution_sites(code: &str) -> Vec<Site> {
                 .count();
         let word = &code[index..end];
         let before = code[..index].trim_end();
-        let constructor = CONSTRUCTORS.contains(&word) && before.ends_with("sqlx::");
-        let executor = EXECUTORS.contains(&word) && before.ends_with('.');
-        if constructor || executor {
+        let kind = if CONSTRUCTORS.contains(&word) && before.ends_with("sqlx::") {
+            Some(SiteKind::Constructor)
+        } else if word == "new" && follows_query_builder(before) {
+            Some(SiteKind::Builder)
+        } else if EXECUTORS.contains(&word) && before.ends_with('.') {
+            Some(SiteKind::Executor)
+        } else {
+            None
+        };
+        if let Some(kind) = kind {
             let mut after = end;
             if code[after..].starts_with("::<") {
                 let mut depth = 0_i32;
@@ -428,7 +587,7 @@ fn execution_sites(code: &str) -> Vec<Site> {
                 sites.push(Site {
                     offset: index,
                     argument: code.len() - open.len(),
-                    executor,
+                    kind,
                 });
             }
         }
