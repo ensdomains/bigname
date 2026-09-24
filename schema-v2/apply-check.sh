@@ -636,7 +636,8 @@ for migration_file in \
     "$ROOT/migrations/20260923130000_normalized_events_chain_block_number_desc_idx.sql" \
     "$ROOT/migrations/20260923140000_project_name_surfaces_label_indexes.sql" \
     "$ROOT/migrations/20260923150000_child_registration_events.sql" \
-    "$ROOT/migrations/20260924120000_normalized_events_project_v1_pointer_addressed_node_idx.sql"
+    "$ROOT/migrations/20260924120000_normalized_events_project_v1_pointer_addressed_node_idx.sql" \
+    "$ROOT/migrations/20260926100000_project_families_publication.sql"
 do
     emit_phase_migration "$migration_file" empty-schema | run_psql
 done
@@ -891,7 +892,9 @@ for migration_file in \
     "$ROOT/migrations/20260923140000_project_name_surfaces_label_indexes.sql" \
     "$ROOT/migrations/20260923140000_project_name_surfaces_label_indexes.sql" \
     "$ROOT/migrations/20260923150000_child_registration_events.sql" \
-    "$ROOT/migrations/20260923150000_child_registration_events.sql"
+    "$ROOT/migrations/20260923150000_child_registration_events.sql" \
+    "$ROOT/migrations/20260926100000_project_families_publication.sql" \
+    "$ROOT/migrations/20260926100000_project_families_publication.sql"
 do
     emit_phase_migration "$migration_file" baseline-first | run_psql
 done
@@ -4118,6 +4121,9 @@ BEGIN
             ('name_current'),
             ('name_surfaces'),
             ('normalized_events'),
+            ('project_family_marker'),
+            ('project_family_undo'),
+            ('project_repair_record'),
             ('project_generation_failures'),
             ('project_redo_child_registration_history'),
             ('project_redo_expiry_roots'),
@@ -4186,6 +4192,9 @@ BEGIN
             ('name_current'),
             ('name_surfaces'),
             ('normalized_events'),
+            ('project_family_marker'),
+            ('project_family_undo'),
+            ('project_repair_record'),
             ('project_generation_failures'),
             ('project_redo_child_registration_history'),
             ('project_redo_expiry_roots'),
