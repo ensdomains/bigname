@@ -69,7 +69,9 @@ authority lives in the registry/registrar/resolver system on Base
 and has no ENSv1/ENSv2 era split. `surface_bindings.authority_arm` is the sole
 arm vocabulary and stores the closed value `ens_v1`, `ens_v2`, or `basenames`
 on each binding. It makes ordinary interval conflicts arm-specific and is
-supplied by adapters, never inferred in SQL. Verified reads consult the selected
+supplied by adapters, never inferred in SQL. The public `authority` field
+refines the ENSv1 arm by [registry generation](#registry-generation) into
+`ens_v0` and `ens_v1`; the stored arm stays `ens_v1` either way. Verified reads consult the selected
 arm against the `verified_authority_arms` the deployment profile's
 `ens_execution` manifest declares (`manifests.md` § `verified_authority_arms`):
 an arm outside that list is refused in band rather than resolved through an
@@ -2028,6 +2030,39 @@ retracts that pointer nor prevents later old-registry root-resolver updates.
 (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L60-L68 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L75-L82 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L48-L54 @ ens_v1@91c966f)
+
+<a id="registry-generation"></a>
+## Registry generation (`registry_generation`)
+
+which of the two ENSv1 registries answers for a node's owner, resolver and
+TTL. The deployed ENSv1 registry, `ENSRegistryWithFallback`, returns the 2017
+registry's (`ENSRegistryOld`) answer for a node until it holds an ownership
+record of its own for that node
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L18-L46 @ ens_v1@91c966f).
+A record exists once any owner has been written, because a zero owner is
+stored as the registry's own address
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L150-L157 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L48-L55 @ ens_v1@91c966f).
+Only `setOwner`, which emits `Transfer`, and `setSubnodeOwner`, which emits
+`NewOwner` for the child, write it
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L60-L84 @ ens_v1@91c966f).
+Both check the owner stored in the current registry, so the first write for a
+node other than the root is a `NewOwner` from its parent
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L16-L21 @ ens_v1@91c966f).
+Project records `old` for a name on the ENSv1
+[authority epoch](#authority-epoch) arm when the 2017 registry recorded an
+owner for the node and no current-registry ownership record has been observed,
+and `current` otherwise. The API serves `old` as `authority=ens_v0`. The first
+current-registry `NewOwner` or `Transfer` for the node is its
+[registry fallback handoff](#registry-fallback-handoff) and makes the name
+`current` for good; a later zero owner does not bring the 2017 registry back.
+The root is always `current`, because the current registry's constructor
+writes the root record without an event
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L23-L26 @ ens_v1@91c966f).
+Registry generation never changes which arm is selected, how registration,
+control or permission handles are derived, or verified-read admission, which
+keeps reading the stored `ens_v1` arm. It is unrelated to the ENSv1→ENSv2
+migration that `migrated_at` and `is_migrated` describe.
 
 <a id="registry-only-handoff"></a>
 ## Registry-only handoff

@@ -334,6 +334,25 @@ of the event that selected the current resolver pointer. Resolver binding
 summaries use that stored event provenance rather than a prior resolver row's
 classification.
 
+`provenance.authority_selection` records the selected
+[authority epoch](glossary.md#authority-epoch) arm and three facts the API reads
+beside it. `registry_generation` is present only on the `ens_v1` arm: `old`
+when the name's ENS node has an ownership record in the 2017 registry and none
+in the current registry, `current` otherwise, and always `current` for the
+root ([registry generation](glossary.md#registry-generation)).
+`registry_handoff_block_number` is the block of the node's first
+current-registry ownership record, whatever the arm, and is absent before one
+exists and for the root. Both read activated, canonical registry ownership
+events by node rather than by name: a `NewOwner` counts for its child node and
+a `Transfer` for its own node, the `emitter_role` of the event tells the two
+registries apart, and a same-transaction registration that reconciliation
+marked `registry_migrated` counts as a current-registry record for its
+namehash, which is the evidence Interpret restores its own handoff state from.
+`ownerless_registry` is `true` exactly when the row is the supported,
+unregistered ownerless registry profile; the selected arm is kept, but the API
+serves no `authority` for such a row and no public `authority` filter matches
+it.
+
 `declared_summary.topology` is the lookup engine's routing input
 (`architecture.md` § `verified_queries`, `execution.md` § Resolver-record
 lookup). Project writes it in a fixed order and each builder fills only rows the

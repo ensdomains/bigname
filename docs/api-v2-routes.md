@@ -290,11 +290,13 @@ collection route carry neither header.
   serializes as `owner,manager,registrant` and reordered sets use canonical
   dictionary order. `profile=feed` returns a documented core-field subset of
   the same record object; it does not introduce another DTO.
-  `profile=detail` records carry `authority` (`ens_v1` or `ens_v2`) when the
+  `profile=detail` records carry `authority` (`ens_v0`, `ens_v1` or `ens_v2`,
+  as defined in the [naming dictionary](api-v2.md#naming-dictionary)) when the
   projection selected an ENSv1/ENSv2 arm for the name, and `migrated_at` when
   that `ens_v2` authority was proven by an ENSv1→ENSv2 migration transition;
   both apply to name results and reverse rows alike and are omitted on feed
-  records and on `status=unsupported` records. Reverse inputs accept no
+  records, on `status=unsupported` records, and, for `authority`, on ownerless
+  registry rows. Reverse inputs accept no
   `authority` filter yet; filter client-side or use
   `GET /v1/addresses/{address}/names?authority=`.
   A name result classified as `registration_status=unregistered` always omits
@@ -651,11 +653,15 @@ collection route carry neither header.
   (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L820 @ ens_v1@91c966f)
   (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L825 @ ens_v1@91c966f)
   `manager` is omitted when no forward-read source can derive it; it is not
-  emitted as a permanent null placeholder. `authority` names the protocol arm
-  the current registration fields come from (`ens_v1` or `ens_v2`, read from
-  the projection's selected [authority epoch](glossary.md#authority-epoch)); it
-  is omitted for Basenames names and on the `status=unsupported` identity-only
-  object. `migrated_at` is present only when `authority=ens_v2` was proven by
+  emitted as a permanent null placeholder. `authority` names where the chain
+  reads the current registration fields from: `ens_v2` or `ens_v1`, read from
+  the projection's selected [authority epoch](glossary.md#authority-epoch), or
+  `ens_v0` for an ENSv1 name whose registry record is still read from the 2017
+  ENS registry ([registry generation](glossary.md#registry-generation)). An
+  `ens_v0` name keeps every field it would have as `ens_v1`, including a
+  registry-only name's `registration_id`. `authority` is omitted for Basenames
+  names, on an ownerless registry row, and on the `status=unsupported`
+  identity-only object. `migrated_at` is present only when `authority=ens_v2` was proven by
   an activated `MigrationApplied` [migration
   boundary](glossary.md#migration-boundary): it is the RFC 3339 block time of
   that proof event, read through the event's block in the chain lineage. A name
@@ -756,7 +762,10 @@ collection route carry neither header.
   owner](glossary.md#getter-visible-owner) is instead supported and unregistered.
   When a current event-linked nonzero registry resolver pointer survives, name
   detail includes that resolver while registration and control fields remain
-  absent.
+  absent. Such a row omits `authority` even when an earlier ENSv1 event still
+  names the arm, and it matches no `authority` filter value on
+  `GET /v1/addresses/{address}/names`; a retained resolver pointer is not
+  evidence of current ownership.
 - Pagination behavior: none.
 - Status semantics: valid names with no name-profile data return `404 not_found`.
   Invalid path names return `400 invalid_input`.
@@ -937,7 +946,9 @@ collection route carry neither header.
   `verified_authority_arms` the selected `ens_execution` manifest declares
   (`manifests.md` § `verified_authority_arms`; absent means `["ens_v1"]`, so
   an `ens_v2`-selected name is refused on Mainnet and
-  admitted on the official `sepolia` profile). Neither refusal dispatches a provider call.
+  admitted on the official `sepolia` profile). A name served as
+  `authority=ens_v0` is on the stored `ens_v1` arm and is admitted wherever
+  `ens_v1` is. Neither refusal dispatches a provider call.
   Bound ENS names of either arm with a non-null exact resolver carry a
   projected direct topology (`execution.md` § Resolver-record lookup), so an
   admitted arm executes the direct route and compares against the indexed
@@ -2206,15 +2217,19 @@ introduces it rebuilds Project from full history before serving the option; see
 - Tier: product read.
 - Purpose: names related to an address.
 - Request parameters: path `address`; query `namespace`, `relation`,
-  `authority=ens_v1|ens_v2`, `coin_type`, `q`,
+  `authority=ens_v0|ens_v1|ens_v2`, `coin_type`, `q`,
   `sort=name|expires_at|registered_at`, `order=asc|desc`,
   `dedupe=name|registration`, `include=role_summary`, `cursor`, `page_size`,
   and optional `finality=latest`. `at` and historical `finality` values are
   rejected by the shared latest-state collection rule.
-  `authority` keeps only rows whose current name row selected that protocol
-  arm; it is a primary-key probe of the name row per candidate relation row.
-  Any other value returns `400 invalid_input`. Rows with no selected arm
-  (Basenames) match neither value.
+  `authority` keeps only rows whose current name row would serve that
+  `authority` value, so `ens_v1` no longer matches a name served as `ens_v0`;
+  it is a primary-key probe of the name row per candidate relation row, applied
+  before grouping and pagination. Any other value returns `400 invalid_input`.
+  Rows with no selected arm (Basenames) and ownerless registry rows match none
+  of the three values.
+  `is_migrated` concerns the ENSv1→ENSv2 migration only and is unrelated to
+  `ens_v0`: an `ens_v0` name never satisfies `is_migrated=true`.
   `is_migrated=true|false` optionally selects whether the current name has the
   same proven ENSv1→ENSv2 transition used by `migrated_at`: an ENSv2 authority
   selected by a migration proof with a retained event and block timestamp.
@@ -2344,7 +2359,7 @@ introduces it rebuilds Project from full history before serving the option; see
   [representative name](glossary.md#representative-name), the group member
   that sorts first by name text, then by namespace and namehash. Rows also
   carry `authority` and `migrated_at` with the same meaning as on
-  `GET /v1/names/{name}`: the selected `ens_v1`/`ens_v2` arm, and the block time
+  `GET /v1/names/{name}`: `ens_v0`, `ens_v1` or `ens_v2`, and the block time
   of the migration boundary that proved an `ens_v2` arm. `is_primary` is
   evaluated against that row namespace's coin-type-60 primary-name claim, not a
   route-wide namespace shortcut; a `resolves_to` row evaluates it against the
@@ -3401,7 +3416,16 @@ so there is no persisted artifact to explain. See
 - Purpose: authority/control explain.
 - Request parameters: path `name`; query `namespace`, `at`, `finality`.
 - Response shape: `data` includes token lineage, control vectors, and
-  permission lineage.
+  permission lineage. For an ENS name `data.registry_handoff` is
+  `{block_number}`, the block of the first ownership record the current
+  ENSv1 registry holds for the node, which is where a name served as
+  `authority=ens_v0` became `ens_v1`
+  ([registry generation](glossary.md#registry-generation)). It is read from the
+  same name row as the rest of `data`, stays the same across later ownership
+  changes, and is absent while no such record has been observed and for the
+  root, whose record the registry's constructor writes without an event. It is
+  not the [authority epoch](glossary.md#authority-epoch) start and appears on
+  no product route.
 - Pagination behavior: none.
 - Status semantics: missing names return `404 not_found`.
 - Replaces (v1): `GET /v1/explain/names/{namespace}/{name}/authority-control`.
