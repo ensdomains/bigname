@@ -1,0 +1,328 @@
+//! Shared fixture for the owned key family tests: a phase schema installed from the baseline,
+//! a canonical lineage, and helpers that write events, run the family loop and snapshot every
+//! family table.
+#![allow(dead_code)]
+
+use anyhow::Result;
+use bigname_project::{
+    Marker,
+    families::{self, FamilyMode, FamilyOptions, FamilyOutcome},
+};
+use bigname_test_support::{TestDatabase, TestDatabaseConfig};
+use serde_json::{Value, json};
+use sqlx::{PgPool, raw_sql};
+
+pub const CHAIN: &str = "ethereum-sepolia";
+pub const CONTENT_HASH: &str = "families-fixture-hash";
+
+pub fn hash(block: i64) -> String {
+    format!("0x{block:064x}")
+}
+
+pub fn marker(block: i64) -> Marker {
+    Marker {
+        number: block,
+        hash: hash(block),
+    }
+}
+
+pub fn uuid(n: u32) -> String {
+    format!("00000000-0000-0000-0000-{n:012x}")
+}
+
+/// Journalled family tables, compared by the undo and rebuild tests.
+pub const FAMILY_TABLES: &[&str] = &[
+    "project_name_state",
+    "project_binding_candidate",
+    "project_lifecycle_key_state",
+    "project_lifecycle_triple_summary",
+    "project_lifecycle_association",
+    "project_lifecycle_event",
+    "project_child_registration_state",
+    "project_wrapper_state",
+    "project_registry_node_state",
+    "project_registry_binding_observation",
+    "project_resolver_classification",
+    "project_registry_pointer",
+    "project_resource_pointer",
+    "project_node_record_partition",
+    "project_node_record_value",
+    "project_record_id_value",
+    "project_resolver_link",
+    "project_grant",
+    "project_resource_admin_aggregate",
+    "project_account_approval",
+    "project_name_alias",
+    "project_resolver_alias",
+    "project_child_edge_candidate",
+    "project_parent_subregistry",
+    "project_reverse_tuple",
+    "project_reverse_node_claim",
+    "project_claim_normalization",
+    "project_address_name_fold",
+    "project_address_name_index",
+    "project_address_record_node_index",
+    "project_address_record_id_index",
+];
+
+pub struct Fixture {
+    pub database: TestDatabase,
+    pub pool: PgPool,
+}
+
+impl Fixture {
+    /// A phase schema with canonical blocks `0..=blocks`.
+    pub async fn new(prefix: &str, blocks: i64) -> Result<Self> {
+        let database =
+            TestDatabase::create(TestDatabaseConfig::new(prefix).pool_max_connections(1)).await?;
+        let pool = database.pool().clone();
+        let name: String = sqlx::query_scalar("SELECT current_database()")
+            .fetch_one(&pool)
+            .await?;
+        let mut tx = pool.begin().await?;
+        sqlx::query("CREATE SCHEMA bigname_phase")
+            .execute(&mut *tx)
+            .await?;
+        raw_sql(&format!(
+            "ALTER DATABASE \"{}\" SET search_path TO bigname_phase, public",
+            name.replace('"', r#""""#)
+        ))
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query("SET LOCAL search_path TO bigname_phase, public")
+            .execute(&mut *tx)
+            .await?;
+        for script in [
+            include_str!("../../../../schema-v2/baseline/01_chain.sql"),
+            include_str!("../../../../schema-v2/baseline/02_raw_facts.sql"),
+            include_str!("../../../../schema-v2/baseline/03_identity.sql"),
+            include_str!("../../../../schema-v2/baseline/04_manifests.sql"),
+            include_str!("../../../../schema-v2/baseline/05_normalized_events.sql"),
+            include_str!("../../../../schema-v2/baseline/06_projections.sql"),
+            include_str!("../../../../schema-v2/baseline/07_labels.sql"),
+            include_str!("../../../../schema-v2/baseline/08_heartbeats.sql"),
+            include_str!("../../../../schema-v2/baseline/09_divergence.sql"),
+            include_str!("../../../../schema-v2/baseline/10_phase_state.sql"),
+        ] {
+            raw_sql(script).execute(&mut *tx).await?;
+        }
+        tx.commit().await?;
+        pool.set_connect_options(
+            pool.connect_options()
+                .as_ref()
+                .clone()
+                .options([("search_path", "bigname_phase,public")]),
+        );
+        let mut connection = pool.acquire().await?;
+        sqlx::query("SET search_path TO bigname_phase, public")
+            .execute(&mut *connection)
+            .await?;
+        drop(connection);
+        sqlx::query(
+            "INSERT INTO chain_lineage (chain_id, block_hash, parent_hash, block_number,
+                 block_timestamp, canonicality_state)
+             SELECT $1, '0x' || lpad(to_hex(block), 64, '0'),
+                    CASE WHEN block > 0 THEN '0x' || lpad(to_hex(block - 1), 64, '0') END,
+                    block, to_timestamp(1800000000 + block * 12), 'canonical'
+             FROM generate_series(0, $2) block",
+        )
+        .bind(CHAIN)
+        .bind(blocks)
+        .execute(&pool)
+        .await?;
+        Ok(Self { database, pool })
+    }
+
+    pub async fn cleanup(self) -> Result<()> {
+        self.database.cleanup().await
+    }
+
+    pub async fn apply(&self, target: i64, mode: FamilyMode) -> FamilyOutcome {
+        self.apply_with(target, mode, &FamilyOptions::new(CONTENT_HASH))
+            .await
+    }
+
+    pub async fn apply_with(
+        &self,
+        target: i64,
+        mode: FamilyMode,
+        options: &FamilyOptions,
+    ) -> FamilyOutcome {
+        families::apply(&self.pool, CHAIN, &marker(target), mode, options).await
+    }
+
+    /// The family marker: block, hash and sequence.
+    pub async fn marker(&self) -> Result<(Option<i64>, Option<String>, i64)> {
+        Ok(sqlx::query_as(
+            "SELECT current_block_number, current_block_hash, sequence
+             FROM project_family_marker WHERE chain_id = $1",
+        )
+        .bind(CHAIN)
+        .fetch_one(&self.pool)
+        .await?)
+    }
+
+    /// Blocks that have a marker journal row.
+    pub async fn journalled_blocks(&self) -> Result<Vec<i64>> {
+        Ok(sqlx::query_scalar(
+            "SELECT block_number FROM project_family_undo
+             WHERE chain_id = $1 AND family = 'marker' ORDER BY 1",
+        )
+        .bind(CHAIN)
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
+    /// Every family table as JSON, rows ordered by their full text.
+    pub async fn snapshot(&self) -> Result<Value> {
+        let mut tables = serde_json::Map::new();
+        for table in FAMILY_TABLES {
+            let rows: Vec<Value> = sqlx::query_scalar(&format!(
+                "SELECT to_jsonb(family_row) FROM {table} family_row
+                 ORDER BY to_jsonb(family_row)::text"
+            ))
+            .fetch_all(&self.pool)
+            .await?;
+            tables.insert((*table).to_owned(), Value::Array(rows));
+        }
+        Ok(Value::Object(tables))
+    }
+
+    /// One event row. `position` is `(transaction_index, log_index)`; `None` writes a
+    /// synthesised event with no transaction.
+    pub async fn event(&self, event: Event<'_>) -> Result<i64> {
+        let (transaction_hash, transaction_index, log_index) = match event.position {
+            Some((transaction, log)) => (
+                Some(format!("0xtx{}_{transaction}", event.block)),
+                Some(transaction),
+                Some(log),
+            ),
+            None => (None, None, None),
+        };
+        Ok(sqlx::query_scalar(
+            "INSERT INTO normalized_events (event_identity, namespace, logical_name_id,
+                 resource_id, event_kind, source_family, manifest_version, chain_id,
+                 block_number, block_hash, transaction_hash, transaction_index, log_index,
+                 derivation_kind, canonicality_state, before_state, after_state, raw_fact_ref)
+             VALUES ($1, 'ens', $2, $3::uuid, $4, $5, 1, $6, $7, $8, $9, $10, $11,
+                     'ens_v2_registry_resource_surface', 'canonical', $12, $13, $14)
+             RETURNING normalized_event_id",
+        )
+        .bind(event.identity)
+        .bind(event.name)
+        .bind(event.resource)
+        .bind(event.kind)
+        .bind(event.family)
+        .bind(CHAIN)
+        .bind(event.block)
+        .bind(hash(event.block))
+        .bind(transaction_hash)
+        .bind(transaction_index)
+        .bind(log_index)
+        .bind(event.before)
+        .bind(event.after)
+        .bind(event.raw)
+        .fetch_one(&self.pool)
+        .await?)
+    }
+
+    /// A name surface, which events that carry a logical name reference.
+    pub async fn surface(&self, logical_name_id: &str, namehash: &str) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO name_surfaces (logical_name_id, namespace, raw_name, raw_labels,
+                 dns_encoded_name, namehash, labelhashes, normalizer_version, visibility_state,
+                 chain_id, block_hash, block_number, canonicality_state)
+             VALUES ($1, 'ens', $1, ARRAY[$1], '\\x00', $2, ARRAY[$2], 'ensip15', 'active',
+                     $3, $4, 0, 'canonical')
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(logical_name_id)
+        .bind(namehash)
+        .bind(CHAIN)
+        .bind(hash(0))
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// A resource row, which events that carry a resource reference.
+    pub async fn resource(&self, resource_id: &str) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO resources (resource_id, chain_id, block_hash, block_number,
+                 canonicality_state)
+             VALUES ($1::uuid, $2, $3, 0, 'canonical')
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(resource_id)
+        .bind(CHAIN)
+        .bind(hash(0))
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+}
+
+pub struct Event<'a> {
+    pub identity: &'a str,
+    pub block: i64,
+    pub position: Option<(i64, i64)>,
+    pub kind: &'a str,
+    pub family: &'a str,
+    pub name: Option<&'a str>,
+    pub resource: Option<&'a str>,
+    pub before: Value,
+    pub after: Value,
+    pub raw: Value,
+}
+
+impl<'a> Event<'a> {
+    pub fn new(identity: &'a str, block: i64, log: i64, kind: &'a str, family: &'a str) -> Self {
+        Self {
+            identity,
+            block,
+            position: Some((0, log)),
+            kind,
+            family,
+            name: None,
+            resource: None,
+            before: json!({}),
+            after: json!({}),
+            raw: json!({"emitting_address": "0x00000000000000000000000000000000000000a4"}),
+        }
+    }
+
+    pub fn name(mut self, name: &'a str) -> Self {
+        self.name = Some(name);
+        self
+    }
+
+    pub fn resource(mut self, resource: &'a str) -> Self {
+        self.resource = Some(resource);
+        self
+    }
+
+    pub fn after(mut self, after: Value) -> Self {
+        self.after = after;
+        self
+    }
+
+    pub fn before(mut self, before: Value) -> Self {
+        self.before = before;
+        self
+    }
+
+    pub fn raw(mut self, raw: Value) -> Self {
+        self.raw = raw;
+        self
+    }
+
+    pub fn synthesised(mut self) -> Self {
+        self.position = None;
+        self
+    }
+
+    pub fn at(mut self, transaction: i64, log: i64) -> Self {
+        self.position = Some((transaction, log));
+        self
+    }
+}

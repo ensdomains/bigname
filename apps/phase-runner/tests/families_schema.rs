@@ -103,7 +103,10 @@ async fn schema_migrations_create_the_family_tables_the_baseline_installs() -> R
         .bind(table)
         .fetch_optional(installed.pool())
         .await?;
-        assert!(key.is_some(), "init-schema installs {table} with a primary key");
+        assert!(
+            key.is_some(),
+            "init-schema installs {table} with a primary key"
+        );
     }
 
     let migrated = database("families_schema_migrated").await?;
@@ -111,7 +114,10 @@ async fn schema_migrations_create_the_family_tables_the_baseline_installs() -> R
     bigname_storage::MIGRATOR.run(migrated.pool()).await?;
     for table in FAMILY_TABLES {
         let from_migration = load_table_structure(migrated.pool(), table).await?;
-        assert!(!from_migration.is_empty(), "the schema-migration creates {table}");
+        assert!(
+            !from_migration.is_empty(),
+            "the schema-migration creates {table}"
+        );
         assert_eq!(
             from_migration,
             load_table_structure(installed.pool(), table).await?,

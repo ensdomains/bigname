@@ -1,5 +1,11 @@
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, Mutex},
+};
+
 use bigname_project::{
     BatchRequest, Engine, ErrorKind as ProjectErrorKind, Marker, RunMode as ProjectRunMode,
+    families::{FamilyMode, FamilyOptions},
 };
 use sqlx::PgPool;
 
@@ -8,7 +14,8 @@ use crate::{
     heads::BlockMarker,
     metrics::RunnerMetricsFeed,
     phase::{
-        Phase, PhaseBatchOutcome, PhaseContext, PhaseFuture, PhaseName, PhaseProgress, RunMode,
+        AfterProgressFuture, Phase, PhaseBatchOutcome, PhaseContext, PhaseFuture, PhaseName,
+        PhaseProgress, RunMode,
     },
 };
 
@@ -17,6 +24,10 @@ pub struct ProjectPhase {
     engine: Engine,
     hydrator: Option<bigname_project::Hydrator>,
     metrics_feed: Option<RunnerMetricsFeed>,
+    families: bool,
+    /// The served marker and mode of each chain's last committed batch, which the owned key
+    /// families follow once the runner has recorded the batch's progress.
+    pending_families: Arc<Mutex<BTreeMap<String, (Marker, FamilyMode)>>>,
 }
 
 impl ProjectPhase {
@@ -26,6 +37,8 @@ impl ProjectPhase {
             pool,
             hydrator: None,
             metrics_feed: None,
+            families: true,
+            pending_families: Arc::default(),
         }
     }
 
@@ -35,7 +48,15 @@ impl ProjectPhase {
             hydrator: Some(bigname_project::Hydrator::new(pool.clone(), rpc_urls)),
             pool,
             metrics_feed: None,
+            families: true,
+            pending_families: Arc::default(),
         }
+    }
+
+    /// Whether each committed batch is followed by the owned key families; on unless turned off.
+    pub fn with_families(mut self, enabled: bool) -> Self {
+        self.families = enabled;
+        self
     }
 
     /// Reports what each committed batch wrote to the metrics task.
@@ -87,6 +108,22 @@ impl ProjectPhase {
 impl Phase for ProjectPhase {
     fn name(&self) -> PhaseName {
         PhaseName::Project
+    }
+
+    fn after_progress_recorded(&self, chain_id: &str) -> AfterProgressFuture<'_> {
+        let pending = self
+            .pending_families
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(chain_id);
+        let chain_id = chain_id.to_owned();
+        Box::pin(async move {
+            let Some((target, mode)) = pending else {
+                return;
+            };
+            let options = FamilyOptions::new(bigname_content_hash::INTERPRETER_CONTENT_HASH);
+            bigname_project::families::apply(&self.pool, &chain_id, &target, mode, &options).await;
+        })
     }
 
     fn run_batch(&self, context: PhaseContext) -> PhaseFuture<'_> {
@@ -175,6 +212,20 @@ impl Phase for ProjectPhase {
             };
             if let Some(feed) = &self.metrics_feed {
                 feed.project_batch(&context.chain_id, &outcome.write_summary);
+            }
+            if self.families {
+                let mode = match context.mode {
+                    RunMode::Normal if context.resume.current.is_none() => FamilyMode::Rebuild,
+                    RunMode::Normal => FamilyMode::Normal,
+                    RunMode::Redo(range) | RunMode::RecomputeFlags(range) => FamilyMode::Redo {
+                        from: range.from,
+                        to: range.to,
+                    },
+                };
+                self.pending_families
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .insert(context.chain_id.clone(), (outcome.current.clone(), mode));
             }
             if let Some(hydrator) = &self.hydrator {
                 hydrator

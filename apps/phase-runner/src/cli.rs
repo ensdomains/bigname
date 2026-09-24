@@ -170,6 +170,15 @@ struct RunArgs {
         help = "CHAIN=HTTP_URL used only for hash-pinned multicall hydration"
     )]
     hydration_rpc_urls: Vec<String>,
+
+    #[arg(
+        long,
+        env = "BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES",
+        default_value_t = true,
+        action = clap::ArgAction::Set,
+        help = "follow each committed Project batch with the owned key families: true or false"
+    )]
+    project_families: bool,
 }
 
 #[derive(Debug, Args)]
@@ -250,6 +259,15 @@ struct RedoArgs {
         help = "CHAIN=HTTP_URL used only for hash-pinned multicall hydration"
     )]
     hydration_rpc_urls: Vec<String>,
+
+    #[arg(
+        long,
+        env = "BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES",
+        default_value_t = true,
+        action = clap::ArgAction::Set,
+        help = "follow each committed Project batch with the owned key families: true or false"
+    )]
+    project_families: bool,
 }
 
 #[derive(Clone, Debug, Args)]
@@ -284,6 +302,7 @@ pub enum ResolvedCommand {
         manifests_root: PathBuf,
         runtime: RuntimeConfig,
         hydration_rpc_urls: bigname_lookup::ChainRpcUrls,
+        project_families: bool,
     },
     Redo {
         database_url: String,
@@ -299,6 +318,7 @@ pub enum ResolvedCommand {
         range: BlockRange,
         watch_set_coverage_attestations: BTreeMap<String, String>,
         hydration_rpc_urls: bigname_lookup::ChainRpcUrls,
+        project_families: bool,
     },
     Rewind {
         database_url: String,
@@ -377,6 +397,7 @@ fn resolve_run(args: RunArgs) -> RunnerResult<ResolvedCommand> {
         manifests_root: args.manifests.manifests_root,
         runtime,
         hydration_rpc_urls,
+        project_families: args.project_families,
     })
 }
 
@@ -433,6 +454,7 @@ fn resolve_redo(args: RedoArgs) -> RunnerResult<ResolvedCommand> {
         range,
         watch_set_coverage_attestations,
         hydration_rpc_urls: resolve_hydration_rpc_urls(&args.hydration_rpc_urls)?,
+        project_families: args.project_families,
     })
 }
 

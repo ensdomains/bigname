@@ -10,6 +10,7 @@ pub type PhaseFuture<'a> =
     Pin<Box<dyn Future<Output = RunnerResult<PhaseBatchOutcome>> + Send + 'a>>;
 pub type CompletedPhaseFuture<'a> =
     Pin<Box<dyn Future<Output = RunnerResult<Option<PhaseProgress>>> + Send + 'a>>;
+pub type AfterProgressFuture<'a> = Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum PhaseName {
@@ -236,6 +237,12 @@ pub trait Phase: Send + Sync {
     }
 
     fn run_batch(&self, context: PhaseContext) -> PhaseFuture<'_>;
+
+    /// Work that follows a batch once its progress is recorded, in transactions of its own. It
+    /// cannot fail or roll back the batch; Project applies the owned key families here.
+    fn after_progress_recorded(&self, _chain_id: &str) -> AfterProgressFuture<'_> {
+        Box::pin(async {})
+    }
 
     fn revalidates_completed(
         &self,
