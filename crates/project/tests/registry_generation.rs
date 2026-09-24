@@ -410,7 +410,10 @@ async fn registry_generation_ignores_inactive_orphaned_root_and_other_arms() -> 
     let orphaned = surface(&pool, 2, "ens", "orphaned.eth", Some("ens_v1"), None).await?;
     let root = surface(&pool, 3, "ens", "", Some("ens_v1"), None).await?;
     let v2 = surface(&pool, 4, "ens", "v2.eth", Some("ens_v2"), None).await?;
-    let unresolved = surface(&pool, 5, "ens", "both.eth", Some("ens_v1"), None).await?;
+    // An ENSv1 binding beside an ENSv2 one follows the chain to ENSv2.
+    let overlapping = surface(&pool, 5, "ens", "both.eth", Some("ens_v1"), None).await?;
+    // No open binding: Project selects no arm.
+    let unresolved = surface(&pool, 7, "ens", "unbound.eth", None, None).await?;
     sqlx::query(
         "INSERT INTO resources (resource_id, chain_id, block_hash, block_number,
                                 canonicality_state)
@@ -431,7 +434,7 @@ async fn registry_generation_ignores_inactive_orphaned_root_and_other_arms() -> 
                 '{\"transaction_index\":0,\"log_index\":1}', 'canonical'
          FROM chain_lineage WHERE chain_id = $2 AND block_number = 1",
     )
-    .bind(&unresolved)
+    .bind(&overlapping)
     .bind(CHAIN)
     .execute(&pool)
     .await?;
@@ -459,6 +462,10 @@ async fn registry_generation_ignores_inactive_orphaned_root_and_other_arms() -> 
         (
             "both-1",
             Ownership::new_owner("eth", "both", "registry_old", 1),
+        ),
+        (
+            "unbound-1",
+            Ownership::new_owner("eth", "unbound", "registry_old", 1),
         ),
         (
             "basenames-1",
@@ -530,6 +537,10 @@ async fn registry_generation_ignores_inactive_orphaned_root_and_other_arms() -> 
     );
     assert_eq!(
         selection(&pool, &v2).await?,
+        (json!("ens_v2"), Value::Null, Value::Null, Value::Null)
+    );
+    assert_eq!(
+        selection(&pool, &overlapping).await?,
         (json!("ens_v2"), Value::Null, Value::Null, Value::Null)
     );
     assert_eq!(
