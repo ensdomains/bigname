@@ -31,6 +31,15 @@ use crate::Marker;
 /// "Owned key families"); the per-block publication tunes it.
 pub const RETAINED_UNDO_DEPTH: i64 = 256;
 
+/// Every owned key family table, journalled and derived, for tests that compare the families
+/// of two runs.
+pub fn family_tables() -> impl Iterator<Item = &'static str> {
+    tables::JOURNALLED
+        .iter()
+        .map(|table| table.name)
+        .chain(tables::DERIVED)
+}
+
 /// How the loop runs for one served batch.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FamilyMode {

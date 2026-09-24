@@ -233,7 +233,7 @@ async fn prepare_fixture(pool: &PgPool, previous: i64, interpreted_through: i64)
 /// `compare` is the subname page size of the rebuild comparison, when it runs.
 async fn run(pool: &PgPool, previous: i64, targets: &[i64], compare: Option<u64>) -> Result<()> {
     let _ = tracing_subscriber::fmt()
-        .with_env_filter("bigname_project::batch=info")
+        .with_env_filter("bigname_project::batch=info,bigname_project::families=info")
         .with_target(false)
         .with_ansi(false)
         .try_init();
@@ -326,6 +326,23 @@ async fn run(pool: &PgPool, previous: i64, targets: &[i64], compare: Option<u64>
             elapsed.as_millis(),
             rewritten.len()
         );
+        // The owned key families follow in their own transactions once progress is recorded,
+        // as the runner calls them; their time is outside the served clock above.
+        let families_started = Instant::now();
+        project.after_progress_recorded(CHAIN).await;
+        let families_ms = families_started.elapsed().as_millis();
+        let family_marker: Option<i64> = sqlx::query_scalar(
+            "SELECT current_block_number FROM project_family_marker WHERE chain_id = $1",
+        )
+        .bind(CHAIN)
+        .fetch_optional(pool)
+        .await?
+        .flatten();
+        eprintln!("SEPOLIA_END_TO_END_FAMILIES target={number} families_ms={families_ms}");
+        ensure!(
+            family_marker == Some(number),
+            "the owned key families stopped at {family_marker:?}, not at target {number}"
+        );
         ensure!(
             publication(pool).await? == (Some(number), Some(target.hash.clone()), false),
             "the progress marker is not at target {number}"
@@ -367,9 +384,33 @@ async fn compare_with_rebuild(
     retention: &endpoint::Retention,
 ) -> Result<()> {
     let candidate = endpoint::Served::read(pool, children_page).await?;
+    let incremental_families = families(pool).await?;
     let started = Instant::now();
     project.run_batch(context(target, None)).await?;
     let rebuild_ms = started.elapsed().as_millis();
+    // The rebuilt batch rebuilds the owned key families from scratch; they must equal the
+    // families the incremental blocks left, row for row, the marker's sequence aside.
+    let families_started = Instant::now();
+    project.after_progress_recorded(CHAIN).await;
+    let families_rebuild_ms = families_started.elapsed().as_millis();
+    let rebuilt_families = families(pool).await?;
+    let differing: Vec<&str> = incremental_families
+        .iter()
+        .zip(&rebuilt_families)
+        .filter(|(incremental, rebuilt)| incremental != rebuilt)
+        .map(|((table, _), _)| table.as_str())
+        .collect();
+    ensure!(
+        differing.is_empty(),
+        "the owned key families differ from a rebuild at {}: {differing:?}",
+        target.number
+    );
+    eprintln!(
+        "SEPOLIA_END_TO_END_FAMILIES_COMPARE target={} tables={} rebuild_ms={families_rebuild_ms} \
+         result=equal",
+        target.number,
+        rebuilt_families.len()
+    );
     let rebuilt = endpoint::Served::read(pool, children_page).await?;
     let stamp = endpoint::Target::load(pool, target.number, &target.hash).await?;
     let outcome = endpoint::compare(&candidate, &rebuilt, &stamp, retention)?;
@@ -384,6 +425,33 @@ async fn compare_with_rebuild(
         outcome.retained,
     );
     Ok(())
+}
+
+/// Every owned key family table as ordered JSON text, then the family marker without its
+/// sequence, which every block and undo advances.
+async fn families(pool: &PgPool) -> Result<Vec<(String, String)>> {
+    let mut tables = Vec::new();
+    for table in bigname_project::families::family_tables() {
+        let rows: String = sqlx::query_scalar(&format!(
+            "SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text), '[]')::text
+             FROM {table} t"
+        ))
+        .fetch_one(pool)
+        .await?;
+        tables.push((table.to_owned(), rows));
+    }
+    let marker: Option<String> = sqlx::query_scalar(
+        "SELECT (to_jsonb(m) - 'sequence')::text FROM project_family_marker m
+         WHERE chain_id = $1",
+    )
+    .bind(CHAIN)
+    .fetch_optional(pool)
+    .await?;
+    tables.push((
+        "project_family_marker".to_owned(),
+        marker.unwrap_or_default(),
+    ));
+    Ok(tables)
 }
 
 async fn publication(pool: &PgPool) -> Result<(Option<i64>, Option<String>, bool)> {
