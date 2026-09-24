@@ -685,7 +685,7 @@ tests.
 1. Accept or revise this ADR; record the outcome as the Final Direction in
    `docs/internal/api-surface-flattening-scope-decisions.md`.
 2. Write the new contract docs from the dictionary and route catalog above —
-   maintained as `docs/api-v1.md` / `docs/api-v1-routes.md` during development
+   maintained as `docs/api-v2.md` / `docs/api-v2-routes.md` during development
    and renamed to the `api-v1` names at the switch; generate the OpenAPI from
    the route table. The existing `docs/api-v1.md` is frozen except for
    corrections until then.
