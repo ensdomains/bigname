@@ -371,27 +371,29 @@ collection route carry neither header.
   `exact_name_profile_not_supported`, `mixed_exact_name_corpus`, and
   `unsupported_reason_missing`. The contracted per-name authority replacement
   is documented in
-  [`architecture.md`](architecture.md#ensv1ensv2-current-authority). When its
-  exact-name consumer slice is activated, `conflicting_current_ens_authority`
-  covers Mainnet overlap without a provable boundary.
-  `independent_ens_deployments_overlap` covers
-  ordinary Sepolia overlap without a proven ENSv1→ENSv2 migration boundary; a proven
-  Sepolia boundary follows the same per-name authority rule. The exact
-  [shared ENS infrastructure](glossary.md#shared-ens-infrastructure) names—root,
-  `eth`, `reverse`, and `addr.reverse`—instead select ENSv2 when the ENSv2 arm is
-  current and ENSv1 evidence, current or historical, exists without proof.
-  When that shared-infrastructure rule selects ENSv2, it overrides the ordinary
-  no-proof handling below, so those names carry neither Mainnet's
-  `conflicting_current_ens_authority` nor Sepolia's
-  `independent_ens_deployments_overlap`.
+  [`architecture.md`](architecture.md#ensv1ensv2-current-authority). A name
+  with facts on both ENSv1 and ENSv2 follows the chain
+  ([ADR 0007](adrs/0007-follow-the-chain-ens-authority.md)): a current ENSv2
+  registration is selected without a migration proof, and otherwise ENSv1
+  decides unless a qualifying ENSv2 release tombstone or regime
+  ([released ENSv2 authority](glossary.md#released-v2-authority)) applies, so
+  such a name is no longer refused. A selected ENSv2 registration
+  still needs the exact-name profile qualification; without it Project records
+  `ensv2_exact_name_profile_shadow`, which the API exposes as
+  `exact_name_profile_not_supported`. The earlier reasons
+  `conflicting_current_ens_authority` (Mainnet) and
+  `independent_ens_deployments_overlap` (Sepolia) are no longer produced. A
+  `name_current` row derived with either reason by an earlier Project generation,
+  before the required full-history Interpret redo and its stamped Project redo
+  complete, still returns the unsupported result below. The exact
+  [shared ENS infrastructure](glossary.md#shared-ens-infrastructure) names (root,
+  `eth`, `reverse`, and `addr.reverse`) select a current ENSv2 arm without an
+  authority epoch when ENSv1 evidence, current or historical, exists.
   Historical ENSv2 evidence alone does not qualify, and `.reverse` descendants
-  do not inherit the exception. These values replace the
-  blanket mixed-corpus reason; intake from the planned [ENSv2 migration source
-  family](glossary.md#source-family) alone does not add them. An address lookup
+  do not inherit the exception. An address lookup
   returns `409 conflict` when the deployment has no ready public namespace.
-  After the authority replacement is activated, an unsupported mixed-history
-  name result retains `input`, `kind`, and a `record` containing only `name`,
-  `display_name`, `namespace`, `namehash`, `status`, and
+  An unsupported name result retains `input`, `kind`, and a `record` containing
+  only `name`, `display_name`, `namespace`, `namehash`, `status`, and
   `unsupported_reason`. It omits registration, control, lifecycle, resolver,
   record, relation, permission, and primary-name fields from both source
   families rather than presenting either binding as current.
@@ -696,10 +698,10 @@ collection route carry neither header.
   `200` with `status=unsupported` and the minimal identity-only object below.
   The single exception is `current_authority_not_projected`, which keeps the
   ratified partial `status=ok` described at the end of this section. Every other
-  unsupported reason downgrades, including
+  unsupported reason downgrades, including the retired
   `conflicting_current_ens_authority` and
-  `independent_ens_deployments_overlap` for a mixed-history read with no
-  provable current authority, and `ensv2_exact_name_profile_shadow`, which
+  `independent_ens_deployments_overlap` on a row derived before the
+  follow-the-chain redo, and `ensv2_exact_name_profile_shadow`, which
   reaches consumers as `exact_name_profile_not_supported`. The rule fails closed
   at both edges: an unsupported row that names no reason downgrades, and so does
   an unsupported reason this build does not recognize, so a reason added to the
@@ -1196,11 +1198,11 @@ collection route carry neither header.
   Every unsupported reason except `current_authority_not_projected`
   short-circuits `source=indexed`, `source=verified`, and `source=auto` before
   provider execution and reports each requested or inventory-derived key as
-  `status=unsupported` with the name-level reason:
-  `conflicting_current_ens_authority` or
-  `independent_ens_deployments_overlap` for a mixed-history name with no
-  provable current authority, and otherwise the same public reason name detail
-  serves for that row. The reason reaches this route through the shared
+  `status=unsupported` with the name-level reason, the same public reason name
+  detail serves for that row (including the retired
+  `conflicting_current_ens_authority` and
+  `independent_ens_deployments_overlap` on a row derived before the
+  follow-the-chain redo). The reason reaches this route through the shared
   name-level vocabulary name detail uses, so one projection reason yields one
   public reason on every route. Verified execution does not choose a resolver
   for an unsupported name. `current_authority_not_projected` also
@@ -1366,8 +1368,11 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   The child's own
   [authority arm](glossary.md#authority-epoch) still chooses between the remaining ENSv1 and ENSv2 candidates.
   An unknown activated migration-path value blocks the Project generation as a
-  data-integrity failure instead of silently hiding relations. A child whose
-  arms disagree with no authority proof is omitted entirely. On every ENS
+  data-integrity failure instead of silently hiding relations. A child
+  without an authority proof publishes the relation of its selected arm
+  ([ADR 0007](adrs/0007-follow-the-chain-ens-authority.md)); only a child
+  with no selected authority at all whose arms disagree is omitted entirely.
+  On every ENS
   [deployment profile](glossary.md#deployment-profile) (Mainnet and Sepolia), an ENSv1 relation that survives
   parent reachability and
   was asserted after a proven ENSv2 child authority began blocks Project
@@ -2742,8 +2747,14 @@ introduces it rebuilds Project from full history before serving the option; see
   dictionary vocabulary. Each result is built only from the selected current
   registration: a migrated name uses its ENSv2 owner, registrant, status, and
   expiry. A name whose exact-name projection is unsupported is omitted from
-  search results whatever the reason, including a mixed-history name with no
-  provable current authority. Search carries no row-local status or
+  search results whatever the reason. Today that is a name with no selected
+  current binding (`current_authority_not_projected`, for example when both
+  arms have only history and nothing is open), a selected ENSv2 registration
+  without the exact-name profile qualification
+  (`ensv2_exact_name_profile_shadow`), or a row an earlier Project generation
+  derived with a retired reason. A mixed-history name is served like any other
+  name when its selected exact-name projection is supported.
+  Search carries no row-local status or
   unsupported-reason field, so it omits such a name rather than serving
   registration fields no selected authority backs; callers use name detail or
   batch lookup when they need an omitted name's explicit coverage reason. The
@@ -2955,13 +2966,16 @@ For a registrar lease first identified by a later readable observation, registra
   ENSv1 NameWrapper registration at the served projection timestamp.
   Once exact-name authority is activated, `bound_names` includes a logical
   name only under the resolver selected by its current registration. A
-  migrated name is absent from its superseded ENSv1 resolver's listing; a
-  mixed-history name with no provable current authority is omitted from all
-  resolver listings rather than forced to `ok`. This nested collection adds no
-  row-local mixed-authority status, so callers use name detail or batch lookup
-  for the explicit coverage reason. A row classified as
-  `current_authority_not_projected` is also absent from `bound_names`; retained
-  resolver-pointer evidence does not establish listing membership. The
+  migrated name is absent from its superseded ENSv1 resolver's listing, and a
+  mixed-history name whose selected arm has a current registration is listed
+  like any other name. This nested collection adds no row-local
+  mixed-authority status, so callers use name detail or batch lookup for the
+  explicit coverage reason. A row classified as
+  `current_authority_not_projected` is absent from `bound_names` unless its
+  serving resource is a TLD's root-registry resolver pointer; otherwise
+  retained resolver-pointer evidence does not establish listing membership.
+  Other unsupported rows, such as `ensv2_exact_name_profile_shadow`, are
+  listed under the resolver their selected registration declares. The
   exception is an ENSv2 TLD whose current
   [root-registry resolver pointer](glossary.md#root-registry-resolver-pointer)
   is its serving resource: like the ownerless ENSv1 or Basenames row below, it
@@ -3380,7 +3394,12 @@ so there is no persisted artifact to explain. See
 - Purpose: full coverage taxonomy.
 - Request parameters: path `name`; query `namespace`, `at`, `finality`.
 - Response shape: `data` includes `exhaustiveness`, `enumeration_basis`,
-  `source_classes_considered`, and `unsupported_reason` detail.
+  `source_classes_considered`, and `unsupported_reason` detail. Coverage
+  describes the selected authority arm: a selected ENSv2 arm reports the ENSv2
+  root, registry and registrar families and `exact_name_profile`, any other
+  selected arm reports `ensv1_registry_path` and `exact_name`, and a name with
+  no selected arm reads its event corpus instead. `enumeration_basis` is
+  `event_linked_registry_resolver` whenever a serving resource is linked.
 - Pagination behavior: none.
 - Status semantics: missing names return `404 not_found`; unsupported coverage
   classes return diagnostic detail rather than product simplification.

@@ -1530,8 +1530,9 @@ name-shaped routes and diagnostics, which read the row directly.
 row when the matching current address relation is provable but other coverage
 for that name is unsupported. Once the [per-name ownership
 rule](consumer-capabilities.md#ensv1ensv2-mixed-history-ownership) is activated,
-a name with no provable current authority has no provable current address
-relation and is therefore structurally absent from this collection.
+address relations come only from a name's selected current binding, so a
+name with no selected binding, such as a `current_authority_not_projected`
+row, has no current address relation and is structurally absent from this collection.
 Listed unsupported rows do not carry a per-row reason; read the reason from the
 name-shaped routes or diagnostics for the name in question.
 

@@ -861,8 +861,10 @@ complete the retained-range Interpret redo under the new interpreter content
 hash, run the stamped Project range, and evaluate the proof-scoped integrity
 assertions for both configured ENS deployment profiles (Mainnet and Sepolia)
 before `publish::swap`. Only after that Project generation publishes may the
-matching API be deployed. Independent unproven Sepolia ENSv1/ENSv2 overlap
-remains a per-name refusal rather than a generation failure. The connected
+matching API be deployed. A Sepolia name with facts on both ENSv1 and ENSv2
+and no proof follows the chain per name
+([ADR 0007](adrs/0007-follow-the-chain-ens-authority.md)) and never blocks
+publication. The connected
 wrapped and locked publication prerequisite is recorded in
 [PR #852](https://github.com/ensdomains/bigname/pull/852).
 An interrupted walk resumes only from its existing exact phase

@@ -128,8 +128,20 @@ async fn event(
     resource: Option<&str>,
     event: Event<'_>,
 ) -> Result<i64> {
-    Ok(sqlx::query_scalar("INSERT INTO normalized_events (event_identity, namespace, logical_name_id, resource_id, event_kind, source_family, manifest_version, chain_id, block_number, block_hash, transaction_hash, transaction_index, log_index, derivation_kind, canonicality_state, after_state, migration_correlation_ids) VALUES ($1, 'ens', $2, $3::uuid, $4, $5, 1, $6, 10, $7, '0x503', 0, $8, CASE WHEN $4 = 'MigrationApplied' THEN 'ens_v2_migration' ELSE 'ens_v2_registry_resource_surface' END, 'canonical', $9, CASE WHEN $4 = 'MigrationApplied' THEN ARRAY['issue-503'] ELSE ARRAY[]::text[] END) RETURNING normalized_event_id")
-        .bind(identity).bind(logical).bind(resource).bind(event.kind).bind(event.family).bind(CHAIN).bind(HASH).bind(event.log).bind(event.after).fetch_one(pool).await?)
+    event_in_tx(pool, identity, logical, resource, "0x503", event).await
+}
+
+/// Like `event`, in the transaction `tx`.
+async fn event_in_tx(
+    pool: &PgPool,
+    identity: &str,
+    logical: &str,
+    resource: Option<&str>,
+    tx: &str,
+    event: Event<'_>,
+) -> Result<i64> {
+    Ok(sqlx::query_scalar("INSERT INTO normalized_events (event_identity, namespace, logical_name_id, resource_id, event_kind, source_family, manifest_version, chain_id, block_number, block_hash, transaction_hash, transaction_index, log_index, derivation_kind, canonicality_state, after_state, migration_correlation_ids) VALUES ($1, 'ens', $2, $3::uuid, $4, $5, 1, $6, 10, $7, $10, 0, $8, CASE WHEN $4 = 'MigrationApplied' THEN 'ens_v2_migration' ELSE 'ens_v2_registry_resource_surface' END, 'canonical', $9, CASE WHEN $4 = 'MigrationApplied' THEN ARRAY['issue-503'] ELSE ARRAY[]::text[] END) RETURNING normalized_event_id")
+        .bind(identity).bind(logical).bind(resource).bind(event.kind).bind(event.family).bind(CHAIN).bind(HASH).bind(event.log).bind(event.after).bind(tx).fetch_one(pool).await?)
 }
 
 async fn run(pool: &PgPool) -> bigname_project::Result<()> {
@@ -200,19 +212,762 @@ async fn capture_staged_authority(pool: &PgPool) -> Result<()> {
     Ok(())
 }
 
+// Follow the chain: a current ENSv2 registration holds the name whatever ENSv1 holds, without a
+// migration proof. The live ENSv1 binding beside it is chain state, not a post-proof
+// contradiction, so the generation publishes.
 #[tokio::test]
-async fn sepolia_no_proof_overlap_remains_refused_not_fatal() -> Result<()> {
+async fn a_current_v2_registration_holds_a_live_v1_name_without_proof() -> Result<()> {
     let (db, pool) = database("issue503_no_proof").await?;
     let logical = surface(&pool, 1, "ordinary.eth", &["ens_v1", "ens_v2"]).await?;
     run(&pool).await?;
     assert_eq!(
         authority(&pool, &logical).await?,
+        (Some("ens_v2".into()), None, None, None)
+    );
+    assert_eq!(
+        authority_evidence(&pool, &logical).await?,
         (
             None,
-            Some("independent_ens_deployments_overlap".into()),
+            None,
+            None,
+            Some(json!({"block_number": 10, "transaction_index": 0, "log_index": 0}))
+        )
+    );
+    db.cleanup().await?;
+    Ok(())
+}
+
+/// Adds a binding of `arm` that is still open at the target block, opened at `log`.
+async fn open_binding(
+    pool: &PgPool,
+    logical: &str,
+    index: u16,
+    arm: &str,
+    log: i64,
+) -> Result<String> {
+    let resource = uuid(8, index);
+    sqlx::query("INSERT INTO resources (resource_id, chain_id, block_hash, block_number, canonicality_state) VALUES ($1::uuid, $2, $3, 10, 'canonical')")
+        .bind(&resource).bind(CHAIN).bind(HASH).execute(pool).await?;
+    sqlx::query("INSERT INTO surface_bindings (surface_binding_id, logical_name_id, resource_id, binding_kind, authority_arm, active_from, chain_id, block_hash, block_number, provenance, canonicality_state) VALUES ($1::uuid, $2, $3::uuid, 'declared_registry_path', $4, '2026-08-25T00:00:00Z', $5, $6, 10, jsonb_build_object('transaction_index', 0, 'log_index', $7::bigint), 'canonical')")
+        .bind(uuid(9, index)).bind(logical).bind(&resource).bind(arm).bind(CHAIN).bind(HASH).bind(log).execute(pool).await?;
+    Ok(resource)
+}
+
+// The remaining risk case: a label registered on ENSv1 after the premigration snapshot, so it
+// has no reservation, and then registered on ENSv2. The ENSv2 registration decides, which is
+// also what the Universal Resolver answers.
+// (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/universalResolver/libraries/LibResolution.sol:L58-L85 @ ens_v2_sepolia_20260916@366de741)
+// (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/resolver/ENSV1Resolver.sol:L40-L43 @ ens_v2_sepolia_20260916@366de741)
+#[tokio::test]
+async fn a_v2_registration_after_an_unreserved_v1_registration_selects_v2() -> Result<()> {
+    let (db, pool) = database("overlap_unreserved_v1").await?;
+    let logical = surface(&pool, 62, "late-v1.eth", &["ens_v1"]).await?;
+    event(
+        &pool,
+        "overlap-late-v1-grant",
+        &logical,
+        Some(&uuid(1, 62)),
+        Event {
+            family: "ens_v1_registrar_l1",
+            kind: "RegistrationGranted",
+            log: 1,
+            after: json!({"status":"registered","registrant":"0x0000000000000000000000000000000000000001"}),
+        },
+    )
+    .await?;
+    let v2_resource = open_binding(&pool, &logical, 62, "ens_v2", 5).await?;
+    event(
+        &pool,
+        "overlap-late-v2-grant",
+        &logical,
+        Some(&v2_resource),
+        Event {
+            family: "ens_v2_registry_l1",
+            kind: "RegistrationGranted",
+            log: 5,
+            after: json!({"status":"registered","registrant":"0x0000000000000000000000000000000000000002"}),
+        },
+    )
+    .await?;
+    run(&pool).await?;
+    assert_eq!(
+        authority(&pool, &logical).await?,
+        (Some("ens_v2".into()), None, None, None)
+    );
+    db.cleanup().await?;
+    Ok(())
+}
+
+// Sepolia group D: a wrapped name moved to ENSv2, and an ENSv1 registry owner change opened a
+// newer ENSv1 binding afterwards. No migration proof was seen. The ENSv2 registration still
+// decides; neither arm's recency does.
+#[tokio::test]
+async fn a_later_v1_registry_owner_does_not_displace_a_current_v2_registration() -> Result<()> {
+    let (db, pool) = database("overlap_later_v1_owner").await?;
+    let logical = surface(&pool, 63, "moved.eth", &["ens_v2"]).await?;
+    let v1_resource = open_binding(&pool, &logical, 63, "ens_v1", 5).await?;
+    event(
+        &pool,
+        "overlap-later-v1-owner",
+        &logical,
+        Some(&v1_resource),
+        Event {
+            family: "ens_v1_registry_l1",
+            kind: "AuthorityTransferred",
+            log: 5,
+            after: json!({"owner":"0x0000000000000000000000000000000000000002"}),
+        },
+    )
+    .await?;
+    run(&pool).await?;
+    assert_eq!(
+        authority(&pool, &logical).await?,
+        (Some("ens_v2".into()), None, None, None)
+    );
+    db.cleanup().await?;
+    Ok(())
+}
+
+async fn lifecycle_state(pool: &PgPool, logical: &str) -> Result<Option<String>> {
+    Ok(sqlx::query_scalar("SELECT provenance #>> '{authority_selection,lifecycle_state}' FROM name_current WHERE logical_name_id = $1")
+        .bind(logical).fetch_one(pool).await?)
+}
+
+// A premigration reservation is not ENSv2 authority: it defers to ENSv1, whose live
+// registration keeps the name.
+#[tokio::test]
+async fn a_v2_reservation_defers_to_a_live_v1_registration() -> Result<()> {
+    let (db, pool) = database("overlap_reserved_live_v1").await?;
+    let logical = surface(&pool, 64, "reserved-live.eth", &["ens_v1"]).await?;
+    event(
+        &pool,
+        "overlap-reserved-live",
+        &logical,
+        None,
+        Event {
+            family: "ens_v2_registry_l1",
+            kind: "RegistrationReserved",
+            log: 2,
+            after: json!({"status":"reserved"}),
+        },
+    )
+    .await?;
+    run(&pool).await?;
+    assert_eq!(
+        authority(&pool, &logical).await?,
+        (Some("ens_v1".into()), None, None, None)
+    );
+    assert_eq!(
+        lifecycle_state(&pool, &logical).await?.as_deref(),
+        Some("registered")
+    );
+    db.cleanup().await?;
+    Ok(())
+}
+
+// A reservation over an ENSv1 lease that has ended leaves nothing current: ENSv1 decides and
+// serves its released lease.
+#[tokio::test]
+async fn a_v2_reservation_over_an_ended_v1_lease_serves_nothing_current() -> Result<()> {
+    let (db, pool) = database("overlap_reserved_ended_v1").await?;
+    let logical = surface(&pool, 65, "reserved-ended.eth", &[]).await?;
+    let v1_resource = closed_binding(&pool, &logical, 65, "ens_v1").await?;
+    for (log, kind, after) in [
+        (
+            1,
+            "RegistrationGranted",
+            json!({"status":"registered","registrant":"0x0000000000000000000000000000000000000001"}),
+        ),
+        (2, "RegistrationReleased", json!({"status":"unregistered"})),
+    ] {
+        event(
+            &pool,
+            &format!("overlap-reserved-ended-{kind}"),
+            &logical,
+            Some(&v1_resource),
+            Event {
+                family: "ens_v1_registrar_l1",
+                kind,
+                log,
+                after,
+            },
+        )
+        .await?;
+    }
+    event(
+        &pool,
+        "overlap-reserved-ended-reservation",
+        &logical,
+        None,
+        Event {
+            family: "ens_v2_registry_l1",
+            kind: "RegistrationReserved",
+            log: 3,
+            after: json!({"status":"reserved"}),
+        },
+    )
+    .await?;
+    run(&pool).await?;
+    assert_eq!(
+        authority(&pool, &logical).await?,
+        (Some("ens_v1".into()), None, None, None)
+    );
+    assert_eq!(
+        lifecycle_state(&pool, &logical).await?.as_deref(),
+        Some("unregistered")
+    );
+    db.cleanup().await?;
+    Ok(())
+}
+
+// Nothing is open on either arm. ENSv1 then decides from its history, and the lifecycle state
+// reads the latest ENSv1 lifecycle row whether or not the name also has ENSv2 history. Here that
+// row is a grant, so both names read `registered` rather than the `unregistered` default of a
+// selection with no binding.
+#[tokio::test]
+async fn ensv1_history_gives_the_lifecycle_state_with_or_without_v2_history() -> Result<()> {
+    let (db, pool) = database("overlap_history_lifecycle").await?;
+    let mixed = surface(&pool, 71, "history-mixed.eth", &[]).await?;
+    let sole = surface(&pool, 72, "history-sole.eth", &[]).await?;
+    for (index, logical) in [(71, &mixed), (72, &sole)] {
+        let v1_resource = closed_binding(&pool, logical, index, "ens_v1").await?;
+        event(
+            &pool,
+            &format!("history-lifecycle-v1-grant-{index}"),
+            logical,
+            Some(&v1_resource),
+            Event {
+                family: "ens_v1_registrar_l1",
+                kind: "RegistrationGranted",
+                log: 1,
+                after: json!({"status":"registered","registrant":"0x0000000000000000000000000000000000000001"}),
+            },
+        )
+        .await?;
+    }
+    // Released ENSv2 history after the ENSv1 grant. The earlier ENSv1 facts keep the release
+    // from qualifying as an ENSv2 tombstone, so ENSv1 decides.
+    let v2_resource = closed_v2_binding_at(&pool, &mixed, 71, 2, 0).await?;
+    for (log, kind, after) in [
+        (
+            2,
+            "RegistrationGranted",
+            json!({"status":"registered","registrant":"0x0000000000000000000000000000000000000002"}),
+        ),
+        (3, "RegistrationReleased", json!({"status":"unregistered"})),
+    ] {
+        event(
+            &pool,
+            &format!("history-lifecycle-v2-{kind}"),
+            &mixed,
+            Some(&v2_resource),
+            Event {
+                family: "ens_v2_registry_l1",
+                kind,
+                log,
+                after,
+            },
+        )
+        .await?;
+    }
+    run(&pool).await?;
+    for logical in [&mixed, &sole] {
+        assert_eq!(
+            authority(&pool, logical).await?,
+            (
+                Some("ens_v1".into()),
+                Some("current_authority_not_projected".into()),
+                None,
+                None
+            )
+        );
+        assert_eq!(
+            lifecycle_state(&pool, logical).await?.as_deref(),
+            Some("registered"),
+            "{logical}"
+        );
+    }
+    db.cleanup().await?;
+    Ok(())
+}
+
+// A lease registered through the NameWrapper lapses, so the closed NameWrapper binding stands
+// for it as the released ENSv1 tombstone. That binding's resource has no lifecycle rows of its
+// own, so the lifecycle state reads the released lease from the ENSv1 history, also when the
+// name has ENSv2 history whose release does not qualify. The wrap carries the facts the
+// NameWrapper producer emits, so the registration fold admits the lease's lifecycle rows and the
+// payload agrees with the lifecycle state.
+#[tokio::test]
+async fn a_wrapped_v1_tombstone_with_v2_history_reads_unregistered() -> Result<()> {
+    let (db, pool) = database("overlap_wrapped_tombstone").await?;
+    let logical = surface(&pool, 73, "wrapped-lapsed.eth", &[]).await?;
+    let wrapper_resource = closed_binding(&pool, &logical, 73, "ens_v1").await?;
+    let lease_resource = uuid(15, 73);
+    sqlx::query("INSERT INTO resources (resource_id, chain_id, block_hash, block_number, canonicality_state) VALUES ($1::uuid, $2, $3, 10, 'canonical')")
+        .bind(&lease_resource).bind(CHAIN).bind(HASH).execute(&pool).await?;
+    let holder = "0x0000000000000000000000000000000000000001";
+    let name_wrapper = "0x0000000000000000000000000000000000000a11";
+    let authority_key = "wrapper:wrapped-lapsed";
+    // The BaseRegistrar lease names the NameWrapper as registrant; the holder is reached only
+    // through the wrapper's own transfer below.
+    event(
+        &pool,
+        "wrapped-tombstone-lease-grant",
+        &logical,
+        Some(&lease_resource),
+        Event {
+            family: "ens_v1_registrar_l1",
+            kind: "RegistrationGranted",
+            log: 1,
+            after: json!({"authority_kind":"registrar","registrant":name_wrapper,"status":"registered","expiry":4}),
+        },
+    )
+    .await?;
+    // NameWrapped, in its own transaction so only the lease it records (not a same-transaction
+    // grant) links it to the lease: the wrapper binding, its holder and authority, the token
+    // transfer to the holder, the wrapper expiry, and its fuse scope, all on the wrapper resource.
+    // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L264-L268 @ ens_v1@91c966f)
+    let wrap = json!({
+        "source_event": "NameWrapped",
+        "owner": holder,
+        "fuses": 0,
+        "wrapper_state": "wrapped",
+        "expiry": 4,
+        "wrapped_registrar_resource_id": lease_resource,
+        "authority_kind": "wrapper",
+        "authority_key": authority_key,
+    });
+    let mut transfer = wrap.clone();
+    transfer["to"] = json!(holder);
+    transfer
+        .as_object_mut()
+        .expect("wrap payload is an object")
+        .remove("owner");
+    for (log, kind, after) in [
+        (2, "SurfaceBound", wrap.clone()),
+        (3, "AuthorityEpochChanged", wrap.clone()),
+        (4, "TokenControlTransferred", transfer),
+        (5, "ExpiryChanged", wrap.clone()),
+        (6, "PermissionScopeChanged", wrap.clone()),
+    ] {
+        event_in_tx(
+            &pool,
+            &format!("wrapped-tombstone-wrap-{kind}"),
+            &logical,
+            Some(&wrapper_resource),
+            "0x5031",
+            Event {
+                family: "ens_v1_wrapper_l1",
+                kind,
+                log,
+                after,
+            },
+        )
+        .await?;
+    }
+    // The earlier ENSv1 binding keeps this ENSv2 release from qualifying as a tombstone.
+    let v2_resource = closed_v2_binding_at(&pool, &logical, 73, 7, 0).await?;
+    for (log, kind, after) in [
+        (
+            7,
+            "RegistrationGranted",
+            json!({"status":"registered","registrant":"0x0000000000000000000000000000000000000002"}),
+        ),
+        (8, "RegistrationReleased", json!({"status":"unregistered"})),
+    ] {
+        event(
+            &pool,
+            &format!("wrapped-tombstone-v2-{kind}"),
+            &logical,
+            Some(&v2_resource),
+            Event {
+                family: "ens_v2_registry_l1",
+                kind,
+                log,
+                after,
+            },
+        )
+        .await?;
+    }
+    // The lease lapses past grace, in a later transaction of its own.
+    event_in_tx(
+        &pool,
+        "wrapped-tombstone-lease-release",
+        &logical,
+        Some(&lease_resource),
+        "0x5032",
+        Event {
+            family: "ens_v1_registrar_l1",
+            kind: "RegistrationReleased",
+            log: 9,
+            after: json!({"source_event":"RegistrationReleased","released_at":5,"namehash":logical.trim_start_matches("ens:"),"expiry":4}),
+        },
+    )
+    .await?;
+    run(&pool).await?;
+    let (summary, selection): (Value, Value) = sqlx::query_as(
+        "SELECT declared_summary, provenance -> 'authority_selection'
+         FROM name_current WHERE logical_name_id = $1",
+    )
+    .bind(&logical)
+    .fetch_one(&pool)
+    .await?;
+    let registration = &summary["registration"];
+    assert_eq!(registration["status"], "released");
+    assert_eq!(registration["released_at"], 5);
+    assert_eq!(registration["resource_id"], json!(lease_resource));
+    // The lapsed lease keeps its own expiry; its last holder and authority are served only
+    // inside the lapsed block.
+    assert_eq!(registration["expiry"], 4);
+    assert!(registration["registrant"].is_null());
+    assert!(registration["authority_kind"].is_null());
+    assert!(registration["authority_key"].is_null());
+    assert_eq!(
+        registration["lapsed_registration"],
+        json!({
+            "registrant": holder,
+            "authority_kind": "wrapper",
+            "authority_key": authority_key,
+            "released_at": 5,
+        })
+    );
+    assert_eq!(summary["control"], json!({"status": "unregistered"}));
+    assert_eq!(
+        (
+            &selection["authority_arm"],
+            &selection["surface_binding_id"],
+            &selection["resource_authority_context"]["released_tombstone"],
+            &selection["lifecycle_state"],
+        ),
+        (
+            &json!("ens_v1"),
+            &json!(uuid(7, 73)),
+            &json!("ens_v1"),
+            &json!("unregistered")
+        )
+    );
+    db.cleanup().await?;
+    Ok(())
+}
+
+/// Adds a binding of `arm` that closed before the target block, with its own resource.
+async fn closed_binding(pool: &PgPool, logical: &str, index: u16, arm: &str) -> Result<String> {
+    let resource = uuid(6, index);
+    sqlx::query("INSERT INTO resources (resource_id, chain_id, block_hash, block_number, canonicality_state) VALUES ($1::uuid, $2, $3, 10, 'canonical')")
+        .bind(&resource).bind(CHAIN).bind(HASH).execute(pool).await?;
+    sqlx::query("INSERT INTO surface_bindings (surface_binding_id, logical_name_id, resource_id, binding_kind, authority_arm, active_from, active_to, chain_id, block_hash, block_number, provenance, canonicality_state) VALUES ($1::uuid, $2, $3::uuid, 'declared_registry_path', $4, '2026-08-25T00:00:00Z', '2026-08-25T12:00:00Z', $5, $6, 10, '{\"transaction_index\":0,\"log_index\":0}', 'canonical')")
+        .bind(uuid(7, index)).bind(logical).bind(&resource).bind(arm).bind(CHAIN).bind(HASH).execute(pool).await?;
+    Ok(resource)
+}
+
+// Sepolia group A: the name is live on ENSv1, and its ENSv2 label was reserved, granted and
+// released again. ENSv2 holds nothing now, so the historical ENSv2 grant is not a current
+// candidate and ENSv1 keeps the name.
+#[tokio::test]
+async fn a_live_v1_name_whose_v2_grant_was_released_selects_v1() -> Result<()> {
+    let (db, pool) = database("overlap_released_v2_grant").await?;
+    let logical = surface(&pool, 60, "released-grant.eth", &["ens_v1"]).await?;
+    let v2_resource = closed_binding(&pool, &logical, 60, "ens_v2").await?;
+    for (log, kind, after) in [
+        (1, "RegistrationReserved", json!({"status":"reserved"})),
+        (
+            2,
+            "RegistrationGranted",
+            json!({"status":"registered","registrant":"0x0000000000000000000000000000000000000001"}),
+        ),
+        (3, "RegistrationReleased", json!({"status":"unregistered"})),
+    ] {
+        event(
+            &pool,
+            &format!("overlap-a-{kind}"),
+            &logical,
+            Some(&v2_resource),
+            Event {
+                family: "ens_v2_registry_l1",
+                kind,
+                log,
+                after,
+            },
+        )
+        .await?;
+    }
+    run(&pool).await?;
+    assert_eq!(
+        authority(&pool, &logical).await?,
+        (Some("ens_v1".into()), None, None, None)
+    );
+    // Coverage describes the selected ENSv1 arm, not the name's released ENSv2 history.
+    let coverage: Value = sqlx::query_scalar(
+        "SELECT declared_summary -> 'coverage' FROM name_current WHERE logical_name_id = $1",
+    )
+    .bind(&logical)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        (
+            &coverage["source_classes_considered"],
+            &coverage["enumeration_basis"]
+        ),
+        (&json!(["ensv1_registry_path"]), &json!("exact_name"))
+    );
+    db.cleanup().await?;
+    Ok(())
+}
+
+// Sepolia group B: the ENSv1 registration ended at expiry plus grace before a fresh ENSv2
+// registration. ENSv1 holds nothing now, so its history is not a current candidate.
+#[tokio::test]
+async fn a_v2_registration_after_the_v1_lease_ended_selects_v2() -> Result<()> {
+    let (db, pool) = database("overlap_released_v1_lease").await?;
+    let logical = surface(&pool, 61, "after-v1.eth", &["ens_v2"]).await?;
+    let v1_resource = closed_binding(&pool, &logical, 61, "ens_v1").await?;
+    for (log, kind, after) in [
+        (
+            1,
+            "RegistrationGranted",
+            json!({"status":"registered","registrant":"0x0000000000000000000000000000000000000001"}),
+        ),
+        (2, "RegistrationReleased", json!({"status":"unregistered"})),
+    ] {
+        event(
+            &pool,
+            &format!("overlap-b-{kind}"),
+            &logical,
+            Some(&v1_resource),
+            Event {
+                family: "ens_v1_registrar_l1",
+                kind,
+                log,
+                after,
+            },
+        )
+        .await?;
+    }
+    run(&pool).await?;
+    assert_eq!(
+        authority(&pool, &logical).await?,
+        (Some("ens_v2".into()), None, None, None)
+    );
+    db.cleanup().await?;
+    Ok(())
+}
+
+// Nothing is open on either arm, the name has history on both, and its latest ENSv1 registry
+// owner is a known zero. ENSv1 decides, so the name serves the ownerless-registry profile
+// rather than being refused for its ENSv2 history.
+#[tokio::test]
+async fn an_ownerless_v1_registry_name_with_v2_history_serves_the_ownerless_profile() -> Result<()>
+{
+    let (db, pool) = database("overlap_ownerless_both_history").await?;
+    let logical = surface(&pool, 66, "ownerless-both.eth", &[]).await?;
+    let v1_resource = closed_binding(&pool, &logical, 66, "ens_v1").await?;
+    event(
+        &pool,
+        "overlap-ownerless-v1-owner",
+        &logical,
+        Some(&v1_resource),
+        Event {
+            family: "ens_v1_registry_l1",
+            kind: "AuthorityTransferred",
+            log: 1,
+            after: json!({"owner":"0x0000000000000000000000000000000000000001","owner_getter":"0x0000000000000000000000000000000000000001"}),
+        },
+    )
+    .await?;
+    let v2_resource = uuid(10, 66);
+    sqlx::query("INSERT INTO resources (resource_id, chain_id, block_hash, block_number, canonicality_state) VALUES ($1::uuid, $2, $3, 10, 'canonical')")
+        .bind(&v2_resource).bind(CHAIN).bind(HASH).execute(&pool).await?;
+    sqlx::query("INSERT INTO surface_bindings (surface_binding_id, logical_name_id, resource_id, binding_kind, authority_arm, active_from, active_to, chain_id, block_hash, block_number, provenance, canonicality_state) VALUES ($1::uuid, $2, $3::uuid, 'declared_registry_path', 'ens_v2', '2026-08-25T00:00:00Z', '2026-08-25T12:00:00Z', $4, $5, 10, '{\"transaction_index\":0,\"log_index\":2}', 'canonical')")
+        .bind(uuid(11, 66)).bind(&logical).bind(&v2_resource).bind(CHAIN).bind(HASH).execute(&pool).await?;
+    for (log, kind, after) in [
+        (
+            2,
+            "RegistrationGranted",
+            json!({"status":"registered","registrant":"0x0000000000000000000000000000000000000002"}),
+        ),
+        (3, "RegistrationReleased", json!({"status":"unregistered"})),
+    ] {
+        event(
+            &pool,
+            &format!("overlap-ownerless-v2-{kind}"),
+            &logical,
+            Some(&v2_resource),
+            Event {
+                family: "ens_v2_registry_l1",
+                kind,
+                log,
+                after,
+            },
+        )
+        .await?;
+    }
+    event(
+        &pool,
+        "overlap-ownerless-v1-zero",
+        &logical,
+        Some(&v1_resource),
+        Event {
+            family: "ens_v1_registry_l1",
+            kind: "AuthorityTransferred",
+            log: 4,
+            after: json!({"owner":"0x0000000000000000000000000000000000000000","owner_getter":"0x0000000000000000000000000000000000000000"}),
+        },
+    )
+    .await?;
+    run(&pool).await?;
+    assert_eq!(
+        authority(&pool, &logical).await?,
+        (Some("ens_v1".into()), None, None, None)
+    );
+    let (support, reason, status): (String, Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT support_status, unsupported_reason,
+                declared_summary #>> '{registration,status}'
+         FROM name_current WHERE logical_name_id = $1",
+    )
+    .bind(&logical)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        (support.as_str(), reason, status.as_deref()),
+        ("supported", None, Some("unregistered"))
+    );
+    db.cleanup().await?;
+    Ok(())
+}
+
+/// Adds an `ens_v2` binding that opened at `log` and at hour `from` of the day before the target
+/// block, and closed an hour later.
+async fn closed_v2_binding_at(
+    pool: &PgPool,
+    logical: &str,
+    index: u16,
+    log: i64,
+    from: i32,
+) -> Result<String> {
+    let resource = uuid(12, index);
+    sqlx::query("INSERT INTO resources (resource_id, chain_id, block_hash, block_number, canonicality_state) VALUES ($1::uuid, $2, $3, 10, 'canonical')")
+        .bind(&resource).bind(CHAIN).bind(HASH).execute(pool).await?;
+    sqlx::query("INSERT INTO surface_bindings (surface_binding_id, logical_name_id, resource_id, binding_kind, authority_arm, active_from, active_to, chain_id, block_hash, block_number, provenance, canonicality_state) VALUES ($1::uuid, $2, $3::uuid, 'declared_registry_path', 'ens_v2', '2026-08-25T00:00:00Z'::timestamptz + make_interval(hours => $7), '2026-08-25T00:00:00Z'::timestamptz + make_interval(hours => $7 + 1), $4, $5, 10, jsonb_build_object('transaction_index', 0, 'log_index', $6::bigint), 'canonical')")
+        .bind(uuid(13, index)).bind(logical).bind(&resource).bind(CHAIN).bind(HASH).bind(log).bind(from).execute(pool).await?;
+    Ok(resource)
+}
+
+// A released ENSv2 regime keeps the name on ENSv2 after its second registration is released.
+// An ENSv1 registry owner that acquired the name in between and was then cleared to zero is
+// retained ENSv1 history: it must not turn the regime into the ownerless-registry profile and
+// serve its ENSv1 resolver under ENSv2 authority.
+#[tokio::test]
+async fn an_ownerless_v1_registry_does_not_serve_under_a_released_v2_regime() -> Result<()> {
+    let (db, pool) = database("overlap_regime_ownerless_v1").await?;
+    let logical = surface(&pool, 67, "regime-ownerless.eth", &[]).await?;
+    let v2 = |kind: &'static str, log: i64, after: Value| Event {
+        family: "ens_v2_registry_l1",
+        kind,
+        log,
+        after,
+    };
+    let registrant = "0x0000000000000000000000000000000000000002";
+    // A: the first ENSv2 registration; B: its qualifying release.
+    let first = closed_v2_binding_at(&pool, &logical, 67, 1, 0).await?;
+    event(
+        &pool,
+        "regime-a-grant",
+        &logical,
+        Some(&first),
+        v2(
+            "RegistrationGranted",
+            1,
+            json!({"status":"registered","registrant":registrant}),
+        ),
+    )
+    .await?;
+    event(
+        &pool,
+        "regime-b-release",
+        &logical,
+        Some(&first),
+        v2("RegistrationReleased", 2, json!({"status":"unregistered"})),
+    )
+    .await?;
+    // C: ENSv1 acquires the name and sets a resolver; D: its registry owner is cleared.
+    let v1_resource = uuid(14, 67);
+    sqlx::query("INSERT INTO resources (resource_id, chain_id, block_hash, block_number, canonicality_state) VALUES ($1::uuid, $2, $3, 10, 'canonical')")
+        .bind(&v1_resource).bind(CHAIN).bind(HASH).execute(&pool).await?;
+    for (log, kind, after) in [
+        (
+            3,
+            "AuthorityTransferred",
+            json!({"owner":"0x0000000000000000000000000000000000000001","owner_getter":"0x0000000000000000000000000000000000000001"}),
+        ),
+        (
+            4,
+            "ResolverChanged",
+            json!({"resolver":"0x00000000000000000000000000000000000000c1"}),
+        ),
+        (
+            5,
+            "AuthorityTransferred",
+            json!({"owner":"0x0000000000000000000000000000000000000000","owner_getter":"0x0000000000000000000000000000000000000000"}),
+        ),
+    ] {
+        event(
+            &pool,
+            &format!("regime-v1-{log}"),
+            &logical,
+            Some(&v1_resource),
+            Event {
+                family: "ens_v1_registry_l1",
+                kind,
+                log,
+                after,
+            },
+        )
+        .await?;
+    }
+    // E: ENSv2 registers the name again; F: that registration is released too.
+    let second = closed_v2_binding_at(&pool, &logical, 68, 6, 2).await?;
+    event(
+        &pool,
+        "regime-e-grant",
+        &logical,
+        Some(&second),
+        v2(
+            "RegistrationGranted",
+            6,
+            json!({"status":"registered","registrant":registrant}),
+        ),
+    )
+    .await?;
+    event(
+        &pool,
+        "regime-f-release",
+        &logical,
+        Some(&second),
+        v2("RegistrationReleased", 7, json!({"status":"unregistered"})),
+    )
+    .await?;
+
+    run(&pool).await?;
+    assert_eq!(
+        authority(&pool, &logical).await?,
+        (
+            Some("ens_v2".into()),
+            Some("current_authority_not_projected".into()),
             None,
             None
         )
+    );
+    let serving: (Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT serving_resource_id::text, declared_summary #>> '{resolver,address}'
+         FROM name_current WHERE logical_name_id = $1",
+    )
+    .bind(&logical)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        serving,
+        (None, None),
+        "no ENSv1 resolver serves under ENSv2"
     );
     db.cleanup().await?;
     Ok(())
@@ -260,8 +1015,10 @@ async fn shared_ens_infrastructure_selects_v2_without_fabricating_proof() -> Res
     Ok(())
 }
 
+// Historical ENSv2 evidence does not qualify for the shared-infrastructure exception, and it is
+// not a current ENSv2 candidate either, so the name's open ENSv1 binding keeps it.
 #[tokio::test]
-async fn shared_infrastructure_refuses_historical_only_v2_evidence() -> Result<()> {
+async fn shared_infrastructure_with_historical_only_v2_evidence_stays_on_v1() -> Result<()> {
     let (db, pool) = database("issue503_shared_historical_v2").await?;
     let logical = surface(&pool, 15, "eth", &["ens_v1"]).await?;
     let v2_resource = uuid(2, 15);
@@ -287,12 +1044,7 @@ async fn shared_infrastructure_refuses_historical_only_v2_evidence() -> Result<(
     run(&pool).await?;
     assert_eq!(
         authority(&pool, &logical).await?,
-        (
-            None,
-            Some("independent_ens_deployments_overlap".into()),
-            None,
-            None
-        )
+        (Some("ens_v1".into()), None, None, None)
     );
     db.cleanup().await?;
     Ok(())
@@ -347,6 +1099,8 @@ async fn shared_infrastructure_current_v2_accepts_historical_or_absent_v1_eviden
     Ok(())
 }
 
+// Descendants follow the ordinary rule: their current ENSv2 registration decides, and unlike the
+// exact infrastructure names they publish its authority epoch.
 #[tokio::test]
 async fn reverse_descendants_are_not_shared_infrastructure() -> Result<()> {
     let (db, pool) = database("issue503_reverse_descendants").await?;
@@ -355,9 +1109,10 @@ async fn reverse_descendants_are_not_shared_infrastructure() -> Result<()> {
     run(&pool).await?;
     for logical in [a, b] {
         assert_eq!(
-            authority(&pool, &logical).await?.1.as_deref(),
-            Some("independent_ens_deployments_overlap")
+            authority(&pool, &logical).await?,
+            (Some("ens_v2".into()), None, None, None)
         );
+        assert!(authority_evidence(&pool, &logical).await?.3.is_some());
     }
     db.cleanup().await?;
     Ok(())
