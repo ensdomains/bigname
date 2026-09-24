@@ -396,6 +396,11 @@ async fn run_benchmark(options: PgConnectOptions, benchmark: Benchmark) -> Resul
     eprintln!(
         "SEPOLIA_ENGINE_BENCHMARK_ROLLBACK complete=true hydration=not_invoked phase_metadata=not_invoked"
     );
+    if let Some(session) = &profile_session {
+        for line in crate::profile::registry_records_fold(session.directory())? {
+            eprintln!("{line}");
+        }
+    }
     pool.close().await;
     Ok(())
 }
@@ -485,6 +490,11 @@ async fn historical_baseline_reference_and_two_candidates_clean_work_tables() ->
             );
             let plans = std::fs::read_dir(entries[0].path())?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
+            let fold = crate::profile::registry_records_fold(&entries[0].path())?;
+            ensure!(
+                fold.len() == 2 && fold.iter().all(|line| line.contains("actual_total_ms=")),
+                "each candidate head profiles the registry-record fold once: {fold:?}"
+            );
             // Plans come only from the explicitly profiled candidate futures.
             ensure!(!plans.is_empty(), "profiled lifecycle produced no plans");
             for plan in plans {

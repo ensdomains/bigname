@@ -15,6 +15,7 @@ pub(crate) enum Stage {
     Events,
     LinkedRecords,
     ResourcePermissions,
+    NameAuthority,
     NameCurrent,
     Resolver,
     Mirror(&'static str),
@@ -29,6 +30,7 @@ impl Stage {
             Self::Events => Ok("project_events"),
             Self::LinkedRecords => Ok("linked_records"),
             Self::ResourcePermissions => Ok("resource_permission_summary"),
+            Self::NameAuthority => Ok("name_authority"),
             Self::NameCurrent => Ok("name_current"),
             Self::Resolver => Ok("resolver_current"),
             Self::Mirror(name) if MIRROR_TABLES.contains(&name) => Ok(name),
@@ -158,8 +160,15 @@ pub(crate) async fn execute_bound(
             "candidate profile plan limit exceeded",
         ));
     }
+    // Node timing costs overhead on every plan node, so only the statement whose inner fold is
+    // baselined (the registry records of pull request 947) measures it.
+    let timing = if matches!(stage, Stage::NameAuthority) {
+        "ON"
+    } else {
+        "OFF"
+    };
     let explained =
-        format!("EXPLAIN (ANALYZE, BUFFERS, SETTINGS, FORMAT JSON, TIMING OFF) {statement}");
+        format!("EXPLAIN (ANALYZE, BUFFERS, SETTINGS, FORMAT JSON, TIMING {timing}) {statement}");
     let mut query = sqlx::query_scalar::<_, serde_json::Value>(&explained);
     for parameter in parameters {
         query = match parameter {
@@ -200,6 +209,69 @@ pub(crate) async fn execute_bound(
         "Project candidate query plan captured privately"
     );
     Ok(true)
+}
+
+/// One line per captured name authority plan describing the `registry_records` fold pull request
+/// 947 added: actual time and rows per loop, loops and shared buffers of the aggregate that folds
+/// the ENSv1 registry records, found above the only scan of `project_events` filtered to
+/// `ens_v1_registry_l1`. The CTE is referenced once, so PostgreSQL inlines it and the plan has no
+/// node named after it. The baseline records these numbers; nothing gates on them.
+pub(crate) fn registry_records_fold(directory: &Path) -> Result<Vec<String>> {
+    fn fold<'a>(
+        node: &'a serde_json::Value,
+        aggregate: Option<&'a serde_json::Value>,
+    ) -> Option<&'a serde_json::Value> {
+        let aggregate = if node["Node Type"] == "Aggregate" {
+            Some(node)
+        } else {
+            aggregate
+        };
+        if node["Relation Name"] == "project_events"
+            && node["Filter"]
+                .as_str()
+                .is_some_and(|filter| filter.contains("ens_v1_registry_l1"))
+        {
+            return aggregate;
+        }
+        node["Plans"]
+            .as_array()?
+            .iter()
+            .find_map(|child| fold(child, aggregate))
+    }
+    let mut plans = fs::read_dir(directory)
+        .map_err(|_| io_error())?
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.contains("-name_authority-"))
+        })
+        .collect::<Vec<_>>();
+    plans.sort();
+    let mut lines = Vec::new();
+    for path in plans {
+        let plan: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).map_err(|_| io_error())?)
+                .map_err(|_| io_error())?;
+        let line = match fold(&plan[0]["Plan"], None) {
+            Some(node) => format!(
+                "SEPOLIA_FOLD_BASELINE fold=registry_records actual_total_ms={} actual_rows={} \
+                 loops={} shared_hit_blocks={} shared_read_blocks={} statement_ms={} gate=none",
+                node["Actual Total Time"],
+                node["Actual Rows"],
+                node["Actual Loops"],
+                node["Shared Hit Blocks"],
+                node["Shared Read Blocks"],
+                plan[0]["Execution Time"],
+            ),
+            None => format!(
+                "SEPOLIA_FOLD_BASELINE fold=registry_records node=not_found statement_ms={} gate=none",
+                plan[0]["Execution Time"]
+            ),
+        };
+        lines.push(line);
+    }
+    Ok(lines)
 }
 
 fn io_error() -> ProjectError {
