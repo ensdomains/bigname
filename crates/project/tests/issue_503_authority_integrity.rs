@@ -200,19 +200,207 @@ async fn capture_staged_authority(pool: &PgPool) -> Result<()> {
     Ok(())
 }
 
+// Follow the chain: a current ENSv2 registration holds the name whatever ENSv1 holds, without a
+// migration proof. The live ENSv1 binding beside it is chain state, not a post-proof
+// contradiction, so the generation publishes.
 #[tokio::test]
-async fn sepolia_no_proof_overlap_remains_refused_not_fatal() -> Result<()> {
+async fn a_current_v2_registration_holds_a_live_v1_name_without_proof() -> Result<()> {
     let (db, pool) = database("issue503_no_proof").await?;
     let logical = surface(&pool, 1, "ordinary.eth", &["ens_v1", "ens_v2"]).await?;
     run(&pool).await?;
     assert_eq!(
         authority(&pool, &logical).await?,
+        (Some("ens_v2".into()), None, None, None)
+    );
+    assert_eq!(
+        authority_evidence(&pool, &logical).await?,
         (
             None,
-            Some("independent_ens_deployments_overlap".into()),
             None,
-            None
+            None,
+            Some(json!({"block_number": 10, "transaction_index": 0, "log_index": 0}))
         )
+    );
+    db.cleanup().await?;
+    Ok(())
+}
+
+/// Adds a binding of `arm` that is still open at the target block, opened at `log`.
+async fn open_binding(
+    pool: &PgPool,
+    logical: &str,
+    index: u16,
+    arm: &str,
+    log: i64,
+) -> Result<String> {
+    let resource = uuid(8, index);
+    sqlx::query("INSERT INTO resources (resource_id, chain_id, block_hash, block_number, canonicality_state) VALUES ($1::uuid, $2, $3, 10, 'canonical')")
+        .bind(&resource).bind(CHAIN).bind(HASH).execute(pool).await?;
+    sqlx::query("INSERT INTO surface_bindings (surface_binding_id, logical_name_id, resource_id, binding_kind, authority_arm, active_from, chain_id, block_hash, block_number, provenance, canonicality_state) VALUES ($1::uuid, $2, $3::uuid, 'declared_registry_path', $4, '2026-08-25T00:00:00Z', $5, $6, 10, jsonb_build_object('transaction_index', 0, 'log_index', $7::bigint), 'canonical')")
+        .bind(uuid(9, index)).bind(logical).bind(&resource).bind(arm).bind(CHAIN).bind(HASH).bind(log).execute(pool).await?;
+    Ok(resource)
+}
+
+// The remaining risk case: a label registered on ENSv1 after the premigration snapshot, so it
+// has no reservation, and then registered on ENSv2. The ENSv2 registration decides, which is
+// also what the Universal Resolver answers.
+#[tokio::test]
+async fn a_v2_registration_after_an_unreserved_v1_registration_selects_v2() -> Result<()> {
+    let (db, pool) = database("overlap_unreserved_v1").await?;
+    let logical = surface(&pool, 62, "late-v1.eth", &["ens_v1"]).await?;
+    event(
+        &pool,
+        "overlap-late-v1-grant",
+        &logical,
+        Some(&uuid(1, 62)),
+        Event {
+            family: "ens_v1_registrar_l1",
+            kind: "RegistrationGranted",
+            log: 1,
+            after: json!({"status":"registered","registrant":"0x0000000000000000000000000000000000000001"}),
+        },
+    )
+    .await?;
+    let v2_resource = open_binding(&pool, &logical, 62, "ens_v2", 5).await?;
+    event(
+        &pool,
+        "overlap-late-v2-grant",
+        &logical,
+        Some(&v2_resource),
+        Event {
+            family: "ens_v2_registry_l1",
+            kind: "RegistrationGranted",
+            log: 5,
+            after: json!({"status":"registered","registrant":"0x0000000000000000000000000000000000000002"}),
+        },
+    )
+    .await?;
+    run(&pool).await?;
+    assert_eq!(
+        authority(&pool, &logical).await?,
+        (Some("ens_v2".into()), None, None, None)
+    );
+    db.cleanup().await?;
+    Ok(())
+}
+
+// Sepolia group D: a wrapped name moved to ENSv2, and an ENSv1 registry owner change opened a
+// newer ENSv1 binding afterwards. No migration proof was seen. The ENSv2 registration still
+// decides; neither arm's recency does.
+#[tokio::test]
+async fn a_later_v1_registry_owner_does_not_displace_a_current_v2_registration() -> Result<()> {
+    let (db, pool) = database("overlap_later_v1_owner").await?;
+    let logical = surface(&pool, 63, "moved.eth", &["ens_v2"]).await?;
+    let v1_resource = open_binding(&pool, &logical, 63, "ens_v1", 5).await?;
+    event(
+        &pool,
+        "overlap-later-v1-owner",
+        &logical,
+        Some(&v1_resource),
+        Event {
+            family: "ens_v1_registry_l1",
+            kind: "AuthorityTransferred",
+            log: 5,
+            after: json!({"owner":"0x0000000000000000000000000000000000000002"}),
+        },
+    )
+    .await?;
+    run(&pool).await?;
+    assert_eq!(
+        authority(&pool, &logical).await?,
+        (Some("ens_v2".into()), None, None, None)
+    );
+    db.cleanup().await?;
+    Ok(())
+}
+
+async fn lifecycle_state(pool: &PgPool, logical: &str) -> Result<Option<String>> {
+    Ok(sqlx::query_scalar("SELECT provenance #>> '{authority_selection,lifecycle_state}' FROM name_current WHERE logical_name_id = $1")
+        .bind(logical).fetch_one(pool).await?)
+}
+
+// A premigration reservation is not ENSv2 authority: it defers to ENSv1, whose live
+// registration keeps the name.
+#[tokio::test]
+async fn a_v2_reservation_defers_to_a_live_v1_registration() -> Result<()> {
+    let (db, pool) = database("overlap_reserved_live_v1").await?;
+    let logical = surface(&pool, 64, "reserved-live.eth", &["ens_v1"]).await?;
+    event(
+        &pool,
+        "overlap-reserved-live",
+        &logical,
+        None,
+        Event {
+            family: "ens_v2_registry_l1",
+            kind: "RegistrationReserved",
+            log: 2,
+            after: json!({"status":"reserved"}),
+        },
+    )
+    .await?;
+    run(&pool).await?;
+    assert_eq!(
+        authority(&pool, &logical).await?,
+        (Some("ens_v1".into()), None, None, None)
+    );
+    assert_eq!(
+        lifecycle_state(&pool, &logical).await?.as_deref(),
+        Some("registered")
+    );
+    db.cleanup().await?;
+    Ok(())
+}
+
+// A reservation over an ENSv1 lease that has ended leaves nothing current: ENSv1 decides and
+// serves its released lease.
+#[tokio::test]
+async fn a_v2_reservation_over_an_ended_v1_lease_serves_nothing_current() -> Result<()> {
+    let (db, pool) = database("overlap_reserved_ended_v1").await?;
+    let logical = surface(&pool, 65, "reserved-ended.eth", &[]).await?;
+    let v1_resource = closed_binding(&pool, &logical, 65, "ens_v1").await?;
+    for (log, kind, after) in [
+        (
+            1,
+            "RegistrationGranted",
+            json!({"status":"registered","registrant":"0x0000000000000000000000000000000000000001"}),
+        ),
+        (2, "RegistrationReleased", json!({"status":"unregistered"})),
+    ] {
+        event(
+            &pool,
+            &format!("overlap-reserved-ended-{kind}"),
+            &logical,
+            Some(&v1_resource),
+            Event {
+                family: "ens_v1_registrar_l1",
+                kind,
+                log,
+                after,
+            },
+        )
+        .await?;
+    }
+    event(
+        &pool,
+        "overlap-reserved-ended-reservation",
+        &logical,
+        None,
+        Event {
+            family: "ens_v2_registry_l1",
+            kind: "RegistrationReserved",
+            log: 3,
+            after: json!({"status":"reserved"}),
+        },
+    )
+    .await?;
+    run(&pool).await?;
+    assert_eq!(
+        authority(&pool, &logical).await?,
+        (Some("ens_v1".into()), None, None, None)
+    );
+    assert_eq!(
+        lifecycle_state(&pool, &logical).await?.as_deref(),
+        Some("unregistered")
     );
     db.cleanup().await?;
     Ok(())
@@ -432,6 +620,8 @@ async fn shared_infrastructure_current_v2_accepts_historical_or_absent_v1_eviden
     Ok(())
 }
 
+// Descendants follow the ordinary rule: their current ENSv2 registration decides, and unlike the
+// exact infrastructure names they publish its authority epoch.
 #[tokio::test]
 async fn reverse_descendants_are_not_shared_infrastructure() -> Result<()> {
     let (db, pool) = database("issue503_reverse_descendants").await?;
@@ -440,9 +630,10 @@ async fn reverse_descendants_are_not_shared_infrastructure() -> Result<()> {
     run(&pool).await?;
     for logical in [a, b] {
         assert_eq!(
-            authority(&pool, &logical).await?.1.as_deref(),
-            Some("independent_ens_deployments_overlap")
+            authority(&pool, &logical).await?,
+            (Some("ens_v2".into()), None, None, None)
         );
+        assert!(authority_evidence(&pool, &logical).await?.3.is_some());
     }
     db.cleanup().await?;
     Ok(())
