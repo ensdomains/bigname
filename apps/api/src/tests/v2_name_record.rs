@@ -255,8 +255,8 @@ async fn v2_get_name_exposes_authority_unsupported_shape() -> Result<()> {
 async fn v2_get_name_downgrades_every_unsupported_reason() -> Result<()> {
     for (reason, expected) in [
         (
-            "ensv2_exact_name_profile_shadow",
-            "exact_name_profile_not_supported",
+            "mixed_ensv1_ensv2_exact_name_corpus",
+            "mixed_exact_name_corpus",
         ),
         (
             "a_reason_this_build_has_never_seen",
@@ -3147,8 +3147,8 @@ async fn v2_get_name_records_withholds_unproven_authority_without_verified_looku
             "conflicting_current_ens_authority",
         ),
         (
-            "ensv2_exact_name_profile_shadow",
-            "exact_name_profile_not_supported",
+            "mixed_ensv1_ensv2_exact_name_corpus",
+            "mixed_exact_name_corpus",
         ),
         (
             "a_reason_this_build_has_never_seen",

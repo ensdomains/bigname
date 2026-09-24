@@ -1696,7 +1696,7 @@ async fn v2_search_omits_every_unsupported_exact_name() -> Result<()> {
     for reason in [
         "conflicting_current_ens_authority",
         "independent_ens_deployments_overlap",
-        "ensv2_exact_name_profile_shadow",
+        "a_reason_this_build_has_never_seen",
         "current_authority_not_projected",
     ] {
         let database = TestDatabase::new_migrated().await?;
