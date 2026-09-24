@@ -105,11 +105,12 @@ pub(super) fn json_timestamp_at_paths(value: &Value, paths: &[&[&str]]) -> Optio
         };
         match value {
             Value::String(value) if !value.trim().is_empty() => match quoted_seconds(value) {
-                Some(seconds) => {
-                    if let Some(timestamp) = seconds.and_then(format_unix_timestamp) {
+                Some(QuotedSeconds::InRange(seconds)) => {
+                    if let Some(timestamp) = format_unix_timestamp(seconds) {
                         return Some(timestamp);
                     }
                 }
+                Some(QuotedSeconds::OutOfRange) => {}
                 None => return Some(value.clone()),
             },
             Value::Number(number) => {
@@ -144,30 +145,52 @@ pub(super) fn json_value_present(value: &Value) -> bool {
     }
 }
 
-/// A quoted seconds value (`"1735689600"`, `"-1"`) reads like the number it spells: `Some(None)`
-/// when it is out of `i64` range, `None` when the string is not a number at all.
-fn quoted_seconds(value: &str) -> Option<Option<i64>> {
-    let unsigned = value.strip_prefix('-').unwrap_or(value);
-    let (whole, fraction) = unsigned.split_once('.').unwrap_or((unsigned, ""));
+const LAST_TIMESTAMP_SECOND: u64 = 253_402_300_799;
+
+#[derive(Debug, PartialEq, Eq)]
+enum QuotedSeconds {
+    /// The whole seconds of a value inside 1970..=9999.
+    InRange(i64),
+    /// A number before 1970 or after 9999-12-31T23:59:59Z, which reads as unknown.
+    OutOfRange,
+}
+
+/// A quoted seconds value (`"1735689600"`, `"-1"`, `"1735689600.5"`) reads like the number it
+/// spells, or `None` when the string is not a decimal number. The range check uses the complete
+/// value, sign and fraction included, the same bounds the collection routes' SQL applies; a value
+/// inside the range then keeps only its whole seconds, as Project's `to_char(to_timestamp(..),
+/// 'SS')` presents it.
+fn quoted_seconds(value: &str) -> Option<QuotedSeconds> {
+    let (negative, unsigned) = match value.strip_prefix('-') {
+        Some(unsigned) => (true, unsigned),
+        None => (false, value),
+    };
+    let (whole, fraction) = match unsigned.split_once('.') {
+        Some((whole, fraction)) if !fraction.is_empty() => (whole, fraction),
+        Some(_) => return None,
+        None => (unsigned, ""),
+    };
     let digits = |part: &str| part.bytes().all(|byte| byte.is_ascii_digit());
-    if whole.is_empty()
-        || !digits(whole)
-        || (unsigned.contains('.') && (fraction.is_empty() || !digits(fraction)))
-    {
+    if whole.is_empty() || !digits(whole) || !digits(fraction) {
         return None;
     }
-    let seconds = whole.parse::<i64>().ok();
-    Some(if value.starts_with('-') {
-        seconds.map(|seconds| -seconds)
-    } else {
-        seconds
-    })
+    let has_fraction = fraction.bytes().any(|byte| byte != b'0');
+    let Ok(whole) = whole.parse::<u64>() else {
+        return Some(QuotedSeconds::OutOfRange);
+    };
+    if (negative && (whole > 0 || has_fraction))
+        || whole > LAST_TIMESTAMP_SECOND
+        || (whole == LAST_TIMESTAMP_SECOND && has_fraction)
+    {
+        return Some(QuotedSeconds::OutOfRange);
+    }
+    Some(i64::try_from(whole).map_or(QuotedSeconds::OutOfRange, QuotedSeconds::InRange))
 }
 
 /// A seconds value outside 1970..=9999 reads as unknown, the same rule the collection routes'
 /// expiry reads and Project's formatted `control.expiry` apply.
 fn format_unix_timestamp(timestamp: i64) -> Option<String> {
-    if !(0..=253_402_300_799).contains(&timestamp) {
+    if !u64::try_from(timestamp).is_ok_and(|timestamp| timestamp <= LAST_TIMESTAMP_SECOND) {
         return None;
     }
     let value = OffsetDateTime::from_unix_timestamp(timestamp).ok()?;
@@ -245,4 +268,39 @@ fn eth_2ld_labelhash_token_id(
     alloy_primitives::U256::from_str_radix(hex, 16)
         .ok()
         .map(|value| value.to_string())
+}
+
+#[cfg(test)]
+mod quoted_seconds_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn quoted_seconds_range_checks_the_whole_value_then_keeps_whole_seconds() {
+        for (quoted, expected) in [
+            ("1735689600.5", Some("2025-01-01T00:00:00Z")),
+            ("-0.5", None),
+            ("-1", None),
+            ("253402300799", Some("9999-12-31T23:59:59Z")),
+            ("253402300799.9", None),
+            ("253402300800", None),
+            ("0", Some("1970-01-01T00:00:00Z")),
+        ] {
+            let summary = json!({"registration": {"expiry": quoted}});
+            assert_eq!(
+                json_timestamp_at_paths(&summary, &[&["registration", "expiry"]]).as_deref(),
+                expected,
+                "{quoted}"
+            );
+        }
+        // Not a number: served as the stored string.
+        for text in ["abc", "1.", ".5", "1e9", "--1"] {
+            assert_eq!(quoted_seconds(text), None, "{text}");
+        }
+        let summary = json!({"registration": {"expiry": "abc"}});
+        assert_eq!(
+            json_timestamp_at_paths(&summary, &[&["registration", "expiry"]]).as_deref(),
+            Some("abc")
+        );
+    }
 }
