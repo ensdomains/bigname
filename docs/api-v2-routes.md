@@ -3391,7 +3391,12 @@ so there is no persisted artifact to explain. See
 - Purpose: full coverage taxonomy.
 - Request parameters: path `name`; query `namespace`, `at`, `finality`.
 - Response shape: `data` includes `exhaustiveness`, `enumeration_basis`,
-  `source_classes_considered`, and `unsupported_reason` detail.
+  `source_classes_considered`, and `unsupported_reason` detail. Coverage
+  describes the selected authority arm: a selected ENSv2 arm reports the ENSv2
+  root, registry and registrar families and `exact_name_profile`, any other
+  selected arm reports `ensv1_registry_path` and `exact_name`, and a name with
+  no selected arm reads its event corpus instead. `enumeration_basis` is
+  `event_linked_registry_resolver` whenever a serving resource is linked.
 - Pagination behavior: none.
 - Status semantics: missing names return `404 not_found`; unsupported coverage
   classes return diagnostic detail rather than product simplification.

@@ -128,8 +128,20 @@ async fn event(
     resource: Option<&str>,
     event: Event<'_>,
 ) -> Result<i64> {
-    Ok(sqlx::query_scalar("INSERT INTO normalized_events (event_identity, namespace, logical_name_id, resource_id, event_kind, source_family, manifest_version, chain_id, block_number, block_hash, transaction_hash, transaction_index, log_index, derivation_kind, canonicality_state, after_state, migration_correlation_ids) VALUES ($1, 'ens', $2, $3::uuid, $4, $5, 1, $6, 10, $7, '0x503', 0, $8, CASE WHEN $4 = 'MigrationApplied' THEN 'ens_v2_migration' ELSE 'ens_v2_registry_resource_surface' END, 'canonical', $9, CASE WHEN $4 = 'MigrationApplied' THEN ARRAY['issue-503'] ELSE ARRAY[]::text[] END) RETURNING normalized_event_id")
-        .bind(identity).bind(logical).bind(resource).bind(event.kind).bind(event.family).bind(CHAIN).bind(HASH).bind(event.log).bind(event.after).fetch_one(pool).await?)
+    event_in_tx(pool, identity, logical, resource, "0x503", event).await
+}
+
+/// Like `event`, in the transaction `tx`.
+async fn event_in_tx(
+    pool: &PgPool,
+    identity: &str,
+    logical: &str,
+    resource: Option<&str>,
+    tx: &str,
+    event: Event<'_>,
+) -> Result<i64> {
+    Ok(sqlx::query_scalar("INSERT INTO normalized_events (event_identity, namespace, logical_name_id, resource_id, event_kind, source_family, manifest_version, chain_id, block_number, block_hash, transaction_hash, transaction_index, log_index, derivation_kind, canonicality_state, after_state, migration_correlation_ids) VALUES ($1, 'ens', $2, $3::uuid, $4, $5, 1, $6, 10, $7, $10, 0, $8, CASE WHEN $4 = 'MigrationApplied' THEN 'ens_v2_migration' ELSE 'ens_v2_registry_resource_surface' END, 'canonical', $9, CASE WHEN $4 = 'MigrationApplied' THEN ARRAY['issue-503'] ELSE ARRAY[]::text[] END) RETURNING normalized_event_id")
+        .bind(identity).bind(logical).bind(resource).bind(event.kind).bind(event.family).bind(CHAIN).bind(HASH).bind(event.log).bind(event.after).bind(tx).fetch_one(pool).await?)
 }
 
 async fn run(pool: &PgPool) -> bigname_project::Result<()> {
@@ -494,7 +506,10 @@ async fn a_wrapped_v1_tombstone_with_v2_history_reads_unregistered() -> Result<(
     sqlx::query("INSERT INTO resources (resource_id, chain_id, block_hash, block_number, canonicality_state) VALUES ($1::uuid, $2, $3, 10, 'canonical')")
         .bind(&lease_resource).bind(CHAIN).bind(HASH).execute(&pool).await?;
     let holder = "0x0000000000000000000000000000000000000001";
+    let name_wrapper = "0x0000000000000000000000000000000000000a11";
     let authority_key = "wrapper:wrapped-lapsed";
+    // The BaseRegistrar lease names the NameWrapper as registrant; the holder is reached only
+    // through the wrapper's own transfer below.
     event(
         &pool,
         "wrapped-tombstone-lease-grant",
@@ -504,50 +519,61 @@ async fn a_wrapped_v1_tombstone_with_v2_history_reads_unregistered() -> Result<(
             family: "ens_v1_registrar_l1",
             kind: "RegistrationGranted",
             log: 1,
-            after: json!({"authority_kind":"registrar","registrant":holder,"status":"registered","expiry":4}),
+            after: json!({"authority_kind":"registrar","registrant":name_wrapper,"status":"registered","expiry":4}),
         },
     )
     .await?;
-    // NameWrapped: the wrapper binding, its holder and authority, and its fuse scope, all on the
-    // wrapper resource and recording the registrar lease it wraps.
+    // NameWrapped, in its own transaction so only the lease it records (not a same-transaction
+    // grant) links it to the lease: the wrapper binding, its holder and authority, the token
+    // transfer to the holder, the wrapper expiry, and its fuse scope, all on the wrapper resource.
     // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L264-L268 @ ens_v1@91c966f)
     let wrap = json!({
         "source_event": "NameWrapped",
         "owner": holder,
         "fuses": 0,
         "wrapper_state": "wrapped",
+        "expiry": 4,
         "wrapped_registrar_resource_id": lease_resource,
         "authority_kind": "wrapper",
         "authority_key": authority_key,
     });
-    for (log, kind) in [
-        (2, "SurfaceBound"),
-        (3, "AuthorityEpochChanged"),
-        (4, "PermissionScopeChanged"),
+    let mut transfer = wrap.clone();
+    transfer["to"] = json!(holder);
+    transfer
+        .as_object_mut()
+        .expect("wrap payload is an object")
+        .remove("owner");
+    for (log, kind, after) in [
+        (2, "SurfaceBound", wrap.clone()),
+        (3, "AuthorityEpochChanged", wrap.clone()),
+        (4, "TokenControlTransferred", transfer),
+        (5, "ExpiryChanged", wrap.clone()),
+        (6, "PermissionScopeChanged", wrap.clone()),
     ] {
-        event(
+        event_in_tx(
             &pool,
             &format!("wrapped-tombstone-wrap-{kind}"),
             &logical,
             Some(&wrapper_resource),
+            "0x5031",
             Event {
                 family: "ens_v1_wrapper_l1",
                 kind,
                 log,
-                after: wrap.clone(),
+                after,
             },
         )
         .await?;
     }
     // The earlier ENSv1 binding keeps this ENSv2 release from qualifying as a tombstone.
-    let v2_resource = closed_v2_binding_at(&pool, &logical, 73, 5, 0).await?;
+    let v2_resource = closed_v2_binding_at(&pool, &logical, 73, 7, 0).await?;
     for (log, kind, after) in [
         (
-            5,
+            7,
             "RegistrationGranted",
             json!({"status":"registered","registrant":"0x0000000000000000000000000000000000000002"}),
         ),
-        (6, "RegistrationReleased", json!({"status":"unregistered"})),
+        (8, "RegistrationReleased", json!({"status":"unregistered"})),
     ] {
         event(
             &pool,
@@ -563,16 +589,17 @@ async fn a_wrapped_v1_tombstone_with_v2_history_reads_unregistered() -> Result<(
         )
         .await?;
     }
-    // The lease lapses past grace.
-    event(
+    // The lease lapses past grace, in a later transaction of its own.
+    event_in_tx(
         &pool,
         "wrapped-tombstone-lease-release",
         &logical,
         Some(&lease_resource),
+        "0x5032",
         Event {
             family: "ens_v1_registrar_l1",
             kind: "RegistrationReleased",
-            log: 7,
+            log: 9,
             after: json!({"source_event":"RegistrationReleased","released_at":5,"namehash":logical.trim_start_matches("ens:"),"expiry":4}),
         },
     )
