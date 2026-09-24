@@ -1006,7 +1006,8 @@ A Sepolia name can therefore have readable ENSv1 and ENSv2 evidence **without**
 an activated `MigrationApplied` boundary connecting that name. Project follows
 the chain for such a name
 ([ADR 0007](../adrs/0007-follow-the-chain-ens-authority.md)): a current ENSv2
-registration selects ENSv2, and otherwise ENSv1 decides. A live ENSv1 binding
+registration selects ENSv2, and otherwise ENSv1 decides unless a qualifying
+ENSv2 release tombstone or regime applies. A live ENSv1 binding
 next to a current ENSv2 registration is then ordinary chain state. The name has
 no authority proof, so it never raises this halt. The exact
 [shared ENS infrastructure](../glossary.md#shared-ens-infrastructure) names (root,

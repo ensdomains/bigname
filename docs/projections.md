@@ -293,7 +293,8 @@ proof fields remain null. Historical ENSv2 evidence without a current ENSv2
 binding does not qualify. An ordinary name without a proof follows the chain
 ([ADR 0007](adrs/0007-follow-the-chain-ens-authority.md)): a current ENSv2
 binding selects ENSv2, with its epoch starting at that binding and null proof
-fields, and otherwise ENSv1 decides.
+fields, and otherwise ENSv1 decides unless a qualifying ENSv2 release tombstone
+or regime applies.
 
 ## Exact-name projection
 

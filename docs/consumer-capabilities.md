@@ -250,7 +250,8 @@ qualifying ENSv2 release tombstone or regime, a later release leaves it
 unregistered on the ENSv2 side rather than restoring the retained ENSv1
 relation. A child without an authority proof follows the chain
 ([ADR 0007](adrs/0007-follow-the-chain-ens-authority.md)): a current ENSv2
-registration selects its ENSv2 relation, and otherwise ENSv1 decides. Event
+registration selects its ENSv2 relation, and otherwise ENSv1 decides unless
+a qualifying ENSv2 release tombstone or regime applies. Event
 recency never picks the arm. Only a pair whose child has no selected authority
 at all and whose two arms disagree is omitted; it is neither an ambiguous
 product row nor a publication failure. A proven Sepolia boundary, or a current

@@ -375,7 +375,8 @@ collection route carry neither header.
   with facts on both ENSv1 and ENSv2 follows the chain
   ([ADR 0007](adrs/0007-follow-the-chain-ens-authority.md)): a current ENSv2
   registration is selected without a migration proof, and otherwise ENSv1
-  decides unless a qualifying ENSv2 release tombstone or regime applies, so
+  decides unless a qualifying ENSv2 release tombstone or regime
+  ([released ENSv2 authority](glossary.md#released-v2-authority)) applies, so
   such a name is no longer refused. A selected ENSv2 registration
   still needs the exact-name profile qualification; without it Project records
   `ensv2_exact_name_profile_shadow`, which the API exposes as

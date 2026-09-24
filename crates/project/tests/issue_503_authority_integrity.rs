@@ -479,6 +479,102 @@ async fn ensv1_history_gives_the_lifecycle_state_with_or_without_v2_history() ->
     Ok(())
 }
 
+// A lease registered through the NameWrapper lapses, so the closed NameWrapper binding stands
+// for it as the released ENSv1 tombstone. That binding's resource has no lifecycle rows of its
+// own, so the lifecycle state reads the released lease from the ENSv1 history, also when the
+// name has ENSv2 history whose release does not qualify.
+#[tokio::test]
+async fn a_wrapped_v1_tombstone_with_v2_history_reads_unregistered() -> Result<()> {
+    let (db, pool) = database("overlap_wrapped_tombstone").await?;
+    let logical = surface(&pool, 73, "wrapped-lapsed.eth", &[]).await?;
+    let wrapper_resource = closed_binding(&pool, &logical, 73, "ens_v1").await?;
+    let lease_resource = uuid(15, 73);
+    sqlx::query("INSERT INTO resources (resource_id, chain_id, block_hash, block_number, canonicality_state) VALUES ($1::uuid, $2, $3, 10, 'canonical')")
+        .bind(&lease_resource).bind(CHAIN).bind(HASH).execute(&pool).await?;
+    event(
+        &pool,
+        "wrapped-tombstone-wrap",
+        &logical,
+        Some(&wrapper_resource),
+        Event {
+            family: "ens_v1_wrapper_l1",
+            kind: "SurfaceBound",
+            log: 1,
+            after: json!({"wrapped_registrar_resource_id": lease_resource}),
+        },
+    )
+    .await?;
+    for (log, kind, after) in [
+        (
+            1,
+            "RegistrationGranted",
+            json!({"status":"registered","registrant":"0x0000000000000000000000000000000000000001"}),
+        ),
+        (4, "RegistrationReleased", json!({"status":"unregistered"})),
+    ] {
+        event(
+            &pool,
+            &format!("wrapped-tombstone-lease-{kind}"),
+            &logical,
+            Some(&lease_resource),
+            Event {
+                family: "ens_v1_registrar_l1",
+                kind,
+                log,
+                after,
+            },
+        )
+        .await?;
+    }
+    // The earlier ENSv1 binding keeps this ENSv2 release from qualifying as a tombstone.
+    let v2_resource = closed_v2_binding_at(&pool, &logical, 73, 2, 0).await?;
+    for (log, kind, after) in [
+        (
+            2,
+            "RegistrationGranted",
+            json!({"status":"registered","registrant":"0x0000000000000000000000000000000000000002"}),
+        ),
+        (3, "RegistrationReleased", json!({"status":"unregistered"})),
+    ] {
+        event(
+            &pool,
+            &format!("wrapped-tombstone-v2-{kind}"),
+            &logical,
+            Some(&v2_resource),
+            Event {
+                family: "ens_v2_registry_l1",
+                kind,
+                log,
+                after,
+            },
+        )
+        .await?;
+    }
+    run(&pool).await?;
+    let selection: (Option<String>, Option<String>, Option<String>, Option<String>) =
+        sqlx::query_as(
+            "SELECT provenance #>> '{authority_selection,authority_arm}',
+                    provenance #>> '{authority_selection,surface_binding_id}',
+                    provenance #>> '{authority_selection,resource_authority_context,released_tombstone}',
+                    provenance #>> '{authority_selection,lifecycle_state}'
+             FROM name_current WHERE logical_name_id = $1",
+        )
+        .bind(&logical)
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(
+        selection,
+        (
+            Some("ens_v1".into()),
+            Some(uuid(7, 73)),
+            Some("ens_v1".into()),
+            Some("unregistered".into())
+        )
+    );
+    db.cleanup().await?;
+    Ok(())
+}
+
 /// Adds a binding of `arm` that closed before the target block, with its own resource.
 async fn closed_binding(pool: &PgPool, logical: &str, index: u16, arm: &str) -> Result<String> {
     let resource = uuid(6, index);
