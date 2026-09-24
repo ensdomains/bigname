@@ -38,6 +38,8 @@ pub struct Served {
     pub names: BTreeMap<String, Value>,
     pub children: BTreeMap<(String, String), Value>,
     pub pages_read: usize,
+    /// Parents with at least one stored subname row.
+    pub parents: usize,
 }
 
 impl Served {
@@ -62,6 +64,7 @@ impl Served {
         .await?;
         let mut children = BTreeMap::new();
         let mut pages_read = 0;
+        let parent_count = parents.len();
         for parent in parents {
             let mut cursor = None;
             let mut served = 0_u64;
@@ -101,6 +104,7 @@ impl Served {
             names,
             children,
             pages_read,
+            parents: parent_count,
         })
     }
 
@@ -496,6 +500,7 @@ mod tests {
                 .into_iter()
                 .collect(),
             pages_read: 1,
+            parents: 1,
         }
     }
 
