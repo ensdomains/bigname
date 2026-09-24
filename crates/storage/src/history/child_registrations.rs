@@ -1,5 +1,5 @@
 //! Name history with the requested name's direct child registrations
-//! (`include=child_registrations`, docs/api-v2-routes.md).
+//! (`include=child_registrations`, docs/api-v1-routes.md).
 //!
 //! The collection is the set union, by event identity, of the name arm (the rows the ordinary
 //! name history selects) and the child arm (`child_arm.rs`). An event in both is a child row.

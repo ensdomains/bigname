@@ -42,7 +42,7 @@ The flat record shape below is unchanged for `GET /v1/names/{name}` and
 `POST /v1/lookup` with `profile=detail`, including their `addresses`,
 `text_records`, `content_hash`, `primary_address`, and `unsupported_fields`
 contracts. Route details live in
-[`api-v2-routes.md`](../api-v2-routes.md#get-v1namesnamerecords).
+[`api-v1-routes.md`](../api-v1-routes.md#get-v1namesnamerecords).
 
 ## 2026-08-06 Amendment: Schema-v2 Serving Boundary
 
@@ -685,7 +685,7 @@ tests.
 1. Accept or revise this ADR; record the outcome as the Final Direction in
    `docs/internal/api-surface-flattening-scope-decisions.md`.
 2. Write the new contract docs from the dictionary and route catalog above —
-   maintained as `docs/api-v2.md` / `docs/api-v2-routes.md` during development
+   maintained as `docs/api-v1.md` / `docs/api-v1-routes.md` during development
    and renamed to the `api-v1` names at the switch; generate the OpenAPI from
    the route table. The existing `docs/api-v1.md` is frozen except for
    corrections until then.

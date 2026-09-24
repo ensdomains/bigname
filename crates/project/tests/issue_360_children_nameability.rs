@@ -416,7 +416,7 @@ async fn ens_v1_topology_only_child_keeps_non_name_form() -> Result<()> {
     );
     assert_eq!(child.manifest_version, 1);
 
-    // Contract: docs/api-v2-routes.md "GET /v2/names/{name}/subnames" requires
+    // Contract: docs/api-v1-routes.md "GET /v2/names/{name}/subnames" requires
     // the prefix-free lowercase labelhash placeholder in both served name fields.
     let rows = load_children_current(&pool, PARENT).await?;
     assert_eq!(rows.len(), 1, "storage must serve the one projected child");
@@ -443,7 +443,7 @@ async fn ens_v1_topology_only_child_keeps_non_name_form() -> Result<()> {
         block_hash(10)
     );
 
-    // Contract: docs/api-v2-routes.md "GET /v1/addresses/{address}/names" — a node known
+    // Contract: docs/api-v1-routes.md "GET /v1/addresses/{address}/names" — a node known
     // only from registry owner events has a registry-only resource and no name surface, so
     // the address collection omits it instead of listing the placeholder; the parent's
     // subnames is its only listing.

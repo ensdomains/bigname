@@ -1,4 +1,4 @@
-// ABI content types on `include=inventory` (docs/api-v2-routes.md, records route). Selection
+// ABI content types on `include=inventory` (docs/api-v1-routes.md, records route). Selection
 // through Project is covered in crates/project/tests/record_inventory_abi.rs and
 // record_id_resolver.rs; these cases pin the public shape, availability, and batch cost.
 

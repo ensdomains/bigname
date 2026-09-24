@@ -2,7 +2,7 @@
 
 bigname is a versioned, replayable indexing and read platform for ENS (v1 and v2) and Basenames. It serves the native `v2` REST contract, a narrow GraphQL compatibility surface, and operator health.
 
-This document defines the model. Wire format lives in [`api-v2.md`](api-v2.md) and [`api-v2-routes.md`](api-v2-routes.md); persistence in [`storage.md`](storage.md); manifests, intake, projections, and execution in their own files. Implementation sequencing and parallel-work boundaries live under [`internal/`](internal/).
+This document defines the model. Wire format lives in [`api-v1.md`](api-v1.md) and [`api-v1-routes.md`](api-v1-routes.md); persistence in [`storage.md`](storage.md); manifests, intake, projections, and execution in their own files. Implementation sequencing and parallel-work boundaries live under [`internal/`](internal/).
 
 ## Objectives
 
@@ -38,7 +38,7 @@ Conflicts reject canonical [admission](glossary.md); namespace assignment happen
 The served REST families are lookup, status, name, address, permission, search,
 event, resolver, namespace, and diagnostic routes under `/v1`. Their parameters,
 result vocabulary, snapshot behavior, and pagination rules are defined in
-[`api-v2-routes.md`](api-v2-routes.md). The deleted v1 REST shapes are not a
+[`api-v1-routes.md`](api-v1-routes.md). The deleted v1 REST shapes are not a
 compatibility layer for this contract.
 
 ### Subgraph-compatible GraphQL surface
@@ -1675,7 +1675,7 @@ The full coverage object — `coverage.status`, `coverage.exhaustiveness`,
 `coverage.enumeration_basis` — is carried on the **diagnostics** name-coverage
 route, not on product responses. `exhaustiveness`, `enumeration_basis`,
 `source_classes_considered`, and `coverage` itself are on the Tier-2
-product-route denylist in [`api-v2.md`](api-v2.md) § Tier 2: Product Reads, and
+product-route denylist in [`api-v1.md`](api-v1.md) § Tier 2: Product Reads, and
 that denylist is enforced in code as `PRODUCT_PIPELINE_TERMS`. Product routes
 expose the simplified `completeness` / `unsupported_fields` / per-item `status`
 vocabulary instead. Projection rows store the coverage object either way; what

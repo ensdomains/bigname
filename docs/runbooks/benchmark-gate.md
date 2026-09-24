@@ -117,7 +117,7 @@ throughput, and no rebuild timing. Restore a fresh disposable copy before
 retrying; partial Interpret redo state is not release evidence.
 
 The API half sends each Tier 1 and Tier 2 REST route in
-[`api-v2-routes.md`](../api-v2-routes.md) 2,000 requests per second for 60
+[`api-v1-routes.md`](../api-v1-routes.md) 2,000 requests per second for 60
 seconds after a 10-second warmup. It loads 10,000 names and 10,000 distinct
 address/name/relation combinations from the target projections, plus at least
 1,000 populated subname parents, permission subjects, and successful primary

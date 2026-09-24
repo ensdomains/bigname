@@ -1,5 +1,5 @@
 // `GET /v1/names/{name}/records` answers per-key `records` as its only value shape. Without
-// `keys` it answers the inventory-derived default key set (docs/api-v2-routes.md
+// `keys` it answers the inventory-derived default key set (docs/api-v1-routes.md
 // § `GET /v1/names/{name}/records`).
 
 const RECORDS_ROUTE_REMOVED_FIELDS: [&str; 3] = ["addresses", "text_records", "content_hash"];

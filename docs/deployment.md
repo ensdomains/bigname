@@ -1110,7 +1110,7 @@ This build rotates the [interpreter content hash](glossary.md#interpreter-conten
 ### Child registration events in name history
 
 The build that adds name history's
-[`include=child_registrations`](api-v2-routes.md#direct-child-registrations-includechild_registrations)
+[`include=child_registrations`](api-v1-routes.md#direct-child-registrations-includechild_registrations)
 adds the Project-owned table
 [`child_registration_events`](projections.md#child-registration-events) and
 changes `crates/project/src`, so it rotates the

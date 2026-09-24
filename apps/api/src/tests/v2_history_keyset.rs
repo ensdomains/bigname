@@ -1,4 +1,4 @@
-// History cursors are keyset anchors (docs/api-v2-routes.md, "Shared Route Rules"). A
+// History cursors are keyset anchors (docs/api-v1-routes.md, "Shared Route Rules"). A
 // continuation resumes after the anchor's position in the history order against whatever is
 // published when it runs: new blocks, redos, a deleted anchor, and a publication during the read
 // never make it fail. A cursor issued before this rule resumes through its anchor row and

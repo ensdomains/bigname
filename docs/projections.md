@@ -2,7 +2,7 @@
 
 [Projections](glossary.md#projection) are rebuildable read models over canonical
 identity and [normalized events](glossary.md#normalized-event). Wire shapes live
-in [`api-v2.md`](api-v2.md) and [`api-v2-routes.md`](api-v2-routes.md); identity
+in [`api-v1.md`](api-v1.md) and [`api-v1-routes.md`](api-v1-routes.md); identity
 and event semantics live in [`architecture.md`](architecture.md); persistence
 rules live in [`storage.md`](storage.md).
 
@@ -415,8 +415,8 @@ before registrar rows were joined by resource identity.
   where the controller event grants the lease.
   Registration-scoped history does not have rule 1. Under a manifest where the controller event
   grants the lease, Project serves the lease as the name's registration while history still
-  uses the NameWrapper resource as that name's handle. `docs/api-v2.md`
-  [states this known gap](api-v2.md#known-gap-a-name-registered-through-the-namewrapper-where-the-controller-event-grants-the-lease).
+  uses the NameWrapper resource as that name's handle. `docs/api-v1.md`
+  [states this known gap](api-v1.md#known-gap-a-name-registered-through-the-namewrapper-where-the-controller-event-grants-the-lease).
   It closes when registrations come from the BaseRegistrar's own events, and the two changes
   must be deployed together.
   (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L264-L268 @ ens_v1@91c966f)
@@ -707,7 +707,7 @@ membership; the rows it returns are still normalized events.
 are registrations of its direct children. It is historical membership, not a
 current child list: one row per parent logical name and event identity, with
 the event's chain position. Name history reads it for
-[`include=child_registrations`](api-v2-routes.md#direct-child-registrations-includechild_registrations);
+[`include=child_registrations`](api-v1-routes.md#direct-child-registrations-includechild_registrations);
 event payloads and public event IDs still come from `normalized_events`.
 
 Project derives each row from one staged event and the event's own name
@@ -753,7 +753,7 @@ For a slice-1 test re-walk that must not change product behavior at a fixed
 readable chain head, product history cursors hold positions rather than
 normalized-event row IDs and follow the
 [history walk](glossary.md#history-walk) rule in
-[api-v2.md](api-v2.md#cursors-and-pagination). A diagnostic-events cursor must
+[api-v1.md](api-v1.md#cursors-and-pagination). A diagnostic-events cursor must
 remain valid and continue from the
 same stable normalized-event anchor, but its subsequent diagnostic rows and
 fields may reflect candidate admission. A pre-existing diagnostic row's numeric
@@ -1144,7 +1144,7 @@ key in every family, ABI writes included even though ABI records are neither
 selectors nor entries, followed by the selecting link ids that
 `provenance.record_link_event_ids` also lists. The records and lookup routes
 read a name's ABI content types back from those ids
-([`api-v2-routes.md`](api-v2-routes.md), `GET /v1/names/{name}/records`), so
+([`api-v1-routes.md`](api-v1-routes.md), `GET /v1/names/{name}/records`), so
 limiting that list to the served families would silently drop them. Those
 routes take the selected resolver's source family and role from
 `resolver_current`, in the same statement that confirms the inventory row they
@@ -1434,7 +1434,7 @@ name detail, batch lookup, the GraphQL resolver fields, the
 `address_records_current` builder, and the divergence-ledger comparison take
 values only from a `supported` row. Entries retained on an `unsupported` row are
 diagnostics for operators, never answers
-([api-v2-routes.md](api-v2-routes.md#get-v1namesnamerecords)).
+([api-v1-routes.md](api-v1-routes.md#get-v1namesnamerecords)).
 
 `GET /v1/names/{name}/records` reads this inventory for `indexed` behavior,
 and for every source to derive its default key set and `include=inventory`

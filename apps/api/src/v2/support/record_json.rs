@@ -26,7 +26,7 @@ pub(crate) fn direct_json_field<'a>(value: &'a JsonValue, key: &str) -> Option<&
 /// is authoritative under the same test the domain evaluator applies. An `unsupported` row (for
 /// example a name behind a resolver whose implementation is not an admitted profile) filters to
 /// `None`, so convenience maps and `unsupported_fields` treat it exactly like a missing inventory
-/// while the per-key answers still carry the row's own reason (docs/api-v2-routes.md).
+/// while the per-key answers still carry the row's own reason (docs/api-v1-routes.md).
 pub(crate) fn serving_record_inventory(
     record_inventory: Option<&bigname_storage::RecordInventoryCurrentRow>,
 ) -> Option<&bigname_storage::RecordInventoryCurrentRow> {

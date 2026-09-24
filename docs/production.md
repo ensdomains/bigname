@@ -15,7 +15,7 @@ are:
 
 - REST reads: `GET` and `HEAD` on `/v1/*`, which covers the lookup, status,
   product, and diagnostic route families in
-  [`api-v2-routes.md`](api-v2-routes.md).
+  [`api-v1-routes.md`](api-v1-routes.md).
 - REST lookup: `POST /v1/lookup` and its `OPTIONS` browser preflight.
 - GraphQL: `POST /graphql` and its `OPTIONS` browser preflight. This is an
   unauthenticated first-party ENS Manager compatibility subset governed by the

@@ -1,14 +1,14 @@
-# API v2 Routes
+# API v1 Routes
 
-> **Prefix note (#315):** the public route prefix is now `/v1`. This file's
-> name (`api-v2-routes`) is historical, naming the ADR 0006 contract
-> generation; it is not the wire prefix. A rename of the contract docs is
-> tracked separately.
+> **Prefix note (#315):** the public route prefix is `/v1`, and this file is
+> named after it. Where the text below says `v2`, it means the contract
+> generation accepted in ADR 0006, and "Replaces (v1)" lines name the older
+> REST surface that #315 deleted. No `/v2` prefix is served.
 
 Per-route reference for the `/v1` surface accepted in
 [ADR 0006](adrs/0006-api-v2-product-surface.md). Contract principles,
 dictionary, envelope, status vocabulary, finality rules, cursor rules, and
-error shape live in [`api-v2.md`](api-v2.md).
+error shape live in [`api-v1.md`](api-v1.md).
 
 Routes below use the `/v1` prefix. The former `/v1` API listed under each
 route's "Replaces (v1)" line was removed in C2; this contract took over the
@@ -180,7 +180,7 @@ name and record routes still expose no current record inventory.
 Field ownership:
 
 - Shared record, lookup, primary-name, event, and count concepts are dictionary
-  fields in `api-v2.md`.
+  fields in `api-v1.md`.
 - Lookup-only transport fields are route-local: `id` is caller correlation
   inside the echoed `input`, `kind` is the result discriminator, `profile` and
   `inputs` are request controls, `record` holds a single name result, `records`
@@ -335,7 +335,7 @@ collection route carry neither header.
   is the batch form of the records route's inventory for a caller holding many
   names, bounded by the batch limit above; per-key values, `source=verified`,
   and the `keys` allowlist stay on the records route.
-  See [registration status](api-v2.md#status-vocabulary) for the upstream
+  See [registration status](api-v1.md#status-vocabulary) for the upstream
   basis.
   An ownerless ENSv2 reservation does not meet this exception, even if identity
   attached to a resource or record inventory was retained for audit, unless it
@@ -615,17 +615,17 @@ collection route carry neither header.
   the same object when backed. For a `.eth` second-level name
   `registration_id` is the BaseRegistrar lease whether or not the name is
   wrapped; see
-  [registration identity of wrapped names](api-v2.md#registration-identity-of-wrapped-names).
+  [registration identity of wrapped names](api-v1.md#registration-identity-of-wrapped-names).
   A released ENSv1 name keeps its lapsed `expires_at`, serves no current
   `registrant`, and carries
   `lapsed_registration: {registrant?, held_through?, released_at?}` with the
   holder the lease had when it lapsed; see
-  [lapsed registration](api-v2.md#lapsed-registration). The block is omitted
+  [lapsed registration](api-v1.md#lapsed-registration). The block is omitted
   for every name that is not released. An ENSv1 wrapper-backed row also carries
   `wrapper_state` with the current [`wrapped`](glossary.md#wrapped-namewrapper-state),
   [`emancipated`](glossary.md#emancipated-namewrapper-state), or
   [`locked`](glossary.md#locked-namewrapper-state) lifecycle value and the typed
-  `wrapper_fuses` object defined in [`api-v2.md`](api-v2.md#naming-dictionary).
+  `wrapper_fuses` object defined in [`api-v1.md`](api-v1.md#naming-dictionary).
   The tristate is bigname vocabulary derived from the enforcing NameWrapper
   guards, not an upstream enum. Both fields are omitted after an emancipated or
   locked wrapper position expires; a plain wrapped position remains `wrapped`
@@ -739,7 +739,7 @@ collection route carry neither header.
   pointer above. This intentionally
   differs from ENSv2, which stores and returns a reservation resolver until
   expiry.
-  See [registration status](api-v2.md#status-vocabulary) for the upstream
+  See [registration status](api-v1.md#status-vocabulary) for the upstream
   basis.
   (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L255-L258 @ ens_v2@a971bd64)
   (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L461-L478 @ ens_v2@a971bd64)
@@ -845,7 +845,7 @@ collection route carry neither header.
   answers. This intentionally
   omits the resolver that ENSv2 can store and return for an unexpired
   reservation.
-  See [registration status](api-v2.md#status-vocabulary) for the upstream
+  See [registration status](api-v1.md#status-vocabulary) for the upstream
   basis.
   (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L255-L258 @ ens_v2@a971bd64)
   (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L461-L478 @ ens_v2@a971bd64)
@@ -1959,13 +1959,13 @@ introduces it rebuilds Project from full history before serving the option; see
   A resource-bound read (`name` or `registration_id`) also returns a top-level
   `restrictions` object beside `data`, `page`, and `meta`: the
   [resource restrictions](glossary.md#resource-restrictions) of the selected
-  registration (shape in [api-v2.md](api-v2.md#resource-restrictions)). It is
+  registration (shape in [api-v1.md](api-v1.md#resource-restrictions)). It is
   omitted for address-only reads and when the registration has no
   resource-level constraint model, its NameWrapper position has expired with a
   cleared owner, or its wrapped token has been burnt or unwrapped.
   `authority_context` is required on every row and records how that row was
   admitted under the per-name ownership rule. `powers` values come from the
-  [permission powers vocabulary](api-v2.md#permission-powers-vocabulary), which
+  [permission powers vocabulary](api-v1.md#permission-powers-vocabulary), which
   names every value and the on-chain role bit or NameWrapper fuse behind it.
   `include=lineage`
   adds route-local `lineage` per row:
@@ -2097,7 +2097,7 @@ introduces it rebuilds Project from full history before serving the option; see
   `meta.completeness=partial`,
   `unsupported_reason=permissions_partially_listed`, and
   `meta.unlisted_permission_surfaces`, the sorted codes defined in
-  [api-v2.md](api-v2.md): `ens_v2_registry_operators`, `registrar_approvals`,
+  [api-v1.md](api-v1.md): `ens_v2_registry_operators`, `registrar_approvals`,
   `resolver_approvals`, and `wrapper_parent_control`. The list shrinks as later
   parts of issue #605 add these surfaces. An unwrapped registrar- or registry-held registration reports
   `["registrar_approvals","resolver_approvals"]`.
@@ -2437,7 +2437,7 @@ introduces it rebuilds Project from full history before serving the option; see
   name therefore stops relating its superseded ENSv1 holder or controller to
   the current name row. This collection adds no row-local mixed-authority
   status. When a current address relation is provable, the standing exception
-  in [`api-v2.md`](api-v2.md#cursors-and-pagination) still lists the row even if other name
+  in [`api-v1.md`](api-v1.md#cursors-and-pagination) still lists the row even if other name
   coverage is unsupported. When no current authority can be proven, no current
   address relation can be established and the name is structurally absent;
   callers use name detail or batch lookup for its explicit coverage reason.

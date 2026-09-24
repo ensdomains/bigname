@@ -184,7 +184,7 @@ pub(super) fn parse_lookup_json_body(
 }
 
 /// `include` takes the GET routes' comma-separated grammar and allows `inventory` only, on
-/// `profile=detail`: feed is the field-budgeted path (docs/api-v2-routes.md).
+/// `profile=detail`: feed is the field-budgeted path (docs/api-v1-routes.md).
 pub(super) fn parse_lookup_include(
     value: Option<&str>,
     profile: LookupProfile,
