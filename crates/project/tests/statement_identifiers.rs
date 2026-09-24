@@ -7,16 +7,19 @@
 //!
 //! - every `.sql` file: with `--` comments removed, each `;`-separated statement starts with an
 //!   identifier, and the file's first line is one;
-//! - every Rust string literal outside test code that begins, after any leading comments, with an
-//!   SQL command keyword in any letter case or with an identifier: it must carry an identifier
+//! - every Rust string literal outside test code that begins, after any leading comments, with one
+//!   of the SQL command keywords in `KEYWORDS` in any letter case or with an identifier: it must
+//!   carry an identifier
 //!   among those leading comments. Fragments spliced into a larger statement carry one too;
 //!   PostgreSQL treats the nested comment as whitespace;
-//! - every literal, `format!` of a literal, or `include_str!` passed directly to a sqlx statement
-//!   constructor (`sqlx::query`, `query_as`, `query_scalar`, their `_with` forms and `raw_sql`),
-//!   to `QueryBuilder::new`, or to an executor method (`execute`, `fetch` and its `fetch_*`
-//!   forms): a literal must be named whatever its first word, and an `include_str!` must include
-//!   a `.sql` file under `src`, which the first rule checks. `QueryBuilder::new` must be given one
-//!   of these, since the fragments pushed after it need not start with a keyword.
+//! - every literal, `format!` of a literal, or `include_str!` written as the first argument of a
+//!   sqlx statement constructor spelled `sqlx::query`, `query_as`, `query_scalar`, their `_with`
+//!   forms or `raw_sql`, of `QueryBuilder::new`, or of an executor method (`execute`, `fetch` and
+//!   its `fetch_*` forms): a literal must be named whatever its first word, and an `include_str!`
+//!   must include a `.sql` file under `src`, which the first rule checks. `QueryBuilder::new` must
+//!   be given one of these, since the fragments pushed after it need not start with a keyword.
+//!   The argument is recognised as text: a Rust comment between the parenthesis and the literal
+//!   stops the recognition, and the site is then counted as given a value built elsewhere.
 //!
 //! A value built elsewhere is counted, not checked: a constant, a loop variable or a bound
 //! `format!` passed to a constructor, or `<name>.as_str()` or `&<name>` passed to an executor. Its
@@ -24,8 +27,9 @@
 //! file. The known ways past the guard are pinned by tests below, so a tightening shows: a bound
 //! value whose text starts with neither a keyword nor an identifier, `concat!`, a constant bound
 //! to `include_str!` of a file outside `src`, and a call a macro assembles from its arguments.
-//! Importing the sqlx constructors unqualified is refused, so a direct constructor call cannot
-//! hide from the search.
+//! Explicit named imports of the constructors matching `use sqlx::` are rejected, so a direct
+//! constructor call cannot hide behind them; glob imports and aliases are not resolved, and a
+//! constructor reached through `use sqlx::*` is neither checked nor counted.
 //!
 //! Test code is a file reached through a `#[cfg(test)]` module declaration, or an item or statement
 //! under `#[cfg(test)]` inside a production file. Names are unique across the crate; a name built
@@ -208,6 +212,27 @@ fn a_value_built_elsewhere_is_counted_not_checked() {
             "{text}"
         );
     }
+}
+
+/// Known gaps in the text recognition: a Rust comment before a direct argument stops the guard
+/// from seeing the literal, so the site is counted as a value built elsewhere; a named
+/// `QueryBuilder::new` literal behind such a comment is wrongly rejected; a constructor reached
+/// through a glob import is neither checked nor counted. Each is pinned so a tightening shows.
+#[test]
+fn a_comment_before_a_direct_argument_or_a_glob_import_is_not_seen_through() {
+    let report = check_one("fn f() { sqlx::query(/* note */ \"(select 1) union (select 2)\"); }");
+    assert!(report.failures.is_empty(), "{:?}", report.failures);
+    assert_eq!((report.execution_sites, report.indirect_sites), (1, 1));
+
+    let report = check_one(
+        "fn f() { QueryBuilder::<Postgres>::new(/* note */ \"/* project:a.one */ select 1\"); }",
+    );
+    assert_eq!(report.failures.len(), 1, "{:?}", report.failures);
+    assert_eq!((report.execution_sites, report.indirect_sites), (1, 0));
+
+    let report = check_one("use sqlx::*;\nfn f() { query(\"(select 1)\"); }");
+    assert!(report.failures.is_empty(), "{:?}", report.failures);
+    assert_eq!((report.execution_sites, report.indirect_sites), (0, 0));
 }
 
 /// Known gap: a macro that assembles the constructor from its arguments is not expanded, so the
