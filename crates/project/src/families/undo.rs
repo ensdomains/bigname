@@ -8,6 +8,7 @@ use serde_json::Value;
 use sqlx::PgPool;
 
 use super::{
+    derived,
     marker::{self, FamilyMarker},
     store, tables,
 };
@@ -67,9 +68,12 @@ pub(crate) async fn undo_block(
             images.push(image.clone());
         }
     }
+    // The index rows follow the base rows: take the keys while the block's rows still stand.
+    let touched = derived::touched(&mut transaction, chain_id, expected.number).await?;
     for (name, (keys, images)) in by_table {
         store::replace(&mut transaction, tables::spec(name), keys, images).await?;
     }
+    derived::refresh(&mut transaction, chain_id, &touched).await?;
 
     let restored = FamilyMarker::from_journal_image(&prior, locked.sequence + 1);
     marker::advance(&mut transaction, chain_id, &restored).await?;

@@ -8,7 +8,9 @@
 // The reducers land in the commits that follow and use the helpers
 // that are unused until then.
 #![allow(dead_code)]
+mod addresses;
 mod block;
+mod derived;
 mod driver;
 mod identity;
 mod input;

@@ -172,6 +172,8 @@ async fn write(
         let written = store::replace(transaction, super::tables::spec(name), keys, inserts).await?;
         stats.rows.insert(name, written);
     }
+    let touched = super::derived::touched(transaction, chain_id, block.number).await?;
+    super::derived::refresh(transaction, chain_id, &touched).await?;
     Ok(stats)
 }
 
