@@ -113,8 +113,12 @@ pub(super) fn json_timestamp_at_paths(value: &Value, paths: &[&[&str]]) -> Optio
                 Some(QuotedSeconds::OutOfRange) => {}
                 None => return Some(value.clone()),
             },
+            // A number reads through the same decimal rule as its quoted form; one whose text is
+            // not a plain decimal (an exponent form) is unknown.
             Value::Number(number) => {
-                if let Some(timestamp) = number.as_i64().and_then(format_unix_timestamp) {
+                if let Some(QuotedSeconds::InRange(seconds)) = quoted_seconds(&number.to_string())
+                    && let Some(timestamp) = format_unix_timestamp(seconds)
+                {
                     return Some(timestamp);
                 }
             }
@@ -291,6 +295,22 @@ mod quoted_seconds_tests {
                 json_timestamp_at_paths(&summary, &[&["registration", "expiry"]]).as_deref(),
                 expected,
                 "{quoted}"
+            );
+        }
+        // A JSON number follows the same rule as its quoted form.
+        for (number, expected) in [
+            (json!(1_735_689_600.5), Some("2025-01-01T00:00:00Z")),
+            (json!(-0.5), None),
+            (json!(253_402_300_799.5), None),
+            (json!(253_402_300_799_u64), Some("9999-12-31T23:59:59Z")),
+            (json!(u64::MAX), None),
+            (json!(-1), None),
+        ] {
+            let summary = json!({"registration": {"expiry": number}});
+            assert_eq!(
+                json_timestamp_at_paths(&summary, &[&["registration", "expiry"]]).as_deref(),
+                expected,
+                "{number}"
             );
         }
         // Not a number: served as the stored string.

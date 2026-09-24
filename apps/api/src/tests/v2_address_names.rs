@@ -652,6 +652,11 @@ async fn v2_get_address_names_treats_an_out_of_range_expiry_as_unknown() -> Resu
             json!("2025-01-01T00:00:00Z"),
             Some("2025-01-01T00:00:00Z"),
         ),
+        (
+            json!(1_735_689_600.5),
+            json!("2025-01-01T00:00:00Z"),
+            Some("2025-01-01T00:00:00Z"),
+        ),
         (Value::Null, json!("2030-01-02T00:00:00Z"), Some("2030-01-02T00:00:00Z")),
     ] {
         set_address_name_expiry(&database, "alpha.eth", &registration, &control).await?;
