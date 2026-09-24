@@ -39,6 +39,8 @@ pub(crate) async fn apply(
     events: &[BlockEvent],
     rows: &mut RowSet,
 ) -> Result<()> {
+    super::identity::apply(transaction, context, events, rows).await?;
+    super::registry::apply(transaction, context, events, rows).await?;
     super::resolver::registry_pointers(transaction, context, events, rows).await?;
     super::resolver::resource_pointers(transaction, context, events, rows).await?;
     super::records::apply(transaction, context, events, rows).await?;

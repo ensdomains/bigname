@@ -10,12 +10,14 @@
 #![allow(dead_code)]
 mod block;
 mod driver;
+mod identity;
 mod input;
 mod keys;
 mod marker;
 mod permissions;
 mod records;
 mod reduce;
+mod registry;
 mod repair;
 mod resolver;
 mod store;

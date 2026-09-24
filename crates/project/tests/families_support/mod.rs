@@ -542,3 +542,44 @@ impl Fixture {
         self.event(event).await
     }
 }
+
+impl Fixture {
+    /// A surface binding created at `block`, with its provenance position, closed when the next
+    /// binding of its name and arm opens at `closed_at`.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn binding(
+        &self,
+        id: &str,
+        name: &str,
+        resource: &str,
+        arm: &str,
+        block: i64,
+        log: i64,
+        closed_at: Option<i64>,
+    ) -> Result<()> {
+        let namehash = name.split_once(':').map_or(name, |(_, hash)| hash);
+        self.surface(name, namehash).await?;
+        self.resource(resource).await?;
+        sqlx::query(
+            "INSERT INTO surface_bindings (surface_binding_id, logical_name_id, resource_id,
+                 binding_kind, authority_arm, active_from, active_to, chain_id, block_hash,
+                 block_number, provenance, canonicality_state)
+             VALUES ($1::uuid, $2, $3::uuid, 'declared_registry_path', $4,
+                     to_timestamp(1800000000 + $6 * 12), to_timestamp(1800000000 + $9 * 12),
+                     $5, $7, $6, jsonb_build_object('transaction_index', 0, 'log_index', $8),
+                     'canonical')",
+        )
+        .bind(id)
+        .bind(name)
+        .bind(resource)
+        .bind(arm)
+        .bind(CHAIN)
+        .bind(block)
+        .bind(hash(block))
+        .bind(log)
+        .bind(closed_at.map(|block| block as f64))
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+}
