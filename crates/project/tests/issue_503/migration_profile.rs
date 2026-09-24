@@ -107,8 +107,19 @@ async fn status(pool: &PgPool, logical: &str) -> Result<(String, Option<String>,
         .bind(logical).fetch_one(pool).await?)
 }
 
+async fn selected_authority(
+    pool: &PgPool,
+    logical: &str,
+) -> Result<(Option<String>, Option<String>, Option<String>)> {
+    Ok(sqlx::query_as("SELECT provenance #>> '{authority_selection,authority_arm}', provenance #>> '{authority_selection,unsupported_reason}', provenance #>> '{authority_selection,proof_event_identity}' FROM name_current WHERE logical_name_id=$1")
+        .bind(logical).fetch_one(pool).await?)
+}
+
+// Each mutation breaks one thing the old exact-name profile gate checked. Support now follows the
+// authority decision alone, so a mutation that leaves the selected ENSv2 registration without an
+// authority refusal serves it, and only a mutation that breaks authority selection stays refused.
 #[tokio::test]
-async fn migration_profile_requires_exact_current_admitted_successor() -> Result<()> {
+async fn migration_boundary_mutations_refuse_only_through_authority_selection() -> Result<()> {
     for case in [
         "supported",
         "missing",
@@ -214,31 +225,50 @@ async fn migration_profile_requires_exact_current_admitted_successor() -> Result
         }
         project(&pool, RunMode::Normal).await?;
         let normal = status(&pool, &f.logical).await?;
+        let authority_refusal = match case {
+            "wrong_binding" => Some("current_authority_not_projected"),
+            _ => None,
+        };
+        let proof = match case {
+            "missing" | "candidate" | "orphan" | "wrong_chain" => None,
+            "unadmitted_latest_proof" => Some("unadmitted-later-boundary"),
+            _ => Some("migration-profile-boundary"),
+        };
         assert_eq!(
-            normal.0,
-            if case == "supported" {
-                "supported"
-            } else {
-                "unsupported"
+            selected_authority(&pool, &f.logical).await?,
+            (
+                Some("ens_v2".to_owned()),
+                authority_refusal.map(str::to_owned),
+                proof.map(str::to_owned)
+            ),
+            "{case}: authority"
+        );
+        assert_eq!(
+            (normal.0.as_str(), normal.1.as_deref()),
+            match authority_refusal {
+                Some(reason) => ("unsupported", Some(reason)),
+                None => ("supported", None),
             },
             "{case}: {normal:?}"
         );
-        if case == "supported" {
-            assert_eq!(normal.1, None);
-            assert_eq!(normal.2, Some(uuid(1, 822)));
-            let registrant: String = sqlx::query_scalar("SELECT declared_summary #>> '{registration,registrant}' FROM name_current WHERE logical_name_id=$1")
+        // `stale` binds a resource with no registration events, and the later boundary in
+        // `unadmitted_latest_proof` starts the authority epoch after the grant.
+        if authority_refusal.is_none() && !matches!(case, "stale" | "unadmitted_latest_proof") {
+            assert_eq!(normal.2, Some(uuid(1, 822)), "{case}");
+            let registrant: Option<String> = sqlx::query_scalar("SELECT declared_summary #>> '{registration,registrant}' FROM name_current WHERE logical_name_id=$1")
                 .bind(&f.logical).fetch_one(&pool).await?;
             assert_eq!(
-                registrant, OWNER,
-                "retained ENSv1 owner must stay historical"
+                registrant.as_deref(),
+                Some(OWNER),
+                "{case}: retained ENSv1 owner must stay historical"
             );
-            let registrar_count: i64 = sqlx::query_scalar(
-                "SELECT count(*) FROM normalized_events WHERE source_family='ens_v2_registrar_l1'",
-            )
-            .fetch_one(&pool)
-            .await?;
-            assert_eq!(registrar_count, 0);
         }
+        let registrar_count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM normalized_events WHERE source_family='ens_v2_registrar_l1'",
+        )
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(registrar_count, 0);
         project(&pool, RunMode::Redo).await?;
         assert_eq!(status(&pool, &f.logical).await?, normal, "redo {case}");
         db.cleanup().await?;
@@ -246,8 +276,18 @@ async fn migration_profile_requires_exact_current_admitted_successor() -> Result
     Ok(())
 }
 
+async fn current_registration(
+    pool: &PgPool,
+    logical: &str,
+) -> Result<(String, Option<String>, Option<String>, Value, Value)> {
+    Ok(sqlx::query_as("SELECT support_status,unsupported_reason,resource_id::text,declared_summary->'registration',declared_summary->'control' FROM name_current WHERE logical_name_id=$1")
+        .bind(logical).fetch_one(pool).await?)
+}
+
+// A registration in an admitted ENSv2 registry is served on its own; the registrar's matching
+// NameRegistered adds history but changes no current value.
 #[tokio::test]
-async fn ordinary_registrar_profile_still_qualifies_without_migration() -> Result<()> {
+async fn registry_registration_serves_the_same_with_or_without_a_registrar_event() -> Result<()> {
     let (db, pool) = database("registrar_profile_control").await?;
     let f = fixture(&pool).await?;
     sqlx::query("DELETE FROM normalized_events WHERE source_family='ens_v1_registrar_l1'")
@@ -257,6 +297,19 @@ async fn ordinary_registrar_profile_still_qualifies_without_migration() -> Resul
         .bind(f.boundary)
         .execute(&pool)
         .await?;
+    let mut without = Vec::new();
+    for mode in [RunMode::Normal, RunMode::Redo] {
+        project(&pool, mode).await?;
+        let current = current_registration(&pool, &f.logical).await?;
+        assert_eq!(
+            (current.0.as_str(), current.1.as_deref(), current.2.clone()),
+            ("supported", None, Some(uuid(1, 822))),
+            "{current:?}"
+        );
+        assert_eq!(current.3["registrant"], OWNER, "{current:?}");
+        without.push(current);
+    }
+    assert_eq!(without[0], without[1], "redo");
     let registrar = manifest(&pool, "ens_v2_registrar_l1", PROFILE, json!([])).await?;
     let id = event(
         &pool,
@@ -274,7 +327,7 @@ async fn ordinary_registrar_profile_still_qualifies_without_migration() -> Resul
     attach(&pool, id, registrar).await?;
     for mode in [RunMode::Normal, RunMode::Redo] {
         project(&pool, mode).await?;
-        assert_eq!(status(&pool, &f.logical).await?.0, "supported");
+        assert_eq!(current_registration(&pool, &f.logical).await?, without[0]);
     }
     db.cleanup().await?;
     Ok(())

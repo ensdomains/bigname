@@ -665,8 +665,8 @@ async fn root_registry_tld_without_a_registration_serves_its_pointer() -> Result
     }
 
     // The rule is scoped to `current_authority_not_projected`: a TLD bound under both arms follows
-    // its current ENSv2 registration, whose exact-name profile this fixture does not support, and
-    // gets neither the pointer nor a serving resource.
+    // its current ENSv2 registration, which is served as it is, and gets neither the pointer nor a
+    // serving resource.
     let fixture = Fixture::declared(
         "tld_root_bound",
         V1Side::NodeOnly {
@@ -679,13 +679,11 @@ async fn root_registry_tld_without_a_registration_serves_its_pointer() -> Result
     let name = name_current(&pool, &logical_name_id)
         .await?
         .context("bound TLD row")?;
-    assert_eq!(
-        name["unsupported_reason"], "ensv2_exact_name_profile_shadow",
-        "{name}"
-    );
+    assert_eq!(name["support_status"], "supported", "{name}");
+    assert_eq!(name["unsupported_reason"], Value::Null, "{name}");
     assert_eq!(name["serving_resource_id"], Value::Null);
-    // The declared resolver is the selected ENSv2 registration's own; the unsupported row is
-    // still not served, and the pointer grants no read reachability.
+    // The declared resolver is the selected ENSv2 registration's own, and the pointer grants no
+    // read reachability.
     assert_eq!(name["declared_summary"]["resolver"]["address"], MIRROR);
     assert_eq!(name["provenance"]["read_reachability"], json!({}));
     database.cleanup().await?;

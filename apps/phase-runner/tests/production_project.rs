@@ -1369,7 +1369,7 @@ async fn undeclared_v1_resolver_is_explicitly_unsupported_without_code_hash_evid
 }
 
 #[tokio::test]
-async fn exact_name_support_keeps_mixed_and_unpromoted_v2_status_explicit() -> Result<()> {
+async fn exact_name_support_follows_the_selected_v2_registration_on_any_chain() -> Result<()> {
     let scratch = ScratchDatabase::create("production_project_name_support").await?;
     let chain = "project-name-support";
     let logical_name_id = seed_dual_open_cross_arm_fixture(scratch.pool(), chain, 4).await?;
@@ -1390,15 +1390,9 @@ async fn exact_name_support_keeps_mixed_and_unpromoted_v2_status_explicit() -> R
     .bind(&logical_name_id)
     .fetch_one(scratch.pool())
     .await?;
-    // The current ENSv2 registration decides the mixed corpus; this Mainnet-profile fixture does
-    // not promote the ENSv2 exact-name profile.
-    assert_eq!(
-        mixed,
-        (
-            "unsupported".into(),
-            Some("ensv2_exact_name_profile_shadow".into())
-        )
-    );
+    // The current ENSv2 registration decides the mixed corpus and is served without a registrar
+    // event, on a chain that is neither Mainnet nor Sepolia.
+    assert_eq!(mixed, ("supported".into(), None));
 
     sqlx::query(
         "DELETE FROM surface_bindings
@@ -1434,20 +1428,14 @@ async fn exact_name_support_keeps_mixed_and_unpromoted_v2_status_explicit() -> R
         3,
     )
     .await?;
-    let shadow: (String, Option<String>) = sqlx::query_as(
+    let relabelled: (String, Option<String>) = sqlx::query_as(
         "SELECT support_status, unsupported_reason
          FROM name_current WHERE logical_name_id = $1",
     )
     .bind(&logical_name_id)
     .fetch_one(scratch.pool())
     .await?;
-    assert_eq!(
-        shadow,
-        (
-            "unsupported".into(),
-            Some("ensv2_exact_name_profile_shadow".into())
-        )
-    );
+    assert_eq!(relabelled, ("supported".into(), None));
     scratch.cleanup().await?;
 
     let sepolia = ScratchDatabase::create("production_project_name_support_sepolia").await?;
@@ -1471,14 +1459,14 @@ async fn exact_name_support_keeps_mixed_and_unpromoted_v2_status_explicit() -> R
         5,
     )
     .await?;
-    let sepolia_reason: String = sqlx::query_scalar(
-        "SELECT unsupported_reason FROM name_current WHERE logical_name_id = $1",
+    let sepolia_support: (String, Option<String>) = sqlx::query_as(
+        "SELECT support_status, unsupported_reason FROM name_current WHERE logical_name_id = $1",
     )
     .bind(sepolia_name)
     .fetch_one(sepolia.pool())
     .await?;
-    // No registrar event qualifies this Sepolia fixture's ENSv2 registration for the exact profile.
-    assert_eq!(sepolia_reason, "ensv2_exact_name_profile_shadow");
+    // No registrar event exists for this Sepolia fixture's ENSv2 registration, and none is needed.
+    assert_eq!(sepolia_support, ("supported".into(), None));
     sepolia.cleanup().await
 }
 
@@ -3745,11 +3733,11 @@ async fn parent_reachability_filters_before_positive_v2_child_integrity() -> Res
 
 // A child migrated through the wrapper receiver lands in the WrapperRegistry its parent's
 // migration created (LockedMigrationController / WrapperRegistry deploy one per migrated name
-// and announce it). That registry is the child's successor registry, so the migration branch
-// of the exact-name profile accepts it on the same registry-creation proof the authority
-// builder uses; without that proof the undeclared registry stays shadowed.
+// and announce it). The registry is not declared in the manifest, and the registrar manifest
+// declares the exact-name profile only as `shadow`; the selected migration successor is served
+// all the same, with or without the registry-creation association.
 #[tokio::test]
-async fn migrated_child_in_a_migration_created_registry_serves_the_exact_profile() -> Result<()> {
+async fn migrated_child_in_a_migration_created_registry_is_served() -> Result<()> {
     let scratch =
         ScratchDatabase::create("project_exact_profile_migration_created_registry").await?;
     let chain = "ethereum-sepolia";
@@ -3937,22 +3925,22 @@ async fn migrated_child_in_a_migration_created_registry_serves_the_exact_profile
     assert_eq!(served.0.as_deref(), Some("migration_authority_transition"));
     assert_eq!(served.3, Some(binding));
     assert_eq!(
-        (served.1.as_str(), served.2),
+        (served.1.as_str(), served.2.as_deref()),
         ("supported", None),
-        "the migration-created successor registry qualifies the exact profile"
+        "the successor in a migration-created registry is served"
     );
 
-    // Without the registry-creation proof the same undeclared registry is still shadowed.
+    // The association only fed the retired registrar qualification. Deleting it leaves the
+    // selected migration proof, and so the served row, unchanged.
     sqlx::query("DELETE FROM migration_discovery_associations WHERE chain_id = $1")
         .bind(chain)
         .execute(scratch.pool())
         .await?;
     run_project(scratch.pool(), chain, None, RunMode::Normal, 0, 5).await?;
-    let shadowed = profile_row(scratch.pool().clone(), logical_name_id.clone()).await?;
     assert_eq!(
-        (shadowed.1.as_str(), shadowed.2.as_deref()),
-        ("unsupported", Some("ensv2_exact_name_profile_shadow")),
-        "an undeclared registry without a creation proof stays shadowed"
+        profile_row(scratch.pool().clone(), logical_name_id.clone()).await?,
+        served,
+        "an undeclared registry without a creation association is still served"
     );
     scratch.cleanup().await
 }
@@ -10875,10 +10863,9 @@ async fn released_v2_regime_regrant_releases_into_a_fresh_tombstone() -> Result<
     assert_eq!(projected.2["authority_arm"], "ens_v2");
     assert_eq!(projected.2["lifecycle_state"], "unregistered");
     assert!(projected.2.get("proof_kind").is_none());
-    assert_eq!(
-        projected.3.as_deref(),
-        Some("ensv2_exact_name_profile_shadow")
-    );
+    // The re-release leaves an unregistered tombstone: served, with its terminal-state fields
+    // cleared above.
+    assert_eq!(projected.3, None);
     scratch.cleanup().await
 }
 
@@ -10928,8 +10915,8 @@ async fn equal_position_v1_residue_suppresses_regime_regrant_carry() -> Result<(
         insert_v2_regrant(scratch.pool(), chain, &logical_name_id, 8).await?;
 
     // The release still does not carry the regime, but the regrant is the only binding open
-    // now and the ENSv1 residue is history, so the regrant is the current candidate. Only this
-    // fixture's missing registrar profile keeps the ENSv2 row unsupported.
+    // now and the ENSv1 residue is history, so the regrant is the current candidate and is
+    // served.
     run_project(scratch.pool(), chain, None, RunMode::Normal, 0, 8).await?;
     let projected: (String, Option<String>, Option<Uuid>, Option<String>) = sqlx::query_as(
         "SELECT support_status, unsupported_reason, resource_id,
@@ -10942,8 +10929,8 @@ async fn equal_position_v1_residue_suppresses_regime_regrant_carry() -> Result<(
     assert_eq!(
         projected,
         (
-            "unsupported".into(),
-            Some("ensv2_exact_name_profile_shadow".into()),
+            "supported".into(),
+            None,
             Some(regrant_resource),
             Some("ens_v2".into()),
         )
@@ -11002,8 +10989,7 @@ async fn earlier_other_resource_grant_disqualifies_regime_carry() -> Result<()> 
         insert_v2_regrant(scratch.pool(), chain, &logical_name_id, 8).await?;
 
     // The release does not carry the regime, but the regrant is the only binding open now, so
-    // it is the current candidate. Only this fixture's missing registrar profile keeps the
-    // ENSv2 row unsupported.
+    // it is the current candidate and is served.
     run_project(scratch.pool(), chain, None, RunMode::Normal, 0, 8).await?;
     let projected: (String, Option<String>, Option<Uuid>, Option<String>) = sqlx::query_as(
         "SELECT support_status, unsupported_reason, resource_id,
@@ -11016,8 +11002,8 @@ async fn earlier_other_resource_grant_disqualifies_regime_carry() -> Result<()> 
     assert_eq!(
         projected,
         (
-            "unsupported".into(),
-            Some("ensv2_exact_name_profile_shadow".into()),
+            "supported".into(),
+            None,
             Some(regrant_resource),
             Some("ens_v2".into()),
         )
@@ -11472,14 +11458,22 @@ async fn positive_v2_child_registration_establishes_authority_without_child_migr
     .await?;
 
     run_project(scratch.pool(), chain, None, RunMode::Normal, 0, 5).await?;
-    let ordinary_registry_reason: String = sqlx::query_scalar(
-        "SELECT unsupported_reason FROM name_current WHERE logical_name_id = $1",
-    )
-    .bind(&logical_name_id)
-    .fetch_one(scratch.pool())
-    .await?;
+    // Until the child proof holds, the current ENSv2 registration is selected without a proof and
+    // is served as it is; each step below checks only that no proof is invented.
+    type ChildAuthority = (Option<String>, String, Option<String>);
+    let unproven: ChildAuthority = (None, "supported".into(), None);
+    let child_authority = |pool: PgPool, name: String| async move {
+        sqlx::query_as::<_, ChildAuthority>(
+            "SELECT provenance #>> '{authority_selection,proof_kind}', support_status, unsupported_reason
+         FROM name_current WHERE logical_name_id = $1",
+        )
+        .bind(name)
+        .fetch_one(&pool)
+        .await
+    };
     assert_eq!(
-        ordinary_registry_reason, "ensv2_exact_name_profile_shadow",
+        child_authority(scratch.pool().clone(), logical_name_id.clone()).await?,
+        unproven,
         "an ordinary ENSv2 registry must not establish child authority"
     );
 
@@ -11522,15 +11516,9 @@ async fn positive_v2_child_registration_establishes_authority_without_child_migr
         2,
     )
     .await?;
-    let association_only_reason: String = sqlx::query_scalar(
-        "SELECT unsupported_reason
-         FROM name_current WHERE logical_name_id = $1",
-    )
-    .bind(&logical_name_id)
-    .fetch_one(scratch.pool())
-    .await?;
     assert_eq!(
-        association_only_reason, "ensv2_exact_name_profile_shadow",
+        child_authority(scratch.pool().clone(), logical_name_id.clone()).await?,
+        unproven,
         "a diagnostic association without its admitted edge is not readable"
     );
     sqlx::query(
@@ -11587,14 +11575,9 @@ async fn positive_v2_child_registration_establishes_authority_without_child_migr
         2,
     )
     .await?;
-    let detached_reason: String = sqlx::query_scalar(
-        "SELECT unsupported_reason FROM name_current WHERE logical_name_id = $1",
-    )
-    .bind(&logical_name_id)
-    .fetch_one(scratch.pool())
-    .await?;
     assert_eq!(
-        detached_reason, "ensv2_exact_name_profile_shadow",
+        child_authority(scratch.pool().clone(), logical_name_id.clone()).await?,
+        unproven,
         "a registry detached before the child grant is not current at proof"
     );
     sqlx::query(
@@ -11628,7 +11611,7 @@ async fn positive_v2_child_registration_establishes_authority_without_child_migr
         Some("positive_v2_child_registration")
     );
     // The child's registry was created and announced by its parent's migration and is not
-    // in the manifest's declared registry list; the exact profile follows that proof.
+    // in the manifest's declared registry list; the proven registration is served.
     let admitted_registry_support: (String, Option<String>) = sqlx::query_as(
         "SELECT support_status, unsupported_reason
          FROM name_current WHERE logical_name_id = $1",
@@ -11639,7 +11622,7 @@ async fn positive_v2_child_registration_establishes_authority_without_child_migr
     assert_eq!(
         admitted_registry_support,
         ("supported".into(), None),
-        "a positive child registration under a migration-created registry serves the exact profile"
+        "a positive child registration under a migration-created registry is served"
     );
     sqlx::query(
         "UPDATE normalized_events
@@ -11665,13 +11648,11 @@ async fn positive_v2_child_registration_establishes_authority_without_child_migr
         3,
     )
     .await?;
-    let candidate_reason: String = sqlx::query_scalar(
-        "SELECT unsupported_reason FROM name_current WHERE logical_name_id = $1",
-    )
-    .bind(&logical_name_id)
-    .fetch_one(scratch.pool())
-    .await?;
-    assert_eq!(candidate_reason, "ensv2_exact_name_profile_shadow");
+    assert_eq!(
+        child_authority(scratch.pool().clone(), logical_name_id.clone()).await?,
+        unproven,
+        "a candidate parent boundary cannot prove the child"
+    );
 
     sqlx::query(
         "UPDATE normalized_events SET consumer_visibility = 'activated'
@@ -12369,8 +12350,9 @@ async fn reservation_release_cannot_borrow_a_later_same_resource_registration() 
     );
 
     run_project(scratch.pool(), chain, None, RunMode::Normal, 0, 3).await?;
-    let selected: (Option<String>, String, Option<String>) = sqlx::query_as(
+    let selected: (Option<String>, Option<String>, String, Option<String>) = sqlx::query_as(
         "SELECT provenance #>> '{authority_selection,authority_arm}',
+                provenance #>> '{authority_selection,lifecycle_state}',
                 support_status, unsupported_reason
          FROM name_current WHERE logical_name_id = $1",
     )
@@ -12381,8 +12363,9 @@ async fn reservation_release_cannot_borrow_a_later_same_resource_registration() 
         selected,
         (
             Some("ens_v2".into()),
-            "unsupported".into(),
-            Some("ensv2_exact_name_profile_shadow".into()),
+            Some("registered".into()),
+            "supported".into(),
+            None,
         ),
         "the later registration decides as the current ENSv2 registration, without \
          retroactively qualifying the reservation release",
@@ -18000,12 +17983,8 @@ async fn mixed_authority_v2_expiry_hands_the_name_to_its_live_v1_registration() 
     .bind(&logical_name_id)
     .fetch_one(scratch.pool())
     .await?;
-    // While both arms are open the current ENSv2 registration decides; this Mainnet-profile
-    // fixture does not promote the ENSv2 exact-name profile.
-    assert_eq!(
-        initial_reason.as_deref(),
-        Some("ensv2_exact_name_profile_shadow")
-    );
+    // While both arms are open the current ENSv2 registration decides and is served.
+    assert_eq!(initial_reason, None);
 
     insert_lineage_block(scratch.pool(), chain, 6).await?;
     let v2_resource: Uuid = sqlx::query_scalar(
@@ -25213,7 +25192,8 @@ fn assert_active_v2_regrant(row: &Value, regrant_binding: Uuid, regrant_resource
     assert_eq!(selection["authority_arm"], "ens_v2");
     assert_eq!(selection["lifecycle_state"], "registered");
     assert!(selection.get("proof_kind").is_none());
-    assert_eq!(row["unsupported_reason"], "ensv2_exact_name_profile_shadow");
+    assert_eq!(row["support_status"], "supported");
+    assert_eq!(row["unsupported_reason"], Value::Null);
 }
 
 async fn insert_activated_authority_proof(
