@@ -218,6 +218,94 @@ async fn sepolia_no_proof_overlap_remains_refused_not_fatal() -> Result<()> {
     Ok(())
 }
 
+/// Adds a binding of `arm` that closed before the target block, with its own resource.
+async fn closed_binding(pool: &PgPool, logical: &str, index: u16, arm: &str) -> Result<String> {
+    let resource = uuid(6, index);
+    sqlx::query("INSERT INTO resources (resource_id, chain_id, block_hash, block_number, canonicality_state) VALUES ($1::uuid, $2, $3, 10, 'canonical')")
+        .bind(&resource).bind(CHAIN).bind(HASH).execute(pool).await?;
+    sqlx::query("INSERT INTO surface_bindings (surface_binding_id, logical_name_id, resource_id, binding_kind, authority_arm, active_from, active_to, chain_id, block_hash, block_number, provenance, canonicality_state) VALUES ($1::uuid, $2, $3::uuid, 'declared_registry_path', $4, '2026-08-25T00:00:00Z', '2026-08-25T12:00:00Z', $5, $6, 10, '{\"transaction_index\":0,\"log_index\":0}', 'canonical')")
+        .bind(uuid(7, index)).bind(logical).bind(&resource).bind(arm).bind(CHAIN).bind(HASH).execute(pool).await?;
+    Ok(resource)
+}
+
+// Sepolia group A: the name is live on ENSv1, and its ENSv2 label was reserved, granted and
+// released again. ENSv2 holds nothing now, so the historical ENSv2 grant is not a current
+// candidate and ENSv1 keeps the name.
+#[tokio::test]
+async fn a_live_v1_name_whose_v2_grant_was_released_selects_v1() -> Result<()> {
+    let (db, pool) = database("overlap_released_v2_grant").await?;
+    let logical = surface(&pool, 60, "released-grant.eth", &["ens_v1"]).await?;
+    let v2_resource = closed_binding(&pool, &logical, 60, "ens_v2").await?;
+    for (log, kind, after) in [
+        (1, "RegistrationReserved", json!({"status":"reserved"})),
+        (
+            2,
+            "RegistrationGranted",
+            json!({"status":"registered","registrant":"0x0000000000000000000000000000000000000001"}),
+        ),
+        (3, "RegistrationReleased", json!({"status":"unregistered"})),
+    ] {
+        event(
+            &pool,
+            &format!("overlap-a-{kind}"),
+            &logical,
+            Some(&v2_resource),
+            Event {
+                family: "ens_v2_registry_l1",
+                kind,
+                log,
+                after,
+            },
+        )
+        .await?;
+    }
+    run(&pool).await?;
+    assert_eq!(
+        authority(&pool, &logical).await?,
+        (Some("ens_v1".into()), None, None, None)
+    );
+    db.cleanup().await?;
+    Ok(())
+}
+
+// Sepolia group B: the ENSv1 registration ended at expiry plus grace before a fresh ENSv2
+// registration. ENSv1 holds nothing now, so its history is not a current candidate.
+#[tokio::test]
+async fn a_v2_registration_after_the_v1_lease_ended_selects_v2() -> Result<()> {
+    let (db, pool) = database("overlap_released_v1_lease").await?;
+    let logical = surface(&pool, 61, "after-v1.eth", &["ens_v2"]).await?;
+    let v1_resource = closed_binding(&pool, &logical, 61, "ens_v1").await?;
+    for (log, kind, after) in [
+        (
+            1,
+            "RegistrationGranted",
+            json!({"status":"registered","registrant":"0x0000000000000000000000000000000000000001"}),
+        ),
+        (2, "RegistrationReleased", json!({"status":"unregistered"})),
+    ] {
+        event(
+            &pool,
+            &format!("overlap-b-{kind}"),
+            &logical,
+            Some(&v1_resource),
+            Event {
+                family: "ens_v1_registrar_l1",
+                kind,
+                log,
+                after,
+            },
+        )
+        .await?;
+    }
+    run(&pool).await?;
+    assert_eq!(
+        authority(&pool, &logical).await?,
+        (Some("ens_v2".into()), None, None, None)
+    );
+    db.cleanup().await?;
+    Ok(())
+}
+
 #[tokio::test]
 async fn shared_ens_infrastructure_selects_v2_without_fabricating_proof() -> Result<()> {
     let (db, pool) = database("issue503_shared").await?;
@@ -260,8 +348,10 @@ async fn shared_ens_infrastructure_selects_v2_without_fabricating_proof() -> Res
     Ok(())
 }
 
+// Historical ENSv2 evidence does not qualify for the shared-infrastructure exception, and it is
+// not a current ENSv2 candidate either, so the name's open ENSv1 binding keeps it.
 #[tokio::test]
-async fn shared_infrastructure_refuses_historical_only_v2_evidence() -> Result<()> {
+async fn shared_infrastructure_with_historical_only_v2_evidence_stays_on_v1() -> Result<()> {
     let (db, pool) = database("issue503_shared_historical_v2").await?;
     let logical = surface(&pool, 15, "eth", &["ens_v1"]).await?;
     let v2_resource = uuid(2, 15);
@@ -287,12 +377,7 @@ async fn shared_infrastructure_refuses_historical_only_v2_evidence() -> Result<(
     run(&pool).await?;
     assert_eq!(
         authority(&pool, &logical).await?,
-        (
-            None,
-            Some("independent_ens_deployments_overlap".into()),
-            None,
-            None
-        )
+        (Some("ens_v1".into()), None, None, None)
     );
     db.cleanup().await?;
     Ok(())

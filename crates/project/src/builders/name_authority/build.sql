@@ -594,6 +594,22 @@
                   SELECT 1 FROM project_latest_registry_owner ownerless
                   WHERE ownerless.logical_name_id = lifecycle.logical_name_id
               )
+        ), overlap AS (
+            -- Both arms hold the name now: each has a binding open at the target block. A name
+            -- with no open binding at all falls back to its authority events, so events on both
+            -- arms count only there. History alone on one arm never outweighs the other arm's
+            -- open binding.
+            SELECT summary.logical_name_id
+            FROM arm_summary summary
+            WHERE summary.has_ens_v1 AND summary.has_ens_v2
+            UNION ALL
+            SELECT event_summary.logical_name_id
+            FROM event_arm_summary event_summary
+            WHERE event_summary.has_ens_v1 AND event_summary.has_ens_v2
+              AND NOT EXISTS (
+                  SELECT 1 FROM arm_summary summary
+                  WHERE summary.logical_name_id = event_summary.logical_name_id
+              )
         ), decision AS (
             SELECT surface.logical_name_id,
                    CASE
@@ -602,13 +618,7 @@
                        WHEN regime.logical_name_id IS NOT NULL THEN 'ens_v2'
                        WHEN shared.logical_name_id IS NOT NULL
                         AND COALESCE(summary.has_ens_v2, false) THEN 'ens_v2'
-                       WHEN (
-                           COALESCE(summary.has_ens_v1, false)
-                           OR COALESCE(event_summary.has_ens_v1, false)
-                       ) AND (
-                           COALESCE(summary.has_ens_v2, false)
-                           OR COALESCE(event_summary.has_ens_v2, false)
-                       ) THEN NULL
+                       WHEN overlap.logical_name_id IS NOT NULL THEN NULL
                        WHEN summary.arm_count = 1 THEN summary.sole_arm
                        WHEN summary.logical_name_id IS NULL
                         AND event_summary.arm_count = 1 THEN event_summary.sole_arm
@@ -620,10 +630,11 @@
                    proof.successor_resource_id,
                    released.released_v2_resource_id,
                    released_v1.released_v1_resource_id, released_v1.released_v1_binding_id,
+                   -- Any ENSv1 evidence, open or historical: a shared-infrastructure selection
+                   -- of ENSv2 over it publishes no authority epoch.
                    COALESCE(summary.has_ens_v1, false)
                        OR COALESCE(event_summary.has_ens_v1, false) AS has_ens_v1,
-                   COALESCE(summary.has_ens_v2, false)
-                       OR COALESCE(event_summary.has_ens_v2, false) AS has_ens_v2,
+                   overlap.logical_name_id IS NOT NULL AS both_arms_current,
                    (shared.logical_name_id IS NOT NULL
                     AND COALESCE(summary.has_ens_v2, false)
                     AND proof.logical_name_id IS NULL AND released.logical_name_id IS NULL AND regime.logical_name_id IS NULL) AS shared_infrastructure_authority,
@@ -651,6 +662,7 @@
             LEFT JOIN released_v2_regime regime USING (logical_name_id)
             LEFT JOIN released_v1_authority released_v1 USING (logical_name_id)
             LEFT JOIN shared_ens_infrastructure shared USING (logical_name_id)
+            LEFT JOIN overlap USING (logical_name_id)
         ), selected AS (
             SELECT decision.*, binding.surface_binding_id AS selected_binding_id,
                    binding.resource_id AS selected_resource_id,
@@ -741,7 +753,7 @@
         SELECT selected.logical_name_id, selected.selected_authority_arm,
                selected.selected_resource_id, selected.selected_binding_id,
                (ownerless.logical_name_id IS NOT NULL AND selected.selected_binding_id IS NULL
-                AND NOT (selected.has_ens_v1 AND selected.has_ens_v2)) AS known_ownerless_registry,
+                AND NOT selected.both_arms_current) AS known_ownerless_registry,
                ownerless.resource_id AS ownerless_registry_resource_id, ownerless.owner_getter_reason,
                (selected.released_v1_binding_id IS NOT NULL
                 AND selected.selected_binding_id = selected.released_v1_binding_id) AS released_v1_tombstone,
@@ -758,14 +770,12 @@
                    ELSE 'registered'
                END AS lifecycle_state,
                CASE
-                   WHEN selected.selected_authority_arm IS NULL AND selected.has_ens_v1 AND selected.has_ens_v2
+                   WHEN selected.selected_authority_arm IS NULL AND selected.both_arms_current
                     AND selected.deployment_profile = 'sepolia'
                        THEN 'independent_ens_deployments_overlap'
-                   WHEN selected.selected_authority_arm IS NULL AND selected.has_ens_v1 AND selected.has_ens_v2
+                   WHEN selected.selected_authority_arm IS NULL AND selected.both_arms_current
                        THEN 'conflicting_current_ens_authority'
-                   WHEN ownerless.logical_name_id IS NOT NULL AND NOT (
-                        selected.has_ens_v1 AND selected.has_ens_v2
-                    )
+                   WHEN ownerless.logical_name_id IS NOT NULL AND NOT selected.both_arms_current
                     AND selected.selected_binding_id IS NULL
                        THEN NULL
                    WHEN selected.selected_binding_id IS NULL THEN 'current_authority_not_projected'
