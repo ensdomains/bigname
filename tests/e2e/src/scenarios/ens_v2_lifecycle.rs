@@ -1277,6 +1277,8 @@ async fn reserved_labels_foreign_registrar_and_token_sale() -> Result<()> {
             ("sale.eth", format!("{bob:#x}")),
             ("batchsaleone.eth", format!("{carol:#x}")),
             ("batchsaletwo.eth", format!("{carol:#x}")),
+            ("foreign.eth", format!("{carol:#x}")),
+            ("leaf.trusted.eth", format!("{bob:#x}")),
         ],
     )
     .await?;
