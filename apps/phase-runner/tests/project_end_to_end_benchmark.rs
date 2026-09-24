@@ -12,9 +12,11 @@
 //! its head, unless the copy was rewound.
 //!
 //! With `BIGNAME_END_TO_END_COMPARE=1` each target is then rebuilt from scratch and committed at
-//! the same block on the same copy, and the name and subname readers must serve the same rows
-//! for every name and every subname in either state. The next target continues from that rebuilt
-//! state.
+//! the same block on the same copy, and the name and subname readers must serve the same values
+//! for every name and every subname in either state, apart from rows the batch was allowed to
+//! keep (`project_end_to_end/endpoint.rs`). That is a reader-value comparison against a full
+//! rebuild, not the rollback benchmark's contract oracle. The next target continues from that
+//! rebuilt state.
 #[path = "project_end_to_end/endpoint.rs"]
 mod endpoint;
 #[allow(dead_code)]
@@ -156,7 +158,18 @@ async fn fixture_corpus_publishes_hydrates_reads_and_matches_a_rebuild() -> Resu
     .execute(pool)
     .await?;
     require_disposable_copy(pool).await?;
-    run(pool, previous, &targets, Some(FIXTURE_CHILDREN_PAGE)).await?;
+    let compared = run(pool, previous, &targets, Some(FIXTURE_CHILDREN_PAGE)).await?;
+    ensure!(compared.len() == targets.len(), "every target is compared");
+    for compared in &compared {
+        // The harness cannot tell whether a dropped key was in the batch's full scope (see
+        // `endpoint::Outcome::dropped`), so the fixture must produce none.
+        ensure!(
+            compared.outcome.dropped == 0,
+            "target {} dropped {} baseline keys",
+            compared.target,
+            compared.outcome.dropped
+        );
+    }
     scratch.cleanup().await
 }
 
@@ -230,8 +243,20 @@ async fn prepare_fixture(pool: &PgPool, previous: i64, interpreted_through: i64)
     Ok(())
 }
 
-/// `compare` is the subname page size of the rebuild comparison, when it runs.
-async fn run(pool: &PgPool, previous: i64, targets: &[i64], compare: Option<u64>) -> Result<()> {
+/// What the rebuild comparison saw at one target.
+struct Compared {
+    target: i64,
+    outcome: endpoint::Outcome,
+}
+
+/// `compare` is the subname page size of the rebuild comparison, when it runs; it returns what
+/// each comparison saw.
+async fn run(
+    pool: &PgPool,
+    previous: i64,
+    targets: &[i64],
+    compare: Option<u64>,
+) -> Result<Vec<Compared>> {
     let _ = tracing_subscriber::fmt()
         .with_env_filter("bigname_project::batch=info")
         .with_target(false)
@@ -258,6 +283,7 @@ async fn run(pool: &PgPool, previous: i64, targets: &[i64], compare: Option<u64>
         last = number;
     }
     let mut resume = load_marker(pool, previous).await?;
+    let mut compared = Vec::new();
     ensure!(
         publication(pool).await? == (Some(previous), Some(resume.hash.clone()), false),
         "Project is not published at the requested previous marker"
@@ -349,11 +375,13 @@ async fn run(pool: &PgPool, previous: i64, targets: &[i64], compare: Option<u64>
                 resume.number,
             )
             .await?;
-            compare_with_rebuild(pool, &project, &target, children_page, &retention).await?;
+            compared.push(
+                compare_with_rebuild(pool, &project, &target, children_page, &retention).await?,
+            );
         }
         resume = target;
     }
-    Ok(())
+    Ok(compared)
 }
 
 /// Reads every name and subname the batch left, rebuilds the target from scratch and commits it,
@@ -365,7 +393,7 @@ async fn compare_with_rebuild(
     target: &BlockMarker,
     children_page: u64,
     retention: &endpoint::Retention,
-) -> Result<()> {
+) -> Result<Compared> {
     let candidate = endpoint::Served::read(pool, children_page).await?;
     let started = Instant::now();
     project.run_batch(context(target, None)).await?;
@@ -375,15 +403,20 @@ async fn compare_with_rebuild(
     let outcome = endpoint::compare(&candidate, &rebuilt, &stamp, retention)?;
     eprintln!(
         "SEPOLIA_END_TO_END_COMPARE target={} names={} subname_rows={} subname_pages={} exact={} \
-         retained={} rebuild_ms={rebuild_ms} result=equal",
+         retained={} removed={} dropped={} rebuild_ms={rebuild_ms} result=equal",
         target.number,
         candidate.names.len(),
         candidate.subname_rows(),
         candidate.pages_read,
         outcome.exact,
         outcome.retained,
+        outcome.removed,
+        outcome.dropped,
     );
-    Ok(())
+    Ok(Compared {
+        target: target.number,
+        outcome,
+    })
 }
 
 async fn publication(pool: &PgPool) -> Result<(Option<i64>, Option<String>, bool)> {
