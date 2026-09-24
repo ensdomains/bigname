@@ -261,9 +261,9 @@ are expected on Sepolia because the runtime admits evidence from both; each
 selects an arm per name under the same rule and is no longer refused. Names that
 were identity-only with `independent_ens_deployments_overlap` (Sepolia) or
 `conflicting_current_ens_authority` (Mainnet) now select ENSv2 when their ENSv2
-registration is current and ENSv1 otherwise. A selected ENSv2 registration still
-needs the exact-name profile qualification and otherwise reports
-`ensv2_exact_name_profile_shadow`. The
+registration is current and ENSv1 otherwise. A name whose selected arm is
+ENSv2 still needs the name's exact-name profile qualification and otherwise
+reports `ensv2_exact_name_profile_shadow`. The
 ENS root, `eth`, `reverse`, and `addr.reverse` are the four exact
 [shared ENS infrastructure](glossary.md#shared-ens-infrastructure) names. They
 select ENSv2 when the ENSv2 arm is current and ENSv1 evidence, current or

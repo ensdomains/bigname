@@ -150,10 +150,14 @@ snapshot. The difference is listed in
   current ENSv2 registration selects ENSv2; any other such name selects ENSv1,
   including as a released ENSv1 registration. On Sepolia this covers all 652
   names refused on 2026-09-23. Selection is not the same as full service: a
-  selected ENSv2 registration still needs the existing exact-name profile
-  qualification, and one without an admitted `ETHRegistrar` event or proven
-  migration successor reports `ensv2_exact_name_profile_shadow` and stays
-  identity-only, like any other such ENSv2 name.
+  name whose selected arm is ENSv2 still needs the existing exact-name profile
+  qualification under the promoted deployment profile. That qualification is
+  per logical name: an admitted `ETHRegistrar` event for the name, a proven
+  migration successor for the selected registration, or a positive child
+  registration proof. A name without one reports
+  `ensv2_exact_name_profile_shadow` and stays identity-only, like any other
+  such ENSv2 name. Matching the registrar event to the selected registration
+  is tracked in a follow-up ticket.
 - A name registered on ENSv1 after the premigration snapshot and then registered
   on ENSv2 is served from ENSv2, which is also what the Universal Resolver
   returns.
