@@ -13,7 +13,10 @@
 //!
 //! With `BIGNAME_END_TO_END_COMPARE=1` each target is then rebuilt from scratch and committed at
 //! the same block on the same copy, and the name and subname readers must serve the same rows
-//! for every name the batch rewrote. The next target continues from that rebuilt state.
+//! for every name and every subname in either state. The next target continues from that rebuilt
+//! state.
+#[path = "project_end_to_end/endpoint.rs"]
+mod endpoint;
 #[allow(dead_code)]
 mod support;
 
@@ -22,18 +25,16 @@ use std::{str::FromStr, time::Instant};
 use anyhow::{Context, Result, ensure};
 use bigname_lookup::ChainRpcUrls;
 use bigname_storage::{
-    ChildrenCurrentPageFilter, PROJECT_PUBLICATION_LAG_TOLERANCE_BLOCKS,
-    load_children_current_page_filtered, load_name_current, load_name_current_by_logical_name_ids,
-    load_served_project_generation,
+    PROJECT_PUBLICATION_LAG_TOLERANCE_BLOCKS, load_name_current, load_served_project_generation,
 };
 use phase_runner::{
     INTERPRETER_CONTENT_HASH,
     heads::{BlockMarker, HeadMarkers, publish_heads},
+    metrics::RunnerMetricsFeed,
     phase::{Phase, PhaseContext, PhaseName, PhaseResume, RunMode},
     project_phase::ProjectPhase,
     state::PhaseStore,
 };
-use serde_json::{Value, json};
 use sqlx::{
     PgPool,
     postgres::{PgConnectOptions, PgPoolOptions},
@@ -42,7 +43,30 @@ use sqlx::{
 use support::ScratchDatabase;
 
 const CHAIN: &str = "ethereum-sepolia";
-const CHILDREN_PAGE: u64 = 1_000;
+/// Subname page sizes for the rebuild comparison: small on the fixture so pages are traversed,
+/// larger on a copy.
+const FIXTURE_CHILDREN_PAGE: u64 = 1;
+const COPY_CHILDREN_PAGE: u64 = 200;
+/// Registry subnames for the fixture, which has none of its own: every registry-only name becomes
+/// a child of the first `.eth` name, so that parent's subnames span several pages.
+const FIXTURE_SUBNAMES: &str = "
+INSERT INTO normalized_events (event_identity, namespace, logical_name_id, resource_id,
+    event_kind, source_family, manifest_version, chain_id, block_number, block_hash,
+    transaction_hash, transaction_index, log_index, derivation_kind, canonicality_state,
+    after_state, raw_fact_ref)
+SELECT 'fixture:subname:' || child.i, 'ens', child.logical_name_id, child.registry_node,
+       'SubregistryChanged', 'ens_v1_registry_l1', 1, '__CHAIN__', child.block, child.block_hash,
+       '0x' || md5('s' || child.i), 0, 12, 'ens_v1_unwrapped_authority',
+       'canonical'::canonicality_state,
+       jsonb_build_object('source_event', 'NewOwner', 'node', parent.namehash,
+           'child_node', child.namehash,
+           'labelhash', '0x' || md5('a' || child.i) || md5('b' || child.i),
+           'owner', child.owner),
+       '{\"emitting_address\":\"0x00000000000000000000000000000000000000a3\"}'
+FROM seed child
+JOIN seed parent ON parent.i = 1
+WHERE child.known AND child.shape = 'registry_only';
+";
 
 #[tokio::test]
 #[ignore = "commits to an explicitly configured disposable copy"]
@@ -61,7 +85,8 @@ async fn disposable_copy_publishes_hydrates_and_reads_each_target() -> Result<()
     require_disposable_copy(&pool).await?;
     let previous = std::env::var("BIGNAME_BENCHMARK_PREVIOUS")?.parse()?;
     let targets = parse_targets(&std::env::var("BIGNAME_BENCHMARK_TARGETS")?)?;
-    let compare = std::env::var("BIGNAME_END_TO_END_COMPARE").as_deref() == Ok("1");
+    let compare = (std::env::var("BIGNAME_END_TO_END_COMPARE").as_deref() == Ok("1"))
+        .then_some(COPY_CHILDREN_PAGE);
     run(&pool, previous, &targets, compare).await?;
     pool.close().await;
     Ok(())
@@ -99,9 +124,16 @@ async fn fixture_corpus_publishes_hydrates_reads_and_matches_a_rebuild() -> Resu
             ),
             1,
         );
+    let seed = seed.replacen(
+        "\nDROP TABLE seed;",
+        &format!("{FIXTURE_SUBNAMES}\nDROP TABLE seed;"),
+        1,
+    );
     ensure!(
-        seed.contains("parent_hash") && seed.contains("block > 1"),
-        "the seed lineage changed shape"
+        seed.contains("parent_hash")
+            && seed.contains("block > 1")
+            && seed.contains("fixture:subname"),
+        "the seed changed shape"
     );
     sqlx::raw_sql(
         &seed
@@ -124,7 +156,7 @@ async fn fixture_corpus_publishes_hydrates_reads_and_matches_a_rebuild() -> Resu
     .execute(pool)
     .await?;
     require_disposable_copy(pool).await?;
-    run(pool, previous, &targets, true).await?;
+    run(pool, previous, &targets, Some(FIXTURE_CHILDREN_PAGE)).await?;
     scratch.cleanup().await
 }
 
@@ -198,7 +230,8 @@ async fn prepare_fixture(pool: &PgPool, previous: i64, interpreted_through: i64)
     Ok(())
 }
 
-async fn run(pool: &PgPool, previous: i64, targets: &[i64], compare: bool) -> Result<()> {
+/// `compare` is the subname page size of the rebuild comparison, when it runs.
+async fn run(pool: &PgPool, previous: i64, targets: &[i64], compare: Option<u64>) -> Result<()> {
     let _ = tracing_subscriber::fmt()
         .with_env_filter("bigname_project::batch=info")
         .with_target(false)
@@ -235,9 +268,16 @@ async fn run(pool: &PgPool, previous: i64, targets: &[i64], compare: bool) -> Re
     store
         .start_phase(CHAIN, PhaseName::Project, &RunMode::Normal)
         .await?;
-    let project = ProjectPhase::with_hydration(pool.clone(), ChainRpcUrls::default());
+    // As main.rs builds it, so the batch log and the metrics handoff fall inside the clock.
+    let metrics_feed = RunnerMetricsFeed::default();
+    let project = ProjectPhase::with_hydration(pool.clone(), ChainRpcUrls::default())
+        .with_metrics_feed(metrics_feed.clone());
     for &number in targets {
         let target = follow_head(pool, number).await?;
+        let baseline = match compare {
+            Some(children_page) => Some(endpoint::Served::read(pool, children_page).await?),
+            None => None,
+        };
         let batch_started: String = sqlx::query_scalar("SELECT clock_timestamp()::text")
             .fetch_one(pool)
             .await?;
@@ -252,6 +292,7 @@ async fn run(pool: &PgPool, previous: i64, targets: &[i64], compare: bool) -> Re
                 outcome.progress(),
             )
             .await?;
+        metrics_feed.batch_committed();
         while load_served_project_generation(pool, CHAIN, number, &target.hash, true, true)
             .await?
             .is_none()
@@ -300,125 +341,49 @@ async fn run(pool: &PgPool, previous: i64, targets: &[i64], compare: bool) -> Re
             hash.as_deref() == Some(INTERPRETER_CONTENT_HASH),
             "the publication does not carry this binary's interpreter hash"
         );
-        if compare {
-            compare_with_rebuild(pool, &project, &target, &rewritten).await?;
+        if let (Some(children_page), Some(baseline)) = (compare, baseline) {
+            let retention = endpoint::Retention::load(
+                pool,
+                baseline,
+                (resume.number + 1, number),
+                resume.number,
+            )
+            .await?;
+            compare_with_rebuild(pool, &project, &target, children_page, &retention).await?;
         }
         resume = target;
     }
     Ok(())
 }
 
-/// Reads every rewritten name and its subname page, rebuilds the target from scratch and commits
-/// it, and requires the same rows again. A name the batch rewrote must match exactly; a subname
-/// row the batch kept may differ only in the target block it names, the one difference a kept
-/// row is allowed.
+/// Reads every name and subname the batch left, rebuilds the target from scratch and commits it,
+/// reads them again and compares. A row that differs must be one the batch was allowed to keep
+/// (see [`endpoint::Retention`]).
 async fn compare_with_rebuild(
     pool: &PgPool,
     project: &ProjectPhase,
     target: &BlockMarker,
-    rewritten: &[String],
+    children_page: u64,
+    retention: &endpoint::Retention,
 ) -> Result<()> {
-    let candidate = endpoint_rows(pool, rewritten).await?;
-    let candidate_keys = name_keys(pool).await?;
+    let candidate = endpoint::Served::read(pool, children_page).await?;
     let started = Instant::now();
     project.run_batch(context(target, None)).await?;
     let rebuild_ms = started.elapsed().as_millis();
-    let reference = endpoint_rows(pool, rewritten).await?;
-    ensure!(
-        candidate_keys == name_keys(pool).await?,
-        "the batch left a different set of names than a rebuild at {}",
-        target.number
-    );
-    ensure!(candidate.names == reference.names, "name rows differ");
-    let mut retained = 0;
-    for ((parent, candidate), (_, reference)) in candidate.children.iter().zip(&reference.children)
-    {
-        ensure!(
-            candidate.len() == reference.len(),
-            "subname pages of {parent} differ in length"
-        );
-        for (kept, rebuilt) in candidate.iter().zip(reference) {
-            if kept == rebuilt {
-                continue;
-            }
-            let mut refreshed = kept.clone();
-            refreshed["chain_positions"]["target_block_number"] = json!(target.number);
-            refreshed["chain_positions"]["target_block_hash"] = json!(target.hash);
-            ensure!(
-                &refreshed == rebuilt,
-                "subname row under {parent} differs from the rebuild: {kept} != {rebuilt}"
-            );
-            retained += 1;
-        }
-    }
+    let rebuilt = endpoint::Served::read(pool, children_page).await?;
+    let stamp = endpoint::Target::load(pool, target.number, &target.hash).await?;
+    let outcome = endpoint::compare(&candidate, &rebuilt, &stamp, retention)?;
     eprintln!(
-        "SEPOLIA_END_TO_END_COMPARE target={} names={} name_keys={} subname_rows={} \
-         retained={retained} rebuild_ms={rebuild_ms} result=equal",
+        "SEPOLIA_END_TO_END_COMPARE target={} names={} subname_rows={} subname_pages={} exact={} \
+         retained={} rebuild_ms={rebuild_ms} result=equal",
         target.number,
         candidate.names.len(),
-        candidate_keys.len(),
-        candidate
-            .children
-            .iter()
-            .map(|(_, rows)| rows.len())
-            .sum::<usize>()
+        candidate.subname_rows(),
+        candidate.pages_read,
+        outcome.exact,
+        outcome.retained,
     );
     Ok(())
-}
-
-struct EndpointRows {
-    names: Vec<String>,
-    children: Vec<(String, Vec<Value>)>,
-}
-
-async fn endpoint_rows(pool: &PgPool, rewritten: &[String]) -> Result<EndpointRows> {
-    let names = load_name_current_by_logical_name_ids(pool, rewritten)
-        .await?
-        .into_values()
-        .map(|mut row| {
-            row.last_recomputed_at = sqlx::types::time::OffsetDateTime::UNIX_EPOCH;
-            format!("{row:?}")
-        })
-        .collect();
-    let mut children = Vec::new();
-    for parent in rewritten {
-        let page = load_children_current_page_filtered(
-            pool,
-            parent,
-            &ChildrenCurrentPageFilter::default(),
-            None,
-            CHILDREN_PAGE,
-        )
-        .await?;
-        let rows = page
-            .rows
-            .into_iter()
-            .map(|row| {
-                json!({
-                    "child": row.child_logical_name_id,
-                    "surface_class": row.surface_class,
-                    "canonical_display_name": row.canonical_display_name,
-                    "labelhash": row.labelhash,
-                    "owner": row.owner,
-                    "registrant": row.registrant,
-                    "provenance": row.provenance,
-                    "chain_positions": row.chain_positions,
-                    "canonicality_summary": row.canonicality_summary,
-                    "manifest_version": row.manifest_version,
-                })
-            })
-            .collect();
-        children.push((parent.clone(), rows));
-    }
-    Ok(EndpointRows { names, children })
-}
-
-async fn name_keys(pool: &PgPool) -> Result<Vec<String>> {
-    Ok(
-        sqlx::query_scalar("SELECT logical_name_id FROM name_current ORDER BY logical_name_id")
-            .fetch_all(pool)
-            .await?,
-    )
 }
 
 async fn publication(pool: &PgPool) -> Result<(Option<i64>, Option<String>, bool)> {

@@ -1,13 +1,22 @@
 //! Every statement Project sends to PostgreSQL starts with a `/* project:<name> */` comment, so the
 //! slow log, `pg_stat_activity` and `pg_stat_statements` name the statement that did the work.
 //!
-//! The guard reads the production sources of `crates/project/src` as text:
+//! The guard reads the production sources of `crates/project/src` as text, and finds statements
+//! without relying on the identifiers it checks for:
 //!
 //! - every `.sql` file: with `--` comments removed, each `;`-separated statement starts with an
 //!   identifier, and the file's first line is one;
-//! - every Rust string literal outside test code whose text starts with an SQL command keyword:
-//!   the literal starts with an identifier. Fragments spliced into a larger statement carry one too;
-//!   PostgreSQL treats the nested comment as whitespace.
+//! - every Rust string literal outside test code that is a statement start: after any leading
+//!   comments, its first word is an SQL command keyword in any letter case. It must carry an
+//!   identifier among those leading comments. Fragments spliced into a larger statement carry one
+//!   too; PostgreSQL treats the nested comment as whitespace;
+//! - every execution site: each `sqlx::query`, `query_as`, `query_scalar`, `query_with` and
+//!   `raw_sql` call, and each executor call given a string literal. A site given a literal, or a
+//!   `format!` of one, must name it whatever its first word; a site given `include_str!` must
+//!   include a `.sql` file under `src`, which the first rule checks. A site given a value built
+//!   elsewhere (a constant, a loop variable, a `format!` bound earlier) is counted: that value's
+//!   text comes from literals and `.sql` files the first two rules check. Importing the sqlx
+//!   constructors unqualified is refused, so no site can hide from this search.
 //!
 //! Test code is a file reached through a `#[cfg(test)]` module declaration, or an item or statement
 //! under `#[cfg(test)]` inside a production file. Names are unique across the crate; a name built
@@ -23,7 +32,24 @@ const MARKER_CLOSE: &str = " */";
 const KEYWORDS: &[&str] = &[
     "SELECT", "WITH", "INSERT", "UPDATE", "DELETE", "MERGE", "VALUES", "CREATE", "ALTER", "DROP",
     "TRUNCATE", "ANALYZE", "VACUUM", "SET", "RESET", "SHOW", "LOCK", "DECLARE", "FETCH", "CLOSE",
-    "EXPLAIN", "COPY", "CALL",
+    "EXPLAIN", "COPY", "CALL", "TABLE",
+];
+const CONSTRUCTORS: &[&str] = &[
+    "query",
+    "query_as",
+    "query_scalar",
+    "query_with",
+    "query_as_with",
+    "query_scalar_with",
+    "raw_sql",
+];
+const EXECUTORS: &[&str] = &[
+    "execute",
+    "fetch",
+    "fetch_all",
+    "fetch_one",
+    "fetch_optional",
+    "fetch_many",
 ];
 
 #[test]
@@ -34,20 +60,128 @@ fn every_production_statement_starts_with_an_identifier() {
     collect(&source_root, &mut rust_files, &mut sql_files);
     let gated = gated_files(&rust_files);
 
-    let mut failures = Vec::new();
-    let mut names: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    let mut rust_sites = 0_usize;
-    let mut sql_statements = 0_usize;
-    let mut markers_in_text = 0_usize;
-
+    let mut report = Report::default();
     for path in &sql_files {
-        let text = fs::read_to_string(path).unwrap();
+        report.check_sql(
+            &relative(&source_root, path),
+            &fs::read_to_string(path).unwrap(),
+        );
+    }
+    for path in rust_files.iter().filter(|path| !gated.contains(*path)) {
         let place = relative(&source_root, path);
-        markers_in_text += text.matches(MARKER_OPEN).count();
+        let text = fs::read_to_string(path).unwrap();
+        report.check_rust(&place, &text, |included| {
+            let file = normalize(&path.parent().unwrap().join(included));
+            file.starts_with(&source_root) && sql_files.iter().any(|sql| normalize(sql) == file)
+        });
+    }
+    report.check_names();
+    println!(
+        "statement identifiers: {} Rust statement sites, {} statements in {} .sql files, {} \
+         identified, {} identifiers in the text; {} execution sites, {} of them given a value \
+         built elsewhere",
+        report.rust_sites,
+        report.sql_statements,
+        sql_files.len(),
+        report.identified(),
+        report.markers_in_text,
+        report.execution_sites,
+        report.indirect_sites,
+    );
+    assert!(
+        report.failures.is_empty(),
+        "{} statement identifier failures:\n{}",
+        report.failures.len(),
+        report.failures.join("\n")
+    );
+    assert_eq!(
+        report.markers_in_text,
+        report.rust_sites + report.sql_statements,
+        "an identifier appears outside a statement start"
+    );
+}
+
+#[test]
+fn an_unnamed_lowercase_statement_fails() {
+    let report = check_one(r#"async fn f() { sqlx::query("select 1").execute(&pool).await; }"#);
+    assert_eq!(report.failures.len(), 2, "{:?}", report.failures);
+    assert!(
+        report
+            .failures
+            .iter()
+            .all(|failure| failure.contains("select 1"))
+    );
+}
+
+#[test]
+fn an_ordinary_leading_comment_does_not_name_a_statement() {
+    for text in [
+        "fn f() { sqlx::query(\"-- counts names\\nSELECT count(*) FROM name_current\"); }",
+        "fn f() { sqlx::query(\"/* counts names */ SELECT count(*) FROM name_current\"); }",
+    ] {
+        let report = check_one(text);
+        assert_eq!(report.failures.len(), 2, "{text}: {:?}", report.failures);
+    }
+}
+
+#[test]
+fn a_site_passes_only_a_named_literal_or_an_included_sql_file() {
+    let report = check_one(
+        "fn f() {
+             sqlx::query(\"/* project:a.one */ select 1\");
+             sqlx::query_scalar::<_, i64>(&format!(\"/* project:a.two */ SELECT {n}\"));
+             sqlx::query(include_str!(\"a/three.sql\"));
+             sqlx::query(statement);
+         }",
+    );
+    assert!(report.failures.is_empty(), "{:?}", report.failures);
+    assert_eq!((report.execution_sites, report.indirect_sites), (4, 1));
+
+    // A literal that does not start with a keyword is still a statement when it is executed.
+    let report = check_one("fn f() { sqlx::query(\"(select 1) union (select 2)\"); }");
+    assert_eq!(report.failures.len(), 1, "{:?}", report.failures);
+    let report = check_one("fn f() { sqlx::query(include_str!(\"../../elsewhere.sql\")); }");
+    assert_eq!(report.failures.len(), 1, "{:?}", report.failures);
+    let report = check_one("fn f() { tx.execute(\"SET LOCAL jit = off\"); }");
+    assert_eq!(report.failures.len(), 2, "{:?}", report.failures);
+    let report = check_one("use sqlx::{Postgres, raw_sql};");
+    assert_eq!(report.failures.len(), 1, "{:?}", report.failures);
+    // Test code is out of scope.
+    let report = check_one("#[cfg(test)]\nmod tests { fn f() { sqlx::query(\"select 1\"); } }");
+    assert!(report.failures.is_empty(), "{:?}", report.failures);
+}
+
+fn check_one(text: &str) -> Report {
+    let mut report = Report::default();
+    report.check_rust("example.rs", text, |included| {
+        included.starts_with("a/") && included.ends_with(".sql")
+    });
+    report
+}
+
+#[derive(Default)]
+struct Report {
+    failures: Vec<String>,
+    names: BTreeMap<String, Vec<String>>,
+    rust_sites: usize,
+    sql_statements: usize,
+    markers_in_text: usize,
+    execution_sites: usize,
+    indirect_sites: usize,
+}
+
+impl Report {
+    fn identified(&self) -> usize {
+        self.names.values().map(Vec::len).sum()
+    }
+
+    fn check_sql(&mut self, place: &str, text: &str) {
+        self.markers_in_text += text.matches(MARKER_OPEN).count();
         if marker_name(text.lines().next().unwrap_or_default())
             .is_none_or(|(_, rest)| !rest.trim().is_empty())
         {
-            failures.push(format!("{place}: first line is not a statement identifier"));
+            self.failures
+                .push(format!("{place}: first line is not a statement identifier"));
         }
         let without_comments = text
             .lines()
@@ -60,10 +194,10 @@ fn every_production_statement_starts_with_an_identifier() {
             .filter(|statement| !statement.trim().is_empty())
             .enumerate()
         {
-            sql_statements += 1;
+            self.sql_statements += 1;
             match marker_name(statement) {
-                Some((name, _)) => names.entry(name).or_default().push(place.clone()),
-                None => failures.push(format!(
+                Some((name, _)) => self.names.entry(name).or_default().push(place.to_owned()),
+                None => self.failures.push(format!(
                     "{place}: statement {} does not start with an identifier",
                     index + 1
                 )),
@@ -71,69 +205,236 @@ fn every_production_statement_starts_with_an_identifier() {
         }
     }
 
-    for path in rust_files.iter().filter(|path| !gated.contains(*path)) {
-        let text = fs::read_to_string(path).unwrap();
-        let place = relative(&source_root, path);
-        let scanned = Scanned::new(&text);
+    /// `included_sql` says whether an `include_str!` path, relative to the file, is a checked
+    /// `.sql` file.
+    fn check_rust(&mut self, place: &str, text: &str, included_sql: impl Fn(&str) -> bool) {
+        let scanned = Scanned::new(text);
         let test_ranges = scanned.test_ranges();
-        for literal in &scanned.literals {
-            if test_ranges
+        let in_test = |offset: usize| {
+            test_ranges
                 .iter()
-                .any(|range| range.0 <= literal.start && literal.start < range.1)
-            {
+                .any(|range| range.0 <= offset && offset < range.1)
+        };
+        let line = |offset: usize| text[..offset].matches('\n').count() + 1;
+        let excerpt = |literal: &Literal| {
+            literal
+                .text
+                .trim_start()
+                .chars()
+                .take(60)
+                .collect::<String>()
+                .replace('\n', " ")
+        };
+        for literal in scanned
+            .literals
+            .iter()
+            .filter(|literal| !in_test(literal.start))
+        {
+            self.markers_in_text += literal.text.matches(MARKER_OPEN).count();
+            let leading = Leading::of(&literal.text);
+            if leading.marker.is_none() && !leading.keyword {
                 continue;
             }
-            markers_in_text += literal.text.matches(MARKER_OPEN).count();
-            let body = literal.text.trim_start();
-            let is_statement = marker_name(body).is_some()
-                || KEYWORDS.iter().any(|keyword| {
-                    body.strip_prefix(keyword).is_some_and(|rest| {
-                        rest.is_empty() || rest.starts_with(|c: char| !c.is_ascii_alphanumeric())
-                    })
-                });
-            if !is_statement {
-                continue;
-            }
-            rust_sites += 1;
-            let line = text[..literal.start].matches('\n').count() + 1;
-            match marker_name(&literal.text) {
-                Some((name, _)) => names
+            self.rust_sites += 1;
+            match leading.marker {
+                Some(name) => self
+                    .names
                     .entry(name)
                     .or_default()
-                    .push(format!("{place}:{line}")),
-                None => failures.push(format!(
-                    "{place}:{line}: statement does not start with an identifier: {}",
-                    body.chars().take(60).collect::<String>().replace('\n', " ")
+                    .push(format!("{place}:{}", line(literal.start))),
+                None => self.failures.push(format!(
+                    "{place}:{}: statement does not start with an identifier: {}",
+                    line(literal.start),
+                    excerpt(literal)
                 )),
+            }
+        }
+        let code = String::from_utf8_lossy(&scanned.code).into_owned();
+        for import in code.match_indices("use sqlx::").map(|(offset, _)| offset) {
+            let statement = &code[import
+                ..code[import..]
+                    .find(';')
+                    .map_or(code.len(), |end| import + end)];
+            if !in_test(import)
+                && CONSTRUCTORS.iter().any(|name| {
+                    statement
+                        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                        .any(|word| word == *name)
+                })
+            {
+                self.failures.push(format!(
+                    "{place}:{}: import sqlx statement constructors qualified, as sqlx::query",
+                    line(import)
+                ));
+            }
+        }
+        for site in execution_sites(&code) {
+            if in_test(site.offset) {
+                continue;
+            }
+            // Literals are blanked in `code`, so the argument is read from the source text.
+            let literal_at = |offset: usize| {
+                let offset = offset + (text[offset..].len() - text[offset..].trim_start().len());
+                scanned
+                    .literals
+                    .iter()
+                    .find(|literal| literal.start == offset)
+            };
+            let argument = text[site.argument..].trim_start();
+            let argument_offset = text.len() - argument.len();
+            let direct = if let Some(rest) = argument
+                .strip_prefix('&')
+                .unwrap_or(argument)
+                .strip_prefix("format!(")
+            {
+                literal_at(text.len() - rest.len())
+            } else if let Some(rest) = argument.strip_prefix("include_str!(") {
+                let path = literal_at(text.len() - rest.len());
+                self.execution_sites += 1;
+                if !path.is_some_and(|path| path.text.ends_with(".sql") && included_sql(&path.text))
+                {
+                    self.failures.push(format!(
+                        "{place}:{}: include_str! of something other than a .sql file under src",
+                        line(site.offset)
+                    ));
+                }
+                continue;
+            } else {
+                literal_at(argument_offset + usize::from(argument.starts_with('&')))
+            };
+            match direct {
+                Some(literal) => {
+                    self.execution_sites += 1;
+                    if Leading::of(&literal.text).marker.is_none() {
+                        self.failures.push(format!(
+                            "{place}:{}: executes an unnamed statement: {}",
+                            line(site.offset),
+                            excerpt(literal)
+                        ));
+                    }
+                }
+                // Executor calls take a connection unless given a literal.
+                None if site.executor => {}
+                None => {
+                    self.execution_sites += 1;
+                    self.indirect_sites += 1;
+                }
             }
         }
     }
 
-    for (name, places) in &names {
-        if places.len() > 1 {
-            failures.push(format!(
-                "identifier {name} is used by {}",
-                places.join(", ")
-            ));
+    fn check_names(&mut self) {
+        for (name, places) in &self.names {
+            if places.len() > 1 {
+                self.failures.push(format!(
+                    "identifier {name} is used by {}",
+                    places.join(", ")
+                ));
+            }
         }
     }
-    let identified = names.values().map(Vec::len).sum::<usize>();
-    println!(
-        "statement identifiers: {rust_sites} Rust statement sites, {sql_statements} statements in \
-         {} .sql files, {identified} identified, {markers_in_text} identifiers in the text",
-        sql_files.len()
-    );
-    assert!(
-        failures.is_empty(),
-        "{} statement identifier failures:\n{}",
-        failures.len(),
-        failures.join("\n")
-    );
-    assert_eq!(
-        markers_in_text,
-        rust_sites + sql_statements,
-        "an identifier appears outside a statement start"
-    );
+}
+
+/// The comments before a statement's first word, and whether that word is a command keyword.
+struct Leading {
+    marker: Option<String>,
+    keyword: bool,
+}
+
+impl Leading {
+    fn of(text: &str) -> Self {
+        let mut rest = text.trim_start();
+        let mut marker = None;
+        loop {
+            if let Some((name, after)) = marker_name(rest) {
+                marker.get_or_insert(name);
+                rest = after.trim_start();
+            } else if let Some(comment) = rest.strip_prefix("/*") {
+                rest = comment
+                    .find("*/")
+                    .map_or("", |end| &comment[end + 2..])
+                    .trim_start();
+            } else if let Some(comment) = rest.strip_prefix("--") {
+                rest = comment
+                    .find('\n')
+                    .map_or("", |end| &comment[end..])
+                    .trim_start();
+            } else {
+                break;
+            }
+        }
+        let word = rest
+            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .next()
+            .unwrap_or_default();
+        Self {
+            marker,
+            keyword: KEYWORDS
+                .iter()
+                .any(|keyword| keyword.eq_ignore_ascii_case(word)),
+        }
+    }
+}
+
+struct Site {
+    /// Where the call's name starts.
+    offset: usize,
+    /// Just after the call's opening parenthesis.
+    argument: usize,
+    executor: bool,
+}
+
+/// Calls of the sqlx statement constructors and executor methods in code with literals and
+/// comments blanked out.
+fn execution_sites(code: &str) -> Vec<Site> {
+    let mut sites = Vec::new();
+    let bytes = code.as_bytes();
+    let is_ident = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'_';
+    let mut index = 0;
+    while index < bytes.len() {
+        if !is_ident(bytes[index]) || (index > 0 && is_ident(bytes[index - 1])) {
+            index += 1;
+            continue;
+        }
+        let end = index
+            + code[index..]
+                .bytes()
+                .take_while(|byte| is_ident(*byte))
+                .count();
+        let word = &code[index..end];
+        let before = code[..index].trim_end();
+        let constructor = CONSTRUCTORS.contains(&word) && before.ends_with("sqlx::");
+        let executor = EXECUTORS.contains(&word) && before.ends_with('.');
+        if constructor || executor {
+            let mut after = end;
+            if code[after..].starts_with("::<") {
+                let mut depth = 0_i32;
+                for (offset, byte) in code[after + 2..].bytes().enumerate() {
+                    match byte {
+                        b'<' => depth += 1,
+                        b'>' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                after += 2 + offset + 1;
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            let rest = &code[after..];
+            if let Some(open) = rest.trim_start().strip_prefix('(') {
+                sites.push(Site {
+                    offset: index,
+                    argument: code.len() - open.len(),
+                    executor,
+                });
+            }
+        }
+        index = end;
+    }
+    sites
 }
 
 /// `/* project:<name> */` at the start of `text`: the name and what follows the comment.

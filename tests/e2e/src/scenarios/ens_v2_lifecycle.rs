@@ -2,12 +2,12 @@ use std::collections::BTreeSet;
 
 use alloy_primitives::{Address, U256, keccak256};
 use anyhow::{Context, Result};
-use serde_json::Value;
+use serde_json::{Value, json};
 use sqlx::types::{Uuid, time::OffsetDateTime};
 
 use super::support;
 use crate::harness::responses::pointer;
-use crate::harness::{anvil::Anvil, ens_v2, repo_root};
+use crate::harness::{anvil::Anvil, ens_v2, pipeline, repo_root};
 
 const YEAR: u64 = 365 * 24 * 60 * 60;
 const MONTH: u64 = 30 * 24 * 60 * 60;
@@ -358,6 +358,380 @@ async fn resolver_and_subregistry_edges_follow_set_change_zero() -> Result<()> {
     Ok(())
 }
 
+/// A name served from a subregistry follows the parent's current pointer. After
+/// `trusted.eth` moves from child registry A to child registry B, and `cut.eth`
+/// detaches its child registry C, A and C are still indexed but their
+/// registrations are no longer the names' current resources. Both the full redo
+/// derivation and normal intake resumed across the pointer change agree.
+#[tokio::test]
+async fn a_replaced_subregistry_stops_serving_its_old_child() -> Result<()> {
+    let anvil = Anvil::spawn_ethereum_sepolia().await?;
+    let rpc = anvil.client();
+    let deployment = ens_v2::deploy_ens_v2(&rpc, &repo_root()).await?;
+    let accounts = rpc.accounts().await?;
+    let (alice, bob, carol) = (accounts[1], accounts[2], accounts[3]);
+    let resolver_a: Address = "0x00000000000000000000000000000000000a11a1".parse()?;
+    let resolver_b: Address = "0x00000000000000000000000000000000000b11b1".parse()?;
+    let expiry = u64::try_from(rpc.block_timestamp().await?)? + YEAR;
+
+    let mut children = Vec::new();
+    for parent_label in ["trusted", "cut"] {
+        let child = ens_v2::deploy_child_registry(&rpc, &repo_root(), &deployment).await?;
+        ens_v2::register_eth_name(
+            &rpc,
+            &deployment,
+            ens_v2::RegisterEthName {
+                from: alice,
+                label: parent_label,
+                owner: alice,
+                duration_secs: YEAR,
+                subregistry: child.address,
+                resolver: Address::ZERO,
+            },
+        )
+        .await?;
+        ens_v2::set_parent(
+            &rpc,
+            child.address,
+            deployment.deployer,
+            deployment.eth_registry.address,
+            parent_label,
+        )
+        .await?;
+        children.push(child);
+    }
+    for (registry, label) in [
+        (children[0].address, "leaf"),
+        (children[1].address, "orphan"),
+    ] {
+        let receipt = ens_v2::register_in_registry_with(
+            &rpc,
+            registry,
+            deployment.deployer,
+            label,
+            bob,
+            ens_v2::role_bit(ens_v2::ROLE_SET_RESOLVER),
+            resolver_a,
+            expiry,
+        )
+        .await?;
+        anyhow::ensure!(receipt.status_ok, "{label} registration reverted");
+    }
+
+    let leaf_id = support::schema_v2_logical_name_id("ens:leaf.trusted.eth");
+    let orphan_id = support::schema_v2_logical_name_id("ens:orphan.cut.eth");
+    let attached = support::ingest_ens_v2_sepolia_and_serve(
+        &anvil,
+        &deployment,
+        Some(
+            "SELECT count(DISTINCT after_state->>'label') = 2 FROM normalized_events \
+             WHERE after_state->>'label' IN ('leaf', 'orphan') \
+               AND event_kind = 'RegistrationGranted' AND canonicality_state = 'canonical'",
+        ),
+    )
+    .await?;
+    for name in ["leaf.trusted.eth", "orphan.cut.eth"] {
+        let served = served_subregistry_name(&attached, name).await?;
+        assert_eq!(
+            (served.registrant.as_deref(), served.resolver.as_deref()),
+            (
+                Some(format!("{bob:#x}").as_str()),
+                Some(format!("{resolver_a:#x}").as_str())
+            ),
+            "{name} is served from its attached child registry: {served:?}"
+        );
+    }
+    let leaf_resource_a = name_resource(&attached.db.pool, &leaf_id).await?;
+    let orphan_resource = name_resource(&attached.db.pool, &orphan_id).await?;
+    attached.db.cleanup().await?;
+    let mut normal = support::IncrementalEnsV2Http::start(&deployment).await?;
+    normal
+        .prove_through_head(
+            &anvil,
+            &[
+                ("leaf.trusted.eth", format!("{bob:#x}")),
+                ("orphan.cut.eth", format!("{bob:#x}")),
+            ],
+        )
+        .await?;
+
+    // Point trusted.eth at child registry B, which names the same parent and then
+    // registers its own `leaf` for carol, and detach cut.eth's child registry.
+    let child_b = ens_v2::deploy_child_registry(&rpc, &repo_root(), &deployment).await?;
+    ens_v2::set_parent(
+        &rpc,
+        child_b.address,
+        deployment.deployer,
+        deployment.eth_registry.address,
+        "trusted",
+    )
+    .await?;
+    for (label, target) in [("trusted", child_b.address), ("cut", Address::ZERO)] {
+        ens_v2::attach_subregistry(
+            &rpc,
+            deployment.eth_registry.address,
+            alice,
+            ens_v2::label_id(label),
+            target,
+        )
+        .await?;
+    }
+    let receipt = ens_v2::register_in_registry_with(
+        &rpc,
+        child_b.address,
+        deployment.deployer,
+        "leaf",
+        carol,
+        ens_v2::role_bit(ens_v2::ROLE_SET_RESOLVER),
+        resolver_b,
+        expiry,
+    )
+    .await?;
+    anyhow::ensure!(receipt.status_ok, "replacement leaf registration reverted");
+
+    let mut moved = support::ingest_ens_v2_sepolia_and_serve(
+        &anvil,
+        &deployment,
+        Some(
+            "SELECT count(DISTINCT resource_id) = 2 FROM normalized_events \
+             WHERE after_state->>'label' = 'leaf' AND event_kind = 'RegistrationGranted' \
+               AND canonicality_state = 'canonical'",
+        ),
+    )
+    .await?;
+    let leaf = served_subregistry_name(&moved, "leaf.trusted.eth").await?;
+    let leaf_resource_b = name_resource(&moved.db.pool, &leaf_id).await?;
+    assert_ne!(leaf_resource_b, leaf_resource_a, "{leaf:?}");
+    assert_eq!(
+        leaf.resource_id,
+        Some(leaf_resource_b.to_string()),
+        "{leaf:?}"
+    );
+    assert_eq!(leaf.records_resource_id, leaf.resource_id, "{leaf:?}");
+    assert_eq!(leaf.registrant, Some(format!("{carol:#x}")), "{leaf:?}");
+    assert_eq!(leaf.resolver, Some(format!("{resolver_b:#x}")), "{leaf:?}");
+    assert_eq!(leaf.records_resolver, leaf.resolver, "{leaf:?}");
+    assert_eq!(leaf.expiry, Some(json!(expiry)), "{leaf:?}");
+
+    let orphan = served_subregistry_name(&moved, "orphan.cut.eth").await?;
+    assert_eq!(
+        orphan.resource_id,
+        Some(orphan_resource.to_string()),
+        "{orphan:?}"
+    );
+    assert_eq!(
+        orphan.registration_status.as_deref(),
+        Some("released"),
+        "{orphan:?}"
+    );
+    assert_eq!(
+        orphan.control_status.as_deref(),
+        Some("unregistered"),
+        "{orphan:?}"
+    );
+    assert_eq!(
+        (
+            &orphan.registrant,
+            &orphan.resolver,
+            &orphan.records_resolver,
+            &orphan.expiry
+        ),
+        (&None, &None, &None, &None),
+        "a detached registry's child keeps no owner, resolver, records or expiry: {orphan:?}"
+    );
+
+    let expected = MovedOverHttp {
+        leaf_owner: format!("{carol:#x}"),
+        leaf_registration_id: leaf_resource_b.to_string(),
+        // Project formats the registry expiry into `control.expiry`; the API serves it as is.
+        leaf_expires_at: sqlx::query_scalar(
+            "SELECT declared_summary #>> '{control,expiry}' FROM name_current \
+             WHERE logical_name_id = $1",
+        )
+        .bind(&leaf_id)
+        .fetch_one(&moved.db.pool)
+        .await?,
+        leaf_resolver: format!("{resolver_b:#x}"),
+    };
+    assert_moved_over_http(&mut moved.db, &anvil, &expected, "full derivation").await?;
+
+    // Normal intake resumed across the pointer change lands on the same rows.
+    normal
+        .prove_through_head(&anvil, &[("leaf.trusted.eth", format!("{carol:#x}"))])
+        .await?;
+    assert_moved_over_http(&mut normal.db, &anvil, &expected, "resumed normal intake").await?;
+    for logical_name_id in [&leaf_id, &orphan_id] {
+        assert_eq!(
+            current_name_facts(&normal.db.pool, logical_name_id).await?,
+            current_name_facts(&moved.db.pool, logical_name_id).await?,
+            "normal intake and the full derivation disagree on {logical_name_id}"
+        );
+    }
+    normal.cleanup().await?;
+    moved.db.cleanup().await?;
+    Ok(())
+}
+
+struct MovedOverHttp {
+    leaf_owner: String,
+    leaf_registration_id: String,
+    leaf_expires_at: String,
+    leaf_resolver: String,
+}
+
+/// The production API's answers for both names once `trusted.eth` points at
+/// child registry B and `cut.eth` has detached its child registry.
+async fn assert_moved_over_http(
+    db: &mut crate::harness::db::HarnessDb,
+    anvil: &Anvil,
+    expected: &MovedOverHttp,
+    path: &str,
+) -> Result<()> {
+    let api = pipeline::ProductionApi::start(&repo_root(), db, &anvil.url).await?;
+    let get = |route: &'static str| {
+        let api = &api;
+        async move {
+            let (status, body) = api.get_indexed(route).await?;
+            anyhow::ensure!(status == 200, "{path} {route}: {status} {body}");
+            Ok::<_, anyhow::Error>(body)
+        }
+    };
+    let leaf = get("/v1/names/leaf.trusted.eth").await?;
+    for (field, value) in [
+        ("owner", &expected.leaf_owner),
+        ("registrant", &expected.leaf_owner),
+        ("registration_id", &expected.leaf_registration_id),
+        ("expires_at", &expected.leaf_expires_at),
+    ] {
+        assert_eq!(
+            leaf["data"][field],
+            json!(value),
+            "{path} leaf {field}: {leaf}"
+        );
+    }
+    assert_eq!(
+        leaf["data"]["registration_status"], "registered",
+        "{path}: {leaf}"
+    );
+    assert_eq!(
+        leaf["data"]["resolver"]["address"],
+        json!(expected.leaf_resolver),
+        "{path}: {leaf}"
+    );
+    let leaf_records = get("/v1/names/leaf.trusted.eth/records").await?;
+    assert_eq!(
+        leaf_records["data"]["resolver"]["address"],
+        json!(expected.leaf_resolver),
+        "{path}: {leaf_records}"
+    );
+
+    let orphan = get("/v1/names/orphan.cut.eth").await?;
+    assert_eq!(
+        orphan["data"]["registration_status"], "released",
+        "{path}: {orphan}"
+    );
+    for field in ["owner", "registrant", "expires_at", "resolver"] {
+        assert_eq!(
+            orphan["data"].get(field),
+            None,
+            "{path} orphan {field}: {orphan}"
+        );
+    }
+    let orphan_records = get("/v1/names/orphan.cut.eth/records").await?;
+    // The records route always carries `resolver`; with none selected it is an explicit null.
+    assert_eq!(
+        (
+            orphan_records["data"].get("resolver"),
+            orphan_records["data"].get("records")
+        ),
+        (Some(&Value::Null), Some(&json!({}))),
+        "{path}: {orphan_records}"
+    );
+    let orphan_keys = get("/v1/names/orphan.cut.eth/records?keys=text:url,addr:60").await?;
+    let answers = orphan_keys["data"]["records"]
+        .as_object()
+        .context("orphan records by key")?;
+    assert_eq!(answers.len(), 2, "{path}: {orphan_keys}");
+    assert!(
+        answers
+            .values()
+            .all(|answer| answer["status"] != "ok" && answer.get("value").is_none()),
+        "a detached registry's child serves no record value: {path} {orphan_keys}"
+    );
+    api.stop().await?;
+    Ok(())
+}
+
+#[derive(Debug)]
+struct ServedSubregistryName {
+    resource_id: Option<String>,
+    registration_status: Option<String>,
+    control_status: Option<String>,
+    registrant: Option<String>,
+    expiry: Option<Value>,
+    resolver: Option<String>,
+    records_resolver: Option<String>,
+    records_resource_id: Option<String>,
+}
+
+async fn served_subregistry_name(
+    run: &support::PipelineRun,
+    name: &str,
+) -> Result<ServedSubregistryName> {
+    let text = |body: &Value, path: &str| {
+        body.pointer(path)
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    };
+    let (status, body) = run
+        .api
+        .get_json(&format!("/v1/names/ens/{name}?chain=ethereum-sepolia"))
+        .await?;
+    anyhow::ensure!(status == 200, "{name}: {body}");
+    anyhow::ensure!(
+        pointer(&body, "/support_status") == "supported",
+        "{name}: {body}"
+    );
+    let (status, records) = run
+        .api
+        .get_json(&format!(
+            "/v1/names/ens/{name}/records?chain=ethereum-sepolia"
+        ))
+        .await?;
+    anyhow::ensure!(status == 200, "{name} records: {records}");
+    Ok(ServedSubregistryName {
+        resource_id: text(&body, "/data/resource_id"),
+        registration_status: text(&body, "/declared_state/registration/status"),
+        control_status: text(&body, "/declared_state/control/status"),
+        registrant: text(&body, "/declared_state/registration/registrant"),
+        expiry: body
+            .pointer("/declared_state/registration/expiry")
+            .filter(|expiry| !expiry.is_null())
+            .cloned(),
+        resolver: text(&body, "/declared_state/resolver/address"),
+        records_resolver: text(&records, "/data/resolver_address"),
+        records_resource_id: text(
+            &records,
+            "/declared_state/record_inventory/record_version_boundary/resource_id",
+        ),
+    })
+}
+
+async fn current_name_facts(pool: &sqlx::PgPool, logical_name_id: &str) -> Result<Value> {
+    Ok(sqlx::query_scalar(
+        "SELECT jsonb_build_object(
+             'resource_id', resource_id,
+             'support_status', support_status,
+             'registration', (declared_summary -> 'registration') - 'latest_event_kind',
+             'control', declared_summary -> 'control',
+             'resolver', declared_summary #> '{resolver,address}')
+         FROM name_current WHERE logical_name_id = $1",
+    )
+    .bind(logical_name_id)
+    .fetch_one(pool)
+    .await?)
+}
+
 /// Row 5: registry expiry passes with no transaction (a state-derived flip),
 /// the registrar grace period then passes, and the name re-registers, advancing
 /// lineage on two LabelRegistered derivations with no unregister and no token
@@ -648,8 +1022,10 @@ async fn root_apex_attach_and_root_scope_roles() -> Result<()> {
 
 /// Rows 7, 8, and 2: reserved labels promote in place preserving expiry, a
 /// non-admitted root-role holder registers with registry-only provenance and
-/// gated coverage, and ERC1155 single and batch sales transfer token control
-/// without regenerating the token.
+/// is served like a registrar registration, a subregistry admitted by
+/// discovery serves its own direct registration the same way, and ERC1155
+/// single and batch sales transfer token control without regenerating the
+/// token.
 #[tokio::test]
 async fn reserved_labels_foreign_registrar_and_token_sale() -> Result<()> {
     let anvil = Anvil::spawn_ethereum_sepolia().await?;
@@ -714,6 +1090,42 @@ async fn reserved_labels_foreign_registrar_and_token_sale() -> Result<()> {
     .await?;
     anyhow::ensure!(foreign_receipt.status_ok, "foreign registration reverted");
 
+    // A registry reached from ETHRegistry through a subregistry edge is
+    // admitted by discovery. The child names its parent so both sides agree
+    // on `trusted.eth`, and its owner then registers a label directly, with
+    // no registrar involved.
+    let child = ens_v2::deploy_child_registry(&rpc, &repo_root(), &deployment).await?;
+    ens_v2::register_eth_name(
+        &rpc,
+        &deployment,
+        ens_v2::RegisterEthName {
+            from: alice,
+            label: "trusted",
+            owner: alice,
+            duration_secs: YEAR,
+            subregistry: child.address,
+            resolver: Address::ZERO,
+        },
+    )
+    .await?;
+    ens_v2::set_parent(
+        &rpc,
+        child.address,
+        deployment.deployer,
+        deployment.eth_registry.address,
+        "trusted",
+    )
+    .await?;
+    ens_v2::register_in_registry(
+        &rpc,
+        child.address,
+        deployment.deployer,
+        "leaf",
+        bob,
+        u64::try_from(rpc.block_timestamp().await?)? + YEAR,
+    )
+    .await?;
+
     // Row 2: a registrar-registered name changes hands by ERC1155 transfer.
     let sale = ens_v2::register_eth_name(
         &rpc,
@@ -775,6 +1187,10 @@ async fn reserved_labels_foreign_registrar_and_token_sale() -> Result<()> {
            WHERE after_state->>'label' = 'foreign' \
              AND event_kind = 'RegistrationGranted' \
              AND canonicality_state = 'canonical') \
+         AND EXISTS (SELECT 1 FROM normalized_events \
+           WHERE after_state->>'label' = 'leaf' \
+             AND event_kind = 'RegistrationGranted' \
+             AND canonicality_state = 'canonical') \
          AND (SELECT count(*) FROM normalized_events \
            WHERE event_kind = 'TokenControlTransferred' \
              AND transaction_hash = '{sale_tx}' \
@@ -827,8 +1243,8 @@ async fn reserved_labels_foreign_registrar_and_token_sale() -> Result<()> {
     );
     assert_eq!(promoted["registrant"], format!("{bob:#x}"));
 
-    // Row 8 pins: registry-only provenance, no registrar fragment, coverage
-    // stays gated.
+    // Row 8 pins: registry-only provenance and no registrar fragment. The
+    // registration in the admitted ETHRegistry is served on its own.
     let foreign_families: Vec<String> = sqlx::query_scalar(
         "SELECT DISTINCT source_family FROM normalized_events \
          WHERE transaction_hash = $1 AND canonicality_state = 'canonical'",
@@ -849,7 +1265,49 @@ async fn reserved_labels_foreign_registrar_and_token_sale() -> Result<()> {
     assert_eq!(
         pointer(&foreign_body, "/coverage/status"),
         "projected",
-        "foreign registration remains a projected unsupported surface: {foreign_body}"
+        "foreign registration remains projected: {foreign_body}"
+    );
+    assert_eq!(
+        pointer(&foreign_body, "/support_status"),
+        "supported",
+        "a registration in the admitted ETHRegistry needs no registrar event: {foreign_body}"
+    );
+    assert_eq!(
+        pointer(&foreign_body, "/coverage/unsupported_reason"),
+        Value::Null,
+        "{foreign_body}"
+    );
+    assert_eq!(
+        pointer(&foreign_body, "/declared_state/registration/registrant"),
+        format!("{carol:#x}"),
+        "{foreign_body}"
+    );
+
+    let leaf_families: Vec<String> = sqlx::query_scalar(
+        "SELECT DISTINCT source_family FROM normalized_events \
+         WHERE after_state->>'label' = 'leaf' AND canonicality_state = 'canonical'",
+    )
+    .fetch_all(&run.db.pool)
+    .await?;
+    assert_eq!(
+        leaf_families,
+        vec!["ens_v2_registry_l1".to_owned()],
+        "the subregistry registration derives registry-only"
+    );
+    let (status, leaf_body) = run
+        .api
+        .get_json("/v1/names/ens/leaf.trusted.eth?chain=ethereum-sepolia")
+        .await?;
+    assert_eq!(status, 200, "leaf.trusted.eth lookup failed: {leaf_body}");
+    assert_eq!(
+        pointer(&leaf_body, "/support_status"),
+        "supported",
+        "a registration in a discovered registry needs no registrar event: {leaf_body}"
+    );
+    assert_eq!(
+        pointer(&leaf_body, "/declared_state/registration/registrant"),
+        format!("{bob:#x}"),
+        "{leaf_body}"
     );
 
     // Row 2 pins the canonical token-control event. The accompanying role
@@ -1193,6 +1651,8 @@ async fn reserved_labels_foreign_registrar_and_token_sale() -> Result<()> {
             ("sale.eth", format!("{bob:#x}")),
             ("batchsaleone.eth", format!("{carol:#x}")),
             ("batchsaletwo.eth", format!("{carol:#x}")),
+            ("foreign.eth", format!("{carol:#x}")),
+            ("leaf.trusted.eth", format!("{bob:#x}")),
         ],
     )
     .await?;

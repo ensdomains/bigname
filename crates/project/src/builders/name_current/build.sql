@@ -113,13 +113,16 @@
                                ELSE COALESCE(status.after_state ->> 'status',
                                    selected_registration.after_state ->> 'status')
                            END,
+                           -- A seconds value outside 1970..=9999 has no timestamp here, the same
+                           -- rule the API's expiry reads apply, so a formatted copy never
+                           -- revives an expiry those reads treat as unknown.
                            'expiry', CASE
                                WHEN COALESCE(expiry.expiry_seconds, CASE
                                         WHEN wrapper.wrapper_state IS NOT NULL
                                          AND NOT COALESCE(selected_registration.is_v2_lifecycle, false)
                                             THEN wrapper_expiry.servable_expiry_seconds END)
-                                    IS NULL THEN NULL
-                               ELSE to_jsonb(to_char(to_timestamp(COALESCE(expiry.expiry_seconds,
+                                    BETWEEN 0 AND 253402300799
+                                   THEN to_jsonb(to_char(to_timestamp(COALESCE(expiry.expiry_seconds,
                                         wrapper_expiry.servable_expiry_seconds))
                                    AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))
                            END,
@@ -811,178 +814,13 @@
             FROM project_events event
             WHERE event.logical_name_id = surface.logical_name_id
         ) corpus ON TRUE
-        LEFT JOIN LATERAL (
-            SELECT EXISTS (
-                       SELECT 1
-                       FROM project_events event
-                       JOIN project_manifests manifest
-                         ON manifest.manifest_id = event.source_manifest_id
-                        AND manifest.manifest_version = event.manifest_version
-                        AND manifest.source_family = event.source_family
-                       WHERE event.logical_name_id = surface.logical_name_id
-                         AND event.source_family = 'ens_v2_registry_l1'
-                         AND manifest.namespace = 'ens'
-                         AND manifest.chain_id = 'ethereum-sepolia'
-                         AND manifest.deployment_label IN (
-                             'ens_v2_sepolia_post_audit', 'ens_v2_sepolia_hackathon', 'ens_v2_sepolia_20260915'
-                         )
-                   )
-                   AND EXISTS (
-                       SELECT 1
-                       FROM project_events event
-                       JOIN project_manifests manifest
-                         ON manifest.manifest_id = event.source_manifest_id
-                        AND manifest.manifest_version = event.manifest_version
-                        AND manifest.source_family = event.source_family
-                       WHERE event.logical_name_id = surface.logical_name_id
-                         AND event.source_family = 'ens_v2_registrar_l1'
-                         AND manifest.namespace = 'ens'
-                         AND manifest.chain_id = 'ethereum-sepolia'
-                         AND manifest.deployment_label IN (
-                             'ens_v2_sepolia_post_audit', 'ens_v2_sepolia_hackathon', 'ens_v2_sepolia_20260915'
-                         )
-                         AND manifest.manifest_payload
-                             -> 'capability_flags'
-                             -> 'exact_name_profile'
-                             ->> 'status' = 'supported'
-                   ) OR EXISTS (
-                       -- A validated migration replaces the registrar qualification only
-                       -- for its exact current successor in the admitted registry profile.
-                       SELECT 1
-                       FROM project_events boundary
-                       JOIN project_manifests migration_manifest
-                         ON migration_manifest.manifest_id = boundary.source_manifest_id
-                        AND migration_manifest.manifest_version = boundary.manifest_version
-                        AND migration_manifest.source_family = boundary.source_family
-                       JOIN project_events successor
-                         ON successor.chain_id = boundary.chain_id
-                        AND successor.namespace = boundary.namespace
-                        AND successor.logical_name_id = boundary.logical_name_id
-                        AND successor.resource_id = selected_authority.selected_resource_id
-                        AND successor.event_kind = 'SurfaceBound'
-                        AND successor.source_family = 'ens_v2_registry_l1'
-                        AND successor.after_state ->> 'surface_binding_id' =
-                            selected_authority.selected_binding_id::text
-                        AND successor.block_number = boundary.block_number
-                        AND successor.transaction_index = boundary.transaction_index
-                       JOIN project_manifests registry_manifest
-                         ON registry_manifest.manifest_id = successor.source_manifest_id
-                        AND registry_manifest.manifest_version = successor.manifest_version
-                        AND registry_manifest.source_family = successor.source_family
-                       JOIN contract_instance_addresses registry_address
-                         ON registry_address.chain_id = successor.chain_id
-                        AND registry_address.contract_instance_id::text =
-                            boundary.after_state ->> 'successor_registry_contract_instance_id'
-                        AND lower(registry_address.address) =
-                            lower(successor.raw_fact_ref ->> 'emitting_address')
-                        AND COALESCE(registry_address.active_from_block_number, 0)
-                            <= successor.block_number
-                        AND (registry_address.active_to_block_number IS NULL
-                             OR registry_address.active_to_block_number >= successor.block_number)
-                       WHERE surface.namespace = 'ens'
-                         AND boundary.namespace = surface.namespace
-                         AND boundary.logical_name_id = surface.logical_name_id
-                         AND boundary.chain_id = 'ethereum-sepolia'
-                         AND selected_authority.selected_authority_arm = 'ens_v2'
-                         AND selected_authority.unsupported_reason IS NULL
-                         AND selected_authority.authority_proof_kind =
-                             'migration_authority_transition'
-                         AND boundary.normalized_event_id =
-                             selected_authority.authority_proof_event_id
-                         AND boundary.event_identity =
-                             selected_authority.authority_proof_event_identity
-                         AND boundary.event_kind = 'MigrationApplied'
-                         AND boundary.source_family = 'ens_v2_migration_l1'
-                         AND boundary.consumer_visibility = 'activated'
-                         AND boundary.canonicality_state IN ('canonical', 'safe', 'finalized')
-                         AND boundary.after_state #>> '{successor_binding,binding_id}' =
-                             selected_authority.selected_binding_id::text
-                         AND boundary.after_state #>> '{successor_binding,resource_id}' =
-                             selected_authority.selected_resource_id::text
-                         AND migration_manifest.namespace = boundary.namespace
-                         AND migration_manifest.chain_id = boundary.chain_id
-                         AND migration_manifest.deployment_label IN ('ens_v2_sepolia_post_audit', 'ens_v2_sepolia_hackathon', 'ens_v2_sepolia_20260915')
-                         AND registry_manifest.namespace = successor.namespace
-                         AND registry_manifest.chain_id = successor.chain_id
-                         AND registry_manifest.deployment_label IN ('ens_v2_sepolia_post_audit', 'ens_v2_sepolia_hackathon', 'ens_v2_sepolia_20260915')
-                         AND (
-                             -- The successor registry is either declared in the admitted
-                             -- registry profile or was created on chain by an admitted
-                             -- migration (LockedMigrationController / WrapperRegistry deploy a
-                             -- WrapperRegistry per migrated name and announce it), which is the
-                             -- same registry-creation proof the authority builder accepts for
-                             -- positive child registrations.
-                             EXISTS (
-                                 SELECT 1 FROM jsonb_array_elements(COALESCE(
-                                     registry_manifest.manifest_payload -> 'contracts', '[]'::jsonb
-                                 )) declaration
-                                 WHERE declaration ->> 'role' = 'registry'
-                                   AND lower(declaration ->> 'address') = lower(registry_address.address)
-                                   AND (declaration ->> 'start_block' IS NULL
-                                        OR (declaration ->> 'start_block')::bigint <= successor.block_number)
-                             )
-                             OR EXISTS (
-                                 SELECT 1
-                                 FROM migration_discovery_associations created
-                                 JOIN discovery_edges created_edge
-                                   ON created_edge.chain_id = created.chain_id
-                                  AND created_edge.edge_kind = 'registry_announcement'
-                                  AND created_edge.to_contract_instance_id =
-                                      created.registry_contract_instance_id
-                                  AND created_edge.source_manifest_id = created.source_manifest_id
-                                  AND created_edge.active_from_block_number = created.block_number
-                                  AND created_edge.active_from_block_hash = created.block_hash
-                                  AND (created_edge.provenance ->> 'transaction_index')::bigint =
-                                      created.transaction_index
-                                  AND (created_edge.provenance ->> 'log_index')::bigint =
-                                      created.log_index
-                                 JOIN chain_lineage created_lineage
-                                   ON created_lineage.chain_id = created.chain_id
-                                  AND created_lineage.block_hash = created.block_hash
-                                  AND created_lineage.block_number = created.block_number
-                                 WHERE created.chain_id = successor.chain_id
-                                   AND created.correlation_kind = 'migration_registry_creation'
-                                   AND created.registry_contract_instance_id =
-                                       registry_address.contract_instance_id
-                                   AND lower(created.registry_address) =
-                                       lower(registry_address.address)
-                                   AND created.block_number <= successor.block_number
-                                   AND created.canonicality_state IN ('canonical', 'safe', 'finalized')
-                                   AND created_lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
-                                   AND created_edge.canonicality_state IN ('canonical', 'safe', 'finalized')
-                                   AND (created_edge.active_to_block_number IS NULL
-                                        OR created_edge.active_to_block_number >= successor.block_number)
-                             )
-                         )
-                   ) OR (
-                       -- A positive ENSv2 child registration is already proven by the authority
-                       -- builder against a migration-created, announced registry under a
-                       -- migrated parent; the exact profile follows that chain of custody.
-                       -- Every operand is coalesced: a NULL here would make `supported`
-                       -- NULL and the support CASE below would fall through to 'supported'.
-                       COALESCE(selected_authority.selected_authority_arm, '') = 'ens_v2'
-                       AND selected_authority.unsupported_reason IS NULL
-                       AND COALESCE(selected_authority.authority_proof_kind, '') =
-                           'positive_v2_child_registration'
-                   ) AS supported
-        ) ens_v2_profile ON TRUE
         CROSS JOIN LATERAL (
             SELECT CASE
                        WHEN selected_authority.unsupported_reason IS NOT NULL
                            THEN 'unsupported'
-                       WHEN selected_authority.selected_authority_arm = 'ens_v2'
-                        AND NOT ens_v2_profile.supported
-                           THEN 'unsupported'
                        ELSE 'supported'
                    END AS support_status,
-                   CASE
-                       WHEN selected_authority.unsupported_reason IS NOT NULL
-                           THEN selected_authority.unsupported_reason
-                       WHEN selected_authority.selected_authority_arm = 'ens_v2'
-                        AND NOT ens_v2_profile.supported
-                           THEN 'ensv2_exact_name_profile_shadow'
-                       ELSE NULL
-                   END AS unsupported_reason
+                   selected_authority.unsupported_reason
         ) support
         WHERE surface.visibility_state = 'active'
           AND surface.raw_name <> ''

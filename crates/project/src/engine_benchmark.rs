@@ -96,8 +96,11 @@ struct Benchmark {
     profile: bool,
     rebuild_baseline: bool,
     contract: bool,
-    /// Derive each target a second time with the target as its resume marker and require the
-    /// same output: the retry a failed hydration or progress write leads to.
+    /// Derive each target a second time over the same window, resuming from the target itself,
+    /// and require the same output. It checks that derivation is idempotent over a state already
+    /// at the target. It is neither the retry after a failed hydration or progress write (which
+    /// resumes from the previous marker over the same window) nor the runner's batch at an
+    /// unchanged head (which covers the target block alone).
     same_head: bool,
 }
 

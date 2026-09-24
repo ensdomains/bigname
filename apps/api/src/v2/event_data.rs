@@ -12,10 +12,9 @@
 use bigname_storage::HistoryEvent as StorageHistoryEvent;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
-use sqlx::types::time::OffsetDateTime;
 
 use super::slug_to_numeric;
-use super::{HistoryEventType, V2Error, V2Result, format_timestamp, permission_powers_value};
+use super::{HistoryEventType, V2Error, V2Result, permission_powers_value};
 
 const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
 
@@ -211,16 +210,10 @@ fn unsigned_field(state: &Value, key: &str) -> Option<Value> {
     }
 }
 
-/// Unix-second expiry fields become RFC 3339 `expires_at` values.
+/// Unix-second expiry fields become RFC 3339 `expires_at` values under the rule every expiry read
+/// applies: a value outside 1970..=9999 is omitted, and one inside keeps its whole seconds.
 fn timestamp_field(state: &Value, key: &str) -> Option<Value> {
-    let seconds = match state.get(key)? {
-        Value::Number(number) => number.as_i64()?,
-        Value::String(text) => text.trim().parse::<i64>().ok()?,
-        _ => return None,
-    };
-    OffsetDateTime::from_unix_timestamp(seconds)
-        .ok()
-        .map(|value| Value::String(format_timestamp(value)))
+    super::name_record::seconds_timestamp(state.get(key)?).map(Value::String)
 }
 
 #[cfg(test)]
@@ -261,6 +254,25 @@ mod tests {
             migration_associations: json!([]),
             provenance: json!({}),
             coverage: json!({}),
+        }
+    }
+
+    #[test]
+    fn expiry_timestamps_follow_the_shared_range_rule() {
+        for (expiry, expected) in [
+            (json!(-1), None),
+            (json!("-1"), None),
+            (json!(0), Some("1970-01-01T00:00:00Z")),
+            (json!(253_402_300_799_u64), Some("9999-12-31T23:59:59Z")),
+            (json!(253_402_300_800_u64), None),
+            (json!(1_735_689_600.5), Some("2025-01-01T00:00:00Z")),
+            (json!("1735689600.5"), Some("2025-01-01T00:00:00Z")),
+        ] {
+            assert_eq!(
+                timestamp_field(&json!({ "expiry": expiry }), "expiry"),
+                expected.map(Value::from),
+                "{expiry}"
+            );
         }
     }
 

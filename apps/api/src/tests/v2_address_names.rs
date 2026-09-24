@@ -622,6 +622,174 @@ async fn v2_address_names_registration_dedupe_preserves_role_summary() -> Result
     database.cleanup().await
 }
 
+// The ENSv2 root registry registers `eth` and `reverse` with the largest uint64 expiry, which no
+// timestamp can hold. A seconds expiry outside 1970..=9999, as a number or a quoted number, is
+// unknown: the row has no `expires_at` and sorts with the other unknown expiries (last ascending,
+// first descending). Project writes no formatted `control.expiry` for such a value, so there is
+// no fallback to revive it; a row whose only expiry is a formatted one still uses it.
+// (upstream: .refs/ens_v2_sepolia_20260916/contracts/script/deploy-constants.ts:L1 @ ens_v2_sepolia_20260916@366de741)
+// (upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ETHRegistry.ts:L46 @ ens_v2_sepolia_20260916@366de741)
+// (upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ReverseMirror.ts:L35 @ ens_v2_sepolia_20260916@366de741)
+#[tokio::test]
+async fn v2_get_address_names_treats_an_out_of_range_expiry_as_unknown() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_address_names_fixture(&database).await?;
+    let first_known = Some("1970-01-01T00:00:00Z");
+    let last_known = Some("9999-12-31T23:59:59Z");
+    for (registration, control, expected) in [
+        (json!(-1), Value::Null, None),
+        (json!(-300_000_000_000_i64), Value::Null, None),
+        (json!(0), json!("1970-01-01T00:00:00Z"), first_known),
+        (json!(253_402_300_799_i64), json!("9999-12-31T23:59:59Z"), last_known),
+        (json!(253_402_300_800_i64), Value::Null, None),
+        (json!(u64::MAX), Value::Null, None),
+        (json!("-1"), Value::Null, None),
+        (json!("0"), json!("1970-01-01T00:00:00Z"), first_known),
+        (json!("253402300799"), json!("9999-12-31T23:59:59Z"), last_known),
+        (json!("253402300800"), Value::Null, None),
+        (
+            json!("1735689600.5"),
+            json!("2025-01-01T00:00:00Z"),
+            Some("2025-01-01T00:00:00Z"),
+        ),
+        (
+            json!(1_735_689_600.5),
+            json!("2025-01-01T00:00:00Z"),
+            Some("2025-01-01T00:00:00Z"),
+        ),
+        (Value::Null, json!("2030-01-02T00:00:00Z"), Some("2030-01-02T00:00:00Z")),
+    ] {
+        set_address_name_expiry(&database, "alpha.eth", &registration, &control).await?;
+        let case = format!("registration.expiry={registration} control.expiry={control}");
+        let asc = v2_address_names_payload_for_database(
+            &database,
+            &format!("/v1/addresses/{V2_ADDRESS}/names?sort=expires_at&order=asc"),
+        )
+        .await?;
+        let desc = v2_address_names_payload_for_database(
+            &database,
+            &format!("/v1/addresses/{V2_ADDRESS}/names?sort=expires_at&order=desc"),
+        )
+        .await?;
+        let asc = asc["data"].as_array().expect("expires asc data");
+        let desc = desc["data"].as_array().expect("expires desc data");
+        let alpha = asc
+            .iter()
+            .find(|row| row["name"] == "alpha.eth")
+            .expect("alpha.eth stays listed");
+        // An unknown expiry leaves the key out; a known one is an RFC 3339 string.
+        assert_eq!(alpha.get("expires_at"), expected.map(Value::from).as_ref(), "{case}");
+        // Every other row expires in 2026 or later, so an earlier known expiry sorts first.
+        let (asc_position, desc_position) =
+            if expected.is_some_and(|expiry| expiry < "2026-01-02T00:00:00Z") {
+                (0, asc.len() - 1)
+            } else {
+                (asc.len() - 1, 0)
+            };
+        assert_eq!(names(asc)[asc_position], "alpha.eth", "{case}: {:?}", names(asc));
+        assert_eq!(names(desc)[desc_position], "alpha.eth", "{case}: {:?}", names(desc));
+    }
+    database.cleanup().await
+}
+
+// A fractional seconds expiry keeps whole seconds for sorting too, as Project presents it. Half a
+// second past alpha.eth's expiry, beta.eth ties with it, so the collection's tie-break orders
+// them (beta.eth first, as it does for any equal expiry here), not the half second.
+#[tokio::test]
+async fn v2_get_address_names_sorts_a_fractional_expiry_by_whole_seconds() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_address_names_fixture(&database).await?;
+    let formatted = json!("2025-01-01T00:00:00Z");
+    set_address_name_expiry(&database, "alpha.eth", &json!("1735689600"), &formatted).await?;
+    set_address_name_expiry(&database, "beta.eth", &json!("1735689600.5"), &formatted).await?;
+    let payload = v2_address_names_payload_for_database(
+        &database,
+        &format!("/v1/addresses/{V2_ADDRESS}/names?sort=expires_at&order=asc"),
+    )
+    .await?;
+    let rows = payload["data"].as_array().expect("expires asc data");
+    assert_eq!(&names(rows)[..2], ["beta.eth", "alpha.eth"], "{payload}");
+    for row in &rows[..2] {
+        assert_eq!(row.get("expires_at"), Some(&formatted), "{row}");
+    }
+    database.cleanup().await
+}
+
+// Paging by expiry walks through several unknown expiries without skipping or repeating a row.
+#[tokio::test]
+async fn v2_get_address_names_pages_through_unknown_expiries() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_address_names_fixture(&database).await?;
+    for (name, registration) in [
+        ("alpha.eth", json!(u64::MAX)),
+        ("beta.eth", json!(-1)),
+        ("gamma.eth", json!("253402300800")),
+    ] {
+        set_address_name_expiry(&database, name, &registration, &Value::Null).await?;
+    }
+    for (order, known_first) in [("asc", true), ("desc", false)] {
+        let mut listed = Vec::new();
+        let mut cursor: Option<String> = None;
+        loop {
+            let uri = match &cursor {
+                Some(cursor) => format!(
+                    "/v1/addresses/{V2_ADDRESS}/names?sort=expires_at&order={order}&page_size=1&cursor={cursor}"
+                ),
+                None => format!(
+                    "/v1/addresses/{V2_ADDRESS}/names?sort=expires_at&order={order}&page_size=1"
+                ),
+            };
+            let page = v2_address_names_payload_for_database(&database, &uri).await?;
+            for row in page["data"].as_array().expect("page data") {
+                listed.push((
+                    row["name"].as_str().expect("row name").to_owned(),
+                    row.get("expires_at").cloned(),
+                ));
+            }
+            match page["page"]["next_cursor"].as_str() {
+                Some(next) => cursor = Some(next.to_owned()),
+                None => break,
+            }
+        }
+        assert_eq!(listed.len(), 5, "{order}: {listed:?}");
+        let (known, unknown) = if known_first {
+            listed.split_at(2)
+        } else {
+            let (unknown, known) = listed.split_at(3);
+            (known, unknown)
+        };
+        assert!(known.iter().all(|(_, expiry)| expiry == &Some(json!("2029-01-02T00:00:00Z"))), "{order}: {listed:?}");
+        assert!(unknown.iter().all(|(_, expiry)| expiry.is_none()), "{order}: {listed:?}");
+        let unknown_names: BTreeSet<&str> = unknown.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(
+            unknown_names,
+            BTreeSet::from(["alpha.eth", "beta.eth", "gamma.eth"]),
+            "{order}: {listed:?}"
+        );
+    }
+    database.cleanup().await
+}
+
+async fn set_address_name_expiry(
+    database: &TestDatabase,
+    name: &str,
+    registration: &Value,
+    control: &Value,
+) -> Result<()> {
+    sqlx::query(
+        "UPDATE bigname_phase.name_current
+         SET declared_summary = jsonb_set(jsonb_set(
+             declared_summary, '{registration,expiry}', $2, true), '{control,expiry}', $3, true)
+         WHERE raw_name = $1",
+    )
+    .bind(name)
+    .bind(registration)
+    .bind(control)
+    .execute(&database.pool)
+    .await?;
+    Ok(())
+}
+
 #[tokio::test]
 async fn v2_get_address_names_sorts_by_expiry_and_registered_at() -> Result<()> {
     let (database, expires_asc) = v2_address_names_payload(&format!(

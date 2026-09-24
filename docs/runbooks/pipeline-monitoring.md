@@ -264,7 +264,8 @@ running binary.
 ## Project batch writes
 
 Six families describe what each committed Project batch cost. They come from
-the write summary the Project engine returns with every batch, so they cover
+the [write summary](../glossary.md#write-summary) the Project engine returns
+with every batch, so they cover
 normal blocks, redo ranges and full rebuilds alike. Like the served-lag gauges
 they have no dashboard panel or alert yet (Linear TYR-34), and they are the
 numbers the Project latency work (Linear TYR-36) is measured with.
@@ -281,8 +282,12 @@ numbers the Project latency work (Linear TYR-36) is measured with.
   pulls in.
 - `phase_runner_project_scope_keys{chain, scope}` is the number of keys in each
   scope when publication starts: `names`, `children`, `resources`,
-  `account_permissions`, `resolvers` and `primary`. Publication deletes and
-  republishes the served rows of exactly these keys.
+  `account_permissions`, `resolvers` and `primary`. On a normal or redo batch,
+  publication deletes and republishes the served rows of these keys. A full
+  rebuild skips scope seeding and republishes every table whole, so its scope
+  counts do not describe what it rewrote; read its row counters instead. Child
+  registrations are not published by key at all: every batch replaces the rows
+  of its own block window, whatever names they belong to.
 - `phase_runner_project_rows_written_total{chain, table, kind}` is a counter of
   the rows Project batches deleted (`kind="deleted"`) from and inserted
   (`kind="inserted"`) into each served table, including
@@ -291,15 +296,19 @@ numbers the Project latency work (Linear TYR-36) is measured with.
   key that had an event in the batch is the ratio TYR-36 drives towards one.
 - `phase_runner_project_stage_duration_seconds{chain, stage}` is the elapsed
   time of each derivation stage of the newest committed batch: `prepare`,
-  `scope`, `inputs`, `builders`, `integrity` and `publish`. It covers the
-  derivation inside the Project transaction only, not the commit, hydration or
-  the runner's progress write.
+  `scope`, `inputs`, `builders`, `integrity` and `publish`. The stages follow
+  one another without gaps, so the six add up to the whole derivation;
+  `publish` includes counting the scope keys and staged events just before
+  publication. It covers the derivation inside the Project transaction only,
+  not the commit, hydration or the runner's progress write.
 
 The gauges hold the newest committed batch of each chain until the next one
 replaces them; they are not reset between batches. The runner hands each
-summary to the metrics task as soon as the engine commits, and the task applies
-it with the refresh that follows the batch's progress write, so the values are
-current shortly after each Project commit. When several batches commit between
+summary to the metrics task as soon as the engine commits, before hydration,
+and the task applies it with its next refresh: the periodic one, or the one
+that follows the batch's progress write, whichever comes first. The values are
+therefore current shortly after each Project commit, and can appear before the
+batch's publication is served. When several batches commit between
 two refreshes, the gauges show the newest and the counter adds all of them. A
 batch whose Project transaction fails reports nothing; one that commits and then
 fails in hydration is still counted. A chain's series appear with its first committed

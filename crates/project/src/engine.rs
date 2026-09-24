@@ -70,10 +70,6 @@ impl WriteSummary {
         self.inserted.values().copied().fold(0, u64::saturating_add)
     }
 
-    pub fn deleted_rows(&self) -> u64 {
-        self.deleted.values().copied().fold(0, u64::saturating_add)
-    }
-
     fn finish_stage(&mut self, stage: &'static str, started: &mut Instant) {
         let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         tracing::debug!(stage, elapsed_ms, "Project stage completed");
@@ -169,8 +165,9 @@ async fn derive(
     summary.finish_stage("builders", &mut stage_start);
     integrity::assert_publishable(transaction, &request.chain_id, target).await?;
     summary.finish_stage("integrity", &mut stage_start);
+    // Counting the scope belongs to `publish`, so the six stage durations add up to the whole
+    // derivation.
     count_inputs(transaction, full_rebuild, &mut summary).await?;
-    stage_start = Instant::now();
     publish::swap(transaction, &request.chain_id, full_rebuild, &mut summary).await?;
     builders::child_registrations::publish(
         transaction,
