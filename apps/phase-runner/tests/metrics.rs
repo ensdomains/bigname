@@ -245,6 +245,7 @@ async fn endpoint_exports_served_lag_against_the_readable_project_publication() 
         feed.clone(),
     )
     .await?;
+    let first_refresh_tick = std::time::Instant::now() + std::time::Duration::from_secs(5);
     let response = tokio::task::spawn_blocking(move || scrape(address))
         .await
         .context("phase metrics scrape task panicked")??;
@@ -283,7 +284,7 @@ async fn endpoint_exports_served_lag_against_the_readable_project_publication() 
     .execute(scratch.pool())
     .await?;
     feed.batch_committed();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    let deadline = first_refresh_tick - std::time::Duration::from_millis(500);
     loop {
         let response = tokio::task::spawn_blocking(move || scrape(address))
             .await

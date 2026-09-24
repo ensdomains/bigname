@@ -42,13 +42,13 @@ impl ServedLagGauges {
         Ok(Self {
             lag_blocks: registry.int_gauge_vec(
                 "phase_runner_served_lag_blocks",
-                "Newest observed execution-client head minus the block of the Project \
-                 publication the API can serve, or -1 when either is unavailable.",
+                "Newest observed execution-client head minus the block of the newest readable \
+                 Project publication, or -1 when either is unavailable.",
                 &["chain"],
             )?,
             publication_block: registry.int_gauge_vec(
                 "phase_runner_served_publication_block",
-                "Block of the Project publication the API can serve, or -1 when none is servable.",
+                "Block of the newest readable Project publication, or -1 when there is none.",
                 &["chain"],
             )?,
         })

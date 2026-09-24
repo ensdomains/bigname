@@ -189,7 +189,9 @@ ops dashboards tracked in Linear TYR-34.
   block the runner has seen. Because the API stops serving a chain once its
   publication trails the published chain head by more than one block, a value
   above one usually means readers are getting stale-data errors, not old
-  answers. `-1` means either side is unavailable. The Project latency target
+  answers. `-1` means either side is unavailable. An alert on this gauge must
+  treat `-1` as unservable too, or it goes quiet exactly when readers get
+  nothing. The Project latency target
   (Linear TYR-36) requires this gauge to return to zero every normal block.
 
 The observed head is the head the latest Live batch read from the execution
@@ -207,9 +209,10 @@ block.
 
 Both gauges are refreshed with the others every 5 seconds and also right after
 every Ingest, Live and Project batch commit, so the value in the runner is
-exact after each of those commits. Other changes, such as a failed Project
-batch or a rewind, show at the next 5-second refresh. The 5-second refresh alone is slower than a Base
-block; on Base the refresh after each commit is what keeps the value current.
+current shortly after each of those commits. Other changes, such as a failed
+Project batch or a rewind, show at the next 5-second refresh. The 5-second
+refresh alone is slower than a Base block; on Base the refresh after each
+commit is what keeps the value current.
 Prometheus still samples it only once per scrape (every 15 seconds in the
 checked-in configuration), so a lag that lasts less than a scrape interval may
 never appear in a graph.
