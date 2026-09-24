@@ -2749,8 +2749,8 @@ introduces it rebuilds Project from full history before serving the option; see
   arms have only history and nothing is open), a selected ENSv2 registration
   without the exact-name profile qualification
   (`ensv2_exact_name_profile_shadow`), or a row an earlier Project generation
-  derived with a retired reason. A mixed-history name whose selected arm has a
-  current registration is supported and is served like any other name.
+  derived with a retired reason. A mixed-history name is served like any other
+  name when its selected exact-name projection is supported.
   Search carries no row-local status or
   unsupported-reason field, so it omits such a name rather than serving
   registration fields no selected authority backs; callers use name detail or

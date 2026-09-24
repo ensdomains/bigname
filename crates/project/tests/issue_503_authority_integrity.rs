@@ -482,7 +482,9 @@ async fn ensv1_history_gives_the_lifecycle_state_with_or_without_v2_history() ->
 // A lease registered through the NameWrapper lapses, so the closed NameWrapper binding stands
 // for it as the released ENSv1 tombstone. That binding's resource has no lifecycle rows of its
 // own, so the lifecycle state reads the released lease from the ENSv1 history, also when the
-// name has ENSv2 history whose release does not qualify.
+// name has ENSv2 history whose release does not qualify. The wrap carries the facts the
+// NameWrapper producer emits, so the registration fold admits the lease's lifecycle rows and the
+// payload agrees with the lifecycle state.
 #[tokio::test]
 async fn a_wrapped_v1_tombstone_with_v2_history_reads_unregistered() -> Result<()> {
     let (db, pool) = database("overlap_wrapped_tombstone").await?;
@@ -491,50 +493,61 @@ async fn a_wrapped_v1_tombstone_with_v2_history_reads_unregistered() -> Result<(
     let lease_resource = uuid(15, 73);
     sqlx::query("INSERT INTO resources (resource_id, chain_id, block_hash, block_number, canonicality_state) VALUES ($1::uuid, $2, $3, 10, 'canonical')")
         .bind(&lease_resource).bind(CHAIN).bind(HASH).execute(&pool).await?;
+    let holder = "0x0000000000000000000000000000000000000001";
+    let authority_key = "wrapper:wrapped-lapsed";
     event(
         &pool,
-        "wrapped-tombstone-wrap",
+        "wrapped-tombstone-lease-grant",
         &logical,
-        Some(&wrapper_resource),
+        Some(&lease_resource),
         Event {
-            family: "ens_v1_wrapper_l1",
-            kind: "SurfaceBound",
+            family: "ens_v1_registrar_l1",
+            kind: "RegistrationGranted",
             log: 1,
-            after: json!({"wrapped_registrar_resource_id": lease_resource}),
+            after: json!({"authority_kind":"registrar","registrant":holder,"status":"registered","expiry":4}),
         },
     )
     .await?;
-    for (log, kind, after) in [
-        (
-            1,
-            "RegistrationGranted",
-            json!({"status":"registered","registrant":"0x0000000000000000000000000000000000000001"}),
-        ),
-        (4, "RegistrationReleased", json!({"status":"unregistered"})),
+    // NameWrapped: the wrapper binding, its holder and authority, and its fuse scope, all on the
+    // wrapper resource and recording the registrar lease it wraps.
+    // (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L264-L268 @ ens_v1@91c966f)
+    let wrap = json!({
+        "source_event": "NameWrapped",
+        "owner": holder,
+        "fuses": 0,
+        "wrapper_state": "wrapped",
+        "wrapped_registrar_resource_id": lease_resource,
+        "authority_kind": "wrapper",
+        "authority_key": authority_key,
+    });
+    for (log, kind) in [
+        (2, "SurfaceBound"),
+        (3, "AuthorityEpochChanged"),
+        (4, "PermissionScopeChanged"),
     ] {
         event(
             &pool,
-            &format!("wrapped-tombstone-lease-{kind}"),
+            &format!("wrapped-tombstone-wrap-{kind}"),
             &logical,
-            Some(&lease_resource),
+            Some(&wrapper_resource),
             Event {
-                family: "ens_v1_registrar_l1",
+                family: "ens_v1_wrapper_l1",
                 kind,
                 log,
-                after,
+                after: wrap.clone(),
             },
         )
         .await?;
     }
     // The earlier ENSv1 binding keeps this ENSv2 release from qualifying as a tombstone.
-    let v2_resource = closed_v2_binding_at(&pool, &logical, 73, 2, 0).await?;
+    let v2_resource = closed_v2_binding_at(&pool, &logical, 73, 5, 0).await?;
     for (log, kind, after) in [
         (
-            2,
+            5,
             "RegistrationGranted",
             json!({"status":"registered","registrant":"0x0000000000000000000000000000000000000002"}),
         ),
-        (3, "RegistrationReleased", json!({"status":"unregistered"})),
+        (6, "RegistrationReleased", json!({"status":"unregistered"})),
     ] {
         event(
             &pool,
@@ -550,25 +563,60 @@ async fn a_wrapped_v1_tombstone_with_v2_history_reads_unregistered() -> Result<(
         )
         .await?;
     }
+    // The lease lapses past grace.
+    event(
+        &pool,
+        "wrapped-tombstone-lease-release",
+        &logical,
+        Some(&lease_resource),
+        Event {
+            family: "ens_v1_registrar_l1",
+            kind: "RegistrationReleased",
+            log: 7,
+            after: json!({"source_event":"RegistrationReleased","released_at":5,"namehash":logical.trim_start_matches("ens:"),"expiry":4}),
+        },
+    )
+    .await?;
     run(&pool).await?;
-    let selection: (Option<String>, Option<String>, Option<String>, Option<String>) =
-        sqlx::query_as(
-            "SELECT provenance #>> '{authority_selection,authority_arm}',
-                    provenance #>> '{authority_selection,surface_binding_id}',
-                    provenance #>> '{authority_selection,resource_authority_context,released_tombstone}',
-                    provenance #>> '{authority_selection,lifecycle_state}'
-             FROM name_current WHERE logical_name_id = $1",
-        )
-        .bind(&logical)
-        .fetch_one(&pool)
-        .await?;
+    let (summary, selection): (Value, Value) = sqlx::query_as(
+        "SELECT declared_summary, provenance -> 'authority_selection'
+         FROM name_current WHERE logical_name_id = $1",
+    )
+    .bind(&logical)
+    .fetch_one(&pool)
+    .await?;
+    let registration = &summary["registration"];
+    assert_eq!(registration["status"], "released");
+    assert_eq!(registration["released_at"], 5);
+    assert_eq!(registration["resource_id"], json!(lease_resource));
+    // The lapsed lease keeps its own expiry; its last holder and authority are served only
+    // inside the lapsed block.
+    assert_eq!(registration["expiry"], 4);
+    assert!(registration["registrant"].is_null());
+    assert!(registration["authority_kind"].is_null());
+    assert!(registration["authority_key"].is_null());
     assert_eq!(
-        selection,
+        registration["lapsed_registration"],
+        json!({
+            "registrant": holder,
+            "authority_kind": "wrapper",
+            "authority_key": authority_key,
+            "released_at": 5,
+        })
+    );
+    assert_eq!(summary["control"], json!({"status": "unregistered"}));
+    assert_eq!(
         (
-            Some("ens_v1".into()),
-            Some(uuid(7, 73)),
-            Some("ens_v1".into()),
-            Some("unregistered".into())
+            &selection["authority_arm"],
+            &selection["surface_binding_id"],
+            &selection["resource_authority_context"]["released_tombstone"],
+            &selection["lifecycle_state"],
+        ),
+        (
+            &json!("ens_v1"),
+            &json!(uuid(7, 73)),
+            &json!("ens_v1"),
+            &json!("unregistered")
         )
     );
     db.cleanup().await?;
@@ -620,6 +668,20 @@ async fn a_live_v1_name_whose_v2_grant_was_released_selects_v1() -> Result<()> {
     assert_eq!(
         authority(&pool, &logical).await?,
         (Some("ens_v1".into()), None, None, None)
+    );
+    // Coverage describes the selected ENSv1 arm, not the name's released ENSv2 history.
+    let coverage: Value = sqlx::query_scalar(
+        "SELECT declared_summary -> 'coverage' FROM name_current WHERE logical_name_id = $1",
+    )
+    .bind(&logical)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        (
+            &coverage["source_classes_considered"],
+            &coverage["enumeration_basis"]
+        ),
+        (&json!(["ensv1_registry_path"]), &json!("exact_name"))
     );
     db.cleanup().await?;
     Ok(())
