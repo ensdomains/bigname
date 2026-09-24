@@ -805,21 +805,25 @@ fn reconciliation_keeps_both_writes_of_the_legacy_controller_shape() -> Result<(
     Ok(())
 }
 
-/// A registration whose owner writes the record first and hands it on later in the same
-/// transaction. That first write is transient: reconciliation drops its `AuthorityTransferred`,
-/// and the later write's stays beside the marker.
+/// A registration whose owner writes the record first and hands both the token and the record on
+/// later in the same transaction. The provisional owner differs from the 2017 registry's, so its
+/// write derives an `AuthorityTransferred`, and the token transfer keeps the later write inside
+/// the reconciled timeline. The first write is transient: reconciliation removes its ownership
+/// row, and the later write's row stays beside the marker.
 #[test]
 fn reconciliation_keeps_the_last_current_registry_write_after_a_transient_one() -> Result<()> {
     use marked::*;
+    const PROVISIONAL: &str = "0x00000000000000000000000000000000000000c8";
     const NEXT: &str = "0x00000000000000000000000000000000000000cd";
     let id = U256::from_be_bytes(keccak256("marked").0);
     let output = marked_batch(vec![
-        token_transfer(&Address::ZERO.to_string(), HOLDER, id, 121, 0),
-        new_owner("marked", HOLDER, 121, 1, REGISTRY),
-        numeric_registration(HOLDER, 2),
-        new_owner("marked", NEXT, 121, 3, REGISTRY),
+        token_transfer(&Address::ZERO.to_string(), PROVISIONAL, id, 121, 0),
+        new_owner("marked", PROVISIONAL, 121, 1, REGISTRY),
+        numeric_registration(PROVISIONAL, 2),
+        token_transfer(PROVISIONAL, NEXT, id, 121, 3),
+        new_owner("marked", NEXT, 121, 4, REGISTRY),
     ])?;
     assert_keeps_current_registry_write(&output, 121);
-    assert_eq!(current_registry_transfers(&output), [(3, NEXT.to_owned())]);
+    assert_eq!(current_registry_transfers(&output), [(4, NEXT.to_owned())]);
     Ok(())
 }
