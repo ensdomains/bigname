@@ -594,17 +594,29 @@ async fn same_transaction_registration_reads_as_the_current_registry_record() ->
         .expect("registration grant");
     assert_eq!(grant.after_state["registry_migrated"], true, "{grant:?}");
 
+    let selection_of = |pool: PgPool| async move {
+        sqlx::query_scalar::<_, Value>(
+            "SELECT provenance -> 'authority_selection' FROM bigname_phase.name_current
+             WHERE raw_name = $1",
+        )
+        .bind(marked::NAME)
+        .fetch_one(&pool)
+        .await
+    };
     let database = TestDatabase::new_migrated().await?;
     seed_v2_history_blocks(&database, 120..=121).await?;
     persist_with_manifests(&database.pool, &marked::inputs().0, &whole).await?;
     project(&database.pool, 121, None).await?;
-    let selection: Value = sqlx::query_scalar(
-        "SELECT provenance -> 'authority_selection' FROM bigname_phase.name_current
-         WHERE raw_name = $1",
-    )
-    .bind(marked::NAME)
-    .fetch_one(&database.pool)
-    .await?;
+    let selection = selection_of(database.pool.clone()).await?;
+    // Incremental Project over the per-block output reaches the same row at the handoff block.
+    let incremental = TestDatabase::new_migrated().await?;
+    seed_v2_history_blocks(&incremental, 120..=121).await?;
+    persist_with_manifests(&incremental.pool, &marked::inputs().0, &first).await?;
+    project(&incremental.pool, 120, None).await?;
+    persist_with_manifests(&incremental.pool, &marked::inputs().0, &second).await?;
+    project(&incremental.pool, 121, Some(120)).await?;
+    assert_eq!(selection, selection_of(incremental.pool.clone()).await?);
+    incremental.cleanup().await?;
     assert_eq!(selection["authority_arm"], "ens_v1", "{selection}");
     assert_eq!(selection["registry_generation"], "current", "{selection}");
     assert_eq!(
