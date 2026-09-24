@@ -2300,6 +2300,28 @@ admission, capability ownership, replay coverage, and provenance attribution.
 
 <a id="surface-binding"></a>
 <a id="surface-name-surface"></a>
+## Statement identifier
+
+the `/* project:<name> */` comment every Project statement starts with. The
+name is the statement's source file under `crates/project/src`, with `.` for
+`/` and without the extension, followed by the statement where the file holds
+more than one (`publish.insert.name_current`, `builders.name_authority.build`).
+PostgreSQL keeps a leading comment in slow-log lines, `pg_stat_activity` and
+`pg_stat_statements`, and ignores it when it computes a query id, so the
+identifier names the statement behind a slow batch without splitting its
+statistics.
+
+## Write summary
+
+what one Project batch read and wrote, counted inside its transaction: the
+blocks in its affected range, the changed events that seeded its scope, the
+events it staged for the builders, the keys in each scope when publication
+starts, the rows publication deleted from and inserted into each served table,
+and the elapsed time of each derivation stage. The engine returns it with the
+batch outcome and logs it; the phase runner exports it as the
+`phase_runner_project_*` metrics ([pipeline monitoring
+runbook](runbooks/pipeline-monitoring.md#project-batch-writes)).
+
 ## Surface (name surface)
 
 an on-chain name identity
