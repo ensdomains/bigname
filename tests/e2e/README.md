@@ -15,6 +15,12 @@ across HTTP. The harness stops and reaps its runner and API on success and
 early return. This local Sepolia scenario does not establish Mainnet intake
 or deployment readiness. Its original fixture and projection assertions remain.
 
+`ens_v2_lifecycle::a_replaced_subregistry_stops_serving_its_old_child` runs the
+same normal intake twice on one database: once while `leaf.trusted.eth` and
+`orphan.cut.eth` sit in attached child registries, and again, resuming, after
+`trusted.eth` points at a new child registry and `cut.eth` detaches its own.
+Its current-name facts must match a full derivation of the same chain.
+
 ## Prerequisites
 
 - Foundry v1.7.1 with `anvil` on `PATH`.
@@ -349,6 +355,7 @@ explicitly with issue #314.
   `cross_protocol::plain_unwrapped_eleven_log_migration_publishes_only_v2_authority`;
   `cross_protocol::unlocked_parent_hides_retained_ens_v1_children`.
 - ENSv2:
+  `ens_v2_lifecycle::a_replaced_subregistry_stops_serving_its_old_child`;
   `ens_v2_lifecycle::expiry_passes_then_reregistration_advances_lineage`;
   `ens_v2_lifecycle::renewal_preserves_promoted_coverage_and_registry_edges_follow`;
   `ens_v2_lifecycle::reserved_labels_foreign_registrar_and_token_sale`;
