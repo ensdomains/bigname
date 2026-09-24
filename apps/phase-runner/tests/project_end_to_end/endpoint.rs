@@ -229,32 +229,142 @@ pub struct Outcome {
     pub retained: usize,
 }
 
-/// Every key must be served in both states, and every row must match the rebuild exactly or
-/// after the target refresh.
-pub fn compare(candidate: &Served, rebuilt: &Served, target: &Target) -> Result<Outcome> {
+/// What a row the batch kept must satisfy, after the contract oracle's retained-row rule: it is
+/// the row the baseline served, the batch was not required to rebuild it, and the block it names
+/// is readable history at or before the previous publication.
+///
+/// The oracle's required scope comes from an independent scope audit that is test-only code
+/// inside `bigname-project`. The harness cannot run it, so it uses the part of that scope it can
+/// compute itself: every name with an event in the batch window, which the scope always
+/// includes (as a changed name, and as a parent or child of the subnames it rebuilds).
+pub struct Retention {
+    pub baseline: Served,
+    pub required_names: BTreeSet<String>,
+    pub previous: i64,
+    /// Timestamps of the readable blocks rows name, by number and hash.
+    pub history: BTreeMap<(i64, String), Value>,
+}
+
+impl Retention {
+    pub async fn load(
+        pool: &PgPool,
+        baseline: Served,
+        window: (i64, i64),
+        previous: i64,
+    ) -> Result<Self> {
+        let required_names = sqlx::query_scalar(
+            "SELECT DISTINCT logical_name_id FROM normalized_events
+             WHERE chain_id = $1 AND block_number BETWEEN $2 AND $3
+               AND logical_name_id IS NOT NULL",
+        )
+        .bind(CHAIN)
+        .bind(window.0)
+        .bind(window.1)
+        .fetch_all(pool)
+        .await?
+        .into_iter()
+        .collect();
+        let mut blocks = BTreeSet::new();
+        for (kind, row) in baseline
+            .names
+            .values()
+            .map(|row| (Kind::Name, row))
+            .chain(baseline.children.values().map(|row| (Kind::Child, row)))
+        {
+            if let Ok((number, hash)) = named_block(kind, row) {
+                blocks.insert((number, hash.to_owned()));
+            }
+        }
+        let (numbers, hashes): (Vec<i64>, Vec<String>) = blocks.into_iter().unzip();
+        let history = sqlx::query_as::<_, (i64, String, Value)>(
+            "SELECT lineage.block_number, lineage.block_hash, to_jsonb(lineage.block_timestamp)
+             FROM unnest($2::bigint[], $3::text[]) wanted(block_number, block_hash)
+             JOIN chain_lineage lineage
+               ON lineage.chain_id = $1
+              AND lineage.block_number = wanted.block_number
+              AND lineage.block_hash = wanted.block_hash
+             WHERE lineage.canonicality_state IN ('canonical', 'safe', 'finalized')",
+        )
+        .bind(CHAIN)
+        .bind(numbers)
+        .bind(hashes)
+        .fetch_all(pool)
+        .await?
+        .into_iter()
+        .map(|(number, hash, timestamp)| ((number, hash), timestamp))
+        .collect();
+        Ok(Self {
+            baseline,
+            required_names,
+            previous,
+            history,
+        })
+    }
+}
+
+/// The block a row says it was built at.
+fn named_block(kind: Kind, row: &Value) -> Result<(i64, &str)> {
+    let (context, number, hash) = match kind {
+        Kind::Name => (&row["chain_positions"][CHAIN], "block_number", "block_hash"),
+        Kind::Child => (
+            &row["chain_positions"],
+            "target_block_number",
+            "target_block_hash",
+        ),
+    };
+    Ok((
+        context[number]
+            .as_i64()
+            .context("row names no target block number")?,
+        context[hash]
+            .as_str()
+            .context("row names no target block hash")?,
+    ))
+}
+
+/// Every key must be served in both states, and every row must match the rebuild exactly or be a
+/// row the batch may keep.
+pub fn compare(
+    candidate: &Served,
+    rebuilt: &Served,
+    target: &Target,
+    retention: &Retention,
+) -> Result<Outcome> {
     let mut outcome = Outcome::default();
     compare_family(
         Kind::Name,
         &candidate.names,
         &rebuilt.names,
+        &retention.baseline.names,
+        |key| retention.required_names.contains(key),
         target,
+        retention,
         &mut outcome,
     )?;
     compare_family(
         Kind::Child,
         &candidate.children,
         &rebuilt.children,
+        &retention.baseline.children,
+        |(parent, child)| {
+            retention.required_names.contains(parent) || retention.required_names.contains(child)
+        },
         target,
+        retention,
         &mut outcome,
     )?;
     Ok(outcome)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn compare_family<K: Ord + std::fmt::Debug>(
     kind: Kind,
     candidate: &BTreeMap<K, Value>,
     rebuilt: &BTreeMap<K, Value>,
+    baseline: &BTreeMap<K, Value>,
+    required: impl Fn(&K) -> bool,
     target: &Target,
+    retention: &Retention,
     outcome: &mut Outcome,
 ) -> Result<()> {
     let candidate_keys = candidate.keys().collect::<BTreeSet<_>>();
@@ -271,10 +381,141 @@ fn compare_family<K: Ord + std::fmt::Debug>(
             continue;
         }
         ensure!(
+            !required(key),
+            "{kind:?} row {key:?} had an event in the batch window but differs from the rebuild"
+        );
+        ensure!(
+            baseline.get(key) == Some(kept),
+            "{kind:?} row {key:?} differs from the rebuild and is not the row served before the \
+             batch"
+        );
+        let (number, hash) = named_block(kind, kept)?;
+        ensure!(
+            number <= retention.previous,
+            "{kind:?} row {key:?} names block {number}, after the previous publication"
+        );
+        let timestamp = retention
+            .history
+            .get(&(number, hash.to_owned()))
+            .with_context(|| {
+                format!("{kind:?} row {key:?} names block {number} {hash}, not readable history")
+            })?;
+        ensure!(
+            kept["canonicality_summary"]["target_block_number"] == json!(number)
+                && kept["canonicality_summary"]["target_block_hash"] == json!(hash),
+            "{kind:?} row {key:?} names two different target blocks"
+        );
+        if kind == Kind::Name {
+            ensure!(
+                &kept["chain_positions"][CHAIN]["timestamp"] == timestamp,
+                "name row {key:?} carries a timestamp its block does not have"
+            );
+        }
+        ensure!(
             &refresh(kind, kept, target)? == expected,
-            "{kind:?} row {key:?} differs from the rebuild: {kept} != {expected}"
+            "{kind:?} row {key:?} differs from the rebuild beyond its target block: \
+             {kept} != {expected}"
         );
         outcome.retained += 1;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const OLD: &str = "0x05";
+    const NEW: &str = "0x0a";
+
+    fn child(number: i64, hash: &str) -> Value {
+        json!({
+            "parent_logical_name_id": "ens:parent",
+            "child_logical_name_id": "ens:child",
+            "owner": "0xa1",
+            "chain_positions": {"target_block_number": number, "target_block_hash": hash},
+            "canonicality_summary": {"target_block_number": number, "target_block_hash": hash},
+        })
+    }
+
+    fn served(row: Value) -> Served {
+        Served {
+            names: BTreeMap::new(),
+            children: BTreeMap::from([(("ens:parent".into(), "ens:child".into()), row)]),
+            pages_read: 1,
+        }
+    }
+
+    fn check(baseline: Value, candidate: Value, required: &[&str]) -> Result<Outcome> {
+        let retention = Retention {
+            baseline: served(baseline),
+            required_names: required.iter().map(|name| (*name).to_owned()).collect(),
+            previous: 7,
+            history: BTreeMap::from([((5, OLD.to_owned()), json!("2026-01-01T00:00:00"))]),
+        };
+        let target = Target {
+            number: 10,
+            hash: NEW.into(),
+            timestamp: json!("2026-01-01T00:01:00"),
+        };
+        compare(
+            &served(candidate),
+            &served(child(10, NEW)),
+            &target,
+            &retention,
+        )
+    }
+
+    #[test]
+    fn a_kept_row_from_readable_history_outside_the_window_is_retained() {
+        let outcome = check(child(5, OLD), child(5, OLD), &[]).unwrap();
+        assert_eq!(
+            outcome,
+            Outcome {
+                exact: 0,
+                retained: 1
+            }
+        );
+    }
+
+    #[test]
+    fn a_kept_row_with_a_corrupted_target_hash_is_rejected() {
+        let corrupted = || {
+            let mut row = child(5, OLD);
+            row["chain_positions"]["target_block_hash"] = json!("0xbad");
+            row
+        };
+        // The batch corrupted a row it kept.
+        let error = check(child(5, OLD), corrupted(), &[]).unwrap_err();
+        assert!(
+            error.to_string().contains("not the row served before"),
+            "{error}"
+        );
+        // The row was already corrupt and the batch kept it.
+        let error = check(corrupted(), corrupted(), &[]).unwrap_err();
+        assert!(
+            error.to_string().contains("not readable history"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_row_the_batch_had_to_rebuild_is_not_retained() {
+        let error = check(child(5, OLD), child(5, OLD), &["ens:child"]).unwrap_err();
+        assert!(
+            error.to_string().contains("event in the batch window"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_kept_row_that_differs_beyond_its_target_is_rejected() {
+        let mut stale = child(5, OLD);
+        stale["owner"] = json!("0xa2");
+        let error = check(stale.clone(), stale, &[]).unwrap_err();
+        assert!(
+            error.to_string().contains("beyond its target block"),
+            "{error}"
+        );
+    }
 }

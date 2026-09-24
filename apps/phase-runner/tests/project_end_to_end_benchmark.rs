@@ -270,6 +270,10 @@ async fn run(pool: &PgPool, previous: i64, targets: &[i64], compare: Option<u64>
     let project = ProjectPhase::with_hydration(pool.clone(), ChainRpcUrls::default());
     for &number in targets {
         let target = follow_head(pool, number).await?;
+        let baseline = match compare {
+            Some(children_page) => Some(endpoint::Served::read(pool, children_page).await?),
+            None => None,
+        };
         let batch_started: String = sqlx::query_scalar("SELECT clock_timestamp()::text")
             .fetch_one(pool)
             .await?;
@@ -332,8 +336,15 @@ async fn run(pool: &PgPool, previous: i64, targets: &[i64], compare: Option<u64>
             hash.as_deref() == Some(INTERPRETER_CONTENT_HASH),
             "the publication does not carry this binary's interpreter hash"
         );
-        if let Some(children_page) = compare {
-            compare_with_rebuild(pool, &project, &target, children_page).await?;
+        if let (Some(children_page), Some(baseline)) = (compare, baseline) {
+            let retention = endpoint::Retention::load(
+                pool,
+                baseline,
+                (resume.number + 1, number),
+                resume.number,
+            )
+            .await?;
+            compare_with_rebuild(pool, &project, &target, children_page, &retention).await?;
         }
         resume = target;
     }
@@ -341,12 +352,14 @@ async fn run(pool: &PgPool, previous: i64, targets: &[i64], compare: Option<u64>
 }
 
 /// Reads every name and subname the batch left, rebuilds the target from scratch and commits it,
-/// reads them again and compares.
+/// reads them again and compares. A row that differs must be one the batch was allowed to keep
+/// (see [`endpoint::Retention`]).
 async fn compare_with_rebuild(
     pool: &PgPool,
     project: &ProjectPhase,
     target: &BlockMarker,
     children_page: u64,
+    retention: &endpoint::Retention,
 ) -> Result<()> {
     let candidate = endpoint::Served::read(pool, children_page).await?;
     let started = Instant::now();
@@ -354,7 +367,7 @@ async fn compare_with_rebuild(
     let rebuild_ms = started.elapsed().as_millis();
     let rebuilt = endpoint::Served::read(pool, children_page).await?;
     let stamp = endpoint::Target::load(pool, target.number, &target.hash).await?;
-    let outcome = endpoint::compare(&candidate, &rebuilt, &stamp)?;
+    let outcome = endpoint::compare(&candidate, &rebuilt, &stamp, retention)?;
     eprintln!(
         "SEPOLIA_END_TO_END_COMPARE target={} names={} subname_rows={} subname_pages={} exact={} \
          retained={} rebuild_ms={rebuild_ms} result=equal",
