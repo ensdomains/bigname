@@ -344,10 +344,10 @@ root ([registry generation](glossary.md#registry-generation)).
 current-registry ownership record, whatever the arm, and is absent before one
 exists and for the root. Both read activated, canonical registry ownership
 events by node rather than by name: a `NewOwner` counts for its child node and
-a `Transfer` for its own node, the `emitter_role` of the event tells the two
-registries apart, and a same-transaction registration that reconciliation
-marked `registry_migrated` counts as a current-registry record for its
-namehash, which is the evidence Interpret restores its own handoff state from.
+a `Transfer` for its own node, and the `emitter_role` of the event tells the two
+registries apart. A same-transaction registration that reconciliation marked
+`registry_migrated` needs no separate reading: reconciliation keeps the
+transaction's last current-registry ownership write, which already counts.
 `ownerless_registry` is `true` exactly when the row is the supported,
 unregistered ownerless registry profile; the selected arm is kept, but the API
 serves no `authority` for such a row and no public `authority` filter matches

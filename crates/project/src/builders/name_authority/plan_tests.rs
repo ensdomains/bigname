@@ -310,7 +310,7 @@ fn namehash_joins(node: &Value) -> Vec<&Value> {
         .iter()
         .any(|key| {
             node[*key].as_str().is_some_and(|condition| {
-                condition.contains("namehash") && condition.contains(".node")
+                condition.contains("namehash") && condition.contains("child_node")
             })
         });
     if compares_namehash {

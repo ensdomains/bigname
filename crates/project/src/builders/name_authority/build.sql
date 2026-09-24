@@ -740,33 +740,31 @@
         ), registry_records AS (
             -- The ownership records the two ENSv1 registries hold for each ENS name's node: whether
             -- the 2017 registry recorded an owner, and the block of the first record in the current
-            -- registry, which answers from the 2017 registry until it holds one. A NewOwner names its
-            -- child node and a Transfer its own; a registration that same-transaction reconciliation
-            -- marked `registry_migrated` stands for the record it absorbed. This is the evidence
-            -- Interpret restores its handoff state from. The root is left out: the constructor writes
-            -- its record without an event.
+            -- registry, which answers from the 2017 registry until it holds one. A NewOwner derives
+            -- SubregistryChanged, a Transfer that is the node's first current-registry write derives
+            -- AuthorityTransferred, and only those two logs derive either kind (the
+            -- ens_v1_registry_l1 manifests' normalized_events). A NewOwner names its child node and a
+            -- Transfer its own. The filter stays on columns with statistics so the join to the names
+            -- below is estimated from real row counts. Same-transaction registration reconciliation keeps the transaction's last
+            -- current-registry ownership write, so a registration it marks `registry_migrated`
+            -- always has such a write beside it and the marker adds nothing here. The root is left
+            -- out: the constructor writes its record without an event.
             -- (upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L18-L46 @ ens_v1@91c966f)
             -- (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L23-L26 @ ens_v1@91c966f)
             -- (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L60-L84 @ ens_v1@91c966f)
             SELECT surface.logical_name_id,
-                   bool_or(record.old_registry) AS has_old_record,
-                   min(record.block_number) FILTER (WHERE NOT record.old_registry)
+                   bool_or(record.emitter_role = 'registry_old') AS has_old_record,
+                   min(record.block_number) FILTER (WHERE record.emitter_role = 'registry')
                        AS current_record_block
             FROM (
                 SELECT lower(COALESCE(event.after_state ->> 'child_node',
                                       event.after_state ->> 'node')) AS node,
-                       event.after_state ->> 'emitter_role' = 'registry_old' AS old_registry,
+                       event.after_state ->> 'emitter_role' AS emitter_role,
                        event.block_number
                 FROM project_events event
                 WHERE event.namespace = 'ens'
                   AND event.source_family = 'ens_v1_registry_l1'
-                  AND event.after_state ->> 'source_event' IN ('NewOwner', 'Transfer')
-                  AND event.after_state ->> 'emitter_role' IN ('registry', 'registry_old')
-                UNION ALL
-                SELECT lower(event.after_state ->> 'namehash'), false, event.block_number
-                FROM project_events event
-                WHERE event.namespace = 'ens'
-                  AND event.after_state -> 'registry_migrated' = 'true'::jsonb
+                  AND event.event_kind IN ('SubregistryChanged', 'AuthorityTransferred')
             ) record
             JOIN project_surfaces surface
               ON surface.namespace = 'ens' AND lower(surface.namehash) = record.node

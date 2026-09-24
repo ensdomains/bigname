@@ -423,6 +423,62 @@ async fn produced_registry_only_name_serves_ens_v0_until_the_current_registry_re
     database.cleanup().await
 }
 
+/// A same-owner `setOwner` as the node's first current-registry write still derives the
+/// `AuthorityTransferred` Project reads the handoff from, although the owner matches the one the
+/// 2017 registry holds.
+#[test]
+fn a_same_owner_transfer_handoff_derives_a_current_registry_record() -> Result<()> {
+    let mut session = None;
+    let mut handoff = Vec::new();
+    for block in [OLD_RECORD, SURFACED, HANDOFF] {
+        let raw_logs = if block == HANDOFF {
+            vec![transfer(OWNER, block)]
+        } else {
+            logs(block)
+        };
+        let input = BatchInput {
+            chain_id: CHAIN.into(),
+            manifests: manifests(),
+            discovery_rules: Vec::new(),
+            admissions: vec![
+                admission(REGISTRY_MANIFEST, 971, "registry", REGISTRY),
+                admission(REGISTRY_MANIFEST, 972, "registry_old", OLD_REGISTRY),
+                admission(
+                    REGISTRAR_MANIFEST,
+                    973,
+                    "legacy_registrar_controller",
+                    CONTROLLER,
+                ),
+            ],
+            prior_events: Vec::new(),
+            blocks: vec![RawBlockInput {
+                chain_id: CHAIN.into(),
+                block_hash: format!("0xhistory{block}"),
+                block_number: block,
+                block_timestamp: timestamp(1_700_000_000 + block),
+                canonicality_state: "canonical".into(),
+            }],
+            raw_logs,
+        };
+        let (output, next) =
+            prepare_schema_v2_batch_incremental(input, session, StateCacheCapacity::Unlimited)?
+                .finish(Vec::new())?;
+        session = Some(next);
+        if block == HANDOFF {
+            handoff = output.normalized_events;
+        }
+    }
+    assert!(
+        handoff
+            .iter()
+            .any(|event| event.event_kind == "AuthorityTransferred"
+                && event.after_state["emitter_role"] == "registry"
+                && event.after_state["node"] == format!("{:#x}", namehash(NAME))),
+        "{handoff:?}"
+    );
+    Ok(())
+}
+
 mod marked {
     use super::*;
 
@@ -593,6 +649,7 @@ async fn same_transaction_registration_reads_as_the_current_registry_record() ->
         .find(|event| event.event_kind == "RegistrationGranted")
         .expect("registration grant");
     assert_eq!(grant.after_state["registry_migrated"], true, "{grant:?}");
+    assert_keeps_current_registry_write(&whole, 121);
 
     let selection_of = |pool: PgPool| async move {
         sqlx::query_scalar::<_, Value>(
@@ -624,4 +681,82 @@ async fn same_transaction_registration_reads_as_the_current_registry_record() ->
         "{selection}"
     );
     database.cleanup().await
+}
+
+/// Reconciliation keeps a current-registry ownership write in the block of a registration it
+/// marks `registry_migrated`, so Project reads the handoff from that write and needs no reading
+/// of the marker.
+fn assert_keeps_current_registry_write(output: &BatchOutput, block: i64) {
+    let marked = output.normalized_events.iter().any(|event| {
+        event.block_number == Some(block) && event.after_state["registry_migrated"] == true
+    });
+    assert!(
+        marked,
+        "no registration marked registry_migrated at {block}"
+    );
+    let kept = output.normalized_events.iter().any(|event| {
+        event.block_number == Some(block)
+            && event.event_kind == "AuthorityTransferred"
+            && event.after_state["emitter_role"] == "registry"
+            && event.after_state["child_node"] == format!("{:#x}", namehash(marked::NAME))
+    });
+    assert!(
+        kept,
+        "reconciliation dropped every current-registry write at {block}"
+    );
+}
+
+/// The resolver-bearing controller shape: the registrar mints to the controller and writes the
+/// registry record for it, the controller then reclaims the record for the buyer and hands the
+/// token over. The controller's own write is transient and reconciliation drops its setup
+/// permission, but the buyer's write stays
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L287-L317 @ ens_v1@91c966f).
+#[test]
+fn reconciliation_keeps_the_last_current_registry_write_of_a_transient_owner() -> Result<()> {
+    use marked::*;
+    const CONTROLLER: &str = "0x00000000000000000000000000000000000000c7";
+    let id = U256::from_be_bytes(keccak256("marked").0);
+    let (manifests, admissions) = inputs();
+    let (output, _) = prepare_schema_v2_batch_incremental(
+        BatchInput {
+            chain_id: CHAIN.into(),
+            manifests,
+            discovery_rules: vec![],
+            admissions,
+            prior_events: vec![],
+            blocks: (120..=121)
+                .map(|block| RawBlockInput {
+                    chain_id: CHAIN.into(),
+                    block_hash: format!("0xhistory{block}"),
+                    block_number: block,
+                    block_timestamp: timestamp(1_700_000_000 + block),
+                    canonicality_state: "canonical".into(),
+                })
+                .collect(),
+            raw_logs: vec![
+                new_owner("marked", HOLDER, 120, 0, OLD_REGISTRY),
+                token_transfer(&Address::ZERO.to_string(), CONTROLLER, id, 121, 0),
+                new_owner("marked", CONTROLLER, 121, 1, REGISTRY),
+                raw(
+                    NameRegistered {
+                        id,
+                        owner: CONTROLLER.parse()?,
+                        expires: U256::from(1_900_000_000_u64),
+                    }
+                    .encode_log_data(),
+                    121,
+                    2,
+                    REGISTRAR,
+                ),
+                new_owner("marked", HOLDER, 121, 3, REGISTRY),
+                token_transfer(CONTROLLER, HOLDER, id, 121, 4),
+            ],
+        },
+        None,
+        StateCacheCapacity::Unlimited,
+    )?
+    .finish(vec![])?;
+    assert!(output.decode_skips.is_empty(), "{:?}", output.decode_skips);
+    assert_keeps_current_registry_write(&output, 121);
+    Ok(())
 }
