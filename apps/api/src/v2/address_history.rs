@@ -9,7 +9,7 @@ use bigname_storage::{HistoryCursor, HistoryOrder, HistorySummaryMode};
 use crate::AppState;
 
 use super::address_names::relation_set_to_storage;
-use super::cursor::{cursor_value, invalid_cursor_error};
+use super::history_keyset::RequestCursor;
 use super::support::{ensure_public_namespace, parse_evm_address};
 use super::{
     CursorPayload, Envelope, Event, HISTORY_TOTAL_COUNT_CAP, HistoryScope, Page,
@@ -24,8 +24,6 @@ const ADDRESS_FILTER_KEY: &str = "address";
 const NAMESPACE_FILTER_KEY: &str = "namespace";
 const RELATION_FILTER_KEY: &str = "relation";
 const SCOPE_FILTER_KEY: &str = "scope";
-const NORMALIZED_EVENT_ID_CURSOR_KEY: &str = "normalized_event_id";
-const EVENT_IDENTITY_CURSOR_KEY: &str = "event_identity";
 
 pub(crate) struct AddressHistoryQueryParams;
 
@@ -84,22 +82,23 @@ pub(crate) async fn get_address_history(
         order: history_storage_order(params.order),
         params: Some(&params),
     };
-    let snapshot = super::collection_snapshot::CollectionSnapshot::capture_for_namespace(
-        &state,
-        params.cursor.as_deref(),
-        Some(&namespace),
-    )
-    .await?;
-    let storage_cursor = params
-        .cursor
-        .as_deref()
-        .map(|cursor| {
-            let payload = decode(cursor)?;
-            let cursor = address_history_storage_cursor(&payload, &cursor_binding)?;
-            snapshot.validate_cursor(&payload)?;
-            Ok(cursor)
-        })
-        .transpose()?;
+    let (snapshot, request_cursor) =
+        super::collection_snapshot::CollectionSnapshot::capture_history(
+            &state,
+            Some(&namespace),
+            || {
+                params
+                    .cursor
+                    .as_deref()
+                    .map(|cursor| address_history_storage_cursor(&decode(cursor)?, &cursor_binding))
+                    .transpose()
+            },
+        )
+        .await?;
+    let storage_cursor = match request_cursor {
+        Some(cursor) => Some(super::history_keyset::resolve(&state, cursor).await?),
+        None => None,
+    };
     let block_window = Some(super::history::bound_history_block_window(
         resolve_history_block_window(&state.pool, &params).await?,
         &snapshot.block_bounds(),
@@ -135,9 +134,10 @@ pub(crate) async fn get_address_history(
     .await
     .map_err(|_| V2Error::internal_error("failed to run history read test hook"))?;
 
-    let next_cursor = storage_page.next_cursor.as_ref().map(|cursor| {
-        encode(&snapshot.bind_cursor(address_history_cursor_payload(cursor, &cursor_binding)))
-    });
+    let next_cursor = storage_page
+        .next_cursor
+        .as_ref()
+        .map(|cursor| encode(&address_history_cursor_payload(cursor, &cursor_binding)));
     let has_more = next_cursor.is_some();
     let total_count = if params.include.iter().any(|v| v == "total_count") {
         storage_page.summary.as_ref().map(|s| s.total_count)
@@ -186,7 +186,7 @@ pub(crate) async fn get_address_history(
             total_count,
             has_more,
         }),
-        meta: snapshot.finish(&state).await?,
+        meta: snapshot.finish_history(&state).await?,
     }))
 }
 
@@ -206,50 +206,22 @@ pub(crate) fn address_history_cursor_payload(
     cursor: &HistoryCursor,
     binding: &AddressHistoryCursorBinding<'_>,
 ) -> CursorPayload {
-    CursorPayload::new(
+    super::history_keyset::cursor_payload(
+        cursor,
         history_sort_token(binding.order),
         address_history_cursor_filters(binding),
-        BTreeMap::from([
-            (
-                NORMALIZED_EVENT_ID_CURSOR_KEY.to_owned(),
-                cursor.normalized_event_id.to_string(),
-            ),
-            (
-                EVENT_IDENTITY_CURSOR_KEY.to_owned(),
-                cursor.event_identity.clone(),
-            ),
-        ]),
-        None,
     )
 }
 
 pub(crate) fn address_history_storage_cursor(
     payload: &CursorPayload,
     binding: &AddressHistoryCursorBinding<'_>,
-) -> V2Result<HistoryCursor> {
-    if payload.sort != history_sort_token(binding.order) {
-        return Err(invalid_cursor_error());
-    }
-    if payload.filters != address_history_cursor_filters(binding) {
-        return Err(invalid_cursor_error());
-    }
-    if payload.last_item.len() != 2 {
-        return Err(invalid_cursor_error());
-    }
-
-    let normalized_event_id = cursor_value(
+) -> V2Result<RequestCursor> {
+    super::history_keyset::decode_cursor(
         payload,
-        NORMALIZED_EVENT_ID_CURSOR_KEY,
-        invalid_cursor_error,
-    )?
-    .parse::<i64>()
-    .map_err(|_| invalid_cursor_error())?;
-    let event_identity = cursor_value(payload, EVENT_IDENTITY_CURSOR_KEY, invalid_cursor_error)?;
-
-    Ok(HistoryCursor {
-        normalized_event_id,
-        event_identity,
-    })
+        history_sort_token(binding.order),
+        &address_history_cursor_filters(binding),
+    )
 }
 
 fn address_history_cursor_filters(
@@ -285,8 +257,15 @@ mod tests {
 
     fn sample_cursor() -> HistoryCursor {
         HistoryCursor {
-            normalized_event_id: 42,
+            normalized_event_id: None,
             event_identity: "event:42".to_owned(),
+            position: Some(bigname_storage::HistoryPosition {
+                block_number: Some(21_000_000),
+                chain_id: Some("ethereum-mainnet".to_owned()),
+                block_hash: Some("0xb1".to_owned()),
+                transaction_hash: Some("0xt1".to_owned()),
+                log_index: Some(4),
+            }),
         }
     }
 
@@ -319,7 +298,7 @@ mod tests {
         );
         assert_eq!(
             address_history_storage_cursor(&payload, &binding).expect("cursor must decode"),
-            cursor
+            RequestCursor::Position(cursor)
         );
         assert!(payload.snapshot.is_none());
     }
@@ -336,7 +315,7 @@ mod tests {
         assert!(!payload.filters.contains_key("relation"));
         assert_eq!(
             address_history_storage_cursor(&payload, &binding).expect("cursor must decode"),
-            cursor
+            RequestCursor::Position(cursor)
         );
     }
 
@@ -371,7 +350,7 @@ mod tests {
         );
         assert_eq!(
             address_history_storage_cursor(&payload, &binding).expect("cursor must decode"),
-            cursor
+            RequestCursor::Position(cursor)
         );
         assert!(address_history_storage_cursor(&payload, &sample_binding()).is_err());
         let desc_binding = AddressHistoryCursorBinding {
@@ -417,7 +396,7 @@ mod tests {
         assert_eq!(
             address_history_storage_cursor(&payload, &binding)
                 .expect("legacy snapshot component must not bind a latest-state cursor"),
-            cursor
+            RequestCursor::Position(cursor)
         );
     }
 }

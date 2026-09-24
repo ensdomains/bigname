@@ -2,14 +2,11 @@ use std::collections::BTreeMap;
 
 use bigname_storage::{HistoryCursor, HistoryOrder};
 
-use crate::v2::{
-    CursorPayload, HistoryScope, QueryParams, V2Result,
-    cursor::{cursor_value, invalid_cursor_error},
-};
+use crate::v2::history_keyset::{self, RequestCursor};
+use crate::v2::{CursorPayload, HistoryScope, QueryParams, V2Result};
 
 use super::{
-    EVENT_IDENTITY_CURSOR_KEY, NAME_FILTER_KEY, NAMESPACE_FILTER_KEY,
-    NORMALIZED_EVENT_ID_CURSOR_KEY, SCOPE_FILTER_KEY, history_sort_token,
+    NAME_FILTER_KEY, NAMESPACE_FILTER_KEY, SCOPE_FILTER_KEY, history_sort_token,
     insert_history_filter_keys,
 };
 
@@ -48,48 +45,20 @@ pub(crate) fn history_cursor_payload(
     cursor: &HistoryCursor,
     binding: &HistoryCursorBinding<'_>,
 ) -> CursorPayload {
-    CursorPayload::new(
+    history_keyset::cursor_payload(
+        cursor,
         history_sort_token(binding.order),
         history_cursor_filters(binding),
-        BTreeMap::from([
-            (
-                NORMALIZED_EVENT_ID_CURSOR_KEY.to_owned(),
-                cursor.normalized_event_id.to_string(),
-            ),
-            (
-                EVENT_IDENTITY_CURSOR_KEY.to_owned(),
-                cursor.event_identity.clone(),
-            ),
-        ]),
-        None,
     )
 }
 
 pub(crate) fn history_storage_cursor(
     payload: &CursorPayload,
     binding: &HistoryCursorBinding<'_>,
-) -> V2Result<HistoryCursor> {
-    if payload.sort != history_sort_token(binding.order) {
-        return Err(invalid_cursor_error());
-    }
-    if payload.filters != history_cursor_filters(binding) {
-        return Err(invalid_cursor_error());
-    }
-    if payload.last_item.len() != 2 {
-        return Err(invalid_cursor_error());
-    }
-
-    let normalized_event_id = cursor_value(
+) -> V2Result<RequestCursor> {
+    history_keyset::decode_cursor(
         payload,
-        NORMALIZED_EVENT_ID_CURSOR_KEY,
-        invalid_cursor_error,
-    )?
-    .parse::<i64>()
-    .map_err(|_| invalid_cursor_error())?;
-    let event_identity = cursor_value(payload, EVENT_IDENTITY_CURSOR_KEY, invalid_cursor_error)?;
-
-    Ok(HistoryCursor {
-        normalized_event_id,
-        event_identity,
-    })
+        history_sort_token(binding.order),
+        &history_cursor_filters(binding),
+    )
 }

@@ -11,6 +11,7 @@ use sqlx::types::Uuid;
 use crate::AppState;
 
 use super::cursor::{cursor_value, invalid_cursor_error};
+use super::history_keyset;
 use super::support::normalize_inferred_route_name;
 use super::{
     CursorPayload, Envelope, EventDetail, HISTORY_TOTAL_COUNT_CAP, HistoryEventType,
@@ -105,22 +106,29 @@ pub(crate) async fn get_events(
     }
     let order = parsed.storage_filter.order;
 
-    let snapshot = super::collection_snapshot::CollectionSnapshot::capture_for_namespace(
-        &state,
-        params.cursor.as_deref(),
-        namespace.as_deref(),
-    )
-    .await?;
-    let storage_cursor = params
-        .cursor
-        .as_deref()
-        .map(|cursor| {
-            let payload = decode(cursor)?;
-            let cursor = events_storage_cursor(&payload, &parsed.cursor_filters, order)?;
-            snapshot.validate_cursor(&payload)?;
-            Ok(cursor)
-        })
-        .transpose()?;
+    let (snapshot, request_cursor) =
+        super::collection_snapshot::CollectionSnapshot::capture_history(
+            &state,
+            namespace.as_deref(),
+            || {
+                params
+                    .cursor
+                    .as_deref()
+                    .map(|cursor| {
+                        history_keyset::decode_cursor(
+                            &decode(cursor)?,
+                            history_sort_token(order),
+                            &parsed.cursor_filters,
+                        )
+                    })
+                    .transpose()
+            },
+        )
+        .await?;
+    let storage_cursor = match request_cursor {
+        Some(cursor) => Some(history_keyset::resolve(&state, cursor).await?),
+        None => None,
+    };
     parsed.storage_filter.block_window = Some(super::history::bound_history_block_window(
         resolve_history_block_window(&state.pool, &params).await?,
         &snapshot.block_bounds(),
@@ -158,7 +166,11 @@ pub(crate) async fn get_events(
     .map_err(|_| V2Error::internal_error("failed to run history read test hook"))?;
 
     let next_cursor = storage_page.next_cursor.as_ref().map(|cursor| {
-        encode(&snapshot.bind_cursor(events_cursor_payload(cursor, &parsed.cursor_filters, order)))
+        encode(&history_keyset::cursor_payload(
+            cursor,
+            history_sort_token(order),
+            parsed.cursor_filters.clone(),
+        ))
     });
     let has_more = next_cursor.is_some();
     let total_count = if params.include.iter().any(|v| v == "total_count") {
@@ -208,7 +220,7 @@ pub(crate) async fn get_events(
             total_count,
             has_more,
         }),
-        meta: snapshot.finish(&state).await?,
+        meta: snapshot.finish_history(&state).await?,
     }))
 }
 
@@ -236,6 +248,7 @@ pub(crate) fn build_event(
     })
 }
 
+/// The anchor cursor of `/v1/diagnostics/events`, which names its anchor row.
 pub(crate) fn events_cursor_payload(
     cursor: &HistoryCursor,
     filters: &BTreeMap<String, String>,
@@ -247,7 +260,10 @@ pub(crate) fn events_cursor_payload(
         BTreeMap::from([
             (
                 NORMALIZED_EVENT_ID_CURSOR_KEY.to_owned(),
-                cursor.normalized_event_id.to_string(),
+                // Every cursor this layout encodes comes from a storage page, whose next cursor
+                // always names its row (`history_cursor_from_row`), or from this decoder, which
+                // requires the id; a `None` here cannot occur.
+                cursor.normalized_event_id.unwrap_or_default().to_string(),
             ),
             (
                 EVENT_IDENTITY_CURSOR_KEY.to_owned(),
@@ -283,8 +299,9 @@ pub(crate) fn events_storage_cursor(
     let event_identity = cursor_value(payload, EVENT_IDENTITY_CURSOR_KEY, invalid_cursor_error)?;
 
     Ok(HistoryCursor {
-        normalized_event_id,
+        normalized_event_id: Some(normalized_event_id),
         event_identity,
+        position: None,
     })
 }
 

@@ -1,13 +1,15 @@
-//! Keyset continuation for history pages: the cursor row, its existence check, and the
-//! predicates that start a page strictly after it in the requested order.
+//! Keyset continuation for history pages: the cursor's position in the history order, and the
+//! predicates that start a page strictly after it in the requested order. A cursor that carries
+//! its position continues after it whether or not its anchor row still exists; a cursor without
+//! one resumes through its anchor row, which must still be one of the rows the filter reads.
 
 use anyhow::{Context, Result};
-use sqlx::{PgConnection, Postgres, QueryBuilder};
+use sqlx::{PgConnection, PgPool, Postgres, QueryBuilder};
 
 use super::{
-    EventHistoryReadFilter, HistoryCursor, HistoryEvent, HistoryOrder, InvalidHistoryCursor,
-    duplicates::push_product_history_duplicate_filter, paging::push_history_filters,
-    source::push_history_source_for_filter,
+    EventHistoryReadFilter, HistoryCursor, HistoryEvent, HistoryOrder, HistoryPosition,
+    InvalidHistoryCursor, duplicates::push_product_history_duplicate_filter,
+    paging::push_history_filters, source::push_history_source_for_filter,
 };
 
 /// A validated continuation point: the cursor and the block number of its row.
@@ -16,8 +18,8 @@ pub(super) struct HistoryKeyset<'a> {
     pub(super) block_number: Option<i64>,
 }
 
-/// Check that the cursor row is still one of the rows this filter reads, and return its block
-/// number for [`push_history_cursor_block_bound`].
+/// The cursor's block number for [`push_history_cursor_block_bound`]. A cursor without its
+/// position must name a row that is still one of the rows this filter reads.
 pub(super) async fn load_history_keyset<'a>(
     connection: &mut PgConnection,
     filter: &EventHistoryReadFilter,
@@ -25,6 +27,12 @@ pub(super) async fn load_history_keyset<'a>(
     cursor: &'a HistoryCursor,
     include_candidates: bool,
 ) -> Result<HistoryKeyset<'a>> {
+    if let Some(position) = cursor.position.as_ref() {
+        return Ok(HistoryKeyset {
+            cursor,
+            block_number: position.block_number,
+        });
+    }
     let mut builder = QueryBuilder::<Postgres>::new(" SELECT ne.block_number ");
     let mut cursor_filter = filter.clone();
     if !cursor_filter.bind_cursor_anchor_to_event_kinds {
@@ -57,10 +65,28 @@ pub(super) async fn load_history_keyset<'a>(
     })
 }
 
+/// `WITH history_cursor_row AS (…)`: the cursor's ordering values, bound as given when the cursor
+/// carries its position, else read from its anchor row.
 pub(super) fn push_history_cursor_cte<'a>(
     builder: &mut QueryBuilder<'a, Postgres>,
     cursor: &'a HistoryCursor,
 ) {
+    if let Some(position) = cursor.position.as_ref() {
+        builder.push(" WITH history_cursor_row AS (SELECT ");
+        builder.push_bind(position.block_number);
+        builder.push("::bigint AS block_number, ");
+        builder.push_bind(position.chain_id.as_deref());
+        builder.push("::text AS chain_id, ");
+        builder.push_bind(position.block_hash.as_deref());
+        builder.push("::text AS block_hash, ");
+        builder.push_bind(position.transaction_hash.as_deref());
+        builder.push("::text AS transaction_hash, ");
+        builder.push_bind(position.log_index);
+        builder.push("::bigint AS log_index, ");
+        builder.push_bind(&cursor.event_identity);
+        builder.push("::text AS event_identity) ");
+        return;
+    }
     builder.push(
         r#"
         WITH history_cursor_row AS (
@@ -87,9 +113,8 @@ pub(super) fn push_history_cursor_cte<'a>(
 /// remaining rows from the column statistics instead of a fixed guess.
 ///
 /// It is added only when the filter already excludes rows without a block, as every block
-/// window and block bound does. A row without a block sorts after every block newest first,
-/// and the comparison would drop it. The cursor row passed the same filter in
-/// [`load_history_keyset`], so its block is known too.
+/// window and block bound does, and the cursor has a block. A row without a block sorts after
+/// every block newest first, and the comparison would drop it.
 pub(super) fn push_history_cursor_block_bound(
     builder: &mut QueryBuilder<'_, Postgres>,
     filter: &EventHistoryReadFilter,
@@ -189,7 +214,56 @@ pub(super) fn push_history_cursor_after(
 
 pub(super) fn history_cursor_from_row(row: &HistoryEvent) -> HistoryCursor {
     HistoryCursor {
-        normalized_event_id: row.normalized_event_id,
+        normalized_event_id: Some(row.normalized_event_id),
         event_identity: row.event_identity.clone(),
+        position: Some(HistoryPosition {
+            block_number: row.block_number,
+            chain_id: row.chain_id.clone(),
+            block_hash: row.block_hash.clone(),
+            transaction_hash: row.transaction_hash.clone(),
+            log_index: row.log_index,
+        }),
     }
+}
+
+/// The history position of the event named `event_identity`, for a cursor that carries only its
+/// anchor, or `None` when no such event exists. It reads under the same Interpret redo check as a
+/// history page, in one snapshot: during a redo it fails with `InterpretRedoInProgress` instead of
+/// reporting an anchor the redo may have removed.
+pub async fn load_history_anchor_position(
+    pool: &PgPool,
+    event_identity: &str,
+) -> Result<Option<HistoryPosition>> {
+    let mut transaction = pool
+        .begin()
+        .await
+        .context("failed to begin a history cursor anchor read")?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+        .execute(&mut *transaction)
+        .await
+        .context("failed to configure a history cursor anchor read")?;
+    super::redo::ensure_interpret_not_redo(&mut transaction).await?;
+    let row = sqlx::query(
+        "SELECT block_number, chain_id, block_hash, transaction_hash, log_index
+             FROM bigname_phase.normalized_events
+             WHERE event_identity = $1",
+    )
+    .bind(event_identity)
+    .fetch_optional(&mut *transaction)
+    .await
+    .context("failed to load a history cursor anchor")?;
+    transaction
+        .commit()
+        .await
+        .context("failed to commit a history cursor anchor read")?;
+    row.map(|row| {
+        Ok(HistoryPosition {
+            block_number: sqlx::Row::try_get(&row, "block_number")?,
+            chain_id: sqlx::Row::try_get(&row, "chain_id")?,
+            block_hash: sqlx::Row::try_get(&row, "block_hash")?,
+            transaction_hash: sqlx::Row::try_get(&row, "transaction_hash")?,
+            log_index: sqlx::Row::try_get(&row, "log_index")?,
+        })
+    })
+    .transpose()
 }
