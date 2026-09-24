@@ -141,6 +141,15 @@ History and event pages read `normalized_events` in chain-position order through
 matching schema-migration on a large initialized database; without the prebuild
 that schema-migration blocks writes to `normalized_events` while it builds.
 
+Project's [ENSv1 mirror resolver](glossary.md#ensv1-mirror-resolver-ensv1_mirror_resolver)
+dependency expansion and evidence staging, and the history reader's mirror
+lookup, find ENSv1 registry resolver pointers by the node each event addresses
+through `normalized_events_project_v1_pointer_addressed_node_idx`. Follow its
+[online index runbook](../ops/mirror-pointer-index/README.md) before applying the
+matching schema-migration on a large initialized database, and before starting a
+release that reads it; without the prebuild that schema-migration blocks writes to
+`normalized_events` while it builds.
+
 The API binds to the configured `BIGNAME_API_HOST` and
 `BIGNAME_API_PORT`; `/healthz` remains its local readiness endpoint. Current
 runtime configuration is documented in
@@ -1123,3 +1132,25 @@ above, and finishes the full-history Interpret redo and the Project redo it
 installs before the matching API serves, as for any rotation. Until then the
 API refuses to serve the new build's snapshots, as described above, so no
 request sees an empty table as a complete answer.
+
+### ENSv1 mirror ancestor gate
+
+The build that stops deriving an
+[ENSv1 mirror resolver](glossary.md#ensv1-mirror-resolver-ensv1_mirror_resolver)
+name through an ancestor's resolver, and reads ENSv1 registry pointers by the
+node each event addresses, changes `crates/project/src`, so it rotates the
+[interpreter content hash](glossary.md#interpreter-content-hash) for every
+chain. It needs no manifest change, no watch-plan widening and no historical
+ingest fetch. An existing deployment prebuilds
+`normalized_events_project_v1_pointer_addressed_node_idx` with
+[`ops/mirror-pointer-index/install.sql`](../ops/mirror-pointer-index/README.md)
+while the old runner is still processing, applies
+`20260924120000_normalized_events_project_v1_pointer_addressed_node_idx.sql`,
+and finishes the full-history Interpret redo and the Project redo it installs
+before the matching API serves, as for any rotation. Names bound to the mirror
+whose nearest ENSv1 resolver is an ancestor become unsupported with
+`mirrored_resolver_not_projected` when that Project redo publishes; before the
+release is recorded, recount the mirror rows by support status and
+`provenance.mirror.mirrored_unsupported_reason` at the published Project target,
+separating inventory resources from the resources names currently serve, and
+check `address_records_current` for the withdrawn rows.
