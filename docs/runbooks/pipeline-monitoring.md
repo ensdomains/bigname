@@ -197,13 +197,19 @@ before Live runs again, the published chain head is used instead. The metrics
 code never asks the execution client itself. Live and Project run one after the
 other, so the observed head does not move while a Project batch runs: a slow
 Project batch reads zero at its commit and shows its real lag once the next
-Live batch has read the head. A lag that jumps at every Live batch and falls to
-zero at every Project commit means Project takes longer than a block.
+Live batch has read the head. When following the chain normally, each Live
+batch reads one new block, so the gauge reads 1 until Project publishes that
+block and then 0. A value above 1 after a Live batch means Project fell behind
+by more than one block, usually because its previous batch took longer than a
+block.
 
 Both gauges are refreshed with the others every 5 seconds and also right after
-every Ingest, Live and Project batch commit, so they are exact at block
-boundaries. The 5-second refresh alone is slower than a Base block; on Base the
-refresh after each commit is what keeps the value current.
+every Ingest, Live and Project batch commit, so the value in the runner is
+exact at block boundaries. The 5-second refresh alone is slower than a Base
+block; on Base the refresh after each commit is what keeps the value current.
+Prometheus still samples it only once per scrape (every 15 seconds in the
+checked-in configuration), so a lag that lasts less than a scrape interval may
+never appear in a graph.
 
 `phase_runner_head_lag_blocks` keeps its meaning: a phase's own target minus
 its own progress. A Project batch's target is the head it started with, so that

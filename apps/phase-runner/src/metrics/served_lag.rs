@@ -82,8 +82,10 @@ pub(super) fn served_lag(observed_head: Option<i64>, publication: Option<i64>) -
 
 /// The observed head is the newer of the head the latest Live batch saw at the
 /// execution client (the Live row's target) and the published chain head, which
-/// Ingest moves while it catches up before Live runs. The publication applies the
-/// API's serving conditions except the one-block lag tolerance, so large lags show.
+/// Ingest moves while it catches up before Live runs. The publication repeats the
+/// conditions of `load_current_project_publication` in `bigname-storage`; it leaves
+/// out the API's one-block lag tolerance, so large lags show, and the Interpret-redo
+/// refusal some routes add.
 pub(super) async fn load(pool: &PgPool) -> Result<Vec<ServedLagRow>> {
     sqlx::query_as(
         "SELECT project.chain_id,
