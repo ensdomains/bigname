@@ -402,6 +402,10 @@ include!("tests/v2_address_names_budget_fence.rs");
 include!("tests/v2_address_resolves_to.rs");
 include!("tests/v2_address_resolves_to_evm.rs");
 include!("tests/v2_address_resolves_to_evm_plan.rs");
+#[path = "tests/v2_authority_ens_v0.rs"]
+mod v2_authority_ens_v0;
+#[path = "tests/v2_authority_ens_v0_produced.rs"]
+mod v2_authority_ens_v0_produced;
 include!("tests/v2_permissions.rs");
 #[path = "tests/v2_history_bounded_rebinding.rs"]
 mod v2_history_bounded_rebinding;

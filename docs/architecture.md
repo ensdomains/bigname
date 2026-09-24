@@ -1238,6 +1238,9 @@ registry, registrar, or wrapper resource to which it was linked. Later
 current-registry owner assignments preserve a current-registry pointer, and an
 old-registry `Transfer` cannot clear it. This provenance rule, rather than
 replay insertion order, applies identically after normalized-event compaction.
+The handoff is also visible to consumers: until it, an ENSv1 name whose node
+the 2017 registry recorded is served as `authority=ens_v0`, and from it as
+`ens_v1` ([registry generation](glossary.md#registry-generation)).
 (upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L18-L24 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L60-L68 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L75-L82 @ ens_v1@91c966f)

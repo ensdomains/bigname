@@ -134,7 +134,9 @@ pub use name_current::{
     load_name_current_expiring_page, load_name_current_for_snapshot, load_name_current_list_page,
     load_name_current_list_page_offset, load_name_current_list_row_by_name,
     load_name_current_list_row_by_namehash, load_name_migration_transition_timestamps,
-    name_current_authority_arm, name_current_list_cursor_from_row,
+    name_current_authority_arm, name_current_is_ownerless_registry,
+    name_current_list_cursor_from_row, name_current_public_authority,
+    name_current_registry_generation, name_current_registry_handoff_block_number,
 };
 pub use normalized_events::*;
 pub use permissions::{
