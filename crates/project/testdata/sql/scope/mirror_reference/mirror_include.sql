@@ -9,7 +9,7 @@ WITH frontier_resources AS MATERIALIZED (
 ), changed_nodes AS MATERIALIZED (
     DELETE FROM project_mirror_changed_nodes RETURNING namespace, namehash, resource_id
 ), resource_nodes AS MATERIALIZED (
-    SELECT DISTINCT event.namespace, lower(event.after_state ->> 'node') AS namehash
+    SELECT DISTINCT event.namespace, lower(COALESCE(event.after_state ->> 'child_node', event.after_state ->> 'namehash', event.after_state ->> 'node')) AS namehash
     FROM frontier_resources scope JOIN LATERAL (
         SELECT * FROM normalized_events WHERE resource_id = scope.resource_id
           AND canonicality_state IN ('canonical', 'safe', 'finalized')
@@ -19,7 +19,7 @@ WITH frontier_resources AS MATERIALIZED (
     WHERE event.chain_id = $1 AND event.block_number <= $2
       AND event.event_kind = 'ResolverChanged'
       AND event.source_family IN ('ens_v1_registry_l1', 'ens_v1_registrar_l1', 'ens_v1_wrapper_l1')
-      AND event.after_state ->> 'node' IS NOT NULL
+      AND COALESCE(event.after_state ->> 'child_node', event.after_state ->> 'namehash', event.after_state ->> 'node') IS NOT NULL
       AND event.consumer_visibility = 'activated'
       AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
       AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
@@ -101,14 +101,14 @@ WITH frontier_resources AS MATERIALIZED (
 ), wanted AS MATERIALIZED (
     SELECT DISTINCT namespace, namehash FROM consulted
 ), nodes AS MATERIALIZED (
-    SELECT DISTINCT event.namespace, lower(event.after_state ->> 'node') AS namehash, event.resource_id
+    SELECT DISTINCT event.namespace, lower(COALESCE(event.after_state ->> 'child_node', event.after_state ->> 'namehash', event.after_state ->> 'node')) AS namehash, event.resource_id
     FROM wanted JOIN LATERAL (
         SELECT * FROM normalized_events
-        WHERE namespace = wanted.namespace AND lower(after_state ->> 'node') = wanted.namehash
+        WHERE namespace = wanted.namespace AND lower(COALESCE(after_state ->> 'child_node', after_state ->> 'namehash', after_state ->> 'node')) = wanted.namehash
           AND chain_id = $1 AND block_number <= $2
           AND event_kind = 'ResolverChanged'
           AND source_family IN ('ens_v1_registry_l1', 'ens_v1_registrar_l1', 'ens_v1_wrapper_l1')
-          AND after_state ->> 'node' IS NOT NULL
+          AND COALESCE(after_state ->> 'child_node', after_state ->> 'namehash', after_state ->> 'node') IS NOT NULL
           AND consumer_visibility = 'activated'
           AND canonicality_state IN ('canonical', 'safe', 'finalized') OFFSET 0
     ) event ON TRUE
@@ -116,7 +116,7 @@ WITH frontier_resources AS MATERIALIZED (
     WHERE event.chain_id = $1 AND event.block_number <= $2
       AND event.event_kind = 'ResolverChanged'
       AND event.source_family IN ('ens_v1_registry_l1', 'ens_v1_registrar_l1', 'ens_v1_wrapper_l1')
-      AND event.after_state ->> 'node' IS NOT NULL
+      AND COALESCE(event.after_state ->> 'child_node', event.after_state ->> 'namehash', event.after_state ->> 'node') IS NOT NULL
       AND event.consumer_visibility = 'activated'
       AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
       AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')

@@ -207,5 +207,9 @@ mod tests;
 mod lock_tests;
 
 #[cfg(test)]
+#[path = "mirror_plan_tests.rs"]
+mod plan_tests;
+
+#[cfg(test)]
 #[path = "mirror_reference.rs"]
 mod deployed_reference;

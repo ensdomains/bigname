@@ -22,7 +22,7 @@ INSERT INTO project_mirror_frontier_changed
 SELECT * FROM changed;
 ANALYZE project_mirror_frontier_changed;
 INSERT INTO project_mirror_resource_nodes
-    SELECT DISTINCT event.namespace, lower(event.after_state ->> 'node') AS namehash
+    SELECT DISTINCT event.namespace, lower(COALESCE(event.after_state ->> 'child_node', event.after_state ->> 'namehash', event.after_state ->> 'node')) AS namehash
     FROM project_mirror_frontier_resources scope JOIN LATERAL (
         SELECT * FROM normalized_events WHERE resource_id = scope.resource_id
           AND canonicality_state IN ('canonical', 'safe', 'finalized')
@@ -32,7 +32,7 @@ INSERT INTO project_mirror_resource_nodes
     WHERE event.chain_id = $1 AND event.block_number <= $2
       AND event.event_kind = 'ResolverChanged'
       AND event.source_family IN ('ens_v1_registry_l1', 'ens_v1_registrar_l1', 'ens_v1_wrapper_l1')
-      AND event.after_state ->> 'node' IS NOT NULL
+      AND COALESCE(event.after_state ->> 'child_node', event.after_state ->> 'namehash', event.after_state ->> 'node') IS NOT NULL
       AND event.consumer_visibility = 'activated'
       AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
       AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
@@ -181,14 +181,15 @@ INSERT INTO project_mirror_wanted
 SELECT * FROM added;
 ANALYZE project_mirror_wanted;
 INSERT INTO project_mirror_cached_nodes
-    SELECT DISTINCT event.namespace, lower(event.after_state ->> 'node') AS namehash, event.resource_id
+    SELECT DISTINCT event.namespace, lower(COALESCE(event.after_state ->> 'child_node', event.after_state ->> 'namehash', event.after_state ->> 'node')) AS namehash, event.resource_id
     FROM project_mirror_wanted JOIN LATERAL (
         SELECT * FROM normalized_events
-        WHERE namespace = project_mirror_wanted.namespace AND lower(after_state ->> 'node') = project_mirror_wanted.namehash
+        WHERE namespace = project_mirror_wanted.namespace
+          AND lower(COALESCE(after_state ->> 'child_node', after_state ->> 'namehash', after_state ->> 'node')) = project_mirror_wanted.namehash
           AND chain_id = $1 AND block_number <= $2
           AND event_kind = 'ResolverChanged'
           AND source_family IN ('ens_v1_registry_l1', 'ens_v1_registrar_l1', 'ens_v1_wrapper_l1')
-          AND after_state ->> 'node' IS NOT NULL
+          AND COALESCE(after_state ->> 'child_node', after_state ->> 'namehash', after_state ->> 'node') IS NOT NULL
           AND consumer_visibility = 'activated'
           AND canonicality_state IN ('canonical', 'safe', 'finalized') OFFSET 0
     ) event ON TRUE
@@ -196,7 +197,7 @@ INSERT INTO project_mirror_cached_nodes
     WHERE event.chain_id = $1 AND event.block_number <= $2
       AND event.event_kind = 'ResolverChanged'
       AND event.source_family IN ('ens_v1_registry_l1', 'ens_v1_registrar_l1', 'ens_v1_wrapper_l1')
-      AND event.after_state ->> 'node' IS NOT NULL
+      AND COALESCE(event.after_state ->> 'child_node', event.after_state ->> 'namehash', event.after_state ->> 'node') IS NOT NULL
       AND event.consumer_visibility = 'activated'
       AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
       AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
