@@ -1157,7 +1157,10 @@ resolver row whose version differs from the running code's (a row from before
 the field existed included), so a deploy that adds or reshapes a section
 reaches every resolver — a manifest-declared one with no events and an
 unchanged citation included — on the first run, without waiting for evidence
-that would otherwise rescope it.
+that would otherwise rescope it. The resolver overview route no longer serves
+these section summaries or their counts; they stay stored until the per-block
+publication replaces them, and the route reads only the classification from
+this row.
 
 `resolver_current.unsupported_reason` for an ENSv2 resolver (and the
 `coverage.unsupported_reason` copied onto its record inventory) uses a closed
