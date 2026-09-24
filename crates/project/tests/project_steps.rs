@@ -7,6 +7,7 @@ use sqlx::{PgPool, raw_sql};
 
 const CHAIN: &str = "ethereum-sepolia";
 const HASH: &str = "0x0000000000000000000000000000000000000000000000000000000000000035";
+const NEXT_HASH: &str = "0x0000000000000000000000000000000000000000000000000000000000000036";
 
 #[derive(Default)]
 struct Recorded(Mutex<Vec<Option<&'static str>>>);
@@ -36,18 +37,59 @@ async fn long_runs_report_every_step_in_order_and_normal_batches_report_none() -
         .chain([None])
         .collect();
 
-    engine.run_batch(request(RunMode::Normal, None)).await?;
+    engine.run_batch(request(RunMode::Normal, None, 10)).await?;
     assert_eq!(recorded.take(), every_step_then_idle, "full rebuild");
 
     engine
-        .run_batch(request(RunMode::Normal, Some(marker())))
+        .run_batch(request(RunMode::Normal, Some(marker()), 10))
         .await?;
     assert_eq!(recorded.take(), Vec::new(), "normal incremental batch");
 
     engine
-        .run_batch(request(RunMode::Redo, Some(marker())))
+        .run_batch(request(RunMode::Redo, Some(marker()), 10))
         .await?;
     assert_eq!(recorded.take(), every_step_then_idle, "redo");
+
+    engine
+        .run_batch(request(RunMode::Normal, Some(marker()), 11))
+        .await?;
+    assert_eq!(recorded.take(), Vec::new(), "advancing normal batch");
+
+    drop(pool);
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn a_long_run_that_fails_in_derive_reports_idle_once() -> Result<()> {
+    let (database, pool) = database("project_steps_fail").await?;
+    // The children builder reads label preimages, so derivation fails partway through
+    // the builders, well after `prepare`.
+    raw_sql("DROP TABLE label_preimages CASCADE")
+        .execute(&pool)
+        .await?;
+    let recorded = Arc::new(Recorded::default());
+    let engine = Engine::new(pool.clone()).with_step_observer(recorded.clone());
+
+    let result = engine.run_batch(request(RunMode::Normal, None, 10)).await;
+    assert!(result.is_err(), "derive must fail without label preimages");
+    let steps = recorded.take();
+    let (last, reached) = steps.split_last().expect("the run reported steps");
+    assert_eq!(*last, None, "the run ends idle");
+    assert!(
+        reached.iter().all(Option::is_some),
+        "exactly one trailing idle: {steps:?}"
+    );
+    let reached: Vec<_> = reached.iter().flatten().copied().collect();
+    assert_eq!(
+        reached.last(),
+        Some(&"children"),
+        "the failure lands in the children builder"
+    );
+    assert_eq!(
+        reached,
+        PROJECT_STEPS[..reached.len()],
+        "a prefix, in order"
+    );
 
     drop(pool);
     database.cleanup().await
@@ -60,12 +102,12 @@ fn marker() -> Marker {
     }
 }
 
-fn request(mode: RunMode, resume_current: Option<Marker>) -> BatchRequest {
+fn request(mode: RunMode, resume_current: Option<Marker>, target_block: i64) -> BatchRequest {
     BatchRequest {
         chain_id: CHAIN.into(),
-        target_block: 10,
-        affected_from_block: 10,
-        affected_to_block: 10,
+        target_block,
+        affected_from_block: target_block,
+        affected_to_block: target_block,
         resume_current,
         mode,
     }
@@ -107,10 +149,12 @@ async fn database(prefix: &str) -> Result<(TestDatabase, PgPool)> {
     drop(connection);
     sqlx::query(
         "INSERT INTO chain_lineage (chain_id, block_hash, block_number, block_timestamp, canonicality_state)
-         VALUES ($1, $2, 10, '2026-09-25T00:00:00Z', 'canonical')",
+         VALUES ($1, $2, 10, '2026-09-25T00:00:00Z', 'canonical'),
+                ($1, $3, 11, '2026-09-25T00:00:12Z', 'canonical')",
     )
     .bind(CHAIN)
     .bind(HASH)
+    .bind(NEXT_HASH)
     .execute(&pool)
     .await?;
     Ok((database, pool))
