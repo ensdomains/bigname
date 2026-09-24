@@ -4,6 +4,12 @@
 //! benchmark in `bigname-project` stops before commit and never writes the marker; this one
 //! measures what a client waits for.
 //!
+//! The timed path is the engine commit, the batch log, hydration, the progress write and the
+//! synchronous metrics handoff: the phase records the write summary on the metrics feed, and the
+//! feed is notified that the batch committed. It does not include the runner's `confirm_progress`,
+//! which production awaits before that notification, nor the metrics worker applying the summary
+//! or a scrape reading it; this test starts no metrics worker.
+//!
 //! It commits, so it runs only against a disposable copy carrying the marker of
 //! docs/runbooks/benchmark-gate.md. The copy must be paused with Project published at
 //! `BIGNAME_BENCHMARK_PREVIOUS`. A target above the stored head moves the head there first, as
@@ -12,9 +18,11 @@
 //! its head, unless the copy was rewound.
 //!
 //! With `BIGNAME_END_TO_END_COMPARE=1` each target is then rebuilt from scratch and committed at
-//! the same block on the same copy, and the name and subname readers must serve the same rows
-//! for every name and every subname in either state. The next target continues from that rebuilt
-//! state.
+//! the same block on the same copy, and the name and subname readers must serve the same values
+//! for every name and every subname in either state, apart from rows the batch was allowed to
+//! keep (`project_end_to_end/endpoint.rs`). That is a reader-value comparison against a full
+//! rebuild, not the rollback benchmark's contract oracle. The next target continues from that
+//! rebuilt state.
 #[path = "project_end_to_end/endpoint.rs"]
 mod endpoint;
 #[allow(dead_code)]
@@ -93,15 +101,21 @@ async fn disposable_copy_publishes_hydrates_and_reads_each_target() -> Result<()
 }
 
 /// The same mode on the rebuild-performance seed, so it keeps working and can be timed locally:
-/// `BIGNAME_END_TO_END_FIXTURE_NAMES`, `_PREVIOUS` and `_TARGETS` size it (defaults 40, 30 and
+/// `BIGNAME_END_TO_END_FIXTURE_NAMES`, `_PREVIOUS` and `_TARGETS` size it (defaults 400, 30 and
 /// 35,40).
+///
+/// The seed's registry-only names (`i % 10 = 9`) become subnames of one parent once their block
+/// is published, and the subname reader serves about half of them (the seed gives half a zero
+/// owner). The defaults serve 3 subnames at block 35 and 4 at block 40, so with pages of one row
+/// every target reads that parent over several pages, which the test requires. More names or
+/// later targets serve more: 5,000 names at blocks 241 to 245 serve 240.
 #[tokio::test]
 async fn fixture_corpus_publishes_hydrates_reads_and_matches_a_rebuild() -> Result<()> {
     let setting = |name: &str, default: &str| {
         std::env::var(format!("BIGNAME_END_TO_END_FIXTURE_{name}"))
             .unwrap_or_else(|_| default.to_owned())
     };
-    let names: u32 = setting("NAMES", "40").parse()?;
+    let names: u32 = setting("NAMES", "400").parse()?;
     let previous: i64 = setting("PREVIOUS", "30").parse()?;
     let targets = parse_targets(&setting("TARGETS", "35,40"))?;
     let scratch = ScratchDatabase::create("phase_runner_project_end_to_end").await?;
@@ -156,7 +170,29 @@ async fn fixture_corpus_publishes_hydrates_reads_and_matches_a_rebuild() -> Resu
     .execute(pool)
     .await?;
     require_disposable_copy(pool).await?;
-    run(pool, previous, &targets, Some(FIXTURE_CHILDREN_PAGE)).await?;
+    let compared = run(pool, previous, &targets, Some(FIXTURE_CHILDREN_PAGE)).await?;
+    ensure!(compared.len() == targets.len(), "every target is compared");
+    for compared in &compared {
+        // The harness cannot tell whether a dropped key was in the batch's full scope (see
+        // `endpoint::Outcome::dropped`), so the fixture must produce none.
+        ensure!(
+            compared.outcome.dropped == 0,
+            "target {} dropped {} baseline keys",
+            compared.target,
+            compared.outcome.dropped
+        );
+        // The subname comparison must have traversed a parent over more than one page, not just
+        // printed that it could.
+        ensure!(
+            compared.subname_rows > 0 && compared.subname_pages > compared.subname_parents,
+            "target {} served {} subnames over {} pages for {} parents; raise \
+             BIGNAME_END_TO_END_FIXTURE_NAMES so a parent spans several pages",
+            compared.target,
+            compared.subname_rows,
+            compared.subname_pages,
+            compared.subname_parents
+        );
+    }
     scratch.cleanup().await
 }
 
@@ -230,8 +266,23 @@ async fn prepare_fixture(pool: &PgPool, previous: i64, interpreted_through: i64)
     Ok(())
 }
 
-/// `compare` is the subname page size of the rebuild comparison, when it runs.
-async fn run(pool: &PgPool, previous: i64, targets: &[i64], compare: Option<u64>) -> Result<()> {
+/// What the rebuild comparison saw at one target.
+struct Compared {
+    target: i64,
+    outcome: endpoint::Outcome,
+    subname_rows: usize,
+    subname_pages: usize,
+    subname_parents: usize,
+}
+
+/// `compare` is the subname page size of the rebuild comparison, when it runs; it returns what
+/// each comparison saw.
+async fn run(
+    pool: &PgPool,
+    previous: i64,
+    targets: &[i64],
+    compare: Option<u64>,
+) -> Result<Vec<Compared>> {
     let _ = tracing_subscriber::fmt()
         .with_env_filter("bigname_project::batch=info,bigname_project::families=info")
         .with_target(false)
@@ -258,6 +309,7 @@ async fn run(pool: &PgPool, previous: i64, targets: &[i64], compare: Option<u64>
         last = number;
     }
     let mut resume = load_marker(pool, previous).await?;
+    let mut compared = Vec::new();
     ensure!(
         publication(pool).await? == (Some(previous), Some(resume.hash.clone()), false),
         "Project is not published at the requested previous marker"
@@ -268,7 +320,8 @@ async fn run(pool: &PgPool, previous: i64, targets: &[i64], compare: Option<u64>
     store
         .start_phase(CHAIN, PhaseName::Project, &RunMode::Normal)
         .await?;
-    // As main.rs builds it, so the batch log and the metrics handoff fall inside the clock.
+    // As main.rs builds it, so the batch log and the metrics handoff fall inside the clock. No
+    // metrics worker consumes the feed here: applying the summary and scraping it are not timed.
     let metrics_feed = RunnerMetricsFeed::default();
     let project = ProjectPhase::with_hydration(pool.clone(), ChainRpcUrls::default())
         .with_metrics_feed(metrics_feed.clone());
@@ -292,6 +345,7 @@ async fn run(pool: &PgPool, previous: i64, targets: &[i64], compare: Option<u64>
                 outcome.progress(),
             )
             .await?;
+        // The runner notifies here too, after `confirm_progress`, which this test skips.
         metrics_feed.batch_committed();
         while load_served_project_generation(pool, CHAIN, number, &target.hash, true, true)
             .await?
@@ -366,11 +420,13 @@ async fn run(pool: &PgPool, previous: i64, targets: &[i64], compare: Option<u64>
                 resume.number,
             )
             .await?;
-            compare_with_rebuild(pool, &project, &target, children_page, &retention).await?;
+            compared.push(
+                compare_with_rebuild(pool, &project, &target, children_page, &retention).await?,
+            );
         }
         resume = target;
     }
-    Ok(())
+    Ok(compared)
 }
 
 /// Reads every name and subname the batch left, rebuilds the target from scratch and commits it,
@@ -382,7 +438,7 @@ async fn compare_with_rebuild(
     target: &BlockMarker,
     children_page: u64,
     retention: &endpoint::Retention,
-) -> Result<()> {
+) -> Result<Compared> {
     let candidate = endpoint::Served::read(pool, children_page).await?;
     let incremental_families = families(pool).await?;
     let started = Instant::now();
@@ -415,16 +471,26 @@ async fn compare_with_rebuild(
     let stamp = endpoint::Target::load(pool, target.number, &target.hash).await?;
     let outcome = endpoint::compare(&candidate, &rebuilt, &stamp, retention)?;
     eprintln!(
-        "SEPOLIA_END_TO_END_COMPARE target={} names={} subname_rows={} subname_pages={} exact={} \
-         retained={} rebuild_ms={rebuild_ms} result=equal",
+        "SEPOLIA_END_TO_END_COMPARE target={} names={} subname_rows={} subname_pages={} \
+         subname_parents={} exact={} retained={} removed={} dropped={} rebuild_ms={rebuild_ms} \
+         result=equal",
         target.number,
         candidate.names.len(),
         candidate.subname_rows(),
         candidate.pages_read,
+        candidate.parents,
         outcome.exact,
         outcome.retained,
+        outcome.removed,
+        outcome.dropped,
     );
-    Ok(())
+    Ok(Compared {
+        target: target.number,
+        outcome,
+        subname_rows: candidate.subname_rows(),
+        subname_pages: candidate.pages_read,
+        subname_parents: candidate.parents,
+    })
 }
 
 /// Every owned key family table as ordered JSON text, then the family marker without its

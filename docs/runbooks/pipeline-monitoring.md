@@ -286,8 +286,10 @@ numbers the Project latency work (Linear TYR-36) is measured with.
   publication deletes and republishes the served rows of these keys. A full
   rebuild skips scope seeding and republishes every table whole, so its scope
   counts do not describe what it rewrote; read its row counters instead. Child
-  registrations are not published by key at all: every batch replaces the rows
-  of its own block window, whatever names they belong to.
+  registrations are not published by key at all. A normal or redo batch
+  replaces the rows of its own block window, whatever names they belong to, and
+  deletes rows above the window whose block is no longer readable; a full
+  rebuild deletes and rewrites the whole chain's rows.
 - `phase_runner_project_rows_written_total{chain, table, kind}` is a counter of
   the rows Project batches deleted (`kind="deleted"`) from and inserted
   (`kind="inserted"`) into each served table, including
@@ -296,11 +298,15 @@ numbers the Project latency work (Linear TYR-36) is measured with.
   key that had an event in the batch is the ratio TYR-36 drives towards one.
 - `phase_runner_project_stage_duration_seconds{chain, stage}` is the elapsed
   time of each derivation stage of the newest committed batch: `prepare`,
-  `scope`, `inputs`, `builders`, `integrity` and `publish`. The stages follow
-  one another without gaps, so the six add up to the whole derivation;
-  `publish` includes counting the scope keys and staged events just before
-  publication. It covers the derivation inside the Project transaction only,
-  not the commit, hydration or the runner's progress write.
+  `scope`, `inputs`, `builders`, `integrity` and `publish`. Together the six
+  cover the derivation's work approximately: they leave out the timing
+  bookkeeping between stages and are each rounded down to whole milliseconds, so
+  their sum can fall slightly short of the derivation's elapsed time. `publish`
+  includes counting the scope keys and staged events just before publication.
+  They cover the derivation inside the Project transaction only: not
+  `SET TRANSACTION` or the target revalidation, which run inside the
+  transaction before the first stage, and not the commit, hydration or the
+  runner's progress write.
 
 The gauges hold the newest committed batch of each chain until the next one
 replaces them; they are not reset between batches. The runner hands each

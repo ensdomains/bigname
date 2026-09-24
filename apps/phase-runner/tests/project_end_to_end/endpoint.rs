@@ -1,8 +1,24 @@
-//! Reader-level comparison between a committed batch and a committed rebuild at the same block.
+//! Reader-value comparison between a committed batch and a full rebuild committed at the same
+//! block.
 //!
 //! Every name in either state is read through the name reader, and every subname page of every
 //! parent through the subname reader, so the keys compared do not depend on what the batch chose
-//! to rewrite.
+//! to rewrite. The comparison is about the values the readers serve: a row equal to the rebuild
+//! passes whatever the batch did to it, and a row that differs passes only under one explicit
+//! retained-row rule (see [`Retention`]). A key the baseline served that neither later state
+//! serves is counted, as removed when the batch had to rewrite it and as dropped otherwise.
+//!
+//! This is not the rollback benchmark's contract oracle and is not equivalent to it. The oracle's
+//! reference is the legacy algorithm run over the same window, so it can require byte-equal rows,
+//! tell mandatory from legacy-only ownership, and reject a refresh the batch did not need. Here
+//! the reference is a full rebuild, which stamps its target block on every row, including correct
+//! rows outside both incremental scopes, so those rules do not carry over. The oracle stays the
+//! full-scope, byte-level contract; this comparison checks what a client reads after a real
+//! commit.
+//!
+//! Out of scope here: columns the readers do not serve, such as `inserted_at` and
+//! `last_recomputed_at`, so a rewrite that changes only those timestamps is invisible to this
+//! comparison and is left to the oracle; and rows the storage readers filter out in both states.
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result, bail, ensure};
@@ -22,6 +38,8 @@ pub struct Served {
     pub names: BTreeMap<String, Value>,
     pub children: BTreeMap<(String, String), Value>,
     pub pages_read: usize,
+    /// Parents with at least one stored subname row.
+    pub parents: usize,
 }
 
 impl Served {
@@ -46,6 +64,7 @@ impl Served {
         .await?;
         let mut children = BTreeMap::new();
         let mut pages_read = 0;
+        let parent_count = parents.len();
         for parent in parents {
             let mut cursor = None;
             let mut served = 0_u64;
@@ -85,6 +104,7 @@ impl Served {
             names,
             children,
             pages_read,
+            parents: parent_count,
         })
     }
 
@@ -225,18 +245,31 @@ pub fn refresh(kind: Kind, row: &Value, target: &Target) -> Result<Value> {
 
 #[derive(Debug, Default, PartialEq)]
 pub struct Outcome {
+    /// Rows equal to the rebuild.
     pub exact: usize,
+    /// Rows that differ from the rebuild only in the target block, under the retained-row rule.
     pub retained: usize,
+    /// Baseline keys neither later state serves, where the batch had to rewrite the key.
+    pub removed: usize,
+    /// Baseline keys neither later state serves, with no changed event in the window naming them.
+    /// The rebuild agrees they are gone, so this is not a served-value difference, but the
+    /// harness cannot tell whether the batch's full scope covered them; the fixture requires
+    /// none.
+    pub dropped: usize,
 }
 
-/// What a row the batch kept must satisfy, after the contract oracle's retained-row rule: it is
-/// the row the baseline served, the batch was not required to rebuild it, and the block it names
-/// is readable history at or before the previous publication.
+/// The retained-row rule, the one way a served row may differ from the rebuild: it is the row
+/// the baseline served, the batch was not required to rewrite it, the block it names is readable
+/// history at or before the previous publication (looked up by number and hash together, so a
+/// real hash under the wrong number is refused), both target stamps name that block, and the
+/// rebuild differs from it only in the target block it stamps.
 ///
-/// The oracle's required scope comes from an independent scope audit that is test-only code
-/// inside `bigname-project`. The harness cannot run it, so it uses the part of that scope it can
-/// compute itself: every name with an event in the batch window, which the scope always
-/// includes (as a changed name, and as a parent or child of the subnames it rebuilds).
+/// Which keys the batch had to rewrite comes, in the rollback oracle, from an independent scope
+/// audit that is test-only code inside `bigname-project`. The harness cannot run it, so
+/// `required_names` holds the part of that scope it can compute itself: every name with a
+/// changed event in the batch window, selected as the scope selects them. A kept row inside the
+/// full scope but outside that part is not caught here; the rollback oracle applies the full
+/// scope.
 pub struct Retention {
     pub baseline: Served,
     pub required_names: BTreeSet<String>,
@@ -252,10 +285,22 @@ impl Retention {
         window: (i64, i64),
         previous: i64,
     ) -> Result<Self> {
+        // The changed-event predicate of `stage_changed_events` in
+        // crates/project/src/scope.rs (lines 144 to 155), whose names seed the scope
+        // (`seed_direct_scope`): activated, readable events on readable blocks in the window.
         let required_names = sqlx::query_scalar(
-            "SELECT DISTINCT logical_name_id FROM normalized_events
-             WHERE chain_id = $1 AND block_number BETWEEN $2 AND $3
-               AND logical_name_id IS NOT NULL",
+            "SELECT DISTINCT event.logical_name_id
+             FROM normalized_events event
+             JOIN chain_lineage lineage
+               ON lineage.chain_id = event.chain_id
+              AND lineage.block_number = event.block_number
+              AND lineage.block_hash = event.block_hash
+             WHERE event.chain_id = $1
+               AND event.consumer_visibility = 'activated'
+               AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
+               AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+               AND event.block_number BETWEEN $2 AND $3
+               AND event.logical_name_id IS NOT NULL",
         )
         .bind(CHAIN)
         .bind(window.0)
@@ -322,8 +367,9 @@ fn named_block(kind: Kind, row: &Value) -> Result<(i64, &str)> {
     ))
 }
 
-/// Every key must be served in both states, and every row must match the rebuild exactly or be a
-/// row the batch may keep.
+/// Every key must be served in both later states or in neither, and every served row must match
+/// the rebuild exactly or satisfy the retained-row rule. Baseline keys served in neither are
+/// counted as removed or dropped.
 pub fn compare(
     candidate: &Served,
     rebuilt: &Served,
@@ -373,6 +419,14 @@ fn compare_family<K: Ord + std::fmt::Debug>(
         let missing = rebuilt_keys.difference(&candidate_keys).next();
         let extra = candidate_keys.difference(&rebuilt_keys).next();
         bail!("{kind:?} keys differ from the rebuild: missing {missing:?}, extra {extra:?}");
+    }
+    // The key sets are equal here, so a baseline key the rebuild lacks is in neither later state.
+    for key in baseline.keys().filter(|key| !rebuilt.contains_key(key)) {
+        if required(key) {
+            outcome.removed += 1;
+        } else {
+            outcome.dropped += 1;
+        }
     }
     for (key, kept) in candidate {
         let expected = &rebuilt[key];
@@ -438,31 +492,48 @@ mod tests {
         })
     }
 
-    fn served(row: Value) -> Served {
+    fn served(row: Option<Value>) -> Served {
         Served {
             names: BTreeMap::new(),
-            children: BTreeMap::from([(("ens:parent".into(), "ens:child".into()), row)]),
+            children: row
+                .map(|row| (("ens:parent".into(), "ens:child".into()), row))
+                .into_iter()
+                .collect(),
             pages_read: 1,
+            parents: 1,
         }
     }
 
-    fn check(baseline: Value, candidate: Value, required: &[&str]) -> Result<Outcome> {
+    /// Compares with the child served in every state; `None` means the key is not served.
+    fn check_served(
+        baseline: Option<Value>,
+        candidate: Option<Value>,
+        rebuilt: Option<Value>,
+        required: &[&str],
+    ) -> Result<Outcome> {
         let retention = Retention {
             baseline: served(baseline),
             required_names: required.iter().map(|name| (*name).to_owned()).collect(),
             previous: 7,
-            history: BTreeMap::from([((5, OLD.to_owned()), json!("2026-01-01T00:00:00"))]),
+            history: BTreeMap::from([
+                ((5, OLD.to_owned()), json!("2026-01-01T00:00:00")),
+                ((6, "0x06".to_owned()), json!("2026-01-01T00:00:12")),
+            ]),
         };
         let target = Target {
             number: 10,
             hash: NEW.into(),
             timestamp: json!("2026-01-01T00:01:00"),
         };
-        compare(
-            &served(candidate),
-            &served(child(10, NEW)),
-            &target,
-            &retention,
+        compare(&served(candidate), &served(rebuilt), &target, &retention)
+    }
+
+    fn check(baseline: Value, candidate: Value, required: &[&str]) -> Result<Outcome> {
+        check_served(
+            Some(baseline),
+            Some(candidate),
+            Some(child(10, NEW)),
+            required,
         )
     }
 
@@ -472,10 +543,43 @@ mod tests {
         assert_eq!(
             outcome,
             Outcome {
-                exact: 0,
-                retained: 1
+                retained: 1,
+                ..Outcome::default()
             }
         );
+    }
+
+    #[test]
+    fn a_real_hash_under_the_wrong_block_number_is_rejected() {
+        // 0x05 is the hash of block 5, and block 6 is readable history with another hash.
+        let error = check(child(6, OLD), child(6, OLD), &[]).unwrap_err();
+        assert!(
+            error.to_string().contains("not readable history"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_baseline_key_neither_later_state_serves_is_counted() {
+        let outcome = check_served(Some(child(5, OLD)), None, None, &[]).unwrap();
+        assert_eq!(
+            outcome,
+            Outcome {
+                dropped: 1,
+                ..Outcome::default()
+            }
+        );
+        let outcome = check_served(Some(child(5, OLD)), None, None, &["ens:parent"]).unwrap();
+        assert_eq!(
+            outcome,
+            Outcome {
+                removed: 1,
+                ..Outcome::default()
+            }
+        );
+        // Served by the rebuild only, it is a missing key, not a removal.
+        let error = check_served(Some(child(5, OLD)), None, Some(child(10, NEW)), &[]).unwrap_err();
+        assert!(error.to_string().contains("keys differ"), "{error}");
     }
 
     #[test]
