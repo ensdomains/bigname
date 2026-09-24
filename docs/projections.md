@@ -281,6 +281,7 @@ outcomes, or durable traces.
 | `resolver_current` | chain and resolver address | resolver overview |
 | `record_inventory_current` | resource plus record boundary key | indexed record inventory and values |
 | `primary_names_current` | address, coin type, and namespace | declared primary-name claims |
+| `project_*` owned key families | per family, see [below](#owned-key-families) | none yet: unread shadows until the per-block publication reads them |
 
 `surface_bindings` remains identity history rather than a `_current`
 projection. Exact-name reads ordinarily first select the logical name's
@@ -1615,6 +1616,47 @@ An interpreter content-hash rotation requires a full-history Interpret and
 Project walk. Phase state and API admission refuse to mix output from different
 compiled hashes.
 
+## Owned key families
+
+Project also keeps per-key current state for every fact the served tables are
+built from, one table per family: name identity and binding candidates,
+registration and lease state, wrapper state, registry ownership, resolver
+classification, the registry-node and resource resolver pointers, node and
+record-id records with resolver links, grants and account approvals, aliases,
+child edges, reverse tuples and claims, and the address associations. Each row
+belongs to one key and holds what the latest events of that key left, clears
+included: a zero pointer, record id `0`, a revoked grant or an inactive alias
+stays a row. A row goes only when nothing remains for its key.
+
+These tables are shadows today. Nothing reads them, and no served value
+depends on them. After each Project batch commits and its progress is
+recorded, the phase runner applies the families block by block, each block in
+a transaction of its own, from the family marker (`project_family_marker`) up
+to the served marker. A block applies only on top of the block before it on
+the readable lineage. It records the before-image of every row it changes and
+the prior marker in `project_family_undo`, advances the marker, and drops
+journal rows more than 256 blocks below it. A failure stops the loop for that
+batch, leaves the served publication and its progress as they were, and the
+next batch catches up from where the marker stands. `--project-families false`
+(or `BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES=false`) turns the loop off.
+
+A Project redo undoes the families from their journal down to the block before
+the redo range and replays them to the served marker. A marker left on a block
+that is no longer readable is undone the same way. A redo below the kept
+journal, a redo attempt the families never saw, or a served rebuild clears the
+families and rebuilds them from the blocks that carry events. The repair
+record (`project_repair_record`) describes the latest of these: its attempt,
+reason, trusted base, replay target, state and, once done, the marker it
+completed at. Each step is its own transaction, so a run that stops between
+blocks is resumed by the next. Each block also records the Interpret row's
+content hash and redo attempt it read, or nothing while Interpret is in redo.
+
+The per-block publication will read these tables in place of the builders;
+until then they cost one extra pass per batch, reported as
+`phase_runner_project_families_seconds`,
+`phase_runner_project_family_lag_blocks` and
+`phase_runner_project_family_skips_total`.
+
 ## Index baseline
 
 Indexes follow measured serving queries. Baseline access paths cover exact-name
@@ -1633,6 +1675,8 @@ new truth family.
   rows without seeding from them; #828 tracks that asymmetry. These rows are
   replay coordination, not projection writes.
 - Project reads canonical interpreted input and owns every projection write.
+  Project also owns the [owned key families](#owned-key-families), their
+  marker, undo journal and repair record; they are unread shadows.
 - The API reads projections and request-scoped lookup output.
 - Storage exposes typed reads and phase publication boundaries; it does not
   grant adapters or API handlers a projection write shortcut.

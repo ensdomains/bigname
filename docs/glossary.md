@@ -2439,3 +2439,33 @@ and the elapsed time of each derivation stage. The engine returns it with the
 batch outcome and logs it; the phase runner exports it as the
 `phase_runner_project_*` metrics ([pipeline monitoring
 runbook](runbooks/pipeline-monitoring.md#project-batch-writes)).
+
+## Owned key family
+
+per-key current state Project keeps for one kind of fact, such as a name's
+binding candidates, a resource's resolver pointer or a resolver's records at a
+node. A block writes only the keys its own events name, and each row holds
+what the latest events of its key left, clears included. The families are
+unread shadows until the per-block publication reads them
+([projections](projections.md#owned-key-families)).
+
+## Family undo record
+
+the rows of `project_family_undo`: for every owned key family row a block
+changed, the row as it was before the block (or nothing, when the block
+created it), plus the family marker before the block. Undoing the block puts
+those images back and returns the marker; the last 256 blocks are kept.
+
+## Repair record
+
+`project_repair_record`: the latest undo-then-replay or rebuild of a chain's
+owned key families, with the Project redo attempt that caused it, its reason,
+the block it trusts, the block it replays to, its state and, when complete,
+the marker it finished at. Undo never rewrites it.
+
+## Family input revision
+
+the Interpret row's `input_content_hash` and `redo_attempt_generation` a family
+block read before it ran, recorded on the family marker; nothing while
+Interpret is in redo. Distinct from the retired [raw-log input
+revision](#input-revision-raw-log-input-revision).
