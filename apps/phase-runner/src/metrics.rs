@@ -12,8 +12,10 @@ use tokio_util::sync::CancellationToken;
 
 use crate::progress_monitor::RunnerPhaseProgress;
 
+mod feed;
 mod served_lag;
-pub use served_lag::RunnerMetricsFeed;
+use feed::ProjectStepGauges;
+pub use feed::RunnerMetricsFeed;
 use served_lag::ServedLagGauges;
 
 const REFRESH_INTERVAL: Duration = Duration::from_secs(5);
@@ -84,10 +86,12 @@ struct PipelineMetrics {
     batches_since_cursor_advance: IntGaugeVec,
     cursor_stall_age_seconds: IntGaugeVec,
     served_lag: ServedLagGauges,
+    project_steps: ProjectStepGauges,
     refresh_success: IntGauge,
     last_refresh_timestamp_seconds: IntGauge,
     loop_heartbeat: RunnerLoopHeartbeat,
     phase_progress: RunnerPhaseProgress,
+    feed: RunnerMetricsFeed,
     known: Arc<Mutex<KnownLabels>>,
 }
 
@@ -120,6 +124,7 @@ impl PipelineMetrics {
         heartbeat_stale_after_secs: i64,
         loop_heartbeat: RunnerLoopHeartbeat,
         phase_progress: RunnerPhaseProgress,
+        feed: RunnerMetricsFeed,
     ) -> Result<Self> {
         ensure!(
             heartbeat_stale_after_secs > 0,
@@ -219,6 +224,7 @@ impl PipelineMetrics {
             &["chain", "phase", "mode"],
         )?;
         let served_lag = ServedLagGauges::new(&registry)?;
+        let project_steps = ProjectStepGauges::new(&registry)?;
         let refresh_success = registry.int_gauge(
             "phase_runner_metrics_refresh_success",
             "Whether the latest database refresh succeeded.",
@@ -245,10 +251,12 @@ impl PipelineMetrics {
             batches_since_cursor_advance,
             cursor_stall_age_seconds,
             served_lag,
+            project_steps,
             refresh_success,
             last_refresh_timestamp_seconds,
             loop_heartbeat,
             phase_progress,
+            feed,
             known: Arc::new(Mutex::new(KnownLabels::default())),
         })
     }
@@ -266,7 +274,7 @@ impl PipelineMetrics {
             self.refresh_success.set(0);
             return Err(error);
         }
-        if let Err(error) = self.refresh_served_lag(pool).await {
+        if let Err(error) = self.refresh_feed(pool).await {
             self.refresh_success.set(0);
             return Err(error);
         }
@@ -282,9 +290,14 @@ impl PipelineMetrics {
         Ok(())
     }
 
-    async fn refresh_served_lag(&self, pool: &PgPool) -> Result<()> {
+    async fn refresh_feed(&self, pool: &PgPool) -> Result<()> {
+        self.apply_feed();
         self.served_lag.apply(&served_lag::load(pool).await?);
         Ok(())
+    }
+
+    fn apply_feed(&self) {
+        self.project_steps.apply(&self.feed.project_step_snapshot());
     }
 
     fn apply_phase_progress(&self) {
@@ -430,7 +443,12 @@ pub async fn start(
     phase_progress: RunnerPhaseProgress,
     feed: RunnerMetricsFeed,
 ) -> Result<SocketAddr> {
-    let metrics = PipelineMetrics::new(heartbeat_stale_after_secs, loop_heartbeat, phase_progress)?;
+    let metrics = PipelineMetrics::new(
+        heartbeat_stale_after_secs,
+        loop_heartbeat,
+        phase_progress,
+        feed,
+    )?;
     metrics.refresh(&pool).await?;
     let server = MetricsServer::bind(bind_addr, metrics.registry.clone()).await?;
     let local_addr = server.local_addr()?;
@@ -445,16 +463,11 @@ pub async fn start(
             () = server_cancellation.cancelled() => {}
         }
     });
-    tokio::spawn(refresh_loop(metrics, pool, feed, cancellation));
+    tokio::spawn(refresh_loop(metrics, pool, cancellation));
     Ok(local_addr)
 }
 
-async fn refresh_loop(
-    metrics: PipelineMetrics,
-    pool: PgPool,
-    feed: RunnerMetricsFeed,
-    cancellation: CancellationToken,
-) {
+async fn refresh_loop(metrics: PipelineMetrics, pool: PgPool, cancellation: CancellationToken) {
     let mut ticks = tokio::time::interval_at(
         tokio::time::Instant::now() + REFRESH_INTERVAL,
         REFRESH_INTERVAL,
@@ -464,7 +477,7 @@ async fn refresh_loop(
         let result = tokio::select! {
             () = cancellation.cancelled() => return,
             _ = ticks.tick() => metrics.refresh(&pool).await,
-            () = feed.committed() => metrics.refresh_served_lag(&pool).await,
+            () = metrics.feed.changed() => metrics.refresh_feed(&pool).await,
         };
         if let Err(error) = result {
             tracing::error!(error = %format!("{error:#}"), "phase metrics refresh failed");

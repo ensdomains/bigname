@@ -166,7 +166,7 @@ async fn run_benchmark(options: PgConnectOptions, benchmark: Benchmark) -> Resul
         };
         super::validate_request(&baseline)?;
         super::revalidate_target(&mut tx, chain, &resume).await?;
-        super::derive(&mut tx, &baseline, &resume).await?;
+        super::derive(&mut tx, &baseline, &resume, &Default::default()).await?;
         eprintln!(
             "SEPOLIA_ENGINE_BASELINE target={} elapsed_ms={} mode=full_rebuild transaction=rollback",
             previous,
@@ -224,10 +224,15 @@ async fn run_benchmark(options: PgConnectOptions, benchmark: Benchmark) -> Resul
         let candidate_started = Instant::now();
         let rows = if let Some(session) = &profile_session {
             session
-                .scope(super::derive(&mut tx, &request, &target))
+                .scope(super::derive(
+                    &mut tx,
+                    &request,
+                    &target,
+                    &Default::default(),
+                ))
                 .await?
         } else {
-            super::derive(&mut tx, &request, &target).await?
+            super::derive(&mut tx, &request, &target, &Default::default()).await?
         };
         let elapsed = if compare || contract {
             guards_elapsed + candidate_started.elapsed()
@@ -272,7 +277,7 @@ async fn run_benchmark(options: PgConnectOptions, benchmark: Benchmark) -> Resul
             sqlx::query("SET LOCAL bigname.benchmark_reference='on'")
                 .execute(&mut *tx)
                 .await?;
-            super::derive(&mut tx, &request, &target).await?;
+            super::derive(&mut tx, &request, &target, &Default::default()).await?;
             let legacy_scope = super::contract_compare::Scopes::capture(&mut tx).await?;
             let mut reference = super::contract_compare::Snapshot::capture(&mut tx, root).await?;
             let target_metadata = super::contract_compare::Target::load(&mut tx, &target).await?;
@@ -303,7 +308,7 @@ async fn run_benchmark(options: PgConnectOptions, benchmark: Benchmark) -> Resul
                 "comparison mode leaked"
             );
             if targets.peek().is_some() {
-                super::derive(&mut tx, &request, &target).await?;
+                super::derive(&mut tx, &request, &target, &Default::default()).await?;
             }
         }
         if compare {
@@ -324,7 +329,7 @@ async fn run_benchmark(options: PgConnectOptions, benchmark: Benchmark) -> Resul
                 .execute(&mut *tx)
                 .await?;
             let reference_started = Instant::now();
-            super::derive(&mut tx, &request, &target).await?;
+            super::derive(&mut tx, &request, &target, &Default::default()).await?;
             eprintln!(
                 "SEPOLIA_ENGINE_REFERENCE from={} to={} elapsed_ms={} mirror_strategy=deployed_2abf622",
                 request.affected_from_block,
@@ -352,7 +357,7 @@ async fn run_benchmark(options: PgConnectOptions, benchmark: Benchmark) -> Resul
                     "reference mode leaked across rollback"
                 );
                 let advance_started = Instant::now();
-                super::derive(&mut tx, &request, &target).await?;
+                super::derive(&mut tx, &request, &target, &Default::default()).await?;
                 eprintln!(
                     "SEPOLIA_ENGINE_CANDIDATE_ADVANCE target={number} elapsed_ms={} timing=excluded",
                     advance_started.elapsed().as_millis()

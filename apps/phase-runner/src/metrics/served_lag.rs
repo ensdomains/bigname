@@ -1,28 +1,6 @@
-use std::sync::Arc;
-
 use anyhow::{Context, Result};
 use bigname_metrics::{IntGaugeVec, MetricsRegistry};
 use sqlx::{FromRow, PgPool};
-use tokio::sync::Notify;
-
-/// Tells the metrics task that a batch committed, so the served-lag gauges move at
-/// block boundaries instead of waiting for the next refresh tick. The metrics task
-/// answers with the same query the periodic refresh runs, one query at a time, so
-/// an older result can never overwrite a newer one.
-#[derive(Clone, Default)]
-pub struct RunnerMetricsFeed {
-    committed: Arc<Notify>,
-}
-
-impl RunnerMetricsFeed {
-    pub fn batch_committed(&self) {
-        self.committed.notify_one();
-    }
-
-    pub(super) async fn committed(&self) {
-        self.committed.notified().await;
-    }
-}
 
 #[derive(Clone, Debug, FromRow)]
 pub(super) struct ServedLagRow {

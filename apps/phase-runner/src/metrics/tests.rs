@@ -31,7 +31,8 @@ fn registers_the_pipeline_metric_families_with_build_identity() -> Result<()> {
     loop_heartbeat.record_progress("ethereum-mainnet");
     let progress = RunnerPhaseProgress::default();
     progress.seed_chain("ethereum-mainnet");
-    let metrics = PipelineMetrics::new(900, loop_heartbeat, progress)?;
+    let metrics =
+        PipelineMetrics::new(900, loop_heartbeat, progress, RunnerMetricsFeed::default())?;
     metrics.apply_phase_progress();
     metrics.apply_rows(&[metric_row("interpret")])?;
     metrics.served_lag.apply(&[served_lag::ServedLagRow {
@@ -71,7 +72,12 @@ fn registers_the_pipeline_metric_families_with_build_identity() -> Result<()> {
 fn updates_failure_freshness_lag_verification_and_redo_signals() -> Result<()> {
     let loop_heartbeat = RunnerLoopHeartbeat::default();
     loop_heartbeat.record_progress("ethereum-mainnet");
-    let metrics = PipelineMetrics::new(900, loop_heartbeat, RunnerPhaseProgress::default())?;
+    let metrics = PipelineMetrics::new(
+        900,
+        loop_heartbeat,
+        RunnerPhaseProgress::default(),
+        RunnerMetricsFeed::default(),
+    )?;
     metrics.apply_rows(&[metric_row("interpret")])?;
     assert_eq!(
         metrics
@@ -154,6 +160,69 @@ fn updates_failure_freshness_lag_verification_and_redo_signals() -> Result<()> {
 }
 
 #[test]
+fn exports_the_active_step_of_a_long_project_run() -> Result<()> {
+    use bigname_project::{PROJECT_STEPS, StepObserver};
+
+    let feed = RunnerMetricsFeed::default();
+    feed.seed_chain("idle-chain");
+    let metrics = PipelineMetrics::new(
+        900,
+        RunnerLoopHeartbeat::default(),
+        RunnerPhaseProgress::default(),
+        feed.clone(),
+    )?;
+    feed.project_step("rebuilding", Some("resolver"));
+    metrics.apply_feed();
+
+    let scrape = metrics.registry.encode()?;
+    for metric_type in [
+        "# TYPE phase_runner_project_step gauge",
+        "# TYPE phase_runner_project_step_index gauge",
+        "# TYPE phase_runner_project_step_total gauge",
+    ] {
+        assert!(scrape.contains(metric_type), "missing {metric_type}");
+    }
+    let resolver = PROJECT_STEPS.iter().position(|step| *step == "resolver");
+    for (line, value) in [
+        (
+            "phase_runner_project_step{chain=\"rebuilding\",step=\"resolver\"}",
+            1,
+        ),
+        (
+            "phase_runner_project_step{chain=\"rebuilding\",step=\"prepare\"}",
+            0,
+        ),
+        (
+            "phase_runner_project_step_index{chain=\"rebuilding\"}",
+            resolver.map_or(-1, |index| i64::try_from(index + 1).unwrap_or(-1)),
+        ),
+        (
+            "phase_runner_project_step_total{chain=\"rebuilding\"}",
+            i64::try_from(PROJECT_STEPS.len())?,
+        ),
+        ("phase_runner_project_step_index{chain=\"idle-chain\"}", 0),
+        ("phase_runner_project_step_total{chain=\"idle-chain\"}", 0),
+    ] {
+        assert!(
+            scrape.contains(&format!("{line} {value}\n")),
+            "missing {line} {value}"
+        );
+    }
+
+    feed.project_step("rebuilding", None);
+    metrics.apply_feed();
+    let scrape = metrics.registry.encode()?;
+    for step in PROJECT_STEPS {
+        assert!(scrape.contains(&format!(
+            "phase_runner_project_step{{chain=\"rebuilding\",step=\"{step}\"}} 0\n"
+        )));
+    }
+    assert!(scrape.contains("phase_runner_project_step_index{chain=\"rebuilding\"} 0\n"));
+    assert!(scrape.contains("phase_runner_project_step_total{chain=\"rebuilding\"} 0\n"));
+    Ok(())
+}
+
+#[test]
 fn served_lag_is_unavailable_without_both_sides() {
     assert_eq!(served_lag::served_lag(Some(104), Some(100)), 4);
     assert_eq!(served_lag::served_lag(Some(100), Some(100)), 0);
@@ -177,7 +246,12 @@ fn configured_chain_loop_heartbeat_does_not_require_phase_rows() -> Result<()> {
     let loop_heartbeat = RunnerLoopHeartbeat::default();
     loop_heartbeat.record_progress("new-chain");
     loop_heartbeat.record_progress("queued-chain");
-    let metrics = PipelineMetrics::new(900, loop_heartbeat, RunnerPhaseProgress::default())?;
+    let metrics = PipelineMetrics::new(
+        900,
+        loop_heartbeat,
+        RunnerPhaseProgress::default(),
+        RunnerMetricsFeed::default(),
+    )?;
 
     metrics.apply_rows(&[])?;
 
@@ -198,7 +272,12 @@ fn configured_chain_loop_heartbeat_does_not_require_phase_rows() -> Result<()> {
 fn progress_snapshots_keep_normal_and_repair_modes_isolated() -> Result<()> {
     let progress = RunnerPhaseProgress::default();
     progress.seed_chain("chain");
-    let metrics = PipelineMetrics::new(900, RunnerLoopHeartbeat::default(), progress.clone())?;
+    let metrics = PipelineMetrics::new(
+        900,
+        RunnerLoopHeartbeat::default(),
+        progress.clone(),
+        RunnerMetricsFeed::default(),
+    )?;
     for mode in [
         RunMode::Normal,
         RunMode::Redo(BlockRange::new(1, 9)?),

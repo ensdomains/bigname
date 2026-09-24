@@ -108,10 +108,10 @@ async fn main() -> Result<()> {
                         database.pool().clone(),
                         &runtime.capacity,
                     )),
-                    Arc::new(ProjectPhase::with_hydration(
-                        database.pool().clone(),
-                        hydration_rpc_urls,
-                    )),
+                    Arc::new(
+                        ProjectPhase::with_hydration(database.pool().clone(), hydration_rpc_urls)
+                            .with_step_observer(Arc::new(metrics_feed.clone())),
+                    ),
                     Arc::new(VerifyPhase::new(verification_database)),
                     Arc::new(LivePhase::with_engine(ingest_engine)),
                 )?;
@@ -217,10 +217,10 @@ async fn main() -> Result<()> {
                     database.pool().clone(),
                     &capacity,
                 ));
-                let project = Arc::new(ProjectPhase::with_hydration(
-                    database.pool().clone(),
-                    hydration_rpc_urls,
-                ));
+                let project = Arc::new(
+                    ProjectPhase::with_hydration(database.pool().clone(), hydration_rpc_urls)
+                        .with_step_observer(Arc::new(metrics_feed.clone())),
+                );
                 let phases = if phase.requires_verify() {
                     let verification_database_url =
                         verification_database_url.as_deref().ok_or_else(|| {
@@ -319,13 +319,14 @@ async fn start_metrics<'a>(
             .try_into()
             .expect("validated threshold"),
     ));
+    let metrics_feed = phase_runner::metrics::RunnerMetricsFeed::default();
     for chain_id in chain_ids {
         if seed_loop_heartbeats {
             loop_heartbeat.record_progress(chain_id);
         }
         phase_progress.seed_chain(chain_id);
+        metrics_feed.seed_chain(chain_id);
     }
-    let metrics_feed = phase_runner::metrics::RunnerMetricsFeed::default();
     let bound_addr = phase_runner::metrics::start(
         bind_addr,
         database.pool().clone(),

@@ -208,6 +208,27 @@ The build identity is already exported as
 `build_info{build_sha, interpreter_content_hash}`, with the value `1` for the
 running binary.
 
+## Long Project runs
+
+A full rebuild (a Project run with no earlier publication to build on) or a
+redo (a repair run over a block range) runs Project as one database transaction
+that can take tens of minutes, and its block gauges do not move until it
+commits. Three gauges show which step it is in instead:
+
+- `phase_runner_project_step{chain, step}` is `1` for the active step and `0`
+  for every other step.
+- `phase_runner_project_step_index{chain}` is the active step's position,
+  starting at 1.
+- `phase_runner_project_step_total{chain}` is the number of steps, currently 20.
+
+The steps run in this order: `prepare`, `scope`, `inputs`, one step per
+projection builder named after it (`name_authority` through
+`child_registrations`), `integrity`, `publish` and `commit`. All three gauges
+read `0` when no full rebuild or redo is running, including right after one
+commits or fails. Normal incremental batches never set them. The runner updates
+them as each step starts, and the values live only in the running process, so a
+restart starts them at zero.
+
 ## Alerts
 
 | Alert | Threshold | Plain-language meaning |
