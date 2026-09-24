@@ -148,7 +148,11 @@ impl Fixture {
         mode: FamilyMode,
         options: &FamilyOptions,
     ) -> FamilyOutcome {
-        families::apply(&self.pool, CHAIN, &marker(target), mode, options).await
+        // The Project phase reads the token right after its batch; the tests read it the same way.
+        let token = families::input_token(&self.pool, CHAIN)
+            .await
+            .expect("the input token reads");
+        families::apply(&self.pool, CHAIN, &marker(target), mode, &token, options).await
     }
 
     /// The family marker: block, hash and sequence.
@@ -324,5 +328,72 @@ impl<'a> Event<'a> {
     pub fn at(mut self, transaction: i64, log: i64) -> Self {
         self.position = Some((transaction, log));
         self
+    }
+}
+
+impl Fixture {
+    /// The Project row of `chain_phase_state` at redo attempt `attempt`. With `redo`, the row is
+    /// inside an open redo of that range carrying that last error, as the runner leaves it while
+    /// the redo batch commits.
+    pub async fn project_row(&self, attempt: i64, redo: Option<(i64, i64, &str)>) -> Result<()> {
+        sqlx::query("DELETE FROM chain_phase_state WHERE chain_id = $1 AND phase_name = 'project'")
+            .bind(CHAIN)
+            .execute(&self.pool)
+            .await?;
+        sqlx::query(
+            "INSERT INTO chain_phase_state (chain_id, phase_name, phase_status,
+                 redo_attempt_generation, redo_in_progress, redo_mode,
+                 redo_previous_phase_status, redo_from_block_number, redo_to_block_number,
+                 last_error, started_at)
+             VALUES ($1, 'project', CASE WHEN $3 THEN 'running' ELSE 'idle' END, $2, $3,
+                     CASE WHEN $3 THEN 'redo' END, CASE WHEN $3 THEN 'idle' END, $4, $5, $6,
+                     CASE WHEN $3 THEN now() END)",
+        )
+        .bind(CHAIN)
+        .bind(attempt)
+        .bind(redo.is_some())
+        .bind(redo.map(|(from, _, _)| from))
+        .bind(redo.map(|(_, to, _)| to))
+        .bind(redo.map(|(_, _, error)| error))
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// The repair record as JSON, without its update time.
+    pub async fn repair_record(&self) -> Result<Option<Value>> {
+        Ok(sqlx::query_scalar(
+            "SELECT to_jsonb(record) - 'updated_at' - 'chain_id'
+             FROM project_repair_record record WHERE chain_id = $1",
+        )
+        .bind(CHAIN)
+        .fetch_optional(&self.pool)
+        .await?)
+    }
+
+    /// A ResolverChanged at `block` pointing the name numbered `name` at `resolver`.
+    pub async fn resolver_changed(
+        &self,
+        block: i64,
+        log: i64,
+        name: u64,
+        resolver: &str,
+    ) -> Result<i64> {
+        let node = format!("0x{name:064x}");
+        let logical_name_id = format!("ens:{node}");
+        self.surface(&logical_name_id, &node).await?;
+        let identity = format!("resolver-{block}-{log}");
+        self.event(
+            Event::new(
+                &identity,
+                block,
+                log,
+                "ResolverChanged",
+                "ens_v1_registry_l1",
+            )
+            .name(&logical_name_id)
+            .after(json!({"resolver": resolver, "node": node})),
+        )
+        .await
     }
 }

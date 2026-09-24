@@ -296,3 +296,73 @@ pub(crate) async fn readable_hash(
     .await
     .map_err(|error| ProjectError::database("failed to read a readable family block hash", error))
 }
+
+/// The input token: the Interpret row's redo state and content hash and the Project row's redo
+/// session fence. The Project phase reads it right after its batch commits, while a redo is still
+/// open, and hands it to the loop. Step 2 records it and aborts nothing.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct InputToken {
+    pub interpret_input_content_hash: Option<String>,
+    pub interpret_redo_attempt_generation: Option<i64>,
+    pub interpret_redo_in_progress: bool,
+    pub project_redo_attempt_generation: i64,
+    pub project_redo_mode: Option<String>,
+    pub project_redo_from: Option<i64>,
+    pub project_redo_to: Option<i64>,
+    pub project_last_error: Option<String>,
+}
+
+impl InputToken {
+    /// The input revision: the Interpret row's content hash and redo attempt, taken only while
+    /// Interpret is not in redo. `None` while it is.
+    pub fn revision(&self) -> (Option<&str>, Option<i64>) {
+        if self.interpret_redo_in_progress {
+            (None, None)
+        } else {
+            (
+                self.interpret_input_content_hash.as_deref(),
+                self.interpret_redo_attempt_generation,
+            )
+        }
+    }
+}
+
+type TokenRow = (
+    Option<String>,
+    Option<i64>,
+    Option<bool>,
+    Option<i64>,
+    Option<String>,
+    Option<i64>,
+    Option<i64>,
+    Option<String>,
+);
+
+pub async fn input_token(pool: &sqlx::PgPool, chain_id: &str) -> Result<InputToken> {
+    let row: TokenRow = sqlx::query_as(
+        "/* project:families.input.input_token */ SELECT interpret.input_content_hash,
+                interpret.redo_attempt_generation, interpret.redo_in_progress,
+                project.redo_attempt_generation, project.redo_mode,
+                project.redo_from_block_number, project.redo_to_block_number, project.last_error
+         FROM (SELECT 1) anchor
+         LEFT JOIN chain_phase_state interpret
+           ON interpret.chain_id = $1 AND interpret.phase_name = 'interpret'
+         LEFT JOIN chain_phase_state project
+           ON project.chain_id = $1 AND project.phase_name = 'project'",
+    )
+    .bind(chain_id)
+    .fetch_one(pool)
+    .await
+    .map_err(|error| ProjectError::database("failed to read the family input token", error))?;
+    let (hash, interpret_attempt, in_redo, project_attempt, mode, from, to, last_error) = row;
+    Ok(InputToken {
+        interpret_input_content_hash: hash,
+        interpret_redo_attempt_generation: interpret_attempt,
+        interpret_redo_in_progress: in_redo.unwrap_or(false),
+        project_redo_attempt_generation: project_attempt.unwrap_or(0),
+        project_redo_mode: mode,
+        project_redo_from: from,
+        project_redo_to: to,
+        project_last_error: last_error,
+    })
+}

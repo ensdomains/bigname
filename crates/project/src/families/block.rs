@@ -41,6 +41,42 @@ pub(crate) async fn apply(
     options: &FamilyOptions,
 ) -> Result<(FamilyMarker, BlockStats)> {
     let started = Instant::now();
+    let (mut transaction, prior, block) = open(pool, chain_id, number, plan).await?;
+    let events = input::block_events(&mut transaction, chain_id, &block).await?;
+    let keys = keys::derive(&events);
+    let mut rows = store::RowSet::default();
+    let context = reduce::Context {
+        chain_id,
+        block: &block,
+        keys: &keys,
+    };
+    reduce::apply(&mut transaction, &context, &events, &mut rows).await?;
+    let (next, mut stats) = publish(
+        transaction,
+        chain_id,
+        &block,
+        &prior,
+        &rows,
+        plan,
+        revision,
+        options,
+    )
+    .await?;
+    stats.elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    Ok((next, stats))
+}
+
+/// Begin the block's transaction: lock the marker and the block, and check the predecessor.
+pub(crate) async fn open(
+    pool: &PgPool,
+    chain_id: &str,
+    number: i64,
+    plan: &Plan<'_>,
+) -> Result<(
+    Transaction<'static, Postgres>,
+    FamilyMarker,
+    input::BlockHeader,
+)> {
     let mut transaction = pool
         .begin()
         .await
@@ -54,18 +90,24 @@ pub(crate) async fn apply(
             ))
         })?;
     marker::require_predecessor(chain_id, &prior, plan.predecessor, &block, plan.contiguous)?;
-    let events = input::block_events(&mut transaction, chain_id, &block).await?;
-    let keys = keys::derive(&events);
-    let mut rows = store::RowSet::default();
-    let context = reduce::Context {
-        chain_id,
-        block: &block,
-        keys: &keys,
-    };
-    reduce::apply(&mut transaction, &context, &events, &mut rows).await?;
-    let mut stats = write(&mut transaction, chain_id, &block, &rows).await?;
+    Ok((transaction, prior, block))
+}
 
-    journal_marker(&mut transaction, chain_id, &block, &prior).await?;
+/// Journal and write the block's changed rows, journal the prior marker, advance the marker,
+/// prune the journal and commit.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn publish(
+    mut transaction: Transaction<'static, Postgres>,
+    chain_id: &str,
+    block: &input::BlockHeader,
+    prior: &FamilyMarker,
+    rows: &store::RowSet,
+    plan: &Plan<'_>,
+    revision: (Option<&str>, Option<i64>),
+    options: &FamilyOptions,
+) -> Result<(FamilyMarker, BlockStats)> {
+    let mut stats = write(&mut transaction, chain_id, block, rows).await?;
+    journal_marker(&mut transaction, chain_id, block, prior).await?;
     stats.undo_rows += 1;
     let next = FamilyMarker {
         current: Some(Marker {
@@ -91,7 +133,6 @@ pub(crate) async fn apply(
         .commit()
         .await
         .map_err(|error| ProjectError::database("failed to commit a family block", error))?;
-    stats.elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
     Ok((next, stats))
 }
 

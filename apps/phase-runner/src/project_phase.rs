@@ -5,7 +5,7 @@ use std::{
 
 use bigname_project::{
     BatchRequest, Engine, ErrorKind as ProjectErrorKind, Marker, RunMode as ProjectRunMode,
-    families::{FamilyMode, FamilyOptions},
+    families::{FamilyMode, FamilyOptions, InputToken},
 };
 use sqlx::PgPool;
 
@@ -19,15 +19,17 @@ use crate::{
     },
 };
 
+type PendingFamilies = (Marker, FamilyMode, InputToken);
+
 pub struct ProjectPhase {
     pool: PgPool,
     engine: Engine,
     hydrator: Option<bigname_project::Hydrator>,
     metrics_feed: Option<RunnerMetricsFeed>,
     families: bool,
-    /// The served marker and mode of each chain's last committed batch, which the owned key
-    /// families follow once the runner has recorded the batch's progress.
-    pending_families: Arc<Mutex<BTreeMap<String, (Marker, FamilyMode)>>>,
+    /// The served marker, mode and input token of each chain's last committed batch, which the
+    /// owned key families follow once the runner has recorded the batch's progress.
+    pending_families: Arc<Mutex<BTreeMap<String, PendingFamilies>>>,
 }
 
 impl ProjectPhase {
@@ -118,13 +120,14 @@ impl Phase for ProjectPhase {
             .remove(chain_id);
         let chain_id = chain_id.to_owned();
         Box::pin(async move {
-            let Some((target, mode)) = pending else {
+            let Some((target, mode, token)) = pending else {
                 return;
             };
             let options = FamilyOptions::new(bigname_content_hash::INTERPRETER_CONTENT_HASH);
-            let outcome =
-                bigname_project::families::apply(&self.pool, &chain_id, &target, mode, &options)
-                    .await;
+            let outcome = bigname_project::families::apply(
+                &self.pool, &chain_id, &target, mode, &token, &options,
+            )
+            .await;
             if let Some(feed) = &self.metrics_feed {
                 feed.project_families(&chain_id, &outcome);
             }
@@ -227,10 +230,25 @@ impl Phase for ProjectPhase {
                         to: range.to,
                     },
                 };
-                self.pending_families
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .insert(context.chain_id.clone(), (outcome.current.clone(), mode));
+                // Read now, while a finished redo's session is still open on the Project row: the
+                // runner closes it when it records this batch. A failed read skips this batch's
+                // families; the next run sees the redo attempt it missed and rebuilds.
+                match bigname_project::families::input_token(&self.pool, &context.chain_id).await {
+                    Ok(token) => {
+                        self.pending_families
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .insert(
+                                context.chain_id.clone(),
+                                (outcome.current.clone(), mode, token),
+                            );
+                    }
+                    Err(error) => tracing::warn!(
+                        chain_id = %context.chain_id,
+                        %error,
+                        "Project families skipped this batch: the input token did not read"
+                    ),
+                }
             }
             if let Some(hydrator) = &self.hydrator {
                 hydrator

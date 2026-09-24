@@ -7,13 +7,13 @@ use sqlx::{PgPool, raw_sql};
 use super::{FamilyOptions, block, marker};
 use crate::Marker;
 
-const CHAIN: &str = "ethereum-sepolia";
+pub(super) const CHAIN: &str = "ethereum-sepolia";
 
-fn hash(block: i64) -> String {
+pub(super) fn hash(block: i64) -> String {
     format!("0x{block:064x}")
 }
 
-async fn database() -> Result<(TestDatabase, PgPool)> {
+pub(super) async fn database() -> Result<(TestDatabase, PgPool)> {
     let database =
         TestDatabase::create(TestDatabaseConfig::new("families_guard").pool_max_connections(1))
             .await?;
