@@ -170,29 +170,46 @@ Two gauges measure how far the newest data the API could serve trails the
 chain. They have no dashboard panel or paging rule yet; those arrive with the
 ops dashboards tracked in Linear TYR-34.
 
-- `phase_runner_served_publication_block{chain}` is the block of the Project
-  publication (the latest committed
-  [projection generation](../glossary.md#projection-generation)) the API could
-  serve: the Project row is `completed` or `running`,
-  was built with this binary's
-  [interpreter content hash](../glossary.md#interpreter-content-hash), and its
-  block is still canonical, safe or finalized. `-1` means no publication passes
-  that test, for example after a reorg orphaned the published block or before
-  Project has rebuilt for a new interpreter content hash. The API's
-  [served head](../glossary.md#served-head) applies more conditions that this
-  gauge leaves out: the publication must be at most one block behind the
-  published chain head, and some routes also refuse while an Interpret
-  repair run is in progress.
+- `phase_runner_served_publication_block{chain}` is an absolute block height:
+  the block of the Project publication (the latest committed
+  [projection generation](../glossary.md#projection-generation)) that the API
+  would accept apart from its one-block lag fence. The Project row is
+  `completed` or `running`, was built with this binary's
+  [interpreter content hash](../glossary.md#interpreter-content-hash), its exact
+  block number and hash are still canonical, safe or finalized, the chain has a
+  stored head, and the publication is not above that head. `-1` means no
+  publication passes, for example after a reorg orphaned the published block,
+  before Project has rebuilt for a new interpreter content hash, or before the
+  chain has a stored head. The API's [served head](../glossary.md#served-head)
+  also refuses a publication more than one block behind the stored head, so a
+  publication this gauge reports can still be one the API will not serve. Two
+  conditional API checks are deliberately left out: the check that a request's
+  position is the publication itself, which means nothing for a per-chain
+  gauge, and the refusal some routes add while an Interpret repair run is in
+  progress, which `phase_runner_redo_in_progress` already shows. This gauge
+  measures Project publication eligibility only. It is not expected to return
+  to zero.
 - `phase_runner_served_lag_blocks{chain}` is the newest observed
-  execution-client head minus that publication block. A non-zero value means
-  the newest data the API could serve is that many blocks behind the newest
-  block the runner has seen. Because the API stops serving a chain once its
-  publication trails the published chain head by more than one block, a value
-  above one usually means readers are getting stale-data errors, not old
-  answers. `-1` means either side is unavailable. An alert on this gauge must
-  treat `-1` as unservable too, or it goes quiet exactly when readers get
-  nothing. The Project latency target
+  execution-client head minus that publication block. It is the only one of
+  the two expected to return to zero. A non-zero value means the newest
+  publication is that many blocks behind the newest block the runner has seen.
+  Because the API stops serving a chain once its publication trails the stored
+  head by more than one block, a value above one usually means readers are
+  getting stale-data errors, not old answers. The Project latency target
   (Linear TYR-36) requires this gauge to return to zero every normal block.
+
+`-1` on either gauge means unavailable, never healthy or caught up. The lag
+reads `-1` when either side is missing, and also when the observed head is below
+the publication, which the stored heads cannot explain; the runner logs a
+warning with both numbers each time that pair changes. Both gauges start at
+`-1` for every configured chain, so a scrape before the first refresh already
+shows the series. An alert on the lag must treat `-1` as unservable too, or it
+goes quiet exactly when readers get nothing.
+
+The existing `phase_runner_chain_head_block{chain}` is the stored chain head,
+not the observed head. Plotting it against the publication block shows how far
+Project trails the stored head, which is what the API's fence checks, not the
+end-to-end lag this gauge reports.
 
 The observed head is the head the latest Live batch read from the execution
 client, which the runner stores as the Live phase's target. When the published
@@ -201,18 +218,19 @@ before Live runs again, the published chain head is used instead. Two cases
 make it briefly inexact: a Live batch that finds no common ancestor with the
 node stores the published head as its target, and after a rewind the Live
 target stays at the old, higher head until the next Live batch. The metrics
-code never asks the execution client itself. Live, Interpret and Project run in
-turn, so the observed head does not move while a Project batch runs: a slow
-Project batch reads zero at its commit and shows its real lag once the next
-Live batch has read the head. When following the chain normally, each Live
+code never asks the execution client itself, and only a Live batch refreshes the
+observed head. Live, Interpret and Project run in turn, so the observed head
+does not move while a Project batch runs and the gauge can under-report until
+the next Live run: a slow Project batch reads zero at its commit and shows its
+real lag once the next Live batch has read the head. When following the chain normally, each Live
 batch reads one new block, so the gauge reads 1 until Project publishes that
 block and then 0. A value above 1 after a Live batch means Project fell behind
 by more than one block, usually because its previous batch took longer than a
 block.
 
 Both gauges are refreshed with the others every 5 seconds and also right after
-every Ingest, Live and Project batch commit, so the value in the runner is
-current shortly after each of those commits. Other changes, such as a failed
+every Ingest, Live and Project batch has recorded its progress row, so the
+value in the runner is current shortly after each of those commits. Other changes, such as a failed
 Project batch or a rewind, show at the next 5-second refresh. The 5-second
 refresh alone is slower than a Base block; on Base the refresh after each
 commit is what keeps the value current.
