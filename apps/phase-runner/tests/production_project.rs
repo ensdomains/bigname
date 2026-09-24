@@ -10257,8 +10257,21 @@ async fn authority_selector_follows_post_migration_v2_binding_churn() -> Result<
     scratch.cleanup().await
 }
 
+// Expected delta (TYR-36 step 6). The ENSv1 lease is withdrawn, the ENSv2 registration is released,
+// and an ENSv1 expiry update shares the release's block-scope position; nothing is open on either
+// arm.
+// Before: the equal-position ENSv1 fact counted as at-or-before the release, so the release left no
+// ENSv2 tombstone and ENSv1 decided with no binding (unsupported `current_authority_not_projected`,
+// arm `ens_v1`).
+// After: expiry maintenance does not start or end a holding, so the ENSv2 release is the latest
+// lifecycle fact and the name is served as the released ENSv2 tombstone (supported, arm `ens_v2`,
+// the released resource).
+// Chain fact: `unregister` burns the token and sets its expiry to now; no ENSv1 lease answers
+// `ownerOf`.
+// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L195-L207 @ ens_v2@a971bd64)
+// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L71-L76 @ ens_v1@91c966f)
 #[tokio::test]
-async fn equal_position_v1_residue_suppresses_released_v2_authority() -> Result<()> {
+async fn expected_delta_equal_position_v1_expiry_residue_keeps_the_v2_tombstone() -> Result<()> {
     let scratch = ScratchDatabase::create("project_authority_equal_position_residue").await?;
     let chain = "authority-equal-position-residue";
     let logical_name_id = seed_dual_open_cross_arm_fixture(scratch.pool(), chain, 4).await?;
@@ -10367,8 +10380,6 @@ async fn equal_position_v1_residue_suppresses_released_v2_authority() -> Result<
     .await?;
     assert_eq!(boundary_positions, vec![(None, None), (None, None)]);
 
-    // The release leaves no ENSv2 tombstone and nothing is open on either arm, so ENSv1
-    // decides; it holds no lease binding, so the name has no projected current authority.
     run_project(scratch.pool(), chain, None, RunMode::Normal, 0, 6).await?;
     let projected: (String, Option<String>, Option<Uuid>, Option<String>) = sqlx::query_as(
         "SELECT support_status, unsupported_reason, resource_id,
@@ -10381,10 +10392,10 @@ async fn equal_position_v1_residue_suppresses_released_v2_authority() -> Result<
     assert_eq!(
         projected,
         (
-            "unsupported".into(),
-            Some("current_authority_not_projected".into()),
+            "supported".into(),
             None,
-            Some("ens_v1".into()),
+            Some(released_resource),
+            Some("ens_v2".into()),
         )
     );
 
@@ -10735,7 +10746,7 @@ async fn proofless_v2_release_retains_closed_authority_after_later_v1_residue() 
 }
 
 #[tokio::test]
-async fn released_v2_regime_carries_regrant_after_v1_residue() -> Result<()> {
+async fn a_v2_regrant_after_a_release_and_v1_residue_is_served() -> Result<()> {
     let scratch = ScratchDatabase::create("project_authority_released_regime_regrant").await?;
     let chain = "authority-released-regime-regrant";
     let (logical_name_id, released_resource) =
@@ -10818,13 +10829,13 @@ async fn released_v2_regime_carries_regrant_after_v1_residue() -> Result<()> {
     .await?;
     assert_eq!(
         incremental, rebuilt,
-        "released-regime re-grant splits must equal a full rebuild"
+        "re-grant after a release: incremental splits must equal a full rebuild"
     );
     scratch.cleanup().await
 }
 
 #[tokio::test]
-async fn released_v2_regime_carries_regrant_without_v1_residue() -> Result<()> {
+async fn a_v2_regrant_after_a_release_is_served() -> Result<()> {
     let scratch =
         ScratchDatabase::create("project_authority_released_regime_clean_regrant").await?;
     let chain = "authority-released-regime-clean-regrant";
@@ -10847,7 +10858,7 @@ async fn released_v2_regime_carries_regrant_without_v1_residue() -> Result<()> {
 }
 
 #[tokio::test]
-async fn released_v2_regime_regrant_releases_into_a_fresh_tombstone() -> Result<()> {
+async fn a_released_v2_regrant_is_the_latest_tombstone() -> Result<()> {
     let scratch = ScratchDatabase::create("project_authority_released_regime_rerelease").await?;
     let chain = "authority-released-regime-rerelease";
     let (logical_name_id, released_resource) =
@@ -10913,15 +10924,14 @@ async fn released_v2_regime_regrant_releases_into_a_fresh_tombstone() -> Result<
 }
 
 #[tokio::test]
-async fn equal_position_v1_residue_suppresses_regime_regrant_carry() -> Result<()> {
+async fn a_v2_regrant_after_equal_position_v1_residue_is_served() -> Result<()> {
     let scratch =
         ScratchDatabase::create("project_authority_regime_equal_position_regrant").await?;
     let chain = "authority-regime-equal-position-regrant";
     let (logical_name_id, _) = seed_proofless_released_v2_authority(scratch.pool(), chain).await?;
     // Boundary materialization emits lifecycle facts at block scope, so this v1
     // fact deliberately shares the release's production `(block, NULL, NULL)`
-    // position; equal-position v1 activity counts as at-or-before the release
-    // and must keep the release out of the regime.
+    // position.
     insert_event(
         scratch.pool(),
         chain,
@@ -10957,9 +10967,8 @@ async fn equal_position_v1_residue_suppresses_regime_regrant_carry() -> Result<(
     let (_, regrant_resource) =
         insert_v2_regrant(scratch.pool(), chain, &logical_name_id, 8).await?;
 
-    // The release still does not carry the regime, but the regrant is the only binding open
-    // now and the ENSv1 residue is history, so the regrant is the current candidate and is
-    // served.
+    // The regrant is the only binding open now and the ENSv1 residue is history, so the
+    // regrant is the current candidate and is served.
     run_project(scratch.pool(), chain, None, RunMode::Normal, 0, 8).await?;
     let projected: (String, Option<String>, Option<Uuid>, Option<String>) = sqlx::query_as(
         "SELECT support_status, unsupported_reason, resource_id,
@@ -10983,13 +10992,11 @@ async fn equal_position_v1_residue_suppresses_regime_regrant_carry() -> Result<(
 }
 
 #[tokio::test]
-async fn earlier_other_resource_grant_disqualifies_regime_carry() -> Result<()> {
+async fn a_v2_regrant_after_an_other_resource_grant_is_served() -> Result<()> {
     let scratch = ScratchDatabase::create("project_authority_regime_other_resource_grant").await?;
     let chain = "authority-regime-other-resource-grant";
     let (logical_name_id, _) = seed_proofless_released_v2_authority(scratch.pool(), chain).await?;
-    // A canonical ENSv2 grant on a different resource at-or-before the release
-    // means the release did not close out the whole v2 story: it must not
-    // qualify the name for the released-v2 regime.
+    // A canonical ENSv2 grant on a different resource at-or-before the release.
     let other_resource = Uuid::new_v4();
     sqlx::query(
         "INSERT INTO resources (
@@ -11031,8 +11038,7 @@ async fn earlier_other_resource_grant_disqualifies_regime_carry() -> Result<()> 
     let (_, regrant_resource) =
         insert_v2_regrant(scratch.pool(), chain, &logical_name_id, 8).await?;
 
-    // The release does not carry the regime, but the regrant is the only binding open now, so
-    // it is the current candidate and is served.
+    // The regrant is the only binding open now, so it is the current candidate and is served.
     run_project(scratch.pool(), chain, None, RunMode::Normal, 0, 8).await?;
     let projected: (String, Option<String>, Option<Uuid>, Option<String>) = sqlx::query_as(
         "SELECT support_status, unsupported_reason, resource_id,
@@ -12024,7 +12030,7 @@ async fn authority_classifier_covers_every_ens_binding_event_arm_combination() -
 
     let regime_name = format!(
         "ens:{:#x}",
-        raw_namehash(&[b"carried-released-v2-regime", b"classifier", b"eth"])
+        raw_namehash(&[b"v2-regrant-after-release", b"classifier", b"eth"])
     );
     let regime_bindings = seed_authority_classifier_case(
         scratch.pool(),
@@ -12139,7 +12145,7 @@ async fn authority_classifier_covers_every_ens_binding_event_arm_combination() -
             None,
         ),
         (
-            "carried_released_v2_regime",
+            "open_v2_regrant_after_a_release",
             regime_name.as_str(),
             new_regime_binding,
             new_regime_resource,

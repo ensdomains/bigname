@@ -16,6 +16,16 @@ decisions kept. Linear TYR-36 step 6.
   authority epoch starts at their ENSv2 binding like any other.
   (upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ETHRegistry.ts:L46 @ ens_v2_sepolia_20260916@366de741)
   (upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ReverseMirror.ts:L35 @ ens_v2_sepolia_20260916@366de741)
+- The released ENSv2 tombstone no longer holds a name over a live ENSv1
+  lease, and the released ENSv2 regime is removed. A name that neither arm
+  holds now follows its latest lifecycle fact: a released ENSv2 registration
+  that no ENSv1 lease or registry ownership change follows is served as the
+  [released v2 authority](../glossary.md#released-v2-authority) tombstone, and
+  otherwise ENSv1 history decides as below. A live ENSv1 lease holds the name
+  even when it began after an ENSv2 release, because `ownerOf` still answers
+  for it.
+  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L195-L207 @ ens_v2@a971bd64)
+  (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L71-L76 @ ens_v1@91c966f)
 
 ## 2026-09-25 Amendment: Support Follows The Authority Decision
 

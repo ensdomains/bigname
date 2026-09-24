@@ -290,8 +290,10 @@ name without a proof, the root, `eth`, `reverse`, and `addr.reverse` included,
 follows the chain
 ([ADR 0007](adrs/0007-follow-the-chain-ens-authority.md)): a current ENSv2
 binding selects ENSv2, with its epoch starting at that binding and null proof
-fields, and otherwise ENSv1 decides unless a qualifying ENSv2 release tombstone
-or regime applies.
+fields, a live ENSv1 binding selects ENSv1 otherwise, and a name neither arm
+holds follows its latest lifecycle fact, which leaves a released ENSv2
+registration with nothing later on ENSv1 as a
+[released v2 authority](glossary.md#released-v2-authority) tombstone.
 
 ## Exact-name projection
 

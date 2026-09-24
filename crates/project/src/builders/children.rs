@@ -5,8 +5,8 @@ use crate::{Marker, ProjectError, Result};
 /// Builds each authority arm's current parent-child relations and publishes the one the child's
 /// own authority selects, after parent ENSv1→ENSv2 migration reachability filters the ENSv1 arm.
 ///
-/// A released ENSv2 child held by a migration proof or a qualifying ENSv2 release tombstone or
-/// regime publishes nothing and never falls back to ENSv1; any other child follows its selected
+/// A released ENSv2 child held by a migration proof or left as a released ENSv2 tombstone
+/// publishes nothing and never falls back to ENSv1; any other child follows its selected
 /// arm, and a pair with no selected authority whose arms disagree is omitted, not ranked.
 pub(super) async fn build(
     transaction: &mut Transaction<'_, Postgres>,

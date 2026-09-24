@@ -2135,23 +2135,19 @@ lease's original registration time and current state. The lease's original rows 
 <a id="released-v2-authority"></a>
 ## Released v2 authority
 
-the authority tombstone left when an
-ENSv2-authoritative registration is released or unregistered. Its current
-registration lifecycle is unregistered, but its authority epoch remains
-`ens_v2`; retained or later ENSv1 facts are history and cannot restore current
-registration, owner, resolver, expiry, or control. A later positive ENSv2
-registration continues within that v2 authority regime when the release's
-regime evidence is unambiguous. If earlier ENSv2 grants on other resources
-leave the release's lifecycle epoch ambiguous, the regime does not continue;
-a later re-registration that is current is still selected as the name's
-current ENSv2 registration.
-Without an [authority proof](#authority-proof), this tombstone is established
-only by a qualifying release boundary — a release of the then-current ENSv2
-registration with no ENSv1 activity at or before it — and later ENSv1 facts do
-not retroactively validate a non-qualifying release. A release that does not
-qualify leaves no ENSv2 tombstone: ENSv1 then decides the name when it holds the
-name or has history for it, and the name is otherwise explicit
-`current_authority_not_projected`.
+the authority tombstone left when an ENSv2 registration is released or
+unregistered and neither arm holds the name now. The release must be the
+latest lifecycle fact of the registration the name was last bound to, and no
+ENSv1 lease grant, renewal or release, or ENSv1 registry ownership change, may
+follow it; ENSv1 expiry updates and token transfers do not count. Its current
+registration lifecycle is unregistered and its selected arm is `ens_v2`, bound
+to the released resource. A live ENSv1 lease or a current ENSv2 registration
+holds the name instead, whatever the order of their facts: `unregister` burns
+the ENSv2 token and sets its expiry to the release time, while
+`BaseRegistrarImplementation.ownerOf` answers for an ENSv1 lease until its own
+expiry.
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L195-L207 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L71-L76 @ ens_v1@91c966f)
 
 <a id="released-v1-authority"></a>
 ## Released v1 authority

@@ -465,8 +465,7 @@ The pins also carry a tracked Sepolia v1-reference address for `WrappedETHRegist
 Registrar-controller coverage remains a known asymmetry against the mainnet deployment profile; resolver-log coverage for the approved four-address set is no longer one.
 
 An ordinary active name with facts on both ENSv1 and ENSv2 on this deployment
-profile, and no admitted authority proof, qualifying release, or
-deployment-wide ENSv2 release-threshold decision, follows the chain
+profile, and no admitted authority proof, follows the chain
 ([ADR 0007](adrs/0007-follow-the-chain-ens-authority.md) and
 [architecture](architecture.md#ensv1ensv2-current-authority)): a current ENSv2
 registration selects ENSv2, and otherwise ENSv1 decides. A premigration
