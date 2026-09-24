@@ -4,6 +4,12 @@
 //! benchmark in `bigname-project` stops before commit and never writes the marker; this one
 //! measures what a client waits for.
 //!
+//! The timed path is the engine commit, the batch log, hydration, the progress write and the
+//! synchronous metrics handoff: the phase records the write summary on the metrics feed, and the
+//! feed is notified that the batch committed. It does not include the runner's `confirm_progress`,
+//! which production awaits before that notification, nor the metrics worker applying the summary
+//! or a scrape reading it; this test starts no metrics worker.
+//!
 //! It commits, so it runs only against a disposable copy carrying the marker of
 //! docs/runbooks/benchmark-gate.md. The copy must be paused with Project published at
 //! `BIGNAME_BENCHMARK_PREVIOUS`. A target above the stored head moves the head there first, as
@@ -294,7 +300,8 @@ async fn run(
     store
         .start_phase(CHAIN, PhaseName::Project, &RunMode::Normal)
         .await?;
-    // As main.rs builds it, so the batch log and the metrics handoff fall inside the clock.
+    // As main.rs builds it, so the batch log and the metrics handoff fall inside the clock. No
+    // metrics worker consumes the feed here: applying the summary and scraping it are not timed.
     let metrics_feed = RunnerMetricsFeed::default();
     let project = ProjectPhase::with_hydration(pool.clone(), ChainRpcUrls::default())
         .with_metrics_feed(metrics_feed.clone());
@@ -318,6 +325,7 @@ async fn run(
                 outcome.progress(),
             )
             .await?;
+        // The runner notifies here too, after `confirm_progress`, which this test skips.
         metrics_feed.batch_committed();
         while load_served_project_generation(pool, CHAIN, number, &target.hash, true, true)
             .await?
