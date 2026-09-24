@@ -416,11 +416,12 @@ fn push_json_timestamp(builder: &mut QueryBuilder<'_, Postgres>, path: &[&str]) 
     let path = format!("'{{{}}}'", path.join(","));
     builder.push("CASE WHEN JSONB_TYPEOF(nc.declared_summary #> ");
     builder.push(path.as_str());
-    // A seconds value outside the timestamp range (the ENSv2 root registry's uint64 max expiry)
-    // reads as unknown instead of failing the whole query.
+    // A seconds value outside 1970..=9999 (the ENSv2 root registry's uint64 max expiry) reads as
+    // unknown instead of failing the whole query.
     builder.push(") = 'number' THEN CASE WHEN (nc.declared_summary #>> ");
     builder.push(path.as_str());
-    builder.push(")::NUMERIC BETWEEN -377705116800 AND 253402300799 THEN TO_TIMESTAMP((nc.declared_summary #>> ");
+    builder
+        .push(")::NUMERIC BETWEEN 0 AND 253402300799 THEN TO_TIMESTAMP((nc.declared_summary #>> ");
     builder.push(path.as_str());
     builder.push(")::DOUBLE PRECISION) END WHEN JSONB_TYPEOF(nc.declared_summary #> ");
     builder.push(path.as_str());
