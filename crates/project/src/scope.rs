@@ -52,13 +52,12 @@ pub(crate) async fn initialize(
     labels::include_changed_children(transaction, chain_id).await?;
     inventory::include_changed_record_consumers(transaction, chain_id, target.number).await?;
     registry_resolver::include_parent_names(transaction, chain_id, target.number).await?;
-    authority::include_changed_child_proofs(
+    authority::include_changed_migration_registry_members(
         transaction,
         chain_id,
         window.from_block,
         window.to_block,
         target.number,
-        window.retain_retracted,
     )
     .await?;
     wrapper::include_time_boundaries(transaction, chain_id, window.previous, target).await?;

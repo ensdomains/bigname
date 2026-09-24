@@ -233,10 +233,14 @@ async fn migration_boundary_mutations_refuse_only_through_authority_selection() 
         }
         project(&pool, RunMode::Normal).await?;
         let normal = status(&pool, &f.logical).await?;
-        let authority_refusal = match case {
-            "wrong_binding" => Some("current_authority_not_projected"),
-            _ => None,
-        };
+        // Expected delta (TYR-36 step 6): `wrong_binding` names a successor binding that does not
+        // exist. Before, the migration proof forced ENSv2 onto that binding and the name was
+        // refused with `current_authority_not_projected`. After, the proof is history only and the
+        // name's open ENSv2 binding, a registration in the admitted registry, is served. Chain
+        // fact: the registry's own `LabelRegistered` holds the owner and expiry whatever a
+        // migration event names.
+        // (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registry/interfaces/IRegistryEvents.sol:L18-L25 @ ens_v2_sepolia_20260916@366de741)
+        let authority_refusal: Option<&str> = None;
         let proof = match case {
             "missing" | "candidate" | "orphan" | "wrong_chain" => None,
             "unadmitted_latest_proof" => Some("unadmitted-later-boundary"),
@@ -259,10 +263,10 @@ async fn migration_boundary_mutations_refuse_only_through_authority_selection() 
             },
             "{case}: {normal:?}"
         );
-        // `stale` binds a resource with no registration events, and the later boundary in
-        // `unadmitted_latest_proof` starts the authority epoch after the grant, so these fixtures
-        // carry no current registration to compare; only their authority result is checked.
-        if authority_refusal.is_none() && !matches!(case, "stale" | "unadmitted_latest_proof") {
+        // `stale` binds a resource with no registration events, so it carries no current
+        // registration to compare; only its authority result is checked. A migration no longer
+        // moves the authority epoch, so `unadmitted_latest_proof` serves its registration too.
+        if authority_refusal.is_none() && case != "stale" {
             assert_eq!(normal.2, Some(uuid(1, 822)), "{case}");
             let registrant: Option<String> = sqlx::query_scalar("SELECT declared_summary #>> '{registration,registrant}' FROM name_current WHERE logical_name_id=$1")
                 .bind(&f.logical).fetch_one(&pool).await?;

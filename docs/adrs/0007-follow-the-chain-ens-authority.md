@@ -26,6 +26,12 @@ decisions kept. Linear TYR-36 step 6.
   for it.
   (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L195-L207 @ ens_v2@a971bd64)
   (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L71-L76 @ ens_v1@91c966f)
+- An activated ENSv1→ENSv2 migration and a positive ENSv2 child registration
+  are no longer [authority proofs](../glossary.md#authority-proof). The
+  migration is served history (`migrated_at`, `is_migrated`) and selects no
+  arm, binding or epoch start; the child registration proof is removed. The
+  ENSv2 registration a migration or a child registration makes is selected
+  like any other registration in an admitted registry.
 
 ## 2026-09-25 Amendment: Support Follows The Authority Decision
 

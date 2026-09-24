@@ -372,10 +372,11 @@ the same cleanup-relative selector remains strict in time.
 Interpret first validates the
 one-to-one correspondence between that activated `MigrationApplied` event and
 its [migration authority transition](glossary.md#migration-authority-transition).
-Project therefore consumes the activated
-event's successor binding, resource, position, and correlation ID as an
-[`authority proof`](glossary.md#authority-proof); it does not repeat migration
-transition correlation or predecessor validation. The selected binding keeps the exact
+Project keeps the activated event as the name's migration history, which
+serves `migrated_at` and `is_migrated`
+([authority proof](glossary.md#authority-proof)); it does not select authority
+from it. The successor binding the migration opened is an ENSv2 registration
+that the chain rule below selects like any other. The selected binding keeps the exact
 `surface_bindings.authority_arm` vocabulary: `ens_v1`, `ens_v2`, or
 `basenames`.
 
@@ -457,43 +458,27 @@ deployment profile (Mainnet or Sepolia) when a child with an activated
 `migration_authority_transition` has a surviving ENSv1 relation asserted after
 its authority epoch began. An unmigrated parent can expose this contradiction;
 unwrapped, unlocked-wrapped, and emancipated-child paths cannot. Neither locked
-path can expose the `positive_v2_child_registration` form because that
-registration is permanent migration-registry entry history, so the
-migratable-child predicate filters the ENSv1 relation first. The query retains
-both proof kinds defensively, but the positive-proof form is unreachable under
-this contract. A surviving contradiction aborts with
+path can expose it for a child registered in the parent's migration registry
+without migrating, because that registration is permanent migration-registry
+entry history, so the migratable-child predicate filters the ENSv1 relation
+first. A surviving contradiction aborts with
 `dual_current_child_authority` through the post-rollback audit path below.
 
-The exact-name ownership rule consumes the activated proof. A
-name with an activated transition authority proof, or a current ENSv2 child
-registration in an admitted migration registry below a proven migrated parent,
-is then not unsupported merely because its history contains both ENSv1 and
-ENSv2 source families. The second case does not require a child
-`MigrationApplied`: the registry permits a registration when the child is not
-protected as migratable, and a prior positive ENSv2 expiry makes ENSv2 the
-child authority. (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L172 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L175 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L293 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L306 @ ens_v2@a971bd64) The name is supported when the selected current authority's capability is
-supported. Project identifies the registry from Interpret's readable canonical
-`migration_registry_creation` association; that association only
-classifies the independently admitted emitter and is not authority proof by
-itself. The first positive registration under that registry establishes the
-child's epoch. Later manifest rotation, parent topology changes, or release do
-not erase that established epoch; a reorg of its parent proof, registry
-association, topology-at-proof, or registration reconstructs the result from
-the surviving lineage. The positive registration is an authority proof only: it neither
-invents a `MigrationApplied` event nor creates ENSv1→ENSv2 migration history or a binding
-transition. Direct-child correlation does derive a child `MigrationApplied`, but only
-from a separate and separately evidenced shape — the parent's own migration
-registry registering the child into itself, with the parent identified by that
+A child registered in its parent's migration registry is selected by the same
+chain rule as any other ENSv2 registration Interpret binds in an admitted
+registry: no child-registration proof, activated parent boundary or
+`migration_registry_creation` association is needed, and the registry permits
+that registration when the child is not protected as migratable.
+(upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L172 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L175 @ ens_v2@a971bd64)
+Direct-child correlation derives a child `MigrationApplied` only from a separate
+and separately evidenced shape — the parent's own migration registry
+registering the child into itself, with the parent identified by that
 registry's own migration evidence. It starts candidate and changes child state
-only after its complete group activates. The two paths do not meet: a bare
-positive child registration never becomes a child boundary, and the
-positive-registration proof path still invents nothing.
-That first ENSv2 registration supersedes the retained ENSv1 child
-binding for subsequent current-state selection; releasing it leaves the child
-with released v2 authority and does not reactivate the ENSv1 residue.
+only after its complete group activates.
+That ENSv2 registration holds the child while it is current; once it is
+released, the child follows its latest lifecycle fact like any other name.
 
-Project trusts the validated activated transition proof and does not
-rank retained binding intervals against the proven arm. Its binding-order
+Project does not rank retained binding intervals against the selected arm. Its binding-order
 regression fixture directly seeds Project's post-transition input with a closed
 predecessor and current successor, proving selection without triggering the intentional
 dual-current fatal. The exact-name dual-current
@@ -517,12 +502,12 @@ the conflicted name still publishes. Reorgs retain the row and make its stored
 block hashes explicitly orphaned through lineage; a later successful generation
 does not erase the failure. Neither slice chooses by recency.
 
-A name without an authority proof follows the chain
+Every name follows the chain
 ([ADR 0007](adrs/0007-follow-the-chain-ens-authority.md)). Only an arm that
 holds the name now, through a binding open at the target block, is a candidate.
 When the name has an open ENSv2 binding, which only a registered ENSv2 entry
 creates, Project selects ENSv2 whatever ENSv1 holds; its authority epoch starts
-at that binding and no proof fields are published. Without one, ENSv1 decides:
+at that binding, and a migration is recorded only as history. Without one, ENSv1 decides:
 its open binding is selected. A name with no open binding on either arm follows
 its latest lifecycle fact. When that is a release of the ENSv2 registration it
 was last bound to, and no ENSv1 lease grant, renewal or release or registry

@@ -120,224 +120,20 @@
                       COALESCE(v1.log_index, -1)
                   )
               )
-        ), transition_proof AS (
+        ), migration_history AS (
+            -- The latest ENSv1->ENSv2 migration of the name. It is served history (the
+            -- migration time and whether the name migrated) and decides nothing about authority:
+            -- the ENSv2 registration the migration made is a registration like any other.
             SELECT DISTINCT ON (event.logical_name_id)
                    event.logical_name_id,
                    event.normalized_event_id AS proof_event_id,
                    event.event_identity AS proof_event_identity,
-                   event.migration_correlation_ids[1] AS transition_id,
-                   event.block_number AS epoch_block_number,
-                   event.transaction_index AS epoch_transaction_index,
-                   event.log_index AS epoch_log_index,
-                   (event.after_state #>> '{successor_binding,binding_id}')::uuid
-                       AS successor_binding_id,
-                   (event.after_state #>> '{successor_binding,resource_id}')::uuid
-                       AS successor_resource_id
+                   event.migration_correlation_ids[1] AS transition_id
             FROM project_events event
             WHERE event.event_kind = 'MigrationApplied'
             ORDER BY event.logical_name_id, event.block_number DESC,
                      event.transaction_index DESC, event.log_index DESC,
                      event.normalized_event_id DESC
-        ), child_proof AS (
-            SELECT DISTINCT ON (registration.logical_name_id)
-                   registration.logical_name_id,
-                   registration.normalized_event_id AS proof_event_id,
-                   registration.event_identity AS proof_event_identity,
-                   registration.block_number AS epoch_block_number,
-                   registration.transaction_index AS epoch_transaction_index,
-                   registration.log_index AS epoch_log_index,
-                   registration.resource_id AS successor_resource_id
-            FROM project_events registration
-            JOIN project_surfaces child
-              ON child.logical_name_id = registration.logical_name_id
-            JOIN migration_discovery_associations migration_registry
-              ON migration_registry.chain_id = registration.chain_id
-             AND migration_registry.registry_contract_instance_id::text =
-                 registration.after_state ->> 'registry_contract_instance_id'
-             AND migration_registry.correlation_kind = 'migration_registry_creation'
-            JOIN discovery_edges registry_edge
-              ON registry_edge.chain_id = migration_registry.chain_id
-             AND registry_edge.edge_kind = 'registry_announcement'
-             AND registry_edge.to_contract_instance_id =
-                 migration_registry.registry_contract_instance_id
-             AND registry_edge.source_manifest_id = migration_registry.source_manifest_id
-             AND registry_edge.active_from_block_number = migration_registry.block_number
-             AND registry_edge.active_from_block_hash = migration_registry.block_hash
-             AND (registry_edge.provenance ->> 'transaction_index')::bigint =
-                 migration_registry.transaction_index
-             AND (registry_edge.provenance ->> 'log_index')::bigint =
-                 migration_registry.log_index
-            JOIN contract_instance_addresses registry_address
-              ON registry_address.chain_id = migration_registry.chain_id
-             AND registry_address.contract_instance_id =
-                 migration_registry.registry_contract_instance_id
-             AND lower(registry_address.address) =
-                 lower(migration_registry.registry_address)
-            JOIN chain_lineage migration_registry_lineage
-              ON migration_registry_lineage.chain_id = migration_registry.chain_id
-             AND migration_registry_lineage.block_hash = migration_registry.block_hash
-             AND migration_registry_lineage.block_number = migration_registry.block_number
-            WHERE registration.event_kind = 'RegistrationGranted'
-              AND registration.source_family = 'ens_v2_registry_l1'
-              AND registration.resource_id IS NOT NULL
-              AND registration.after_state ->> 'status' = 'registered'
-              AND EXISTS (
-                  SELECT 1
-                  FROM project_events parent_boundary
-                  JOIN name_surfaces parent
-                    ON parent.logical_name_id = parent_boundary.logical_name_id
-                   AND parent.chain_id = parent_boundary.chain_id
-                  JOIN project_events parent_registry
-                    ON parent_registry.chain_id = parent_boundary.chain_id
-                   AND parent_registry.logical_name_id = parent_boundary.logical_name_id
-                   AND parent_registry.event_kind = 'SubregistryChanged'
-                   AND parent_registry.source_family IN (
-                       'ens_v2_root_l1', 'ens_v2_registry_l1'
-                   )
-                  JOIN chain_lineage parent_surface_lineage
-                    ON parent_surface_lineage.chain_id = parent.chain_id
-                   AND parent_surface_lineage.block_hash = parent.block_hash
-                   AND parent_surface_lineage.block_number = parent.block_number
-                  JOIN chain_lineage parent_lineage
-                    ON parent_lineage.chain_id = parent_boundary.chain_id
-                   AND parent_lineage.block_hash = parent_boundary.block_hash
-                   AND parent_lineage.block_number = parent_boundary.block_number
-                  JOIN chain_lineage parent_registry_lineage
-                    ON parent_registry_lineage.chain_id = parent_registry.chain_id
-                   AND parent_registry_lineage.block_hash = parent_registry.block_hash
-                   AND parent_registry_lineage.block_number = parent_registry.block_number
-                  WHERE parent_boundary.chain_id = $1
-                    AND parent_boundary.block_number <= $2
-                    AND parent_boundary.event_kind = 'MigrationApplied'
-                    AND parent_boundary.consumer_visibility = 'activated'
-                    AND parent_boundary.canonicality_state IN (
-                        'canonical', 'safe', 'finalized'
-                    )
-                    AND parent.block_number <= $2
-                    AND parent.canonicality_state IN ('canonical', 'safe', 'finalized')
-                    AND parent_lineage.canonicality_state IN (
-                        'canonical', 'safe', 'finalized'
-                    )
-                    AND parent_surface_lineage.canonicality_state IN (
-                        'canonical', 'safe', 'finalized'
-                    )
-                    AND migration_registry.block_number <= registration.block_number
-                    AND migration_registry.canonicality_state IN (
-                        'canonical', 'safe', 'finalized'
-                    )
-                    AND migration_registry_lineage.canonicality_state IN (
-                        'canonical', 'safe', 'finalized'
-                    )
-                    AND registry_edge.canonicality_state IN (
-                        'canonical', 'safe', 'finalized'
-                    )
-                    AND registry_edge.active_from_block_number <=
-                        registration.block_number
-                    AND (
-                        registry_edge.active_to_block_number IS NULL
-                        OR registry_edge.active_to_block_number >=
-                           registration.block_number
-                    )
-                    AND COALESCE(registry_address.active_from_block_number, 0) <=
-                        registration.block_number
-                    AND (
-                        registry_address.active_to_block_number IS NULL
-                        OR registry_address.active_to_block_number >=
-                           registration.block_number
-                    )
-                    AND lower(parent_registry.after_state ->> 'subregistry') =
-                        lower(migration_registry.registry_address)
-                    AND parent_registry.block_number <= registration.block_number
-                    AND parent_registry.consumer_visibility = 'activated'
-                    AND parent_registry.canonicality_state IN (
-                        'canonical', 'safe', 'finalized'
-                    )
-                    AND parent_registry_lineage.canonicality_state IN (
-                        'canonical', 'safe', 'finalized'
-                    )
-                    AND NOT EXISTS (
-                        SELECT 1
-                        FROM project_events later_registry
-                        WHERE later_registry.chain_id = parent_registry.chain_id
-                          AND later_registry.logical_name_id =
-                              parent_registry.logical_name_id
-                          AND later_registry.event_kind = 'SubregistryChanged'
-                          AND later_registry.source_family IN (
-                              'ens_v2_root_l1', 'ens_v2_registry_l1'
-                          )
-                          AND (
-                              later_registry.block_number,
-                              COALESCE(later_registry.transaction_index, -1),
-                              COALESCE(later_registry.log_index, -1),
-                              later_registry.normalized_event_id
-                          ) > (
-                              parent_registry.block_number,
-                              COALESCE(parent_registry.transaction_index, -1),
-                              COALESCE(parent_registry.log_index, -1),
-                              parent_registry.normalized_event_id
-                          )
-                          AND (
-                              later_registry.block_number,
-                              COALESCE(later_registry.transaction_index, -1),
-                              COALESCE(later_registry.log_index, -1)
-                          ) <= (
-                              registration.block_number,
-                              COALESCE(registration.transaction_index, -1),
-                              COALESCE(registration.log_index, -1)
-                          )
-                    )
-                    AND cardinality(child.labelhashes) =
-                        cardinality(parent.labelhashes) + 1
-                    AND child.labelhashes[2:cardinality(child.labelhashes)] =
-                        parent.labelhashes
-                    AND (
-                        migration_registry.block_number,
-                        migration_registry.transaction_index,
-                        migration_registry.log_index
-                    ) <= (
-                        parent_registry.block_number,
-                        COALESCE(parent_registry.transaction_index, -1),
-                        COALESCE(parent_registry.log_index, -1)
-                    )
-                    AND (
-                        parent_boundary.block_number,
-                        COALESCE(parent_boundary.transaction_index, -1),
-                        COALESCE(parent_boundary.log_index, -1)
-                    ) <= (
-                        parent_registry.block_number,
-                        COALESCE(parent_registry.transaction_index, -1),
-                        COALESCE(parent_registry.log_index, -1)
-                    )
-                    AND (
-                        parent_registry.block_number,
-                        COALESCE(parent_registry.transaction_index, -1),
-                        COALESCE(parent_registry.log_index, -1)
-                    ) <= (
-                        registration.block_number,
-                        COALESCE(registration.transaction_index, -1),
-                        COALESCE(registration.log_index, -1)
-                    )
-              )
-            ORDER BY registration.logical_name_id, registration.block_number,
-                     registration.transaction_index, registration.log_index,
-                     registration.normalized_event_id
-        ), proof AS (
-            SELECT logical_name_id, 'migration_authority_transition'::text AS proof_kind,
-                   proof_event_id, proof_event_identity, transition_id,
-                   epoch_block_number, epoch_transaction_index, epoch_log_index,
-                   successor_binding_id, successor_resource_id
-            FROM transition_proof
-            UNION ALL
-            SELECT child.logical_name_id,
-                   'positive_v2_child_registration'::text,
-                   child.proof_event_id, child.proof_event_identity, NULL::text,
-                   child.epoch_block_number, child.epoch_transaction_index,
-                   child.epoch_log_index, NULL::uuid, child.successor_resource_id
-            FROM child_proof child
-            WHERE NOT EXISTS (
-                SELECT 1 FROM transition_proof transition
-                WHERE transition.logical_name_id = child.logical_name_id
-            )
         ), latest_v1_lifecycle AS (
             SELECT DISTINCT ON (event.logical_name_id)
                    event.logical_name_id, event.resource_id, event.event_kind,
@@ -486,7 +282,6 @@
         ), decision AS (
             SELECT surface.logical_name_id,
                    CASE
-                       WHEN proof.logical_name_id IS NOT NULL THEN 'ens_v2'
                        -- Follow the chain (docs/adrs/0007-follow-the-chain-ens-authority.md). Only a
                        -- registered ENSv2 entry opens an ENSv2 binding, and it decides the name
                        -- whatever ENSv1 holds, without a proof; a reservation opens none and
@@ -505,19 +300,17 @@
                        WHEN summary.logical_name_id IS NULL
                         AND event_summary.arm_count = 1 THEN event_summary.sole_arm
                    END AS selected_authority_arm,
-                   proof.proof_kind, proof.proof_event_id,
-                   proof.proof_event_identity, proof.transition_id,
-                   proof.epoch_block_number, proof.epoch_transaction_index,
-                   proof.epoch_log_index, proof.successor_binding_id,
-                   proof.successor_resource_id,
+                   CASE WHEN migration.logical_name_id IS NOT NULL
+                       THEN 'migration_authority_transition' END AS proof_kind,
+                   migration.proof_event_id, migration.proof_event_identity,
+                   migration.transition_id,
                    released.released_v2_resource_id,
                    released_v1.released_v1_resource_id, released_v1.released_v1_binding_id,
                    -- The arm was selected from event history with nothing open: the sole arm with
                    -- history, or ENSv1 when both arms have history and no ENSv2 release tombstone
                    -- applies. Its lifecycle state then reads that arm's events.
                    COALESCE(
-                       proof.logical_name_id IS NULL
-                           AND summary.logical_name_id IS NULL
+                       summary.logical_name_id IS NULL
                            AND (
                                event_summary.arm_count = 1
                                OR (
@@ -530,24 +323,17 @@
             FROM project_surfaces surface
             LEFT JOIN arm_summary summary USING (logical_name_id)
             LEFT JOIN event_arm_summary event_summary USING (logical_name_id)
-            LEFT JOIN proof USING (logical_name_id)
+            LEFT JOIN migration_history migration USING (logical_name_id)
             LEFT JOIN released_v2_authority released USING (logical_name_id)
             LEFT JOIN released_v1_authority released_v1 USING (logical_name_id)
         ), selected AS (
             SELECT decision.*, binding.surface_binding_id AS selected_binding_id,
                    binding.resource_id AS selected_resource_id,
                    binding.binding_kind AS selected_binding_kind,
-                   COALESCE(
-                       decision.epoch_block_number, binding.block_number
-                   ) AS selected_epoch_block_number,
-                   COALESCE(
-                       decision.epoch_transaction_index,
-                       (binding.provenance ->> 'transaction_index')::bigint
-                   ) AS selected_epoch_transaction_index,
-                   COALESCE(
-                       decision.epoch_log_index,
-                       (binding.provenance ->> 'log_index')::bigint
-                   ) AS selected_epoch_log_index
+                   binding.block_number AS selected_epoch_block_number,
+                   (binding.provenance ->> 'transaction_index')::bigint
+                       AS selected_epoch_transaction_index,
+                   (binding.provenance ->> 'log_index')::bigint AS selected_epoch_log_index
             FROM decision
             LEFT JOIN LATERAL (
                 SELECT candidate.*
@@ -564,8 +350,7 @@
                       OR candidate.resource_id = decision.released_v2_resource_id
                   )
                   AND (
-                      decision.proof_event_id IS NOT NULL
-                      OR decision.released_v2_resource_id IS NOT NULL
+                      decision.released_v2_resource_id IS NOT NULL
                       OR candidate.surface_binding_id = decision.released_v1_binding_id
                       OR (
                           candidate.active_from < target_time.cutoff
@@ -573,40 +358,6 @@
                               candidate.active_to IS NULL
                               OR candidate.active_to >= target_time.cutoff
                           )
-                      )
-                  )
-                  AND (
-                      decision.epoch_block_number IS NULL
-                      OR candidate.surface_binding_id = decision.successor_binding_id
-                      OR (
-                          decision.successor_binding_id IS NULL
-                          AND candidate.resource_id = decision.successor_resource_id
-                          AND (
-                              candidate.block_number,
-                              COALESCE(
-                                  (candidate.provenance ->> 'transaction_index')::bigint, -1
-                              ),
-                              COALESCE(
-                                  (candidate.provenance ->> 'log_index')::bigint, -1
-                              )
-                          ) = (
-                              decision.epoch_block_number,
-                              COALESCE(decision.epoch_transaction_index, -1),
-                              COALESCE(decision.epoch_log_index, -1)
-                          )
-                      )
-                      OR (
-                          candidate.block_number,
-                          COALESCE(
-                              (candidate.provenance ->> 'transaction_index')::bigint, -1
-                          ),
-                          COALESCE(
-                              (candidate.provenance ->> 'log_index')::bigint, -1
-                          )
-                      ) > (
-                          decision.epoch_block_number,
-                          COALESCE(decision.epoch_transaction_index, -1),
-                          COALESCE(decision.epoch_log_index, -1)
                       )
                   )
                 ORDER BY candidate.block_number DESC,

@@ -3135,7 +3135,44 @@ async fn seed_child_authority_fixture(
         json!({}),
     )
     .await?;
-    insert_migration_boundary(pool, "ens:0xalice", boundary_block).await
+    insert_migration_boundary(pool, "ens:0xalice", boundary_block).await?;
+    // Interpret closes the ENSv1 predecessor binding at the boundary and opens the ENSv2
+    // successor binding there; the ENSv2 registration is that binding's resource.
+    sqlx::query(
+        "UPDATE surface_bindings SET active_to = to_timestamp($1)
+         WHERE logical_name_id = 'ens:0xalice' AND authority_arm = 'ens_v1'",
+    )
+    .bind(boundary_block)
+    .execute(pool)
+    .await?;
+    open_child_v2_binding(pool, boundary_block).await
+}
+
+const CHILD_V2_RESOURCE: &str = "00000000-0000-0000-0000-0000000000c2";
+
+/// The ENSv2 binding Interpret opens for `alice`'s registration in the admitted subregistry, with
+/// the registration moved onto its resource.
+async fn open_child_v2_binding(pool: &PgPool, block: i64) -> Result<()> {
+    insert_classifier_resource_and_binding(
+        pool,
+        CHAIN,
+        "ens:0xalice",
+        "ens_v2",
+        Uuid::parse_str(CHILD_V2_RESOURCE)?,
+        Uuid::parse_str("00000000-0000-0000-0000-0000000000c3")?,
+        block,
+        None,
+    )
+    .await?;
+    sqlx::query(
+        "UPDATE normalized_events SET resource_id = $1
+         WHERE logical_name_id = 'ens:0xalice' AND source_family = 'ens_v2_registry_l1'
+           AND event_kind = 'RegistrationGranted'",
+    )
+    .bind(Uuid::parse_str(CHILD_V2_RESOURCE)?)
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 async fn insert_migration_boundary(pool: &PgPool, child: &str, block: i64) -> Result<()> {
@@ -3210,7 +3247,7 @@ async fn a_released_v2_child_publishes_no_relation_and_never_falls_back() -> Res
         CHAIN,
         4,
         Some("ens:0xalice"),
-        None,
+        Some(CHILD_V2_RESOURCE),
         "RegistrationReleased",
         "ens_v2_registry_l1",
         json!({
@@ -3218,6 +3255,12 @@ async fn a_released_v2_child_publishes_no_relation_and_never_falls_back() -> Res
         }),
         json!({}),
     )
+    .await?;
+    sqlx::query(
+        "UPDATE surface_bindings SET active_to = to_timestamp(4)
+         WHERE logical_name_id = 'ens:0xalice' AND authority_arm = 'ens_v2'",
+    )
+    .execute(scratch.pool())
     .await?;
 
     run_project(scratch.pool(), CHAIN, None, RunMode::Normal, 0, 4).await?;
@@ -3314,9 +3357,9 @@ async fn a_post_boundary_ens_v1_child_relation_blocks_mainnet_publication() -> R
     scratch.cleanup().await
 }
 
-/// Seeds the same parent-child pair, but with the child's ENSv2 authority proven by a
-/// positive ENSv2 child registration under a migrated parent registry instead of by the
-/// child's own migration boundary. The ENSv1 relation is restated at `v1_block`.
+/// Seeds the same parent-child pair, but with the child registered in the registry its parent's
+/// migration created instead of migrating itself; the child keeps its ENSv1 binding. The ENSv1
+/// relation is restated at `v1_block`.
 async fn seed_positive_child_authority_fixture(
     pool: &PgPool,
     v1_block: i64,
@@ -3353,8 +3396,7 @@ async fn seed_positive_child_authority_fixture(
     .bind(subregistry_address)
     .execute(pool)
     .await?;
-    // The parent's registry was created by its own migration, which is what lets a positive
-    // ENSv2 registration under it stand as the child's authority proof.
+    // The parent's registry was created by its own migration.
     sqlx::query(
         "INSERT INTO migration_discovery_associations (
              logical_edge_identity, migration_correlation_id, correlation_kind,
@@ -3483,7 +3525,8 @@ async fn seed_positive_child_authority_fixture(
         }),
         json!({}),
     )
-    .await
+    .await?;
+    open_child_v2_binding(pool, 2).await
 }
 
 /// Replays what a redo does to the events in a block range: deletes them and writes them
@@ -3736,11 +3779,11 @@ async fn same_position_multi_candidate_child_conflict_is_replay_stable_within_ea
 // for a chain/address, and `ranked_v2_registrations` keeps one current row per child and admitted
 // instance, so that proposed second candidate cannot reach `publish` after candidate construction.
 
-// Parent reachability is applied before the child's positive ENSv2 authority proof. An ENSv1
+// Parent reachability is applied before the child's ENSv2 registration is published. An ENSv1
 // relation restated beneath an unlocked migrated parent is unreachable, so it cannot become a
 // dual-current contradiction or suppress the reachable ENSv2 relation.
 #[tokio::test]
-async fn parent_reachability_filters_before_positive_v2_child_integrity() -> Result<()> {
+async fn parent_reachability_filters_before_v2_child_integrity() -> Result<()> {
     for path in ["unlocked_wrapped", "locked_wrapped"] {
         let scratch =
             ScratchDatabase::create(&format!("production_project_positive_child_{path}")).await?;
@@ -3764,6 +3807,8 @@ async fn parent_reachability_filters_before_positive_v2_child_integrity() -> Res
     seed_project_fixture(control.pool()).await?;
     seed_positive_child_authority_fixture(control.pool(), 5, "locked_wrapped").await?;
     sqlx::query("DELETE FROM normalized_events WHERE source_family = 'ens_v2_registry_l1' AND event_kind = 'RegistrationGranted' AND logical_name_id = 'ens:0xalice' AND after_state ->> 'registry_contract_instance_id' = '00000000-0000-0000-0000-0000000000e4'")
+        .execute(control.pool()).await?;
+    sqlx::query("DELETE FROM surface_bindings WHERE logical_name_id = 'ens:0xalice' AND authority_arm = 'ens_v2'")
         .execute(control.pool()).await?;
     run_project(control.pool(), CHAIN, None, RunMode::Normal, 0, 5).await?;
     assert_eq!(
@@ -11441,11 +11486,14 @@ async fn selected_authority_constrains_the_effective_controller_fold() -> Result
     scratch.cleanup().await
 }
 
+// A registration in the registry its parent's migration announced is a registration like any
+// other: it is selected and served with no child proof, before and after the parent's migration.
 #[tokio::test]
-async fn positive_v2_child_registration_establishes_authority_without_child_migration() -> Result<()>
-{
+async fn a_v2_child_registration_is_served_without_a_child_proof() -> Result<()> {
     let scratch = ScratchDatabase::create("project_authority_positive_child").await?;
-    let chain = "authority-positive-child";
+    // A chain the resolution topology knows, because the ENSv1 arm this name ends on publishes a
+    // direct topology.
+    let chain = "ethereum-sepolia";
     let logical_name_id = seed_dual_open_cross_arm_fixture(scratch.pool(), chain, 4).await?;
     InterpretEngine::new(scratch.pool().clone())
         .run_batch(InterpretRequest {
@@ -11456,10 +11504,8 @@ async fn positive_v2_child_registration_establishes_authority_without_child_migr
             mode: InterpretRunMode::Normal,
         })
         .await?;
-    let (registry_instance, registry_address, registry_manifest): (String, String, i64) =
-        sqlx::query_as(
-            "SELECT event.after_state ->> 'registry_contract_instance_id', address.address,
-                    event.source_manifest_id
+    let (registry_instance, registry_address): (String, String) = sqlx::query_as(
+        "SELECT event.after_state ->> 'registry_contract_instance_id', address.address
          FROM normalized_events event
          JOIN contract_instance_addresses address
            ON address.contract_instance_id::text =
@@ -11470,11 +11516,11 @@ async fn positive_v2_child_registration_establishes_authority_without_child_migr
            AND event.source_family = 'ens_v2_registry_l1'
            AND event.event_kind = 'RegistrationGranted' AND event.resource_id IS NOT NULL
          ORDER BY event.normalized_event_id DESC LIMIT 1",
-        )
-        .bind(chain)
-        .bind(&logical_name_id)
-        .fetch_one(scratch.pool())
-        .await?;
+    )
+    .bind(chain)
+    .bind(&logical_name_id)
+    .fetch_one(scratch.pool())
+    .await?;
     let parent_id = format!("ens:{:#x}", raw_namehash(&[b"eth"]));
     insert_event(
         scratch.pool(),
@@ -11507,8 +11553,6 @@ async fn positive_v2_child_registration_establishes_authority_without_child_migr
     .await?;
 
     run_project(scratch.pool(), chain, None, RunMode::Normal, 0, 5).await?;
-    // Until the child proof holds, the current ENSv2 registration is selected without a proof and
-    // is served as it is; each step below checks only that no proof is invented.
     type ChildAuthority = (Option<String>, String, Option<String>);
     let unproven: ChildAuthority = (None, "supported".into(), None);
     let child_authority = |pool: PgPool, name: String| async move {
@@ -11523,223 +11567,9 @@ async fn positive_v2_child_registration_establishes_authority_without_child_migr
     assert_eq!(
         child_authority(scratch.pool().clone(), logical_name_id.clone()).await?,
         unproven,
-        "an ordinary ENSv2 registry must not establish child authority"
+        "the ENSv2 registration is served and no proof is invented"
     );
 
-    sqlx::query(
-        "INSERT INTO migration_discovery_associations (
-             logical_edge_identity, migration_correlation_id, correlation_kind,
-             registry_contract_instance_id, registry_address, source_manifest_id,
-             evidence_refs, chain_id, block_number, block_hash, transaction_hash,
-             transaction_index, log_index, canonicality_state, consumer_visibility,
-             interpreter_content_hash
-         ) VALUES (
-             $1, $2, 'migration_registry_creation', $3, lower($4), $5,
-             '[{\"event_identity\":\"fixture-migration-registry-proof\"}]'::jsonb,
-             $6, $7, $8, $9, $10, $11, 'canonical', 'candidate', $12
-         )",
-    )
-    .bind(format!("{chain}:migration-registry-edge"))
-    .bind(format!("{chain}:migration-registry-correlation"))
-    .bind(Uuid::parse_str(&registry_instance)?)
-    .bind(&registry_address)
-    .bind(registry_manifest)
-    .bind(chain)
-    .bind(2_i64)
-    .bind(block_hash(chain, 2))
-    .bind(format!("{chain}:migration-registry-tx"))
-    .bind(0_i64)
-    .bind(0_i64)
-    .bind(INTERPRETER_CONTENT_HASH)
-    .execute(scratch.pool())
-    .await?;
-    run_project(
-        scratch.pool(),
-        chain,
-        Some(Marker {
-            number: 5,
-            hash: block_hash(chain, 5),
-        }),
-        RunMode::Normal,
-        2,
-        2,
-    )
-    .await?;
-    assert_eq!(
-        child_authority(scratch.pool().clone(), logical_name_id.clone()).await?,
-        unproven,
-        "a diagnostic association without its admitted edge is not readable"
-    );
-    sqlx::query(
-        "INSERT INTO discovery_edges (
-             chain_id, edge_kind, from_contract_instance_id, to_contract_instance_id,
-             discovery_source, admission_basis, source_manifest_id,
-             active_from_block_number, active_from_block_hash, canonicality_state,
-             provenance
-         ) VALUES (
-             $1, 'registry_announcement', $2, $2, 'RegistryCreated',
-             'reachable_from_root', $3, 2, $4, 'canonical',
-             '{\"transaction_index\":0,\"log_index\":0}'::jsonb
-         )",
-    )
-    .bind(chain)
-    .bind(Uuid::parse_str(&registry_instance)?)
-    .bind(registry_manifest)
-    .bind(block_hash(chain, 2))
-    .execute(scratch.pool())
-    .await?;
-    insert_event(
-        scratch.pool(),
-        chain,
-        3,
-        Some(&parent_id),
-        None,
-        "SubregistryChanged",
-        "ens_v2_registry_l1",
-        json!({"subregistry":"0x0000000000000000000000000000000000000000"}),
-        json!({}),
-    )
-    .await?;
-    let detached_event_identity: String = sqlx::query_scalar(
-        "SELECT event_identity FROM normalized_events
-         WHERE chain_id = $1 AND logical_name_id = $2
-           AND event_kind = 'SubregistryChanged'
-           AND after_state ->> 'subregistry' =
-               '0x0000000000000000000000000000000000000000'
-         ORDER BY normalized_event_id DESC LIMIT 1",
-    )
-    .bind(chain)
-    .bind(&parent_id)
-    .fetch_one(scratch.pool())
-    .await?;
-    run_project(
-        scratch.pool(),
-        chain,
-        Some(Marker {
-            number: 5,
-            hash: block_hash(chain, 5),
-        }),
-        RunMode::Normal,
-        2,
-        2,
-    )
-    .await?;
-    assert_eq!(
-        child_authority(scratch.pool().clone(), logical_name_id.clone()).await?,
-        unproven,
-        "a registry detached before the child grant is not current at proof"
-    );
-    sqlx::query(
-        "UPDATE normalized_events SET canonicality_state = 'orphaned'
-         WHERE event_identity = $1",
-    )
-    .bind(&detached_event_identity)
-    .execute(scratch.pool())
-    .await?;
-    run_project(
-        scratch.pool(),
-        chain,
-        Some(Marker {
-            number: 5,
-            hash: block_hash(chain, 5),
-        }),
-        RunMode::Redo,
-        3,
-        3,
-    )
-    .await?;
-    let admitted_registry_proof: Option<String> = sqlx::query_scalar(
-        "SELECT provenance #>> '{authority_selection,proof_kind}'
-         FROM name_current WHERE logical_name_id = $1",
-    )
-    .bind(&logical_name_id)
-    .fetch_one(scratch.pool())
-    .await?;
-    assert_eq!(
-        admitted_registry_proof.as_deref(),
-        Some("positive_v2_child_registration")
-    );
-    // The child's registry was created and announced by its parent's migration and is not
-    // in the manifest's declared registry list; the proven registration is served.
-    let admitted_registry_support: (String, Option<String>) = sqlx::query_as(
-        "SELECT support_status, unsupported_reason
-         FROM name_current WHERE logical_name_id = $1",
-    )
-    .bind(&logical_name_id)
-    .fetch_one(scratch.pool())
-    .await?;
-    assert_eq!(
-        admitted_registry_support,
-        ("supported".into(), None),
-        "a positive child registration under a migration-created registry is served"
-    );
-    sqlx::query(
-        "UPDATE normalized_events
-         SET consumer_visibility = 'candidate',
-             migration_correlation_ids = ARRAY[$3]::text[]
-         WHERE chain_id = $1 AND logical_name_id = $2
-           AND event_kind = 'MigrationApplied'",
-    )
-    .bind(chain)
-    .bind(&parent_id)
-    .bind(format!("{chain}:parent-transition"))
-    .execute(scratch.pool())
-    .await?;
-    run_project(
-        scratch.pool(),
-        chain,
-        Some(Marker {
-            number: 5,
-            hash: block_hash(chain, 5),
-        }),
-        RunMode::Normal,
-        3,
-        3,
-    )
-    .await?;
-    assert_eq!(
-        child_authority(scratch.pool().clone(), logical_name_id.clone()).await?,
-        unproven,
-        "a candidate parent boundary cannot prove the child"
-    );
-
-    sqlx::query(
-        "UPDATE normalized_events SET consumer_visibility = 'activated'
-         WHERE chain_id = $1 AND logical_name_id = $2
-           AND event_kind = 'MigrationApplied'",
-    )
-    .bind(chain)
-    .bind(&parent_id)
-    .execute(scratch.pool())
-    .await?;
-    run_project(
-        scratch.pool(),
-        chain,
-        Some(Marker {
-            number: 5,
-            hash: block_hash(chain, 5),
-        }),
-        RunMode::Normal,
-        3,
-        3,
-    )
-    .await?;
-    normalize_projection_clocks(scratch.pool()).await?;
-    let incremental: Value = sqlx::query_scalar(
-        "SELECT to_jsonb(current) FROM name_current current WHERE logical_name_id = $1",
-    )
-    .bind(&logical_name_id)
-    .fetch_one(scratch.pool())
-    .await?;
-    run_project(scratch.pool(), chain, None, RunMode::Normal, 0, 5).await?;
-    normalize_projection_clocks(scratch.pool()).await?;
-    let rebuilt: Value = sqlx::query_scalar(
-        "SELECT to_jsonb(current) FROM name_current current WHERE logical_name_id = $1",
-    )
-    .bind(&logical_name_id)
-    .fetch_one(scratch.pool())
-    .await?;
-    assert_eq!(incremental, rebuilt, "incremental child proof diverged");
     let authority: Value = sqlx::query_scalar(
         "SELECT provenance -> 'authority_selection'
          FROM name_current WHERE logical_name_id = $1",
@@ -11748,69 +11578,15 @@ async fn positive_v2_child_registration_establishes_authority_without_child_migr
     .fetch_one(scratch.pool())
     .await?;
     assert_eq!(authority["authority_arm"], "ens_v2");
-    assert_eq!(authority["proof_kind"], "positive_v2_child_registration");
 
-    insert_lineage_block(scratch.pool(), chain, 6).await?;
-    insert_event(
-        scratch.pool(),
-        chain,
-        6,
-        Some(&parent_id),
-        None,
-        "SubregistryChanged",
-        "ens_v2_registry_l1",
-        json!({"subregistry":"0x0000000000000000000000000000000000000000"}),
-        json!({}),
-    )
-    .await?;
-    sqlx::query(
-        "UPDATE manifest_versions SET rollout_status = 'deprecated' WHERE manifest_id = $1",
-    )
-    .bind(registry_manifest)
-    .execute(scratch.pool())
-    .await?;
-    insert_namespaced_manifest(
-        scratch.pool(),
-        "ens",
-        chain,
-        "ens_v2_registry_l1",
-        2,
-        "fixture-rotation",
-        "tests/project-v2-registry-rotation.toml",
-        json!({"contracts":[{"role":"registry","address":registry_address}]}),
-    )
-    .await?;
-    sqlx::query(
-        "INSERT INTO normalized_events (
-             event_identity, namespace, event_kind, source_family, manifest_version,
-             source_manifest_id, chain_id, raw_fact_ref, derivation_kind,
-             canonicality_state, before_state, after_state
-         ) VALUES (
-             $1, 'ens', 'SourceManifestUpdated', 'ens_v2_registry_l1', 1,
-             $2, $3, '{}'::jsonb, 'manifest_sync', 'finalized', '{}'::jsonb,
-             '{\"rollout_status\":\"deprecated\",\"manifest_payload\":{}}'::jsonb
-         )",
-    )
-    .bind(format!("{chain}:SourceManifestUpdated:retired"))
-    .bind(registry_manifest)
-    .bind(chain)
-    .execute(scratch.pool())
-    .await?;
-    run_project(scratch.pool(), chain, None, RunMode::Normal, 0, 6).await?;
-    let after_rotation: Value = sqlx::query_scalar(
-        "SELECT provenance -> 'authority_selection'
-         FROM name_current WHERE logical_name_id = $1",
-    )
-    .bind(&logical_name_id)
-    .fetch_one(scratch.pool())
-    .await?;
-    assert_eq!(after_rotation["authority_arm"], "ens_v2");
-    assert_eq!(
-        after_rotation["proof_kind"],
-        "positive_v2_child_registration"
-    );
-
-    for block in 7..=8 {
+    // Expected delta (TYR-36 step 6). The child's ENSv2 registration is released while its ENSv1
+    // lease is still live. Before, the positive child registration proof kept the name on ENSv2 as
+    // a released tombstone. After, the live ENSv1 lease holds the name. Chain fact:
+    // `BaseRegistrarImplementation.ownerOf` answers for a live lease, and `unregister` burned the
+    // ENSv2 token and set its expiry to the release time.
+    // (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L71-L76 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L195-L207 @ ens_v2@a971bd64)
+    for block in 6..=7 {
         insert_lineage_block(scratch.pool(), chain, block).await?;
     }
     let v2_resource: String = sqlx::query_scalar(
@@ -11842,19 +11618,7 @@ async fn positive_v2_child_registration_establishes_authority_without_child_migr
     .bind(&logical_name_id)
     .execute(scratch.pool())
     .await?;
-    insert_event(
-        scratch.pool(),
-        chain,
-        8,
-        Some(&logical_name_id),
-        None,
-        "ExpiryChanged",
-        "ens_v1_registrar_l1",
-        json!({"expiry":8_888}),
-        json!({}),
-    )
-    .await?;
-    run_project(scratch.pool(), chain, None, RunMode::Normal, 0, 8).await?;
+    run_project(scratch.pool(), chain, None, RunMode::Normal, 0, 7).await?;
     let released: (Value, Value) = sqlx::query_as(
         "SELECT declared_summary, provenance -> 'authority_selection'
          FROM name_current WHERE logical_name_id = $1",
@@ -11862,19 +11626,9 @@ async fn positive_v2_child_registration_establishes_authority_without_child_migr
     .bind(&logical_name_id)
     .fetch_one(scratch.pool())
     .await?;
-    assert_eq!(released.0["registration"]["status"], "released");
-    assert!(released.0["registration"]["expiry"].is_null());
-    assert_eq!(released.1["authority_arm"], "ens_v2");
-    assert_eq!(released.1["lifecycle_state"], "unregistered");
-    let child_migrations: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM normalized_events
-         WHERE chain_id = $1 AND logical_name_id = $2 AND event_kind = 'MigrationApplied'",
-    )
-    .bind(chain)
-    .bind(&logical_name_id)
-    .fetch_one(scratch.pool())
-    .await?;
-    assert_eq!(child_migrations, 0);
+    assert_eq!(released.1["authority_arm"], "ens_v1");
+    assert_eq!(released.0["registration"]["status"], "active");
+    assert!(released.1.get("proof_kind").is_none());
     scratch.cleanup().await
 }
 

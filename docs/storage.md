@@ -721,9 +721,8 @@ traverses it. Interpret attaches the `migration_registry_creation` relationship
 in `migration_discovery_associations`, keyed to that ordinary edge;
 the association does not change the edge's columns or active range. After an
 activated parent transition, Project may use the readable canonical association
-and active ordinary announcement to classify a positive child-registration
-emitter or prove the current parent subregistry is the migration-created
-`WrapperRegistry`. Candidate or activated, the association establishes neither
+and active ordinary announcement to prove the current parent subregistry is the
+migration-created `WrapperRegistry`; authority selection does not read it. Candidate or activated, the association establishes neither
 result by itself and activates no correlation-dependent effect. Parent
 reachability additionally requires the association's evidence-reference array
 to be non-empty, every reference to be a non-empty object, and the whole array

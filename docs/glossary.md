@@ -76,7 +76,7 @@ arm against the `verified_authority_arms` the deployment profile's
 `ens_execution` manifest declares (`manifests.md` § `verified_authority_arms`):
 an arm outside that list is refused in band rather than resolved through an
 entrypoint the selection has ruled out. Project stages the selected arm,
-binding, resource, start position, lifecycle state, and proof together; field
+binding, resource, start position, lifecycle state, and migration history together; field
 selection cannot rank events from different arms or combine them in one
 `name_current` row. The related `AuthorityEpochChanged`
 normalized event is broader than an era flip: it records every move of a
@@ -126,24 +126,21 @@ capture](manifests.md#resolver-creation-capture).
 
 ## Authority proof
 
-the evidence that selects an authority epoch before any
-current field is chosen. For an ENSv1→ENSv2 boundary it is the activated
-`MigrationApplied` event that Interpret already matched one-to-one with a
-validated [migration authority transition](#migration-authority-transition);
-Project trusts its successor binding, resource, position, and ENSv1→ENSv2 migration correlation ID rather than
-repeating raw ENSv1→ENSv2 migration correlation. A current positive ENSv2 child registration in an
-admitted [migration registry](#migration-registry-wrapperregistry) below a
-proven migrated parent is the other proof. The readable canonical
-`migration_registry_creation` association classifies that registry but does not
-establish authority by itself. Once the positive registration establishes the
-child epoch, later topology or manifest changes do not erase it. That child proof does not synthesize
-`MigrationApplied`, ENSv1→ENSv2 migration history, or a binding transition. Candidate
-events, reservations, event recency, binding UUID order, and `active_from`
-order are not authority proof. A proof is not needed for ENSv2 to hold a name:
-a current ENSv2 registration selects ENSv2 without one, following the chain
-([ADR 0007](adrs/0007-follow-the-chain-ens-authority.md)). A proof decides
-where the authority epoch starts, and it is what arms the dual-current
-generation checks.
+an earlier bigname rule, removed in TYR-36 step 6, under which an activated
+`MigrationApplied` event or a positive ENSv2 child registration in a
+[migration registry](#migration-registry-wrapperregistry) selected the ENSv2
+arm, its binding and its authority epoch start. Neither is an authority
+condition now. The latest activated `MigrationApplied` of a name, which
+Interpret matches one-to-one with a validated
+[migration authority transition](#migration-authority-transition), is kept as
+served migration history: Project records it in
+`provenance.authority_selection` as `proof_kind`
+`migration_authority_transition` with its event id, identity and
+ENSv1→ENSv2 migration correlation ID, and the API reads it for `migrated_at`
+and `is_migrated`. Authority follows the chain
+([ADR 0007](adrs/0007-follow-the-chain-ens-authority.md)): the ENSv2
+registration the migration made is selected like any other registration in an
+admitted registry, and the authority epoch starts at its binding.
 
 ## Backfill coverage fact
 

@@ -313,11 +313,8 @@ async fn assert_child_authority(
              AND predecessor.parent_logical_name_id = successor.parent_logical_name_id
              AND predecessor.authority_arm = 'ens_v1'
             WHERE authority.selected_authority_arm = 'ens_v2'
-              -- Both ENSv2 child authority proofs: the activated migration boundary
-              -- and the positive ENSv2 child registration.
-              AND authority.authority_proof_kind IN (
-                  'migration_authority_transition', 'positive_v2_child_registration'
-              )
+              -- The activated migration boundary the child's history records.
+              AND authority.authority_proof_kind = 'migration_authority_transition'
               AND authority.authority_proof_event_identity IS NOT NULL
               AND (
                   predecessor.block_number,

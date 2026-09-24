@@ -250,9 +250,8 @@ outcomes, or durable traces.
 - The independently admitted `registry_announcement` edge for an ENSv1→ENSv2
   migration-created registry remains ordinary because it drives the watch plan,
   not a product projection. Project ignores every candidate downstream effect.
-  After an activated parent transition, authority selection may classify a positive
-  child-registration [authority proof](glossary.md#authority-proof), and child reachability may prove the current subregistry is its migration-created `WrapperRegistry`.
-  Both require the readable canonical association, active ordinary announcement, and matching topology; reachability additionally requires non-empty association evidence contained in the parent boundary. The association proves neither result by itself.
+  After an activated parent transition, child reachability may prove the current subregistry is its migration-created `WrapperRegistry`.
+  That requires the readable canonical association, active ordinary announcement, matching topology, and non-empty association evidence contained in the parent boundary. The association proves nothing by itself, and authority selection does not read it.
 - Coverage and support are explicit. They are never inferred from row presence
   or a historical ingest range.
 - Verified provider answers are request-scoped lookup output, not projection
@@ -277,10 +276,7 @@ outcomes, or durable traces.
 `surface_bindings` remains identity history rather than a `_current`
 projection. Exact-name reads ordinarily first select the logical name's
 [`authority epoch`](glossary.md#authority-epoch), then select fields only from
-that epoch's binding and resources at the requested position. An activated
-ENSv1→ENSv2 authority proof may select a closed ENSv2 binding after release;
-that [released v2 authority](glossary.md#released-v2-authority) does not fall
-back to an active retained ENSv1 binding. A released ENSv1 lease with no
+that epoch's binding and resources at the requested position. A released ENSv1 lease with no
 revived custody likewise selects its closed lease binding,
 or the closed NameWrapper binding that stands for a lease registered through
 the NameWrapper, or the open registry-only binding under which the lease lapsed
@@ -289,8 +285,8 @@ as a [released v1 authority](glossary.md#released-v1-authority) tombstone. A
 name without a proof, the root, `eth`, `reverse`, and `addr.reverse` included,
 follows the chain
 ([ADR 0007](adrs/0007-follow-the-chain-ens-authority.md)): a current ENSv2
-binding selects ENSv2, with its epoch starting at that binding and null proof
-fields, a live ENSv1 binding selects ENSv1 otherwise, and a name neither arm
+binding selects ENSv2, with its epoch starting at that binding and a migration
+recorded only as history, a live ENSv1 binding selects ENSv1 otherwise, and a name neither arm
 holds follows its latest lifecycle fact, which leaves a released ENSv2
 registration with nothing later on ENSv1 as a
 [released v2 authority](glossary.md#released-v2-authority) tombstone.

@@ -1393,7 +1393,7 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   [authority arm](glossary.md#authority-epoch) still chooses between the remaining ENSv1 and ENSv2 candidates.
   An unknown activated migration-path value blocks the Project generation as a
   data-integrity failure instead of silently hiding relations. A child
-  without an authority proof publishes the relation of its selected arm
+  publishes the relation of its selected arm
   ([ADR 0007](adrs/0007-follow-the-chain-ens-authority.md)); only a child
   with no selected authority at all whose arms disagree is omitted entirely.
   On every ENS
