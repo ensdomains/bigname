@@ -9,8 +9,11 @@ use super::name_current_authority_arm;
 
 /// The [registry generation](../../../../docs/glossary.md#registry-generation) Project recorded
 /// for a name on the `ens_v1` arm: `old` while only the 2017 registry holds an ownership record
-/// for its node, `current` after. Absent on other arms and on rows projected before Project
-/// recorded it.
+/// for its node, `current` after. The deployed registry answers from the 2017 registry while it
+/// holds no record for the node
+/// (upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L18-L46 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L150-L157 @ ens_v1@91c966f).
+/// Absent on other arms and on rows projected before Project recorded it.
 pub fn name_current_registry_generation(provenance: &Value) -> Option<&str> {
     provenance
         .pointer("/authority_selection/registry_generation")
@@ -18,8 +21,11 @@ pub fn name_current_registry_generation(provenance: &Value) -> Option<&str> {
 }
 
 /// The block of the node's first current ENSv1 registry ownership record, where a name on the
-/// ENSv1 arm stopped being read from the 2017 registry. Absent before that record and for the
-/// root. A diagnostics fact: product responses never carry it.
+/// ENSv1 arm stopped being read from the 2017 registry
+/// (upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L18-L46 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L60-L84 @ ens_v1@91c966f).
+/// Absent before that record and for the root. A diagnostics fact: product responses never
+/// carry it.
 pub fn name_current_registry_handoff_block_number(provenance: &Value) -> Option<i64> {
     provenance
         .pointer("/authority_selection/registry_handoff_block_number")
@@ -32,8 +38,11 @@ pub fn name_current_is_ownerless_registry(provenance: &Value) -> bool {
     provenance.pointer("/authority_selection/ownerless_registry") == Some(&Value::Bool(true))
 }
 
-/// `ens_v2`, `ens_v1`, or `ens_v0` (the `ens_v1` arm while the 2017 registry answers for the
-/// node); `None` for Basenames, an unresolved selection, or an ownerless registry row.
+/// `ens_v2`, `ens_v1`, or `ens_v0`, which is the `ens_v1` arm while the 2017 registry answers
+/// for the node
+/// (upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L18-L46 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L150-L157 @ ens_v1@91c966f).
+/// `None` for Basenames, an unresolved selection, or an ownerless registry row.
 pub fn name_current_public_authority(provenance: &Value) -> Option<&'static str> {
     if name_current_is_ownerless_registry(provenance) {
         return None;
