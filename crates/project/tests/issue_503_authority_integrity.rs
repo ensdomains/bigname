@@ -1251,6 +1251,75 @@ async fn shared_infrastructure_without_proof_is_not_integrity_fatal() -> Result<
     Ok(())
 }
 
+// On Sepolia `eth` and `reverse` are registered in the ENSv2 root registry, so their ENSv2 facts come
+// from the root family and no ETHRegistrar event exists for them. A registration in the admitted
+// root registry is served like any other, with no proof fabricated for it.
+// (upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ETHRegistry.ts:L46 @ ens_v2_sepolia_20260916@366de741)
+// (upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ReverseMirror.ts:L35 @ ens_v2_sepolia_20260916@366de741)
+#[tokio::test]
+async fn root_registry_eth_and_reverse_serve_without_a_registrar_event() -> Result<()> {
+    let (db, pool) = database("issue503_root_family").await?;
+    let root_owner = "0x0000000000000000000000000000000000000660";
+    for (index, name) in [(60_u16, "eth"), (61, "reverse")] {
+        let logical = surface(&pool, index, name, &["ens_v1", "ens_v2"]).await?;
+        event(
+            &pool,
+            &format!("issue503-{name}-v1-owner"),
+            &logical,
+            Some(&uuid(1, index)),
+            Event {
+                family: "ens_v1_registry_l1",
+                kind: "AuthorityTransferred",
+                log: 1,
+                after: json!({"owner":"0x0000000000000000000000000000000000000001"}),
+            },
+        )
+        .await?;
+        event(
+            &pool,
+            &format!("issue503-{name}-root-grant"),
+            &logical,
+            Some(&uuid(2, index)),
+            Event {
+                family: "ens_v2_root_l1",
+                kind: "RegistrationGranted",
+                log: 2,
+                after: json!({"label":name,"registrant":root_owner,"owner":root_owner,"expiry":u64::MAX}),
+            },
+        )
+        .await?;
+        run(&pool).await?;
+        assert_eq!(
+            authority(&pool, &logical).await?,
+            (Some("ens_v2".into()), None, None, None),
+            "{name}"
+        );
+        let (status, reason, coverage_reason, registrant): (
+            String,
+            Option<String>,
+            Value,
+            Option<String>,
+        ) = sqlx::query_as("SELECT support_status, unsupported_reason, declared_summary #> '{coverage,unsupported_reason}', declared_summary #>> '{registration,registrant}' FROM name_current WHERE logical_name_id = $1")
+            .bind(&logical)
+            .fetch_one(&pool)
+            .await?;
+        assert_eq!(
+            (status.as_str(), reason, coverage_reason),
+            ("supported", None, Value::Null),
+            "{name}"
+        );
+        assert_eq!(registrant.as_deref(), Some(root_owner), "{name}");
+    }
+    let registrar_events: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM normalized_events WHERE source_family = 'ens_v2_registrar_l1'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(registrar_events, 0);
+    db.cleanup().await?;
+    Ok(())
+}
+
 fn ops_event(family: &'static str, kind: &'static str, log: i64, after: Value) -> Event<'static> {
     Event {
         family,

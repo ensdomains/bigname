@@ -866,6 +866,55 @@ pub async fn prove_ens_v2_normal_http(
     db.cleanup().await
 }
 
+/// Normal local RPC intake that keeps its database between proofs, so a later
+/// proof resumes Interpret, Project and Live from where the earlier one stopped
+/// instead of deriving the chain again from block zero.
+pub struct IncrementalEnsV2Http {
+    pub db: HarnessDb,
+    manifests_root: std::path::PathBuf,
+    _scratch: TempDir,
+}
+
+impl IncrementalEnsV2Http {
+    pub async fn start(deployment: &EnsV2Deployment) -> Result<Self> {
+        let scratch = TempDir::create()?;
+        let profile = manifests::generate_local_sepolia_profile(
+            scratch.path(),
+            &repo_root(),
+            &deployment.manifest_targets(),
+        )?;
+        Ok(Self {
+            db: HarnessDb::create().await?,
+            manifests_root: profile.root,
+            _scratch: scratch,
+        })
+    }
+
+    /// Run normal intake to the current head, then check each name's indexed
+    /// owner and registrant over the real API.
+    pub async fn prove_through_head(
+        &mut self,
+        anvil: &Anvil,
+        owners: &[(&str, String)],
+    ) -> Result<()> {
+        let head = i64::try_from(anvil.client().block_number().await?)?;
+        pipeline::prove_normal_sepolia_http(
+            &repo_root(),
+            &mut self.db,
+            &self.manifests_root,
+            &anvil.url,
+            head,
+            owners,
+            false,
+        )
+        .await
+    }
+
+    pub async fn cleanup(self) -> Result<()> {
+        self.db.cleanup().await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;

@@ -928,7 +928,7 @@ async fn v2_conformance_success_payload(route: &V2ConformanceRoute) -> Result<Va
                 WHERE lower(raw_name) = 'unsupported.eth'
                 "#,
             )
-            .bind("ensv2_exact_name_profile_shadow")
+            .bind("conflicting_current_ens_authority")
             .execute(&database.pool)
             .await?;
             let payload = v2_lookup_json(
