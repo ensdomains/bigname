@@ -201,42 +201,52 @@ ops dashboards tracked in Linear TYR-34.
 `-1` on either gauge means unavailable, never healthy or caught up. The lag
 reads `-1` when either side is missing, and also when the observed head is below
 the publication, which the stored heads cannot explain; the runner logs a
-warning with both numbers each time that pair changes. Both gauges start at
-`-1` for every configured chain, so a scrape before the first refresh already
-shows the series. An alert on the lag must treat `-1` as unservable too, or it
-goes quiet exactly when readers get nothing.
+warning with both numbers each time that pair changes. Every configured chain is
+set to `-1` on both gauges before the initial refresh and before the listener
+starts, so a configured chain with no rows shows `-1` from the first scrape.
+Each refresh reconciles the whole result: a configured chain the query no longer
+returns, for example because its Project row is gone, reads `-1` and keeps its
+series; a chain that is neither configured nor returned loses its series. An
+alert on the lag must treat `-1` as unservable too, or it goes quiet exactly
+when readers get nothing.
 
 The existing `phase_runner_chain_head_block{chain}` is the stored chain head,
 not the observed head. Plotting it against the publication block shows how far
 Project trails the stored head, which is what the API's fence checks, not the
 end-to-end lag this gauge reports.
 
-The observed head is the head the latest Live batch read from the execution
-client, which the runner stores as the Live phase's target. When the published
-chain head is newer, for example while Ingest catches up after a restart and
-before Live runs again, the published chain head is used instead. Two cases
-make it briefly inexact: a Live batch that finds no common ancestor with the
-node stores the published head as its target, and after a rewind the Live
-target stays at the old, higher head until the next Live batch. The metrics
-code never asks the execution client itself, and only a Live batch refreshes the
-observed head. Live, Interpret and Project run in turn, so the observed head
-does not move while a Project batch runs and the gauge can under-report until
-the next Live run: a slow Project batch reads zero at its commit and shows its
-real lag once the next Live batch has read the head. When following the chain normally, each Live
-batch reads one new block, so the gauge reads 1 until Project publishes that
-block and then 0. A value above 1 after a Live batch means Project fell behind
-by more than one block, usually because its previous batch took longer than a
-block.
+The observed head is the newer of two stored values: the Live phase's target,
+which each Live batch sets to the head it read from the execution client, and
+the stored chain head, which Ingest and Live advance as they publish heads. So a
+Live batch moves the observed head, and Ingest can move it too, for example
+while it catches up after a restart before Live runs again. Two cases make it
+briefly inexact: a Live batch that finds no common ancestor with the node stores
+the published head as its target, and after a rewind the Live target stays at
+the old, higher head until the next Live batch. The metrics code never asks the
+execution client itself. Live, Interpret and Project run in turn, so nothing
+moves the observed head while a Project batch runs, and the gauge can
+under-report until the next Live run. A Project commit reads zero only when its
+publication reaches the retained observed head; a batch that started behind
+that head still shows the difference after it commits, and a slow batch's real
+lag appears once the next Live batch has read the head. When following the
+chain normally, each Live batch reads one new block, so the gauge reads 1 until
+Project publishes that block and then 0. A value above 1 after a Live batch
+means Project fell behind by more than one block, usually because its previous
+batch took longer than a block.
 
-Both gauges are refreshed with the others every 5 seconds and also right after
-every Ingest, Live and Project batch has recorded its progress row, so the
-value in the runner is current shortly after each of those commits. Other changes, such as a failed
-Project batch or a rewind, show at the next 5-second refresh. The 5-second
-refresh alone is slower than a Base block; on Base the refresh after each
-commit is what keeps the value current.
-Prometheus still samples it only once per scrape (every 15 seconds in the
-checked-in configuration), so a lag that lasts less than a scrape interval may
-never appear in a graph.
+Both gauges are refreshed with the others every 5 seconds, and a refresh is
+also requested after every Ingest, Live and Project batch has recorded its
+progress row, so the value in the runner is current shortly after each of those
+commits. Commits that arrive together share one refresh; this is not sampling of
+every block. Other changes, such as a failed Project batch or a rewind, show at
+the next 5-second refresh. Two more gaps are covered only by that refresh: when
+a completed batch's follow-up confirmation fails after its progress row
+committed, no refresh is requested, and the refresh after a redo batch can run
+before the final redo completion restores the Project row. The 5-second refresh
+alone is slower than a Base block; on Base the refresh after each commit is
+what keeps the value current. Prometheus still samples it only once per scrape
+(every 15 seconds in the checked-in configuration), so a lag that lasts less
+than a scrape interval may never appear in a graph.
 
 `phase_runner_head_lag_blocks` keeps its meaning: a phase's own target minus
 its own progress. A Project batch's target is the head it started with, so that
