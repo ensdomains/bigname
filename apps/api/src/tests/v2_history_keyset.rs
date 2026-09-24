@@ -442,6 +442,8 @@ async fn v2_history_malformed_cursors_precede_publication_admission() -> Result<
             "garbage".to_owned(),
             hk_with_last_item(&cursor, "block_number", "not-a-number")?,
             hk_with_last_item(&legacy, "normalized_event_id", "not-a-number")?,
+            hk_with_last_item(&cursor, "event_identity", "   ")?,
+            hk_with_last_item(&legacy, "event_identity", "   ")?,
         ] {
             let (status, payload) =
                 hk_get(&database, &format!("{base}&cursor={malformed}")).await?;

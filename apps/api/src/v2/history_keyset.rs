@@ -86,7 +86,7 @@ fn decode_last_item(payload: &CursorPayload) -> V2Result<RequestCursor> {
     let item = &payload.last_item;
     let event_identity = item
         .get(EVENT_IDENTITY_KEY)
-        .filter(|value| !value.is_empty())
+        .filter(|value| !value.trim().is_empty())
         .ok_or_else(invalid_cursor_error)?
         .clone();
     if item.len() == 2
@@ -205,6 +205,8 @@ mod tests {
             vec![("normalized_event_id", "x"), ("event_identity", "event:42")],
             vec![("block_number", "1")],
             vec![("event_identity", "")],
+            vec![("event_identity", "  ")],
+            vec![("normalized_event_id", "42"), ("event_identity", " ")],
             vec![("event_identity", "e"), ("block_number", "one")],
             vec![("event_identity", "e"), ("chain_id", "")],
             vec![("event_identity", "e"), ("unknown", "1")],
