@@ -494,6 +494,89 @@ async fn a_v2_registration_after_the_v1_lease_ended_selects_v2() -> Result<()> {
     Ok(())
 }
 
+// Nothing is open on either arm, the name has history on both, and its latest ENSv1 registry
+// owner is a known zero. ENSv1 decides, so the name serves the ownerless-registry profile
+// rather than being refused for its ENSv2 history.
+#[tokio::test]
+async fn an_ownerless_v1_registry_name_with_v2_history_serves_the_ownerless_profile() -> Result<()>
+{
+    let (db, pool) = database("overlap_ownerless_both_history").await?;
+    let logical = surface(&pool, 66, "ownerless-both.eth", &[]).await?;
+    let v1_resource = closed_binding(&pool, &logical, 66, "ens_v1").await?;
+    event(
+        &pool,
+        "overlap-ownerless-v1-owner",
+        &logical,
+        Some(&v1_resource),
+        Event {
+            family: "ens_v1_registry_l1",
+            kind: "AuthorityTransferred",
+            log: 1,
+            after: json!({"owner":"0x0000000000000000000000000000000000000001","owner_getter":"0x0000000000000000000000000000000000000001"}),
+        },
+    )
+    .await?;
+    let v2_resource = uuid(10, 66);
+    sqlx::query("INSERT INTO resources (resource_id, chain_id, block_hash, block_number, canonicality_state) VALUES ($1::uuid, $2, $3, 10, 'canonical')")
+        .bind(&v2_resource).bind(CHAIN).bind(HASH).execute(&pool).await?;
+    sqlx::query("INSERT INTO surface_bindings (surface_binding_id, logical_name_id, resource_id, binding_kind, authority_arm, active_from, active_to, chain_id, block_hash, block_number, provenance, canonicality_state) VALUES ($1::uuid, $2, $3::uuid, 'declared_registry_path', 'ens_v2', '2026-08-25T00:00:00Z', '2026-08-25T12:00:00Z', $4, $5, 10, '{\"transaction_index\":0,\"log_index\":2}', 'canonical')")
+        .bind(uuid(11, 66)).bind(&logical).bind(&v2_resource).bind(CHAIN).bind(HASH).execute(&pool).await?;
+    for (log, kind, after) in [
+        (
+            2,
+            "RegistrationGranted",
+            json!({"status":"registered","registrant":"0x0000000000000000000000000000000000000002"}),
+        ),
+        (3, "RegistrationReleased", json!({"status":"unregistered"})),
+    ] {
+        event(
+            &pool,
+            &format!("overlap-ownerless-v2-{kind}"),
+            &logical,
+            Some(&v2_resource),
+            Event {
+                family: "ens_v2_registry_l1",
+                kind,
+                log,
+                after,
+            },
+        )
+        .await?;
+    }
+    event(
+        &pool,
+        "overlap-ownerless-v1-zero",
+        &logical,
+        Some(&v1_resource),
+        Event {
+            family: "ens_v1_registry_l1",
+            kind: "AuthorityTransferred",
+            log: 4,
+            after: json!({"owner":"0x0000000000000000000000000000000000000000","owner_getter":"0x0000000000000000000000000000000000000000"}),
+        },
+    )
+    .await?;
+    run(&pool).await?;
+    assert_eq!(
+        authority(&pool, &logical).await?,
+        (Some("ens_v1".into()), None, None, None)
+    );
+    let (support, reason, status): (String, Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT support_status, unsupported_reason,
+                declared_summary #>> '{registration,status}'
+         FROM name_current WHERE logical_name_id = $1",
+    )
+    .bind(&logical)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        (support.as_str(), reason, status.as_deref()),
+        ("supported", None, Some("unregistered"))
+    );
+    db.cleanup().await?;
+    Ok(())
+}
+
 #[tokio::test]
 async fn shared_ens_infrastructure_selects_v2_without_fabricating_proof() -> Result<()> {
     let (db, pool) = database("issue503_shared").await?;

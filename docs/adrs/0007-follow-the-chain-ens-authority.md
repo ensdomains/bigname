@@ -39,17 +39,20 @@ The ENSv2 contracts answer this question themselves, without a proof:
   (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registrar/ETHRegistrar.sol:L142 @ ens_v2_sepolia_20260916@366de741)
   (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registrar/ETHRegistrar.sol:L245-L257 @ ens_v2_sepolia_20260916@366de741)
   (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registrar/ETHRegistrar.sol:L284-L292 @ ens_v2_sepolia_20260916@366de741)
-- The ENSv2 registry refuses to overwrite a registered label, and a reserved
-  label can become registered only through a caller holding
-  `ROLE_REGISTER_RESERVED`.
+- The `.eth` registry refuses to overwrite a registered label, and its public
+  `register` turns a reserved label into a registered one only for a caller
+  holding `ROLE_REGISTER_RESERVED`. (A migration `WrapperRegistry` registers
+  through the same internal path without that role check.)
+  (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registry/PermissionedRegistry.sol:L207-L219 @ ens_v2_sepolia_20260916@366de741)
   (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registry/PermissionedRegistry.sol:L466 @ ens_v2_sepolia_20260916@366de741)
   (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registry/PermissionedRegistry.sol:L471 @ ens_v2_sepolia_20260916@366de741)
+  (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registry/WrapperRegistry.sol:L238 @ ens_v2_sepolia_20260916@366de741)
 - What keeps a live ENSv1 name from being registered afresh on ENSv2 is the
   premigration script, not the contracts: it writes each live ENSv1 name into
   the ENSv2 registry as a reservation with owner zero and `ENSV1Resolver` as its
   resolver.
   (upstream: .refs/ens_v2_sepolia_20260916/contracts/docs/premigration.md:L3-L8 @ ens_v2_sepolia_20260916@366de741)
-  (upstream: .refs/ens_v2_sepolia_20260916/contracts/docs/premigration.md:L149-L150 @ ens_v2_sepolia_20260916@366de741)
+  (upstream: .refs/ens_v2_sepolia_20260916/contracts/docs/premigration.md:L151-L152 @ ens_v2_sepolia_20260916@366de741)
   (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registrar/BatchRegistrar.sol:L64-L65 @ ens_v2_sepolia_20260916@366de741)
 - The ENSv2 Universal Resolver has one read path and it starts from the ENSv2
   root registry. It walks ENSv2 registries label by label, taking each entry's
@@ -71,18 +74,21 @@ scripts, and the chain does not need it to decide who holds a name.
 
 bigname follows the chain. For an ordinary ENS name:
 
-- **An ENSv2 registration decides.** When the name has an ENSv2 binding open at
+- **An ENSv2 registration decides.** When the name has an ENSv2
+  [binding](../glossary.md#surface-binding) open at
   the target block, which only a registered ENSv2 entry creates, bigname selects
   ENSv2. This holds whatever ENSv1 holds and without a migration proof. The
   authority epoch starts at that ENSv2 binding, and no proof fields are
   published.
-- **An ENSv2 reservation defers to ENSv1.** A reservation opens no binding and is
+- **An ENSv2 reservation defers to ENSv1.** A
+  [premigration reservation](../glossary.md#premigration-reservation) opens no binding and is
   not ENSv2 authority, as before. A name with a live ENSv1 registration and only
   a reservation is served from ENSv1. A name whose ENSv1 registration has ended
   and that has only a reservation has nothing current: it is served as the
   released ENSv1 registration, or as `current_authority_not_projected` when no
   released registration qualifies.
-- **No ENSv2 entry means ENSv1 decides.** Without an open ENSv2 binding the
+- **No ENSv2 entry means ENSv1 decides.** Without an open ENSv2 binding, and
+  unless a qualifying ENSv2 release tombstone or regime applies (see below), the
   name's open ENSv1 binding is selected. A name with no open binding on either
   arm follows its ENSv1 history when it has any, and its ENSv2 history
   otherwise.
@@ -113,11 +119,12 @@ either halt.
 
 - ENSv2 `.eth` registration checks only ENSv2 state: `ETHRegistrar.sol` L142,
   L245-L257 and L284-L292, cited above.
-- The registry refuses to overwrite a registered label and needs
-  `ROLE_REGISTER_RESERVED` for a reserved one: `PermissionedRegistry.sol` L466
-  and L471, cited above.
+- The `.eth` registry refuses to overwrite a registered label, and its public
+  `register` needs `ROLE_REGISTER_RESERVED` for a reserved one:
+  `PermissionedRegistry.sol` L207-L219, L466 and L471, cited above. A migration
+  `WrapperRegistry` skips that role check: `WrapperRegistry.sol` L238.
 - Premigration reservations carry `ENSV1Resolver`: `premigration.md` L3-L8 and
-  L149-L150, and `BatchRegistrar.sol` L64-L65, cited above.
+  L151-L152, and `BatchRegistrar.sol` L64-L65, cited above.
 - The Universal Resolver reads only ENSv2 registries, and `ENSV1Resolver`
   forwards to the ENSv1 registry: `UniversalResolverV2.sol` L56-L63,
   `LibResolution.sol` L58-L85, `PermissionedRegistry.sol` L283-L286 and
@@ -139,31 +146,40 @@ snapshot. The difference is listed in
 ## Consequences
 
 - Names that were identity-only with `independent_ens_deployments_overlap` or
-  `conflicting_current_ens_authority` are served. A name with a current ENSv2
-  registration is served from ENSv2; any other such name is served from ENSv1,
+  `conflicting_current_ens_authority` get a selected authority. A name with a
+  current ENSv2 registration selects ENSv2; any other such name selects ENSv1,
   including as a released ENSv1 registration. On Sepolia this covers all 652
-  names refused on 2026-09-23.
+  names refused on 2026-09-23. Selection is not the same as full service: a
+  selected ENSv2 registration still needs the existing exact-name profile
+  qualification, and one without an admitted `ETHRegistrar` event or proven
+  migration successor reports `ensv2_exact_name_profile_shadow` and stays
+  identity-only, like any other such ENSv2 name.
 - A name registered on ENSv1 after the premigration snapshot and then registered
   on ENSv2 is served from ENSv2, which is also what the Universal Resolver
   returns.
 - The API keeps treating the two retired reasons as unsupported reasons that
-  reduce a name to its identity fields. It only sees them on projection rows an
-  earlier interpreter derived before the required redo.
+  reduce a name to its identity fields. It only sees them on `name_current`
+  rows derived by an earlier Project generation, before the required redo below
+  completes.
 - Selecting an arm now reads only the arms' current bindings, and falls back to
   authority-event history only for a name with no open binding. Cross-era
   recency still never chooses an arm.
 - The change rotates the
   [interpreter content hash](../glossary.md#interpreter-content-hash), so every
-  deployment needs a complete retained-range Project redo before the matching API
-  is served.
+  deployment needs the full-history Interpret redo and the stamped Project redo
+  it installs before the matching API is served, as
+  [interpretation replay](../storage.md#interpretation-replay) requires for any
+  rotation.
 
 ## Rollout
 
 Doc-first. This ADR and the contract docs change first; the Project authority
 selection follows in the same pull request. The rule applies to every ENS
-[deployment profile](../glossary.md#deployment-profile). Mainnet has no ENSv2
-deployment yet, so nothing changes there until ENSv2 facts appear, and then the
-same rule applies.
+[deployment profile](../glossary.md#deployment-profile). The Mainnet manifest
+profile admits no ENSv2 source family today (`manifests/mainnet/ethereum/ens/`
+declares only ENSv1 families and `ens_execution`), so Mainnet names have no
+ENSv2 facts and nothing changes there. Once ENSv2 sources are admitted on
+Mainnet, the same rule applies.
 
 ## Alternatives considered
 

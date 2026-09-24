@@ -342,12 +342,15 @@ collection route carry neither header.
   [`architecture.md`](architecture.md#ensv1ensv2-current-authority). A name
   with facts on both ENSv1 and ENSv2 follows the chain
   ([ADR 0007](adrs/0007-follow-the-chain-ens-authority.md)): a current ENSv2
-  registration is served from ENSv2 without a migration proof, and otherwise
-  ENSv1 decides, so such a name is served rather than unsupported. The earlier
-  reasons `conflicting_current_ens_authority` (Mainnet) and
-  `independent_ens_deployments_overlap` (Sepolia) are no longer produced. A row
-  an earlier interpreter derived with either reason before the required Project
-  redo still returns the unsupported result below. The exact
+  registration is selected without a migration proof, and otherwise ENSv1
+  decides, so such a name is no longer refused. A selected ENSv2 registration
+  still needs the exact-name profile qualification; without it the name reports
+  `ensv2_exact_name_profile_shadow`. The earlier reasons
+  `conflicting_current_ens_authority` (Mainnet) and
+  `independent_ens_deployments_overlap` (Sepolia) are no longer produced. A
+  `name_current` row derived with either reason by an earlier Project generation,
+  before the required full-history Interpret redo and its stamped Project redo
+  complete, still returns the unsupported result below. The exact
   [shared ENS infrastructure](glossary.md#shared-ens-infrastructure) names (root,
   `eth`, `reverse`, and `addr.reverse`) select a current ENSv2 arm without an
   authority epoch when ENSv1 evidence, current or historical, exists.

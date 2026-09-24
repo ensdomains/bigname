@@ -525,19 +525,23 @@ A name without an authority proof follows the chain
 holds the name now, through a binding open at the target block, is a candidate.
 When the name has an open ENSv2 binding, which only a registered ENSv2 entry
 creates, Project selects ENSv2 whatever ENSv1 holds; its authority epoch starts
-at that binding and no proof fields are published. Without one, ENSv1 decides:
-its open binding is selected. A name with no open binding on either arm follows
-its ENSv1 authority events when it has any, and its ENSv2 events otherwise; that
-selects a released ENSv1 lease as a
-[released v1 authority](glossary.md#released-v1-authority) tombstone, or leaves
-the name `current_authority_not_projected`. This matches the ENSv2 Universal
+at that binding and no proof fields are published. Without one, ENSv1 decides
+unless a qualifying ENSv2 release tombstone or regime applies (the
+[released v2 authority](glossary.md#released-v2-authority) branches keep their
+precedence): its open binding is selected. A name with no open binding on either
+arm follows its ENSv1 authority events when it has any, and its ENSv2 events
+otherwise. That selects a released ENSv1 lease as a
+[released v1 authority](glossary.md#released-v1-authority) tombstone, serves the
+supported ownerless-registry profile when the latest ENSv1 registry owner is a
+known zero (even with ENSv2 history), or leaves the name
+`current_authority_not_projected`. This matches the ENSv2 Universal
 Resolver, which reads only ENSv2 registries: a registered ENSv2 entry answers
 from its own resolver, and a reserved entry answers through `ENSV1Resolver`,
 which reads the ENSv1 registry.
 (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/universalResolver/libraries/LibResolution.sol:L58-L85 @ ens_v2_sepolia_20260916@366de741)
 (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/resolver/ENSV1Resolver.sol:L40-L43 @ ens_v2_sepolia_20260916@366de741)
-A `.eth` label with no live ENSv2 entry is the one difference: the Universal
-Resolver finds no resolver for it, while bigname lets ENSv1 decide; see
+When ENSv1 decides a `.eth` label with no live ENSv2 entry, that is the one
+difference: the Universal Resolver finds no resolver for it; see
 [`upstream.md`](upstream.md#ensv1-authority-without-an-ensv2-entry). No name is
 refused for holding facts on both arms, so Project no longer produces the
 earlier `conflicting_current_ens_authority` (Mainnet) or

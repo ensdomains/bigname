@@ -255,11 +255,13 @@ at all and whose two arms disagree is omitted; it is neither an ambiguous
 product row nor a publication failure. A proven Sepolia boundary, or a current
 child registration in the admitted [migration registry](glossary.md#migration-registry-wrapperregistry) below a proven migrated
 parent, selects ENSv2 from the proof. Names with facts on both protocol eras
-are expected on Sepolia because the runtime admits evidence from both; they are
-served per name under the same rule and are no longer unsupported. Names that
+are expected on Sepolia because the runtime admits evidence from both; each
+selects an arm per name under the same rule and is no longer refused. Names that
 were identity-only with `independent_ens_deployments_overlap` (Sepolia) or
-`conflicting_current_ens_authority` (Mainnet) are now served from ENSv2 when
-their ENSv2 registration is current and from ENSv1 otherwise. The
+`conflicting_current_ens_authority` (Mainnet) now select ENSv2 when their ENSv2
+registration is current and ENSv1 otherwise. A selected ENSv2 registration still
+needs the exact-name profile qualification and otherwise reports
+`ensv2_exact_name_profile_shadow`. The
 ENS root, `eth`, `reverse`, and `addr.reverse` are the four exact
 [shared ENS infrastructure](glossary.md#shared-ens-infrastructure) names. They
 select ENSv2 when the ENSv2 arm is current and ENSv1 evidence, current or
