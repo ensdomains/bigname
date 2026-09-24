@@ -12,6 +12,10 @@ use tokio_util::sync::CancellationToken;
 
 use crate::progress_monitor::RunnerPhaseProgress;
 
+mod served_lag;
+pub use served_lag::RunnerMetricsFeed;
+use served_lag::ServedLagGauges;
+
 const REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 const PHASE_STATUSES: [&str; 5] = ["idle", "running", "paused", "completed", "failed"];
 const VERIFICATION_LEVELS: [&str; 3] = ["quick_synced", "cross_checked", "node_checked"];
@@ -79,6 +83,7 @@ struct PipelineMetrics {
     head_lag_blocks: IntGaugeVec,
     batches_since_cursor_advance: IntGaugeVec,
     cursor_stall_age_seconds: IntGaugeVec,
+    served_lag: ServedLagGauges,
     refresh_success: IntGauge,
     last_refresh_timestamp_seconds: IntGauge,
     loop_heartbeat: RunnerLoopHeartbeat,
@@ -213,6 +218,7 @@ impl PipelineMetrics {
             "Seconds since the first confirmed unchanged-cursor batch commit in the current consecutive sequence, or zero when no sequence is active.",
             &["chain", "phase", "mode"],
         )?;
+        let served_lag = ServedLagGauges::new(&registry)?;
         let refresh_success = registry.int_gauge(
             "phase_runner_metrics_refresh_success",
             "Whether the latest database refresh succeeded.",
@@ -238,6 +244,7 @@ impl PipelineMetrics {
             head_lag_blocks,
             batches_since_cursor_advance,
             cursor_stall_age_seconds,
+            served_lag,
             refresh_success,
             last_refresh_timestamp_seconds,
             loop_heartbeat,
@@ -259,6 +266,10 @@ impl PipelineMetrics {
             self.refresh_success.set(0);
             return Err(error);
         }
+        if let Err(error) = self.refresh_served_lag(pool).await {
+            self.refresh_success.set(0);
+            return Err(error);
+        }
         let timestamp = match unix_timestamp() {
             Ok(timestamp) => timestamp,
             Err(error) => {
@@ -269,6 +280,19 @@ impl PipelineMetrics {
         self.last_refresh_timestamp_seconds.set(timestamp);
         self.refresh_success.set(1);
         Ok(())
+    }
+
+    async fn refresh_served_lag(&self, pool: &PgPool) -> Result<()> {
+        self.served_lag.apply(&served_lag::load(pool).await?);
+        Ok(())
+    }
+
+    async fn refresh_after_commit(&self, pool: &PgPool) -> Result<()> {
+        let result = self.refresh_served_lag(pool).await;
+        if result.is_err() {
+            self.refresh_success.set(0);
+        }
+        result
     }
 
     fn apply_phase_progress(&self) {
@@ -411,8 +435,10 @@ pub async fn start(
     heartbeat_stale_after_secs: i64,
     loop_heartbeat: RunnerLoopHeartbeat,
     phase_progress: RunnerPhaseProgress,
+    feed: RunnerMetricsFeed,
 ) -> Result<SocketAddr> {
     let metrics = PipelineMetrics::new(heartbeat_stale_after_secs, loop_heartbeat, phase_progress)?;
+    metrics.served_lag.configure(&feed.configured_chains());
     metrics.refresh(&pool).await?;
     let server = MetricsServer::bind(bind_addr, metrics.registry.clone()).await?;
     let local_addr = server.local_addr()?;
@@ -427,17 +453,28 @@ pub async fn start(
             () = server_cancellation.cancelled() => {}
         }
     });
-    tokio::spawn(refresh_loop(metrics, pool, cancellation));
+    tokio::spawn(refresh_loop(metrics, pool, feed, cancellation));
     Ok(local_addr)
 }
 
-async fn refresh_loop(metrics: PipelineMetrics, pool: PgPool, cancellation: CancellationToken) {
+async fn refresh_loop(
+    metrics: PipelineMetrics,
+    pool: PgPool,
+    feed: RunnerMetricsFeed,
+    cancellation: CancellationToken,
+) {
+    let mut ticks = tokio::time::interval_at(
+        tokio::time::Instant::now() + REFRESH_INTERVAL,
+        REFRESH_INTERVAL,
+    );
+    ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
-        tokio::select! {
+        let result = tokio::select! {
             () = cancellation.cancelled() => return,
-            () = tokio::time::sleep(REFRESH_INTERVAL) => {}
-        }
-        if let Err(error) = metrics.refresh(&pool).await {
+            _ = ticks.tick() => metrics.refresh(&pool).await,
+            () = feed.committed() => metrics.refresh_after_commit(&pool).await,
+        };
+        if let Err(error) = result {
             tracing::error!(error = %format!("{error:#}"), "phase metrics refresh failed");
         }
     }
