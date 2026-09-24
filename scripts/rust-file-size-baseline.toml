@@ -17,7 +17,7 @@ justification = "Namespace overview grew the per-chain verified-read capability 
 
 [[files]]
 path = "apps/api/src/v2/vocab.rs"
-loc = 718
+loc = 714
 justification = "Product vocabulary gained HistoryEventTypeSet canonicalization (history ergonomics), Authority (name-list ergonomics), and the resolves_to relation in parallel branches; split history vocabulary into a submodule now that the branches have landed. Authority moved to vocab/authority.rs when it gained ens_v0, ratcheting this file down from 747 lines."
 
 [[files]]

@@ -10,7 +10,7 @@ normalizer_version = "ensip15@ens-normalize-0.1.1"
 discovery_rules = []
 
 [capability_flags]
-exact_name_profile = { status = "supported", notes = "selected official Sepolia ETHRegistry and ETHRegistrar supply exact-name facts; deployment validation remains separate" }
+exact_name_profile = { status = "supported", notes = "namespace capability declaration for /v1/namespaces; whether a name is served follows its authority decision, not this flag" }
 name_history = { status = "shadow", notes = "post-audit Sepolia registrar history remains downstream work" }
 
 # (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/ETHRegistrar.json:L2 @ ens_v2_sepolia_20260916@366de741)

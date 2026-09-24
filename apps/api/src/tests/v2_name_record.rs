@@ -255,8 +255,8 @@ async fn v2_get_name_exposes_authority_unsupported_shape() -> Result<()> {
 async fn v2_get_name_downgrades_every_unsupported_reason() -> Result<()> {
     for (reason, expected) in [
         (
-            "ensv2_exact_name_profile_shadow",
-            "exact_name_profile_not_supported",
+            "mixed_ensv1_ensv2_exact_name_corpus",
+            "mixed_exact_name_corpus",
         ),
         (
             "a_reason_this_build_has_never_seen",
@@ -3147,8 +3147,8 @@ async fn v2_get_name_records_withholds_unproven_authority_without_verified_looku
             "conflicting_current_ens_authority",
         ),
         (
-            "ensv2_exact_name_profile_shadow",
-            "exact_name_profile_not_supported",
+            "mixed_ensv1_ensv2_exact_name_corpus",
+            "mixed_exact_name_corpus",
         ),
         (
             "a_reason_this_build_has_never_seen",
@@ -6110,6 +6110,164 @@ async fn seed_v2_alice_name_records_fixture_with_row(
     configure_inventory(logical_name_id, resource_id, &mut inventory);
     database.insert_record_inventory_current_row(inventory).await?;
 
+    Ok(())
+}
+
+// Sepolia's root registry registers `reverse` and points it at the ENSv1 mirror resolver
+// (upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ReverseMirror.ts:L35 @ ens_v2_sepolia_20260916@366de741).
+// These rows follow what Project builds for a bound, registered root name read through a mirror
+// (crates/project/tests/mirror_resolver.rs, `tld_root_bound`): a supported ENSv2 row with its own
+// binding and resolver, no serving resource and no pointer reachability, and an inventory on the
+// registration's resource that carries the mirrored records.
+const REVERSE_MIRROR: &str = "0x0000000000000000000000000000000000000f10";
+
+async fn v2_reverse_root_records_payload(
+    uri: &str,
+    mirror_projected: bool,
+) -> Result<Value> {
+    let database = TestDatabase::new_with_schemas(false, true).await?;
+    let logical_name_id = "ens:reverse";
+    let resource_id = Uuid::from_u128(0x6100);
+    let token_lineage_id = Uuid::from_u128(0x6101);
+    let surface_binding_id = Uuid::from_u128(0x6102);
+    database
+        .seed_name_current_binding(
+            logical_name_id,
+            "ens",
+            "reverse",
+            "reverse",
+            "namehash:reverse",
+            resource_id,
+            token_lineage_id,
+            surface_binding_id,
+        )
+        .await?;
+    let mut row = exact_name_row(logical_name_id, surface_binding_id, resource_id, token_lineage_id);
+    row.canonical_display_name = "reverse".to_owned();
+    row.normalized_name = "reverse".to_owned();
+    row.namehash = "namehash:reverse".to_owned();
+    row.declared_summary["registration"] = json!({
+        "status": "active",
+        "authority_kind": "ens_v2_registry",
+        "latest_event_kind": "RegistrationGranted",
+        "registrant": "0x0000000000000000000000000000000000000660",
+        "expiry": u64::MAX
+    });
+    row.declared_summary["control"] = json!({
+        "registrant": "0x0000000000000000000000000000000000000660",
+        "registry_owner": "0x0000000000000000000000000000000000000660",
+        "expiry": null
+    });
+    row.declared_summary["resolver"]["address"] = json!(REVERSE_MIRROR);
+    row.provenance["authority_selection"] = json!({
+        "authority_arm": "ens_v2",
+        "resource_id": resource_id,
+        "surface_binding_id": surface_binding_id
+    });
+    row.provenance["read_reachability"] = json!({});
+    database.insert_name_current_row(row).await?;
+
+    let mut inventory = record_inventory_current_row(logical_name_id, resource_id);
+    inventory.selectors = json!([{
+        "record_key": "text:url",
+        "record_family": "text",
+        "selector_key": "url",
+        "cacheable": true
+    }]);
+    inventory.explicit_gaps = json!([]);
+    inventory.unsupported_families = json!([]);
+    inventory.entries = json!([{
+        "record_key": "text:url",
+        "record_family": "text",
+        "selector_key": "url",
+        "status": "success",
+        "value": "https://reverse.example"
+    }]);
+    inventory.provenance["mirror"] = json!({
+        "resolver_address": REVERSE_MIRROR,
+        "mirrored_resolver_address": "0x0000000000000000000000000000000000000f11",
+        "ancestor_depth": 0
+    });
+    if !mirror_projected {
+        inventory.coverage = json!({
+            "status": "unsupported",
+            "exhaustiveness": "not_asserted",
+            "unsupported_reason": "mirrored_resolver_not_projected"
+        });
+    }
+    database.insert_record_inventory_current_row(inventory).await?;
+
+    let response = app_router(database.app_state())
+        .oneshot(
+            Request::builder()
+                .uri(uri)
+                .body(Body::empty())
+                .expect("request must build"),
+        )
+        .await
+        .context("reverse records request failed")?;
+    let status = response.status();
+    let payload: Value = read_json(response).await?;
+    assert_eq!(status, StatusCode::OK, "unexpected response: {payload:#}");
+    database.cleanup().await?;
+    Ok(payload)
+}
+
+#[tokio::test]
+async fn v2_get_name_records_serves_the_registered_reverse_root_through_its_mirror() -> Result<()> {
+    for source in ["indexed", "auto"] {
+        let payload = v2_reverse_root_records_payload(
+            &format!("/v1/names/reverse/records?source={source}&keys=text:url&include=inventory"),
+            true,
+        )
+        .await?;
+        assert_eq!(
+            payload["data"]["resolver"],
+            json!({"chain_id": 1, "address": REVERSE_MIRROR}),
+            "{source}: {payload}"
+        );
+        assert_eq!(
+            payload["data"]["records"]["text:url"],
+            json!({"status": "ok", "value": "https://reverse.example"}),
+            "{source}: {payload}"
+        );
+        assert_eq!(payload["meta"]["source"], json!("indexed"), "{source}");
+    }
+
+    let indexed = v2_reverse_root_records_payload(
+        "/v1/names/reverse/records?source=indexed&keys=text:url&include=inventory",
+        false,
+    )
+    .await?;
+    assert_eq!(
+        indexed["data"]["resolver"],
+        json!({"chain_id": 1, "address": REVERSE_MIRROR}),
+        "{indexed}"
+    );
+    assert_eq!(
+        indexed["data"]["records"]["text:url"],
+        json!({"status": "unsupported", "unsupported_reason": "mirrored_resolver_not_projected"}),
+        "{indexed}"
+    );
+    assert_eq!(indexed["data"]["inventory"]["unsupported_keys"], json!(["text:url"]));
+    // An unsupported inventory does not satisfy `auto`; the key goes to verified lookup, which
+    // this fixture declares no topology for, and the resolver stays the registration's own.
+    let auto = v2_reverse_root_records_payload(
+        "/v1/names/reverse/records?source=auto&keys=text:url",
+        false,
+    )
+    .await?;
+    assert_eq!(auto["meta"]["source"], json!("verified"), "{auto}");
+    assert_eq!(
+        auto["data"]["resolver"],
+        json!({"chain_id": 1, "address": REVERSE_MIRROR}),
+        "{auto}"
+    );
+    assert_eq!(
+        auto["data"]["records"]["text:url"],
+        json!({"status": "unsupported", "unsupported_reason": "verified_records_not_supported"}),
+        "{auto}"
+    );
     Ok(())
 }
 

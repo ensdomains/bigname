@@ -2195,17 +2195,8 @@ fn comma_values(value: Option<&str>) -> impl Iterator<Item = &str> {
 
 /// Prove normal RPC intake and supported HTTP against naturally produced rows.
 /// This does not use the fixture replay commands or seed phase progress.
-pub async fn prove_normal_sepolia_http(
-    repo_root: &Path,
-    db: &mut super::db::HarnessDb,
-    manifests_root: &Path,
-    rpc_url: &str,
-    head: i64,
-    owners: &[(&str, String)],
-    require_unwrapped_migration: bool,
-) -> Result<()> {
-    let reader = db.verification_url().await?;
-    let binary = profile_phase_runner(repo_root, manifests_root).await?;
+/// Build the API from this source tree and return its executable.
+async fn exact_source_api_binary(repo_root: &Path) -> Result<PathBuf> {
     let cargo = std::env::var_os("BIGNAME_E2E_REAL_CARGO")
         .or_else(|| std::env::var_os("CARGO"))
         .unwrap_or_else(|| "cargo".into());
@@ -2232,6 +2223,110 @@ pub async fn prove_normal_sepolia_http(
         }
     }
     let api_binary = api_binary.context("Cargo did not produce the exact-source API")?;
+    Ok(api_binary)
+}
+
+/// The production API serving a harness database through its SELECT-only
+/// verification role, for scenarios that assert real HTTP responses.
+pub struct ProductionApi {
+    process: OwnedProofProcess,
+    address: std::net::SocketAddr,
+    client: reqwest::Client,
+}
+
+impl ProductionApi {
+    pub async fn start(
+        repo_root: &Path,
+        db: &mut super::db::HarnessDb,
+        sepolia_rpc_url: &str,
+    ) -> Result<Self> {
+        let reader = db.verification_url().await?;
+        let api_binary = exact_source_api_binary(repo_root).await?;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        let startup_guard = await_with_readiness_deadline(
+            deadline,
+            30,
+            "production HTTP API startup lock",
+            super::lock_local_server_start(),
+        )
+        .await?;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        let address = listener.local_addr()?;
+        drop(listener);
+        let mut command = pipeline_command(repo_root, &api_binary);
+        command.args([
+            "serve",
+            "--database-url",
+            &reader,
+            "--bind-addr",
+            &address.to_string(),
+            "--metrics-bind-addr",
+            "127.0.0.1:0",
+            "--chain-rpc-url",
+            &format!("ethereum-sepolia={sepolia_rpc_url}"),
+        ]);
+        let mut process = OwnedProofProcess::spawn(command, "production-http-api")?;
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()?;
+        loop {
+            process.ensure_running()?;
+            if client
+                .get(format!("http://{address}/healthz"))
+                .send()
+                .await
+                .is_ok_and(|response| response.status().is_success())
+            {
+                break;
+            }
+            anyhow::ensure!(
+                tokio::time::Instant::now() < deadline,
+                "API did not become healthy; logs {:?}",
+                process.logs
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        drop(startup_guard);
+        Ok(Self {
+            process,
+            address,
+            client,
+        })
+    }
+
+    /// GET an indexed ENS read at the latest finality.
+    pub async fn get_indexed(&self, path: &str) -> Result<(reqwest::StatusCode, Value)> {
+        let response = self
+            .client
+            .get(format!("http://{}{path}", self.address))
+            .query(&[
+                ("namespace", "ens"),
+                ("finality", "latest"),
+                ("source", "indexed"),
+            ])
+            .send()
+            .await?;
+        let status = response.status();
+        Ok((status, response.json().await?))
+    }
+
+    pub async fn stop(mut self) -> Result<()> {
+        self.process.stop().await
+    }
+}
+
+pub async fn prove_normal_sepolia_http(
+    repo_root: &Path,
+    db: &mut super::db::HarnessDb,
+    manifests_root: &Path,
+    rpc_url: &str,
+    head: i64,
+    owners: &[(&str, String)],
+    require_unwrapped_migration: bool,
+) -> Result<()> {
+    let reader = db.verification_url().await?;
+    let binary = profile_phase_runner(repo_root, manifests_root).await?;
+    let api_binary = exact_source_api_binary(repo_root).await?;
     eprintln!(
         "OPS producer binary {:?}; API binary {api_binary:?}",
         binary.path

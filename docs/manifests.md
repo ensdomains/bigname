@@ -482,7 +482,7 @@ evidence remains the ordinary single-arm ENSv2 case.
 Admitting ENSv1 sources here makes names with facts on both arms reachable in
 production; it does not establish an ENSv1→ENSv2 migration boundary.
 
-`exact_name_profile` [capability promotion](glossary.md) is deployment-profile-scoped: only `exact_name_profile = "supported"` on the active `ens_v2_registrar_l1` version in the `sepolia` root promotes `.eth` exact-name declared reads to supported, backed by `ETHRegistry` resource/token state and `ETHRegistrar` lifecycle facts.[^v2-iperm-l22][^v2-events-l15][^v2-iethreg-l32] The admitted ENSv1 registrar remains `shadow` because registrar-controller label coverage is absent, so the product namespace route aggregates the two declarations as `name_profile.completeness = "partial"`; this does not demote the ENSv2 family-level support. The capability promotion does not apply to mainnet, another deployment profile, or any runtime that has not selected `manifests/sepolia`. Names that reach ENSv2 through a validated migration, or through a positive child registration under a migrated parent, qualify without a registrar event when their registry is declared in the `ens_v2_registry_l1` manifest or was created and announced by the migration itself (the per-name `WrapperRegistry` of the locked path, proven by its `migration_registry_creation` association and admitted `registry_announcement` edge); see [architecture](architecture.md). Active rollout, raw preimage observations, resolver admission, or backfill completion promote no other capability.
+`exact_name_profile` is a namespace-level capability declaration, not a per-name serving switch. `exact_name_profile = "supported"` on the active Sepolia `ens_v2_registrar_l1` version declares ENSv2 `.eth` exact-name reads supported, and the admitted ENSv1 registrar remains `shadow` because registrar-controller label coverage is absent, so the product namespace route aggregates the two declarations as `name_profile.completeness = "partial"`. Whether an individual name is served follows its authority decision: an ENSv2 name selected without a refusal is supported, including a registration in the root registry, the declared ETH registry or a registry that discovery admits, with no `ETHRegistrar` event, ENSv1→ENSv2 migration proof or child-registration proof required. The registry's own state and its `LabelRegistered` carry the owner and expiry (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registry/interfaces/IPermissionedRegistry.sol:L30-L35 @ ens_v2_sepolia_20260916@366de741) (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registry/interfaces/IRegistryEvents.sol:L18-L25 @ ens_v2_sepolia_20260916@366de741), while the registrar's `NameRegistered` adds payment and referral detail that Project does not serve (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registrar/interfaces/IETHRegistrar.sol:L32-L43 @ ens_v2_sepolia_20260916@366de741). Active rollout, raw preimage observations, resolver admission, or backfill completion promote no capability.
 
 Upstream events map to normalized adapter output: `TokenResource` →
 `TokenResourceLinked`; `TokenRegenerated` → `TokenRegenerated`, plus the
@@ -1770,7 +1770,7 @@ the hash of the setter argument, with no namehash component.
 
 ## Capability policy
 
-Capabilities gate behavior, not public-contract existence. An unsupported capability surfaces as `coverage.unsupported_reason` or a typed error. Shadow capabilities admit facts without enabling general reads. Adding a new capability is additive only when it does not change prior semantics.
+Capabilities gate behavior, not public-contract existence. An unsupported capability surfaces as `coverage.unsupported_reason` or a typed error. Shadow capabilities admit facts without enabling general reads. The `exact_name_profile` flag is the exception: it is a namespace-level declaration that `/v1/namespaces` reports as `name_profile`, and it does not gate whether an individual name is served (see [architecture](architecture.md#ensv1ensv2-current-authority)). Adding a new capability is additive only when it does not change prior semantics.
 
 ## Ownership
 
@@ -1892,13 +1892,10 @@ above does not change that provenance rule.
 [^v2-pres-l70]: (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/resolver/interfaces/IPermissionedResolver.sol:L19 @ ens_v2_sepolia_20260629@ccaeb58)
 [^v2-pres-data]: (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/resolver/PermissionedResolver.sol:L46 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/resolver/PermissionedResolver.sol:L161 @ ens_v2_sepolia_20260629@ccaeb58) (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/resolver/PermissionedResolver.sol:L437 @ ens_v2_sepolia_20260629@ccaeb58)
 
-[^v2-iperm-l22]: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IPermissionedRegistry.sol:L24 @ ens_v2@a971bd64)
 [^v2-iperm-l34]: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IPermissionedRegistry.sol:L39 @ ens_v2@a971bd64)
 [^v2-iperm-resolver-l14]: (upstream: .refs/ens_v2_sepolia_20260629/contracts/src/resolver/interfaces/IPermissionedResolver.sol:L19 @ ens_v2_sepolia_20260629@ccaeb58)
-[^v2-iethreg-l32]: (upstream: .refs/ens_v2/contracts/src/registrar/interfaces/IETHRegistrar.sol:L32 @ ens_v2@a971bd64)
 
 [^v2-events-created]: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L9 @ ens_v2@a971bd64)
-[^v2-events-l15]: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L18 @ ens_v2@a971bd64)
 [^v2-events-l49]: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L56 @ ens_v2@a971bd64)
 [^v2-events-l69]: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L82 @ ens_v2@a971bd64)
 [^v2-events-l75]: (upstream: .refs/ens_v2/contracts/src/registry/interfaces/IRegistryEvents.sol:L88 @ ens_v2@a971bd64)

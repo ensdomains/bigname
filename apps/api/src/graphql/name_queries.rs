@@ -416,15 +416,27 @@ fn push_json_timestamp(builder: &mut QueryBuilder<'_, Postgres>, path: &[&str]) 
     let path = format!("'{{{}}}'", path.join(","));
     builder.push("CASE WHEN JSONB_TYPEOF(nc.declared_summary #> ");
     builder.push(path.as_str());
-    builder.push(") = 'number' THEN TO_TIMESTAMP((nc.declared_summary #>> ");
+    // A seconds value outside 1970..=9999 (the ENSv2 root registry's uint64 max expiry) reads as
+    // unknown instead of failing the whole query. The range check reads the full value; a value
+    // inside it keeps whole seconds, as Project's formatted `control.expiry` presents it.
+    // (upstream: .refs/ens_v2_sepolia_20260916/contracts/script/deploy-constants.ts:L1 @ ens_v2_sepolia_20260916@366de741)
+    // (upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ETHRegistry.ts:L46 @ ens_v2_sepolia_20260916@366de741)
+    // (upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ReverseMirror.ts:L35 @ ens_v2_sepolia_20260916@366de741)
+    builder.push(") = 'number' THEN CASE WHEN (nc.declared_summary #>> ");
     builder.push(path.as_str());
-    builder.push(")::DOUBLE PRECISION) WHEN JSONB_TYPEOF(nc.declared_summary #> ");
+    builder.push(
+        ")::NUMERIC BETWEEN 0 AND 253402300799 THEN TO_TIMESTAMP(FLOOR((nc.declared_summary #>> ",
+    );
+    builder.push(path.as_str());
+    builder.push(")::NUMERIC)::DOUBLE PRECISION) END WHEN JSONB_TYPEOF(nc.declared_summary #> ");
     builder.push(path.as_str());
     builder.push(") = 'string' AND nc.declared_summary #>> ");
     builder.push(path.as_str());
-    builder.push(" ~ '^[0-9]+(\\.[0-9]+)?$' THEN TO_TIMESTAMP((nc.declared_summary #>> ");
+    builder.push(" ~ '^[0-9]+(\\.[0-9]+)?$' THEN CASE WHEN (nc.declared_summary #>> ");
     builder.push(path.as_str());
-    builder.push(")::DOUBLE PRECISION) WHEN JSONB_TYPEOF(nc.declared_summary #> ");
+    builder.push(")::NUMERIC <= 253402300799 THEN TO_TIMESTAMP(FLOOR((nc.declared_summary #>> ");
+    builder.push(path.as_str());
+    builder.push(")::NUMERIC)::DOUBLE PRECISION) END WHEN JSONB_TYPEOF(nc.declared_summary #> ");
     builder.push(path.as_str());
     builder.push(") = 'string' AND nc.declared_summary #>> ");
     builder.push(path.as_str());

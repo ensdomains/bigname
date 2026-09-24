@@ -104,9 +104,21 @@ pub(super) fn json_timestamp_at_paths(value: &Value, paths: &[&[&str]]) -> Optio
             continue;
         };
         match value {
-            Value::String(value) if !value.trim().is_empty() => return Some(value.clone()),
+            Value::String(value) if !value.trim().is_empty() => match quoted_seconds(value) {
+                Some(QuotedSeconds::InRange(seconds)) => {
+                    if let Some(timestamp) = format_unix_timestamp(seconds) {
+                        return Some(timestamp);
+                    }
+                }
+                Some(QuotedSeconds::OutOfRange) => {}
+                None => return Some(value.clone()),
+            },
+            // A number reads by its value, not its printed form, under the same range and
+            // whole-seconds rule as a quoted value.
             Value::Number(number) => {
-                if let Some(timestamp) = number.as_i64().and_then(format_unix_timestamp) {
+                if let Some(QuotedSeconds::InRange(seconds)) = number_seconds(number)
+                    && let Some(timestamp) = format_unix_timestamp(seconds)
+                {
                     return Some(timestamp);
                 }
             }
@@ -137,7 +149,91 @@ pub(super) fn json_value_present(value: &Value) -> bool {
     }
 }
 
+const LAST_TIMESTAMP_SECOND: u64 = 253_402_300_799;
+
+#[derive(Debug, PartialEq, Eq)]
+enum QuotedSeconds {
+    /// The whole seconds of a value inside 1970..=9999.
+    InRange(i64),
+    /// A number before 1970 or after 9999-12-31T23:59:59Z, which reads as unknown.
+    OutOfRange,
+}
+
+/// A quoted seconds value (`"1735689600"`, `"-1"`, `"1735689600.5"`) reads like the number it
+/// spells, or `None` when the string is not a decimal number. Any value with a leading minus sign
+/// is out of range, `"-0"` included, as the collection routes' SQL reads a quoted value only
+/// without a sign. The range check otherwise uses the complete value, fraction included, with the
+/// same bounds that SQL applies; a value inside the range then keeps only its whole seconds, as
+/// Project's `to_char(to_timestamp(..), 'SS')` presents it.
+fn quoted_seconds(value: &str) -> Option<QuotedSeconds> {
+    let (negative, unsigned) = match value.strip_prefix('-') {
+        Some(unsigned) => (true, unsigned),
+        None => (false, value),
+    };
+    let (whole, fraction) = match unsigned.split_once('.') {
+        Some((whole, fraction)) if !fraction.is_empty() => (whole, fraction),
+        Some(_) => return None,
+        None => (unsigned, ""),
+    };
+    let digits = |part: &str| part.bytes().all(|byte| byte.is_ascii_digit());
+    if whole.is_empty() || !digits(whole) || !digits(fraction) {
+        return None;
+    }
+    let has_fraction = fraction.bytes().any(|byte| byte != b'0');
+    let Ok(whole) = whole.parse::<u64>() else {
+        return Some(QuotedSeconds::OutOfRange);
+    };
+    if negative || whole > LAST_TIMESTAMP_SECOND || (whole == LAST_TIMESTAMP_SECOND && has_fraction)
+    {
+        return Some(QuotedSeconds::OutOfRange);
+    }
+    Some(i64::try_from(whole).map_or(QuotedSeconds::OutOfRange, QuotedSeconds::InRange))
+}
+
+/// A seconds value, as a JSON number or a quoted number, under the same rule as every expiry
+/// read: a value outside 1970..=9999 is `None`, and one inside keeps its whole seconds. A string
+/// that is not a number is `None` too.
+pub(in crate::v2) fn seconds_timestamp(value: &Value) -> Option<String> {
+    let seconds = match value {
+        Value::Number(number) => number_seconds(number)?,
+        Value::String(text) => quoted_seconds(text.trim())?,
+        _ => return None,
+    };
+    match seconds {
+        QuotedSeconds::InRange(seconds) => format_unix_timestamp(seconds),
+        QuotedSeconds::OutOfRange => None,
+    }
+}
+
+/// A JSON number's seconds by value, whatever notation it was written or prints in (`1e-7` is
+/// second zero). The range check uses the full value, so `253402300799.5` is out of range; a value
+/// inside it keeps its whole seconds, as the SQL helpers' `FLOOR` does. A negative zero is zero, as
+/// Postgres stores it. `None` for a value that is not finite.
+fn number_seconds(number: &serde_json::Number) -> Option<QuotedSeconds> {
+    if let Some(seconds) = number.as_u64() {
+        return Some(if seconds > LAST_TIMESTAMP_SECOND {
+            QuotedSeconds::OutOfRange
+        } else {
+            i64::try_from(seconds).map_or(QuotedSeconds::OutOfRange, QuotedSeconds::InRange)
+        });
+    }
+    if number.as_i64().is_some() {
+        return Some(QuotedSeconds::OutOfRange);
+    }
+    let value = number.as_f64().filter(|value| value.is_finite())?;
+    if value < 0.0 || value > LAST_TIMESTAMP_SECOND as f64 {
+        return Some(QuotedSeconds::OutOfRange);
+    }
+    // In range, so the floor fits an i64 exactly.
+    Some(QuotedSeconds::InRange(value.floor() as i64))
+}
+
+/// A seconds value outside 1970..=9999 reads as unknown, the same rule the collection routes'
+/// expiry reads and Project's formatted `control.expiry` apply.
 fn format_unix_timestamp(timestamp: i64) -> Option<String> {
+    if !u64::try_from(timestamp).is_ok_and(|timestamp| timestamp <= LAST_TIMESTAMP_SECOND) {
+        return None;
+    }
     let value = OffsetDateTime::from_unix_timestamp(timestamp).ok()?;
     Some(format_timestamp(value))
 }
@@ -213,4 +309,61 @@ fn eth_2ld_labelhash_token_id(
     alloy_primitives::U256::from_str_radix(hex, 16)
         .ok()
         .map(|value| value.to_string())
+}
+
+#[cfg(test)]
+mod quoted_seconds_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn quoted_seconds_range_checks_the_whole_value_then_keeps_whole_seconds() {
+        for (quoted, expected) in [
+            ("1735689600.5", Some("2025-01-01T00:00:00Z")),
+            ("-0.5", None),
+            ("-1", None),
+            ("253402300799", Some("9999-12-31T23:59:59Z")),
+            ("253402300799.9", None),
+            ("253402300800", None),
+            ("0", Some("1970-01-01T00:00:00Z")),
+            ("-0", None),
+            ("-0.0", None),
+        ] {
+            let summary = json!({"registration": {"expiry": quoted}});
+            assert_eq!(
+                json_timestamp_at_paths(&summary, &[&["registration", "expiry"]]).as_deref(),
+                expected,
+                "{quoted}"
+            );
+        }
+        // A JSON number follows the same rule as its quoted form.
+        for (number, expected) in [
+            (json!(1_735_689_600.5), Some("2025-01-01T00:00:00Z")),
+            (json!(-0.5), None),
+            (json!(253_402_300_799.5), None),
+            (json!(253_402_300_799_u64), Some("9999-12-31T23:59:59Z")),
+            (json!(u64::MAX), None),
+            (json!(-1), None),
+            (json!(-0.0), Some("1970-01-01T00:00:00Z")),
+            (json!(1e-7), Some("1970-01-01T00:00:00Z")),
+            (json!(1.735_689_6e9), Some("2025-01-01T00:00:00Z")),
+            (json!(2.534_023_007_99e11), Some("9999-12-31T23:59:59Z")),
+        ] {
+            let summary = json!({"registration": {"expiry": number}});
+            assert_eq!(
+                json_timestamp_at_paths(&summary, &[&["registration", "expiry"]]).as_deref(),
+                expected,
+                "{number}"
+            );
+        }
+        // Not a number: served as the stored string.
+        for text in ["abc", "1.", ".5", "1e9", "--1"] {
+            assert_eq!(quoted_seconds(text), None, "{text}");
+        }
+        let summary = json!({"registration": {"expiry": "abc"}});
+        assert_eq!(
+            json_timestamp_at_paths(&summary, &[&["registration", "expiry"]]).as_deref(),
+            Some("abc")
+        );
+    }
 }

@@ -38,7 +38,6 @@ mod tests {
             // the follow-the-chain redo can still carry them.
             "conflicting_current_ens_authority",
             "independent_ens_deployments_overlap",
-            "ensv2_exact_name_profile_shadow",
             "a_reason_this_build_has_never_seen",
             MISSING_UNSUPPORTED_REASON,
             "",
