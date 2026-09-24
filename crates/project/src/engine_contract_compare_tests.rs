@@ -326,11 +326,11 @@ async fn contract_audit_distinguishes_forward_inputs_late_keys_and_same_value_ch
 }
 
 #[tokio::test]
-async fn contract_private_snapshots_validate_all_ten_rows_and_reject_unnecessary_refresh()
+async fn contract_private_snapshots_validate_every_table_and_reject_unnecessary_refresh()
 -> Result<()> {
     use bigname_test_support::{TestDatabase, TestDatabaseConfig};
     use sqlx::Acquire;
-    let database = TestDatabase::create(TestDatabaseConfig::new("contract_all_ten")).await?;
+    let database = TestDatabase::create(TestDatabaseConfig::new("contract_every_table")).await?;
     let mut tx = database.pool().begin().await?;
     sqlx::raw_sql("CREATE TEMP TABLE chain_lineage(chain_id text,block_number bigint,block_hash text,block_timestamp timestamptz,canonicality_state text);
         INSERT INTO chain_lineage VALUES('ethereum-sepolia',10,'old',to_timestamp(1800000010),'canonical'),('ethereum-sepolia',20,'new',to_timestamp(1800000020),'canonical')")
@@ -363,6 +363,7 @@ async fn contract_private_snapshots_validate_all_ten_rows_and_reject_unnecessary
         "subject".into(),
         "relation".into(),
     ]);
+    old.window = (1, 10);
     let mut baselines = Vec::new();
     for (table, keys) in TABLES {
         let mut row = json!({"logical_name_id":"name","parent_logical_name_id":"parent","child_logical_name_id":"child","resource_id":"resource","record_resource_id":null,
@@ -379,6 +380,11 @@ async fn contract_private_snapshots_validate_all_ten_rows_and_reject_unnecessary
         }
         if *table == "name_current" {
             row["chain_positions"] = json!({"ethereum-sepolia":{"block_number":10,"block_hash":"old","timestamp":old_time}});
+        }
+        if *table == "child_registration_events" {
+            row["block_number"] = json!(7);
+            row["target_block_number"] = json!(10);
+            row["target_block_hash"] = json!("old");
         }
         let columns = row
             .as_object()
@@ -483,7 +489,7 @@ async fn contract_private_snapshots_validate_all_ten_rows_and_reject_unnecessary
             }
         }
     }
-    assert_eq!((retained, rejected), (10, 10));
+    assert_eq!((retained, rejected), (TABLES.len(), TABLES.len()));
     drop((baseline, candidate, reference, wrongly_refreshed));
     std::fs::remove_dir_all(root)?;
     tx.rollback().await?;
@@ -566,6 +572,280 @@ async fn contract_audit_rejects_unmodeled_classification_and_invalid_input_targe
             .is_err(),
         "new mirror classification invalidation absent old audit was accepted"
     );
+    tx.rollback().await?;
+    database.cleanup().await?;
+    Ok(())
+}
+
+/// Temporary stand-ins for every compared table, empty except one child registration row at
+/// block 15, and the lineage the target metadata reads.
+async fn child_registration_fixture(tx: &mut Transaction<'_, Postgres>) -> Result<Target> {
+    sqlx::raw_sql("CREATE TEMP TABLE chain_lineage(chain_id text,block_number bigint,block_hash text,block_timestamp timestamptz,canonicality_state text);
+        INSERT INTO chain_lineage VALUES('ethereum-sepolia',10,'old',to_timestamp(1800000010),'canonical'),('ethereum-sepolia',20,'new',to_timestamp(1800000020),'canonical')")
+        .execute(&mut **tx).await?;
+    for (table, keys) in TABLES {
+        if *table == "child_registration_events" {
+            continue;
+        }
+        let columns = keys
+            .split(',')
+            .map(|key| format!("{key} text"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        sqlx::query(&format!("CREATE TEMP TABLE {table}({columns})"))
+            .execute(&mut **tx)
+            .await?;
+    }
+    sqlx::query(
+        "CREATE TEMP TABLE child_registration_events(parent_logical_name_id text,
+         event_identity text, child_logical_name_id text, chain_id text, block_number bigint,
+         provenance jsonb, target_block_number bigint, target_block_hash text,
+         last_recomputed_at text)",
+    )
+    .execute(&mut **tx)
+    .await?;
+    sqlx::query(
+        "INSERT INTO child_registration_events VALUES
+         ('ens:parent', 'grant-15', 'ens:child', 'ethereum-sepolia', 15,
+          '{\"source_family\":\"ens_v2_registry_l1\"}', 20, 'new', 'operational')",
+    )
+    .execute(&mut **tx)
+    .await?;
+    Target::load(
+        tx,
+        &crate::Marker {
+            number: 20,
+            hash: "new".into(),
+        },
+    )
+    .await
+}
+
+async fn compare_child_registration_candidate(
+    tx: &mut Transaction<'_, Postgres>,
+    mandatory: &Scopes,
+    root: &std::path::Path,
+    candidate_change: &str,
+    reference_change: Option<&str>,
+) -> Result<()> {
+    use sqlx::Acquire;
+    let target = child_registration_fixture(tx).await?;
+    let mut baseline = Snapshot::capture(tx, root).await?;
+    let mut branch = tx.begin().await?;
+    sqlx::query(candidate_change).execute(&mut *branch).await?;
+    let mut candidate = Snapshot::capture(&mut branch, root).await?;
+    branch.rollback().await?;
+    let mut branch = tx.begin().await?;
+    if let Some(change) = reference_change {
+        sqlx::query(change).execute(&mut *branch).await?;
+    }
+    let mut reference = Snapshot::capture(&mut branch, root).await?;
+    branch.rollback().await?;
+    snapshot::compare(
+        tx,
+        snapshot::Snapshots {
+            baseline: &mut baseline,
+            candidate: &mut candidate,
+            reference: &mut reference,
+        },
+        snapshot::Expectations {
+            mandatory,
+            old_scope: mandatory,
+            target: &target,
+            previous: 10,
+        },
+    )
+    .await
+}
+
+/// A candidate that rewrites or drops a published child registration row outside the batch's
+/// blocks must fail the comparison, like any other served table.
+#[tokio::test]
+async fn contract_rejects_a_rewritten_or_dropped_child_registration_row() -> Result<()> {
+    use bigname_test_support::{TestDatabase, TestDatabaseConfig};
+    let database =
+        TestDatabase::create(TestDatabaseConfig::new("contract_child_registrations")).await?;
+    let root = std::env::temp_dir().join(format!("contract-child-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&root)?;
+    for change in [
+        "UPDATE child_registration_events SET provenance = '{\"source_family\":\"rewritten\"}'",
+        "DELETE FROM child_registration_events",
+    ] {
+        let mut tx = database.pool().begin().await?;
+        let result =
+            compare_child_registration_candidate(&mut tx, &Scopes::default(), &root, change, None)
+                .await;
+        tx.rollback().await?;
+        let error = result
+            .err()
+            .unwrap_or_else(|| panic!("the comparator accepted a candidate that ran: {change}"));
+        assert!(
+            error
+                .to_string()
+                .contains("contract comparison rejected 1 rows"),
+            "{change}: {error:#}"
+        );
+    }
+    std::fs::remove_dir_all(root)?;
+    database.cleanup().await?;
+    Ok(())
+}
+
+/// Rows of an owned key: absent everywhere, deleted by both derivations, created by both, or
+/// deleted or kept by only one of them.
+#[test]
+fn owned_absent_and_deleted_rows_follow_the_reference() -> Result<()> {
+    let b = row();
+    let mut owned = Scopes::default();
+    owned.names.insert("ancestor".into());
+    let mut refreshed = target().refresh("name_current", &b)?;
+    refreshed["inserted_at"] = json!("new-op");
+    let verdict = |base, candidate, reference| {
+        compare_row(
+            "name_current",
+            base,
+            candidate,
+            reference,
+            &owned,
+            &owned,
+            &target(),
+        )
+    };
+    // A key the batch owns that neither derivation produces, and never had a row.
+    assert_eq!(verdict(None, None, None)?, Verdict::Exact);
+    // A released name: both derivations delete the published row.
+    assert_eq!(verdict(Some(&b), None, None)?, Verdict::Exact);
+    // A new row both derivations produce, equal apart from operational timestamps.
+    let produced = target().refresh("name_current", &b)?;
+    assert_eq!(
+        verdict(None, Some(&refreshed), Some(&produced))?,
+        Verdict::Exact
+    );
+    // Only one side deletes.
+    assert!(verdict(Some(&b), None, Some(&refreshed)).is_err());
+    assert!(verdict(Some(&b), Some(&refreshed), None).is_err());
+    Ok(())
+}
+
+/// Child registration rows belong to the batch by block. Inside the window both derivations
+/// may delete or refresh a row as long as they agree; outside it nothing may change.
+#[tokio::test]
+async fn child_registration_rows_in_the_batch_window_follow_the_reference() -> Result<()> {
+    use bigname_test_support::{TestDatabase, TestDatabaseConfig};
+    let database = TestDatabase::create(TestDatabaseConfig::new("contract_child_window")).await?;
+    let root = std::env::temp_dir().join(format!("contract-window-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&root)?;
+    let window = Scopes {
+        window: (11, 20),
+        ..Scopes::default()
+    };
+    let orphaned = "DELETE FROM child_registration_events";
+    let refreshed = "UPDATE child_registration_events SET last_recomputed_at = 'later'";
+    let rewritten =
+        "UPDATE child_registration_events SET provenance = '{\"source_family\":\"rewritten\"}'";
+    for (candidate, reference, accepted) in [
+        (orphaned, Some(orphaned), true),
+        (refreshed, None, true),
+        (orphaned, None, false),
+        (rewritten, None, false),
+    ] {
+        let mut tx = database.pool().begin().await?;
+        let result =
+            compare_child_registration_candidate(&mut tx, &window, &root, candidate, reference)
+                .await;
+        tx.rollback().await?;
+        assert_eq!(
+            result.is_ok(),
+            accepted,
+            "{candidate} against {reference:?}: {result:?}"
+        );
+    }
+    std::fs::remove_dir_all(root)?;
+    database.cleanup().await?;
+    Ok(())
+}
+
+/// The publication record must be the same in all three snapshots, and a same-head rerun must
+/// reproduce every row apart from operational timestamps.
+#[tokio::test]
+async fn publication_record_and_same_head_output_must_not_change() -> Result<()> {
+    use bigname_test_support::{TestDatabase, TestDatabaseConfig};
+    use sqlx::Acquire;
+    let database = TestDatabase::create(TestDatabaseConfig::new("contract_publication")).await?;
+    let root = std::env::temp_dir().join(format!("contract-publication-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&root)?;
+    let mut tx = database.pool().begin().await?;
+    let target = child_registration_fixture(&mut tx).await?;
+    sqlx::raw_sql(
+        "CREATE TEMP TABLE chain_phase_state(chain_id text, phase_name text,
+             current_block_number bigint, current_block_hash text, input_content_hash text,
+             phase_status text, redo_in_progress boolean);
+         INSERT INTO chain_phase_state VALUES
+             ('ethereum-sepolia', 'project', 10, 'old', 'hash', 'completed', false),
+             ('ethereum-sepolia', 'interpret', 20, 'new', 'hash', 'completed', false);
+         CREATE TEMP TABLE chain_heads(chain_id text, latest_block_number bigint);
+         INSERT INTO chain_heads VALUES ('ethereum-sepolia', 20)",
+    )
+    .execute(&mut *tx)
+    .await?;
+    let mut baseline = Snapshot::capture(&mut tx, &root).await?;
+    assert_eq!(
+        baseline.publication["project"][0]["current_block_number"],
+        10
+    );
+    let mut branch = tx.begin().await?;
+    sqlx::query(
+        "UPDATE chain_phase_state SET current_block_number = 20 WHERE phase_name = 'project'",
+    )
+    .execute(&mut *branch)
+    .await?;
+    let mut moved = Snapshot::capture(&mut branch, &root).await?;
+    branch.rollback().await?;
+    let mut reference = Snapshot::capture(&mut tx, &root).await?;
+    let error = snapshot::compare(
+        &mut tx,
+        snapshot::Snapshots {
+            baseline: &mut baseline,
+            candidate: &mut moved,
+            reference: &mut reference,
+        },
+        snapshot::Expectations {
+            mandatory: &Scopes::default(),
+            old_scope: &Scopes::default(),
+            target: &target,
+            previous: 10,
+        },
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("publication record"),
+        "{error:#}"
+    );
+
+    let mut rerun = Snapshot::capture(&mut tx, &root).await?;
+    assert_eq!(assert_same_output(&mut reference, &mut rerun)?, 1);
+    for (change, same) in [
+        (
+            "UPDATE child_registration_events SET last_recomputed_at = 'rerun'",
+            true,
+        ),
+        (
+            "UPDATE child_registration_events SET target_block_number = 21",
+            false,
+        ),
+        ("UPDATE chain_heads SET latest_block_number = 21", false),
+    ] {
+        let mut branch = tx.begin().await?;
+        sqlx::query(change).execute(&mut *branch).await?;
+        let mut changed = Snapshot::capture(&mut branch, &root).await?;
+        branch.rollback().await?;
+        let mut first = Snapshot::capture(&mut tx, &root).await?;
+        let result = assert_same_output(&mut first, &mut changed);
+        assert_eq!(result.is_ok(), same, "{change}: {result:?}");
+    }
+    drop((baseline, moved, reference, rerun));
+    std::fs::remove_dir_all(root)?;
     tx.rollback().await?;
     database.cleanup().await?;
     Ok(())

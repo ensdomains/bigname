@@ -58,7 +58,12 @@ async fn retained_sepolia_passes_rollback() -> Result<()> {
         "choose exact reference or separately named contract comparison"
     );
     let profile = std::env::var("BIGNAME_BENCHMARK_PROFILE").as_deref() == Ok("1");
-    let evidence_dir = if compare || contract || profile {
+    let same_head = std::env::var("BIGNAME_BENCHMARK_SAME_HEAD").as_deref() == Ok("1");
+    ensure!(
+        !(same_head && (compare || contract)),
+        "the same-head rerun runs on its own, without a reference comparison"
+    );
+    let evidence_dir = if compare || contract || profile || same_head {
         Some(std::path::PathBuf::from(std::env::var(
             "BIGNAME_BENCHMARK_EVIDENCE_DIR",
         )?))
@@ -76,6 +81,7 @@ async fn retained_sepolia_passes_rollback() -> Result<()> {
             rebuild_baseline: std::env::var("BIGNAME_BENCHMARK_REBUILD_BASELINE").as_deref()
                 == Ok("1"),
             contract,
+            same_head,
         },
     )
     .await
@@ -90,6 +96,9 @@ struct Benchmark {
     profile: bool,
     rebuild_baseline: bool,
     contract: bool,
+    /// Derive each target a second time with the target as its resume marker and require the
+    /// same output: the retry a failed hydration or progress write leads to.
+    same_head: bool,
 }
 
 async fn run_benchmark(options: PgConnectOptions, benchmark: Benchmark) -> Result<()> {
@@ -101,6 +110,7 @@ async fn run_benchmark(options: PgConnectOptions, benchmark: Benchmark) -> Resul
         profile,
         rebuild_baseline,
         contract,
+        same_head,
     } = benchmark;
     let pool = PgPoolOptions::new()
         .max_connections(2)
@@ -260,6 +270,22 @@ async fn run_benchmark(options: PgConnectOptions, benchmark: Benchmark) -> Resul
             "SEPOLIA_ENGINE_CARDINALITY names={} resources={} events={}",
             counts.0, counts.1, counts.2
         );
+        if same_head {
+            let root = evidence_dir
+                .as_deref()
+                .context("same-head evidence directory")?;
+            let mut first = super::contract_compare::Snapshot::capture(&mut tx, root).await?;
+            drop_work_tables(&mut tx).await?;
+            let rerun = BatchRequest {
+                resume_current: Some(target.clone()),
+                ..request.clone()
+            };
+            super::validate_request(&rerun)?;
+            super::derive(&mut tx, &rerun, &target).await?;
+            let mut second = super::contract_compare::Snapshot::capture(&mut tx, root).await?;
+            let rows = super::contract_compare::assert_same_output(&mut first, &mut second)?;
+            eprintln!("SEPOLIA_SAME_HEAD_RERUN target={number} rows={rows} result=unchanged");
+        }
         if contract {
             let root = evidence_dir
                 .as_deref()
@@ -274,7 +300,8 @@ async fn run_benchmark(options: PgConnectOptions, benchmark: Benchmark) -> Resul
                 .execute(&mut *tx)
                 .await?;
             super::derive(&mut tx, &request, &target).await?;
-            let legacy_scope = super::contract_compare::Scopes::capture(&mut tx).await?;
+            let window = (request.affected_from_block, request.affected_to_block);
+            let legacy_scope = super::contract_compare::Scopes::capture(&mut tx, window).await?;
             let mut reference = super::contract_compare::Snapshot::capture(&mut tx, root).await?;
             let target_metadata = super::contract_compare::Target::load(&mut tx, &target).await?;
             super::contract_compare::compare(
@@ -446,6 +473,7 @@ async fn historical_baseline_reference_and_two_candidates_clean_work_tables() ->
                 profile,
                 rebuild_baseline: true,
                 contract: false,
+                same_head: false,
             },
         )
         .await?;
@@ -507,12 +535,43 @@ async fn contract_baseline_audit_reference_and_two_candidates_rollback() -> Resu
             profile: false,
             rebuild_baseline: true,
             contract: true,
+            same_head: false,
         },
     )
     .await?;
     let phase:Option<i64>=sqlx::query_scalar("SELECT current_block_number FROM bigname_phase.chain_phase_state WHERE chain_id='ethereum-sepolia' AND phase_name='interpret'").fetch_one(database.pool()).await?;
     ensure!(phase == Some(12), "phase metadata mutated");
     std::fs::remove_dir_all(evidence)?;
+    database.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn same_head_rerun_reproduces_each_candidate_head() -> Result<()> {
+    let database = lifecycle_database().await?;
+    let evidence = std::env::temp_dir().join(format!("same-head-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&evidence)?;
+    let options = database.pool().connect_options().as_ref().clone();
+    let benchmark = Benchmark {
+        previous: 10,
+        targets: vec![11, 12],
+        compare: false,
+        evidence_dir: Some(evidence.clone()),
+        profile: false,
+        rebuild_baseline: true,
+        contract: false,
+        same_head: true,
+    };
+    run_benchmark(
+        options.options([("search_path", "bigname_phase,public")]),
+        benchmark,
+    )
+    .await?;
+    ensure!(
+        std::fs::read_dir(&evidence)?.next().is_none(),
+        "same-head evidence was kept"
+    );
+    std::fs::remove_dir(evidence)?;
     database.cleanup().await?;
     Ok(())
 }

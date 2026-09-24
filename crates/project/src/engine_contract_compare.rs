@@ -11,7 +11,7 @@ pub(crate) mod audit;
 #[cfg(test)]
 #[path = "engine_contract_compare_snapshot.rs"]
 mod snapshot;
-pub(super) use snapshot::{Expectations, Snapshot, Snapshots, compare};
+pub(super) use snapshot::{Expectations, Snapshot, Snapshots, assert_same_output, compare};
 
 pub(super) const TABLES: &[(&str, &str)] = &[
     ("name_current", "logical_name_id"),
@@ -36,6 +36,10 @@ pub(super) const TABLES: &[(&str, &str)] = &[
         "address,coin_type,logical_name_id",
     ),
     ("primary_names_current", "address,coin_type,namespace"),
+    (
+        "child_registration_events",
+        "parent_logical_name_id,event_identity",
+    ),
 ];
 
 #[derive(Default)]
@@ -46,14 +50,19 @@ pub(super) struct Scopes {
     resolvers: BTreeSet<String>,
     accounts: BTreeSet<Vec<String>>,
     primary: BTreeSet<Vec<String>>,
+    /// The batch's affected blocks: child registration rows are replaced by block, not by key.
+    window: (i64, i64),
     audit_inputs: Value,
 }
 impl Scopes {
     fn evidence(&self) -> Value {
-        json!({"names":self.names,"resources":self.resources,"children":self.children,"resolvers":self.resolvers,"accounts":self.accounts,"primary":self.primary,"audit_inputs":self.audit_inputs})
+        json!({"names":self.names,"resources":self.resources,"children":self.children,"resolvers":self.resolvers,"accounts":self.accounts,"primary":self.primary,"window":self.window,"audit_inputs":self.audit_inputs})
     }
 
-    pub(super) async fn capture(tx: &mut Transaction<'_, Postgres>) -> Result<Self> {
+    pub(super) async fn capture(
+        tx: &mut Transaction<'_, Postgres>,
+        window: (i64, i64),
+    ) -> Result<Self> {
         async fn single(
             tx: &mut Transaction<'_, Postgres>,
             table: &str,
@@ -92,6 +101,7 @@ impl Scopes {
             Value::Null
         };
         Ok(Self {
+            window,
             audit_inputs,
             names: single(tx, "project_scope_names", "logical_name_id").await?,
             resources: single(tx, "project_scope_resources", "resource_id").await?,
@@ -146,6 +156,14 @@ impl Scopes {
                     || member(&self.resources, "resource_id")
                     || member(&self.resources, "record_resource_id")
             }
+            // The publisher deletes the affected block range (and non-canonical rows above it)
+            // and republishes it, whatever names the rows belong to.
+            "child_registration_events" => {
+                let block = row["block_number"]
+                    .as_i64()
+                    .ok_or_else(|| anyhow::anyhow!("missing child registration block"))?;
+                (self.window.0..=self.window.1).contains(&block)
+            }
             "resolver_current" => {
                 let address = row["resolver_address"]
                     .as_str()
@@ -199,7 +217,10 @@ impl Target {
             Ok(())
         }
         let mut transformed = meaningful(baseline);
-        if table == "primary_names_current" {
+        if table == "child_registration_events" {
+            replace(&mut transformed, "/target_block_number", json!(self.number))?;
+            replace(&mut transformed, "/target_block_hash", json!(self.hash))?;
+        } else if table == "primary_names_current" {
             replace(
                 &mut transformed,
                 "/claim_provenance/target_block_number",
