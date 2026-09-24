@@ -1282,7 +1282,7 @@ async fn root_registry_eth_and_reverse_serve_without_a_registrar_event() -> Resu
                 family: "ens_v2_root_l1",
                 kind: "RegistrationGranted",
                 log: 2,
-                after: json!({"label":name,"registrant":root_owner,"owner":root_owner,"expiry":4102444800_i64}),
+                after: json!({"label":name,"registrant":root_owner,"owner":root_owner,"expiry":u64::MAX}),
             },
         )
         .await?;

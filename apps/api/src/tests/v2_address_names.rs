@@ -622,6 +622,31 @@ async fn v2_address_names_registration_dedupe_preserves_role_summary() -> Result
     database.cleanup().await
 }
 
+// The ENSv2 root registry registers `eth` and `reverse` with the largest uint64 expiry, which no
+// timestamp can hold. Sorting by expiry treats it as unknown instead of failing the page.
+#[tokio::test]
+async fn v2_get_address_names_sorts_past_an_expiry_beyond_the_timestamp_range() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_address_names_fixture(&database).await?;
+    sqlx::query(
+        "UPDATE bigname_phase.name_current
+         SET declared_summary = jsonb_set(
+             declared_summary, '{registration,expiry}', '18446744073709551615'::jsonb, true)
+         WHERE raw_name = 'alpha.eth'",
+    )
+    .execute(&database.pool)
+    .await?;
+    let payload = v2_address_names_payload_for_database(
+        &database,
+        &format!("/v1/addresses/{V2_ADDRESS}/names?sort=expires_at&order=asc"),
+    )
+    .await?;
+    let listed = names(payload["data"].as_array().expect("expires asc data"));
+    assert_eq!(listed.first(), Some(&"beta.eth"), "{listed:?}");
+    assert!(listed.contains(&"alpha.eth"), "{listed:?}");
+    database.cleanup().await
+}
+
 #[tokio::test]
 async fn v2_get_address_names_sorts_by_expiry_and_registered_at() -> Result<()> {
     let (database, expires_asc) = v2_address_names_payload(&format!(

@@ -159,6 +159,32 @@ fn v2_names_listed(payload: &Value) -> Vec<String> {
         .collect()
 }
 
+// The ENSv2 root registry registers `eth` and `reverse` with the largest uint64 expiry, which no
+// timestamp can hold. The listing treats that expiry as unknown and leaves the name out instead
+// of failing.
+#[tokio::test]
+async fn v2_get_names_skips_an_expiry_beyond_the_timestamp_range() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_names_fixture(&database).await?;
+    sqlx::query(
+        "UPDATE bigname_phase.name_current
+         SET declared_summary = jsonb_set(
+             declared_summary, '{registration,expiry}', '18446744073709551615'::jsonb, true)
+         WHERE raw_name = 'alpha.eth'",
+    )
+    .execute(&database.pool)
+    .await?;
+
+    let payload = v2_names_payload(
+        &database,
+        "/v1/names?namespace=ens&expires_after=2025-01-01T00:00:00Z&sort=expires_at&order=asc",
+    )
+    .await?;
+    assert_eq!(v2_names_listed(&payload), vec!["gamma.eth", "beta.eth"]);
+    database.cleanup().await?;
+    Ok(())
+}
+
 #[tokio::test]
 async fn v2_get_names_lists_a_namespace_expiry_window_in_expiry_order() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;

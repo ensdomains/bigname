@@ -1731,6 +1731,31 @@ async fn v2_search_omits_every_unsupported_exact_name() -> Result<()> {
     Ok(())
 }
 
+// The Sepolia root registry registers `eth` and `reverse` with the largest uint64 expiry, which no
+// timestamp can hold. Such a supported name is still searchable; its expiry reads as unknown.
+#[tokio::test]
+async fn v2_search_serves_a_name_whose_expiry_exceeds_the_timestamp_range() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_search_fixture(&database).await?;
+    sqlx::query(
+        "UPDATE bigname_phase.name_current
+         SET declared_summary = jsonb_set(
+             declared_summary, '{registration,expiry}', '18446744073709551615'::jsonb, true)
+         WHERE raw_name = 'alpha.eth'",
+    )
+    .execute(&database.pool)
+    .await?;
+
+    let payload =
+        v2_search_payload_for_database(&database, "/v1/search?q=al&namespace=ens").await?;
+    assert_eq!(
+        v2_search_names(payload["data"].as_array().expect("search data must be an array")),
+        vec!["alpha.eth", "alpine.eth"]
+    );
+    database.cleanup().await?;
+    Ok(())
+}
+
 fn v2_search_names(rows: &[Value]) -> Vec<&str> {
     rows.iter()
         .map(|row| row["name"].as_str().expect("search row must include name"))
