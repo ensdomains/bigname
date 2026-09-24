@@ -8,7 +8,7 @@ use std::{
 
 use anyhow::{Context, Result, ensure};
 use phase_runner::RunnerPhaseProgress;
-use phase_runner::metrics::RunnerLoopHeartbeat;
+use phase_runner::metrics::{RunnerLoopHeartbeat, RunnerMetricsFeed};
 use phase_runner::state::PhaseStore;
 use tokio_util::sync::CancellationToken;
 
@@ -35,6 +35,7 @@ async fn endpoint_exports_failed_phase_and_stale_heartbeat_signals() -> Result<(
         900,
         loop_heartbeat,
         phase_progress,
+        RunnerMetricsFeed::default(),
     )
     .await?;
     let response = tokio::task::spawn_blocking(move || scrape(address))
@@ -179,6 +180,265 @@ async fn endpoint_exports_failed_phase_and_stale_heartbeat_signals() -> Result<(
     cancellation.cancel();
     tokio::task::yield_now().await;
     scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn endpoint_exports_served_lag_against_the_readable_project_publication() -> Result<()> {
+    let scratch = ScratchDatabase::create("phase_runner_served_lag").await?;
+    let store = PhaseStore::new(scratch.pool().clone());
+    for chain in [
+        "served",
+        "orphaned",
+        "older-hash",
+        "failed",
+        "published-head",
+        "ingest-ahead",
+        "running",
+        "same-height-fork",
+        "ahead-of-head",
+        "no-head-row",
+        "unobserved",
+    ] {
+        store.initialize_chain(chain).await?;
+        seed_served_lag_state(scratch.pool(), chain).await?;
+    }
+    sqlx::query(
+        "UPDATE chain_lineage SET canonicality_state = 'orphaned'
+         WHERE chain_id = 'orphaned' AND block_number = 90",
+    )
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query(
+        "UPDATE chain_phase_state SET target_block_number = NULL, target_block_hash = NULL
+         WHERE chain_id IN ('published-head', 'unobserved') AND phase_name = 'live'",
+    )
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query(
+        "UPDATE chain_phase_state SET input_content_hash = 'older-fingerprint'
+         WHERE chain_id = 'older-hash' AND phase_name = 'project'",
+    )
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET phase_status = 'failed', last_error = 'terminal projection error'
+         WHERE chain_id = 'failed' AND phase_name = 'project'",
+    )
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query(
+        "UPDATE chain_phase_state SET target_block_number = 95, target_block_hash = 'x-95'
+         WHERE chain_id = 'ingest-ahead' AND phase_name = 'live'",
+    )
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query(
+        "UPDATE chain_phase_state SET phase_status = 'running', finished_at = NULL
+         WHERE chain_id = 'running' AND phase_name = 'project'",
+    )
+    .execute(scratch.pool())
+    .await?;
+    // The published block is a same-height fork of the readable block 90.
+    sqlx::query(
+        "INSERT INTO chain_lineage (
+             chain_id, block_hash, block_number, block_timestamp, canonicality_state
+         ) VALUES ('same-height-fork', 'same-height-fork-90b', 90, now(), 'orphaned')",
+    )
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET current_block_hash = 'same-height-fork-90b', target_block_hash = 'same-height-fork-90b'
+         WHERE chain_id = 'same-height-fork' AND phase_name = 'project'",
+    )
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query(
+        "UPDATE chain_heads
+         SET latest_block_number = 90, latest_block_hash = 'ahead-of-head-90'
+         WHERE chain_id = 'ahead-of-head'",
+    )
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET current_block_number = 100, current_block_hash = 'ahead-of-head-100',
+             target_block_number = 100, target_block_hash = 'ahead-of-head-100'
+         WHERE chain_id = 'ahead-of-head' AND phase_name = 'project'",
+    )
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query("DELETE FROM chain_heads WHERE chain_id IN ('no-head-row', 'unobserved')")
+        .execute(scratch.pool())
+        .await?;
+
+    let cancellation = CancellationToken::new();
+    let feed = RunnerMetricsFeed::default();
+    feed.seed_chain("configured-without-rows");
+    feed.seed_chain("served");
+    let address = phase_runner::metrics::start(
+        "127.0.0.1:0".parse()?,
+        scratch.pool().clone(),
+        cancellation.clone(),
+        900,
+        RunnerLoopHeartbeat::default(),
+        RunnerPhaseProgress::default(),
+        feed.clone(),
+    )
+    .await?;
+    let first_refresh_tick = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let response = tokio::task::spawn_blocking(move || scrape(address))
+        .await
+        .context("phase metrics scrape task panicked")??;
+    let body = parse_http_scrape(&response)?;
+
+    // Observed head 104, stored head 100, publication 90 unless a case changes it.
+    for (chain, lag, publication) in [
+        ("served", 14.0, 90.0),
+        ("running", 14.0, 90.0),
+        ("same-height-fork", -1.0, -1.0),
+        ("ahead-of-head", -1.0, -1.0),
+        ("no-head-row", -1.0, -1.0),
+        ("orphaned", -1.0, -1.0),
+        ("older-hash", -1.0, -1.0),
+        ("failed", -1.0, -1.0),
+        ("published-head", 10.0, 90.0),
+        ("ingest-ahead", 10.0, 90.0),
+        ("unobserved", -1.0, -1.0),
+        ("configured-without-rows", -1.0, -1.0),
+    ] {
+        let label = format!("chain=\"{chain}\"");
+        let labels = [label.as_str()];
+        assert_eq!(
+            sample(body, "phase_runner_served_lag_blocks", &labels)?,
+            lag,
+            "served lag for {chain}"
+        );
+        assert_eq!(
+            sample(body, "phase_runner_served_publication_block", &labels)?,
+            publication,
+            "served publication for {chain}"
+        );
+    }
+
+    // A committed batch refreshes the gauges well before the five-second refresh tick.
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET current_block_number = 100, current_block_hash = 'served-100',
+             target_block_number = 100, target_block_hash = 'served-100'
+         WHERE chain_id = 'served' AND phase_name = 'project'",
+    )
+    .execute(scratch.pool())
+    .await?;
+    feed.batch_committed();
+    let deadline = first_refresh_tick - std::time::Duration::from_millis(500);
+    loop {
+        let response = tokio::task::spawn_blocking(move || scrape(address))
+            .await
+            .context("phase metrics scrape task panicked")??;
+        let body = parse_http_scrape(&response)?;
+        let labels = ["chain=\"served\""];
+        if sample(body, "phase_runner_served_publication_block", &labels)? == 100.0 {
+            assert_eq!(
+                sample(body, "phase_runner_served_lag_blocks", &labels)?,
+                4.0
+            );
+            break;
+        }
+        ensure!(
+            std::time::Instant::now() < deadline,
+            "a committed batch must refresh the served-lag gauges before the next refresh tick"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    // A chain whose Project row disappears while its Live row remains reads -1.
+    sqlx::query(
+        "DELETE FROM chain_phase_state WHERE chain_id = 'served' AND phase_name = 'project'",
+    )
+    .execute(scratch.pool())
+    .await?;
+    feed.batch_committed();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    loop {
+        let response = tokio::task::spawn_blocking(move || scrape(address))
+            .await
+            .context("phase metrics scrape task panicked")??;
+        let body = parse_http_scrape(&response)?;
+        let labels = ["chain=\"served\""];
+        if sample(body, "phase_runner_served_publication_block", &labels)? == -1.0 {
+            assert_eq!(
+                sample(body, "phase_runner_served_lag_blocks", &labels)?,
+                -1.0
+            );
+            break;
+        }
+        ensure!(
+            std::time::Instant::now() < deadline,
+            "a chain that lost its Project row must stop reporting its old publication"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    cancellation.cancel();
+    tokio::task::yield_now().await;
+    scratch.cleanup().await
+}
+
+/// Chain head and Project at block 90; the latest Live batch observed block 104.
+async fn seed_served_lag_state(pool: &sqlx::PgPool, chain: &str) -> Result<()> {
+    for block in [90_i64, 100] {
+        sqlx::query(
+            "INSERT INTO chain_lineage (
+                 chain_id, block_hash, block_number, block_timestamp, canonicality_state
+             ) VALUES ($1, $2, $3, now(), 'canonical')",
+        )
+        .bind(chain)
+        .bind(format!("{chain}-{block}"))
+        .bind(block)
+        .execute(pool)
+        .await?;
+    }
+    sqlx::query(
+        "INSERT INTO chain_heads (chain_id, latest_block_hash, latest_block_number)
+         VALUES ($1, $1 || '-100', 100)",
+    )
+    .bind(chain)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET phase_status = 'completed',
+             current_block_number = 90,
+             current_block_hash = $1 || '-90',
+             target_block_number = 90,
+             target_block_hash = $1 || '-90',
+             input_content_hash = $2,
+             started_at = now() - interval '2 minutes',
+             finished_at = now() - interval '1 minute'
+         WHERE chain_id = $1 AND phase_name = 'project'",
+    )
+    .bind(chain)
+    .bind(phase_runner::INTERPRETER_CONTENT_HASH)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET phase_status = 'running',
+             current_block_number = 100,
+             current_block_hash = $1 || '-100',
+             target_block_number = 104,
+             target_block_hash = $1 || '-104',
+             input_content_hash = $2,
+             started_at = now() - interval '2 minutes'
+         WHERE chain_id = $1 AND phase_name = 'live'",
+    )
+    .bind(chain)
+    .bind(phase_runner::INTERPRETER_CONTENT_HASH)
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 async fn seed_metric_state(pool: &sqlx::PgPool, chain: &str) -> Result<()> {

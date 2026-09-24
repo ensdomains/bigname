@@ -84,7 +84,7 @@ async fn main() -> Result<()> {
                     manifest_profile,
                 )
                 .await?;
-                let (loop_heartbeat, phase_progress) = start_metrics(
+                let (loop_heartbeat, phase_progress, metrics_feed) = start_metrics(
                     metrics_bind_addr,
                     &database,
                     &cancellation,
@@ -124,7 +124,8 @@ async fn main() -> Result<()> {
                         runtime.timing.clone(),
                     )?
                     .with_loop_heartbeat(loop_heartbeat)
-                    .with_phase_progress(phase_progress),
+                    .with_phase_progress(phase_progress)
+                    .with_metrics_feed(metrics_feed),
                 ))
             };
             let Some(runner) =
@@ -201,7 +202,7 @@ async fn main() -> Result<()> {
             }
             let startup = async {
                 validate_redo_attestation_chains(&watch_set_coverage_attestations, &chains)?;
-                let (loop_heartbeat, phase_progress) = start_metrics(
+                let (loop_heartbeat, phase_progress, metrics_feed) = start_metrics(
                     metrics_bind_addr,
                     &database,
                     &cancellation,
@@ -249,7 +250,8 @@ async fn main() -> Result<()> {
                     )?
                     .with_watch_set_coverage_attestations(watch_set_coverage_attestations)
                     .with_loop_heartbeat(loop_heartbeat)
-                    .with_phase_progress(phase_progress),
+                    .with_phase_progress(phase_progress)
+                    .with_metrics_feed(metrics_feed),
                 )
             };
             let Some(runner) =
@@ -309,6 +311,7 @@ async fn start_metrics<'a>(
 ) -> Result<(
     phase_runner::metrics::RunnerLoopHeartbeat,
     phase_runner::RunnerPhaseProgress,
+    phase_runner::metrics::RunnerMetricsFeed,
 )> {
     let loop_heartbeat = phase_runner::metrics::RunnerLoopHeartbeat::default();
     let phase_progress = phase_runner::RunnerPhaseProgress::new(Duration::from_secs(
@@ -316,11 +319,13 @@ async fn start_metrics<'a>(
             .try_into()
             .expect("validated threshold"),
     ));
+    let metrics_feed = phase_runner::metrics::RunnerMetricsFeed::default();
     for chain_id in chain_ids {
         if seed_loop_heartbeats {
             loop_heartbeat.record_progress(chain_id);
         }
         phase_progress.seed_chain(chain_id);
+        metrics_feed.seed_chain(chain_id);
     }
     let bound_addr = phase_runner::metrics::start(
         bind_addr,
@@ -329,6 +334,7 @@ async fn start_metrics<'a>(
         heartbeat_stale_after_secs,
         loop_heartbeat.clone(),
         phase_progress.clone(),
+        metrics_feed.clone(),
     )
     .await?;
     tracing::info!(
@@ -339,7 +345,7 @@ async fn start_metrics<'a>(
         interpreter_content_hash = phase_runner::INTERPRETER_CONTENT_HASH,
         "phase-runner metrics listener started"
     );
-    Ok((loop_heartbeat, phase_progress))
+    Ok((loop_heartbeat, phase_progress, metrics_feed))
 }
 
 fn require_clean_supervisor_exit(report: SupervisorReport) -> Result<()> {
