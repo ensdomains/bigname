@@ -8,7 +8,7 @@ use std::{
 
 use anyhow::{Context, Result, ensure};
 use phase_runner::RunnerPhaseProgress;
-use phase_runner::metrics::RunnerLoopHeartbeat;
+use phase_runner::metrics::{RunnerLoopHeartbeat, RunnerMetricsFeed};
 use phase_runner::state::PhaseStore;
 use tokio_util::sync::CancellationToken;
 
@@ -35,6 +35,7 @@ async fn endpoint_exports_failed_phase_and_stale_heartbeat_signals() -> Result<(
         900,
         loop_heartbeat,
         phase_progress,
+        RunnerMetricsFeed::default(),
     )
     .await?;
     let response = tokio::task::spawn_blocking(move || scrape(address))
@@ -179,6 +180,158 @@ async fn endpoint_exports_failed_phase_and_stale_heartbeat_signals() -> Result<(
     cancellation.cancel();
     tokio::task::yield_now().await;
     scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn endpoint_exports_served_lag_against_the_readable_project_publication() -> Result<()> {
+    let scratch = ScratchDatabase::create("phase_runner_served_lag").await?;
+    let store = PhaseStore::new(scratch.pool().clone());
+    for chain in ["served", "orphaned", "published-head", "unobserved"] {
+        store.initialize_chain(chain).await?;
+        seed_served_lag_state(scratch.pool(), chain).await?;
+    }
+    sqlx::query(
+        "UPDATE chain_lineage SET canonicality_state = 'orphaned'
+         WHERE chain_id = 'orphaned' AND block_number = 90",
+    )
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query(
+        "UPDATE chain_phase_state SET target_block_number = NULL, target_block_hash = NULL
+         WHERE chain_id IN ('published-head', 'unobserved') AND phase_name = 'live'",
+    )
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query("DELETE FROM chain_heads WHERE chain_id = 'unobserved'")
+        .execute(scratch.pool())
+        .await?;
+
+    let cancellation = CancellationToken::new();
+    let feed = RunnerMetricsFeed::default();
+    let address = phase_runner::metrics::start(
+        "127.0.0.1:0".parse()?,
+        scratch.pool().clone(),
+        cancellation.clone(),
+        900,
+        RunnerLoopHeartbeat::default(),
+        RunnerPhaseProgress::default(),
+        feed.clone(),
+    )
+    .await?;
+    let response = tokio::task::spawn_blocking(move || scrape(address))
+        .await
+        .context("phase metrics scrape task panicked")??;
+    let body = parse_http_scrape(&response)?;
+
+    for (chain, lag, publication) in [
+        ("served", 14.0, 90.0),
+        ("orphaned", -1.0, -1.0),
+        ("published-head", 10.0, 90.0),
+        ("unobserved", -1.0, 90.0),
+    ] {
+        let label = format!("chain=\"{chain}\"");
+        let labels = [label.as_str()];
+        assert_eq!(
+            sample(body, "phase_runner_served_lag_blocks", &labels)?,
+            lag,
+            "served lag for {chain}"
+        );
+        assert_eq!(
+            sample(body, "phase_runner_served_publication_block", &labels)?,
+            publication,
+            "served publication for {chain}"
+        );
+    }
+
+    // A committed batch refreshes the gauges well before the five-second refresh tick.
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET current_block_number = 100, current_block_hash = 'served-100',
+             target_block_number = 100, target_block_hash = 'served-100'
+         WHERE chain_id = 'served' AND phase_name = 'project'",
+    )
+    .execute(scratch.pool())
+    .await?;
+    feed.batch_committed();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    loop {
+        let response = tokio::task::spawn_blocking(move || scrape(address))
+            .await
+            .context("phase metrics scrape task panicked")??;
+        let body = parse_http_scrape(&response)?;
+        let labels = ["chain=\"served\""];
+        if sample(body, "phase_runner_served_publication_block", &labels)? == 100.0 {
+            assert_eq!(
+                sample(body, "phase_runner_served_lag_blocks", &labels)?,
+                4.0
+            );
+            break;
+        }
+        ensure!(
+            std::time::Instant::now() < deadline,
+            "a committed batch must refresh the served-lag gauges before the next refresh tick"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    cancellation.cancel();
+    tokio::task::yield_now().await;
+    scratch.cleanup().await
+}
+
+/// Chain head and Project at block 90; the latest Live batch observed block 104.
+async fn seed_served_lag_state(pool: &sqlx::PgPool, chain: &str) -> Result<()> {
+    for block in [90_i64, 100] {
+        sqlx::query(
+            "INSERT INTO chain_lineage (
+                 chain_id, block_hash, block_number, block_timestamp, canonicality_state
+             ) VALUES ($1, $2, $3, now(), 'canonical')",
+        )
+        .bind(chain)
+        .bind(format!("{chain}-{block}"))
+        .bind(block)
+        .execute(pool)
+        .await?;
+    }
+    sqlx::query(
+        "INSERT INTO chain_heads (chain_id, latest_block_hash, latest_block_number)
+         VALUES ($1, $1 || '-100', 100)",
+    )
+    .bind(chain)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET phase_status = 'completed',
+             current_block_number = 90,
+             current_block_hash = $1 || '-90',
+             target_block_number = 90,
+             target_block_hash = $1 || '-90',
+             input_content_hash = $2,
+             started_at = now() - interval '2 minutes',
+             finished_at = now() - interval '1 minute'
+         WHERE chain_id = $1 AND phase_name = 'project'",
+    )
+    .bind(chain)
+    .bind(phase_runner::INTERPRETER_CONTENT_HASH)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET phase_status = 'running',
+             current_block_number = 100,
+             current_block_hash = $1 || '-100',
+             target_block_number = 104,
+             target_block_hash = $1 || '-104',
+             input_content_hash = $2,
+             started_at = now() - interval '2 minutes'
+         WHERE chain_id = $1 AND phase_name = 'live'",
+    )
+    .bind(chain)
+    .bind(phase_runner::INTERPRETER_CONTENT_HASH)
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 async fn seed_metric_state(pool: &sqlx::PgPool, chain: &str) -> Result<()> {

@@ -164,6 +164,50 @@ is `bigname-phase-runner`, so a later import updates the same dashboard.
 | Phase cursor non-progress | Committed [work-bearing batches](../glossary.md#work-bearing-batch) confirmed at the next resume to have left the [durable composite cursor](../glossary.md#durable-composite-cursor) unchanged, and the age of that sequence. Normal, redo, and recompute-flags work remain separate. |
 | Exporter health | Whether Prometheus can scrape the runner and whether the latest read of PostgreSQL state succeeded. |
 
+## Served lag
+
+Two gauges measure how far the data the API serves trails the chain. They have
+no dashboard panel or paging rule yet; those arrive with the ops dashboards
+(TYR-34).
+
+- `phase_runner_served_publication_block{chain}` is the block of the Project
+  publication the API can serve: the Project row is `completed` or `running`,
+  was built with this binary's
+  [interpreter content hash](../glossary.md#interpreter-content-hash), and its
+  block is still canonical, safe or finalized. This is the same test the API
+  applies to its [served head](../glossary.md#served-head), without the API's
+  one-block tolerance. `-1` means nothing is servable, for example after a
+  reorg orphaned the published block or before Project has rebuilt for a new
+  interpreter content hash.
+- `phase_runner_served_lag_blocks{chain}` is the newest observed
+  execution-client head minus that publication block. A non-zero value means
+  the API is serving data that many blocks behind the newest block the runner
+  has seen. `-1` means either side is unavailable. TYR-36 requires this gauge
+  to return to zero every normal block.
+
+The observed head is the head the latest Live batch read from the execution
+client, which the runner stores as the Live phase's target. When the published
+chain head is newer, for example while Ingest catches up after a restart and
+before Live runs again, the published chain head is used instead. The metrics
+code never asks the execution client itself. Live and Project run one after the
+other, so the observed head does not move while a Project batch runs: a slow
+Project batch reads zero at its commit and shows its real lag once the next
+Live batch has read the head. A lag that jumps at every Live batch and falls to
+zero at every Project commit means Project takes longer than a block.
+
+Both gauges are refreshed with the others every 5 seconds and also right after
+every Ingest, Live and Project batch commit, so they are exact at block
+boundaries. The 5-second refresh alone is slower than a Base block; on Base the
+refresh after each commit is what keeps the value current.
+
+`phase_runner_head_lag_blocks` keeps its meaning: a phase's own target minus
+its own progress. A Project batch's target is the head it started with, so that
+gauge is not a freshness measure; use the served lag instead.
+
+The build identity is already exported as
+`build_info{build_sha, interpreter_content_hash}`, with the value `1` for the
+running binary.
+
 ## Alerts
 
 | Alert | Threshold | Plain-language meaning |
@@ -292,7 +336,7 @@ Keep diagnosis read-only until the failure is understood:
 
 ```sh
 curl -fsS http://127.0.0.1:9465/metrics | \
-  grep -E 'phase_runner_(phase_status|heartbeat_age_seconds|loop_heartbeat_age_seconds|head_lag_blocks|phase_batches_since_cursor_advance|phase_cursor_stall_age_seconds)'
+  grep -E 'phase_runner_(phase_status|heartbeat_age_seconds|loop_heartbeat_age_seconds|head_lag_blocks|served_lag_blocks|served_publication_block|phase_batches_since_cursor_advance|phase_cursor_stall_age_seconds)'
 
 docker compose --env-file .env.server \
   -f docker-compose.server.yml \

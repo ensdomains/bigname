@@ -34,6 +34,11 @@ fn registers_the_pipeline_metric_families_with_build_identity() -> Result<()> {
     let metrics = PipelineMetrics::new(900, loop_heartbeat, progress)?;
     metrics.apply_phase_progress();
     metrics.apply_rows(&[metric_row("interpret")])?;
+    metrics.served_lag.apply(&[served_lag::ServedLagRow {
+        chain_id: "ethereum-mainnet".to_owned(),
+        observed_head_block_number: Some(104),
+        publication_block_number: Some(100),
+    }]);
 
     let scrape = metrics.registry.encode()?;
     for metric_type in [
@@ -48,9 +53,15 @@ fn registers_the_pipeline_metric_families_with_build_identity() -> Result<()> {
         "# TYPE phase_runner_reinterpretation_required gauge",
         "# TYPE phase_runner_phase_batches_since_cursor_advance gauge",
         "# TYPE phase_runner_phase_cursor_stall_age_seconds gauge",
+        "# TYPE phase_runner_served_lag_blocks gauge",
+        "# TYPE phase_runner_served_publication_block gauge",
     ] {
         assert!(scrape.contains(metric_type), "missing {metric_type}");
     }
+    assert!(scrape.contains("phase_runner_served_lag_blocks{chain=\"ethereum-mainnet\"} 4"));
+    assert!(
+        scrape.contains("phase_runner_served_publication_block{chain=\"ethereum-mainnet\"} 100")
+    );
     assert!(scrape.contains("build_sha="));
     assert!(scrape.contains("interpreter_content_hash="));
     Ok(())
@@ -140,6 +151,15 @@ fn updates_failure_freshness_lag_verification_and_redo_signals() -> Result<()> {
         1
     );
     Ok(())
+}
+
+#[test]
+fn served_lag_is_unavailable_without_both_sides() {
+    assert_eq!(served_lag::served_lag(Some(104), Some(100)), 4);
+    assert_eq!(served_lag::served_lag(Some(100), Some(100)), 0);
+    assert_eq!(served_lag::served_lag(None, Some(100)), -1);
+    assert_eq!(served_lag::served_lag(Some(104), None), -1);
+    assert_eq!(served_lag::served_lag(None, None), -1);
 }
 
 #[test]
