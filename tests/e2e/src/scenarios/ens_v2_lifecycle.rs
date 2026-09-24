@@ -648,8 +648,10 @@ async fn root_apex_attach_and_root_scope_roles() -> Result<()> {
 
 /// Rows 7, 8, and 2: reserved labels promote in place preserving expiry, a
 /// non-admitted root-role holder registers with registry-only provenance and
-/// gated coverage, and ERC1155 single and batch sales transfer token control
-/// without regenerating the token.
+/// is served like a registrar registration, a subregistry admitted by
+/// discovery serves its own direct registration the same way, and ERC1155
+/// single and batch sales transfer token control without regenerating the
+/// token.
 #[tokio::test]
 async fn reserved_labels_foreign_registrar_and_token_sale() -> Result<()> {
     let anvil = Anvil::spawn_ethereum_sepolia().await?;
@@ -714,6 +716,42 @@ async fn reserved_labels_foreign_registrar_and_token_sale() -> Result<()> {
     .await?;
     anyhow::ensure!(foreign_receipt.status_ok, "foreign registration reverted");
 
+    // A registry reached from ETHRegistry through a subregistry edge is
+    // admitted by discovery. The child names its parent so both sides agree
+    // on `trusted.eth`, and its owner then registers a label directly, with
+    // no registrar involved.
+    let child = ens_v2::deploy_child_registry(&rpc, &repo_root(), &deployment).await?;
+    ens_v2::register_eth_name(
+        &rpc,
+        &deployment,
+        ens_v2::RegisterEthName {
+            from: alice,
+            label: "trusted",
+            owner: alice,
+            duration_secs: YEAR,
+            subregistry: child.address,
+            resolver: Address::ZERO,
+        },
+    )
+    .await?;
+    ens_v2::set_parent(
+        &rpc,
+        child.address,
+        deployment.deployer,
+        deployment.eth_registry.address,
+        "trusted",
+    )
+    .await?;
+    ens_v2::register_in_registry(
+        &rpc,
+        child.address,
+        deployment.deployer,
+        "leaf",
+        bob,
+        u64::try_from(rpc.block_timestamp().await?)? + YEAR,
+    )
+    .await?;
+
     // Row 2: a registrar-registered name changes hands by ERC1155 transfer.
     let sale = ens_v2::register_eth_name(
         &rpc,
@@ -775,6 +813,10 @@ async fn reserved_labels_foreign_registrar_and_token_sale() -> Result<()> {
            WHERE after_state->>'label' = 'foreign' \
              AND event_kind = 'RegistrationGranted' \
              AND canonicality_state = 'canonical') \
+         AND EXISTS (SELECT 1 FROM normalized_events \
+           WHERE after_state->>'label' = 'leaf' \
+             AND event_kind = 'RegistrationGranted' \
+             AND canonicality_state = 'canonical') \
          AND (SELECT count(*) FROM normalized_events \
            WHERE event_kind = 'TokenControlTransferred' \
              AND transaction_hash = '{sale_tx}' \
@@ -827,8 +869,8 @@ async fn reserved_labels_foreign_registrar_and_token_sale() -> Result<()> {
     );
     assert_eq!(promoted["registrant"], format!("{bob:#x}"));
 
-    // Row 8 pins: registry-only provenance, no registrar fragment, coverage
-    // stays gated.
+    // Row 8 pins: registry-only provenance and no registrar fragment. The
+    // registration in the admitted ETHRegistry is served on its own.
     let foreign_families: Vec<String> = sqlx::query_scalar(
         "SELECT DISTINCT source_family FROM normalized_events \
          WHERE transaction_hash = $1 AND canonicality_state = 'canonical'",
@@ -849,7 +891,49 @@ async fn reserved_labels_foreign_registrar_and_token_sale() -> Result<()> {
     assert_eq!(
         pointer(&foreign_body, "/coverage/status"),
         "projected",
-        "foreign registration remains a projected unsupported surface: {foreign_body}"
+        "foreign registration remains projected: {foreign_body}"
+    );
+    assert_eq!(
+        pointer(&foreign_body, "/support_status"),
+        "supported",
+        "a registration in the admitted ETHRegistry needs no registrar event: {foreign_body}"
+    );
+    assert_eq!(
+        pointer(&foreign_body, "/coverage/unsupported_reason"),
+        Value::Null,
+        "{foreign_body}"
+    );
+    assert_eq!(
+        pointer(&foreign_body, "/declared_state/registration/registrant"),
+        format!("{carol:#x}"),
+        "{foreign_body}"
+    );
+
+    let leaf_families: Vec<String> = sqlx::query_scalar(
+        "SELECT DISTINCT source_family FROM normalized_events \
+         WHERE after_state->>'label' = 'leaf' AND canonicality_state = 'canonical'",
+    )
+    .fetch_all(&run.db.pool)
+    .await?;
+    assert_eq!(
+        leaf_families,
+        vec!["ens_v2_registry_l1".to_owned()],
+        "the subregistry registration derives registry-only"
+    );
+    let (status, leaf_body) = run
+        .api
+        .get_json("/v1/names/ens/leaf.trusted.eth?chain=ethereum-sepolia")
+        .await?;
+    assert_eq!(status, 200, "leaf.trusted.eth lookup failed: {leaf_body}");
+    assert_eq!(
+        pointer(&leaf_body, "/support_status"),
+        "supported",
+        "a registration in a discovered registry needs no registrar event: {leaf_body}"
+    );
+    assert_eq!(
+        pointer(&leaf_body, "/declared_state/registration/registrant"),
+        format!("{bob:#x}"),
+        "{leaf_body}"
     );
 
     // Row 2 pins the canonical token-control event. The accompanying role
