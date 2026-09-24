@@ -28,7 +28,7 @@ pub(super) async fn stage(
     target_block: i64,
 ) -> Result<()> {
     sqlx::query(
-        r#"
+        r#"/* project:builders.resolver.link_summary.create_resolver_links */
         CREATE TEMP TABLE project_resolver_links ON COMMIT DROP AS
         SELECT DISTINCT ON (chain_id, lower(after_state ->> 'resolver'),
                             lower(after_state ->> 'node')) event.*
@@ -45,7 +45,7 @@ pub(super) async fn stage(
     .await
     .map_err(|error| ProjectError::database("failed to select resolver links", error))?;
     let summary = format!(
-        r#"
+        r#"/* project:builders.resolver.link_summary.create_resolver_link_summary */
         CREATE TEMP TABLE project_resolver_link_summary ON COMMIT DROP AS
         WITH active_links AS (
             SELECT lower(link.after_state ->> 'resolver') AS resolver_address,

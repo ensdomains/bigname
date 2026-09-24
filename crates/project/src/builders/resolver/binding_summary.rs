@@ -13,7 +13,7 @@ pub(super) async fn stage(
     // [source family](../../../../../docs/glossary.md#source-family) of the event that selected the
     // pointer.
     sqlx::query(
-        r#"
+        r#"/* project:builders.resolver.binding_summary */
         CREATE TEMP TABLE project_resolver_binding_summary ON COMMIT DROP AS
         WITH retained_names AS (
             SELECT current.logical_name_id,

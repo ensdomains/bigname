@@ -49,12 +49,12 @@ impl Engine {
         let mut transaction = self.pool.begin().await.map_err(|error| {
             ProjectError::database("failed to begin project transaction", error)
         })?;
-        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
-            .execute(&mut *transaction)
-            .await
-            .map_err(|error| {
-                ProjectError::database("failed to configure project snapshot", error)
-            })?;
+        sqlx::query(
+            "/* project:engine.isolation */ SET TRANSACTION ISOLATION LEVEL REPEATABLE READ",
+        )
+        .execute(&mut *transaction)
+        .await
+        .map_err(|error| ProjectError::database("failed to configure project snapshot", error))?;
         revalidate_target(&mut transaction, &request.chain_id, &target).await?;
 
         let row_count = derive(&mut transaction, &request, &target).await?;
@@ -163,7 +163,7 @@ fn validate_request(request: &BatchRequest) -> Result<()> {
 
 async fn load_marker(pool: &PgPool, chain_id: &str, number: i64) -> Result<Marker> {
     let rows: Vec<String> = sqlx::query_scalar(
-        "SELECT block_hash FROM chain_lineage
+        "/* project:engine.load_marker */ SELECT block_hash FROM chain_lineage
          WHERE chain_id = $1 AND block_number = $2
            AND canonicality_state IN ('canonical', 'safe', 'finalized')",
     )
@@ -212,7 +212,7 @@ async fn revalidate_target(
     target: &Marker,
 ) -> Result<()> {
     let live: Option<String> = sqlx::query_scalar(
-        "SELECT block_hash FROM chain_lineage
+        "/* project:engine.revalidate_target */ SELECT block_hash FROM chain_lineage
          WHERE chain_id = $1 AND block_number = $2 AND block_hash = $3
            AND canonicality_state IN ('canonical', 'safe', 'finalized')
          FOR SHARE",

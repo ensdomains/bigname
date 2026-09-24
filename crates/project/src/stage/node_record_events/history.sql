@@ -1,3 +1,4 @@
+/* project:stage.node_record_events.history */
 CREATE TEMP TABLE project_node_record_history ON COMMIT DROP AS
 WITH wanted_nodes AS MATERIALIZED (
     SELECT DISTINCT lower(surface.namehash) AS node

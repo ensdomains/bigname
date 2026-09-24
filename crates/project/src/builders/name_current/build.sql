@@ -1,3 +1,4 @@
+/* project:builders.name_current.build */
 
         INSERT INTO project_stage_name_current (
             logical_name_id, namespace, raw_name, namehash,

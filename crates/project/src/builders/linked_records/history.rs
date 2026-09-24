@@ -8,7 +8,7 @@ use crate::{ProjectError, Result};
 /// values written before the link; later writes on an abandoned record stay unrelated.
 pub(super) async fn build(transaction: &mut Transaction<'_, Postgres>) -> Result<()> {
     sqlx::query(
-        r#"CREATE TEMP TABLE project_linked_record_history_attribution ON COMMIT DROP AS
+        r#"/* project:builders.linked_records.history */ CREATE TEMP TABLE project_linked_record_history_attribution ON COMMIT DROP AS
         WITH links AS (
             SELECT normalized_event_id, lower(after_state ->> 'resolver') AS resolver_address,
                    lower(after_state ->> 'node') AS node,

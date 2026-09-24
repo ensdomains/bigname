@@ -32,7 +32,7 @@ pub(crate) async fn prepare(
     Ok(())
 }
 
-pub(crate) const SCOPED_NODE_RECORD_EVENT_IDS_SQL: &str = r#"
+pub(crate) const SCOPED_NODE_RECORD_EVENT_IDS_SQL: &str = r#"/* project:stage.node_record_events */
 SELECT record.normalized_event_id
 FROM name_surfaces surface
 JOIN chain_lineage surface_lineage

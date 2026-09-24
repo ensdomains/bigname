@@ -9,29 +9,29 @@ pub(crate) async fn swap(
 ) -> Result<u64> {
     let deletes = if full_rebuild {
         vec![
-            "DELETE FROM address_names_current row USING name_surfaces surface WHERE row.logical_name_id = surface.logical_name_id AND surface.chain_id = $1",
-            "DELETE FROM address_records_current row USING name_surfaces surface WHERE row.logical_name_id = surface.logical_name_id AND surface.chain_id = $1",
-            "DELETE FROM children_current row USING name_surfaces surface WHERE row.parent_logical_name_id = surface.logical_name_id AND surface.chain_id = $1",
-            "DELETE FROM name_current row USING name_surfaces surface WHERE row.logical_name_id = surface.logical_name_id AND surface.chain_id = $1",
-            "DELETE FROM permissions_current row USING resources resource WHERE row.resource_id = resource.resource_id AND resource.chain_id = $1",
-            "DELETE FROM account_permission_state_current WHERE chain_id = $1",
-            "DELETE FROM permissions_current_resource_summary row USING resources resource WHERE row.resource_id = resource.resource_id AND resource.chain_id = $1",
-            "DELETE FROM record_inventory_current row USING resources resource WHERE row.resource_id = resource.resource_id AND resource.chain_id = $1",
-            "DELETE FROM resolver_current WHERE chain_id = $1",
-            "DELETE FROM primary_names_current WHERE claim_provenance ->> 'chain_id' = $1",
+            "/* project:publish.delete_all.address_names_current */ DELETE FROM address_names_current row USING name_surfaces surface WHERE row.logical_name_id = surface.logical_name_id AND surface.chain_id = $1",
+            "/* project:publish.delete_all.address_records_current */ DELETE FROM address_records_current row USING name_surfaces surface WHERE row.logical_name_id = surface.logical_name_id AND surface.chain_id = $1",
+            "/* project:publish.delete_all.children_current */ DELETE FROM children_current row USING name_surfaces surface WHERE row.parent_logical_name_id = surface.logical_name_id AND surface.chain_id = $1",
+            "/* project:publish.delete_all.name_current */ DELETE FROM name_current row USING name_surfaces surface WHERE row.logical_name_id = surface.logical_name_id AND surface.chain_id = $1",
+            "/* project:publish.delete_all.permissions_current */ DELETE FROM permissions_current row USING resources resource WHERE row.resource_id = resource.resource_id AND resource.chain_id = $1",
+            "/* project:publish.delete_all.account_permission_state_current */ DELETE FROM account_permission_state_current WHERE chain_id = $1",
+            "/* project:publish.delete_all.permissions_current_resource_summary */ DELETE FROM permissions_current_resource_summary row USING resources resource WHERE row.resource_id = resource.resource_id AND resource.chain_id = $1",
+            "/* project:publish.delete_all.record_inventory_current */ DELETE FROM record_inventory_current row USING resources resource WHERE row.resource_id = resource.resource_id AND resource.chain_id = $1",
+            "/* project:publish.delete_all.resolver_current */ DELETE FROM resolver_current WHERE chain_id = $1",
+            "/* project:publish.delete_all.primary_names_current */ DELETE FROM primary_names_current WHERE claim_provenance ->> 'chain_id' = $1",
         ]
     } else {
         vec![
-            "DELETE FROM address_names_current row WHERE EXISTS (SELECT 1 FROM project_scope_names scope WHERE scope.logical_name_id = row.logical_name_id) OR EXISTS (SELECT 1 FROM project_scope_resources scope WHERE scope.resource_id = row.resource_id)",
-            "DELETE FROM address_records_current row WHERE EXISTS (SELECT 1 FROM project_scope_names scope WHERE scope.logical_name_id = row.logical_name_id) OR EXISTS (SELECT 1 FROM project_scope_resources scope WHERE scope.resource_id IN (row.resource_id, row.record_resource_id))",
-            "DELETE FROM children_current row WHERE EXISTS (SELECT 1 FROM project_scope_children scope WHERE scope.logical_name_id IN (row.parent_logical_name_id, row.child_logical_name_id))",
-            "DELETE FROM name_current row USING project_scope_names scope WHERE row.logical_name_id = scope.logical_name_id",
-            "DELETE FROM permissions_current row USING project_scope_resources scope WHERE row.resource_id = scope.resource_id",
-            "DELETE FROM account_permission_state_current row USING project_scope_account_permissions scope WHERE row.chain_id = scope.chain_id AND row.authority_kind = scope.authority_kind AND row.authority_contract = scope.authority_contract AND row.owner = scope.owner AND row.subject = scope.subject AND row.relation_kind = scope.relation_kind",
-            "DELETE FROM permissions_current_resource_summary row USING project_scope_resources scope WHERE row.resource_id = scope.resource_id",
-            "DELETE FROM record_inventory_current row USING project_scope_resources scope WHERE row.resource_id = scope.resource_id",
-            "DELETE FROM resolver_current row USING project_scope_resolvers scope WHERE row.chain_id = $1 AND lower(row.resolver_address) = lower(scope.resolver_address)",
-            "DELETE FROM primary_names_current row USING project_scope_primary scope WHERE row.address = scope.address AND row.coin_type = scope.coin_type AND row.namespace = scope.namespace",
+            "/* project:publish.delete.address_names_current */ DELETE FROM address_names_current row WHERE EXISTS (SELECT 1 FROM project_scope_names scope WHERE scope.logical_name_id = row.logical_name_id) OR EXISTS (SELECT 1 FROM project_scope_resources scope WHERE scope.resource_id = row.resource_id)",
+            "/* project:publish.delete.address_records_current */ DELETE FROM address_records_current row WHERE EXISTS (SELECT 1 FROM project_scope_names scope WHERE scope.logical_name_id = row.logical_name_id) OR EXISTS (SELECT 1 FROM project_scope_resources scope WHERE scope.resource_id IN (row.resource_id, row.record_resource_id))",
+            "/* project:publish.delete.children_current */ DELETE FROM children_current row WHERE EXISTS (SELECT 1 FROM project_scope_children scope WHERE scope.logical_name_id IN (row.parent_logical_name_id, row.child_logical_name_id))",
+            "/* project:publish.delete.name_current */ DELETE FROM name_current row USING project_scope_names scope WHERE row.logical_name_id = scope.logical_name_id",
+            "/* project:publish.delete.permissions_current */ DELETE FROM permissions_current row USING project_scope_resources scope WHERE row.resource_id = scope.resource_id",
+            "/* project:publish.delete.account_permission_state_current */ DELETE FROM account_permission_state_current row USING project_scope_account_permissions scope WHERE row.chain_id = scope.chain_id AND row.authority_kind = scope.authority_kind AND row.authority_contract = scope.authority_contract AND row.owner = scope.owner AND row.subject = scope.subject AND row.relation_kind = scope.relation_kind",
+            "/* project:publish.delete.permissions_current_resource_summary */ DELETE FROM permissions_current_resource_summary row USING project_scope_resources scope WHERE row.resource_id = scope.resource_id",
+            "/* project:publish.delete.record_inventory_current */ DELETE FROM record_inventory_current row USING project_scope_resources scope WHERE row.resource_id = scope.resource_id",
+            "/* project:publish.delete.resolver_current */ DELETE FROM resolver_current row USING project_scope_resolvers scope WHERE row.chain_id = $1 AND lower(row.resolver_address) = lower(scope.resolver_address)",
+            "/* project:publish.delete.primary_names_current */ DELETE FROM primary_names_current row USING project_scope_primary scope WHERE row.address = scope.address AND row.coin_type = scope.coin_type AND row.namespace = scope.namespace",
         ]
     };
     for statement in deletes {
@@ -95,8 +95,9 @@ pub(crate) async fn swap(
         } else {
             scoped_predicate
         };
-        let statement =
-            format!("INSERT INTO {table} SELECT * FROM project_stage_{table} WHERE {predicate}");
+        let statement = format!(
+            "/* project:publish.insert.{table} */ INSERT INTO {table} SELECT * FROM project_stage_{table} WHERE {predicate}"
+        );
         inserted = inserted.saturating_add(
             sqlx::query(&statement)
                 .execute(&mut **transaction)

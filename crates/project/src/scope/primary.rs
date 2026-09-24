@@ -4,7 +4,7 @@ use crate::{ProjectError, Result};
 
 pub(super) async fn seed(transaction: &mut Transaction<'_, Postgres>) -> Result<()> {
     sqlx::query(
-        "INSERT INTO project_scope_primary
+        "/* project:scope.primary.insert_scope_primary_from_changed_events */ INSERT INTO project_scope_primary
          SELECT DISTINCT lower(candidate.address), candidate.coin_type, candidate.namespace
          FROM project_changed_events event
          CROSS JOIN LATERAL (
@@ -24,7 +24,7 @@ pub(super) async fn seed(transaction: &mut Transaction<'_, Postgres>) -> Result<
     .map_err(|error| ProjectError::database("failed to derive primary-name scope", error))?;
 
     sqlx::query(
-        "INSERT INTO project_scope_primary
+        "/* project:scope.primary.insert_scope_primary_from_primary_names_current */ INSERT INTO project_scope_primary
          SELECT current.address, current.coin_type, current.namespace
          FROM primary_names_current current
          JOIN project_changed_events event

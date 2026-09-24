@@ -8,7 +8,7 @@ pub(super) async fn build(transaction: &mut Transaction<'_, Postgres>) -> Result
     // `project_resolver_links` (the latest `Linked` per node) is staged by the resolver
     // builder, which also summarizes it on `resolver_current`.
     let selected_records = format!(
-        r#"CREATE TEMP TABLE project_selected_records ON COMMIT DROP AS
+        r#"/* project:builders.linked_records.create_selected_records */ CREATE TEMP TABLE project_selected_records ON COMMIT DROP AS
         SELECT pointer.resource_id,
                pointer.resolver_address,
                CASE WHEN exact.after_state ->> 'resolver_record_id' <> '0'
@@ -34,7 +34,7 @@ pub(super) async fn build(transaction: &mut Transaction<'_, Postgres>) -> Result
         // selected only through the latest non-zero pointer (`project_record_pointers`), but a
         // node-keyed write stays attributed to the registration that selected the resolver it was
         // written to, so history keeps listing it after a later switch or clear.
-        r#"CREATE TEMP TABLE project_record_pointer_history ON COMMIT DROP AS
+        r#"/* project:builders.linked_records.create_record_pointer_history */ CREATE TEMP TABLE project_record_pointer_history ON COMMIT DROP AS
         WITH ordered_pointers AS (
             SELECT event.resource_id,
                    event.logical_name_id,
@@ -76,11 +76,11 @@ pub(super) async fn build(transaction: &mut Transaction<'_, Postgres>) -> Result
           AND resolver_address NOT IN (
               '0x0000000000000000000000000000000000000000', ''
           )"#,
-        r#"CREATE INDEX ON project_record_pointer_history (resource_id)"#,
+        r#"/* project:builders.linked_records.index_record_pointer_history_resource_id */ CREATE INDEX ON project_record_pointer_history (resource_id)"#,
         // The resource's current pointer, clears included. `project_record_pointers` drops a
         // selected clear so no value is served through it; the cleared row is still the anchor the
         // history-only inventory row is published on.
-        r#"CREATE TEMP TABLE project_record_pointer_latest ON COMMIT DROP AS
+        r#"/* project:builders.linked_records.create_record_pointer_latest */ CREATE TEMP TABLE project_record_pointer_latest ON COMMIT DROP AS
         SELECT DISTINCT ON (event.resource_id)
                event.resource_id,
                event.logical_name_id,
@@ -102,14 +102,14 @@ pub(super) async fn build(transaction: &mut Transaction<'_, Postgres>) -> Result
                  event.transaction_index DESC NULLS LAST,
                  event.log_index DESC NULLS LAST,
                  event.normalized_event_id DESC"#,
-        r#"CREATE TEMP TABLE project_record_pointers ON COMMIT DROP AS
+        r#"/* project:builders.linked_records.create_record_pointers */ CREATE TEMP TABLE project_record_pointers ON COMMIT DROP AS
         SELECT * FROM project_record_pointer_latest
         WHERE resolver_address IS NOT NULL
           AND resolver_address NOT IN (
               '0x0000000000000000000000000000000000000000', ''
           )"#,
         selected_records.as_str(),
-        r#"CREATE TEMP TABLE project_linked_record_events ON COMMIT DROP AS
+        r#"/* project:builders.linked_records.create_linked_record_events */ CREATE TEMP TABLE project_linked_record_events ON COMMIT DROP AS
         SELECT selected.resource_id, event.normalized_event_id
         FROM project_selected_records selected
         JOIN project_events event
@@ -123,7 +123,7 @@ pub(super) async fn build(transaction: &mut Transaction<'_, Postgres>) -> Result
         CROSS JOIN LATERAL (VALUES (selected.exact_link_event_id),
                                   (selected.default_link_event_id)) link(event_id)
         WHERE link.event_id IS NOT NULL"#,
-        r#"CREATE TEMP TABLE project_linked_record_changes ON COMMIT DROP AS
+        r#"/* project:builders.linked_records.create_linked_record_changes */ CREATE TEMP TABLE project_linked_record_changes ON COMMIT DROP AS
         SELECT attributed.resource_id,
                jsonb_agg(event.normalized_event_id ORDER BY event.normalized_event_id)
                    FILTER (WHERE event.event_kind = 'ResolverRecordLinked') AS event_ids,

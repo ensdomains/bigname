@@ -13,7 +13,7 @@ pub(super) async fn include_time_boundaries(
     };
 
     let positions_present = sqlx::query_scalar(
-        r#"
+        r#"/* project:scope.wrapper.include_time_boundaries.select_chain_lineage */
         SELECT EXISTS (
             SELECT 1
             FROM chain_lineage prior
@@ -41,7 +41,7 @@ pub(super) async fn include_time_boundaries(
     require_positions(positions_present, previous, target)?;
 
     sqlx::query(
-        r#"
+        r#"/* project:scope.wrapper.include_time_boundaries.insert_scope_permission_effect_resources */
         WITH positions AS (
             SELECT extract(epoch FROM prior.block_timestamp) AS prior_seconds,
                    extract(epoch FROM target.block_timestamp) AS target_seconds
@@ -119,7 +119,7 @@ async fn include_all(
     target: &Marker,
 ) -> Result<()> {
     sqlx::query(
-        r#"
+        r#"/* project:scope.wrapper.include_all */
         INSERT INTO project_scope_permission_effect_resources
         SELECT DISTINCT event.resource_id
         FROM normalized_events event
@@ -153,7 +153,7 @@ pub(super) async fn include_operator_holder_resources(
     chain_id: &str,
 ) -> Result<()> {
     sqlx::query(
-        r#"
+        r#"/* project:scope.wrapper.include_operator_holder_resources */
         INSERT INTO project_scope_permission_effect_resources
         SELECT DISTINCT holder.resource_id
         FROM project_scope_account_permissions scope
@@ -182,7 +182,7 @@ pub(super) async fn include_effect_resources(
     target_block: i64,
 ) -> Result<()> {
     sqlx::query(
-        "INSERT INTO project_scope_resources
+        "/* project:scope.wrapper.include_effect_resources.insert_scope_resources */ INSERT INTO project_scope_resources
          SELECT resource_id FROM project_scope_permission_effect_resources
          ON CONFLICT DO NOTHING",
     )
@@ -192,7 +192,7 @@ pub(super) async fn include_effect_resources(
         ProjectError::database("failed to include permission-effect resources", error)
     })?;
     sqlx::query(
-        r#"
+        r#"/* project:scope.wrapper.include_effect_resources.insert_scope_children */
         INSERT INTO project_scope_children
         SELECT DISTINCT event.logical_name_id
         FROM project_scope_permission_effect_resources scope

@@ -31,8 +31,8 @@ pub(super) async fn prepare(transaction: &mut Transaction<'_, Postgres>) -> Resu
 async fn registry_only_handoffs(transaction: &mut Transaction<'_, Postgres>) -> Result<()> {
     for statement in [
         REGISTRY_ONLY_HANDOFFS,
-        "CREATE INDEX ON project_registry_only_handoffs (surface_binding_id)",
-        "CREATE INDEX ON project_registry_only_handoffs (logical_name_id)",
+        "/* project:builders.name_authority.stage.registry_only_handoffs.index_registry_only_handoffs_surface_binding_id */ CREATE INDEX ON project_registry_only_handoffs (surface_binding_id)",
+        "/* project:builders.name_authority.stage.registry_only_handoffs.index_registry_only_handoffs_logical_name_id */ CREATE INDEX ON project_registry_only_handoffs (logical_name_id)",
     ] {
         sqlx::query(statement)
             .execute(&mut **transaction)
@@ -44,7 +44,7 @@ async fn registry_only_handoffs(transaction: &mut Transaction<'_, Postgres>) -> 
     Ok(())
 }
 
-const REGISTRY_ONLY_HANDOFFS: &str = "
+const REGISTRY_ONLY_HANDOFFS: &str = "/* project:builders.name_authority.stage.registry_only_handoffs.create_registry_only_handoffs */
     CREATE TEMP TABLE project_registry_only_handoffs ON COMMIT DROP AS
     SELECT binding.logical_name_id, binding.surface_binding_id, binding.authority_arm,
            binding.resource_id, binding.block_number,
@@ -146,7 +146,7 @@ const REGISTRY_ONLY_HANDOFFS: &str = "
 /// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L264-L265 @ ens_v1@91c966f)
 async fn bind_resource_events(transaction: &mut Transaction<'_, Postgres>) -> Result<()> {
     for statement in [
-        "UPDATE project_events event SET logical_name_id = binding.logical_name_id
+        "/* project:builders.name_authority.stage.bind_resource_events.update_events */ UPDATE project_events event SET logical_name_id = binding.logical_name_id
          FROM project_binding_candidates binding JOIN project_surfaces surface
            ON surface.logical_name_id = binding.logical_name_id
          WHERE event.logical_name_id IS NULL AND event.resource_id = binding.resource_id
@@ -156,7 +156,7 @@ async fn bind_resource_events(transaction: &mut Transaction<'_, Postgres>) -> Re
                'ExpiryChanged', 'TokenControlTransferred'
            )
            AND lower(surface.namehash) = lower(event.after_state ->> 'namehash')",
-        "CREATE TEMP TABLE project_wrapper_linked_events (
+        "/* project:builders.name_authority.stage.bind_resource_events.create_wrapper_linked_events */ CREATE TEMP TABLE project_wrapper_linked_events (
              normalized_event_id bigint PRIMARY KEY
          ) ON COMMIT DROP",
         BIND_WRAPPER_LINKED_EVENTS,
@@ -171,7 +171,8 @@ async fn bind_resource_events(transaction: &mut Transaction<'_, Postgres>) -> Re
     Ok(())
 }
 
-const BIND_WRAPPER_LINKED_EVENTS: &str = "
+const BIND_WRAPPER_LINKED_EVENTS: &str =
+    "/* project:builders.name_authority.stage.bind_wrapper_linked_events */
     WITH named AS (
         UPDATE project_events event SET logical_name_id = wrapper.logical_name_id
         FROM project_events wrapper
@@ -199,7 +200,7 @@ const BIND_WRAPPER_LINKED_EVENTS: &str = "
 
 async fn ownerless_registry(transaction: &mut Transaction<'_, Postgres>) -> Result<()> {
     sqlx::query(
-        "CREATE TEMP TABLE project_latest_registry_owner ON COMMIT DROP AS
+        "/* project:builders.name_authority.stage.ownerless_registry */ CREATE TEMP TABLE project_latest_registry_owner ON COMMIT DROP AS
          SELECT latest.logical_name_id, latest.resource_id, latest.owner_getter,
                 latest.owner_getter_reason
          FROM (
@@ -271,15 +272,15 @@ pub(super) const SELECTED_BINDINGS: [&str; 5] = [
     // Temporary tables are never analyzed automatically, and the builders read every table
     // staged here once per name. Without statistics the planner assumes a handful of rows
     // and joins them by nested loop.
-    "ALTER TABLE project_name_authority ADD PRIMARY KEY (logical_name_id)",
-    "ANALYZE project_name_authority",
-    "CREATE TEMP TABLE project_bindings ON COMMIT DROP AS
+    "/* project:builders.name_authority.stage.selected_bindings.key_name_authority */ ALTER TABLE project_name_authority ADD PRIMARY KEY (logical_name_id)",
+    "/* project:builders.name_authority.stage.selected_bindings.analyze_name_authority */ ANALYZE project_name_authority",
+    "/* project:builders.name_authority.stage.selected_bindings.create_bindings */ CREATE TEMP TABLE project_bindings ON COMMIT DROP AS
      SELECT candidate.*
      FROM project_name_authority authority
      JOIN project_binding_candidates candidate
        ON candidate.surface_binding_id = authority.selected_binding_id",
-    "CREATE INDEX ON project_bindings (logical_name_id)",
-    "ANALYZE project_bindings",
+    "/* project:builders.name_authority.stage.selected_bindings.index_bindings_logical_name_id */ CREATE INDEX ON project_bindings (logical_name_id)",
+    "/* project:builders.name_authority.stage.selected_bindings.analyze_bindings */ ANALYZE project_bindings",
 ];
 pub(super) const AUTHORITY_EVENTS: &str = include_str!("authority_events.sql");
 
@@ -287,14 +288,14 @@ pub(super) async fn build(transaction: &mut Transaction<'_, Postgres>) -> Result
     for statement in SELECTED_BINDINGS.into_iter().chain([
         AUTHORITY_EVENTS,
         // Each staged event joins at most one name, so the event id is the table's key.
-        "ALTER TABLE project_authority_events ADD PRIMARY KEY (normalized_event_id)",
-        "CREATE INDEX ON project_authority_events (logical_name_id, normalized_event_id)",
-        "CREATE INDEX ON project_authority_events (resource_id, normalized_event_id)",
-        "ANALYZE project_authority_events",
+        "/* project:builders.name_authority.stage.build.key_authority_events */ ALTER TABLE project_authority_events ADD PRIMARY KEY (normalized_event_id)",
+        "/* project:builders.name_authority.stage.build.index_authority_events_logical_name_id */ CREATE INDEX ON project_authority_events (logical_name_id, normalized_event_id)",
+        "/* project:builders.name_authority.stage.build.index_authority_events_resource_id */ CREATE INDEX ON project_authority_events (resource_id, normalized_event_id)",
+        "/* project:builders.name_authority.stage.build.analyze_authority_events */ ANALYZE project_authority_events",
         include_str!("registration_events.sql"),
-        "CREATE INDEX ON project_registration_events (logical_name_id, normalized_event_id)",
-        "ANALYZE project_registration_events",
-        "CREATE TEMP TABLE project_name_serving ON COMMIT DROP AS
+        "/* project:builders.name_authority.stage.build.index_registration_events_logical_name_id */ CREATE INDEX ON project_registration_events (logical_name_id, normalized_event_id)",
+        "/* project:builders.name_authority.stage.build.analyze_registration_events */ ANALYZE project_registration_events",
+        "/* project:builders.name_authority.stage.build.create_name_serving */ CREATE TEMP TABLE project_name_serving ON COMMIT DROP AS
          SELECT authority.logical_name_id,
                 pointer.resource_id AS serving_resource_id,
                 pointer.chain_id AS resolver_chain_id,
@@ -401,10 +402,10 @@ pub(super) async fn build(transaction: &mut Transaction<'_, Postgres>) -> Result
                      COALESCE(pointer.log_index, -1)
                  )
            )",
-        "CREATE UNIQUE INDEX ON project_name_serving (logical_name_id)",
-        "CREATE INDEX ON project_name_serving (serving_resource_id)",
-        "CREATE INDEX ON project_name_serving (resolver_chain_id, resolver_address)",
-        "ANALYZE project_name_serving",
+        "/* project:builders.name_authority.stage.build.index_name_serving_logical_name_id */ CREATE UNIQUE INDEX ON project_name_serving (logical_name_id)",
+        "/* project:builders.name_authority.stage.build.index_name_serving_serving_resource_id */ CREATE INDEX ON project_name_serving (serving_resource_id)",
+        "/* project:builders.name_authority.stage.build.index_name_serving_resolver_chain_id */ CREATE INDEX ON project_name_serving (resolver_chain_id, resolver_address)",
+        "/* project:builders.name_authority.stage.build.analyze_name_serving */ ANALYZE project_name_serving",
     ]) {
         sqlx::query(statement)
             .execute(&mut **transaction)

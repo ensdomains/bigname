@@ -42,7 +42,7 @@ pub(super) async fn build(
 
 pub(in crate::builders) fn query() -> String {
     [
-        r#"
+        r#"/* project:builders.permissions.resource_summary */
         WITH target_time AS (
             SELECT extract(epoch FROM lineage.block_timestamp) AS epoch_seconds
             FROM chain_lineage lineage
