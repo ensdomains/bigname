@@ -1605,7 +1605,9 @@ every id, so it is a merge key, not a durable reference to store.
   Contract pointers use the `{chain_id, address}` shape with the row's own
   numeric `chain_id`; a zero-address pointer means "cleared" and is omitted, so
   a `resolver` row whose `data` has no `resolver` records a clearing. Unix
-  expiry values become RFC 3339 `expires_at`.
+  expiry values become RFC 3339 `expires_at` under the same rule as every
+  other route: a value before 1970 or after 9999-12-31T23:59:59Z is omitted,
+  and a value inside that range keeps its whole seconds.
 
 `include=raw` is a separate, explicit opt-in for explorer and diagnostic use.
 It adds one field:

@@ -190,6 +190,21 @@ fn quoted_seconds(value: &str) -> Option<QuotedSeconds> {
     Some(i64::try_from(whole).map_or(QuotedSeconds::OutOfRange, QuotedSeconds::InRange))
 }
 
+/// A seconds value, as a JSON number or a quoted number, under the same rule as every expiry
+/// read: a value outside 1970..=9999 is `None`, and one inside keeps its whole seconds. A string
+/// that is not a number is `None` too.
+pub(in crate::v2) fn seconds_timestamp(value: &Value) -> Option<String> {
+    let seconds = match value {
+        Value::Number(number) => number_seconds(number)?,
+        Value::String(text) => quoted_seconds(text.trim())?,
+        _ => return None,
+    };
+    match seconds {
+        QuotedSeconds::InRange(seconds) => format_unix_timestamp(seconds),
+        QuotedSeconds::OutOfRange => None,
+    }
+}
+
 /// A JSON number's seconds by value, whatever notation it was written or prints in (`1e-7` is
 /// second zero). The range check uses the full value, so `253402300799.5` is out of range; a value
 /// inside it keeps its whole seconds, as the SQL helpers' `FLOOR` does. A negative zero is zero, as
