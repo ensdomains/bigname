@@ -344,8 +344,9 @@ collection route carry neither header.
   ([ADR 0007](adrs/0007-follow-the-chain-ens-authority.md)): a current ENSv2
   registration is selected without a migration proof, and otherwise ENSv1
   decides, so such a name is no longer refused. A selected ENSv2 registration
-  still needs the exact-name profile qualification; without it the name reports
-  `ensv2_exact_name_profile_shadow`. The earlier reasons
+  still needs the exact-name profile qualification; without it Project records
+  `ensv2_exact_name_profile_shadow`, which the API exposes as
+  `exact_name_profile_not_supported`. The earlier reasons
   `conflicting_current_ens_authority` (Mainnet) and
   `independent_ens_deployments_overlap` (Sepolia) are no longer produced. A
   `name_current` row derived with either reason by an earlier Project generation,

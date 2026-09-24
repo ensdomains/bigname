@@ -577,6 +577,144 @@ async fn an_ownerless_v1_registry_name_with_v2_history_serves_the_ownerless_prof
     Ok(())
 }
 
+/// Adds an `ens_v2` binding that opened at `log` and at hour `from` of the day before the target
+/// block, and closed an hour later.
+async fn closed_v2_binding_at(
+    pool: &PgPool,
+    logical: &str,
+    index: u16,
+    log: i64,
+    from: i32,
+) -> Result<String> {
+    let resource = uuid(12, index);
+    sqlx::query("INSERT INTO resources (resource_id, chain_id, block_hash, block_number, canonicality_state) VALUES ($1::uuid, $2, $3, 10, 'canonical')")
+        .bind(&resource).bind(CHAIN).bind(HASH).execute(pool).await?;
+    sqlx::query("INSERT INTO surface_bindings (surface_binding_id, logical_name_id, resource_id, binding_kind, authority_arm, active_from, active_to, chain_id, block_hash, block_number, provenance, canonicality_state) VALUES ($1::uuid, $2, $3::uuid, 'declared_registry_path', 'ens_v2', '2026-08-25T00:00:00Z'::timestamptz + make_interval(hours => $7), '2026-08-25T00:00:00Z'::timestamptz + make_interval(hours => $7 + 1), $4, $5, 10, jsonb_build_object('transaction_index', 0, 'log_index', $6::bigint), 'canonical')")
+        .bind(uuid(13, index)).bind(logical).bind(&resource).bind(CHAIN).bind(HASH).bind(log).bind(from).execute(pool).await?;
+    Ok(resource)
+}
+
+// A released ENSv2 regime keeps the name on ENSv2 after its second registration is released.
+// An ENSv1 registry owner that acquired the name in between and was then cleared to zero is
+// retained ENSv1 history: it must not turn the regime into the ownerless-registry profile and
+// serve its ENSv1 resolver under ENSv2 authority.
+#[tokio::test]
+async fn an_ownerless_v1_registry_does_not_serve_under_a_released_v2_regime() -> Result<()> {
+    let (db, pool) = database("overlap_regime_ownerless_v1").await?;
+    let logical = surface(&pool, 67, "regime-ownerless.eth", &[]).await?;
+    let v2 = |kind: &'static str, log: i64, after: Value| Event {
+        family: "ens_v2_registry_l1",
+        kind,
+        log,
+        after,
+    };
+    let registrant = "0x0000000000000000000000000000000000000002";
+    // A: the first ENSv2 registration; B: its qualifying release.
+    let first = closed_v2_binding_at(&pool, &logical, 67, 1, 0).await?;
+    event(
+        &pool,
+        "regime-a-grant",
+        &logical,
+        Some(&first),
+        v2(
+            "RegistrationGranted",
+            1,
+            json!({"status":"registered","registrant":registrant}),
+        ),
+    )
+    .await?;
+    event(
+        &pool,
+        "regime-b-release",
+        &logical,
+        Some(&first),
+        v2("RegistrationReleased", 2, json!({"status":"unregistered"})),
+    )
+    .await?;
+    // C: ENSv1 acquires the name and sets a resolver; D: its registry owner is cleared.
+    let v1_resource = uuid(14, 67);
+    sqlx::query("INSERT INTO resources (resource_id, chain_id, block_hash, block_number, canonicality_state) VALUES ($1::uuid, $2, $3, 10, 'canonical')")
+        .bind(&v1_resource).bind(CHAIN).bind(HASH).execute(&pool).await?;
+    for (log, kind, after) in [
+        (
+            3,
+            "AuthorityTransferred",
+            json!({"owner":"0x0000000000000000000000000000000000000001","owner_getter":"0x0000000000000000000000000000000000000001"}),
+        ),
+        (
+            4,
+            "ResolverChanged",
+            json!({"resolver":"0x00000000000000000000000000000000000000c1"}),
+        ),
+        (
+            5,
+            "AuthorityTransferred",
+            json!({"owner":"0x0000000000000000000000000000000000000000","owner_getter":"0x0000000000000000000000000000000000000000"}),
+        ),
+    ] {
+        event(
+            &pool,
+            &format!("regime-v1-{log}"),
+            &logical,
+            Some(&v1_resource),
+            Event {
+                family: "ens_v1_registry_l1",
+                kind,
+                log,
+                after,
+            },
+        )
+        .await?;
+    }
+    // E: ENSv2 registers the name again; F: that registration is released too.
+    let second = closed_v2_binding_at(&pool, &logical, 68, 6, 2).await?;
+    event(
+        &pool,
+        "regime-e-grant",
+        &logical,
+        Some(&second),
+        v2(
+            "RegistrationGranted",
+            6,
+            json!({"status":"registered","registrant":registrant}),
+        ),
+    )
+    .await?;
+    event(
+        &pool,
+        "regime-f-release",
+        &logical,
+        Some(&second),
+        v2("RegistrationReleased", 7, json!({"status":"unregistered"})),
+    )
+    .await?;
+
+    run(&pool).await?;
+    assert_eq!(
+        authority(&pool, &logical).await?,
+        (
+            Some("ens_v2".into()),
+            Some("current_authority_not_projected".into()),
+            None,
+            None
+        )
+    );
+    let serving: (Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT serving_resource_id::text, declared_summary #>> '{resolver,address}'
+         FROM name_current WHERE logical_name_id = $1",
+    )
+    .bind(&logical)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        serving,
+        (None, None),
+        "no ENSv1 resolver serves under ENSv2"
+    );
+    db.cleanup().await?;
+    Ok(())
+}
+
 #[tokio::test]
 async fn shared_ens_infrastructure_selects_v2_without_fabricating_proof() -> Result<()> {
     let (db, pool) = database("issue503_shared").await?;

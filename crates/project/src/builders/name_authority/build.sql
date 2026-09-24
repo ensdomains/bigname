@@ -744,8 +744,7 @@
         )
         SELECT selected.logical_name_id, selected.selected_authority_arm,
                selected.selected_resource_id, selected.selected_binding_id,
-               (ownerless.logical_name_id IS NOT NULL
-                AND selected.selected_binding_id IS NULL) AS known_ownerless_registry,
+               ownerless_profile.eligible AS known_ownerless_registry,
                ownerless.resource_id AS ownerless_registry_resource_id, ownerless.owner_getter_reason,
                (selected.released_v1_binding_id IS NOT NULL
                 AND selected.selected_binding_id = selected.released_v1_binding_id) AS released_v1_tombstone,
@@ -762,9 +761,7 @@
                    ELSE 'registered'
                END AS lifecycle_state,
                CASE
-                   WHEN ownerless.logical_name_id IS NOT NULL
-                    AND selected.selected_binding_id IS NULL
-                       THEN NULL
+                   WHEN ownerless_profile.eligible THEN NULL
                    WHEN selected.selected_binding_id IS NULL THEN 'current_authority_not_projected'
                END AS unsupported_reason,
                selected.deployment_profile,
@@ -777,6 +774,14 @@
                        THEN 'ens_v1' END)) AS resource_authority_context
         FROM selected
         LEFT JOIN project_latest_registry_owner ownerless USING (logical_name_id)
+        -- The ownerless-registry profile serves an ENSv1 or Basenames registry row, so it never
+        -- applies under ENSv2 authority: a released ENSv2 regime keeps retained or later ENSv1
+        -- registry facts as history (docs/glossary.md#released-v2-authority).
+        CROSS JOIN LATERAL (
+            SELECT ownerless.logical_name_id IS NOT NULL
+                   AND selected.selected_binding_id IS NULL
+                   AND selected.selected_authority_arm IS DISTINCT FROM 'ens_v2' AS eligible
+        ) ownerless_profile
         LEFT JOIN LATERAL (
             SELECT event.event_kind
             FROM project_events event
