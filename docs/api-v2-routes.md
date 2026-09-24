@@ -657,11 +657,18 @@ collection route carry neither header.
   reads the current registration fields from: `ens_v2` or `ens_v1`, read from
   the projection's selected [authority epoch](glossary.md#authority-epoch), or
   `ens_v0` for an ENSv1 name whose registry record is still read from the 2017
-  ENS registry ([registry generation](glossary.md#registry-generation)). An
+  ENS registry, because the current registry holds no ownership record for the
+  node yet
+  (upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L18-L46 @ ens_v1@91c966f)
+  (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L150-L157 @ ens_v1@91c966f)
+  ([registry generation](glossary.md#registry-generation)). It becomes `ens_v1`
+  at the first current-registry `NewOwner` or `Transfer`
+  (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L60-L84 @ ens_v1@91c966f). An
   `ens_v0` name keeps every field it would have as `ens_v1`, including a
   registry-only name's `registration_id`. `authority` is omitted for Basenames
-  names, on an ownerless registry row, and on the `status=unsupported`
-  identity-only object. `migrated_at` is present only when `authority=ens_v2` was proven by
+  names, on a supported, unregistered ownerless registry row, and on the
+  `status=unsupported` identity-only object. A zero registry owner does not
+  remove `authority` supplied by a retained registrar binding. `migrated_at` is present only when `authority=ens_v2` was proven by
   an activated `MigrationApplied` [migration
   boundary](glossary.md#migration-boundary): it is the RFC 3339 block time of
   that proof event, read through the event's block in the chain lineage. A name
@@ -2223,7 +2230,9 @@ introduces it rebuilds Project from full history before serving the option; see
   and optional `finality=latest`. `at` and historical `finality` values are
   rejected by the shared latest-state collection rule.
   `authority` keeps only rows whose current name row would serve that
-  `authority` value, so `ens_v1` no longer matches a name served as `ens_v0`;
+  `authority` value, so `ens_v1` no longer matches a name served as `ens_v0`,
+  whose record the current registry does not hold yet
+  (upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L18-L46 @ ens_v1@91c966f);
   it is a primary-key probe of the name row per candidate relation row, applied
   before grouping and pagination. Any other value returns `400 invalid_input`.
   Rows with no selected arm (Basenames) and ownerless registry rows match none
@@ -3418,12 +3427,15 @@ so there is no persisted artifact to explain. See
 - Response shape: `data` includes token lineage, control vectors, and
   permission lineage. For an ENS name `data.registry_handoff` is
   `{block_number}`, the block of the first ownership record the current
-  ENSv1 registry holds for the node, which is where a name served as
+  ENSv1 registry holds for the node
+  (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L60-L84 @ ens_v1@91c966f),
+  which is where a name served as
   `authority=ens_v0` became `ens_v1`
   ([registry generation](glossary.md#registry-generation)). It is read from the
   same name row as the rest of `data`, stays the same across later ownership
   changes, and is absent while no such record has been observed and for the
-  root, whose record the registry's constructor writes without an event. It is
+  root, whose record the registry's constructor writes without an event
+  (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L23-L26 @ ens_v1@91c966f). It is
   not the [authority epoch](glossary.md#authority-epoch) start and appears on
   no product route.
 - Pagination behavior: none.
