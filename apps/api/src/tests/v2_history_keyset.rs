@@ -192,8 +192,12 @@ async fn hk_legacy_cursor(database: &TestDatabase, cursor: &str) -> Result<Strin
         "normalized_event_id": normalized_event_id.to_string(),
         "event_identity": event_identity,
     });
-    value["snapshot"] = json!(format!("publication-0x{}", "ab".repeat(32)));
-    value["evaluated_at"] = json!("2026-09-01T00:00:00Z");
+    // A cursor that already carries a publication token and evaluation time keeps them, so the
+    // same test can run against a build that still checks them.
+    if value["snapshot"].is_null() {
+        value["snapshot"] = json!(format!("publication-0x{}", "ab".repeat(32)));
+        value["evaluated_at"] = json!("2026-09-01T00:00:00Z");
+    }
     Ok(hex::encode(serde_json::to_vec(&value)?))
 }
 
@@ -410,5 +414,112 @@ async fn v2_history_pages_ignore_a_publication_during_the_read() -> Result<()> {
             block += 1;
         }
     }
+    database.cleanup().await
+}
+
+/// Replaces one `last_item` value of an issued cursor, keeping everything else.
+fn hk_with_last_item(cursor: &str, key: &str, value: &str) -> Result<String> {
+    let mut payload: Value = serde_json::from_slice(&hex::decode(cursor)?)?;
+    payload["last_item"][key] = json!(value);
+    Ok(hex::encode(serde_json::to_vec(&payload)?))
+}
+
+/// A malformed cursor is refused with 400 before publication admission, so an Interpret redo
+/// that leaves no publication to admit still answers 400 for it, in either cursor layout.
+#[tokio::test]
+async fn v2_history_malformed_cursors_precede_publication_admission() -> Result<()> {
+    for route in hk_routes() {
+        let database = TestDatabase::new_migrated().await?;
+        seed_v2_history_fixture(&database).await?;
+        let base = format!("{route}&page_size=1");
+        let cursor = hk_next_cursor(&hk_ok(&database, &base).await?)?;
+        let legacy = hk_legacy_cursor(&database, &cursor).await?;
+        hk_begin_redo(&database, HK_CHAIN, "interpret").await?;
+
+        let (status, payload) = hk_get(&database, &format!("{base}&cursor={cursor}")).await?;
+        assert_eq!(status, StatusCode::CONFLICT, "{base}: {payload}");
+        for malformed in [
+            "garbage".to_owned(),
+            hk_with_last_item(&cursor, "block_number", "not-a-number")?,
+            hk_with_last_item(&legacy, "normalized_event_id", "not-a-number")?,
+        ] {
+            let (status, payload) =
+                hk_get(&database, &format!("{base}&cursor={malformed}")).await?;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{base}: {payload}");
+            assert_eq!(payload["error"]["code"], json!("invalid_input"), "{base}");
+        }
+        database.cleanup().await?;
+    }
+    Ok(())
+}
+
+/// A cursor issued before the walk rule recovers its position from its anchor row even when
+/// that row is no longer one the request reads, orphaned or detached from the name, and the
+/// walk continues from there.
+#[tokio::test]
+async fn v2_history_legacy_cursor_resumes_from_an_anchor_outside_the_collection() -> Result<()> {
+    for route in hk_routes() {
+        for detach in [
+            "UPDATE bigname_phase.normalized_events SET canonicality_state = 'orphaned'
+             WHERE event_identity = $1",
+            "UPDATE bigname_phase.normalized_events SET logical_name_id = NULL, resource_id = NULL
+             WHERE event_identity = $1",
+        ] {
+            let database = TestDatabase::new_migrated().await?;
+            seed_v2_history_fixture(&database).await?;
+            let base = format!("{route}&page_size=1");
+            let cursor = hk_next_cursor(&hk_ok(&database, &base).await?)?;
+            let expected = hk_ok(&database, &format!("{base}&cursor={cursor}")).await?;
+            let legacy = hk_legacy_cursor(&database, &cursor).await?;
+            let anchor = hk_anchor(&cursor)?;
+            let updated = sqlx::query(detach)
+                .bind(&anchor)
+                .execute(&database.pool)
+                .await?
+                .rows_affected();
+            anyhow::ensure!(updated == 1, "anchor {anchor} must exist");
+            let first = hk_ok(&database, &base).await?;
+            assert!(!hk_ids(&first).is_empty(), "{base}");
+            let continued = hk_ok(&database, &format!("{base}&cursor={legacy}")).await?;
+            assert_eq!(hk_ids(&continued), hk_ids(&expected), "{base}: {detach}");
+            database.cleanup().await?;
+        }
+    }
+    Ok(())
+}
+
+/// `/v1/diagnostics/events` keeps its own cursor: exactly the boundary row's numeric id and
+/// identity, no publication token, and a 400 once that row is gone.
+#[tokio::test]
+async fn v2_diagnostic_events_keep_their_anchor_cursor() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_v2_history_fixture(&database).await?;
+    let base = "/v1/diagnostics/events?name=history.eth&page_size=1";
+    let first = hk_ok(&database, base).await?;
+    let cursor = hk_next_cursor(&first)?;
+    let payload: Value = serde_json::from_slice(&hex::decode(&cursor)?)?;
+    let last_item = payload["last_item"].as_object().context("last_item")?;
+    assert_eq!(
+        last_item.keys().map(String::as_str).collect::<Vec<_>>(),
+        vec!["event_identity", "normalized_event_id"]
+    );
+    let anchor = hk_anchor(&cursor)?;
+    let normalized_event_id: i64 = sqlx::query_scalar(
+        "SELECT normalized_event_id FROM bigname_phase.normalized_events WHERE event_identity = $1",
+    )
+    .bind(&anchor)
+    .fetch_one(&database.pool)
+    .await?;
+    assert_eq!(last_item["normalized_event_id"], json!(normalized_event_id.to_string()));
+    assert_eq!(payload["snapshot"], Value::Null);
+    assert!(payload.get("evaluated_at").is_none(), "{payload}");
+
+    let next = hk_ok(&database, &format!("{base}&cursor={cursor}")).await?;
+    assert_eq!(next["data"].as_array().map(Vec::len), Some(1));
+
+    hk_delete_event(&database, &anchor).await?;
+    let (status, payload) = hk_get(&database, &format!("{base}&cursor={cursor}")).await?;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{payload}");
+    assert_eq!(payload["error"]["code"], json!("invalid_input"));
     database.cleanup().await
 }

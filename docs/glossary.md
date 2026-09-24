@@ -1445,9 +1445,10 @@ how `/v1/events`, name history, and address history page: a walk through the
 history order, not a snapshot. The cursor holds the position of the last row
 returned (block number, chain, block hash, transaction hash, log index, and
 `event_identity` as the final tiebreaker) and no publication. Each page reads
-the publication current when it runs, reported in `meta.as_of`, so later pages
-can include newer rows, rows can move or disappear after an Interpret redo, and
-`total_count` can change, without a `409 stale`. See
+the publication captured when it is admitted, reported in `meta.as_of`, so
+later pages can include newer rows, rows can move or disappear after an
+Interpret redo, and `total_count` can change. Publication changes do not expire
+the cursor. See
 [api-v2.md](api-v2.md#cursors-and-pagination).
 
 ## v1 fallback resolver (`ENSV1Resolver`, exposed as `V1_RESOLVER`)

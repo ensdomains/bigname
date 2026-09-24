@@ -69,24 +69,31 @@ continuation reads whatever is published when it runs and returns the rows
 after that position, whether or not the row the cursor came from still exists.
 A later page can therefore include rows published after the first page, a row
 can move or disappear after an Interpret redo, and `total_count` can change
-between pages. Each page reports the publication it read in `meta.as_of`. None
-of this returns `409 stale`. A publication that lands while a page is being
-read does not refuse the page either. The page is still capped at the
+between pages. `meta.as_of` is the publication captured when the page was
+admitted. The page's rows are bounded at it, but the inputs listed under
+[history collection filters](#history-collection-filters) as read from current
+state (the resolver classification, and the address relation kinds in the
+known limitation) are not pinned to it, so not every field of a page belongs
+to that one publication. Publication changes do not expire a position cursor,
+and a publication that lands while a page is being read does not refuse that
+page either. The page is still capped at the
 publication it reports, so no row above it can appear; but when the new
 publication rewrites rows at or below it, for example after a reorg, the page
 can mix rows from before and after that rewrite. Because
 `event_identity` is only the final tiebreaker, a re-derivation that changes the
 identities of events sharing one log position can skip or repeat a row at that
 position; that is the same walk rule, not an error. A history cursor returns
-`400 invalid_input` only when it is malformed or replayed against a different
-query. A requested namespace with no publication still returns retryable
-`409 stale` ("not available; retry after indexing is ready"), and an active
-Interpret redo still returns retryable `409 stale`; once the redo finishes, the
-same cursor continues, so that refusal is a retry, not an expiry. A history
-cursor issued before this rule names its last row instead of carrying its
-position: its publication token is ignored and it resumes from that row's
-position, and when the row no longer exists it returns `409 stale` once,
-requiring a restart without the cursor. A parameter that pins a history walk to
+`400 invalid_input` when it is malformed or replayed against a different query,
+before publication admission. A history cursor issued before this rule names
+its last row instead of carrying its position: its publication token is
+ignored and it resumes from that row's position. Three distinct `409 stale`
+outcomes remain. A requested namespace with no publication returns "not
+available; retry after indexing is ready". An Interpret redo that is active or
+ran during the read returns the redo retry. Both are temporary: retry the same
+request with the same cursor, which continues once the publication is available
+or the redo has finished. A cursor issued before this rule whose row no longer
+exists returns the restart once, and only that one requires restarting without
+the cursor. A parameter that pins a history walk to
 one block may be added later; it is not part of this contract.
 
 These current-state and history collections still reject `at`,
@@ -1707,12 +1714,12 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
   the rows `scope` selects plus the direct child registrations, under
   `scope=name`, `scope=registration`, and `scope=both` alike, and child rows
   are returned even when the scope selects no rows of the name itself.
-- Walk behavior: each page and its counts read the publication current when
-  that page is read, and the response discloses it in `meta.as_of`. The
-  continuation cursor holds the last row's position, not a publication, so a
-  later page can include newer rows and never returns `409 stale` because the
-  publication changed; see the [history walk](glossary.md#history-walk) rule
-  in [Shared Route Rules](#shared-route-rules).
+- Walk behavior: each page and its counts read the publication captured when
+  that page is admitted, disclosed in `meta.as_of`. The continuation cursor
+  holds the last row's position, not a publication, so a later page can
+  include newer rows and a publication change does not expire the cursor; see
+  the [history walk](glossary.md#history-walk) rule in
+  [Shared Route Rules](#shared-route-rules).
   Historical replay through `at` is not supported.
 - Status semantics: no product-visible matches return `200` with empty `data`,
   `page.next_cursor=null`, and `page.has_more=false`. Missing names return
@@ -2686,12 +2693,12 @@ introduces it rebuilds Project from full history before serving the option; see
   both. Without a distinct control resource, the sole registry-resource row
   remains visible.
   (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L89-L94 @ ens_v1@91c966f)
-- Walk behavior: each page and its counts read the publication current when
-  that page is read, and the response discloses it in `meta.as_of`. The
-  continuation cursor holds the last row's position, not a publication, so a
-  later page can include newer rows and never returns `409 stale` because the
-  publication changed; see the [history walk](glossary.md#history-walk) rule
-  in [Shared Route Rules](#shared-route-rules).
+- Walk behavior: each page and its counts read the publication captured when
+  that page is admitted, disclosed in `meta.as_of`. The continuation cursor
+  holds the last row's position, not a publication, so a later page can
+  include newer rows and a publication change does not expire the cursor; see
+  the [history walk](glossary.md#history-walk) rule in
+  [Shared Route Rules](#shared-route-rules).
   Historical replay through `at` is not supported.
 - Pagination behavior: product event-type filtering, including an explicit
   `type` set, runs before keyset page construction (newest first unless
@@ -2899,12 +2906,12 @@ For a registrar lease first identified by a later readable observation, registra
   rule: populated (exact up to 10,000 rows, `null` beyond) when `name`,
   `registration_id`, `address`, or `resolver` anchors the read; opting into
   `include=total_count` removes that cap. It is always `null` for unanchored reads.
-- Walk behavior: each page and its counts read the publication current when
-  that page is read, and the response discloses it in `meta.as_of`. The
-  continuation cursor holds the last row's position, not a publication, so a
-  later page can include newer rows and never returns `409 stale` because the
-  publication changed; see the [history walk](glossary.md#history-walk) rule
-  in [Shared Route Rules](#shared-route-rules).
+- Walk behavior: each page and its counts read the publication captured when
+  that page is admitted, disclosed in `meta.as_of`. The continuation cursor
+  holds the last row's position, not a publication, so a later page can
+  include newer rows and a publication change does not expire the cursor; see
+  the [history walk](glossary.md#history-walk) rule in
+  [Shared Route Rules](#shared-route-rules).
   Historical replay through `at` is not supported.
 - Status semantics: no product-visible matches return `200` with empty `data`,
   `page.next_cursor=null`, and `page.has_more=false`. Filter and cursor-binding

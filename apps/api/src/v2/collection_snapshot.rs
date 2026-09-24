@@ -31,30 +31,34 @@ impl CollectionSnapshot {
         cursor: Option<&str>,
         namespace: Option<&str>,
     ) -> V2Result<Self> {
-        let (snapshot, cursor) = Self::capture_scope(state, cursor, namespace, false).await?;
+        let (snapshot, cursor) = Self::capture_scope(state, cursor, namespace).await?;
         if let Some(cursor) = cursor.as_ref() {
             snapshot.validate_cursor(cursor)?;
         }
         Ok(snapshot)
     }
 
-    /// Admission for the history collections, whose cursors are keyset anchors that no
-    /// publication binds (`history_keyset`). The namespace must be served and every scope must
-    /// have a publication; a request cursor must decode, but its publication token, if any, is
-    /// not checked.
-    pub(crate) async fn capture_history(
+    /// Admission for the history collections, whose cursors are keyset positions that no
+    /// publication binds (`history_keyset`). An unserved namespace is refused first (404), then
+    /// `decode_cursor` decodes and binds the request cursor (400), and only then must every scope
+    /// have a publication (409). A cursor's publication token, if any, is not checked.
+    pub(crate) async fn capture_history<C>(
         state: &AppState,
-        cursor: Option<&str>,
         namespace: Option<&str>,
-    ) -> V2Result<Self> {
-        Ok(Self::capture_scope(state, cursor, namespace, true).await?.0)
+        decode_cursor: impl FnOnce() -> V2Result<C>,
+    ) -> V2Result<(Self, C)> {
+        if let Some(namespace) = namespace {
+            ensure_public_namespace(namespace).map_err(api_error_to_v2)?;
+        }
+        let cursor = decode_cursor()?;
+        let (snapshot, _) = Self::capture_scope(state, None, namespace).await?;
+        Ok((snapshot, cursor))
     }
 
     async fn capture_scope(
         state: &AppState,
         cursor: Option<&str>,
         namespace: Option<&str>,
-        history: bool,
     ) -> V2Result<(Self, Option<CursorPayload>)> {
         if let Some(namespace) = namespace {
             ensure_public_namespace(namespace).map_err(api_error_to_v2)?;
@@ -77,14 +81,14 @@ impl CollectionSnapshot {
         let token = namespaces.collection_fingerprint();
 
         let evaluated_at = match cursor.as_ref() {
-            Some(cursor) if !history => bigname_storage::parse_rfc3339_utc_timestamp(
+            Some(cursor) => bigname_storage::parse_rfc3339_utc_timestamp(
                 cursor
                     .evaluated_at
                     .as_deref()
                     .ok_or_else(restart_required)?,
             )
             .map_err(|_| super::cursor::invalid_cursor_error())?,
-            _ => OffsetDateTime::now_utc()
+            None => OffsetDateTime::now_utc()
                 .replace_nanosecond(0)
                 .expect("zero nanoseconds are valid"),
         };

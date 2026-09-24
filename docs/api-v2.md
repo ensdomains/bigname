@@ -1234,20 +1234,30 @@ and no evaluation time. A continuation reads whatever is published when it runs
 and returns the rows after that position; the row the cursor came from need not
 still exist. A later page can therefore include rows published after the first
 page, a row can move or disappear after an Interpret redo, and `total_count`
-can change between pages. `meta.as_of` reports the publication each page was
-read at. None of this returns `409 stale`, and neither does a publication that
-lands while a page is being read. That page is still capped at the publication
+can change between pages. `meta.as_of` is the publication captured when the page was admitted: the
+page's rows are bounded at it, but some inputs are read from current state
+rather than from that publication (the resolver classification that decides
+whether a pointer attributes writes, and the address relation kinds listed
+under [history collection filters](api-v2-routes.md#history-collection-filters)),
+so not every field of a page belongs to that one publication. Publication
+changes do not expire a position cursor, and a publication that lands while a
+page is being read does not refuse that page either. That page is still capped at the publication
 it reports, so no row above it can appear; but when the new publication
 rewrites rows at or below it, for example after a reorg, the page can mix rows
 from before and after that rewrite. Because `event_identity`
 is only the final tiebreaker, a re-derivation that changes the identities of
 events sharing one log position can skip or repeat a row at that position,
 which the same walk rule covers. A history cursor returns `400 invalid_input`
-only when it is malformed or replayed against a different query. A history
-cursor issued before this rule names its last row instead of carrying its
-position: its publication token is ignored, it resumes from that row's
-position, and when the row no longer exists it returns `409 stale` once,
-requiring a restart without the cursor. A parameter that pins a history walk to
+when it is malformed or replayed against a different query, and that check
+comes before publication admission. A history cursor issued before this rule
+names its last row instead of carrying its position: its publication token is
+ignored and it resumes from that row's position. A history read can still
+return `409 stale` for three distinct reasons: a requested namespace has no
+publication yet ("not available; retry after indexing is ready"), an Interpret
+redo is active or ran during the read, or a cursor issued before this rule
+names a row that no longer exists. The first two are temporary: retry the same
+request with the same cursor. Only the third requires restarting without the
+cursor, and it happens once. A parameter that pins a history walk to
 one block may be added later; it is not part of this contract.
 
 The `/v1/events`, name-history, and address-history collections use a

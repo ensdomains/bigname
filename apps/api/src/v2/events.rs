@@ -106,23 +106,25 @@ pub(crate) async fn get_events(
     }
     let order = parsed.storage_filter.order;
 
-    let snapshot = super::collection_snapshot::CollectionSnapshot::capture_history(
-        &state,
-        params.cursor.as_deref(),
-        namespace.as_deref(),
-    )
-    .await?;
-    let request_cursor = params
-        .cursor
-        .as_deref()
-        .map(|cursor| {
-            history_keyset::decode_cursor(
-                &decode(cursor)?,
-                history_sort_token(order),
-                &parsed.cursor_filters,
-            )
-        })
-        .transpose()?;
+    let (snapshot, request_cursor) =
+        super::collection_snapshot::CollectionSnapshot::capture_history(
+            &state,
+            namespace.as_deref(),
+            || {
+                params
+                    .cursor
+                    .as_deref()
+                    .map(|cursor| {
+                        history_keyset::decode_cursor(
+                            &decode(cursor)?,
+                            history_sort_token(order),
+                            &parsed.cursor_filters,
+                        )
+                    })
+                    .transpose()
+            },
+        )
+        .await?;
     let storage_cursor = match request_cursor {
         Some(cursor) => Some(history_keyset::resolve(&state, cursor).await?),
         None => None,

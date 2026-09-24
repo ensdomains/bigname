@@ -109,17 +109,19 @@ pub(crate) async fn get_history(
         params: &params,
         child_registrations,
     };
-    let snapshot = super::collection_snapshot::CollectionSnapshot::capture_history(
-        &state,
-        params.cursor.as_deref(),
-        Some(&namespace),
-    )
-    .await?;
-    let request_cursor = params
-        .cursor
-        .as_deref()
-        .map(|cursor| history_storage_cursor(&decode(cursor)?, &cursor_binding))
-        .transpose()?;
+    let (snapshot, request_cursor) =
+        super::collection_snapshot::CollectionSnapshot::capture_history(
+            &state,
+            Some(&namespace),
+            || {
+                params
+                    .cursor
+                    .as_deref()
+                    .map(|cursor| history_storage_cursor(&decode(cursor)?, &cursor_binding))
+                    .transpose()
+            },
+        )
+        .await?;
     let storage_cursor = match request_cursor {
         Some(cursor) => Some(super::history_keyset::resolve(&state, cursor).await?),
         None => None,
