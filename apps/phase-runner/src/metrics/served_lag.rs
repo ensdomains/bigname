@@ -17,6 +17,7 @@ use tokio::sync::Notify;
 pub struct RunnerMetricsFeed {
     committed: Arc<Notify>,
     configured_chains: Arc<Mutex<BTreeSet<String>>>,
+    project_writes: super::project_writes::PendingProjectWrites,
 }
 
 impl RunnerMetricsFeed {
@@ -26,6 +27,15 @@ impl RunnerMetricsFeed {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .insert(chain.to_owned());
+    }
+
+    /// Records what a Project batch wrote; the metrics task exports it with the next refresh.
+    pub fn project_batch(&self, chain: &str, summary: &bigname_project::WriteSummary) {
+        self.project_writes.record(chain, summary);
+    }
+
+    pub(super) fn take_project_writes(&self) -> super::project_writes::Pending {
+        self.project_writes.take()
     }
 
     pub fn batch_committed(&self) {

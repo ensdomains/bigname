@@ -261,6 +261,56 @@ The build identity is already exported as
 `build_info{build_sha, interpreter_content_hash}`, with the value `1` for the
 running binary.
 
+## Project batch writes
+
+Six families describe what each committed Project batch cost. They come from
+the write summary the Project engine returns with every batch, so they cover
+normal blocks, redo ranges and full rebuilds alike. Like the served-lag gauges
+they have no dashboard panel or alert yet (Linear TYR-34), and they are the
+numbers the Project latency work (Linear TYR-36) is measured with.
+
+- `phase_runner_project_batch_blocks{chain}` is the number of blocks in the
+  newest committed batch's affected range. A batch that follows the chain
+  covers one block; catch-up and redo batches cover more.
+- `phase_runner_project_changed_events{chain}` is the number of readable events
+  in those blocks. It seeds the batch's scope. A full rebuild reads `0` because
+  it derives the whole chain without a changed-event list.
+- `phase_runner_project_staged_events{chain}` is the number of events the batch
+  staged for its builders: the history the rebuilt names and resources read.
+  Compared with the changed events, it shows how much older history one block
+  pulls in.
+- `phase_runner_project_scope_keys{chain, scope}` is the number of keys in each
+  scope when publication starts: `names`, `children`, `resources`,
+  `account_permissions`, `resolvers` and `primary`. Publication deletes and
+  republishes the served rows of exactly these keys.
+- `phase_runner_project_rows_written_total{chain, table, kind}` is a counter of
+  the rows Project batches deleted (`kind="deleted"`) from and inserted
+  (`kind="inserted"`) into each served table, including
+  `child_registration_events`, whose inserted count also includes rows the
+  batch updated in place. Its rate is the write volume. Rows written for each
+  key that had an event in the batch is the ratio TYR-36 drives towards one.
+- `phase_runner_project_stage_duration_seconds{chain, stage}` is the elapsed
+  time of each derivation stage of the newest committed batch: `prepare`,
+  `scope`, `inputs`, `builders`, `integrity` and `publish`. It covers the
+  derivation inside the Project transaction only, not the commit, hydration or
+  the runner's progress write.
+
+The gauges hold the newest committed batch of each chain until the next one
+replaces them; they are not reset between batches. The runner hands each
+summary to the metrics task as soon as the engine commits, and the task applies
+it with the refresh that follows the batch's progress write, so the values are
+current shortly after each Project commit. When several batches commit between
+two refreshes, the gauges show the newest and the counter adds all of them. A
+batch whose Project transaction fails reports nothing; one that commits and then
+fails in hydration is still counted. A chain's series appear with its first committed
+batch after the runner starts.
+
+Every Project statement also begins with a `/* project:<name> */` comment, so
+PostgreSQL's slow log, `pg_stat_activity` and `pg_stat_statements` name the
+statement behind a slow stage. The name is the source file under
+`crates/project/src` with `.` for `/`, followed by the statement, for example
+`publish.insert.name_current` or `builders.name_authority.build`.
+
 ## Alerts
 
 | Alert | Threshold | Plain-language meaning |

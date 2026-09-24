@@ -79,6 +79,12 @@ impl MetricsRegistry {
         self.register(gauge)
     }
 
+    pub fn gauge_vec(&self, name: &str, help: &str, labels: &[&str]) -> Result<GaugeVec> {
+        let gauge = GaugeVec::new(prometheus::Opts::new(name, help), labels)
+            .with_context(|| format!("failed to define {name}"))?;
+        self.register(gauge)
+    }
+
     pub fn histogram_vec(&self, name: &str, help: &str, labels: &[&str]) -> Result<HistogramVec> {
         let histogram = HistogramVec::new(
             HistogramOpts::new(name, help).buckets(duration_buckets()),

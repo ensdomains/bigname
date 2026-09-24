@@ -6,6 +6,7 @@ use sqlx::PgPool;
 use crate::{
     error::{ErrorKind, RunnerError, RunnerResult},
     heads::BlockMarker,
+    metrics::RunnerMetricsFeed,
     phase::{
         Phase, PhaseBatchOutcome, PhaseContext, PhaseFuture, PhaseName, PhaseProgress, RunMode,
     },
@@ -15,6 +16,7 @@ pub struct ProjectPhase {
     pool: PgPool,
     engine: Engine,
     hydrator: Option<bigname_project::Hydrator>,
+    metrics_feed: Option<RunnerMetricsFeed>,
 }
 
 impl ProjectPhase {
@@ -23,6 +25,7 @@ impl ProjectPhase {
             engine: Engine::new(pool.clone()),
             pool,
             hydrator: None,
+            metrics_feed: None,
         }
     }
 
@@ -31,7 +34,14 @@ impl ProjectPhase {
             engine: Engine::new(pool.clone()),
             hydrator: Some(bigname_project::Hydrator::new(pool.clone(), rpc_urls)),
             pool,
+            metrics_feed: None,
         }
+    }
+
+    /// Reports what each committed batch wrote to the metrics task.
+    pub fn with_metrics_feed(mut self, feed: RunnerMetricsFeed) -> Self {
+        self.metrics_feed = Some(feed);
+        self
     }
 
     async fn redo_target(&self, chain_id: &str) -> RunnerResult<BlockMarker> {
@@ -163,6 +173,9 @@ impl Phase for ProjectPhase {
                     });
                 }
             };
+            if let Some(feed) = &self.metrics_feed {
+                feed.project_batch(&context.chain_id, &outcome.write_summary);
+            }
             if let Some(hydrator) = &self.hydrator {
                 hydrator
                     .hydrate_if_canonical_head(&context.chain_id, &outcome.current)
