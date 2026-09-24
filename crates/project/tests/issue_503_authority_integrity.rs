@@ -244,6 +244,8 @@ async fn open_binding(
 // The remaining risk case: a label registered on ENSv1 after the premigration snapshot, so it
 // has no reservation, and then registered on ENSv2. The ENSv2 registration decides, which is
 // also what the Universal Resolver answers.
+// (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/universalResolver/libraries/LibResolution.sol:L58-L85 @ ens_v2_sepolia_20260916@366de741)
+// (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/resolver/ENSV1Resolver.sol:L40-L43 @ ens_v2_sepolia_20260916@366de741)
 #[tokio::test]
 async fn a_v2_registration_after_an_unreserved_v1_registration_selects_v2() -> Result<()> {
     let (db, pool) = database("overlap_unreserved_v1").await?;
@@ -402,6 +404,77 @@ async fn a_v2_reservation_over_an_ended_v1_lease_serves_nothing_current() -> Res
         lifecycle_state(&pool, &logical).await?.as_deref(),
         Some("unregistered")
     );
+    db.cleanup().await?;
+    Ok(())
+}
+
+// Nothing is open on either arm. ENSv1 then decides from its history, and the lifecycle state
+// reads the latest ENSv1 lifecycle row whether or not the name also has ENSv2 history. Here that
+// row is a grant, so both names read `registered` rather than the `unregistered` default of a
+// selection with no binding.
+#[tokio::test]
+async fn ensv1_history_gives_the_lifecycle_state_with_or_without_v2_history() -> Result<()> {
+    let (db, pool) = database("overlap_history_lifecycle").await?;
+    let mixed = surface(&pool, 71, "history-mixed.eth", &[]).await?;
+    let sole = surface(&pool, 72, "history-sole.eth", &[]).await?;
+    for (index, logical) in [(71, &mixed), (72, &sole)] {
+        let v1_resource = closed_binding(&pool, logical, index, "ens_v1").await?;
+        event(
+            &pool,
+            &format!("history-lifecycle-v1-grant-{index}"),
+            logical,
+            Some(&v1_resource),
+            Event {
+                family: "ens_v1_registrar_l1",
+                kind: "RegistrationGranted",
+                log: 1,
+                after: json!({"status":"registered","registrant":"0x0000000000000000000000000000000000000001"}),
+            },
+        )
+        .await?;
+    }
+    // Released ENSv2 history after the ENSv1 grant. The earlier ENSv1 facts keep the release
+    // from qualifying as an ENSv2 tombstone, so ENSv1 decides.
+    let v2_resource = closed_v2_binding_at(&pool, &mixed, 71, 2, 0).await?;
+    for (log, kind, after) in [
+        (
+            2,
+            "RegistrationGranted",
+            json!({"status":"registered","registrant":"0x0000000000000000000000000000000000000002"}),
+        ),
+        (3, "RegistrationReleased", json!({"status":"unregistered"})),
+    ] {
+        event(
+            &pool,
+            &format!("history-lifecycle-v2-{kind}"),
+            &mixed,
+            Some(&v2_resource),
+            Event {
+                family: "ens_v2_registry_l1",
+                kind,
+                log,
+                after,
+            },
+        )
+        .await?;
+    }
+    run(&pool).await?;
+    for logical in [&mixed, &sole] {
+        assert_eq!(
+            authority(&pool, logical).await?,
+            (
+                Some("ens_v1".into()),
+                Some("current_authority_not_projected".into()),
+                None,
+                None
+            )
+        );
+        assert_eq!(
+            lifecycle_state(&pool, logical).await?.as_deref(),
+            Some("registered"),
+            "{logical}"
+        );
+    }
     db.cleanup().await?;
     Ok(())
 }

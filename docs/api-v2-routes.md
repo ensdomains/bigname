@@ -375,7 +375,8 @@ collection route carry neither header.
   with facts on both ENSv1 and ENSv2 follows the chain
   ([ADR 0007](adrs/0007-follow-the-chain-ens-authority.md)): a current ENSv2
   registration is selected without a migration proof, and otherwise ENSv1
-  decides, so such a name is no longer refused. A selected ENSv2 registration
+  decides unless a qualifying ENSv2 release tombstone or regime applies, so
+  such a name is no longer refused. A selected ENSv2 registration
   still needs the exact-name profile qualification; without it Project records
   `ensv2_exact_name_profile_shadow`, which the API exposes as
   `exact_name_profile_not_supported`. The earlier reasons
@@ -1363,8 +1364,11 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   The child's own
   [authority arm](glossary.md#authority-epoch) still chooses between the remaining ENSv1 and ENSv2 candidates.
   An unknown activated migration-path value blocks the Project generation as a
-  data-integrity failure instead of silently hiding relations. A child whose
-  arms disagree with no authority proof is omitted entirely. On every ENS
+  data-integrity failure instead of silently hiding relations. A child
+  without an authority proof publishes the relation of its selected arm
+  ([ADR 0007](adrs/0007-follow-the-chain-ens-authority.md)); only a child
+  with no selected authority at all whose arms disagree is omitted entirely.
+  On every ENS
   [deployment profile](glossary.md#deployment-profile) (Mainnet and Sepolia), an ENSv1 relation that survives
   parent reachability and
   was asserted after a proven ENSv2 child authority began blocks Project

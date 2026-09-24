@@ -631,10 +631,20 @@
                    (shared.logical_name_id IS NOT NULL
                     AND COALESCE(summary.has_ens_v2, false)
                     AND proof.logical_name_id IS NULL AND released.logical_name_id IS NULL AND regime.logical_name_id IS NULL) AS shared_infrastructure_authority,
+                   -- The arm was selected from event history with nothing open: the sole arm with
+                   -- history, or ENSv1 when both arms have history and no ENSv2 release tombstone
+                   -- or regime applies. Its lifecycle state then reads that arm's events.
                    COALESCE(
                        proof.logical_name_id IS NULL
                            AND summary.logical_name_id IS NULL
-                           AND event_summary.arm_count = 1,
+                           AND (
+                               event_summary.arm_count = 1
+                               OR (
+                                   released.logical_name_id IS NULL
+                                   AND regime.logical_name_id IS NULL
+                                   AND event_summary.has_ens_v1
+                               )
+                           ),
                        false
                    ) AS bindingless_event_authority,
                    CASE
