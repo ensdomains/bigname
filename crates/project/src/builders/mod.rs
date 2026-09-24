@@ -26,7 +26,9 @@ pub(crate) async fn build_all(
     chain_id: &str,
     target: &crate::Marker,
     full_rebuild: bool,
+    steps: &crate::steps::Steps<'_>,
 ) -> Result<()> {
+    steps.enter("name_authority");
     let started = std::time::Instant::now();
     name_authority::build(transaction, chain_id, target).await?;
     tracing::debug!(
@@ -34,6 +36,7 @@ pub(crate) async fn build_all(
         elapsed_ms = started.elapsed().as_millis() as u64,
         "Project builder completed"
     );
+    steps.enter("account_permissions");
     let started = std::time::Instant::now();
     account_permissions::build(transaction, chain_id, target).await?;
     tracing::debug!(
@@ -41,6 +44,7 @@ pub(crate) async fn build_all(
         elapsed_ms = started.elapsed().as_millis() as u64,
         "Project builder completed"
     );
+    steps.enter("permissions");
     let started = std::time::Instant::now();
     permissions::build(transaction, chain_id, target, full_rebuild).await?;
     tracing::debug!(
@@ -48,6 +52,7 @@ pub(crate) async fn build_all(
         elapsed_ms = started.elapsed().as_millis() as u64,
         "Project builder completed"
     );
+    steps.enter("name_current");
     let started = std::time::Instant::now();
     name_current::build(transaction, chain_id, target).await?;
     tracing::debug!(
@@ -55,6 +60,7 @@ pub(crate) async fn build_all(
         elapsed_ms = started.elapsed().as_millis() as u64,
         "Project builder completed"
     );
+    steps.enter("permission_resources");
     let started = std::time::Instant::now();
     permission_resources::build_registry_binding(transaction).await?;
     tracing::debug!(
@@ -62,6 +68,7 @@ pub(crate) async fn build_all(
         elapsed_ms = started.elapsed().as_millis() as u64,
         "Project builder completed"
     );
+    steps.enter("resolver");
     let started = std::time::Instant::now();
     resolver::build(transaction, chain_id, target, full_rebuild).await?;
     tracing::debug!(
@@ -69,6 +76,7 @@ pub(crate) async fn build_all(
         elapsed_ms = started.elapsed().as_millis() as u64,
         "Project builder completed"
     );
+    steps.enter("linked_records");
     let started = std::time::Instant::now();
     linked_records::build(transaction).await?;
     tracing::debug!(
@@ -76,6 +84,7 @@ pub(crate) async fn build_all(
         elapsed_ms = started.elapsed().as_millis() as u64,
         "Project builder completed"
     );
+    steps.enter("record_inventory");
     let started = std::time::Instant::now();
     record_inventory::build(transaction, chain_id, target).await?;
     tracing::debug!(
@@ -83,6 +92,7 @@ pub(crate) async fn build_all(
         elapsed_ms = started.elapsed().as_millis() as u64,
         "Project builder completed"
     );
+    steps.enter("name_topology");
     let started = std::time::Instant::now();
     name_topology::build(transaction, chain_id, target).await?;
     tracing::debug!(
@@ -90,6 +100,7 @@ pub(crate) async fn build_all(
         elapsed_ms = started.elapsed().as_millis() as u64,
         "Project builder completed"
     );
+    steps.enter("children");
     let started = std::time::Instant::now();
     children::build(transaction, chain_id, target).await?;
     tracing::debug!(
@@ -97,6 +108,7 @@ pub(crate) async fn build_all(
         elapsed_ms = started.elapsed().as_millis() as u64,
         "Project builder completed"
     );
+    steps.enter("address_names");
     let started = std::time::Instant::now();
     address_names::build(transaction, chain_id, target).await?;
     tracing::debug!(
@@ -104,6 +116,7 @@ pub(crate) async fn build_all(
         elapsed_ms = started.elapsed().as_millis() as u64,
         "Project builder completed"
     );
+    steps.enter("address_records");
     let started = std::time::Instant::now();
     address_records::build(transaction, chain_id, target).await?;
     tracing::debug!(
@@ -111,6 +124,7 @@ pub(crate) async fn build_all(
         elapsed_ms = started.elapsed().as_millis() as u64,
         "Project builder completed"
     );
+    steps.enter("primary_names");
     let started = std::time::Instant::now();
     primary_names::build(transaction, chain_id, target).await?;
     tracing::debug!(
@@ -118,6 +132,7 @@ pub(crate) async fn build_all(
         elapsed_ms = started.elapsed().as_millis() as u64,
         "Project builder completed"
     );
+    steps.enter("child_registrations");
     let started = std::time::Instant::now();
     child_registrations::build(transaction, target, full_rebuild).await?;
     tracing::debug!(

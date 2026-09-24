@@ -221,7 +221,12 @@ async fn run(
     let session = crate::profile::Session::create(evidence)?;
     let started = Instant::now();
     let rows = session
-        .scope(super::super::derive(&mut tx, &request, &target))
+        .scope(super::super::derive(
+            &mut tx,
+            &request,
+            &target,
+            &Default::default(),
+        ))
         .await?;
     let elapsed = started.elapsed().as_millis();
     let counts:(i64,i64,i64)=sqlx::query_as(
@@ -465,7 +470,7 @@ mod tests {
             std::env::temp_dir().join(format!("same-head-equality-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&evidence)?;
         sqlx::query("SAVEPOINT baseline").execute(&mut *tx).await?;
-        super::super::super::derive(&mut tx, &request, &target).await?;
+        super::super::super::derive(&mut tx, &request, &target, &Default::default()).await?;
         ensure!(
             sqlx::query_scalar::<_, String>(
                 "SELECT raw_name FROM name_current WHERE logical_name_id='ens:profile-name'"
@@ -496,7 +501,12 @@ mod tests {
         disable_jit(&mut tx).await?;
         let session = crate::profile::Session::create(&evidence)?;
         session
-            .scope(super::super::super::derive(&mut tx, &request, &target))
+            .scope(super::super::super::derive(
+                &mut tx,
+                &request,
+                &target,
+                &Default::default(),
+            ))
             .await?;
         expected.assert_equal(&mut tx, super::super::TABLES).await?;
         expected.cleanup()?;

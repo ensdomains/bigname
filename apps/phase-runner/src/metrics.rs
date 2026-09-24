@@ -12,7 +12,9 @@ use tokio_util::sync::CancellationToken;
 
 use crate::progress_monitor::RunnerPhaseProgress;
 
+mod project_steps;
 mod served_lag;
+use project_steps::ProjectStepGauges;
 pub use served_lag::RunnerMetricsFeed;
 use served_lag::ServedLagGauges;
 
@@ -84,6 +86,7 @@ struct PipelineMetrics {
     batches_since_cursor_advance: IntGaugeVec,
     cursor_stall_age_seconds: IntGaugeVec,
     served_lag: ServedLagGauges,
+    project_steps: ProjectStepGauges,
     refresh_success: IntGauge,
     last_refresh_timestamp_seconds: IntGauge,
     loop_heartbeat: RunnerLoopHeartbeat,
@@ -219,6 +222,7 @@ impl PipelineMetrics {
             &["chain", "phase", "mode"],
         )?;
         let served_lag = ServedLagGauges::new(&registry)?;
+        let project_steps = ProjectStepGauges::new(&registry)?;
         let refresh_success = registry.int_gauge(
             "phase_runner_metrics_refresh_success",
             "Whether the latest database refresh succeeded.",
@@ -245,6 +249,7 @@ impl PipelineMetrics {
             batches_since_cursor_advance,
             cursor_stall_age_seconds,
             served_lag,
+            project_steps,
             refresh_success,
             last_refresh_timestamp_seconds,
             loop_heartbeat,
@@ -439,6 +444,7 @@ pub async fn start(
 ) -> Result<SocketAddr> {
     let metrics = PipelineMetrics::new(heartbeat_stale_after_secs, loop_heartbeat, phase_progress)?;
     metrics.served_lag.configure(&feed.configured_chains());
+    metrics.project_steps.apply(&feed.project_steps.snapshot());
     metrics.refresh(&pool).await?;
     let server = MetricsServer::bind(bind_addr, metrics.registry.clone()).await?;
     let local_addr = server.local_addr()?;
@@ -473,6 +479,10 @@ async fn refresh_loop(
             () = cancellation.cancelled() => return,
             _ = ticks.tick() => metrics.refresh(&pool).await,
             () = feed.committed() => metrics.refresh_after_commit(&pool).await,
+            () = feed.project_steps.changed() => {
+                metrics.project_steps.apply(&feed.project_steps.snapshot());
+                Ok(())
+            }
         };
         if let Err(error) = result {
             tracing::error!(error = %format!("{error:#}"), "phase metrics refresh failed");

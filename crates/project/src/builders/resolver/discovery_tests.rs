@@ -198,7 +198,7 @@ async fn scoped_discovery_preserves_all_ten_project_outputs() -> Result<()> {
                 .bind(if reference { "on" } else { "off" })
                 .execute(&mut *tx)
                 .await?;
-            crate::builders::build_all(&mut tx, CHAIN, &target, full).await?;
+            crate::builders::build_all(&mut tx, CHAIN, &target, full, &Default::default()).await?;
             crate::integrity::assert_publishable(&mut tx, CHAIN, &target).await?;
             crate::publish::swap(&mut tx, CHAIN, full).await?;
             let result = outputs(&mut tx).await?;
