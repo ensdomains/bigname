@@ -17,7 +17,7 @@ use phase_runner::{
     config::{CapacityConfig, ChainConfig, RuntimeConfig, SeedBasis, SourceConfig, TimingConfig},
     error::{ErrorKind, RunnerError, RunnerResult},
     heads::{BlockMarker, HeadMarkers, publish_heads},
-    metrics::RunnerLoopHeartbeat,
+    metrics::{RunnerLoopHeartbeat, RunnerMetricsFeed},
     phase::{
         BlockRange, LoopbackPhase, Phase, PhaseBatchOutcome, PhaseContext, PhaseFuture, PhaseName,
         PhaseProgress, PhaseSet, RedoAttemptFence, RunMode, SourceProgress, VerificationLevel,
@@ -609,6 +609,40 @@ async fn runner_writes_transitions_cursors_heads_and_heartbeats() -> Result<()> 
     .fetch_one(scratch.pool())
     .await?;
     assert_eq!(stamped_rows, 5);
+    scratch.cleanup().await
+}
+
+#[tokio::test]
+async fn settled_batches_wake_the_metrics_feed_only_when_it_is_wired() -> Result<()> {
+    let scratch = ScratchDatabase::create("phase_runner_metrics_feed").await?;
+    for (chain_id, wired) in [("feed-wired-chain", true), ("feed-unwired-chain", false)] {
+        seed_identified_lineage(scratch.pool(), chain_id, 1).await?;
+        let heads = HeadMarkers {
+            latest: BlockMarker::new(1, format!("{chain_id}-block-1"))?,
+            safe: None,
+            finalized: None,
+        };
+        let feed = RunnerMetricsFeed::default();
+        let mut runner = runner(
+            scratch.runner(),
+            complete_phase_set(Some(heads)),
+            available_capacity(),
+            "metrics-feed-runner",
+        )?;
+        if wired {
+            runner = runner.with_metrics_feed(feed.clone());
+        }
+        runner
+            .run_chain(&chain(chain_id)?, CancellationToken::new())
+            .await?;
+        let woken = tokio::time::timeout(Duration::from_millis(200), feed.committed())
+            .await
+            .is_ok();
+        assert_eq!(
+            woken, wired,
+            "a settled Ingest or Project batch wakes the served-lag refresh only through the wired feed"
+        );
+    }
     scratch.cleanup().await
 }
 

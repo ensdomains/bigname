@@ -74,6 +74,7 @@ pub struct PhaseRunner {
     after_required_redo_catch_up: Option<live_follow::AfterRequiredRedoCatchUp>,
     loop_heartbeat: Option<crate::metrics::RunnerLoopHeartbeat>,
     phase_progress: RunnerPhaseProgress,
+    metrics_feed: crate::metrics::RunnerMetricsFeed,
     stop_budget: std::time::Duration,
     chain_stop_clocks: Arc<std::sync::Mutex<BTreeMap<String, Arc<StopClock>>>>,
 }
@@ -109,6 +110,7 @@ impl PhaseRunner {
             after_required_redo_catch_up: None,
             loop_heartbeat: None,
             phase_progress: RunnerPhaseProgress::default(),
+            metrics_feed: crate::metrics::RunnerMetricsFeed::default(),
             stop_budget: StopClock::DEFAULT_BUDGET,
             chain_stop_clocks: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
         })

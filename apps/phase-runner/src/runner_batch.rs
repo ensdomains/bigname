@@ -5,7 +5,7 @@ use crate::{
     error::{RunnerError, RunnerResult},
     heads::publish_heads,
     ingest_progress,
-    metrics::RunnerLoopHeartbeat,
+    metrics::{RunnerLoopHeartbeat, RunnerMetricsFeed},
     phase::{
         PhaseBatchOutcome, PhaseContext, PhaseName, PhaseProgress, RedoAttemptFence, RunMode,
         VerificationLevel,
@@ -67,6 +67,11 @@ impl PhaseRunner {
 
     pub fn with_phase_progress(mut self, progress: RunnerPhaseProgress) -> Self {
         self.phase_progress = progress;
+        self
+    }
+
+    pub fn with_metrics_feed(mut self, feed: RunnerMetricsFeed) -> Self {
+        self.metrics_feed = feed;
         self
     }
 
@@ -166,6 +171,12 @@ impl PhaseRunner {
             .record_committed(progress_token, &outcome);
         if matches!(outcome, PhaseBatchOutcome::Complete(_)) {
             self.confirm_progress(context).await?;
+        }
+        if matches!(
+            phase_name,
+            PhaseName::Ingest | PhaseName::Live | PhaseName::Project
+        ) {
+            self.metrics_feed.batch_committed();
         }
         if phase_name == PhaseName::Verify && matches!(mode, RunMode::Normal) {
             crate::verify_level::warn_optional_downgrade(

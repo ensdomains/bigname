@@ -34,6 +34,11 @@ fn registers_the_pipeline_metric_families_with_build_identity() -> Result<()> {
     let metrics = PipelineMetrics::new(900, loop_heartbeat, progress)?;
     metrics.apply_phase_progress();
     metrics.apply_rows(&[metric_row("interpret")])?;
+    metrics.served_lag.apply(&[served_lag::ServedLagRow {
+        chain_id: "ethereum-mainnet".to_owned(),
+        observed_head_block_number: Some(104),
+        publication_block_number: Some(100),
+    }]);
 
     let scrape = metrics.registry.encode()?;
     for metric_type in [
@@ -48,9 +53,15 @@ fn registers_the_pipeline_metric_families_with_build_identity() -> Result<()> {
         "# TYPE phase_runner_reinterpretation_required gauge",
         "# TYPE phase_runner_phase_batches_since_cursor_advance gauge",
         "# TYPE phase_runner_phase_cursor_stall_age_seconds gauge",
+        "# TYPE phase_runner_served_lag_blocks gauge",
+        "# TYPE phase_runner_served_publication_block gauge",
     ] {
         assert!(scrape.contains(metric_type), "missing {metric_type}");
     }
+    assert!(scrape.contains("phase_runner_served_lag_blocks{chain=\"ethereum-mainnet\"} 4"));
+    assert!(
+        scrape.contains("phase_runner_served_publication_block{chain=\"ethereum-mainnet\"} 100")
+    );
     assert!(scrape.contains("build_sha="));
     assert!(scrape.contains("interpreter_content_hash="));
     Ok(())
@@ -140,6 +151,108 @@ fn updates_failure_freshness_lag_verification_and_redo_signals() -> Result<()> {
         1
     );
     Ok(())
+}
+
+#[tokio::test]
+async fn a_failed_refresh_after_a_commit_reports_refresh_failure() -> Result<()> {
+    let metrics = PipelineMetrics::new(
+        900,
+        RunnerLoopHeartbeat::default(),
+        RunnerPhaseProgress::default(),
+    )?;
+    metrics.refresh_success.set(1);
+    let unreachable = sqlx::postgres::PgPoolOptions::new()
+        .acquire_timeout(Duration::from_millis(200))
+        .connect_lazy("postgres://bigname@127.0.0.1:1/bigname")?;
+
+    assert!(metrics.refresh_after_commit(&unreachable).await.is_err());
+    assert_eq!(metrics.refresh_success.get(), 0);
+    Ok(())
+}
+
+#[test]
+fn an_incoherent_observed_head_warns_once_per_change() -> Result<()> {
+    let metrics = PipelineMetrics::new(
+        900,
+        RunnerLoopHeartbeat::default(),
+        RunnerPhaseProgress::default(),
+    )?;
+    let lag = &metrics.served_lag;
+    assert!(lag.incoherent_changed("chain", Some((99, 100))));
+    assert!(!lag.incoherent_changed("chain", Some((99, 100))));
+    assert!(lag.incoherent_changed("chain", Some((98, 100))));
+    assert!(!lag.incoherent_changed("chain", None));
+    assert!(lag.incoherent_changed("chain", Some((98, 100))));
+    Ok(())
+}
+
+#[test]
+fn served_gauges_reconcile_chains_the_query_no_longer_returns() -> Result<()> {
+    let metrics = PipelineMetrics::new(
+        900,
+        RunnerLoopHeartbeat::default(),
+        RunnerPhaseProgress::default(),
+    )?;
+    metrics.served_lag.configure(&[
+        "project-row-gone".to_owned(),
+        "configured-emptied".to_owned(),
+    ]);
+    let phase = |chain: &str, phase: &str| PhaseMetricRow {
+        chain_id: chain.to_owned(),
+        ..metric_row(phase)
+    };
+    let served = |chain: &str| served_lag::ServedLagRow {
+        chain_id: chain.to_owned(),
+        observed_head_block_number: Some(104),
+        publication_block_number: Some(100),
+    };
+    metrics.apply_rows(&[
+        phase("configured-emptied", "project"),
+        phase("project-row-gone", "live"),
+        phase("project-row-gone", "project"),
+        phase("unconfigured-emptied", "project"),
+    ])?;
+    metrics.served_lag.apply(&[
+        served("configured-emptied"),
+        served("project-row-gone"),
+        served("unconfigured-emptied"),
+    ]);
+    let scrape = metrics.registry.encode()?;
+    assert!(scrape.contains("phase_runner_served_lag_blocks{chain=\"project-row-gone\"} 4\n"));
+
+    // Every Project row is gone; one chain keeps its Live row.
+    metrics.apply_rows(&[phase("project-row-gone", "live")])?;
+    metrics.served_lag.apply(&[]);
+
+    let scrape = metrics.registry.encode()?;
+    for chain in ["project-row-gone", "configured-emptied"] {
+        for gauge in [
+            "phase_runner_served_lag_blocks",
+            "phase_runner_served_publication_block",
+        ] {
+            let line = format!("{gauge}{{chain=\"{chain}\"}} -1\n");
+            assert!(scrape.contains(&line), "missing {line}");
+        }
+    }
+    assert!(
+        !scrape.contains("chain=\"unconfigured-emptied\""),
+        "a chain that is neither configured nor returned leaves the served gauges"
+    );
+    Ok(())
+}
+
+#[test]
+fn served_lag_is_unavailable_without_both_sides() {
+    assert_eq!(served_lag::served_lag(Some(104), Some(100)), 4);
+    assert_eq!(
+        served_lag::served_lag(Some(99), Some(100)),
+        -1,
+        "an observed head below the publication is unavailable, not caught up"
+    );
+    assert_eq!(served_lag::served_lag(Some(100), Some(100)), 0);
+    assert_eq!(served_lag::served_lag(None, Some(100)), -1);
+    assert_eq!(served_lag::served_lag(Some(104), None), -1);
+    assert_eq!(served_lag::served_lag(None, None), -1);
 }
 
 #[test]
