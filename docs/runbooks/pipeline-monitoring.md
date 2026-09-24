@@ -266,7 +266,10 @@ running binary.
 A full rebuild (a Project run with no earlier publication to build on) or a
 redo (a repair run over a block range) runs Project as one database transaction
 that can take tens of minutes, and its block gauges do not move until it
-commits. Three gauges show which step it is in instead:
+commits. The Project refresh of a recompute-flags run is also a redo, so it
+counts too. Three gauges show which step it is in instead. They have no
+dashboard panel or alert yet; those arrive with the ops dashboards tracked in
+Linear TYR-34.
 
 - `phase_runner_project_step{chain, step}` is `1` for the active step and `0`
   for every other step.
@@ -278,9 +281,19 @@ The steps run in this order: `prepare`, `scope`, `inputs`, one step per
 projection builder named after it (`name_authority` through
 `child_registrations`), `integrity`, `publish` and `commit`. All three gauges
 read `0` when no full rebuild or redo is running, including right after one
-commits or fails. Normal incremental batches never set them. The runner updates
-them as each step starts, and the values live only in the running process, so a
-restart starts them at zero.
+commits or fails. Normal incremental batches never set them. The values live
+only in the running process, so a restart starts them at zero.
+
+The runner records each step the moment it starts, but a separate metrics
+worker copies the latest recorded step into the gauges a moment later. A step
+that finishes quickly may never show up in the gauges or in a scrape.
+
+The gauges cover the engine's derivation and its commit only. The hydration
+and the progress write that follow a Project batch are not steps, and the
+gauges already read `0` while they run. The gauges also read `0` as soon as a
+run stops, before the database has finished with it: after a redo fails,
+PostgreSQL may still be rolling the transaction back while the gauges read `0`
+and the Project row still says `running`.
 
 ## Alerts
 
