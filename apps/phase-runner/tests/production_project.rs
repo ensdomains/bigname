@@ -1975,7 +1975,7 @@ async fn retained_name_and_resolver_summary_sections_are_projected() -> Result<(
     assert_eq!(summaries.0["registration"]["registrant"], OWNER);
     assert_eq!(summaries.0["control"]["registry_owner"], OWNER);
     assert_eq!(summaries.0["resolver"]["address"], RESOLVER);
-    assert_eq!(summaries.0["record_inventory"]["status"], "unsupported");
+    assert!(summaries.0.get("record_inventory").is_none());
     assert!(summaries.0["history"]["surface_head"].is_object());
     assert!(summaries.0["history"]["resource_head"].is_object());
 

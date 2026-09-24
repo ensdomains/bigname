@@ -162,11 +162,6 @@
                        END,
                        'latest_event_kind', resolver.event_kind
                    ),
-                   'record_inventory', jsonb_build_object(
-                       'status', 'unsupported',
-                       'unsupported_reason',
-                           'record_inventory remains unsupported in the ENSv1 name_current rebuild'
-                   ),
                    'history', jsonb_build_object(
                        'surface_head', surface_history.pointer,
                        'resource_head', resource_history.pointer
