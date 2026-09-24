@@ -1711,6 +1711,7 @@ dependencies = [
  "syn 2.0.117",
  "time",
  "uuid",
+ "zstd",
 ]
 
 [[package]]

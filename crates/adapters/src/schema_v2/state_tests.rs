@@ -515,11 +515,13 @@ fn controller_preimage_restore_rebinds_existing_registrar_identity() {
     state
         .v1_registrars
         .get_mut("test:restored")
+        .map(std::sync::Arc::make_mut)
         .unwrap()
         .surface_known = false;
     state
         .v1_names
         .get_mut("test:restored")
+        .map(std::sync::Arc::make_mut)
         .unwrap()
         .surface_known = false;
     state.active_resources.remove("test:restored");
