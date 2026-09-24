@@ -4324,7 +4324,7 @@ async fn v2_get_subnames_uses_current_sepolia_anchor_on_mixed_phase_heads() -> R
     child.canonicality_summary = json!({"state":"canonical_lineage"});
     upsert_phase_children_current_rows(&database.pool, &[child]).await?;
     database.insert_manifest("ens", "ens_v2_registry_l1", "ethereum-sepolia",
-        "ens_v2_sepolia_post_audit", 1, "active", "ensip15@ens-normalize-0.1.1").await?;
+        "ens_v2_sepolia_20260915", 1, "active", "ensip15@ens-normalize-0.1.1").await?;
     let state = AppState::new_with_rpc_urls(database.lookup_pool.clone(),
         bigname_lookup::ChainRpcUrls::default());
     let response = app_router(state).oneshot(Request::builder()

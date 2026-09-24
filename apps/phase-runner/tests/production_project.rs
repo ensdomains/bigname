@@ -3785,7 +3785,7 @@ async fn migrated_child_in_a_migration_created_registry_is_served() -> Result<()
         ScratchDatabase::create("project_exact_profile_migration_created_registry").await?;
     let chain = "ethereum-sepolia";
     seed_lineage(scratch.pool(), chain, 5).await?;
-    declare_sepolia_post_audit_profile(scratch.pool(), chain).await?;
+    declare_live_sepolia_manifest(scratch.pool(), chain).await?;
     let registry_manifest = insert_namespaced_manifest(
         scratch.pool(),
         "ens",
@@ -4210,7 +4210,7 @@ async fn a_sepolia_child_overlap_blocks_publication() -> Result<()> {
     let scratch = ScratchDatabase::create("production_project_child_sepolia").await?;
     seed_project_fixture(scratch.pool()).await?;
     seed_child_authority_fixture(scratch.pool(), 5, 3).await?;
-    declare_sepolia_post_audit_profile(scratch.pool(), CHAIN).await?;
+    declare_live_sepolia_manifest(scratch.pool(), CHAIN).await?;
 
     run_project_phase(scratch.pool(), CHAIN, 5)
         .await
@@ -11877,7 +11877,7 @@ async fn authority_classifier_covers_every_ens_binding_event_arm_combination() -
     let scratch = ScratchDatabase::create("project_authority_classifier_matrix").await?;
     let chain = "ethereum-sepolia";
     seed_lineage(scratch.pool(), chain, 5).await?;
-    declare_sepolia_post_audit_profile(scratch.pool(), chain).await?;
+    declare_live_sepolia_manifest(scratch.pool(), chain).await?;
     insert_namespaced_manifest(
         scratch.pool(),
         "ens",
@@ -12533,7 +12533,7 @@ async fn reservation_release_event_vote_requires_a_preexisting_binding() -> Resu
     let scratch = ScratchDatabase::create("project_authority_release_event_causality").await?;
     let chain = "project-authority-release-event-causality";
     seed_lineage(scratch.pool(), chain, 4).await?;
-    declare_sepolia_post_audit_profile(scratch.pool(), chain).await?;
+    declare_live_sepolia_manifest(scratch.pool(), chain).await?;
     insert_namespaced_manifest(
         scratch.pool(),
         "ens",
@@ -13023,7 +13023,7 @@ async fn bindingless_resolver_summary_ignores_selected_head_resource_shape() -> 
 
     for pool in [incremental.pool(), fresh.pool()] {
         seed_lineage(pool, chain, 3).await?;
-        declare_sepolia_post_audit_profile(pool, chain).await?;
+        declare_live_sepolia_manifest(pool, chain).await?;
         insert_namespaced_manifest(
             pool,
             "ens",
@@ -19203,7 +19203,7 @@ async fn assert_ancestor_expiry_release_redo_restores_descendant(
     let fresh = ScratchDatabase::create(&format!("{fixture_name}_fresh")).await?;
 
     for pool in [incremental.pool(), fresh.pool()] {
-        declare_sepolia_post_audit_profile(pool, CHAIN).await?;
+        declare_live_sepolia_manifest(pool, CHAIN).await?;
         for (number, timestamp) in [(0_i64, 0_i64), (1, 10), (2, 30), (3, 40)] {
             sqlx::query(
                 "INSERT INTO chain_lineage (
@@ -20789,69 +20789,6 @@ async fn a_failed_audit_write_keeps_the_non_retryable_invariant_failure() -> Res
     scratch.cleanup().await
 }
 
-// A post-audit Sepolia manifest declared for a different chain must not
-// reclassify this one: the deployment profile is per projected chain.
-#[tokio::test]
-async fn a_foreign_chain_sepolia_manifest_keeps_the_mainnet_profile() -> Result<()> {
-    let scratch = ScratchDatabase::create("project_dual_current_foreign_label").await?;
-    let chain = "project-dual-current-foreign";
-    seed_mainnet_dual_current_conflict(scratch.pool(), chain).await?;
-    declare_sepolia_post_audit_profile(scratch.pool(), "project-dual-current-elsewhere").await?;
-
-    let failure = run_project_phase(scratch.pool(), chain, 5)
-        .await
-        .expect_err("a foreign sepolia label must not disable the assertion");
-    assert!(
-        failure.to_string().contains("both authority arms"),
-        "unexpected failure: {failure}"
-    );
-    assert_eq!(
-        generation_failure_rows(scratch.pool(), chain).await?.len(),
-        1,
-        "the mainnet assertion still records its evidence"
-    );
-
-    scratch.cleanup().await
-}
-
-#[tokio::test]
-async fn a_foreign_chain_sepolia_manifest_keeps_the_mainnet_profile_for_a_mixed_corpus()
--> Result<()> {
-    let scratch = ScratchDatabase::create("project_dual_current_foreign_reason").await?;
-    let chain = "project-dual-current-foreign-reason";
-    let logical_name_id = seed_dual_open_cross_arm_fixture(scratch.pool(), chain, 4).await?;
-    declare_sepolia_post_audit_profile(scratch.pool(), "project-dual-current-elsewhere").await?;
-    InterpretEngine::new(scratch.pool().clone())
-        .run_batch(InterpretRequest {
-            chain_id: chain.into(),
-            from_block: 0,
-            to_block: 5,
-            resume_current: None,
-            mode: InterpretRunMode::Normal,
-        })
-        .await?;
-
-    run_project_phase(scratch.pool(), chain, 5).await?;
-
-    // The current ENSv2 registration decides the proofless mixed corpus, and the selection
-    // still reports the chain's own Mainnet profile.
-    let selection: (Option<String>, Option<String>) = sqlx::query_as(
-        "SELECT provenance #>> '{authority_selection,authority_arm}',
-                provenance #>> '{authority_selection,deployment_profile}'
-         FROM name_current WHERE logical_name_id = $1",
-    )
-    .bind(&logical_name_id)
-    .fetch_one(scratch.pool())
-    .await?;
-    assert_eq!(
-        selection,
-        (Some("ens_v2".into()), Some("mainnet".into())),
-        "a proofless mainnet mixed corpus keeps the mainnet profile"
-    );
-
-    scratch.cleanup().await
-}
-
 // The false-positive guard: a Mainnet name whose predecessor binding closed at
 // the boundary is the ordinary migrated shape and must keep publishing.
 // Follow the chain: a current ENSv2 registration holds the name beside a live ENSv1 lease without
@@ -20967,7 +20904,7 @@ async fn sepolia_profile_blocks_the_same_proven_dual_current_corpus() -> Result<
     let scratch = ScratchDatabase::create("project_dual_current_sepolia").await?;
     let chain = "project-dual-current-sepolia";
     let logical_name_id = seed_dual_open_cross_arm_fixture(scratch.pool(), chain, 4).await?;
-    declare_sepolia_post_audit_profile(scratch.pool(), chain).await?;
+    declare_live_sepolia_manifest(scratch.pool(), chain).await?;
     InterpretEngine::new(scratch.pool().clone())
         .run_batch(InterpretRequest {
             chain_id: chain.into(),
@@ -24284,7 +24221,7 @@ async fn seed_raw_v2_reservation_fixture(
     insert_lineage_block(pool, chain, 6).await?;
     insert_lineage_block(pool, chain, 7).await?;
     if source_family != "ens_v2_root_l1" {
-        declare_sepolia_post_audit_profile(pool, chain).await?;
+        declare_live_sepolia_manifest(pool, chain).await?;
     }
     let role = if source_family == "ens_v2_root_l1" {
         "root_registry"
@@ -25009,7 +24946,7 @@ async fn seed_closed_predecessor_cross_arm_fixture(
     boundary_block: i64,
 ) -> Result<String> {
     seed_lineage(pool, chain, 5).await?;
-    declare_sepolia_post_audit_profile(pool, chain).await?;
+    declare_live_sepolia_manifest(pool, chain).await?;
     for source_family in ["ens_v2_registry_l1", "ens_v2_registrar_l1"] {
         insert_namespaced_manifest(
             pool,
@@ -25061,14 +24998,12 @@ async fn seed_closed_predecessor_cross_arm_fixture(
     Ok(logical_name_id)
 }
 
-// An inert manifest whose deployment epoch makes Project classify the chain
-// under the [Sepolia deployment profile](../../../docs/glossary.md#deployment-profile).
-// A proven boundary with both authority arms still open is unpublishable on
-// every ENS deployment profile, so selector-only fixtures seed the closed
-// predecessor state that production Interpret writes. Declare this before the
-// first projection so a deployment-profile-sensitive field cannot change
-// mid-test.
-async fn declare_sepolia_post_audit_profile(pool: &PgPool, chain: &str) -> Result<()> {
+// An inert active manifest carrying the live Sepolia ENSv2 deployment epoch. Project
+// selects nothing by deployment label, so this only gives the chain the manifest set a
+// Sepolia runtime has. A proven boundary with both authority arms still open is
+// unpublishable, so selector-only fixtures seed the closed predecessor state that
+// production Interpret writes.
+async fn declare_live_sepolia_manifest(pool: &PgPool, chain: &str) -> Result<()> {
     insert_namespaced_manifest(
         pool,
         "ens",
@@ -25076,7 +25011,7 @@ async fn declare_sepolia_post_audit_profile(pool: &PgPool, chain: &str) -> Resul
         "ens_v2_root_l1",
         1,
         "ens_v2_sepolia_20260915",
-        &format!("tests/raw-{chain}-sepolia-post-audit.toml"),
+        &format!("tests/raw-{chain}-sepolia-20260915.toml"),
         json!({
             "manifest_version": 1,
             "namespace": "ens",

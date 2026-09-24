@@ -240,7 +240,6 @@
                        'proof_event_identity', selected_authority.authority_proof_event_identity,
                        'transition_id', selected_authority.authority_transition_id,
                        'lifecycle_state', selected_authority.lifecycle_state,
-                       'deployment_profile', selected_authority.deployment_profile,
                        'resource_authority_context', selected_authority.resource_authority_context,
                        'unsupported_reason', selected_authority.unsupported_reason,
                        'registry_generation', selected_authority.registry_generation,

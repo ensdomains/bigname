@@ -2,7 +2,7 @@ use super::*;
 
 const REGISTRY: &str = "0x0000000000000000000000000000000000000822";
 const OWNER: &str = "0x0000000000000000000000000000000000000823";
-const PROFILE: &str = "ens_v2_sepolia_post_audit";
+const PROFILE: &str = "ens_v2_sepolia_20260915";
 
 async fn manifest(pool: &PgPool, family: &str, profile: &str, contracts: Value) -> Result<i64> {
     let payload = json!({"deployment_epoch":profile,"contracts":contracts,

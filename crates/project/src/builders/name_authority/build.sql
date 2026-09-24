@@ -646,17 +646,7 @@
                                )
                            ),
                        false
-                   ) AS bindingless_event_authority,
-                   CASE
-                       WHEN $1 = 'ethereum-sepolia' OR EXISTS (
-                           SELECT 1 FROM project_manifests manifest
-                           WHERE manifest.namespace = 'ens'
-                             AND manifest.deployment_label IN (
-                                 'ens_v2_sepolia_post_audit', 'ens_v2_sepolia_hackathon', 'ens_v2_sepolia_20260915'
-                             )
-                       ) THEN 'sepolia'
-                       ELSE 'mainnet'
-                   END AS deployment_profile
+                   ) AS bindingless_event_authority
             FROM project_surfaces surface
             LEFT JOIN arm_summary summary USING (logical_name_id)
             LEFT JOIN event_arm_summary event_summary USING (logical_name_id)
@@ -817,7 +807,6 @@
                        THEN 'old' ELSE 'current' END
                END AS registry_generation,
                records.current_record_block AS registry_handoff_block_number,
-               selected.deployment_profile,
                jsonb_strip_nulls(jsonb_build_object('authority_arm',
                    selected.selected_authority_arm, 'binding_kind', selected.selected_binding_kind,
                    'resource_id', selected.selected_resource_id, 'surface_binding_id',
