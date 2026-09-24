@@ -171,7 +171,9 @@ chain. They have no dashboard panel or paging rule yet; those arrive with the
 ops dashboards tracked in Linear TYR-34.
 
 - `phase_runner_served_publication_block{chain}` is the block of the Project
-  publication the API could serve: the Project row is `completed` or `running`,
+  publication (the latest committed
+  [projection generation](../glossary.md#projection-generation)) the API could
+  serve: the Project row is `completed` or `running`,
   was built with this binary's
   [interpreter content hash](../glossary.md#interpreter-content-hash), and its
   block is still canonical, safe or finalized. `-1` means no publication passes
@@ -179,8 +181,8 @@ ops dashboards tracked in Linear TYR-34.
   Project has rebuilt for a new interpreter content hash. The API's
   [served head](../glossary.md#served-head) applies more conditions that this
   gauge leaves out: the publication must be at most one block behind the
-  published chain head, and some routes also refuse while an Interpret redo
-  runs.
+  published chain head, and some routes also refuse while an Interpret
+  repair run is in progress.
 - `phase_runner_served_lag_blocks{chain}` is the newest observed
   execution-client head minus that publication block. A non-zero value means
   the newest data the API could serve is that many blocks behind the newest
@@ -194,8 +196,8 @@ The observed head is the head the latest Live batch read from the execution
 client, which the runner stores as the Live phase's target. When the published
 chain head is newer, for example while Ingest catches up after a restart and
 before Live runs again, the published chain head is used instead. The metrics
-code never asks the execution client itself. Live and Project run one after the
-other, so the observed head does not move while a Project batch runs: a slow
+code never asks the execution client itself. Live, Interpret and Project run in
+turn, so the observed head does not move while a Project batch runs: a slow
 Project batch reads zero at its commit and shows its real lag once the next
 Live batch has read the head. When following the chain normally, each Live
 batch reads one new block, so the gauge reads 1 until Project publishes that
@@ -205,7 +207,8 @@ block.
 
 Both gauges are refreshed with the others every 5 seconds and also right after
 every Ingest, Live and Project batch commit, so the value in the runner is
-exact at block boundaries. The 5-second refresh alone is slower than a Base
+exact after each of those commits. Other changes, such as a failed Project
+batch or a rewind, show at the next 5-second refresh. The 5-second refresh alone is slower than a Base
 block; on Base the refresh after each commit is what keeps the value current.
 Prometheus still samples it only once per scrape (every 15 seconds in the
 checked-in configuration), so a lag that lasts less than a scrape interval may
@@ -213,7 +216,10 @@ never appear in a graph.
 
 `phase_runner_head_lag_blocks` keeps its meaning: a phase's own target minus
 its own progress. A Project batch's target is the head it started with, so that
-gauge is not a freshness measure; use the served lag instead.
+gauge is not a freshness measure; use `phase_runner_served_lag_blocks` instead.
+If Live stops, its target stops moving and the served-lag gauge can read 0
+while the chain moves on, so check it together with the Live heartbeat age and
+`phase_runner_head_lag_blocks{phase="live"}`.
 
 The build identity is already exported as
 `build_info{build_sha, interpreter_content_hash}`, with the value `1` for the

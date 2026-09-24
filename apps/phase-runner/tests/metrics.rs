@@ -186,7 +186,15 @@ async fn endpoint_exports_failed_phase_and_stale_heartbeat_signals() -> Result<(
 async fn endpoint_exports_served_lag_against_the_readable_project_publication() -> Result<()> {
     let scratch = ScratchDatabase::create("phase_runner_served_lag").await?;
     let store = PhaseStore::new(scratch.pool().clone());
-    for chain in ["served", "orphaned", "published-head", "unobserved"] {
+    for chain in [
+        "served",
+        "orphaned",
+        "older-hash",
+        "failed",
+        "published-head",
+        "ingest-ahead",
+        "unobserved",
+    ] {
         store.initialize_chain(chain).await?;
         seed_served_lag_state(scratch.pool(), chain).await?;
     }
@@ -199,6 +207,25 @@ async fn endpoint_exports_served_lag_against_the_readable_project_publication() 
     sqlx::query(
         "UPDATE chain_phase_state SET target_block_number = NULL, target_block_hash = NULL
          WHERE chain_id IN ('published-head', 'unobserved') AND phase_name = 'live'",
+    )
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query(
+        "UPDATE chain_phase_state SET input_content_hash = 'older-fingerprint'
+         WHERE chain_id = 'older-hash' AND phase_name = 'project'",
+    )
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query(
+        "UPDATE chain_phase_state
+         SET phase_status = 'failed', last_error = 'terminal projection error'
+         WHERE chain_id = 'failed' AND phase_name = 'project'",
+    )
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query(
+        "UPDATE chain_phase_state SET target_block_number = 95, target_block_hash = 'x-95'
+         WHERE chain_id = 'ingest-ahead' AND phase_name = 'live'",
     )
     .execute(scratch.pool())
     .await?;
@@ -226,7 +253,10 @@ async fn endpoint_exports_served_lag_against_the_readable_project_publication() 
     for (chain, lag, publication) in [
         ("served", 14.0, 90.0),
         ("orphaned", -1.0, -1.0),
+        ("older-hash", -1.0, -1.0),
+        ("failed", -1.0, -1.0),
         ("published-head", 10.0, 90.0),
+        ("ingest-ahead", 10.0, 90.0),
         ("unobserved", -1.0, 90.0),
     ] {
         let label = format!("chain=\"{chain}\"");
