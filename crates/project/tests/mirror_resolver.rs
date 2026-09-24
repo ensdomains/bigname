@@ -359,87 +359,74 @@ async fn mirror_without_a_projected_ensv1_resolver_is_explicitly_unsupported() -
     Ok(())
 }
 
+/// The walk selects the parent's resolver for the child, but the mirror keeps a resolver found
+/// above the queried node only when it is an ENSIP-10 extended resolver, so the mirrored row is
+/// unsupported rather than served from the parent resolver's storage for the child.
+/// (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/resolver/ENSV1Resolver.sol:L40-L43 @ ens_v2_sepolia_20260916@366de741)
+/// (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/universalResolver/libraries/LibResolution.sol:L39-L48 @ ens_v2_sepolia_20260916@366de741)
 #[tokio::test]
-async fn mirror_walks_to_the_nearest_ancestor_resolver_and_reads_the_queried_node() -> Result<()> {
+async fn mirror_drops_a_non_extended_ancestor_resolver() -> Result<()> {
     let fixture =
         Fixture::declared("mirror_ancestor", V1Side::Absent).with_ancestor(Ancestor::Direct {
             pointer_block_offset: 0,
         });
-    let (database, pool) = project(&fixture, fixture.target(), Execution::FromZero).await?;
-    let v2 = inventory(&pool, V2_RESOURCE).await?;
-    let parent = inventory(&pool, PARENT_V1_RESOURCE).await?;
-    assert_eq!(v2["support_status"], "supported", "{v2}");
-    assert_eq!(v2["unsupported_reason"], Value::Null);
-    // Only the parent's resolver storage for the queried (child) node is served: not the
-    // parent's own records, and not the child's records on a resolver the walk did not select.
-    let keys: Vec<_> = v2["entries"]
-        .as_array()
-        .context("entries")?
-        .iter()
-        .map(|entry| entry["record_key"].as_str().unwrap().to_owned())
-        .collect();
-    assert_eq!(keys, ["text:description"], "{v2}");
-    assert_eq!(v2["entries"][0]["value"], "child on parent resolver");
-    let parent_keys: Vec<_> = parent["entries"]
-        .as_array()
-        .context("parent entries")?
-        .iter()
-        .map(|entry| entry["record_key"].as_str().unwrap().to_owned())
-        .collect();
-    assert_eq!(parent_keys, ["text:url"], "{parent}");
-    assert_eq!(v2["provenance"]["resolver_address"], MIRROR);
-    assert_eq!(v2["provenance"]["read_rules"], json!([]));
     let node = bigname_lookup::ens_namehash_hex(NAME)?;
     let parent_node = bigname_lookup::ens_namehash_hex(PARENT_NAME)?;
-    assert_eq!(
-        v2["provenance"]["mirror"],
-        json!({
-            "resolver_address": MIRROR,
-            "mirrored_source_family": "ens_v1_resolver_l1",
-            "mirrored_registry_source_family": "ens_v1_registry_l1",
-            "mirrored_registry_address": V1_REGISTRY,
-            "queried_node": node,
-            "mirrored_node": parent_node,
-            "mirrored_name": PARENT_NAME,
-            "ancestor_depth": 1,
-            "forwarding": "direct_call",
-            "mirrored_resolver_address": PARENT_RESOLVER,
-            "mirrored_resource_id": PARENT_V1_RESOURCE,
-            "mirrored_pointer_event_id": parent["provenance"]["resolver_pointer_event_id"],
-            "mirrored_pointer_source_family": "ens_v1_registry_l1"
-        }),
-        "{v2}"
-    );
-    assert_eq!(v2["record_version_boundary"]["resource_id"], V2_RESOURCE);
-    assert_eq!(
-        v2["record_version_boundary_key"],
-        boundary_key(&v2["record_version_boundary"], CHAIN)
-    );
-    database.cleanup().await?;
-
-    // Before any write for the child node, the ancestor's resolver answers empty: supported, no
-    // entries, exactly as the chain would answer the direct getter call.
-    let (database, pool) = project(&fixture, fixture.base, Execution::FromZero).await?;
-    let v2 = inventory(&pool, V2_RESOURCE).await?;
-    assert_eq!(v2["support_status"], "supported", "{v2}");
-    assert_eq!(v2["entries"], json!([]));
-    assert_eq!(v2["provenance"]["mirror"]["ancestor_depth"], 1);
-    database.cleanup().await?;
+    for target in [fixture.base, fixture.target()] {
+        let (database, pool) = project(&fixture, target, Execution::FromZero).await?;
+        let v2 = inventory(&pool, V2_RESOURCE).await?;
+        let parent = inventory(&pool, PARENT_V1_RESOURCE).await?;
+        ancestor_gate::assert_unsupported_mirror_row(&v2);
+        // The parent resolver stores a record for the child node; the mirror never reads it.
+        assert_eq!(
+            v2["provenance"]["mirror"],
+            json!({
+                "resolver_address": MIRROR,
+                "mirrored_source_family": "ens_v1_resolver_l1",
+                "mirrored_registry_source_family": "ens_v1_registry_l1",
+                "mirrored_registry_address": V1_REGISTRY,
+                "queried_node": node,
+                "mirrored_node": parent_node,
+                "mirrored_name": PARENT_NAME,
+                "ancestor_depth": 1,
+                "forwarding": "direct_call",
+                "mirrored_resolver_address": PARENT_RESOLVER,
+                "mirrored_resource_id": PARENT_V1_RESOURCE,
+                "mirrored_pointer_event_id": parent["provenance"]["resolver_pointer_event_id"],
+                "mirrored_pointer_source_family": "ens_v1_registry_l1",
+                "mirrored_unsupported_reason": "ancestor_resolver_not_extended"
+            }),
+            "{target}: {v2}"
+        );
+        assert_eq!(v2["record_version_boundary"]["resource_id"], V2_RESOURCE);
+        assert_eq!(
+            v2["record_version_boundary_key"],
+            boundary_key(&v2["record_version_boundary"], CHAIN)
+        );
+        // The parent's own inventory is independent of the mirror.
+        assert_eq!(parent["support_status"], "supported", "{parent}");
+        if target == fixture.target() {
+            assert_eq!(parent["entries"][0]["record_key"], "text:url", "{parent}");
+        }
+        database.cleanup().await?;
+    }
 
     // The exact node's resolver wins over the ancestor's, and a cleared exact node falls through
-    // to the ancestor.
-    for (id, v1_side, expected_resolver, expected_depth) in [
+    // to the ancestor, which the mirror then rejects.
+    for (id, v1_side, expected_resolver, expected_depth, expected_support) in [
         (
             "mirror_exact_over_ancestor",
             V1Side::Projected,
             V1_RESOLVER,
             0,
+            "supported",
         ),
         (
             "mirror_cleared_to_ancestor",
             V1Side::Cleared,
             PARENT_RESOLVER,
             1,
+            "unsupported",
         ),
     ] {
         let fixture = Fixture::declared(id, v1_side).with_ancestor(Ancestor::Direct {
@@ -447,7 +434,7 @@ async fn mirror_walks_to_the_nearest_ancestor_resolver_and_reads_the_queried_nod
         });
         let (database, pool) = project(&fixture, fixture.target(), Execution::FromZero).await?;
         let v2 = inventory(&pool, V2_RESOURCE).await?;
-        assert_eq!(v2["support_status"], "supported", "{id}: {v2}");
+        assert_eq!(v2["support_status"], expected_support, "{id}: {v2}");
         assert_eq!(
             v2["provenance"]["mirror"]["mirrored_resolver_address"], expected_resolver,
             "{id}: {v2}"
@@ -677,8 +664,9 @@ async fn root_registry_tld_without_a_registration_serves_its_pointer() -> Result
         }
     }
 
-    // The rule is scoped to `current_authority_not_projected`: a TLD bound under both arms is a
-    // mixed-history overlap and gets neither the pointer nor a serving resource.
+    // The rule is scoped to `current_authority_not_projected`: a TLD bound under both arms follows
+    // its current ENSv2 registration, whose exact-name profile this fixture does not support, and
+    // gets neither the pointer nor a serving resource.
     let fixture = Fixture::declared(
         "tld_root_bound",
         V1Side::NodeOnly {
@@ -692,11 +680,13 @@ async fn root_registry_tld_without_a_registration_serves_its_pointer() -> Result
         .await?
         .context("bound TLD row")?;
     assert_eq!(
-        name["unsupported_reason"], "independent_ens_deployments_overlap",
+        name["unsupported_reason"], "ensv2_exact_name_profile_shadow",
         "{name}"
     );
     assert_eq!(name["serving_resource_id"], Value::Null);
-    assert_eq!(name["declared_summary"]["resolver"]["address"], Value::Null);
+    // The declared resolver is the selected ENSv2 registration's own; the unsupported row is
+    // still not served, and the pointer grants no read reachability.
+    assert_eq!(name["declared_summary"]["resolver"]["address"], MIRROR);
     assert_eq!(name["provenance"]["read_reachability"], json!({}));
     database.cleanup().await?;
 
@@ -841,8 +831,9 @@ async fn mirror_does_not_derive_through_an_extended_ancestor_resolver() -> Resul
 #[tokio::test]
 async fn ancestor_pointer_changes_rescope_the_mirrored_descendant() -> Result<()> {
     // The child's record on the parent's resolver is written at base + 1, before the ENSv1
-    // registry points the parent at that resolver at base + 2. Every execution shape must publish
-    // the same supported row once the pointer exists.
+    // registry points the parent at that resolver at base + 2. Once the pointer exists the walk
+    // selects it and the mirror rejects it, so every execution shape must publish the same
+    // unsupported row naming the parent's pointer.
     let fixture =
         Fixture::declared("mirror_rescope", V1Side::Absent).with_ancestor(Ancestor::Direct {
             pointer_block_offset: 2,
@@ -871,13 +862,34 @@ async fn ancestor_pointer_changes_rescope_the_mirrored_descendant() -> Result<()
             section.remove("target_block_number");
             section.remove("target_block_hash");
         }
-        assert_eq!(v2["support_status"], "supported", "{execution:?}: {v2}");
-        assert_eq!(v2["provenance"]["mirror"]["ancestor_depth"], 1);
-        assert_eq!(v2["entries"][0]["record_key"], "text:description");
+        ancestor_gate::assert_unsupported_mirror_row(&v2);
+        let mirror = &v2["provenance"]["mirror"];
+        assert_eq!(mirror["ancestor_depth"], 1, "{execution:?}: {v2}");
+        assert_eq!(
+            mirror["mirrored_unsupported_reason"],
+            "ancestor_resolver_not_extended"
+        );
+        // The consulted ancestor pointer at base + 2 is evidence in `provenance.mirror`; the
+        // unsupported row's own position and boundary stay at the name's mirror pointer.
+        let pointer_block: i64 = sqlx::query_scalar(
+            "SELECT block_number FROM normalized_events WHERE normalized_event_id = $1",
+        )
+        .bind(
+            mirror["mirrored_pointer_event_id"]
+                .as_i64()
+                .context("pointer id")?,
+        )
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(pointer_block, fixture.base + 2);
         assert_eq!(
             v2["chain_positions"]["block_number"],
-            json!(fixture.base + 2),
+            json!(fixture.base),
             "{execution:?}: {v2}"
+        );
+        assert_eq!(
+            v2["record_version_boundary"]["chain_position"]["block_number"],
+            json!(fixture.base)
         );
         if let Some(previous) = &previous {
             assert_eq!(&v2, previous, "{execution:?} drifted");
@@ -1160,15 +1172,31 @@ async fn direct_bound_name_without_a_resolver_keeps_no_topology() -> Result<()> 
 async fn project_direct_fixture(fixture: &Fixture) -> Result<(TestDatabase, PgPool)> {
     let (database, pool) = database(fixture.id).await?;
     seed(&pool, fixture).await?;
+    serve_through_ensv2_arm(&pool, fixture).await?;
+    run(
+        &pool,
+        fixture.target(),
+        0,
+        fixture.target(),
+        None,
+        RunMode::Normal,
+    )
+    .await?;
+    Ok((database, pool))
+}
+
+/// Make the ENSv2 mirror resource the name's selected serving resource: drop the child's ENSv1
+/// binding and admit the ENSv2 registry and registrar arms for it.
+async fn serve_through_ensv2_arm(pool: &PgPool, fixture: &Fixture) -> Result<()> {
     // Keep ENSv1 resolver evidence for the mirror without claiming a second current
     // registry authority for the child in this independent deployment fixture.
     sqlx::query("DELETE FROM surface_bindings WHERE surface_binding_id = $1::uuid")
         .bind(V1_BINDING)
-        .execute(&pool)
+        .execute(pool)
         .await?;
     for family in ["ens_v2_registry_l1", "ens_v2_registrar_l1"] {
         let manifest_id = manifest(
-            &pool,
+            pool,
             fixture,
             family,
             &json!({
@@ -1178,7 +1206,7 @@ async fn project_direct_fixture(fixture: &Fixture) -> Result<(TestDatabase, PgPo
         )
         .await?;
         sqlx::query("UPDATE manifest_versions SET deployment_label = 'ens_v2_sepolia_20260915' WHERE manifest_id = $1")
-            .bind(manifest_id).execute(&pool).await?;
+            .bind(manifest_id).execute(pool).await?;
         sqlx::query(
             "INSERT INTO normalized_events (
                  event_identity, namespace, event_kind, source_family, manifest_version,
@@ -1202,19 +1230,10 @@ async fn project_direct_fixture(fixture: &Fixture) -> Result<(TestDatabase, PgPo
         .bind(fixture.base)
         .bind(block_hash(fixture.base))
         .bind(json!({"expiry": 2_000_000_000, "surface_binding_id": V2_BINDING}))
-        .execute(&pool)
+        .execute(pool)
         .await?;
     }
-    run(
-        &pool,
-        fixture.target(),
-        0,
-        fixture.target(),
-        None,
-        RunMode::Normal,
-    )
-    .await?;
-    Ok((database, pool))
+    Ok(())
 }
 
 async fn inventory(pool: &PgPool, resource: &str) -> Result<Value> {
@@ -1649,15 +1668,20 @@ async fn seed(pool: &PgPool, fixture: &Fixture) -> Result<()> {
         });
     }
     for event in events {
-        sqlx::query("INSERT INTO normalized_events (event_identity,namespace,logical_name_id,resource_id,event_kind,source_family,manifest_version,source_manifest_id,chain_id,block_number,block_hash,transaction_hash,transaction_index,log_index,derivation_kind,canonicality_state,after_state,raw_fact_ref) VALUES ($1,'ens',$2,$3::uuid,$4,$5,1,$6,$7,$8,$9,$10,0,$11,'ens_v1_unwrapped_authority','canonical',$12,$13)")
-            .bind(format!("{}:{}", fixture.id, event.identity)).bind(event.logical_name_id)
-            .bind(event.resource_id).bind(event.kind).bind(event.source_family).bind(event.manifest_id)
-            .bind(CHAIN).bind(event.block).bind(block_hash(event.block))
-            .bind(format!("0x{:064x}", event.block * 10 + event.log_index)).bind(event.log_index)
-            .bind(event.after_state).bind(json!({"emitting_address": event.emitter}))
-            .execute(pool).await?;
+        insert_event(pool, fixture, event).await?;
     }
     Ok(())
+}
+
+/// Insert one fixture event and return its normalized event id.
+async fn insert_event(pool: &PgPool, fixture: &Fixture, event: Event) -> Result<i64> {
+    Ok(sqlx::query_scalar("INSERT INTO normalized_events (event_identity,namespace,logical_name_id,resource_id,event_kind,source_family,manifest_version,source_manifest_id,chain_id,block_number,block_hash,transaction_hash,transaction_index,log_index,derivation_kind,canonicality_state,after_state,raw_fact_ref) VALUES ($1,'ens',$2,$3::uuid,$4,$5,1,$6,$7,$8,$9,$10,0,$11,'ens_v1_unwrapped_authority','canonical',$12,$13) RETURNING normalized_event_id")
+        .bind(format!("{}:{}", fixture.id, event.identity)).bind(event.logical_name_id)
+        .bind(event.resource_id).bind(event.kind).bind(event.source_family).bind(event.manifest_id)
+        .bind(CHAIN).bind(event.block).bind(block_hash(event.block))
+        .bind(format!("0x{:064x}", event.block * 10 + event.log_index)).bind(event.log_index)
+        .bind(event.after_state).bind(json!({"emitting_address": event.emitter}))
+        .fetch_one(pool).await?)
 }
 
 struct Event {
@@ -1742,8 +1766,123 @@ async fn database(name: &str) -> Result<(TestDatabase, PgPool)> {
     Ok((database, pool))
 }
 
+/// Add a surface for `name` whose ENSv2 resource is bound through the ENSv2 arm and points at the
+/// fixture's mirror at `fixture.base`, exactly like the seeded ENSv2 pointer. Returns the logical
+/// name id.
+async fn add_mirror_name(
+    pool: &PgPool,
+    fixture: &Fixture,
+    name: &str,
+    resource: &'static str,
+    binding: &str,
+) -> Result<String> {
+    let node = bigname_lookup::ens_namehash_hex(name)?;
+    let logical_name_id = format!("ens:{node}");
+    let labelhashes: Vec<_> = name
+        .split('.')
+        .map(|label| format!("{:#x}", alloy_primitives::keccak256(label)))
+        .collect();
+    let mut dns = Vec::new();
+    for label in name.split('.') {
+        dns.push(u8::try_from(label.len())?);
+        dns.extend_from_slice(label.as_bytes());
+    }
+    dns.push(0);
+    sqlx::query("INSERT INTO name_surfaces (logical_name_id,namespace,raw_name,raw_labels,dns_encoded_name,namehash,labelhashes,normalizer_version,visibility_state,chain_id,block_hash,block_number,canonicality_state) VALUES ($1,'ens',$2,string_to_array($2,'.'),$3,$4,$5,'fixture','active',$6,$7,$8,'canonical')")
+        .bind(&logical_name_id).bind(name).bind(dns).bind(&node).bind(labelhashes)
+        .bind(CHAIN).bind(block_hash(fixture.base)).bind(fixture.base).execute(pool).await?;
+    sqlx::query("INSERT INTO resources (resource_id,chain_id,block_hash,block_number,canonicality_state) VALUES ($1::uuid,$2,$3,$4,'canonical')")
+        .bind(resource).bind(CHAIN).bind(block_hash(fixture.base)).bind(fixture.base).execute(pool).await?;
+    sqlx::query("INSERT INTO surface_bindings (surface_binding_id,logical_name_id,resource_id,binding_kind,authority_arm,active_from,chain_id,block_hash,block_number,canonicality_state) VALUES ($1::uuid,$2,$3::uuid,'declared_registry_path','ens_v2',to_timestamp($4),$5,$6,$7,'canonical')")
+        .bind(binding).bind(&logical_name_id).bind(resource).bind(1_800_000_000 + fixture.base)
+        .bind(CHAIN).bind(block_hash(fixture.base)).bind(fixture.base).execute(pool).await?;
+    insert_event(
+        pool,
+        fixture,
+        Event {
+            identity: Box::leak(format!("v2-pointer-{name}").into_boxed_str()),
+            logical_name_id: Some(logical_name_id.clone()),
+            resource_id: Some(resource),
+            kind: "ResolverChanged",
+            source_family: "ens_v2_root_l1",
+            manifest_id: Some(manifest_id(pool, "ens_v2_root_l1").await?),
+            block: fixture.base,
+            log_index: 8,
+            emitter: V1_REGISTRY,
+            after_state: json!({"node": node, "resolver": fixture.mirror}),
+        },
+    )
+    .await?;
+    Ok(logical_name_id)
+}
+
+async fn manifest_id(pool: &PgPool, source_family: &str) -> Result<i64> {
+    Ok(sqlx::query_scalar(
+        "SELECT manifest_id FROM manifest_versions WHERE source_family = $1 ORDER BY manifest_id DESC LIMIT 1",
+    )
+    .bind(source_family)
+    .fetch_one(pool)
+    .await?)
+}
+
+/// Add canonical blocks after the seeded `base..=base + 3`.
+async fn extend_chain(pool: &PgPool, from: i64, through: i64) -> Result<()> {
+    for number in from..=through {
+        sqlx::query("INSERT INTO chain_lineage (chain_id,block_hash,block_number,block_timestamp,canonicality_state) VALUES ($1,$2,$3,to_timestamp($4),'canonical')")
+            .bind(CHAIN).bind(block_hash(number)).bind(number).bind(1_800_000_000 + number).execute(pool).await?;
+    }
+    Ok(())
+}
+
+async fn event_id(pool: &PgPool, fixture: &Fixture, identity: &str) -> Result<i64> {
+    Ok(sqlx::query_scalar(
+        "SELECT normalized_event_id FROM normalized_events WHERE event_identity = $1",
+    )
+    .bind(format!("{}:{identity}", fixture.id))
+    .fetch_one(pool)
+    .await?)
+}
+
+/// What the bounded history reader attributes to `resource` at `block`, independent of what
+/// Project published.
+async fn history_attribution(
+    pool: &PgPool,
+    resource: &str,
+    block: i64,
+) -> Result<std::collections::BTreeSet<i64>> {
+    let resource = resource.parse::<uuid::Uuid>()?;
+    let bound = std::collections::BTreeMap::from([(CHAIN.to_owned(), block)]);
+    Ok(
+        bigname_storage::load_bounded_record_attribution(pool, &[resource], Some(&bound))
+            .await?
+            .remove(&resource)
+            .unwrap_or_default(),
+    )
+}
+
+/// The published row without the publication's own target marker, for comparing content across
+/// execution shapes that publish it at different targets.
+fn content(mut row: Value) -> Value {
+    for section in ["chain_positions", "canonicality_summary"] {
+        if let Some(section) = row[section].as_object_mut() {
+            section.remove("target_block_number");
+            section.remove("target_block_hash");
+        }
+    }
+    row
+}
+
 #[path = "mirror_resolver/dependency_metadata_repro.rs"]
 mod dependency_metadata_repro;
+
+#[path = "mirror_resolver/ancestor_gate.rs"]
+mod ancestor_gate;
+
+#[path = "mirror_resolver/ancestor_transition.rs"]
+mod ancestor_transition;
+
+#[path = "mirror_resolver/pointer_identity.rs"]
+mod pointer_identity;
 
 #[path = "mirror_resolver/classification_inputs.rs"]
 mod classification_inputs;

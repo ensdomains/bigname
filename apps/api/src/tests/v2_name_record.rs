@@ -7223,6 +7223,114 @@ async fn v2_get_name_records_serves_inventory_mirrored_from_ensv1() -> Result<()
     Ok(())
 }
 
+/// Project's row for a name bound to the ENSv1 mirror whose nearest ENSv1 resolver is a
+/// non-extended ancestor, which the mirror rejects: unsupported with the public mirror reason, no
+/// record values, and the internal marker only in persisted `provenance.mirror`.
+fn ancestor_rejected_mirror_inventory(
+    mirror: &str,
+    inventory: &mut bigname_storage::RecordInventoryCurrentRow,
+) {
+    inventory.selectors = json!([]);
+    inventory.entries = json!([]);
+    inventory.explicit_gaps = json!([]);
+    inventory.unsupported_families = json!([{
+        "record_family": "resolver_classification",
+        "unsupported_reason": "mirrored_resolver_not_projected"
+    }]);
+    inventory.coverage = json!({
+        "status": "unsupported",
+        "exhaustiveness": "not_asserted",
+        "unsupported_reason": "mirrored_resolver_not_projected"
+    });
+    inventory.provenance["resolver_address"] = json!(mirror);
+    for field in [
+        "record_event_ids",
+        "record_link_event_ids",
+        "attributed_event_ids",
+        "read_rules",
+    ] {
+        inventory.provenance[field] = json!([]);
+    }
+    inventory.provenance["mirror"] = json!({
+        "resolver_address": mirror,
+        "mirrored_source_family": "ens_v1_resolver_l1",
+        "mirrored_registry_source_family": "ens_v1_registry_l1",
+        "mirrored_registry_address": "0x00000000000c2e074ec69a0dfb2997ba6c7d2e1e",
+        "queried_node": "namehash:alice.eth",
+        "mirrored_node": "namehash:eth",
+        "mirrored_name": "eth",
+        "ancestor_depth": 1,
+        "forwarding": "direct_call",
+        "mirrored_resolver_address": "0x0000000000000000000000000000000000000abc",
+        "mirrored_pointer_event_id": 77,
+        "mirrored_pointer_source_family": "ens_v1_registry_l1",
+        "mirrored_unsupported_reason": "ancestor_resolver_not_extended"
+    });
+}
+
+#[tokio::test]
+async fn v2_get_name_records_refuses_a_mirror_whose_ancestor_resolver_is_rejected() -> Result<()> {
+    const MIRROR: &str = "0x1010101010101010101010101010101010101010";
+    let payload_for = |uri: &'static str| {
+        v2_name_records_payload_with_row_and_setup(
+            uri,
+            |row| {
+                row.declared_summary["resolver"]["address"] = json!(MIRROR);
+            },
+            |_, _, inventory| ancestor_rejected_mirror_inventory(MIRROR, inventory),
+        )
+    };
+
+    // Explicit indexed keys answer unsupported with the existing public mirror reason, and the
+    // name keeps the mirror as its resolver.
+    let payload = payload_for(
+        "/v1/names/alice.eth/records?source=indexed&keys=addr:60,text:description&include=inventory",
+    )
+    .await?;
+    assert_eq!(payload["meta"]["source"], json!("indexed"));
+    assert_eq!(payload["data"]["resolver"]["address"], json!(MIRROR));
+    let refused = json!({
+        "status": "unsupported",
+        "unsupported_reason": "mirrored_resolver_not_projected"
+    });
+    assert_eq!(
+        payload["data"]["records"],
+        json!({"addr:60": refused, "text:description": refused})
+    );
+    // `include=inventory` serializes key summaries only; the internal marker stays in the
+    // persisted provenance.
+    assert_eq!(
+        payload["data"]["inventory"],
+        json!({
+            "known_keys": [],
+            "unset_keys": [],
+            "unsupported_keys": ["addr:60", "text:description"],
+            "abi_content_types": null,
+            "abi_unsupported_reason": "inventory_not_authoritative"
+        })
+    );
+    let serialized = payload.to_string();
+    for internal in ["ancestor_resolver_not_extended", "mirrored_unsupported_reason", "provenance"] {
+        assert!(!serialized.contains(internal), "{internal} leaked: {payload:#}");
+    }
+
+    // Without keys the default set comes from the row's selectors, entries and gaps, all empty,
+    // so no unsupported keys are manufactured.
+    let payload = payload_for("/v1/names/alice.eth/records").await?;
+    assert_eq!(payload["data"]["records"], json!({}), "{payload:#}");
+    assert_eq!(payload["data"]["resolver"]["address"], json!(MIRROR));
+
+    // `source=auto` with keys keeps the ordinary fallback to verified execution; this fixture
+    // cannot execute it, so the answer is the existing verified contract, not an indexed value.
+    let payload = payload_for("/v1/names/alice.eth/records?source=auto&keys=addr:60").await?;
+    assert_eq!(payload["meta"]["source"], json!("verified"));
+    assert_eq!(
+        payload["data"]["records"]["addr:60"]["unsupported_reason"],
+        json!("verified_records_not_supported")
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn v2_subname_filtered_totals_match_every_page_and_fixed_expiry_time() -> Result<()> {
     let (database, _) = v2_subnames_payload("/v1/names/parent.eth/subnames").await?;

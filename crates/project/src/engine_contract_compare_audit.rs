@@ -136,7 +136,7 @@ pub(super) async fn reject_unsupported(
             AND surface.canonicality_state IN ('canonical','safe','finalized') AND lineage.canonicality_state IN ('canonical','safe','finalized')
         ), addresses AS (
           SELECT DISTINCT lower(address) address FROM nodes
-          JOIN normalized_events event ON event.namespace=nodes.namespace AND lower(event.after_state ->> 'node')=nodes.namehash
+          JOIN normalized_events event ON event.namespace=nodes.namespace AND lower(COALESCE(event.after_state ->> 'child_node', event.after_state ->> 'namehash', event.after_state ->> 'node'))=nodes.namehash
           JOIN chain_lineage lineage ON lineage.chain_id=event.chain_id AND lineage.block_number=event.block_number AND lineage.block_hash=event.block_hash
           CROSS JOIN LATERAL (VALUES(event.before_state ->> 'resolver'),(event.after_state ->> 'resolver')) pointer(address)
           WHERE event.chain_id=$1 AND event.block_number <= $2 AND event.event_kind='ResolverChanged'

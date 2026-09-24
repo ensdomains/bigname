@@ -131,10 +131,12 @@ capture](manifests.md#resolver-creation-capture).
 the exact ENS root, `eth`, `reverse`, and `addr.reverse` names. When an active
 surface has a current ENSv2 arm and ENSv1 evidence from a current binding or
 historical events, but no higher-precedence authority evidence, Project selects
-the ENSv2 arm for these four names without creating an authority proof or epoch.
-Historical ENSv2 evidence without a current ENSv2 binding does not qualify, and
-descendants are not included in the exception. A current ENSv2 binding with no
-ENSv1 evidence remains the ordinary single-arm ENSv2 case.
+the ENSv2 arm for these four names without creating an authority proof or epoch:
+their epoch start stays null, where an ordinary name selected by its current
+ENSv2 registration starts its epoch at that binding. Historical ENSv2 evidence
+without a current ENSv2 binding does not qualify, and descendants are not
+included in the exception. A current ENSv2 binding with no ENSv1 evidence
+remains the ordinary single-arm ENSv2 case.
 
 ## Authority proof
 
@@ -151,7 +153,11 @@ establish authority by itself. Once the positive registration establishes the
 child epoch, later topology or manifest changes do not erase it. That child proof does not synthesize
 `MigrationApplied`, ENSv1→ENSv2 migration history, or a binding transition. Candidate
 events, reservations, event recency, binding UUID order, and `active_from`
-order are not authority proof.
+order are not authority proof. A proof is not needed for ENSv2 to hold a name:
+a current ENSv2 registration selects ENSv2 without one, following the chain
+([ADR 0007](adrs/0007-follow-the-chain-ens-authority.md)). A proof decides
+where the authority epoch starts, and it is what arms the dual-current
+generation checks.
 
 ## Backfill coverage fact
 
@@ -1456,9 +1462,11 @@ the cursor. See
 the
 ENSv2-side resolver that answers by reading ENSv1. It looks the name up in the
 ENSv1 registry
-(upstream: .refs/ens_v2/contracts/src/resolver/ENSV1Resolver.sol:L40 @ ens_v2@a971bd64)
-and forwards the resolve call to whatever resolver it finds there
-(upstream: .refs/ens_v2/contracts/src/resolver/AbstractMirrorResolver.sol:L68 @ ens_v2@a971bd64).
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/resolver/ENSV1Resolver.sol:L41 @ ens_v2_sepolia_20260916@366de741)
+and forwards the resolve call to the nearest resolver it finds there when that
+resolver is set on the name itself or supports `IExtendedResolver`
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/resolver/ENSV1Resolver.sol:L42 @ ens_v2_sepolia_20260916@366de741)
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/resolver/AbstractMirrorResolver.sol:L68 @ ens_v2_sepolia_20260916@366de741).
 It is the resolver the premigration tooling writes onto every reservation
 (upstream: .refs/ens_v2/contracts/script/preMigrationUtils.ts:L52 @ ens_v2@a971bd64),
 and a
@@ -1478,16 +1486,20 @@ bigname's manifest role for a declared instance of the
 contract family: an `ens_v2_resolver_l1` contract declaration whose address
 stores no records and answers a name by reading the ENSv1 registry named in the
 manifest's `correlation_addresses.ens_v1_registry` and forwarding to the
-resolver found there
-(upstream: .refs/ens_v2/contracts/src/resolver/ENSV1Resolver.sol:L38-L41 @ ens_v2@a971bd64)
-(upstream: .refs/ens_v2/contracts/src/resolver/AbstractMirrorResolver.sol:L66-L74 @ ens_v2@a971bd64).
+nearest resolver found there, which it keeps only when that resolver is set on
+the name itself or supports `IExtendedResolver`
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/resolver/ENSV1Resolver.sol:L40-L43 @ ens_v2_sepolia_20260916@366de741)
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/universalResolver/libraries/LibResolution.sol:L39-L48 @ ens_v2_sepolia_20260916@366de741)
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/resolver/AbstractMirrorResolver.sol:L66-L74 @ ens_v2_sepolia_20260916@366de741).
 Project classifies the address as supported without `Upgraded` history and
 serves a name bound to it from the storage of the ENSv1 resolver the mirror's
-registry walk selects, the exact node's or else the nearest ancestor's, read for
-the queried node, marking the row with `provenance.mirror` (`mirrored_node`,
-`ancestor_depth`, `forwarding`); when no consulted node has a projected resolver,
-or the selected ancestor resolver is declared `ensip10_extended_resolver`, the
-row is unsupported with `mirrored_resolver_not_projected`. See
+registry walk selects at the name's own node, read for the queried node,
+marking the row with `provenance.mirror` (`mirrored_node`, `ancestor_depth`,
+`forwarding`). When no consulted node has a projected resolver, or the walk's
+nearest resolver belongs to an ancestor, the row is unsupported with
+`mirrored_resolver_not_projected`; `provenance.mirror.mirrored_unsupported_reason`
+is `ensip10_extended_resolver` for a declared extended ancestor and
+`ancestor_resolver_not_extended` for one the mirror rejects. See
 [manifest declarations](manifests.md#ensv1-mirror-resolver-declarations) and
 [projections](projections.md#resolver-and-records).
 
@@ -2106,14 +2118,15 @@ registration lifecycle is unregistered, but its authority epoch remains
 registration, owner, resolver, expiry, or control. A later positive ENSv2
 registration continues within that v2 authority regime when the release's
 regime evidence is unambiguous. If earlier ENSv2 grants on other resources
-leave the release's lifecycle epoch ambiguous, a later re-registration
-combined with post-release ENSv1 residue resolves to an explicit
-mixed-authority conflict rather than continuing the regime.
+leave the release's lifecycle epoch ambiguous, the regime does not continue;
+a later re-registration that is current is still selected as the name's
+current ENSv2 registration.
 Without an [authority proof](#authority-proof), this tombstone is established
 only by a qualifying release boundary — a release of the then-current ENSv2
 registration with no ENSv1 activity at or before it — and later ENSv1 facts do
 not retroactively validate a non-qualifying release. A release that does not
-qualify leaves no tombstone: the name resolves to explicit
+qualify leaves no ENSv2 tombstone: ENSv1 then decides the name when it holds the
+name or has history for it, and the name is otherwise explicit
 `current_authority_not_projected`.
 
 <a id="released-v1-authority"></a>

@@ -13,20 +13,25 @@ const V1_POINTER_FAMILIES: &str =
 ///
 /// The mirror finds the resolver with `RegistryUtils.findResolver` over the ENSv1 registry: it
 /// walks the DNS-encoded name toward the root and returns the nearest node with a nonzero registry
-/// resolver, the exact node first; the root node itself is never consulted.
-/// (upstream: .refs/ens_v2/contracts/src/resolver/ENSV1Resolver.sol:L38-L41 @ ens_v2@a971bd64)
+/// resolver, the exact node first; the root node itself is never consulted. It keeps that resolver
+/// only when it was found at the queried node or supports `IExtendedResolver`, and otherwise
+/// answers with no resolver instead of walking on to a farther ancestor.
+/// (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/resolver/ENSV1Resolver.sol:L40-L43 @ ens_v2_sepolia_20260916@366de741)
+/// (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/universalResolver/libraries/LibResolution.sol:L39-L48 @ ens_v2_sepolia_20260916@366de741)
 /// (upstream: .refs/ens_v1/contracts/universalResolver/RegistryUtils.sol:L25-L38 @ ens_v1@91c966f)
-/// It then calls that resolver with the original calldata: an immediate resolver receives the
+/// It then calls a kept resolver with the original calldata: an immediate resolver receives the
 /// queried node's getter call directly, so it answers with its own storage for the queried node,
 /// while an `IExtendedResolver` receives `resolve(name, data)` and answers by its own logic.
-/// (upstream: .refs/ens_v2/contracts/src/resolver/AbstractMirrorResolver.sol:L66-L69 @ ens_v2@a971bd64)
+/// (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/resolver/AbstractMirrorResolver.sol:L66-L74 @ ens_v2_sepolia_20260916@366de741)
 /// (upstream: .refs/ens_v1/contracts/universalResolver/ResolverCaller.sol:L66-L70 @ ens_v1@91c966f)
 /// (upstream: .refs/ens_v1/contracts/universalResolver/ResolverCaller.sol:L88-L96 @ ens_v1@91c966f)
 /// (upstream: .refs/ens_v1/contracts/universalResolver/ResolverCaller.sol:L108-L127 @ ens_v1@91c966f)
 ///
 /// `project_mirror_substituted_pointers` therefore re-points each derivable mirrored resource at
-/// the selected ENSv1 resolver while keeping the queried node, so the ordinary node-keyed
-/// attribution computes exactly the records that resolver stores for the queried node.
+/// the resolver selected at the queried node itself, so the ordinary node-keyed attribution
+/// computes exactly the records that resolver stores for the queried node. A nearest resolver on
+/// an ancestor is never derived through: the row is unsupported with
+/// `ensip10_extended_resolver` or `ancestor_resolver_not_extended`.
 pub(super) async fn stage_pointers(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
@@ -76,9 +81,12 @@ pub(super) async fn stage_pointers(
             -- ResolverChanged for the node, clears included, so a cleared exact node falls through
             -- to its ancestors. The registry sets resolvers for nodes without any ENSv1 owner or
             -- surface link, so this is keyed by node, not by the event's resource or logical name
-            -- (a pre-surface pointer keeps both null; docs/storage.md).
-            SELECT DISTINCT ON (lower(event.after_state ->> 'node'))
-                   lower(event.after_state ->> 'node') AS namehash,
+            -- (a pre-surface pointer keeps both null; docs/storage.md). The node is the name the
+            -- event addresses, read in the adapters' shared order (V1_EVENT_NODE_FIELDS in
+            -- crates/adapters/src/schema_v2/seam.rs): a derived child pointer keeps its NewOwner
+            -- observation, whose `node` is the parent and whose `child_node` is the child.
+            SELECT DISTINCT ON (lower(COALESCE(event.after_state ->> 'child_node', event.after_state ->> 'namehash', event.after_state ->> 'node')))
+                   lower(COALESCE(event.after_state ->> 'child_node', event.after_state ->> 'namehash', event.after_state ->> 'node')) AS namehash,
                    event.resource_id,
                    event.namespace AS pointer_namespace,
                    event.source_family AS pointer_source_family,
@@ -89,12 +97,12 @@ pub(super) async fn stage_pointers(
                    surface.namespace, surface.raw_name, surface.raw_labels
             FROM project_events event
             JOIN project_surfaces surface
-              ON lower(surface.namehash) = lower(event.after_state ->> 'node')
+              ON lower(surface.namehash) = lower(COALESCE(event.after_state ->> 'child_node', event.after_state ->> 'namehash', event.after_state ->> 'node'))
              AND surface.namespace = event.namespace
             WHERE event.event_kind = 'ResolverChanged'
               AND event.source_family IN ({V1_POINTER_FAMILIES})
-              AND event.after_state ->> 'node' IS NOT NULL
-            ORDER BY lower(event.after_state ->> 'node'),
+              AND COALESCE(event.after_state ->> 'child_node', event.after_state ->> 'namehash', event.after_state ->> 'node') IS NOT NULL
+            ORDER BY lower(COALESCE(event.after_state ->> 'child_node', event.after_state ->> 'namehash', event.after_state ->> 'node')),
                      event.block_number DESC NULLS LAST,
                      event.transaction_index DESC NULLS LAST,
                      event.log_index DESC NULLS LAST,
@@ -164,6 +172,11 @@ pub(super) async fn stage_pointers(
                         '[]'::jsonb
                     ) ? 'ensip10_extended_resolver'
                        THEN 'ensip10_extended_resolver'
+                   -- The mirror keeps a resolver found above the queried node only when it is an
+                   -- ENSIP-10 extended resolver and otherwise answers with no resolver; it does
+                   -- not walk on to a farther ancestor.
+                   WHEN nearest.ancestor_depth > 0
+                       THEN 'ancestor_resolver_not_extended'
                END AS mirrored_unsupported_reason,
                COALESCE(resolver.manifest_version, 1) AS mirrored_resolver_manifest_version
         FROM nearest

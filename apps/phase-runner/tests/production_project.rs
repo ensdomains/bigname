@@ -1369,7 +1369,7 @@ async fn undeclared_v1_resolver_is_explicitly_unsupported_without_code_hash_evid
 }
 
 #[tokio::test]
-async fn exact_name_support_keeps_conflicting_and_unpromoted_v2_status_explicit() -> Result<()> {
+async fn exact_name_support_keeps_mixed_and_unpromoted_v2_status_explicit() -> Result<()> {
     let scratch = ScratchDatabase::create("production_project_name_support").await?;
     let chain = "project-name-support";
     let logical_name_id = seed_dual_open_cross_arm_fixture(scratch.pool(), chain, 4).await?;
@@ -1390,11 +1390,13 @@ async fn exact_name_support_keeps_conflicting_and_unpromoted_v2_status_explicit(
     .bind(&logical_name_id)
     .fetch_one(scratch.pool())
     .await?;
+    // The current ENSv2 registration decides the mixed corpus; this Mainnet-profile fixture does
+    // not promote the ENSv2 exact-name profile.
     assert_eq!(
         mixed,
         (
             "unsupported".into(),
-            Some("conflicting_current_ens_authority".into())
+            Some("ensv2_exact_name_profile_shadow".into())
         )
     );
 
@@ -1475,14 +1477,16 @@ async fn exact_name_support_keeps_conflicting_and_unpromoted_v2_status_explicit(
     .bind(sepolia_name)
     .fetch_one(sepolia.pool())
     .await?;
-    assert_eq!(sepolia_reason, "independent_ens_deployments_overlap");
+    // No registrar event qualifies this Sepolia fixture's ENSv2 registration for the exact profile.
+    assert_eq!(sepolia_reason, "ensv2_exact_name_profile_shadow");
     sepolia.cleanup().await
 }
 
 #[tokio::test]
-async fn exact_name_no_proof_mixed_history_ignores_the_remaining_open_arm() -> Result<()> {
+async fn exact_name_no_proof_mixed_history_selects_the_remaining_open_arm() -> Result<()> {
     let scratch = ScratchDatabase::create("production_project_name_support_selected_arm").await?;
-    let chain = "project-name-support-selected-arm";
+    // Once served, the name projects a topology, which needs a known chain.
+    let chain = CHAIN;
     let logical_name_id = seed_dual_open_cross_arm_fixture(scratch.pool(), chain, 4).await?;
     InterpretEngine::new(scratch.pool().clone())
         .run_batch(InterpretRequest {
@@ -1511,14 +1515,8 @@ async fn exact_name_no_proof_mixed_history_ignores_the_remaining_open_arm() -> R
     .bind(logical_name_id)
     .fetch_one(scratch.pool())
     .await?;
-    assert_eq!(
-        support,
-        (
-            "unsupported".into(),
-            Some("conflicting_current_ens_authority".into()),
-            None,
-        )
-    );
+    // ENSv2 is history once its binding is gone, so the open ENSv1 binding holds the name.
+    assert_eq!(support, ("supported".into(), None, Some("ens_v1".into())));
     scratch.cleanup().await
 }
 
@@ -4192,10 +4190,10 @@ async fn a_sepolia_child_overlap_blocks_publication() -> Result<()> {
     scratch.cleanup().await
 }
 
-// `alice` carries ENSv1 history and takes an ENSv2 registration with no migration
-// proof, so per-child authority omits it as an unsupported mixed corpus rather than
-// ranking the two arms. The renewal of that invisible child must still leave the
-// clean sibling `bob` published.
+// `alice` keeps its open ENSv1 binding and takes an ENSv2 registration event that opens no
+// ENSv2 binding in this fixture, so per-child authority selects ENSv1 from the binding that
+// holds it now. The ENSv2 renewal of that child must still leave the sibling `bob`
+// published beside it.
 #[tokio::test]
 async fn incremental_v2_child_renewal_retains_sibling_edges() -> Result<()> {
     let scratch = ScratchDatabase::create("production_project_v2_sibling_scope").await?;
@@ -4297,7 +4295,7 @@ async fn incremental_v2_child_renewal_retains_sibling_edges() -> Result<()> {
     )
     .fetch_all(scratch.pool())
     .await?;
-    assert_eq!(before, vec!["ens:0xbob"]);
+    assert_eq!(before, vec!["ens:0xalice", "ens:0xbob"]);
 
     insert_event(
         scratch.pool(),
@@ -10338,9 +10336,12 @@ async fn equal_position_v1_residue_suppresses_released_v2_authority() -> Result<
     .await?;
     assert_eq!(boundary_positions, vec![(None, None), (None, None)]);
 
+    // The release leaves no ENSv2 tombstone and nothing is open on either arm, so ENSv1
+    // decides; it holds no lease binding, so the name has no projected current authority.
     run_project(scratch.pool(), chain, None, RunMode::Normal, 0, 6).await?;
-    let projected: (String, Option<String>, Option<Uuid>) = sqlx::query_as(
-        "SELECT support_status, unsupported_reason, resource_id
+    let projected: (String, Option<String>, Option<Uuid>, Option<String>) = sqlx::query_as(
+        "SELECT support_status, unsupported_reason, resource_id,
+                provenance #>> '{authority_selection,authority_arm}'
          FROM name_current WHERE logical_name_id = $1",
     )
     .bind(&logical_name_id)
@@ -10350,8 +10351,9 @@ async fn equal_position_v1_residue_suppresses_released_v2_authority() -> Result<
         projected,
         (
             "unsupported".into(),
-            Some("conflicting_current_ens_authority".into()),
+            Some("current_authority_not_projected".into()),
             None,
+            Some("ens_v1".into()),
         )
     );
 
@@ -10922,11 +10924,16 @@ async fn equal_position_v1_residue_suppresses_regime_regrant_carry() -> Result<(
     for block in 7..=8 {
         insert_lineage_block(scratch.pool(), chain, block).await?;
     }
-    insert_v2_regrant(scratch.pool(), chain, &logical_name_id, 8).await?;
+    let (_, regrant_resource) =
+        insert_v2_regrant(scratch.pool(), chain, &logical_name_id, 8).await?;
 
+    // The release still does not carry the regime, but the regrant is the only binding open
+    // now and the ENSv1 residue is history, so the regrant is the current candidate. Only this
+    // fixture's missing registrar profile keeps the ENSv2 row unsupported.
     run_project(scratch.pool(), chain, None, RunMode::Normal, 0, 8).await?;
-    let projected: (String, Option<String>, Option<Uuid>) = sqlx::query_as(
-        "SELECT support_status, unsupported_reason, resource_id
+    let projected: (String, Option<String>, Option<Uuid>, Option<String>) = sqlx::query_as(
+        "SELECT support_status, unsupported_reason, resource_id,
+                provenance #>> '{authority_selection,authority_arm}'
          FROM name_current WHERE logical_name_id = $1",
     )
     .bind(&logical_name_id)
@@ -10936,8 +10943,9 @@ async fn equal_position_v1_residue_suppresses_regime_regrant_carry() -> Result<(
         projected,
         (
             "unsupported".into(),
-            Some("conflicting_current_ens_authority".into()),
-            None,
+            Some("ensv2_exact_name_profile_shadow".into()),
+            Some(regrant_resource),
+            Some("ens_v2".into()),
         )
     );
 
@@ -10990,11 +10998,16 @@ async fn earlier_other_resource_grant_disqualifies_regime_carry() -> Result<()> 
         json!({}),
     )
     .await?;
-    insert_v2_regrant(scratch.pool(), chain, &logical_name_id, 8).await?;
+    let (_, regrant_resource) =
+        insert_v2_regrant(scratch.pool(), chain, &logical_name_id, 8).await?;
 
+    // The release does not carry the regime, but the regrant is the only binding open now, so
+    // it is the current candidate. Only this fixture's missing registrar profile keeps the
+    // ENSv2 row unsupported.
     run_project(scratch.pool(), chain, None, RunMode::Normal, 0, 8).await?;
-    let projected: (String, Option<String>, Option<Uuid>) = sqlx::query_as(
-        "SELECT support_status, unsupported_reason, resource_id
+    let projected: (String, Option<String>, Option<Uuid>, Option<String>) = sqlx::query_as(
+        "SELECT support_status, unsupported_reason, resource_id,
+                provenance #>> '{authority_selection,authority_arm}'
          FROM name_current WHERE logical_name_id = $1",
     )
     .bind(&logical_name_id)
@@ -11004,8 +11017,9 @@ async fn earlier_other_resource_grant_disqualifies_regime_carry() -> Result<()> 
         projected,
         (
             "unsupported".into(),
-            Some("conflicting_current_ens_authority".into()),
-            None,
+            Some("ensv2_exact_name_profile_shadow".into()),
+            Some(regrant_resource),
+            Some("ens_v2".into()),
         )
     );
 
@@ -11465,7 +11479,7 @@ async fn positive_v2_child_registration_establishes_authority_without_child_migr
     .fetch_one(scratch.pool())
     .await?;
     assert_eq!(
-        ordinary_registry_reason, "conflicting_current_ens_authority",
+        ordinary_registry_reason, "ensv2_exact_name_profile_shadow",
         "an ordinary ENSv2 registry must not establish child authority"
     );
 
@@ -11516,7 +11530,7 @@ async fn positive_v2_child_registration_establishes_authority_without_child_migr
     .fetch_one(scratch.pool())
     .await?;
     assert_eq!(
-        association_only_reason, "conflicting_current_ens_authority",
+        association_only_reason, "ensv2_exact_name_profile_shadow",
         "a diagnostic association without its admitted edge is not readable"
     );
     sqlx::query(
@@ -11580,7 +11594,7 @@ async fn positive_v2_child_registration_establishes_authority_without_child_migr
     .fetch_one(scratch.pool())
     .await?;
     assert_eq!(
-        detached_reason, "conflicting_current_ens_authority",
+        detached_reason, "ensv2_exact_name_profile_shadow",
         "a registry detached before the child grant is not current at proof"
     );
     sqlx::query(
@@ -11657,7 +11671,7 @@ async fn positive_v2_child_registration_establishes_authority_without_child_migr
     .bind(&logical_name_id)
     .fetch_one(scratch.pool())
     .await?;
-    assert_eq!(candidate_reason, "conflicting_current_ens_authority");
+    assert_eq!(candidate_reason, "ensv2_exact_name_profile_shadow");
 
     sqlx::query(
         "UPDATE normalized_events SET consumer_visibility = 'activated'
@@ -11887,13 +11901,14 @@ async fn authority_classifier_covers_every_ens_binding_event_arm_combination() -
                 None,
             )
             .await?;
-            let has_v1 = bindings.includes_v1() || events.includes_v1();
-            let has_v2 = bindings.includes_v2() || events.includes_v2();
-            let selected_arm = if has_v1 && has_v2 {
-                None
+            // Follow the chain: an open ENSv2 binding decides, then an open ENSv1 binding. A
+            // name with no open binding follows its ENSv1 authority events first, then its
+            // ENSv2 events.
+            let selected_arm = if bindings.includes_v2() {
+                Some("ens_v2")
             } else if bindings.includes_v1() || events.includes_v1() {
                 Some("ens_v1")
-            } else if bindings.includes_v2() || events.includes_v2() {
+            } else if events.includes_v2() {
                 Some("ens_v2")
             } else {
                 None
@@ -11903,9 +11918,7 @@ async fn authority_classifier_covers_every_ens_binding_event_arm_combination() -
                 Some("ens_v2") => seeded.v2,
                 _ => None,
             };
-            let reason = if has_v1 && has_v2 {
-                Some("independent_ens_deployments_overlap")
-            } else if selected_binding.is_none() {
+            let reason = if selected_binding.is_none() {
                 Some("current_authority_not_projected")
             } else {
                 None
@@ -12367,11 +12380,12 @@ async fn reservation_release_cannot_borrow_a_later_same_resource_registration() 
     assert_eq!(
         selected,
         (
-            None,
+            Some("ens_v2".into()),
             "unsupported".into(),
-            Some("independent_ens_deployments_overlap".into()),
+            Some("ensv2_exact_name_profile_shadow".into()),
         ),
-        "a later same-resource registration cannot retroactively qualify a reservation release",
+        "the later registration decides as the current ENSv2 registration, without \
+         retroactively qualifying the reservation release",
     );
 
     scratch.cleanup().await
@@ -12481,7 +12495,8 @@ async fn reservation_release_same_resource_incremental_matches_fresh() -> Result
     .fetch_one(fresh.pool())
     .await?;
     assert_eq!(incremental_authority, fresh_authority);
-    assert!(incremental_authority["authority_arm"].is_null());
+    assert_eq!(incremental_authority["authority_arm"], "ens_v2");
+    assert!(incremental_authority.get("proof_kind").is_none());
 
     incremental.cleanup().await?;
     fresh.cleanup().await
@@ -17964,9 +17979,10 @@ async fn project_redo_retracts_a_missing_reverse_resolver_pointer() -> Result<()
 }
 
 #[tokio::test]
-async fn mixed_authority_survives_v2_expiry_as_explicitly_unsupported() -> Result<()> {
+async fn mixed_authority_v2_expiry_hands_the_name_to_its_live_v1_registration() -> Result<()> {
     let scratch = ScratchDatabase::create("project_mixed_authority_v2_expiry").await?;
-    let chain = "project-mixed-authority-v2-expiry";
+    // Once served, the name projects a topology, which needs a known chain.
+    let chain = CHAIN;
     let logical_name_id = seed_dual_open_cross_arm_fixture(scratch.pool(), chain, 4).await?;
     InterpretEngine::new(scratch.pool().clone())
         .run_batch(InterpretRequest {
@@ -17984,9 +18000,11 @@ async fn mixed_authority_survives_v2_expiry_as_explicitly_unsupported() -> Resul
     .bind(&logical_name_id)
     .fetch_one(scratch.pool())
     .await?;
+    // While both arms are open the current ENSv2 registration decides; this Mainnet-profile
+    // fixture does not promote the ENSv2 exact-name profile.
     assert_eq!(
         initial_reason.as_deref(),
-        Some("conflicting_current_ens_authority")
+        Some("ensv2_exact_name_profile_shadow")
     );
 
     insert_lineage_block(scratch.pool(), chain, 6).await?;
@@ -18042,10 +18060,12 @@ async fn mixed_authority_survives_v2_expiry_as_explicitly_unsupported() -> Resul
     .bind(&logical_name_id)
     .fetch_optional(scratch.pool())
     .await?;
-    let incremental = incremental.expect("mixed authority must remain explicitly unsupported");
+    // Once the ENSv2 registration expires only the ENSv1 arm holds the name.
+    let incremental = incremental.expect("the name stays projected after the ENSv2 expiry");
+    assert_eq!(incremental["unsupported_reason"], Value::Null);
     assert_eq!(
-        incremental["unsupported_reason"],
-        "conflicting_current_ens_authority"
+        incremental["provenance"]["authority_selection"]["authority_arm"],
+        "ens_v1"
     );
 
     run_project(scratch.pool(), chain, None, RunMode::Normal, 0, 6).await?;
@@ -18061,10 +18081,11 @@ async fn mixed_authority_survives_v2_expiry_as_explicitly_unsupported() -> Resul
 }
 
 #[tokio::test]
-async fn mixed_authority_expiry_release_preserves_guarded_summary_fields() -> Result<()> {
+async fn mixed_authority_expiry_release_serves_the_v1_summary_on_both_paths() -> Result<()> {
     let incremental = ScratchDatabase::create("project_mixed_authority_summary_guard").await?;
     let fresh = ScratchDatabase::create("project_mixed_authority_summary_guard_fresh").await?;
-    let chain = "project-mixed-authority-summary-guard";
+    // Once served, the name projects a topology, which needs a known chain.
+    let chain = CHAIN;
     let mut logical_name_id = String::new();
 
     for pool in [incremental.pool(), fresh.pool()] {
@@ -18150,26 +18171,34 @@ async fn mixed_authority_expiry_release_preserves_guarded_summary_fields() -> Re
     .fetch_one(fresh.pool())
     .await?;
     assert_eq!(incremental_row, fresh_row);
+    assert_eq!(incremental_row["unsupported_reason"], Value::Null);
     assert_eq!(
-        incremental_row["unsupported_reason"],
-        "conflicting_current_ens_authority"
+        incremental_row["provenance"]["authority_selection"]["authority_arm"],
+        "ens_v1"
     );
     assert_eq!(
         (
             incremental_row.pointer("/declared_summary/registration/registrant"),
             incremental_row.pointer("/declared_summary/registration/expiry"),
             incremental_row.pointer("/declared_summary/registration/authority_kind"),
-            incremental_row.pointer("/declared_summary/registration/authority_key"),
+            incremental_row.pointer("/declared_summary/registration/status"),
             incremental_row.pointer("/declared_summary/control/status"),
         ),
         (
-            Some(&Value::Null),
+            Some(&json!(OWNER)),
             Some(&json!(4_000_000_000_i64)),
+            Some(&json!("registrar")),
+            Some(&json!("active")),
             Some(&Value::Null),
-            Some(&Value::Null),
-            Some(&json!("released")),
         ),
-        "an unresolved mixed-authority release must preserve its exact summary fields",
+        "after the ENSv2 expiry the live ENSv1 registration supplies the summary",
+    );
+    assert!(
+        incremental_row
+            .pointer("/declared_summary/registration/authority_key")
+            .and_then(Value::as_str)
+            .is_some_and(|key| key.starts_with("registrar:")),
+        "the ENSv1 registrar lease keys the registration: {incremental_row}"
     );
 
     incremental.cleanup().await?;
@@ -20764,7 +20793,8 @@ async fn a_foreign_chain_sepolia_manifest_keeps_the_mainnet_profile() -> Result<
 }
 
 #[tokio::test]
-async fn a_foreign_chain_sepolia_manifest_keeps_the_mainnet_mixed_corpus_reason() -> Result<()> {
+async fn a_foreign_chain_sepolia_manifest_keeps_the_mainnet_profile_for_a_mixed_corpus()
+-> Result<()> {
     let scratch = ScratchDatabase::create("project_dual_current_foreign_reason").await?;
     let chain = "project-dual-current-foreign-reason";
     let logical_name_id = seed_dual_open_cross_arm_fixture(scratch.pool(), chain, 4).await?;
@@ -20781,16 +20811,20 @@ async fn a_foreign_chain_sepolia_manifest_keeps_the_mainnet_mixed_corpus_reason(
 
     run_project_phase(scratch.pool(), chain, 5).await?;
 
-    let reason: Option<String> = sqlx::query_scalar(
-        "SELECT unsupported_reason FROM name_current WHERE logical_name_id = $1",
+    // The current ENSv2 registration decides the proofless mixed corpus, and the selection
+    // still reports the chain's own Mainnet profile.
+    let selection: (Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT provenance #>> '{authority_selection,authority_arm}',
+                provenance #>> '{authority_selection,deployment_profile}'
+         FROM name_current WHERE logical_name_id = $1",
     )
     .bind(&logical_name_id)
     .fetch_one(scratch.pool())
     .await?;
     assert_eq!(
-        reason.as_deref(),
-        Some("conflicting_current_ens_authority"),
-        "a proofless mainnet mixed corpus keeps its own reason"
+        selection,
+        (Some("ens_v2".into()), Some("mainnet".into())),
+        "a proofless mainnet mixed corpus keeps the mainnet profile"
     );
 
     scratch.cleanup().await
@@ -20798,6 +20832,82 @@ async fn a_foreign_chain_sepolia_manifest_keeps_the_mainnet_mixed_corpus_reason(
 
 // The false-positive guard: a Mainnet name whose predecessor binding closed at
 // the boundary is the ordinary migrated shape and must keep publishing.
+// Follow the chain: a current ENSv2 registration holds the name beside a live ENSv1 lease without
+// a migration proof. The name publishes, the post-proof dual-current halt does not fire, and the
+// ENSv1 lease keeps exactly the permission rows it has after a proven migration.
+#[tokio::test]
+async fn an_unproven_v2_registration_publishes_like_a_proven_migration() -> Result<()> {
+    let unproven = ScratchDatabase::create("project_follow_chain_unproven").await?;
+    let proven = ScratchDatabase::create("project_follow_chain_proven").await?;
+    let chain = "project-follow-chain";
+    let logical_name_id = seed_dual_open_cross_arm_fixture(unproven.pool(), chain, 4).await?;
+    InterpretEngine::new(unproven.pool().clone())
+        .run_batch(InterpretRequest {
+            chain_id: chain.into(),
+            from_block: 0,
+            to_block: 5,
+            resume_current: None,
+            mode: InterpretRunMode::Normal,
+        })
+        .await?;
+    // The proven twin: the same corpus with an activated boundary that closed the ENSv1 binding.
+    assert_eq!(
+        seed_mainnet_dual_current_conflict(proven.pool(), chain).await?,
+        logical_name_id
+    );
+    sqlx::query(
+        "UPDATE surface_bindings SET active_to = to_timestamp(4)
+         WHERE chain_id = $1 AND logical_name_id = $2 AND authority_arm = 'ens_v1'",
+    )
+    .bind(chain)
+    .bind(&logical_name_id)
+    .execute(proven.pool())
+    .await?;
+
+    run_project_phase(unproven.pool(), chain, 5).await?;
+    run_project_phase(proven.pool(), chain, 5).await?;
+    assert!(
+        generation_failure_rows(unproven.pool(), chain)
+            .await?
+            .is_empty(),
+        "a name without a proof never reaches the dual-current halts"
+    );
+
+    let selection = |pool: PgPool| {
+        let logical_name_id = logical_name_id.clone();
+        async move {
+            sqlx::query_as::<_, (Option<String>, Option<String>, Option<Uuid>)>(
+                "SELECT provenance #>> '{authority_selection,authority_arm}',
+                        provenance #>> '{authority_selection,proof_kind}', resource_id
+                 FROM name_current WHERE logical_name_id = $1",
+            )
+            .bind(logical_name_id)
+            .fetch_one(&pool)
+            .await
+        }
+    };
+    let unproven_selection = selection(unproven.pool().clone()).await?;
+    let proven_selection = selection(proven.pool().clone()).await?;
+    assert_eq!(unproven_selection.0.as_deref(), Some("ens_v2"));
+    assert_eq!(unproven_selection.1, None);
+    assert_eq!(
+        proven_selection.1.as_deref(),
+        Some("migration_authority_transition")
+    );
+    assert_eq!(unproven_selection.2, proven_selection.2);
+
+    normalize_projection_clocks(unproven.pool()).await?;
+    normalize_projection_clocks(proven.pool()).await?;
+    assert_eq!(
+        permission_projection_snapshot(unproven.pool()).await?,
+        permission_projection_snapshot(proven.pool()).await?,
+        "the live ENSv1 lease keeps the permission rows of a proven migration"
+    );
+
+    unproven.cleanup().await?;
+    proven.cleanup().await
+}
+
 #[tokio::test]
 async fn a_closed_predecessor_publishes_on_mainnet_without_an_audit_row() -> Result<()> {
     let scratch = ScratchDatabase::create("project_dual_current_migrated").await?;

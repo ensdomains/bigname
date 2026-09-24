@@ -145,9 +145,11 @@ records.
 reached by ancestor walk is resolver-defined.
 (upstream: .refs/ens_v1/contracts/universalResolver/ResolverCaller.sol:L66-L70 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/universalResolver/ResolverCaller.sol:L108-L116 @ ens_v1@91c966f)
-Project consumes it only to refuse deriving an
+Project consumes it only to tell apart the two reasons it records when it
+refuses to derive an
 [ENSv1 mirror resolver](glossary.md#ensv1-mirror-resolver-ensv1_mirror_resolver)'s
-inventory through such an ancestor
+inventory through an ancestor, `ensip10_extended_resolver` or
+`ancestor_resolver_not_extended`
 ([`projections.md`](projections.md#resolver-and-records)); it authorizes no
 getter and no watch-plan expansion. No admitted ENSv1 resolver generation
 declares it: the pinned `PublicResolver` inherits the profile resolvers and
@@ -462,23 +464,23 @@ No ENSv1 registrar-controller contract is admitted on this deployment profile. T
 The pins also carry a tracked Sepolia v1-reference address for `WrappedETHRegistrarController`, `0xFED6a969AaA60E4961FCD3EBF1A2e8913ac65B72`, and the ENSv2 `ETHRenewerV1` constructor data names the same controller. That reference artifact contains only the address and ABI, however: it has no deployment transaction, receipt, or historical start block. The ENS subgraph and ENSNode cross-check references both pair the address with block `3790244`, but those references do not supply authoritative deployment provenance. Unlike the explicit BaseRegistrar exception above, bigname does not elevate that cross-check metadata into a controller watch-plan floor, so the controller remains unadmitted and its admission remains deferred.[^v1-sepolia-wrapped-controller-gap]
 Registrar-controller coverage remains a known asymmetry against the mainnet deployment profile; resolver-log coverage for the approved four-address set is no longer one.
 
-An ordinary active name that carries both current ENSv1 and ENSv2 arms on this
-deployment profile, without an admitted authority proof, qualifying release, or
-deployment-wide ENSv2 release-threshold decision, is
-[`independent_ens_deployments_overlap`](architecture.md) rather than a chosen
-authority. The runtime admits evidence from both protocol eras, but only an
-admitted ENSv1→ENSv2 migration boundary establishes per-name authority between
-them.
+An ordinary active name with facts on both ENSv1 and ENSv2 on this deployment
+profile, and no admitted authority proof, qualifying release, or
+deployment-wide ENSv2 release-threshold decision, follows the chain
+([ADR 0007](adrs/0007-follow-the-chain-ens-authority.md) and
+[architecture](architecture.md#ensv1ensv2-current-authority)): a current ENSv2
+registration selects ENSv2, and otherwise ENSv1 decides. A premigration
+reservation is not a registration and defers to ENSv1. Only an admitted
+ENSv1→ENSv2 migration boundary sets an authority epoch at the boundary itself.
 The exact [shared ENS infrastructure](glossary.md#shared-ens-infrastructure)
-names—root, `eth`, `reverse`, and `addr.reverse`—instead select ENSv2 when the
-ENSv2 arm is current, ENSv1 evidence exists as either a current binding or
-historical events, and none of those higher-precedence decisions applies.
-Historical ENSv2 evidence alone does not qualify, and descendants do not
-inherit the exception. A current ENSv2 arm without ENSv1 evidence remains the
-ordinary single-arm ENSv2 case.
-Admitting ENSv1 sources here
-makes ordinary overlap reachable in production for the first time; it does not
-establish an ENSv1→ENSv2 migration boundary.
+names (root, `eth`, `reverse`, and `addr.reverse`) select a current ENSv2 arm
+without publishing an authority epoch when ENSv1 evidence exists as either a
+current binding or historical events and none of those higher-precedence
+decisions applies. Historical ENSv2 evidence alone does not qualify, and
+descendants do not inherit the exception. A current ENSv2 arm without ENSv1
+evidence remains the ordinary single-arm ENSv2 case.
+Admitting ENSv1 sources here makes names with facts on both arms reachable in
+production; it does not establish an ENSv1→ENSv2 migration boundary.
 
 `exact_name_profile` [capability promotion](glossary.md) is deployment-profile-scoped: only `exact_name_profile = "supported"` on the active `ens_v2_registrar_l1` version in the `sepolia` root promotes `.eth` exact-name declared reads to supported, backed by `ETHRegistry` resource/token state and `ETHRegistrar` lifecycle facts.[^v2-iperm-l22][^v2-events-l15][^v2-iethreg-l32] The admitted ENSv1 registrar remains `shadow` because registrar-controller label coverage is absent, so the product namespace route aggregates the two declarations as `name_profile.completeness = "partial"`; this does not demote the ENSv2 family-level support. The capability promotion does not apply to mainnet, another deployment profile, or any runtime that has not selected `manifests/sepolia`. Names that reach ENSv2 through a validated migration, or through a positive child registration under a migrated parent, qualify without a registrar event when their registry is declared in the `ens_v2_registry_l1` manifest or was created and announced by the migration itself (the per-name `WrapperRegistry` of the locked path, proven by its `migration_registry_creation` association and admitted `registry_announcement` edge); see [architecture](architecture.md). Active rollout, raw preimage observations, resolver admission, or backfill completion promote no other capability.
 
@@ -560,12 +562,14 @@ sharing the family-level `correlation_addresses.ens_v1_registry` described under
 rejects a repeated address. Manifest sync persists each instance under its own
 `declaration_name` `ensv1_mirror_resolver@<lowercase address>` with `role =
 ensv1_mirror_resolver` (see [contract instance admission and continuity](#contract-instance-admission-and-continuity)). Upstream's `ENSV1Resolver` is the model:
-it holds one ENSv1 registry as an immutable, finds the resolver for the
-requested name in that registry, and forwards the resolve call to it; it
+it holds one ENSv1 registry as an immutable, finds the nearest resolver for
+the requested name in that registry, keeps it only when it is set on the name
+itself or supports `IExtendedResolver`, and forwards the resolve call to it; it
 stores no records and defines no record events of its own.
-(upstream: .refs/ens_v2/contracts/src/resolver/ENSV1Resolver.sol:L18-L19 @ ens_v2@a971bd64)
-(upstream: .refs/ens_v2/contracts/src/resolver/ENSV1Resolver.sol:L38-L41 @ ens_v2@a971bd64)
-(upstream: .refs/ens_v2/contracts/src/resolver/AbstractMirrorResolver.sol:L66-L74 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/resolver/ENSV1Resolver.sol:L19-L20 @ ens_v2_sepolia_20260916@366de741)
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/resolver/ENSV1Resolver.sol:L40-L43 @ ens_v2_sepolia_20260916@366de741)
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/universalResolver/libraries/LibResolution.sol:L39-L48 @ ens_v2_sepolia_20260916@366de741)
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/resolver/AbstractMirrorResolver.sol:L66-L74 @ ens_v2_sepolia_20260916@366de741)
 
 The declaration is a classification input, not a record source. Project
 classifies the address as supported `ens_v2_resolver_l1` /
@@ -576,10 +580,11 @@ publishes `declared_summary.classification.mirror = {mirrored_source_family:
 "ens_v1_resolver_l1", mirrored_registry_source_family: "ens_v1_registry_l1",
 mirrored_registry_address}` on `resolver_current`. A name whose current ENSv2
 resolver pointer targets the mirror is then served through the ENSv1 resolver
-the mirror's registry walk selects, the exact node's or else the nearest
-ancestor's, read for the queried node as specified in
-[`projections.md`](projections.md#resolver-and-records); an ancestor declared
-`ensip10_extended_resolver` is not derived through. Because the declared
+the mirror's registry walk selects at the name's own node, read for the
+queried node as specified in
+[`projections.md`](projections.md#resolver-and-records); no ancestor's
+resolver is derived through, whether or not it is declared
+`ensip10_extended_resolver`. Because the declared
 address becomes a watched emitter of the family, adding it widens the watch plan
 and triggers the [mandatory historical fetch](#mandatory-historical-fetch-after-watch-plan-widening);
 the mirror emits no logs, so that fetch is empty. Discovery alone, matching
@@ -1019,8 +1024,8 @@ and the generated watch plans remain byte-for-byte unchanged. The new
 requires one complete retained-range Interpret re-walk followed by Project,
 with publication blocked until the completed generation is coherent. The
 dual-current integrity assertions apply to activated proofs on the configured
-Mainnet and Sepolia ENS deployment profiles. Ordinary unproven Sepolia
-ENSv1/ENSv2 overlap remains a per-name refusal rather than a publication block.
+Mainnet and Sepolia ENS deployment profiles. A Sepolia name with facts on both
+arms and no proof follows the chain per name and never blocks publication.
 [PR #852](https://github.com/ensdomains/bigname/pull/852) supplies the connected
 wrapped and locked Interpret-to-Project publication proof. There is no
 production interval serving candidate-only data.

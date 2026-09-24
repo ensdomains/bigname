@@ -34,6 +34,8 @@ mod tests {
             PARTIAL_SERVE_UNSUPPORTED_REASON
         ));
         for reason in [
+            // Retired by ADR 0007: Project no longer writes these two, but rows derived before
+            // the follow-the-chain redo can still carry them.
             "conflicting_current_ens_authority",
             "independent_ens_deployments_overlap",
             "ensv2_exact_name_profile_shadow",

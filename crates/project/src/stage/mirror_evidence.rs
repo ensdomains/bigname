@@ -18,6 +18,28 @@ pub(crate) async fn create(tx: &mut Transaction<'_, Postgres>) -> Result<()> {
     Ok(())
 }
 
+/// Every eligible historical ENSv1 registry-side pointer, clears included, for the consulted
+/// nodes. The node is the name the event addresses, read in the adapters' shared order
+/// (`V1_EVENT_NODE_FIELDS` in `crates/adapters/src/schema_v2/seam.rs`), which
+/// `normalized_events_project_v1_pointer_addressed_node_idx` keys.
+pub(crate) const EVIDENCE_EVENTS_SQL: &str = "INSERT INTO project_mirror_evidence_events
+         SELECT event.normalized_event_id
+         FROM project_mirror_evidence_nodes node
+         JOIN normalized_events event
+           ON event.namespace=node.namespace
+          AND lower(COALESCE(event.after_state ->> 'child_node', event.after_state ->> 'namehash', event.after_state ->> 'node'))=node.namehash
+         JOIN chain_lineage lineage
+           ON lineage.chain_id=event.chain_id AND lineage.block_number=event.block_number
+          AND lineage.block_hash=event.block_hash
+         WHERE event.chain_id=$1 AND event.block_number <= $2
+           AND event.event_kind='ResolverChanged'
+           AND COALESCE(event.after_state ->> 'child_node', event.after_state ->> 'namehash', event.after_state ->> 'node') IS NOT NULL
+           AND event.source_family IN ('ens_v1_registry_l1','ens_v1_registrar_l1','ens_v1_wrapper_l1')
+           AND event.consumer_visibility='activated'
+           AND event.canonicality_state IN ('canonical','safe','finalized')
+           AND lineage.canonicality_state IN ('canonical','safe','finalized')
+         ON CONFLICT DO NOTHING";
+
 pub(crate) async fn resolve_inputs(
     tx: &mut Transaction<'_, Postgres>,
     chain_id: &str,
@@ -30,23 +52,7 @@ pub(crate) async fn resolve_inputs(
     // Preserve all historical pointers, including clears and unlinked node pointers.
     // The shared event stage applies its serving eligibility filter again.
     for sql in [
-        "INSERT INTO project_mirror_evidence_events
-         SELECT event.normalized_event_id
-         FROM project_mirror_evidence_nodes node
-         JOIN normalized_events event
-           ON event.namespace=node.namespace
-          AND lower(event.after_state ->> 'node')=node.namehash
-         JOIN chain_lineage lineage
-           ON lineage.chain_id=event.chain_id AND lineage.block_number=event.block_number
-          AND lineage.block_hash=event.block_hash
-         WHERE event.chain_id=$1 AND event.block_number <= $2
-           AND event.event_kind='ResolverChanged'
-           AND event.after_state ->> 'node' IS NOT NULL
-           AND event.source_family IN ('ens_v1_registry_l1','ens_v1_registrar_l1','ens_v1_wrapper_l1')
-           AND event.consumer_visibility='activated'
-           AND event.canonicality_state IN ('canonical','safe','finalized')
-           AND lineage.canonicality_state IN ('canonical','safe','finalized')
-         ON CONFLICT DO NOTHING",
+        EVIDENCE_EVENTS_SQL,
         "INSERT INTO project_mirror_evidence_resolvers
          SELECT DISTINCT lower(candidate.address)
          FROM project_mirror_evidence_events evidence
@@ -58,8 +64,12 @@ pub(crate) async fn resolve_inputs(
            AND $1::text IS NOT NULL AND $2::bigint IS NOT NULL
          ON CONFLICT DO NOTHING",
     ] {
-        sqlx::query(sql).bind(chain_id).bind(target_block)
-            .execute(&mut **tx).await.map_err(|e| {
+        sqlx::query(sql)
+            .bind(chain_id)
+            .bind(target_block)
+            .execute(&mut **tx)
+            .await
+            .map_err(|e| {
                 ProjectError::database("failed to resolve mirror input dependencies", e)
             })?;
     }
