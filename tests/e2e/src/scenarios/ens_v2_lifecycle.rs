@@ -638,12 +638,13 @@ async fn assert_moved_over_http(
         );
     }
     let orphan_records = get("/v1/names/orphan.cut.eth/records").await?;
+    // The records route always carries `resolver`; with none selected it is an explicit null.
     assert_eq!(
         (
-            &orphan_records["data"]["resolver"],
-            &orphan_records["data"]["records"]
+            orphan_records["data"].get("resolver"),
+            orphan_records["data"].get("records")
         ),
-        (&Value::Null, &json!({})),
+        (Some(&Value::Null), Some(&json!({}))),
         "{path}: {orphan_records}"
     );
     let orphan_keys = get("/v1/names/orphan.cut.eth/records?keys=text:url,addr:60").await?;

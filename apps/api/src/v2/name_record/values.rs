@@ -113,16 +113,10 @@ pub(super) fn json_timestamp_at_paths(value: &Value, paths: &[&[&str]]) -> Optio
                 Some(QuotedSeconds::OutOfRange) => {}
                 None => return Some(value.clone()),
             },
-            // A number reads through the same decimal rule as its quoted form; one whose text is
-            // not a plain decimal (an exponent form) is unknown. A negative zero (`-0.0`) is second
-            // zero: Postgres stores it as `0.0`, so the SQL helpers read it that way.
+            // A number reads by its value, not its printed form, under the same range and
+            // whole-seconds rule as a quoted value.
             Value::Number(number) => {
-                let text = number.to_string();
-                let text = text
-                    .strip_prefix('-')
-                    .filter(|rest| rest.bytes().all(|byte| matches!(byte, b'0' | b'.')))
-                    .unwrap_or(&text);
-                if let Some(QuotedSeconds::InRange(seconds)) = quoted_seconds(text)
+                if let Some(QuotedSeconds::InRange(seconds)) = number_seconds(number)
                     && let Some(timestamp) = format_unix_timestamp(seconds)
                 {
                     return Some(timestamp);
@@ -194,6 +188,29 @@ fn quoted_seconds(value: &str) -> Option<QuotedSeconds> {
         return Some(QuotedSeconds::OutOfRange);
     }
     Some(i64::try_from(whole).map_or(QuotedSeconds::OutOfRange, QuotedSeconds::InRange))
+}
+
+/// A JSON number's seconds by value, whatever notation it was written or prints in (`1e-7` is
+/// second zero). The range check uses the full value, so `253402300799.5` is out of range; a value
+/// inside it keeps its whole seconds, as the SQL helpers' `FLOOR` does. A negative zero is zero, as
+/// Postgres stores it. `None` for a value that is not finite.
+fn number_seconds(number: &serde_json::Number) -> Option<QuotedSeconds> {
+    if let Some(seconds) = number.as_u64() {
+        return Some(if seconds > LAST_TIMESTAMP_SECOND {
+            QuotedSeconds::OutOfRange
+        } else {
+            i64::try_from(seconds).map_or(QuotedSeconds::OutOfRange, QuotedSeconds::InRange)
+        });
+    }
+    if number.as_i64().is_some() {
+        return Some(QuotedSeconds::OutOfRange);
+    }
+    let value = number.as_f64().filter(|value| value.is_finite())?;
+    if value < 0.0 || value > LAST_TIMESTAMP_SECOND as f64 {
+        return Some(QuotedSeconds::OutOfRange);
+    }
+    // In range, so the floor fits an i64 exactly.
+    Some(QuotedSeconds::InRange(value.floor() as i64))
 }
 
 /// A seconds value outside 1970..=9999 reads as unknown, the same rule the collection routes'
@@ -313,6 +330,9 @@ mod quoted_seconds_tests {
             (json!(u64::MAX), None),
             (json!(-1), None),
             (json!(-0.0), Some("1970-01-01T00:00:00Z")),
+            (json!(1e-7), Some("1970-01-01T00:00:00Z")),
+            (json!(1.735_689_6e9), Some("2025-01-01T00:00:00Z")),
+            (json!(2.534_023_007_99e11), Some("9999-12-31T23:59:59Z")),
         ] {
             let summary = json!({"registration": {"expiry": number}});
             assert_eq!(
