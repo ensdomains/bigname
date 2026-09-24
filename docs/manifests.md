@@ -233,7 +233,7 @@ lookup engine reads the list from the selected active-or-shadow `ens_execution`
 manifest at the readable head and refuses a verified record, name-detail,
 batch-lookup, diagnostics, or forward primary-name read for a name whose
 selected `authority_arm` is not listed; the API reports that refusal in band
-(`docs/api-v2-routes.md`, `docs/execution.md`). A `verified_authority_arms`
+(`docs/api-v1-routes.md`, `docs/execution.md`). A `verified_authority_arms`
 change is a manifest-payload change and moves the manifest row the engine
 fences on, so an in-flight verified read that started under the previous
 declaration is rejected as concurrent state rather than served across the
@@ -360,7 +360,7 @@ Capability ownership attaches to the declaring `source_family`. It is never impl
 
 ### ENS mainnet
 
-`ens_execution` owns verified resolution at the ENS Universal Resolver proxy `0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe` with `verified_resolution = "shadow"`.[^ens-docs-univ][^v1-ur-deploy][^v1-ursol-l8] The pinned `.refs/` artifact is the implementation/ABI anchor; the lookup entry is the proxy address. The shadow flag records manifest ownership for the execution substrate; public ENS verified-resolution support is gated by the route-level support classes in `docs/api-v2-routes.md` and `docs/execution.md`, not by widening this manifest flag. The manifest declares no [`verified_authority_arms`](#verified_authority_arms), so it admits the default `["ens_v1"]`: the Mainnet profile has no ENSv2 arm to verify.
+`ens_execution` owns verified resolution at the ENS Universal Resolver proxy `0xeEeEEEeE14D718C2B47D9923Deab1335E144EeEe` with `verified_resolution = "shadow"`.[^ens-docs-univ][^v1-ur-deploy][^v1-ursol-l8] The pinned `.refs/` artifact is the implementation/ABI anchor; the lookup entry is the proxy address. The shadow flag records manifest ownership for the execution substrate; public ENS verified-resolution support is gated by the route-level support classes in `docs/api-v1-routes.md` and `docs/execution.md`, not by widening this manifest flag. The manifest declares no [`verified_authority_arms`](#verified_authority_arms), so it admits the default `["ens_v1"]`: the Mainnet profile has no ENSv2 arm to verify.
 
 The ENS primary-name route does not introduce a second manifest capability. `ens_execution` supplies the manifest selection for the request-scoped, hash-pinned ENS/60 missing-tuple lookup under the same owner manifest, without turning `verified_resolution = "shadow"` into a route-level primary-name support flag. Indexed exact-tuple claim state lives in `bigname_phase.primary_names_current`; provider lookup responses are not persisted as execution outcomes or traces.
 

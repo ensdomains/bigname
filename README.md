@@ -76,7 +76,7 @@ See [`docs/deployment.md`](docs/deployment.md) and [`docs/production.md`](docs/p
 
 Start with [`docs/architecture.md`](docs/architecture.md) for the model — with [`docs/glossary.md`](docs/glossary.md) beside it for any project-specific term — then dive into the area you care about:
 
-- [`docs/api-v2.md`](docs/api-v2.md) — the read contract; per-route reference in [`docs/api-v2-routes.md`](docs/api-v2-routes.md)
+- [`docs/api-v1.md`](docs/api-v1.md) — the read contract; per-route reference in [`docs/api-v1-routes.md`](docs/api-v1-routes.md)
 - [`docs/storage.md`](docs/storage.md) — schema and write ownership
 - [`docs/manifests.md`](docs/manifests.md) — source manifests and discovery
 - [`docs/chain-intake.md`](docs/chain-intake.md) — block intake, lineage, reorgs, backfill

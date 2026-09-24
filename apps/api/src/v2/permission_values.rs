@@ -154,7 +154,7 @@ pub(crate) fn record_resource_value(selector: &Value, powers: &Value) -> V2Resul
                 .any(|power| power == format!("set_{family}"))
         })
     };
-    // coin_type and content_type are numbers on the wire (docs/api-v2.md vocabulary);
+    // coin_type and content_type are numbers on the wire (docs/api-v1.md vocabulary);
     // an argument outside u64 is served as the decimal string the chain carried.
     let numeric = |field: &str| -> V2Result<Value> {
         let key = key()?;
@@ -228,7 +228,7 @@ mod tests {
         product_permission_power,
     };
 
-    const DOCS: &str = include_str!("../../../../docs/api-v2.md");
+    const DOCS: &str = include_str!("../../../../docs/api-v1.md");
     const V2_ROLE_TABLES: &str =
         include_str!("../../../../crates/adapters/src/schema_v2/protocol/permissions.rs");
     const V2_RECORD_RESOLVER_ROLE_TABLE: &str = include_str!(
@@ -249,10 +249,10 @@ mod tests {
     fn documented_powers() -> BTreeSet<String> {
         let start = DOCS
             .find("<!-- powers-vocabulary:start -->")
-            .expect("docs/api-v2.md must carry the powers vocabulary start marker");
+            .expect("docs/api-v1.md must carry the powers vocabulary start marker");
         let end = DOCS
             .find("<!-- powers-vocabulary:end -->")
-            .expect("docs/api-v2.md must carry the powers vocabulary end marker");
+            .expect("docs/api-v1.md must carry the powers vocabulary end marker");
         DOCS[start..end]
             .lines()
             .filter_map(|line| line.strip_prefix("| `"))
@@ -363,7 +363,7 @@ mod tests {
         let stale = documented.difference(&code).collect::<Vec<_>>();
         assert!(
             undocumented.is_empty() && stale.is_empty(),
-            "docs/api-v2.md powers vocabulary drifted from code: undocumented {undocumented:?}, stale {stale:?}"
+            "docs/api-v1.md powers vocabulary drifted from code: undocumented {undocumented:?}, stale {stale:?}"
         );
     }
 

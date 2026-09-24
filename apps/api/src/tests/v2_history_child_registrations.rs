@@ -1,5 +1,5 @@
 // `include=child_registrations` on `GET /v1/names/{name}/history`
-// (docs/api-v2-routes.md, "Direct child registrations").
+// (docs/api-v1-routes.md, "Direct child registrations").
 
 const CHILD_PARENT_RESOURCE: u128 = 0x7c00;
 

@@ -415,7 +415,7 @@ normalized output.
 a registration row of a name exactly one label below another name, in the same
 namespace and on the same chain, as the event attributed it when it happened.
 Name history lists these rows for the parent with
-[`include=child_registrations`](api-v2-routes.md#direct-child-registrations-includechild_registrations).
+[`include=child_registrations`](api-v1-routes.md#direct-child-registrations-includechild_registrations).
 The rule is historical: a child released since, or registered under a registry
 the parent no longer links, still counts. It is a stored grant row, not one
 registration action, so one registration can contribute several rows. The
@@ -665,7 +665,7 @@ role. It is absent for registrations without a resource-level constraint model
 (ENSv1 registrar- and registry-held names, Basenames), for an expired
 emancipated or locked NameWrapper position, and once the wrapped token is burnt
 or unwrapped. Field
-shapes are in [api-v2.md](api-v2.md#resource-restrictions); the derivation is in
+shapes are in [api-v1.md](api-v1.md#resource-restrictions); the derivation is in
 [projections.md](projections.md#permissions).
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1058-L1068 @ ens_v1@91c966f)
 (upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L418-L424 @ ens_v2@a971bd64)
@@ -1455,7 +1455,7 @@ the publication captured when it is admitted, reported in `meta.as_of`, so
 later pages can include newer rows, rows can move or disappear after an
 Interpret redo, and `total_count` can change. Publication changes do not expire
 the cursor. See
-[api-v2.md](api-v2.md#cursors-and-pagination).
+[api-v1.md](api-v1.md#cursors-and-pagination).
 
 ## v1 fallback resolver (`ENSV1Resolver`, exposed as `V1_RESOLVER`)
 
@@ -1958,11 +1958,11 @@ consumes them. Readability is a statement about block canonicality only, not
 about support: a readable row may still carry an unsupported support status,
 and routes that additionally require supported rows say so. `POST /v1/lookup`
 reverse address results are one such route
-([api-v2.md](api-v2.md#cursors-and-pagination)); indexed resolver-record values
+([api-v1.md](api-v1.md#cursors-and-pagination)); indexed resolver-record values
 on `GET /v1/names/{name}/records`, `GET /v1/names/{name}`, and `POST /v1/lookup`
 name results are another: a readable but `unsupported` record inventory row
 serves no record values, only its unsupported reason
-([api-v2-routes.md](api-v2-routes.md#get-v1namesnamerecords)).
+([api-v1-routes.md](api-v1-routes.md#get-v1namesnamerecords)).
 
 ## Re-derivation boundary
 
@@ -2003,7 +2003,7 @@ names that share a registration resource. It is the group member whose name
 text sorts first, with ties broken by namespace and namehash. The row's name
 fields, counts, and primary-name flag describe that member; fields defined as
 group facets, such as `relations` or `resolutions`, still cover every member.
-See [`GET /v1/addresses/{address}/names`](api-v2-routes.md#get-v1addressesaddressnames).
+See [`GET /v1/addresses/{address}/names`](api-v1-routes.md#get-v1addressesaddressnames).
 
 ## Resolver profile
 
