@@ -1081,14 +1081,10 @@ async fn v2_conformance_success_payload(route: &V2ConformanceRoute) -> Result<Va
         V2SuccessFixture::Resolver => {
             let database = TestDatabase::new_migrated().await?;
             seed_v2_resolver_bound_names_fixture(&database).await?;
-            let mut resolver_row =
+            let resolver_row =
                 resolver_current_row_with_writer_alias("ethereum-mainnet", V2_RESOLVER_ADDRESS);
-            resolver_row.declared_summary["role_holders"]["items"][0]["effective_powers"] =
-                json!(["resource_control", "set_resolver"]);
             upsert_test_resolver_current_rows(&database, &[resolver_row]).await?;
-            let uri = format!(
-                "/v1/resolvers/1/{V2_RESOLVER_ADDRESS}?include=nodes,aliases,roles,events&page_size=5"
-            );
+            let uri = format!("/v1/resolvers/1/{V2_RESOLVER_ADDRESS}?page_size=5");
             let payload = v2_resolver_payload_for_database(&database, &uri).await?;
             assert_v2_as_of_token_fixpoint(&database, route, &uri, &payload).await?;
             database.cleanup().await?;

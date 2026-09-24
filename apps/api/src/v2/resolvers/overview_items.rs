@@ -1,83 +1,8 @@
+//! Resolver alias and binding items, shaped for the `/aliases` collection.
+
 use serde_json::{Map, Value, json};
 
-use crate::v2::{
-    V2Error, V2Result, contains_boundary_vocabulary, history_event_type, permission_powers_value,
-    slug_to_numeric,
-};
-
-pub(super) fn projected_section_items(summary: &Value, field_key: &str) -> V2Result<Option<Value>> {
-    if !summary_is_supported(summary) {
-        return Ok(None);
-    }
-
-    if field_key == "events" {
-        return compact_resolver_event_summary(summary).map(Some);
-    }
-
-    let Some(items) = summary.get("items").and_then(Value::as_array) else {
-        return Ok(None);
-    };
-
-    let items = match field_key {
-        "nodes" | "aliases" => Value::Array(
-            items
-                .iter()
-                .map(compact_resolver_binding_item)
-                .collect::<V2Result<Vec<_>>>()?,
-        ),
-        "roles" => Value::Array(
-            items
-                .iter()
-                .map(compact_resolver_role_item)
-                .collect::<V2Result<Vec<_>>>()?,
-        ),
-        "links" => Value::Array(
-            items
-                .iter()
-                .map(super::link_items::compact_resolver_link_item)
-                .collect::<V2Result<Vec<_>>>()?,
-        ),
-        _ => Value::Array(items.clone()),
-    };
-    Ok(Some(items))
-}
-
-fn compact_resolver_event_summary(summary: &Value) -> V2Result<Value> {
-    let Some(count) = summary.get("count") else {
-        return Err(resolver_event_summary_mapping_error());
-    };
-    if count.as_u64().is_none() {
-        return Err(resolver_event_summary_mapping_error());
-    }
-
-    let Some(by_kind) = summary.get("by_kind").and_then(Value::as_object) else {
-        return Err(resolver_event_summary_mapping_error());
-    };
-    let mut by_type = Map::new();
-    for (event_kind, count) in by_kind {
-        let Some(event_type) = history_event_type(event_kind) else {
-            continue;
-        };
-        let count = count
-            .as_u64()
-            .ok_or_else(resolver_event_summary_mapping_error)?;
-        let key = event_type.as_str();
-        let previous = by_type.get(key).and_then(Value::as_u64).unwrap_or(0);
-        let mapped_count = previous
-            .checked_add(count)
-            .ok_or_else(resolver_event_summary_mapping_error)?;
-        by_type.insert(key.to_owned(), json!(mapped_count));
-    }
-
-    let mut compact = Map::new();
-    compact.insert("count".to_owned(), count.clone());
-    compact.insert("by_type".to_owned(), Value::Object(by_type));
-    Ok(Value::Object(compact))
-}
-
-fn resolver_event_summary_mapping_error() -> V2Error {
-    V2Error::internal_error("failed to map resolver event summary")
-}
+use crate::v2::{V2Error, V2Result, contains_boundary_vocabulary, slug_to_numeric};
 
 pub(super) fn compact_resolver_binding_item(item: &Value) -> V2Result<Value> {
     if resolver_alias_item_has_writer_shape(item) {
@@ -290,32 +215,6 @@ fn normalize_resolver_name(
 ) -> V2Result<bigname_domain::normalization::NormalizedEnsName> {
     bigname_domain::normalization::normalize_name(value)
         .map_err(|_| V2Error::internal_error("failed to normalize resolver name item"))
-}
-
-fn compact_resolver_role_item(item: &Value) -> V2Result<Value> {
-    let Some(object) = item.as_object() else {
-        return Ok(item.clone());
-    };
-
-    let mut compact = object.clone();
-    if let Some(value) = compact.remove("subject") {
-        compact.insert("address".to_owned(), value);
-    }
-    let resource_count = compact.remove("resource_count");
-    if let Some(value) = resource_count.clone() {
-        compact.insert("registration_count".to_owned(), value);
-    }
-    compact.remove("permission_row_count");
-    if let Some(value) = resource_count {
-        // Resolver-scoped permission staging is unique by resource, subject, and
-        // scope, so a holder's resource count is also its permission-row count.
-        compact.insert("permission_count".to_owned(), value);
-    }
-    if let Some(value) = compact.remove("effective_powers") {
-        compact.insert("powers".to_owned(), permission_powers_value(&value)?);
-    }
-    compact.remove("resource_ids");
-    Ok(Value::Object(compact))
 }
 
 fn item_string(item: &Value, key: &str) -> Option<String> {
