@@ -14,7 +14,7 @@ use crate::progress_monitor::RunnerPhaseProgress;
 
 mod project_steps;
 mod served_lag;
-use project_steps::ProjectStepGauges;
+use project_steps::{ProjectStepFeed, ProjectStepGauges};
 pub use served_lag::RunnerMetricsFeed;
 use served_lag::ServedLagGauges;
 
@@ -459,8 +459,28 @@ pub async fn start(
             () = server_cancellation.cancelled() => {}
         }
     });
+    tokio::spawn(project_step_loop(
+        metrics.project_steps.clone(),
+        feed.project_steps.clone(),
+        cancellation.clone(),
+    ));
     tokio::spawn(refresh_loop(metrics, pool, feed, cancellation));
     Ok(local_addr)
+}
+
+/// Applies Project step changes on their own, so a step change or the final idle
+/// never waits behind a pending served-lag database refresh.
+async fn project_step_loop(
+    gauges: ProjectStepGauges,
+    steps: ProjectStepFeed,
+    cancellation: CancellationToken,
+) {
+    loop {
+        tokio::select! {
+            () = cancellation.cancelled() => return,
+            () = steps.changed() => gauges.apply(&steps.snapshot()),
+        }
+    }
 }
 
 async fn refresh_loop(
@@ -479,10 +499,6 @@ async fn refresh_loop(
             () = cancellation.cancelled() => return,
             _ = ticks.tick() => metrics.refresh(&pool).await,
             () = feed.committed() => metrics.refresh_after_commit(&pool).await,
-            () = feed.project_steps.changed() => {
-                metrics.project_steps.apply(&feed.project_steps.snapshot());
-                Ok(())
-            }
         };
         if let Err(error) = result {
             tracing::error!(error = %format!("{error:#}"), "phase metrics refresh failed");

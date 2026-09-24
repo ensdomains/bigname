@@ -25,7 +25,10 @@ pub const PROJECT_STEPS: [&str; 20] = [
 
 /// Told which step a full rebuild or a redo is in. Such a run is one transaction
 /// that can take tens of minutes, so its steps are the only progress it shows.
-/// The normal incremental path never reports.
+/// The normal incremental path never reports. An observer shared across runs needs
+/// at most one reporting run per chain at a time, since a later run's `None` would
+/// clear an earlier run's step; the engine does not enforce this, and the phase
+/// runner's per-chain phase lock provides it.
 pub trait StepObserver: Send + Sync {
     /// `step` is one of [`PROJECT_STEPS`], or `None` once the run commits or stops.
     fn project_step(&self, chain_id: &str, step: Option<&'static str>);

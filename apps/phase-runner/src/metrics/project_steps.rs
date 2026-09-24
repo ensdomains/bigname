@@ -11,8 +11,11 @@ use tokio::sync::Notify;
 use super::RunnerMetricsFeed;
 
 /// Which step a full-rebuild or redo Project run is in, per chain. Each change wakes
-/// the metrics task, which applies the latest snapshot. This wakeup is separate from
-/// the batch-commit one, so a step change never runs the served-lag query.
+/// the step worker, which applies the latest snapshot. That worker is separate from
+/// the served-lag one, so a step change never runs the served-lag query and never
+/// waits behind it. The feed keeps one value per chain and the last write wins, so it
+/// needs at most one reporting run per chain at a time; the runner's per-chain phase
+/// lock provides that, and the feed does not check it.
 #[derive(Clone, Default)]
 pub(super) struct ProjectStepFeed {
     changed: Arc<Notify>,
