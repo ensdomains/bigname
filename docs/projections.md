@@ -348,6 +348,14 @@ a `Transfer` for its own node, and the `emitter_role` of the event tells the two
 registries apart. A same-transaction registration that reconciliation marked
 `registry_migrated` needs no separate reading: reconciliation keeps the
 transaction's last current-registry ownership write, which already counts.
+One theoretical residual remains. A zero-resolver registration's
+`NewOwner(registrant)` followed in the same transaction by a redundant
+same-owner `setOwner` or `reclaim` derives nothing for the second write. If
+reconciliation then treated the first write as transient and dropped all of
+its rows while `registry_migrated` stayed set, Project would read the name as
+`ens_v0` until its next current-registry write. No real caller has been found
+that produces this shape, and in the transient shapes tested the first write's
+`SubregistryChanged` survives.
 `ownerless_registry` is `true` exactly when the row is the supported,
 unregistered ownerless registry profile; the selected arm is kept, but the API
 serves no `authority` for such a row and no public `authority` filter matches

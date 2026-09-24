@@ -740,15 +740,20 @@
         ), registry_records AS (
             -- The ownership records the two ENSv1 registries hold for each ENS name's node: whether
             -- the 2017 registry recorded an owner, and the block of the first record in the current
-            -- registry, which answers from the 2017 registry until it holds one. A NewOwner derives
-            -- SubregistryChanged, a Transfer that is the node's first current-registry write derives
-            -- AuthorityTransferred, and only those two logs derive either kind (the
-            -- ens_v1_registry_l1 manifests' normalized_events). A NewOwner names its child node and a
-            -- Transfer its own. The filter stays on columns with statistics so the join to the names
-            -- below is estimated from real row counts. Same-transaction registration reconciliation keeps the transaction's last
-            -- current-registry ownership write, so a registration it marks `registry_migrated`
-            -- always has such a write beside it and the marker adds nothing here. The root is left
-            -- out: the constructor writes its record without an event.
+            -- registry, which answers from the 2017 registry until it holds one. A node's first
+            -- current-registry write is always its parent's setSubnodeOwner, because setOwner is
+            -- authorised by the current registry's own record; its NewOwner derives
+            -- SubregistryChanged. Only NewOwner and Transfer derive SubregistryChanged or
+            -- AuthorityTransferred (the ens_v1_registry_l1 manifests' normalized_events). Reading
+            -- Transfer too is defensive: Interpret forces AuthorityTransferred for a first-write
+            -- Transfer only when no old-registry resolver link is retired, and the chain does not
+            -- produce that shape. A NewOwner names its child node and a Transfer its own. The filter
+            -- stays on columns with statistics so the join to the names below is estimated from
+            -- real row counts. Same-transaction registration reconciliation keeps the
+            -- transaction's last current-registry ownership write, so a registration it marks
+            -- `registry_migrated` has such a write beside it and the marker adds nothing here. The
+            -- root is left out: the constructor writes its record without an event.
+            -- (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L17-L21 @ ens_v1@91c966f)
             -- (upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L18-L46 @ ens_v1@91c966f)
             -- (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L23-L26 @ ens_v1@91c966f)
             -- (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L60-L84 @ ens_v1@91c966f)

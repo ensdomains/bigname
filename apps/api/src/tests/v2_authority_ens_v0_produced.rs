@@ -423,9 +423,13 @@ async fn produced_registry_only_name_serves_ens_v0_until_the_current_registry_re
     database.cleanup().await
 }
 
-/// A same-owner `setOwner` as the node's first current-registry write still derives the
-/// `AuthorityTransferred` Project reads the handoff from, although the owner matches the one the
-/// 2017 registry holds.
+/// The interpreter's defensive branch for a `Transfer` that is a node's first current-registry
+/// write. The chain cannot produce this: `authorised` reads the current registry's own record, so
+/// `setOwner` reverts on a node that has none, and a node's first write is always its parent's
+/// `setSubnodeOwner`
+/// (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L17-L21 @ ens_v1@91c966f).
+/// If such a same-owner `Transfer` arrived, it would still derive the `AuthorityTransferred`
+/// Project reads the handoff from.
 #[test]
 fn a_same_owner_transfer_handoff_derives_a_current_registry_record() -> Result<()> {
     let mut session = None;
@@ -706,17 +710,12 @@ fn assert_keeps_current_registry_write(output: &BatchOutput, block: i64) {
     );
 }
 
-/// The resolver-bearing controller shape: the registrar mints to the controller and writes the
-/// registry record for it, the controller then reclaims the record for the buyer and hands the
-/// token over. The controller's own write is transient and reconciliation drops its setup
-/// permission, but the buyer's write stays
-/// (upstream: .refs/ens_v1/contracts/ethregistrar/ETHRegistrarController.sol:L287-L317 @ ens_v1@91c966f).
-#[test]
-fn reconciliation_keeps_the_last_current_registry_write_of_a_transient_owner() -> Result<()> {
+/// Interprets one Sepolia-shaped batch: the 2017-style record at block 120 and `logs` at 121.
+fn marked_batch(logs: Vec<RawLogInput>) -> Result<BatchOutput> {
     use marked::*;
-    const CONTROLLER: &str = "0x00000000000000000000000000000000000000c7";
-    let id = U256::from_be_bytes(keccak256("marked").0);
     let (manifests, admissions) = inputs();
+    let mut raw_logs = vec![new_owner("marked", HOLDER, 120, 0, OLD_REGISTRY)];
+    raw_logs.extend(logs);
     let (output, _) = prepare_schema_v2_batch_incremental(
         BatchInput {
             chain_id: CHAIN.into(),
@@ -733,30 +732,94 @@ fn reconciliation_keeps_the_last_current_registry_write_of_a_transient_owner() -
                     canonicality_state: "canonical".into(),
                 })
                 .collect(),
-            raw_logs: vec![
-                new_owner("marked", HOLDER, 120, 0, OLD_REGISTRY),
-                token_transfer(&Address::ZERO.to_string(), CONTROLLER, id, 121, 0),
-                new_owner("marked", CONTROLLER, 121, 1, REGISTRY),
-                raw(
-                    NameRegistered {
-                        id,
-                        owner: CONTROLLER.parse()?,
-                        expires: U256::from(1_900_000_000_u64),
-                    }
-                    .encode_log_data(),
-                    121,
-                    2,
-                    REGISTRAR,
-                ),
-                new_owner("marked", HOLDER, 121, 3, REGISTRY),
-                token_transfer(CONTROLLER, HOLDER, id, 121, 4),
-            ],
+            raw_logs,
         },
         None,
         StateCacheCapacity::Unlimited,
     )?
     .finish(vec![])?;
     assert!(output.decode_skips.is_empty(), "{:?}", output.decode_skips);
+    Ok(output)
+}
+
+/// The owners of the current-registry `AuthorityTransferred` rows at block 121, by log index.
+fn current_registry_transfers(output: &BatchOutput) -> Vec<(i64, String)> {
+    output
+        .normalized_events
+        .iter()
+        .filter(|event| {
+            event.block_number == Some(121)
+                && event.event_kind == "AuthorityTransferred"
+                && event.after_state["emitter_role"] == "registry"
+        })
+        .map(|event| {
+            (
+                event.log_index.unwrap_or_default(),
+                event.after_state["owner"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned(),
+            )
+        })
+        .collect()
+}
+
+fn numeric_registration(owner: &str, index: i64) -> RawLogInput {
+    raw(
+        marked::NameRegistered {
+            id: U256::from_be_bytes(keccak256("marked").0),
+            owner: owner.parse().unwrap(),
+            expires: U256::from(1_900_000_000_u64),
+        }
+        .encode_log_data(),
+        121,
+        index,
+        marked::REGISTRAR,
+    )
+}
+
+/// The legacy 2019 controller's resolver-bearing shape, whose source is not pinned: the registrar
+/// registers the name to the controller and writes its registry record, then the controller
+/// reclaims the record for the buyer and hands over the token
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L131-L153 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L175 @ ens_v1@91c966f).
+/// The registration's owner is the controller, so the buyer's write comes after the registry and
+/// registrar owners diverge; neither write is transient and both stay.
+#[test]
+fn reconciliation_keeps_both_writes_of_the_legacy_controller_shape() -> Result<()> {
+    use marked::*;
+    const CONTROLLER: &str = "0x00000000000000000000000000000000000000c7";
+    let id = U256::from_be_bytes(keccak256("marked").0);
+    let output = marked_batch(vec![
+        token_transfer(&Address::ZERO.to_string(), CONTROLLER, id, 121, 0),
+        new_owner("marked", CONTROLLER, 121, 1, REGISTRY),
+        numeric_registration(CONTROLLER, 2),
+        new_owner("marked", HOLDER, 121, 3, REGISTRY),
+        token_transfer(CONTROLLER, HOLDER, id, 121, 4),
+    ])?;
     assert_keeps_current_registry_write(&output, 121);
+    assert_eq!(
+        current_registry_transfers(&output),
+        [(1, CONTROLLER.to_owned()), (3, HOLDER.to_owned())]
+    );
+    Ok(())
+}
+
+/// A registration whose owner writes the record first and hands it on later in the same
+/// transaction. That first write is transient: reconciliation drops its `AuthorityTransferred`,
+/// and the later write's stays beside the marker.
+#[test]
+fn reconciliation_keeps_the_last_current_registry_write_after_a_transient_one() -> Result<()> {
+    use marked::*;
+    const NEXT: &str = "0x00000000000000000000000000000000000000cd";
+    let id = U256::from_be_bytes(keccak256("marked").0);
+    let output = marked_batch(vec![
+        token_transfer(&Address::ZERO.to_string(), HOLDER, id, 121, 0),
+        new_owner("marked", HOLDER, 121, 1, REGISTRY),
+        numeric_registration(HOLDER, 2),
+        new_owner("marked", NEXT, 121, 3, REGISTRY),
+    ])?;
+    assert_keeps_current_registry_write(&output, 121);
+    assert_eq!(current_registry_transfers(&output), [(3, NEXT.to_owned())]);
     Ok(())
 }
