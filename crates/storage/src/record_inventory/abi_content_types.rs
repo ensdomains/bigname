@@ -14,7 +14,7 @@
 //! version boundary key, chain positions, and recompute time) is still published; a replaced row
 //! answers `abi_observations_stale` instead of pairing the older row with a newer classification.
 //! The public meaning is documented under `GET /v1/names/{name}/records` in
-//! `docs/api-v2-routes.md`.
+//! `docs/api-v1-routes.md`.
 
 use std::collections::{BTreeMap, BTreeSet};
 

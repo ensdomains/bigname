@@ -1,5 +1,5 @@
 //! `include=child_registrations` on name history: the name's direct child registrations merged
-//! into its history (docs/api-v2-routes.md, "Direct child registrations").
+//! into its history (docs/api-v1-routes.md, "Direct child registrations").
 
 use bigname_storage::{
     HistoryCursor, HistoryPageOptions, HistoryScope, HistorySubject, HistorySummary,

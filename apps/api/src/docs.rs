@@ -72,8 +72,8 @@ mod tests {
     fn every_upstream_citation_in_the_guide_is_in_the_route_contract() {
         let guide = include_str!("docs.html");
         let contract = concat!(
-            include_str!("../../../docs/api-v2-routes.md"),
-            include_str!("../../../docs/api-v2.md"),
+            include_str!("../../../docs/api-v1-routes.md"),
+            include_str!("../../../docs/api-v1.md"),
             include_str!("../../../docs/consumer-capabilities.md"),
             include_str!("../../../docs/projections.md"),
             include_str!("../../../docs/architecture.md")
@@ -93,7 +93,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(
             unverified.is_empty(),
-            "citations in apps/api/src/docs.html absent from the contract docs (api-v2-routes, api-v2, consumer-capabilities, projections, architecture): {unverified:?}"
+            "citations in apps/api/src/docs.html absent from the contract docs (api-v1-routes, api-v1, consumer-capabilities, projections, architecture): {unverified:?}"
         );
     }
 

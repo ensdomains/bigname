@@ -9,7 +9,7 @@ use super::vocab::{WrapperFuses, WrapperState};
 use super::{V2Error, V2Result};
 
 /// Registration-level constraints served as `restrictions`; see
-/// [resource restrictions](../../../../docs/api-v2.md#resource-restrictions).
+/// [resource restrictions](../../../../docs/api-v1.md#resource-restrictions).
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(crate) enum ResourceRestrictions {

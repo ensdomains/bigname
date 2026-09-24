@@ -1,12 +1,13 @@
-# API v2
+# API v1
 
-> **Prefix note (#315):** the public route prefix is now `/v1`. This file's
-> name (`api-v2`) is historical, naming the ADR 0006 contract generation; it
-> is not the wire prefix. A rename of the contract docs is tracked separately.
+> **Prefix note (#315):** the public route prefix is `/v1`, and this file is
+> named after it. Where the text below says `v2`, it means the contract
+> generation accepted in ADR 0006, and `v1` in "Replaces" columns means the
+> older REST surface that #315 deleted. No `/v2` prefix is served.
 
 Development-time contract for the API surface accepted in
 [ADR 0006](adrs/0006-api-v2-product-surface.md). Per-route reference lives in
-[`api-v2-routes.md`](api-v2-routes.md). This surface has no generated OpenAPI
+[`api-v1-routes.md`](api-v1-routes.md). This surface has no generated OpenAPI
 artifact.
 
 ## Contract Principles
@@ -114,7 +115,7 @@ step-3-gate vocabulary needed by the route schemas:
 | `sort` | route-documented sort field | `sort` (unchanged; allowed fields are now route-documented) |
 | `order` | sort direction, `asc` or `desc`; history collections default to `desc` (newest first) and treat `asc` as the exact reverse | `order` (unchanged) |
 | `scope` (history) | `name`, `registration`, `both` | `surface`, `resource`, `both` |
-| `subject` (history) | on name history with `include=child_registrations` only: the row's relation to the requested name, `name` for the name's own rows and `child` for a [direct child registration](api-v2-routes.md#direct-child-registrations-includechild_registrations) | comparing a row's `name` with the requested name |
+| `subject` (history) | on name history with `include=child_registrations` only: the row's relation to the requested name, `name` for the name's own rows and `child` for a [direct child registration](api-v1-routes.md#direct-child-registrations-includechild_registrations) | comparing a row's `name` with the requested name |
 | `grant_scope` | the protocol scope of a permission row: `root`, `registry`, `registration`, `resolver`, `record_manager`, or [`account`](glossary.md#account-permission-scope) | permission-row `scope` (renamed so history `scope` and permission scope are two names for two concepts) |
 | `grant_relation` | optional explicit [grant relation](glossary.md#grant-relation); `operator` identifies a registry-wide approval, while direct permission rows omit the field | new in v2 |
 | `verification` | typed checked-answer summary for claimed-vs-verified answers | `verified_state`, `verified_primary_name` section wrappers |
@@ -152,7 +153,7 @@ step-3-gate vocabulary needed by the route schemas:
 | `to_timestamp` | inclusive upper RFC 3339 bound on history collections, resolved per chain to the last readable lineage block at or before it | new in v2 |
 | `expires_after` | inclusive lower `expires_at` bound on `GET /v1/names` (RFC 3339 UTC) | `expires_after` (new) |
 | `expires_before` | exclusive upper `expires_at` bound on `GET /v1/names` (RFC 3339 UTC) | `expires_before` (new) |
-| `data` | envelope root payload, and the `include=data` event-row payload when nested inside an event row (see [history event payloads](api-v2-routes.md#history-event-payloads-includedata-includeraw)) | compact event payload objects |
+| `data` | envelope root payload, and the `include=data` event-row payload when nested inside an event row (see [history event payloads](api-v1-routes.md#history-event-payloads-includedata-includeraw)) | compact event payload objects |
 | `kind` | raw storage event kind on an event row, exposed only behind the explicit `include=raw` opt-in (never part of `include=data`); the one pipeline term the product tier carries, for explorer and diagnostic use | `event_kind` |
 | `contract_address` | lower-cased emitting contract of an event row, exposed only with `include=data`; `null` for state-derived rows | `emitting_address` |
 | `resolver` (query) | `/v1/events` filter naming one resolver contract as `<chain_id>:<address>` (numeric chain id, case-insensitive address); matches rows the contract emitted plus `resolver` pointer rows naming it | new in v2 |
@@ -907,7 +908,7 @@ Common parameter rules:
 | `include` | route-documented expansions | per-route allowlist |
 | `sort`, `order` | paginated routes that declare a sort set; history collections accept `order` alone over their fixed chain-position sort | route-documented field set plus `asc`/`desc` |
 | `resolver` | `/v1/events` | `<chain_id>:<address>` resolver contract; anchors the read, suppresses the `ens` namespace default, and is bound by cursors |
-| `type`, `from_timestamp`, `to_timestamp` | name history, address history, `/v1/events` | friendly event type or comma-separated set; inclusive RFC 3339 bounds resolved to lineage block ranges (see [history collection filters](api-v2-routes.md#history-collection-filters)) |
+| `type`, `from_timestamp`, `to_timestamp` | name history, address history, `/v1/events` | friendly event type or comma-separated set; inclusive RFC 3339 bounds resolved to lineage block ranges (see [history collection filters](api-v1-routes.md#history-collection-filters)) |
 | `expires_after`, `expires_before` | `GET /v1/names` | RFC 3339 UTC window over `expires_at`; at least one is required, `expires_after` inclusive, `expires_before` exclusive |
 | `include_expired` | `GET /v1/names/{name}/subnames` | `true` (default) lists released and past-expiry children; `false` omits them |
 | `cursor`, `page_size` | every paginated route | opaque cursor; default 50, max 200 |
@@ -1031,7 +1032,7 @@ Rules:
   `status=unsupported` even when it names no reason or names a reason the build
   does not recognize. Exceptions are per-route and named there, such as the
   name-detail partial serve for `current_authority_not_projected` in
-  [`api-v2-routes.md`](api-v2-routes.md).
+  [`api-v1-routes.md`](api-v1-routes.md).
 - When an unsupported projected row names a reason that this build does not
   recognize and that cannot cross the serving boundary as public vocabulary,
   the public `unsupported_reason` is `unsupported_reason_unrecognized`.
@@ -1051,7 +1052,7 @@ taken from a record inventory only while that inventory's coverage is
 authoritative (`full` or `projected` with no `unsupported_reason`); an
 `unsupported` inventory row yields `status=unsupported` with the row's reason
 and no `value` for every key, whatever entries the projection retained
-([api-v2-routes.md](api-v2-routes.md#get-v1namesnamerecords)).
+([api-v1-routes.md](api-v1-routes.md#get-v1namesnamerecords)).
 
 For a successful `contenthash` answer, `value` is a lowercase,
 `0x`-prefixed hex string containing the bytes returned by the resolver. The API
@@ -1241,7 +1242,7 @@ can change between pages. `meta.as_of` is the publication captured when the page
 page's rows are bounded at it, but some inputs are read from current state
 rather than from that publication (the resolver classification that decides
 whether a pointer attributes writes, and the address relation kinds listed
-under [history collection filters](api-v2-routes.md#history-collection-filters)),
+under [history collection filters](api-v1-routes.md#history-collection-filters)),
 so not every field of a page belongs to that one publication. Publication
 changes do not expire a position cursor, and a publication that lands while a
 page is being read does not refuse that page either. That page is still capped at the publication
@@ -1292,7 +1293,7 @@ canonical `type` set and timestamp bounds in their filters, so `order=asc`,
 `type`, `from_timestamp`, and `to_timestamp` each fail closed when a cursor is
 replayed against a different query. Name history cursors also record
 `include=child_registrations`; see the [history collection
-filters](api-v2-routes.md#history-collection-filters). Cursor bytes remain
+filters](api-v1-routes.md#history-collection-filters). Cursor bytes remain
 unstable.
 
 A full Interpret and Project re-walk does not invalidate a history cursor: the
