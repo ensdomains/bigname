@@ -121,6 +121,11 @@ async fn selected_authority(
 // Authority selection does not check the proof's manifest (`missing_manifest`, `inactive_manifest`,
 // `wrong_proof_family`, `wrong_namespace`, `unadmitted_latest_proof` keep their proof); Interpret
 // writes events only from active manifests, so these rows exist only in fixtures.
+// These cases pin that support follows the authority result; they do not show that a malformed
+// proof is rejected. Several keep a proof that should not establish a migration (`wrong_resource`
+// keeps one whose successor is another resource), and the registration is served because it is
+// independently current, not because the proof is sound. Checking proof association belongs to
+// authority selection, not to the support decision this suite covers.
 #[tokio::test]
 async fn migration_boundary_mutations_refuse_only_through_authority_selection() -> Result<()> {
     for case in [
