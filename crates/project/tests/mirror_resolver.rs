@@ -20,6 +20,7 @@ const UNDECLARED_RESOLVER: &str = "0x4848484848484848484848484848484848484848";
 const MIRROR: &str = "0x1010101010101010101010101010101010101010";
 const ZERO20: &str = "0x0000000000000000000000000000000000000000";
 const ADDRESS: &str = "0x2222222222222222222222222222222222222222";
+const ROOT_OWNER: &str = "0x5555555555555555555555555555555555555555";
 const V1_RESOURCE: &str = "69100000-0000-0000-0000-000000000001";
 const V2_RESOURCE: &str = "69100000-0000-0000-0000-000000000002";
 const V1_BINDING: &str = "69100000-0000-0000-0000-000000000101";
@@ -84,6 +85,9 @@ enum V2Lifecycle {
     /// The staging shape: the label is reserved (owner zero, infinite expiry) with the pointer
     /// supplied at reservation in the same block, and a label preimage is observed later.
     Reserved,
+    /// The root registry registers the label to `ROOT_OWNER` with the largest uint64 expiry in
+    /// the pointer's block, as the Sepolia deployment does for `eth` and `reverse`.
+    Registered,
     /// The token was released at `base + 2` through a state-derived release that names the
     /// resource but no logical name, with no pointer clear.
     ReleasedOnly,
@@ -666,27 +670,88 @@ async fn root_registry_tld_without_a_registration_serves_its_pointer() -> Result
 
     // The rule is scoped to `current_authority_not_projected`: a TLD bound under both arms follows
     // its current ENSv2 registration, which is served as it is, and gets neither the pointer nor a
-    // serving resource.
-    let fixture = Fixture::declared(
-        "tld_root_bound",
-        V1Side::NodeOnly {
-            resolver: V1_RESOLVER,
-            pointer_block_offset: 0,
-        },
-    )
-    .single_label();
-    let (database, pool) = project(&fixture, fixture.target(), Execution::FromZero).await?;
-    let name = name_current(&pool, &logical_name_id)
-        .await?
-        .context("bound TLD row")?;
-    assert_eq!(name["support_status"], "supported", "{name}");
-    assert_eq!(name["unsupported_reason"], Value::Null, "{name}");
-    assert_eq!(name["serving_resource_id"], Value::Null);
-    // The declared resolver is the selected ENSv2 registration's own, and the pointer grants no
-    // read reachability.
-    assert_eq!(name["declared_summary"]["resolver"]["address"], MIRROR);
-    assert_eq!(name["provenance"]["read_reachability"], json!({}));
-    database.cleanup().await?;
+    // serving resource. A root registration (Sepolia's `eth` and `reverse`) serves its registrant,
+    // keeps the uint64 expiry unformatted, and reads its records through the mirror, the same in
+    // every execution.
+    // (upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ReverseMirror.ts:L35 @ ens_v2_sepolia_20260916@366de741)
+    for lifecycle in [V2Lifecycle::None, V2Lifecycle::Registered] {
+        let fixture = Fixture::declared(
+            "tld_root_bound",
+            V1Side::NodeOnly {
+                resolver: V1_RESOLVER,
+                pointer_block_offset: 0,
+            },
+        )
+        .single_label()
+        .with_v2_lifecycle(lifecycle);
+        let mut previous: Option<(Value, Value)> = None;
+        for execution in [
+            Execution::FromZero,
+            Execution::PerBlock,
+            Execution::RedoLastBlock,
+        ] {
+            let (database, pool) = project(&fixture, fixture.target(), execution).await?;
+            let mut name = name_current(&pool, &logical_name_id)
+                .await?
+                .context("bound TLD row")?;
+            assert_eq!(name["support_status"], "supported", "{execution:?} {name}");
+            assert_eq!(name["unsupported_reason"], Value::Null, "{name}");
+            assert_eq!(name["serving_resource_id"], Value::Null);
+            assert_eq!(name["resource_id"], V2_RESOURCE);
+            // The declared resolver is the selected ENSv2 registration's own, and the pointer
+            // grants no read reachability.
+            let summary = &name["declared_summary"];
+            assert_eq!(summary["resolver"]["address"], MIRROR);
+            assert_eq!(name["provenance"]["read_reachability"], json!({}));
+            if lifecycle == V2Lifecycle::Registered {
+                assert_eq!(
+                    summary["registration"]["registrant"], ROOT_OWNER,
+                    "{summary}"
+                );
+                assert_eq!(
+                    summary["registration"]["expiry"],
+                    json!(u64::MAX),
+                    "{summary}"
+                );
+                assert_eq!(summary["control"]["expiry"], Value::Null, "{summary}");
+                assert_eq!(
+                    summary["registration"]["authority_kind"], "ens_v2_registry",
+                    "{summary}"
+                );
+                assert_eq!(
+                    summary["control"]["registry_owner"], ROOT_OWNER,
+                    "{summary}"
+                );
+            }
+            let mut v2 = inventory(&pool, V2_RESOURCE).await?;
+            assert_eq!(v2["support_status"], "supported", "{v2}");
+            assert_eq!(v2["provenance"]["mirror"]["resolver_address"], MIRROR);
+            assert_eq!(
+                v2["provenance"]["mirror"]["mirrored_resolver_address"],
+                V1_RESOLVER
+            );
+            assert_eq!(
+                v2["entries"],
+                json!([{"record_family": "text", "record_key": "text:url", "selector_key": "url",
+                        "status": "success", "value": "https://tld.example"}]),
+                "{v2}"
+            );
+            for row in [&mut name, &mut v2] {
+                let row = row.as_object_mut().context("row")?;
+                row.remove("chain_positions");
+                row.remove("canonicality_summary");
+            }
+            if let Some(previous) = &previous {
+                assert_eq!(
+                    &(name.clone(), v2.clone()),
+                    previous,
+                    "{execution:?} drifted"
+                );
+            }
+            previous = Some((name, v2));
+            database.cleanup().await?;
+        }
+    }
 
     // A release on the token resource at or after the pointer withdraws it, with or without the
     // pointer clear the interpreter derives alongside an expiry; both name the resource but no
@@ -1505,6 +1570,34 @@ async fn seed(pool: &PgPool, fixture: &Fixture) -> Result<()> {
                 log_index: 7,
                 emitter: V1_REGISTRY,
                 after_state: json!({"label": fixture.queried}),
+            });
+        }
+        V2Lifecycle::Registered => {
+            events.push(Event {
+                identity: "v2-registered",
+                logical_name_id: Some(queried_logical_name_id.clone()),
+                resource_id: Some(V2_RESOURCE),
+                kind: "RegistrationGranted",
+                source_family: "ens_v2_root_l1",
+                manifest_id: Some(root_manifest),
+                block: base,
+                log_index: 1,
+                emitter: V1_REGISTRY,
+                after_state: json!({"source_event": "LabelRegistered",
+                                    "authority_kind": "ens_v2_registry", "status": "registered",
+                                    "registrant": ROOT_OWNER, "expiry": u64::MAX}),
+            });
+            events.push(Event {
+                identity: "v2-registered-owner",
+                logical_name_id: Some(queried_logical_name_id.clone()),
+                resource_id: Some(V2_RESOURCE),
+                kind: "AuthorityTransferred",
+                source_family: "ens_v2_root_l1",
+                manifest_id: Some(root_manifest),
+                block: base,
+                log_index: 2,
+                emitter: V1_REGISTRY,
+                after_state: json!({"source_event": "LabelRegistered", "owner": ROOT_OWNER}),
             });
         }
         V2Lifecycle::ReleasedOnly => {}
