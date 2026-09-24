@@ -1628,6 +1628,14 @@ belongs to one key and holds what the latest events of that key left, clears
 included: a zero pointer, record id `0`, a revoked grant or an inactive alias
 stays a row. A row goes only when nothing remains for its key.
 
+Registration and lease state also keeps every registration, renewal, release,
+reservation, expiry change and token transfer of a lease or ENSv2 triple as a
+row of its own, never pruned. Each row keeps the name the adapter emitted,
+which nothing rewrites, beside the name the ENSv1 registrar and wrapper linking
+gives it. The address-to-name and address-to-record index rows are not kept
+state: after every block and every undo they are derived again for the keys the
+block touched. The resolver classification table exists but is not filled yet.
+
 These tables are shadows today. Nothing reads them, and no served value
 depends on them. After each Project batch commits and its progress is
 recorded, the phase runner applies the families block by block, each block in
