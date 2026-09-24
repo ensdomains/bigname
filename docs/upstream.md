@@ -140,6 +140,24 @@ hash, deploy the matching phase runner, complete and publish that walk, and
 only then deploy the matching API as required by the
 [deployment order](deployment.md#replacing-an-initialized-phase-schema).
 
+On 2026-09-24 the
+[ENSv1 mirror resolver](glossary.md#ensv1-mirror-resolver-ensv1_mirror_resolver)
+citations in `projections.md`, `glossary.md`, `manifests.md`, and the Project
+and history mirror code moved from `ens_v2@a971bd64` to
+`ens_v2_sepolia_20260916@366de741`, the source of the deployed Sepolia mirror.
+No pin changed. The cited content did change: at `a971bd64` `_findResolver`
+returns the registry walk's result as it is, while at `366de741` it keeps a
+resolver found above the queried node only when that resolver supports
+`IExtendedResolver`
+(upstream: .refs/ens_v2/contracts/src/resolver/ENSV1Resolver.sol:L39-L41 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/resolver/ENSV1Resolver.sol:L40-L43 @ ens_v2_sepolia_20260916@366de741).
+Project now follows the newer behaviour and never derives a mirrored name
+through an ancestor's resolver
+([`projections.md`](projections.md#resolver-and-records)). That change to
+`crates/project/src` rotates the
+[interpreter content hash](glossary.md#interpreter-content-hash); the rollout is
+under [ENSv1 mirror ancestor gate](deployment.md#ensv1-mirror-ancestor-gate).
+
 ## Known divergences
 
 > **Registry count comparison after full revocation of a newer resource version** —

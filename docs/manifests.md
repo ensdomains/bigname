@@ -145,9 +145,11 @@ records.
 reached by ancestor walk is resolver-defined.
 (upstream: .refs/ens_v1/contracts/universalResolver/ResolverCaller.sol:L66-L70 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/universalResolver/ResolverCaller.sol:L108-L116 @ ens_v1@91c966f)
-Project consumes it only to refuse deriving an
+Project consumes it only to tell apart the two reasons it records when it
+refuses to derive an
 [ENSv1 mirror resolver](glossary.md#ensv1-mirror-resolver-ensv1_mirror_resolver)'s
-inventory through such an ancestor
+inventory through an ancestor, `ensip10_extended_resolver` or
+`ancestor_resolver_not_extended`
 ([`projections.md`](projections.md#resolver-and-records)); it authorizes no
 getter and no watch-plan expansion. No admitted ENSv1 resolver generation
 declares it: the pinned `PublicResolver` inherits the profile resolvers and
@@ -560,12 +562,14 @@ sharing the family-level `correlation_addresses.ens_v1_registry` described under
 rejects a repeated address. Manifest sync persists each instance under its own
 `declaration_name` `ensv1_mirror_resolver@<lowercase address>` with `role =
 ensv1_mirror_resolver` (see [contract instance admission and continuity](#contract-instance-admission-and-continuity)). Upstream's `ENSV1Resolver` is the model:
-it holds one ENSv1 registry as an immutable, finds the resolver for the
-requested name in that registry, and forwards the resolve call to it; it
+it holds one ENSv1 registry as an immutable, finds the nearest resolver for
+the requested name in that registry, keeps it only when it is set on the name
+itself or supports `IExtendedResolver`, and forwards the resolve call to it; it
 stores no records and defines no record events of its own.
-(upstream: .refs/ens_v2/contracts/src/resolver/ENSV1Resolver.sol:L18-L19 @ ens_v2@a971bd64)
-(upstream: .refs/ens_v2/contracts/src/resolver/ENSV1Resolver.sol:L38-L41 @ ens_v2@a971bd64)
-(upstream: .refs/ens_v2/contracts/src/resolver/AbstractMirrorResolver.sol:L66-L74 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/resolver/ENSV1Resolver.sol:L19-L20 @ ens_v2_sepolia_20260916@366de741)
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/resolver/ENSV1Resolver.sol:L40-L43 @ ens_v2_sepolia_20260916@366de741)
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/universalResolver/libraries/LibResolution.sol:L39-L48 @ ens_v2_sepolia_20260916@366de741)
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/src/resolver/AbstractMirrorResolver.sol:L66-L74 @ ens_v2_sepolia_20260916@366de741)
 
 The declaration is a classification input, not a record source. Project
 classifies the address as supported `ens_v2_resolver_l1` /
@@ -576,10 +580,11 @@ publishes `declared_summary.classification.mirror = {mirrored_source_family:
 "ens_v1_resolver_l1", mirrored_registry_source_family: "ens_v1_registry_l1",
 mirrored_registry_address}` on `resolver_current`. A name whose current ENSv2
 resolver pointer targets the mirror is then served through the ENSv1 resolver
-the mirror's registry walk selects, the exact node's or else the nearest
-ancestor's, read for the queried node as specified in
-[`projections.md`](projections.md#resolver-and-records); an ancestor declared
-`ensip10_extended_resolver` is not derived through. Because the declared
+the mirror's registry walk selects at the name's own node, read for the
+queried node as specified in
+[`projections.md`](projections.md#resolver-and-records); no ancestor's
+resolver is derived through, whether or not it is declared
+`ensip10_extended_resolver`. Because the declared
 address becomes a watched emitter of the family, adding it widens the watch plan
 and triggers the [mandatory historical fetch](#mandatory-historical-fetch-after-watch-plan-widening);
 the mirror emits no logs, so that fetch is empty. Discovery alone, matching

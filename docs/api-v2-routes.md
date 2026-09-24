@@ -880,16 +880,19 @@ collection route carry neither header.
   A name whose current ENSv2 resolver is a declared
   [ENSv1 mirror resolver](glossary.md#ensv1-mirror-resolver-ensv1_mirror_resolver)
   keeps that mirror as `data.resolver`, and its indexed `records` and
-  `include=inventory` come from the ENSv1
-  resolver the mirror's registry walk selects for the name (the exact node's,
-  else the nearest ancestor's), read for the queried node exactly as Project
+  `include=inventory` come from the ENSv1 resolver the mirror's registry walk
+  selects at the name's own node, read for the queried node exactly as Project
   derived it ([`projections.md`](projections.md#resolver-and-records)); the
-  response shape does not change, and an ancestor-derived answer is usually
-  empty because it is the ancestor resolver's storage for this node. When no
-  consulted node has a projected resolver, or the selected ancestor resolver is
-  declared `ensip10_extended_resolver`, the inventory is unsupported with
-  `mirrored_resolver_not_projected`, and `source=auto` with `keys` falls back
-  to verified lookup as for any unsupported inventory.
+  response shape does not change. When no consulted node has a projected
+  resolver, or the walk's nearest resolver belongs to an ancestor, the
+  inventory is unsupported with `mirrored_resolver_not_projected`: explicit
+  indexed keys answer `unsupported` with that reason, a request without `keys`
+  returns `records: {}` because the row names no keys, and `source=auto` with
+  `keys` falls back to verified lookup as for any unsupported inventory. That
+  fallback's answer follows the ordinary verified-execution contract; this
+  route does not promise `not_found` for it. The finer reason Project records
+  for the refusal stays in persisted projection provenance and is not part of
+  `include=inventory`.
 
   Representative keyed answers are:
 
