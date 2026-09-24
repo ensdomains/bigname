@@ -654,8 +654,9 @@ async fn v2_name_history_child_registrations_stop_at_the_publication_bound() -> 
             .fetch_one(&pool)
             .await?;
             anyhow::Ok(bigname_storage::HistoryCursor {
-                normalized_event_id,
+                normalized_event_id: Some(normalized_event_id),
                 event_identity: identity.to_owned(),
+                position: None,
             })
         }
     };

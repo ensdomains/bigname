@@ -11,7 +11,9 @@ use std::cmp::Ordering;
 
 use sqlx::{PgConnection, Postgres, QueryBuilder};
 
-use super::{EventHistoryReadFilter, HistoryOrder, source::push_history_canonicality_filter};
+use super::{
+    EventHistoryReadFilter, HistoryCursor, HistoryOrder, source::push_history_canonicality_filter,
+};
 
 /// Stored kinds of the friendly `registration` history type; every membership row has one.
 const REGISTRATION_KINDS: [&str; 2] = ["RegistrationGranted", "LabelRegistered"];
@@ -210,13 +212,34 @@ pub(super) enum ChildArmBound {
 }
 
 impl ChildArmBound {
-    /// Load the cursor event's position, comparing chains in SQL so the comparison uses the
-    /// collation history is ordered by.
+    /// The cursor event's position: the one the cursor carries, or its anchor row's. Chains are
+    /// compared in SQL so the comparison uses the collation history is ordered by.
     pub(super) async fn load_cursor(
         connection: &mut PgConnection,
         arm: &ChildArm,
-        event_identity: &str,
+        cursor: &HistoryCursor,
     ) -> anyhow::Result<Option<CursorPosition>> {
+        if let Some(position) = cursor.position.as_ref() {
+            let arm_chain_order: Option<i32> = sqlx::query_scalar(
+                "SELECT CASE WHEN $1::text IS NULL THEN NULL
+                             WHEN $2::text < $1::text THEN -1
+                             WHEN $2::text > $1::text THEN 1
+                             ELSE 0 END",
+            )
+            .bind(position.chain_id.as_deref())
+            .bind(&arm.chain_id)
+            .fetch_one(&mut *connection)
+            .await?;
+            return Ok(Some(CursorPosition {
+                arm_chain_order,
+                block_number: position.block_number,
+                block_hash: position.block_hash.clone(),
+                transaction_hash: position.transaction_hash.clone(),
+                log_index: position.log_index,
+                event_identity: cursor.event_identity.clone(),
+            }));
+        }
+        let event_identity = cursor.event_identity.as_str();
         Ok(sqlx::query_as(
             "SELECT CASE WHEN chain_id IS NULL THEN NULL
                          WHEN $2 < chain_id THEN -1

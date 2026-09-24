@@ -11,8 +11,9 @@ const REGISTRATION_ID: &str = "550e8400-e29b-41d4-a716-446655440000";
 
 fn sample_cursor() -> HistoryCursor {
     HistoryCursor {
-        normalized_event_id: 42,
+        normalized_event_id: Some(42),
         event_identity: "event:42".to_owned(),
+        position: None,
     }
 }
 

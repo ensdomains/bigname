@@ -20,7 +20,7 @@ use super::{
     columns::push_history_columns,
     decoders::decode_history_event,
     duplicates::push_product_history_duplicate_filter,
-    keyset::{push_history_cursor_after, push_history_cursor_cte},
+    keyset::{history_cursor_from_row, push_history_cursor_after, push_history_cursor_cte},
     paging::{push_history_filters, push_history_order, push_history_order_terms},
     redo::{InterpretRedoFence, ensure_interpret_redo_fence},
     selectors::{HistorySelector, name_history_selector},
@@ -101,7 +101,7 @@ pub async fn load_name_history_page_with_child_registrations(
     // published block, from the same snapshot as the rows, exactly as name history without the
     // option does.
     let filter = filter.with_attributed_records(&mut transaction).await?;
-    if let Some(cursor) = cursor {
+    if let Some(cursor) = cursor.filter(|cursor| cursor.position.is_none()) {
         ensure_cursor_in_collection(&mut transaction, logical_name_id, &filter, cursor).await?;
     }
     let arm = ChildArm::resolve(&mut transaction, logical_name_id, &filter).await?;
@@ -138,11 +138,9 @@ pub async fn load_name_history_page_with_child_registrations(
             .map(decode_row)
             .collect::<Result<Vec<_>>>()?
     };
-    let (rows, next_cursor) =
-        split_keyset_page(rows, page_size, |row: &NameHistoryRow| HistoryCursor {
-            normalized_event_id: row.event.normalized_event_id,
-            event_identity: row.event.event_identity.clone(),
-        });
+    let (rows, next_cursor) = split_keyset_page(rows, page_size, |row: &NameHistoryRow| {
+        history_cursor_from_row(&row.event)
+    });
     transaction
         .commit()
         .await
@@ -176,7 +174,7 @@ async fn child_arm_bound(
 ) -> Result<ChildArmBound> {
     Ok(match (arm, cursor) {
         (Some(arm), Some(cursor)) => {
-            let position = ChildArmBound::load_cursor(connection, arm, &cursor.event_identity)
+            let position = ChildArmBound::load_cursor(connection, arm, cursor)
                 .await?
                 .ok_or(InvalidHistoryCursor)?;
             ChildArmBound::after(&position, order)
