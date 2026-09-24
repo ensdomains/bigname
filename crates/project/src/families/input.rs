@@ -42,11 +42,6 @@ impl Position {
         Self::from_object(row)
     }
 
-    /// A secondary position read back from its JSON object.
-    pub(crate) fn from_json(value: Option<&Value>) -> Option<Self> {
-        value.and_then(Value::as_object).and_then(Self::from_object)
-    }
-
     fn from_object(object: &Map<String, Value>) -> Option<Self> {
         Some(Self {
             block_number: object.get("block_number")?.as_i64()?,

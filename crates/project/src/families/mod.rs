@@ -7,14 +7,15 @@
 //! marker from their own shadow marker, catching up from wherever it stands.
 // The reducers land in the commits that follow and use the helpers
 // that are unused until then.
-#![allow(dead_code)]
 mod addresses;
 mod block;
+mod decode;
 mod derived;
 mod driver;
 mod identity;
 mod input;
 mod keys;
+mod lifecycle;
 mod marker;
 mod permissions;
 mod records;

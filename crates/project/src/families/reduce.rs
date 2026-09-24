@@ -49,6 +49,7 @@ pub(crate) async fn apply(
     super::topology::apply(transaction, context, events, rows).await?;
     super::reverse::apply(transaction, context, events, rows).await?;
     super::addresses::apply(transaction, context, events, rows).await?;
+    super::lifecycle::apply(transaction, context, events, rows).await?;
     Ok(())
 }
 
@@ -115,11 +116,6 @@ pub(crate) fn put(
 /// Set `column` to `value` on a row being built.
 pub(crate) fn set(row: &mut Map<String, Value>, column: &str, value: impl Into<Value>) {
     row.insert(column.to_owned(), value.into());
-}
-
-/// A JSON value of the event's after state, `Value::Null` when absent.
-pub(crate) fn after(event: &BlockEvent, field: &str) -> Value {
-    event.after.get(field).cloned().unwrap_or(Value::Null)
 }
 
 /// A text value as JSON, null when absent.

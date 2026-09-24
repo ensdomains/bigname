@@ -62,6 +62,7 @@ impl BlockKeys {
         self.spaces.get(&space).into_iter().flatten()
     }
 
+    #[cfg(test)]
     pub(crate) fn contains(&self, space: Space, key: &[&str]) -> bool {
         self.spaces.get(&space).is_some_and(|keys| {
             keys.contains(&key.iter().map(|part| (*part).to_owned()).collect::<Key>())
