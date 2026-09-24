@@ -6181,7 +6181,7 @@ async fn v2_reverse_root_records_payload(
         "record_family": "text",
         "selector_key": "url",
         "status": "success",
-        "value": {"key": "url", "value": "https://reverse.example"}
+        "value": "https://reverse.example"
     }]);
     inventory.provenance["mirror"] = json!({
         "resolver_address": REVERSE_MIRROR,

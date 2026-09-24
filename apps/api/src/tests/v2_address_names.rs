@@ -667,7 +667,8 @@ async fn v2_get_address_names_treats_an_out_of_range_expiry_as_unknown() -> Resu
             .iter()
             .find(|row| row["name"] == "alpha.eth")
             .expect("alpha.eth stays listed");
-        assert_eq!(alpha.get("expires_at").and_then(Value::as_str), expected, "{case}");
+        // An unknown expiry leaves the key out; a known one is an RFC 3339 string.
+        assert_eq!(alpha.get("expires_at"), expected.map(Value::from).as_ref(), "{case}");
         let (asc_position, desc_position) = if expected == first_known {
             (0, asc.len() - 1)
         } else {
@@ -707,7 +708,7 @@ async fn v2_get_address_names_pages_through_unknown_expiries() -> Result<()> {
             for row in page["data"].as_array().expect("page data") {
                 listed.push((
                     row["name"].as_str().expect("row name").to_owned(),
-                    row.get("expires_at").and_then(Value::as_str).map(str::to_owned),
+                    row.get("expires_at").cloned(),
                 ));
             }
             match page["page"]["next_cursor"].as_str() {
@@ -722,7 +723,7 @@ async fn v2_get_address_names_pages_through_unknown_expiries() -> Result<()> {
             let (unknown, known) = listed.split_at(3);
             (known, unknown)
         };
-        assert!(known.iter().all(|(_, expiry)| expiry.as_deref() == Some("2029-01-02T00:00:00Z")), "{order}: {listed:?}");
+        assert!(known.iter().all(|(_, expiry)| expiry == &Some(json!("2029-01-02T00:00:00Z"))), "{order}: {listed:?}");
         assert!(unknown.iter().all(|(_, expiry)| expiry.is_none()), "{order}: {listed:?}");
         let unknown_names: BTreeSet<&str> = unknown.iter().map(|(name, _)| name.as_str()).collect();
         assert_eq!(

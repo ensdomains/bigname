@@ -1762,7 +1762,7 @@ async fn v2_search_serves_a_name_whose_expiry_exceeds_the_timestamp_range() -> R
     let rows = payload["data"].as_array().expect("search data must be an array");
     assert_eq!(v2_search_names(rows), vec!["alpha.eth", "alpine.eth"]);
     for row in rows {
-        assert_eq!(row.get("expires_at").and_then(Value::as_str), None, "{row}");
+        assert_eq!(row.get("expires_at"), None, "an unknown expiry leaves the key out: {row}");
     }
     database.cleanup().await?;
     Ok(())

@@ -209,8 +209,8 @@ async fn v2_get_names_skips_an_expiry_beyond_the_timestamp_range() -> Result<()>
             .iter()
             .find(|row| row["name"] == "alpha.eth");
         assert_eq!(
-            alpha.and_then(|row| row.get("expires_at")).and_then(Value::as_str),
-            alpha_expires_at,
+            alpha.and_then(|row| row.get("expires_at")),
+            alpha_expires_at.map(Value::from).as_ref(),
             "{expiry}"
         );
     }
