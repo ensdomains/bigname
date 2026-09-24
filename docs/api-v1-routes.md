@@ -2686,9 +2686,14 @@ introduces it rebuilds Project from full history before serving the option; see
   projection supports whose selected authority arm is not listed in the
   selected `ens_execution` manifest's `verified_authority_arms` returns that
   same reason. Mainnet lists only `ens_v1`; the official Sepolia manifest
-  lists both arms and therefore admits an `ens_v2`-selected claim. The refusal case needs a deployment profile that can support an
-  ENSv2 selection at all; where the deployment profile shadows the ENSv2 arm,
-  the name is already unsupported and takes the first case instead. None of the
+  lists both arms and therefore admits an `ens_v2`-selected claim. An
+  `ens_v2`-selected name is supported whenever its authority selection carries
+  no refusal, whichever registry or registrar recorded it and whatever the
+  `exact_name_profile` flag says, so such a claim reaches the arm check: it
+  proceeds to verification where the manifest lists `ens_v2` and returns
+  `exact_name_authority_not_verifiable` where it does not. Only an authority
+  refusal such as `current_authority_not_projected` makes the name unsupported
+  and sends the claim to the first case. None of the
   three cases dispatches a forward resolver call. A live reverse claim has
   already used its two reverse-leg provider calls before the name-level refusal
   is known. A consumer reads `unsupported_reason` to distinguish a projected
