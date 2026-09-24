@@ -1166,8 +1166,8 @@ The build that serves a selected ENSv2 registration without a registrar event
 chain. It needs no schema-migration, no watch-plan widening and no historical
 ingest fetch. It also rewords the notes of the `exact_name_profile` flag in the
 Sepolia `ens_v2_registrar_l1` manifest without changing its status. That changes
-the Sepolia manifest payload, so manifest synchronization records a manifest
-authority change for Sepolia and its full-history Interpret redo runs with
+the Sepolia manifest payload, so manifest synchronization records a
+[manifest-authority marker](glossary.md#manifest-authority-marker) for Sepolia and its full-history Interpret redo runs with
 `--attest-watch-set-coverage`, attesting that no watch-plan range widened. An
 existing deployment finishes that Interpret redo and the Project redo it
 installs before the matching API serves, as for any rotation. When the Project

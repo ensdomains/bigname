@@ -270,8 +270,8 @@ and the registry's `LabelRegistered` already carries the owner and expiry
 Registrar events still feed name history and renewal expiry; they are no longer a
 condition for support. The rule is the same on every chain: admitting a chain's
 ENSv2 source families in its manifests is the decision that makes its names
-servable, and the `exact_name_profile` capability flag only summarizes that for
-`/v1/namespaces`. Migration and child-registration proofs keep their role in
+servable. The `exact_name_profile` capability flag is a separate, hand-declared
+namespace summary that `/v1/namespaces` reports; it does not gate serving. Migration and child-registration proofs keep their role in
 authority selection below. Candidate and noncanonical events remain excluded by
 Project staging. This changes no resolver feature admission or read routing.
 

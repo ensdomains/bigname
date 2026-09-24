@@ -1770,7 +1770,7 @@ the hash of the setter argument, with no namehash component.
 
 ## Capability policy
 
-Capabilities gate behavior, not public-contract existence. An unsupported capability surfaces as `coverage.unsupported_reason` or a typed error. Shadow capabilities admit facts without enabling general reads. Adding a new capability is additive only when it does not change prior semantics.
+Capabilities gate behavior, not public-contract existence. An unsupported capability surfaces as `coverage.unsupported_reason` or a typed error. Shadow capabilities admit facts without enabling general reads. The `exact_name_profile` flag is the exception: it is a namespace-level declaration that `/v1/namespaces` reports as `name_profile`, and it does not gate whether an individual name is served (see [architecture](architecture.md#ensv1ensv2-current-authority)). Adding a new capability is additive only when it does not change prior semantics.
 
 ## Ownership
 

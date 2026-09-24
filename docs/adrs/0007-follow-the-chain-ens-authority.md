@@ -6,8 +6,10 @@ Amended: 2026-09-25 (support follows the authority decision without a registrar 
 
 ## 2026-09-25 Amendment: Support Follows The Authority Decision
 
-A name whose selected arm is ENSv2 and whose selection carries no refusal is
-now supported without any further qualification. A registration in an admitted
+A name whose selected [authority epoch](../glossary.md#authority-epoch)
+arm is ENSv2, and whose selection carries no refusal such as
+`current_authority_not_projected`, is now supported without any further
+qualification. A registration in an admitted
 ENSv2 registry (the root registry, the declared ETH registry, or a registry
 discovery admits) is a registration; no `ETHRegistrar` event, migration
 successor proof or child registration proof is needed. The reason
