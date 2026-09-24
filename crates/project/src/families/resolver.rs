@@ -51,10 +51,11 @@ pub(super) async fn registry_pointers(
             [json!(context.chain_id), json!(event.namespace), json!(node)],
         );
         let mut row = current(rows, table, &key);
+        // A pointer without a resolver is a clear, stored as the empty address.
         set(
             &mut row,
             "resolver_address",
-            text_or_null(raw_lower(&event.after, "resolver")),
+            raw_lower(&event.after, "resolver").unwrap_or_default(),
         );
         set(
             &mut row,

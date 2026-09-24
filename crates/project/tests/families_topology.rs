@@ -214,3 +214,28 @@ async fn child_edges_and_the_v2_subregistry_keep_their_latest_clears_included() 
     fixture.assert_rebuild_equal(11).await?;
     fixture.cleanup().await
 }
+
+#[tokio::test]
+async fn an_alias_without_an_active_flag_is_stored_active() -> Result<()> {
+    let fixture = Fixture::new("families_alias_default", 20).await?;
+    fixture
+        .write(
+            10,
+            1,
+            "AliasChanged",
+            "ens_v2_resolver_l1",
+            Some(&name(3)),
+            None,
+            json!({"resolver": RESOLVER, "to_logical_name_id": name(2)}),
+            RESOLVER,
+        )
+        .await?;
+    let outcome = fixture.apply(10, FamilyMode::Normal).await;
+    assert_eq!(outcome.skipped, None);
+    for table in ["project_name_alias", "project_resolver_alias"] {
+        let rows = fixture.rows(table).await?;
+        assert_eq!(rows.len(), 1, "{table}");
+        assert_eq!(rows[0]["active"], json!(true), "{table}");
+    }
+    fixture.cleanup().await
+}

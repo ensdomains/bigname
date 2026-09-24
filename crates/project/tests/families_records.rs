@@ -69,6 +69,19 @@ async fn pointers_keep_the_latest_resolver_per_node_and_resource_clears_included
             REGISTRY,
         )
         .await?;
+    // A pointer without a resolver is a clear too.
+    fixture
+        .write(
+            11,
+            1,
+            "ResolverChanged",
+            "ens_v1_registry_l1",
+            None,
+            None,
+            json!({"node": node(2), "resolver": null}),
+            REGISTRY,
+        )
+        .await?;
     fixture
         .apply(12, bigname_project::families::FamilyMode::Normal)
         .await;
@@ -81,7 +94,7 @@ async fn pointers_keep_the_latest_resolver_per_node_and_resource_clears_included
             .collect::<Vec<_>>(),
         vec![
             json!({"node": node(1), "resolver_address": ZERO, "block_number": 12}),
-            json!({"node": node(2), "resolver_address": R1, "block_number": 10}),
+            json!({"node": node(2), "resolver_address": "", "block_number": 11}),
         ],
         "the clear stays a row"
     );

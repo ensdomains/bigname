@@ -176,16 +176,12 @@ pub(super) async fn apply(
     Ok(())
 }
 
-/// The event's active flag as stored: `true`, `false`, or null when it carries none (the read
-/// treats null as active).
+/// The event's active flag, active when it carries none, as both alias readers take it
+/// (`COALESCE((after_state ->> 'active')::boolean, true)`).
 fn active(event: &BlockEvent) -> Value {
-    match field(event, "active") {
-        Value::Bool(flag) => Value::Bool(flag),
-        Value::String(text) => match text.trim().to_ascii_lowercase().as_str() {
-            "true" | "t" => Value::Bool(true),
-            "false" | "f" => Value::Bool(false),
-            _ => Value::Null,
-        },
-        _ => Value::Null,
-    }
+    Value::Bool(match field(event, "active") {
+        Value::Bool(flag) => flag,
+        Value::String(text) => !matches!(text.trim().to_ascii_lowercase().as_str(), "false" | "f"),
+        _ => true,
+    })
 }

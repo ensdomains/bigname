@@ -147,6 +147,10 @@ pub(super) async fn apply(
     load_rows(transaction, rows, &tables::ACCOUNT_APPROVAL, approval_keys).await?;
     for (key, event) in approvals {
         let table = &tables::ACCOUNT_APPROVAL;
+        // An approval whose flag does not read as a boolean has nothing to store.
+        let Some(flag) = event.after.get("approved").and_then(approved) else {
+            continue;
+        };
         let mut row = current(
             rows,
             table,
@@ -159,14 +163,7 @@ pub(super) async fn apply(
             "authority_contract_instance_id",
             text_or_null(raw_text(&scope, "authority_contract_instance_id")),
         );
-        set(
-            &mut row,
-            "approved",
-            after
-                .get("approved")
-                .and_then(approved)
-                .map_or(Value::Null, Value::Bool),
-        );
+        set(&mut row, "approved", flag);
         set(
             &mut row,
             "effective_powers",
