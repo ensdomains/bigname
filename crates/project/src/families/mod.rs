@@ -13,8 +13,10 @@ mod driver;
 mod input;
 mod keys;
 mod marker;
+mod records;
 mod reduce;
 mod repair;
+mod resolver;
 mod store;
 mod tables;
 mod undo;
@@ -38,6 +40,20 @@ pub fn family_tables() -> impl Iterator<Item = &'static str> {
         .iter()
         .map(|table| table.name)
         .chain(tables::DERIVED)
+}
+
+/// Undo the families block by block until their marker is at or below `number`, each block in
+/// its own transaction. Returns the blocks undone; stops early, leaving the families where they
+/// stand, when the journal no longer holds the next block.
+pub async fn undo_to(pool: &PgPool, chain_id: &str, number: i64) -> crate::Result<u64> {
+    let mut undone = 0;
+    while let Some(current) = marker::read(pool, chain_id).await?.current {
+        if current.number <= number || undo::undo_block(pool, chain_id, &current).await?.is_none() {
+            break;
+        }
+        undone += 1;
+    }
+    Ok(undone)
 }
 
 /// How the loop runs for one served batch.

@@ -118,6 +118,8 @@ pub(crate) struct BlockHeader {
     /// The predecessor's hash: the recorded parent, else the readable hash one block below.
     pub(crate) predecessor_hash: Option<String>,
     pub(crate) timestamp_seconds: i64,
+    /// The block timestamp as `to_jsonb` renders it, for timestamp columns of family rows.
+    pub(crate) timestamp: Value,
 }
 
 /// Lock block `number`'s readable lineage row for the transaction and read its predecessor.
@@ -126,7 +128,7 @@ pub(crate) async fn lock_block(
     chain_id: &str,
     number: i64,
 ) -> Result<Option<BlockHeader>> {
-    let row: Option<(String, Option<String>, i64)> = sqlx::query_as(
+    let row: Option<(String, Option<String>, i64, Value)> = sqlx::query_as(
         "/* project:families.input.lock_block */ SELECT lineage.block_hash,
                 COALESCE(lineage.parent_hash, (
                     SELECT previous.block_hash FROM chain_lineage previous
@@ -134,7 +136,8 @@ pub(crate) async fn lock_block(
                       AND previous.block_number = lineage.block_number - 1
                       AND previous.canonicality_state IN ('canonical', 'safe', 'finalized')
                 )),
-                extract(epoch FROM lineage.block_timestamp)::bigint
+                extract(epoch FROM lineage.block_timestamp)::bigint,
+                to_jsonb(lineage.block_timestamp)
          FROM chain_lineage lineage
          WHERE lineage.chain_id = $1 AND lineage.block_number = $2
            AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
@@ -145,14 +148,15 @@ pub(crate) async fn lock_block(
     .fetch_optional(&mut **transaction)
     .await
     .map_err(|error| ProjectError::database("failed to lock family block lineage", error))?;
-    Ok(
-        row.map(|(hash, predecessor_hash, timestamp_seconds)| BlockHeader {
+    Ok(row.map(
+        |(hash, predecessor_hash, timestamp_seconds, timestamp)| BlockHeader {
             number,
             hash,
             predecessor_hash,
             timestamp_seconds,
-        }),
-    )
+            timestamp,
+        },
+    ))
 }
 
 type EventRow = (

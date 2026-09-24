@@ -438,3 +438,107 @@ impl Fixture {
         .await?)
     }
 }
+
+impl Fixture {
+    /// One family table's rows as JSON, ordered by their text.
+    pub async fn rows(&self, table: &str) -> Result<Vec<Value>> {
+        Ok(sqlx::query_scalar(&format!(
+            "SELECT to_jsonb(family_row) - 'chain_id' FROM {table} family_row
+             ORDER BY to_jsonb(family_row)::text"
+        ))
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
+    /// Every family table and the marker without its sequence, as text.
+    pub async fn exact(&self) -> Result<Vec<(String, String)>> {
+        let mut tables = Vec::new();
+        for table in families::family_tables() {
+            let rows: String = sqlx::query_scalar(&format!(
+                "SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text), '[]')::text
+                 FROM {table} t"
+            ))
+            .fetch_one(&self.pool)
+            .await?;
+            tables.push((table.to_owned(), rows));
+        }
+        let marker: Option<String> = sqlx::query_scalar(
+            "SELECT (to_jsonb(m) - 'sequence')::text FROM project_family_marker m
+             WHERE chain_id = $1",
+        )
+        .bind(CHAIN)
+        .fetch_optional(&self.pool)
+        .await?;
+        tables.push(("marker".to_owned(), marker.unwrap_or_default()));
+        Ok(tables)
+    }
+
+    /// Apply through `last - 1`, keep the families, apply `last`, undo it and require the
+    /// families byte for byte as they were; then apply `last` again.
+    pub async fn assert_undo_restores(&self, last: i64) -> Result<()> {
+        self.apply(last - 1, FamilyMode::Normal).await;
+        let before = self.exact().await?;
+        let applied = self.apply(last, FamilyMode::Normal).await;
+        anyhow::ensure!(
+            applied.skipped.is_none(),
+            "block {last}: {:?}",
+            applied.skipped
+        );
+        let undone = families::undo_to(&self.pool, CHAIN, last - 1).await?;
+        anyhow::ensure!(undone == 1, "undid {undone} blocks, not block {last}");
+        let after = self.exact().await?;
+        for ((table, was), (_, now)) in before.iter().zip(&after) {
+            anyhow::ensure!(
+                was == now,
+                "undo of {last} left {table} as {now}, not {was}"
+            );
+        }
+        self.apply(last, FamilyMode::Normal).await;
+        Ok(())
+    }
+
+    /// The families after the incremental run must equal a rebuild from scratch at `target`.
+    pub async fn assert_rebuild_equal(&self, target: i64) -> Result<()> {
+        let incremental = self.exact().await?;
+        let rebuilt = self.apply(target, FamilyMode::Rebuild).await;
+        anyhow::ensure!(rebuilt.skipped.is_none(), "rebuild: {:?}", rebuilt.skipped);
+        let fresh = self.exact().await?;
+        for ((table, was), (_, now)) in incremental.iter().zip(&fresh) {
+            anyhow::ensure!(
+                was == now,
+                "a rebuild at {target} left {table} as {now}, not {was}"
+            );
+        }
+        Ok(())
+    }
+
+    /// An event with its namespace, family and payloads set, at `block` and log `log` in
+    /// transaction 0.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn write(
+        &self,
+        block: i64,
+        log: i64,
+        kind: &str,
+        family: &str,
+        name: Option<&str>,
+        resource: Option<&str>,
+        after: Value,
+        emitter: &str,
+    ) -> Result<i64> {
+        if let Some(resource) = resource {
+            self.resource(resource).await?;
+        }
+        if let Some(name) = name {
+            let namehash = name.split_once(':').map_or(name, |(_, hash)| hash);
+            self.surface(name, namehash).await?;
+        }
+        let identity = format!("{kind}:{block}:{log}");
+        let mut event = Event::new(&identity, block, log, kind, family)
+            .after(after)
+            .raw(json!({"emitting_address": emitter}));
+        event.name = name;
+        event.resource = resource;
+        self.event(event).await
+    }
+}
