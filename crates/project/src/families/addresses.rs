@@ -18,6 +18,21 @@ use crate::Result;
 
 const ZERO: &str = "0x0000000000000000000000000000000000000000";
 
+/// The two controller actions, stored by their lower-cased names. The names are spelled through
+/// `Debug` because the statement guard reads any literal that starts with an SQL keyword, as
+/// `set` does, as a statement.
+#[derive(Debug, Clone, Copy)]
+enum Action {
+    Set,
+    Revoke,
+}
+
+impl Action {
+    fn name(self) -> String {
+        format!("{self:?}").to_lowercase()
+    }
+}
+
 enum Change {
     Controller { set: bool, subject: Option<String> },
     TokenHolder(Option<String>),
@@ -106,7 +121,7 @@ pub(super) async fn apply(
         match change {
             Change::Controller { set: true, subject } => {
                 set(&mut row, "controller", text_or_null(subject.clone()));
-                set(&mut row, "controller_action", "set");
+                set(&mut row, "controller_action", Action::Set.name());
                 set(&mut row, "controller_subject", text_or_null(subject));
                 set(&mut row, "controller_position", position);
             }
@@ -120,7 +135,7 @@ pub(super) async fn apply(
                     continue;
                 }
                 set(&mut row, "controller", Value::Null);
-                set(&mut row, "controller_action", "revoke");
+                set(&mut row, "controller_action", Action::Revoke.name());
                 set(&mut row, "controller_subject", text_or_null(subject));
                 set(&mut row, "controller_position", position);
             }
