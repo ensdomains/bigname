@@ -385,12 +385,9 @@ collection route carry neither header.
   `independent_ens_deployments_overlap` (Sepolia) are no longer produced. A
   `name_current` row derived with either reason by an earlier Project generation,
   before the required full-history Interpret redo and its stamped Project redo
-  complete, still returns the unsupported result below. The exact
-  [shared ENS infrastructure](glossary.md#shared-ens-infrastructure) names (root,
-  `eth`, `reverse`, and `addr.reverse`) select a current ENSv2 arm without an
-  authority epoch when ENSv1 evidence, current or historical, exists.
-  Historical ENSv2 evidence alone does not qualify, and `.reverse` descendants
-  do not inherit the exception. An address lookup
+  complete, still returns the unsupported result below. The root, `eth`,
+  `reverse`, and `addr.reverse` follow the same rule as every other name. An
+  address lookup
   returns `409 conflict` when the deployment has no ready public namespace.
   An unsupported name result retains `input`, `kind`, and a `record` containing
   only `name`, `display_name`, `namespace`, `namehash`, `status`, and

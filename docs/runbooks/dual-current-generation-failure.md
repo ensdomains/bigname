@@ -1009,11 +1009,8 @@ the chain for such a name
 registration selects ENSv2, and otherwise ENSv1 decides unless a qualifying
 ENSv2 release tombstone or regime applies. A live ENSv1 binding
 next to a current ENSv2 registration is then ordinary chain state. The name has
-no authority proof, so it never raises this halt. The exact
-[shared ENS infrastructure](../glossary.md#shared-ens-infrastructure) names (root,
-`eth`, `reverse`, and `addr.reverse`) select a current ENSv2 arm when ENSv1
-evidence is current or historical, without fabricating a proof, so they also do
-not raise this halt (the `shared_ens_infrastructure` and `decision` steps of
+no authority proof, so it never raises this halt. The root, `eth`, `reverse`,
+and `addr.reverse` follow the same rule (the `decision` step of
 [`crates/project/src/builders/name_authority/build.sql`](../../crates/project/src/builders/name_authority/build.sql)).
 Do not interpret mere cross-era Sepolia evidence as a missed ENSv1→ENSv2
 migration.

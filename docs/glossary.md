@@ -78,15 +78,11 @@ an arm outside that list is refused in band rather than resolved through an
 entrypoint the selection has ruled out. Project stages the selected arm,
 binding, resource, start position, lifecycle state, and proof together; field
 selection cannot rank events from different arms or combine them in one
-`name_current` row. The exact [shared ENS
-infrastructure](#shared-ens-infrastructure) no-proof exception is not an
-authority epoch: it selects the ENSv2 arm for current fields while its
-epoch start and proof fields remain null. The related `AuthorityEpochChanged`
+`name_current` row. The related `AuthorityEpochChanged`
 normalized event is broader than an era flip: it records every move of a
 name's authority anchor (registry-, registrar-, or wrapper-held), so most such
 rows — millions on Basenames alone — mark within-era anchor transitions.
 
-<a id="shared-ens-infrastructure"></a>
 ## Implementation-announcement watch
 
 a [watch plan](#watch-plan--watched-tuple) entry compiled from one
@@ -127,18 +123,6 @@ never admits its target for capture; Project's declaration precedence still
 reads it as proof that a name in its namespace uses the address. Defined in
 [`manifests.md` § Resolver creation
 capture](manifests.md#resolver-creation-capture).
-
-## Shared ENS infrastructure
-
-the exact ENS root, `eth`, `reverse`, and `addr.reverse` names. When an active
-surface has a current ENSv2 arm and ENSv1 evidence from a current binding or
-historical events, but no higher-precedence authority evidence, Project selects
-the ENSv2 arm for these four names without creating an authority proof or epoch:
-their epoch start stays null, where an ordinary name selected by its current
-ENSv2 registration starts its epoch at that binding. Historical ENSv2 evidence
-without a current ENSv2 binding does not qualify, and descendants are not
-included in the exception. A current ENSv2 binding with no ENSv1 evidence
-remains the ordinary single-arm ENSv2 case.
 
 ## Authority proof
 

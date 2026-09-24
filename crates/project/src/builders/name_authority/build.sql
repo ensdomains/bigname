@@ -446,9 +446,6 @@
                 SELECT 1 FROM transition_proof transition
                 WHERE transition.logical_name_id = child.logical_name_id
             )
-        ), shared_ens_infrastructure AS (
-            -- ENSv2 deploys root and canonically parented eth, then registers or preserves reverse. (upstream: .refs/ens_v2/contracts/deploy/00_RootRegistry.ts:L15-L29 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/deploy/01_ETHRegistry.ts:L23-L64 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/deploy/01_ReverseMirror.ts:L13-L34 @ ens_v2@a971bd64) ENSv1 defines addr.reverse as its reverse registrar node and assigns it directly on testnets. (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L15-L37 @ ens_v1@91c966f) (upstream: .refs/ens_v1/deploy/reverseregistrar/00_deploy_reverse_registrar.ts:L30-L48 @ ens_v1@91c966f)
-            SELECT logical_name_id FROM project_surfaces WHERE namespace = 'ens' AND visibility_state = 'active' AND raw_name IN ('', 'eth', 'reverse', 'addr.reverse')
         ), latest_v1_lifecycle AS (
             SELECT DISTINCT ON (event.logical_name_id)
                    event.logical_name_id, event.resource_id, event.event_kind,
@@ -600,8 +597,6 @@
                        WHEN proof.logical_name_id IS NOT NULL THEN 'ens_v2'
                        WHEN released.logical_name_id IS NOT NULL THEN 'ens_v2'
                        WHEN regime.logical_name_id IS NOT NULL THEN 'ens_v2'
-                       WHEN shared.logical_name_id IS NOT NULL
-                        AND COALESCE(summary.has_ens_v2, false) THEN 'ens_v2'
                        -- Follow the chain (docs/adrs/0007-follow-the-chain-ens-authority.md). Only a
                        -- registered ENSv2 entry opens an ENSv2 binding, and it decides the name
                        -- whatever ENSv1 holds, without a proof; a reservation opens none and
@@ -624,13 +619,6 @@
                    proof.successor_resource_id,
                    released.released_v2_resource_id,
                    released_v1.released_v1_resource_id, released_v1.released_v1_binding_id,
-                   -- Any ENSv1 evidence, open or historical: a shared-infrastructure selection
-                   -- of ENSv2 over it publishes no authority epoch.
-                   COALESCE(summary.has_ens_v1, false)
-                       OR COALESCE(event_summary.has_ens_v1, false) AS has_ens_v1,
-                   (shared.logical_name_id IS NOT NULL
-                    AND COALESCE(summary.has_ens_v2, false)
-                    AND proof.logical_name_id IS NULL AND released.logical_name_id IS NULL AND regime.logical_name_id IS NULL) AS shared_infrastructure_authority,
                    -- The arm was selected from event history with nothing open: the sole arm with
                    -- history, or ENSv1 when both arms have history and no ENSv2 release tombstone
                    -- or regime applies. Its lifecycle state then reads that arm's events.
@@ -654,7 +642,6 @@
             LEFT JOIN released_v2_authority released USING (logical_name_id)
             LEFT JOIN released_v2_regime regime USING (logical_name_id)
             LEFT JOIN released_v1_authority released_v1 USING (logical_name_id)
-            LEFT JOIN shared_ens_infrastructure shared USING (logical_name_id)
         ), selected AS (
             SELECT decision.*, binding.surface_binding_id AS selected_binding_id,
                    binding.resource_id AS selected_resource_id,
@@ -786,8 +773,8 @@
                ownerless.resource_id AS ownerless_registry_resource_id, ownerless.owner_getter_reason,
                (selected.released_v1_binding_id IS NOT NULL
                 AND selected.selected_binding_id = selected.released_v1_binding_id) AS released_v1_tombstone,
-               CASE WHEN selected.shared_infrastructure_authority AND selected.has_ens_v1 THEN NULL ELSE jsonb_strip_nulls(jsonb_build_object(
-                   'block_number', selected.selected_epoch_block_number, 'transaction_index', selected.selected_epoch_transaction_index, 'log_index', selected.selected_epoch_log_index)) END AS authority_epoch_start_position,
+               jsonb_strip_nulls(jsonb_build_object(
+                   'block_number', selected.selected_epoch_block_number, 'transaction_index', selected.selected_epoch_transaction_index, 'log_index', selected.selected_epoch_log_index)) AS authority_epoch_start_position,
                selected.proof_kind AS authority_proof_kind, selected.proof_event_id AS authority_proof_event_id,
                selected.proof_event_identity AS authority_proof_event_identity, selected.transition_id AS authority_transition_id,
                CASE

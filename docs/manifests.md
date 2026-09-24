@@ -472,13 +472,8 @@ deployment-wide ENSv2 release-threshold decision, follows the chain
 registration selects ENSv2, and otherwise ENSv1 decides. A premigration
 reservation is not a registration and defers to ENSv1. Only an admitted
 ENSv1→ENSv2 migration boundary sets an authority epoch at the boundary itself.
-The exact [shared ENS infrastructure](glossary.md#shared-ens-infrastructure)
-names (root, `eth`, `reverse`, and `addr.reverse`) select a current ENSv2 arm
-without publishing an authority epoch when ENSv1 evidence exists as either a
-current binding or historical events and none of those higher-precedence
-decisions applies. Historical ENSv2 evidence alone does not qualify, and
-descendants do not inherit the exception. A current ENSv2 arm without ENSv1
-evidence remains the ordinary single-arm ENSv2 case.
+The root, `eth`, `reverse`, and `addr.reverse` follow the same rule as every
+other name.
 Admitting ENSv1 sources here makes names with facts on both arms reachable in
 production; it does not establish an ENSv1→ENSv2 migration boundary.
 

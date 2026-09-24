@@ -3,6 +3,19 @@
 Status: Accepted
 Date: 2026-09-24
 Amended: 2026-09-25 (support follows the authority decision without a registrar qualification)
+Amended: 2026-09-25 (the remaining ENSv2 authority exceptions are removed)
+
+## 2026-09-25 Amendment: The Remaining ENSv2 Authority Exceptions Are Removed
+
+The rule in this ADR now applies without the exceptions that the earlier
+decisions kept. Linear TYR-36 step 6.
+
+- The root, `eth`, `reverse`, and `addr.reverse` are no longer
+  classified as shared ENS infrastructure. They are registered in the admitted
+  root registry and follow the same rule as every other name, so their
+  authority epoch starts at their ENSv2 binding like any other.
+  (upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ETHRegistry.ts:L46 @ ens_v2_sepolia_20260916@366de741)
+  (upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ReverseMirror.ts:L35 @ ens_v2_sepolia_20260916@366de741)
 
 ## 2026-09-25 Amendment: Support Follows The Authority Decision
 

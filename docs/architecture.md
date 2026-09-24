@@ -546,24 +546,15 @@ earlier `conflicting_current_ens_authority` (Mainnet) or
 blocks that omit proof events establish no proof; they only decide which facts
 the selection sees.
 
-The ENS root, `eth`, `reverse`, and `addr.reverse` are the four exact
-[shared ENS infrastructure](glossary.md#shared-ens-infrastructure) names. When
-the ENSv2 arm is current and ENSv1 evidence exists as a current binding or
-historical events, they select ENSv2 without fabricating a proof or authority
-epoch: unlike an ordinary name, their epoch start stays null. Historical ENSv2
-evidence without a current ENSv2 binding does not qualify, and such a name
-follows the ordinary rule above. The pinned ENSv2 deployment establishes
-root, `eth`, and `reverse`. The pinned ENSv1 contract defines `addr.reverse` as
-its reverse registrar node, and its deployment assigns that node directly on
-testnets; bigname intentionally preserves this exact four-name classification
-across configured ENS deployment profiles.
-(upstream: .refs/ens_v2/contracts/deploy/00_RootRegistry.ts:L15-L29 @ ens_v2@a971bd64)
-(upstream: .refs/ens_v2/contracts/deploy/01_ETHRegistry.ts:L23-L64 @ ens_v2@a971bd64)
-(upstream: .refs/ens_v2/contracts/deploy/01_ReverseMirror.ts:L13-L34 @ ens_v2@a971bd64)
-(upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L15-L37 @ ens_v1@91c966f)
-(upstream: .refs/ens_v1/deploy/reverseregistrar/00_deploy_reverse_registrar.ts:L30-L48 @ ens_v1@91c966f)
-Descendants, including `alice.addr.reverse`, are not exceptions. Existing ENSv1→ENSv2 migration proof, qualifying
-release, and deployment-wide ENSv2 release-threshold branches retain precedence.
+The ENS root, `eth`, `reverse`, and `addr.reverse` follow the same rule as
+every other name. The ENSv2 deployment registers `eth` and `reverse` in the
+root registry, so a current registration there opens an ENSv2 binding that
+decides the name whatever ENSv1 holds, and its authority epoch starts at that
+binding.
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ETHRegistry.ts:L46 @ ens_v2_sepolia_20260916@366de741)
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ReverseMirror.ts:L35 @ ens_v2_sepolia_20260916@366de741)
+Existing ENSv1→ENSv2 migration proof and qualifying release branches retain
+precedence.
 A live ENSv1 binding next to a current ENSv2 registration is ordinary chain state
 when the name has no proof. The dual-current contradiction keeps its post-proof
 scope: only after a proven activated boundary does it abort projection generation

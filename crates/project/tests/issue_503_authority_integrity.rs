@@ -973,9 +973,14 @@ async fn an_ownerless_v1_registry_does_not_serve_under_a_released_v2_regime() ->
     Ok(())
 }
 
+// The root, `eth`, `reverse` and `addr.reverse` are names registered in the admitted root
+// registry, so they follow the ordinary rule: their open ENSv2 binding decides whatever ENSv1
+// holds, no proof is fabricated, and the authority epoch starts at that binding like any other.
+// (upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ETHRegistry.ts:L46 @ ens_v2_sepolia_20260916@366de741)
+// (upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ReverseMirror.ts:L35 @ ens_v2_sepolia_20260916@366de741)
 #[tokio::test]
-async fn shared_ens_infrastructure_selects_v2_without_fabricating_proof() -> Result<()> {
-    let (db, pool) = database("issue503_shared").await?;
+async fn root_registry_names_follow_the_ordinary_rule_beside_ensv1() -> Result<()> {
+    let (db, pool) = database("issue503_root_registry_names").await?;
     let mut logicals = Vec::new();
     for (index, name) in ["", "eth", "reverse", "addr.reverse"]
         .into_iter()
@@ -985,6 +990,7 @@ async fn shared_ens_infrastructure_selects_v2_without_fabricating_proof() -> Res
     }
     capture_staged_authority(&pool).await?;
     run(&pool).await?;
+    let binding_position = json!({"block_number": 10, "transaction_index": 0, "log_index": 0});
     let root_authority: CapturedAuthority = sqlx::query_as("SELECT selected_authority_arm, authority_epoch_start_position, authority_proof_kind, authority_proof_event_id, authority_proof_event_identity, authority_transition_id FROM issue503_authority_capture WHERE logical_name_id = $1")
         .bind(&logicals[0])
         .fetch_one(&pool)
@@ -993,7 +999,10 @@ async fn shared_ens_infrastructure_selects_v2_without_fabricating_proof() -> Res
         root_authority.selected_authority_arm.as_deref(),
         Some("ens_v2")
     );
-    assert_eq!(root_authority.authority_epoch_start_position, None);
+    assert_eq!(
+        root_authority.authority_epoch_start_position,
+        Some(binding_position.clone())
+    );
     assert_eq!(root_authority.authority_proof_kind, None);
     assert_eq!(root_authority.authority_proof_event_id, None);
     assert_eq!(root_authority.authority_proof_event_identity, None);
@@ -1008,17 +1017,17 @@ async fn shared_ens_infrastructure_selects_v2_without_fabricating_proof() -> Res
         );
         assert_eq!(
             authority_evidence(&pool, logical).await?,
-            (None, None, None, None)
+            (None, None, None, Some(binding_position.clone()))
         );
     }
     db.cleanup().await?;
     Ok(())
 }
 
-// Historical ENSv2 evidence does not qualify for the shared-infrastructure exception, and it is
-// not a current ENSv2 candidate either, so the name's open ENSv1 binding keeps it.
+// Historical ENSv2 evidence is not a current ENSv2 candidate, so `eth`'s open ENSv1 binding keeps
+// it, as for any other name.
 #[tokio::test]
-async fn shared_infrastructure_with_historical_only_v2_evidence_stays_on_v1() -> Result<()> {
+async fn eth_with_historical_only_v2_evidence_stays_on_v1() -> Result<()> {
     let (db, pool) = database("issue503_shared_historical_v2").await?;
     let logical = surface(&pool, 15, "eth", &["ens_v1"]).await?;
     let v2_resource = uuid(2, 15);
@@ -1051,7 +1060,7 @@ async fn shared_infrastructure_with_historical_only_v2_evidence_stays_on_v1() ->
 }
 
 #[tokio::test]
-async fn shared_infrastructure_current_v2_accepts_historical_or_absent_v1_evidence() -> Result<()> {
+async fn eth_and_reverse_current_v2_with_historical_or_absent_v1_evidence() -> Result<()> {
     let (db, pool) = database("issue503_shared_current_v2").await?;
     let historical_v1 = surface(&pool, 16, "eth", &["ens_v2"]).await?;
     let v2_only = surface(&pool, 17, "reverse", &["ens_v2"]).await?;
@@ -1076,7 +1085,16 @@ async fn shared_infrastructure_current_v2_accepts_historical_or_absent_v1_eviden
     );
     assert_eq!(
         authority_evidence(&pool, &historical_v1).await?,
-        (None, None, None, None)
+        (
+            None,
+            None,
+            None,
+            Some(json!({
+                "block_number": 10,
+                "transaction_index": 0,
+                "log_index": 0
+            }))
+        )
     );
     assert_eq!(
         authority(&pool, &v2_only).await?,
@@ -1099,10 +1117,10 @@ async fn shared_infrastructure_current_v2_accepts_historical_or_absent_v1_eviden
     Ok(())
 }
 
-// Descendants follow the ordinary rule: their current ENSv2 registration decides, and unlike the
-// exact infrastructure names they publish its authority epoch.
+// Descendants follow the same rule: their current ENSv2 registration decides and they publish its
+// authority epoch.
 #[tokio::test]
-async fn reverse_descendants_are_not_shared_infrastructure() -> Result<()> {
+async fn reverse_descendants_follow_the_ordinary_rule() -> Result<()> {
     let (db, pool) = database("issue503_reverse_descendants").await?;
     let a = surface(&pool, 20, "alice.addr.reverse", &["ens_v1", "ens_v2"]).await?;
     let b = surface(&pool, 21, "default.reverse", &["ens_v1", "ens_v2"]).await?;
@@ -1241,8 +1259,8 @@ async fn proven_sepolia_dual_current_child_is_fatal() -> Result<()> {
 }
 
 #[tokio::test]
-async fn shared_infrastructure_without_proof_is_not_integrity_fatal() -> Result<()> {
-    let (db, pool) = database("issue503_shared_nonfatal").await?;
+async fn eth_on_both_arms_without_proof_is_not_integrity_fatal() -> Result<()> {
+    let (db, pool) = database("issue503_eth_nonfatal").await?;
     let logical = surface(&pool, 50, "eth", &["ens_v1", "ens_v2"]).await?;
     run(&pool).await?;
     let selected = authority(&pool, &logical).await?;

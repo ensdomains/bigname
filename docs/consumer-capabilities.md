@@ -258,12 +258,8 @@ were identity-only with `independent_ens_deployments_overlap` (Sepolia) or
 registration is current and ENSv1 otherwise. A name whose selected arm is
 ENSv2 and carries no refusal is served from its ENSv2 registration without a
 further registrar, ENSv1→ENSv2 migration or child-registration qualification. The
-ENS root, `eth`, `reverse`, and `addr.reverse` are the four exact
-[shared ENS infrastructure](glossary.md#shared-ens-infrastructure) names. They
-select ENSv2 when the ENSv2 arm is current and ENSv1 evidence, current or
-historical, exists, without fabricating a proof, publishing an authority epoch,
-or extending the exception to descendants. Historical ENSv2 evidence without a
-current binding does not qualify. Complete
+ENS root, `eth`, `reverse`, and `addr.reverse` follow the same rule as every
+other name. Complete
 direct-child groups now supply production input
 to the activated-boundary branch; a refused or unmigrated child reaches ENSv2
 authority only through a current positive ENSv2 registration.

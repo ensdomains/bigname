@@ -285,12 +285,9 @@ revived custody likewise selects its closed lease binding,
 or the closed NameWrapper binding that stands for a lease registered through
 the NameWrapper, or the open registry-only binding under which the lease lapsed
 after its token was transferred without `reclaim`,
-as a [released v1 authority](glossary.md#released-v1-authority) tombstone. The exact
-[shared ENS infrastructure](glossary.md#shared-ens-infrastructure) no-proof
-exception selects a current ENSv2 arm when ENSv1 evidence is current or
-historical, without establishing an authority epoch, so its epoch start and
-proof fields remain null. Historical ENSv2 evidence without a current ENSv2
-binding does not qualify. An ordinary name without a proof follows the chain
+as a [released v1 authority](glossary.md#released-v1-authority) tombstone. A
+name without a proof, the root, `eth`, `reverse`, and `addr.reverse` included,
+follows the chain
 ([ADR 0007](adrs/0007-follow-the-chain-ens-authority.md)): a current ENSv2
 binding selects ENSv2, with its epoch starting at that binding and null proof
 fields, and otherwise ENSv1 decides unless a qualifying ENSv2 release tombstone
