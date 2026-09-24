@@ -169,8 +169,9 @@ async fn derive(
     summary.finish_stage("builders", &mut stage_start);
     integrity::assert_publishable(transaction, &request.chain_id, target).await?;
     summary.finish_stage("integrity", &mut stage_start);
+    // Counting the scope belongs to `publish`, so the six stage durations add up to the whole
+    // derivation.
     count_inputs(transaction, full_rebuild, &mut summary).await?;
-    stage_start = Instant::now();
     publish::swap(transaction, &request.chain_id, full_rebuild, &mut summary).await?;
     builders::child_registrations::publish(
         transaction,

@@ -51,7 +51,9 @@ pub(super) async fn create(
             .map_err(|error| ProjectError::database("failed to analyze event scope", error))?;
     }
     node_record_events::prepare(transaction, chain_id, target_block).await?;
-    let scoped_event_ids = r#"/* project:stage.event_ids.arms */
+    // The identifier below reaches only the first arm, which runs as `stage.event_ids.arm_0`
+    // with it nested inside.
+    let scoped_event_ids = r#"/* project:stage.event_ids.arm_0.select */
         SELECT event.normalized_event_id
         FROM normalized_events event
         WHERE event.chain_id = $1
