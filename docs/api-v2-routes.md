@@ -1739,8 +1739,9 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
   any chain returns `409 stale` regardless of the requested namespace or name.
   The same response applies when either check sees an active redo or a redo
   began between the checks. That refusal is a retry: once the redo finishes,
-  the same cursor continues. A cursor continues whether or not the row it came
-  from still exists.
+  the same cursor continues. A position cursor continues whether or not the
+  row it came from still exists; a cursor from before history walks restarts
+  once if its row is gone.
 - Replaces (v1): `GET /v1/history/names/{namespace}/{name}`.
   Registration-id anchored history from `GET /v1/history/resources/{resource_id}`
   moves to `GET /v1/events?registration_id=...`. `scope=registration` on this
@@ -2720,8 +2721,9 @@ introduces it rebuilds Project from full history before serving the option; see
   any chain returns retryable `409 stale` with no `data` page, regardless of the
   requested namespace. The same response applies when a redo began between the
   checks. That refusal is a retry: once the redo finishes, the same cursor
-  continues. A cursor continues whether or not the row it came from still
-  exists.
+  continues. A position cursor continues whether or not the row it came from
+  still exists; a cursor from before history walks restarts once if its row is
+  gone.
 - Replaces (v1): `GET /v1/history/addresses/{address}`.
 
 ### `GET /v1/search`
@@ -2924,8 +2926,9 @@ For a registrar lease first identified by a later readable observation, registra
   Interpret redo on any chain returns retryable `409 stale` with no `data` page,
   regardless of the requested filters or namespace. The same response applies
   when a redo began between the checks. That refusal is a retry: once the redo
-  finishes, the same cursor continues. A cursor continues whether or not the
-  row it came from still exists.
+  finishes, the same cursor continues. A position cursor continues whether or
+  not the row it came from still exists; a cursor from before history walks
+  restarts once if its row is gone.
 - Replaces (v1): `GET /v1/events` compact event search.
 
 ### `GET /v1/resolvers/{chain_id}/{address}`

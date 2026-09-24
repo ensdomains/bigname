@@ -619,8 +619,8 @@ Rules:
   are not retained for collection replay. A changed publication returns `409 stale`
   requiring a restart without the cursor; a first page, sent without one, is
   simply retried. History collections (`/v1/events`, name history, and address
-  history) disclose in `meta.as_of` the publication each page was read at and
-  do not bind cursors to it; see [Cursors And Pagination](#cursors-and-pagination).
+  history) disclose in `meta.as_of` the publication captured when the request
+  was admitted and do not bind cursors to it; see [Cursors And Pagination](#cursors-and-pagination).
   `/v1/search` reports request-scoped `meta.as_of` as
   staleness attribution without a publication-bound cursor. Diagnostic event
   collections retain their separately documented latest-state behavior.
@@ -1165,8 +1165,9 @@ Top-level collections page over mutable latest-state tables. They omit
 `meta.as_of_token`, because old publications are not retained for replay
 through `at`. Product name, subname, ownership, and permission collections
 report in `meta.as_of` the publication their cursors are bound to; history
-collections report the publication each page read, as a
-[history walk](glossary.md#history-walk) whose cursor holds only a position; search reports request-scoped `meta.as_of` for staleness
+collections report the publication captured when the request was admitted,
+as a [history walk](glossary.md#history-walk) whose cursor holds only a
+position; search reports request-scoped `meta.as_of` for staleness
 attribution. No collection cursor claims a snapshot bound that `at` could
 replay. A history cursor carries no publication token, and the token of a
 history cursor issued before the walk rule is ignored rather than treated as
