@@ -737,6 +737,41 @@
                          candidate.surface_binding_id DESC
                 LIMIT 1
             ) binding ON TRUE
+        ), registry_records AS (
+            -- The ownership records the two ENSv1 registries hold for each ENS name's node: whether
+            -- the 2017 registry recorded an owner, and the block of the first record in the current
+            -- registry, which answers from the 2017 registry until it holds one. A NewOwner names its
+            -- child node and a Transfer its own; a registration that same-transaction reconciliation
+            -- marked `registry_migrated` stands for the record it absorbed. This is the evidence
+            -- Interpret restores its handoff state from. The root is left out: the constructor writes
+            -- its record without an event.
+            -- (upstream: .refs/ens_v1/contracts/registry/ENSRegistryWithFallback.sol:L18-L46 @ ens_v1@91c966f)
+            -- (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L23-L26 @ ens_v1@91c966f)
+            -- (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L60-L84 @ ens_v1@91c966f)
+            SELECT surface.logical_name_id,
+                   bool_or(record.old_registry) AS has_old_record,
+                   min(record.block_number) FILTER (WHERE NOT record.old_registry)
+                       AS current_record_block
+            FROM (
+                SELECT lower(COALESCE(event.after_state ->> 'child_node',
+                                      event.after_state ->> 'node')) AS node,
+                       event.after_state ->> 'emitter_role' = 'registry_old' AS old_registry,
+                       event.block_number
+                FROM project_events event
+                WHERE event.namespace = 'ens'
+                  AND event.source_family = 'ens_v1_registry_l1'
+                  AND event.after_state ->> 'source_event' IN ('NewOwner', 'Transfer')
+                  AND event.after_state ->> 'emitter_role' IN ('registry', 'registry_old')
+                UNION ALL
+                SELECT lower(event.after_state ->> 'namehash'), false, event.block_number
+                FROM project_events event
+                WHERE event.namespace = 'ens'
+                  AND event.after_state -> 'registry_migrated' = 'true'::jsonb
+            ) record
+            JOIN project_surfaces surface
+              ON surface.namespace = 'ens' AND lower(surface.namehash) = record.node
+            WHERE record.node <> '0x0000000000000000000000000000000000000000000000000000000000000000'
+            GROUP BY surface.logical_name_id
         )
         SELECT selected.logical_name_id, selected.selected_authority_arm,
                selected.selected_resource_id, selected.selected_binding_id,
@@ -770,6 +805,11 @@
                        THEN NULL
                    WHEN selected.selected_binding_id IS NULL THEN 'current_authority_not_projected'
                END AS unsupported_reason,
+               CASE WHEN selected.selected_authority_arm = 'ens_v1' THEN
+                   CASE WHEN records.has_old_record AND records.current_record_block IS NULL
+                       THEN 'old' ELSE 'current' END
+               END AS registry_generation,
+               records.current_record_block AS registry_handoff_block_number,
                selected.deployment_profile,
                jsonb_strip_nulls(jsonb_build_object('authority_arm',
                    selected.selected_authority_arm, 'binding_kind', selected.selected_binding_kind,
@@ -780,6 +820,7 @@
                        THEN 'ens_v1' END)) AS resource_authority_context
         FROM selected
         LEFT JOIN project_latest_registry_owner ownerless USING (logical_name_id)
+        LEFT JOIN registry_records records USING (logical_name_id)
         LEFT JOIN LATERAL (
             SELECT event.event_kind
             FROM project_events event
