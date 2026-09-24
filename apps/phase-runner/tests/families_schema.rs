@@ -9,6 +9,19 @@ const FAMILY_TABLES: &[&str] = &[
     "project_family_marker",
     "project_family_undo",
     "project_repair_record",
+    "project_name_state",
+    "project_binding_candidate",
+    "project_lifecycle_key_state",
+    "project_lifecycle_triple_summary",
+    "project_lifecycle_association",
+    "project_lifecycle_event",
+    "project_child_registration_state",
+    "project_wrapper_state",
+    "project_registry_node_state",
+    "project_registry_binding_observation",
+    "project_resolver_classification",
+    "project_registry_pointer",
+    "project_resource_pointer",
 ];
 
 const BASELINE: &[&str] = &[

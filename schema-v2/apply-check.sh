@@ -637,7 +637,9 @@ for migration_file in \
     "$ROOT/migrations/20260923140000_project_name_surfaces_label_indexes.sql" \
     "$ROOT/migrations/20260923150000_child_registration_events.sql" \
     "$ROOT/migrations/20260924120000_normalized_events_project_v1_pointer_addressed_node_idx.sql" \
-    "$ROOT/migrations/20260926100000_project_families_publication.sql"
+    "$ROOT/migrations/20260926100000_project_families_publication.sql" \
+    "$ROOT/migrations/20260926100100_project_families_identity_lifecycle.sql" \
+    "$ROOT/migrations/20260926100200_project_families_resolvers.sql"
 do
     emit_phase_migration "$migration_file" empty-schema | run_psql
 done
@@ -894,7 +896,11 @@ for migration_file in \
     "$ROOT/migrations/20260923150000_child_registration_events.sql" \
     "$ROOT/migrations/20260923150000_child_registration_events.sql" \
     "$ROOT/migrations/20260926100000_project_families_publication.sql" \
-    "$ROOT/migrations/20260926100000_project_families_publication.sql"
+    "$ROOT/migrations/20260926100000_project_families_publication.sql" \
+    "$ROOT/migrations/20260926100100_project_families_identity_lifecycle.sql" \
+    "$ROOT/migrations/20260926100100_project_families_identity_lifecycle.sql" \
+    "$ROOT/migrations/20260926100200_project_families_resolvers.sql" \
+    "$ROOT/migrations/20260926100200_project_families_resolvers.sql"
 do
     emit_phase_migration "$migration_file" baseline-first | run_psql
 done
@@ -4124,6 +4130,19 @@ BEGIN
             ('project_family_marker'),
             ('project_family_undo'),
             ('project_repair_record'),
+            ('project_name_state'),
+            ('project_binding_candidate'),
+            ('project_lifecycle_key_state'),
+            ('project_lifecycle_triple_summary'),
+            ('project_lifecycle_association'),
+            ('project_lifecycle_event'),
+            ('project_child_registration_state'),
+            ('project_wrapper_state'),
+            ('project_registry_node_state'),
+            ('project_registry_binding_observation'),
+            ('project_resolver_classification'),
+            ('project_registry_pointer'),
+            ('project_resource_pointer'),
             ('project_generation_failures'),
             ('project_redo_child_registration_history'),
             ('project_redo_expiry_roots'),
@@ -4195,6 +4214,19 @@ BEGIN
             ('project_family_marker'),
             ('project_family_undo'),
             ('project_repair_record'),
+            ('project_name_state'),
+            ('project_binding_candidate'),
+            ('project_lifecycle_key_state'),
+            ('project_lifecycle_triple_summary'),
+            ('project_lifecycle_association'),
+            ('project_lifecycle_event'),
+            ('project_child_registration_state'),
+            ('project_wrapper_state'),
+            ('project_registry_node_state'),
+            ('project_registry_binding_observation'),
+            ('project_resolver_classification'),
+            ('project_registry_pointer'),
+            ('project_resource_pointer'),
             ('project_generation_failures'),
             ('project_redo_child_registration_history'),
             ('project_redo_expiry_roots'),
