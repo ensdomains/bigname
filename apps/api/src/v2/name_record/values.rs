@@ -114,9 +114,15 @@ pub(super) fn json_timestamp_at_paths(value: &Value, paths: &[&[&str]]) -> Optio
                 None => return Some(value.clone()),
             },
             // A number reads through the same decimal rule as its quoted form; one whose text is
-            // not a plain decimal (an exponent form) is unknown.
+            // not a plain decimal (an exponent form) is unknown. A negative zero (`-0.0`) is second
+            // zero: Postgres stores it as `0.0`, so the SQL helpers read it that way.
             Value::Number(number) => {
-                if let Some(QuotedSeconds::InRange(seconds)) = quoted_seconds(&number.to_string())
+                let text = number.to_string();
+                let text = text
+                    .strip_prefix('-')
+                    .filter(|rest| rest.bytes().all(|byte| matches!(byte, b'0' | b'.')))
+                    .unwrap_or(&text);
+                if let Some(QuotedSeconds::InRange(seconds)) = quoted_seconds(text)
                     && let Some(timestamp) = format_unix_timestamp(seconds)
                 {
                     return Some(timestamp);
@@ -160,10 +166,11 @@ enum QuotedSeconds {
 }
 
 /// A quoted seconds value (`"1735689600"`, `"-1"`, `"1735689600.5"`) reads like the number it
-/// spells, or `None` when the string is not a decimal number. The range check uses the complete
-/// value, sign and fraction included, the same bounds the collection routes' SQL applies; a value
-/// inside the range then keeps only its whole seconds, as Project's `to_char(to_timestamp(..),
-/// 'SS')` presents it.
+/// spells, or `None` when the string is not a decimal number. Any value with a leading minus sign
+/// is out of range, `"-0"` included, as the collection routes' SQL reads a quoted value only
+/// without a sign. The range check otherwise uses the complete value, fraction included, with the
+/// same bounds that SQL applies; a value inside the range then keeps only its whole seconds, as
+/// Project's `to_char(to_timestamp(..), 'SS')` presents it.
 fn quoted_seconds(value: &str) -> Option<QuotedSeconds> {
     let (negative, unsigned) = match value.strip_prefix('-') {
         Some(unsigned) => (true, unsigned),
@@ -182,9 +189,7 @@ fn quoted_seconds(value: &str) -> Option<QuotedSeconds> {
     let Ok(whole) = whole.parse::<u64>() else {
         return Some(QuotedSeconds::OutOfRange);
     };
-    if (negative && (whole > 0 || has_fraction))
-        || whole > LAST_TIMESTAMP_SECOND
-        || (whole == LAST_TIMESTAMP_SECOND && has_fraction)
+    if negative || whole > LAST_TIMESTAMP_SECOND || (whole == LAST_TIMESTAMP_SECOND && has_fraction)
     {
         return Some(QuotedSeconds::OutOfRange);
     }
@@ -289,6 +294,8 @@ mod quoted_seconds_tests {
             ("253402300799.9", None),
             ("253402300800", None),
             ("0", Some("1970-01-01T00:00:00Z")),
+            ("-0", None),
+            ("-0.0", None),
         ] {
             let summary = json!({"registration": {"expiry": quoted}});
             assert_eq!(
@@ -305,6 +312,7 @@ mod quoted_seconds_tests {
             (json!(253_402_300_799_u64), Some("9999-12-31T23:59:59Z")),
             (json!(u64::MAX), None),
             (json!(-1), None),
+            (json!(-0.0), Some("1970-01-01T00:00:00Z")),
         ] {
             let summary = json!({"registration": {"expiry": number}});
             assert_eq!(
