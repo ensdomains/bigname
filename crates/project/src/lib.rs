@@ -15,7 +15,7 @@ mod scope;
 mod stage;
 
 pub use builders::child_registrations::EXCLUDED_CHILD_REGISTRATION_PARENTS;
-pub use engine::{BatchOutcome, BatchRequest, Engine, Marker, RunMode};
+pub use engine::{BatchOutcome, BatchRequest, Engine, Marker, RunMode, WriteSummary};
 pub use error::{ErrorKind, ProjectError, Result};
 pub use hydration::{HydrationOutcome, Hydrator};
 pub use integrity::{

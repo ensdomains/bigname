@@ -1,52 +1,116 @@
 use sqlx::{Postgres, Transaction};
 
-use crate::{ProjectError, Result};
+use crate::{ProjectError, Result, engine::WriteSummary};
 
+/// Replaces the scoped rows of every served table with the staged rows, counting both sides.
 pub(crate) async fn swap(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
     full_rebuild: bool,
-) -> Result<u64> {
+    summary: &mut WriteSummary,
+) -> Result<()> {
     let deletes = if full_rebuild {
         vec![
-            "/* project:publish.delete_all.address_names_current */ DELETE FROM address_names_current row USING name_surfaces surface WHERE row.logical_name_id = surface.logical_name_id AND surface.chain_id = $1",
-            "/* project:publish.delete_all.address_records_current */ DELETE FROM address_records_current row USING name_surfaces surface WHERE row.logical_name_id = surface.logical_name_id AND surface.chain_id = $1",
-            "/* project:publish.delete_all.children_current */ DELETE FROM children_current row USING name_surfaces surface WHERE row.parent_logical_name_id = surface.logical_name_id AND surface.chain_id = $1",
-            "/* project:publish.delete_all.name_current */ DELETE FROM name_current row USING name_surfaces surface WHERE row.logical_name_id = surface.logical_name_id AND surface.chain_id = $1",
-            "/* project:publish.delete_all.permissions_current */ DELETE FROM permissions_current row USING resources resource WHERE row.resource_id = resource.resource_id AND resource.chain_id = $1",
-            "/* project:publish.delete_all.account_permission_state_current */ DELETE FROM account_permission_state_current WHERE chain_id = $1",
-            "/* project:publish.delete_all.permissions_current_resource_summary */ DELETE FROM permissions_current_resource_summary row USING resources resource WHERE row.resource_id = resource.resource_id AND resource.chain_id = $1",
-            "/* project:publish.delete_all.record_inventory_current */ DELETE FROM record_inventory_current row USING resources resource WHERE row.resource_id = resource.resource_id AND resource.chain_id = $1",
-            "/* project:publish.delete_all.resolver_current */ DELETE FROM resolver_current WHERE chain_id = $1",
-            "/* project:publish.delete_all.primary_names_current */ DELETE FROM primary_names_current WHERE claim_provenance ->> 'chain_id' = $1",
+            (
+                "address_names_current",
+                "/* project:publish.delete_all.address_names_current */ DELETE FROM address_names_current row USING name_surfaces surface WHERE row.logical_name_id = surface.logical_name_id AND surface.chain_id = $1",
+            ),
+            (
+                "address_records_current",
+                "/* project:publish.delete_all.address_records_current */ DELETE FROM address_records_current row USING name_surfaces surface WHERE row.logical_name_id = surface.logical_name_id AND surface.chain_id = $1",
+            ),
+            (
+                "children_current",
+                "/* project:publish.delete_all.children_current */ DELETE FROM children_current row USING name_surfaces surface WHERE row.parent_logical_name_id = surface.logical_name_id AND surface.chain_id = $1",
+            ),
+            (
+                "name_current",
+                "/* project:publish.delete_all.name_current */ DELETE FROM name_current row USING name_surfaces surface WHERE row.logical_name_id = surface.logical_name_id AND surface.chain_id = $1",
+            ),
+            (
+                "permissions_current",
+                "/* project:publish.delete_all.permissions_current */ DELETE FROM permissions_current row USING resources resource WHERE row.resource_id = resource.resource_id AND resource.chain_id = $1",
+            ),
+            (
+                "account_permission_state_current",
+                "/* project:publish.delete_all.account_permission_state_current */ DELETE FROM account_permission_state_current WHERE chain_id = $1",
+            ),
+            (
+                "permissions_current_resource_summary",
+                "/* project:publish.delete_all.permissions_current_resource_summary */ DELETE FROM permissions_current_resource_summary row USING resources resource WHERE row.resource_id = resource.resource_id AND resource.chain_id = $1",
+            ),
+            (
+                "record_inventory_current",
+                "/* project:publish.delete_all.record_inventory_current */ DELETE FROM record_inventory_current row USING resources resource WHERE row.resource_id = resource.resource_id AND resource.chain_id = $1",
+            ),
+            (
+                "resolver_current",
+                "/* project:publish.delete_all.resolver_current */ DELETE FROM resolver_current WHERE chain_id = $1",
+            ),
+            (
+                "primary_names_current",
+                "/* project:publish.delete_all.primary_names_current */ DELETE FROM primary_names_current WHERE claim_provenance ->> 'chain_id' = $1",
+            ),
         ]
     } else {
         vec![
-            "/* project:publish.delete.address_names_current */ DELETE FROM address_names_current row WHERE EXISTS (SELECT 1 FROM project_scope_names scope WHERE scope.logical_name_id = row.logical_name_id) OR EXISTS (SELECT 1 FROM project_scope_resources scope WHERE scope.resource_id = row.resource_id)",
-            "/* project:publish.delete.address_records_current */ DELETE FROM address_records_current row WHERE EXISTS (SELECT 1 FROM project_scope_names scope WHERE scope.logical_name_id = row.logical_name_id) OR EXISTS (SELECT 1 FROM project_scope_resources scope WHERE scope.resource_id IN (row.resource_id, row.record_resource_id))",
-            "/* project:publish.delete.children_current */ DELETE FROM children_current row WHERE EXISTS (SELECT 1 FROM project_scope_children scope WHERE scope.logical_name_id IN (row.parent_logical_name_id, row.child_logical_name_id))",
-            "/* project:publish.delete.name_current */ DELETE FROM name_current row USING project_scope_names scope WHERE row.logical_name_id = scope.logical_name_id",
-            "/* project:publish.delete.permissions_current */ DELETE FROM permissions_current row USING project_scope_resources scope WHERE row.resource_id = scope.resource_id",
-            "/* project:publish.delete.account_permission_state_current */ DELETE FROM account_permission_state_current row USING project_scope_account_permissions scope WHERE row.chain_id = scope.chain_id AND row.authority_kind = scope.authority_kind AND row.authority_contract = scope.authority_contract AND row.owner = scope.owner AND row.subject = scope.subject AND row.relation_kind = scope.relation_kind",
-            "/* project:publish.delete.permissions_current_resource_summary */ DELETE FROM permissions_current_resource_summary row USING project_scope_resources scope WHERE row.resource_id = scope.resource_id",
-            "/* project:publish.delete.record_inventory_current */ DELETE FROM record_inventory_current row USING project_scope_resources scope WHERE row.resource_id = scope.resource_id",
-            "/* project:publish.delete.resolver_current */ DELETE FROM resolver_current row USING project_scope_resolvers scope WHERE row.chain_id = $1 AND lower(row.resolver_address) = lower(scope.resolver_address)",
-            "/* project:publish.delete.primary_names_current */ DELETE FROM primary_names_current row USING project_scope_primary scope WHERE row.address = scope.address AND row.coin_type = scope.coin_type AND row.namespace = scope.namespace",
+            (
+                "address_names_current",
+                "/* project:publish.delete.address_names_current */ DELETE FROM address_names_current row WHERE EXISTS (SELECT 1 FROM project_scope_names scope WHERE scope.logical_name_id = row.logical_name_id) OR EXISTS (SELECT 1 FROM project_scope_resources scope WHERE scope.resource_id = row.resource_id)",
+            ),
+            (
+                "address_records_current",
+                "/* project:publish.delete.address_records_current */ DELETE FROM address_records_current row WHERE EXISTS (SELECT 1 FROM project_scope_names scope WHERE scope.logical_name_id = row.logical_name_id) OR EXISTS (SELECT 1 FROM project_scope_resources scope WHERE scope.resource_id IN (row.resource_id, row.record_resource_id))",
+            ),
+            (
+                "children_current",
+                "/* project:publish.delete.children_current */ DELETE FROM children_current row WHERE EXISTS (SELECT 1 FROM project_scope_children scope WHERE scope.logical_name_id IN (row.parent_logical_name_id, row.child_logical_name_id))",
+            ),
+            (
+                "name_current",
+                "/* project:publish.delete.name_current */ DELETE FROM name_current row USING project_scope_names scope WHERE row.logical_name_id = scope.logical_name_id",
+            ),
+            (
+                "permissions_current",
+                "/* project:publish.delete.permissions_current */ DELETE FROM permissions_current row USING project_scope_resources scope WHERE row.resource_id = scope.resource_id",
+            ),
+            (
+                "account_permission_state_current",
+                "/* project:publish.delete.account_permission_state_current */ DELETE FROM account_permission_state_current row USING project_scope_account_permissions scope WHERE row.chain_id = scope.chain_id AND row.authority_kind = scope.authority_kind AND row.authority_contract = scope.authority_contract AND row.owner = scope.owner AND row.subject = scope.subject AND row.relation_kind = scope.relation_kind",
+            ),
+            (
+                "permissions_current_resource_summary",
+                "/* project:publish.delete.permissions_current_resource_summary */ DELETE FROM permissions_current_resource_summary row USING project_scope_resources scope WHERE row.resource_id = scope.resource_id",
+            ),
+            (
+                "record_inventory_current",
+                "/* project:publish.delete.record_inventory_current */ DELETE FROM record_inventory_current row USING project_scope_resources scope WHERE row.resource_id = scope.resource_id",
+            ),
+            (
+                "resolver_current",
+                "/* project:publish.delete.resolver_current */ DELETE FROM resolver_current row USING project_scope_resolvers scope WHERE row.chain_id = $1 AND lower(row.resolver_address) = lower(scope.resolver_address)",
+            ),
+            (
+                "primary_names_current",
+                "/* project:publish.delete.primary_names_current */ DELETE FROM primary_names_current row USING project_scope_primary scope WHERE row.address = scope.address AND row.coin_type = scope.coin_type AND row.namespace = scope.namespace",
+            ),
         ]
     };
-    for statement in deletes {
+    for (table, statement) in deletes {
         let query = sqlx::query(statement);
         let result = if statement.contains("$1") {
             query.bind(chain_id).execute(&mut **transaction).await
         } else {
             query.execute(&mut **transaction).await
         };
-        result.map_err(|error| {
-            ProjectError::database("failed to clear projection swap scope", error)
-        })?;
+        let deleted = result
+            .map_err(|error| {
+                ProjectError::database("failed to clear projection swap scope", error)
+            })?
+            .rows_affected();
+        summary.deleted.insert(table, deleted);
     }
 
-    let mut inserted = 0u64;
     let scoped = [
         (
             "name_current",
@@ -98,15 +162,12 @@ pub(crate) async fn swap(
         let statement = format!(
             "/* project:publish.insert.{table} */ INSERT INTO {table} SELECT * FROM project_stage_{table} WHERE {predicate}"
         );
-        inserted = inserted.saturating_add(
-            sqlx::query(&statement)
-                .execute(&mut **transaction)
-                .await
-                .map_err(|error| {
-                    ProjectError::database(format!("failed to publish {table}"), error)
-                })?
-                .rows_affected(),
-        );
+        let inserted = sqlx::query(&statement)
+            .execute(&mut **transaction)
+            .await
+            .map_err(|error| ProjectError::database(format!("failed to publish {table}"), error))?
+            .rows_affected();
+        summary.inserted.insert(table, inserted);
     }
-    Ok(inserted)
+    Ok(())
 }

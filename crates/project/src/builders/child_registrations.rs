@@ -121,7 +121,8 @@ pub(crate) async fn publish(
     full_rebuild: bool,
     from_block: i64,
     to_block: i64,
-) -> Result<u64> {
+    summary: &mut crate::engine::WriteSummary,
+) -> Result<()> {
     let delete = if full_rebuild {
         sqlx::query("/* project:builders.child_registrations.publish.delete_all */ DELETE FROM child_registration_events WHERE chain_id = $1").bind(chain_id)
     } else {
@@ -144,9 +145,12 @@ pub(crate) async fn publish(
         .bind(from_block)
         .bind(to_block)
     };
-    delete.execute(&mut **transaction).await.map_err(|error| {
-        ProjectError::database("failed to clear child registration scope", error)
-    })?;
+    let deleted = delete
+        .execute(&mut **transaction)
+        .await
+        .map_err(|error| ProjectError::database("failed to clear child registration scope", error))?
+        .rows_affected();
+    summary.deleted.insert("child_registration_events", deleted);
     let inserted = sqlx::query(
         "/* project:builders.child_registrations.publish.upsert */ INSERT INTO child_registration_events
          SELECT * FROM project_stage_child_registration_events
@@ -169,7 +173,10 @@ pub(crate) async fn publish(
     .await
     .map_err(|error| ProjectError::database("failed to publish child registrations", error))?
     .rows_affected();
-    Ok(inserted)
+    summary
+        .inserted
+        .insert("child_registration_events", inserted);
+    Ok(())
 }
 
 /// `FROM … WHERE` over the staged events that can be a direct child registration: an activated,

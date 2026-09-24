@@ -228,7 +228,8 @@ async fn run_benchmark(options: PgConnectOptions, benchmark: Benchmark) -> Resul
                 .await?
         } else {
             super::derive(&mut tx, &request, &target).await?
-        };
+        }
+        .inserted_rows();
         let elapsed = if compare || contract {
             guards_elapsed + candidate_started.elapsed()
         } else {
