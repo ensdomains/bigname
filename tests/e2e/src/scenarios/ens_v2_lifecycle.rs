@@ -7,7 +7,7 @@ use sqlx::types::{Uuid, time::OffsetDateTime};
 
 use super::support;
 use crate::harness::responses::pointer;
-use crate::harness::{anvil::Anvil, ens_v2, repo_root};
+use crate::harness::{anvil::Anvil, ens_v2, pipeline, repo_root};
 
 const YEAR: u64 = 365 * 24 * 60 * 60;
 const MONTH: u64 = 30 * 24 * 60 * 60;
@@ -489,7 +489,7 @@ async fn a_replaced_subregistry_stops_serving_its_old_child() -> Result<()> {
     .await?;
     anyhow::ensure!(receipt.status_ok, "replacement leaf registration reverted");
 
-    let moved = support::ingest_ens_v2_sepolia_and_serve(
+    let mut moved = support::ingest_ens_v2_sepolia_and_serve(
         &anvil,
         &deployment,
         Some(
@@ -540,10 +540,26 @@ async fn a_replaced_subregistry_stops_serving_its_old_child() -> Result<()> {
         "a detached registry's child keeps no owner, resolver, records or expiry: {orphan:?}"
     );
 
+    let expected = MovedOverHttp {
+        leaf_owner: format!("{carol:#x}"),
+        leaf_registration_id: leaf_resource_b.to_string(),
+        // Project formats the registry expiry into `control.expiry`; the API serves it as is.
+        leaf_expires_at: sqlx::query_scalar(
+            "SELECT declared_summary #>> '{control,expiry}' FROM name_current \
+             WHERE logical_name_id = $1",
+        )
+        .bind(&leaf_id)
+        .fetch_one(&moved.db.pool)
+        .await?,
+        leaf_resolver: format!("{resolver_b:#x}"),
+    };
+    assert_moved_over_http(&mut moved.db, &anvil, &expected, "full derivation").await?;
+
     // Normal intake resumed across the pointer change lands on the same rows.
     normal
         .prove_through_head(&anvil, &[("leaf.trusted.eth", format!("{carol:#x}"))])
         .await?;
+    assert_moved_over_http(&mut normal.db, &anvil, &expected, "resumed normal intake").await?;
     for logical_name_id in [&leaf_id, &orphan_id] {
         assert_eq!(
             current_name_facts(&normal.db.pool, logical_name_id).await?,
@@ -553,6 +569,95 @@ async fn a_replaced_subregistry_stops_serving_its_old_child() -> Result<()> {
     }
     normal.cleanup().await?;
     moved.db.cleanup().await?;
+    Ok(())
+}
+
+struct MovedOverHttp {
+    leaf_owner: String,
+    leaf_registration_id: String,
+    leaf_expires_at: String,
+    leaf_resolver: String,
+}
+
+/// The production API's answers for both names once `trusted.eth` points at
+/// child registry B and `cut.eth` has detached its child registry.
+async fn assert_moved_over_http(
+    db: &mut crate::harness::db::HarnessDb,
+    anvil: &Anvil,
+    expected: &MovedOverHttp,
+    path: &str,
+) -> Result<()> {
+    let api = pipeline::ProductionApi::start(&repo_root(), db, &anvil.url).await?;
+    let get = |route: &'static str| {
+        let api = &api;
+        async move {
+            let (status, body) = api.get_indexed(route).await?;
+            anyhow::ensure!(status == 200, "{path} {route}: {status} {body}");
+            Ok::<_, anyhow::Error>(body)
+        }
+    };
+    let leaf = get("/v1/names/leaf.trusted.eth").await?;
+    for (field, value) in [
+        ("owner", &expected.leaf_owner),
+        ("registrant", &expected.leaf_owner),
+        ("registration_id", &expected.leaf_registration_id),
+        ("expires_at", &expected.leaf_expires_at),
+    ] {
+        assert_eq!(
+            leaf["data"][field],
+            json!(value),
+            "{path} leaf {field}: {leaf}"
+        );
+    }
+    assert_eq!(
+        leaf["data"]["registration_status"], "registered",
+        "{path}: {leaf}"
+    );
+    assert_eq!(
+        leaf["data"]["resolver"]["address"],
+        json!(expected.leaf_resolver),
+        "{path}: {leaf}"
+    );
+    let leaf_records = get("/v1/names/leaf.trusted.eth/records").await?;
+    assert_eq!(
+        leaf_records["data"]["resolver"]["address"],
+        json!(expected.leaf_resolver),
+        "{path}: {leaf_records}"
+    );
+
+    let orphan = get("/v1/names/orphan.cut.eth").await?;
+    assert_eq!(
+        orphan["data"]["registration_status"], "released",
+        "{path}: {orphan}"
+    );
+    for field in ["owner", "registrant", "expires_at", "resolver"] {
+        assert_eq!(
+            orphan["data"].get(field),
+            None,
+            "{path} orphan {field}: {orphan}"
+        );
+    }
+    let orphan_records = get("/v1/names/orphan.cut.eth/records").await?;
+    assert_eq!(
+        (
+            &orphan_records["data"]["resolver"],
+            &orphan_records["data"]["records"]
+        ),
+        (&Value::Null, &json!({})),
+        "{path}: {orphan_records}"
+    );
+    let orphan_keys = get("/v1/names/orphan.cut.eth/records?keys=text:url,addr:60").await?;
+    let answers = orphan_keys["data"]["records"]
+        .as_object()
+        .context("orphan records by key")?;
+    assert_eq!(answers.len(), 2, "{path}: {orphan_keys}");
+    assert!(
+        answers
+            .values()
+            .all(|answer| answer["status"] != "ok" && answer.get("value").is_none()),
+        "a detached registry's child serves no record value: {path} {orphan_keys}"
+    );
+    api.stop().await?;
     Ok(())
 }
 

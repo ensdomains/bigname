@@ -3,7 +3,7 @@
 This package exercises ENSv1, ENSv2, and Basenames contract emissions against
 schema-v2 through the production `phase-runner` binary. Most assertions read
 [projections](../../docs/glossary.md#projection) and phase state directly
-through the test-only `ProjectionReader`; the two zero-address scenarios, registry-operator lifecycle, and shutdown scenario start the production API.
+through the test-only `ProjectionReader`; the two zero-address scenarios, registry-operator lifecycle, subregistry-replacement scenario, and shutdown scenario start the production API.
 
 `ens_v2_lifecycle::reserved_labels_foreign_registrar_and_token_sale` also
 runs normal local RPC intake through Interpret, Project, and Live, then starts
@@ -19,7 +19,10 @@ or deployment readiness. Its original fixture and projection assertions remain.
 same normal intake twice on one database: once while `leaf.trusted.eth` and
 `orphan.cut.eth` sit in attached child registries, and again, resuming, after
 `trusted.eth` points at a new child registry and `cut.eth` detaches its own.
-Its current-name facts must match a full derivation of the same chain.
+Its current-name facts must match a full derivation of the same chain. After
+both the full derivation and the resumed intake it starts the production API
+(`pipeline::ProductionApi`) on that database and checks name detail and records
+for both names over HTTP.
 
 ## Prerequisites
 
