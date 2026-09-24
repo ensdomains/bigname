@@ -30,6 +30,7 @@ use bigname_storage::{
 use phase_runner::{
     INTERPRETER_CONTENT_HASH,
     heads::{BlockMarker, HeadMarkers, publish_heads},
+    metrics::RunnerMetricsFeed,
     phase::{Phase, PhaseContext, PhaseName, PhaseResume, RunMode},
     project_phase::ProjectPhase,
     state::PhaseStore,
@@ -267,7 +268,10 @@ async fn run(pool: &PgPool, previous: i64, targets: &[i64], compare: Option<u64>
     store
         .start_phase(CHAIN, PhaseName::Project, &RunMode::Normal)
         .await?;
-    let project = ProjectPhase::with_hydration(pool.clone(), ChainRpcUrls::default());
+    // As main.rs builds it, so the batch log and the metrics handoff fall inside the clock.
+    let metrics_feed = RunnerMetricsFeed::default();
+    let project = ProjectPhase::with_hydration(pool.clone(), ChainRpcUrls::default())
+        .with_metrics_feed(metrics_feed.clone());
     for &number in targets {
         let target = follow_head(pool, number).await?;
         let baseline = match compare {
@@ -288,6 +292,7 @@ async fn run(pool: &PgPool, previous: i64, targets: &[i64], compare: Option<u64>
                 outcome.progress(),
             )
             .await?;
+        metrics_feed.batch_committed();
         while load_served_project_generation(pool, CHAIN, number, &target.hash, true, true)
             .await?
             .is_none()
