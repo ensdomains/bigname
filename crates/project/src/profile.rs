@@ -212,10 +212,11 @@ pub(crate) async fn execute_bound(
 }
 
 /// One line per captured name authority plan describing the `registry_records` fold pull request
-/// 947 added: actual time and rows per loop, loops and shared buffers of the aggregate that folds
+/// 947 added: actual time and rows per loop, loops and buffers of the aggregate that folds
 /// the ENSv1 registry records, found above the only scan of `project_events` filtered to
 /// `ens_v1_registry_l1`. The CTE is referenced once, so PostgreSQL inlines it and the plan has no
-/// node named after it. The baseline records these numbers; nothing gates on them.
+/// node named after it. `project_events` is a temporary work table, so its reads count as local
+/// buffers, not shared ones. The baseline records these numbers; nothing gates on them.
 pub(crate) fn registry_records_fold(directory: &Path) -> Result<Vec<String>> {
     fn fold<'a>(
         node: &'a serde_json::Value,
@@ -256,12 +257,15 @@ pub(crate) fn registry_records_fold(directory: &Path) -> Result<Vec<String>> {
         let line = match fold(&plan[0]["Plan"], None) {
             Some(node) => format!(
                 "SEPOLIA_FOLD_BASELINE fold=registry_records actual_total_ms={} actual_rows={} \
-                 loops={} shared_hit_blocks={} shared_read_blocks={} statement_ms={} gate=none",
+                 loops={} shared_hit_blocks={} shared_read_blocks={} local_hit_blocks={} \
+                 local_read_blocks={} statement_ms={} gate=none",
                 node["Actual Total Time"],
                 node["Actual Rows"],
                 node["Actual Loops"],
                 node["Shared Hit Blocks"],
                 node["Shared Read Blocks"],
+                node["Local Hit Blocks"],
+                node["Local Read Blocks"],
                 plan[0]["Execution Time"],
             ),
             None => format!(
