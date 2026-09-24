@@ -268,7 +268,10 @@ emits its own `NameRegistered`
 and the registry's `LabelRegistered` already carries the owner and expiry
 (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registry/interfaces/IRegistryEvents.sol:L18-L25 @ ens_v2_sepolia_20260916@366de741).
 Registrar events still feed name history and renewal expiry; they are no longer a
-condition for support. Migration and child-registration proofs keep their role in
+condition for support. The rule is the same on every chain: admitting a chain's
+ENSv2 source families in its manifests is the decision that makes its names
+servable, and the `exact_name_profile` capability flag only summarizes that for
+`/v1/namespaces`. Migration and child-registration proofs keep their role in
 authority selection below. Candidate and noncanonical events remain excluded by
 Project staging. This changes no resolver feature admission or read routing.
 

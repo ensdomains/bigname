@@ -611,9 +611,9 @@ Declared ENSv2 exact-name rows come from the admitted root and registry
 families, with registrar events adding history and renewal expiry. A name whose
 selected ENSv2 registration carries no authority refusal is supported without a
 registrar event; see
-[architecture](architecture.md#ensv1ensv2-current-authority). Out-of-profile
-resolver, reverse, primary-name, and execution behavior does not become
-exact-name truth.
+[architecture](architecture.md#ensv1ensv2-current-authority). Resolver,
+reverse, primary-name, and execution behavior outside those admitted sources does
+not become exact-name truth.
 
 Within the selected ENSv2 registration lifecycle, `control.registry_owner`
 follows the latest canonical ownership event, including
