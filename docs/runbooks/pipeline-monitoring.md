@@ -166,24 +166,29 @@ is `bigname-phase-runner`, so a later import updates the same dashboard.
 
 ## Served lag
 
-Two gauges measure how far the data the API serves trails the chain. They have
-no dashboard panel or paging rule yet; those arrive with the ops dashboards
-(TYR-34).
+Two gauges measure how far the newest data the API could serve trails the
+chain. They have no dashboard panel or paging rule yet; those arrive with the
+ops dashboards tracked in Linear TYR-34.
 
 - `phase_runner_served_publication_block{chain}` is the block of the Project
-  publication the API can serve: the Project row is `completed` or `running`,
+  publication the API could serve: the Project row is `completed` or `running`,
   was built with this binary's
   [interpreter content hash](../glossary.md#interpreter-content-hash), and its
-  block is still canonical, safe or finalized. This is the same test the API
-  applies to its [served head](../glossary.md#served-head), without the API's
-  one-block tolerance. `-1` means nothing is servable, for example after a
-  reorg orphaned the published block or before Project has rebuilt for a new
-  interpreter content hash.
+  block is still canonical, safe or finalized. `-1` means no publication passes
+  that test, for example after a reorg orphaned the published block or before
+  Project has rebuilt for a new interpreter content hash. The API's
+  [served head](../glossary.md#served-head) applies more conditions that this
+  gauge leaves out: the publication must be at most one block behind the
+  published chain head, and some routes also refuse while an Interpret redo
+  runs.
 - `phase_runner_served_lag_blocks{chain}` is the newest observed
   execution-client head minus that publication block. A non-zero value means
-  the API is serving data that many blocks behind the newest block the runner
-  has seen. `-1` means either side is unavailable. TYR-36 requires this gauge
-  to return to zero every normal block.
+  the newest data the API could serve is that many blocks behind the newest
+  block the runner has seen. Because the API stops serving a chain once its
+  publication trails the published chain head by more than one block, a value
+  above one usually means readers are getting stale-data errors, not old
+  answers. `-1` means either side is unavailable. The Project latency target
+  (Linear TYR-36) requires this gauge to return to zero every normal block.
 
 The observed head is the head the latest Live batch read from the execution
 client, which the runner stores as the Live phase's target. When the published
