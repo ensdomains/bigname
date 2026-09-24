@@ -87,7 +87,7 @@ pub async fn load_address_records_current_page(
     namespaces: Option<&[String]>,
     dedupe_by: AddressNamesCurrentDedupe,
     q: Option<&str>,
-    authority_arm: Option<&str>,
+    authority: Option<&str>,
     sort: AddressNamesCurrentSort,
     order: AddressNamesCurrentOrder,
     cursor: Option<&AddressNamesCurrentSortedCursor>,
@@ -99,7 +99,7 @@ pub async fn load_address_records_current_page(
         namespaces,
         dedupe_by,
         q,
-        authority_arm,
+        authority,
     };
     let (rows, next_cursor) =
         load_sorted_entries(pool, &filter, sort, order, cursor, page_size).await?;
@@ -247,7 +247,7 @@ pub(super) struct AddressRecordsFilter<'a> {
     pub(super) namespaces: Option<&'a [String]>,
     pub(super) dedupe_by: AddressNamesCurrentDedupe,
     pub(super) q: Option<&'a str>,
-    pub(super) authority_arm: Option<&'a str>,
+    pub(super) authority: Option<&'a str>,
 }
 
 impl AddressRecordsFilter<'_> {
@@ -262,8 +262,8 @@ impl AddressRecordsFilter<'_> {
         if let Some(q) = self.q {
             parts.push(format!("q {q}"));
         }
-        if let Some(authority_arm) = self.authority_arm {
-            parts.push(format!("authority_arm {authority_arm}"));
+        if let Some(authority) = self.authority {
+            parts.push(format!("authority {authority}"));
         }
         parts.push(format!("dedupe_by {}", self.dedupe_by.as_str()));
         parts.join(" ")
@@ -388,16 +388,12 @@ fn push_entries_cte<'a>(
         builder.push_bind(format!("{}%", escape_like_pattern(prefix)));
         builder.push(" ESCAPE '\\'");
     }
-    if let Some(authority_arm) = filter.authority_arm {
-        builder.push(
-            r#" AND EXISTS (
-                SELECT 1
-                FROM bigname_phase.name_current authority_nc
-                WHERE authority_nc.logical_name_id = arc.logical_name_id
-                  AND authority_nc.provenance #>> '{authority_selection,authority_arm}' = "#,
+    if let Some(authority) = filter.authority {
+        crate::name_current::push_public_authority_filter(
+            builder,
+            "arc.logical_name_id",
+            authority,
         );
-        builder.push_bind(authority_arm);
-        builder.push(")");
     }
     builder.push(ADDRESS_RECORDS_CURRENT_READ_FILTER);
     builder.push(

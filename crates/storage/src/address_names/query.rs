@@ -17,7 +17,7 @@ pub(super) fn push_address_names_current_grouped_entries_cte<'a>(
     relations: Option<&'a [AddressNameRelation]>,
     dedupe_by: AddressNamesCurrentDedupe,
     q: Option<&'a str>,
-    authority_arm: Option<&'a str>,
+    authority: Option<&'a str>,
     is_migrated: Option<bool>,
 ) {
     builder.push(
@@ -78,18 +78,12 @@ pub(super) fn push_address_names_current_grouped_entries_cte<'a>(
         builder.push_bind(format!("{}%", escape_like_pattern(prefix)));
         builder.push(" ESCAPE '\\'");
     }
-    if let Some(authority_arm) = authority_arm {
-        // The selected arm lives on the exact-name row; this is a primary-key probe per relation
-        // row, so the filter costs one index lookup per candidate.
-        builder.push(
-            r#" AND EXISTS (
-                SELECT 1
-                FROM bigname_phase.name_current authority_nc
-                WHERE authority_nc.logical_name_id = anc.logical_name_id
-                  AND authority_nc.provenance #>> '{authority_selection,authority_arm}' = "#,
+    if let Some(authority) = authority {
+        crate::name_current::push_public_authority_filter(
+            builder,
+            "anc.logical_name_id",
+            authority,
         );
-        builder.push_bind(authority_arm);
-        builder.push(")");
     }
     if let Some(is_migrated) = is_migrated {
         if is_migrated {

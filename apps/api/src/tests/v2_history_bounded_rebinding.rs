@@ -17,8 +17,8 @@ use bigname_adapters::schema_v2::{
 use bigname_project::{BatchRequest, Engine, RunMode};
 
 const CHAIN: &str = "ethereum-mainnet";
-const REGISTRY_MANIFEST: i64 = 961;
-const REGISTRAR_MANIFEST: i64 = 962;
+pub(super) const REGISTRY_MANIFEST: i64 = 961;
+pub(super) const REGISTRAR_MANIFEST: i64 = 962;
 const REGISTRY: &str = "0x0000000000000000000000000000000000000091";
 const REGISTRAR: &str = "0x0000000000000000000000000000000000000042";
 const CONTROLLER: &str = "0x0000000000000000000000000000000000000092";
@@ -70,7 +70,7 @@ fn raw(data: alloy_primitives::LogData, block: i64, index: i64, emitter: &str) -
 }
 
 /// The checked-in mainnet registry and registrar manifests under fixture ids.
-fn manifests() -> Vec<ManifestInput> {
+pub(super) fn manifests() -> Vec<ManifestInput> {
     let repository = bigname_manifests::load_repository(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../manifests/mainnet"),
     )
@@ -228,8 +228,17 @@ fn handoff() -> Vec<RawLogInput> {
 }
 
 /// Persists adapter output as Interpret does for the rows Project and the history read use.
-async fn persist(pool: &PgPool, output: &BatchOutput) -> Result<()> {
-    for manifest in manifests() {
+pub(super) async fn persist(pool: &PgPool, output: &BatchOutput) -> Result<()> {
+    persist_with_manifests(pool, &manifests(), output).await
+}
+
+/// [`persist`] for output interpreted under other manifest declarations.
+pub(super) async fn persist_with_manifests(
+    pool: &PgPool,
+    manifests: &[ManifestInput],
+    output: &BatchOutput,
+) -> Result<()> {
+    for manifest in manifests {
         sqlx::query(
             "INSERT INTO manifest_versions (
                  manifest_id, manifest_version, namespace, source_family, chain_id,

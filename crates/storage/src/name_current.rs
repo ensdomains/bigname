@@ -1,6 +1,7 @@
 mod expiring;
 mod list;
 mod migration;
+mod public_authority;
 mod row;
 mod snapshot;
 
@@ -20,6 +21,11 @@ pub use list::{
 pub use migration::{
     MIGRATION_AUTHORITY_TRANSITION_PROOF_KIND, load_name_migration_transition_timestamps,
     name_current_authority_arm,
+};
+pub(crate) use public_authority::push_public_authority_filter;
+pub use public_authority::{
+    name_current_is_ownerless_registry, name_current_public_authority,
+    name_current_registry_generation, name_current_registry_handoff_block_number,
 };
 pub use row::NameCurrentRow;
 use row::decode_name_current_row;
