@@ -397,3 +397,44 @@ impl Fixture {
         .await
     }
 }
+
+impl Fixture {
+    /// The Interpret row of `chain_phase_state` with its content hash and redo attempt, inside an
+    /// open redo of blocks 0 to 1 when `in_redo`.
+    pub async fn interpret_row(&self, hash: &str, attempt: i64, in_redo: bool) -> Result<()> {
+        sqlx::query(
+            "DELETE FROM chain_phase_state WHERE chain_id = $1 AND phase_name = 'interpret'",
+        )
+        .bind(CHAIN)
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO chain_phase_state (chain_id, phase_name, phase_status,
+                 input_content_hash, redo_attempt_generation, redo_in_progress, redo_mode,
+                 redo_previous_phase_status, redo_from_block_number, redo_to_block_number,
+                 started_at)
+             VALUES ($1, 'interpret', CASE WHEN $4 THEN 'running' ELSE 'idle' END, $2, $3, $4,
+                     CASE WHEN $4 THEN 'redo' END, CASE WHEN $4 THEN 'idle' END,
+                     CASE WHEN $4 THEN 0 END, CASE WHEN $4 THEN 1 END,
+                     CASE WHEN $4 THEN now() END)",
+        )
+        .bind(CHAIN)
+        .bind(hash)
+        .bind(attempt)
+        .bind(in_redo)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// The input revision the family marker records.
+    pub async fn marker_revision(&self) -> Result<(Option<String>, Option<i64>)> {
+        Ok(sqlx::query_as(
+            "SELECT interpret_input_content_hash, interpret_redo_attempt
+             FROM project_family_marker WHERE chain_id = $1",
+        )
+        .bind(CHAIN)
+        .fetch_one(&self.pool)
+        .await?)
+    }
+}

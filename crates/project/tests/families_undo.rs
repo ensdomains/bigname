@@ -63,6 +63,7 @@ async fn a_redo_undoes_to_the_range_predecessor_and_replays_to_a_complete_record
 
     // Deletion-only redo of 13..=14 under the Project row's next attempt.
     drop_events(&fixture, &dropped).await?;
+    fixture.interpret_row("interpret-hash", 2, false).await?;
     fixture
         .project_row(
             1,
@@ -100,8 +101,8 @@ async fn a_redo_undoes_to_the_range_predecessor_and_replays_to_a_complete_record
             "trusted_base_hash": hash(12),
             "replay_target_number": 14,
             "replay_target_hash": hash(14),
-            "prefix_interpret_input_content_hash": null,
-            "prefix_interpret_redo_attempt": null,
+            "prefix_interpret_input_content_hash": "interpret-hash",
+            "prefix_interpret_redo_attempt": 2,
             "invalidation_from": null,
             "pending_undo_target": null,
             "completed_sequence": sequence,

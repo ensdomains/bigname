@@ -25,7 +25,9 @@ pub(super) async fn run(
     options: &FamilyOptions,
     outcome: &mut FamilyOutcome,
 ) -> Result<()> {
-    let revision: Revision<'_> = (None, None);
+    // The input revision each block records: the Interpret row's content hash and redo attempt,
+    // or nothing while Interpret is in redo.
+    let revision: Revision<'_> = token.revision();
     let family = marker::read(pool, chain_id).await?;
     let record = repair::read(pool, chain_id).await?;
     let attempt = token.project_redo_attempt_generation;
@@ -260,7 +262,16 @@ async fn rebuild_from_scratch(
     reset(pool, chain_id).await?;
     outcome.reset = true;
     repair::begin_rebuild(pool, chain_id, reason, token, target).await?;
-    populate(pool, chain_id, target, None, (None, None), options, outcome).await?;
+    populate(
+        pool,
+        chain_id,
+        target,
+        None,
+        token.revision(),
+        options,
+        outcome,
+    )
+    .await?;
     finish(pool, chain_id, options).await
 }
 

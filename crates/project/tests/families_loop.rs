@@ -165,3 +165,29 @@ async fn served_digest(fixture: &Fixture) -> Result<Vec<String>> {
     }
     Ok(digest)
 }
+
+// The marker records the input revision each block read: the Interpret row's content hash and
+// redo attempt, or nothing while Interpret is in redo.
+#[tokio::test]
+async fn each_block_records_the_interpret_revision_it_read() -> Result<()> {
+    let fixture = Fixture::new("families_loop_revision", 20).await?;
+    fixture.interpret_row("interpret-hash-a", 3, false).await?;
+    fixture.apply(10, FamilyMode::Normal).await;
+    assert_eq!(
+        fixture.marker_revision().await?,
+        (Some("interpret-hash-a".to_owned()), Some(3))
+    );
+
+    fixture.interpret_row("interpret-hash-b", 4, true).await?;
+    fixture.apply(11, FamilyMode::Normal).await;
+    assert_eq!(fixture.marker().await?.0, Some(11), "the block still ran");
+    assert_eq!(fixture.marker_revision().await?, (None, None));
+
+    fixture.interpret_row("interpret-hash-b", 4, false).await?;
+    fixture.apply(12, FamilyMode::Normal).await;
+    assert_eq!(
+        fixture.marker_revision().await?,
+        (Some("interpret-hash-b".to_owned()), Some(4))
+    );
+    fixture.cleanup().await
+}
