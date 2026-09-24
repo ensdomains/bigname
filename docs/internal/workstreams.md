@@ -34,7 +34,7 @@ Internal reference for splitting implementation work. `AGENTS.md` is the process
 
 | Surface | Owner | Notes |
 | --- | --- | --- |
-| `apps/api`, `docs/api-v2.md`, `docs/api-v2-routes.md` | Projections and API | Public route shape, route-specific joins and pagination, wire and GraphQL compatibility, API tests |
+| `apps/api`, `docs/api-v1.md`, `docs/api-v1-routes.md` | Projections and API | Public route shape, route-specific joins and pagination, wire and GraphQL compatibility, API tests |
 | `apps/phase-runner`, `crates/ingest`, `crates/interpret`, `crates/adapters`, `docs/chain-intake.md` | Intake and Adapters | Phase orchestration, raw intake, and schema-v2 interpretation behavior |
 | `crates/project`, phase projection modules, `docs/projections.md` | Projections and API | Projection publication, current read models, and redo behavior |
 | `crates/storage`, `migrations`, `docs/storage.md` | Storage and Domain | Schema, canonicality, snapshot selection, reusable row reads, database invariants, schema-migrations |

@@ -1,4 +1,4 @@
-//! The inventory container's ABI content types (docs/api-v2-routes.md, records route). Both
+//! The inventory container's ABI content types (docs/api-v1-routes.md, records route). Both
 //! routes resolve every container they serve through one batched storage read.
 
 use bigname_storage::{

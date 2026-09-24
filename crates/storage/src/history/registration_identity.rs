@@ -349,7 +349,7 @@ fn push_registration_lifecycle_witness(
     builder.push(" AND ");
     builder.push(same_fork_as("lifecycle_grant", anchors, canonical_only));
     // A null link is ambiguous: preserve history's wrapper-handle fallback. It does not
-    // prove that no registrar lease exists; see docs/api-v2.md's known gap for registrations
+    // prove that no registrar lease exists; see docs/api-v1.md's known gap for registrations
     // through NameWrapper.
     builder.push(
         "))

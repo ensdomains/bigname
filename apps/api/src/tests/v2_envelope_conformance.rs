@@ -120,7 +120,7 @@ const PRODUCT_ONLY_BANNED_FIELD_NAMES: &[&str] = &[
     "resource",
 ];
 
-// docs/api-v2-routes.md documents diagnostics events carrying
+// docs/api-v1-routes.md documents diagnostics events carrying
 // normalized_event_id, and ADR 0006 tier-3 diagnostics are the routes that may
 // carry pipeline vocabulary. It remains banned on product routes.
 const DIAGNOSTICS_ONLY_PIPELINE_IDENTIFIER_FIELD_NAMES: &[&str] = &["normalized_event_id"];
@@ -145,7 +145,7 @@ const DIAGNOSTICS_AUTHORITY_DICTIONARY_ALLOWLIST: &[&str] = &[
 ];
 
 const DIAGNOSTICS_EVENTS_DICTIONARY_ALLOWLIST: &[&str] = &[
-    // docs/api-v2-routes.md L554-L559 documents diagnostics events as raw
+    // docs/api-v1-routes.md L554-L559 documents diagnostics events as raw
     // normalized-event rows with raw fact refs, chain position, and full provenance.
     "normalized_event_id",
     "chain_position",

@@ -261,7 +261,7 @@ fn unavailable_reasons_are_product_vocabulary() {
             "abi_content_type_not_single_bit",
         ]
     );
-    let routes = include_str!("../../../../../docs/api-v2-routes.md");
+    let routes = include_str!("../../../../../docs/api-v1-routes.md");
     for reason in reasons {
         assert!(
             routes.contains(&format!("`{reason}`")),

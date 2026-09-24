@@ -44,7 +44,7 @@ pub(crate) fn parse_record_keys(keys: Option<&str>) -> V2Result<Option<Vec<Resol
 /// Without `keys` the route answers the inventory-derived default set, but that set is not a
 /// caller selection: it must not make an unkeyed `source=auto` read eligible for verified
 /// fallback, and the `include=inventory` container keeps listing only what the row itself
-/// carries (`docs/api-v2-routes.md` § `GET /v1/names/{name}/records`).
+/// carries (`docs/api-v1-routes.md` § `GET /v1/names/{name}/records`).
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct RecordSelection<'a> {
     pub(crate) records: &'a [ResolutionRecordKey],

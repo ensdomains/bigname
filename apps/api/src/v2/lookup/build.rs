@@ -26,7 +26,7 @@ pub(super) fn build_forward_detail_record(
 ) -> V2Result<LookupRecord> {
     let mut built = build_detail_record(record, "60", None, Vec::new())?;
     // The container is served with the inventory the value fields come from, so it is absent on
-    // a record that serves none: unsupported, unregistered, a reservation (docs/api-v2-routes.md).
+    // a record that serves none: unsupported, unregistered, a reservation (docs/api-v1-routes.md).
     if include.inventory && built.status != Status::Unsupported {
         built.inventory = record
             .record_inventory_current

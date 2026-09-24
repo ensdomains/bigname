@@ -73,7 +73,7 @@ pub const fn ensip19_default_fallback_target(coin_type: u64) -> bool {
 /// with no `unsupported_reason`). An `unsupported` row, such as a name behind a resolver whose
 /// implementation is not an admitted profile, may retain entries for diagnostics, but they are not
 /// answers: every key reports the row's own reason instead
-/// (`docs/api-v2-routes.md` § `GET /v1/names/{name}/records`).
+/// (`docs/api-v1-routes.md` § `GET /v1/names/{name}/records`).
 pub fn evaluate_indexed_record(
     entries: &Value,
     provenance: &Value,
