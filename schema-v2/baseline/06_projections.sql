@@ -1973,3 +1973,863 @@ COMMENT ON COLUMN project_resource_pointer.boundary_position IS
     'This value is that boundary event''s position.';
 COMMENT ON COLUMN project_resource_pointer.boundary_block_timestamp IS
     'This value is that boundary event''s block timestamp.';
+
+CREATE TABLE IF NOT EXISTS project_node_record_partition (
+    chain_id text NOT NULL,
+    resolver_address text NOT NULL,
+    arm text NOT NULL,
+    arm_identity text NOT NULL,
+    block_number bigint NOT NULL,
+    transaction_index bigint,
+    log_index bigint,
+    event_identity text NOT NULL,
+    normalized_event_id bigint,
+    node text,
+    logical_name_id text,
+    source_family text NOT NULL,
+    namespace text NOT NULL,
+    source_manifest_id bigint,
+    version_position jsonb,
+    PRIMARY KEY (chain_id, resolver_address, arm, arm_identity),
+    CHECK ((transaction_index IS NULL) = (log_index IS NULL)),
+    CHECK (arm IN ('named', 'native', 'guarded'))
+);
+COMMENT ON TABLE project_node_record_partition IS
+    'Project-owned node record partitions of family F6: per resolver, attribution arm and arm identity, the latest record version event. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
+COMMENT ON COLUMN project_node_record_partition.chain_id IS
+    'This value is the chain.';
+COMMENT ON COLUMN project_node_record_partition.resolver_address IS
+    'This value is the lower-cased resolver.';
+COMMENT ON COLUMN project_node_record_partition.arm IS
+    'This value is named, native or guarded.';
+COMMENT ON COLUMN project_node_record_partition.arm_identity IS
+    'This value is the logical name for named; node and source family for native; node, source family, namespace and manifest for guarded, joined by a vertical bar.';
+COMMENT ON COLUMN project_node_record_partition.block_number IS
+    'This value is the block number of the event that last wrote the row.';
+COMMENT ON COLUMN project_node_record_partition.transaction_index IS
+    'This value is the transaction index of the event that last wrote the row; null with log_index for a synthesised event, which sorts before every transaction of its block.';
+COMMENT ON COLUMN project_node_record_partition.log_index IS
+    'This value is the log index of the event that last wrote the row; null with transaction_index for a synthesised event.';
+COMMENT ON COLUMN project_node_record_partition.event_identity IS
+    'This value is the event identity of the event that last wrote the row, the final tiebreak of the canonical event order, compared as bytes.';
+COMMENT ON COLUMN project_node_record_partition.normalized_event_id IS
+    'This value names the event that last wrote the row in normalized_events as attribution only; it never takes part in ordering.';
+COMMENT ON COLUMN project_node_record_partition.node IS
+    'This value is the lower-cased node.';
+COMMENT ON COLUMN project_node_record_partition.logical_name_id IS
+    'This value is the name the events carry.';
+COMMENT ON COLUMN project_node_record_partition.source_family IS
+    'This value is the events'' source family.';
+COMMENT ON COLUMN project_node_record_partition.namespace IS
+    'This value is the events'' namespace.';
+COMMENT ON COLUMN project_node_record_partition.source_manifest_id IS
+    'This value is the events'' source manifest.';
+COMMENT ON COLUMN project_node_record_partition.version_position IS
+    'This value is the position of the partition''s latest RecordVersionChanged.';
+
+CREATE TABLE IF NOT EXISTS project_node_record_value (
+    chain_id text NOT NULL,
+    resolver_address text NOT NULL,
+    arm text NOT NULL,
+    arm_identity text NOT NULL,
+    record_key text NOT NULL,
+    block_number bigint NOT NULL,
+    transaction_index bigint,
+    log_index bigint,
+    event_identity text NOT NULL,
+    normalized_event_id bigint,
+    status text NOT NULL,
+    value jsonb,
+    record_family text,
+    selector_key text,
+    contenthash_hex text,
+    address_bytes_hex text,
+    source_event text,
+    storage_model text,
+    sibling_value jsonb,
+    sibling_position jsonb,
+    node text,
+    logical_name_id text,
+    resource_id uuid,
+    source_family text NOT NULL,
+    namespace text NOT NULL,
+    source_manifest_id bigint,
+    hydrated_value jsonb,
+    hydrated_at_block bigint,
+    PRIMARY KEY (chain_id, resolver_address, arm, arm_identity, record_key),
+    CHECK ((transaction_index IS NULL) = (log_index IS NULL)),
+    CHECK (arm IN ('named', 'native', 'guarded'))
+);
+COMMENT ON TABLE project_node_record_value IS
+    'Project-owned node record values of family F6: per partition and record key, the latest record in the canonical event order, with its coin-60 compatibility sibling. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
+COMMENT ON COLUMN project_node_record_value.chain_id IS
+    'This value is the chain.';
+COMMENT ON COLUMN project_node_record_value.resolver_address IS
+    'This value is the lower-cased resolver.';
+COMMENT ON COLUMN project_node_record_value.arm IS
+    'This value is the partition''s arm.';
+COMMENT ON COLUMN project_node_record_value.arm_identity IS
+    'This value is the partition''s arm identity.';
+COMMENT ON COLUMN project_node_record_value.record_key IS
+    'This value is the record key.';
+COMMENT ON COLUMN project_node_record_value.block_number IS
+    'This value is the block number of the event that last wrote the row.';
+COMMENT ON COLUMN project_node_record_value.transaction_index IS
+    'This value is the transaction index of the event that last wrote the row; null with log_index for a synthesised event, which sorts before every transaction of its block.';
+COMMENT ON COLUMN project_node_record_value.log_index IS
+    'This value is the log index of the event that last wrote the row; null with transaction_index for a synthesised event.';
+COMMENT ON COLUMN project_node_record_value.event_identity IS
+    'This value is the event identity of the event that last wrote the row, the final tiebreak of the canonical event order, compared as bytes.';
+COMMENT ON COLUMN project_node_record_value.normalized_event_id IS
+    'This value names the event that last wrote the row in normalized_events as attribution only; it never takes part in ordering.';
+COMMENT ON COLUMN project_node_record_value.status IS
+    'This value is success, not_found or unsupported, as the inventory builder classifies the value.';
+COMMENT ON COLUMN project_node_record_value.value IS
+    'This value is the record value as the event carries it.';
+COMMENT ON COLUMN project_node_record_value.record_family IS
+    'This value is the after-state record_family.';
+COMMENT ON COLUMN project_node_record_value.selector_key IS
+    'This value is the after-state selector_key.';
+COMMENT ON COLUMN project_node_record_value.contenthash_hex IS
+    'This value is the after-state contenthash_hex.';
+COMMENT ON COLUMN project_node_record_value.address_bytes_hex IS
+    'This value is the after-state address_bytes_hex.';
+COMMENT ON COLUMN project_node_record_value.source_event IS
+    'This value is the after-state source_event.';
+COMMENT ON COLUMN project_node_record_value.storage_model IS
+    'This value is the after-state storage_model.';
+COMMENT ON COLUMN project_node_record_value.sibling_value IS
+    'This value is the AddressChanged half''s value when this record is the AddrChanged half of a coin-60 pair.';
+COMMENT ON COLUMN project_node_record_value.sibling_position IS
+    'This value is that AddressChanged half''s own position.';
+COMMENT ON COLUMN project_node_record_value.node IS
+    'This value is the lower-cased node.';
+COMMENT ON COLUMN project_node_record_value.logical_name_id IS
+    'This value is the name the record carries.';
+COMMENT ON COLUMN project_node_record_value.resource_id IS
+    'This value is the resource the record carries.';
+COMMENT ON COLUMN project_node_record_value.source_family IS
+    'This value is the record''s source family.';
+COMMENT ON COLUMN project_node_record_value.namespace IS
+    'This value is the record''s namespace.';
+COMMENT ON COLUMN project_node_record_value.source_manifest_id IS
+    'This value is the record''s source manifest.';
+COMMENT ON COLUMN project_node_record_value.hydrated_value IS
+    'This value is the hydrated text value; null until hydration moves into the block.';
+COMMENT ON COLUMN project_node_record_value.hydrated_at_block IS
+    'This value is the block the hydrated value was read at.';
+
+CREATE TABLE IF NOT EXISTS project_record_id_value (
+    chain_id text NOT NULL,
+    resolver_address text NOT NULL,
+    record_id text NOT NULL,
+    record_key text NOT NULL,
+    block_number bigint NOT NULL,
+    transaction_index bigint,
+    log_index bigint,
+    event_identity text NOT NULL,
+    normalized_event_id bigint,
+    status text NOT NULL,
+    value jsonb,
+    record_family text,
+    selector_key text,
+    contenthash_hex text,
+    address_bytes_hex text,
+    source_event text,
+    storage_model text,
+    source_family text NOT NULL,
+    namespace text NOT NULL,
+    source_manifest_id bigint,
+    PRIMARY KEY (chain_id, resolver_address, record_id, record_key),
+    CHECK ((transaction_index IS NULL) = (log_index IS NULL))
+);
+COMMENT ON TABLE project_record_id_value IS
+    'Project-owned record-id values of family F7: per resolver, record id and record key, the latest RecordChanged with storage model resolver_record_id. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
+COMMENT ON COLUMN project_record_id_value.chain_id IS
+    'This value is the chain.';
+COMMENT ON COLUMN project_record_id_value.resolver_address IS
+    'This value is the lower-cased resolver.';
+COMMENT ON COLUMN project_record_id_value.record_id IS
+    'This value is the resolver record id.';
+COMMENT ON COLUMN project_record_id_value.record_key IS
+    'This value is the record key.';
+COMMENT ON COLUMN project_record_id_value.block_number IS
+    'This value is the block number of the event that last wrote the row.';
+COMMENT ON COLUMN project_record_id_value.transaction_index IS
+    'This value is the transaction index of the event that last wrote the row; null with log_index for a synthesised event, which sorts before every transaction of its block.';
+COMMENT ON COLUMN project_record_id_value.log_index IS
+    'This value is the log index of the event that last wrote the row; null with transaction_index for a synthesised event.';
+COMMENT ON COLUMN project_record_id_value.event_identity IS
+    'This value is the event identity of the event that last wrote the row, the final tiebreak of the canonical event order, compared as bytes.';
+COMMENT ON COLUMN project_record_id_value.normalized_event_id IS
+    'This value names the event that last wrote the row in normalized_events as attribution only; it never takes part in ordering.';
+COMMENT ON COLUMN project_record_id_value.status IS
+    'This value is success, not_found or unsupported, as the inventory builder classifies the value.';
+COMMENT ON COLUMN project_record_id_value.value IS
+    'This value is the record value as the event carries it.';
+COMMENT ON COLUMN project_record_id_value.record_family IS
+    'This value is the after-state record_family.';
+COMMENT ON COLUMN project_record_id_value.selector_key IS
+    'This value is the after-state selector_key.';
+COMMENT ON COLUMN project_record_id_value.contenthash_hex IS
+    'This value is the after-state contenthash_hex.';
+COMMENT ON COLUMN project_record_id_value.address_bytes_hex IS
+    'This value is the after-state address_bytes_hex.';
+COMMENT ON COLUMN project_record_id_value.source_event IS
+    'This value is the after-state source_event.';
+COMMENT ON COLUMN project_record_id_value.storage_model IS
+    'This value is the after-state storage_model.';
+COMMENT ON COLUMN project_record_id_value.source_family IS
+    'This value is the record''s source family.';
+COMMENT ON COLUMN project_record_id_value.namespace IS
+    'This value is the record''s namespace.';
+COMMENT ON COLUMN project_record_id_value.source_manifest_id IS
+    'This value is the record''s source manifest.';
+
+CREATE TABLE IF NOT EXISTS project_resolver_link (
+    chain_id text NOT NULL,
+    resolver_address text NOT NULL,
+    node text NOT NULL,
+    block_number bigint NOT NULL,
+    transaction_index bigint,
+    log_index bigint,
+    event_identity text NOT NULL,
+    normalized_event_id bigint,
+    record_id text NOT NULL,
+    storage_model text,
+    PRIMARY KEY (chain_id, resolver_address, node),
+    CHECK ((transaction_index IS NULL) = (log_index IS NULL))
+);
+COMMENT ON TABLE project_resolver_link IS
+    'Project-owned resolver links of family F7: per resolver and node, the latest ResolverRecordLinked; record id 0 is an explicit clear. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
+COMMENT ON COLUMN project_resolver_link.chain_id IS
+    'This value is the chain.';
+COMMENT ON COLUMN project_resolver_link.resolver_address IS
+    'This value is the lower-cased resolver.';
+COMMENT ON COLUMN project_resolver_link.node IS
+    'This value is the lower-cased node; 32 zero bytes is the default link.';
+COMMENT ON COLUMN project_resolver_link.block_number IS
+    'This value is the block number of the event that last wrote the row.';
+COMMENT ON COLUMN project_resolver_link.transaction_index IS
+    'This value is the transaction index of the event that last wrote the row; null with log_index for a synthesised event, which sorts before every transaction of its block.';
+COMMENT ON COLUMN project_resolver_link.log_index IS
+    'This value is the log index of the event that last wrote the row; null with transaction_index for a synthesised event.';
+COMMENT ON COLUMN project_resolver_link.event_identity IS
+    'This value is the event identity of the event that last wrote the row, the final tiebreak of the canonical event order, compared as bytes.';
+COMMENT ON COLUMN project_resolver_link.normalized_event_id IS
+    'This value names the event that last wrote the row in normalized_events as attribution only; it never takes part in ordering.';
+COMMENT ON COLUMN project_resolver_link.record_id IS
+    'This value is the linked record id, 0 for an unlink.';
+COMMENT ON COLUMN project_resolver_link.storage_model IS
+    'This value is the after-state storage_model.';
+
+CREATE TABLE IF NOT EXISTS project_grant (
+    chain_id text NOT NULL,
+    resource_id uuid NOT NULL,
+    subject text NOT NULL,
+    scope text NOT NULL,
+    block_number bigint NOT NULL,
+    transaction_index bigint,
+    log_index bigint,
+    event_identity text NOT NULL,
+    normalized_event_id bigint,
+    event_kind text NOT NULL,
+    scope_kind text,
+    scope_detail jsonb,
+    effective_powers jsonb NOT NULL,
+    grant_source jsonb,
+    revocation_source jsonb,
+    inheritance_path jsonb,
+    transfer_behavior jsonb,
+    revoked boolean NOT NULL,
+    registration_position jsonb,
+    PRIMARY KEY (chain_id, resource_id, subject, scope),
+    CHECK ((transaction_index IS NULL) = (log_index IS NULL))
+);
+COMMENT ON TABLE project_grant IS
+    'Project-owned raw grants of family F8: per resource, subject and scope, the latest PermissionChanged or RootPermissionChanged, unmasked; wrapper masks, grace and expiry retirement apply at read. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
+COMMENT ON COLUMN project_grant.chain_id IS
+    'This value is the chain.';
+COMMENT ON COLUMN project_grant.resource_id IS
+    'This value is the resource.';
+COMMENT ON COLUMN project_grant.subject IS
+    'This value is the lower-cased subject.';
+COMMENT ON COLUMN project_grant.scope IS
+    'This value is the scope key as permissions.rs builds it.';
+COMMENT ON COLUMN project_grant.block_number IS
+    'This value is the block number of the event that last wrote the row.';
+COMMENT ON COLUMN project_grant.transaction_index IS
+    'This value is the transaction index of the event that last wrote the row; null with log_index for a synthesised event, which sorts before every transaction of its block.';
+COMMENT ON COLUMN project_grant.log_index IS
+    'This value is the log index of the event that last wrote the row; null with transaction_index for a synthesised event.';
+COMMENT ON COLUMN project_grant.event_identity IS
+    'This value is the event identity of the event that last wrote the row, the final tiebreak of the canonical event order, compared as bytes.';
+COMMENT ON COLUMN project_grant.normalized_event_id IS
+    'This value names the event that last wrote the row in normalized_events as attribution only; it never takes part in ordering.';
+COMMENT ON COLUMN project_grant.event_kind IS
+    'This value is PermissionChanged or RootPermissionChanged.';
+COMMENT ON COLUMN project_grant.scope_kind IS
+    'This value is the scope kind with registry_root folded into root.';
+COMMENT ON COLUMN project_grant.scope_detail IS
+    'This value is the after-state scope object.';
+COMMENT ON COLUMN project_grant.effective_powers IS
+    'This value is the after-state effective_powers array, unmasked.';
+COMMENT ON COLUMN project_grant.grant_source IS
+    'This value is the after-state grant_source.';
+COMMENT ON COLUMN project_grant.revocation_source IS
+    'This value is the after-state revocation_source.';
+COMMENT ON COLUMN project_grant.inheritance_path IS
+    'This value is the after-state inheritance_path.';
+COMMENT ON COLUMN project_grant.transfer_behavior IS
+    'This value is the after-state transfer_behavior.';
+COMMENT ON COLUMN project_grant.revoked IS
+    'This value is true when the effective powers are empty; the row stays as a clear.';
+COMMENT ON COLUMN project_grant.registration_position IS
+    'This value is the position of the resource''s latest grant or reservation when the grant was written, the registration the grant belongs to.';
+
+CREATE TABLE IF NOT EXISTS project_resource_admin_aggregate (
+    chain_id text NOT NULL,
+    resource_id uuid NOT NULL,
+    block_number bigint NOT NULL,
+    transaction_index bigint,
+    log_index bigint,
+    event_identity text NOT NULL,
+    normalized_event_id bigint,
+    admin_powers jsonb NOT NULL,
+    PRIMARY KEY (chain_id, resource_id),
+    CHECK ((transaction_index IS NULL) = (log_index IS NULL))
+);
+COMMENT ON TABLE project_resource_admin_aggregate IS
+    'Project-owned admin aggregate of family F8: per resource, the admin powers any subject holds through a registry or root scope grant. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
+COMMENT ON COLUMN project_resource_admin_aggregate.chain_id IS
+    'This value is the chain.';
+COMMENT ON COLUMN project_resource_admin_aggregate.resource_id IS
+    'This value is the resource.';
+COMMENT ON COLUMN project_resource_admin_aggregate.block_number IS
+    'This value is the block number of the event that last wrote the row.';
+COMMENT ON COLUMN project_resource_admin_aggregate.transaction_index IS
+    'This value is the transaction index of the event that last wrote the row; null with log_index for a synthesised event, which sorts before every transaction of its block.';
+COMMENT ON COLUMN project_resource_admin_aggregate.log_index IS
+    'This value is the log index of the event that last wrote the row; null with transaction_index for a synthesised event.';
+COMMENT ON COLUMN project_resource_admin_aggregate.event_identity IS
+    'This value is the event identity of the event that last wrote the row, the final tiebreak of the canonical event order, compared as bytes.';
+COMMENT ON COLUMN project_resource_admin_aggregate.normalized_event_id IS
+    'This value names the event that last wrote the row in normalized_events as attribution only; it never takes part in ordering.';
+COMMENT ON COLUMN project_resource_admin_aggregate.admin_powers IS
+    'This value is the sorted distinct admin powers.';
+
+CREATE TABLE IF NOT EXISTS project_account_approval (
+    chain_id text NOT NULL,
+    authority_kind text NOT NULL,
+    authority_contract text NOT NULL,
+    owner text NOT NULL,
+    subject text NOT NULL,
+    relation_kind text NOT NULL,
+    block_number bigint NOT NULL,
+    transaction_index bigint,
+    log_index bigint,
+    event_identity text NOT NULL,
+    normalized_event_id bigint,
+    authority_contract_instance_id text,
+    approved boolean NOT NULL,
+    effective_powers jsonb,
+    grant_source jsonb,
+    revocation_source jsonb,
+    inheritance_path jsonb,
+    transfer_behavior jsonb,
+    PRIMARY KEY (chain_id, authority_kind, authority_contract, owner, subject, relation_kind),
+    CHECK ((transaction_index IS NULL) = (log_index IS NULL))
+);
+COMMENT ON TABLE project_account_approval IS
+    'Project-owned account approvals of family F9: the latest AccountPermissionChanged per authority contract, owner, subject and relation; an explicit false stays as a row. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
+COMMENT ON COLUMN project_account_approval.chain_id IS
+    'This value is the chain.';
+COMMENT ON COLUMN project_account_approval.authority_kind IS
+    'This value is registry or wrapper.';
+COMMENT ON COLUMN project_account_approval.authority_contract IS
+    'This value is the lower-cased authority contract.';
+COMMENT ON COLUMN project_account_approval.owner IS
+    'This value is the lower-cased owner.';
+COMMENT ON COLUMN project_account_approval.subject IS
+    'This value is the lower-cased approved operator.';
+COMMENT ON COLUMN project_account_approval.relation_kind IS
+    'This value is the relation kind.';
+COMMENT ON COLUMN project_account_approval.block_number IS
+    'This value is the block number of the event that last wrote the row.';
+COMMENT ON COLUMN project_account_approval.transaction_index IS
+    'This value is the transaction index of the event that last wrote the row; null with log_index for a synthesised event, which sorts before every transaction of its block.';
+COMMENT ON COLUMN project_account_approval.log_index IS
+    'This value is the log index of the event that last wrote the row; null with transaction_index for a synthesised event.';
+COMMENT ON COLUMN project_account_approval.event_identity IS
+    'This value is the event identity of the event that last wrote the row, the final tiebreak of the canonical event order, compared as bytes.';
+COMMENT ON COLUMN project_account_approval.normalized_event_id IS
+    'This value names the event that last wrote the row in normalized_events as attribution only; it never takes part in ordering.';
+COMMENT ON COLUMN project_account_approval.authority_contract_instance_id IS
+    'This value is the authority contract instance.';
+COMMENT ON COLUMN project_account_approval.approved IS
+    'This value is the after-state approved flag.';
+COMMENT ON COLUMN project_account_approval.effective_powers IS
+    'This value is the after-state effective_powers.';
+COMMENT ON COLUMN project_account_approval.grant_source IS
+    'This value is the after-state grant_source.';
+COMMENT ON COLUMN project_account_approval.revocation_source IS
+    'This value is the after-state revocation_source.';
+COMMENT ON COLUMN project_account_approval.inheritance_path IS
+    'This value is the after-state inheritance_path.';
+COMMENT ON COLUMN project_account_approval.transfer_behavior IS
+    'This value is the after-state transfer_behavior.';
+
+CREATE TABLE IF NOT EXISTS project_name_alias (
+    chain_id text NOT NULL,
+    logical_name_id text NOT NULL,
+    block_number bigint NOT NULL,
+    transaction_index bigint,
+    log_index bigint,
+    event_identity text NOT NULL,
+    normalized_event_id bigint,
+    active boolean NOT NULL,
+    alias_state text,
+    to_logical_name_id text,
+    to_name text,
+    to_resource_id text,
+    to_normalized_name text,
+    to_canonical_display_name text,
+    to_namehash text,
+    resolver_address text,
+    PRIMARY KEY (chain_id, logical_name_id),
+    CHECK ((transaction_index IS NULL) = (log_index IS NULL))
+);
+COMMENT ON TABLE project_name_alias IS
+    'Project-owned name aliases of family F10: per source name, the latest AliasChanged with its event-carried target. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
+COMMENT ON COLUMN project_name_alias.chain_id IS
+    'This value is the chain.';
+COMMENT ON COLUMN project_name_alias.logical_name_id IS
+    'This value is the source name.';
+COMMENT ON COLUMN project_name_alias.block_number IS
+    'This value is the block number of the event that last wrote the row.';
+COMMENT ON COLUMN project_name_alias.transaction_index IS
+    'This value is the transaction index of the event that last wrote the row; null with log_index for a synthesised event, which sorts before every transaction of its block.';
+COMMENT ON COLUMN project_name_alias.log_index IS
+    'This value is the log index of the event that last wrote the row; null with transaction_index for a synthesised event.';
+COMMENT ON COLUMN project_name_alias.event_identity IS
+    'This value is the event identity of the event that last wrote the row, the final tiebreak of the canonical event order, compared as bytes.';
+COMMENT ON COLUMN project_name_alias.normalized_event_id IS
+    'This value names the event that last wrote the row in normalized_events as attribution only; it never takes part in ordering.';
+COMMENT ON COLUMN project_name_alias.active IS
+    'This value is the after-state active flag, true when absent.';
+COMMENT ON COLUMN project_name_alias.alias_state IS
+    'This value is the after-state alias_state.';
+COMMENT ON COLUMN project_name_alias.to_logical_name_id IS
+    'This value is the after-state to_logical_name_id.';
+COMMENT ON COLUMN project_name_alias.to_name IS
+    'This value is the after-state to_name.';
+COMMENT ON COLUMN project_name_alias.to_resource_id IS
+    'This value is the after-state to_resource_id.';
+COMMENT ON COLUMN project_name_alias.to_normalized_name IS
+    'This value is the after-state to_normalized_name.';
+COMMENT ON COLUMN project_name_alias.to_canonical_display_name IS
+    'This value is the after-state to_canonical_display_name.';
+COMMENT ON COLUMN project_name_alias.to_namehash IS
+    'This value is the after-state to_namehash.';
+COMMENT ON COLUMN project_name_alias.resolver_address IS
+    'This value is the lower-cased resolver the alias was written at.';
+
+CREATE TABLE IF NOT EXISTS project_resolver_alias (
+    chain_id text NOT NULL,
+    resolver_address text NOT NULL,
+    alias_identity text NOT NULL,
+    block_number bigint NOT NULL,
+    transaction_index bigint,
+    log_index bigint,
+    event_identity text NOT NULL,
+    normalized_event_id bigint,
+    active boolean NOT NULL,
+    alias_state text,
+    from_dns_encoded_name text,
+    to_dns_encoded_name text,
+    from_name text,
+    to_logical_name_id text,
+    to_name text,
+    to_resource_id text,
+    logical_name_id text,
+    PRIMARY KEY (chain_id, resolver_address, alias_identity),
+    CHECK ((transaction_index IS NULL) = (log_index IS NULL))
+);
+COMMENT ON TABLE project_resolver_alias IS
+    'Project-owned per-resolver alias state of family F10: per resolver and alias identity, the latest AliasChanged. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
+COMMENT ON COLUMN project_resolver_alias.chain_id IS
+    'This value is the chain.';
+COMMENT ON COLUMN project_resolver_alias.resolver_address IS
+    'This value is lower(COALESCE(after resolver, before resolver, emitting address)).';
+COMMENT ON COLUMN project_resolver_alias.alias_identity IS
+    'This value is COALESCE(logical_name_id, from_logical_name_id, from_namehash, from_dns_encoded_name, from_name, event_identity).';
+COMMENT ON COLUMN project_resolver_alias.block_number IS
+    'This value is the block number of the event that last wrote the row.';
+COMMENT ON COLUMN project_resolver_alias.transaction_index IS
+    'This value is the transaction index of the event that last wrote the row; null with log_index for a synthesised event, which sorts before every transaction of its block.';
+COMMENT ON COLUMN project_resolver_alias.log_index IS
+    'This value is the log index of the event that last wrote the row; null with transaction_index for a synthesised event.';
+COMMENT ON COLUMN project_resolver_alias.event_identity IS
+    'This value is the event identity of the event that last wrote the row, the final tiebreak of the canonical event order, compared as bytes.';
+COMMENT ON COLUMN project_resolver_alias.normalized_event_id IS
+    'This value names the event that last wrote the row in normalized_events as attribution only; it never takes part in ordering.';
+COMMENT ON COLUMN project_resolver_alias.active IS
+    'This value is the after-state active flag, true when absent.';
+COMMENT ON COLUMN project_resolver_alias.alias_state IS
+    'This value is the after-state alias_state, active when absent.';
+COMMENT ON COLUMN project_resolver_alias.from_dns_encoded_name IS
+    'This value is the from_dns_encoded_name.';
+COMMENT ON COLUMN project_resolver_alias.to_dns_encoded_name IS
+    'This value is the to_dns_encoded_name.';
+COMMENT ON COLUMN project_resolver_alias.from_name IS
+    'This value is the from_name.';
+COMMENT ON COLUMN project_resolver_alias.to_logical_name_id IS
+    'This value is the after-state to_logical_name_id.';
+COMMENT ON COLUMN project_resolver_alias.to_name IS
+    'This value is the after-state to_name.';
+COMMENT ON COLUMN project_resolver_alias.to_resource_id IS
+    'This value is the after-state to_resource_id.';
+COMMENT ON COLUMN project_resolver_alias.logical_name_id IS
+    'This value is the event''s name.';
+
+CREATE TABLE IF NOT EXISTS project_child_edge_candidate (
+    chain_id text NOT NULL,
+    namespace text NOT NULL,
+    parent_node text NOT NULL,
+    child_node text NOT NULL,
+    authority_arm text NOT NULL,
+    block_number bigint NOT NULL,
+    transaction_index bigint,
+    log_index bigint,
+    event_identity text NOT NULL,
+    normalized_event_id bigint,
+    owner text,
+    owner_getter text,
+    labelhash text,
+    source_family text NOT NULL,
+    PRIMARY KEY (chain_id, namespace, parent_node, child_node, authority_arm),
+    CHECK ((transaction_index IS NULL) = (log_index IS NULL))
+);
+COMMENT ON TABLE project_child_edge_candidate IS
+    'Project-owned ENSv1 and Basenames child edge candidates of family F11: the latest SubregistryChanged per child and arm, kept while ineligible; a later edge for the child under another parent replaces it. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
+COMMENT ON COLUMN project_child_edge_candidate.chain_id IS
+    'This value is the chain.';
+COMMENT ON COLUMN project_child_edge_candidate.namespace IS
+    'This value is the namespace.';
+COMMENT ON COLUMN project_child_edge_candidate.parent_node IS
+    'This value is the lower-cased parent node.';
+COMMENT ON COLUMN project_child_edge_candidate.child_node IS
+    'This value is the lower-cased child node.';
+COMMENT ON COLUMN project_child_edge_candidate.authority_arm IS
+    'This value is ens_v1 or basenames.';
+COMMENT ON COLUMN project_child_edge_candidate.block_number IS
+    'This value is the block number of the event that last wrote the row.';
+COMMENT ON COLUMN project_child_edge_candidate.transaction_index IS
+    'This value is the transaction index of the event that last wrote the row; null with log_index for a synthesised event, which sorts before every transaction of its block.';
+COMMENT ON COLUMN project_child_edge_candidate.log_index IS
+    'This value is the log index of the event that last wrote the row; null with transaction_index for a synthesised event.';
+COMMENT ON COLUMN project_child_edge_candidate.event_identity IS
+    'This value is the event identity of the event that last wrote the row, the final tiebreak of the canonical event order, compared as bytes.';
+COMMENT ON COLUMN project_child_edge_candidate.normalized_event_id IS
+    'This value names the event that last wrote the row in normalized_events as attribution only; it never takes part in ordering.';
+COMMENT ON COLUMN project_child_edge_candidate.owner IS
+    'This value is the lower-cased edge owner.';
+COMMENT ON COLUMN project_child_edge_candidate.owner_getter IS
+    'This value is the lower-cased edge owner_getter.';
+COMMENT ON COLUMN project_child_edge_candidate.labelhash IS
+    'This value is the lower-cased labelhash.';
+COMMENT ON COLUMN project_child_edge_candidate.source_family IS
+    'This value is the event''s source family.';
+
+CREATE TABLE IF NOT EXISTS project_parent_subregistry (
+    chain_id text NOT NULL,
+    logical_name_id text NOT NULL,
+    block_number bigint NOT NULL,
+    transaction_index bigint,
+    log_index bigint,
+    event_identity text NOT NULL,
+    normalized_event_id bigint,
+    subregistry_address text NOT NULL,
+    PRIMARY KEY (chain_id, logical_name_id),
+    CHECK ((transaction_index IS NULL) = (log_index IS NULL))
+);
+COMMENT ON TABLE project_parent_subregistry IS
+    'Project-owned ENSv2 parent subregistry of family F11: per parent name, the latest SubregistryChanged address, clears included. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
+COMMENT ON COLUMN project_parent_subregistry.chain_id IS
+    'This value is the chain.';
+COMMENT ON COLUMN project_parent_subregistry.logical_name_id IS
+    'This value is the parent name.';
+COMMENT ON COLUMN project_parent_subregistry.block_number IS
+    'This value is the block number of the event that last wrote the row.';
+COMMENT ON COLUMN project_parent_subregistry.transaction_index IS
+    'This value is the transaction index of the event that last wrote the row; null with log_index for a synthesised event, which sorts before every transaction of its block.';
+COMMENT ON COLUMN project_parent_subregistry.log_index IS
+    'This value is the log index of the event that last wrote the row; null with transaction_index for a synthesised event.';
+COMMENT ON COLUMN project_parent_subregistry.event_identity IS
+    'This value is the event identity of the event that last wrote the row, the final tiebreak of the canonical event order, compared as bytes.';
+COMMENT ON COLUMN project_parent_subregistry.normalized_event_id IS
+    'This value names the event that last wrote the row in normalized_events as attribution only; it never takes part in ordering.';
+COMMENT ON COLUMN project_parent_subregistry.subregistry_address IS
+    'This value is the lower-cased subregistry, empty or zero for a clear.';
+
+CREATE TABLE IF NOT EXISTS project_reverse_tuple (
+    address text NOT NULL,
+    coin_type text NOT NULL,
+    namespace text NOT NULL,
+    chain_id text NOT NULL,
+    block_number bigint NOT NULL,
+    transaction_index bigint,
+    log_index bigint,
+    event_identity text NOT NULL,
+    normalized_event_id bigint,
+    reverse_node text,
+    source_event text,
+    claim_provenance jsonb,
+    reverse_position jsonb,
+    raw_name jsonb,
+    raw_name_bytes jsonb,
+    claim_event_identity text,
+    claim_position jsonb,
+    hydrated_name text,
+    attempt_block bigint,
+    attempt_hash text,
+    attempt_ordinal bigint,
+    baseline jsonb,
+    PRIMARY KEY (address, coin_type, namespace),
+    CHECK ((transaction_index IS NULL) = (log_index IS NULL))
+);
+COMMENT ON TABLE project_reverse_tuple IS
+    'Project-owned reverse tuples of family F12: per address, coin type and namespace, the latest ReverseChanged and the latest direct claim, with the hydration result once hydration moves into the block. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
+COMMENT ON COLUMN project_reverse_tuple.address IS
+    'This value is the lower-cased address.';
+COMMENT ON COLUMN project_reverse_tuple.coin_type IS
+    'This value is the coin type.';
+COMMENT ON COLUMN project_reverse_tuple.namespace IS
+    'This value is the namespace.';
+COMMENT ON COLUMN project_reverse_tuple.chain_id IS
+    'This value is the chain.';
+COMMENT ON COLUMN project_reverse_tuple.block_number IS
+    'This value is the block number of the event that last wrote the row.';
+COMMENT ON COLUMN project_reverse_tuple.transaction_index IS
+    'This value is the transaction index of the event that last wrote the row; null with log_index for a synthesised event, which sorts before every transaction of its block.';
+COMMENT ON COLUMN project_reverse_tuple.log_index IS
+    'This value is the log index of the event that last wrote the row; null with transaction_index for a synthesised event.';
+COMMENT ON COLUMN project_reverse_tuple.event_identity IS
+    'This value is the event identity of the event that last wrote the row, the final tiebreak of the canonical event order, compared as bytes.';
+COMMENT ON COLUMN project_reverse_tuple.normalized_event_id IS
+    'This value names the event that last wrote the row in normalized_events as attribution only; it never takes part in ordering.';
+COMMENT ON COLUMN project_reverse_tuple.reverse_node IS
+    'This value is the lower-cased reverse node of the latest ReverseChanged.';
+COMMENT ON COLUMN project_reverse_tuple.source_event IS
+    'This value is that event''s source_event.';
+COMMENT ON COLUMN project_reverse_tuple.claim_provenance IS
+    'This value is that event''s claim_provenance.';
+COMMENT ON COLUMN project_reverse_tuple.reverse_position IS
+    'This value is that ReverseChanged''s position.';
+COMMENT ON COLUMN project_reverse_tuple.raw_name IS
+    'This value is the raw_name of the latest direct claim.';
+COMMENT ON COLUMN project_reverse_tuple.raw_name_bytes IS
+    'This value is the raw_name_bytes of that claim.';
+COMMENT ON COLUMN project_reverse_tuple.claim_event_identity IS
+    'This value is that claim''s event identity.';
+COMMENT ON COLUMN project_reverse_tuple.claim_position IS
+    'This value is that claim''s position.';
+COMMENT ON COLUMN project_reverse_tuple.hydrated_name IS
+    'This value is the hydrated reverse name; null until hydration moves into the block.';
+COMMENT ON COLUMN project_reverse_tuple.attempt_block IS
+    'This value is the hydration attempt block.';
+COMMENT ON COLUMN project_reverse_tuple.attempt_hash IS
+    'This value is the hydration attempt block hash.';
+COMMENT ON COLUMN project_reverse_tuple.attempt_ordinal IS
+    'This value is the hydration attempt ordinal.';
+COMMENT ON COLUMN project_reverse_tuple.baseline IS
+    'This value is the pre-hydration baseline.';
+
+CREATE TABLE IF NOT EXISTS project_reverse_node_claim (
+    namespace text NOT NULL,
+    reverse_node text NOT NULL,
+    chain_id text NOT NULL,
+    block_number bigint NOT NULL,
+    transaction_index bigint,
+    log_index bigint,
+    event_identity text NOT NULL,
+    normalized_event_id bigint,
+    resolver_address text,
+    raw_name jsonb,
+    raw_name_bytes jsonb,
+    PRIMARY KEY (namespace, reverse_node),
+    CHECK ((transaction_index IS NULL) = (log_index IS NULL))
+);
+COMMENT ON TABLE project_reverse_node_claim IS
+    'Project-owned node-selected claim facts of family F12: per node, the latest name record, the claim a ReverseClaimed tuple selects through the node''s resolver. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
+COMMENT ON COLUMN project_reverse_node_claim.namespace IS
+    'This value is the namespace.';
+COMMENT ON COLUMN project_reverse_node_claim.reverse_node IS
+    'This value is the lower-cased node.';
+COMMENT ON COLUMN project_reverse_node_claim.chain_id IS
+    'This value is the chain.';
+COMMENT ON COLUMN project_reverse_node_claim.block_number IS
+    'This value is the block number of the event that last wrote the row.';
+COMMENT ON COLUMN project_reverse_node_claim.transaction_index IS
+    'This value is the transaction index of the event that last wrote the row; null with log_index for a synthesised event, which sorts before every transaction of its block.';
+COMMENT ON COLUMN project_reverse_node_claim.log_index IS
+    'This value is the log index of the event that last wrote the row; null with transaction_index for a synthesised event.';
+COMMENT ON COLUMN project_reverse_node_claim.event_identity IS
+    'This value is the event identity of the event that last wrote the row, the final tiebreak of the canonical event order, compared as bytes.';
+COMMENT ON COLUMN project_reverse_node_claim.normalized_event_id IS
+    'This value names the event that last wrote the row in normalized_events as attribution only; it never takes part in ordering.';
+COMMENT ON COLUMN project_reverse_node_claim.resolver_address IS
+    'This value is the lower-cased resolver the name record was written at.';
+COMMENT ON COLUMN project_reverse_node_claim.raw_name IS
+    'This value is the record''s raw_name.';
+COMMENT ON COLUMN project_reverse_node_claim.raw_name_bytes IS
+    'This value is the record''s raw_name_bytes.';
+
+CREATE TABLE IF NOT EXISTS project_claim_normalization (
+    chain_id text NOT NULL,
+    claim_event_identity text NOT NULL,
+    block_number bigint NOT NULL,
+    transaction_index bigint,
+    log_index bigint,
+    event_identity text NOT NULL,
+    normalized_event_id bigint,
+    status text NOT NULL,
+    normalized_name text,
+    reason text,
+    PRIMARY KEY (chain_id, claim_event_identity),
+    CHECK ((transaction_index IS NULL) = (log_index IS NULL))
+);
+COMMENT ON TABLE project_claim_normalization IS
+    'Project-owned claim normalization of family F12: the normalization result of each claim event, stored once. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
+COMMENT ON COLUMN project_claim_normalization.chain_id IS
+    'This value is the chain.';
+COMMENT ON COLUMN project_claim_normalization.claim_event_identity IS
+    'This value is the claim event.';
+COMMENT ON COLUMN project_claim_normalization.block_number IS
+    'This value is the block number of the event that last wrote the row.';
+COMMENT ON COLUMN project_claim_normalization.transaction_index IS
+    'This value is the transaction index of the event that last wrote the row; null with log_index for a synthesised event, which sorts before every transaction of its block.';
+COMMENT ON COLUMN project_claim_normalization.log_index IS
+    'This value is the log index of the event that last wrote the row; null with transaction_index for a synthesised event.';
+COMMENT ON COLUMN project_claim_normalization.event_identity IS
+    'This value is the event identity of the event that last wrote the row, the final tiebreak of the canonical event order, compared as bytes.';
+COMMENT ON COLUMN project_claim_normalization.normalized_event_id IS
+    'This value names the event that last wrote the row in normalized_events as attribution only; it never takes part in ordering.';
+COMMENT ON COLUMN project_claim_normalization.status IS
+    'This value is success, not_found, invalid_name or unsupported.';
+COMMENT ON COLUMN project_claim_normalization.normalized_name IS
+    'This value is the normalized name on success.';
+COMMENT ON COLUMN project_claim_normalization.reason IS
+    'This value is the reason when not successful.';
+
+CREATE TABLE IF NOT EXISTS project_address_name_fold (
+    chain_id text NOT NULL,
+    logical_name_id text NOT NULL,
+    block_number bigint NOT NULL,
+    transaction_index bigint,
+    log_index bigint,
+    event_identity text NOT NULL,
+    normalized_event_id bigint,
+    controller text,
+    controller_action text,
+    controller_subject text,
+    controller_position jsonb,
+    token_holder text,
+    token_holder_position jsonb,
+    registrant text,
+    registrant_position jsonb,
+    PRIMARY KEY (chain_id, logical_name_id),
+    CHECK ((transaction_index IS NULL) = (log_index IS NULL))
+);
+COMMENT ON TABLE project_address_name_fold IS
+    'Project-owned per-name address fold of family F13: the ordered controller fold, the token holder and the registrant, unmasked. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
+COMMENT ON COLUMN project_address_name_fold.chain_id IS
+    'This value is the chain.';
+COMMENT ON COLUMN project_address_name_fold.logical_name_id IS
+    'This value is the name.';
+COMMENT ON COLUMN project_address_name_fold.block_number IS
+    'This value is the block number of the event that last wrote the row.';
+COMMENT ON COLUMN project_address_name_fold.transaction_index IS
+    'This value is the transaction index of the event that last wrote the row; null with log_index for a synthesised event, which sorts before every transaction of its block.';
+COMMENT ON COLUMN project_address_name_fold.log_index IS
+    'This value is the log index of the event that last wrote the row; null with transaction_index for a synthesised event.';
+COMMENT ON COLUMN project_address_name_fold.event_identity IS
+    'This value is the event identity of the event that last wrote the row, the final tiebreak of the canonical event order, compared as bytes.';
+COMMENT ON COLUMN project_address_name_fold.normalized_event_id IS
+    'This value names the event that last wrote the row in normalized_events as attribution only; it never takes part in ordering.';
+COMMENT ON COLUMN project_address_name_fold.controller IS
+    'This value is the controller the fold holds after the latest event.';
+COMMENT ON COLUMN project_address_name_fold.controller_action IS
+    'This value is set or revoke, the latest controller action.';
+COMMENT ON COLUMN project_address_name_fold.controller_subject IS
+    'This value is that action''s lower-cased subject.';
+COMMENT ON COLUMN project_address_name_fold.controller_position IS
+    'This value is that action''s position.';
+COMMENT ON COLUMN project_address_name_fold.token_holder IS
+    'This value is the lower-cased recipient of the latest TokenControlTransferred.';
+COMMENT ON COLUMN project_address_name_fold.token_holder_position IS
+    'This value is that transfer''s position.';
+COMMENT ON COLUMN project_address_name_fold.registrant IS
+    'This value is the lower-cased registrant of the latest grant naming one.';
+COMMENT ON COLUMN project_address_name_fold.registrant_position IS
+    'This value is that grant''s position.';
+
+CREATE TABLE IF NOT EXISTS project_address_name_index (
+    address text NOT NULL,
+    logical_name_id text NOT NULL,
+    relation text NOT NULL,
+    chain_id text NOT NULL,
+    PRIMARY KEY (address, logical_name_id, relation)
+);
+COMMENT ON TABLE project_address_name_index IS
+    'Project-owned address-to-name index of family F13, re-derived from project_address_name_fold and never journalled. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
+COMMENT ON COLUMN project_address_name_index.address IS
+    'This value is the lower-cased address.';
+COMMENT ON COLUMN project_address_name_index.logical_name_id IS
+    'This value is the name.';
+COMMENT ON COLUMN project_address_name_index.relation IS
+    'This value is controller, token_holder or registrant.';
+COMMENT ON COLUMN project_address_name_index.chain_id IS
+    'This value is the chain.';
+
+CREATE TABLE IF NOT EXISTS project_address_record_node_index (
+    address text NOT NULL,
+    coin_type text NOT NULL,
+    chain_id text NOT NULL,
+    resolver_address text NOT NULL,
+    node text NOT NULL,
+    PRIMARY KEY (address, coin_type, chain_id, resolver_address, node)
+);
+COMMENT ON TABLE project_address_record_node_index IS
+    'Project-owned inverse address record index of family F14 for node-keyed values, re-derived from project_node_record_value and never journalled. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
+COMMENT ON COLUMN project_address_record_node_index.address IS
+    'This value is the lower-cased address.';
+COMMENT ON COLUMN project_address_record_node_index.coin_type IS
+    'This value is the coin type.';
+COMMENT ON COLUMN project_address_record_node_index.chain_id IS
+    'This value is the chain.';
+COMMENT ON COLUMN project_address_record_node_index.resolver_address IS
+    'This value is the resolver.';
+COMMENT ON COLUMN project_address_record_node_index.node IS
+    'This value is the node.';
+
+CREATE TABLE IF NOT EXISTS project_address_record_id_index (
+    address text NOT NULL,
+    coin_type text NOT NULL,
+    chain_id text NOT NULL,
+    resolver_address text NOT NULL,
+    record_id text NOT NULL,
+    PRIMARY KEY (address, coin_type, chain_id, resolver_address, record_id)
+);
+COMMENT ON TABLE project_address_record_id_index IS
+    'Project-owned inverse address record index of family F14 for record-id values, re-derived from project_record_id_value and never journalled. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
+COMMENT ON COLUMN project_address_record_id_index.address IS
+    'This value is the lower-cased address.';
+COMMENT ON COLUMN project_address_record_id_index.coin_type IS
+    'This value is the coin type.';
+COMMENT ON COLUMN project_address_record_id_index.chain_id IS
+    'This value is the chain.';
+COMMENT ON COLUMN project_address_record_id_index.resolver_address IS
+    'This value is the resolver.';
+COMMENT ON COLUMN project_address_record_id_index.record_id IS
+    'This value is the record id.';

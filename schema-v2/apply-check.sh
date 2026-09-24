@@ -639,7 +639,11 @@ for migration_file in \
     "$ROOT/migrations/20260924120000_normalized_events_project_v1_pointer_addressed_node_idx.sql" \
     "$ROOT/migrations/20260926100000_project_families_publication.sql" \
     "$ROOT/migrations/20260926100100_project_families_identity_lifecycle.sql" \
-    "$ROOT/migrations/20260926100200_project_families_resolvers.sql"
+    "$ROOT/migrations/20260926100200_project_families_resolvers.sql" \
+    "$ROOT/migrations/20260926100300_project_families_records.sql" \
+    "$ROOT/migrations/20260926100400_project_families_permissions.sql" \
+    "$ROOT/migrations/20260926100500_project_families_topology.sql" \
+    "$ROOT/migrations/20260926100600_project_families_addresses.sql"
 do
     emit_phase_migration "$migration_file" empty-schema | run_psql
 done
@@ -900,7 +904,15 @@ for migration_file in \
     "$ROOT/migrations/20260926100100_project_families_identity_lifecycle.sql" \
     "$ROOT/migrations/20260926100100_project_families_identity_lifecycle.sql" \
     "$ROOT/migrations/20260926100200_project_families_resolvers.sql" \
-    "$ROOT/migrations/20260926100200_project_families_resolvers.sql"
+    "$ROOT/migrations/20260926100200_project_families_resolvers.sql" \
+    "$ROOT/migrations/20260926100300_project_families_records.sql" \
+    "$ROOT/migrations/20260926100300_project_families_records.sql" \
+    "$ROOT/migrations/20260926100400_project_families_permissions.sql" \
+    "$ROOT/migrations/20260926100400_project_families_permissions.sql" \
+    "$ROOT/migrations/20260926100500_project_families_topology.sql" \
+    "$ROOT/migrations/20260926100500_project_families_topology.sql" \
+    "$ROOT/migrations/20260926100600_project_families_addresses.sql" \
+    "$ROOT/migrations/20260926100600_project_families_addresses.sql"
 do
     emit_phase_migration "$migration_file" baseline-first | run_psql
 done
@@ -4143,6 +4155,24 @@ BEGIN
             ('project_resolver_classification'),
             ('project_registry_pointer'),
             ('project_resource_pointer'),
+            ('project_node_record_partition'),
+            ('project_node_record_value'),
+            ('project_record_id_value'),
+            ('project_resolver_link'),
+            ('project_grant'),
+            ('project_resource_admin_aggregate'),
+            ('project_account_approval'),
+            ('project_name_alias'),
+            ('project_resolver_alias'),
+            ('project_child_edge_candidate'),
+            ('project_parent_subregistry'),
+            ('project_reverse_tuple'),
+            ('project_reverse_node_claim'),
+            ('project_claim_normalization'),
+            ('project_address_name_fold'),
+            ('project_address_name_index'),
+            ('project_address_record_node_index'),
+            ('project_address_record_id_index'),
             ('project_generation_failures'),
             ('project_redo_child_registration_history'),
             ('project_redo_expiry_roots'),
@@ -4227,6 +4257,24 @@ BEGIN
             ('project_resolver_classification'),
             ('project_registry_pointer'),
             ('project_resource_pointer'),
+            ('project_node_record_partition'),
+            ('project_node_record_value'),
+            ('project_record_id_value'),
+            ('project_resolver_link'),
+            ('project_grant'),
+            ('project_resource_admin_aggregate'),
+            ('project_account_approval'),
+            ('project_name_alias'),
+            ('project_resolver_alias'),
+            ('project_child_edge_candidate'),
+            ('project_parent_subregistry'),
+            ('project_reverse_tuple'),
+            ('project_reverse_node_claim'),
+            ('project_claim_normalization'),
+            ('project_address_name_fold'),
+            ('project_address_name_index'),
+            ('project_address_record_node_index'),
+            ('project_address_record_id_index'),
             ('project_generation_failures'),
             ('project_redo_child_registration_history'),
             ('project_redo_expiry_roots'),
