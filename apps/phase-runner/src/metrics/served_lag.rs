@@ -90,8 +90,9 @@ impl ServedLagGauges {
         self.apply(&[]);
     }
 
-    /// Applies one complete query result. A configured or previously exported chain
-    /// the query did not return reads -1; one that is neither is removed.
+    /// Applies one complete query result. Configured chains missing from the result
+    /// retain both gauges at -1. Previously exported chains that are neither
+    /// configured nor returned are removed.
     pub(super) fn apply(&self, rows: &[ServedLagRow]) {
         let returned: BTreeSet<&str> = rows.iter().map(|row| row.chain_id.as_str()).collect();
         let configured = lock(&self.configured).clone();

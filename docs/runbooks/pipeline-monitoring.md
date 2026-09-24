@@ -238,13 +238,15 @@ Both gauges are refreshed with the others every 5 seconds, and a refresh is
 also requested after every Ingest, Live and Project batch has recorded its
 progress row, so the value in the runner is current shortly after each of those
 commits. Commits that arrive together share one refresh; this is not sampling of
-every block. Other changes, such as a failed Project batch or a rewind, show at
-the next 5-second refresh. Two more gaps are covered only by that refresh: when
-a completed batch's follow-up confirmation fails after its progress row
-committed, no refresh is requested, and the refresh after a redo batch can run
-before the final redo completion restores the Project row. The 5-second refresh
-alone is slower than a Base block; on Base the refresh after each commit is
-what keeps the value current. Prometheus still samples it only once per scrape
+every block. Some transitions send no dedicated refresh request: a failed
+Project batch, a rewind, a completed batch whose follow-up confirmation fails
+after its progress row committed, and the final redo completion that restores
+the Project row after the refresh a redo batch requested. They become visible
+on the next successful refresh, periodic or triggered by another commit on any
+chain, since every refresh reads all chains. The periodic refresh is the
+fallback when no further request arrives. The 5-second refresh alone is slower
+than a Base block; on Base the refresh after each commit is what keeps the
+value current. Prometheus still samples it only once per scrape
 (every 15 seconds in the checked-in configuration), so a lag that lasts less
 than a scrape interval may never appear in a graph.
 
