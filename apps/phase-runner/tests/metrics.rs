@@ -276,6 +276,7 @@ async fn endpoint_exports_served_lag_against_the_readable_project_publication() 
     let cancellation = CancellationToken::new();
     let feed = RunnerMetricsFeed::default();
     feed.seed_chain("configured-without-rows");
+    feed.seed_chain("served");
     let address = phase_runner::metrics::start(
         "127.0.0.1:0".parse()?,
         scratch.pool().clone(),
@@ -348,6 +349,34 @@ async fn endpoint_exports_served_lag_against_the_readable_project_publication() 
         ensure!(
             std::time::Instant::now() < deadline,
             "a committed batch must refresh the served-lag gauges before the next refresh tick"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    // A chain whose Project row disappears while its Live row remains reads -1.
+    sqlx::query(
+        "DELETE FROM chain_phase_state WHERE chain_id = 'served' AND phase_name = 'project'",
+    )
+    .execute(scratch.pool())
+    .await?;
+    feed.batch_committed();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    loop {
+        let response = tokio::task::spawn_blocking(move || scrape(address))
+            .await
+            .context("phase metrics scrape task panicked")??;
+        let body = parse_http_scrape(&response)?;
+        let labels = ["chain=\"served\""];
+        if sample(body, "phase_runner_served_publication_block", &labels)? == -1.0 {
+            assert_eq!(
+                sample(body, "phase_runner_served_lag_blocks", &labels)?,
+                -1.0
+            );
+            break;
+        }
+        ensure!(
+            std::time::Instant::now() < deadline,
+            "a chain that lost its Project row must stop reporting its old publication"
         );
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }

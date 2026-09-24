@@ -8,10 +8,11 @@ use bigname_metrics::{IntGaugeVec, MetricsRegistry};
 use sqlx::{FromRow, PgPool};
 use tokio::sync::Notify;
 
-/// Tells the metrics task that a batch committed, so the served-lag gauges move at
-/// block boundaries instead of waiting for the next refresh tick. The metrics task
-/// answers with the same query the periodic refresh runs, one query at a time, so
-/// an older result can never overwrite a newer one.
+/// Tells the metrics task that a batch committed, so it refreshes the served-lag
+/// gauges soon after the commit instead of at the next refresh tick. This is a
+/// notification, not sampling of every block: commits that arrive together share
+/// one refresh. The metrics task answers with the same query the periodic refresh
+/// runs, one query at a time, so an older result can never overwrite a newer one.
 #[derive(Clone, Default)]
 pub struct RunnerMetricsFeed {
     committed: Arc<Notify>,
@@ -19,7 +20,7 @@ pub struct RunnerMetricsFeed {
 }
 
 impl RunnerMetricsFeed {
-    /// Configured chains export both gauges as -1 from startup, before any refresh.
+    /// Configured chains always export both gauges, as -1 when nothing is available.
     pub fn seed_chain(&self, chain: &str) {
         self.configured_chains
             .lock()
@@ -58,6 +59,8 @@ pub(super) struct ServedLagGauges {
     lag_blocks: IntGaugeVec,
     publication_block: IntGaugeVec,
     incoherent: Arc<Mutex<BTreeMap<String, (i64, i64)>>>,
+    configured: Arc<Mutex<BTreeSet<String>>>,
+    exported: Arc<Mutex<BTreeSet<String>>>,
 }
 
 impl ServedLagGauges {
@@ -75,17 +78,43 @@ impl ServedLagGauges {
                 &["chain"],
             )?,
             incoherent: Arc::default(),
+            configured: Arc::default(),
+            exported: Arc::default(),
         })
     }
 
-    pub(super) fn seed(&self, chains: &[String]) {
-        for chain in chains {
-            self.lag_blocks.with_label_values(&[chain]).set(-1);
-            self.publication_block.with_label_values(&[chain]).set(-1);
-        }
+    /// Seeds -1 for configured chains before the first refresh and keeps their series
+    /// for the life of the process.
+    pub(super) fn configure(&self, chains: &[String]) {
+        *lock(&self.configured) = chains.iter().cloned().collect();
+        self.apply(&[]);
     }
 
+    /// Applies one complete query result. A configured or previously exported chain
+    /// the query did not return reads -1; one that is neither is removed.
     pub(super) fn apply(&self, rows: &[ServedLagRow]) {
+        let returned: BTreeSet<&str> = rows.iter().map(|row| row.chain_id.as_str()).collect();
+        let configured = lock(&self.configured).clone();
+        let mut exported = lock(&self.exported);
+        for chain in exported.iter().chain(&configured) {
+            if returned.contains(chain.as_str()) {
+                continue;
+            }
+            self.incoherent_changed(chain, None);
+            if configured.contains(chain) {
+                self.lag_blocks.with_label_values(&[chain]).set(-1);
+                self.publication_block.with_label_values(&[chain]).set(-1);
+            } else {
+                let _ = self.lag_blocks.remove_label_values(&[chain]);
+                let _ = self.publication_block.remove_label_values(&[chain]);
+            }
+        }
+        *exported = returned
+            .iter()
+            .map(|chain| (*chain).to_owned())
+            .chain(configured)
+            .collect();
+        drop(exported);
         for row in rows {
             let incoherent = row
                 .observed_head_block_number
@@ -114,10 +143,7 @@ impl ServedLagGauges {
 
     /// True the first time a chain reports this incoherent pair.
     pub(super) fn incoherent_changed(&self, chain: &str, pair: Option<(i64, i64)>) -> bool {
-        let mut incoherent = self
-            .incoherent
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut incoherent = lock(&self.incoherent);
         match pair {
             Some(pair) => incoherent.insert(chain.to_owned(), pair) != Some(pair),
             None => {
@@ -126,11 +152,12 @@ impl ServedLagGauges {
             }
         }
     }
+}
 
-    pub(super) fn remove_chain(&self, chain: &str) {
-        let _ = self.lag_blocks.remove_label_values(&[chain]);
-        let _ = self.publication_block.remove_label_values(&[chain]);
-    }
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// -1 means unavailable, never caught up: either side is missing, or the observed

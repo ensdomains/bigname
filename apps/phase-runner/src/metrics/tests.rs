@@ -187,6 +187,61 @@ fn an_incoherent_observed_head_warns_once_per_change() -> Result<()> {
 }
 
 #[test]
+fn served_gauges_reconcile_chains_the_query_no_longer_returns() -> Result<()> {
+    let metrics = PipelineMetrics::new(
+        900,
+        RunnerLoopHeartbeat::default(),
+        RunnerPhaseProgress::default(),
+    )?;
+    metrics.served_lag.configure(&[
+        "project-row-gone".to_owned(),
+        "configured-emptied".to_owned(),
+    ]);
+    let phase = |chain: &str, phase: &str| PhaseMetricRow {
+        chain_id: chain.to_owned(),
+        ..metric_row(phase)
+    };
+    let served = |chain: &str| served_lag::ServedLagRow {
+        chain_id: chain.to_owned(),
+        observed_head_block_number: Some(104),
+        publication_block_number: Some(100),
+    };
+    metrics.apply_rows(&[
+        phase("configured-emptied", "project"),
+        phase("project-row-gone", "live"),
+        phase("project-row-gone", "project"),
+        phase("unconfigured-emptied", "project"),
+    ])?;
+    metrics.served_lag.apply(&[
+        served("configured-emptied"),
+        served("project-row-gone"),
+        served("unconfigured-emptied"),
+    ]);
+    let scrape = metrics.registry.encode()?;
+    assert!(scrape.contains("phase_runner_served_lag_blocks{chain=\"project-row-gone\"} 4\n"));
+
+    // Every Project row is gone; one chain keeps its Live row.
+    metrics.apply_rows(&[phase("project-row-gone", "live")])?;
+    metrics.served_lag.apply(&[]);
+
+    let scrape = metrics.registry.encode()?;
+    for chain in ["project-row-gone", "configured-emptied"] {
+        for gauge in [
+            "phase_runner_served_lag_blocks",
+            "phase_runner_served_publication_block",
+        ] {
+            let line = format!("{gauge}{{chain=\"{chain}\"}} -1\n");
+            assert!(scrape.contains(&line), "missing {line}");
+        }
+    }
+    assert!(
+        !scrape.contains("chain=\"unconfigured-emptied\""),
+        "a chain that is neither configured nor returned leaves the served gauges"
+    );
+    Ok(())
+}
+
+#[test]
 fn served_lag_is_unavailable_without_both_sides() {
     assert_eq!(served_lag::served_lag(Some(104), Some(100)), 4);
     assert_eq!(

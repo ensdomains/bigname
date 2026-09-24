@@ -420,7 +420,6 @@ impl PipelineMetrics {
     }
 
     fn remove_chain(&self, chain: &str) {
-        self.served_lag.remove_chain(chain);
         let _ = self.chain_head_block.remove_label_values(&[chain]);
         let _ = self.reinterpretation_required.remove_label_values(&[chain]);
         for level in VERIFICATION_LEVELS {
@@ -439,7 +438,7 @@ pub async fn start(
     feed: RunnerMetricsFeed,
 ) -> Result<SocketAddr> {
     let metrics = PipelineMetrics::new(heartbeat_stale_after_secs, loop_heartbeat, phase_progress)?;
-    metrics.served_lag.seed(&feed.configured_chains());
+    metrics.served_lag.configure(&feed.configured_chains());
     metrics.refresh(&pool).await?;
     let server = MetricsServer::bind(bind_addr, metrics.registry.clone()).await?;
     let local_addr = server.local_addr()?;
