@@ -1784,6 +1784,89 @@ async fn served_rows_the_serving_readers_exclude_are_not_compared() -> Result<()
     fixture.cleanup().await
 }
 
+/// Pro Q6 on 6c8bdf8b: the other side of the served filters. Rows the serving readers do
+/// expose are compared: with every block finalized, the name, resource and approval are still
+/// compared and equal, and an approval copy for another subject marked safe is served, so the
+/// comparison counts it, as an approval and as an operator row, as a mismatch the families do
+/// not hold.
+#[tokio::test]
+async fn served_rows_the_serving_readers_include_are_compared() -> Result<()> {
+    let fixture = Fixture::new("families_shadow_registry_served_included", 20).await?;
+    let lease = uuid(1);
+    bound(&fixture, &lease).await?;
+    fixture
+        .event(
+            Event::new(
+                "registry-approval",
+                10,
+                5,
+                "AccountPermissionChanged",
+                V1_REGISTRY,
+            )
+            .after(json!({
+                "subject": OPERATOR, "relation_kind": "operator", "approved": true,
+                "scope": {"kind": "account", "chain_id": CHAIN, "authority_kind": "registry",
+                          "authority_contract": REGISTRY,
+                          "authority_contract_instance_id": "00000000-0000-0000-0000-0000000000e5",
+                          "owner": OWNER},
+                "effective_powers": ["registry_control"],
+                "grant_source": {"kind": "raw_log", "source_event": "ApprovalForAll"},
+                "revocation_source": null, "inheritance_path": [],
+                "transfer_behavior": {"mode": "owner_scoped", "on_holder_change": "ceases_to_apply"},
+                "source_event": "ApprovalForAll",
+            }))
+            .raw(json!({"emitting_address": REGISTRY})),
+        )
+        .await?;
+    let report = publish_and_compare(&fixture, 12).await?;
+    shadow_support::assert_counts(&report, &[], &[]);
+    let counts = |report: &shadow_support::compare::Report| {
+        (report.names, report.resources, report.accounts)
+    };
+    assert_eq!(counts(&report), (1, 1, 1));
+    for state in ["safe", "finalized"] {
+        sqlx::query(
+            "UPDATE chain_lineage SET canonicality_state = $2::canonicality_state
+             WHERE chain_id = $1",
+        )
+        .bind(CHAIN)
+        .bind(state)
+        .execute(&fixture.pool)
+        .await?;
+    }
+    let finalized = shadow_support::compare::compare(&fixture.pool, CHAIN, 12).await?;
+    shadow_support::assert_counts(&finalized, &[], &[]);
+    assert_eq!(counts(&finalized), (1, 1, 1), "{:#?}", finalized.lines);
+    sqlx::query(
+        "INSERT INTO account_permission_state_current
+         SELECT (jsonb_populate_record(NULL::account_permission_state_current,
+                    to_jsonb(approval) || jsonb_build_object('subject', $1::text,
+                        'canonicality_summary', approval.canonicality_summary
+                            || '{\"state\": \"safe\"}'::jsonb))).*
+         FROM account_permission_state_current approval",
+    )
+    .bind(THIRD)
+    .execute(&fixture.pool)
+    .await?;
+    let included = shadow_support::compare::compare(&fixture.pool, CHAIN, 12).await?;
+    assert_eq!(counts(&included), (1, 1, 2), "{:#?}", included.lines);
+    // The copy is served both as an approval and, through the operator reader, as an operator
+    // row of the resource.
+    assert_eq!(included.mismatched, 2, "{:#?}", included.lines);
+    let mut failed = failed_fields(&included);
+    failed.dedup();
+    assert_eq!(
+        failed,
+        [
+            "account_permission_state_current",
+            "effective_operator_rows"
+        ],
+        "{:#?}",
+        included.lines
+    );
+    fixture.cleanup().await
+}
+
 /// Codex thread PRRT_kwDOSJpxAs6l9H62: the registration's authority kind and key read the
 /// binding candidates' SurfaceBounds and the epoch starts as well as the lifecycle events
 /// (laterals.rs `authority_context`), so a registration field passes as a same-block delta only

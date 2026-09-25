@@ -797,8 +797,10 @@ async fn compare_fenced(
     }
 
     // Account approvals, under the account half of the operator reader's filter
-    // (`ACCOUNT_APPROVAL_READ_FILTER`); its binding half is the resource summary's, applied
-    // above.
+    // (`ACCOUNT_APPROVAL_READ_FILTER`). The operator query's other half is not the resource
+    // summary's filter: it also requires the summary's registry binding lineage readable
+    // (effective.rs `ACCOUNT_READ_FILTER`). The operator rows above come through that reader
+    // itself, so the account comparison does not repeat it.
     let served_accounts: Vec<Value> = sqlx::query_scalar(&format!(
         "SELECT jsonb_build_object('authority_kind', authority_kind,
                     'authority_contract', authority_contract,

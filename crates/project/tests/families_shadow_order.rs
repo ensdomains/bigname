@@ -823,3 +823,43 @@ async fn a_permission_row_the_serving_reader_excludes_is_not_compared() -> Resul
     assert_counts(&filtered, &[], &[]);
     fixture.cleanup().await
 }
+
+/// Pro Q6 on 6c8bdf8b: the including side of the same filter. A copy of BOB's row for ALICE
+/// marked safe is served (`DEFAULT_PERMISSIONS_CURRENT_READ_FILTER` admits canonical, safe and
+/// finalized), so the comparison reads it and counts the permission rows as a mismatch the
+/// families do not hold.
+#[tokio::test]
+async fn a_permission_row_the_serving_reader_includes_is_compared() -> Result<()> {
+    let fixture = Fixture::new("families_shadow_order_served_included", 20).await?;
+    let (k1, n1) = (uuid(1), name(1));
+    v2_binding(&fixture, &k1).await?;
+    fixture
+        .event(grant("grant-10", 10, &n1, &k1, ALICE))
+        .await?;
+    fixture
+        .event(registry_grant("permission-11", 11, &k1, BOB))
+        .await?;
+    let report = publish_and_compare(&fixture, 16).await?;
+    assert_counts(&report, &[], &[]);
+    sqlx::query(
+        "INSERT INTO permissions_current
+         SELECT (jsonb_populate_record(NULL::permissions_current,
+                    to_jsonb(row) || jsonb_build_object('subject', $1::text,
+                        'canonicality_summary', row.canonicality_summary
+                            || '{\"state\": \"safe\"}'::jsonb))).*
+         FROM permissions_current row WHERE row.subject = $2",
+    )
+    .bind(ALICE)
+    .bind(BOB)
+    .execute(&fixture.pool)
+    .await?;
+    let included = shadow_support::compare::compare(&fixture.pool, CHAIN, 16).await?;
+    let failed: Vec<&str> = included
+        .lines
+        .iter()
+        .filter(|line| line.starts_with("SEPOLIA_END_TO_END_SHADOW_MISMATCH"))
+        .filter_map(|line| line.split(" field=").nth(1)?.split(' ').next())
+        .collect();
+    assert_eq!(failed, vec!["permissions_current"], "{:#?}", included.lines);
+    fixture.cleanup().await
+}
