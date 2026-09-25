@@ -13,7 +13,7 @@ mod support;
 
 use anyhow::{Context, Result, ensure};
 use bigname_storage::{
-    ChildrenCurrentPageFilter, ChildrenCurrentSort,
+    ChildrenCurrentOrder, ChildrenCurrentPageFilter, ChildrenCurrentSort,
     families::topology::{FamilyChildRow, load_children_shadow_page},
     load_children_current_page_filtered,
 };
@@ -1043,7 +1043,7 @@ fn display_names(rows: &[FamilyChildRow]) -> Vec<&str> {
 }
 
 // The subnames filters at the block clock. ENSv2 children have mixed null and non-null expiries
-// and registration times, labels a prefix must match literally (`_` and `%`), and an expiry
+// and registration times (two are bound, so their grant gives them one), labels a prefix must match literally (`_` and `%`), and an expiry
 // exactly at the publication's time, which the fence keeps. An expiry-sorted, fenced page is
 // then continued from one publication into the next at the new block's time, after a child on
 // the remaining pages expired in between. Every page's rows, total and cursor are compared.
@@ -1089,6 +1089,20 @@ async fn child_filters_sort_page_and_expire_at_the_block_clock() -> Result<()> {
                 1,
             )
             .await?;
+        // A registration time comes from the grant of the name's selected authority, so only
+        // the two children with an ENSv2 binding have one; the others sort as null.
+        if matches!(n, 2 | 5) {
+            fixture
+                .binding(
+                    &uuid(0xc000 + n),
+                    &logical,
+                    &uuid(0xa000 + n),
+                    "declared_registry_path",
+                    "ens_v2",
+                    block,
+                )
+                .await?;
+        }
         expiring_registration(
             &fixture,
             &format!("granted-{label}"),
@@ -1105,6 +1119,42 @@ async fn child_filters_sort_page_and_expire_at_the_block_clock() -> Result<()> {
     let pool = fixture.pool();
     let (_, clock) = shadow::publication(pool, CHAIN).await?;
     ensure!(clock.unix_timestamp() == epoch + 6, "{clock}");
+    let registered: Vec<(String, bool)> = sqlx::query_as(
+        "SELECT logical_name_id,
+                declared_summary #>> '{registration,registered_at}' IS NOT NULL
+         FROM name_current WHERE logical_name_id = ANY($1) ORDER BY 1",
+    )
+    .bind(
+        (1..=6)
+            .map(|n| format!("ens:{}", word(0x7000 + n)))
+            .collect::<Vec<_>>(),
+    )
+    .fetch_all(pool)
+    .await?;
+    let with_time: Vec<bool> = registered.iter().map(|(_, set)| *set).collect();
+    ensure!(
+        with_time == [false, true, false, false, true, false],
+        "{registered:?}"
+    );
+    // Registration time in both directions, fenced and not, over pages of one row: two children
+    // with a time and four without.
+    for order in [ChildrenCurrentOrder::Asc, ChildrenCurrentOrder::Desc] {
+        for include_expired in [true, false] {
+            let filter = ChildrenCurrentPageFilter {
+                sort: ChildrenCurrentSort::RegisteredAt,
+                order,
+                include_expired,
+                evaluated_at: (!include_expired).then_some(clock),
+                ..ChildrenCurrentPageFilter::default()
+            };
+            let (served_total, served, shadow_total, shadowed) =
+                shadow::walk_children(pool, &parent_id, &filter, 1).await?;
+            ensure!(
+                served == shadowed && served_total == 6 && shadow_total == 6,
+                "{order:?} {include_expired}: served {served:?}, shadow {shadowed:?}"
+            );
+        }
+    }
 
     // The fence at block 6 keeps the child whose expiry is exactly block 6's time.
     let fenced = ChildrenCurrentPageFilter {
