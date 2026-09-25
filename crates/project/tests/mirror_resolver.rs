@@ -1500,7 +1500,7 @@ fn unnamed_clear_withdraws(counts: &[(i64, usize)]) -> Expectations {
             .map(|&(target, times)| ExpectedDifference {
                 target,
                 key: format!("record_inventory {V2_RESOURCE}"),
-                fields: vec![("row".into(), json!(true), json!(false))],
+                fields: vec![("row".into(), Some(json!(true)), Some(json!(false)))],
                 times,
             })
             .collect(),

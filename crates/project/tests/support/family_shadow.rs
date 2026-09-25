@@ -31,8 +31,9 @@ pub struct ExpectedDifference {
     pub target: i64,
     /// The complete result key, as the report names it.
     pub key: String,
-    /// Every field that differs, with today's value and the family's value.
-    pub fields: Vec<(String, Value, Value)>,
+    /// Every field that differs, with today's value and the family's value; `None` is a side
+    /// where the field is missing.
+    pub fields: Vec<(String, Option<Value>, Option<Value>)>,
     /// How many comparisons in the test must show it.
     pub times: usize,
 }
@@ -60,6 +61,13 @@ impl Expectations {
     /// Check one comparison at `target` against the expectations.
     pub fn check(&self, target: i64, report: &ShadowReport) -> Result<()> {
         let mut matched = vec![false; self.differences.len()];
+        let mut keys = std::collections::BTreeSet::new();
+        for (key, _) in &report.differences {
+            ensure!(
+                keys.insert(key),
+                "the report at {target} names {key} more than once"
+            );
+        }
         for (key, differences) in &report.differences {
             let Some(index) = self
                 .differences
@@ -68,7 +76,7 @@ impl Expectations {
             else {
                 bail!("unexpected difference at {target} on {key}: {differences:#?}");
             };
-            let mut actual: Vec<(String, Value, Value)> = differences
+            let mut actual: Vec<(String, Option<Value>, Option<Value>)> = differences
                 .iter()
                 .map(|difference| {
                     (

@@ -29,8 +29,8 @@ use serde_json::Value;
 use sqlx::{Row, postgres::PgRow};
 
 pub use compare::{
-    Difference, check_compatibility_pairs, compare_address_records, compare_primary_name,
-    compare_record_inventory,
+    Difference, check_compatibility_pairs, compare_address_records, compare_address_results,
+    compare_primary_name, compare_record_inventory,
 };
 pub use facts::{
     ResolverClassification as FamilyResolverClassification,

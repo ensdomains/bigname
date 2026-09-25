@@ -305,13 +305,21 @@ async fn link_and_version_boundaries_read_the_same_through_the_families() -> Res
             target: 23,
             key: format!("record_inventory {}", resource(1)),
             fields: vec![
-                ("entries[text:url].value".into(), json!("a"), json!("b")),
+                (
+                    "entries[text:url].value".into(),
+                    Some(json!("a")),
+                    Some(json!("b")),
+                ),
                 (
                     "last_change.normalized_event_id".into(),
-                    json!(tie_a),
-                    json!(tie_b),
+                    Some(json!(tie_a)),
+                    Some(json!(tie_b)),
                 ),
-                ("provenance.record_event_ids".into(), today_ids, family_ids),
+                (
+                    "provenance.record_event_ids".into(),
+                    Some(today_ids),
+                    Some(family_ids),
+                ),
             ],
             times: 1,
         }],
@@ -389,7 +397,11 @@ async fn link_and_version_boundaries_read_the_same_through_the_families() -> Res
     missing.push(ExpectedDifference {
         target: 23,
         key: format!("record_inventory {}", resource(2)),
-        fields: vec![("entries[text:url].value".into(), json!("x"), json!("y"))],
+        fields: vec![(
+            "entries[text:url].value".into(),
+            Some(json!("x")),
+            Some(json!("y")),
+        )],
         times: 1,
     });
     let missing = Expectations {
@@ -413,6 +425,23 @@ async fn link_and_version_boundaries_read_the_same_through_the_families() -> Res
     assert_eq!(
         counted.finish().expect_err("missing").to_string(),
         format!("{stated} showed 0 times, not 1")
+    );
+    // A report naming one result twice fails rather than matching one expectation twice.
+    let mut twice = bigname_storage::families::records::compare_family_reads(
+        &pool,
+        CHAIN,
+        Some((23, hash(23))),
+        1,
+    )
+    .await?;
+    let first = twice.differences[0].clone();
+    twice.differences.push(first);
+    assert_eq!(
+        expected.check(23, &twice).expect_err("twice").to_string(),
+        format!(
+            "the report at 23 names record_inventory {} more than once",
+            resource(1)
+        )
     );
     db.cleanup().await?;
     Ok(())

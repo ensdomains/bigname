@@ -13,7 +13,6 @@ const ADDRESS: &str = "0x0000000000000000000000000000000000000001";
 const RESOLVER: &str = "0x0000000000000000000000000000000000000011";
 const OTHER: &str = "0x0000000000000000000000000000000000000022";
 /// How the comparison shows a field one side does not have.
-const ABSENT: &str = "<absent>";
 const NODE: &str = "0x1111111111111111111111111111111111111111111111111111111111111111";
 
 #[tokio::test]
@@ -174,24 +173,36 @@ async fn an_unnamed_ens_v2_reverse_node_pointer_is_outside_the_pointer_families(
             target: 2,
             key,
             fields: vec![
-                ("claim_name_is_normalized".into(), json!(true), json!(false)),
+                (
+                    "claim_name_is_normalized".into(),
+                    Some(json!(true)),
+                    Some(json!(false)),
+                ),
                 (
                     "claim_provenance.claim_event_id".into(),
-                    json!(3),
-                    json!(ABSENT),
+                    Some(json!(3)),
+                    None,
                 ),
                 (
                     "claim_provenance.resolver_address".into(),
-                    json!(RESOLVER),
-                    json!(ABSENT),
+                    Some(json!(RESOLVER)),
+                    None,
                 ),
                 (
                     "claim_provenance.resolver_event_id".into(),
-                    json!(2),
-                    json!(ABSENT),
+                    Some(json!(2)),
+                    None,
                 ),
-                ("claim_status".into(), json!("success"), json!("not_found")),
-                ("raw_claim_name".into(), json!("alice.eth"), Value::Null),
+                (
+                    "claim_status".into(),
+                    Some(json!("success")),
+                    Some(json!("not_found")),
+                ),
+                (
+                    "raw_claim_name".into(),
+                    Some(json!("alice.eth")),
+                    Some(Value::Null),
+                ),
             ],
             times: 1,
         }],

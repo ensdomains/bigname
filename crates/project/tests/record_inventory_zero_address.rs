@@ -7,7 +7,8 @@ use anyhow::{Context, Result};
 use bigname_domain::resolver_read::{IndexedRecordStatus, evaluate_indexed_record};
 use bigname_project::{BatchOutcome, BatchRequest, Engine, Marker, RunMode};
 use bigname_storage::families::records::{
-    FamilyAttribution, compare_family_reads, load_family_record_inventory_detail,
+    FamilyAttribution, check_compatibility_pairs, compare_family_reads,
+    load_family_record_inventory_detail,
 };
 use bigname_test_support::{TestDatabase, TestDatabaseConfig};
 use family_shadow::Expectations;
@@ -571,6 +572,29 @@ async fn coin60_pairs_serve_the_address_changed_half_at_its_own_position() -> Re
                 family.row.provenance
             );
         }
+        // Mutation: a wrong sibling event and both positions moved one log on, adjacency kept,
+        // must each be named against the pairs the harness accepted.
+        if pairs > 0 {
+            let mut moved = family.clone();
+            for pair in &mut moved.compatibility_pairs {
+                pair.sibling_event_id = pair.sibling_event_id.map(|id| id + 1000);
+                for position in [&mut pair.value_position, &mut pair.sibling_position] {
+                    position.log_index = position.log_index.map(|log| log + 1);
+                }
+            }
+            let differences = check_compatibility_pairs(&moved, &family.compatibility_pairs);
+            let mut fields: Vec<&str> = differences.iter().map(|d| d.field.as_str()).collect();
+            fields.sort_unstable();
+            assert_eq!(
+                fields,
+                [
+                    "compatibility_pairs[addr:60].sibling_event_id",
+                    "compatibility_pairs[addr:60].sibling_position.log_index",
+                    "compatibility_pairs[addr:60].value_position.log_index",
+                ],
+                "{id}"
+            );
+        }
         // Mutation: without the pair metadata the family read must fail the comparison, on the
         // pairs today's row serves as well as on the served value's event.
         if pairs > 0 {
@@ -593,7 +617,10 @@ async fn coin60_pairs_serve_the_address_changed_half_at_its_own_position() -> Re
                 .iter()
                 .flat_map(|(_, differences)| differences.iter().map(|d| d.field.as_str()))
                 .collect();
-            assert!(fields.contains(&"compatibility_pairs"), "{id}: {report:#?}");
+            assert!(
+                fields.contains(&"compatibility_pairs[addr:60]"),
+                "{id}: {report:#?}"
+            );
         }
         database.cleanup().await?;
     }

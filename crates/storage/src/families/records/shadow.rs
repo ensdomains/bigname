@@ -9,13 +9,14 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result, ensure};
 use serde_json::Value;
-use sqlx::PgPool;
+use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
 use super::{
-    Difference, FamilyAttribution, check_compatibility_pairs, compare_address_records,
-    compare_primary_name, compare_record_inventory, load_family_address_records,
-    load_family_record_inventory_detail, load_family_reverse_claim, page_family_address_records,
+    CompatibilityPair, Difference, FamilyAttribution, FamilyPosition, check_compatibility_pairs,
+    compare_address_results, compare_primary_name, compare_record_inventory,
+    load_family_address_records, load_family_record_inventory_detail, load_family_reverse_claim,
+    page_family_address_records,
 };
 use crate::{
     AddressNamesCurrentDedupe, AddressNamesCurrentOrder, AddressNamesCurrentSort,
@@ -246,15 +247,7 @@ async fn addresses(
             .extend(misses.iter().map(|(resource, record_key)| {
                 format!("resolves_to {address} coin {coin_type} resource {resource} {record_key}")
             }));
-        let mut differences = compare_address_records(&today, &family);
-        // The continuations follow from the entries, so they are compared once the entries agree.
-        if differences.is_empty() && today_pages != family_pages {
-            differences.push(Difference {
-                field: "pages".to_owned(),
-                today: serde_json::json!(today_pages),
-                family: serde_json::json!(family_pages),
-            });
-        }
+        let differences = compare_address_results(&today, &today_pages, &family, &family_pages);
         if !differences.is_empty() {
             report.differences.push((
                 format!("resolves_to {address} coin {coin_type}"),
@@ -387,7 +380,7 @@ async fn all_family_pages(
 async fn expected_pairs(
     pool: &PgPool,
     today: Option<&RecordInventoryCurrentRow>,
-) -> Result<BTreeSet<i64>> {
+) -> Result<Vec<CompatibilityPair>> {
     let ids = |field: &str| -> Vec<i64> {
         today
             .and_then(|row| row.provenance.get(field))
@@ -397,13 +390,18 @@ async fn expected_pairs(
     };
     let (values, attributed) = (ids("record_event_ids"), ids("attributed_event_ids"));
     if values.is_empty() {
-        return Ok(BTreeSet::new());
+        return Ok(Vec::new());
     }
     // As today's `coin60_siblings`: the sibling is attributed to the same resource and sits one
     // log later in the same transaction, compared null-safely. A node-keyed sibling is attributed
     // when today's row lists it; a named one when it shares the value's name and resolver.
-    let pairs: Vec<i64> = sqlx::query_scalar(
-        "SELECT value.normalized_event_id
+    let rows = sqlx::query(
+        "SELECT value.normalized_event_id AS value_id, value.block_number AS value_block,
+                value.transaction_index AS value_transaction, value.log_index AS value_log,
+                value.event_identity AS value_identity,
+                sibling.normalized_event_id AS sibling_id, sibling.block_number AS sibling_block,
+                sibling.transaction_index AS sibling_transaction,
+                sibling.log_index AS sibling_log, sibling.event_identity AS sibling_identity
          FROM bigname_phase.normalized_events value
          JOIN bigname_phase.normalized_events sibling
            ON sibling.chain_id = value.chain_id AND sibling.block_hash = value.block_hash
@@ -426,14 +424,33 @@ async fn expected_pairs(
          WHERE value.normalized_event_id = ANY($1::bigint[])
            AND value.event_kind = 'RecordChanged'
            AND value.after_state ->> 'source_event' = 'AddressChanged'
-           AND value.after_state ->> 'record_key' = 'addr:60'",
+           AND value.after_state ->> 'record_key' = 'addr:60'
+         ORDER BY value.normalized_event_id, sibling.normalized_event_id",
     )
     .bind(&values)
     .bind(&attributed)
     .fetch_all(pool)
     .await
     .context("failed to find the coin-60 pairs today's row serves")?;
-    Ok(pairs.into_iter().collect())
+    rows.iter()
+        .map(|row| {
+            let position = |prefix: &str| -> Result<FamilyPosition> {
+                Ok(FamilyPosition {
+                    block_number: row.try_get(format!("{prefix}_block").as_str())?,
+                    transaction_index: row.try_get(format!("{prefix}_transaction").as_str())?,
+                    log_index: row.try_get(format!("{prefix}_log").as_str())?,
+                    event_identity: row.try_get(format!("{prefix}_identity").as_str())?,
+                })
+            };
+            Ok(CompatibilityPair {
+                record_key: "addr:60".to_owned(),
+                value_event_id: Some(row.try_get("value_id")?),
+                value_position: position("value")?,
+                sibling_event_id: Some(row.try_get("sibling_id")?),
+                sibling_position: position("sibling")?,
+            })
+        })
+        .collect()
 }
 
 async fn primary(pool: &PgPool, chain_id: &str, report: &mut ShadowReport) -> Result<()> {

@@ -8,23 +8,32 @@
 //! record lists (entries, selectors, unsupported families, the entries of an address's names)
 //! element by element under the element's own key, with a separate `.order` difference when the
 //! same elements come in another order. So an accepted difference can be checked field by field,
-//! and a second difference on the same result shows up on its own.
+//! and a second difference on the same result shows up on its own. A missing field is `None`,
+//! apart from any stored value, so no stored value compares equal to a missing one.
 use std::collections::BTreeSet;
 
 use serde_json::{Map, Value, json};
 
-use super::inventory::FamilyRecordInventory;
+use super::{
+    FamilyPosition,
+    inventory::{CompatibilityPair, FamilyRecordInventory},
+};
 use crate::{AddressRecordCurrentEntry, PrimaryNameCurrentSnapshot, RecordInventoryCurrentRow};
 
-/// One field whose values differ.
+/// One field whose values differ; `None` is a side where the field or element is missing.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Difference {
     pub field: String,
-    pub today: Value,
-    pub family: Value,
+    pub today: Option<Value>,
+    pub family: Option<Value>,
 }
 
-fn push(differences: &mut Vec<Difference>, field: &str, today: Value, family: Value) {
+fn push_either(
+    differences: &mut Vec<Difference>,
+    field: &str,
+    today: Option<Value>,
+    family: Option<Value>,
+) {
     if today != family {
         differences.push(Difference {
             field: field.to_owned(),
@@ -34,8 +43,9 @@ fn push(differences: &mut Vec<Difference>, field: &str, today: Value, family: Va
     }
 }
 
-/// The value a missing object key or list element compares as, distinct from a stored null.
-const ABSENT: &str = "<absent>";
+fn push(differences: &mut Vec<Difference>, field: &str, today: Value, family: Value) {
+    push_either(differences, field, Some(today), Some(family));
+}
 
 fn join(path: &str, key: &str) -> String {
     if path.is_empty() {
@@ -74,12 +84,9 @@ fn diff(differences: &mut Vec<Difference>, path: &str, today: &Value, family: &V
                 let path = join(path, key);
                 match (today.get(key), family.get(key)) {
                     (Some(today), Some(family)) => diff(differences, &path, today, family),
-                    (today, family) => push(
-                        differences,
-                        &path,
-                        today.cloned().unwrap_or_else(|| json!(ABSENT)),
-                        family.cloned().unwrap_or_else(|| json!(ABSENT)),
-                    ),
+                    (today, family) => {
+                        push_either(differences, &path, today.cloned(), family.cloned());
+                    }
                 }
             }
         }
@@ -120,12 +127,7 @@ fn diff_keyed(
         let element = format!("{path}[{key}]");
         match (today.get(key), family.get(key)) {
             (Some(today), Some(family)) => diff(differences, &element, today, family),
-            (today, family) => push(
-                differences,
-                &element,
-                today.cloned().unwrap_or_else(|| json!(ABSENT)),
-                family.cloned().unwrap_or_else(|| json!(ABSENT)),
-            ),
+            (today, family) => push_either(differences, &element, today.cloned(), family.cloned()),
         }
     }
     let common = |order: &[String], other: &Map<String, Value>| -> Vec<Value> {
@@ -217,43 +219,56 @@ pub fn compare_record_inventory(
     differences
 }
 
+fn pair_view(pair: &CompatibilityPair) -> Value {
+    let position = |position: &FamilyPosition| {
+        json!({
+            "block_number": position.block_number,
+            "transaction_index": position.transaction_index,
+            "log_index": position.log_index,
+            "event_identity": position.event_identity,
+        })
+    };
+    json!({
+        "record_key": pair.record_key,
+        "value_event_id": pair.value_event_id,
+        "value_position": position(&pair.value_position),
+        "sibling_event_id": pair.sibling_event_id,
+        "sibling_position": position(&pair.sibling_position),
+    })
+}
+
 /// The coin-60 pairs of a family row against the pairs today's row serves, found independently
-/// of the family reader (`expected`, the value events of today's row that are the
-/// `AddressChanged` half of a pair): the same value events, each `AddressChanged` half at log n
-/// with its `AddrChanged` sibling at log n + 1 of the same transaction. The row's provenance is
-/// compared with today's separately and lists only the value event, as today's does; the design's
-/// provenance names both events, which step 7 serves from the sibling the pair carries.
+/// of the family reader (`expected`): record key, both event ids and both positions, pair by pair
+/// under the record key. A duplicate record key on either side is its own difference. The row's
+/// provenance is compared with today's separately and lists only the value event, as today's
+/// does; the design's provenance names both events, which step 7 serves from the sibling the pair
+/// carries.
 pub fn check_compatibility_pairs(
     inventory: &FamilyRecordInventory,
-    expected: &BTreeSet<i64>,
+    expected: &[CompatibilityPair],
 ) -> Vec<Difference> {
     let mut differences = Vec::new();
-    let returned: BTreeSet<i64> = inventory
-        .compatibility_pairs
-        .iter()
-        .filter_map(|pair| pair.value_event_id)
-        .collect();
+    let duplicates = |pairs: &[CompatibilityPair]| {
+        let mut seen = BTreeSet::new();
+        pairs
+            .iter()
+            .filter(|pair| !seen.insert(pair.record_key.clone()))
+            .map(|pair| json!(pair.record_key))
+            .collect::<Vec<_>>()
+    };
     push(
         &mut differences,
-        "compatibility_pairs",
-        json!(expected),
-        json!(returned),
+        "compatibility_pairs.duplicates",
+        Value::Array(duplicates(expected)),
+        Value::Array(duplicates(&inventory.compatibility_pairs)),
     );
-    for pair in &inventory.compatibility_pairs {
-        let (value, sibling) = (&pair.value_position, &pair.sibling_position);
-        let adjacent = value.block_number == sibling.block_number
-            && value.transaction_index == sibling.transaction_index
-            && value
-                .log_index
-                .zip(sibling.log_index)
-                .is_some_and(|(n, m)| n + 1 == m);
-        push(
-            &mut differences,
-            &format!("compatibility_pairs[{}].adjacent", pair.record_key),
-            Value::Bool(true),
-            Value::Bool(adjacent && pair.sibling_event_id.is_some()),
-        );
-    }
+    let view = |pairs: &[CompatibilityPair]| Value::Array(pairs.iter().map(pair_view).collect());
+    diff(
+        &mut differences,
+        "compatibility_pairs",
+        &view(expected),
+        &view(&inventory.compatibility_pairs),
+    );
     differences
 }
 
@@ -338,11 +353,18 @@ pub fn compare_address_records(
     today: &[AddressRecordCurrentEntry],
     family: &[AddressRecordCurrentEntry],
 ) -> Vec<Difference> {
+    // A repeated key is compared as its own occurrence (`key#2` and on), never overwritten.
     let sequence = |entries: &[AddressRecordCurrentEntry]| {
         let mut map = Map::new();
         let mut order = Vec::new();
         for entry in entries {
-            let key = format!("{}|{}", entry.logical_name_id, entry.record_resource_id);
+            let base = format!("{}|{}", entry.logical_name_id, entry.record_resource_id);
+            let mut key = base.clone();
+            let mut occurrence = 1;
+            while map.contains_key(&key) {
+                occurrence += 1;
+                key = format!("{base}#{occurrence}");
+            }
             order.push(key.clone());
             map.insert(key, address_entry(entry));
         }
@@ -367,6 +389,23 @@ pub fn compare_address_records(
     differences
 }
 
+/// [`compare_address_records`] and, whatever the entries show, the continuation of every page.
+pub fn compare_address_results(
+    today: &[AddressRecordCurrentEntry],
+    today_pages: &[String],
+    family: &[AddressRecordCurrentEntry],
+    family_pages: &[String],
+) -> Vec<Difference> {
+    let mut differences = compare_address_records(today, family);
+    push(
+        &mut differences,
+        "pages",
+        json!(today_pages),
+        json!(family_pages),
+    );
+    differences
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -387,20 +426,95 @@ mod tests {
             [
                 Difference {
                     field: "entries[a]".into(),
-                    today: json!({"record_key": "a", "value": 1}),
-                    family: json!(ABSENT),
+                    today: Some(json!({"record_key": "a", "value": 1})),
+                    family: None,
                 },
                 Difference {
                     field: "entries[b].value".into(),
-                    today: json!(2),
-                    family: json!(3),
+                    today: Some(json!(2)),
+                    family: Some(json!(3)),
                 },
                 Difference {
                     field: "provenance.extra".into(),
-                    today: json!(ABSENT),
-                    family: Value::Null,
+                    today: None,
+                    family: Some(Value::Null),
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn a_stored_absent_marker_is_not_a_missing_field() {
+        let mut differences = Vec::new();
+        diff(
+            &mut differences,
+            "",
+            &json!({"chain_positions": {"block_number": 1}}),
+            &json!({"chain_positions": {"block_number": 1, "mutated": "<absent>"}}),
+        );
+        assert_eq!(
+            differences,
+            [Difference {
+                field: "chain_positions.mutated".into(),
+                today: None,
+                family: Some(json!("<absent>")),
+            }]
+        );
+    }
+
+    fn address(name: &str, value: &str) -> AddressRecordCurrentEntry {
+        AddressRecordCurrentEntry {
+            address: "0x01".into(),
+            logical_name_id: name.into(),
+            namespace: "ens".into(),
+            canonical_display_name: name.into(),
+            normalized_name: name.into(),
+            namehash: name.into(),
+            surface_binding_id: None,
+            resource_id: None,
+            record_resource_id: uuid::Uuid::nil(),
+            binding_kind: None,
+            coin_type: "60".into(),
+            record_key: "addr:60".into(),
+            provenance: json!({"value": value}),
+            coverage: json!({}),
+            chain_positions: json!({}),
+            canonicality_summary: json!({}),
+            manifest_version: 1,
+            last_recomputed_at: sqlx::types::time::OffsetDateTime::UNIX_EPOCH,
+        }
+    }
+
+    #[test]
+    fn a_page_difference_shows_beside_an_entry_difference() {
+        let differences = compare_address_results(
+            &[address("a", "1")],
+            &["cursor-a".into()],
+            &[address("a", "2")],
+            &["cursor-b".into()],
+        );
+        let fields: Vec<&str> = differences.iter().map(|d| d.field.as_str()).collect();
+        let key = format!("a|{}", uuid::Uuid::nil());
+        assert_eq!(
+            fields,
+            [format!("entries[{key}].provenance.value").as_str(), "pages"]
+        );
+    }
+
+    #[test]
+    fn a_repeated_address_key_is_compared_per_occurrence() {
+        let differences = compare_address_records(
+            &[address("a", "1"), address("a", "2")],
+            &[address("a", "1"), address("a", "3")],
+        );
+        let key = format!("a|{}", uuid::Uuid::nil());
+        assert_eq!(
+            differences,
+            [Difference {
+                field: format!("entries[{key}#2].provenance.value"),
+                today: Some(json!("2")),
+                family: Some(json!("3")),
+            }]
         );
     }
 
@@ -417,8 +531,8 @@ mod tests {
             differences,
             [Difference {
                 field: "selectors.order".into(),
-                today: json!(["a", "b"]),
-                family: json!(["b", "a"]),
+                today: Some(json!(["a", "b"])),
+                family: Some(json!(["b", "a"])),
             }]
         );
     }
