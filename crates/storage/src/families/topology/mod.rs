@@ -3,7 +3,7 @@
 //! overview's classification and bound names, and the resolver `/aliases`, `/links` and `/roles`
 //! collections. They read the family tables (`project_child_edge_candidate`,
 //! `project_parent_subregistry`, `project_child_registration_state`, `project_wrapper_state`,
-//! `project_registry_node_state`, `project_name_state`, `project_binding_candidate`,
+//! `project_name_state`, `project_binding_candidate`,
 //! `project_resource_pointer`, `project_resolver_classification`, `project_name_alias`,
 //! `project_resolver_alias`, `project_resolver_link`, `project_grant`), the identity tables and
 //! the interim reads of [`shims`] only. No served route calls them: the phase-runner harness

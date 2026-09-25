@@ -1,8 +1,8 @@
 //! The declared direct children of one parent, read from the family tables: the edge candidates
 //! (`project_child_edge_candidate`) and parent subregistry (`project_parent_subregistry`), the
-//! per-registry child registrations (`project_child_registration_state`), registry owners
-//! (`project_registry_node_state`), child wrapper fuses (`project_wrapper_state`) and the parent's
-//! migration state (`project_name_state`), with the identity tables and label preimages. It
+//! per-registry child registrations (`project_child_registration_state`), child wrapper fuses
+//! (`project_wrapper_state`) and the parent's migration state (`project_name_state`), with the
+//! identity tables, label preimages and the zero-owner attribution shim. It
 //! reproduces the relation crates/project/src/builders/children.rs builds into
 //! `children_current` (its candidates, then the arm selection of `publish`) and the read filter
 //! of crates/storage/src/children/page.rs, evaluated at read against the family marker's block:
@@ -10,7 +10,8 @@
 use sqlx::{Postgres, QueryBuilder};
 
 use super::shims::{
-    effective_child_fuses, row_position, selected_authority_arm, serving_row_exists,
+    attributed_zero_owner, effective_child_fuses, row_position, selected_authority_arm,
+    serving_row_exists,
 };
 
 pub(super) const READABLE: &str = "('canonical', 'safe', 'finalized')";
@@ -131,26 +132,19 @@ pub(super) fn push_selected<'a>(
         ), v1_edges AS (
             -- The latest edge for the child across parents and arms (ranked_v1), so a child is
             -- never served under a parent it has left.
+            -- A zero current owner overrides the edge's owner; any other owner does not, as
+            -- project_latest_registry_owner keeps zero owners only. Today attributes the
+            -- Transfer to a name by the name it carries, then its resource, then an active
+            -- surface at its node, which project_registry_node_state (keyed by node) cannot
+            -- reproduce, so the override is the attribution shim over normalized_events.
             SELECT edge.*, parent.namespace || ':' || edge.child_node AS child_logical_name_id,
-                   lower(COALESCE(ownership.owner_getter, edge.owner_getter, edge.owner))
-                       AS served_owner
-            FROM parent
+                   CASE WHEN {zero_owner} THEN {ZERO_ADDRESS}
+                        ELSE lower(COALESCE(edge.owner_getter, edge.owner))
+                   END AS served_owner
+            FROM parent CROSS JOIN clock
             JOIN bigname_phase.project_child_edge_candidate edge
               ON edge.chain_id = parent.chain_id AND edge.namespace = parent.namespace
              AND edge.parent_node = parent.node
-            -- project_registry_node_state keeps the latest owner; only a zero current owner
-            -- overrides the edge's owner, as project_latest_registry_owner keeps zero owners only.
-            -- Today's override is keyed by logical name
-            -- (crates/project/src/builders/name_authority/stage.rs:207-241), so a
-            -- Transfer of a node with no name surface never reaches the child row: the override
-            -- applies only when the child has a surface.
-            LEFT JOIN bigname_phase.project_registry_node_state ownership
-              ON ownership.chain_id = edge.chain_id AND ownership.namespace = edge.namespace
-             AND ownership.node = edge.child_node
-             AND ownership.owner_getter = {ZERO_ADDRESS}
-             AND EXISTS (
-                 SELECT 1 FROM bigname_phase.name_surfaces child_surface
-                 WHERE child_surface.logical_name_id = edge.namespace || ':' || edge.child_node)
             WHERE NOT EXISTS (
                 SELECT 1 FROM bigname_phase.project_child_edge_candidate other
                 WHERE other.chain_id = edge.chain_id AND other.namespace = edge.namespace
@@ -239,6 +233,12 @@ pub(super) fn push_selected<'a>(
             "address",
             "subregistry.chain_id",
             "subregistry.subregistry_address"
+        ),
+        zero_owner = attributed_zero_owner(
+            "edge.chain_id",
+            "edge.namespace || ':' || edge.child_node",
+            "edge.child_node",
+            "clock.block_number"
         ),
         other_position = row_position("other"),
         edge_position = row_position("edge"),

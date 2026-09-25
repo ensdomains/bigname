@@ -15,6 +15,10 @@
 //! - [`effective_child_fuses`]: the child's wrapper fuses masked at the family marker's block
 //!   time over `project_wrapper_state`, the mask `effective_wrapper_state` applies in
 //!   crates/project/src/builders/children.rs, until a shared wrapper mask read exists.
+//! - [`attributed_zero_owner`]: whether the latest registry Transfer attributed to the child
+//!   reports a zero owner. Interim: the attribution of `project_latest_registry_owner` over
+//!   `normalized_events`, because `project_registry_node_state` keys a Transfer by the node it
+//!   carries and cannot attribute it through its name or resource.
 use anyhow::{Context, Result};
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -26,6 +30,104 @@ pub(super) fn row_position(alias: &str) -> String {
     format!(
         "({alias}.block_number, COALESCE({alias}.transaction_index, -1), \
          COALESCE({alias}.log_index, -1), {alias}.event_identity COLLATE \"C\")"
+    )
+}
+
+/// An event today's Project stages: activated, canonical, and on the readable lineage at or
+/// below the block `block` unless it has no block (crates/project/src/stage/events.rs).
+fn staged_event(alias: &str, block: &str) -> String {
+    format!(
+        "{alias}.consumer_visibility = 'activated'
+         AND {alias}.canonicality_state IN ('canonical', 'safe', 'finalized')
+         AND (({alias}.block_number IS NULL AND {alias}.block_hash IS NULL)
+              OR ({alias}.block_number <= {block}
+                  AND EXISTS (SELECT 1 FROM bigname_phase.chain_lineage {alias}_lineage
+                              WHERE {alias}_lineage.chain_id = {alias}.chain_id
+                                AND {alias}_lineage.block_hash = {alias}.block_hash
+                                AND {alias}_lineage.block_number = {alias}.block_number
+                                AND {alias}_lineage.canonicality_state
+                                    IN ('canonical', 'safe', 'finalized'))))"
+    )
+}
+
+/// Interim: whether the latest ENSv1 or Basenames registry AuthorityTransferred attributed to the
+/// child `child` (a name id expression, at node `node` in chain `chain`) reports a zero owner
+/// getter, at the block `block`. The attribution and order are those of
+/// `project_latest_registry_owner` (crates/project/src/builders/name_authority/stage.rs): the
+/// name the event carries, else the latest named event of the same resource and source family,
+/// else an active, readable surface at the event's `child_node` or `node`; latest by block,
+/// transaction index and log index with nulls lowest, then event identity. The candidates are
+/// the Transfers that can attribute to the child: those naming it, those of a resource one of
+/// its named registry events carries, and unnamed ones at its node.
+pub(super) fn attributed_zero_owner(chain: &str, child: &str, node: &str, block: &str) -> String {
+    let registries = "('ens_v1_registry_l1', 'basenames_base_registry')";
+    let transfer_readable = staged_event("transfer", block);
+    let candidate_readable = staged_event("candidate", block);
+    let named_readable = staged_event("named", block);
+    let transfer_node = "lower(COALESCE(NULLIF(transfer.after_state ->> 'child_node', ''),
+                                        NULLIF(transfer.after_state ->> 'node', '')))";
+    format!(
+        "COALESCE((
+            SELECT attributed.owner_getter = '0x0000000000000000000000000000000000000000'
+            FROM (
+                SELECT transfer.after_state ->> 'owner_getter' AS owner_getter,
+                       COALESCE(transfer.logical_name_id, linked.logical_name_id,
+                                attributed_surface.logical_name_id) AS logical_name_id,
+                       transfer.block_number, transfer.transaction_index, transfer.log_index,
+                       transfer.event_identity
+                FROM bigname_phase.normalized_events transfer
+                LEFT JOIN LATERAL (
+                    SELECT candidate.logical_name_id
+                    FROM bigname_phase.normalized_events candidate
+                    WHERE transfer.logical_name_id IS NULL
+                      AND candidate.logical_name_id IS NOT NULL
+                      AND candidate.chain_id = transfer.chain_id
+                      AND candidate.resource_id = transfer.resource_id
+                      AND candidate.source_family = transfer.source_family
+                      AND {candidate_readable}
+                    ORDER BY candidate.block_number DESC NULLS LAST,
+                             candidate.transaction_index DESC NULLS LAST,
+                             candidate.log_index DESC NULLS LAST,
+                             candidate.event_identity DESC
+                    LIMIT 1
+                ) linked ON TRUE
+                LEFT JOIN bigname_phase.name_surfaces attributed_surface
+                  ON transfer.logical_name_id IS NULL
+                 AND attributed_surface.chain_id = transfer.chain_id
+                 AND attributed_surface.namespace = transfer.namespace
+                 AND attributed_surface.visibility_state = 'active'
+                 AND attributed_surface.block_number <= {block}
+                 AND attributed_surface.canonicality_state IN ('canonical', 'safe', 'finalized')
+                 AND EXISTS (SELECT 1 FROM bigname_phase.chain_lineage surface_lineage
+                             WHERE surface_lineage.chain_id = attributed_surface.chain_id
+                               AND surface_lineage.block_hash = attributed_surface.block_hash
+                               AND surface_lineage.block_number = attributed_surface.block_number
+                               AND surface_lineage.canonicality_state
+                                   IN ('canonical', 'safe', 'finalized'))
+                 AND lower(attributed_surface.namehash) = {transfer_node}
+                WHERE transfer.chain_id = {chain}
+                  AND transfer.event_kind = 'AuthorityTransferred'
+                  AND transfer.source_family IN {registries}
+                  AND {transfer_readable}
+                  AND (transfer.logical_name_id = {child}
+                       OR (transfer.logical_name_id IS NULL
+                           AND ({transfer_node} = {node}
+                                OR transfer.resource_id IN (
+                                    SELECT named.resource_id
+                                    FROM bigname_phase.normalized_events named
+                                    WHERE named.logical_name_id = {child}
+                                      AND named.chain_id = {chain}
+                                      AND named.source_family IN {registries}
+                                      AND named.resource_id IS NOT NULL
+                                      AND {named_readable}))))
+            ) attributed
+            WHERE attributed.logical_name_id = {child}
+            ORDER BY attributed.block_number DESC NULLS LAST,
+                     attributed.transaction_index DESC NULLS LAST,
+                     attributed.log_index DESC NULLS LAST,
+                     attributed.event_identity DESC
+            LIMIT 1
+        ), FALSE)"
     )
 }
 

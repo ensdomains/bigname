@@ -64,7 +64,7 @@ async fn edge(
     Ok(())
 }
 
-/// An ENSv1 registry Transfer of `node` to `new_owner`.
+/// An ENSv1 registry Transfer of `node` to `new_owner`, attributed to no name or resource.
 async fn transfer(
     fixture: &Fixture,
     identity: &str,
@@ -72,11 +72,25 @@ async fn transfer(
     new_owner: &str,
     block: i64,
 ) -> Result<()> {
+    attributed_transfer(fixture, identity, child, new_owner, block, None, None).await
+}
+
+/// An ENSv1 registry Transfer of `node` to `new_owner`, carrying the name and resource the adapter
+/// attributed it to.
+async fn attributed_transfer(
+    fixture: &Fixture,
+    identity: &str,
+    child: u64,
+    new_owner: &str,
+    block: i64,
+    logical: Option<&str>,
+    resource: Option<&str>,
+) -> Result<()> {
     fixture
         .event(
             identity,
-            None,
-            None,
+            logical,
+            resource,
             V1_REGISTRY,
             "AuthorityTransferred",
             block,
@@ -535,12 +549,22 @@ async fn ens_v2_subregistry_children_match_the_served_children() -> Result<()> {
 /// The parent's migration registry, announced and associated the way the served gate requires
 /// (children.rs:93-135): a manifest, a registry announcement edge and the association row whose
 /// evidence the migration event carries.
+/// Which migration evidence a locked parent's registry gets: all of it, no registry
+/// announcement edge, or a migration whose evidence does not contain the association's.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Evidence {
+    Valid,
+    NoAnnouncement,
+    UnmatchedMigration,
+}
+
 async fn migration_registry(
     fixture: &Fixture,
     parent_id: &str,
     registry: &str,
     registry_address: &str,
     block: i64,
+    evidence: Evidence,
 ) -> Result<()> {
     let pool = fixture.pool();
     fixture.contract(registry, registry_address, block).await?;
@@ -554,20 +578,22 @@ async fn migration_registry(
     .bind(CHAIN)
     .fetch_one(pool)
     .await?;
-    sqlx::query(
-        "INSERT INTO discovery_edges (chain_id, edge_kind, from_contract_instance_id,
-             to_contract_instance_id, discovery_source, admission_basis, source_manifest_id,
-             active_from_block_number, active_from_block_hash, canonicality_state, provenance)
-         VALUES ($1, 'registry_announcement', $2::uuid, $2::uuid, 'fixture', 'fixture', $3, $4,
-             $5, 'canonical', '{\"transaction_index\":0,\"log_index\":0}')",
-    )
-    .bind(CHAIN)
-    .bind(registry)
-    .bind(manifest_id)
-    .bind(block)
-    .bind(shadow_fixture::hash(block))
-    .execute(pool)
-    .await?;
+    if evidence != Evidence::NoAnnouncement {
+        sqlx::query(
+            "INSERT INTO discovery_edges (chain_id, edge_kind, from_contract_instance_id,
+                 to_contract_instance_id, discovery_source, admission_basis, source_manifest_id,
+                 active_from_block_number, active_from_block_hash, canonicality_state, provenance)
+             VALUES ($1, 'registry_announcement', $2::uuid, $2::uuid, 'fixture', 'fixture', $3,
+                 $4, $5, 'canonical', '{\"transaction_index\":0,\"log_index\":0}')",
+        )
+        .bind(CHAIN)
+        .bind(registry)
+        .bind(manifest_id)
+        .bind(block)
+        .bind(shadow_fixture::hash(block))
+        .execute(pool)
+        .await?;
+    }
     sqlx::query(
         "INSERT INTO migration_discovery_associations (logical_edge_identity,
              migration_correlation_id, correlation_kind, registry_contract_instance_id,
@@ -608,8 +634,12 @@ async fn migration_registry(
             "MigrationApplied",
             block,
             json!({"migration_path": "locked_wrapped",
-                   "successor_registry_contract_instance_id": registry,
-                   "evidence": [{"event_identity": "migration-registry-proof"}]}),
+            "successor_registry_contract_instance_id": registry,
+            "evidence": [{"event_identity": if evidence == Evidence::UnmatchedMigration {
+                "another-proof"
+            } else {
+                "migration-registry-proof"
+            }}]}),
             &address(0xe2),
         )
         .await?;
@@ -624,7 +654,15 @@ async fn a_locked_parent_keeps_its_migratable_children() -> Result<()> {
     let mut fixture = Fixture::new("families_shadow_children_locked", 12).await?;
     let (parent_id, parent_node, parent_labels) = parent(&fixture, 1, "locked").await?;
     let registry = uuid(0xf9);
-    migration_registry(&fixture, &parent_id, &registry, &address(0xf9), 2).await?;
+    migration_registry(
+        &fixture,
+        &parent_id,
+        &registry,
+        &address(0xf9),
+        2,
+        Evidence::Valid,
+    )
+    .await?;
     let far = shadow_fixture::EPOCH + 1_000_000;
     let soon = shadow_fixture::EPOCH + 7;
     // (child, label, fuses, expiry, expiry from the registrar's NameRenewed, registered in the
@@ -727,4 +765,177 @@ async fn a_locked_parent_keeps_its_migratable_children() -> Result<()> {
             .contains(&format!("ens:{}", word(3)))
     );
     fixture.cleanup().await
+}
+
+/// A child `n` of `parent_node` with a name surface under `parent_labels`, returning its id.
+async fn child_surface(
+    fixture: &Fixture,
+    child: u64,
+    name: &str,
+    parent_labels: &[String],
+) -> Result<String> {
+    let mut labels = vec![word(0x5000 + child)];
+    labels.extend(parent_labels.iter().cloned());
+    fixture.surface("ens", &word(child), name, &labels, 1).await
+}
+
+// A registry Transfer to zero overrides a child's edge owner only when today's stage attributes
+// it to that child (crates/project/src/builders/name_authority/stage.rs,
+// `project_latest_registry_owner`): by the name it carries, else by the latest named event of
+// its resource and family, else by an active surface at its node. An inactive surface at the
+// node attributes nothing, while a name or resource attributes whatever node the Transfer
+// carries. An event can only name a name that has a surface, so the name and resource cases use
+// inactive surfaces and Transfers of another node.
+#[tokio::test]
+async fn zero_owner_attribution_follows_the_served_precedence() -> Result<()> {
+    let mut fixture = Fixture::new("families_shadow_children_owner", 12).await?;
+    let (parent_id, parent_node, parent_labels) = parent(&fixture, 1, "owners").await?;
+    for (child, label) in [
+        (41, "inactive"),
+        (42, "direct"),
+        (43, "resource"),
+        (44, "surfaced"),
+        (45, "kept"),
+    ] {
+        fixture.label(&word(0x5000 + child), label, true).await?;
+        edge(
+            &fixture,
+            &format!("edge-{label}"),
+            &parent_node,
+            child,
+            &owner(child),
+            2,
+        )
+        .await?;
+    }
+    for (child, name) in [
+        (41, "inactive.owners.eth"),
+        (42, "direct.owners.eth"),
+        (43, "resource.owners.eth"),
+    ] {
+        let logical = child_surface(&fixture, child, name, &parent_labels).await?;
+        sqlx::query(
+            "UPDATE name_surfaces SET visibility_state = 'shadow',
+                 deactivation_reason = 'fixture', deactivated_at = now()
+             WHERE logical_name_id = $1",
+        )
+        .bind(&logical)
+        .execute(fixture.pool())
+        .await?;
+    }
+    // 41: an unattributed zero Transfer at its node, which has only an inactive surface.
+    transfer(&fixture, "zero-inactive", 41, ZERO_ADDRESS, 3).await?;
+    // 42: a zero Transfer of another node that names the child.
+    let direct = format!("ens:{}", word(42));
+    attributed_transfer(
+        &fixture,
+        "zero-direct",
+        142,
+        ZERO_ADDRESS,
+        3,
+        Some(&direct),
+        None,
+    )
+    .await?;
+    // 43: a named non-zero Transfer of a resource, then an unnamed zero Transfer of the same
+    // resource at another node.
+    let resourced = format!("ens:{}", word(43));
+    let resource = uuid(0xd043);
+    fixture.resource(&resource, 1).await?;
+    attributed_transfer(
+        &fixture,
+        "named-resource",
+        43,
+        &owner(143),
+        2,
+        Some(&resourced),
+        Some(&resource),
+    )
+    .await?;
+    attributed_transfer(
+        &fixture,
+        "zero-resource",
+        143,
+        ZERO_ADDRESS,
+        3,
+        None,
+        Some(&resource),
+    )
+    .await?;
+    // 44: an active surface, then an unattributed zero Transfer at its node.
+    child_surface(&fixture, 44, "surfaced.owners.eth", &parent_labels).await?;
+    transfer(&fixture, "zero-surfaced", 44, ZERO_ADDRESS, 3).await?;
+    fixture.publish(4).await?;
+    let report = fixture.compare(2).await?;
+    unexpected(&report, &[])?;
+    let visible = shadow::shadow_children(fixture.pool(), &parent_id).await?;
+    let expected: std::collections::BTreeSet<String> = [41, 45]
+        .iter()
+        .map(|child| format!("ens:{}", word(*child)))
+        .collect();
+    ensure!(visible == expected, "{visible:?}");
+    fixture.cleanup().await
+}
+
+// A locked parent whose migration registry evidence is rejected, by a missing registry
+// announcement or by a migration whose evidence does not contain the association's, serves none
+// of its ENSv1 children, even a migratable one.
+#[tokio::test]
+async fn rejected_migration_evidence_hides_a_locked_parents_children() -> Result<()> {
+    for (evidence, prefix) in [
+        (
+            Evidence::NoAnnouncement,
+            "families_shadow_children_no_announcement",
+        ),
+        (
+            Evidence::UnmatchedMigration,
+            "families_shadow_children_unmatched",
+        ),
+    ] {
+        let mut fixture = Fixture::new(prefix, 12).await?;
+        let (parent_id, parent_node, parent_labels) = parent(&fixture, 1, "locked").await?;
+        let registry = uuid(0xf9);
+        migration_registry(&fixture, &parent_id, &registry, &address(0xf9), 2, evidence).await?;
+        fixture.label(&word(0x5000 + 1), "migratable", true).await?;
+        let logical = child_surface(&fixture, 1, "migratable.locked.eth", &parent_labels).await?;
+        let wrapper = uuid(0xc001);
+        fixture.resource(&wrapper, 1).await?;
+        edge(&fixture, "edge-migratable", &parent_node, 1, &owner(1), 2).await?;
+        fixture
+            .event(
+                "fuses-migratable",
+                Some(&logical),
+                Some(&wrapper),
+                "ens_v1_wrapper_l1",
+                "PermissionScopeChanged",
+                2,
+                json!({"fuses": 65_536, "wrapper_state": "emancipated"}),
+                &address(0xe4),
+            )
+            .await?;
+        fixture
+            .event(
+                "expiry-migratable",
+                Some(&logical),
+                Some(&wrapper),
+                "ens_v1_wrapper_l1",
+                "ExpiryChanged",
+                2,
+                json!({"expiry": shadow_fixture::EPOCH + 1_000_000}),
+                &address(0xe4),
+            )
+            .await?;
+        fixture.publish(4).await?;
+        let report = fixture.compare(1).await?;
+        unexpected(&report, &[])?;
+        ensure!(
+            shadow::shadow_children(fixture.pool(), &parent_id)
+                .await?
+                .is_empty(),
+            "{evidence:?}: {}",
+            report.line()
+        );
+        fixture.cleanup().await?;
+    }
+    Ok(())
 }
