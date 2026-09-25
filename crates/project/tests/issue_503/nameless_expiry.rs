@@ -11,6 +11,9 @@ use super::*;
 // takes the token's name also writes a named release first (see production_interpret
 // `a_detached_child_expiry_is_released_without_a_name_and_stays_a_v2_tombstone`), and this case
 // leaves that release out so the nameless one decides alone.
+// The name's registration section follows the same selection (Tate's ruling of 2026-09-26): it
+// reads the nameless release on the resource the name was last bound to, so it serves the release
+// too, not the old grant.
 // (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L255-L258 @ ens_v2@a971bd64)
 #[tokio::test]
 async fn a_nameless_path_expiry_release_keeps_the_name_on_its_v2_tombstone() -> Result<()> {
@@ -62,27 +65,39 @@ async fn a_nameless_path_expiry_release_keeps_the_name_on_its_v2_tombstone() -> 
         lifecycle_state(&pool, &logical).await?.as_deref(),
         Some("unregistered")
     );
-    let (resource, binding, status): (Option<String>, Option<String>, Option<String>) =
-        sqlx::query_as(
-            "SELECT resource_id::text, surface_binding_id::text,
-                    declared_summary #>> '{registration,status}'
-             FROM name_current WHERE logical_name_id = $1",
-        )
-        .bind(&logical)
-        .fetch_one(&pool)
-        .await?;
-    // Known gap: the served registration block still reads ENSv2 lifecycle events by name, so
-    // it does not see the nameless release and serves the grant. How that block counts an event
-    // with a resource and no name is the open question the TYR-36 step 3 report left for a ruling
-    // (`unnamed_resource_event_in_key_state`). On Interpret output a named release comes first,
-    // so the block serves `released` there.
+    type Served = (
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    );
+    let served: Served = sqlx::query_as(
+        "SELECT resource_id::text, surface_binding_id::text,
+                declared_summary #>> '{registration,status}',
+                declared_summary #>> '{registration,latest_event_kind}',
+                declared_summary #>> '{control,status}'
+         FROM name_current WHERE logical_name_id = $1",
+    )
+    .bind(&logical)
+    .fetch_one(&pool)
+    .await?;
     assert_eq!(
-        (resource.as_deref(), binding.as_deref(), status.as_deref()),
+        (
+            served.0.as_deref(),
+            served.1.as_deref(),
+            served.2.as_deref(),
+            served.3.as_deref(),
+            served.4.as_deref(),
+        ),
         (
             Some(v2_resource.as_str()),
             Some(v2_binding.as_str()),
-            Some("active")
-        )
+            Some("released"),
+            Some("RegistrationReleased"),
+            Some("unregistered"),
+        ),
+        "the registration section serves the nameless release, as authority selection does"
     );
     db.cleanup().await?;
     Ok(())

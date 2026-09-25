@@ -5400,6 +5400,34 @@ async fn a_detached_child_expiry_is_released_without_a_name_and_stays_a_v2_tombs
             Some("released".into()),
         )
     );
+    // The registration section reads the same latest fact as authority selection (Tate's ruling
+    // of 2026-09-26): the nameless path-expiry release at block 2, not the named path-cut release
+    // at block 1. So it serves that release's time and the lapsed expiry the entry still holds,
+    // and the control section is unregistered.
+    let details: (
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    ) = sqlx::query_as(
+        "SELECT declared_summary #>> '{registration,latest_event_kind}',
+                declared_summary #>> '{registration,released_at}',
+                declared_summary #>> '{registration,expiry}',
+                declared_summary #>> '{control,status}'
+         FROM name_current WHERE logical_name_id = $1",
+    )
+    .bind(&leaf)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        details,
+        (
+            Some("RegistrationReleased".into()),
+            Some("2".into()),
+            Some("2".into()),
+            Some("unregistered".into()),
+        )
+    );
     scratch.cleanup().await
 }
 

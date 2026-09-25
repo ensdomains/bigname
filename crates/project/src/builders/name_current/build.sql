@@ -309,7 +309,13 @@
         LEFT JOIN LATERAL (
             SELECT event.event_kind, event.after_state, event.resource_id, event.lifecycle_key
             FROM (SELECT DISTINCT ON (event.lifecycle_key) event.* FROM project_v2_lifecycle_events event
-            WHERE event.logical_name_id = surface.logical_name_id AND (
+            -- Like authority selection, a release Interpret wrote without a name on the resource
+            -- the name was last bound to is that registration's release (Tate's ruling of
+            -- 2026-09-26), so the section serves it as authority selection does. The selected
+            -- binding of an ENSv2 name is on that resource.
+            WHERE (event.logical_name_id = surface.logical_name_id
+                   OR (event.logical_name_id IS NULL AND event.event_kind = 'RegistrationReleased'
+                       AND event.lifecycle_key = binding.resource_id::text)) AND (
                   event.event_kind IN ('RegistrationGranted', 'RegistrationReserved') OR
                   (event.event_kind = 'RegistrationReleased' AND ((event.after_state ->> 'source_event' = 'RegistryPathExpired' AND event.after_state ->> 'derived_from' = 'interpreter_state' AND event.after_state ->> 'terminal_reason' = 'registry_name_binding_expired')
                         OR EXISTS (SELECT 1 FROM project_v2_lifecycle_events active WHERE active.logical_name_id = event.logical_name_id AND active.lifecycle_key = event.lifecycle_key
@@ -354,7 +360,10 @@
                    selected_registration.is_v2_lifecycle AND selected_registration.event_kind IS NOT NULL AND selected_registration.resource_id IS DISTINCT FROM binding.resource_id AS mismatch) identity) row_identity
         LEFT JOIN LATERAL (
             SELECT event.event_kind FROM project_v2_lifecycle_events event
-            WHERE selected_registration.is_v2_lifecycle AND event.logical_name_id = surface.logical_name_id
+            WHERE selected_registration.is_v2_lifecycle
+              AND (event.logical_name_id = surface.logical_name_id
+                   OR (event.logical_name_id IS NULL AND event.event_kind = 'RegistrationReleased'
+                       AND event.lifecycle_key = binding.resource_id::text))
               AND event.lifecycle_key IS NOT DISTINCT FROM COALESCE(selected_registration.lifecycle_key, row_identity.event_resource_id::text)
               AND event.event_kind IN ('RegistrationGranted', 'RegistrationRenewed', 'RegistrationReleased', 'RegistrationReserved', 'ExpiryChanged')
             ORDER BY event.block_number DESC NULLS LAST, event.transaction_index DESC NULLS LAST,
