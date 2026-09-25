@@ -96,6 +96,14 @@ pub(super) async fn run(
         }
         FamilyMode::Redo { from, .. } if *from < 1 => Some(Reason::of_redo(session)),
         FamilyMode::Normal if attempt > recorded => Some(Reason::OperatorRedo),
+        // Families another binary wrote: a served rebuild whose family run was skipped leaves
+        // them, and nothing else would rebuild them.
+        _ if family.current.is_some()
+            && family.input_content_hash.as_deref()
+                != Some(options.input_content_hash.as_str()) =>
+        {
+            Some(Reason::ContentHashRebuild)
+        }
         _ if family.current.is_none() && rebuilding.is_none() => Some(Reason::ContentHashRebuild),
         _ => None,
     };

@@ -506,3 +506,42 @@ async fn a_rebuild_over_two_runs_refreshes_the_statistics_once_per_threshold() -
     );
     fixture.cleanup().await
 }
+
+// A served rebuild under a new binary whose family run was skipped (a late or failed token read)
+// leaves families written under the old content hash. The next run, even a plain follow,
+// rebuilds them under its own hash.
+#[tokio::test]
+async fn families_from_another_content_hash_rebuild_after_a_skipped_rebuild() -> Result<()> {
+    let fixture = Fixture::new("families_repair_hash_fence", 20).await?;
+    seed(&fixture, 11..=15).await?;
+    fixture.apply(14, FamilyMode::Normal).await;
+    // The served rebuild's family run under the new binary never ran.
+    let rotated = FamilyOptions::new("rotated-content-hash");
+    let next = fixture.apply_with(15, FamilyMode::Normal, &rotated).await;
+    assert_eq!(next.skipped, None);
+    assert!(next.reset, "the families were written by another binary");
+    let record = fixture.repair_record().await?.unwrap_or_default();
+    assert_eq!(
+        (
+            &record["state"],
+            &record["reason"],
+            &record["completed_input_hash"]
+        ),
+        (
+            &json!("complete"),
+            &json!("content_hash_rebuild"),
+            &json!("rotated-content-hash")
+        )
+    );
+    let hash: Option<String> = sqlx::query_scalar(
+        "SELECT input_content_hash FROM project_family_marker WHERE chain_id = $1",
+    )
+    .bind(CHAIN)
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(hash.as_deref(), Some("rotated-content-hash"));
+    let incremental = fixture.snapshot().await?;
+    fixture.apply_with(15, FamilyMode::Rebuild, &rotated).await;
+    assert_eq!(fixture.snapshot().await?, incremental);
+    fixture.cleanup().await
+}
