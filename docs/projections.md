@@ -1872,13 +1872,16 @@ registration live in today's order and lapse it canonically, the served value is
 not empty, and the families read in today's order give it. That read also
 folds the registry root's admin powers in today's order, so when the resource
 has a root, the root's retained events must match the log too; if they do not,
-every differing field of the resource is refused, its permission rows included.
+the resource's permission-row, admin-power and restriction excuses are refused.
+Its registry-binding and operator-row checks are separate.
 A served empty value against a family row is a mismatch. A live registration's restriction block
 reads its registry root's admin powers, so it also passes when only the root's
 lapse differs between the orders, the whole block read in today's order equals
 the served one and the canonical read the shadow one. The canonical side is the
-families read against themselves; the pass is sound because a wrong root value
-leaves the root's own admin powers a mismatch, which fails the run. These checks run for
+families read against themselves, so the rule is sound for the report, not for
+the field: a wrong root value leaves the root's own admin powers a mismatch, and
+a wrong child admin power the live root also holds can let the child's block
+pass while the child's own admin powers stay a mismatch; either fails the run. These checks run for
 the items that differ: a family value equal to the served one is not a
 difference. One ENSv1 NewOwner log yields a
 SubregistryChanged and an AuthorityTransferred at one position; the families keep

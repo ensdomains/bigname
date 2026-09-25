@@ -880,19 +880,12 @@ async fn a_transfer_to_the_delegate_from_one_log_drops_the_recipients_holder_row
     fixture.cleanup().await
 }
 
-/// Codex thread PRRT_kwDOSJpxAs6l9h_u: a live ENSv2 registration's locked roles read its
-/// registry root's admin powers (resource_summary.rs:272-325), which the root's own path-expiry
-/// drop decides. The root holds a grant at block 10 and its `admin_renew` admin at 11; at block
-/// 14 the interpreter's path-expiry release of the root (log 2) is written before a new grant
-/// of it (log 1). The canonical order takes the release last and lapses the root, so the
-/// families lock every role of the child; today's order takes the grant (higher id), keeps the
-/// root live and serves `renew` unlocked. The child's restriction block differs only through
-/// its root, and passes as a same-block delta only when the whole block read in today's order
-/// equals the served one and the canonical read the shadow one. A wrong admin role in the
-/// families, on the root or on the child, leaves the child's block a mismatch.
-#[tokio::test]
-async fn a_root_reversal_moves_the_child_restrictions_as_a_same_block_delta() -> Result<()> {
-    let fixture = Fixture::new("families_shadow_permissions_root_reversal", 20).await?;
+/// The root-reversal shape: child registration `uuid(1)` bound to name 1 and granted at 10, its
+/// holder given `child_powers` on it; registry root `uuid(50)` granted at 10 with `admin_renew`
+/// at 11, and at block 14 the root's path-expiry release (log 2) written before a new grant of it
+/// (log 1). The canonical order takes the release last and lapses the root; today's order takes
+/// the grant (higher id) and keeps it live.
+async fn root_reversal(fixture: &Fixture, child_powers: &[&str]) -> Result<(String, String)> {
     let (child, root) = (uuid(1), uuid(50));
     for (resource, upstream) in [(&child, CHILD_WORD), (&root, ZERO_WORD)] {
         fixture.resource(resource).await?;
@@ -937,15 +930,7 @@ async fn a_root_reversal_moves_the_child_restrictions_as_a_same_block_delta() ->
             V2_REGISTRY,
         )
         .await?;
-    role(
-        &fixture,
-        false,
-        10,
-        &child,
-        HOLDER,
-        &["unregister", "set_resolver"],
-    )
-    .await?;
+    role(fixture, false, 10, &child, HOLDER, child_powers).await?;
     let root_grant = |identity: &'static str, block: i64| {
         support::Event::new(
             identity,
@@ -959,7 +944,7 @@ async fn a_root_reversal_moves_the_child_restrictions_as_a_same_block_delta() ->
         .raw(json!({"emitting_address": V2_REGISTRY}))
     };
     fixture.event(root_grant("root-grant-10", 10)).await?;
-    role(&fixture, true, 11, &root, ROOT_ADMIN, &["admin_renew"]).await?;
+    role(fixture, true, 11, &root, ROOT_ADMIN, &["admin_renew"]).await?;
     fixture
         .event(
             support::Event::new(
@@ -980,11 +965,72 @@ async fn a_root_reversal_moves_the_child_restrictions_as_a_same_block_delta() ->
         )
         .await?;
     fixture.event(root_grant("root-grant-14", 14)).await?;
+    Ok((child, root))
+}
+
+/// The resource's `project_resource_admin_aggregate.admin_powers` object, keyed by holder.
+async fn admin_aggregate(fixture: &Fixture, resource: &str) -> Result<Value> {
+    Ok(sqlx::query_scalar(
+        "SELECT admin_powers FROM bigname_phase.project_resource_admin_aggregate
+         WHERE resource_id = $1::uuid",
+    )
+    .bind(resource)
+    .fetch_one(&fixture.pool)
+    .await?)
+}
+
+/// Replace the resource's admin aggregate object; exactly one row must change.
+async fn set_admin_aggregate(fixture: &Fixture, resource: &str, powers: &Value) -> Result<()> {
+    let updated = sqlx::query(
+        "UPDATE bigname_phase.project_resource_admin_aggregate SET admin_powers = $2
+         WHERE resource_id = $1::uuid",
+    )
+    .bind(resource)
+    .bind(powers)
+    .execute(&fixture.pool)
+    .await?
+    .rows_affected();
+    assert_eq!(updated, 1, "one admin aggregate row of {resource}");
+    Ok(())
+}
+
+/// Every holder of the aggregate given exactly `powers`.
+fn every_holder(aggregate: &Value, powers: &[&str]) -> Value {
+    Value::Object(
+        aggregate
+            .as_object()
+            .expect("the reducer keeps an object keyed by holder")
+            .keys()
+            .map(|holder| (holder.clone(), json!(powers)))
+            .collect(),
+    )
+}
+
+/// Codex thread PRRT_kwDOSJpxAs6l9h_u: a live ENSv2 registration's locked roles read its
+/// registry root's admin powers (resource_summary.rs:272-325), which the root's own path-expiry
+/// drop decides. The root holds a grant at block 10 and its `admin_renew` admin at 11; at block
+/// 14 the interpreter's path-expiry release of the root (log 2) is written before a new grant
+/// of it (log 1). The canonical order takes the release last and lapses the root, so the
+/// families lock every role of the child; today's order takes the grant (higher id), keeps the
+/// root live and serves `renew` unlocked. The child's restriction block differs only through
+/// its root, and passes as a same-block delta only when the whole block read in today's order
+/// equals the served one and the canonical read the shadow one. The child's holder also holds
+/// `admin_set_subregistry`, so both resources have an admin aggregate. A wrong admin role in the
+/// families, on the root or on the child, written into that holder-keyed object and restored
+/// before the next case, leaves the child's block a mismatch and fails the report.
+#[tokio::test]
+async fn a_root_reversal_moves_the_child_restrictions_as_a_same_block_delta() -> Result<()> {
+    let fixture = Fixture::new("families_shadow_permissions_root_reversal", 20).await?;
+    let (child, root) = root_reversal(
+        &fixture,
+        &["unregister", "set_resolver", "admin_set_subregistry"],
+    )
+    .await?;
     let report = publish_and_compare(&fixture, 16).await?;
     assert_eq!(
         locked_roles(&fixture, &child).await?,
         Some(json!({"kind": "ens_v2_registry",
-                    "locked_roles": ["unregister", "set_subregistry", "set_resolver", "transfer"]})),
+                    "locked_roles": ["unregister", "set_resolver", "transfer"]})),
         "today's order keeps the root live and serves renew unlocked"
     );
     // The root's own rows, admin powers and restriction block are the resource's own lapse
@@ -998,37 +1044,117 @@ async fn a_root_reversal_moves_the_child_restrictions_as_a_same_block_delta() ->
             ("d12_same_block_order:resource_restrictions", 2),
         ],
     );
-    for (case, resource) in [("root admin", &root), ("child admin", &child)] {
-        sqlx::query(
-            "UPDATE bigname_phase.project_resource_admin_aggregate
-             SET admin_powers = '[\"admin_set_resolver\"]'::jsonb WHERE resource_id = $1::uuid",
+    let baseline = (
+        report.expected_delta_fields.clone(),
+        report.mismatched,
+        report.equal,
+    );
+    for (case, resource, fields) in [
+        (
+            "root admin",
+            &root,
+            vec![
+                (root.as_str(), "admin_powers"),
+                (root.as_str(), "resource_restrictions"),
+                (child.as_str(), "resource_restrictions"),
+            ],
+        ),
+        (
+            "child admin",
+            &child,
+            vec![
+                (child.as_str(), "admin_powers"),
+                (child.as_str(), "resource_restrictions"),
+            ],
+        ),
+    ] {
+        let original = admin_aggregate(&fixture, resource).await?;
+        set_admin_aggregate(
+            &fixture,
+            resource,
+            &every_holder(&original, &["admin_set_resolver"]),
         )
-        .bind(resource)
-        .execute(&fixture.pool)
         .await?;
         let mutated = shadow_support::compare::compare(&fixture.pool, CHAIN, 16).await?;
-        assert!(
-            mutated.lines.iter().any(|line| {
-                line.starts_with("SEPOLIA_END_TO_END_SHADOW_MISMATCH")
-                    && line.contains(&format!("key={child} "))
-                    && line.contains("field=resource_restrictions")
-            }),
-            "{case}: a wrong admin must leave the child's block a mismatch: {:#?}",
-            mutated.lines
+        let mut failed: Vec<(String, String)> = mutated
+            .lines
+            .iter()
+            .filter(|line| line.starts_with("SEPOLIA_END_TO_END_SHADOW_MISMATCH"))
+            .filter_map(|line| {
+                let key = line.split(" key=").nth(1)?.split(' ').next()?;
+                let field = line.split(" field=").nth(1)?.split(' ').next()?;
+                Some((key.to_owned(), field.to_owned()))
+            })
+            .collect();
+        failed.sort();
+        let mut expected: Vec<(String, String)> = fields
+            .iter()
+            .map(|(key, field)| ((*key).to_owned(), (*field).to_owned()))
+            .collect();
+        expected.sort();
+        assert_eq!(failed, expected, "{case}: {:#?}", mutated.lines);
+        set_admin_aggregate(&fixture, resource, &original).await?;
+        let restored = shadow_support::compare::compare(&fixture.pool, CHAIN, 16).await?;
+        assert_eq!(
+            (
+                restored.expected_delta_fields,
+                restored.mismatched,
+                restored.equal
+            ),
+            baseline,
+            "{case}: the baseline is back before the next case"
         );
-        sqlx::query(
-            "UPDATE bigname_phase.project_resource_admin_aggregate
-             SET admin_powers = $2 WHERE resource_id = $1::uuid",
-        )
-        .bind(resource)
-        .bind(if resource == &root {
-            json!(["admin_renew"])
-        } else {
-            json!([])
-        })
-        .execute(&fixture.pool)
-        .await?;
     }
+    fixture.cleanup().await
+}
+
+/// Pro r5 Q6 on c23e3e5b, overlapping admin powers: the child's holder and the root's admin
+/// both hold `admin_renew`, so `renew` is unlocked on the child in both orders and nothing
+/// differs. With `admin_renew` removed only from the child's aggregate, today's read of the
+/// child's block still unlocks `renew` through the live root and equals the served block, while
+/// the canonical read, the root lapsed, locks it and equals the corrupt shadow: the restriction
+/// block alone could pass as the root-reversal delta. The child's own admin powers still differ
+/// and no excuse covers them, so the report fails through `admin_powers`.
+#[tokio::test]
+async fn a_child_admin_power_the_root_also_holds_still_fails_the_report() -> Result<()> {
+    let fixture = Fixture::new("families_shadow_permissions_root_overlap", 20).await?;
+    let (child, _) =
+        root_reversal(&fixture, &["unregister", "set_resolver", "admin_renew"]).await?;
+    let report = publish_and_compare(&fixture, 16).await?;
+    shadow_support::assert_counts(
+        &report,
+        &[],
+        &[
+            ("d12_same_block_order:admin_powers", 1),
+            ("d12_same_block_order:permissions_current", 1),
+            ("d12_same_block_order:resource_restrictions", 1),
+        ],
+    );
+    let holders = admin_aggregate(&fixture, &child).await?;
+    set_admin_aggregate(&fixture, &child, &every_holder(&holders, &[])).await?;
+    let mutated = shadow_support::compare::compare(&fixture.pool, CHAIN, 16).await?;
+    // The child's restriction block passes as the root-reversal delta, as the rule allows; the
+    // child's admin powers are the one mismatch, and they fail the run.
+    let failed: Vec<&str> = mutated
+        .lines
+        .iter()
+        .filter(|line| line.starts_with("SEPOLIA_END_TO_END_SHADOW_MISMATCH"))
+        .filter(|line| line.contains(&format!("key={child} ")))
+        .filter_map(|line| line.split(" field=").nth(1)?.split(' ').next())
+        .collect();
+    assert_eq!(failed, ["admin_powers"], "{:#?}", mutated.lines);
+    assert_eq!(mutated.mismatched, 1, "{:#?}", mutated.lines);
+    assert_eq!(
+        mutated.expected_delta_fields,
+        [
+            ("d12_same_block_order:admin_powers".to_owned(), 1),
+            ("d12_same_block_order:permissions_current".to_owned(), 1),
+            ("d12_same_block_order:resource_restrictions".to_owned(), 2),
+        ]
+        .into(),
+        "{:#?}",
+        mutated.lines
+    );
     fixture.cleanup().await
 }
 
@@ -1038,7 +1164,8 @@ async fn a_root_reversal_moves_the_child_restrictions_as_a_same_block_delta() ->
 /// written before a new grant (log 1): today's order keeps it live, the canonical order lapses
 /// it, and its permission rows pass as a same-block delta. With the root's grant row dropped
 /// from the families, the root's retained events no longer match the log, and the child's
-/// permission rows stay a mismatch: the refusal is in the safe direction.
+/// permission-row and restriction excuses are refused (the admin-power one would be too; the
+/// child has no admin difference here): the refusal is in the safe direction.
 #[tokio::test]
 async fn a_root_retention_gap_refuses_the_child_permission_excuse() -> Result<()> {
     let fixture = Fixture::new("families_shadow_permissions_root_gap", 20).await?;
@@ -1181,7 +1308,8 @@ async fn a_root_retention_gap_refuses_the_child_permission_excuse() -> Result<()
         "a root retention gap must leave the child's permission rows a mismatch: {:#?}",
         mutated.lines
     );
-    // Every differing field of the child is refused, the restriction block included.
+    // Both differing fields of the child are refused; they are the permission-row and
+    // restriction excuses `resource_excuses` gives.
     assert!(
         mutated.expected_delta_fields.is_empty(),
         "{:#?}",
