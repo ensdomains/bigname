@@ -1811,7 +1811,7 @@ steps that read them must key on. Each is also stated on its table or column:
   keeps every EVM-shaped addr value past a version change, under the
   `logical_name_id` it was written under, because a later link can keep such a
   value served. The reader owns the version and link boundary (the table
-  comment, set by migration `20260926101200`).
+  comment, set by schema-migration `20260926101200`).
 - The undo journal is not pruned while the chain has no finalized or safe
   head.
 
