@@ -15,8 +15,8 @@
 //! priority 1 the edges themselves, declaration_precedence.rs) and the manifests are read at the
 //! block. A resolver is classified again when an event of the block names it, when a pointer row
 //! moves to or from it, when a resolver edge, its contract address or a manifest declaration of
-//! it starts or stops at the block, and, every stored resolver, when the block sees another
-//! active manifest set. A resolver with no candidate has no row. One with candidates but no active
+//! it starts or stops at the block, and, every stored resolver and every address an active
+//! resolver edge reaches, when the block sees another active manifest set. A resolver with no candidate has no row. One with candidates but no active
 //! manifest of its family, which the served build leaves out, keeps a row marked unsupported with
 //! `resolver_manifest_not_active`. The row's position is the latest event that named the
 //! resolver, or `activation:<block>` for an activation; a manifest set change reclassifies
@@ -147,16 +147,38 @@ pub(super) async fn apply(
         .chain(activated.iter().cloned())
         .collect();
     if context.manifests_changed {
-        let stored: Vec<String> = sqlx::query_scalar(
+        // Every stored resolver, and every address a resolver edge reaches at the block: an
+        // edge-only resolver whose origin manifest retired has no row, and nothing else names it
+        // when the manifest returns.
+        let candidates: Vec<String> = sqlx::query_scalar(
             "/* project:families.classification.stored */ SELECT resolver_address
-             FROM project_resolver_classification WHERE chain_id = $1",
+             FROM project_resolver_classification WHERE chain_id = $1
+             UNION
+             SELECT lower(address.address) FROM discovery_edges edge
+             JOIN contract_instance_addresses address
+               ON address.contract_instance_id = edge.to_contract_instance_id
+              AND address.chain_id = edge.chain_id
+             WHERE edge.chain_id = $1 AND edge.edge_kind = 'resolver'
+               AND edge.deactivated_at IS NULL
+               AND (edge.active_from_block_number IS NULL OR edge.active_from_block_number <= $2)
+               AND (edge.active_to_block_number IS NULL OR edge.active_to_block_number > $2)
+               AND address.deactivated_at IS NULL
+               AND (address.active_from_block_number IS NULL
+                    OR address.active_from_block_number <= $2)
+               AND (address.active_to_block_number IS NULL
+                    OR address.active_to_block_number > $2)",
         )
         .bind(context.chain_id)
+        .bind(context.block.number)
         .fetch_all(&mut **transaction)
         .await
         .map_err(|error| ProjectError::database("failed to read classified resolvers", error))
         .map_err(in_family(table.name))?;
-        touched.extend(stored);
+        touched.extend(
+            candidates
+                .into_iter()
+                .map(|address| address.to_ascii_lowercase()),
+        );
     }
     if touched.is_empty() {
         return Ok(());
