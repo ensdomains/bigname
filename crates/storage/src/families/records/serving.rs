@@ -27,7 +27,9 @@ pub(crate) struct ServingPointer {
 /// The serving pointer of an F5 row, `None` when the current pointer is a clear or the resource
 /// has only version changes. The row keeps neither the pointer event's normalized event id (when
 /// a later version change owns the row) nor its logical name, so both are read back from
-/// `normalized_events` by the pointer's event identity.
+/// `normalized_events` by the pointer's event identity. A pointer event without a logical name
+/// serves no records here, as today's serving pointer requires one; the comparison then reports
+/// the row that today's reader serves through an older named pointer.
 pub(crate) async fn serving_pointer(
     pool: &PgPool,
     pointer: &FamilyResourcePointer,
@@ -43,11 +45,7 @@ pub(crate) async fn serving_pointer(
     let probed = probe_events(pool, std::slice::from_ref(&position.event_identity)).await?;
     let event = probed.get(&position.event_identity);
     let Some(logical_name_id) = event.and_then(|event| event.logical_name_id.clone()) else {
-        anyhow::bail!(
-            "the family pointer of {} names event {} with no logical name",
-            pointer.resource_id,
-            position.event_identity
-        );
+        return Ok(None);
     };
     Ok(Some(ServingPointer {
         resource_id: pointer.resource_id,

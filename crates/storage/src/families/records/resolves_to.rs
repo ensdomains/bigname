@@ -64,6 +64,10 @@ async fn candidate_resources(
          mirrors AS (
              SELECT chain_id, resolver_address FROM bigname_phase.resolver_current
              WHERE declared_summary #>> '{classification,role}' = 'ensv1_mirror_resolver'
+             UNION
+             SELECT chain_id, resolver_address
+             FROM bigname_phase.project_resolver_classification
+             WHERE classification ->> 'role' = 'ensv1_mirror_resolver'
          )
          SELECT DISTINCT pointer.chain_id, pointer.resource_id
          FROM keys
