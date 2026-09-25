@@ -308,6 +308,9 @@ pub struct WrapperRow {
     /// The expiry word, 0 to 2^64 - 1, kept as text so no value is truncated.
     pub expiry_seconds: Option<String>,
     pub has_expiry: bool,
+    /// Whether the newest wrapper lifecycle event (mint, NameUnwrapped, holder grant or holder
+    /// revoke) leaves the resource unwrapped.
+    pub lifecycle_unwrapped: Option<bool>,
 }
 
 impl WrapperRow {
@@ -322,6 +325,7 @@ impl WrapperRow {
                 .is_some_and(Value::is_object),
             expiry_seconds: text(row, "expiry_seconds"),
             has_expiry: row.get("expiry_position").is_some_and(Value::is_object),
+            lifecycle_unwrapped: flag(row, "lifecycle_unwrapped"),
         })
     }
 }

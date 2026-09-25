@@ -5,12 +5,7 @@ use std::collections::BTreeSet;
 
 use serde_json::{Value, json};
 
-use crate::families::control::{
-    rows::{LifecycleEvent, WrapperRow},
-    wrapper::restrictions,
-};
-
-use super::grants::GrantRow;
+use crate::families::control::{rows::WrapperRow, wrapper::restrictions};
 
 /// The ENSv2 roles a token-scoped admin can lock, with the admin power that keeps each open
 /// (resource_summary.rs:427-433).
@@ -48,42 +43,11 @@ pub fn locked_roles(own: &[String], root: &[String]) -> Value {
     )
 }
 
-/// Whether the wrapper's newest mint, holder grant, holder revocation or unwrap is not a mint or
-/// holder grant (resource_summary.rs:172-197). The families keep the wrapper's mint as a retained
-/// TokenControlTransferred with source event NameWrapped and every holder grant or revocation as
-/// a grant row; they keep no NameUnwrapped AuthorityEpochChanged or SurfaceUnbound, so an unwrap
-/// that revokes no holder grant is not seen and the restriction block stays (fixture
-/// `an_unwrap_that_revokes_no_holder_grant_is_not_seen`, a step 2 retention follow-up).
-pub fn wrapper_unwrapped(resource: &str, events: &[LifecycleEvent], grants: &[GrantRow]) -> bool {
-    let mint = events
-        .iter()
-        .filter(|event| {
-            event.resource_id.as_deref() == Some(resource)
-                && event.source_family == "ens_v1_wrapper_l1"
-                && event.event_kind == "TokenControlTransferred"
-                && event.source_event.as_deref() == Some("NameWrapped")
-        })
-        .map(|event| (event.position.clone(), false));
-    let holders = grants
-        .iter()
-        .filter(|grant| {
-            grant.resource_id == resource
-                && grant.scope_kind.as_deref() == Some("resource")
-                && [&grant.grant_source, &grant.revocation_source]
-                    .iter()
-                    .find_map(|source| source.get("relation_kind").and_then(Value::as_str))
-                    == Some("holder")
-        })
-        .map(|grant| {
-            let empty = grant
-                .effective_powers
-                .as_array()
-                .is_some_and(|powers| powers.is_empty());
-            (grant.position.clone(), empty)
-        });
-    mint.chain(holders)
-        .max_by(|left, right| left.0.cmp(&right.0))
-        .is_some_and(|(_, unwrapped)| unwrapped)
+/// Whether the wrapper's newest mint, holder grant, holder revocation or unwrap leaves it
+/// unwrapped (resource_summary.rs:172-197): step 2 keeps that verdict on the wrapper row
+/// (`project_wrapper_state.lifecycle_unwrapped`), NameUnwrapped included.
+pub fn wrapper_unwrapped(wrapper: Option<&WrapperRow>) -> bool {
+    wrapper.is_some_and(|row| row.lifecycle_unwrapped == Some(true))
 }
 
 /// The restriction block for a resource of `authority_kind`.

@@ -130,20 +130,6 @@ pub async fn load_shadow_permissions_in(
     } else {
         refolded(pool, chain_id, &ids, order).await?
     };
-    let mints: Vec<LifecycleEvent> = rows_for(
-        pool,
-        "/* storage:families.control.permissions.wrapper_mints */ SELECT to_jsonb(event)
-         FROM bigname_phase.project_lifecycle_event event
-         WHERE event.chain_id = $1 AND event.state_kind = 'resource' AND event.state_key = ANY($2)
-           AND event.event_kind = 'TokenControlTransferred'
-           AND event.source_family = 'ens_v1_wrapper_l1'",
-        chain_id,
-        &ids,
-    )
-    .await?
-    .iter()
-    .filter_map(LifecycleEvent::from_row)
-    .collect();
     let wrappers: BTreeMap<String, _> = load_wrapper_rows(pool, chain_id, &ids)
         .await?
         .into_iter()
@@ -221,7 +207,7 @@ pub async fn load_shadow_permissions_in(
             .as_deref()
             .map(admins)
             .unwrap_or_default();
-        let unwrapped = wrapper_unwrapped(resource, &mints, &grants);
+        let unwrapped = wrapper_unwrapped(wrappers.get(resource));
         let restrictions = resource_restrictions(
             input.authority_kind.as_deref(),
             wrappers.get(resource),

@@ -344,13 +344,11 @@ async fn combined_fuses_grace_and_the_operator_fan_out_mask_together() -> Result
 
 /// Item 6 of the TYR-36 step 3 review (Q6): the wrapper restriction block is served while the
 /// wrapper's newest mint, holder grant, holder revocation or NameUnwrapped is a mint or a
-/// holder grant (resource_summary.rs:164-196). The families keep the mint and every holder
-/// grant or revocation but no NameUnwrapped, so `wrapper_unwrapped` cannot observe an unwrap
-/// that revokes no holder grant: today's reader serves no block, the shadow still serves the
-/// wrapper block, and the difference fails. Step 2 retention follow-up: keep the wrapper's
-/// NameUnwrapped.
+/// holder grant (resource_summary.rs:164-196). Step 2 keeps that lifecycle on the wrapper row,
+/// NameUnwrapped included (`project_wrapper_state.lifecycle_unwrapped`), so an unwrap that
+/// revokes no holder grant is seen: neither side serves a restriction block.
 #[tokio::test]
-async fn an_unwrap_that_revokes_no_holder_grant_is_not_seen() -> Result<()> {
+async fn an_unwrap_that_revokes_no_holder_grant_clears_the_restrictions() -> Result<()> {
     let fixture = Fixture::new("families_shadow_permissions_unwrap", 20).await?;
     let fuses = PARENT_CANNOT_CONTROL;
     let expiry = timestamp(TARGET) + 1_000_000;
@@ -389,32 +387,10 @@ async fn an_unwrap_that_revokes_no_holder_grant_is_not_seen() -> Result<()> {
     )
     .await?;
     assert_eq!(
-        shadow[&resource].restrictions,
-        Some(
-            json!({"kind": "ens_v1_wrapper", "wrapper_state": "emancipated",
-                    "fuses": fuses, "expiry_seconds": expiry})
-        ),
-        "the families do not"
+        shadow[&resource].restrictions, None,
+        "the families see it too"
     );
-    assert!(report.known_discrepancy.is_empty(), "{:#?}", report.lines);
-    assert!(
-        report.expected_delta_fields.is_empty(),
-        "{:#?}",
-        report.lines
-    );
-    assert_eq!(report.mismatched, 1, "{:#?}", report.lines);
-    let mismatched: Vec<&str> = report
-        .lines
-        .iter()
-        .filter(|line| line.starts_with("SEPOLIA_END_TO_END_SHADOW_MISMATCH"))
-        .filter_map(|line| line.split(" field=").nth(1)?.split(' ').next())
-        .collect();
-    assert_eq!(
-        mismatched,
-        vec!["resource_restrictions"],
-        "{:#?}",
-        report.lines
-    );
+    shadow_support::assert_counts(&report, &[], &[]);
     fixture.cleanup().await
 }
 
