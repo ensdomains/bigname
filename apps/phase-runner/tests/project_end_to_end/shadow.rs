@@ -23,10 +23,11 @@
 //!   (`v2_lifecycle_events.sql:10-23`), gives exactly the served value for the field. Those
 //!   reads take the name's retained lifecycle events rebuilt from the publication-visible log,
 //!   not the family rows, and the same rebuild read in the canonical order must give the
-//!   shadow value; every named cause below needs that too. A `control/*` field also needs
-//!   every owner event, epoch start (its kind, name and arm) and binding candidate's
-//!   SurfaceBound (its kind, name, resource, authority kind and key, state-derived flag and
-//!   owner) the families hold for the name to equal its rebuild from that log. For a
+//!   shadow value; every named cause below needs that too. Every name field also needs each
+//!   epoch start (its kind, name and arm) and binding candidate's SurfaceBound (its kind, name,
+//!   resource, authority kind and key, state-derived flag and owner) the families hold for the
+//!   name to equal its rebuild from that log, since the registration's authority kind and key
+//!   read them too, and a `control/*` field every owner-setting event of its node. For a
 //!   resource's permission rows, admin powers and restriction block, the path-expiry drop rule of
 //!   permissions.rs:111-133, :391-398 must keep the registration live in today's order and
 //!   lapse it in the canonical order, the served value must not be empty, and the whole read in
@@ -925,7 +926,7 @@ async fn name_excuses(
         return Ok(out);
     };
     let today = evaluate(&legacy, clock);
-    let mut control_holds = None;
+    let mut checks = None;
     for (index, diff) in diffs.iter().enumerate() {
         // Only the fields both reads compute: an authority-selection field has no today's-order
         // value here and stays open.
@@ -935,16 +936,15 @@ async fn name_excuses(
         {
             continue;
         }
-        // A control field also needs the families' other control facts to be what the event
-        // log gives.
-        if diff.field.starts_with("control/") {
-            if control_holds.is_none() {
-                control_holds =
-                    Some(control_facts_hold(pool, chain, clock.block_number, &facts).await?);
-            }
-            if control_holds != Some(true) {
-                continue;
-            }
+        // Both blocks also read the families' identity facts, the epoch starts and the binding
+        // candidates' SurfaceBounds, and the control block the node's owner-setting events:
+        // those must be what the event log gives too.
+        if checks.is_none() {
+            checks = Some(control_fact_checks(pool, chain, clock.block_number, &facts).await?);
+        }
+        let held = checks.as_ref().expect("checked above");
+        if !held.identity || (diff.field.starts_with("control/") && !held.owners) {
+            continue;
         }
         out[index] = Excuse::SameBlockOrder;
     }
@@ -1216,6 +1216,25 @@ pub async fn control_facts_hold(
     target: i64,
     facts: &NameFacts,
 ) -> Result<bool> {
+    let checks = control_fact_checks(pool, chain, target, facts).await?;
+    Ok(checks.owners && checks.identity)
+}
+
+/// The two halves of `control_facts_hold`: the node's owner-setting events, which only the
+/// control block reads, and the identity facts (epoch starts and candidate SurfaceBounds),
+/// which the registration's authority kind and key read too (laterals.rs
+/// `authority_context`).
+pub struct ControlFactChecks {
+    pub owners: bool,
+    pub identity: bool,
+}
+
+pub async fn control_fact_checks(
+    pool: &PgPool,
+    chain: &str,
+    target: i64,
+    facts: &NameFacts,
+) -> Result<ControlFactChecks> {
     let identities: Vec<String> = control_positions(facts)
         .into_iter()
         .map(|position| position.event_identity)
@@ -1286,7 +1305,10 @@ pub async fn control_facts_hold(
                 })
             })
     });
-    Ok(owners_hold && starts_hold && bounds_hold)
+    Ok(ControlFactChecks {
+        owners: owners_hold,
+        identity: starts_hold && bounds_hold,
+    })
 }
 
 /// A resource's registry-operator rows as the effective-permission reader adds them, from its

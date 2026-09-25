@@ -1710,3 +1710,81 @@ async fn served_rows_the_serving_readers_exclude_are_not_compared() -> Result<()
     );
     fixture.cleanup().await
 }
+
+/// Codex thread PRRT_kwDOSJpxAs6l9H62: the registration's authority kind and key read the
+/// binding candidates' SurfaceBounds and the epoch starts as well as the lifecycle events
+/// (laterals.rs `authority_context`), so a registration field passes as a same-block delta only
+/// when those facts are what the log gives too. A state-derived registry-only SurfaceBound
+/// (key K-bound) and the lease's grant (key K-grant) share one log, the SurfaceBound written
+/// first: canonically the SurfaceBound is later (its identity sorts after the grant's), today
+/// the grant is (higher id). A wrong key on the family candidate moves the shadow value and the
+/// canonical read of the rebuilt lifecycle events together, while today's order still gives the
+/// grant's; the key must stay a mismatch.
+#[tokio::test]
+async fn a_wrong_candidate_authority_key_stays_a_registration_mismatch() -> Result<()> {
+    let fixture = Fixture::new("families_shadow_registry_candidate_key", 20).await?;
+    let node_resource = uuid(3);
+    fixture
+        .binding(&uuid(100), &name(1), &node_resource, "ens_v1", 10, 9, None)
+        .await?;
+    fixture
+        .write(
+            10,
+            9,
+            "SurfaceBound",
+            "registry_only_binding",
+            Some(&name(1)),
+            Some(&node_resource),
+            json!({"authority_kind": "registry_only", "state_derived": true,
+                   "authority_key": "K-bound", "registry_contract": REGISTRY, "owner": OTHER}),
+            REGISTRY,
+        )
+        .await?;
+    fixture
+        .write(
+            10,
+            9,
+            "RegistrationGranted",
+            V1_REGISTRAR,
+            Some(&name(1)),
+            Some(&node_resource),
+            json!({"authority_kind": "registrar", "authority_key": "K-grant",
+                   "status": "registered", "registrant": OWNER, "expiry": 2_000_000_000u64}),
+            REGISTRAR,
+        )
+        .await?;
+    let report = publish_and_compare(&fixture, 12).await?;
+    shadow_support::assert_counts(
+        &report,
+        &[],
+        &[
+            ("d12_same_block_order:registration/authority_key", 1),
+            ("d12_same_block_order:registration/authority_kind", 1),
+        ],
+    );
+    let (served, shadow) = shadow_support::name(&fixture, 12, &name(1)).await?;
+    assert_eq!(served.registration("authority_key"), json!("K-grant"));
+    assert_eq!(shadow.registration["authority_key"], json!("K-bound"));
+    sqlx::query(
+        "UPDATE bigname_phase.project_binding_candidate SET authority_key = 'K-wrong'
+         WHERE resource_id = $1::uuid",
+    )
+    .bind(&node_resource)
+    .execute(&fixture.pool)
+    .await?;
+    let mutated = shadow_support::compare::compare(&fixture.pool, CHAIN, 12).await?;
+    // The candidate's facts are checked as a whole, so the kind it also decides fails with the
+    // key.
+    assert!(
+        mutated.expected_delta_fields.is_empty() && mutated.known_discrepancy.is_empty(),
+        "a wrong candidate key must not pass: {:#?}",
+        mutated.lines
+    );
+    assert_eq!(
+        failed_fields(&mutated),
+        ["registration/authority_key", "registration/authority_kind"],
+        "{:#?}",
+        mutated.lines
+    );
+    fixture.cleanup().await
+}
