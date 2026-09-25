@@ -303,6 +303,7 @@ pub async fn compare(pool: &PgPool, chain: &str, target: i64) -> Result<Report> 
             })
             .collect();
         let nodes = load_registry_nodes(pool, chain, &node_keys).await?;
+        let mut pending: Vec<(&NameInput, Vec<Difference>, Value)> = Vec::new();
         for input in &inputs {
             let row = &rows[&input.logical_name_id];
             attributions.insert(
@@ -367,6 +368,18 @@ pub async fn compare(pool: &PgPool, chain: &str, target: i64) -> Result<Report> 
                     shadow: json!(ownerless),
                 });
             }
+            pending.push((input, diffs, selection));
+        }
+        // The excuse pass reads the chunk's differing names' facts and their log rows once for
+        // the chunk, not once per name.
+        let differing: Vec<NameInput> = pending
+            .iter()
+            .filter(|(_, diffs, _)| !diffs.is_empty())
+            .map(|(input, _, _)| (*input).clone())
+            .collect();
+        let prefetched = ExcuseInputs::load(pool, chain, clock.block_number, &differing).await?;
+        for (input, diffs, selection) in pending {
+            let shadow = &shadows[&input.logical_name_id];
             if !diffs.is_empty() && report.lines.len() < PRINTED {
                 report.lines.push(format!(
                     "SEPOLIA_END_TO_END_SHADOW_TRACE key={} selection={} trace={}",
@@ -375,7 +388,7 @@ pub async fn compare(pool: &PgPool, chain: &str, target: i64) -> Result<Report> 
                     Value::Object(shadow.trace.clone())
                 ));
             }
-            let excuses = name_excuses(pool, chain, &clock, input, shadow, &diffs).await?;
+            let excuses = name_excuses(&prefetched, &clock, input, shadow, &diffs);
             if excuses.contains(&Excuse::Known(
                 "served_membership_skips_unnamed_path_expiry",
             )) {
@@ -813,26 +826,15 @@ fn serves_the_raw_arm_release(input: &NameInput, shadow: &ShadowName, diff: &Dif
 /// The name's facts as today's name-scoped membership reads them: without the interpreter's
 /// unnamed path-expiry releases, every key folded from its retained events in today's
 /// generated-id order.
-async fn without_unnamed_release(
-    pool: &PgPool,
-    chain: &str,
-    target: i64,
-    facts: &NameFacts,
-) -> Result<NameFacts> {
+fn without_unnamed_release(facts: &NameFacts, ids: &BTreeMap<String, i64>) -> NameFacts {
     let mut membership = facts.clone();
     membership.events.retain(|event| {
         !(event.original_logical_name_id.is_none()
             && event.event_kind == "RegistrationReleased"
             && event.is_path_expiry())
     });
-    let identities: Vec<String> = membership
-        .events
-        .iter()
-        .map(|event| event.position.event_identity.clone())
-        .collect();
-    membership.order =
-        EventOrder::Generated(generated_ids(pool, chain, target, &identities).await?);
-    Ok(membership)
+    membership.order = EventOrder::Generated(ids.clone());
+    membership
 }
 
 /// Whether `read` computes `value` for `field`.
@@ -846,26 +848,22 @@ fn gives(read: Option<&ShadowName>, field: &str, value: &Value) -> bool {
 /// family rows: read in the canonical order (through the refolding path, so the stored key
 /// states and triple summaries are not read either) they must give the field's shadow value,
 /// so a wrong fact on a family row fails the fields it decides and no other.
-async fn name_excuses(
-    pool: &PgPool,
-    chain: &str,
+fn name_excuses(
+    prefetched: &ExcuseInputs,
     clock: &Clock,
     input: &NameInput,
     shadow: &ShadowName,
     diffs: &[Difference],
-) -> Result<Vec<Excuse>> {
+) -> Vec<Excuse> {
     let mut out = vec![Excuse::None; diffs.len()];
     if diffs.is_empty() {
-        return Ok(out);
+        return out;
     }
-    let Some(facts) = load_name_facts(pool, chain, std::slice::from_ref(input))
-        .await?
-        .pop()
-    else {
-        return Ok(out);
+    let Some(facts) = prefetched.facts.get(&input.logical_name_id) else {
+        return out;
     };
-    let Some(from_log) = log_facts(pool, chain, clock.block_number, &facts).await? else {
-        return Ok(out);
+    let Some(from_log) = log_facts_in(facts, &prefetched.log) else {
+        return out;
     };
     let canonical = evaluate(&in_canonical_ranks(&from_log), clock);
     let log_gives_shadow: Vec<bool> = diffs
@@ -879,14 +877,9 @@ async fn name_excuses(
         .iter()
         .map(|diff| serves_the_unnamed_release(shadow, diff))
         .collect();
-    let without_release = if unnamed.contains(&true) {
-        Some(evaluate(
-            &without_unnamed_release(pool, chain, clock.block_number, &from_log).await?,
-            clock,
-        ))
-    } else {
-        None
-    };
+    let without_release = unnamed
+        .contains(&true)
+        .then(|| evaluate(&without_unnamed_release(&from_log, &prefetched.ids), clock));
     for (index, diff) in diffs.iter().enumerate() {
         if !log_gives_shadow[index] {
             continue;
@@ -905,25 +898,13 @@ async fn name_excuses(
         .zip(&log_gives_shadow)
         .any(|(excuse, holds)| *excuse == Excuse::None && *holds)
     {
-        return Ok(out);
+        return out;
     }
 
     // The same events read in today's generated-id order at the selectors that use it: a field
     // passes as a same-block delta only when that read gives the served value.
-    let identities: Vec<String> = from_log
-        .events
-        .iter()
-        .map(|event| event.position.event_identity.clone())
-        .chain(
-            control_positions(&from_log)
-                .into_iter()
-                .map(|position| position.event_identity),
-        )
-        .collect();
-    let ids = generated_ids(pool, chain, clock.block_number, &identities).await?;
-    let keys = association_keys(pool, chain, clock.block_number, &identities).await?;
-    let Some(legacy) = legacy_facts(&from_log, &ids, &keys) else {
-        return Ok(out);
+    let Some(legacy) = legacy_facts(&from_log, &prefetched.ids, &prefetched.keys) else {
+        return out;
     };
     let today = evaluate(&legacy, clock);
     let mut checks = None;
@@ -940,7 +921,7 @@ async fn name_excuses(
         // candidates' SurfaceBounds, and the control block the node's owner-setting events:
         // those must be what the event log gives too.
         if checks.is_none() {
-            checks = Some(control_fact_checks(pool, chain, clock.block_number, &facts).await?);
+            checks = Some(control_fact_checks_in(facts, &prefetched.log));
         }
         let held = checks.as_ref().expect("checked above");
         if !held.identity || (diff.field.starts_with("control/") && !held.owners) {
@@ -948,7 +929,7 @@ async fn name_excuses(
         }
         out[index] = Excuse::SameBlockOrder;
     }
-    Ok(out)
+    out
 }
 
 /// The owner an authority event reports to the served control block, as step 2 stores it for
@@ -974,6 +955,8 @@ fn reported_control_owner(after: &Value) -> Option<String> {
 
 /// One publication-visible event of the log.
 pub struct LogEvent {
+    /// The generated normalized event id.
+    pub id: i64,
     pub kind: String,
     pub name: Option<String>,
     pub resource: Option<String>,
@@ -1003,12 +986,13 @@ pub async fn published_log(
         Option<String>,
         Value,
         Value,
+        i64,
     );
     let sql = format!(
         "SELECT event.event_identity, event.event_kind, event.logical_name_id,
                 event.resource_id::text, event.source_family, event.block_number,
                 event.transaction_index, event.log_index, event.transaction_hash,
-                event.before_state, event.after_state
+                event.before_state, event.after_state, event.normalized_event_id
          FROM normalized_events event
          WHERE event.chain_id = $1 AND event.event_identity = ANY($2) AND {}",
         published("$3")
@@ -1028,6 +1012,7 @@ pub async fn published_log(
                 event_identity: row.0.clone(),
             };
             let event = LogEvent {
+                id: row.11,
                 kind: row.1,
                 name: row.2,
                 resource: row.3,
@@ -1151,20 +1136,74 @@ async fn events_from_log(
         .collect())
 }
 
-/// The name's facts with every retained lifecycle event rebuilt from the publication-visible
-/// log; None when one is not there.
-pub async fn log_facts(
-    pool: &PgPool,
-    chain: &str,
-    target: i64,
-    facts: &NameFacts,
-) -> Result<Option<NameFacts>> {
-    let Some(events) = events_from_log(pool, chain, target, &facts.events).await? else {
-        return Ok(None);
-    };
+/// The name's facts with every retained lifecycle event rebuilt from its publication-visible
+/// log row in `log`; None when one is not there.
+fn log_facts_in(facts: &NameFacts, log: &BTreeMap<String, LogEvent>) -> Option<NameFacts> {
+    let events = facts
+        .events
+        .iter()
+        .map(|event| lifecycle_from_log(event, log.get(&event.position.event_identity)?))
+        .collect::<Option<Vec<_>>>()?;
     let mut out = facts.clone();
     out.events = events;
-    Ok(Some(out))
+    Some(out)
+}
+
+/// What the name excuses read, loaded once for a chunk of differing names: their facts, and the
+/// publication-visible log rows, generated ids and association keys of every lifecycle and
+/// control event those facts name.
+pub struct ExcuseInputs {
+    pub facts: BTreeMap<String, NameFacts>,
+    pub log: BTreeMap<String, LogEvent>,
+    pub ids: BTreeMap<String, i64>,
+    pub keys: BTreeMap<String, (String, String)>,
+}
+
+impl ExcuseInputs {
+    pub async fn load(
+        pool: &PgPool,
+        chain: &str,
+        target: i64,
+        names: &[NameInput],
+    ) -> Result<Self> {
+        let facts: BTreeMap<String, NameFacts> = if names.is_empty() {
+            BTreeMap::new()
+        } else {
+            load_name_facts(pool, chain, names)
+                .await?
+                .into_iter()
+                .map(|facts| (facts.input.logical_name_id.clone(), facts))
+                .collect()
+        };
+        let identities: Vec<String> = facts
+            .values()
+            .flat_map(|facts| {
+                facts
+                    .events
+                    .iter()
+                    .map(|event| event.position.event_identity.clone())
+                    .chain(
+                        control_positions(facts)
+                            .into_iter()
+                            .map(|position| position.event_identity),
+                    )
+            })
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let log = published_log(pool, chain, target, &identities).await?;
+        let ids = log
+            .iter()
+            .map(|(identity, event)| (identity.clone(), event.id))
+            .collect();
+        let keys = association_keys(pool, chain, target, &identities).await?;
+        Ok(Self {
+            facts,
+            log,
+            ids,
+            keys,
+        })
+    }
 }
 
 /// The facts read in the canonical order through the refolding path: every event and control
@@ -1240,6 +1279,14 @@ pub async fn control_fact_checks(
         .map(|position| position.event_identity)
         .collect();
     let log = published_log(pool, chain, target, &identities).await?;
+    Ok(control_fact_checks_in(facts, &log))
+}
+
+/// `control_fact_checks` against publication-visible log rows already loaded.
+fn control_fact_checks_in(
+    facts: &NameFacts,
+    log: &BTreeMap<String, LogEvent>,
+) -> ControlFactChecks {
     let at = |position: &Position| {
         log.get(&position.event_identity)
             .filter(|row| row.position == *position)
@@ -1305,10 +1352,10 @@ pub async fn control_fact_checks(
                 })
             })
     });
-    Ok(ControlFactChecks {
+    ControlFactChecks {
         owners: owners_hold,
         identity: starts_hold && bounds_hold,
-    })
+    }
 }
 
 /// A resource's registry-operator rows as the effective-permission reader adds them, from its
