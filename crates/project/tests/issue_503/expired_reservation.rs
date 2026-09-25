@@ -14,17 +14,35 @@ use super::*;
 /// Block 10's timestamp in seconds: `database` writes it as 2026-08-26T00:00:00Z.
 const BLOCK_10_SECONDS: i64 = 1_787_702_400;
 
-/// A live ENSv1 lease; an ENSv2 registration granted and unregistered in block 9; and in
-/// block 10 a reservation of the name with no resource at (10, 1, 1) whose expiry is `expiry`.
-/// With `derived_release`, Interpret's block-boundary release of that reservation at
-/// (10, NULL, NULL), by name and without a resource, as it writes one for an expired
-/// reservation. Returns the name and the ENSv1 and ENSv2 resources.
+/// What the fixture writes besides the ENSv1 lease, the ENSv2 grant and the reservation.
+#[derive(Clone, Copy)]
+struct Shape {
+    /// Interpret's block-boundary release of the reservation at (10, NULL, NULL), by name, as it
+    /// writes one for a reservation expired when written.
+    derived_release: bool,
+    /// The reservation and its derived release carry the reservation's own resource, as a
+    /// version-zero reservation does; otherwise neither has a resource, as a versioned one.
+    own_resource: bool,
+    /// The ENSv2 registration is unregistered in block 9. Without it, the derived release is the
+    /// only release, so the tombstone shows that it is kept.
+    owned_release: bool,
+}
+
+const RESOURCELESS: Shape = Shape {
+    derived_release: true,
+    own_resource: false,
+    owned_release: true,
+};
+
+/// A live ENSv1 lease; an ENSv2 registration granted, and unless `shape` says otherwise
+/// unregistered, in block 9; and in block 10 a reservation of the name at (10, 1, 1) whose expiry
+/// is `expiry`, with what `shape` adds. Returns the name and the ENSv1 and ENSv2 resources.
 async fn seed(
     pool: &PgPool,
     index: u16,
     name: &str,
     expiry: i64,
-    derived_release: bool,
+    shape: Shape,
 ) -> Result<(String, String, String)> {
     earlier_block(pool).await?;
     let logical = surface(pool, index, name, &[]).await?;
@@ -56,7 +74,10 @@ async fn seed(
             3,
             json!({"source_event":"LabelUnregistered","status":"released"}),
         ),
-    ] {
+    ]
+    .into_iter()
+    .filter(|(_, kind, _, _)| shape.owned_release || *kind != "RegistrationReleased")
+    {
         event(
             pool,
             identity,
@@ -73,11 +94,17 @@ async fn seed(
         sqlx::query("UPDATE normalized_events SET block_number = 9, block_hash = $1 WHERE event_identity = $2")
             .bind(EARLIER_HASH).bind(identity).execute(pool).await?;
     }
+    let own_resource = uuid(21, index);
+    if shape.own_resource {
+        sqlx::query("INSERT INTO resources (resource_id, chain_id, block_hash, block_number, canonicality_state) VALUES ($1::uuid, $2, $3, 10, 'canonical')")
+            .bind(&own_resource).bind(CHAIN).bind(HASH).execute(pool).await?;
+    }
+    let reservation_resource = shape.own_resource.then_some(own_resource.as_str());
     event(
         pool,
         "expired-reservation-reserve",
         &logical,
-        None,
+        reservation_resource,
         Event {
             family: "ens_v2_registry_l1",
             kind: "RegistrationReserved",
@@ -88,12 +115,12 @@ async fn seed(
     .await?;
     sqlx::query("UPDATE normalized_events SET transaction_index = 1 WHERE event_identity = 'expired-reservation-reserve'")
         .execute(pool).await?;
-    if derived_release {
+    if shape.derived_release {
         event(
             pool,
             "expired-reservation-derived-release",
             &logical,
-            None,
+            reservation_resource,
             Event {
                 family: "ens_v2_registry_l1",
                 kind: "RegistrationReleased",
@@ -132,20 +159,19 @@ async fn full_and_incremental(
     index: u16,
     name: &str,
     expiry: i64,
-    derived_release: bool,
+    shape: Shape,
 ) -> Result<(
     (Option<String>, Option<String>, Option<String>),
     String,
     String,
 )> {
     let (full_db, full) = database(&format!("{prefix}_full")).await?;
-    let (logical, v1_resource, v2_resource) =
-        seed(&full, index, name, expiry, derived_release).await?;
+    let (logical, v1_resource, v2_resource) = seed(&full, index, name, expiry, shape).await?;
     run(&full).await?;
     let full_selection = selection(&full, &logical).await?;
     full_db.cleanup().await?;
     let (incremental_db, incremental) = database(&format!("{prefix}_incremental")).await?;
-    seed(&incremental, index, name, expiry, derived_release).await?;
+    seed(&incremental, index, name, expiry, shape).await?;
     let first = Engine::new(incremental.clone())
         .run_batch(BatchRequest {
             chain_id: CHAIN.into(),
@@ -184,7 +210,7 @@ async fn a_reservation_expiring_at_its_own_block_leaves_the_v2_tombstone() -> Re
         99,
         "expired-at-block.eth",
         BLOCK_10_SECONDS,
-        true,
+        RESOURCELESS,
     )
     .await?;
     assert_eq!(
@@ -207,7 +233,7 @@ async fn a_reservation_expired_before_its_own_block_leaves_the_v2_tombstone() ->
         100,
         "expired-before-block.eth",
         BLOCK_10_SECONDS - 1,
-        true,
+        RESOURCELESS,
     )
     .await?;
     assert_eq!(
@@ -231,7 +257,10 @@ async fn a_live_reservation_in_the_same_shape_hands_the_name_to_ensv1() -> Resul
         101,
         "live-reservation.eth",
         BLOCK_10_SECONDS + 1,
-        false,
+        Shape {
+            derived_release: false,
+            ..RESOURCELESS
+        },
     )
     .await?;
     assert_eq!(
@@ -239,6 +268,70 @@ async fn a_live_reservation_in_the_same_shape_hands_the_name_to_ensv1() -> Resul
         (Some("ens_v1"), Some(v1_resource.as_str())),
         "a live reservation defers to the live ENSv1 lease"
     );
+    Ok(())
+}
+
+// The same expired-at-write reservation at version zero (Pro review of e18e509e, question 4): the
+// reservation and its derived release both carry the reservation's own resource, as Interpret
+// writes them for a version-zero token. With the expiry equal to the block time and before it,
+// the reservation stays out and the name is the released ENSv2 tombstone on the old bound
+// resource. Without the owned release in block 9, the derived release is the only release, so the
+// tombstone also shows that it is kept.
+#[tokio::test]
+async fn a_version_zero_reservation_expired_when_written_keeps_its_release_and_the_tombstone()
+-> Result<()> {
+    for (case, index, name, expiry, owned_release) in [
+        (
+            "v0_expired_at_block",
+            108,
+            "v0-at-block.eth",
+            BLOCK_10_SECONDS,
+            true,
+        ),
+        (
+            "v0_expired_before_block",
+            109,
+            "v0-before-block.eth",
+            BLOCK_10_SECONDS - 1,
+            true,
+        ),
+        (
+            "v0_expired_only_release",
+            110,
+            "v0-only-release.eth",
+            BLOCK_10_SECONDS,
+            false,
+        ),
+        (
+            "v0_expired_before_only_release",
+            111,
+            "v0-before-only.eth",
+            BLOCK_10_SECONDS - 1,
+            false,
+        ),
+    ] {
+        let (selected, _, v2_resource) = full_and_incremental(
+            case,
+            index,
+            name,
+            expiry,
+            Shape {
+                derived_release: true,
+                own_resource: true,
+                owned_release,
+            },
+        )
+        .await?;
+        assert_eq!(
+            selected,
+            (
+                Some("ens_v2".into()),
+                Some("unregistered".into()),
+                Some(v2_resource)
+            ),
+            "{case}"
+        );
+    }
     Ok(())
 }
 
