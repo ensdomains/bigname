@@ -31,8 +31,19 @@ pub struct EffectiveWrapper {
     /// A `.eth` name (the effective fuses carry IS_DOT_ETH) whose clock is inside the last
     /// grace period before its wrapper expiry: `expiry - GRACE_PERIOD < clock`
     /// (permissions.rs:329-335). The NameWrapper expiry of a `.eth` name already includes the
-    /// registrar grace period, so the grace window ends at the wrapper expiry itself; past it
-    /// the effective fuses are zero and the name is never in grace.
+    /// grace period: every path that sets it adds the wrapper's own 90-day `GRACE_PERIOD` to the
+    /// registrar expiry (wrapETH2LD, registerAndWrapETH2LD, renew, onERC721Received), and the
+    /// wrapper's grace test is `expiry - GRACE_PERIOD < block.timestamp`. So the grace window
+    /// ends at the wrapper expiry itself; past it `getData` clears the fuses, IS_DOT_ETH with
+    /// them, and the name is never in grace.
+    /// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L48 @ ens_v1@91c966f)
+    /// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L270 @ ens_v1@91c966f)
+    /// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L297-L304 @ ens_v1@91c966f)
+    /// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L332-L337 @ ens_v1@91c966f)
+    /// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L806 @ ens_v1@91c966f)
+    /// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1082-L1089 @ ens_v1@91c966f)
+    /// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L143-L154 @ ens_v1@91c966f)
+    /// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L843-L856 @ ens_v1@91c966f)
     pub in_grace: bool,
 }
 
