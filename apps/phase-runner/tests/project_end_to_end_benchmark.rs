@@ -436,6 +436,13 @@ async fn run(
                 "the family readers differ from the served readers at {number}: {:#}",
                 shadow::describe(&report)
             );
+            // While project_resolver_classification is unfilled the shadow classifies from the
+            // declaration manifest; its mirror must still be the served one.
+            ensure!(
+                report.f3_unfilled_mirror_differs == 0,
+                "the declaration fallback serves a different mirror at {number}: {:#}",
+                shadow::describe(&report)
+            );
         }
         if let (Some(children_page), Some(baseline)) = (compare, baseline) {
             let retention = endpoint::Retention::load(

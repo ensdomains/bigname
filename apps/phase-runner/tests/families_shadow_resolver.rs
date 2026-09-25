@@ -12,6 +12,7 @@ mod shadow_fixture;
 mod support;
 
 use anyhow::{Result, ensure};
+use bigname_storage::families::topology::{FamilyCollectionPage, load_resolver_links_shadow};
 use serde_json::{Value, json};
 use shadow_fixture::{CHAIN, Fixture, ZERO_ADDRESS, ZERO_NODE, address, unexpected, uuid, word};
 
@@ -193,6 +194,10 @@ async fn resolver_collections_and_bound_names_match_the_served_readers() -> Resu
     let first = address(0xd1);
     let second = address(0xd2);
     let stranger = address(0xd9);
+    // Both resolvers are declared, so the overview's classification is compared for each.
+    fixture
+        .declare_resolvers(RESOLVER, &[&first, &second])
+        .await?;
     let one = name(&fixture, 1, "one", "declared_registry_path").await?;
     let two = name(&fixture, 2, "two", "declared_registry_path").await?;
     let three = name(&fixture, 3, "three", "declared_registry_path").await?;
@@ -327,6 +332,10 @@ async fn resolver_collections_and_bound_names_match_the_served_readers() -> Resu
         "{}",
         report.line()
     );
+    // project_resolver_classification is not filled yet, so both resolvers are classified from
+    // their declaration. When the table is filled this turns red: then the classification rows
+    // are compared in full, support status included, and this assertion goes.
+    ensure!(report.f3_unfilled > 0, "{}", report.line());
 
     // Block 6: the second name moves to the second resolver, the fourth clears its pointer, and a
     // stranger emits a Linked naming the first resolver, which today's reader ignores.
@@ -344,12 +353,43 @@ async fn resolver_collections_and_bound_names_match_the_served_readers() -> Resu
     .await?;
     fixture.publish(7).await?;
     let report = fixture.compare(1).await?;
-    // Expected difference: F7 keeps the latest ResolverRecordLinked per (resolver, node) from
+    // Expected difference: project_resolver_link keeps the latest ResolverRecordLinked per
+    // (resolver, node) from
     // any emitter (crates/project/src/families/records.rs:167-175, :302-322), while today's
     // /links reads only the resolver's own logs
     // (apps/api/src/v2/resolvers/collections/links.sql:14-17). The stranger's link replaces
     // record 5 at the first resolver in the family and not in the served reader.
-    unexpected(&report, &[&format!("links of {first}")])?;
+    // The difference is exactly that row: the served collection keeps record 5 at the first
+    // name's node, the shadow serves the stranger's record 13 there, and every other row and the
+    // total agree.
+    let (height, _) = shadow::publication(fixture.pool(), CHAIN).await?;
+    let served =
+        shadow::served_collection(fixture.pool(), CHAIN, &first, "links", height, None, 1_000)
+            .await?;
+    let shadowed =
+        load_resolver_links_shadow(fixture.pool(), CHAIN, &first, "ens", None, 1_000).await?;
+    let records_at = |page: &FamilyCollectionPage| -> Vec<Value> {
+        page.rows
+            .iter()
+            .filter(|(_, node, _)| node == &one.node)
+            .map(|(_, _, item)| item["record_id"].clone())
+            .collect()
+    };
+    let others = |page: &FamilyCollectionPage| -> Vec<(String, String, Value)> {
+        page.rows
+            .iter()
+            .filter(|(_, node, _)| node != &one.node)
+            .cloned()
+            .collect()
+    };
+    ensure!(
+        records_at(&served) == [json!("5")]
+            && records_at(&shadowed) == [json!("13")]
+            && others(&served) == others(&shadowed)
+            && served.total_count == shadowed.total_count,
+        "served {served:?}, shadow {shadowed:?}"
+    );
+    unexpected(&report, &[format!("links of {first}")])?;
     ensure!(report.bound_names == 4, "{}", report.line());
     fixture.cleanup().await
 }

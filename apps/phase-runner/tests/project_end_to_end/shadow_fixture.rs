@@ -12,7 +12,7 @@ use phase_runner::{
     project_phase::ProjectPhase,
     state::PhaseStore,
 };
-use serde_json::Value;
+use serde_json::{Value, json};
 use sqlx::PgPool;
 
 use crate::{shadow, support::ScratchDatabase};
@@ -222,6 +222,43 @@ impl Fixture {
         Ok(())
     }
 
+    /// An active manifest declaring `addresses` as resolvers of `source_family`, with its
+    /// SourceManifestUpdated event, as the rebuild-performance seed declares its resolvers. The
+    /// resolver builder then serves a `resolver_current` row for each address.
+    pub async fn declare_resolvers(&self, source_family: &str, addresses: &[&str]) -> Result<()> {
+        let contracts: Vec<Value> = addresses
+            .iter()
+            .map(|address| {
+                json!({"role": "resolver", "address": address, "proxy_kind": "none",
+                       "start_block": 0})
+            })
+            .collect();
+        let payload = json!({"deployment_epoch": "fixture", "contracts": contracts});
+        sqlx::query(
+            "WITH manifest AS (
+                 INSERT INTO manifest_versions (manifest_version, namespace, source_family,
+                     chain_id, deployment_label, rollout_status, normalizer_version, file_path,
+                     manifest_payload)
+                 VALUES (1, 'ens', $2, $1, 'fixture', 'active', 'fixture',
+                     'fixture/shadow-resolvers.toml', $3)
+                 RETURNING manifest_id, manifest_payload)
+             INSERT INTO normalized_events (event_identity, namespace, event_kind, source_family,
+                 manifest_version, source_manifest_id, chain_id, derivation_kind,
+                 canonicality_state, after_state)
+             SELECT 'fixture:manifest:' || $2, 'ens', 'SourceManifestUpdated', $2, 1, manifest_id,
+                    $1, 'manifest_sync', 'canonical'::canonicality_state,
+                    jsonb_build_object('rollout_status', 'active', 'normalizer_version', 'fixture',
+                        'manifest_payload', manifest_payload)
+             FROM manifest",
+        )
+        .bind(CHAIN)
+        .bind(source_family)
+        .bind(payload)
+        .execute(self.pool())
+        .await?;
+        Ok(())
+    }
+
     /// A proof-checked label; `normalized` false stores a normalization error.
     pub async fn label(&self, labelhash: &str, label: &str, normalized: bool) -> Result<()> {
         sqlx::query(
@@ -400,23 +437,32 @@ impl Fixture {
     }
 }
 
-/// Mismatches other than the named expected differences; every expected difference must still
-/// be present, so a fixed reducer or reader turns the test red until the name is removed.
-pub fn unexpected(report: &shadow::Report, expected: &[&str]) -> Result<()> {
-    for needle in expected {
+/// Mismatches other than the named expected differences. Each name is an exact mismatch key, and
+/// every named key must still differ, so a fixed reducer or reader turns the test red until the
+/// name is removed. A key only says which read differs: the caller asserts that the whole read
+/// differs in exactly the expected rows, so a second regression on the same key is not hidden.
+/// A declaration-manifest classification whose mirror disagrees with the served one always fails.
+pub fn unexpected(report: &shadow::Report, expected: &[String]) -> Result<()> {
+    ensure!(
+        report.f3_unfilled_mirror_differs == 0,
+        "the declaration fallback serves a different mirror: {:#}",
+        shadow::describe(report)
+    );
+    for key in expected {
         ensure!(
             report
                 .mismatches
                 .iter()
-                .any(|mismatch| mismatch.contains(needle)),
-            "expected difference {needle:?} is gone: {:#}",
+                .any(|mismatch| &mismatch.key == key),
+            "expected difference {key:?} is gone: {:#}",
             shadow::describe(report)
         );
     }
-    let unexpected: Vec<&String> = report
+    let unexpected: Vec<String> = report
         .mismatches
         .iter()
-        .filter(|mismatch| !expected.iter().any(|needle| mismatch.contains(needle)))
+        .filter(|mismatch| !expected.contains(&mismatch.key))
+        .map(ToString::to_string)
         .collect();
     ensure!(
         unexpected.is_empty(),

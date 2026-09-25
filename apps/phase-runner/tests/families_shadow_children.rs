@@ -227,8 +227,36 @@ async fn ens_v1_edges_match_the_served_children() -> Result<()> {
     // (crates/project/src/scope.rs:204-212) and a registry Transfer carries `node`, so the child's
     // row is never restaged; a rebuild at the same block drops it, as the shadow does.
     let report = fixture.compare(2).await?;
-    unexpected(&report, &[&format!("children of {first}")])?;
     let surfaced = format!("ens:{}", word(8));
+    // The difference is exactly that row: under every filter, the served rows without it are the
+    // shadow rows in order, and the served total is one more when it is served.
+    let (_, clock) = shadow::publication(fixture.pool(), CHAIN).await?;
+    let mut expected = Vec::new();
+    for (index, filter) in shadow::child_filters(clock, true).iter().enumerate() {
+        let (served_total, served_rows, shadow_total, shadow_rows) =
+            shadow::walk_children(fixture.pool(), &first, filter, 2).await?;
+        let kept = served_rows
+            .iter()
+            .any(|row| row.child_logical_name_id == surfaced);
+        let without: Vec<_> = served_rows
+            .iter()
+            .filter(|row| row.child_logical_name_id != surfaced)
+            .cloned()
+            .collect();
+        ensure!(
+            without == shadow_rows && served_total == shadow_total + u64::from(kept),
+            "filter {index}: served {served_total} {served_rows:?}, \
+             shadow {shadow_total} {shadow_rows:?}"
+        );
+        if kept {
+            expected.push(format!("children of {first} filter {index}"));
+        }
+    }
+    ensure!(
+        expected.first() == Some(&format!("children of {first} filter 0")),
+        "the default page no longer serves {surfaced}: {expected:?}"
+    );
+    unexpected(&report, &expected)?;
     let served: Vec<String> = sqlx::query_scalar(
         "SELECT child_logical_name_id FROM children_current
          WHERE parent_logical_name_id = $1 ORDER BY 1",

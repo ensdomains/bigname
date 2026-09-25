@@ -47,6 +47,21 @@ pub struct Settings {
     pub every_child_filter: bool,
 }
 
+/// One difference between a served read and its shadow. `key` names the read exactly (for
+/// example `children of ens:0x.. filter 2` or `links of 0x..`), so a named expected difference
+/// matches one key and never a family of keys.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Mismatch {
+    pub key: String,
+    pub detail: String,
+}
+
+impl std::fmt::Display for Mismatch {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}: {}", self.key, self.detail)
+    }
+}
+
 /// What the comparison saw.
 #[derive(Debug, Default)]
 pub struct Report {
@@ -64,7 +79,7 @@ pub struct Report {
     /// unfilled, and the subset whose served mirror that fallback does not reproduce.
     pub f3_unfilled: usize,
     pub f3_unfilled_mirror_differs: usize,
-    pub mismatches: Vec<String>,
+    pub mismatches: Vec<Mismatch>,
     /// Shadow time per reader: total microseconds and keys read.
     pub timings: BTreeMap<&'static str, (u128, usize)>,
 }
@@ -76,8 +91,8 @@ impl Report {
         entry.1 += 1;
     }
 
-    fn mismatch(&mut self, message: String) {
-        self.mismatches.push(message);
+    fn mismatch(&mut self, key: String, detail: String) {
+        self.mismatches.push(Mismatch { key, detail });
     }
 
     /// One line for the pull request: counts, mismatches and mean shadow time per key.
@@ -111,8 +126,9 @@ impl Report {
     }
 }
 
-/// The served and family markers must name the same block.
-async fn publication(pool: &PgPool, chain: &str) -> Result<(i64, OffsetDateTime)> {
+/// The served and family markers must name the same block: that block, and the family marker's
+/// block timestamp, which is the clock the time-dependent filters read.
+pub async fn publication(pool: &PgPool, chain: &str) -> Result<(i64, OffsetDateTime)> {
     let served: (Option<i64>, Option<String>) = sqlx::query_as(
         "SELECT current_block_number, current_block_hash FROM chain_phase_state
          WHERE chain_id = $1 AND phase_name = 'project'",
@@ -160,6 +176,82 @@ pub async fn compare(pool: &PgPool, chain: &str, settings: Settings) -> Result<R
     Ok(report)
 }
 
+/// The subnames filters the comparison reads: the default page, and with `every` also the expiry
+/// sort behind the expiry fence at `clock`, the registration sort descending, and the fence alone
+/// descending. A filter's index in this list is the `filter` number in a mismatch key.
+pub fn child_filters(
+    clock: OffsetDateTime,
+    every: bool,
+) -> Vec<ChildrenCurrentPageFilter<'static>> {
+    let default = ChildrenCurrentPageFilter::default();
+    let mut filters = vec![default];
+    if every {
+        filters.extend([
+            ChildrenCurrentPageFilter {
+                include_expired: false,
+                evaluated_at: Some(clock),
+                sort: ChildrenCurrentSort::ExpiresAt,
+                ..default
+            },
+            ChildrenCurrentPageFilter {
+                sort: ChildrenCurrentSort::RegisteredAt,
+                order: ChildrenCurrentOrder::Desc,
+                ..default
+            },
+            ChildrenCurrentPageFilter {
+                include_expired: false,
+                evaluated_at: Some(clock),
+                order: ChildrenCurrentOrder::Desc,
+                ..default
+            },
+        ]);
+    }
+    filters
+}
+
+/// Every row both subnames readers serve for `parent` under `filter`, each reader walking its own
+/// cursors: `(served total, served rows, shadow total, shadow rows)`.
+pub async fn walk_children(
+    pool: &PgPool,
+    parent: &str,
+    filter: &ChildrenCurrentPageFilter<'_>,
+    page: u64,
+) -> Result<(u64, Vec<FamilyChildRow>, u64, Vec<FamilyChildRow>)> {
+    let mut served_rows = Vec::new();
+    let mut served_total = None;
+    let mut cursor: Option<ChildrenCurrentKeysetCursor> = None;
+    loop {
+        let served =
+            load_children_current_page_filtered(pool, parent, filter, cursor.as_ref(), page)
+                .await?;
+        served_total.get_or_insert(served.total_count);
+        served_rows.extend(served.rows.iter().map(wire));
+        match served.next_cursor {
+            Some(next) => cursor = Some(next),
+            None => break,
+        }
+    }
+    let mut shadow_rows = Vec::new();
+    let mut shadow_total = None;
+    let mut cursor: Option<ChildrenCurrentKeysetCursor> = None;
+    loop {
+        let shadow =
+            family::load_children_shadow_page(pool, parent, filter, cursor.as_ref(), page).await?;
+        shadow_total.get_or_insert(shadow.total_count);
+        shadow_rows.extend(shadow.rows);
+        match shadow.next_cursor {
+            Some(next) => cursor = Some(next),
+            None => break,
+        }
+    }
+    Ok((
+        served_total.unwrap_or_default(),
+        served_rows,
+        shadow_total.unwrap_or_default(),
+        shadow_rows,
+    ))
+}
+
 fn wire(row: &ChildrenCurrentRow) -> FamilyChildRow {
     FamilyChildRow {
         parent_logical_name_id: row.parent_logical_name_id.clone(),
@@ -196,29 +288,7 @@ async fn children(
     .fetch_all(pool)
     .await?;
     report.parents = parents.len();
-    let default = ChildrenCurrentPageFilter::default();
-    let mut filters = vec![default];
-    if settings.every_child_filter {
-        filters.extend([
-            ChildrenCurrentPageFilter {
-                include_expired: false,
-                evaluated_at: Some(clock),
-                sort: ChildrenCurrentSort::ExpiresAt,
-                ..default
-            },
-            ChildrenCurrentPageFilter {
-                sort: ChildrenCurrentSort::RegisteredAt,
-                order: ChildrenCurrentOrder::Desc,
-                ..default
-            },
-            ChildrenCurrentPageFilter {
-                include_expired: false,
-                evaluated_at: Some(clock),
-                order: ChildrenCurrentOrder::Desc,
-                ..default
-            },
-        ]);
-    }
+    let filters = child_filters(clock, settings.every_child_filter);
     for parent in &parents {
         for (index, filter) in filters.iter().enumerate() {
             let mut served_cursor: Option<ChildrenCurrentKeysetCursor> = None;
@@ -251,15 +321,18 @@ async fn children(
                     || served.total_count != shadow.total_count
                     || served.next_cursor != shadow.next_cursor
                 {
-                    report.mismatch(format!(
-                        "children of {parent} filter {index}: served total {} rows {served_rows:?} \
-                         next {:?}; shadow total {} rows {:?} next {:?}",
-                        served.total_count,
-                        served.next_cursor,
-                        shadow.total_count,
-                        shadow.rows,
-                        shadow.next_cursor
-                    ));
+                    report.mismatch(
+                        format!("children of {parent} filter {index}"),
+                        format!(
+                            "served total {} rows {served_rows:?} next {:?}; \
+                             shadow total {} rows {:?} next {:?}",
+                            served.total_count,
+                            served.next_cursor,
+                            shadow.total_count,
+                            shadow.rows,
+                            shadow.next_cursor
+                        ),
+                    );
                     break;
                 }
                 match served.next_cursor {
@@ -301,9 +374,10 @@ async fn topology(pool: &PgPool, chain: &str, report: &mut Report) -> Result<()>
         report.time("topology", started);
         let served = served.filter(|_| on_arm);
         if served != shadow {
-            report.mismatch(format!(
-                "topology of {name}: served {served:?}, shadow {shadow:?}"
-            ));
+            report.mismatch(
+                format!("topology of {name}"),
+                format!("served {served:?}, shadow {shadow:?}"),
+            );
         }
     }
     Ok(())
@@ -364,7 +438,10 @@ async fn classification(
             .as_ref()
             .is_some_and(|shadow| shadow.source == ClassificationSource::Family)
         {
-            report.mismatch(format!("resolver {address}: F3 row with no served row"));
+            report.mismatch(
+                format!("resolver {address}"),
+                "a classification row with no served row".to_owned(),
+            );
         }
         return Ok(());
     };
@@ -389,14 +466,20 @@ async fn classification(
             if shadow.mirrored_registry_address() != served_mirror
                 || shadow.support_status.as_deref() != support
             {
-                report.mismatch(format!(
-                    "resolver {address}: served mirror {served_mirror:?} support {support:?}, \
-                     F3 {shadow:?}"
-                ));
+                report.mismatch(
+                    format!("resolver {address}"),
+                    format!(
+                        "served mirror {served_mirror:?} support {support:?}, \
+                         classification row {shadow:?}"
+                    ),
+                );
             }
         }
         fallback => {
-            // Step 2 leaves F3 unfilled: a named gap, not a reader mismatch.
+            // project_resolver_classification is not filled yet, so the shadow classifies from
+            // the declaration manifest. A declaration carries no support status, so support is
+            // not compared on this path until the table is filled; the mirror is, and every
+            // caller asserts `f3_unfilled_mirror_differs == 0`.
             report.f3_unfilled += 1;
             let mirror = fallback.and_then(|shadow| shadow.mirrored_registry_address());
             if mirror != served_mirror {
@@ -443,9 +526,10 @@ async fn bound_names(
             .map(|row| row.logical_name_id.as_str())
             .collect();
         if served_ids != shadow_ids {
-            report.mismatch(format!(
-                "bound_names of {address}: served {served_ids:?}, shadow {shadow_ids:?}"
-            ));
+            report.mismatch(
+                format!("bound_names of {address}"),
+                format!("served {served_ids:?}, shadow {shadow_ids:?}"),
+            );
             return Ok(());
         }
         let page = usize::try_from(settings.collection_page)?;
@@ -501,7 +585,7 @@ fn served_collection_sql(section: &str) -> String {
     )
 }
 
-async fn served_collection(
+pub async fn served_collection(
     pool: &PgPool,
     chain: &str,
     address: &str,
@@ -599,10 +683,13 @@ async fn collection(
         report.time(section, started);
         let served_rows = comparable(section, &served);
         if served_rows != comparable(section, &shadow) || served.total_count != shadow.total_count {
-            report.mismatch(format!(
-                "{section} of {address}: served total {} {served_rows:?}; shadow total {} {:?}",
-                served.total_count, shadow.total_count, shadow.rows
-            ));
+            report.mismatch(
+                format!("{section} of {address}"),
+                format!(
+                    "served total {} {served_rows:?}; shadow total {} {:?}",
+                    served.total_count, shadow.total_count, shadow.rows
+                ),
+            );
             return Ok(());
         }
         let counted = served.rows.len().min(page);
@@ -640,6 +727,11 @@ pub async fn shadow_children(pool: &PgPool, parent: &str) -> Result<BTreeSet<Str
 pub fn describe(report: &Report) -> Value {
     json!({
         "line": report.line(),
-        "mismatches": report.mismatches.iter().take(20).collect::<Vec<_>>(),
+        "mismatches": report
+            .mismatches
+            .iter()
+            .take(20)
+            .map(ToString::to_string)
+            .collect::<Vec<_>>(),
     })
 }

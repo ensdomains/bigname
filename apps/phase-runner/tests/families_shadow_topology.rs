@@ -202,7 +202,24 @@ async fn alias_and_wildcard_topology_match_the_served_names() -> Result<()> {
     // same block moves the boundary to block 7, as the shadow does. No interpreter producer
     // writes observed_wildcard_path today (scope.rs:389-390).
     let report = fixture.compare(1).await?;
-    unexpected(&report, &[&format!("topology of {}", wildcard.logical)])?;
+    // The difference is exactly the boundary: the served topology still bounds at block 3, the
+    // shadow at block 7, and with the shadow's boundaries put in, the served topology is the
+    // shadow's.
+    let boundary = "/version_boundaries/topology_version_boundary/chain_position/block_number";
+    let mut served = served_topology(&fixture, &wildcard.logical)
+        .await?
+        .unwrap_or_default();
+    let shadowed = load_name_topology_shadow(fixture.pool(), &wildcard.logical)
+        .await?
+        .unwrap_or_default();
+    ensure!(
+        served.pointer(boundary) == Some(&json!(3))
+            && shadowed.pointer(boundary) == Some(&json!(7)),
+        "served {served}, shadow {shadowed}"
+    );
+    served["version_boundaries"] = shadowed["version_boundaries"].clone();
+    ensure!(served == shadowed, "served {served}, shadow {shadowed}");
+    unexpected(&report, &[format!("topology of {}", wildcard.logical)])?;
     fixture.rebuild().await?;
     let report = fixture.compare(1).await?;
     unexpected(&report, &[])?;
