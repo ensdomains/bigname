@@ -878,36 +878,43 @@ async fn publication_record_and_same_head_output_must_not_change() -> Result<()>
         baseline.publication["project"][0]["current_block_number"],
         10
     );
-    let mut branch = tx.begin().await?;
-    sqlx::query(
+    // Readers take the served generation from the Project row's `xmin`, so a rewrite that keeps
+    // every value changes the publication as much as a moved block does.
+    for change in [
         "UPDATE chain_phase_state SET current_block_number = 20 WHERE phase_name = 'project'",
-    )
-    .execute(&mut *branch)
-    .await?;
-    let mut moved = Snapshot::capture(&mut branch, &root).await?;
-    branch.rollback().await?;
-    let mut reference = Snapshot::capture(&mut tx, &root).await?;
-    let error = snapshot::compare(
-        &mut tx,
-        snapshot::Snapshots {
-            baseline: &mut baseline,
-            candidate: &mut moved,
-            reference: &mut reference,
-        },
-        snapshot::Expectations {
-            mandatory: &Scopes::default(),
-            old_scope: &Scopes::default(),
-            target: &target,
-            previous: 10,
-        },
-    )
-    .await
-    .unwrap_err();
-    assert!(
-        error.to_string().contains("publication record"),
-        "{error:#}"
-    );
+        "UPDATE chain_phase_state SET current_block_number = current_block_number
+         WHERE phase_name = 'project'",
+    ] {
+        let mut branch = tx.begin().await?;
+        sqlx::query(change).execute(&mut *branch).await?;
+        let mut moved = Snapshot::capture(&mut branch, &root).await?;
+        branch.rollback().await?;
+        let mut reference = Snapshot::capture(&mut tx, &root).await?;
+        let result = snapshot::compare(
+            &mut tx,
+            snapshot::Snapshots {
+                baseline: &mut baseline,
+                candidate: &mut moved,
+                reference: &mut reference,
+            },
+            snapshot::Expectations {
+                mandatory: &Scopes::default(),
+                old_scope: &Scopes::default(),
+                target: &target,
+                previous: 10,
+            },
+        )
+        .await;
+        let error = result
+            .err()
+            .unwrap_or_else(|| panic!("the comparator accepted a candidate that ran: {change}"));
+        assert!(
+            error.to_string().contains("publication record"),
+            "{change}: {error:#}"
+        );
+    }
 
+    let mut reference = Snapshot::capture(&mut tx, &root).await?;
     let mut rerun = Snapshot::capture(&mut tx, &root).await?;
     assert_eq!(assert_same_output(&mut reference, &mut rerun)?, 1);
     for (change, same) in [
@@ -929,7 +936,7 @@ async fn publication_record_and_same_head_output_must_not_change() -> Result<()>
         let result = assert_same_output(&mut first, &mut changed);
         assert_eq!(result.is_ok(), same, "{change}: {result:?}");
     }
-    drop((baseline, moved, reference, rerun));
+    drop((baseline, reference, rerun));
     std::fs::remove_dir_all(root)?;
     tx.rollback().await?;
     database.cleanup().await?;
