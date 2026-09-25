@@ -150,6 +150,72 @@ async fn default_fallback_tracks_exact_replacement_and_version_reset() -> Result
     Ok(())
 }
 
+/// An exact coin-60 record cleared to empty bytes lets the ENSIP-19 default answer coin 60; one
+/// cleared to the zero address carries `exact_nonempty_not_found_record_keys` and keeps shadowing
+/// the default. Both readers list the default's address at coin 60 only in the first case.
+#[tokio::test]
+async fn the_nonempty_absence_marker_keeps_the_default_off_coin_60_in_both_readers() -> Result<()> {
+    let mut empty = composed_fixture(true)?;
+    empty.events = vec![
+        scalar(10, 1, 10, "AddressChanged", "2147483648", LATER20),
+        scalar(11, 1, 11, "AddressChanged", "60", ZERO20),
+        scalar(11, 2, 11, "AddrChanged", "60", ZERO20),
+        {
+            let mut clear = flat(12, "60", "0x");
+            clear.transaction = 12;
+            clear
+        },
+        scalar(12, 2, 12, "AddrChanged", "60", ZERO20),
+    ];
+    for (fixture, marked, at_60) in [(composed_fixture(true)?, true, 0), (empty, false, 1)] {
+        let (database, row) = project_case_with_database(&fixture, 13, Execution::FromZero).await?;
+        assert_marker(&row, marked);
+        let pool = database.pool().clone();
+        for (coin, listed) in [("60", at_60), ("2147483648", 1)] {
+            let arguments = (
+                bigname_storage::AddressNamesCurrentDedupe::Surface,
+                bigname_storage::AddressNamesCurrentSort::Name,
+                bigname_storage::AddressNamesCurrentOrder::Asc,
+            );
+            let today = bigname_storage::load_address_records_current_page(
+                &pool,
+                LATER20,
+                coin,
+                None,
+                arguments.0,
+                None,
+                None,
+                arguments.1,
+                arguments.2,
+                None,
+                50,
+            )
+            .await?;
+            let family = bigname_storage::families::records::load_family_address_records_page(
+                &pool,
+                LATER20,
+                coin,
+                None,
+                arguments.0,
+                None,
+                None,
+                arguments.1,
+                arguments.2,
+                None,
+                50,
+            )
+            .await?;
+            assert_eq!(
+                (today.entries.len(), family.entries.len()),
+                (listed, listed),
+                "marked {marked} coin {coin}"
+            );
+        }
+        database.cleanup().await?;
+    }
+    Ok(())
+}
+
 fn assert_marker(row: &Value, marked: bool) {
     let marker = row["provenance"].get("exact_nonempty_not_found_record_keys");
     assert_eq!(marker.cloned(), marked.then(|| json!(["addr:60"])));
