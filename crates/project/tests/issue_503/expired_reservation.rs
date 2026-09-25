@@ -31,9 +31,15 @@ struct Shape {
 /// The registry instance Interpret writes on the reservation and its derived release.
 const EXPIRED_REGISTRY: &str = "0000000e-0000-0000-0000-00000000000e";
 
-/// The reservation's token id, written on the reservation and its derived release.
-fn expired_token(index: u16) -> String {
-    format!("0x{index:064x}")
+/// The reservation's token id, written on the reservation and its derived release: a stand-in
+/// labelhash with the token version in its low 32 bits. Interpret gives a reservation its own
+/// resource only at version zero, so a shape with its own resource uses version zero and the
+/// others use version one. The rows are hand-built. In the resource-less shapes these keys are not
+/// what keeps the tombstone, since the block 9 release of the old registration is there as well;
+/// in migration_readers.rs they are what matches the reservation's end.
+/// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L649-L651 @ ens_v2@a971bd64)
+fn expired_token(index: u16, version_zero: bool) -> String {
+    format!("0x{index:056x}{:08x}", u32::from(!version_zero))
 }
 
 const RESOURCELESS: Shape = Shape {
@@ -117,7 +123,7 @@ async fn seed(
             family: "ens_v2_registry_l1",
             kind: "RegistrationReserved",
             log: 1,
-            after: json!({"source_event":"LabelReserved","expiry":expiry,"status":"reserved","registry_contract_instance_id":EXPIRED_REGISTRY,"token_id":expired_token(index)}),
+            after: json!({"source_event":"LabelReserved","expiry":expiry,"status":"reserved","registry_contract_instance_id":EXPIRED_REGISTRY,"token_id":expired_token(index, shape.own_resource)}),
         },
     )
     .await?;
@@ -133,7 +139,7 @@ async fn seed(
                 family: "ens_v2_registry_l1",
                 kind: "RegistrationReleased",
                 log: 0,
-                after: json!({"source_event":"RegistryPathExpired","derived_from":"interpreter_state","terminal_reason":"registry_name_binding_expired","expiry":expiry,"status":"released","registry_contract_instance_id":EXPIRED_REGISTRY,"token_id":expired_token(index)}),
+                after: json!({"source_event":"RegistryPathExpired","derived_from":"interpreter_state","terminal_reason":"registry_name_binding_expired","expiry":expiry,"status":"released","registry_contract_instance_id":EXPIRED_REGISTRY,"token_id":expired_token(index, shape.own_resource)}),
             },
         )
         .await?;
