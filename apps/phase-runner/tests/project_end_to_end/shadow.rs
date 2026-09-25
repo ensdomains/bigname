@@ -888,7 +888,9 @@ async fn name_excuses(
                 // event log gives, so a wrong value on the canonically selected event fails.
                 if diff.field.starts_with("control/") {
                     if control_holds.is_none() {
-                        control_holds = Some(control_facts_hold(pool, chain, &facts).await?);
+                        control_holds = Some(
+                            control_facts_hold(pool, chain, clock.block_number, &facts).await?,
+                        );
                     }
                     if control_holds != Some(true) {
                         continue;
@@ -936,10 +938,16 @@ type LogRow = (
 );
 
 /// Whether every control fact of the name the control block reads, beyond its lifecycle
-/// events, is what the event log gives: each owner-setting event of its node, each epoch
-/// start and each binding candidate's SurfaceBound owner, rebuilt from its event as step 2
+/// events, is what the event log up to the publication gives: each owner-setting event of its
+/// node, each epoch start and each binding candidate's SurfaceBound owner, found by identity at
+/// its position among canonical events of the published blocks and rebuilt from it as step 2
 /// derives it.
-async fn control_facts_hold(pool: &PgPool, chain: &str, facts: &NameFacts) -> Result<bool> {
+async fn control_facts_hold(
+    pool: &PgPool,
+    chain: &str,
+    target: i64,
+    facts: &NameFacts,
+) -> Result<bool> {
     let identities: Vec<String> = control_positions(facts)
         .into_iter()
         .map(|position| position.event_identity)
@@ -960,10 +968,13 @@ async fn control_facts_hold(pool: &PgPool, chain: &str, facts: &NameFacts) -> Re
     >(
         "SELECT event_identity, event_kind, logical_name_id, resource_id::text, source_family,
                 block_number, transaction_index, log_index, after_state
-         FROM normalized_events WHERE chain_id = $1 AND event_identity = ANY($2)",
+         FROM normalized_events WHERE chain_id = $1 AND event_identity = ANY($2)
+           AND block_number <= $3
+           AND canonicality_state IN ('canonical', 'safe', 'finalized')",
     )
     .bind(chain)
     .bind(&identities)
+    .bind(target)
     .fetch_all(pool)
     .await?
     .into_iter()
@@ -1331,7 +1342,7 @@ async fn rebuilt_bindings(
 /// The positions of the control-block events the lifecycle family does not retain: the node's
 /// owner-setting registry events (`project_registry_owner_event`), F1's epoch starts and the
 /// binding candidates' SurfaceBounds, which feed the control owner as registry-only bindings.
-fn control_positions(facts: &NameFacts) -> Vec<Position> {
+pub fn control_positions(facts: &NameFacts) -> Vec<Position> {
     let owners = facts
         .registry_node
         .iter()
@@ -1413,15 +1424,14 @@ pub fn legacy_facts(
             .or_default()
             .push(event.position.clone());
     }
-    // The owner events and epoch starts the control block reads are ordered too, where the
-    // event log names them.
+    // The owner events, epoch starts and SurfaceBounds the control block reads are ordered
+    // too; one the event log does not name leaves the order unknown, so there is no reread.
     for position in control_positions(facts) {
-        if ids.contains_key(&position.event_identity) {
-            blocks
-                .entry(position.block_number)
-                .or_default()
-                .push(position);
-        }
+        ids.get(&position.event_identity)?;
+        blocks
+            .entry(position.block_number)
+            .or_default()
+            .push(position);
     }
     let disagreeing: BTreeSet<i64> = blocks
         .iter()

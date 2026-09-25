@@ -22,7 +22,9 @@ use bigname_storage::{
 use serde_json::{Value, json};
 use shadow_support::{
     assert_counts,
-    compare::{Excuse, association_keys, generated_ids, legacy_facts, resource_excuses},
+    compare::{
+        Excuse, association_keys, control_positions, generated_ids, legacy_facts, resource_excuses,
+    },
     publish_and_compare,
     wrapper::timestamp,
 };
@@ -441,6 +443,11 @@ async fn facts_and_legacy(fixture: &Fixture) -> Result<(NameFacts, NameFacts)> {
         .events
         .iter()
         .map(|event| event.position.event_identity.clone())
+        .chain(
+            control_positions(&facts)
+                .into_iter()
+                .map(|position| position.event_identity),
+        )
         .collect();
     let ids = generated_ids(&fixture.pool, CHAIN, &identities).await?;
     let keys = association_keys(&fixture.pool, CHAIN, &identities).await?;
@@ -547,6 +554,25 @@ async fn the_order_counterfactual_keeps_the_admission_of_a_reordered_block() -> 
     );
     assert_eq!(admitted(&facts, 16), json!(["expiry-12"]));
     assert_eq!(admitted(&legacy, 16), admitted(&facts, 16));
+
+    // A control position the event log does not name leaves today's order unknown, so there is
+    // no reread rather than a partly ordered one.
+    let controls = control_positions(&facts);
+    assert!(!controls.is_empty(), "the name has control positions");
+    let identities: Vec<String> = facts
+        .events
+        .iter()
+        .map(|event| event.position.event_identity.clone())
+        .chain(
+            controls
+                .iter()
+                .map(|position| position.event_identity.clone()),
+        )
+        .collect();
+    let mut ids = generated_ids(&fixture.pool, CHAIN, &identities).await?;
+    let keys = association_keys(&fixture.pool, CHAIN, &identities).await?;
+    ids.remove(&controls[0].event_identity);
+    assert!(legacy_facts(&facts, &ids, &keys).is_none());
 
     // Pro Q7b: the reordered block makes the name's same-block read run, but it computes only
     // the registration and control blocks. A wrong non-null handoff block in the families, the
