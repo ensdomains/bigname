@@ -283,8 +283,9 @@ pub async fn load_name_facts(
         "/* storage:families.control.lifecycle.authority_starts */
          SELECT state.logical_name_id, state.authority_start_positions
          FROM bigname_phase.project_name_state state
-         WHERE state.logical_name_id = ANY($1)",
+         WHERE state.chain_id = $1 AND state.logical_name_id = ANY($2)",
     )
+    .bind(chain_id)
     .bind(&ids)
     .fetch_all(pool)
     .await

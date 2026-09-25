@@ -2341,3 +2341,75 @@ async fn a_same_height_replacement_is_compared_only_once_both_sides_follow_it() 
     assert_eq!(report.names, 1);
     fixture.cleanup().await
 }
+
+/// Codex thread PRRT_kwDOSJpxAs6mBYSt: the lifecycle loader reads F1's epoch starts for the
+/// requested chain only, like every other lifecycle read. Name 1 has no epoch on this chain;
+/// another chain's name-state row for the same logical name carries an ENSv2 epoch start on the
+/// name's resource, after its grant and owned by Bob. Read for this chain, the name has no
+/// epoch start, and its registration and control values and the comparison stay the baseline.
+#[tokio::test]
+async fn another_chains_epoch_start_is_not_read() -> Result<()> {
+    let fixture = Fixture::new("families_shadow_other_chain_start", 20).await?;
+    let k1 = uuid(1);
+    v2_binding(&fixture, &k1).await?;
+    v2(
+        &fixture,
+        10,
+        "RegistrationGranted",
+        Some(&k1),
+        json!({"status": "registered", "registrant": ALICE, "expiry": 2_000_000_000u64}),
+    )
+    .await?;
+    let report = publish_and_compare(&fixture, 16).await?;
+    assert_counts(&report, &[], &[]);
+    let (_, before) = shadow_reads(&fixture, 16).await?;
+    sqlx::query(
+        "INSERT INTO bigname_phase.project_name_state (namespace, logical_name_id, chain_id,
+             block_number, transaction_index, log_index, event_identity,
+             authority_start_positions)
+         VALUES ('ens', $1, 'other-chain', 11, 0, 1, 'AuthorityEpochChanged:11:1',
+                 jsonb_build_object('ens_v2', jsonb_build_object(
+                     'block_number', 11, 'transaction_index', 0, 'log_index', 1,
+                     'event_identity', 'AuthorityEpochChanged:11:1',
+                     'authority_kind', 'registrar', 'authority_key', NULL, 'owner', $2::text,
+                     'resource_id', $3::text)))",
+    )
+    .bind(name(1))
+    .bind(BOB)
+    .bind(&k1)
+    .execute(&fixture.pool)
+    .await?;
+    let rows =
+        bigname_storage::load_name_current_by_logical_name_ids(&fixture.pool, &[name(1)]).await?;
+    let row = &rows[&name(1)];
+    let input = bigname_storage::families::control::lifecycle::NameInput {
+        logical_name_id: row.logical_name_id.clone(),
+        namehash: row.namehash.to_ascii_lowercase(),
+        selection:
+            bigname_storage::families::control::lifecycle::AuthoritySelection::from_provenance(
+                &row.provenance,
+            ),
+    };
+    let facts = bigname_storage::families::control::lifecycle::load_name_facts(
+        &fixture.pool,
+        CHAIN,
+        std::slice::from_ref(&input),
+    )
+    .await?;
+    assert_eq!(
+        facts[0].authority_starts,
+        Value::Null,
+        "another chain's epoch start is not this chain's"
+    );
+    let (_, after) = shadow_reads(&fixture, 16).await?;
+    assert_eq!(after, before);
+    let other = shadow_support::compare::compare(&fixture.pool, CHAIN, 16).await?;
+    assert_counts(&other, &[], &[]);
+    assert_eq!(
+        (other.names, other.equal),
+        (report.names, report.equal),
+        "{:#?}",
+        other.lines
+    );
+    fixture.cleanup().await
+}
