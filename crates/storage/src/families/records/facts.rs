@@ -110,12 +110,13 @@ pub(crate) fn chain_position(
 
 /// A resolver's classification as the served record inventory reads it: the classification
 /// object, its support status and reason, and the namespace of its declaration manifest when that
-/// manifest is admitted (latest `SourceManifestUpdated` active with a payload).
+/// manifest is admitted (latest `SourceManifestUpdated` active with a payload, at or before the
+/// block the families stand at).
 ///
-/// It is read from the owned key family F3 (`project_resolver_classification`) once that family
-/// holds rows for the chain; a resolver without an F3 row is then unclassified. While F3 is empty
-/// for the chain, as step 2 leaves it today, it is read from `resolver_current` and the manifest
-/// events the way today's builders read it.
+/// The switch to the owned key family F3 (`project_resolver_classification`) is per resolver: a
+/// resolver with an F3 row is read from it, and a resolver without one is read from
+/// `resolver_current` and the manifest events the way today's builders read it. No writer fills
+/// F3 yet, so today every read takes the second path.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ResolverClassification {
     pub(crate) classification: Value,
@@ -153,30 +154,22 @@ pub(crate) async fn load_classification(
     resolver_address: &str,
 ) -> Result<Option<ResolverClassification>> {
     let family = sqlx::query(
-        "SELECT populated.any, classification.classification, classification.support_status,
-                classification.unsupported_reason, classification.manifest_id,
-                classification.admission_namespace
-         FROM (SELECT EXISTS (
-                   SELECT 1 FROM bigname_phase.project_resolver_classification
-                   WHERE chain_id = $1
-               ) AS any) populated
-         LEFT JOIN bigname_phase.project_resolver_classification classification
-           ON classification.chain_id = $1 AND classification.resolver_address = $2",
+        "SELECT classification, support_status, unsupported_reason, manifest_id,
+                admission_namespace
+         FROM bigname_phase.project_resolver_classification
+         WHERE chain_id = $1 AND resolver_address = $2",
     )
     .bind(chain_id)
     .bind(resolver_address)
-    .fetch_one(pool)
+    .fetch_optional(pool)
     .await
     .with_context(|| format!("failed to load the F3 classification of {resolver_address}"))?;
-    if family.try_get::<bool, _>("any")? {
-        let Some(support_status) = family.try_get::<Option<String>, _>("support_status")? else {
-            return Ok(None);
-        };
+    if let Some(family) = family {
         return Ok(Some(ResolverClassification {
             classification: family
                 .try_get::<Option<Value>, _>("classification")?
                 .unwrap_or(Value::Null),
-            support_status: Some(support_status),
+            support_status: family.try_get("support_status")?,
             unsupported_reason: family.try_get("unsupported_reason")?,
             manifest_id: family.try_get("manifest_id")?,
             declaration_namespace: family.try_get("admission_namespace")?,
@@ -188,6 +181,10 @@ pub(crate) async fn load_classification(
                 (resolver.provenance ->> 'manifest_id')::bigint AS manifest_id,
                 declaration.namespace AS declaration_namespace
          FROM bigname_phase.resolver_current resolver
+         LEFT JOIN (
+             SELECT current_block_number AS block FROM bigname_phase.project_family_marker
+             WHERE chain_id = $1
+         ) marker ON TRUE
          LEFT JOIN LATERAL (
              SELECT manifest.namespace,
                     manifest.after_state ->> 'rollout_status' = 'active'
@@ -206,6 +203,8 @@ pub(crate) async fn load_classification(
                AND manifest.canonicality_state IN ('canonical', 'safe', 'finalized')
                AND (manifest.block_hash IS NULL
                     OR lineage.canonicality_state IN ('canonical', 'safe', 'finalized'))
+               AND (manifest.block_number IS NULL OR marker.block IS NULL
+                    OR manifest.block_number <= marker.block)
              ORDER BY manifest.normalized_event_id DESC
              LIMIT 1
          ) declaration ON declaration.active
