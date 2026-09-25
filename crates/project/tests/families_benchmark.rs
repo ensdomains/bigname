@@ -144,6 +144,26 @@ async fn family_block_timings() -> Result<()> {
         "FAMILY_BENCHMARK rebuild_to={base} elapsed_ms={}",
         started.elapsed().as_millis()
     );
+    // The seed writes every binding at its opening SurfaceBound's log, as the adapter does, so
+    // every candidate pairs with it and a wrapped one carries its wrapper lease.
+    let (unpaired, wrapped, wrapped_bindings): (i64, i64, i64) = sqlx::query_as(
+        "SELECT count(*) FILTER (WHERE candidate.event_identity LIKE 'binding:%'),
+                count(*) FILTER (WHERE candidate.wrapped_registrar_resource_id IS NOT NULL),
+                (SELECT count(*) FROM normalized_events event
+                 WHERE event.event_kind = 'SurfaceBound'
+                   AND event.source_family = 'ens_v1_wrapper_l1')
+         FROM project_binding_candidate candidate",
+    )
+    .fetch_one(&pool)
+    .await?;
+    println!(
+        "FAMILY_BENCHMARK unpaired_bindings={unpaired} wrapped_with_lease={wrapped} \
+         wrapper_surface_bounds={wrapped_bindings}"
+    );
+    ensure!(
+        unpaired == 0 && wrapped == wrapped_bindings,
+        "seed bindings do not pair with their SurfaceBound"
+    );
     // The plans cover the follow, the undo and the replay; the rebuild ran without them.
     if let Some(min_ms) = &min_ms {
         for setting in [
