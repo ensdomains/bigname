@@ -1109,9 +1109,11 @@ fn observation_of(row: &RivalRow, family: &Observation) -> Observation {
     }
 }
 
-/// Whether a family observation is exactly the one rebuilt from its event.
+/// Whether a family observation is exactly the one rebuilt from its event. A row that reaches
+/// its own resource targets that resource (step 2 sets the target so).
 fn same_observation(family: &Observation, rebuilt: &Observation) -> bool {
-    family.position == rebuilt.position
+    (family.attributed_via != "own" || family.target_resource_id == family.resource_id)
+        && family.position == rebuilt.position
         && family.resource_id == rebuilt.resource_id
         && family.logical_name_id == rebuilt.logical_name_id
         && family.attributed_via == rebuilt.attributed_via
