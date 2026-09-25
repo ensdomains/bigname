@@ -15,6 +15,12 @@ use super::{
 
 pub const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
 
+/// Whether a node is the all-zero root node.
+fn is_root(node: &str) -> bool {
+    node.strip_prefix("0x")
+        .is_some_and(|digits| digits.len() == 64 && digits.bytes().all(|digit| digit == b'0'))
+}
+
 /// The parts of one `project_registry_node_state` row the readers use, with the node's
 /// owner-setting events. The row's owner group is not read: the control owner and the
 /// ownerless profile read the owner events, which keep every owner-setting event.
@@ -101,13 +107,14 @@ impl RegistryNode {
 /// The registry generation and handoff block of an ENS name (name_authority/build.sql
 /// :815-819): `old` when the 2017 registry recorded the node and the current registry has not,
 /// under arm ens_v1; the handoff block is the first current-registry record. The served fold
-/// reads ENS registry records only (name_authority/build.sql:775-790), so a node of another
-/// namespace, such as a Basenames node F2c also keeps, has no handoff block.
+/// reads ENS registry records only and leaves the all-zero root node out
+/// (name_authority/build.sql:775-791), so a node of another namespace, such as a Basenames node
+/// F2c also keeps, and the root node have no records and no handoff block.
 pub fn registry_generation(
     node: Option<&RegistryNode>,
     authority_arm: Option<&str>,
 ) -> (Option<&'static str>, Option<i64>) {
-    let node = node.filter(|node| node.namespace == "ens");
+    let node = node.filter(|node| node.namespace == "ens" && !is_root(&node.node));
     let generation = (authority_arm == Some("ens_v1")).then(|| match node {
         Some(node) if node.has_old_record && node.first_current_record_block.is_none() => "old",
         _ => "current",
@@ -465,5 +472,22 @@ mod tests {
             registry_generation(Some(&node), Some("ens_v1")),
             (Some("current"), None)
         );
+    }
+
+    /// The served records leave the all-zero root node out (name_authority/build.sql:790): an
+    /// old-only or current-registry root record gives no records and no handoff block.
+    #[test]
+    fn the_root_node_has_no_registry_records() {
+        let mut root = RegistryNode {
+            namespace: "ens".into(),
+            node: format!("0x{}", "0".repeat(64)),
+            has_old_record: true,
+            ..RegistryNode::default()
+        };
+        for current in [None, Some(12)] {
+            root.first_current_record_block = current;
+            let generation = registry_generation(Some(&root), Some("ens_v1"));
+            assert_eq!(generation, (Some("current"), None), "{current:?}");
+        }
     }
 }
