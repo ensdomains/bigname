@@ -43,8 +43,10 @@
 //!   lapse it in the canonical order, the served value must not be empty, and the whole read in
 //!   today's order must equal it. A served empty value against a canonical row is a mismatch.
 //!   A live registration's restriction block also passes when only its registry root's lapse
-//!   differs between the orders and the whole block read in each order equals the served and
-//!   shadow block respectively (`resource_excuses`).
+//!   differs between the orders, the whole block read in today's order equals the served one
+//!   and the canonical read the shadow one; the canonical side is the families against
+//!   themselves, and a wrong root value is caught by the root's own `admin_powers` mismatch
+//!   (`resource_excuses`).
 //!   For the registry binding, the observations are rebuilt from the publication-visible event
 //!   log (activated, canonical, at the canonical lineage's hash, at or below the target: the set
 //!   family intake reads), independently of the families: for each observation identity (the name, else the
@@ -2176,8 +2178,11 @@ async fn lapse_evidence(
 /// the same way in both orders and its root lapses in one only, `resource_restrictions` passes
 /// when the whole block read in today's order equals the served one, the whole block read in
 /// the canonical order through the refolding path (both resources' events ranked canonically,
-/// so the stored key states are not read) equals the shadow one, and the two differ. Both are
-/// non-empty blocks, so both directions carry evidence.
+/// so the stored key states are not read) equals the shadow one, and the two differ. The
+/// canonical side is the families read against themselves, so it is no evidence on its own.
+/// The child's pass is sound because the rest is checked elsewhere: the child's own content is
+/// in both reads and today's must equal the served block, and a wrong root value leaves the
+/// root's own `admin_powers` difference a mismatch, which fails the run.
 pub async fn resource_excuses(
     pool: &PgPool,
     chain: &str,

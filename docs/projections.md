@@ -1839,8 +1839,10 @@ registration live in today's order and lapse it canonically, the served value is
 not empty, and the families read in today's order give it. A served empty value
 against a family row is a mismatch. A live registration's restriction block
 reads its registry root's admin powers, so it also passes when only the root's
-lapse differs between the orders and the whole block read in today's order and
-in the canonical order equals the served and shadow block. These checks run for
+lapse differs between the orders, the whole block read in today's order equals
+the served one and the canonical read the shadow one. The canonical side is the
+families read against themselves; the pass is sound because a wrong root value
+leaves the root's own admin powers a mismatch, which fails the run. These checks run for
 the items that differ: a family value equal to the served one is not a
 difference. One ENSv1 NewOwner log yields a
 SubregistryChanged and an AuthorityTransferred at one position; the families keep
