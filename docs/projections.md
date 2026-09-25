@@ -667,8 +667,13 @@ ENSv1→ENSv2 migration path: `unwrapped`, `unlocked_wrapped`, and
 `locked_child` parents retain only a [migratable child](glossary.md#migratable-child)
 through their [migration registry](glossary.md#migration-registry-wrapperregistry).
 An unknown activated path is a Project data-integrity failure. Child authority
-selection then chooses among the surviving arms; cross-era recency never chooses
-the arm. A surviving locked-path row cites the matched association's stable
+selection then keeps only the arm the child's own authority selects; cross-era
+recency never chooses the arm. A released ENSv2 child publishes no ENSv2
+relation, and publishes its ENSv1 relation only when its own selected arm is
+ENSv1 and the relation survived that filter. Any entry the child has had in the
+parent's migration registry, released or not, makes it non-migratable, so a
+released child of a locked parent publishes no relation even when its own name
+selects ENSv1. A surviving locked-path row cites the matched association's stable
 logical-edge and correlation identities plus its source manifest; its row-level
 manifest version therefore accounts for the association that authorized the
 migration registry. Its `normalized_event_ids`, `event_identities`,

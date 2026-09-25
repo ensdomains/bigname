@@ -567,8 +567,8 @@ collection route carry neither header.
   The Sepolia root registry registers `eth` and `reverse` with the largest
   uint64 expiry
   (upstream: .refs/ens_v2_sepolia_20260916/contracts/script/deploy-constants.ts:L1 @ ens_v2_sepolia_20260916@366de741)
-  (upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ETHRegistry.ts:L46 @ ens_v2_sepolia_20260916@366de741)
-  (upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ReverseMirror.ts:L35 @ ens_v2_sepolia_20260916@366de741).
+  (upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ETHRegistry.ts:L36-L48 @ ens_v2_sepolia_20260916@366de741)
+  (upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ReverseMirror.ts:L25-L37 @ ens_v2_sepolia_20260916@366de741).
   Search and address collections treat such an expiry, or the same value as a
   quoted number, as unknown the same way: the row has no `expires_at` and
   address names with `sort=expires_at` place it with the other unknown expiries, last ascending
@@ -2256,8 +2256,8 @@ introduces it rebuilds Project from full history before serving the option; see
   `is_migrated` concerns the ENSv1→ENSv2 migration only and is unrelated to
   `ens_v0`: an `ens_v0` name never satisfies `is_migrated=true`.
   `is_migrated=true|false` optionally selects whether the current name has the
-  same proven ENSv1→ENSv2 transition used by `migrated_at`: an ENSv2 authority
-  selected by a migration proof with a retained event and block timestamp.
+  same ENSv1→ENSv2 migration history used by `migrated_at`: a selected ENSv2
+  arm and a retained activated `MigrationApplied` with its block timestamp.
   Native ENSv2 registrations do not satisfy `is_migrated=true`. It combines
   with the other filters and is rejected with `relation=resolves_to`.
   The ownership collection always returns an exact `page.total_count` before

@@ -651,16 +651,14 @@ parent and still reads `canonical`. Any reader that reaches these rows without
 that join, or treats one as current, must anchor the row's own
 `(chain_id, block_number, block_hash)` on `chain_lineage` with a readable-state
 predicate. The readers that treat these rows as current — the children builder,
-the name-authority child proof, the Interpret admission loader, and Project
-scoping — all anchor on `chain_lineage` today; two scope-widening reads —
+the Interpret admission loader, and Project scoping — all anchor on `chain_lineage` today; two scope-widening reads —
 `include_topology_dependents` in `crates/project/src/scope/authority.rs` and
 `capture_child_registration_history` in `crates/interpret/src/write/redo.rs` —
 do not, which can only enlarge a rebuild's scope, never publish a row.
 
-In today's two publishing readers the association-lineage predicate cannot be
-the reason a row is withheld, so no test isolates it. Both the children builder
-(`crates/project/src/builders/children.rs`) and the name-authority child proof
-(`crates/project/src/builders/name_authority.rs`) reach a correlation row only
+In today's one publishing reader the association-lineage predicate cannot be
+the reason a row is withheld, so no test isolates it. The children builder
+(`crates/project/src/builders/children.rs`) reaches a correlation row only
 through rows that sit at or after its block, and that ordering is bigname's own
 invariant rather than a claim about ENSv2. A migration boundary's `evidence`
 array is built from the raw-log observations the interpreter had already decoded

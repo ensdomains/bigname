@@ -14,10 +14,12 @@ decisions kept. Linear TYR-36 step 6.
   classified as shared ENS infrastructure. They are registered in the admitted
   root registry and follow the same rule as every other name, so their
   authority epoch starts at their ENSv2 binding like any other.
-  (upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ETHRegistry.ts:L46 @ ens_v2_sepolia_20260916@366de741)
-  (upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ReverseMirror.ts:L35 @ ens_v2_sepolia_20260916@366de741)
+  (upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ETHRegistry.ts:L36-L48 @ ens_v2_sepolia_20260916@366de741)
+  (upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ReverseMirror.ts:L25-L37 @ ens_v2_sepolia_20260916@366de741)
 - The released ENSv2 tombstone no longer holds a name over a live ENSv1
-  lease, and the released ENSv2 regime is removed. A name that neither arm
+  lease. The released ENSv2 regime, the rule that kept a released name under
+  ENSv2 across its later facts so that a regrant continued the old ENSv2
+  authority and later ENSv1 facts stayed history, is removed. A name that neither arm
   holds now follows its latest lifecycle fact: a released ENSv2 registration
   that no ENSv1 lease or registry ownership change follows is served as the
   [released v2 authority](../glossary.md#released-v2-authority) tombstone, and
@@ -32,6 +34,11 @@ decisions kept. Linear TYR-36 step 6.
   arm, binding or epoch start; the child registration proof is removed. The
   ENSv2 registration a migration or a child registration makes is selected
   like any other registration in an admitted registry.
+- The deployment-profile classifier (the `deployment_profile` value in
+  `authority_selection` provenance) and the two retired Sepolia deployment
+  labels `ens_v2_sepolia_post_audit` and `ens_v2_sepolia_hackathon` are removed
+  too. They were classification, not an authority rule: they chose which reason
+  string a refusal carried and never which arm held a name.
 
 ## 2026-09-25 Amendment: Support Follows The Authority Decision
 
@@ -45,8 +52,8 @@ migration successor proof or child registration proof is needed. The reason
 `ensv2_exact_name_profile_shadow` and its public name
 `exact_name_profile_not_supported` are no longer produced or mapped. On Sepolia
 the root-registry names `eth` and `reverse` become supported
-(upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ETHRegistry.ts:L46 @ ens_v2_sepolia_20260916@366de741)
-(upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ReverseMirror.ts:L35 @ ens_v2_sepolia_20260916@366de741). Admitting a
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ETHRegistry.ts:L36-L48 @ ens_v2_sepolia_20260916@366de741)
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ReverseMirror.ts:L25-L37 @ ens_v2_sepolia_20260916@366de741). Admitting a
 chain's ENSv2 [source families](../glossary.md#source-family) is therefore the decision that exposes its names:
 the `exact_name_profile` flag stays a namespace summary for `/v1/namespaces` and
 no longer gates serving, so a future Mainnet ENSv2 admission serves each
@@ -68,8 +75,10 @@ arms was refused: its profile was served identity-only with the reason
 `independent_ens_deployments_overlap` on Sepolia or
 `conflicting_current_ens_authority` on Mainnet. The rule treated choosing an arm
 without a proof as inventing an authority boundary. Only the four exact
-[shared ENS infrastructure](../glossary.md#shared-ens-infrastructure) names were
-excepted.
+shared ENS infrastructure names (the root, `eth`, `reverse` and `addr.reverse`)
+were excepted; the
+[2026-09-25 amendment](#2026-09-25-amendment-the-remaining-ensv2-authority-exceptions-are-removed)
+removes that exception.
 
 On Sepolia that refused 652 names on 2026-09-23. None of them was live on both
 arms at once. In 649 of them one arm held only history: 466 names live on ENSv1

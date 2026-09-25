@@ -2135,8 +2135,13 @@ lease's original registration time and current state. The lease's original rows 
 the authority tombstone left when an ENSv2 registration is released or
 unregistered and neither arm holds the name now. The release must be the
 latest lifecycle fact of the registration the name was last bound to, and no
-ENSv1 lease grant, renewal or release, or ENSv1 registry ownership change, may
-follow it; ENSv1 expiry updates and token transfers do not count. Its current
+ENSv1 lease grant, renewal or release, ENSv1 registry ownership change, or
+ENSv1 [authority anchor](#anchor) move (`AuthorityEpochChanged`, such as a wrap or unwrap)
+may follow it; ENSv1 expiry updates and token transfers do not count. An ENSv1
+fact at exactly the release's block, transaction and log position counts as
+following it, so such a tie goes to ENSv1: no tombstone is left and ENSv1
+history decides. Facts Interpret writes at a block boundary carry no
+transaction or log index, which is how two of them can share a position. Its current
 registration lifecycle is unregistered and its selected arm is `ens_v2`, bound
 to the released resource. A live ENSv1 lease or a current ENSv2 registration
 holds the name instead, whatever the order of their facts: `unregister` burns

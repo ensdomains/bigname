@@ -160,13 +160,14 @@ the per-name current-authority rule in
 [`architecture.md`](architecture.md#ensv1ensv2-current-authority). Under that
 rule, the chain first selects one
 [authority epoch](glossary.md#authority-epoch), and every current field is then
-selected inside that epoch. A migrated name keeps both eras in history while current
-registration, control, resolver, expiry, address relations, and permissions
-come only from its ENSv2 resource. Retained ENSv1 facts remain history and
-provenance; they do not make the current read unsupported and cannot become
-current again after an ENSv2 release. Release leaves
-[released v2 authority](glossary.md#released-v2-authority), so later ENSv1
-events cannot repopulate any current field. Slice 2C applies this rule to the
+selected inside that epoch. A migrated name keeps both eras in history. While
+its ENSv2 registration is current, registration, control, resolver, expiry,
+address relations, and permissions come only from its ENSv2 resource, and
+retained ENSv1 facts remain history and provenance that do not make the current
+read unsupported. After an ENSv2 release the name follows its latest lifecycle
+fact like any other name: with no later ENSv1 lease or registry change it is a
+[released v2 authority](glossary.md#released-v2-authority) tombstone, and a live
+ENSv1 lease makes ENSv1 current again. Slice 2C applies this rule to the
 exact-name projection, the name-detail response, and per-result batch-lookup
 records. Slice 2D makes the address-name, permission, search, primary-name, and
 address-history collections consume that selected current registration, but
@@ -239,19 +240,23 @@ first removes an ENSv1 relation below a parent on the `unwrapped`,
 [migratable child](glossary.md#migratable-child). Once that child migrates or
 otherwise obtains a current ENSv2
 registration, the published relation is the ENSv2 one and the retained ENSv1
-relation is residue. When the child is held by a migration proof, or is a
-[released v2 authority](glossary.md#released-v2-authority) tombstone, a later
-release leaves it unregistered on the ENSv2 side rather than restoring the
-retained ENSv1 relation. Any other child follows the chain
+relation is residue. A released ENSv2 child publishes no ENSv2 relation, and
+its ENSv1 relation only when its own selected arm is ENSv1 and parent
+reachability kept it. An entry in the parent's
+[migration registry](glossary.md#migration-registry-wrapperregistry), released or
+not, makes the child non-migratable for good, so a released child of a locked
+parent publishes no relation, whether its name is a
+[released v2 authority](glossary.md#released-v2-authority) tombstone or selects
+ENSv1. Any other child follows the chain
 ([ADR 0007](adrs/0007-follow-the-chain-ens-authority.md)): a current ENSv2
 registration selects its ENSv2 relation, a live ENSv1 registration selects its
 ENSv1 relation, and a child neither arm holds follows its latest lifecycle
 fact. Event
 recency never picks the arm. Only a pair whose child has no selected authority
 at all and whose two arms disagree is omitted; it is neither an ambiguous
-product row nor a publication failure. A proven Sepolia boundary, or a current
-child registration in the admitted [migration registry](glossary.md#migration-registry-wrapperregistry) below a proven migrated
-parent, selects ENSv2 from the proof. Names with facts on both protocol eras
+product row nor a publication failure. A current child registration in the
+admitted migration registry selects ENSv2 like any other ENSv2 registration;
+no activated boundary for the child or its parent is needed. Names with facts on both protocol eras
 are expected on Sepolia because the runtime admits evidence from both; each
 selects an arm per name under the same rule and is no longer refused. Names that
 were identity-only with `independent_ens_deployments_overlap` (Sepolia) or
@@ -349,7 +354,7 @@ statements that complete migration groups remain candidate-only.
 | 2D. Authority fanout across product collections | Address-name membership and role summaries, name-filtered permission selection, search membership, primary-name forward verification, and address-derived product-history anchors all consume the exact-name authority slice 2C selects ([current-authority fanout](glossary.md#current-authority-fanout)); no collection performs an ENSv1-versus-ENSv2 ranking of its own. Explicit registration or resource reads remain audit views, and per-result exact-name classification in batch lookup stays 2C-owned. A collection that carries no row-local unsupported vocabulary omits a name whose exact-name authority is unsupported instead of inventing a row-local status. | 5 |
 | 2E. Post-rollback generation-failure audit | Enforce the reconciled dual-current invariant on both configured ENS deployment profiles (Mainnet and Sepolia) and persist the rolled-back generation failure in a separate append-only diagnostic transaction. | To be scoped |
 | 3A. Direct-child correlation | Derive the deferred child-migration shapes that reach no migration controller, where the already-migrated parent's own [migration registry](glossary.md#migration-registry-wrapperregistry) registers the child into itself through the self-call that definition cites; admit the registry a locked child receives from its parent registry so admitted depth is unbounded; derive the child's ENSv1 predecessor from the parent registry's own migration evidence and the registered labelhash rather than inheriting the `.eth` second-level rule, under the separate `wrapper_backed_child_control` anchor defined at [child migration boundary](glossary.md#child-migration-boundary), selected against the child's ENSv1 cleanup rather than the registration; admit both cleanup shapes that definition cites — the `locked_child` path, whose wrapper token is parked in the Graveyard, and the `emancipated_child` path, whose node is unwrapped into it — each only with that ENSv1 predecessor cleanup present, earlier in the registration's own transaction; and reject the clobbered registration, the unmigrated child, factory-only evidence, incomplete parent discovery, and any self-claim lacking ENSv1 predecessor cleanup as non-boundaries, `MigrationHelper` participation being unobservable for the reason cited there and so never a correlation key at all. Correlation reuses `authority_transition`; every child boundary and effect is candidate-only, so no child state, projection, or product row changes — though an admitted child registry does widen Project's delete-and-rebuild scope — and activating a child transition remains an explicit refusal until slice 3B. | 4 |
-| 3B. Children publication invariant | Stage the parent-child relation each authority arm states, first filtering ENSv1 relations by the parent's activated ENSv1→ENSv2 migration path: unwrapped, unlocked-wrapped, and emancipated-child parents retain none, while locked-wrapped and locked-child parents retain only [migratable children](glossary.md#migratable-child). Then publish the arm the child's own staged authority selects, so recency orders only within that arm; a released ENSv2 child held by a proof or left as a released ENSv2 tombstone publishes nothing and does not fall back, and only a pair with no selected authority at all whose surviving arms disagree is omitted as unsupported rather than ranked. On either configured ENS deployment profile (Mainnet or Sepolia), the ordered child assertion fails an ENS [projection generation](glossary.md#projection-generation) with `dual_current_child_authority` only when a post-epoch ENSv1 relation survives that parent filter; positive registration in a locked parent's migration registry is itself disqualifying entry history, so it is filtered before the assertion. | 4 (children projection builder, Project integrity assertion, child transition writer, redo reopen) plus one reviewed schema-migration file for the failure-kind vocabulary |
+| 3B. Children publication invariant | Stage the parent-child relation each authority arm states, first filtering ENSv1 relations by the parent's activated ENSv1→ENSv2 migration path: unwrapped, unlocked-wrapped, and emancipated-child parents retain none, while locked-wrapped and locked-child parents retain only [migratable children](glossary.md#migratable-child). Then publish the arm the child's own staged authority selects, so recency orders only within that arm; a released ENSv2 child publishes no ENSv2 relation and publishes its ENSv1 relation only when its own selected arm is ENSv1 and reachability kept it, and only a pair with no selected authority at all whose surviving arms disagree is omitted as unsupported rather than ranked. The ordered child assertion fails an ENS [projection generation](glossary.md#projection-generation) with `dual_current_child_authority` only when a child with an activated ENSv1→ENSv2 migration keeps a post-epoch ENSv1 relation that survives that parent filter; positive registration in a locked parent's migration registry is itself disqualifying entry history, so it is filtered before the assertion. | 4 (children projection builder, Project integrity assertion, child transition writer, redo reopen) plus one reviewed schema-migration file for the failure-kind vocabulary |
 | Final activation. Production [complete groups](glossary.md#complete-group) | Run the already-proven activation function after all batch correlation paths finish; activate the authority paths that pass predecessor resolution and complete non-boundary normalized rows while retaining candidate-only diagnostic effect records; reconcile complete registrar-token `unwrapped` transactions before the ENSv1 state fold while retaining their recorded issue #822 coverage status pending runtime acceptance; preserve named refusals, ordinary events, exact predecessor selection, and Sepolia's then-current refusal of ordinary no-proof overlap (later retired by [ADR 0007](adrs/0007-follow-the-chain-ens-authority.md)); rotate the [interpreter content hash](glossary.md#interpreter-content-hash) and require the full Interpret→Project walk before publication. Coverage is enumerated in [`migration-activation-coverage.md`](migration-activation-coverage.md). | 4 adapter production files, one of which deletes the superseded helper; no schema, manifest, API, or Project vocabulary change |
 
 Issues [#348](https://github.com/ensdomains/bigname/issues/348) and

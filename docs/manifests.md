@@ -469,8 +469,10 @@ profile, and no admitted authority proof, follows the chain
 ([ADR 0007](adrs/0007-follow-the-chain-ens-authority.md) and
 [architecture](architecture.md#ensv1ensv2-current-authority)): a current ENSv2
 registration selects ENSv2, and otherwise ENSv1 decides. A premigration
-reservation is not a registration and defers to ENSv1. Only an admitted
-ENSv1→ENSv2 migration boundary sets an authority epoch at the boundary itself.
+reservation is not a registration and defers to ENSv1. An admitted
+ENSv1→ENSv2 [migration boundary](glossary.md#migration-boundary) is history and
+sets no authority epoch: a migrated name's epoch starts at its successor ENSv2
+binding's own position, like any other ENSv2 registration's.
 The root, `eth`, `reverse`, and `addr.reverse` follow the same rule as every
 other name.
 Admitting ENSv1 sources here makes names with facts on both arms reachable in
