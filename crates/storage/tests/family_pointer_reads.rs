@@ -3,8 +3,8 @@
 //! - `load_family_link_selection`: only links of the record-ID storage model count; the link at
 //!   the name's own node wins unless it is absent or a clear (record id `0`); then the link at the
 //!   empty-name node, the resolver's default record, serves, unless it is a clear too.
-//! - `load_family_alias_source_pointer`: the resource's current pointer, rejected when null or
-//!   zero, never an older pointer.
+//! - `load_family_alias_source_pointer`: the resource's current pointer, rejected when null, zero
+//!   or empty, never an older pointer.
 //! - `load_family_wildcard_source`: the latest non-zero pointer, which a null or empty resolver
 //!   counts as, with the latest pointer or version event as its boundary.
 use anyhow::Result;
@@ -223,18 +223,18 @@ async fn pointer(
     Ok(())
 }
 
-// The alias read takes the current pointer and then rejects a null or zero resolver, so a clear
-// never exposes an older pointer. An empty resolver is not rejected: that pins today's alias
-// behaviour, which differs from the record pointer's rejection of an empty resolver and is to be
-// settled before served reads switch to these readers.
+// The alias read takes the current pointer and then rejects a null, zero or empty resolver, so a
+// clear never exposes an older pointer. An empty resolver means no alias (Tate, 2026-09-26): it is
+// the same "no resolver" rule the record pointer applies, and the ENSv2 registry adapter writes
+// the resolver through `nullable_address`, so only a fixture can hold an empty one.
 #[tokio::test]
-async fn alias_pointer_rejects_null_and_zero_but_not_empty() -> Result<()> {
+async fn alias_pointer_rejects_null_zero_and_empty() -> Result<()> {
     with_database("family_alias_pointer", |pool| async move {
         let cases = [
             (Uuid::from_u128(1), Some(RESOLVER), Some(RESOLVER)),
             (Uuid::from_u128(2), None, None),
             (Uuid::from_u128(3), Some(ZERO), None),
-            (Uuid::from_u128(4), Some(""), Some("")),
+            (Uuid::from_u128(4), Some(""), None),
         ];
         for (resource, current, _) in cases {
             pointer(&pool, resource, current, Some(Some(OLDER))).await?;
