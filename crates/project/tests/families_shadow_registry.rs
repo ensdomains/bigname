@@ -313,6 +313,10 @@ async fn an_earlier_admitted_transfer_with_an_unmasked_word_reports_no_owner() -
     Ok(())
 }
 
+/// A synthetic shape: the interpreter never puts registry_owner on a registry
+/// AuthorityTransferred (it sets it on the registrar epoch observation only,
+/// crates/adapters/src/schema_v2/protocol/v1/registrar.rs). The fixture exercises the served
+/// COALESCE(registry_owner, owner) rule of build.sql:660-663, not a chain shape.
 #[tokio::test]
 async fn an_earlier_admitted_transfer_reports_its_registry_owner() -> Result<()> {
     let (served, shadow) = earlier_transfer_wins(
