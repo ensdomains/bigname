@@ -23,10 +23,10 @@
 //!   permissions.rs:111-133, :391-398 must keep the registration live in today's order and
 //!   lapse it in the canonical order, the served value must not be empty, and the whole read in
 //!   today's order must equal it. A served empty value against a canonical row is a mismatch.
-//!   The same read in today's order also takes, for the F2c node and for each registry-binding
-//!   observation, the event of the higher generated id where two share one block, transaction
-//!   and log (the SubregistryChanged and AuthorityTransferred of one ENSv1 NewOwner), read from
-//!   the event log, and chooses each resource's binding by generated id at equal positions; a
+//!   The same read in today's order also takes, for each registry-binding observation, the
+//!   event of the higher generated id where two share one block, transaction and log (the
+//!   SubregistryChanged and AuthorityTransferred of one ENSv1 NewOwner), read from the event
+//!   log, and chooses each resource's binding by generated id at equal positions; a
 //!   `registry_binding/*` field passes only when that whole binding equals the served one.
 //!
 //! Named causes, each a place where the families and today's builders disagree, reported
@@ -87,9 +87,8 @@ use bigname_storage::{
         },
         position::{EventOrder, Position},
         registry::{
-            NameAttribution, Observation, RegistryBinding, RegistryNode, load_observations,
-            load_registry_nodes, ownerless_registry, registry_bindings, registry_bindings_in,
-            registry_generation,
+            NameAttribution, Observation, RegistryBinding, load_observations, load_registry_nodes,
+            ownerless_registry, registry_bindings, registry_bindings_in, registry_generation,
         },
         rows::LifecycleEvent,
     },
@@ -817,25 +816,7 @@ async fn name_excuses(
             .collect();
         let ids = generated_ids(pool, chain, &identities).await?;
         let keys = association_keys(pool, chain, &identities).await?;
-        let node = match &facts.registry_node {
-            Some(node) => node_in_todays_order(pool, chain, node).await?,
-            None => None,
-        };
-        let legacy = match (legacy_facts(&facts, &ids, &keys), node) {
-            (Some(mut legacy), node) => {
-                if node.is_some() {
-                    legacy.registry_node = node;
-                }
-                Some(legacy)
-            }
-            (None, Some(node)) => {
-                let mut legacy = facts.clone();
-                legacy.registry_node = Some(node);
-                Some(legacy)
-            }
-            (None, None) => None,
-        };
-        if let Some(legacy) = legacy {
+        if let Some(legacy) = legacy_facts(&facts, &ids, &keys) {
             let counterfactual = evaluate(&legacy, clock);
             for (index, diff) in diffs.iter().enumerate() {
                 if open(&out, index)
@@ -1020,78 +1001,6 @@ async fn bindings_in_todays_order(
         names,
         &EventOrder::Generated(ids),
     ))
-}
-
-/// The F2c node as a fold in today's order would leave it: when another registry event of the
-/// node shares the block, transaction and log of the event that set its owner group (the
-/// AuthorityTransferred beside the SubregistryChanged of one NewOwner) with a higher generated
-/// id, today's order writes it last, so it sets the owner group, read from the event log with
-/// its own columns (crates/project/src/families/registry.rs `registry_nodes`).
-async fn node_in_todays_order(
-    pool: &PgPool,
-    chain: &str,
-    node: &RegistryNode,
-) -> Result<Option<RegistryNode>> {
-    let Some(position) = &node.owner_position else {
-        return Ok(None);
-    };
-    let family = if node.namespace == "basenames" {
-        "basenames_base_registry"
-    } else {
-        "ens_v1_registry_l1"
-    };
-    let row: Option<(String, String, Option<String>, Value)> = sqlx::query_as(
-        "SELECT event.event_identity, event.event_kind, event.resource_id::text,
-                event.after_state
-         FROM normalized_events event
-         WHERE event.chain_id = $1 AND event.namespace = $2 AND event.source_family = $3
-           AND event.event_kind IN ('AuthorityTransferred', 'SubregistryChanged')
-           AND event.block_number = $4
-           AND event.transaction_index IS NOT DISTINCT FROM $5
-           AND event.log_index IS NOT DISTINCT FROM $6
-           AND lower(COALESCE(NULLIF(event.after_state ->> 'child_node', ''),
-                              event.after_state ->> 'node')) = $7
-           AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
-         ORDER BY event.normalized_event_id DESC LIMIT 1",
-    )
-    .bind(chain)
-    .bind(&node.namespace)
-    .bind(family)
-    .bind(position.block_number)
-    .bind(position.transaction_index)
-    .bind(position.log_index)
-    .bind(&node.node)
-    .fetch_optional(pool)
-    .await?;
-    let Some((identity, kind, resource, after)) = row else {
-        return Ok(None);
-    };
-    if identity == position.event_identity {
-        return Ok(None);
-    }
-    let lower = |field: &str| {
-        after
-            .get(field)
-            .and_then(Value::as_str)
-            .map(str::to_ascii_lowercase)
-    };
-    Ok(Some(RegistryNode {
-        owner_event_kind: Some(kind),
-        owner_position: Some(Position {
-            event_identity: identity,
-            ..position.clone()
-        }),
-        owner_resource_id: resource,
-        owner: lower("owner"),
-        registry_owner: lower("registry_owner"),
-        owner_getter: lower("owner_getter"),
-        owner_getter_reason: after
-            .get("owner_getter_reason")
-            .and_then(Value::as_str)
-            .map(str::to_owned),
-        owner_word_unmasked: after.get("owner_word_unmasked").and_then(Value::as_bool),
-        ..node.clone()
-    }))
 }
 
 /// The generated ids of events, by identity.

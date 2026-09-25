@@ -1801,9 +1801,11 @@ served value is not empty, and the families read in that order give it. A served
 empty value against a family row is a mismatch. One ENSv1 NewOwner log yields a
 SubregistryChanged and an AuthorityTransferred at one position; the families keep
 the SubregistryChanged, whose identity sorts last, and today's builders the
-AuthorityTransferred, whose generated id is higher, so
-the registry node and the registry binding are read again in today's order from
-the event log, and a binding passes only when it matches the served one whole. The second is a named cause whose own check holds for
+AuthorityTransferred, whose generated id is higher, as the registry-binding
+observation of the name, so the binding is read again in today's order from the
+event log, and it passes only when it matches the served one whole. The control
+block reads only the name's admitted transfers, which the families keep apart,
+so it needs no such read. The second is a named cause whose own check holds for
 that field. A named cause is either a step 2 family gap, reported rather than
 patched, or a served-side bug.
 
