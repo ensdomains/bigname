@@ -711,20 +711,12 @@ async fn a_registry_only_new_owner_transfer_and_epoch_at_one_log_is_a_same_block
     fixture.cleanup().await
 }
 
-/// Item 4 of the ea047c04..2533ef55 review: a state-derived registry-only SurfaceBound and a
-/// registry AuthorityTransferred at one block, transaction and log, the SurfaceBound pushed
-/// first. Both feed the control owner (build.sql:664-667). The canonical order puts the
-/// SurfaceBound last (its identity sorts after the transfer's) and reports its bound owner;
-/// today's order puts the transfer last (higher id) and reports its owner. The same-block read
-/// orders the binding candidates' SurfaceBound positions by generated id too, so the owner is a
-/// same-block delta.
-#[tokio::test]
-async fn a_registry_only_surface_bound_and_transfer_at_one_log_is_a_same_block_delta() -> Result<()>
-{
-    let fixture = Fixture::new("families_shadow_registry_one_log_bound", 20).await?;
-    let node_resource = uuid(3);
+/// A state-derived registry-only SurfaceBound of name 1 on `node_resource` (bound owner OTHER)
+/// and a registry AuthorityTransferred (OWNER) at block 10, transaction 0, log 9, the
+/// SurfaceBound written first.
+async fn one_log_bound(fixture: &Fixture, node_resource: &str) -> Result<()> {
     fixture
-        .binding(&uuid(100), &name(1), &node_resource, "ens_v1", 10, 9, None)
+        .binding(&uuid(100), &name(1), node_resource, "ens_v1", 10, 9, None)
         .await?;
     fixture
         .write(
@@ -733,7 +725,7 @@ async fn a_registry_only_surface_bound_and_transfer_at_one_log_is_a_same_block_d
             "SurfaceBound",
             "registry_only_binding",
             Some(&name(1)),
-            Some(&node_resource),
+            Some(node_resource),
             json!({"authority_kind": "registry_only", "state_derived": true,
                    "registry_contract": REGISTRY, "owner": OTHER}),
             REGISTRY,
@@ -746,12 +738,28 @@ async fn a_registry_only_surface_bound_and_transfer_at_one_log_is_a_same_block_d
             "AuthorityTransferred",
             V1_REGISTRY,
             Some(&name(1)),
-            Some(&node_resource),
+            Some(node_resource),
             json!({"node": node(1), "owner": OWNER, "owner_getter": OWNER,
                    "emitter_role": "registry"}),
             REGISTRY,
         )
         .await?;
+    Ok(())
+}
+
+/// Item 4 of the ea047c04..2533ef55 review: a state-derived registry-only SurfaceBound and a
+/// registry AuthorityTransferred at one block, transaction and log, the SurfaceBound pushed
+/// first. Both feed the control owner (build.sql:664-667). The canonical order puts the
+/// SurfaceBound last (its identity sorts after the transfer's) and reports its bound owner;
+/// today's order puts the transfer last (higher id) and reports its owner. The same-block read
+/// orders the binding candidates' SurfaceBound positions by generated id too, so the owner is a
+/// same-block delta.
+#[tokio::test]
+async fn a_registry_only_surface_bound_and_transfer_at_one_log_is_a_same_block_delta() -> Result<()>
+{
+    let fixture = Fixture::new("families_shadow_registry_one_log_bound", 20).await?;
+    let node_resource = uuid(3);
+    one_log_bound(&fixture, &node_resource).await?;
     let report = publish_and_compare(&fixture, 12).await?;
     let (served, shadow) = shadow_support::name(&fixture, 12, &name(1)).await?;
     assert_eq!(served.control("registry_owner"), json!(OWNER));
@@ -1121,4 +1129,283 @@ fn each_condition_of_the_binding_delta_rejects_on_its_own() {
     );
     // A resource an unverified family observation reaches.
     assert!(!orders(m, a, true).same_block_delta("r", &served, &shadow));
+}
+
+/// Pro Q1 on a5f61182: the registry rebuild reads only the publication-visible event log, the
+/// set family intake reads (crates/project/src/families/input.rs:175-195, :309-319): activated,
+/// canonical, at the canonical lineage's hash for its height, at or below the target. Name 1's
+/// visible AuthorityTransferred a-visible (getter OTHER) is what both sides serve; each case
+/// then points the families at a wrong selection, which must stay a mismatch rather than pass
+/// as a same-block delta:
+/// - a rival z-rival at a-visible's position, written first (lower id), that is a candidate,
+///   or canonical-looking but at an orphaned hash of block 11, or at block 13 past the target;
+///   the family observation of name 1 is repointed at it with its getter THIRD. Read without
+///   the predicate, the canonical rebuild would take z-rival (its identity sorts last) and
+///   today's a-visible (higher id), and the difference would pass.
+/// - an extra family observation of the lease, which the event log does not hold.
+/// - a missing one: an unnamed z-lease (THIRD) on the lease, then m-name (a SubregistryChanged
+///   of name 1, FOURTH) and a-visible at one position. Canonically the lease takes z-lease,
+///   today a-visible, a legitimate delta; dropping the lease's family row makes the families
+///   serve m-name.
+#[tokio::test]
+async fn a_family_selection_outside_the_published_log_stays_a_mismatch() -> Result<()> {
+    const FOURTH: &str = "0x00000000000000000000000000000000000000dd";
+    const ORPHAN: &str = "0x00000000000000000000000000000000000000000000000000000000000dead0";
+    for case in [
+        "unactivated",
+        "wrong lineage",
+        "past the target",
+        "extra",
+        "missing",
+    ] {
+        let fixture = Fixture::new("families_shadow_registry_unpublished", 20).await?;
+        let lease = uuid(1);
+        bound(&fixture, &lease).await?;
+        let rival_block = if case == "past the target" { 13 } else { 11 };
+        let name_1 = name(1);
+        let rival_id = if matches!(case, "extra" | "missing") {
+            None
+        } else {
+            let event = Event::new(
+                "z-rival",
+                rival_block,
+                1,
+                "AuthorityTransferred",
+                V1_REGISTRY,
+            )
+            .name(&name_1)
+            .resource(&lease)
+            .after(
+                json!({"source_event": "NewOwner", "node": node(2), "child_node": node(1),
+                           "owner": OTHER, "owner_getter": THIRD, "emitter_role": "registry"}),
+            )
+            .raw(json!({"emitting_address": REGISTRY}));
+            Some(fixture.event(event).await?)
+        };
+        if case == "missing" {
+            unnamed_on(&fixture, "z-lease", 11, &lease, THIRD).await?;
+            named_on(&fixture, "m-name", "SubregistryChanged", &lease, FOURTH).await?;
+        }
+        named_on(&fixture, "a-visible", "AuthorityTransferred", &lease, OTHER).await?;
+        match case {
+            "unactivated" => {
+                sqlx::query(
+                    "UPDATE normalized_events SET consumer_visibility = 'candidate',
+                         migration_correlation_ids = ARRAY['fixture']
+                     WHERE event_identity = 'z-rival'",
+                )
+                .execute(&fixture.pool)
+                .await?;
+            }
+            "wrong lineage" => {
+                sqlx::query(
+                    "INSERT INTO chain_lineage (chain_id, block_hash, parent_hash, block_number,
+                         block_timestamp, canonicality_state)
+                     VALUES ($1, $2, $3, 11, to_timestamp(1800000132), 'orphaned')",
+                )
+                .bind(CHAIN)
+                .bind(ORPHAN)
+                .bind(support::hash(10))
+                .execute(&fixture.pool)
+                .await?;
+                sqlx::query(
+                    "UPDATE normalized_events SET block_hash = $1 WHERE event_identity = 'z-rival'",
+                )
+                .bind(ORPHAN)
+                .execute(&fixture.pool)
+                .await?;
+            }
+            _ => {}
+        }
+        let report = publish_and_compare(&fixture, 12).await?;
+        let baseline: &[(&str, usize)] = if case == "missing" {
+            &[
+                ("d12_same_block_order:registry_binding/event_ids", 1),
+                ("d12_same_block_order:registry_binding/registry_owner", 1),
+            ]
+        } else {
+            &[]
+        };
+        shadow_support::assert_counts(&report, &[], baseline);
+        assert_eq!(
+            summary(&fixture, &lease).await?.expect("summarised")["registry_owner"],
+            json!(OTHER),
+            "{case}"
+        );
+        let (mutation, fields): (String, &[&str]) = match case {
+            "extra" => (
+                format!(
+                    "INSERT INTO bigname_phase.project_registry_binding_observation
+                     SELECT (jsonb_populate_record(
+                         NULL::bigname_phase.project_registry_binding_observation,
+                         to_jsonb(observation) || jsonb_build_object(
+                             'observation_identity', '{lease}', 'logical_name_id', NULL,
+                             'attributed_via', 'own', 'event_identity', 'z-extra',
+                             'registry_owner', '{THIRD}', 'normalized_event_id', 999999))).*
+                     FROM bigname_phase.project_registry_binding_observation observation
+                     WHERE observation.observation_identity = $1"
+                ),
+                &[
+                    "registry_binding/event_ids",
+                    "registry_binding/registry_owner",
+                ],
+            ),
+            "missing" => (
+                "DELETE FROM bigname_phase.project_registry_binding_observation
+                 WHERE observation_identity <> $1"
+                    .to_owned(),
+                &[
+                    "registry_binding/event_ids",
+                    "registry_binding/registry_owner",
+                ],
+            ),
+            _ => (
+                format!(
+                    "UPDATE bigname_phase.project_registry_binding_observation
+                     SET event_identity = 'z-rival', block_number = {rival_block},
+                         normalized_event_id = {}, registry_owner = '{THIRD}'
+                     WHERE observation_identity = $1",
+                    rival_id.expect("a rival")
+                ),
+                if case == "past the target" {
+                    &[
+                        "registry_binding/block_number",
+                        "registry_binding/event_ids",
+                        "registry_binding/registry_owner",
+                    ]
+                } else {
+                    &[
+                        "registry_binding/event_ids",
+                        "registry_binding/registry_owner",
+                    ]
+                },
+            ),
+        };
+        sqlx::query(&mutation)
+            .bind(name(1))
+            .execute(&fixture.pool)
+            .await?;
+        let mutated = shadow_support::compare::compare(&fixture.pool, CHAIN, 12).await?;
+        assert!(
+            mutated.expected_delta_fields.is_empty() && mutated.known_discrepancy.is_empty(),
+            "{case}: a wrong family selection must not pass: {:#?}",
+            mutated.lines
+        );
+        assert_eq!(
+            failed_fields(&mutated),
+            fields,
+            "{case}: {:#?}",
+            mutated.lines
+        );
+        fixture.cleanup().await?;
+    }
+    Ok(())
+}
+
+/// Name 1's facts as the harness loads them.
+async fn name_facts(
+    fixture: &Fixture,
+) -> Result<bigname_storage::families::control::lifecycle::NameFacts> {
+    use bigname_storage::families::control::lifecycle::{
+        AuthoritySelection, NameInput, load_name_facts,
+    };
+    let rows =
+        bigname_storage::load_name_current_by_logical_name_ids(&fixture.pool, &[name(1)]).await?;
+    let row = &rows[&name(1)];
+    let input = NameInput {
+        logical_name_id: row.logical_name_id.clone(),
+        namehash: row.namehash.to_ascii_lowercase(),
+        selection: AuthoritySelection::from_provenance(&row.provenance),
+    };
+    Ok(load_name_facts(&fixture.pool, CHAIN, &[input])
+        .await?
+        .pop()
+        .expect("name 1 has facts"))
+}
+
+/// Pro Q1 on a5f61182: the control-fact guard and the generated ids read only the
+/// publication-visible event log. In the one-log SurfaceBound fixture the owner difference is a
+/// same-block delta; the transfer's log row is then made a candidate, or moved to an orphaned
+/// hash of its block, after publication. Each read on its own then no longer finds it, and the
+/// whole comparison leaves the owner a mismatch. Read at a target before block 10, neither
+/// finds the block's events.
+#[tokio::test]
+async fn the_control_guard_and_generated_ids_read_the_published_log_only() -> Result<()> {
+    use shadow_support::compare::{control_facts_hold, control_positions, generated_ids};
+    const ORPHAN: &str = "0x00000000000000000000000000000000000000000000000000000000000dead0";
+    const TRANSFER: &str = "AuthorityTransferred:10:9";
+    for case in ["unactivated", "wrong lineage"] {
+        let fixture = Fixture::new("families_shadow_registry_published_control", 20).await?;
+        let node_resource = uuid(3);
+        one_log_bound(&fixture, &node_resource).await?;
+        let report = publish_and_compare(&fixture, 12).await?;
+        shadow_support::assert_counts(
+            &report,
+            &[],
+            &[("d12_same_block_order:control/registry_owner", 1)],
+        );
+        let facts = name_facts(&fixture).await?;
+        let identities: Vec<String> = control_positions(&facts)
+            .into_iter()
+            .map(|position| position.event_identity)
+            .collect();
+        assert!(identities.iter().any(|identity| identity == TRANSFER));
+        assert!(control_facts_hold(&fixture.pool, CHAIN, 12, &facts).await?);
+        assert!(!control_facts_hold(&fixture.pool, CHAIN, 9, &facts).await?);
+        assert!(
+            generated_ids(&fixture.pool, CHAIN, 9, &identities)
+                .await?
+                .is_empty()
+        );
+        if case == "unactivated" {
+            sqlx::query(
+                "UPDATE normalized_events SET consumer_visibility = 'candidate',
+                     migration_correlation_ids = ARRAY['fixture']
+                 WHERE event_identity = $1",
+            )
+            .bind(TRANSFER)
+            .execute(&fixture.pool)
+            .await?;
+        } else {
+            sqlx::query(
+                "INSERT INTO chain_lineage (chain_id, block_hash, parent_hash, block_number,
+                     block_timestamp, canonicality_state)
+                 VALUES ($1, $2, $3, 10, to_timestamp(1800000120), 'orphaned')",
+            )
+            .bind(CHAIN)
+            .bind(ORPHAN)
+            .bind(support::hash(9))
+            .execute(&fixture.pool)
+            .await?;
+            sqlx::query("UPDATE normalized_events SET block_hash = $1 WHERE event_identity = $2")
+                .bind(ORPHAN)
+                .bind(TRANSFER)
+                .execute(&fixture.pool)
+                .await?;
+        }
+        assert!(
+            !control_facts_hold(&fixture.pool, CHAIN, 12, &facts).await?,
+            "{case}: the guard must not find the transfer"
+        );
+        assert!(
+            !generated_ids(&fixture.pool, CHAIN, 12, &identities)
+                .await?
+                .contains_key(TRANSFER),
+            "{case}: no generated id for the transfer"
+        );
+        let mutated = shadow_support::compare::compare(&fixture.pool, CHAIN, 12).await?;
+        assert!(
+            mutated.expected_delta_fields.is_empty() && mutated.known_discrepancy.is_empty(),
+            "{case}: {:#?}",
+            mutated.lines
+        );
+        assert_eq!(
+            failed_fields(&mutated),
+            ["control/registry_owner"],
+            "{case}: {:#?}",
+            mutated.lines
+        );
+        fixture.cleanup().await?;
+    }
+    Ok(())
 }

@@ -27,8 +27,9 @@
 //!   permissions.rs:111-133, :391-398 must keep the registration live in today's order and
 //!   lapse it in the canonical order, the served value must not be empty, and the whole read in
 //!   today's order must equal it. A served empty value against a canonical row is a mismatch.
-//!   For the registry binding, the observations are rebuilt from the event log of the published
-//!   blocks, independently of the families: for each observation identity (the name, else the
+//!   For the registry binding, the observations are rebuilt from the publication-visible event
+//!   log (activated, canonical, at the canonical lineage's hash, at or below the target: the set
+//!   family intake reads), independently of the families: for each observation identity (the name, else the
 //!   resource) its latest producer event canonically (block, transaction, log, event identity)
 //!   and in today's order (block, transaction, log, generated id), each derived as step 2
 //!   derives it, its target read from the name's current binding at the publication. A
@@ -875,7 +876,7 @@ async fn name_excuses(
             )
             .collect();
         let ids = generated_ids(pool, chain, clock.block_number, &identities).await?;
-        let keys = association_keys(pool, chain, &identities).await?;
+        let keys = association_keys(pool, chain, clock.block_number, &identities).await?;
         if let Some(legacy) = legacy_facts(&facts, &ids, &keys) {
             let counterfactual = evaluate(&legacy, clock);
             let mut control_holds = None;
@@ -944,9 +945,9 @@ type LogRow = (
 /// Whether every control fact of the name the control block reads, beyond its lifecycle
 /// events, is what the event log up to the publication gives: each owner-setting event of its
 /// node, each epoch start and each binding candidate's SurfaceBound owner, found by identity at
-/// its position among canonical events of the published blocks and rebuilt from it as step 2
-/// derives it.
-async fn control_facts_hold(
+/// its position among the publication-visible events (`published`) and rebuilt from it as
+/// step 2 derives it.
+pub async fn control_facts_hold(
     pool: &PgPool,
     chain: &str,
     target: i64,
@@ -969,13 +970,14 @@ async fn control_facts_hold(
             Option<i64>,
             Value,
         ),
-    >(
-        "SELECT event_identity, event_kind, logical_name_id, resource_id::text, source_family,
-                block_number, transaction_index, log_index, after_state
-         FROM normalized_events WHERE chain_id = $1 AND event_identity = ANY($2)
-           AND block_number <= $3
-           AND canonicality_state IN ('canonical', 'safe', 'finalized')",
-    )
+    >(&format!(
+        "SELECT event.event_identity, event.event_kind, event.logical_name_id,
+                event.resource_id::text, event.source_family, event.block_number,
+                event.transaction_index, event.log_index, event.after_state
+         FROM normalized_events event
+         WHERE event.chain_id = $1 AND event.event_identity = ANY($2) AND {}",
+        published("$3")
+    ))
     .bind(chain)
     .bind(&identities)
     .bind(target)
@@ -1218,8 +1220,8 @@ fn same_observation(family: &Observation, rebuilt: &Observation) -> bool {
         && family.normalized_event_id == rebuilt.normalized_event_id
 }
 
-/// Every resource's registry binding rebuilt from the event log of the published blocks, in
-/// both orders, independently of the family's choices. For each observation identity (the
+/// Every resource's registry binding rebuilt from the publication-visible event log
+/// (`published`), in both orders, independently of the family's choices. For each observation identity (the
 /// name, else the resource) the canonical rebuild takes its latest producer event in the
 /// canonical order (block, transaction, log, event identity), as F2c keeps it, and today's
 /// rebuild the latest in (block, transaction, log, generated id), as the served summary does
@@ -1235,7 +1237,7 @@ async fn rebuilt_bindings(
     observations: &[Observation],
     names: &BTreeMap<String, NameAttribution>,
 ) -> Result<BindingOrders> {
-    let rows: Vec<RivalRow> = sqlx::query_as(
+    let rows: Vec<RivalRow> = sqlx::query_as(&format!(
         r#"SELECT COALESCE(event.logical_name_id, event.resource_id::text), event.event_identity,
                event.logical_name_id, event.resource_id::text, event.block_number,
                event.transaction_index, event.log_index, event.normalized_event_id,
@@ -1243,23 +1245,23 @@ async fn rebuilt_bindings(
                lower(CASE WHEN event.source_family IN (
                                   'ens_v1_registrar_l1', 'basenames_base_registrar')
                               OR (event.event_kind = 'SurfaceBound'
-                                  AND event.after_state @> '{"state_derived":true,"authority_kind":"registry_only"}')
+                                  AND event.after_state @> '{{"state_derived":true,"authority_kind":"registry_only"}}')
                           THEN event.after_state ->> 'registry_contract'
                           ELSE COALESCE(event.raw_fact_ref ->> 'emitting_address',
                                         event.after_state ->> 'registry_contract') END),
                jsonb_build_object('owner_getter', lower(event.after_state ->> 'owner_getter'),
                                   'raw_fact_ref', event.raw_fact_ref)
          FROM normalized_events event
-         WHERE event.chain_id = $1 AND event.block_number <= $2
+         WHERE event.chain_id = $1 AND {}
            AND event.event_kind IN ('AuthorityTransferred', 'SubregistryChanged', 'SurfaceBound',
                                     'SurfaceUnbound')
            AND (event.source_family IN ('ens_v1_registry_l1', 'basenames_base_registry')
                 OR (event.event_kind IN ('SurfaceBound', 'SurfaceUnbound')
                     AND event.source_family IN ('ens_v1_registrar_l1',
                                                 'basenames_base_registrar')))
-           AND event.resource_id IS NOT NULL
-           AND event.canonicality_state IN ('canonical', 'safe', 'finalized')"#,
-    )
+           AND event.resource_id IS NOT NULL"#,
+        published("$2")
+    ))
     .bind(chain)
     .bind(clock.block_number)
     .fetch_all(pool)
@@ -1274,6 +1276,11 @@ async fn rebuilt_bindings(
         "SELECT DISTINCT ON (binding.logical_name_id) binding.logical_name_id,
                 binding.resource_id::text
          FROM surface_bindings binding
+         JOIN chain_lineage lineage
+           ON lineage.chain_id = binding.chain_id
+          AND lineage.block_number = binding.block_number
+          AND lineage.block_hash = binding.block_hash
+          AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
          WHERE binding.chain_id = $1 AND binding.logical_name_id = ANY($2)
            AND binding.authority_arm IN ('ens_v1', 'basenames')
            AND binding.canonicality_state IN ('canonical', 'safe', 'finalized')
@@ -1386,52 +1393,75 @@ pub fn control_positions(facts: &NameFacts) -> Vec<Position> {
     owners.chain(starts).chain(bounds).collect()
 }
 
-/// The generated ids of events, by identity, among canonical events of the published blocks,
-/// the predicate the registry-binding and control-fact reads use. An event whose log row is no
-/// longer canonical, or lies past the target, has no id here, so a read that needs it has no
-/// today's order.
+/// The publication-visible event log at or below the target bound `target` (a query
+/// parameter): activated, canonical, and at the canonical lineage's hash for its height, the
+/// set family intake reads (crates/project/src/families/input.rs:175-195, :309-319). `event` is
+/// the normalized_events alias. Every log read an excuse rests on takes this predicate.
+fn published(target: &str) -> String {
+    format!(
+        "event.block_number <= {target}
+         AND event.consumer_visibility = 'activated'
+         AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
+         AND EXISTS (SELECT 1 FROM chain_lineage lineage
+                     WHERE lineage.chain_id = event.chain_id
+                       AND lineage.block_number = event.block_number
+                       AND lineage.block_hash = event.block_hash
+                       AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized'))"
+    )
+}
+
+/// The generated ids of events, by identity, among the publication-visible events
+/// (`published`). An event that is a candidate, off the canonical lineage or past the target
+/// has no id here, so a read that needs it has no today's order.
 pub async fn generated_ids(
     pool: &PgPool,
     chain: &str,
     target: i64,
     identities: &[String],
 ) -> Result<BTreeMap<String, i64>> {
-    Ok(sqlx::query_as::<_, (String, i64)>(
-        "SELECT event_identity, normalized_event_id FROM normalized_events
-         WHERE chain_id = $1 AND event_identity = ANY($2) AND block_number <= $3
-           AND canonicality_state IN ('canonical', 'safe', 'finalized')",
-    )
-    .bind(chain)
-    .bind(identities)
-    .bind(target)
-    .fetch_all(pool)
-    .await?
-    .into_iter()
-    .collect())
-}
-
-/// The registry identifier and token id of events, by identity, as today's association keys
-/// them (v2_lifecycle_events.sql:14-19).
-pub async fn association_keys(
-    pool: &PgPool,
-    chain: &str,
-    identities: &[String],
-) -> Result<BTreeMap<String, (String, String)>> {
-    Ok(
-        sqlx::query_as::<_, (String, Option<String>, Option<String>)>(
-            "SELECT event_identity,
-                COALESCE(after_state ->> 'registry_contract_instance_id',
-                         raw_fact_ref ->> 'emitting_address', after_state ->> 'registry'),
-                after_state ->> 'token_id'
-         FROM normalized_events WHERE chain_id = $1 AND event_identity = ANY($2)",
-        )
+    let sql = format!(
+        "SELECT event.event_identity, event.normalized_event_id FROM normalized_events event
+         WHERE event.chain_id = $1 AND event.event_identity = ANY($2) AND {}",
+        published("$3")
+    );
+    Ok(sqlx::query_as::<_, (String, i64)>(&sql)
         .bind(chain)
         .bind(identities)
+        .bind(target)
         .fetch_all(pool)
         .await?
         .into_iter()
-        .filter_map(|(identity, registry, token)| Some((identity, (registry?, token?))))
-        .collect(),
+        .collect())
+}
+
+/// The registry identifier and token id of publication-visible events (`published`), by
+/// identity, as today's association keys them (v2_lifecycle_events.sql:14-19).
+pub async fn association_keys(
+    pool: &PgPool,
+    chain: &str,
+    target: i64,
+    identities: &[String],
+) -> Result<BTreeMap<String, (String, String)>> {
+    let sql = format!(
+        "SELECT event.event_identity,
+                COALESCE(event.after_state ->> 'registry_contract_instance_id',
+                         event.raw_fact_ref ->> 'emitting_address',
+                         event.after_state ->> 'registry'),
+                event.after_state ->> 'token_id'
+         FROM normalized_events event
+         WHERE event.chain_id = $1 AND event.event_identity = ANY($2) AND {}",
+        published("$3")
+    );
+    Ok(
+        sqlx::query_as::<_, (String, Option<String>, Option<String>)>(&sql)
+            .bind(chain)
+            .bind(identities)
+            .bind(target)
+            .fetch_all(pool)
+            .await?
+            .into_iter()
+            .filter_map(|(identity, registry, token)| Some((identity, (registry?, token?))))
+            .collect(),
     )
 }
 
