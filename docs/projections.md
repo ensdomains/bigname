@@ -1813,27 +1813,35 @@ then event identity). Binding candidates are not events: two at the same block,
 transaction and log still break the tie by binding id, as the served stage does,
 and a fixture pins that. The Project fixture
 tests and the phase runner's fixture-corpus run compare each value with what the
-production readers serve at the same publication, field by field. A differing
-field passes in two cases only. The first is a disclosed same-block ordering case:
-reading the same families with that block in the old generated-id order must give
-exactly the served value. For a resource's permission rows, admin powers and restriction block
-it passes only in one direction: today's order keeps the registration live, the
-served value is not empty, and the families read in that order give it. A served
-empty value against a family row is a mismatch. One ENSv1 NewOwner log yields a
+production readers serve at the same publication, field by field. Every log
+read these checks make takes only the publication-visible events: activated,
+canonical, at the canonical lineage's hash for their height and at or below the
+target, the set family intake reads. A name's checks read its retained lifecycle
+events rebuilt from that log rather than the family rows, and those rebuilt
+events read in the canonical order must give the shadow value, so a wrong fact
+on a family row fails the fields it decides. A differing field passes in two
+cases only. The first is a disclosed same-block ordering case: reading the
+rebuilt events with that block in the old generated-id order must give exactly
+the served value. For a resource's permission rows, admin powers and restriction
+block it passes only in one direction: the resource's rebuilt events keep the
+registration live in today's order and lapse it canonically, the served value is
+not empty, and the families read in today's order give it. A served empty value
+against a family row is a mismatch. One ENSv1 NewOwner log yields a
 SubregistryChanged and an AuthorityTransferred at one position; the families keep
 the SubregistryChanged, whose identity sorts last, and today's builders the
 AuthorityTransferred, whose generated id is higher, as the registry-binding
-observation of the name. So the observations are rebuilt from the published
-event log in both orders, each identity's latest event chosen from the log and
-not from the family row, and a binding field passes only when the family
-observations equal their canonical rebuild, the canonical binding equals the
-shadow one whole, today's binding equals the served one whole, and the two
-select different events. The control block's same-block read orders the node's owner-setting
-events, the epoch starts and the registry-only SurfaceBounds by generated id
-too, and a control field passes only when each of those family facts equals its
-rebuild from the event log. The second is a named cause whose own check holds for
-that field. A named cause is either a step 2 family gap, reported rather than
-patched, or a served-side bug.
+observation of the name. So the observations are rebuilt from the
+publication-visible event log in both orders, each identity's latest event
+chosen from the log and not from the family row, and a binding field passes only
+when the family observations equal their canonical rebuild, the canonical
+binding equals the shadow one whole, today's binding equals the served one
+whole, and the two select different events. The control block's same-block read
+orders the node's owner-setting events, the epoch starts and the registry-only
+SurfaceBounds by generated id too, and a control field passes only when each of
+those family facts equals its rebuild from the event log. The second is a named
+cause whose own check holds for that field. Both named causes are served-side
+bugs. A step 2 family gap is never a named cause: its fields stay mismatches and
+fail the run until the owning reducer is fixed.
 
 Under Tate's ruling an expired or released ENSv2 registration stays ENSv2 and
 is served unregistered. Three served-side bugs break that rule today, and the
