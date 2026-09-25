@@ -207,18 +207,21 @@ async fn seed_direct_scope(
     // through the linked authority or, for a zero owner, the node's registry read anchor, so it
     // can arrive without one while the node has an active surface; the child row follows that
     // surface's latest registry owner. The before-state `node` is a conservative extra candidate.
-    for (table, columns, events) in [
+    for (seed, table, columns, events) in [
         (
+            "project_scope_children",
             "project_scope_children",
             "(event.after_state ->> 'child_node'), (event.before_state ->> 'child_node')",
             "event.event_kind IN ('SubregistryChanged', 'AuthorityTransferred')",
         ),
         (
             "project_scope_ancestors",
+            "project_scope_ancestors",
             "(event.after_state ->> 'node'), (event.before_state ->> 'node')",
             "event.event_kind IN ('SubregistryChanged', 'AuthorityTransferred')",
         ),
         (
+            "project_scope_children_from_transfer",
             "project_scope_children",
             "(event.after_state ->> 'node'), (event.before_state ->> 'node')",
             "event.event_kind = 'AuthorityTransferred'
@@ -226,7 +229,7 @@ async fn seed_direct_scope(
         ),
     ] {
         let statement = format!(
-            "/* project:scope.seed_direct_scope.insert_{table} */ INSERT INTO {table}
+            "/* project:scope.seed_direct_scope.insert_{seed} */ INSERT INTO {table}
              SELECT event.namespace || ':' || lower(candidate.node)
              FROM project_changed_events event
              CROSS JOIN LATERAL (
