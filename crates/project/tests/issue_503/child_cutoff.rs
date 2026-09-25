@@ -10,6 +10,8 @@ const REGISTRY_ADDRESS: &str = "0x0000000000000000000000000000000000000590";
 const LATER_HASH: &str = "0x50311";
 
 type Position = (i64, Option<i64>, Option<i64>);
+/// (case, binding, migration, relation, halts)
+type CutoffCase = (&'static str, (i64, i64, i64), Position, Position, bool);
 
 fn block_hash_of(block: i64) -> &'static str {
     match block {
@@ -188,8 +190,7 @@ fn assert_halt(
 #[tokio::test]
 async fn child_integrity_cutoff_is_the_migration_position_in_full_rebuilds() -> Result<()> {
     let some = |block: i64, tx: i64, log: i64| (block, Some(tx), Some(log));
-    // (case, binding, migration, relation, halts)
-    let cases: [(&str, (i64, i64, i64), Position, Position, bool); 9] = [
+    let cases: [CutoffCase; 9] = [
         (
             "before both",
             (10, 0, 2),
