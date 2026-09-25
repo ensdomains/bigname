@@ -626,3 +626,149 @@ async fn a_topology_reservation_is_ended_by_a_later_release_on_its_resource() ->
     }
     Ok(())
 }
+
+// Which reservation a resource-less release ends (TYR-36 step 6, Pro review of 3be64c73,
+// question 1). A versioned reservation carries no resource, and neither does its end, so a
+// resource cannot tell which reservation a resource-less release ends. Interpret writes the
+// registry instance and token id on both, and the release ends the name's current reservation
+// only when that reservation has the same registry instance and token id. After a later
+// reservation of the name elsewhere, the old reservation's end changes nothing.
+
+/// A resource-less reservation of the name by registry instance `registry` and token `token`.
+fn versioned_reservation(
+    identity: &'static str,
+    registry: &'static str,
+    token: &'static str,
+    block: i64,
+    log: i64,
+) -> Fact {
+    (
+        identity,
+        "RegistrationReserved",
+        None,
+        block,
+        log,
+        json!({"source_event":"LabelReserved","expiry":4_000_000_000_i64,"status":"reserved","registry_contract_instance_id":registry,"token_id":token}),
+    )
+}
+
+/// The end of the reservation by `registry` and `token`, by name and without a resource.
+fn versioned_release(
+    identity: &'static str,
+    registry: &'static str,
+    token: &'static str,
+    block: i64,
+    log: i64,
+) -> Fact {
+    (
+        identity,
+        "RegistrationReleased",
+        None,
+        block,
+        log,
+        json!({"source_event":"LabelUnregistered","status":"released","registry_contract_instance_id":registry,"token_id":token}),
+    )
+}
+
+const REGISTRY_A: &str = "0000000a-0000-0000-0000-00000000000a";
+const REGISTRY_B: &str = "0000000b-0000-0000-0000-00000000000b";
+const REGISTRY_C: &str = "0000000c-0000-0000-0000-00000000000c";
+const TOKEN_B1: &str = "0x00000000000000000000000000000000000000000000000000000000000000b1";
+const TOKEN_C1: &str = "0x00000000000000000000000000000000000000000000000000000000000000c1";
+const TOKEN_A0: &str = "0x00000000000000000000000000000000000000000000000000000000000000a0";
+
+// (a) The resource-less reservation B1 in registry B, then a live reservation A0 with its own
+// resource in registry A after the parent points there, then B1 is unregistered. A0 is live, so
+// ENSv1 stays selected.
+#[tokio::test]
+async fn a_resourceless_release_does_not_end_a_later_reservation_with_a_resource() -> Result<()> {
+    let facts = [
+        versioned_reservation("b1-reserve", REGISTRY_B, TOKEN_B1, 10, 1),
+        (
+            "a0-reserve",
+            "RegistrationReserved",
+            Some(A0),
+            10,
+            2,
+            json!({"source_event":"LabelReserved","expiry":4_000_000_000_i64,"status":"reserved","reservation_resource":true,"registry_contract_instance_id":REGISTRY_A,"token_id":TOKEN_A0}),
+        ),
+        versioned_release("b1-release", REGISTRY_B, TOKEN_B1, 11, 1),
+    ];
+    let (v1_resource, block_10, block_11) = sequence_selections(
+        "resourceless_release_after_a0",
+        115,
+        "resourceless-a0.eth",
+        &facts,
+    )
+    .await?;
+    let ensv1 = (
+        Some("ens_v1".to_owned()),
+        Some("registered".to_owned()),
+        Some(v1_resource),
+    );
+    assert_eq!(block_10, ensv1);
+    assert_eq!(block_11, ensv1, "A0 is still live");
+    Ok(())
+}
+
+// (b) Two resource-less reservations of the name from different registry instances and tokens:
+// B1, then C1 after the parent points at registry C, then B1 is unregistered. Both reservations
+// and the release have no resource, so only their registry and token tell them apart. C1 is live,
+// so ENSv1 stays selected.
+#[tokio::test]
+async fn a_resourceless_release_does_not_end_another_resourceless_reservation() -> Result<()> {
+    let facts = [
+        versioned_reservation("b1-reserve", REGISTRY_B, TOKEN_B1, 10, 1),
+        versioned_reservation("c1-reserve", REGISTRY_C, TOKEN_C1, 10, 2),
+        versioned_release("b1-release", REGISTRY_B, TOKEN_B1, 11, 1),
+    ];
+    let (v1_resource, block_10, block_11) = sequence_selections(
+        "resourceless_release_after_c1",
+        116,
+        "resourceless-c1.eth",
+        &facts,
+    )
+    .await?;
+    let ensv1 = (
+        Some("ens_v1".to_owned()),
+        Some("registered".to_owned()),
+        Some(v1_resource),
+    );
+    assert_eq!(block_10, ensv1);
+    assert_eq!(block_11, ensv1, "C1 is still live");
+    Ok(())
+}
+
+// The positive case with the same rows: B1 alone, then its release, restores the released ENSv2
+// tombstone on B0.
+#[tokio::test]
+async fn a_resourceless_release_ends_its_own_reservation() -> Result<()> {
+    let facts = [
+        versioned_reservation("b1-reserve", REGISTRY_B, TOKEN_B1, 10, 1),
+        versioned_release("b1-release", REGISTRY_B, TOKEN_B1, 11, 1),
+    ];
+    let (v1_resource, block_10, block_11) = sequence_selections(
+        "resourceless_release_own",
+        117,
+        "resourceless-own.eth",
+        &facts,
+    )
+    .await?;
+    assert_eq!(
+        block_10,
+        (
+            Some("ens_v1".to_owned()),
+            Some("registered".to_owned()),
+            Some(v1_resource)
+        )
+    );
+    assert_eq!(
+        block_11,
+        (
+            Some("ens_v2".to_owned()),
+            Some("unregistered".to_owned()),
+            Some(uuid(15, 117))
+        )
+    );
+    Ok(())
+}
