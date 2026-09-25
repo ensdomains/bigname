@@ -18,6 +18,7 @@ const REGISTRAR: &str = "0x00000000000000000000000000000000000000e3";
 const REGISTRY: &str = "0x00000000000000000000000000000000000000e5";
 const OWNER: &str = "0x00000000000000000000000000000000000000aa";
 const ZERO: &str = "0x0000000000000000000000000000000000000000";
+const OTHER: &str = "0x00000000000000000000000000000000000000bb";
 const V1_REGISTRAR: &str = "ens_v1_registrar_l1";
 const V1_REGISTRY: &str = "ens_v1_registry_l1";
 
@@ -194,6 +195,93 @@ async fn a_zero_registry_owner_keeps_its_getter_facts() -> Result<()> {
         selection["ownerless_registry"],
         Value::Null,
         "the lease still holds the name"
+    );
+    fixture.cleanup().await
+}
+
+/// Items 3 and 5 of the TYR-36 step 3 review (Q7, Q5), the control owner under the authority
+/// admission. Name 1's node gets an AuthorityTransferred to OWNER at 11, which the admission
+/// holds, then one to OTHER at 12 carrying another resource, which the admission leaves out
+/// (authority_events.sql admits a resource-bearing event only on the selected resource); the
+/// lease is transferred at 13 and a SubregistryChanged at 15 stamps the F2c node row. The
+/// served control block reads the latest admitted events (build.sql:649-694): owner OWNER,
+/// latest kind TokenControlTransferred. F2c keeps only the node's latest owner, OTHER, with the
+/// position of its latest write and nothing about the transfer that set it, so the families
+/// cannot recover the admitted transfer and both fields differ. The registry-position exception
+/// must not excuse either: the node's latest transfer is not the name's latest admitted one.
+/// Step 2 retention follow-up: keep the owner-setting transfer's identity, position, resource
+/// and admission evidence on the node row.
+#[tokio::test]
+async fn an_excluded_later_transfer_is_not_the_control_owner_and_is_not_excused() -> Result<()> {
+    let fixture = Fixture::new("families_shadow_registry_admitted_owner", 20).await?;
+    let lease = uuid(1);
+    bound(&fixture, &lease).await?;
+    transferred(&fixture, 11, OWNER, "registry").await?;
+    fixture
+        .write(
+            12,
+            1,
+            "AuthorityTransferred",
+            V1_REGISTRY,
+            Some(&name(1)),
+            Some(&uuid(2)),
+            json!({"node": node(1), "owner": OTHER, "owner_getter": OTHER,
+                   "emitter_role": "registry"}),
+            REGISTRY,
+        )
+        .await?;
+    fixture
+        .write(
+            13,
+            1,
+            "TokenControlTransferred",
+            V1_REGISTRAR,
+            Some(&name(1)),
+            Some(&lease),
+            json!({"authority_kind": "registrar", "from": OWNER, "to": OTHER}),
+            REGISTRAR,
+        )
+        .await?;
+    fixture
+        .write(
+            15,
+            1,
+            "SubregistryChanged",
+            V1_REGISTRY,
+            Some(&name(1)),
+            None,
+            json!({"node": node(1), "subregistry": REGISTRY}),
+            REGISTRY,
+        )
+        .await?;
+    let report = publish_and_compare(&fixture, 16).await?;
+    let (served, shadow) = shadow_support::name(&fixture, 16, &name(1)).await?;
+    assert_eq!(served.control("registry_owner"), json!(OWNER));
+    assert_eq!(
+        served.control("latest_event_kind"),
+        json!("TokenControlTransferred")
+    );
+    assert_eq!(shadow.control["registry_owner"], json!(OTHER));
+    assert_eq!(
+        shadow.control["latest_event_kind"],
+        json!("AuthorityTransferred")
+    );
+    assert!(report.known_discrepancy.is_empty(), "{:#?}", report.lines);
+    assert!(
+        report.expected_delta_fields.is_empty(),
+        "{:#?}",
+        report.lines
+    );
+    assert_eq!(report.mismatched, 1, "{:#?}", report.lines);
+    let mismatched: Vec<&str> = report
+        .lines
+        .iter()
+        .filter(|line| line.starts_with("SEPOLIA_END_TO_END_SHADOW_MISMATCH"))
+        .filter_map(|line| line.split(" field=").nth(1)?.split(' ').next())
+        .collect();
+    assert_eq!(
+        mismatched,
+        vec!["control/registry_owner", "control/latest_event_kind"]
     );
     fixture.cleanup().await
 }

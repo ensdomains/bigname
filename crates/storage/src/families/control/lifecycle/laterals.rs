@@ -389,9 +389,12 @@ pub(super) fn registrar_resource<'a>(
 
 /// The control block's registry owner and latest kind (build.sql:649-694), from what the
 /// families keep: the latest admitted ENSv2 transfer or registrar snapshot grant, and the F2c
-/// node's latest owner for an ENSv1 or Basenames name. F2c keeps the owner without the position
-/// of the AuthorityTransferred that set it, and no family keeps an AuthorityEpochChanged's owner,
-/// so this part is an approximation the harness reports separately.
+/// node's latest owner for an ENSv1 or Basenames name. F2c keeps the owner without the position,
+/// resource or admission of the AuthorityTransferred that set it, and no family keeps an
+/// AuthorityEpochChanged's owner, so this part is an approximation: when a later transfer the
+/// name's admission leaves out set the node's owner, this read serves that owner and the
+/// comparison fails (fixture `an_excluded_later_transfer_is_not_the_control_owner_and_is_not_excused`,
+/// a step 2 retention follow-up).
 pub(super) fn control_owner(
     facts: &NameFacts,
     authority: &Authority<'_>,

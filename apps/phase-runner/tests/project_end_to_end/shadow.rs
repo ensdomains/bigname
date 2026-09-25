@@ -59,9 +59,12 @@
 //! - `registry_node_position_moved_by_later_write`: F2c sets the node's owner only on
 //!   AuthorityTransferred (crates/project/src/families/registry.rs:69-94) but stamps the row with
 //!   the position of every event that writes it, SubregistryChanged included (:120). A control
-//!   `latest_event_kind` or `registry_owner` field passes only when the node row's position is
-//!   not the node's latest AuthorityTransferred and reading the name again with that
-//!   AuthorityTransferred's position gives exactly the served value.
+//!   `latest_event_kind` or `registry_owner` field passes only when the node's latest
+//!   AuthorityTransferred (any name or resource) is also the name's latest one the authority
+//!   admission holds, carries the owner the node row holds, is not the row's position, and
+//!   reading the name again with its position gives exactly the served value. When a later
+//!   transfer the admission leaves out set the row's owner, the families cannot recover the
+//!   admitted one and the field fails (step 2 retention follow-up).
 //! - `authority_kind_defaulted_to_registrar`: the retained lifecycle row stores `authority_kind`
 //!   with a `registrar` default when the event's after-state has none
 //!   (crates/project/src/families/lifecycle.rs:317-322), while the served block serves null
@@ -88,7 +91,8 @@ use bigname_storage::{
         lifecycle::view::registration_lapsed,
         lifecycle::{
             AuthoritySelection, CONTROL_FIELDS, Clock, NameFacts, NameInput, REGISTRATION_FIELDS,
-            ShadowName, evaluate, load_name_facts, load_shadow_names, membership::maxima_of,
+            ShadowName, admits_named_event, evaluate, load_name_facts, load_shadow_names,
+            membership::maxima_of,
         },
         permissions::{
             ResourceInput, ShadowPermissions, effective_operator_rows, grant_json,
@@ -743,7 +747,11 @@ async fn name_excuses(
         return Ok(out);
     };
 
-    // The registry node row's position, when a later write moved it off the AuthorityTransferred.
+    // The registry node row's position, when a later write moved it off the AuthorityTransferred
+    // that set its owner. That transfer must be the name's latest admitted one (the served
+    // control lateral reads the admitted events, build.sql:649-694), the node's latest transfer
+    // of any name or resource, and carry the owner the node row holds; otherwise the families
+    // cannot show which transfer the row's owner came from and nothing is excused.
     let owner_fields = ["control/latest_event_kind", "control/registry_owner"];
     let open = |out: &[Excuse], index: usize| out[index] == Excuse::None;
     if !input.selection.is_v2()
@@ -754,11 +762,16 @@ async fn name_excuses(
         && let Some(node) = &facts.registry_node
         && let Some(transferred) =
             latest_authority_transferred(pool, chain, &node.namespace, &node.node, clock).await?
-        && node.position.as_ref() != Some(&transferred)
+        && latest_admitted_transfer(pool, chain, &facts, clock)
+            .await?
+            .is_some_and(|admitted| admitted == transferred)
+        && node.position.as_ref() != Some(&transferred.position)
+        && node.registry_owner.clone().or_else(|| node.owner.clone()) == transferred.owner
+        && node.owner_word_unmasked == transferred.owner_word_unmasked
     {
         let mut moved = facts.clone();
         if let Some(node) = moved.registry_node.as_mut() {
-            node.position = Some(transferred);
+            node.position = Some(transferred.position);
         }
         let counterfactual = evaluate(&moved, clock);
         for (index, diff) in diffs.iter().enumerate() {
@@ -814,42 +827,104 @@ async fn winner_has_no_authority_kind(
     Ok(matches!(kind, Some(None)))
 }
 
-/// The canonical position of the latest AuthorityTransferred of a registry node at the clock's
-/// block, from the event log, in the canonical order.
+/// A registry AuthorityTransferred read from the event log: its position and the owner the
+/// served control lateral and the F2c node row read from it.
+#[derive(Debug, PartialEq, Eq)]
+struct Transfer {
+    position: Position,
+    owner: Option<String>,
+    owner_word_unmasked: Option<bool>,
+}
+
+const TRANSFERS: &str = "SELECT block_number, transaction_index, log_index, event_identity,
+            resource_id::text, NULLIF(after_state ->> 'authority_kind', ''), source_family,
+            lower(COALESCE(after_state ->> 'registry_owner', after_state ->> 'owner')),
+            (after_state ->> 'owner_word_unmasked')::boolean
+     FROM normalized_events
+     WHERE chain_id = $1 AND block_number <= $2 AND event_kind = 'AuthorityTransferred'
+       AND source_family IN ('ens_v1_registry_l1', 'basenames_base_registry')
+       AND canonicality_state IN ('canonical', 'safe', 'finalized')";
+
+type TransferRow = (
+    i64,
+    Option<i64>,
+    Option<i64>,
+    String,
+    Option<String>,
+    Option<String>,
+    String,
+    Option<String>,
+    Option<bool>,
+);
+
+fn transfer(row: &TransferRow) -> Transfer {
+    Transfer {
+        position: Position {
+            block_number: row.0,
+            transaction_index: row.1,
+            log_index: row.2,
+            event_identity: row.3.clone(),
+        },
+        owner: row.7.clone(),
+        owner_word_unmasked: row.8,
+    }
+}
+
+/// The latest AuthorityTransferred of a registry node at the clock's block, of any name or
+/// resource, from the event log, in the canonical order: the transfer whose owner the F2c node
+/// row holds (crates/project/src/families/registry.rs:69-94).
 async fn latest_authority_transferred(
     pool: &PgPool,
     chain: &str,
     namespace: &str,
     node: &str,
     clock: &Clock,
-) -> Result<Option<Position>> {
-    let row: Option<(i64, Option<i64>, Option<i64>, String)> = sqlx::query_as(
-        "SELECT block_number, transaction_index, log_index, event_identity
-         FROM normalized_events
-         WHERE chain_id = $1 AND namespace = $2 AND block_number <= $4
-           AND event_kind = 'AuthorityTransferred'
-           AND source_family IN ('ens_v1_registry_l1', 'basenames_base_registry')
-           AND canonicality_state IN ('canonical', 'safe', 'finalized')
+) -> Result<Option<Transfer>> {
+    let rows: Vec<TransferRow> = sqlx::query_as(&format!(
+        "{TRANSFERS} AND namespace = $3
            AND lower(COALESCE(NULLIF(after_state ->> 'child_node', ''),
-                              after_state ->> 'node')) = $3
-         ORDER BY block_number DESC, transaction_index DESC NULLS LAST,
-                  log_index DESC NULLS LAST, convert_to(event_identity, 'UTF8') DESC
-         LIMIT 1",
-    )
+                              after_state ->> 'node')) = $4"
+    ))
     .bind(chain)
+    .bind(clock.block_number)
     .bind(namespace)
     .bind(node)
-    .bind(clock.block_number)
-    .fetch_optional(pool)
+    .fetch_all(pool)
     .await?;
-    Ok(row.map(
-        |(block_number, transaction_index, log_index, event_identity)| Position {
-            block_number,
-            transaction_index,
-            log_index,
-            event_identity,
-        },
-    ))
+    Ok(rows
+        .iter()
+        .map(transfer)
+        .max_by(|left, right| left.position.cmp(&right.position)))
+}
+
+/// The latest AuthorityTransferred of the name that the name's authority admission holds, the
+/// set the served control lateral reads (build.sql:649-694 over project_authority_events).
+async fn latest_admitted_transfer(
+    pool: &PgPool,
+    chain: &str,
+    facts: &NameFacts,
+    clock: &Clock,
+) -> Result<Option<Transfer>> {
+    let rows: Vec<TransferRow> = sqlx::query_as(&format!("{TRANSFERS} AND logical_name_id = $3"))
+        .bind(chain)
+        .bind(clock.block_number)
+        .bind(&facts.input.logical_name_id)
+        .fetch_all(pool)
+        .await?;
+    Ok(rows
+        .iter()
+        .filter(|row| {
+            admits_named_event(
+                facts,
+                "AuthorityTransferred",
+                &row.6,
+                row.4.as_deref(),
+                row.5.as_deref().unwrap_or("registrar"),
+                &transfer(row).position,
+            )
+        })
+        .map(transfer)
+        .max_by(|left, right| left.position.cmp(&right.position)))
 }
 
 /// The generated ids of events, by identity.

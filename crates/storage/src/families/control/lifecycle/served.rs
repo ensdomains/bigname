@@ -54,29 +54,36 @@ fn opt_text(value: Option<&str>) -> Value {
     value.map_or(Value::Null, |text| Value::String(text.to_owned()))
 }
 
-pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> ShadowName {
-    let input = &facts.input;
-    let selection = &input.selection;
-    let is_v2 = selection.is_v2();
-    let binding = selection.surface_binding_id.as_deref().and_then(|id| {
-        facts
-            .candidates
-            .iter()
-            .find(|candidate| candidate.surface_binding_id == id)
-    });
-    let binding_resource = binding.map(|binding| binding.resource_id.as_str());
-    let authority = Authority {
-        name: &input.logical_name_id,
+/// The admission inputs of one name: its selection, binding candidates, selected binding,
+/// wrapper modifier and retained events.
+pub(super) fn authority_of(facts: &NameFacts) -> Authority<'_> {
+    let selection = &facts.input.selection;
+    Authority {
+        name: &facts.input.logical_name_id,
         selection,
         candidates: &facts.candidates,
-        binding,
+        binding: selection.surface_binding_id.as_deref().and_then(|id| {
+            facts
+                .candidates
+                .iter()
+                .find(|candidate| candidate.surface_binding_id == id)
+        }),
         wrapper_modifier: selection
             .resource_id
             .as_deref()
             .and_then(|resource| facts.wrappers.get(resource))
             .is_some_and(|wrapper| wrapper.has_modifier),
         events: &facts.events,
-    };
+    }
+}
+
+pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> ShadowName {
+    let input = &facts.input;
+    let selection = &input.selection;
+    let is_v2 = selection.is_v2();
+    let authority = authority_of(facts);
+    let binding = authority.binding;
+    let binding_resource = binding.map(|binding| binding.resource_id.as_str());
     let triple_targets: BTreeMap<String, Option<String>> = facts
         .triples
         .iter()
