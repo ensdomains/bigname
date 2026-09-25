@@ -773,3 +773,123 @@ async fn a_resourceless_release_ends_its_own_reservation() -> Result<()> {
     );
     Ok(())
 }
+
+const TOKEN_B2: &str = "0x00000000000000000000000000000000000000000000000000000000000000b2";
+
+// Same registry, different token (Pro review of 211cbaf0, question 4): the reservation is B1 in
+// registry B, and the resource-less release at block 11 is for token B2 in the same registry.
+// Only the token id tells them apart, so the release does not end B1 and ENSv1 stays selected.
+#[tokio::test]
+async fn a_resourceless_release_of_another_token_in_the_same_registry_ends_nothing() -> Result<()> {
+    let facts = [
+        versioned_reservation("b1-reserve", REGISTRY_B, TOKEN_B1, 10, 1),
+        versioned_release("b2-release", REGISTRY_B, TOKEN_B2, 11, 1),
+    ];
+    let (v1_resource, block_10, block_11) = sequence_selections(
+        "resourceless_other_token",
+        118,
+        "resourceless-token.eth",
+        &facts,
+    )
+    .await?;
+    let ensv1 = (
+        Some("ens_v1".to_owned()),
+        Some("registered".to_owned()),
+        Some(v1_resource),
+    );
+    assert_eq!(block_10, ensv1);
+    assert_eq!(block_11, ensv1, "B1 is still live");
+    Ok(())
+}
+
+// Both reservations and the release in one block at indexed positions: B1 at (10, 0, 1), a later
+// reservation in registry C with the same token id at (10, 0, 2), and B1's release at (10, 0, 3).
+// The later reservation is the name's current one, so the release ends nothing.
+#[tokio::test]
+async fn a_resourceless_release_in_the_same_block_does_not_end_the_later_reservation() -> Result<()>
+{
+    let facts = [
+        versioned_reservation("b1-reserve", REGISTRY_B, TOKEN_B1, 10, 1),
+        versioned_reservation("c1-reserve", REGISTRY_C, TOKEN_B1, 10, 2),
+        versioned_release("b1-release", REGISTRY_B, TOKEN_B1, 10, 3),
+    ];
+    let (v1_resource, block_10, block_11) = sequence_selections(
+        "resourceless_same_block",
+        119,
+        "resourceless-block.eth",
+        &facts,
+    )
+    .await?;
+    let ensv1 = (
+        Some("ens_v1".to_owned()),
+        Some("registered".to_owned()),
+        Some(v1_resource),
+    );
+    assert_eq!(block_10, ensv1, "the later reservation is live");
+    assert_eq!(block_11, ensv1);
+    Ok(())
+}
+
+// Unknown identity never matches: a release without the registry instance and token id, and a
+// reservation and release that both carry them as JSON null. Neither release ends the reservation,
+// so ENSv1 stays selected at block 11.
+#[tokio::test]
+async fn a_resourceless_release_without_a_known_identity_ends_nothing() -> Result<()> {
+    let missing = [
+        versioned_reservation("b1-reserve", REGISTRY_B, TOKEN_B1, 10, 1),
+        (
+            "keyless-release",
+            "RegistrationReleased",
+            None,
+            11,
+            1,
+            json!({"source_event":"LabelUnregistered","status":"released"}),
+        ),
+    ];
+    let null = [
+        (
+            "null-reserve",
+            "RegistrationReserved",
+            None,
+            10,
+            1,
+            json!({"source_event":"LabelReserved","expiry":4_000_000_000_i64,"status":"reserved","registry_contract_instance_id":null,"token_id":null}),
+        ),
+        (
+            "null-release",
+            "RegistrationReleased",
+            None,
+            11,
+            1,
+            json!({"source_event":"LabelUnregistered","status":"released","registry_contract_instance_id":null,"token_id":null}),
+        ),
+    ];
+    for (case, index, name, facts) in [
+        (
+            "resourceless_missing_keys",
+            120,
+            "resourceless-missing.eth",
+            &missing,
+        ),
+        (
+            "resourceless_null_keys",
+            121,
+            "resourceless-null.eth",
+            &null,
+        ),
+    ] {
+        let (v1_resource, block_10, block_11) =
+            sequence_selections(case, index, name, facts).await?;
+        let ensv1 = (
+            Some("ens_v1".to_owned()),
+            Some("registered".to_owned()),
+            Some(v1_resource),
+        );
+        assert_eq!(block_10, ensv1, "{case}");
+        assert_eq!(
+            block_11, ensv1,
+            "{case}: an unknown identity is not a match"
+        );
+    }
+    Ok(())
+}
