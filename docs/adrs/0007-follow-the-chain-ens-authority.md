@@ -11,9 +11,11 @@ The rule in this ADR now applies without the exceptions that the earlier
 decisions kept. Linear TYR-36 step 6.
 
 - The root, `eth`, `reverse`, and `addr.reverse` are no longer
-  classified as shared ENS infrastructure. They are registered in the admitted
-  root registry and follow the same rule as every other name, so their
-  authority epoch starts at their ENSv2 binding like any other.
+  classified as shared ENS infrastructure. They follow the same rule as every
+  other name: a name among them with an open ENSv2 binding selects ENSv2 and
+  its authority epoch starts at that binding, like any other. The deployment
+  registers `eth` and `reverse` in the root registry; this does not make all
+  four names ordinary root-registry registrations.
   (upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ETHRegistry.ts:L36-L48 @ ens_v2_sepolia_20260916@366de741)
   (upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ReverseMirror.ts:L25-L37 @ ens_v2_sepolia_20260916@366de741)
 - The released ENSv2 tombstone no longer holds a name over a live ENSv1
@@ -130,6 +132,13 @@ The proof the refusal waited for is therefore a product of the migration
 scripts, and the chain does not need it to decide who holds a name.
 
 ## Decision
+
+> **Superseded in part.** This section is the original 2026-09-24 decision,
+> kept as the record of what was decided then. The two 2026-09-25 amendments at
+> the top of this ADR supersede it where they differ: no authority proof,
+> released regime or shared-infrastructure classification remains, an
+> activated migration is served history only, and support needs no further
+> qualification. Read the amendments for the current rule.
 
 bigname follows the chain. For an ordinary ENS name:
 

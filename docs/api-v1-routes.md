@@ -677,11 +677,13 @@ collection route carry neither header.
   registry-only name's `registration_id`. `authority` is omitted for Basenames
   names, on a supported, unregistered ownerless registry row, and on the
   `status=unsupported` identity-only object. A zero registry owner does not
-  remove `authority` supplied by a retained registrar binding. `migrated_at` is present only when `authority=ens_v2` was proven by
-  an activated `MigrationApplied` [migration
-  boundary](glossary.md#migration-boundary): it is the RFC 3339 block time of
-  that proof event, read through the event's block in the chain lineage. A name
-  first registered in ENSv2 has `authority=ens_v2` and no `migrated_at`. The
+  remove `authority` supplied by a retained registrar binding. `migrated_at` is present only when ENSv2 is the currently selected
+  `authority` and the name's history retains an activated `MigrationApplied`
+  [migration boundary](glossary.md#migration-boundary): it is the RFC 3339 block
+  time of that migration event, read through the event's block in the chain
+  lineage. The migration is history, not the reason for the selection; a
+  migrated name whose selection changes to ENSv1 omits it. A name first
+  registered in ENSv2 has `authority=ens_v2` and no `migrated_at`. The
   name-profile portion uses `name`, `display_name`, `namespace`, `namehash`, `resolver`,
   `subregistry`, `addresses`, `text_records`, `content_hash`,
   `primary_name`, `primary_address`, `chain_id`, `network`, `status`, and

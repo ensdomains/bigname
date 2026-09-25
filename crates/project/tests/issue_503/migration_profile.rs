@@ -124,8 +124,9 @@ async fn selected_authority(
 // These cases pin that support follows the authority result; they do not show that a malformed
 // proof is rejected. Several keep a proof that should not establish a migration (`wrong_resource`
 // keeps one whose successor is another resource), and the registration is served because it is
-// independently current, not because the proof is sound. Checking proof association belongs to
-// authority selection, not to the support decision this suite covers.
+// independently current, not because the proof is sound. Neither authority selection nor the
+// support decision checks proof association any more: the migration is history, and selection
+// reads only the open ENSv2 binding.
 #[tokio::test]
 async fn migration_boundary_mutations_refuse_only_through_authority_selection() -> Result<()> {
     for case in [

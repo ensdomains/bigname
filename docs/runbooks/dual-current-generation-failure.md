@@ -6,10 +6,12 @@ Mainnet or Sepolia for either dual-current invariant. An exact-name halt means
 both ENSv1 and ENSv2 [authority arms](../glossary.md#authority-epoch) retain a
 current [surface binding](../glossary.md#surface-name-surface) after a proven,
 activated [ENSv1→ENSv2 migration boundary](../glossary.md#migration-boundary).
-A child halt means both arms retain a current parent-child relation after the
-child's ENSv2 authority began; its admitted proof can instead be a positive
-ENSv2 child registration
-([`crates/project/src/integrity.rs:309-327`](../../crates/project/src/integrity.rs#L309-L327)).
+A child halt means a child that is currently selected under ENSv2 and retains an
+activated ENSv1→ENSv2 migration in its history still has both arms stating a
+current parent-child relation, with the ENSv1 relation asserted after that
+migration's `MigrationApplied` position. A child registration without a
+migration never raises it
+([`crates/project/src/integrity.rs`](../../crates/project/src/integrity.rs), `assert_child_authority`).
 This is a
 [projection generation failure](../glossary.md#projection-generation-failure):
 Project rolls back the whole attempted publication, and the phase runner then
@@ -242,8 +244,9 @@ restart, deploy, or code change, attach all of the following to the incident:
   binding IDs, resource IDs, block hashes, block/transaction/log positions,
   current lineage states, ENSv1→ENSv2 migration correlation IDs, and
   transaction hashes;
-- for a child failure, the parent logical name, authority-proof identity and
-  position, and both child-relation event identities, source families,
+- for a child failure, the parent logical name, the migration event identity
+  and position (`integrity_cutoff_position`, the cutoff the assertion compared
+  against), the published `authority_epoch_start_position`, and both child-relation event identities, source families,
   normalized event IDs, positions, and failure-time canonicality recorded in
   the audit JSON; and
 - for an exact-name failure, the raw transaction, receipt, and logs for every
@@ -1026,7 +1029,7 @@ to the Graveyard, and then performs the same ENSv2 injection
 Only a proven per-name boundary derived from such admitted evidence connects the
 two arms. If Sepolia has that proof and an open predecessor, treat the resulting
 `dual_current_exact_name_authority` failure as this runbook's incident and follow
-the same evidence-capture and repair procedure. A surviving post-epoch child
+the same evidence-capture and repair procedure. A surviving post-migration child
 contradiction follows the `dual_current_child_authority` procedure. The command
 examples above use Mainnet; substitute `ethereum-sepolia` and the affected
 Sepolia source descriptors without changing proof, lineage or publication checks.

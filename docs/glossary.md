@@ -1077,16 +1077,19 @@ is the discriminator. Its `correlation_kind` is the ordinary
 `authority_transition`; there is no child-specific correlation kind. An
 incomplete or refused child group remains candidate or derives no boundary. A
 [complete group](#complete-group) instead activates its `MigrationApplied`,
-schedules the exact child predecessor transition, and becomes Project authority
-evidence.
+schedules the exact child predecessor transition, and becomes the migration
+history Project serves.
 
 Inert output is not the same as inert cost. Admitting a child registry writes a
 `migration_registry_creation` discovery association, and Project's rebuild scope
 reads that table without a visibility filter, so names registered into a
-newly-admitted child registry enter delete-and-rebuild candidacy. What those
-rebuilds publish still depends on proof: the child-registration authority rule
-requires an activated parent boundary, while the child's own arm changes only
-when its complete child group activates.
+newly-admitted child registry enter delete-and-rebuild candidacy. That read only
+widens rebuild scope; it admits nothing. What those rebuilds publish follows the
+ordinary open-binding rule: a child registration in the migration registry opens
+an ENSv2 binding and selects ENSv2 like any other registration, with no
+activated boundary needed for the child or its parent. When the child's complete
+group activates, it adds migration history (`migrated_at`, `is_migrated`) and
+selects nothing.
 
 The child's ENSv1 predecessor uses its own anchor kind,
 `wrapper_backed_child_control`. That anchor points at the child's position in
@@ -1131,8 +1134,8 @@ registration.
 
 Five shapes are refused, and one more never arises. A self-claim with no ENSv1
 predecessor cleanup is not a migration, whatever its sender. A parent owner registering
-an unprotected child label directly is a real registration and an authority
-proof, but never a child `MigrationApplied`
+an unprotected child label directly is a real, independently authoritative
+registration, but never a child `MigrationApplied`
 (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L172 @ ens_v2@a971bd64)
 (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L175 @ ens_v2@a971bd64).
 An unmigrated [migratable child](#migratable-child) emits no ENSv2 registration

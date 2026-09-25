@@ -288,17 +288,21 @@ can be expected residue rather than an anomaly. The child assertion runs after
 parent reachability and fails a
 [projection generation](glossary.md#projection-generation) with failure kind
 `dual_current_child_authority` only when a surviving child on either configured
-ENS deployment profile with an
-activated `migration_authority_transition` has an ENSv1 parent-child relation
-asserted after that child's authority epoch started. A positive ENSv2 child
-registration is permanent entry history in a locked parent's migration registry
-(upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L293-L307 @ ens_v2@a971bd64), so parent reachability filters that ENSv1 relation before the
-assertion even though the defensive integrity query recognizes that proof kind.
+ENS deployment profile is currently selected under ENSv2, retains an activated
+`migration_authority_transition` in its history, and has an ENSv1 parent-child
+relation asserted after that migration's `MigrationApplied` position. The
+cutoff is the migration's own position, not the published authority epoch
+start, which is the child's ENSv2 binding. A child registration in a locked
+parent's migration registry, without a migration, is not in scope: it is
+permanent entry history there
+(upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L293-L307 @ ens_v2@a971bd64),
+so parent reachability filters that ENSv1 relation, and the assertion reads only
+the migration condition.
 Relations filtered by an
 unwrapped, unlocked-wrapped, or emancipated-child parent cannot trigger the
-assertion. Both assertions keep this post-proof scope: a name or child with no
-authority proof never reaches them, so a live ENSv1 lease next to a current
-ENSv2 registration without a proof is served under the ENSv2 registration
+assertion. Both assertions keep this migration scope: a name or child with no
+activated migration never reaches them, so a live ENSv1 lease next to a current
+ENSv2 registration without a migration is served under the ENSv2 registration
 rather than becoming a generation failure.
 The connected wrapped and locked scenarios in
 [PR #852](https://github.com/ensdomains/bigname/pull/852) establish coherent

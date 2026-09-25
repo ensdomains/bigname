@@ -1105,9 +1105,11 @@ async fn expected_delta_a_second_v2_release_after_an_ownerless_v1_registry_is_a_
     Ok(())
 }
 
-// The root, `eth`, `reverse` and `addr.reverse` are names registered in the admitted root
-// registry, so they follow the ordinary rule: their open ENSv2 binding decides whatever ENSv1
-// holds, no proof is fabricated, and the authority epoch starts at that binding like any other.
+// The root, `eth`, `reverse` and `addr.reverse` follow the ordinary rule: an open ENSv2 binding
+// decides whatever ENSv1 holds, no proof is fabricated, and the authority epoch starts at that
+// binding like any other. The deployment registers `eth` and `reverse` in the root registry; this
+// fixture gives all four names a binding to show the rule, not that all four are root-registry
+// registrations, and the root's empty surface is staged but not served.
 // (upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ETHRegistry.ts:L36-L48 @ ens_v2_sepolia_20260916@366de741)
 // (upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ReverseMirror.ts:L25-L37 @ ens_v2_sepolia_20260916@366de741)
 #[tokio::test]
