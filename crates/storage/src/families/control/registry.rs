@@ -15,24 +15,13 @@ use super::{
 
 pub const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
 
-/// One `project_registry_node_state` row.
+/// The parts of one `project_registry_node_state` row the readers use, with the node's
+/// owner-setting events. The row's owner group is not read: the control owner and the
+/// ownerless profile read the owner events, which keep every owner-setting event.
 #[derive(Clone, Debug, Default)]
 pub struct RegistryNode {
     pub namespace: String,
     pub node: String,
-    /// The position of the last event that wrote the row.
-    pub position: Option<Position>,
-    /// The kind of the event that last set the owner group: AuthorityTransferred or
-    /// SubregistryChanged.
-    pub owner_event_kind: Option<String>,
-    /// That event's position, apart from the row's last write.
-    pub owner_position: Option<Position>,
-    /// That event's resource.
-    pub owner_resource_id: Option<String>,
-    pub owner: Option<String>,
-    pub registry_owner: Option<String>,
-    pub owner_word_unmasked: Option<bool>,
-    pub owner_getter: Option<String>,
     pub has_old_record: bool,
     pub first_current_record_block: Option<i64>,
     /// Every owner-setting registry event of the node (`project_registry_owner_event`), in the
@@ -100,14 +89,6 @@ impl RegistryNode {
         Some(Self {
             namespace: text(row, "namespace")?,
             node: text(row, "node")?,
-            position: Position::of_row(row),
-            owner_event_kind: text(row, "owner_event_kind"),
-            owner_position: row.get("owner_position").and_then(Position::from_json),
-            owner_resource_id: text(row, "owner_resource_id"),
-            owner: lower(row, "owner"),
-            registry_owner: lower(row, "registry_owner"),
-            owner_word_unmasked: flag(row, "owner_word_unmasked"),
-            owner_getter: lower(row, "owner_getter"),
             has_old_record: flag(row, "has_old_record").unwrap_or(false),
             first_current_record_block: row
                 .get("first_current_record_block")
@@ -164,7 +145,10 @@ pub async fn load_registry_nodes(
 ) -> Result<BTreeMap<(String, String), RegistryNode>> {
     let (namespaces, nodes_wanted): (Vec<String>, Vec<String>) = keys.iter().cloned().unzip();
     let rows: Vec<Value> = sqlx::query_scalar(
-        "/* storage:families.control.registry.nodes */ SELECT to_jsonb(state)
+        "/* storage:families.control.registry.nodes */ SELECT jsonb_build_object(
+                    'namespace', state.namespace, 'node', state.node,
+                    'has_old_record', state.has_old_record,
+                    'first_current_record_block', state.first_current_record_block)
          FROM bigname_phase.project_registry_node_state state
          JOIN unnest($2::text[], $3::text[]) wanted(namespace, node)
            ON wanted.namespace = state.namespace AND wanted.node = state.node
