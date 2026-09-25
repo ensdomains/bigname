@@ -315,8 +315,8 @@ async fn a_version_zero_reservation_expired_when_written_leaves_the_v2_tombstone
 // by it.
 // (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L435-L471 @ ens_v2@a971bd64)
 
-/// One extra normalized row for the name: kind, resource (`None` for none), block, log and
-/// after-state.
+/// One extra normalized row for the name: kind, resource (`None` for none), block, log (negative
+/// for a block-boundary row with no transaction or log index) and after-state.
 type Fact = (
     &'static str,
     &'static str,
@@ -393,7 +393,7 @@ async fn seed_sequence(
             Event {
                 family: "ens_v2_registry_l1",
                 kind,
-                log,
+                log: log.max(0),
                 after,
             },
         )
@@ -405,6 +405,11 @@ async fn seed_sequence(
         };
         sqlx::query("UPDATE normalized_events SET block_number = $2, block_hash = $3 WHERE normalized_event_id = $1")
             .bind(id).bind(block).bind(hash).execute(pool).await?;
+        // A negative log stands for a block-boundary row with no transaction or log index.
+        if log < 0 {
+            sqlx::query("UPDATE normalized_events SET transaction_hash = NULL, transaction_index = NULL, log_index = NULL WHERE normalized_event_id = $1")
+                .bind(id).execute(pool).await?;
+        }
     }
     Ok((logical, v1_resource, b0))
 }
@@ -567,5 +572,57 @@ async fn a_release_on_one_resource_does_not_end_a_later_reservation_on_another()
     );
     assert_eq!(block_10, ensv1);
     assert_eq!(block_11, ensv1, "B1 is still live");
+    Ok(())
+}
+
+// A topology reservation as the witness (TYR-36 step 6, adversarial review of 3be64c73). When a
+// renewal revives an expired version-zero reservation and restores its name, Interpret writes the
+// reservation again from topology, with `source_event` `ExpiryUpdated` and the reservation's own
+// resource. That row is the reservation a later release on the resource ends, whether it sits at
+// a log position or at the block boundary with no transaction or log index. It hands the name to
+// ENSv1 at block 10, and its release at block 11 restores the released ENSv2 tombstone.
+#[tokio::test]
+async fn a_topology_reservation_is_ended_by_a_later_release_on_its_resource() -> Result<()> {
+    for (case, index, name, log) in [
+        ("topology_witness_indexed", 113, "topology-indexed.eth", 1),
+        (
+            "topology_witness_boundary",
+            114,
+            "topology-boundary.eth",
+            -1,
+        ),
+    ] {
+        let facts = [
+            (
+                "a0-topology-reserve",
+                "RegistrationReserved",
+                Some(A0),
+                10,
+                log,
+                json!({"source_event":"ExpiryUpdated","status":"reserved","expiry":4_000_000_000_i64,"reservation_resource":true}),
+            ),
+            release("a0-release", Some(A0), 11, 1),
+        ];
+        let (v1_resource, block_10, block_11) =
+            sequence_selections(case, index, name, &facts).await?;
+        assert_eq!(
+            block_10,
+            (
+                Some("ens_v1".to_owned()),
+                Some("registered".to_owned()),
+                Some(v1_resource)
+            ),
+            "{case}: the topology reservation hands the name to ENSv1"
+        );
+        assert_eq!(
+            block_11,
+            (
+                Some("ens_v2".to_owned()),
+                Some("unregistered".to_owned()),
+                Some(uuid(15, index))
+            ),
+            "{case}: its release restores the tombstone on B0"
+        );
+    }
     Ok(())
 }
