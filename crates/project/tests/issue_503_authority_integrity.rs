@@ -1854,3 +1854,6 @@ mod migration_profile;
 
 #[path = "issue_503/child_cutoff.rs"]
 mod child_cutoff;
+
+#[path = "issue_503/migration_readers.rs"]
+mod migration_readers;
