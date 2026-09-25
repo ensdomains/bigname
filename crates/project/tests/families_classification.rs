@@ -39,6 +39,18 @@ async fn manifest(
     block: i64,
     payload: Value,
 ) -> Result<i64> {
+    manifest_status(fixture, manifest_id, family, block, payload, "active").await
+}
+
+/// As [`manifest`], with the update's rollout status.
+async fn manifest_status(
+    fixture: &Fixture,
+    manifest_id: Option<i64>,
+    family: &str,
+    block: i64,
+    payload: Value,
+    status: &str,
+) -> Result<i64> {
     let id = match manifest_id {
         Some(id) => id,
         None => {
@@ -63,7 +75,7 @@ async fn manifest(
              derivation_kind, canonicality_state, before_state, after_state, raw_fact_ref)
          VALUES ($1, 'ens', 'SourceManifestUpdated', $2, 1, $3, $4, $5, $6,
                  'ens_v2_registry_resource_surface', 'canonical', '{}'::jsonb,
-                 jsonb_build_object('rollout_status', 'active', 'manifest_payload', $7::jsonb),
+                 jsonb_build_object('rollout_status', $8::text, 'manifest_payload', $7::jsonb),
                  '{}'::jsonb)",
     )
     .bind(format!("manifest:{id}:{block}"))
@@ -73,6 +85,7 @@ async fn manifest(
     .bind(block)
     .bind(hash(block))
     .bind(&payload)
+    .bind(status)
     .execute(&fixture.pool)
     .await?;
     Ok(id)
@@ -327,6 +340,31 @@ async fn a_resolver_edge_that_starts_creates_the_row_at_its_block() -> Result<()
         json!({"contracts": []}),
     )
     .await?;
+    resolver_edge(&fixture, R3, registry_manifest, 13).await?;
+    fixture.apply(12, FamilyMode::Normal).await;
+    assert!(classifications(&fixture).await?.is_empty());
+    fixture.apply(13, FamilyMode::Normal).await;
+    assert_eq!(
+        classifications(&fixture).await?,
+        vec![
+            json!({"resolver_address": R3, "support_status": "supported",
+                    "unsupported_reason": null, "block_number": 13,
+                    "event_identity": "activation:13",
+                    "source_family": "ens_v1_resolver_l1", "role": "public_resolver"})
+        ]
+    );
+    assert_eq!(
+        fixture.rows("project_resolver_classification").await?[0]["admission_namespace"],
+        json!("ens")
+    );
+    fixture.assert_undo_restores(13).await?;
+    fixture.assert_rebuild_equal(13).await?;
+    fixture.cleanup().await
+}
+
+/// A resolver discovery edge that `origin` admitted, to a contract at `address`, active from
+/// `block`.
+async fn resolver_edge(fixture: &Fixture, address: &str, origin: i64, block: i64) -> Result<()> {
     let (from, to) = (
         "00000000-0000-0000-0000-00000000f001",
         "00000000-0000-0000-0000-00000000f002",
@@ -347,41 +385,123 @@ async fn a_resolver_edge_that_starts_creates_the_row_at_its_block() -> Result<()
     )
     .bind(to)
     .bind(CHAIN)
-    .bind(R3)
+    .bind(address)
     .execute(&fixture.pool)
     .await?;
     sqlx::query(
         "INSERT INTO discovery_edges (chain_id, edge_kind, from_contract_instance_id,
              to_contract_instance_id, discovery_source, admission_basis, source_manifest_id,
              active_from_block_number, active_from_block_hash, canonicality_state)
-         VALUES ($1, 'resolver', $2::uuid, $3::uuid, 'NewResolver', 'fixture', $4, 13, $5,
+         VALUES ($1, 'resolver', $2::uuid, $3::uuid, 'NewResolver', 'fixture', $4, $5, $6,
                  'canonical')",
     )
     .bind(CHAIN)
     .bind(from)
     .bind(to)
-    .bind(registry_manifest)
-    .bind(hash(13))
+    .bind(origin)
+    .bind(block)
+    .bind(hash(block))
     .execute(&fixture.pool)
     .await?;
-    fixture.apply(12, FamilyMode::Normal).await;
-    assert!(classifications(&fixture).await?.is_empty());
-    fixture.apply(13, FamilyMode::Normal).await;
+    Ok(())
+}
+
+/// The supported classification row of R3 an edge-only admission gives it at `block`.
+fn edge_only_r3(block: i64) -> Value {
+    json!({"resolver_address": R3, "support_status": "supported",
+           "unsupported_reason": null, "block_number": block,
+           "event_identity": format!("activation:{block}"),
+           "source_family": "ens_v1_resolver_l1", "role": "public_resolver"})
+}
+
+// A resolver admitted only by a discovery edge, with no event or pointer naming it, loses its row
+// when the edge's origin manifest retires and gets it back when the manifest returns, although
+// neither the edge nor the address starts or stops at that block.
+#[tokio::test]
+async fn an_edge_only_resolver_returns_when_its_origin_manifest_does() -> Result<()> {
+    let fixture = Fixture::new("families_classification_edge_return", 20).await?;
+    let declared = json!({"contracts": [{"address": R3, "role": "public_resolver"}]});
+    manifest(&fixture, None, "ens_v1_resolver_l1", 1, declared).await?;
+    let origin = manifest(
+        &fixture,
+        None,
+        "ens_v1_registry_l1",
+        1,
+        json!({"contracts": []}),
+    )
+    .await?;
+    resolver_edge(&fixture, R3, origin, 5).await?;
+    fixture.apply(5, FamilyMode::Normal).await;
+    assert_eq!(classifications(&fixture).await?, vec![edge_only_r3(5)]);
+
+    let registry = "ens_v1_registry_l1";
+    manifest_status(
+        &fixture,
+        Some(origin),
+        registry,
+        8,
+        json!({"contracts": []}),
+        "deprecated",
+    )
+    .await?;
+    fixture.apply(8, FamilyMode::Normal).await;
+    assert!(
+        classifications(&fixture).await?.is_empty(),
+        "no active origin, no admission"
+    );
+
+    manifest(
+        &fixture,
+        Some(origin),
+        registry,
+        11,
+        json!({"contracts": []}),
+    )
+    .await?;
+    fixture.apply(11, FamilyMode::Normal).await;
     assert_eq!(
         classifications(&fixture).await?,
-        vec![
-            json!({"resolver_address": R3, "support_status": "supported",
-                    "unsupported_reason": null, "block_number": 13,
-                    "event_identity": "activation:13",
-                    "source_family": "ens_v1_resolver_l1", "role": "public_resolver"})
-        ]
+        vec![edge_only_r3(11)],
+        "the returning manifest admits R3 again"
     );
-    assert_eq!(
-        fixture.rows("project_resolver_classification").await?[0]["admission_namespace"],
-        json!("ens")
-    );
-    fixture.assert_undo_restores(13).await?;
-    fixture.assert_rebuild_equal(13).await?;
+    fixture.assert_undo_restores(11).await?;
+    fixture.assert_rebuild_equal(11).await?;
+    fixture.cleanup().await
+}
+
+// The same when the origin manifest is inactive from the start: the edge alone admits nothing,
+// and the manifest's activation creates the row.
+#[tokio::test]
+async fn an_edge_only_resolver_appears_when_its_origin_manifest_activates() -> Result<()> {
+    let fixture = Fixture::new("families_classification_edge_late", 20).await?;
+    let declared = json!({"contracts": [{"address": R3, "role": "public_resolver"}]});
+    manifest(&fixture, None, "ens_v1_resolver_l1", 1, declared).await?;
+    let registry = "ens_v1_registry_l1";
+    let origin = manifest_status(
+        &fixture,
+        None,
+        registry,
+        1,
+        json!({"contracts": []}),
+        "shadow",
+    )
+    .await?;
+    resolver_edge(&fixture, R3, origin, 5).await?;
+    fixture.apply(5, FamilyMode::Normal).await;
+    assert!(classifications(&fixture).await?.is_empty());
+
+    manifest(
+        &fixture,
+        Some(origin),
+        registry,
+        9,
+        json!({"contracts": []}),
+    )
+    .await?;
+    fixture.apply(9, FamilyMode::Normal).await;
+    assert_eq!(classifications(&fixture).await?, vec![edge_only_r3(9)]);
+    fixture.assert_undo_restores(9).await?;
+    fixture.assert_rebuild_equal(9).await?;
     fixture.cleanup().await
 }
 

@@ -1,32 +1,5 @@
-//! The SQL F3 shares with the served resolver build: the manifests active at a block and the
-//! candidate classification of build.sql.
-
-/// The active manifests at block $2 (stage.rs `create_manifests`).
-pub(crate) const MANIFESTS: &str = "manifests AS (
-    SELECT * FROM (
-        SELECT DISTINCT ON (event.source_manifest_id)
-               event.source_manifest_id AS manifest_id, event.namespace, event.source_family,
-               event.after_state ->> 'rollout_status' AS rollout_status,
-               event.after_state -> 'manifest_payload' AS manifest_payload,
-               event.normalized_event_id AS manifest_event_id
-        FROM normalized_events event
-        LEFT JOIN chain_lineage lineage
-          ON lineage.chain_id = event.chain_id AND lineage.block_hash = event.block_hash
-         AND lineage.block_number = event.block_number
-        WHERE (event.chain_id = $1
-               OR ($1 = 'base-mainnet' AND event.namespace = 'basenames'
-                   AND event.source_family = 'basenames_execution'
-                   AND event.chain_id = 'ethereum-mainnet'))
-          AND event.event_kind = 'SourceManifestUpdated'
-          AND event.source_manifest_id IS NOT NULL
-          AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
-          AND (event.block_hash IS NULL
-               OR lineage.canonicality_state IN ('canonical', 'safe', 'finalized'))
-          AND (event.block_number IS NULL OR event.block_number <= $2)
-        ORDER BY event.source_manifest_id, event.normalized_event_id DESC
-    ) latest
-    WHERE rollout_status = 'active' AND manifest_payload IS NOT NULL
-)";
+//! The SQL F3 shares with the served resolver build: the candidate classification of build.sql.
+//! The active manifests come from the run's captured history (manifests.rs).
 
 /// The served classification over the input resolvers: the candidate precedence of build.sql
 /// `candidates`, the manifest join, role, support and read features of `classified` to

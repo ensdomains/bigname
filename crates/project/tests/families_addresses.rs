@@ -5,8 +5,8 @@
 mod families_support;
 
 use anyhow::Result;
-use bigname_project::families::FamilyMode;
-use families_support::{Fixture, uuid};
+use bigname_project::{BatchRequest, Engine, RunMode, families::FamilyMode};
+use families_support::{CHAIN, Fixture, uuid};
 use serde_json::{Value, json};
 
 const R1: &str = "0x00000000000000000000000000000000000000a1";
@@ -508,5 +508,236 @@ async fn a_named_value_indexes_the_name_it_was_written_under() -> Result<()> {
     );
     fixture.assert_undo_restores(10).await?;
     fixture.assert_rebuild_equal(10).await?;
+    fixture.cleanup().await
+}
+
+const REGISTRY: &str = "0x00000000000000000000000000000000000000e1";
+const OWNER: &str = "0x00000000000000000000000000000000000000c1";
+
+/// The served address rows (`address_records_current`, the table the served resolves-to reader
+/// reads) as (address, coin type, name).
+async fn served_addresses(fixture: &Fixture, target: i64) -> Result<Vec<Value>> {
+    Engine::new(fixture.pool.clone())
+        .run_batch(BatchRequest {
+            chain_id: CHAIN.to_owned(),
+            target_block: target,
+            affected_from_block: 0,
+            affected_to_block: target,
+            resume_current: None,
+            mode: RunMode::Normal,
+        })
+        .await?;
+    Ok(sqlx::query_scalar(
+        "SELECT jsonb_build_object('address', address, 'coin_type', coin_type,
+                                   'logical_name_id', logical_name_id)
+         FROM address_records_current ORDER BY address, coin_type, logical_name_id",
+    )
+    .fetch_all(&fixture.pool)
+    .await?)
+}
+
+/// A name the served build publishes: bound at `block` to its own resource, owned through the
+/// registry and pointing at R1, which an active manifest declares.
+async fn served_name(fixture: &Fixture, n: u64, block: i64) -> Result<()> {
+    let (name, resource) = (name(n), uuid(100 + n as u32));
+    fixture
+        .binding(
+            &uuid(200 + n as u32),
+            &name,
+            &resource,
+            "ens_v1",
+            block,
+            0,
+            None,
+        )
+        .await?;
+    let registry = "ens_v1_registry_l1";
+    fixture
+        .write(
+            block,
+            1,
+            "AuthorityTransferred",
+            registry,
+            Some(&name),
+            Some(&resource),
+            json!({"node": node(n), "owner": OWNER, "owner_getter": OWNER,
+                   "authority_kind": "registry_only"}),
+            REGISTRY,
+        )
+        .await?;
+    fixture
+        .write(
+            block,
+            2,
+            "ResolverChanged",
+            registry,
+            Some(&name),
+            Some(&resource),
+            json!({"node": node(n), "resolver": R1}),
+            REGISTRY,
+        )
+        .await?;
+    Ok(())
+}
+
+async fn declare_r1(fixture: &Fixture) -> Result<()> {
+    let payload = json!({"deployment_epoch": "fixture", "contracts": [{
+        "role": "resolver", "address": R1, "proxy_kind": "none", "start_block": 0,
+        "read_features": []
+    }]});
+    let id: i64 = sqlx::query_scalar(
+        "INSERT INTO manifest_versions (manifest_version, namespace, source_family, chain_id,
+             deployment_label, rollout_status, normalizer_version, file_path, manifest_payload)
+         VALUES (1, 'ens', 'ens_v1_resolver_l1', $1, 'fixture', 'active', 'fixture',
+                 'fixture/resolver.yaml', $2)
+         RETURNING manifest_id",
+    )
+    .bind(CHAIN)
+    .bind(&payload)
+    .fetch_one(&fixture.pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO normalized_events (event_identity, namespace, event_kind, source_family,
+             manifest_version, source_manifest_id, chain_id, derivation_kind,
+             canonicality_state, after_state)
+         VALUES ('manifest:resolver', 'ens', 'SourceManifestUpdated', 'ens_v1_resolver_l1', 1,
+                 $1, $2, 'manifest_sync', 'canonical',
+                 jsonb_build_object('rollout_status', 'active', 'manifest_payload', $3::jsonb))",
+    )
+    .bind(id)
+    .bind(CHAIN)
+    .bind(&payload)
+    .execute(&fixture.pool)
+    .await?;
+    Ok(())
+}
+
+// A named write under A at node 8, whose own name B is bound a block later, then version changes
+// at node 8 named under B, unnamed and named under A, and a later link there. Each step runs the
+// served build and reads what it publishes for both names (`address_records_current`, the
+// resolves-to reader's table): A serves the value until the version named under A, and B never
+// does. The F14 node index keeps the value under A through every step, so it holds every served
+// row; readers apply the version and link boundary.
+#[tokio::test]
+async fn a_named_write_keeps_its_name_through_a_rebinding_versions_and_a_link() -> Result<()> {
+    let fixture = Fixture::new("families_addresses_combined", 20).await?;
+    let (a, b) = (name(7), name(8));
+    declare_r1(&fixture).await?;
+    served_name(&fixture, 7, 10).await?;
+    let v1 = "ens_v1_resolver_l1";
+    let addr = |value: &str| {
+        json!({"node": node(8), "resolver": R1, "record_key": "addr:60",
+               "record_family": "addr", "selector_key": "60", "value": value,
+               "source_event": "AddressChanged"})
+    };
+    fixture
+        .write(11, 1, "RecordChanged", v1, Some(&a), None, addr(DAVE), R1)
+        .await?;
+    let mut steps = Vec::new();
+    fixture.apply(11, FamilyMode::Normal).await;
+    steps.push(("write under A", served_addresses(&fixture, 11).await?));
+    served_name(&fixture, 8, 12).await?;
+    fixture.apply(12, FamilyMode::Normal).await;
+    steps.push(("B bound at node 8", served_addresses(&fixture, 12).await?));
+    let version = |n: &str| json!({"node": node(8), "resolver": R1, "version": n});
+    fixture
+        .write(
+            13,
+            1,
+            "RecordVersionChanged",
+            v1,
+            Some(&b),
+            None,
+            version("1"),
+            R1,
+        )
+        .await?;
+    fixture.apply(13, FamilyMode::Normal).await;
+    steps.push(("named version", served_addresses(&fixture, 13).await?));
+    fixture
+        .write(
+            14,
+            1,
+            "RecordVersionChanged",
+            v1,
+            None,
+            None,
+            version("2"),
+            R1,
+        )
+        .await?;
+    fixture.apply(14, FamilyMode::Normal).await;
+    steps.push(("unnamed version", served_addresses(&fixture, 14).await?));
+    fixture
+        .write(
+            15,
+            1,
+            "RecordVersionChanged",
+            v1,
+            Some(&a),
+            None,
+            version("3"),
+            R1,
+        )
+        .await?;
+    fixture.apply(15, FamilyMode::Normal).await;
+    steps.push((
+        "named version under A",
+        served_addresses(&fixture, 15).await?,
+    ));
+    fixture
+        .write(
+            16,
+            1,
+            "ResolverRecordLinked",
+            "ens_v2_resolver_l1",
+            None,
+            None,
+            json!({"source_event": "Linked", "storage_model": "resolver_record_id",
+                   "resolver": R1, "node": node(8), "resolver_record_id": "1",
+                   "dns_encoded_name": "0x00"}),
+            R1,
+        )
+        .await?;
+    fixture.apply(16, FamilyMode::Normal).await;
+    steps.push(("later link", served_addresses(&fixture, 16).await?));
+    let indexed = index(
+        &fixture.rows("project_address_record_node_index").await?,
+        &["address", "coin_type", "node", "logical_name_id"],
+    );
+    // One value, indexed under A at node 8 through every step: B's binding at node 8 does not
+    // relabel it, and no version change removes it.
+    let dave = DAVE.to_lowercase();
+    assert_eq!(
+        indexed,
+        vec![json!({"address": dave, "coin_type": "60", "node": node(8), "logical_name_id": a})]
+    );
+    // A serves it until a version change attributed to A; B, whose own node it is, never
+    // serves it; a version named under B, an unnamed one, and the later link change neither.
+    let served_a = vec![json!({"address": dave, "coin_type": "60", "logical_name_id": a})];
+    let expected = [
+        ("write under A", served_a.clone()),
+        ("B bound at node 8", served_a.clone()),
+        ("named version", served_a.clone()),
+        ("unnamed version", served_a),
+        ("named version under A", vec![]),
+        ("later link", vec![]),
+    ];
+    for ((step, served), (expected_step, expected_rows)) in steps.iter().zip(&expected) {
+        assert_eq!((step, served), (expected_step, expected_rows));
+        // Every served row has its index row under the name it was written under.
+        for row in served {
+            assert!(
+                indexed.iter().any(|indexed| {
+                    indexed["address"] == row["address"]
+                        && indexed["coin_type"] == row["coin_type"]
+                        && indexed["logical_name_id"] == row["logical_name_id"]
+                }),
+                "{step}: {row} is served but not indexed"
+            );
+        }
+    }
+    fixture.assert_undo_restores(16).await?;
+    fixture.assert_rebuild_equal(16).await?;
     fixture.cleanup().await
 }

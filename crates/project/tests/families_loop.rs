@@ -252,3 +252,37 @@ async fn the_lag_counts_a_marker_off_the_served_branch_or_above_the_target() -> 
     assert_eq!(forked.lag_blocks(), 1);
     fixture.cleanup().await
 }
+
+// A rebuild does not start while Interpret is in redo: the run reports the wait, resets nothing
+// and leaves no marker. The next run after the redo clears rebuilds to the served marker.
+#[tokio::test]
+async fn a_rebuild_waits_out_an_interpret_redo_and_the_next_run_completes_it() -> Result<()> {
+    let fixture = Fixture::new("families_loop_rebuild_wait", 20).await?;
+    fixture.interpret_row("interpret-hash-a", 3, true).await?;
+    let waiting = fixture.apply(10, FamilyMode::Rebuild).await;
+    let skipped = waiting
+        .skipped
+        .clone()
+        .expect("no rebuild starts while Interpret is in redo");
+    assert!(skipped.contains("Interpret is in redo"), "{skipped}");
+    assert_eq!((waiting.reset, waiting.blocks), (false, 0));
+    let applied: Option<i64> = sqlx::query_scalar(
+        "SELECT current_block_number FROM project_family_marker WHERE chain_id = $1",
+    )
+    .bind(CHAIN)
+    .fetch_optional(&fixture.pool)
+    .await?
+    .flatten();
+    assert_eq!(applied, None, "no family block applied");
+
+    fixture.interpret_row("interpret-hash-a", 3, false).await?;
+    let rebuilt = fixture.apply(10, FamilyMode::Normal).await;
+    assert_eq!(rebuilt.skipped, None);
+    assert!(
+        rebuilt.reset,
+        "the next run rebuilds the families it never started"
+    );
+    assert_eq!(fixture.marker().await?.0, Some(10));
+    assert_eq!(rebuilt.lag_blocks(), 0);
+    fixture.cleanup().await
+}

@@ -164,6 +164,12 @@ CREATE INDEX IF NOT EXISTS project_families_discovery_edges_resolver_to_block_id
     ON discovery_edges (chain_id, active_to_block_number)
     WHERE edge_kind = 'resolver' AND active_to_block_number IS NOT NULL;
 
+-- It also asks whether an address that starts or stops at the block is any resolver edge's
+-- destination, deactivated edges included.
+CREATE INDEX IF NOT EXISTS project_families_discovery_edges_resolver_destination_idx
+    ON discovery_edges (chain_id, to_contract_instance_id)
+    WHERE edge_kind = 'resolver';
+
 -- Interpret closes and orders historical observations as well as active ones.
 CREATE INDEX IF NOT EXISTS discovery_edges_observation_history_idx
     ON discovery_edges (
