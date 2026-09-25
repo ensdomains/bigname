@@ -1667,8 +1667,8 @@ set](glossary.md#active-manifest-set-family-block), with the
 manifests active at that block, the way the served resolver build does.
 
 These tables are shadows today. No production serving reader reads them, and
-no served value depends on them; only the family reducers and tests do. After each Project batch commits and its progress is
-recorded, the phase runner applies the families block by block, each block in
+no served value depends on them; only the family reducers and tests do. After
+each Project batch commits and its progress is recorded, the phase runner applies the families block by block, each block in
 a transaction of its own, from the [family marker](glossary.md#family-marker)
 (`project_family_marker`) up to the served marker. A batch's publication never
 waits for them, since it has committed before they run, but the next batch
@@ -1747,7 +1747,13 @@ journal, a redo attempt the families never saw, or a served rebuild clears the
 families and rebuilds them from the blocks that carry events or start or stop
 a resolver activation. So do families whose marker records a content hash
 other than the running binary's, which covers a served rebuild whose family run
-was skipped. The repair record describes the latest of these: its
+was skipped. An undo journal the families refuse, such as one whose prior
+markers form a cycle, does not trigger a rebuild: every run that needs it
+stops with a data-integrity skip, logs a warning and counts on
+`phase_runner_project_family_skips_total`, changing nothing, until an operator
+runs a rebuild or a redo below the kept journal. That is deliberate: a
+malformed journal is a defect to look at, not state to rebuild over silently.
+The repair record describes the latest of these: its
 attempt, reason, trusted base, replay target, state (`undoing`, `replaying`,
 `rebuilding` or `complete`) and, once done, the marker, generation and input
 content hash it completed with. Each transition commits with the work it

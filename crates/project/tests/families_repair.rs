@@ -645,3 +645,38 @@ async fn a_rebuild_run_reads_one_work_block_past_its_budget() -> Result<()> {
     }
     Ok(())
 }
+
+// A refused undo journal (here a marker row that names itself) is not a reason to rebuild: the
+// run reports a skip and changes nothing, every later run does the same, and an operator rebuild
+// or a redo below the kept journal is the way out.
+#[tokio::test]
+async fn a_cyclic_undo_journal_skips_the_run_instead_of_rebuilding() -> Result<()> {
+    let fixture = Fixture::new("families_repair_cycle", 20).await?;
+    seed(&fixture, 11..=12).await?;
+    fixture.apply(12, FamilyMode::Normal).await;
+    let before = fixture.snapshot().await?;
+    sql(
+        &fixture,
+        &format!(
+            "UPDATE project_family_undo
+             SET before_image = before_image
+                 || jsonb_build_object('current_block_number', 12,
+                                       'current_block_hash', '{}')
+             WHERE family = 'marker' AND block_number = 12",
+            hash(12)
+        ),
+    )
+    .await?;
+    fixture.project_row(1, Some((11, 12, "operator"))).await?;
+    for _ in 0..2 {
+        let outcome = fixture
+            .apply(12, FamilyMode::Redo { from: 11, to: 12 })
+            .await;
+        let skipped = outcome.skipped.clone().unwrap_or_default();
+        assert!(skipped.contains("cycle"), "{skipped}");
+        assert!(!outcome.reset, "a refused journal does not rebuild");
+        assert_eq!(outcome.blocks + outcome.undone_blocks, 0);
+        assert_eq!(fixture.snapshot().await?, before, "nothing changed");
+    }
+    fixture.cleanup().await
+}
