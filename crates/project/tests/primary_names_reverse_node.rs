@@ -4,6 +4,7 @@ mod family_shadow;
 use anyhow::Result;
 use bigname_project::{BatchRequest, Engine, Marker, RunMode};
 use bigname_test_support::{TestDatabase, TestDatabaseConfig};
+use family_shadow::{Expectations, ExpectedDifference};
 use serde_json::{Value, json};
 use sqlx::{PgPool, raw_sql};
 
@@ -11,6 +12,8 @@ const CHAIN: &str = "fixture-reverse-node";
 const ADDRESS: &str = "0x0000000000000000000000000000000000000001";
 const RESOLVER: &str = "0x0000000000000000000000000000000000000011";
 const OTHER: &str = "0x0000000000000000000000000000000000000022";
+/// How the comparison shows a field one side does not have.
+const ABSENT: &str = "<absent>";
 const NODE: &str = "0x1111111111111111111111111111111111111111111111111111111111111111";
 
 #[tokio::test]
@@ -30,20 +33,17 @@ async fn reverse_node_claims_follow_resolver_storage_in_full_incremental_and_red
         Some(("success", Some("owner.eth"))),
         Some(("success", Some("owner.eth"))),
     ];
-    let mut unrepresented = Vec::new();
+    let shadow = lost_node_claims();
     for (index, expected) in expected.into_iter().enumerate() {
         let block = index as i64 + 1;
-        if run(
+        run(
             &pool,
             block,
             (block > 1).then_some(block - 1),
             RunMode::Normal,
+            &shadow,
         )
-        .await?
-            > 0
-        {
-            unrepresented.push(block);
-        }
+        .await?;
         let incremental = snapshot(&pool).await?;
         match expected {
             None => assert!(incremental.is_none()),
@@ -54,19 +54,12 @@ async fn reverse_node_claims_follow_resolver_storage_in_full_incremental_and_red
                 assert_eq!(row["claim_name_is_normalized"], status == "success");
             }
         }
-        run(&pool, block, Some(block), RunMode::Redo).await?;
+        run(&pool, block, Some(block), RunMode::Redo, &shadow).await?;
         assert_eq!(snapshot(&pool).await?, incremental, "redo block {block}");
-        run(&pool, block, None, RunMode::Normal).await?;
+        run(&pool, block, None, RunMode::Normal, &shadow).await?;
         assert_eq!(snapshot(&pool).await?, incremental, "full block {block}");
     }
-    // Step 2 finding: the node claim family keeps one row per node, so while the node points at
-    // OTHER (block 4) or its latest name record was written at OTHER (block 11), the older record
-    // at the current resolver that today's reader serves is not in the families.
-    assert_eq!(
-        unrepresented,
-        [4, 11],
-        "reverse claims the families cannot represent"
-    );
+    shadow.finish()?;
     let surfaces: i64 = sqlx::query_scalar("SELECT count(*) FROM name_surfaces")
         .fetch_one(&pool)
         .await?;
@@ -79,13 +72,13 @@ async fn reverse_node_claims_follow_resolver_storage_in_full_incremental_and_red
 async fn reverse_node_claim_reorg_and_deleted_reset_restore_canonical_history() -> Result<()> {
     let (database, pool) = database("reorg").await?;
     seed(&pool).await?;
-    run(&pool, 7, None, RunMode::Normal).await?;
+    run(&pool, 7, None, RunMode::Normal, &Expectations::none()).await?;
     assert_eq!(snapshot(&pool).await?.unwrap()["claim_status"], "not_found");
     // Redo must recover the projected clearing event even after Interpret replaces it.
     sqlx::query("DELETE FROM normalized_events WHERE event_identity = '7:2'")
         .execute(&pool)
         .await?;
-    run(&pool, 7, Some(7), RunMode::Redo).await?;
+    run(&pool, 7, Some(7), RunMode::Redo, &Expectations::none()).await?;
     assert_eq!(
         snapshot(&pool).await?.unwrap()["raw_claim_name"],
         "before-reset.eth"
@@ -95,10 +88,10 @@ async fn reverse_node_claim_reorg_and_deleted_reset_restore_canonical_history() 
     )
     .execute(&pool)
     .await?;
-    run(&pool, 7, Some(7), RunMode::Redo).await?;
+    run(&pool, 7, Some(7), RunMode::Redo, &Expectations::none()).await?;
     let repaired = snapshot(&pool).await?;
     assert_eq!(repaired.as_ref().unwrap()["raw_claim_name"], "updated.eth");
-    run(&pool, 7, None, RunMode::Normal).await?;
+    run(&pool, 7, None, RunMode::Normal, &Expectations::none()).await?;
     assert_eq!(snapshot(&pool).await?, repaired);
     database.cleanup().await?;
     Ok(())
@@ -132,7 +125,7 @@ async fn explicit_tuple_claims_keep_their_existing_path() -> Result<()> {
         }),
     )
     .await?;
-    run(&pool, 3, None, RunMode::Normal).await?;
+    run(&pool, 3, None, RunMode::Normal, &Expectations::none()).await?;
     assert_eq!(
         snapshot(&pool).await?.unwrap()["raw_claim_name"],
         "explicit.eth"
@@ -253,10 +246,14 @@ fn hash(block: i64) -> String {
     format!("0x{block:064x}")
 }
 
-/// Run Project, then compare the family reads with today's. Returns the blocks' reverse claims the
-/// node claim family cannot represent (one row per node, so a node whose latest name record was
-/// written at another resolver than its current one loses the older record at the current one).
-async fn run(pool: &PgPool, block: i64, previous: Option<i64>, mode: RunMode) -> Result<usize> {
+/// Run Project, then compare the family reads with today's, expecting `shadow`.
+async fn run(
+    pool: &PgPool,
+    block: i64,
+    previous: Option<i64>,
+    mode: RunMode,
+    shadow: &Expectations,
+) -> Result<()> {
     let outcome = Engine::new(pool.clone())
         .run_batch(BatchRequest {
             chain_id: CHAIN.to_owned(),
@@ -270,12 +267,56 @@ async fn run(pool: &PgPool, block: i64, previous: Option<i64>, mode: RunMode) ->
             mode,
         })
         .await?;
-    let report =
-        family_shadow::assert_family_reads_match_with_gaps(pool, &outcome.current, |key| {
-            key.starts_with("primary_name ")
-        })
-        .await?;
-    Ok(report.node_claim_findings.len())
+    family_shadow::compare_family_reads_at(pool, &outcome.current, shadow).await?;
+    Ok(())
+}
+
+/// Step 2 finding: the node claim family keeps one row per node, so while the node points at
+/// OTHER (block 4) or its latest name record was written at OTHER (block 11), the older record at
+/// the current resolver that today's reader serves is not in the families. Each block runs three
+/// times (incremental, redo and full), so each difference shows three times.
+fn lost_node_claims() -> Expectations {
+    let key = format!("primary_name {ADDRESS} ens 60");
+    Expectations {
+        differences: vec![
+            // Today serves the name record written at OTHER (event 2), the node's resolver then.
+            ExpectedDifference {
+                target: 4,
+                key: key.clone(),
+                fields: vec![
+                    ("claim_name_is_normalized".into(), json!(true), json!(false)),
+                    (
+                        "claim_provenance.claim_event_id".into(),
+                        json!(2),
+                        json!(ABSENT),
+                    ),
+                    ("claim_status".into(), json!("success"), json!("not_found")),
+                    ("raw_claim_name".into(), json!("other.eth"), Value::Null),
+                ],
+                times: 3,
+            },
+            // Today serves the name record written at the current resolver (event 15).
+            ExpectedDifference {
+                target: 11,
+                key: key.clone(),
+                fields: vec![
+                    ("claim_name_is_normalized".into(), json!(true), json!(false)),
+                    (
+                        "claim_provenance.claim_event_id".into(),
+                        json!(15),
+                        json!(ABSENT),
+                    ),
+                    ("claim_status".into(), json!("success"), json!("not_found")),
+                    ("raw_claim_name".into(), json!("owner.eth"), Value::Null),
+                ],
+                times: 3,
+            },
+        ],
+        // At block 5 the node's only claim is at OTHER too, and today serves no claim either,
+        // so the diagnostic shows with no difference.
+        node_claims_at_other_resolver: [4, 5, 11].map(|block| (block, key.clone())).to_vec(),
+        ..Expectations::none()
+    }
 }
 
 async fn snapshot(pool: &PgPool) -> Result<Option<Value>> {

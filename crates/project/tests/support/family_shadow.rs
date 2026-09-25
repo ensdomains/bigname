@@ -1,39 +1,143 @@
 //! Shadow comparison of the owned key family readers (TYR-36 step 4) after a Project run: the
-//! families are rebuilt to the served marker, then every record inventory row, every page of names
-//! resolving to an indexed address and every reverse claim is read through today's readers and
-//! through the family readers (`bigname_storage::families::records`) and compared field by field.
-//! A test that includes this file calls it after each Project run, so a served value the families
-//! do not reproduce fails there.
+//! families are rebuilt to the served marker, then every record inventory row, the complete
+//! sequence of names resolving to each address and every reverse claim is read through today's
+//! readers and through the family readers (`bigname_storage::families::records`) and compared
+//! field by field. A test that includes this file calls it after each Project run.
+//!
+//! A test states every difference it expects as an [`ExpectedDifference`]: the target, the
+//! complete result key, every differing field with today's and the family's value, and how many
+//! comparisons in the test must show it. A comparison fails on a difference no record expects, on
+//! an expected result with another field or value, and on an expected difference that does not
+//! show; [`Expectations::finish`] fails when one showed a different number of times. The index
+//! misses and node claims at another resolver the report lists as diagnostics must equal the ones
+//! the test states at that target, so they too cannot appear or vanish unnoticed.
 #![allow(dead_code)]
 
-use anyhow::{Result, ensure};
+use std::sync::Mutex;
+
+use anyhow::{Result, bail, ensure};
 use bigname_project::{
     Marker,
     families::{self, FamilyMode, FamilyOptions},
 };
 use bigname_storage::families::records::{ShadowReport, compare_family_reads};
+use serde_json::Value;
 use sqlx::PgPool;
 
-/// Rebuild the families at `target`, compare, and require no difference outside `expected`, a
-/// predicate over the difference key (for a disclosed canonical-order change the test names), and
-/// no step 2 gap finding at all.
-pub async fn compare_family_reads_at(
-    pool: &PgPool,
-    target: &Marker,
-    expected: impl Fn(&str) -> bool,
-) -> Result<ShadowReport> {
-    compare_family_reads_with(pool, target, expected, |_| false).await
+/// One difference a test expects.
+#[derive(Clone, Debug)]
+pub struct ExpectedDifference {
+    /// The served block the comparison runs at.
+    pub target: i64,
+    /// The complete result key, as the report names it.
+    pub key: String,
+    /// Every field that differs, with today's value and the family's value.
+    pub fields: Vec<(String, Value, Value)>,
+    /// How many comparisons in the test must show it.
+    pub times: usize,
 }
 
-/// [`compare_family_reads_at`] that also accepts the step 2 gap findings (node claims the family
-/// cannot represent, address pages the index cannot answer) whose key `gap` accepts. Every other
-/// gap finding fails, so a reader bug cannot hide in a gap bucket.
-pub async fn compare_family_reads_with(
-    pool: &PgPool,
-    target: &Marker,
-    expected: impl Fn(&str) -> bool,
-    gap: impl Fn(&str) -> bool,
-) -> Result<ShadowReport> {
+/// What a test expects its comparisons to show beyond equality.
+#[derive(Debug, Default)]
+pub struct Expectations {
+    pub differences: Vec<ExpectedDifference>,
+    /// `(target, index miss)`: the served entries the address index alone would not find.
+    pub index_misses: Vec<(i64, String)>,
+    /// `(target, tuple key)`: reverse tuples whose node claim is only at another resolver.
+    pub node_claims_at_other_resolver: Vec<(i64, String)>,
+    /// How often each expected difference showed so far; leave it at its default.
+    pub seen: Mutex<Vec<usize>>,
+}
+
+impl Expectations {
+    /// No difference and no diagnostic.
+    pub fn none() -> Self {
+        Self::default()
+    }
+
+    /// Check one comparison at `target` against the expectations.
+    pub fn check(&self, target: i64, report: &ShadowReport) -> Result<()> {
+        let mut matched = vec![false; self.differences.len()];
+        for (key, differences) in &report.differences {
+            let Some(index) = self
+                .differences
+                .iter()
+                .position(|expected| expected.target == target && &expected.key == key)
+            else {
+                bail!("unexpected difference at {target} on {key}: {differences:#?}");
+            };
+            let mut actual: Vec<(String, Value, Value)> = differences
+                .iter()
+                .map(|difference| {
+                    (
+                        difference.field.clone(),
+                        difference.today.clone(),
+                        difference.family.clone(),
+                    )
+                })
+                .collect();
+            let mut expected = self.differences[index].fields.clone();
+            actual.sort_by(|a, b| a.0.cmp(&b.0));
+            expected.sort_by(|a, b| a.0.cmp(&b.0));
+            ensure!(
+                actual == expected,
+                "the difference at {target} on {key} is not the expected one: \
+                 expected {expected:#?}, got {actual:#?}"
+            );
+            matched[index] = true;
+        }
+        for (index, expected) in self.differences.iter().enumerate() {
+            ensure!(
+                expected.target != target || matched[index],
+                "the expected difference at {target} on {} did not show",
+                expected.key
+            );
+        }
+        let stated = |list: &[(i64, String)]| -> Vec<String> {
+            list.iter()
+                .filter(|(at, _)| *at == target)
+                .map(|(_, key)| key.clone())
+                .collect()
+        };
+        ensure!(
+            report.address_index_misses == stated(&self.index_misses),
+            "index misses at {target}: expected {:#?}, got {:#?}",
+            stated(&self.index_misses),
+            report.address_index_misses
+        );
+        ensure!(
+            report.node_claims_at_other_resolver == stated(&self.node_claims_at_other_resolver),
+            "node claims at another resolver at {target}: expected {:#?}, got {:#?}",
+            stated(&self.node_claims_at_other_resolver),
+            report.node_claims_at_other_resolver
+        );
+        let mut seen = self.seen.lock().expect("expectation counts");
+        seen.resize(self.differences.len(), 0);
+        for (index, hit) in matched.into_iter().enumerate() {
+            seen[index] += usize::from(hit);
+        }
+        Ok(())
+    }
+
+    /// Require every expected difference to have shown exactly its number of times.
+    pub fn finish(&self) -> Result<()> {
+        let mut seen = self.seen.lock().expect("expectation counts").clone();
+        seen.resize(self.differences.len(), 0);
+        for (expected, seen) in self.differences.iter().zip(seen) {
+            ensure!(
+                seen == expected.times,
+                "the expected difference at {} on {} showed {seen} times, not {}",
+                expected.target,
+                expected.key,
+                expected.times
+            );
+        }
+        Ok(())
+    }
+}
+
+/// Rebuild the families at `target` and compare, without judging the report.
+pub async fn shadow_report_at(pool: &PgPool, target: &Marker) -> Result<ShadowReport> {
     let chain_id: String = sqlx::query_scalar(
         "SELECT chain_id FROM bigname_phase.chain_lineage
          WHERE block_number = $1 AND block_hash = $2 LIMIT 1",
@@ -70,7 +174,7 @@ pub async fn compare_family_reads_with(
     );
     eprintln!(
         "FAMILY_SHADOW target={} inventory_rows={} compatibility_pairs={} address_pages={} \
-         address_entries={} primary_tuples={} differences={} node_claim_findings={} \
+         address_entries={} primary_tuples={} differences={} node_claims_at_other_resolver={} \
          address_index_misses={}",
         target.number,
         report.inventory_rows,
@@ -79,42 +183,24 @@ pub async fn compare_family_reads_with(
         report.address_entries,
         report.primary_tuples,
         report.differences.len(),
-        report.node_claim_findings.len(),
+        report.node_claims_at_other_resolver.len(),
         report.address_index_misses.len()
-    );
-    let unexpected: Vec<_> = report
-        .differences
-        .iter()
-        .filter(|(key, _)| !expected(key))
-        .collect();
-    ensure!(
-        unexpected.is_empty(),
-        "family reads differ from today's reads at {}: {unexpected:#?}",
-        target.number
-    );
-    let unexpected_gaps: Vec<_> = report
-        .node_claim_findings
-        .iter()
-        .filter(|(key, _)| !gap(key))
-        .collect();
-    ensure!(
-        unexpected_gaps.is_empty(),
-        "family reads show step 2 gaps the test does not expect at {}: {unexpected_gaps:#?}",
-        target.number
     );
     Ok(report)
 }
 
-/// [`compare_family_reads_at`] with no expected difference.
-pub async fn assert_family_reads_match(pool: &PgPool, target: &Marker) -> Result<ShadowReport> {
-    compare_family_reads_at(pool, target, |_| false).await
-}
-
-/// [`assert_family_reads_match`] that accepts the step 2 gap findings whose key `gap` accepts.
-pub async fn assert_family_reads_match_with_gaps(
+/// Rebuild the families at `target`, compare, and check the report against `expected`.
+pub async fn compare_family_reads_at(
     pool: &PgPool,
     target: &Marker,
-    gap: impl Fn(&str) -> bool,
+    expected: &Expectations,
 ) -> Result<ShadowReport> {
-    compare_family_reads_with(pool, target, |_| false, gap).await
+    let report = shadow_report_at(pool, target).await?;
+    expected.check(target.number, &report)?;
+    Ok(report)
+}
+
+/// [`compare_family_reads_at`] with no difference and no diagnostic expected.
+pub async fn assert_family_reads_match(pool: &PgPool, target: &Marker) -> Result<ShadowReport> {
+    compare_family_reads_at(pool, target, &Expectations::none()).await
 }

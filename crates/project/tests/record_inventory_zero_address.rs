@@ -10,6 +10,7 @@ use bigname_storage::families::records::{
     FamilyAttribution, compare_family_reads, load_family_record_inventory_detail,
 };
 use bigname_test_support::{TestDatabase, TestDatabaseConfig};
+use family_shadow::Expectations;
 use serde_json::{Value, json};
 use sqlx::{PgPool, raw_sql};
 
@@ -523,7 +524,27 @@ async fn coin60_pairs_serve_the_address_changed_half_at_its_own_position() -> Re
         let fixture = case(id)?;
         let (database, pool) = database(&format!("{id}_pair")).await?;
         seed(&pool, fixture).await?;
-        let outcome = run_window(&pool, 11, 0, 11, None, RunMode::Normal).await?;
+        // Step 2 finding: the inverse address index reads the `AddrChanged` half's own value, so
+        // when the halves carry different addresses the served `AddressChanged` address has no
+        // index row. The family read finds it from the retained pair value; the diagnostic names
+        // exactly that entry.
+        let halves_differ = matches!(
+            id,
+            "ens_v1_pair_after_boundary" | "ens_v1_older_write_then_boundary_then_pair"
+        );
+        let comparison = Expectations {
+            index_misses: if halves_differ {
+                vec![(
+                    11,
+                    format!("resolves_to {NONZERO20} coin 60 resource {RESOURCE} addr:60"),
+                )]
+            } else {
+                Vec::new()
+            },
+            ..Expectations::none()
+        };
+        let outcome =
+            run_window_expecting(&pool, 11, 0, 11, None, RunMode::Normal, &comparison).await?;
         let row: Value = sqlx::query_scalar(
             "SELECT to_jsonb(row) FROM record_inventory_current row WHERE resource_id = $1::uuid",
         )
@@ -564,33 +585,30 @@ async fn coin60_pairs_serve_the_address_changed_half_at_its_own_position() -> Re
                 family.row.provenance
             );
         }
-        // Step 2 finding: the inverse address index reads the `AddrChanged` half's own value,
-        // so when the halves carry different addresses the served `AddressChanged` address has
-        // no index row. The family read finds it from the retained pair value; the diagnostic
-        // names exactly that entry.
-        let report = compare_family_reads(
-            &pool,
-            fixture.chain,
-            Some((outcome.current.number, outcome.current.hash.clone())),
-            1,
-        )
-        .await?;
-        let halves_differ = matches!(
-            id,
-            "ens_v1_pair_after_boundary" | "ens_v1_older_write_then_boundary_then_pair"
-        );
-        assert!(report.differences.is_empty(), "{id}: {report:#?}");
-        let expected_misses: Vec<String> = if halves_differ {
-            vec![format!(
-                "resolves_to {NONZERO20} coin 60 resource {RESOURCE} addr:60"
-            )]
-        } else {
-            Vec::new()
-        };
-        assert_eq!(
-            report.address_index_misses, expected_misses,
-            "{id}: {report:#?}"
-        );
+        // Mutation: without the pair metadata the family read must fail the comparison, on the
+        // pairs today's row serves as well as on the served value's event.
+        if pairs > 0 {
+            sqlx::query(
+                "UPDATE project_node_record_value
+                 SET sibling_position = NULL, sibling_value = NULL",
+            )
+            .execute(&pool)
+            .await?;
+            let report = compare_family_reads(
+                &pool,
+                fixture.chain,
+                Some((outcome.current.number, outcome.current.hash.clone())),
+                1,
+            )
+            .await?;
+            assert!(comparison.check(11, &report).is_err(), "{id}: {report:#?}");
+            let fields: Vec<&str> = report
+                .differences
+                .iter()
+                .flat_map(|(_, differences)| differences.iter().map(|d| d.field.as_str()))
+                .collect();
+            assert!(fields.contains(&"compatibility_pairs"), "{id}: {report:#?}");
+        }
         database.cleanup().await?;
     }
     Ok(())
@@ -1071,6 +1089,28 @@ async fn run_window(
     resume_current: Option<i64>,
     mode: RunMode,
 ) -> Result<BatchOutcome> {
+    run_window_expecting(
+        pool,
+        target_block,
+        affected_from_block,
+        affected_to_block,
+        resume_current,
+        mode,
+        &Expectations::none(),
+    )
+    .await
+}
+
+/// [`run_window`] whose family comparison expects `expected`.
+async fn run_window_expecting(
+    pool: &PgPool,
+    target_block: i64,
+    affected_from_block: i64,
+    affected_to_block: i64,
+    resume_current: Option<i64>,
+    mode: RunMode,
+    expected: &Expectations,
+) -> Result<BatchOutcome> {
     let outcome = Engine::new(pool.clone())
         .run_batch(BatchRequest {
             chain_id: sqlx::query_scalar("SELECT chain_id FROM chain_lineage LIMIT 1")
@@ -1087,7 +1127,7 @@ async fn run_window(
         })
         .await?;
     bounded_attribution::assert_bounded_record_attribution_matches_inventory(pool).await?;
-    family_shadow::assert_family_reads_match(pool, &outcome.current).await?;
+    family_shadow::compare_family_reads_at(pool, &outcome.current, expected).await?;
     assert!(outcome.complete);
     assert_eq!(outcome.current, outcome.target);
     assert_eq!(outcome.target.number, target_block);

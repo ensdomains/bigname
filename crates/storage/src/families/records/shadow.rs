@@ -1,10 +1,13 @@
-//! The shadow comparison the harness runs at a publication: every record inventory row, every
-//! page of names resolving to each indexed address, and every reverse claim, read through today's
-//! readers and through the family readers, compared field by field. It runs only when the family
-//! marker equals the served marker; otherwise the families lag and the comparison is not evidence.
-use std::collections::BTreeSet;
+//! The shadow comparison the harness runs at a publication: every record inventory row, the
+//! complete sequence of names resolving to each address either side knows, and every reverse
+//! claim, read through today's readers and through the family readers, compared field by field.
+//! It runs only when the family marker equals the served marker; otherwise the families lag and
+//! the comparison is not evidence. Every difference is reported; nothing is set apart. The
+//! diagnostics beside them (index misses, node claims at another resolver) say why a family read
+//! took another path, and never hold a difference.
+use std::collections::{BTreeMap, BTreeSet};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 use serde_json::Value;
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -16,14 +19,13 @@ use super::{
 };
 use crate::{
     AddressNamesCurrentDedupe, AddressNamesCurrentOrder, AddressNamesCurrentSort,
+    AddressNamesCurrentSortedCursor, AddressRecordCurrentEntry, RecordInventoryCurrentRow,
     load_address_records_current_page, load_bounded_record_attribution,
     load_primary_name_current_snapshot, load_record_inventory_current,
 };
 
 /// What one shadow comparison saw. `differences` holds every key whose family read differs from
-/// today's read outside the rules the comparison excludes; `node_claim_findings` holds the reverse
-/// claims the node claim family cannot represent (one row per node, see
-/// [`super::FamilyReverseClaim`]), kept apart as a known step 2 gap.
+/// today's read outside the rules the comparison excludes, each with its differing fields.
 #[derive(Clone, Debug, Default)]
 pub struct ShadowReport {
     pub family_marker: Option<(i64, String)>,
@@ -34,7 +36,11 @@ pub struct ShadowReport {
     pub address_entries: usize,
     pub primary_tuples: usize,
     pub differences: Vec<(String, Vec<Difference>)>,
-    pub node_claim_findings: Vec<(String, Vec<Difference>)>,
+    /// Diagnostic: the reverse tuples whose node has a claim in the family only at another
+    /// resolver than its current one (`primary_name <address> <namespace> <coin type>`). While
+    /// the claim family keeps one row per node, this is where it loses the claim today's reader
+    /// serves; any difference on such a tuple is still in `differences`.
+    pub node_claims_at_other_resolver: Vec<String>,
     /// Diagnostic, not an exclusion: every family entry of a name resolving to an address that
     /// the derived address index alone would not have found, as `resolves_to <address> coin
     /// <coin> resource <id> <record key>`. The family read finds these from the retained values;
@@ -111,23 +117,9 @@ async fn inventory(pool: &PgPool, chain_id: &str, report: &mut ShadowReport) -> 
     let bound = report
         .served_marker
         .as_ref()
-        .map(|(block, _)| std::collections::BTreeMap::from([(chain_id.to_owned(), *block)]));
+        .map(|(block, _)| BTreeMap::from([(chain_id.to_owned(), *block)]));
     let mut attribution = load_bounded_record_attribution(pool, &resources, bound.as_ref()).await?;
     for resource_id in resources {
-        let boundaries: Vec<Value> = sqlx::query_scalar(
-            "SELECT record_version_boundary FROM bigname_phase.record_inventory_current
-             WHERE resource_id = $1",
-        )
-        .bind(resource_id)
-        .fetch_all(pool)
-        .await?;
-        let mut today = None;
-        for boundary in &boundaries {
-            if let Some(row) = load_record_inventory_current(pool, resource_id, boundary).await? {
-                today = Some(row);
-                break;
-            }
-        }
         let family = load_family_record_inventory_detail(
             pool,
             chain_id,
@@ -135,12 +127,35 @@ async fn inventory(pool: &PgPool, chain_id: &str, report: &mut ShadowReport) -> 
             FamilyAttribution::Given(attribution.remove(&resource_id).unwrap_or_default()),
         )
         .await?;
+        // Today's readable row at the family row's boundary, else its first readable row.
+        let boundaries: Vec<(String, Value)> = sqlx::query_as(
+            "SELECT record_version_boundary_key, record_version_boundary
+             FROM bigname_phase.record_inventory_current
+             WHERE resource_id = $1
+             ORDER BY record_version_boundary_key = $2 DESC, record_version_boundary_key",
+        )
+        .bind(resource_id)
+        .bind(
+            family
+                .as_ref()
+                .map(|family| family.record_version_boundary_key.clone()),
+        )
+        .fetch_all(pool)
+        .await?;
+        let mut today = None;
+        for (_, boundary) in &boundaries {
+            if let Some(row) = load_record_inventory_current(pool, resource_id, boundary).await? {
+                today = Some(row);
+                break;
+            }
+        }
         report.inventory_rows += usize::from(today.is_some() || family.is_some());
         let mut differences =
             compare_record_inventory(today.as_ref(), family.as_ref().map(|family| &family.row));
         if let Some(family) = &family {
             report.compatibility_pairs += family.compatibility_pairs.len();
-            differences.extend(check_compatibility_pairs(family));
+            let expected = expected_pairs(pool, today.as_ref()).await?;
+            differences.extend(check_compatibility_pairs(family, &expected));
         }
         if !differences.is_empty() {
             report
@@ -157,7 +172,7 @@ async fn addresses(
     page_size: u64,
     report: &mut ShadowReport,
 ) -> Result<()> {
-    let keys: Vec<(String, String)> = sqlx::query_as(
+    let keys: Vec<(String, String)> = sqlx::query_as(&format!(
         "SELECT address, coin_type FROM bigname_phase.address_records_current
          WHERE provenance ->> 'chain_id' = $1
          UNION
@@ -166,79 +181,202 @@ async fn addresses(
          UNION
          SELECT address, coin_type FROM bigname_phase.project_address_record_id_index
          WHERE chain_id = $1
+         UNION
+         SELECT address, coin_type FROM (
+             {}
+             UNION ALL
+             {}
+         ) retained
+         WHERE address ~ '^0x[0-9a-f]{{40}}$'
+           AND address <> '0x0000000000000000000000000000000000000000'
          ORDER BY 1, 2",
-    )
+        retained_addresses("project_node_record_value", true),
+        retained_addresses("project_record_id_value", false),
+    ))
     .bind(chain_id)
     .fetch_all(pool)
     .await
     .context("failed to list the addresses to compare")?;
     for (address, coin_type) in keys {
-        let (mut today_cursor, mut family_cursor) = (None, None);
-        loop {
-            let today = load_address_records_current_page(
-                pool,
-                &address,
-                &coin_type,
-                None,
-                AddressNamesCurrentDedupe::Surface,
-                None,
-                None,
-                AddressNamesCurrentSort::Name,
-                AddressNamesCurrentOrder::Asc,
-                today_cursor.as_ref(),
-                page_size,
-            )
-            .await?;
-            let family = load_family_address_records_page_detail(
-                pool,
-                &address,
-                &coin_type,
-                None,
-                AddressNamesCurrentDedupe::Surface,
-                None,
-                None,
-                AddressNamesCurrentSort::Name,
-                AddressNamesCurrentOrder::Asc,
-                family_cursor.as_ref(),
-                page_size,
-            )
-            .await?;
-            report
-                .address_index_misses
-                .extend(family.index_misses.iter().map(|(resource, record_key)| {
-                    format!(
-                        "resolves_to {address} coin {coin_type} resource {resource} {record_key}"
-                    )
-                }));
-            let family = family.page;
-            report.address_pages += 1;
-            report.address_entries += today.entries.len();
-            let mut differences = compare_address_records(&today.entries, &family.entries);
-            if today.next_cursor != family.next_cursor {
-                differences.push(Difference {
-                    field: "next_cursor".to_owned(),
-                    today: Value::String(format!("{:?}", today.next_cursor)),
-                    family: Value::String(format!("{:?}", family.next_cursor)),
-                });
-            }
-            let done = today.next_cursor.is_none() || !differences.is_empty();
-            if !differences.is_empty() {
-                report.differences.push((
-                    format!(
-                        "resolves_to {address} coin {coin_type} page {}",
-                        report.address_pages
-                    ),
-                    differences,
-                ));
-            }
-            if done {
-                break;
-            }
-            today_cursor = today.next_cursor;
-            family_cursor = family.next_cursor;
+        let (today, today_pages) = all_today_pages(pool, &address, &coin_type, page_size).await?;
+        let (family, family_pages, misses) =
+            all_family_pages(pool, &address, &coin_type, page_size).await?;
+        report.address_pages += today_pages.len();
+        report.address_entries += today.len();
+        report
+            .address_index_misses
+            .extend(misses.iter().map(|(resource, record_key)| {
+                format!("resolves_to {address} coin {coin_type} resource {resource} {record_key}")
+            }));
+        let mut differences = compare_address_records(&today, &family);
+        // The continuations follow from the entries, so they are compared once the entries agree.
+        if differences.is_empty() && today_pages != family_pages {
+            differences.push(Difference {
+                field: "pages".to_owned(),
+                today: serde_json::json!(today_pages),
+                family: serde_json::json!(family_pages),
+            });
+        }
+        if !differences.is_empty() {
+            report.differences.push((
+                format!("resolves_to {address} coin {coin_type}"),
+                differences,
+            ));
         }
     }
     Ok(())
+}
+
+/// Every retained address value of a value table as (address, coin type) rows: the row's value,
+/// its coin-60 pair sibling's value and its raw address bytes.
+fn retained_addresses(table: &str, with_sibling: bool) -> String {
+    let text = |column: &str| {
+        format!(
+            "lower(CASE WHEN jsonb_typeof({column}) = 'string' THEN {column} #>> '{{}}'
+                        ELSE COALESCE({column} ->> 'value', {column} ->> 'bytes') END)"
+        )
+    };
+    let sibling = if with_sibling {
+        text("value.sibling_value")
+    } else {
+        "NULL".to_owned()
+    };
+    format!(
+        "SELECT candidate.address, value.selector_key::numeric::text AS coin_type
+         FROM bigname_phase.{table} value
+         CROSS JOIN LATERAL (VALUES ({}), ({sibling}), (lower(value.address_bytes_hex)))
+             candidate (address)
+         WHERE value.chain_id = $1 AND value.record_family = 'addr'
+           AND value.selector_key ~ '^[0-9]{{1,30}}$' AND candidate.address IS NOT NULL",
+        text("value.value"),
+    )
+}
+
+/// A page's continuation, for the page comparison.
+fn continuation(cursor: Option<&AddressNamesCurrentSortedCursor>) -> String {
+    format!("{cursor:?}")
+}
+
+/// Pages a reader may return for one address before the comparison gives up on it.
+const MAX_PAGES: usize = 100_000;
+
+async fn all_today_pages(
+    pool: &PgPool,
+    address: &str,
+    coin_type: &str,
+    page_size: u64,
+) -> Result<(Vec<AddressRecordCurrentEntry>, Vec<String>)> {
+    let (mut entries, mut pages, mut cursor) = (Vec::new(), Vec::new(), None);
+    loop {
+        let page = load_address_records_current_page(
+            pool,
+            address,
+            coin_type,
+            None,
+            AddressNamesCurrentDedupe::Surface,
+            None,
+            None,
+            AddressNamesCurrentSort::Name,
+            AddressNamesCurrentOrder::Asc,
+            cursor.as_ref(),
+            page_size,
+        )
+        .await?;
+        entries.extend(page.entries);
+        pages.push(continuation(page.next_cursor.as_ref()));
+        ensure!(
+            pages.len() < MAX_PAGES,
+            "today's pages of {address} do not end"
+        );
+        match page.next_cursor {
+            Some(next) => cursor = Some(next),
+            None => return Ok((entries, pages)),
+        }
+    }
+}
+
+type FamilyPages = (
+    Vec<AddressRecordCurrentEntry>,
+    Vec<String>,
+    Vec<(Uuid, String)>,
+);
+
+async fn all_family_pages(
+    pool: &PgPool,
+    address: &str,
+    coin_type: &str,
+    page_size: u64,
+) -> Result<FamilyPages> {
+    let (mut entries, mut pages, mut misses, mut cursor) =
+        (Vec::new(), Vec::new(), Vec::new(), None);
+    loop {
+        let page = load_family_address_records_page_detail(
+            pool,
+            address,
+            coin_type,
+            None,
+            AddressNamesCurrentDedupe::Surface,
+            None,
+            None,
+            AddressNamesCurrentSort::Name,
+            AddressNamesCurrentOrder::Asc,
+            cursor.as_ref(),
+            page_size,
+        )
+        .await?;
+        misses.extend(page.index_misses);
+        entries.extend(page.page.entries);
+        pages.push(continuation(page.page.next_cursor.as_ref()));
+        ensure!(
+            pages.len() < MAX_PAGES,
+            "the family pages of {address} do not end"
+        );
+        match page.page.next_cursor {
+            Some(next) => cursor = Some(next),
+            None => return Ok((entries, pages, misses)),
+        }
+    }
+}
+
+/// The value events of today's row that are the `AddressChanged` half of a coin-60 pair: an
+/// `AddressChanged` `addr:60` write with an `AddrChanged` `addr:60` write of the same node and
+/// resolver one log later in the same transaction.
+async fn expected_pairs(
+    pool: &PgPool,
+    today: Option<&RecordInventoryCurrentRow>,
+) -> Result<BTreeSet<i64>> {
+    let ids: Vec<i64> = today
+        .and_then(|row| row.provenance.get("record_event_ids"))
+        .and_then(Value::as_array)
+        .map(|ids| ids.iter().filter_map(Value::as_i64).collect())
+        .unwrap_or_default();
+    if ids.is_empty() {
+        return Ok(BTreeSet::new());
+    }
+    let pairs: Vec<i64> = sqlx::query_scalar(
+        "SELECT value.normalized_event_id
+         FROM bigname_phase.normalized_events value
+         JOIN bigname_phase.normalized_events sibling
+           ON sibling.chain_id = value.chain_id AND sibling.block_hash = value.block_hash
+          AND sibling.transaction_index = value.transaction_index
+          AND sibling.log_index = value.log_index + 1
+          AND sibling.event_kind = 'RecordChanged'
+          AND sibling.after_state ->> 'source_event' = 'AddrChanged'
+          AND sibling.after_state ->> 'record_key' = 'addr:60'
+          AND lower(sibling.after_state ->> 'node') IS NOT DISTINCT FROM
+              lower(value.after_state ->> 'node')
+          AND lower(sibling.after_state ->> 'resolver') IS NOT DISTINCT FROM
+              lower(value.after_state ->> 'resolver')
+         WHERE value.normalized_event_id = ANY($1::bigint[])
+           AND value.event_kind = 'RecordChanged'
+           AND value.after_state ->> 'source_event' = 'AddressChanged'
+           AND value.after_state ->> 'record_key' = 'addr:60'",
+    )
+    .bind(&ids)
+    .fetch_all(pool)
+    .await
+    .context("failed to find the coin-60 pairs today's row serves")?;
+    Ok(pairs.into_iter().collect())
 }
 
 async fn primary(pool: &PgPool, chain_id: &str, report: &mut ShadowReport) -> Result<()> {
@@ -265,13 +403,11 @@ async fn primary(pool: &PgPool, chain_id: &str, report: &mut ShadowReport) -> Re
             today.as_ref(),
             family.as_ref().map(|family| &family.snapshot),
         );
-        if differences.is_empty() {
-            continue;
-        }
         let key = format!("primary_name {address} {namespace} {coin_type}");
         if family.is_some_and(|family| family.node_claim_at_other_resolver) {
-            report.node_claim_findings.push((key, differences));
-        } else {
+            report.node_claims_at_other_resolver.push(key.clone());
+        }
+        if !differences.is_empty() {
             report.differences.push((key, differences));
         }
     }

@@ -6,6 +6,7 @@ mod family_shadow;
 use anyhow::Result;
 use bigname_project::{BatchRequest, Engine, Marker, RunMode};
 use bigname_test_support::{TestDatabase, TestDatabaseConfig};
+use family_shadow::{Expectations, ExpectedDifference};
 use serde_json::{Value, json};
 use sqlx::{PgPool, raw_sql};
 
@@ -266,31 +267,124 @@ async fn link_and_version_boundaries_read_the_same_through_the_families() -> Res
         })
         .await?;
     assert_text(&pool, 1, "a").await?;
-    let tied = format!("record_inventory {}", resource(1));
-    let report =
-        family_shadow::compare_family_reads_at(&pool, &outcome.current, |key| key == tied).await?;
-    let (_, differences) = report
-        .differences
-        .iter()
-        .find(|(key, _)| *key == tied)
-        .expect("the tie resolves differently");
-    let entries = differences
-        .iter()
-        .find(|difference| difference.field == "entries")
-        .expect("the served value differs");
-    let url = |entries: &Value| {
-        entries
-            .as_array()
-            .and_then(|entries| {
-                entries
-                    .iter()
-                    .find(|entry| entry["record_key"] == "text:url")
-            })
-            .map(|entry| entry["value"].clone())
+    let id = |identity: &'static str| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT normalized_event_id FROM normalized_events WHERE event_identity = $1",
+            )
+            .bind(identity)
+            .fetch_one(&pool)
+            .await
+        }
     };
-    assert_eq!(url(&entries.today), Some(json!("a")));
-    assert_eq!(url(&entries.family), Some(json!("b")));
-    assert_eq!(report.differences.len(), 1, "{report:#?}");
+    let (tie_a, tie_b) = (id("tie-a").await?, id("tie-b").await?);
+    let today_ids: Value = sqlx::query_scalar(
+        "SELECT provenance -> 'record_event_ids' FROM record_inventory_current
+         WHERE resource_id = $1::uuid",
+    )
+    .bind(resource(1))
+    .fetch_one(&pool)
+    .await?;
+    let family_ids = Value::Array(
+        today_ids
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|id| {
+                if *id == json!(tie_a) {
+                    json!(tie_b)
+                } else {
+                    id.clone()
+                }
+            })
+            .collect(),
+    );
+    let expected = Expectations {
+        differences: vec![ExpectedDifference {
+            target: 23,
+            key: format!("record_inventory {}", resource(1)),
+            fields: vec![
+                ("entries[text:url].value".into(), json!("a"), json!("b")),
+                (
+                    "last_change.normalized_event_id".into(),
+                    json!(tie_a),
+                    json!(tie_b),
+                ),
+                ("provenance.record_event_ids".into(), today_ids, family_ids),
+            ],
+            times: 1,
+        }],
+        ..Expectations::none()
+    };
+    family_shadow::compare_family_reads_at(&pool, &outcome.current, &expected).await?;
+    expected.finish()?;
+
+    // Mutations on the accepted result must fail: another value for an expected field, and a
+    // further field that differs.
+    for mutation in [
+        "UPDATE record_inventory_current SET entries = (
+             SELECT jsonb_agg(CASE WHEN entry ->> 'record_key' = 'text:url'
+                                   THEN jsonb_set(entry, '{value}', '\"c\"') ELSE entry END)
+             FROM jsonb_array_elements(entries) entry)
+         WHERE resource_id = $1::uuid",
+        "UPDATE record_inventory_current
+         SET chain_positions = chain_positions || '{\"mutated\": true}'
+         WHERE resource_id = $1::uuid",
+    ] {
+        let (entries, positions): (Value, Value) = sqlx::query_as(
+            "SELECT entries, chain_positions FROM record_inventory_current
+             WHERE resource_id = $1::uuid",
+        )
+        .bind(resource(1))
+        .fetch_one(&pool)
+        .await?;
+        sqlx::query(mutation)
+            .bind(resource(1))
+            .execute(&pool)
+            .await?;
+        let report = bigname_storage::families::records::compare_family_reads(
+            &pool,
+            CHAIN,
+            Some((23, hash(23))),
+            1,
+        )
+        .await?;
+        assert!(
+            expected.check(23, &report).is_err(),
+            "{mutation}: {report:#?}"
+        );
+        sqlx::query(
+            "UPDATE record_inventory_current SET entries = $2, chain_positions = $3
+             WHERE resource_id = $1::uuid",
+        )
+        .bind(resource(1))
+        .bind(entries)
+        .bind(positions)
+        .execute(&pool)
+        .await?;
+    }
+    // An expected difference that does not show fails, at once and in the final count.
+    let report = bigname_storage::families::records::compare_family_reads(
+        &pool,
+        CHAIN,
+        Some((23, hash(23))),
+        1,
+    )
+    .await?;
+    let mut missing = expected.differences.clone();
+    missing.push(ExpectedDifference {
+        target: 23,
+        key: format!("record_inventory {}", resource(2)),
+        fields: vec![("entries[text:url].value".into(), json!("x"), json!("y"))],
+        times: 1,
+    });
+    let missing = Expectations {
+        differences: missing,
+        ..Expectations::none()
+    };
+    assert!(missing.check(23, &report).is_err());
+    assert!(missing.finish().is_err());
     db.cleanup().await?;
     Ok(())
 }
@@ -349,35 +443,29 @@ async fn inverse_address_reads_find_values_the_address_index_drops() -> Result<(
         1,
         "RecordChanged",
         Some(2),
-        address(2, INVERSE_B),
+        address(2, INVERSE_A),
     )
     .await?;
     sqlx::query("UPDATE normalized_events SET transaction_hash = NULL, transaction_index = NULL, log_index = NULL WHERE event_identity IN ('tie-a-version', 'tie-b-value')").execute(&pool).await?;
-    run(&pool, 22, None, RunMode::Normal).await?;
-    // The step 2 index drops both values; the family read finds them from the retained values.
-    let report = family_shadow::assert_family_reads_match(
-        &pool,
-        &Marker {
-            number: 22,
-            hash: hash(22),
-        },
-    )
-    .await?;
-    assert_eq!(
-        report.address_index_misses,
-        [
-            format!(
-                "resolves_to {INVERSE_A} coin 60 resource {} addr:60",
-                resource(1)
-            ),
-            format!(
-                "resolves_to {INVERSE_B} coin 60 resource {} addr:60",
-                resource(2)
-            ),
-        ],
-        "{report:#?}"
-    );
-    for (id, value) in [(1, INVERSE_A), (2, INVERSE_B)] {
+    // The step 2 index drops both values; the family read finds them from the retained values,
+    // and the diagnostic names each entry the index alone would miss.
+    let expected = Expectations {
+        index_misses: [1, 2]
+            .map(|id| {
+                (
+                    22,
+                    format!(
+                        "resolves_to {INVERSE_A} coin 60 resource {} addr:60",
+                        resource(id)
+                    ),
+                )
+            })
+            .to_vec(),
+        ..Expectations::none()
+    };
+    run_expecting(&pool, 22, None, RunMode::Normal, &expected).await?;
+    for id in [1, 2] {
+        let value = INVERSE_A;
         let row = inventory(&pool, id).await?;
         let served = row["entries"]
             .as_array()
@@ -387,19 +475,51 @@ async fn inverse_address_reads_find_values_the_address_index_drops() -> Result<(
             .map(|entry| entry["value"].clone());
         assert_eq!(served, Some(json!(value)), "resource{id}: {row}");
         let listed: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM address_records_current WHERE address = $1 AND coin_type = '60'",
+            "SELECT count(*) FROM address_records_current
+             WHERE address = $1 AND coin_type = '60' AND record_resource_id = $2::uuid",
         )
         .bind(value)
+        .bind(resource(id))
         .fetch_one(&pool)
         .await?;
         assert_eq!(listed, 1, "today lists resource{id} for {value}");
     }
+
+    // Mutation: a difference on the second of the address's two pages (page size one) must fail
+    // the comparison, and be named on that entry.
+    sqlx::query(
+        "UPDATE address_records_current SET provenance = provenance || '{\"mutated\": true}'
+         WHERE address = $1 AND record_resource_id = $2::uuid",
+    )
+    .bind(INVERSE_A)
+    .bind(resource(2))
+    .execute(&pool)
+    .await?;
+    let target = Marker {
+        number: 22,
+        hash: hash(22),
+    };
+    let report = family_shadow::shadow_report_at(&pool, &target).await?;
+    assert!(expected.check(22, &report).is_err(), "{report:#?}");
+    let fields: Vec<&str> = report
+        .differences
+        .iter()
+        .flat_map(|(_, differences)| differences.iter().map(|d| d.field.as_str()))
+        .collect();
+    assert_eq!(
+        fields,
+        [format!(
+            "entries[ens:{}|{}].provenance.mutated",
+            node(2),
+            resource(2)
+        )],
+        "{report:#?}"
+    );
     db.cleanup().await?;
     Ok(())
 }
 
 const INVERSE_A: &str = "0x5555555555555555555555555555555555555555";
-const INVERSE_B: &str = "0x6666666666666666666666666666666666666666";
 
 // ABI content types come from the writes the selected record holds, so a write made before a
 // name links to the record counts, and a name without an exact link reads the default record.
@@ -896,6 +1016,17 @@ async fn assert_history(pool: &PgPool, id: i64, present: &[&str], absent: &[&str
 }
 
 async fn run(pool: &PgPool, target: i64, previous: Option<i64>, mode: RunMode) -> Result<()> {
+    run_expecting(pool, target, previous, mode, &Expectations::none()).await
+}
+
+/// [`run`] whose family comparison expects `expected`.
+async fn run_expecting(
+    pool: &PgPool,
+    target: i64,
+    previous: Option<i64>,
+    mode: RunMode,
+    expected: &Expectations,
+) -> Result<()> {
     let outcome = Engine::new(pool.clone())
         .run_batch(BatchRequest {
             chain_id: CHAIN.to_owned(),
@@ -910,7 +1041,7 @@ async fn run(pool: &PgPool, target: i64, previous: Option<i64>, mode: RunMode) -
         })
         .await?;
     bounded_attribution::assert_bounded_record_attribution_matches_inventory(pool).await?;
-    family_shadow::assert_family_reads_match(pool, &outcome.current).await?;
+    family_shadow::compare_family_reads_at(pool, &outcome.current, expected).await?;
     Ok(())
 }
 
@@ -1220,28 +1351,22 @@ async fn official_sepolia_direct_resolver_projects_ensip19_default_for_missing_e
         }),
     )
     .await?;
-    run(&pool, target, None, RunMode::Normal).await?;
     // Step 2 finding, kept visible: the inverse address index derives an address from a value
     // row's `value` only (crates/project/src/families/derived.rs:162 and :197), so this
     // `AddressChanged`, which carries only `address_bytes_hex`, has no index row. The family read
     // finds the name from the retained value and serves the same page; the diagnostic names the
     // one entry the index alone would miss.
-    let report = family_shadow::assert_family_reads_match(
-        &pool,
-        &Marker {
-            number: target,
-            hash: hash(target),
-        },
-    )
-    .await?;
-    assert_eq!(
-        report.address_index_misses,
-        [format!(
-            "resolves_to {ADDRESS_BYTES_ONLY} coin 2147483648 resource {} addr:2147483648",
-            resource(1)
+    let expected = Expectations {
+        index_misses: vec![(
+            target,
+            format!(
+                "resolves_to {ADDRESS_BYTES_ONLY} coin 2147483648 resource {} addr:2147483648",
+                resource(1)
+            ),
         )],
-        "{report:#?}"
-    );
+        ..Expectations::none()
+    };
+    run_expecting(&pool, target, None, RunMode::Normal, &expected).await?;
     // A direct node-keyed declaration has no link state, so the section is unsupported
     // by kind rather than reported empty.
     assert_eq!(
