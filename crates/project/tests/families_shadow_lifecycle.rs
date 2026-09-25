@@ -1897,6 +1897,18 @@ async fn a_transfer_refiled_under_another_key_stays_a_mismatch() -> Result<()> {
             "{case}: a refiled transfer must not pass: {:#?}",
             mutated.lines
         );
+        // Either way the three same-block deltas of the baseline are refused, and nothing
+        // else differs.
+        assert_eq!(
+            failed_fields(&mutated),
+            [
+                "control/registrant",
+                "control/registry_owner",
+                "registration/registrant"
+            ],
+            "{case}: {:#?}",
+            mutated.lines
+        );
     }
     fixture.cleanup().await
 }

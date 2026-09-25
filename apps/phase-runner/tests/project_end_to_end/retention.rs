@@ -28,11 +28,13 @@
 //! - the node's owner-setting registry events and its old-record and first-current-record
 //!   facts (registry.rs `registry_nodes`).
 //!
+//! - each candidate's surface namehash, the namehash part of its name (identity.rs:398-402).
+//!
 //! The older admitted epochs the families do not keep (one start per arm) are not expected
-//! here, so a served value that needs one stays a mismatch. Not rebuilt here: the wrapper rows,
-//! the other names' candidates the staging passes choose among for an unnamed registrar event
-//! (`lease_candidates`), and a candidate's surface namehash. The stored key-state and triple
-//! maxima are not read by the excuse reads, which fold the events themselves.
+//! here, so a served value that needs one stays a mismatch. Not rebuilt here: the wrapper rows
+//! and the other names' candidates the staging passes choose among for an unnamed registrar
+//! event (`lease_candidates`). The stored key-state and triple maxima are not read by the excuse
+//! reads, which fold the events themselves.
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::Result;
@@ -383,6 +385,16 @@ fn candidate_differs(candidate: &BindingCandidate, expected: &Expected<'_>) -> O
         .map(|(predecessor, _)| predecessor.resource.clone());
     let checks = [
         ("name", candidate.logical_name_id == binding.name),
+        // identity.rs:398-402 writes the namehash part of the name, lower case (reduce.rs
+        // `namehash_of`); staging names unnamed registrar rows through it.
+        (
+            "surface_namehash",
+            candidate.surface_namehash
+                == binding
+                    .name
+                    .split_once(':')
+                    .map(|(_, namehash)| namehash.to_ascii_lowercase()),
+        ),
         ("resource", candidate.resource_id == binding.resource),
         ("arm", candidate.authority_arm == binding.arm),
         (

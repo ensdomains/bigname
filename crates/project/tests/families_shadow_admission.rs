@@ -15,7 +15,7 @@ mod support;
 use anyhow::Result;
 use serde_json::{Value, json};
 use shadow_support::{assert_counts, publish, publish_and_compare};
-use support::{Event, Fixture, uuid};
+use support::{CHAIN, Event, Fixture, uuid};
 
 const REGISTRAR: &str = "0x00000000000000000000000000000000000000e3";
 const WRAPPER: &str = "0x00000000000000000000000000000000000000e4";
@@ -277,5 +277,121 @@ async fn a_row_several_names_match_is_named_for_none_of_them() -> Result<()> {
     publish(&fixture, 16).await?;
     assert_eq!(trace(&fixture, 16, &other).await?["staged"], Value::Null);
     assert_eq!(trace(&fixture, 16, &name(1)).await?["staged"], Value::Null);
+    fixture.cleanup().await
+}
+
+const BOB: &str = "0x00000000000000000000000000000000000000bb";
+const CAROL: &str = "0x00000000000000000000000000000000000000cc";
+const HOLDER: &str = "0x00000000000000000000000000000000000000dd";
+
+/// The complete comparison's mismatched fields, sorted.
+fn failed_fields(report: &shadow_support::compare::Report) -> Vec<String> {
+    let mut fields: Vec<String> = report
+        .lines
+        .iter()
+        .filter(|line| line.starts_with("SEPOLIA_END_TO_END_SHADOW_MISMATCH"))
+        .filter_map(|line| Some(line.split(" field=").nth(1)?.split(' ').next()?.to_owned()))
+        .collect();
+    fields.sort();
+    fields
+}
+
+/// Pro r5 Q1 on c23e3e5b: name 1 is bound directly to lease L (a candidate whose surface
+/// namehash is node 1) and granted at block 10. At block 11 three registrar transfers share one
+/// block, transaction and log: `c`, unnamed on L at node 1, to Carol, then `b` and `a`, named
+/// for name 1, to Bob and Alice, written in that order so their generated ids run a > b > c.
+/// Pass one names `c` for name 1 through the candidate's namehash, so the canonical order takes
+/// `c` (Carol) and today's order `a` (Alice): both registrants are same-block deltas. Name 2 is
+/// bound to lease M, a bystander whose candidate the second mutation moves.
+async fn staged_transfer_race(fixture: &Fixture) -> Result<(String, String)> {
+    let (lease, other_lease) = (uuid(1), uuid(3));
+    for (binding, logical, resource, log) in [
+        (uuid(100), name(1), &lease, 0),
+        (uuid(101), name(2), &other_lease, 3),
+    ] {
+        fixture
+            .binding(&binding, &logical, resource, "ens_v1", 9, log, None)
+            .await?;
+        fixture
+            .write(
+                9,
+                log,
+                "SurfaceBound",
+                V1_REGISTRAR,
+                Some(&logical),
+                Some(resource),
+                json!({"authority_kind": "registrar", "state_derived": false}),
+                REGISTRAR,
+            )
+            .await?;
+    }
+    fixture
+        .write(
+            10,
+            1,
+            "RegistrationGranted",
+            V1_REGISTRAR,
+            Some(&name(1)),
+            Some(&lease),
+            json!({"authority_kind": "registrar", "status": "registered", "registrant": HOLDER,
+                   "expiry": 2_000_000_000u64}),
+            REGISTRAR,
+        )
+        .await?;
+    let first = name(1);
+    for (identity, to, named) in [("c", CAROL, false), ("b", BOB, true), ("a", ALICE, true)] {
+        let mut after = json!({"authority_kind": "registrar", "from": HOLDER, "to": to});
+        let mut event = Event::new(identity, 11, 1, "TokenControlTransferred", V1_REGISTRAR)
+            .resource(&lease)
+            .raw(json!({"emitting_address": REGISTRAR}));
+        if named {
+            event = event.name(&first);
+        } else {
+            after["namehash"] = json!(node(1));
+        }
+        fixture.event(event.after(after)).await?;
+    }
+    Ok((lease, other_lease))
+}
+
+const RACE_DELTA: [(&str, usize); 2] = [
+    ("d12_same_block_order:control/registrant", 1),
+    ("d12_same_block_order:registration/registrant", 1),
+];
+
+/// Pro r5 Q1 on c23e3e5b: only the candidate's surface namehash is set to null after
+/// publication. The families no longer name `c` for name 1, while `a` and `b` stay named, so the
+/// shadow and the canonical read of the log-rebuilt events both give Bob and today's order still
+/// gives the served Alice. Step 2 writes the namehash from the name (identity.rs:398-402), so the
+/// candidate is not what the log gives and both registrants stay mismatches.
+#[tokio::test]
+async fn a_wrong_candidate_surface_namehash_stays_a_mismatch() -> Result<()> {
+    let fixture = Fixture::new("families_shadow_admission_candidate_namehash", 20).await?;
+    staged_transfer_race(&fixture).await?;
+    let report = publish_and_compare(&fixture, 12).await?;
+    assert_counts(&report, &[], &RACE_DELTA);
+    let updated = sqlx::query(
+        "UPDATE bigname_phase.project_binding_candidate SET surface_namehash = NULL
+         WHERE surface_binding_id = $1::uuid",
+    )
+    .bind(uuid(100))
+    .execute(&fixture.pool)
+    .await?
+    .rows_affected();
+    assert_eq!(updated, 1);
+    let (_, shadow) = shadow_support::name(&fixture, 12, &name(1)).await?;
+    assert_eq!(shadow.control["registrant"], json!(BOB));
+    let mutated = shadow_support::compare::compare(&fixture.pool, CHAIN, 12).await?;
+    assert!(
+        mutated.known_discrepancy.is_empty() && mutated.expected_delta_fields.is_empty(),
+        "{:#?}",
+        mutated.lines
+    );
+    assert_eq!(
+        failed_fields(&mutated),
+        ["control/registrant", "registration/registrant"],
+        "{:#?}",
+        mutated.lines
+    );
     fixture.cleanup().await
 }
