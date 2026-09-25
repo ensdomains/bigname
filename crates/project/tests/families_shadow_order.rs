@@ -942,7 +942,7 @@ async fn another_chain_served_rows_are_not_compared() -> Result<()> {
     }
     let served = bigname_storage::load_name_current_by_logical_name_ids(
         &fixture.pool,
-        &[other_name.clone()],
+        std::slice::from_ref(&other_name),
     )
     .await?;
     assert!(
