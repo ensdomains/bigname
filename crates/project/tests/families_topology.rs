@@ -262,14 +262,47 @@ async fn a_child_edge_stores_its_owner_and_owner_getter_lower_cased() -> Result<
         )
         .await?;
     fixture.apply(10, FamilyMode::Normal).await;
-    let edges = fixture.rows("project_child_edge_candidate").await?;
+    let owners = || async {
+        let edges = fixture.rows("project_child_edge_candidate").await?;
+        anyhow::ensure!(edges.len() == 1, "one edge key: {edges:?}");
+        anyhow::Ok(columns(
+            &edges[0],
+            &["owner", "owner_getter", "block_number"],
+        ))
+    };
     assert_eq!(
-        columns(&edges[0], &["owner", "owner_getter"]),
+        owners().await?,
         json!({"owner": "0x00000000000000000000000000000000000000aa",
-               "owner_getter": "0x00000000000000000000000000000000000000bb"})
+               "owner_getter": "0x00000000000000000000000000000000000000bb",
+               "block_number": 10})
     );
     fixture.assert_undo_restores(10).await?;
-    fixture.assert_rebuild_equal(10).await?;
+    // The same key again with other mixed-case owners: the update lands lower-cased, its undo
+    // restores block 10's row (checked inside assert_undo_restores), and the replay lower-cases
+    // again.
+    fixture
+        .write(
+            11,
+            1,
+            "SubregistryChanged",
+            "ens_v1_registry_l1",
+            None,
+            None,
+            json!({"source_event": "NewOwner", "node": node(1), "child_node": node(9),
+                   "labelhash": node(99),
+                   "owner": "0x00000000000000000000000000000000000000cC",
+                   "owner_getter": "0x00000000000000000000000000000000000000Dd"}),
+            REGISTRY,
+        )
+        .await?;
+    fixture.apply(11, FamilyMode::Normal).await;
+    let updated = json!({"owner": "0x00000000000000000000000000000000000000cc",
+                         "owner_getter": "0x00000000000000000000000000000000000000dd",
+                         "block_number": 11});
+    assert_eq!(owners().await?, updated);
+    fixture.assert_undo_restores(11).await?;
+    assert_eq!(owners().await?, updated, "the replay lower-cases again");
+    fixture.assert_rebuild_equal(11).await?;
     fixture.cleanup().await
 }
 
