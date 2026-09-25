@@ -2102,7 +2102,10 @@ pub fn legacy_facts(
 
 /// A resource's retained lifecycle events rebuilt from the publication-visible log, with their
 /// generated ids: None unless the families hold exactly the retained events the log gives the
-/// resource, each is at its logged position, and the log names every generated id.
+/// resource, each is at its logged position and filed under the resource, each family row
+/// equals its rebuild from the log whole (today's-order reads refold the family rows, so a
+/// wrong payload there could otherwise supply the served value), and the log names every
+/// generated id.
 async fn lapse_evidence(
     pool: &PgPool,
     chain: &str,
@@ -2127,9 +2130,23 @@ async fn lapse_evidence(
     {
         return Ok(None);
     }
-    let Some(events) = events_from_log(pool, chain, target, &events).await? else {
+    let Some(rebuilt) = events_from_log(pool, chain, target, &events).await? else {
         return Ok(None);
     };
+    let placed = |event: &LifecycleEvent| {
+        event.state_kind == "resource"
+            && event.state_key == resource
+            && event.resource_id.as_deref() == Some(resource)
+    };
+    if !rebuilt.iter().all(placed)
+        || events
+            .iter()
+            .zip(&rebuilt)
+            .any(|(row, log)| format!("{row:?}") != format!("{log:?}"))
+    {
+        return Ok(None);
+    }
+    let events = rebuilt;
     let identities: Vec<String> = family.into_iter().collect();
     let ids = generated_ids(pool, chain, target, &identities).await?;
     if !identities.iter().all(|identity| ids.contains_key(identity)) {

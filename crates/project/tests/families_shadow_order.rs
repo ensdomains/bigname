@@ -417,6 +417,58 @@ async fn a_missing_resource_event_row_fails_the_permission_excuse() -> Result<()
     fixture.cleanup().await
 }
 
+/// Codex thread PRRT_kwDOSJpxAs6l_B6G: the lapse is decided from the log, but today's read of
+/// the permission rows refolds the family rows, so a retained resource event must equal its
+/// log rebuild, payload included, before the rows can pass. In the same-block release shape,
+/// the release's family row given another terminal reason, its identity, position and key
+/// state unchanged, leaves the permission rows a mismatch.
+#[tokio::test]
+async fn a_wrong_payload_on_a_retained_resource_event_fails_the_permission_excuse() -> Result<()> {
+    let fixture = Fixture::new("families_shadow_order_resource_payload", 20).await?;
+    let (k1, n1) = (uuid(1), name(1));
+    v2_binding(&fixture, &k1).await?;
+    fixture
+        .event(grant("grant-10", 10, &n1, &k1, ALICE))
+        .await?;
+    fixture
+        .event(registry_grant("permission-11", 11, &k1, BOB))
+        .await?;
+    fixture
+        .event(unnamed_path_expiry("path-expiry-14", 14, &k1).at(0, 2))
+        .await?;
+    fixture
+        .event(grant("grant-14", 14, &n1, &k1, ALICE))
+        .await?;
+    let report = publish_and_compare(&fixture, 16).await?;
+    assert_counts(&report, &RELEASED_NAME, &DELTA);
+    sqlx::query(
+        "UPDATE bigname_phase.project_lifecycle_event SET terminal_reason = 'owner_released'
+         WHERE event_identity = 'path-expiry-14'",
+    )
+    .execute(&fixture.pool)
+    .await?;
+    let mutated = shadow_support::compare::compare(&fixture.pool, CHAIN, 16).await?;
+    let failed: Vec<&str> = mutated
+        .lines
+        .iter()
+        .filter(|line| line.starts_with("SEPOLIA_END_TO_END_SHADOW_MISMATCH"))
+        .filter_map(|line| line.split(" field=").nth(1)?.split(' ').next())
+        .collect();
+    assert!(
+        failed.contains(&"permissions_current"),
+        "a wrong retained payload must fail the permission rows: {:#?}",
+        mutated.lines
+    );
+    assert!(
+        !mutated
+            .expected_delta_fields
+            .contains_key("d12_same_block_order:permissions_current"),
+        "{:#?}",
+        mutated.lines
+    );
+    fixture.cleanup().await
+}
+
 /// Codex thread PRRT_kwDOSJpxAs6l4hOv: the passing direction of the same-block release with
 /// BOB's registry grant carrying an admin power. Today's order keeps the registration live and
 /// serves the admin power from BOB's row (resource_summary.rs:272-297); the canonical order
