@@ -222,10 +222,12 @@ fn block_time(block: i64) -> i64 {
     1_800_000_000 + block * 12
 }
 
-// A wrap whose wrapper expiry equals block 12's timestamp, an unwrap and a new expiry in the same
-// block, and a rewrap of the same resource. The raw wrapper row keeps each fact unmasked; the
-// served name masks the fuses and a locked state only strictly after the expiry (name_current,
-// `effective_wrapper`).
+// An emancipated wrap (PARENT_CANNOT_CONTROL without CANNOT_UNWRAP, so it can be unwrapped) whose
+// wrapper expiry equals block 12's timestamp, an unwrap in the shape the adapter writes it
+// (SurfaceUnbound and the holder revoke; v1/wrapper.rs `name_unwrapped`, which writes no expiry),
+// and a rewrap of the same resource with its own expiry. The raw wrapper row keeps each fact
+// unmasked; the served name masks the fuses and the emancipated state only strictly after the
+// expiry (name_current, `effective_wrapper`).
 #[tokio::test]
 async fn the_wrapper_row_stays_raw_through_expiry_unwrap_and_rewrap() -> Result<()> {
     let fixture = Fixture::new("families_retention_rewrap", 20).await?;
@@ -234,37 +236,55 @@ async fn the_wrapper_row_stays_raw_through_expiry_unwrap_and_rewrap() -> Result<
         .binding(&uuid(30), &logical, &resource, "ens_v1", 10, 0, None)
         .await?;
     let wrapper = "ens_v1_wrapper_l1";
-    let wrap = |log: i64, kind: &'static str, after: Value| (log, kind, after);
-    for (log, kind, after) in [
-        wrap(
-            1,
-            "TokenControlTransferred",
-            json!({"source_event": "NameWrapped", "to": HOLDER}),
-        ),
-        wrap(
-            2,
-            "PermissionScopeChanged",
-            json!({"source_event": "NameWrapped", "wrapper_state": "locked", "fuses": 65537}),
-        ),
-        wrap(
-            3,
-            "ExpiryChanged",
-            json!({"source_event": "NameWrapped", "expiry": block_time(12)}),
-        ),
-    ] {
-        fixture
-            .write(
-                10,
-                log,
-                kind,
-                wrapper,
-                Some(&logical),
-                Some(&resource),
-                after,
-                WRAPPER,
-            )
-            .await?;
-    }
+    let holder = |effective_powers: Value, granted: bool| {
+        let source = json!({"kind": "ens_v1_authority", "authority_kind": "wrapper",
+                            "relation_kind": "holder", "node": node(3)});
+        let (grant, revocation) = if granted {
+            (source, Value::Null)
+        } else {
+            (Value::Null, source)
+        };
+        json!({"subject": HOLDER, "scope": {"kind": "resource"},
+               "effective_powers": effective_powers, "grant_source": grant,
+               "revocation_source": revocation})
+    };
+    let wrap = |state: &str, fuses: i64, expiry: i64| {
+        [
+            (
+                "TokenControlTransferred",
+                json!({"source_event": "NameWrapped", "to": HOLDER}),
+            ),
+            (
+                "PermissionScopeChanged",
+                json!({"source_event": "NameWrapped", "wrapper_state": state, "fuses": fuses}),
+            ),
+            (
+                "ExpiryChanged",
+                json!({"source_event": "NameWrapped", "expiry": expiry}),
+            ),
+        ]
+    };
+    let write_all = |block: i64, events: Vec<(&'static str, Value)>| {
+        let (fixture, logical, resource) = (&fixture, &logical, &resource);
+        async move {
+            for (log, (kind, after)) in (1..).zip(events) {
+                fixture
+                    .write(
+                        block,
+                        log,
+                        kind,
+                        wrapper,
+                        Some(logical),
+                        Some(resource),
+                        after,
+                        WRAPPER,
+                    )
+                    .await?;
+            }
+            anyhow::Ok(())
+        }
+    };
+    write_all(10, wrap("emancipated", 65536, block_time(12)).to_vec()).await?;
     let raw = [
         "wrapper_state",
         "fuses",
@@ -274,119 +294,75 @@ async fn the_wrapper_row_stays_raw_through_expiry_unwrap_and_rewrap() -> Result<
         "unwrapped_position",
     ];
     let mut seen = Vec::new();
+    let observe = |target: i64| {
+        let (fixture, logical) = (&fixture, &logical);
+        async move {
+            fixture.apply(target, FamilyMode::Normal).await;
+            anyhow::Ok((
+                target,
+                columns(&fixture.rows("project_wrapper_state").await?[0], &raw),
+                served_wrapper(fixture, logical, target).await?,
+            ))
+        }
+    };
     for target in [11, 12, 13] {
-        fixture.apply(target, FamilyMode::Normal).await;
-        seen.push((
-            target,
-            columns(&fixture.rows("project_wrapper_state").await?[0], &raw),
-            served_wrapper(&fixture, &logical, target).await?,
-        ));
+        seen.push(observe(target).await?);
     }
-    // Block 14: the unwrap and a new expiry in one block.
-    fixture
-        .write(
-            14,
-            1,
-            "AuthorityEpochChanged",
-            wrapper,
-            Some(&logical),
-            Some(&resource),
-            json!({"source_event": "NameUnwrapped", "node": node(3)}),
-            WRAPPER,
-        )
-        .await?;
-    fixture
-        .write(
-            14,
-            2,
-            "ExpiryChanged",
-            wrapper,
-            Some(&logical),
-            Some(&resource),
-            json!({"source_event": "NameUnwrapped", "expiry": block_time(30)}),
-            WRAPPER,
-        )
-        .await?;
-    fixture.apply(14, FamilyMode::Normal).await;
-    seen.push((
+    // Block 14: the unwrap as the adapter writes it; the wrapper expiry does not move.
+    write_all(
         14,
-        columns(&fixture.rows("project_wrapper_state").await?[0], &raw),
-        served_wrapper(&fixture, &logical, 14).await?,
-    ));
-    // Block 15: a rewrap of the same resource.
-    fixture
-        .write(
-            15,
-            1,
-            "TokenControlTransferred",
-            wrapper,
-            Some(&logical),
-            Some(&resource),
-            json!({"source_event": "NameWrapped", "to": HOLDER}),
-            WRAPPER,
-        )
-        .await?;
-    fixture
-        .write(
-            15,
-            2,
-            "PermissionScopeChanged",
-            wrapper,
-            Some(&logical),
-            Some(&resource),
-            json!({"source_event": "NameWrapped", "wrapper_state": "wrapped", "fuses": 0}),
-            WRAPPER,
-        )
-        .await?;
-    fixture.apply(15, FamilyMode::Normal).await;
-    seen.push((
-        15,
-        columns(&fixture.rows("project_wrapper_state").await?[0], &raw),
-        served_wrapper(&fixture, &logical, 15).await?,
-    ));
-    let wrapped_raw = |expiry: i64, fuses: i64, state: &str, source: &str, unwrapped: Value| {
-        let lifecycle_unwrapped = source == "NameUnwrapped";
+        vec![
+            (
+                "SurfaceUnbound",
+                json!({"source_event": "NameUnwrapped", "node": node(3)}),
+            ),
+            ("PermissionChanged", holder(json!([]), false)),
+        ],
+    )
+    .await?;
+    seen.push(observe(14).await?);
+    // Block 15: a rewrap of the same resource, with a new expiry.
+    write_all(15, wrap("wrapped", 0, block_time(30)).to_vec()).await?;
+    seen.push(observe(15).await?);
+    let row = |expiry: i64, state: &str, fuses: i64, source: &str, unwrapped: Value| {
         json!({"wrapper_state": state, "fuses": fuses, "expiry_seconds": expiry,
-               "lifecycle_source": source, "lifecycle_unwrapped": lifecycle_unwrapped,
+               "lifecycle_source": source, "lifecycle_unwrapped": source == "holder_revoke",
                "unwrapped_position": unwrapped})
     };
-    let unwrap = at(14, 1, "AuthorityEpochChanged:14:1");
-    let locked = json!({"wrapper_state": "locked", "fuses": 65537});
+    let wrapped = row(
+        block_time(12),
+        "emancipated",
+        65536,
+        "NameWrapped",
+        Value::Null,
+    );
+    let emancipated = json!({"wrapper_state": "emancipated", "fuses": 65536});
+    let masked = json!({"wrapper_state": null, "fuses": null});
+    let unwrap = at(14, 1, "SurfaceUnbound:14:1");
     let expected = vec![
         // Before the expiry and at it (expiry equal to the block time) nothing is masked.
-        (
-            11,
-            wrapped_raw(block_time(12), 65537, "locked", "NameWrapped", Value::Null),
-            locked.clone(),
-        ),
-        (
-            12,
-            wrapped_raw(block_time(12), 65537, "locked", "NameWrapped", Value::Null),
-            locked.clone(),
-        ),
-        // Just after it the served name drops the locked state and its fuses; the row does not.
-        (
-            13,
-            wrapped_raw(block_time(12), 65537, "locked", "NameWrapped", Value::Null),
-            json!({"wrapper_state": null, "fuses": null}),
-        ),
-        // The unwrap and a new expiry in one block: the row keeps both; the served name, which
-        // does not read the lifecycle, serves the locked state again under the new expiry.
+        (11, wrapped.clone(), emancipated.clone()),
+        (12, wrapped.clone(), emancipated),
+        // Just after it the served name drops the emancipated state and its fuses; the row does
+        // not.
+        (13, wrapped, masked.clone()),
+        // The unwrap: the holder revoke is the newest lifecycle event, the unwrap's position is
+        // kept, and the expired wrapper stays masked on the served name.
         (
             14,
-            wrapped_raw(
-                block_time(30),
-                65537,
-                "locked",
-                "NameUnwrapped",
+            row(
+                block_time(12),
+                "emancipated",
+                65536,
+                "holder_revoke",
                 unwrap.clone(),
             ),
-            locked,
+            masked,
         ),
-        // The rewrap is the newest lifecycle event and the unwrap stays recorded.
+        // The rewrap with a new expiry is served again and still remembers the unwrap.
         (
             15,
-            wrapped_raw(block_time(30), 0, "wrapped", "NameWrapped", unwrap),
+            row(block_time(30), "wrapped", 0, "NameWrapped", unwrap),
             json!({"wrapper_state": "wrapped", "fuses": 0}),
         ),
     ];
