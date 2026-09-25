@@ -663,20 +663,25 @@ async fn a_lapsed_registration_drops_its_rows_and_the_root_keeps_its_admin() -> 
 /// Pro Q5 on ea047c04, conflicting lifecycle events at one position. A NameWrapper
 /// TransferSingle emits the old holder's revoke and then the new holder's grant from one log
 /// (adapters schema_v2/protocol/v1/wrapper/transfer.rs:158-159), their identities ending
-/// `holder:0:revoke:<old>` and `holder:0:grant:<new>`. Today's summary ranks wrapper lifecycle
-/// events by position and then generated id (resource_summary.rs:172-196), so the grant, pushed
-/// second, is the latest and the restriction block stays. The wrapper family takes the
-/// canonical latest, the revoke, whose identity sorts after the grant's, and reads the name as
-/// unwrapped, so it serves no restriction block. This is a step 2 reducer gap on an ordinary
-/// chain shape, pinned as a mismatch with no excuse.
+/// `holder:0:revoke:<old>:0` and `holder:0:grant:<new>:1`, the fact's index in the log
+/// (adapters schema_v2/normalized.rs:118-131). Today's summary ranks wrapper lifecycle events by
+/// position and then generated id (resource_summary.rs:172-196), so the grant, pushed second, is
+/// the latest and the restriction block stays. Under step 2's amended D12 (39990c38) the family
+/// folds facts of one log by that emission ordinal, so it takes the grant too and serves the same
+/// block. Until 39990c38 the revoke's identity sorted after the grant's and this was pinned as a
+/// mismatch on `resource_restrictions`; it is now pinned equal.
 #[tokio::test]
-async fn a_holder_transfer_from_one_log_drops_the_family_restrictions() -> Result<()> {
+async fn a_holder_transfer_from_one_log_keeps_the_restrictions_in_emission_order() -> Result<()> {
     let fixture = Fixture::new("families_shadow_permissions_one_log_transfer", 20).await?;
     let fuses = PARENT_CANNOT_CONTROL;
     let expiry = timestamp(TARGET) + 1_000_000;
     let resource = wrapped(&fixture, fuses, expiry).await?;
-    for (subject, action, grant) in [(HOLDER, "revoke", false), (NEXT_HOLDER, "grant", true)] {
-        let identity = format!("0xtx13:1:PermissionChanged:holder:0:{action}:{subject}");
+    for (ordinal, (subject, action, grant)) in
+        [(HOLDER, "revoke", false), (NEXT_HOLDER, "grant", true)]
+            .into_iter()
+            .enumerate()
+    {
+        let identity = format!("0xtx13:1:PermissionChanged:holder:0:{action}:{subject}:{ordinal}");
         fixture
             .event(
                 Event::new(&identity, 13, 1, "PermissionChanged", V1_WRAPPER)
@@ -716,21 +721,10 @@ async fn a_holder_transfer_from_one_log_drops_the_family_restrictions() -> Resul
         ),
         "today's summary keeps the block through the transfer"
     );
-    assert!(
-        report.expected_delta_fields.is_empty()
-            && report.known_discrepancy.is_empty()
-            && report.mismatched == 1,
-        "{:#?}",
-        report.lines
-    );
-    let failed: Vec<&String> = report
-        .lines
-        .iter()
-        .filter(|line| line.starts_with("SEPOLIA_END_TO_END_SHADOW_MISMATCH"))
-        .collect();
-    assert_eq!(failed.len(), 1, "{:#?}", report.lines);
-    assert!(
-        failed[0].contains("field=resource_restrictions") && failed[0].ends_with("shadow=null"),
+    shadow_support::assert_counts(&report, &[], &[]);
+    assert_eq!(
+        (report.equal, report.mismatched),
+        (3, 0),
         "{:#?}",
         report.lines
     );
@@ -793,12 +787,14 @@ async fn an_unwrap_and_an_expiry_update_in_one_block_in_both_orders() -> Result<
 /// log, and relies on the recipient's holder grant being the later row
 /// (adapters schema_v2/protocol/v1/wrapper/transfer.rs:141-146). Both rows fold to one family
 /// grant key, the resource, subject and resource scope. Today's builder keeps the grant, the
-/// higher generated id, and serves the recipient's holder row; the family keeps the canonical
-/// latest, the revoke, whose identity (`token_approval`) sorts after the grant's (`holder`),
-/// and serves no row for the recipient. The same step 2 cause drops the restriction block (the
-/// old holder's revoke sorts after the grant). Pinned as mismatches with no excuse.
+/// higher generated id, and serves the recipient's holder row. Under step 2's amended D12
+/// (39990c38) the family folds the log's facts by their emission ordinals (0 for the revoke, 2
+/// for the grant), keeps the grant and serves the same rows and restriction block. Until
+/// 39990c38 the revoke's identity (`token_approval`) sorted after the grant's (`holder`) and this
+/// was pinned as a mismatch on `permissions_current` and `resource_restrictions`; it is now
+/// pinned equal.
 #[tokio::test]
-async fn a_transfer_to_the_delegate_from_one_log_drops_the_recipients_holder_row() -> Result<()> {
+async fn a_transfer_to_the_delegate_from_one_log_keeps_the_recipients_holder_row() -> Result<()> {
     let fixture = Fixture::new("families_shadow_permissions_one_log_delegate", 20).await?;
     let fuses = PARENT_CANNOT_CONTROL;
     let resource = wrapped(&fixture, fuses, timestamp(TARGET) + 1_000_000).await?;
@@ -814,7 +810,7 @@ async fn a_transfer_to_the_delegate_from_one_log_drops_the_recipients_holder_row
         true,
     )
     .await?;
-    for (relation, powers, action, subject, grant) in [
+    for (ordinal, (relation, powers, action, subject, grant)) in [
         (
             "token_approval",
             &["extend_subname_expiry"][..],
@@ -824,8 +820,12 @@ async fn a_transfer_to_the_delegate_from_one_log_drops_the_recipients_holder_row
         ),
         ("holder", HOLDER_POWERS, "revoke", HOLDER, false),
         ("holder", HOLDER_POWERS, "grant", NEXT_HOLDER, true),
-    ] {
-        let identity = format!("0xtx13:1:PermissionChanged:{relation}:0:{action}:{subject}");
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let identity =
+            format!("0xtx13:1:PermissionChanged:{relation}:0:{action}:{subject}:{ordinal}");
         fixture
             .event(
                 Event::new(&identity, 13, 1, "PermissionChanged", V1_WRAPPER)
@@ -851,29 +851,25 @@ async fn a_transfer_to_the_delegate_from_one_log_drops_the_recipients_holder_row
     }
     let report = publish_and_compare(&fixture, TARGET).await?;
     let served = rows(&fixture, &resource).await?;
-    assert!(
-        served
-            .iter()
-            .any(|(subject, relation, _)| subject == NEXT_HOLDER && relation == "holder"),
-        "today's builder serves the recipient's holder row: {served:?}"
-    );
-    assert!(
-        report.expected_delta_fields.is_empty()
-            && report.known_discrepancy.is_empty()
-            && report.mismatched == 1,
-        "{:#?}",
-        report.lines
-    );
-    let mut failed: Vec<&str> = report
-        .lines
-        .iter()
-        .filter(|line| line.starts_with("SEPOLIA_END_TO_END_SHADOW_MISMATCH"))
-        .filter_map(|line| line.split(" field=").nth(1)?.split(' ').next())
-        .collect();
-    failed.sort_unstable();
     assert_eq!(
-        failed,
-        ["permissions_current", "resource_restrictions"],
+        served,
+        [(
+            NEXT_HOLDER.to_owned(),
+            "holder".to_owned(),
+            // Every holder power but `extend_expiry`, which the served row derives away.
+            json!(
+                HOLDER_POWERS
+                    .iter()
+                    .filter(|power| **power != "extend_expiry")
+                    .collect::<Vec<_>>()
+            )
+        )],
+        "today's builder serves the recipient's holder row only"
+    );
+    shadow_support::assert_counts(&report, &[], &[]);
+    assert_eq!(
+        (report.equal, report.mismatched),
+        (3, 0),
         "{:#?}",
         report.lines
     );
