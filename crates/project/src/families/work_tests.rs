@@ -70,10 +70,12 @@ async fn the_work_list_takes_declaration_starts_from_the_captured_history() -> R
     Ok(())
 }
 
-// The planning-to-population window itself: the work list is materialized, the update lands,
-// and the population step then applies under the history the run captured. Neither the work list
-// nor the block's classification sees the update; a block applied under a history read afterwards
-// does.
+// The window after the work list: the work list is materialized, the update lands, and a block is
+// applied through `block::apply` with a hand-built plan carrying the captured history, the
+// contract the driver's population relies on. The work list omits the update and the block records
+// the captured active-set key; a block applied under a history read afterwards records the updated
+// key. No resolver is seeded, so this shows which history reaches the block, not a classification
+// value.
 #[tokio::test]
 async fn an_update_after_the_work_list_is_invisible_to_the_blocks_populated_under_it() -> Result<()>
 {
@@ -109,7 +111,7 @@ async fn an_update_after_the_work_list_is_invisible_to_the_blocks_populated_unde
     assert_eq!(
         admitted.as_deref(),
         Some(captured.at(11).key.as_str()),
-        "block 11 classified under the captured history"
+        "block 11 records the captured active-set key"
     );
     let later = manifests::History::read(&pool, CHAIN, 12).await?;
     assert_ne!(
@@ -125,7 +127,7 @@ async fn an_update_after_the_work_list_is_invisible_to_the_blocks_populated_unde
     assert_eq!(
         admitted.as_deref(),
         Some(later.at(12).key.as_str()),
-        "a block applied under a fresh history classifies under the update"
+        "a block applied under a fresh history records the updated active-set key"
     );
     database.cleanup().await?;
     Ok(())
