@@ -39,7 +39,7 @@ async fn seed_account_permissions(
     chain_id: &str,
 ) -> Result<()> {
     sqlx::query(
-        r#"
+        r#"/* project:scope.retracted.seed_account_permissions */
         INSERT INTO project_scope_account_permissions
         SELECT row.chain_id, row.authority_kind, row.authority_contract,
                row.owner, row.subject, row.relation_kind
@@ -73,7 +73,7 @@ async fn seed_names(
     target_block: i64,
 ) -> Result<()> {
     sqlx::query(
-        r#"
+        r#"/* project:scope.retracted.seed_names.insert_scope_names_from_name_current */
         WITH citations AS (
             SELECT row.logical_name_id, citation.event_id
             FROM name_current row
@@ -112,7 +112,7 @@ async fn seed_names(
     .await
     .map_err(|error| ProjectError::database("failed to retain retracted name scope", error))?;
     sqlx::query(
-        r#"
+        r#"/* project:scope.retracted.seed_names.insert_scope_expiry_names */
         INSERT INTO project_scope_expiry_names
         SELECT DISTINCT event.logical_name_id
         FROM normalized_events event
@@ -152,7 +152,7 @@ async fn seed_names(
     )
     .await?;
     sqlx::query(
-        "INSERT INTO project_scope_names
+        "/* project:scope.retracted.seed_names.insert_scope_names_from_scope_expiry_names */ INSERT INTO project_scope_names
          SELECT logical_name_id FROM project_scope_expiry_names
          ON CONFLICT DO NOTHING",
     )
@@ -164,7 +164,7 @@ async fn seed_names(
 
 async fn seed_children(transaction: &mut Transaction<'_, Postgres>, chain_id: &str) -> Result<()> {
     sqlx::query(
-        r#"
+        r#"/* project:scope.retracted.seed_children */
         WITH citations AS (
             SELECT row.parent_logical_name_id, row.child_logical_name_id,
                    citation.event_id
@@ -215,7 +215,7 @@ async fn seed_resources(
     to_block: i64,
 ) -> Result<()> {
     sqlx::query(
-        r#"
+        r#"/* project:scope.retracted.seed_resources */
         WITH citations AS (
             SELECT row.resource_id, citation.event_id, false AS force_scope
             FROM permissions_current row
@@ -332,7 +332,7 @@ pub(super) async fn consume(
     to_block: i64,
 ) -> Result<()> {
     sqlx::query(
-        "DELETE FROM project_redo_resolver_evidence
+        "/* project:scope.retracted.consume.delete_redo_resolver_evidence */ DELETE FROM project_redo_resolver_evidence
          WHERE chain_id = $1 AND block_number BETWEEN $2 AND $3",
     )
     .bind(chain_id)
@@ -347,7 +347,7 @@ pub(super) async fn consume(
         )
     })?;
     sqlx::query(
-        "DELETE FROM project_redo_expiry_roots
+        "/* project:scope.retracted.consume.delete_redo_expiry_roots */ DELETE FROM project_redo_expiry_roots
          WHERE chain_id = $1 AND block_number BETWEEN $2 AND $3",
     )
     .bind(chain_id)
@@ -362,7 +362,7 @@ pub(super) async fn consume(
         )
     })?;
     sqlx::query(
-        "DELETE FROM project_redo_child_registration_history
+        "/* project:scope.retracted.consume.delete_redo_child_registration_history */ DELETE FROM project_redo_child_registration_history
          WHERE chain_id = $1 AND block_number BETWEEN $2 AND $3",
     )
     .bind(chain_id)
@@ -381,7 +381,7 @@ pub(super) async fn consume(
 
 async fn seed_primary(transaction: &mut Transaction<'_, Postgres>, chain_id: &str) -> Result<()> {
     sqlx::query(
-        r#"
+        r#"/* project:scope.retracted.seed_primary */
         WITH citations AS (
             SELECT row.address, row.coin_type, row.namespace, citation.event_id
             FROM primary_names_current row

@@ -8,7 +8,7 @@ pub(super) async fn build(
     target: &Marker,
 ) -> Result<()> {
     sqlx::query(
-        r#"
+        r#"/* project:builders.account_permissions */
         WITH decoded AS (
             SELECT event.*,
                    lower(event.after_state #>> '{scope,authority_contract}') AS authority_contract,

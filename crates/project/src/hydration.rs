@@ -92,7 +92,7 @@ impl Hydrator {
         updated_rows += reverse_updates;
         for row in text_rows.iter().filter(|row| row.changed) {
             let result = sqlx::query(
-                "UPDATE record_inventory_current
+                "/* project:hydration */ UPDATE record_inventory_current
                  SET entries = $3, last_recomputed_at = now()
                  WHERE resource_id::text = $1
                    AND record_version_boundary_key = $2",

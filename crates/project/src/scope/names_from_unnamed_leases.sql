@@ -1,3 +1,4 @@
+/* project:scope.names_from_unnamed_leases */
 -- Only names historically bound to each new resource can be added. Check registrar history
 -- once per distinct resource/namehash relationship, rather than multiplying every lifecycle
 -- event by every historical binding. These keyed fences remain for broad frontiers too.

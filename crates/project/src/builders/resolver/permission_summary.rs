@@ -12,7 +12,7 @@ pub(super) async fn stage(
     // resource that historically pointed at the resolver. Merge untouched current rows with the
     // rebuilt resource slice so rebuilding the resolver itself never requires dependent scope.
     sqlx::query(
-        "CREATE TEMP TABLE project_resolver_permission_rows ON COMMIT DROP AS
+        "/* project:builders.resolver.permission_summary.create_resolver_permission_rows */ CREATE TEMP TABLE project_resolver_permission_rows ON COMMIT DROP AS
          WITH retained_permissions AS (
              SELECT current.*
              FROM permissions_current current
@@ -63,7 +63,7 @@ pub(super) async fn stage(
     .map_err(|error| ProjectError::database("failed to stage resolver permissions", error))?;
 
     sqlx::query(
-        r#"
+        r#"/* project:builders.resolver.permission_summary.create_resolver_permission_summary */
         CREATE TEMP TABLE project_resolver_permission_summary ON COMMIT DROP AS
         WITH permission_items AS (
             SELECT permission.*,

@@ -12,7 +12,7 @@ pub(super) async fn build(transaction: &mut Transaction<'_, Postgres>) -> Result
     Ok(())
 }
 
-pub(in crate::builders) const PROJECT_DIRECT_TOPOLOGY: &str = r#"
+pub(in crate::builders) const PROJECT_DIRECT_TOPOLOGY: &str = r#"/* project:builders.name_topology.direct */
         UPDATE project_stage_name_current name
         SET declared_summary = jsonb_set(
             name.declared_summary,

@@ -6,7 +6,7 @@ pub(super) async fn build_registry_binding(
     transaction: &mut Transaction<'_, Postgres>,
 ) -> Result<()> {
     sqlx::query(
-        r#"
+        r#"/* project:builders.permission_resources */
         WITH latest_registry_observation AS (
             SELECT DISTINCT ON (COALESCE(event.logical_name_id, event.resource_id::text))
                    COALESCE(current_name.resource_id, event.resource_id) AS resource_id,

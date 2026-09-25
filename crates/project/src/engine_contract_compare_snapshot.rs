@@ -9,6 +9,11 @@ use std::{
 pub(in crate::engine) struct Snapshot {
     directory: PathBuf,
     preserve: bool,
+    /// The rows the API selects a publication by: every chain's Project phase row, with the row
+    /// version (`xmin`) readers take as the served generation, and stored head. Derivation never
+    /// writes them, so all three snapshots of one comparison must agree, and a rewrite that
+    /// keeps every value still counts as a change.
+    pub(in crate::engine) publication: Value,
 }
 impl Drop for Snapshot {
     fn drop(&mut self) {
@@ -36,6 +41,7 @@ impl Snapshot {
         let result = Self {
             directory,
             preserve: false,
+            publication: publication_record(tx).await?,
         };
         for (table, keys) in TABLES {
             let mut out = writer(&result.directory.join(table))?;
@@ -60,6 +66,31 @@ impl Snapshot {
         Ok(result)
     }
 }
+/// `Null` when the schema has no phase state, as in the comparator's own table-only tests.
+pub(in crate::engine) async fn publication_record(
+    tx: &mut Transaction<'_, Postgres>,
+) -> Result<Value> {
+    let present: bool = sqlx::query_scalar(
+        "SELECT to_regclass('chain_phase_state') IS NOT NULL AND to_regclass('chain_heads') IS NOT NULL",
+    )
+    .fetch_one(&mut **tx)
+    .await?;
+    if !present {
+        return Ok(Value::Null);
+    }
+    Ok(sqlx::query_scalar(
+        "SELECT jsonb_build_object(
+             'project', (SELECT COALESCE(jsonb_agg(row ORDER BY row.chain_id), '[]') FROM (
+                 SELECT chain_id, current_block_number, current_block_hash, input_content_hash,
+                        phase_status, redo_in_progress, xmin::text AS row_xmin
+                 FROM chain_phase_state WHERE phase_name = 'project') row),
+             'heads', (SELECT COALESCE(jsonb_agg(to_jsonb(head) ORDER BY head.chain_id), '[]')
+                 FROM chain_heads head))",
+    )
+    .fetch_one(&mut **tx)
+    .await?)
+}
+
 fn writer(path: &Path) -> Result<BufWriter<fs::File>> {
     let mut options = fs::OpenOptions::new();
     options.write(true).create_new(true);
@@ -145,6 +176,12 @@ pub(in crate::engine) async fn compare(
         &json!({"algorithm":"literal_full_pairs_directional_outputs_original_nonmirror_operators","mandatory":mandatory.evidence(),"legacy_publication":old_scope.evidence()}),
     )?;
     audit_report.flush()?;
+    ensure!(
+        baseline.publication == candidate.publication
+            && baseline.publication == reference.publication,
+        "the publication record changed during derivation"
+    );
+    eprintln!("SEPOLIA_CONTRACT_PUBLICATION result=unchanged");
     let mut report = writer(&candidate.directory.join("differences.jsonl"))?;
     let mut failed = 0_u64;
     let mut canonical = BTreeSet::new();
@@ -233,6 +270,56 @@ pub(in crate::engine) async fn compare(
     Ok(())
 }
 
+/// Asserts that a second derivation at the same target left every compared table as the first
+/// left it, apart from `inserted_at` and `last_recomputed_at`, and the publication record
+/// byte-equal. Returns the number of rows compared. Both snapshots are kept for review when
+/// anything differs.
+pub(in crate::engine) fn assert_same_output(
+    first: &mut Snapshot,
+    second: &mut Snapshot,
+) -> Result<u64> {
+    let mut rows = 0_u64;
+    let mut difference = (first.publication != second.publication)
+        .then(|| "the publication record differs".to_owned());
+    for (table, _) in TABLES {
+        if difference.is_some() {
+            break;
+        }
+        let mut a = Rows::open(&first.directory.join(table))?;
+        let mut b = Rows::open(&second.directory.join(table))?;
+        loop {
+            match (&a.next, &b.next) {
+                (None, None) => break,
+                (Some((ka, va)), Some((kb, vb)))
+                    if ka == kb && meaningful(va) == meaningful(vb) =>
+                {
+                    rows += 1;
+                }
+                (a_row, b_row) => {
+                    let key = a_row
+                        .as_ref()
+                        .or(b_row.as_ref())
+                        .map(|(key, _)| key.clone());
+                    difference = Some(format!("{table} differs at key {key:?}"));
+                    break;
+                }
+            }
+            a.advance()?;
+            b.advance()?;
+        }
+    }
+    if let Some(difference) = difference {
+        first.preserve = true;
+        second.preserve = true;
+        bail!(
+            "same-head rerun changed its output: {difference}; private evidence {} and {}",
+            first.directory.display(),
+            second.directory.display()
+        );
+    }
+    Ok(rows)
+}
+
 async fn validate_retained(
     tx: &mut Transaction<'_, Postgres>,
     table: &str,
@@ -243,6 +330,7 @@ async fn validate_retained(
     let context = match table {
         "name_current" => &row["chain_positions"]["ethereum-sepolia"],
         "primary_names_current" => &row["claim_provenance"],
+        "child_registration_events" => row,
         _ => &row["chain_positions"],
     };
     let number_key = if table == "name_current" {
@@ -265,10 +353,10 @@ async fn validate_retained(
         number <= previous,
         "retained projection has future target context"
     );
-    if table == "primary_names_current" {
+    if table == "primary_names_current" || table == "child_registration_events" {
         ensure!(
             context["chain_id"] == "ethereum-sepolia",
-            "foreign primary context"
+            "foreign retained context"
         );
     } else {
         ensure!(

@@ -7,7 +7,7 @@ pub(super) async fn seed_wrapper_effect_resources(
     chain_id: &str,
 ) -> Result<()> {
     sqlx::query(
-        r#"
+        r#"/* project:scope.retracted.handoffs.seed_wrapper_effect_resources */
         INSERT INTO project_scope_permission_effect_resources
         SELECT DISTINCT row.resource_id
         FROM permissions_current_resource_summary row
@@ -47,7 +47,7 @@ pub(super) async fn seed_child_registration_history(
     to_block: i64,
 ) -> Result<()> {
     sqlx::query(
-        "INSERT INTO project_scope_children
+        "/* project:scope.retracted.handoffs.seed_child_registration_history */ INSERT INTO project_scope_children
          SELECT DISTINCT logical_name_id
          FROM project_redo_child_registration_history
          WHERE chain_id = $1 AND block_number BETWEEN $2 AND $3

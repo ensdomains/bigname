@@ -6,7 +6,8 @@ use crate::{ProjectError, Result};
 #[path = "plan_tests.rs"]
 mod plan_tests;
 
-const REGISTRY_RESOLVER_PARENT_SCOPE_SQL: &str = "INSERT INTO project_scope_names
+const REGISTRY_RESOLVER_PARENT_SCOPE_SQL: &str =
+    "/* project:scope.registry_resolver */ INSERT INTO project_scope_names
      SELECT DISTINCT edge.namespace || ':' || lower(edge.after_state ->> 'node')
      FROM project_changed_events pointer
      CROSS JOIN LATERAL (

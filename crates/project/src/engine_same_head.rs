@@ -227,7 +227,8 @@ async fn run(
             &target,
             &Default::default(),
         ))
-        .await?;
+        .await?
+        .inserted_rows();
     let elapsed = started.elapsed().as_millis();
     let counts:(i64,i64,i64)=sqlx::query_as(
         "SELECT (SELECT count(*) FROM project_scope_names),(SELECT count(*) FROM project_scope_resources),(SELECT count(*) FROM project_events)")

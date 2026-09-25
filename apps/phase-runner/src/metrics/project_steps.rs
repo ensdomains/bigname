@@ -7,6 +7,7 @@ use anyhow::Result;
 use bigname_metrics::{IntGaugeVec, MetricsRegistry};
 use bigname_project::PROJECT_STEPS;
 use tokio::sync::Notify;
+use tokio_util::sync::CancellationToken;
 
 use super::RunnerMetricsFeed;
 
@@ -103,6 +104,21 @@ impl ProjectStepGauges {
             self.total
                 .with_label_values(&[chain.as_str()])
                 .set(if index == 0 { 0 } else { total });
+        }
+    }
+}
+
+/// Applies Project step changes on their own, so a step change or the final idle
+/// never waits behind a pending served-lag database refresh.
+pub(super) async fn project_step_loop(
+    gauges: ProjectStepGauges,
+    steps: ProjectStepFeed,
+    cancellation: CancellationToken,
+) {
+    loop {
+        tokio::select! {
+            () = cancellation.cancelled() => return,
+            () = steps.changed() => gauges.apply(&steps.snapshot()),
         }
     }
 }

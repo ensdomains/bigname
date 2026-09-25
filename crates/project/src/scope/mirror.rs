@@ -88,7 +88,7 @@ pub(super) async fn include(
     .await?;
     if tracing::enabled!(tracing::Level::DEBUG) {
         let counts: (i64, i64, i64, i64) = sqlx::query_as(
-            "SELECT (SELECT count(*) FROM project_mirror_frontier_names),
+            "/* project:scope.mirror.include.frontier_counts */ SELECT (SELECT count(*) FROM project_mirror_frontier_names),
                     (SELECT count(*) FROM project_mirror_frontier_resources),
                     (SELECT count(*) FROM project_mirror_new_pointers),
                     (SELECT count(*) FROM project_mirror_links)",
@@ -140,11 +140,11 @@ async fn execute(
             ]
             .into_iter()
             .filter(|name| statement.contains(&format!("FROM project_mirror_{name} ")))
-            .map(|name| format!("SELECT 1 FROM project_mirror_{name}"))
+            .map(|name| format!("/* project:scope.mirror.execute.frontier_input */ SELECT 1 FROM project_mirror_{name}"))
             .collect::<Vec<_>>();
             debug_assert!(!inputs.is_empty());
             let broad: bool = sqlx::query_scalar(&format!(
-                "SELECT EXISTS(SELECT 1 FROM ({}) inputs OFFSET 256 LIMIT 1)",
+                "/* project:scope.mirror.execute.assess_frontier */ SELECT EXISTS(SELECT 1 FROM ({}) inputs OFFSET 256 LIMIT 1)",
                 inputs.join(" UNION ALL ")
             ))
             .fetch_one(&mut **transaction)
@@ -190,7 +190,7 @@ pub(super) async fn finish(
         return deployed_reference::finish(transaction, reference).await;
     }
     sqlx::query(
-        "DROP TABLE project_mirror_links, project_mirror_seen_seeds, project_mirror_seen_pointers, project_mirror_seen_nodes, project_mirror_cached_nodes",
+        "/* project:scope.mirror.finish */ DROP TABLE project_mirror_links, project_mirror_seen_seeds, project_mirror_seen_pointers, project_mirror_seen_nodes, project_mirror_cached_nodes",
     )
     .execute(&mut **transaction)
     .await

@@ -37,7 +37,7 @@ pub(super) async fn close_binding_scope(
         &super::frontier::query(
             transaction,
             "active_bindings_from_names",
-            "INSERT INTO project_scope_resources
+            "/* project:scope.binding_closure.insert_scope_resources */ INSERT INTO project_scope_resources
          SELECT binding.resource_id
          FROM project_scope_names scope
          JOIN LATERAL (
@@ -91,7 +91,7 @@ pub(super) async fn close_binding_scope(
         &super::frontier::query(
             transaction,
             "active_bindings_from_resources",
-            "INSERT INTO project_scope_names
+            "/* project:scope.binding_closure.insert_scope_names */ INSERT INTO project_scope_names
          SELECT binding.logical_name_id
          FROM project_scope_resources scope
          JOIN LATERAL (

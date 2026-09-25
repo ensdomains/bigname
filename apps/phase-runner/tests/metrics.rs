@@ -569,3 +569,154 @@ fn sample(body: &str, name: &str, labels: &[&str]) -> Result<f64> {
         .parse()
         .with_context(|| format!("metric sample has an invalid value: {line}"))
 }
+
+const PROJECT_WRITE_TABLES: [&str; 11] = [
+    "name_current",
+    "children_current",
+    "permissions_current",
+    "account_permission_state_current",
+    "permissions_current_resource_summary",
+    "record_inventory_current",
+    "resolver_current",
+    "address_names_current",
+    "address_records_current",
+    "primary_names_current",
+    "child_registration_events",
+];
+
+#[tokio::test]
+async fn endpoint_exports_what_each_project_batch_scoped_and_wrote() -> Result<()> {
+    use phase_runner::{
+        heads::{BlockMarker, HeadMarkers},
+        phase::{Phase, PhaseContext, PhaseName, PhaseResume, RunMode},
+        project_phase::ProjectPhase,
+    };
+
+    let scratch = ScratchDatabase::create("phase_runner_project_writes").await?;
+    let chain = "ethereum-sepolia";
+    sqlx::raw_sql(
+        &include_str!("../../../crates/project/tests/rebuild_performance/seed.sql")
+            .replace("__NAMES__", "40")
+            .replace("__CHAIN__", chain),
+    )
+    .execute(scratch.pool())
+    .await?;
+
+    let cancellation = CancellationToken::new();
+    let feed = RunnerMetricsFeed::default();
+    let address = phase_runner::metrics::start(
+        "127.0.0.1:0".parse()?,
+        scratch.pool().clone(),
+        cancellation.clone(),
+        900,
+        RunnerLoopHeartbeat::default(),
+        RunnerPhaseProgress::default(),
+        feed.clone(),
+    )
+    .await?;
+    let project = ProjectPhase::new(scratch.pool().clone()).with_metrics_feed(feed.clone());
+    let marker = |block: i64| BlockMarker::new(block, format!("0x{block:064x}"));
+    let context = |target: i64, resume: Option<i64>| -> Result<PhaseContext> {
+        Ok(PhaseContext {
+            chain_id: chain.to_owned(),
+            phase: PhaseName::Project,
+            mode: RunMode::Normal,
+            redo_attempt: None,
+            sources: Vec::new().into(),
+            available_heads: Some(HeadMarkers {
+                latest: marker(target)?,
+                safe: None,
+                finalized: None,
+            }),
+            live_handoff: None,
+            resume: PhaseResume {
+                current: resume.map(marker).transpose()?,
+                ..PhaseResume::default()
+            },
+        })
+    };
+    // The seed spreads the names over blocks 1 to 40: a full rebuild to block 30, then one batch
+    // for blocks 31 to 40.
+    project.run_batch(context(30, None)?).await?;
+    project.run_batch(context(40, Some(30))?).await?;
+    feed.batch_committed();
+
+    let chain_label = format!("chain=\"{chain}\"");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    let body = loop {
+        let response = tokio::task::spawn_blocking(move || scrape(address))
+            .await
+            .context("phase metrics scrape task panicked")??;
+        let body = parse_http_scrape(&response)?.to_owned();
+        if sample(&body, "phase_runner_project_batch_blocks", &[&chain_label]).ok() == Some(10.0) {
+            break body;
+        }
+        ensure!(
+            std::time::Instant::now() < deadline,
+            "a committed Project batch must reach the write gauges before the next refresh tick"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    };
+    for gauge in [
+        "phase_runner_project_changed_events",
+        "phase_runner_project_staged_events",
+    ] {
+        ensure!(
+            sample(&body, gauge, &[&chain_label])? > 0.0,
+            "{gauge} is empty"
+        );
+    }
+    ensure!(
+        sample(
+            &body,
+            "phase_runner_project_scope_keys",
+            &[&chain_label, "scope=\"names\""]
+        )? > 0.0
+    );
+    for stage in [
+        "prepare",
+        "scope",
+        "inputs",
+        "builders",
+        "integrity",
+        "publish",
+    ] {
+        let label = format!("stage=\"{stage}\"");
+        sample(
+            &body,
+            "phase_runner_project_stage_duration_seconds",
+            &[&chain_label, &label],
+        )?;
+    }
+    // The counter adds both batches: every served table holds the rows it received less the
+    // rows it lost, because it started empty.
+    for table in PROJECT_WRITE_TABLES {
+        let rows: i64 = sqlx::query_scalar(&format!("SELECT count(*) FROM {table}"))
+            .fetch_one(scratch.pool())
+            .await?;
+        let table_label = format!("table=\"{table}\"");
+        let written = |kind: &str| {
+            sample(
+                &body,
+                "phase_runner_project_rows_written_total",
+                &[&chain_label, &table_label, &format!("kind=\"{kind}\"")],
+            )
+        };
+        assert_eq!(
+            written("inserted")? - written("deleted")?,
+            rows as f64,
+            "{table}"
+        );
+    }
+    ensure!(
+        sample(
+            &body,
+            "phase_runner_project_rows_written_total",
+            &[&chain_label, "table=\"name_current\"", "kind=\"inserted\""],
+        )? > 0.0
+    );
+
+    cancellation.cancel();
+    tokio::task::yield_now().await;
+    scratch.cleanup().await
+}

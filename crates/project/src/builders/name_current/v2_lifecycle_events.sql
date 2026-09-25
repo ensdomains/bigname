@@ -1,3 +1,4 @@
+/* project:builders.name_current.v2_lifecycle_events */
 -- Every ENSv2 registry, root-registry and registrar event with the key of the registration it
 -- belongs to: the token resource when the event names one, else the resource of the latest grant
 -- or reservation of the same registry and token id, else the registry and token id themselves.

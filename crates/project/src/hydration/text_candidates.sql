@@ -1,3 +1,4 @@
+/* project:hydration.text_candidates */
 SELECT row.resource_id::text, row.record_version_boundary_key,
        COALESCE(lower(row.provenance ->> 'resolver_address'), ''), surface.namehash, row.entries,
        admission.allowed, pending.ordinals

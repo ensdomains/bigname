@@ -27,7 +27,7 @@ pub(super) async fn create(
             })?;
     }
     sqlx::query(
-        "CREATE TEMP TABLE project_event_ids (
+        "/* project:stage.event_ids.create_event_ids */ CREATE TEMP TABLE project_event_ids (
              normalized_event_id bigint PRIMARY KEY
          ) ON COMMIT DROP",
     )
@@ -36,14 +36,14 @@ pub(super) async fn create(
     .map_err(|error| ProjectError::database("failed to create event identity stage", error))?;
 
     for statement in [
-        "ANALYZE project_scope_resources",
-        "ANALYZE project_scope_ancestors",
-        "ANALYZE project_scope_account_permissions",
-        "ANALYZE project_scope_resolvers",
-        "ANALYZE project_scope_resolver_passthrough",
-        "ANALYZE project_scope_resolver_candidate_events",
-        "ANALYZE project_declared_resolver_addresses",
-        "ANALYZE project_changed_events",
+        "/* project:stage.event_ids.analyze_scope_resources */ ANALYZE project_scope_resources",
+        "/* project:stage.event_ids.analyze_scope_ancestors */ ANALYZE project_scope_ancestors",
+        "/* project:stage.event_ids.analyze_scope_account_permissions */ ANALYZE project_scope_account_permissions",
+        "/* project:stage.event_ids.analyze_scope_resolvers */ ANALYZE project_scope_resolvers",
+        "/* project:stage.event_ids.analyze_scope_resolver_passthrough */ ANALYZE project_scope_resolver_passthrough",
+        "/* project:stage.event_ids.analyze_scope_resolver_candidate_events */ ANALYZE project_scope_resolver_candidate_events",
+        "/* project:stage.event_ids.analyze_declared_resolver_addresses */ ANALYZE project_declared_resolver_addresses",
+        "/* project:stage.event_ids.analyze_changed_events */ ANALYZE project_changed_events",
     ] {
         sqlx::query(statement)
             .execute(&mut **transaction)
@@ -51,7 +51,9 @@ pub(super) async fn create(
             .map_err(|error| ProjectError::database("failed to analyze event scope", error))?;
     }
     node_record_events::prepare(transaction, chain_id, target_block).await?;
-    let scoped_event_ids = r#"
+    // The identifier below reaches only the first arm, which runs as `stage.event_ids.arm_0`
+    // with it nested inside.
+    let scoped_event_ids = r#"/* project:stage.event_ids.arm_0.select */
         SELECT event.normalized_event_id
         FROM normalized_events event
         WHERE event.chain_id = $1
@@ -222,7 +224,7 @@ pub(super) async fn create(
     // Each arm contributes to the same set. The primary key deduplicates across arms
     // inside this repeatable-read transaction, without one global UNION sort. Separate
     // statements also retain useful per-arm timings in PostgreSQL's slow query log.
-    for arm in scoped_event_ids.split("\n        UNION\n") {
+    for (arm_index, arm) in scoped_event_ids.split("\n        UNION\n").enumerate() {
         let arm = arm
             .replace(
                 "__SCOPED_NODE_RECORD_EVENT_IDS_SQL__",
@@ -231,7 +233,7 @@ pub(super) async fn create(
             .replace("__SCOPED_NAME_HISTORY_SQL__", SCOPED_NAME_HISTORY_SQL)
             .replace("__SCOPED_PRIMARY_HISTORY_SQL__", SCOPED_PRIMARY_HISTORY_SQL);
         let statement = format!(
-            "INSERT INTO project_event_ids SELECT normalized_event_id FROM ({arm}) selected \
+            "/* project:stage.event_ids.arm_{arm_index} */ INSERT INTO project_event_ids SELECT normalized_event_id FROM ({arm}) selected \
              WHERE $1::text IS NOT NULL AND $2::bigint IS NOT NULL ON CONFLICT DO NOTHING"
         );
         sqlx::query(&statement)
@@ -244,8 +246,8 @@ pub(super) async fn create(
             })?;
     }
     for statement in [
-        "ANALYZE project_event_ids",
-        "DROP TABLE project_node_record_history",
+        "/* project:stage.event_ids.analyze_event_ids */ ANALYZE project_event_ids",
+        "/* project:stage.event_ids.drop_node_record_history */ DROP TABLE project_node_record_history",
     ] {
         sqlx::query(statement)
             .execute(&mut **transaction)
