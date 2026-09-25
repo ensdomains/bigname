@@ -78,9 +78,11 @@ fn replace(loaded: Vec<BindingCandidate>, replaced: &[BindingCandidate]) -> Vec<
         .collect()
 }
 
-/// `load_name_facts` with the binding candidates of `replaced` standing in for the stored rows
-/// of the same binding id, everything they reach loaded as if stored: the harness's
-/// counterfactual for a candidate step 2 wrote differently. The shadow read never replaces one.
+/// Test support only: `load_name_facts` with the binding candidates of `replaced` standing in
+/// for the stored rows of the same binding id, everything they reach loaded as if stored. The
+/// harness's `binding_candidate_pairs_its_surface_bound_by_log` counterfactual is its only
+/// caller, and the shadow read never replaces a candidate. It goes with that cause once the
+/// seed corpus pairs its wrapped bindings with their SurfaceBound on step 2's branch.
 pub async fn load_name_facts_replacing(
     pool: &PgPool,
     chain_id: &str,

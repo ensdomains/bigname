@@ -196,28 +196,3 @@ pub const CONTROL_FIELDS: [&str; 6] = [
 pub fn evaluate(facts: &NameFacts, clock: &Clock) -> ShadowName {
     served::evaluate(facts, clock)
 }
-
-/// Whether today's authority admission (authority_events.sql:12-312) holds, for the name of
-/// `facts`, an event of the name's own log that the families do not retain, such as a registry
-/// AuthorityTransferred. The shadow harness reads it to show that the event a served lateral
-/// took is one the name admits before it may reason from that event.
-pub fn admits_named_event(
-    facts: &NameFacts,
-    event_kind: &str,
-    source_family: &str,
-    resource_id: Option<&str>,
-    authority_kind: &str,
-    position: &Position,
-) -> bool {
-    served::authority_of(facts).admits(&admission::Probe {
-        event_kind,
-        source_family,
-        resource_id,
-        authority_kind,
-        position,
-        transaction_hash: None,
-        to_address: None,
-        namehash: None,
-        wrapper_linked: false,
-    })
-}
