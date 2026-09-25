@@ -920,7 +920,8 @@ async fn a_permission_row_the_serving_reader_includes_is_compared() -> Result<()
 /// name, resource summary and permission row, readable on that chain's own lineage, are what
 /// the serving readers expose for that chain (their read filters scope each row by its
 /// provenance chain), so they must not be compared against this chain's families: the report
-/// stays exactly the baseline.
+/// stays exactly the baseline. A row of the other chain on this chain's own resource is served
+/// by the effective-permission reader, so it is a mismatch.
 #[tokio::test]
 async fn another_chain_served_rows_are_not_compared() -> Result<()> {
     const OTHER: &str = "other-chain";
@@ -1009,9 +1010,11 @@ async fn another_chain_served_rows_are_not_compared() -> Result<()> {
         "{:#?}",
         report.lines
     );
-    // Adversarial pass on 5bf7fca1 (item 7): the other chain's permission row on this chain's
-    // resource id, an admin power for another subject, is neither a grant nor an admin power of
-    // the resource here (the admin read scopes by provenance chain too).
+    // Adversarial pass on 5bf7fca1 (item 7) and Pro r5 Q7 on c23e3e5b: the other chain's
+    // permission row on this chain's resource id, an admin power for another subject, is neither
+    // a grant nor an admin power of the resource here (both reads scope by provenance chain).
+    // The effective-permission reader serves it all the same, since it selects direct rows by
+    // resource id, so the comparison must reject it rather than drop it.
     sqlx::query(
         "INSERT INTO permissions_current
          SELECT (jsonb_populate_record(NULL::permissions_current,
@@ -1026,11 +1029,37 @@ async fn another_chain_served_rows_are_not_compared() -> Result<()> {
     .bind(BOB)
     .execute(&fixture.pool)
     .await?;
+    let resource: uuid::Uuid = k1.parse()?;
+    let effective = bigname_storage::load_effective_permissions_by_resource_ids(
+        &fixture.pool,
+        &[resource],
+        None,
+    )
+    .await?;
+    assert!(
+        effective.iter().any(|row| {
+            row.subject == "0x00000000000000000000000000000000000000cc"
+                && row.provenance["chain_id"] == json!(OTHER)
+        }),
+        "the API serves the other chain's row on this chain's resource"
+    );
     let admins = shadow_support::compare::compare(&fixture.pool, CHAIN, 16).await?;
-    assert_counts(&admins, &[], &[]);
+    assert!(
+        admins.known_discrepancy.is_empty() && admins.expected_delta_fields.is_empty(),
+        "{:#?}",
+        admins.lines
+    );
+    let failed: Vec<&str> = admins
+        .lines
+        .iter()
+        .filter(|line| line.starts_with("SEPOLIA_END_TO_END_SHADOW_MISMATCH"))
+        .filter(|line| line.contains(&format!("key={k1} ")))
+        .filter_map(|line| line.split(" field=").nth(1)?.split(' ').next())
+        .collect();
+    assert_eq!(failed, ["other_chain_rows"], "{:#?}", admins.lines);
     assert_eq!(
-        (admins.names, admins.resources, admins.equal),
-        (baseline.names, baseline.resources, baseline.equal),
+        (admins.names, admins.resources, admins.mismatched),
+        (baseline.names, baseline.resources, 1),
         "{:#?}",
         admins.lines
     );

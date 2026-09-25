@@ -630,8 +630,28 @@ async fn compare_fenced(
         .collect();
     // Every semantic column of a registry-operator row, keyed by subject and scope.
     let mut served_operators: BTreeMap<String, BTreeMap<(String, String), Value>> = BTreeMap::new();
+    // The direct rows the effective-permission reader serves on this chain's resources whose
+    // provenance chain is another one. The reader selects direct rows by resource id and the
+    // standard canonicality predicate, which does not require the row's chain to be the
+    // resource's (effective.rs `build_batch`, canonicality.rs), so the API serves them; the
+    // baselines above read this chain's rows only, so such a row is a mismatch, never compared
+    // as equal.
+    let mut other_chain_rows: BTreeMap<String, Vec<Value>> = BTreeMap::new();
     for chunk in ids.chunks(NAME_CHUNK) {
         for row in load_effective_permissions_by_resource_ids(pool, chunk, None).await? {
+            let row_chain = row.provenance.get("chain_id").and_then(Value::as_str);
+            if !matches!(row.scope, EffectivePermissionScope::Account { .. })
+                && row_chain != Some(chain)
+            {
+                other_chain_rows
+                    .entry(row.resource_id.to_string())
+                    .or_default()
+                    .push(json!({
+                        "subject": row.subject, "scope": row.scope.storage_key(),
+                        "provenance_chain_id": row_chain,
+                    }));
+                continue;
+            }
             if let EffectivePermissionScope::Account {
                 chain_id,
                 authority_kind,
@@ -695,6 +715,13 @@ async fn compare_fenced(
                 field: "permissions_current".into(),
                 served: Value::Array(served),
                 shadow: Value::Array(computed),
+            });
+        }
+        if let Some(rows) = other_chain_rows.get(resource) {
+            diffs.push(Difference {
+                field: "other_chain_rows".into(),
+                served: Value::Array(rows.clone()),
+                shadow: Value::Null,
             });
         }
         let served_admin = json!(served_admins.get(resource).cloned().unwrap_or_default());
