@@ -40,7 +40,6 @@ use crate::{ProjectError, Result};
 mod sql;
 
 use self::sql::CLASSIFY;
-pub(crate) use self::sql::MANIFESTS;
 
 /// The served classification summary version (resolver/section_summaries.rs).
 const SUMMARY_VERSION: i32 = 1;

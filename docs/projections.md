@@ -1700,8 +1700,9 @@ skip, when that revision differs from the one the run applies under or
 Interpret is in redo; the next run adopts the new revision or waits. The block
 records that revision and the whole input token on the marker. The run reads
 the chain's manifest updates once, before its first block; each block takes its
-active manifest set from that read and records the set's key, so an update
-written during a run applies from the next run. The block writes the
+active manifest set from that read and records the set's key, and a rebuild
+takes the declaration start blocks of its work list from the same read, so an
+update written during a run applies from the next run. The block writes the
 before-image of every row it changes and the prior marker to the [family undo
 journal](glossary.md#family-undo-journal) (`project_family_undo`) and advances
 the marker. A block's events are taken once per `event_identity`, which

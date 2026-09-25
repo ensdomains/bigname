@@ -292,17 +292,20 @@ impl BlockEvent {
 
 /// Blocks in `from..=to` that carry family work, ascending: an activated canonical event, or a
 /// resolver activation the F3 classification is pinned to (a resolver edge or its target's
-/// contract address that starts or stops there, or an active manifest declaration whose start
-/// block it is; classification.rs, `activated`). A rebuild visits only these: any other block
+/// contract address that starts or stops there, or a manifest declaration whose start block it
+/// is; classification.rs, `activated`). The declaration start blocks come from the manifest
+/// history the run captured (`manifests::History::declaration_starts`), the one population
+/// classifies under, not from a read of their own. A rebuild visits only these: any other block
 /// owns no family fact.
 pub(crate) async fn work_blocks(
     pool: &sqlx::PgPool,
     chain_id: &str,
     from: i64,
     to: i64,
+    manifests: &super::manifests::History,
 ) -> Result<Vec<i64>> {
-    sqlx::query_scalar(&format!(
-        "/* project:families.input.work_blocks */ WITH {manifests}
+    sqlx::query_scalar(
+        "/* project:families.input.work_blocks */
          SELECT work.block_number FROM (
              SELECT event.block_number
              FROM normalized_events event
@@ -333,12 +336,7 @@ pub(crate) async fn work_blocks(
              WHERE edge.chain_id = $1 AND edge.edge_kind = 'resolver'
                AND boundary.block_number BETWEEN $3 AND $2
              UNION
-             SELECT (declaration ->> 'start_block')::bigint
-             FROM manifests manifest
-             CROSS JOIN LATERAL jsonb_array_elements(COALESCE(
-                 manifest.manifest_payload -> 'contracts', '[]'::jsonb)) declaration
-             WHERE declaration ->> 'start_block' ~ '^[0-9]+$'
-               AND (declaration ->> 'start_block')::bigint BETWEEN $3 AND $2
+             SELECT start.block_number FROM unnest($4::bigint[]) start (block_number)
          ) work
          -- An activation below the retained lineage has no block to apply; the first readable
          -- work block classifies under it.
@@ -347,11 +345,11 @@ pub(crate) async fn work_blocks(
              WHERE lineage.chain_id = $1 AND lineage.block_number = work.block_number
                AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized'))
          ORDER BY 1",
-        manifests = super::classification::MANIFESTS,
-    ))
+    )
     .bind(chain_id)
     .bind(to)
     .bind(from)
+    .bind(manifests.declaration_starts(from, to))
     .fetch_all(pool)
     .await
     .map_err(|error| ProjectError::database("failed to list family work blocks", error))

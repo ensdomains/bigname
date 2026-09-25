@@ -5,8 +5,9 @@
 //! written, the order stage.rs `create_manifests` uses.
 //!
 //! A run reads the chain's manifest updates once, before its first block, and every block takes
-//! its set from that read: no block statement reads `normalized_events` for manifests. An update
-//! written during a run applies from the next run.
+//! its set from that read: no block statement reads `normalized_events` for manifests. A rebuild
+//! also takes its work list's declaration start blocks from it. An update written during a run
+//! applies from the next run.
 use serde_json::{Value, json};
 use sqlx::PgPool;
 
@@ -103,6 +104,30 @@ impl History {
                 })
                 .collect(),
         ))
+    }
+
+    /// The declaration start blocks in `from..=to` of every active update in the history, the
+    /// blocks a declaration can start classifying at. A superset of what one block's set
+    /// declares: a start block no set reaches is visited and changes nothing.
+    pub(crate) fn declaration_starts(&self, from: i64, to: i64) -> Vec<i64> {
+        let mut starts: Vec<i64> = self
+            .events
+            .iter()
+            .filter(|event| event.rollout_status.as_deref() == Some("active"))
+            .filter_map(|event| event.payload.as_ref()?.get("contracts")?.as_array())
+            .flatten()
+            .filter_map(|declaration| match declaration.get("start_block")? {
+                Value::Number(number) => number.as_i64(),
+                Value::String(text) if text.bytes().all(|byte| byte.is_ascii_digit()) => {
+                    text.parse().ok()
+                }
+                _ => None,
+            })
+            .filter(|start| (from..=to).contains(start))
+            .collect();
+        starts.sort_unstable();
+        starts.dedup();
+        starts
     }
 
     /// The set active at block `number`.
