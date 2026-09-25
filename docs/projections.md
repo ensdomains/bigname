@@ -1670,8 +1670,13 @@ These tables are shadows today. Nothing reads them, and no served value
 depends on them. After each Project batch commits and its progress is
 recorded, the phase runner applies the families block by block, each block in
 a transaction of its own, from the [family marker](glossary.md#family-marker)
-(`project_family_marker`) up to the served marker. The served publication never
-waits for them: the families trail it until the loop catches up, and
+(`project_family_marker`) up to the served marker. A batch's publication never
+waits for them, since it has committed before they run, but the next batch
+waits for one budgeted family run. The hook is driven by served batches and its
+pending work is held in memory, so a restart at a stalled head does not run the
+families until the next batch; while Interpret is in redo they do not advance,
+and they resume on the first batch after it clears. The families trail the
+served marker until the loop catches up, and
 `phase_runner_project_family_lag_blocks` reports by how much. It reads 0 only
 when the family marker is the served block, hash included. A marker above a
 lowered served marker counts the blocks in between, and a marker off the served
@@ -1700,8 +1705,9 @@ skip, when that revision differs from the one the run applies under or
 Interpret is in redo; the next run adopts the new revision or waits. The block
 records that revision and the whole input token on the marker. The run reads
 the chain's manifest updates once, before its first block; each block takes its
-active manifest set from that read and records the set's key, so an update
-written during a run applies from the next run. The block writes the
+active manifest set from that read and records the set's key, and a rebuild
+takes the declaration start blocks of its work list from the same read, so an
+update written during a run applies from the next run. The block writes the
 before-image of every row it changes and the prior marker to the [family undo
 journal](glossary.md#family-undo-journal) (`project_family_undo`) and advances
 the marker. A block's events are taken once per `event_identity`, which
@@ -1749,7 +1755,8 @@ steps that read them must key on. Each is also stated on its table or column:
   group, so a `SubregistryChanged` after a zero-getter transfer replaces the
   owner and the served "ownerless" verdict cannot be recovered from the node
   row; `project_registry_owner_event` keeps every owner-setting event of the
-  node by position, with its name, resource and authority kind, for it. An
+  node by position, with its name, resource, authority kind, registry owner and
+  unmasked-word flag, for it. An
   observation's `target_resource_id` is the name's ENSv1 or Basenames binding
   active at the block, not the served authority selection.
 - F3: the pointer-family priority is approximated from the F4 and F5 pointer
@@ -1764,8 +1771,10 @@ steps that read them must key on. Each is also stated on its table or column:
 - F5 keeps the unnamed resolver clear the interpreter emits at an ENSv2
   root-registry TLD expiry. The served pointer read takes named
   `ResolverChanged` only, never sees that clear, and keeps an inventory row the
-  name no longer reaches; the chain agrees with F5 (`getResolver` returns the
-  zero address once the token has expired).
+  name no longer reaches. The pinned registry returns the zero address from
+  `getResolver` once the token has expired, which F5 matches (upstream:
+  .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L255-L258,
+  L628-L630 @ ens_v2@a971bd64).
 - F7 keeps a `ResolverRecordLinked` whose payload has no resolver; the served
   link reader requires the payload resolver equal to the emitter.
 - F14's node index (`project_address_record_node_index`) is a superset: it

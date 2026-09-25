@@ -90,13 +90,21 @@ impl Run<'_> {
             .current
             .as_ref()
             .map_or(0, |marker| marker.number + 1);
-        let mut blocks =
-            input::work_blocks(self.pool, self.chain_id, from, self.target.number).await?;
+        // One manifest read serves both the work list and the blocks, so a manifest update that
+        // lands meanwhile cannot give classification a start block the work list omitted.
+        let manifests =
+            manifests::History::read(self.pool, self.chain_id, self.target.number).await?;
+        let mut blocks = input::work_blocks(
+            self.pool,
+            self.chain_id,
+            from,
+            self.target.number,
+            &manifests,
+        )
+        .await?;
         if blocks.last() != Some(&self.target.number) {
             blocks.push(self.target.number);
         }
-        let manifests =
-            manifests::History::read(self.pool, self.chain_id, self.target.number).await?;
         for number in blocks {
             if !self.budget.take(outcome) {
                 return Ok(());

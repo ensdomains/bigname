@@ -1364,7 +1364,7 @@ COMMENT ON COLUMN project_binding_candidate.transaction_index IS
 COMMENT ON COLUMN project_binding_candidate.log_index IS
     'This value is the log index of the binding''s position: the position of the SurfaceBound that opened it (the block''s SurfaceBound of the same name and resource at the transaction and log index of the binding''s provenance), else the binding''s own block and provenance index with the identity binding:<surface_binding_id>. Null with transaction_index for a synthesised event.';
 COMMENT ON COLUMN project_binding_candidate.event_identity IS
-    'This value is the event identity of the binding''s position: the position of the SurfaceBound that opened it (the block''s SurfaceBound of the same name and resource at the transaction and log index of the binding''s provenance), else the binding''s own block and provenance index with the identity binding:<surface_binding_id>. It is the final tiebreak of the canonical event order, compared as bytes; two bindings one event opened are ordered by surface_binding_id. The pairing is exact: the adapter writes a log-sourced binding and its SurfaceBound from one raw log with that log''s provenance (adapters schema_v2/identity.rs), and a block-boundary binding and its SurfaceBound from one block with no transaction or log. A binding:<surface_binding_id> identity therefore means the adapter''s reconcile dropped the SurfaceBound, never that the SurfaceBound sits at another position.';
+    'This value is the event identity of the binding''s position: the position of the SurfaceBound that opened it (the block''s SurfaceBound of the same name and resource at the transaction and log index of the binding''s provenance), else the binding''s own block and provenance index with the identity binding:<surface_binding_id>. It is the final tiebreak of the canonical event order, compared as bytes; two bindings one event opened are ordered by surface_binding_id. The adapter materializes one raw log''s events and bindings together (adapters schema_v2/session.rs:490 and :512) and stamps each log-sourced binding with that log''s provenance (schema_v2/identity.rs:229 and :329); a block-boundary binding and its SurfaceBound come from one block with no transaction or log (identity/boundary.rs:137). By that code, an identity binding:<surface_binding_id> means the adapter''s reconcile dropped the SurfaceBound (schema_v2/protocol/v1/reconcile_support.rs:42-43), not that the SurfaceBound sits at another position.';
 COMMENT ON COLUMN project_binding_candidate.normalized_event_id IS
     'This value names the SurfaceBound that opened the binding in normalized_events as attribution only; it never takes part in ordering.';
 COMMENT ON COLUMN project_binding_candidate.state_derived IS
@@ -1868,6 +1868,8 @@ CREATE TABLE IF NOT EXISTS project_registry_owner_event (
     owner text,
     owner_getter text,
     owner_getter_reason text,
+    registry_owner text,
+    owner_word_unmasked boolean,
     PRIMARY KEY (chain_id, namespace, node, event_identity),
     CHECK ((transaction_index IS NULL) = (log_index IS NULL))
 );
@@ -1907,6 +1909,10 @@ COMMENT ON COLUMN project_registry_owner_event.owner_getter IS
     'This value is the lower-cased owner_getter of the event.';
 COMMENT ON COLUMN project_registry_owner_event.owner_getter_reason IS
     'This value is the owner_getter_reason of the event.';
+COMMENT ON COLUMN project_registry_owner_event.registry_owner IS
+    'This value is the lower-cased registry_owner of the event, as the node row keeps it for its latest event.';
+COMMENT ON COLUMN project_registry_owner_event.owner_word_unmasked IS
+    'This value is the owner_word_unmasked flag of the event, as the node row keeps it for its latest event.';
 
 CREATE TABLE IF NOT EXISTS project_registry_binding_observation (
     chain_id text NOT NULL,
@@ -2110,7 +2116,7 @@ COMMENT ON COLUMN project_resource_pointer.event_identity IS
 COMMENT ON COLUMN project_resource_pointer.normalized_event_id IS
     'This value names the event that last wrote the row in normalized_events as attribution only; it never takes part in ordering.';
 COMMENT ON COLUMN project_resource_pointer.resolver_address IS
-    'This value is the lower-cased resolver of the latest ResolverChanged on the resource, named or not, clears included. At an ENSv2 root-registry TLD expiry the interpreter emits the resolver clear with no logical name (adapters schema_v2/protocol/v2_registry/expiry.rs); this row keeps that clear, where the served pointer read takes named ResolverChanged only (builders/linked_records.rs, project_record_pointer_latest) and never sees it, so the served inventory keeps a row the name no longer reaches. The chain agrees with this row: getResolver returns the zero address once the token has expired.';
+    'This value is the lower-cased resolver of the latest ResolverChanged on the resource, named or not, clears included. At an ENSv2 root-registry TLD expiry the interpreter emits the resolver clear with no logical name (adapters schema_v2/protocol/v2_registry/expiry.rs); this row keeps that clear, where the served pointer read takes named ResolverChanged only (builders/linked_records.rs, project_record_pointer_latest) and never sees it, so the served inventory keeps a row the name no longer reaches. The pinned registry returns the zero address from getResolver once the token has expired (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L255-L258, L628-L630 @ ens_v2@a971bd64), which this row matches.';
 COMMENT ON COLUMN project_resource_pointer.pointer_position IS
     'This value is that ResolverChanged''s position.';
 COMMENT ON COLUMN project_resource_pointer.namespace IS
