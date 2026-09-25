@@ -982,7 +982,6 @@ async fn resolver_links_summary_follows_latest_link_per_node() -> Result<()> {
 #[tokio::test]
 async fn resolver_links_summary_follows_a_retracted_link_through_redo() -> Result<()> {
     const OTHER: &str = "0x5555555555555555555555555555555555555555";
-
     let (db, pool) = database("record_id_link_retraction").await?;
     seed(&pool).await?;
     event(
@@ -1081,7 +1080,6 @@ async fn resolver_links_summary_picks_up_a_name_discovered_beside_a_scoped_inven
 }
 
 const OTHER: &str = "0x5555555555555555555555555555555555555555";
-
 /// The seed, a second record-ID resolver, and its link to node 9 before that node
 /// has a surface.
 async fn link_node_before_its_name(pool: &PgPool) -> Result<()> {
@@ -1606,10 +1604,166 @@ async fn database(name: &str) -> Result<(TestDatabase, PgPool)> {
     Ok((database, pool))
 }
 
+/// Optimism's coin (`0x80000000 | 10`), an ENSIP-19 fallback target the comparison does not add.
+const OPTIMISM_COIN: &str = "2147483658";
+/// An exact address for the fallback cases that differs from the default.
+const EXACT_OTHER: &str = "0x8888888888888888888888888888888888888888";
+
+/// Today's and the family's names for `address` and `coin`, which must agree; returns how many.
+async fn probe(pool: &PgPool, address: &str, coin: &str) -> Result<usize> {
+    let read = |family: bool| async move {
+        let arguments = (
+            None,
+            bigname_storage::AddressNamesCurrentDedupe::Surface,
+            None,
+            None,
+            bigname_storage::AddressNamesCurrentSort::Name,
+            bigname_storage::AddressNamesCurrentOrder::Asc,
+            None,
+            50,
+        );
+        if family {
+            bigname_storage::families::records::load_family_address_records_page(
+                pool,
+                address,
+                coin,
+                arguments.0,
+                arguments.1,
+                arguments.2,
+                arguments.3,
+                arguments.4,
+                arguments.5,
+                arguments.6,
+                arguments.7,
+            )
+            .await
+        } else {
+            bigname_storage::load_address_records_current_page(
+                pool,
+                address,
+                coin,
+                arguments.0,
+                arguments.1,
+                arguments.2,
+                arguments.3,
+                arguments.4,
+                arguments.5,
+                arguments.6,
+                arguments.7,
+            )
+            .await
+        }
+    };
+    let (today, family) = (read(false).await?, read(true).await?);
+    let differences = bigname_storage::families::records::compare_address_records(
+        &today.entries,
+        &family.entries,
+    );
+    assert!(
+        differences.is_empty(),
+        "{address} coin {coin}: {differences:#?}"
+    );
+    Ok(today.entries.len())
+}
+
+// ENSIP-19 fallback against exact records, table-driven over one name with a default address D.
+// Each case adds exact records after the default and states how many names each probe finds:
+// D for ETH, Base, Optimism and the ineligible coin 0, then the exact address where it differs.
+// An exact record with an address shadows the default for its coin, and so does one whose value
+// is not retained (unsupported); a cleared exact record falls back to the default. Every run also
+// compares every stored key, with coin 60 and Base added for D, and each probe requires both
+// readers to list the same names.
 #[tokio::test]
-async fn official_sepolia_direct_resolver_projects_ensip19_default_for_missing_eth_address()
--> Result<()> {
-    use bigname_domain::resolver_read::{IndexedRecordStatus, evaluate_indexed_record};
+async fn exact_records_and_the_default_address_answer_alike_through_the_families() -> Result<()> {
+    type Record = (&'static str, Value);
+    type Case = (
+        &'static str,
+        Vec<Record>,
+        [usize; 4],
+        Option<(&'static str, &'static str, usize)>,
+    );
+    let exact = |coin: &'static str, payload: Value| -> Record { (coin, payload) };
+    let d = ADDRESS_BYTES_ONLY;
+    // (case, exact records, names for D at [60, Base, Optimism, 0], exact probe)
+    let cases: Vec<Case> = vec![
+        ("default_only", vec![], [1, 1, 1, 0], None),
+        (
+            "overlapping_eth",
+            vec![exact("60", json!({"value": d}))],
+            [1, 1, 1, 0],
+            None,
+        ),
+        (
+            "differing_eth",
+            vec![exact("60", json!({"value": EXACT_OTHER}))],
+            [0, 1, 1, 0],
+            Some((EXACT_OTHER, "60", 1)),
+        ),
+        (
+            "cleared_eth",
+            vec![exact("60", json!({"value": "0x"}))],
+            [1, 1, 1, 0],
+            None,
+        ),
+        (
+            "unsupported_eth",
+            vec![exact("60", json!({"value_retained": false}))],
+            [0, 1, 1, 0],
+            None,
+        ),
+        (
+            "differing_optimism",
+            vec![exact(OPTIMISM_COIN, json!({"value": EXACT_OTHER}))],
+            [1, 1, 0, 0],
+            Some((EXACT_OTHER, OPTIMISM_COIN, 1)),
+        ),
+        (
+            "ineligible_coin",
+            vec![exact("0", json!({"value": "0x0014abcd"}))],
+            [1, 1, 1, 0],
+            None,
+        ),
+    ];
+    for (case, records, names, exact_probe) in cases {
+        let (db, pool, target, resolver) = public_default(&format!("ensip19_{case}")).await?;
+        for (index, (coin, payload)) in records.iter().enumerate() {
+            let mut after = json!({
+                "source_event":"AddressChanged","resolver":resolver,"node":node(1),
+                "record_family":"addr","record_key":format!("addr:{coin}"),
+                "selector_key":coin,"coin_type":coin,
+            });
+            for (key, value) in payload.as_object().unwrap() {
+                after[key] = value.clone();
+            }
+            event(
+                &pool,
+                &format!("exact-{index}"),
+                target,
+                i64::try_from(index)? + 2,
+                "RecordChanged",
+                None,
+                after,
+            )
+            .await?;
+        }
+        run(&pool, target, None, RunMode::Normal).await?;
+        let mut found = [0; 4];
+        for (slot, coin) in ["60", "2147492101", OPTIMISM_COIN, "0"].iter().enumerate() {
+            found[slot] = probe(&pool, d, coin).await?;
+        }
+        assert_eq!(found, names, "{case}");
+        if let Some((address, coin, count)) = exact_probe {
+            assert_eq!(probe(&pool, address, coin).await?, count, "{case}");
+        }
+        db.cleanup().await?;
+    }
+    Ok(())
+}
+
+/// A name pointing at the official Sepolia PublicResolverV2 with an ENSIP-19 default address
+/// (`ADDRESS_BYTES_ONLY`, as raw bytes) written at the target block; returns the database, the
+/// target block and the resolver address.
+async fn public_default(name: &str) -> Result<(TestDatabase, PgPool, i64, String)> {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()
@@ -1630,7 +1784,7 @@ async fn official_sepolia_direct_resolver_projects_ensip19_default_for_missing_e
     let target = i64::try_from(direct.start_block.unwrap())? + 1;
     let address = direct.address.to_ascii_lowercase();
     let payload = serde_json::to_value(manifest)?;
-    let (db, pool) = database("record_id_public_default").await?;
+    let (db, pool) = database(name).await?;
     seed(&pool).await?;
     let _: i64 = sqlx::query_scalar("UPDATE manifest_versions SET manifest_payload=$1, normalizer_version=$2, deployment_label=$3 WHERE source_family='ens_v2_resolver_l1' RETURNING manifest_id")
         .bind(&payload).bind(&manifest.normalizer_version).bind(&manifest.deployment_epoch).fetch_one(&pool).await?;
@@ -1663,6 +1817,15 @@ async fn official_sepolia_direct_resolver_projects_ensip19_default_for_missing_e
         }),
     )
     .await?;
+    Ok((db, pool, target, address))
+}
+
+#[tokio::test]
+async fn official_sepolia_direct_resolver_projects_ensip19_default_for_missing_eth_address()
+-> Result<()> {
+    use bigname_domain::resolver_read::{IndexedRecordStatus, evaluate_indexed_record};
+    let (db, pool, target, address) = public_default("record_id_public_default").await?;
+    let value = ADDRESS_BYTES_ONLY;
     // Step 2 indexes the address this `AddressChanged` carries only as `address_bytes_hex`, so
     // the comparison expects nothing.
     let expected = Expectations::none();
