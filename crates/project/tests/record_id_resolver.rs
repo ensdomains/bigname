@@ -320,9 +320,9 @@ async fn link_and_version_boundaries_read_the_same_through_the_families() -> Res
     family_shadow::compare_family_reads_at(&pool, &outcome.current, &expected).await?;
     expected.finish()?;
 
-    // Mutations on the accepted result must fail: another value for an expected field, and a
-    // further field that differs.
-    for (mutation, field) in [
+    // Mutations on the accepted result must fail: another value for an expected field, named with
+    // the mutated value, and a further field that differs.
+    for (mutation, field, value) in [
         (
             "UPDATE record_inventory_current SET entries = (
              SELECT jsonb_agg(CASE WHEN entry ->> 'record_key' = 'text:url'
@@ -330,12 +330,14 @@ async fn link_and_version_boundaries_read_the_same_through_the_families() -> Res
              FROM jsonb_array_elements(entries) entry)
          WHERE resource_id = $1::uuid",
             "entries[text:url].value",
+            Some("\"c\""),
         ),
         (
             "UPDATE record_inventory_current
          SET chain_positions = chain_positions || '{\"mutated\": true}'
          WHERE resource_id = $1::uuid",
             "chain_positions.mutated",
+            None,
         ),
     ] {
         let (entries, positions): (Value, Value) = sqlx::query_as(
@@ -361,7 +363,8 @@ async fn link_and_version_boundaries_read_the_same_through_the_families() -> Res
             error.starts_with(&format!(
                 "the difference at 23 on record_inventory {} is not the expected one",
                 resource(1)
-            )) && error.contains(field),
+            )) && error.contains(field)
+                && value.is_none_or(|value| error.contains(value)),
             "{mutation}: {error}"
         );
         sqlx::query(

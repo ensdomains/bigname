@@ -1485,10 +1485,14 @@ async fn project_expecting(
 }
 
 /// Step 2 keeps in F5 the unnamed pointer clear the interpreter derives beside a root-registry
-/// expiry, so the family read withdraws the TLD token's records at the clear. Today's record
-/// pointers read only named pointer events and keep serving the token through its earlier named
-/// pointer: a semantic difference between F5 and today's serving pointer, not a reader bug.
-/// `counts` are `(target, times)`.
+/// expiry, so the family read withdraws the TLD token's records at the clear. The chain agrees:
+/// an expired entry's resolver reads as zero.
+/// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L255-L258 @ ens_v2@a971bd64)
+/// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L628-L630 @ ens_v2@a971bd64)
+/// Today's record pointer read requires a named event (builders/linked_records.rs:97-99), so it
+/// keeps the token's record_inventory_current row, which no name route reaches (its name row has
+/// no resource or serving resource). That row is a served-side leftover the per-block publication
+/// step replaces. `counts` are `(target, times)`.
 fn unnamed_clear_withdraws(counts: &[(i64, usize)]) -> Expectations {
     Expectations {
         differences: counts
