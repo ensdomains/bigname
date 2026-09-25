@@ -30,7 +30,7 @@ pub(crate) async fn assert_publishable(
     assert_child_authority(transaction, chain_id, target).await
 }
 
-/// Fail the generation when a name still holds current bindings on both arms after its proven
+/// Fail the generation when a name still holds current bindings on both arms after its
 /// activated ENSv1->ENSv2 migration boundary.
 ///
 /// Bindings are evaluated at end-of-target-block, which is the transaction- and
@@ -233,7 +233,7 @@ async fn assert_exact_name_authority(
 }
 
 /// Fail the generation when a parent-child pair still states both an ENSv1 and an ENSv2 relation
-/// after the child's own proven ENSv2 authority began.
+/// after the ENSv2 authority epoch of a child with an activated ENSv1->ENSv2 migration began.
 ///
 /// Raw coexistence is not the anomaly: a migrated or positively registered ENSv2
 /// child normally keeps its ENSv1 relation as residue, because neither migration
@@ -248,10 +248,10 @@ async fn assert_exact_name_authority(
 /// relation asserted *after* that authority epoch started — the selection would
 /// silently drop it, and dropping a live contradiction is what this refuses.
 ///
-/// A released ENSv2 child held by a migration proof or left as a released ENSv2 tombstone is
-/// deliberately outside that: release publishes no row and never falls back to ENSv1,
-/// so a later ENSv1 relation is residue with nothing left to contradict rather than a
-/// dual-current pair. A child without those follows its selected arm.
+/// A released ENSv2 child is deliberately outside that: release publishes no ENSv2 relation, so
+/// a later ENSv1 relation has no ENSv2 relation left to contradict. The check covers only a
+/// child whose selected arm is ENSv2 and whose history records an activated ENSv1->ENSv2
+/// migration; that child's epoch starts at its own ENSv2 binding, not at the migration.
 async fn assert_child_authority(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,

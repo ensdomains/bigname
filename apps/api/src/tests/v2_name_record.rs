@@ -6114,7 +6114,7 @@ async fn seed_v2_alice_name_records_fixture_with_row(
 }
 
 // Sepolia's root registry registers `reverse` and points it at the ENSv1 mirror resolver
-// (upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ReverseMirror.ts:L35 @ ens_v2_sepolia_20260916@366de741).
+// (upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ReverseMirror.ts:L25-L37 @ ens_v2_sepolia_20260916@366de741).
 // These rows follow what Project builds for a bound, registered root name read through a mirror
 // (crates/project/tests/mirror_resolver.rs, `tld_root_bound`): a supported ENSv2 row with its own
 // binding and resolver, no serving resource and no pointer reachability, and an inventory on the

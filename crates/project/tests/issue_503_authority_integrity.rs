@@ -1108,8 +1108,8 @@ async fn expected_delta_a_second_v2_release_after_an_ownerless_v1_registry_is_a_
 // The root, `eth`, `reverse` and `addr.reverse` are names registered in the admitted root
 // registry, so they follow the ordinary rule: their open ENSv2 binding decides whatever ENSv1
 // holds, no proof is fabricated, and the authority epoch starts at that binding like any other.
-// (upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ETHRegistry.ts:L46 @ ens_v2_sepolia_20260916@366de741)
-// (upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ReverseMirror.ts:L35 @ ens_v2_sepolia_20260916@366de741)
+// (upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ETHRegistry.ts:L36-L48 @ ens_v2_sepolia_20260916@366de741)
+// (upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ReverseMirror.ts:L25-L37 @ ens_v2_sepolia_20260916@366de741)
 #[tokio::test]
 async fn root_registry_names_follow_the_ordinary_rule_beside_ensv1() -> Result<()> {
     let (db, pool) = database("issue503_root_registry_names").await?;
@@ -1404,8 +1404,8 @@ async fn eth_on_both_arms_without_proof_is_not_integrity_fatal() -> Result<()> {
 // On Sepolia `eth` and `reverse` are registered in the ENSv2 root registry, so their ENSv2 facts come
 // from the root family and no ETHRegistrar event exists for them. A registration in the admitted
 // root registry is served like any other, with no proof fabricated for it.
-// (upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ETHRegistry.ts:L46 @ ens_v2_sepolia_20260916@366de741)
-// (upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ReverseMirror.ts:L35 @ ens_v2_sepolia_20260916@366de741)
+// (upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ETHRegistry.ts:L36-L48 @ ens_v2_sepolia_20260916@366de741)
+// (upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ReverseMirror.ts:L25-L37 @ ens_v2_sepolia_20260916@366de741)
 #[tokio::test]
 async fn root_registry_eth_and_reverse_serve_without_a_registrar_event() -> Result<()> {
     let (db, pool) = database("issue503_root_family").await?;
