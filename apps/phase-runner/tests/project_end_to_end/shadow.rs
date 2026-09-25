@@ -686,17 +686,16 @@ fn row_namespace(name: &str) -> String {
         .to_owned()
 }
 
-/// The value of a `registration/...` or `control/...` field of a shadow read.
-fn shadow_field(shadow: &ShadowName, path: &str) -> Value {
-    let Some((block, rest)) = path.split_once('/') else {
-        return Value::Null;
-    };
+/// The value of a `registration/...` or `control/...` field of a shadow read; `None` for any
+/// other path, which the shadow read does not compute.
+fn shadow_field(shadow: &ShadowName, path: &str) -> Option<Value> {
+    let (block, rest) = path.split_once('/')?;
     let block = match block {
         "registration" => &shadow.registration,
         "control" => &shadow.control,
-        _ => return Value::Null,
+        _ => return None,
     };
-    field(&Value::Object(block.clone()), rest).clone()
+    Some(field(&Value::Object(block.clone()), rest).clone())
 }
 
 /// Whether the shadow presents its selected registration as an ENSv2 release, whole: status
@@ -772,7 +771,7 @@ fn serves_the_raw_arm_release(input: &NameInput, shadow: &ShadowName, diff: &Dif
         return false;
     };
     matches!(block, "registration" | "control")
-        && same(&diff.shadow, &shadow_field(shadow, &diff.field))
+        && shadow_field(shadow, &diff.field).is_some_and(|value| same(&diff.shadow, &value))
         && same(&diff.served, field(&raw[block], rest))
 }
 
@@ -824,8 +823,11 @@ async fn name_excuses(
         if let Some(legacy) = legacy_facts(&facts, &ids, &keys) {
             let counterfactual = evaluate(&legacy, clock);
             for (index, diff) in diffs.iter().enumerate() {
+                // Only the fields the counterfactual computes: an authority-selection field has
+                // no today's-order value here and stays open.
                 if open(&out, index)
-                    && same(&shadow_field(&counterfactual, &diff.field), &diff.served)
+                    && shadow_field(&counterfactual, &diff.field)
+                        .is_some_and(|value| same(&value, &diff.served))
                 {
                     out[index] = Excuse::SameBlockOrder;
                 }

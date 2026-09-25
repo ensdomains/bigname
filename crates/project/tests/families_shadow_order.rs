@@ -483,6 +483,33 @@ async fn the_order_counterfactual_keeps_the_admission_of_a_reordered_block() -> 
     );
     assert_eq!(admitted(&facts, 16), json!(["expiry-12"]));
     assert_eq!(admitted(&legacy, 16), admitted(&facts, 16));
+
+    // Pro Q7b: the reordered block makes the name's same-block read run, but it computes only
+    // the registration and control blocks. A wrong non-null handoff block in the families, the
+    // served one null, must stay a mismatch rather than match an uncomputed null.
+    sqlx::query(
+        "INSERT INTO bigname_phase.project_registry_node_state (chain_id, namespace, node,
+             block_number, event_identity, first_current_record_block)
+         VALUES ($1, 'ens', $2, 5, 'node-5', 5)",
+    )
+    .bind(CHAIN)
+    .bind(node(1))
+    .execute(&fixture.pool)
+    .await?;
+    let mutated = shadow_support::compare::compare(&fixture.pool, CHAIN, 16).await?;
+    assert!(
+        mutated.expected_delta_fields.is_empty() && mutated.mismatched == 1,
+        "a wrong handoff block must fail: {:#?}",
+        mutated.lines
+    );
+    assert!(
+        mutated.lines.iter().any(|line| {
+            line.starts_with("SEPOLIA_END_TO_END_SHADOW_MISMATCH")
+                && line.contains("field=authority_selection/registry_handoff_block_number")
+        }),
+        "{:#?}",
+        mutated.lines
+    );
     fixture.cleanup().await
 }
 
