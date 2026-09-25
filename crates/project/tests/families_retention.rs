@@ -347,7 +347,9 @@ async fn the_wrapper_row_stays_raw_through_expiry_unwrap_and_rewrap() -> Result<
         // not.
         (13, wrapped, masked.clone()),
         // The unwrap: the holder revoke is the newest lifecycle event, the unwrap's position is
-        // kept, and the expired wrapper stays masked on the served name.
+        // kept, and the served name stays masked. That mask comes from the expiry at block 12,
+        // not from the unwrap: name_current does not read the wrapper lifecycle (see
+        // `an_unwrap_before_expiry_keeps_the_served_name_wrapped_but_closes_the_restrictions`).
         (
             14,
             row(
@@ -369,6 +371,144 @@ async fn the_wrapper_row_stays_raw_through_expiry_unwrap_and_rewrap() -> Result<
     assert_eq!(seen, expected);
     fixture.assert_undo_restores(15).await?;
     fixture.assert_rebuild_equal(15).await?;
+    fixture.cleanup().await
+}
+
+// A characterization of a known served-side defect, not of NameWrapper semantics: name_current
+// picks the latest wrapper modifier and expiry without reading the wrapper lifecycle, so an unwrap
+// before the wrapper expiry leaves the name serving the old wrapper state and fuses. The
+// lifecycle-aware permissions resource summary (resource_summary.rs, `wrapper_lifecycles`) closes
+// the wrapper restrictions on the unwrap and opens them again on a rewrap; the raw family row keeps
+// the lifecycle both readers need. The served builders are pinned as they are, not corrected.
+#[tokio::test]
+async fn an_unwrap_before_expiry_keeps_the_served_name_wrapped_but_closes_the_restrictions()
+-> Result<()> {
+    let fixture = Fixture::new("families_retention_unwrap_live", 20).await?;
+    let (logical, resource) = (name(4), uuid(4));
+    fixture
+        .binding(&uuid(40), &logical, &resource, "ens_v1", 10, 0, None)
+        .await?;
+    let wrapper = "ens_v1_wrapper_l1";
+    let holder = |granted: bool| {
+        let source = json!({"kind": "ens_v1_authority", "authority_kind": "wrapper",
+                            "relation_kind": "holder", "node": node(4)});
+        let (powers, grant, revocation) = if granted {
+            (json!(["wrapper_control"]), source, Value::Null)
+        } else {
+            (json!([]), Value::Null, source)
+        };
+        json!({"subject": HOLDER, "scope": {"kind": "resource"}, "effective_powers": powers,
+               "grant_source": grant, "revocation_source": revocation})
+    };
+    // A wrap as the adapter writes it: the token mint, the holder grant, the fuses and the expiry.
+    let wrap = |state: &str, fuses: i64| {
+        vec![
+            (
+                "TokenControlTransferred",
+                json!({"source_event": "NameWrapped", "to": HOLDER}),
+            ),
+            ("PermissionChanged", holder(true)),
+            (
+                "PermissionScopeChanged",
+                json!({"source_event": "NameWrapped", "wrapper_state": state, "fuses": fuses}),
+            ),
+            (
+                "ExpiryChanged",
+                json!({"source_event": "NameWrapped", "expiry": block_time(30)}),
+            ),
+        ]
+    };
+    let write_all = |block: i64, events: Vec<(&'static str, Value)>| {
+        let (fixture, logical, resource) = (&fixture, &logical, &resource);
+        async move {
+            for (log, (kind, after)) in (1..).zip(events) {
+                fixture
+                    .write(
+                        block,
+                        log,
+                        kind,
+                        wrapper,
+                        Some(logical),
+                        Some(resource),
+                        after,
+                        WRAPPER,
+                    )
+                    .await?;
+            }
+            anyhow::Ok(())
+        }
+    };
+    let observe = |target: i64| {
+        let (fixture, logical, resource) = (&fixture, &logical, &resource);
+        async move {
+            fixture.apply(target, FamilyMode::Normal).await;
+            let row = columns(
+                &fixture.rows("project_wrapper_state").await?[0],
+                &["wrapper_state", "lifecycle_unwrapped"],
+            );
+            let name = served_wrapper(fixture, logical, target).await?;
+            let restrictions: Option<Value> = sqlx::query_scalar(
+                "SELECT resource_restrictions #- '{expiry_seconds}'
+                 FROM permissions_current_resource_summary WHERE resource_id = $1::uuid",
+            )
+            .bind(resource)
+            .fetch_optional(&fixture.pool)
+            .await?
+            .flatten();
+            anyhow::Ok((target, row, name, restrictions))
+        }
+    };
+    let mut seen = Vec::new();
+    write_all(10, wrap("emancipated", 65536)).await?;
+    seen.push(observe(11).await?);
+    // Block 12: the unwrap as the adapter writes it, well before the wrapper expiry.
+    write_all(
+        12,
+        vec![
+            (
+                "SurfaceUnbound",
+                json!({"source_event": "NameUnwrapped", "node": node(4)}),
+            ),
+            ("PermissionChanged", holder(false)),
+        ],
+    )
+    .await?;
+    seen.push(observe(12).await?);
+    // Block 13: a rewrap of the same resource.
+    write_all(13, wrap("wrapped", 0)).await?;
+    seen.push(observe(13).await?);
+    let emancipated = json!({"wrapper_state": "emancipated", "fuses": 65536});
+    let wrapped = json!({"wrapper_state": "wrapped", "fuses": 0});
+    let restricted = |state: &Value| {
+        let mut restrictions = state.clone();
+        restrictions["kind"] = json!("ens_v1_wrapper");
+        Some(restrictions)
+    };
+    let expected = vec![
+        (
+            11,
+            json!({"wrapper_state": "emancipated", "lifecycle_unwrapped": false}),
+            emancipated.clone(),
+            restricted(&emancipated),
+        ),
+        // The defect: the served name keeps the unwrapped wrapper; the restrictions close.
+        (
+            12,
+            json!({"wrapper_state": "emancipated", "lifecycle_unwrapped": true}),
+            emancipated,
+            None,
+        ),
+        // The rewrap opens the restrictions again, and both readers serve the new wrapper.
+        (
+            13,
+            json!({"wrapper_state": "wrapped", "lifecycle_unwrapped": false}),
+            wrapped.clone(),
+            restricted(&wrapped),
+        ),
+    ];
+    assert_eq!(seen, expected);
+    fixture.assert_undo_restores(13).await?;
+    fixture.assert_rebuild_equal(13).await?;
     fixture.cleanup().await
 }
 
