@@ -1,9 +1,11 @@
 //! Shadow comparison (TYR-36 step 3): after the owned key families have followed a publication,
 //! the family readers of `bigname_storage::families::control` compute the registration and
-//! control blocks of every served name, the permission rows, restriction block and registry
-//! binding of every summarised resource, the registry-operator rows the effective-permission
-//! reader adds, and every account approval, and each is compared with what the production
-//! readers serve from today's tables at the same publication.
+//! control blocks of every served name, the permission rows, admin powers, restriction block and
+//! registry binding of every summarised resource, the registry-operator rows the
+//! effective-permission reader adds (every semantic column), and every account approval, and each
+//! is compared with what the production readers serve from today's tables at the same
+//! publication. `created_at`, the lapsed registration's authority, the child rows and the
+//! whole-history evidence columns are not compared.
 //!
 //! Every differing field of every item is decided on its own, at this publication, and passes
 //! only when a named cause is shown to produce it; anything else is a mismatch and fails the run.
@@ -437,17 +439,42 @@ pub async fn compare(pool: &PgPool, chain: &str, target: i64) -> Result<Report> 
         .iter()
         .filter_map(|resource| resource.parse().ok())
         .collect();
-    let mut served_operators: BTreeMap<String, BTreeSet<(String, String)>> = BTreeMap::new();
+    // Every semantic column of a registry-operator row, keyed by subject and scope.
+    let mut served_operators: BTreeMap<String, BTreeMap<(String, String), Value>> = BTreeMap::new();
     for chunk in ids.chunks(NAME_CHUNK) {
         for row in load_effective_permissions_by_resource_ids(pool, chunk, None).await? {
             if matches!(row.scope, EffectivePermissionScope::Account { .. }) {
+                let scope = row.scope.storage_key();
+                let value = json!({
+                    "subject": row.subject, "scope": scope,
+                    "grant_relation": row.grant_relation.map(|_| "operator"),
+                    "effective_powers": row.effective_powers, "grant_source": row.grant_source,
+                    "revocation_source": row.revocation_source,
+                    "inheritance_path": row.inheritance_path,
+                    "transfer_behavior": row.transfer_behavior,
+                });
                 served_operators
                     .entry(row.resource_id.to_string())
                     .or_default()
-                    .insert((row.subject.clone(), row.scope.storage_key()));
+                    .insert((row.subject.clone(), scope), value);
             }
         }
     }
+    // The admin powers the served summary derives for each resource (resource_summary.rs
+    // :272-297, `v2_admin_powers`): the distinct admin powers of its registry- or root-scoped
+    // served rows.
+    let served_admins: BTreeMap<String, Vec<String>> = sqlx::query_as(
+        r"SELECT served.resource_id::text, array_agg(DISTINCT power.value ORDER BY power.value)
+         FROM permissions_current served
+         CROSS JOIN LATERAL jsonb_array_elements_text(served.effective_powers) power
+         WHERE served.scope_kind IN ('registry', 'root')
+           AND (power.value LIKE 'admin\_%' OR power.value = 'can_transfer_admin')
+         GROUP BY 1",
+    )
+    .fetch_all(pool)
+    .await?
+    .into_iter()
+    .collect();
     for resource in &resource_ids {
         let shadow = &shadows[resource];
         let mut diffs = Vec::new();
@@ -464,6 +491,15 @@ pub async fn compare(pool: &PgPool, chain: &str, target: i64) -> Result<Report> 
                 field: "permissions_current".into(),
                 served: Value::Array(served),
                 shadow: Value::Array(computed),
+            });
+        }
+        let served_admin = json!(served_admins.get(resource).cloned().unwrap_or_default());
+        let computed_admin = json!(shadow.admin_powers);
+        if !same(&served_admin, &computed_admin) {
+            diffs.push(Difference {
+                field: "admin_powers".into(),
+                served: served_admin,
+                shadow: computed_admin,
             });
         }
         let summary = summary_by_resource.get(resource);
@@ -515,17 +551,31 @@ pub async fn compare(pool: &PgPool, chain: &str, target: i64) -> Result<Report> 
                     ..diff
                 }),
             );
-            let computed: BTreeSet<(String, String)> =
+            let computed: BTreeMap<(String, String), Value> =
                 effective_operator_rows(chain, resource, &binding, &approvals)
                     .into_iter()
-                    .map(|row| (row.subject, row.scope))
+                    .map(|row| {
+                        let value = json!({
+                            "subject": row.subject, "scope": row.scope,
+                            "grant_relation": "operator",
+                            "effective_powers": row.effective_powers,
+                            "grant_source": row.grant_source, "revocation_source": null,
+                            "inheritance_path": row.inheritance_path,
+                            "transfer_behavior": row.transfer_behavior,
+                        });
+                        ((row.subject, row.scope), value)
+                    })
                     .collect();
             let served = served_operators.get(resource).cloned().unwrap_or_default();
-            if served != computed {
+            let (served, computed) = (
+                Value::Array(served.into_values().collect()),
+                Value::Array(computed.into_values().collect()),
+            );
+            if !same(&served, &computed) {
                 diffs.push(Difference {
                     field: "effective_operator_rows".into(),
-                    served: json!(served),
-                    shadow: json!(computed),
+                    served,
+                    shadow: computed,
                 });
             }
         }

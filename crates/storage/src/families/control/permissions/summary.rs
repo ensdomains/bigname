@@ -52,7 +52,8 @@ pub fn locked_roles(own: &[String], root: &[String]) -> Value {
 /// holder grant (resource_summary.rs:172-197). The families keep the wrapper's mint as a retained
 /// TokenControlTransferred with source event NameWrapped and every holder grant or revocation as
 /// a grant row; they keep no NameUnwrapped AuthorityEpochChanged or SurfaceUnbound, so an unwrap
-/// that revokes no holder grant is not seen.
+/// that revokes no holder grant is not seen and the restriction block stays (fixture
+/// `an_unwrap_that_revokes_no_holder_grant_is_not_seen`, a step 2 retention follow-up).
 pub fn wrapper_unwrapped(resource: &str, events: &[LifecycleEvent], grants: &[GrantRow]) -> bool {
     let mint = events
         .iter()
