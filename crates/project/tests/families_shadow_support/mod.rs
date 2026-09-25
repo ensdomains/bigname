@@ -23,6 +23,19 @@ use crate::support::{CHAIN, Fixture};
 
 /// Publish `target` with the production batch, then apply the families to it.
 pub async fn publish(fixture: &Fixture, target: i64) -> Result<()> {
+    publish_served(fixture, target).await?;
+    let outcome = fixture.apply(target, FamilyMode::Normal).await;
+    ensure!(
+        outcome.skipped.is_none(),
+        "the families followed {target}: {:?}",
+        outcome.skipped
+    );
+    Ok(())
+}
+
+/// Publish `target` with the production batch and record the publication, the readable block
+/// at that height, on the Project phase row as the runner does (`record_progress`).
+pub async fn publish_served(fixture: &Fixture, target: i64) -> Result<()> {
     Engine::new(fixture.pool.clone())
         .run_batch(BatchRequest {
             chain_id: CHAIN.to_owned(),
@@ -33,12 +46,22 @@ pub async fn publish(fixture: &Fixture, target: i64) -> Result<()> {
             mode: RunMode::Normal,
         })
         .await?;
-    let outcome = fixture.apply(target, FamilyMode::Normal).await;
-    ensure!(
-        outcome.skipped.is_none(),
-        "the families followed {target}: {:?}",
-        outcome.skipped
-    );
+    sqlx::query(
+        "INSERT INTO chain_phase_state (chain_id, phase_name, phase_status,
+             current_block_number, current_block_hash)
+         SELECT lineage.chain_id, 'project', 'idle', lineage.block_number,
+                lineage.block_hash
+         FROM chain_lineage lineage
+         WHERE lineage.chain_id = $1 AND lineage.block_number = $2
+           AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+         ON CONFLICT (chain_id, phase_name) DO UPDATE
+         SET current_block_number = EXCLUDED.current_block_number,
+             current_block_hash = EXCLUDED.current_block_hash",
+    )
+    .bind(CHAIN)
+    .bind(target)
+    .execute(&fixture.pool)
+    .await?;
     Ok(())
 }
 

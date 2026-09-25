@@ -2231,7 +2231,7 @@ async fn every_name_gets_the_same_result_in_any_chunk() -> Result<()> {
 /// log, so a later read counts nothing, but the report keeps what its own publication gave.
 #[tokio::test]
 async fn the_corpus_expectation_is_read_at_the_report_publication() -> Result<()> {
-    use shadow_support::compare::{Options, compare_with, corpus_expectation};
+    use shadow_support::compare::{Options, Publication, compare_with, corpus_expectation};
     const REPLACEMENT: &str = "0x00000000000000000000000000000000000000000000000000000000000bee14";
     let fixture = Fixture::new("families_shadow_corpus_snapshot", 20).await?;
     let k1 = uuid(1);
@@ -2250,7 +2250,8 @@ async fn the_corpus_expectation_is_read_at_the_report_publication() -> Result<()
         corpus: true,
         ..Options::default()
     };
-    let report = compare_with(&fixture.pool, CHAIN, 16, options).await?;
+    let publication = Publication::readable(&fixture.pool, CHAIN, 16).await?;
+    let report = compare_with(&fixture.pool, CHAIN, &publication, options).await?;
     let recorded = report.corpus_expected.expect("read with the report");
     assert_eq!(recorded.len(), 8, "{recorded:?}");
     sqlx::query(
@@ -2275,5 +2276,70 @@ async fn the_corpus_expectation_is_read_at_the_report_publication() -> Result<()
             .await?
             .is_empty()
     );
+    fixture.cleanup().await
+}
+
+/// Pro Q1 on 6c8bdf8b: the comparison is for one publication, a height and its hash, and it
+/// reads the served tables, the families and the log separately. Once block 12 is replaced by
+/// 12' at the same height, the comparison refuses to run until the families and the served
+/// publication both stand on 12', and then compares.
+#[tokio::test]
+async fn a_same_height_replacement_is_compared_only_once_both_sides_follow_it() -> Result<()> {
+    const REPLACEMENT: &str = "0x00000000000000000000000000000000000000000000000000000000000bee12";
+    let fixture = Fixture::new("families_shadow_replaced_target", 20).await?;
+    let k1 = uuid(1);
+    v2_binding(&fixture, &k1).await?;
+    v2(
+        &fixture,
+        10,
+        "RegistrationGranted",
+        Some(&k1),
+        json!({"status": "registered", "registrant": ALICE, "expiry": 2_000_000_000u64}),
+    )
+    .await?;
+    let report = publish_and_compare(&fixture, 12).await?;
+    assert_counts(&report, &[], &[]);
+    sqlx::query(
+        "UPDATE chain_lineage SET canonicality_state = 'orphaned'
+         WHERE chain_id = $1 AND block_number = 12",
+    )
+    .bind(CHAIN)
+    .execute(&fixture.pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO chain_lineage (chain_id, block_hash, parent_hash, block_number,
+             block_timestamp, canonicality_state)
+         VALUES ($1, $2, $3, 12, to_timestamp(1800000144), 'canonical')",
+    )
+    .bind(CHAIN)
+    .bind(REPLACEMENT)
+    .bind(support::hash(11))
+    .execute(&fixture.pool)
+    .await?;
+    let refused = shadow_support::compare::compare(&fixture.pool, CHAIN, 12).await;
+    assert!(refused.is_err(), "neither side follows 12': {refused:?}");
+    let token = bigname_project::families::input_token(&fixture.pool, CHAIN).await?;
+    let outcome = bigname_project::families::apply(
+        &fixture.pool,
+        CHAIN,
+        &bigname_project::Marker {
+            number: 12,
+            hash: REPLACEMENT.to_owned(),
+        },
+        bigname_project::families::FamilyMode::Normal,
+        &token,
+        &bigname_project::families::FamilyOptions::new(support::CONTENT_HASH),
+    )
+    .await;
+    assert_eq!(outcome.skipped, None);
+    let refused = shadow_support::compare::compare(&fixture.pool, CHAIN, 12).await;
+    assert!(
+        refused.is_err(),
+        "the served side does not follow 12': {refused:?}"
+    );
+    shadow_support::publish_served(&fixture, 12).await?;
+    let report = shadow_support::compare::compare(&fixture.pool, CHAIN, 12).await?;
+    assert_counts(&report, &[], &[]);
+    assert_eq!(report.names, 1);
     fixture.cleanup().await
 }

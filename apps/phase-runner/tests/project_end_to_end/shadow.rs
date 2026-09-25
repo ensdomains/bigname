@@ -7,6 +7,11 @@
 //! publication. `created_at`, the lapsed registration's authority, the child rows and the
 //! whole-history evidence columns are not compared.
 //!
+//! A comparison is for one publication, a height and its block's hash (`Publication`). Before
+//! its first read and after its last it checks that the block is readable and that the
+//! families' marker and Project's published position both stand on it, outside a redo, and it
+//! refuses to report otherwise (`fence`).
+//!
 //! Every differing field of every item is decided on its own, at this publication, and passes
 //! only when a named cause is shown to produce it; anything else is a mismatch and fails the run.
 //! Each passing field is printed with its served and shadow values and counted by
@@ -297,8 +302,68 @@ impl Default for Options {
     }
 }
 
+/// The publication a comparison is for: a height and the hash of its block.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Publication {
+    pub number: i64,
+    pub hash: String,
+}
+
+impl Publication {
+    /// The readable block at `number`, for a caller that holds no hash (the fixtures, which
+    /// publish one block at a time).
+    pub async fn readable(pool: &PgPool, chain: &str, number: i64) -> Result<Self> {
+        let hash: String = sqlx::query_scalar(
+            "SELECT block_hash FROM chain_lineage
+             WHERE chain_id = $1 AND block_number = $2
+               AND canonicality_state IN ('canonical', 'safe', 'finalized')",
+        )
+        .bind(chain)
+        .bind(number)
+        .fetch_one(pool)
+        .await
+        .with_context(|| format!("block {number} is not readable"))?;
+        Ok(Self { number, hash })
+    }
+}
+
+/// The publication fence of one comparison: its block must be readable, the families' marker
+/// and the Project phase's published position must both stand on it, and Project must not be
+/// in a redo. The comparison reads the served tables, the families and the log separately, so
+/// it checks this before its first read and after its last and refuses to report if either
+/// fails: nothing it read can then belong to another publication at the same height.
+async fn fence(pool: &PgPool, chain: &str, publication: &Publication) -> Result<()> {
+    let (readable, families, served): (bool, bool, bool) = sqlx::query_as(
+        "SELECT EXISTS (SELECT 1 FROM chain_lineage
+                        WHERE chain_id = $1 AND block_number = $2 AND block_hash = $3
+                          AND canonicality_state IN ('canonical', 'safe', 'finalized')),
+                EXISTS (SELECT 1 FROM project_family_marker
+                        WHERE chain_id = $1 AND current_block_number = $2
+                          AND current_block_hash = $3),
+                EXISTS (SELECT 1 FROM chain_phase_state
+                        WHERE chain_id = $1 AND phase_name = 'project'
+                          AND current_block_number = $2 AND current_block_hash = $3
+                          AND NOT redo_in_progress)",
+    )
+    .bind(chain)
+    .bind(publication.number)
+    .bind(&publication.hash)
+    .fetch_one(pool)
+    .await?;
+    anyhow::ensure!(
+        readable && families && served,
+        "publication {} {} is not both sides' (readable {readable}, families {families}, \
+         served {served})",
+        publication.number,
+        publication.hash
+    );
+    Ok(())
+}
+
+/// Compare at the readable block of `target`.
 pub async fn compare(pool: &PgPool, chain: &str, target: i64) -> Result<Report> {
-    compare_with(pool, chain, target, Options::default()).await
+    let publication = Publication::readable(pool, chain, target).await?;
+    compare_with(pool, chain, &publication, Options::default()).await
 }
 
 /// `compare` with the names read `chunk` at a time.
@@ -308,32 +373,46 @@ pub async fn compare_in_chunks(
     target: i64,
     chunk: usize,
 ) -> Result<Report> {
-    compare_with(
-        pool,
-        chain,
-        target,
-        Options {
-            chunk,
-            ..Options::default()
-        },
-    )
-    .await
+    let publication = Publication::readable(pool, chain, target).await?;
+    let options = Options {
+        chunk,
+        ..Options::default()
+    };
+    compare_with(pool, chain, &publication, options).await
 }
 
+/// Compare every served item with its shadow read at `publication`, inside its fence.
 pub async fn compare_with(
     pool: &PgPool,
     chain: &str,
-    target: i64,
+    publication: &Publication,
     options: Options,
 ) -> Result<Report> {
+    fence(pool, chain, publication)
+        .await
+        .context("before the comparison")?;
+    let report = compare_fenced(pool, chain, publication, options).await?;
+    fence(pool, chain, publication)
+        .await
+        .context("after the comparison")?;
+    Ok(report)
+}
+
+async fn compare_fenced(
+    pool: &PgPool,
+    chain: &str,
+    publication: &Publication,
+    options: Options,
+) -> Result<Report> {
+    let target = publication.number;
     let mut report = Report::default();
     let timestamp: i64 = sqlx::query_scalar(
         "SELECT extract(epoch FROM block_timestamp)::bigint FROM chain_lineage
-         WHERE chain_id = $1 AND block_number = $2
-           AND canonicality_state IN ('canonical', 'safe', 'finalized')",
+         WHERE chain_id = $1 AND block_number = $2 AND block_hash = $3",
     )
     .bind(chain)
     .bind(target)
+    .bind(&publication.hash)
     .fetch_one(pool)
     .await
     .context("target clock")?;

@@ -449,7 +449,11 @@ async fn run(
                 corpus,
                 ..shadow::Options::default()
             };
-            let report = shadow::compare_with(pool, CHAIN, number, options).await?;
+            let publication = shadow::Publication {
+                number,
+                hash: target.hash.clone(),
+            };
+            let report = shadow::compare_with(pool, CHAIN, &publication, options).await?;
             report.print(number);
             ensure!(
                 report.mismatched == 0,
