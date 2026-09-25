@@ -192,7 +192,11 @@ async fn family_block_timings() -> Result<()> {
          mismatched_candidates={mismatched} candidates={candidates} wrapper_leases={leases}"
     );
     ensure!(
-        bindings > 0 && without_bound == 0 && mismatched == 0 && candidates == bindings,
+        bindings > 0,
+        "FAMILY_BENCHMARK_BASE {base} is below the first seed binding, so no binding is checked"
+    );
+    ensure!(
+        without_bound == 0 && mismatched == 0 && candidates == bindings,
         "seed bindings do not pair with their SurfaceBound"
     );
     // The plans cover the follow, the undo and the replay; the rebuild ran without them.
@@ -234,7 +238,8 @@ async fn family_block_timings() -> Result<()> {
         let text = std::fs::read(log)?;
         let start = usize::try_from(log_offset)?.min(text.len());
         let follow_text = String::from_utf8_lossy(&text[start..]);
-        // (statement tag, whether it reads the manifest updates)
+        // (whether it is the per-run manifest read, whether it reads the manifest updates); the
+        // counts are totals over the whole follow, printed, not asserted.
         let statements: Vec<(bool, bool)> = follow_text
             .split("Query Text:")
             .skip(1)
@@ -260,7 +265,7 @@ async fn family_block_timings() -> Result<()> {
             .filter(|(run, reads)| !*run && *reads)
             .count();
         println!(
-            "FAMILY_BENCHMARK follow blocks={followed} runs={} manifest_reads_per_run={run_reads} \
+            "FAMILY_BENCHMARK follow blocks={followed} runs={} manifest_read_statements={run_reads} \
              manifest_reads_in_block_statements={block_reads}",
             300 - base
         );

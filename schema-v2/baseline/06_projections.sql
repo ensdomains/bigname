@@ -1268,7 +1268,7 @@ CREATE TABLE IF NOT EXISTS project_name_state (
     migration_position jsonb,
     migrated_at timestamptz,
     authority_start_positions jsonb NOT NULL DEFAULT '{}'::jsonb,
-    PRIMARY KEY (namespace, logical_name_id),
+    PRIMARY KEY (chain_id, namespace, logical_name_id),
     CHECK ((transaction_index IS NULL) = (log_index IS NULL))
 );
 COMMENT ON TABLE project_name_state IS
@@ -1278,7 +1278,7 @@ COMMENT ON COLUMN project_name_state.namespace IS
 COMMENT ON COLUMN project_name_state.logical_name_id IS
     'This value identifies the name.';
 COMMENT ON COLUMN project_name_state.chain_id IS
-    'This value is the chain whose events wrote the row.';
+    'This value is the chain whose events wrote the row; each chain keeps its own row for a name.';
 COMMENT ON COLUMN project_name_state.block_number IS
     'This value is the block number of the event that last wrote the row.';
 COMMENT ON COLUMN project_name_state.transaction_index IS
@@ -1364,7 +1364,7 @@ COMMENT ON COLUMN project_binding_candidate.transaction_index IS
 COMMENT ON COLUMN project_binding_candidate.log_index IS
     'This value is the log index of the binding''s position: the position of the SurfaceBound that opened it (the block''s SurfaceBound of the same name and resource at the transaction and log index of the binding''s provenance), else the binding''s own block and provenance index with the identity binding:<surface_binding_id>. Null with transaction_index for a synthesised event.';
 COMMENT ON COLUMN project_binding_candidate.event_identity IS
-    'This value is the event identity of the binding''s position: the position of the SurfaceBound that opened it (the block''s SurfaceBound of the same name and resource at the transaction and log index of the binding''s provenance), else the binding''s own block and provenance index with the identity binding:<surface_binding_id>. It is the final tiebreak of the canonical event order, compared as bytes; two bindings one event opened are ordered by surface_binding_id. The adapter materializes one raw log''s events and bindings together (adapters schema_v2/session.rs:490 and :512) and stamps each log-sourced binding with that log''s provenance (schema_v2/identity.rs:229 and :329); a block-boundary binding and its SurfaceBound come from one block with no transaction or log (identity/boundary.rs:137). By that code, an identity binding:<surface_binding_id> means the adapter''s reconcile dropped the SurfaceBound (schema_v2/protocol/v1/reconcile_support.rs:42-43), not that the SurfaceBound sits at another position.';
+    'This value is the event identity of the binding''s position: the position of the SurfaceBound that opened it (the block''s SurfaceBound of the same name and resource at the transaction and log index of the binding''s provenance), else the binding''s own block and provenance index with the identity binding:<surface_binding_id>. It is the final tiebreak of the canonical event order, compared as bytes; two bindings one event opened are ordered by surface_binding_id. The adapter materializes one raw log''s events and bindings together (adapters schema_v2/session.rs:490 and :512) and stamps each log-sourced binding with that log''s provenance (schema_v2/identity.rs:229 and :329); a block-boundary binding and its SurfaceBound come from one block with no transaction or log (identity/boundary.rs:137). The families assume, as an adapter precondition, that an identity binding:<surface_binding_id> means the adapter''s reconcile dropped the SurfaceBound (schema_v2/protocol/v1/reconcile_support.rs:42-43), not that the SurfaceBound sits at another position; the cited lines show that a binding and its SurfaceBound share provenance, not that every binding has an opener. If the precondition fails, the family positions the binding at its own block and provenance index under the identity binding:<surface_binding_id>, with no error and no anomaly count.';
 COMMENT ON COLUMN project_binding_candidate.normalized_event_id IS
     'This value names the SurfaceBound that opened the binding in normalized_events as attribution only; it never takes part in ordering.';
 COMMENT ON COLUMN project_binding_candidate.state_derived IS
@@ -1765,11 +1765,11 @@ COMMENT ON COLUMN project_wrapper_state.normalized_event_id IS
 COMMENT ON COLUMN project_wrapper_state.wrapper_state IS
     'This value is wrapped, emancipated or locked from the latest PermissionScopeChanged; null for any other value.';
 COMMENT ON COLUMN project_wrapper_state.fuses IS
-    'This value is that event''s fuses when a JSON number from 0 to 4294967295.';
+    'This value is the fuses of the latest PermissionScopeChanged when a JSON number whose value is an integer from 0 to 9223372036854775807, the range builders/permissions.rs modifiers and address_names.rs scope_modifiers read before casting to bigint; null otherwise. The served children and name blocks read a narrower range, 0 to 4294967295 (children.rs:146-148, name_current/build.sql:541-544), so a publisher for those two readers must reapply it; the NameWrapper emits fuses as uint32 (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L27-L37 @ ens_v1@91c966f), so the ranges differ only for a value the contract never emits. A non-integral spelling such as 1.0 fails the served bigint cast and the Project batch, so it never reaches a served row.';
 COMMENT ON COLUMN project_wrapper_state.wrapper_state_position IS
     'This value is that PermissionScopeChanged''s position.';
 COMMENT ON COLUMN project_wrapper_state.expiry_seconds IS
-    'This value is the latest wrapper expiry: a JSON number from 0 to 18446744073709551615.';
+    'This value is the latest wrapper expiry when a JSON number whose value is from 0 to 18446744073709551615, compared by value as the served numeric read does (address_names.rs wrapper_expiries, children.rs latest_wrapper_expiries), so 1.0 and 1.5 count as those numbers; null otherwise.';
 COMMENT ON COLUMN project_wrapper_state.expiry_position IS
     'This value is that ExpiryChanged''s position.';
 COMMENT ON COLUMN project_wrapper_state.owner_word_unmasked IS
@@ -2467,7 +2467,7 @@ COMMENT ON COLUMN project_grant.transfer_behavior IS
 COMMENT ON COLUMN project_grant.revoked IS
     'This value is true when the effective powers are empty; the row stays as a clear.';
 COMMENT ON COLUMN project_grant.registration_position IS
-    'This value is the position of the resource''s latest grant or reservation when the grant was written, the registration the grant belongs to.';
+    'This value is the position of the resource''s latest RegistrationGranted or RegistrationReserved before the grant, counting earlier events of the grant''s own block: the registration the grant was written under, by the rule F2a keeps as last_active. It is new state for the per-block publisher, not a copy of a served value: the served permissions read has no per-grant registration and masks by the resource''s current registration (builders/permissions.rs v2_registration_current). Null when the resource has no earlier grant or reservation.';
 
 CREATE TABLE IF NOT EXISTS project_resource_admin_aggregate (
     chain_id text NOT NULL,

@@ -2449,6 +2449,29 @@ what the latest events of its key left, clears included. The families are
 unread shadows until the per-block publication reads them
 ([projections](projections.md#owned-key-families)).
 
+The families carry labels F1 to F14, used in the difference lists, the table
+comments and the reducers' module headers. Each label names these tables and
+the reducer under `crates/project/src/families/` that writes them:
+
+| Label | Tables | Reducer |
+| --- | --- | --- |
+| F1, name identity | `project_name_state`, `project_binding_candidate` | `identity.rs` |
+| F2a, registration and lease state | `project_lifecycle_key_state`, `project_lifecycle_triple_summary`, `project_lifecycle_association`, `project_lifecycle_event`, `project_child_registration_state` | `lifecycle.rs` |
+| F2b, wrapper state | `project_wrapper_state` | `wrapper.rs` |
+| F2c, registry ownership | `project_registry_node_state`, `project_registry_owner_event`, `project_registry_binding_observation` | `registry.rs` |
+| F3, resolver classification | `project_resolver_classification` | `classification.rs` |
+| F4, registry-node resolver pointer | `project_registry_pointer` | `resolver.rs` |
+| F5, resource resolver pointer | `project_resource_pointer` | `resolver.rs` |
+| F6, node records | `project_node_record_partition`, `project_node_record_value` | `records.rs` |
+| F7, record-id records and resolver links | `project_record_id_value`, `project_resolver_link` | `records.rs` |
+| F8, grants | `project_grant`, `project_resource_admin_aggregate` | `permissions.rs` |
+| F9, account approvals | `project_account_approval` | `permissions.rs` |
+| F10, aliases | `project_name_alias`, `project_resolver_alias` | `topology.rs` |
+| F11, child edges | `project_child_edge_candidate`, `project_parent_subregistry` | `topology.rs` |
+| F12, reverse tuples and claims | `project_reverse_tuple`, `project_reverse_node_claim`, `project_claim_normalization` | `reverse.rs` |
+| F13, address-to-name association | `project_address_name_fold`, `project_address_controller_candidate`, `project_address_name_index` | `addresses.rs`, with the index derived in `derived.rs` |
+| F14, address-to-record association | `project_address_record_node_index`, `project_address_record_id_index` | `derived.rs` |
+
 ## Family marker
 
 `project_family_marker`: the block and hash a chain's [owned key
@@ -2496,9 +2519,29 @@ from the retired [admission epoch](#admission-epoch).
 
 ## Canonical event order
 
-the one order Project applies a chain's events in (D12): block number, then
-transaction index, then log index, then `event_identity` compared as bytes
-(`COLLATE "C"` in SQL). A synthesised event has no transaction or log position
-and sorts before every transaction of its block. Owned key family reducers,
-the dedupe of repeated deliveries and every position comparison use it
-([projections](projections.md#owned-key-families)).
+the one order Project applies a chain's events in (D12, amended by Tate on
+2026-09-26): block number, then transaction index, then log index, then, for an
+event with both a transaction and a log index, the emission ordinal its
+`event_identity` ends with, then `event_identity` compared as bytes
+(`COLLATE "C"` in SQL). The emission ordinal is the identity's final
+`:`-separated segment when that is a nonempty run of ASCII digits no greater
+than 4294967295, leading zeros allowed; any other suffix has none, and none
+sorts first. Several facts of one log therefore apply in the order the adapter
+wrote them: a NameWrapper transfer's resource-scoped facts (the delegate
+approval clear, the old holder's revoke, the new holder's grant, a retained
+delegate's re-grant) end on what the adapter wrote last. A synthesised event
+has no transaction or log position, sorts before every transaction of its
+block and keeps the identity byte order, since its trailing number is not an
+emission index. Ordinals are per source, so facts of two sources at one log
+interleave by ordinal, and that cross-source order is a disclosed
+precondition: where two sources write one key from one log, the fact with the
+higher ordinal (then the higher identity bytes) wins, and it may differ from
+the served read in provenance only. Its one
+known instance is the NameWrapped registry-node pointer
+([projections](projections.md#owned-key-families)). Owned key family reducers, the
+dedupe of repeated deliveries and every position comparison use it
+([projections](projections.md#owned-key-families)). A served reader ported to
+it (step 7) must parse the ordinal the same way:
+`CASE WHEN m[1]::numeric <= 4294967295 THEN m[1]::bigint END` over
+`regexp_match(event_identity, ':([0-9]+)$') m`, only when both indexes are
+present, ordered `NULLS FIRST`; never a bare bigint cast.

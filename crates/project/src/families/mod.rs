@@ -20,6 +20,7 @@ mod lifecycle;
 mod manifests;
 mod marker;
 mod permissions;
+mod position;
 mod records;
 mod reduce;
 mod registry;
