@@ -173,6 +173,8 @@ pub struct FamilyOutcome {
     pub target: Option<Marker>,
     /// The family marker when the loop stopped.
     pub marker: Option<Marker>,
+    /// Whether the family marker's hash is readable on the lineage at its height.
+    pub marker_readable: bool,
     /// Blocks applied.
     pub blocks: u64,
     /// Blocks undone.
@@ -200,11 +202,24 @@ pub struct FamilyOutcome {
 }
 
 impl FamilyOutcome {
-    /// Served marker minus family marker, zero when the families are current.
+    /// Blocks between the families and the served marker, zero only when the family marker is the
+    /// served block itself. A readable marker below or above the served height counts the blocks
+    /// in between. A marker off the served branch (orphaned, or another hash at the served
+    /// height) counts from the block below the lower of the two heights, a lower bound because the
+    /// branch point can sit deeper.
     pub fn lag_blocks(&self) -> u64 {
-        let target = self.target.as_ref().map_or(0, |marker| marker.number);
-        let current = self.marker.as_ref().map_or(-1, |marker| marker.number);
-        u64::try_from(target - current).unwrap_or(0)
+        let Some(target) = self.target.as_ref() else {
+            return 0;
+        };
+        let Some(marker) = self.marker.as_ref() else {
+            return u64::try_from(target.number + 1).unwrap_or(0);
+        };
+        let on_branch =
+            self.marker_readable && (marker.number != target.number || marker.hash == target.hash);
+        if on_branch {
+            return (target.number - marker.number).unsigned_abs();
+        }
+        u64::try_from(target.number - marker.number.min(target.number) + 1).unwrap_or(0)
     }
 
     fn record(&mut self, stats: block::BlockStats) {
@@ -256,10 +271,7 @@ pub async fn apply(
         );
         outcome.skipped = Some(error.to_string());
     }
-    outcome.marker = marker::read(pool, chain_id)
-        .await
-        .ok()
-        .and_then(|marker| marker.current);
+    (outcome.marker, outcome.marker_readable) = current_marker(pool, chain_id).await;
     outcome.elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
     let mut sorted = outcome.block_ms.clone();
     sorted.sort_unstable();
@@ -300,15 +312,32 @@ pub async fn skipped(
         reason,
         "Project families skipped this batch; they catch up on the next"
     );
+    let (marker, marker_readable) = current_marker(pool, chain_id).await;
     FamilyOutcome {
         target: Some(target.clone()),
-        marker: marker::read(pool, chain_id)
-            .await
-            .ok()
-            .and_then(|marker| marker.current),
+        marker,
+        marker_readable,
         skipped: Some(reason),
         ..FamilyOutcome::default()
     }
+}
+
+/// The family marker and whether its hash is readable at its height; a read that fails reports
+/// no marker, as the lag then counts the whole served chain.
+async fn current_marker(pool: &PgPool, chain_id: &str) -> (Option<Marker>, bool) {
+    let Some(current) = marker::read(pool, chain_id)
+        .await
+        .ok()
+        .and_then(|marker| marker.current)
+    else {
+        return (None, false);
+    };
+    let readable = input::readable_hash(pool, chain_id, current.number)
+        .await
+        .ok()
+        .flatten()
+        .is_some_and(|hash| hash == current.hash);
+    (Some(current), readable)
 }
 
 #[cfg(test)]

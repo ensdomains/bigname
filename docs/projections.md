@@ -1646,7 +1646,11 @@ recorded, the phase runner applies the families block by block, each block in
 a transaction of its own, from the [family marker](glossary.md#family-marker)
 (`project_family_marker`) up to the served marker. The served publication never
 waits for them: the families trail it until the loop catches up, and
-`phase_runner_project_family_lag_blocks` reports by how much. One run applies or
+`phase_runner_project_family_lag_blocks` reports by how much. It reads 0 only
+when the family marker is the served block, hash included. A marker above a
+lowered served marker counts the blocks in between, and a marker off the served
+branch (orphaned, or another hash at the served height) counts at least one
+block. One run applies or
 undoes at most 256 blocks (`--project-families-max-blocks`, or
 `BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES_MAX_BLOCKS`), so a rebuild or a long
 catch-up spans several runner cycles. The run reads the Interpret and Project
