@@ -680,6 +680,28 @@ async fn a_registry_only_new_owner_transfer_and_epoch_at_one_log_is_a_same_block
     let mut delta: Vec<(&str, usize)> = binding.iter().map(|field| (field.as_str(), 1)).collect();
     delta.push(("d12_same_block_order:control/latest_event_kind", 1));
     shadow_support::assert_counts(&report, &[], &delta);
+    // Pro Q2 on a5f61182: an epoch start must be an AuthorityEpochChanged of the name filed
+    // under its family's arm. Filed under another arm, or pointed at the transfer of the same
+    // log with the transfer's (absent) kind and key, the start fails the guard.
+    let facts = name_facts(&fixture).await?;
+    assert!(shadow_support::compare::control_facts_hold(&fixture.pool, CHAIN, 12, &facts).await?);
+    let start = facts.authority_starts["ens_v1"].clone();
+    let mut other_arm = facts.clone();
+    other_arm.authority_starts = json!({"basenames": start.clone()});
+    assert!(
+        !shadow_support::compare::control_facts_hold(&fixture.pool, CHAIN, 12, &other_arm).await?,
+        "a start filed under another arm"
+    );
+    let mut other_kind = facts.clone();
+    let mut transfer = start.clone();
+    transfer["event_identity"] = json!("AuthorityTransferred:10:9");
+    transfer["authority_kind"] = Value::Null;
+    transfer["authority_key"] = Value::Null;
+    other_kind.authority_starts = json!({"ens_v1": transfer});
+    assert!(
+        !shadow_support::compare::control_facts_hold(&fixture.pool, CHAIN, 12, &other_kind).await?,
+        "a start that is not an epoch change"
+    );
     // A wrong owner on the canonically selected transfer must stay a mismatch, though today's
     // order selects the epoch, which carries the served owner.
     sqlx::query(
@@ -786,6 +808,124 @@ async fn a_registry_only_surface_bound_and_transfer_at_one_log_is_a_same_block_d
         mutated.lines
     );
     assert_eq!(failed_fields(&mutated), ["control/registry_owner"]);
+    fixture.cleanup().await
+}
+
+/// Pro Q2 on a5f61182: a binding candidate's SurfaceBound must be of the candidate's name and
+/// resource with its authority kind, key and state-derived flag, since those decide whether it
+/// enters the registry-only owner pool. In the one-log SurfaceBound fixture the guard holds;
+/// the candidate read with another resource, authority kind or state-derived flag fails it.
+/// End to end, a registrar SurfaceBound (not in the pool) and the transfer at one log serve the
+/// transfer's owner on both sides; making the family candidate registry-only and state-derived
+/// puts its bound owner last canonically, while today's order still gives the transfer's, and
+/// the owner must stay a mismatch. Deleting the SurfaceBound's log row leaves the comparison
+/// complete with the owner a mismatch.
+#[tokio::test]
+async fn a_binding_candidate_is_checked_against_its_surface_bound() -> Result<()> {
+    let fixture = Fixture::new("families_shadow_registry_candidate_facts", 20).await?;
+    let node_resource = uuid(3);
+    one_log_bound(&fixture, &node_resource).await?;
+    publish_and_compare(&fixture, 12).await?;
+    let facts = name_facts(&fixture).await?;
+    assert!(shadow_support::compare::control_facts_hold(&fixture.pool, CHAIN, 12, &facts).await?);
+    let index = facts
+        .candidates
+        .iter()
+        .position(|candidate| candidate.surface_bound_position.is_some())
+        .expect("a candidate with its SurfaceBound");
+    for (case, mutate) in [
+        (
+            "resource",
+            (|candidate: &mut bigname_storage::families::control::rows::BindingCandidate| {
+                candidate.resource_id = uuid(9);
+            }) as fn(&mut _),
+        ),
+        ("authority kind", |candidate| {
+            candidate.authority_kind = Some("registrar".into());
+        }),
+        ("state derived", |candidate| {
+            candidate.state_derived = Some(false);
+        }),
+    ] {
+        let mut mutated = facts.clone();
+        mutate(&mut mutated.candidates[index]);
+        assert!(
+            !shadow_support::compare::control_facts_hold(&fixture.pool, CHAIN, 12, &mutated)
+                .await?,
+            "{case}"
+        );
+    }
+    sqlx::query("DELETE FROM normalized_events WHERE event_identity = 'SurfaceBound:10:9'")
+        .execute(&fixture.pool)
+        .await?;
+    let missing = shadow_support::compare::compare(&fixture.pool, CHAIN, 12).await?;
+    assert!(
+        missing.expected_delta_fields.is_empty() && missing.known_discrepancy.is_empty(),
+        "a missing log row must not pass: {:#?}",
+        missing.lines
+    );
+    assert_eq!(failed_fields(&missing), ["control/registry_owner"]);
+    fixture.cleanup().await?;
+
+    let fixture = Fixture::new("families_shadow_registry_candidate_pool", 20).await?;
+    fixture
+        .binding(&uuid(100), &name(1), &node_resource, "ens_v1", 10, 9, None)
+        .await?;
+    fixture
+        .write(
+            10,
+            9,
+            "SurfaceBound",
+            "registry_only_binding",
+            Some(&name(1)),
+            Some(&node_resource),
+            json!({"authority_kind": "registrar", "state_derived": false,
+                   "registry_contract": REGISTRY, "owner": OTHER}),
+            REGISTRY,
+        )
+        .await?;
+    fixture
+        .write(
+            10,
+            9,
+            "AuthorityTransferred",
+            V1_REGISTRY,
+            Some(&name(1)),
+            Some(&node_resource),
+            json!({"node": node(1), "owner": OWNER, "owner_getter": OWNER,
+                   "emitter_role": "registry"}),
+            REGISTRY,
+        )
+        .await?;
+    let report = publish_and_compare(&fixture, 12).await?;
+    shadow_support::assert_counts(&report, &[], &[]);
+    let (served, _) = shadow_support::name(&fixture, 12, &name(1)).await?;
+    assert_eq!(served.control("registry_owner"), json!(OWNER));
+    sqlx::query(
+        "UPDATE bigname_phase.project_binding_candidate
+         SET authority_kind = 'registry_only', state_derived = true
+         WHERE resource_id = $1::uuid",
+    )
+    .bind(&node_resource)
+    .execute(&fixture.pool)
+    .await?;
+    let (_, shadow) = shadow_support::name(&fixture, 12, &name(1)).await?;
+    assert_eq!(
+        shadow.control["registry_owner"],
+        json!(OTHER),
+        "the pool took it"
+    );
+    let mutated = shadow_support::compare::compare(&fixture.pool, CHAIN, 12).await?;
+    assert!(
+        mutated.expected_delta_fields.is_empty() && mutated.known_discrepancy.is_empty(),
+        "a wrong candidate kind must not pass: {:#?}",
+        mutated.lines
+    );
+    assert!(
+        failed_fields(&mutated).contains(&"control/registry_owner".to_owned()),
+        "{:#?}",
+        mutated.lines
+    );
     fixture.cleanup().await
 }
 

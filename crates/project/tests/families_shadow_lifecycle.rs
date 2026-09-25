@@ -1322,3 +1322,92 @@ async fn a_release_with_no_selected_arm_is_presented_as_an_ensv2_release() -> Re
     );
     fixture.cleanup().await
 }
+
+/// Pro Q2 on a5f61182: two synthesised ENSv2 TokenControlTransferred events of name 1 in one
+/// block, b-transfer (to BOB) written first and a-transfer (to CAROL) second. The canonical
+/// order takes b-transfer (its identity sorts last) and today's order a-transfer (higher id),
+/// so the control owner is a legitimate same-block delta. Flipping only the canonically
+/// selected family row's unmasked-word flag, or its recipient, makes the families' owner wrong
+/// while today's order still selects a-transfer; the owner must then stay a mismatch, because
+/// the canonical read of the lifecycle events rebuilt from the log gives BOB.
+#[tokio::test]
+async fn a_wrong_fact_on_the_canonically_selected_transfer_stays_a_mismatch() -> Result<()> {
+    const CAROL: &str = "0x00000000000000000000000000000000000000cc";
+    let fixture = Fixture::new("families_shadow_canonical_transfer", 20).await?;
+    let k1 = uuid(1);
+    v2_binding(&fixture, &k1).await?;
+    v2(
+        &fixture,
+        10,
+        "RegistrationGranted",
+        Some(&k1),
+        json!({"status": "registered", "registrant": ALICE, "expiry": 2_000_000_000u64}),
+    )
+    .await?;
+    for (identity, to) in [("b-transfer", BOB), ("a-transfer", CAROL)] {
+        fixture
+            .event(
+                Event::new(identity, 11, 0, "TokenControlTransferred", V2_REGISTRY)
+                    .name(&name(1))
+                    .resource(&k1)
+                    .after(
+                        json!({"registry_contract_instance_id": "R", "token_id": "7",
+                                  "authority_kind": "registrar", "from": ALICE, "to": to}),
+                    )
+                    .raw(json!({"emitting_address": REGISTRY}))
+                    .synthesised(),
+            )
+            .await?;
+    }
+    let report = publish_and_compare(&fixture, 12).await?;
+    let (served, shadow) = shadow_support::name(&fixture, 12, &name(1)).await?;
+    assert_eq!(served.control("registry_owner"), json!(CAROL));
+    assert_eq!(shadow.control["registry_owner"], json!(BOB));
+    let delta = report.expected_delta_fields.clone();
+    assert!(
+        delta.contains_key("d12_same_block_order:control/registry_owner"),
+        "{:#?}",
+        report.lines
+    );
+    assert_eq!(report.mismatched, 0, "{:#?}", report.lines);
+    for (case, update) in [
+        ("unmasked word", "owner_word_unmasked = true"),
+        (
+            "recipient",
+            "to_address = '0x00000000000000000000000000000000000000dd'",
+        ),
+    ] {
+        sqlx::query(&format!(
+            "UPDATE bigname_phase.project_lifecycle_event SET {update}
+             WHERE event_identity = 'b-transfer'"
+        ))
+        .execute(&fixture.pool)
+        .await?;
+        let mutated = shadow_support::compare::compare(&fixture.pool, CHAIN, 12).await?;
+        assert!(
+            !mutated
+                .expected_delta_fields
+                .keys()
+                .any(|field| field.contains(":control/registry_owner")),
+            "{case}: a wrong canonical owner must not pass: {:#?}",
+            mutated.lines
+        );
+        assert!(
+            failed_fields(&mutated).contains(&"control/registry_owner".to_owned()),
+            "{case}: {:#?}",
+            mutated.lines
+        );
+        sqlx::query(
+            "UPDATE bigname_phase.project_lifecycle_event
+             SET owner_word_unmasked = NULL, to_address = $1
+             WHERE event_identity = 'b-transfer'",
+        )
+        .bind(BOB)
+        .execute(&fixture.pool)
+        .await?;
+        let restored = shadow_support::compare::compare(&fixture.pool, CHAIN, 12).await?;
+        assert_eq!(restored.expected_delta_fields, delta, "{case}");
+        assert_eq!(restored.mismatched, 0, "{case}");
+    }
+    fixture.cleanup().await
+}

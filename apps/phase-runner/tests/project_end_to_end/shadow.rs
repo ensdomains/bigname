@@ -21,8 +21,12 @@
 //!   generated ids too, and the association winner of
 //!   an affected triple moved only to a grant of the same name, registry and token
 //!   (`v2_lifecycle_events.sql:10-23`), gives exactly the served value for the field. A
-//!   `control/*` field also needs every owner event, epoch start and SurfaceBound owner the
-//!   families hold for the name to equal its rebuild from the event log. For a
+//!   `control/*` field is read from the name's retained lifecycle events rebuilt from the
+//!   publication-visible log, not from the family rows: that read in the canonical order must
+//!   give the shadow value and in today's order the served one. It also needs every owner
+//!   event, epoch start (its kind, name and arm) and binding candidate's SurfaceBound (its kind,
+//!   name, resource, authority kind and key, state-derived flag and owner) the families hold for
+//!   the name to equal its rebuild from that log. For a
 //!   resource's permission rows, admin powers and restriction block, the path-expiry drop rule of
 //!   permissions.rs:111-133, :391-398 must keep the registration live in today's order and
 //!   lapse it in the canonical order, the served value must not be empty, and the whole read in
@@ -877,32 +881,54 @@ async fn name_excuses(
             .collect();
         let ids = generated_ids(pool, chain, clock.block_number, &identities).await?;
         let keys = association_keys(pool, chain, clock.block_number, &identities).await?;
-        if let Some(legacy) = legacy_facts(&facts, &ids, &keys) {
-            let counterfactual = evaluate(&legacy, clock);
-            let mut control_holds = None;
-            for (index, diff) in diffs.iter().enumerate() {
-                // Only the fields the counterfactual computes: an authority-selection field has
-                // no today's-order value here and stays open.
-                if !open(&out, index)
-                    || !shadow_field(&counterfactual, &diff.field)
-                        .is_some_and(|value| same(&value, &diff.served))
-                {
+        // The name's retained lifecycle events rebuilt from the publication-visible log, read
+        // in the canonical order through the refolding path and in today's order. A control
+        // field passes only when the first gives the shadow value and the second the served
+        // one, so a wrong fact on a canonically selected event (its unmasked-word flag, its
+        // recipient) fails even when today's order selects another event.
+        let from_log = log_facts(pool, chain, clock.block_number, &facts).await?;
+        let canonical_log = from_log
+            .as_ref()
+            .map(|facts| evaluate(&in_canonical_ranks(facts), clock));
+        let legacy_log = from_log
+            .as_ref()
+            .and_then(|facts| legacy_facts(facts, &ids, &keys))
+            .map(|legacy| evaluate(&legacy, clock));
+        let legacy = legacy_facts(&facts, &ids, &keys).map(|legacy| evaluate(&legacy, clock));
+        let gives = |read: &Option<ShadowName>, field: &str, value: &Value| {
+            read.as_ref()
+                .and_then(|read| shadow_field(read, field))
+                .is_some_and(|computed| same(&computed, value))
+        };
+        let mut control_holds = None;
+        for (index, diff) in diffs.iter().enumerate() {
+            // Only the fields the counterfactual computes: an authority-selection field has no
+            // today's-order value here and stays open.
+            if !open(&out, index) {
+                continue;
+            }
+            let control = diff.field.starts_with("control/");
+            let passes = if control {
+                gives(&canonical_log, &diff.field, &diff.shadow)
+                    && gives(&legacy_log, &diff.field, &diff.served)
+            } else {
+                gives(&legacy, &diff.field, &diff.served)
+            };
+            if !passes {
+                continue;
+            }
+            // A control field also needs the families' other control facts to be what the event
+            // log gives.
+            if control {
+                if control_holds.is_none() {
+                    control_holds =
+                        Some(control_facts_hold(pool, chain, clock.block_number, &facts).await?);
+                }
+                if control_holds != Some(true) {
                     continue;
                 }
-                // A control field passes only when the families' control facts are what the
-                // event log gives, so a wrong value on the canonically selected event fails.
-                if diff.field.starts_with("control/") {
-                    if control_holds.is_none() {
-                        control_holds = Some(
-                            control_facts_hold(pool, chain, clock.block_number, &facts).await?,
-                        );
-                    }
-                    if control_holds != Some(true) {
-                        continue;
-                    }
-                }
-                out[index] = Excuse::SameBlockOrder;
             }
+            out[index] = Excuse::SameBlockOrder;
         }
     }
     Ok(out)
@@ -929,24 +955,244 @@ fn reported_control_owner(after: &Value) -> Option<String> {
     lower("registry_owner").or_else(|| lower("owner"))
 }
 
-/// One event's log row, by identity: kind, name, resource, source family, block, transaction,
-/// log and after-state.
-type LogRow = (
-    String,
-    Option<String>,
-    Option<String>,
-    String,
-    i64,
-    Option<i64>,
-    Option<i64>,
-    Value,
-);
+/// One publication-visible event of the log.
+pub struct LogEvent {
+    pub kind: String,
+    pub name: Option<String>,
+    pub resource: Option<String>,
+    pub family: String,
+    pub position: Position,
+    pub transaction_hash: Option<String>,
+    pub before: Value,
+    pub after: Value,
+}
+
+/// The publication-visible events (`published`) of `identities`, by identity.
+pub async fn published_log(
+    pool: &PgPool,
+    chain: &str,
+    target: i64,
+    identities: &[String],
+) -> Result<BTreeMap<String, LogEvent>> {
+    type Row = (
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        String,
+        i64,
+        Option<i64>,
+        Option<i64>,
+        Option<String>,
+        Value,
+        Value,
+    );
+    let sql = format!(
+        "SELECT event.event_identity, event.event_kind, event.logical_name_id,
+                event.resource_id::text, event.source_family, event.block_number,
+                event.transaction_index, event.log_index, event.transaction_hash,
+                event.before_state, event.after_state
+         FROM normalized_events event
+         WHERE event.chain_id = $1 AND event.event_identity = ANY($2) AND {}",
+        published("$3")
+    );
+    Ok(sqlx::query_as::<_, Row>(&sql)
+        .bind(chain)
+        .bind(identities)
+        .bind(target)
+        .fetch_all(pool)
+        .await?
+        .into_iter()
+        .map(|row| {
+            let position = Position {
+                block_number: row.5,
+                transaction_index: row.6,
+                log_index: row.7,
+                event_identity: row.0.clone(),
+            };
+            let event = LogEvent {
+                kind: row.1,
+                name: row.2,
+                resource: row.3,
+                family: row.4,
+                position,
+                transaction_hash: row.8,
+                before: row.9,
+                after: row.10,
+            };
+            (row.0, event)
+        })
+        .collect())
+}
+
+/// `after ->> field` as step 2 stores it: a string as it is, another value as its JSON text,
+/// null as none (crates/project/src/families/reduce.rs:134-140).
+fn raw_text(value: &Value, field: &str) -> Option<String> {
+    match value.get(field)? {
+        Value::Null => None,
+        Value::String(text) => Some(text.clone()),
+        other => Some(other.to_string()),
+    }
+}
+
+fn raw_lower(value: &Value, field: &str) -> Option<String> {
+    raw_text(value, field).map(|text| text.to_ascii_lowercase())
+}
+
+/// A boolean or its text, as step 2 stores a flag (crates/project/src/families/lifecycle.rs
+/// :291-299).
+fn raw_flag(value: &Value, field: &str) -> Option<bool> {
+    match value.get(field) {
+        Some(Value::Bool(flag)) => Some(*flag),
+        Some(Value::String(text)) if text == "true" || text == "false" => Some(text == "true"),
+        _ => None,
+    }
+}
+
+/// The expiry in seconds as step 2 converts it: an integral JSON number in range, else none
+/// (crates/project/src/families/lifecycle.rs:302-316, build.sql:493-501).
+fn expiry_seconds(after: &Value) -> Option<i64> {
+    let Some(Value::Number(number)) = after.get("expiry") else {
+        return None;
+    };
+    number
+        .as_i64()
+        .or_else(|| {
+            number
+                .as_f64()
+                .filter(|value| value.fract() == 0.0 && value.abs() < 1e15)
+                .map(|value| value as i64)
+        })
+        .filter(|value| (-377_705_116_800..=253_402_300_799).contains(value))
+}
+
+/// A retained lifecycle event rebuilt from its log row as step 2 writes it
+/// (crates/project/src/families/lifecycle.rs:318-389, `retained_columns`), keeping only the
+/// family's key and decoded name, which the log does not carry. None when the log row is not at
+/// the event's position.
+fn lifecycle_from_log(event: &LifecycleEvent, log: &LogEvent) -> Option<LifecycleEvent> {
+    if log.position != event.position {
+        return None;
+    }
+    let after = &log.after;
+    let kind = log.kind.as_str();
+    Some(LifecycleEvent {
+        position: log.position.clone(),
+        event_kind: log.kind.clone(),
+        original_logical_name_id: log.name.clone(),
+        resource_id: log.resource.clone(),
+        source_family: log.family.clone(),
+        authority_kind: raw_text(after, "authority_kind")
+            .filter(|kind| !kind.is_empty())
+            .unwrap_or_else(|| "registrar".into()),
+        authority_kind_raw: raw_text(after, "authority_kind"),
+        authority_key: raw_text(after, "authority_key"),
+        transaction_hash: log.transaction_hash.clone(),
+        to_address: (kind == "TokenControlTransferred")
+            .then(|| raw_lower(after, "to"))
+            .flatten(),
+        namehash: raw_lower(after, "namehash"),
+        registrant: raw_lower(after, "registrant"),
+        before_registrant: (kind == "RegistrationReleased")
+            .then(|| raw_lower(&log.before, "registrant"))
+            .flatten(),
+        expiry: after.get("expiry").cloned().unwrap_or(Value::Null),
+        expiry_seconds: expiry_seconds(after),
+        status: raw_text(after, "status"),
+        released_at: after.get("released_at").cloned().unwrap_or(Value::Null),
+        source_event: raw_text(after, "source_event"),
+        derived_from: raw_text(after, "derived_from"),
+        terminal_reason: raw_text(after, "terminal_reason"),
+        revived_from_expiry: raw_flag(after, "revived_from_expiry"),
+        state_derived: raw_flag(after, "state_derived"),
+        surface_materialization: raw_flag(after, "surface_materialization"),
+        registrar_surface_snapshot: raw_flag(after, "registrar_surface_snapshot"),
+        original_registered_at: raw_text(after, "original_registered_at")
+            .and_then(|value| value.parse().ok()),
+        owner_getter: raw_lower(after, "owner_getter"),
+        owner_word_unmasked: raw_flag(after, "owner_word_unmasked"),
+        registry_owner: raw_lower(after, "registry_owner"),
+        ..event.clone()
+    })
+}
+
+/// `events` each rebuilt from its publication-visible log row; None when one is not there.
+async fn events_from_log(
+    pool: &PgPool,
+    chain: &str,
+    target: i64,
+    events: &[LifecycleEvent],
+) -> Result<Option<Vec<LifecycleEvent>>> {
+    let identities: Vec<String> = events
+        .iter()
+        .map(|event| event.position.event_identity.clone())
+        .collect();
+    let log = published_log(pool, chain, target, &identities).await?;
+    Ok(events
+        .iter()
+        .map(|event| lifecycle_from_log(event, log.get(&event.position.event_identity)?))
+        .collect())
+}
+
+/// The name's facts with every retained lifecycle event rebuilt from the publication-visible
+/// log; None when one is not there.
+pub async fn log_facts(
+    pool: &PgPool,
+    chain: &str,
+    target: i64,
+    facts: &NameFacts,
+) -> Result<Option<NameFacts>> {
+    let Some(events) = events_from_log(pool, chain, target, &facts.events).await? else {
+        return Ok(None);
+    };
+    let mut out = facts.clone();
+    out.events = events;
+    Ok(Some(out))
+}
+
+/// The facts read in the canonical order through the refolding path: every event and control
+/// position ranked by (block, transaction, log, identity) and the rank given as its generated
+/// id, so membership and the laterals fold the retained events themselves in the canonical
+/// order rather than read the stored key states and triple summaries.
+pub fn in_canonical_ranks(facts: &NameFacts) -> NameFacts {
+    let mut positions: Vec<Position> = facts
+        .events
+        .iter()
+        .map(|event| event.position.clone())
+        .chain(control_positions(facts))
+        .collect();
+    positions.sort();
+    positions.dedup_by(|left, right| left.event_identity == right.event_identity);
+    let mut out = facts.clone();
+    out.order = EventOrder::Generated(
+        positions
+            .into_iter()
+            .enumerate()
+            .map(|(rank, position)| (position.event_identity, rank as i64))
+            .collect(),
+    );
+    out
+}
+
+/// The arm step 2 files an epoch start under (crates/project/src/families/identity.rs:29-37).
+fn epoch_arm(source_family: &str) -> &'static str {
+    if source_family.starts_with("basenames_") {
+        "basenames"
+    } else if source_family.starts_with("ens_v2_") {
+        "ens_v2"
+    } else {
+        "ens_v1"
+    }
+}
 
 /// Whether every control fact of the name the control block reads, beyond its lifecycle
 /// events, is what the event log up to the publication gives: each owner-setting event of its
-/// node, each epoch start and each binding candidate's SurfaceBound owner, found by identity at
-/// its position among the publication-visible events (`published`) and rebuilt from it as
-/// step 2 derives it.
+/// node, each epoch start and each binding candidate's SurfaceBound, found by identity at its
+/// position among the publication-visible events (`published`) and rebuilt from it as step 2
+/// derives it. An epoch start must be an AuthorityEpochChanged of the name filed under its
+/// family's arm (identity.rs:88-101); a candidate's SurfaceBound must be of the candidate's
+/// name and resource with its authority kind, key, state-derived flag and owner
+/// (identity.rs:135-152, :380-400).
 pub async fn control_facts_hold(
     pool: &PgPool,
     chain: &str,
@@ -957,65 +1203,24 @@ pub async fn control_facts_hold(
         .into_iter()
         .map(|position| position.event_identity)
         .collect();
-    let rows: BTreeMap<String, LogRow> = sqlx::query_as::<
-        _,
-        (
-            String,
-            String,
-            Option<String>,
-            Option<String>,
-            String,
-            i64,
-            Option<i64>,
-            Option<i64>,
-            Value,
-        ),
-    >(&format!(
-        "SELECT event.event_identity, event.event_kind, event.logical_name_id,
-                event.resource_id::text, event.source_family, event.block_number,
-                event.transaction_index, event.log_index, event.after_state
-         FROM normalized_events event
-         WHERE event.chain_id = $1 AND event.event_identity = ANY($2) AND {}",
-        published("$3")
-    ))
-    .bind(chain)
-    .bind(&identities)
-    .bind(target)
-    .fetch_all(pool)
-    .await?
-    .into_iter()
-    .map(|row| {
-        (
-            row.0,
-            (row.1, row.2, row.3, row.4, row.5, row.6, row.7, row.8),
-        )
-    })
-    .collect();
+    let log = published_log(pool, chain, target, &identities).await?;
     let at = |position: &Position| {
-        rows.get(&position.event_identity).filter(|row| {
-            (row.4, row.5, row.6)
-                == (
-                    position.block_number,
-                    position.transaction_index,
-                    position.log_index,
-                )
-        })
+        log.get(&position.event_identity)
+            .filter(|row| row.position == *position)
     };
-    let text =
-        |after: &Value, name: &str| after.get(name).and_then(Value::as_str).map(str::to_owned);
-    let lower = |after: &Value, name: &str| text(after, name).map(|value| value.to_lowercase());
+    let lower = |after: &Value, name: &str| raw_lower(after, name);
     let owners_hold = facts
         .registry_node
         .iter()
         .flat_map(|node| &node.owner_events)
         .all(|event| {
             at(&event.position).is_some_and(|row| {
-                let after = &row.7;
-                row.0 == event.event_kind
-                    && row.1 == event.logical_name_id
-                    && row.2 == event.resource_id
-                    && row.3 == event.source_family
-                    && text(after, "authority_kind") == event.authority_kind
+                let after = &row.after;
+                row.kind == event.event_kind
+                    && row.name == event.logical_name_id
+                    && row.resource == event.resource_id
+                    && row.family == event.source_family
+                    && raw_text(after, "authority_kind") == event.authority_kind
                     && lower(after, "owner") == event.owner
                     && lower(after, "registry_owner") == event.registry_owner
                     && after.get("owner_word_unmasked").and_then(Value::as_bool)
@@ -1023,22 +1228,26 @@ pub async fn control_facts_hold(
                     && lower(after, "owner_getter") == event.owner_getter
             })
         });
+    let name = facts.input.logical_name_id.as_str();
     let starts_hold = facts
         .authority_starts
         .as_object()
         .into_iter()
         .flatten()
-        .all(|(_, start)| {
+        .all(|(arm, start)| {
             Position::from_json(start).is_some_and(|position| {
                 at(&position).is_some_and(|row| {
-                    let member = |name: &str| start.get(name).and_then(Value::as_str);
-                    let after = &row.7;
-                    member("owner").map(str::to_owned) == reported_control_owner(after)
-                        && member("resource_id") == row.2.as_deref()
+                    let member = |field: &str| start.get(field).and_then(Value::as_str);
+                    let after = &row.after;
+                    row.kind == "AuthorityEpochChanged"
+                        && row.name.as_deref() == Some(name)
+                        && epoch_arm(&row.family) == arm
+                        && member("owner").map(str::to_owned) == reported_control_owner(after)
+                        && member("resource_id") == row.resource.as_deref()
                         && member("authority_kind").map(str::to_owned)
-                            == text(after, "authority_kind")
+                            == raw_text(after, "authority_kind")
                         && member("authority_key").map(str::to_owned)
-                            == text(after, "authority_key")
+                            == raw_text(after, "authority_key")
                 })
             })
         });
@@ -1047,8 +1256,17 @@ pub async fn control_facts_hold(
             .surface_bound_position
             .as_ref()
             .is_none_or(|position| {
-                at(position)
-                    .is_some_and(|row| candidate.bound_owner == reported_control_owner(&row.7))
+                at(position).is_some_and(|row| {
+                    let after = &row.after;
+                    row.kind == "SurfaceBound"
+                        && row.name.as_deref() == Some(candidate.logical_name_id.as_str())
+                        && row.resource.as_deref() == Some(candidate.resource_id.as_str())
+                        && raw_text(after, "authority_kind") == candidate.authority_kind
+                        && raw_text(after, "authority_key") == candidate.authority_key
+                        && after.get("state_derived").and_then(Value::as_bool)
+                            == candidate.state_derived
+                        && candidate.bound_owner == reported_control_owner(after)
+                })
             })
     });
     Ok(owners_hold && starts_hold && bounds_hold)
