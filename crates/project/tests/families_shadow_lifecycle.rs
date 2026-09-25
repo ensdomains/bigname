@@ -982,3 +982,77 @@ async fn an_unnamed_path_expiry_on_the_resource_serves_the_release() -> Result<(
     );
     fixture.cleanup().await
 }
+
+/// A subregistry rebind moves resource K1 from name 1 to name 2 in one raw log: the adapter
+/// emits a named RegistrationReleased for the previous name and a named RegistrationGranted for
+/// the current one on the same resource (crates/adapters/src/schema_v2/protocol/v2_registry/
+/// topology.rs:65-84, :363-370), and their identities sort the grant first. The key state of K1
+/// then holds both names' events. A name's membership of its key is its own events and the
+/// unnamed ones, never another name's: name 2 stays active on its grant, name 1 is released, and
+/// the other name's events on the key are traced.
+#[tokio::test]
+async fn a_topology_rebind_keeps_each_name_to_its_own_events_on_the_shared_key() -> Result<()> {
+    let fixture = Fixture::new("families_shadow_topology_rebind", 20).await?;
+    let k1 = uuid(1);
+    v2_binding(&fixture, &k1).await?;
+    v2(
+        &fixture,
+        10,
+        "RegistrationGranted",
+        Some(&k1),
+        json!({"status": "registered", "registrant": ALICE, "expiry": 2_000_000_000u64}),
+    )
+    .await?;
+    fixture
+        .binding(&uuid(101), &name(2), &k1, "ens_v2", 12, 0, None)
+        .await?;
+    let registry = json!({"registry_contract_instance_id": "R", "token_id": "7",
+                          "authority_kind": "registrar"});
+    for (identity, kind, logical_name, mut after) in [
+        (
+            "rebind:RegistrationReleased:topology:R:7",
+            "RegistrationReleased",
+            name(1),
+            json!({"source_event": "SubregistryUpdated",
+                   "terminal_reason": "registry_name_binding_changed", "status": "released",
+                   "released_at": 1_800_000_144u64}),
+        ),
+        (
+            "rebind:RegistrationGranted:topology:R:7",
+            "RegistrationGranted",
+            name(2),
+            json!({"source_event": "SubregistryUpdated", "status": "registered",
+                   "registrant": BOB, "expiry": 2_000_000_000u64}),
+        ),
+    ] {
+        for (field, value) in registry.as_object().expect("an object") {
+            after[field] = value.clone();
+        }
+        fixture
+            .event(
+                Event::new(identity, 12, 1, kind, V2_REGISTRY)
+                    .name(&logical_name)
+                    .resource(&k1)
+                    .after(after)
+                    .raw(json!({"emitting_address": REGISTRY})),
+            )
+            .await?;
+    }
+    let report = publish_and_compare(&fixture, 14).await?;
+    assert_counts(&report, &[], &[]);
+    let (served, shadow) = shadow_support::name(&fixture, 14, &name(2)).await?;
+    assert_eq!(served.registration("status"), json!("active"));
+    assert_eq!(shadow.registration["status"], json!("active"));
+    assert_eq!(shadow.registration["registrant"], json!(BOB));
+    assert_eq!(
+        shadow.trace["foreign_named_members"],
+        json!([
+            "RegistrationGranted:10:1",
+            "rebind:RegistrationReleased:topology:R:7"
+        ])
+    );
+    let (served, shadow) = shadow_support::name(&fixture, 14, &name(1)).await?;
+    assert_eq!(served.registration("status"), json!("released"));
+    assert_eq!(shadow.registration["status"], json!("released"));
+    fixture.cleanup().await
+}

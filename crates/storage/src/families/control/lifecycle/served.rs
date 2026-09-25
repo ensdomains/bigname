@@ -12,7 +12,8 @@ use super::{
         authority_context, control_owner, expiry_candidate, format_utc, latest_event_kind,
         registered_at, registrant, registrar_resource,
     },
-    view::{self, Candidate, MergedView},
+    membership::{foreign_named, merged_for},
+    view::{self, Candidate},
 };
 use crate::families::control::{
     position::Position,
@@ -383,46 +384,56 @@ fn select_v2<'a>(
         .collect();
     keys.sort();
     keys.dedup();
-    // Events on the name's keys that were not emitted for the name: the key state counts them,
-    // today's name-scoped membership does not.
-    let foreign: Vec<String> = tagged
+    // Events on the name's keys emitted for another name (a topology rebind): left out of the
+    // name's membership (membership.rs) and traced.
+    let foreign: Vec<String> = facts
+        .events
         .iter()
-        .filter(|tagged| {
-            tagged.event.is_v2_family()
-                && tagged.event.original_logical_name_id.as_deref() != Some(name)
-                && tagged
-                    .key
-                    .as_ref()
-                    .is_some_and(|key| keys.binary_search(key).is_ok())
-        })
-        .map(|tagged| tagged.event.position.event_identity.clone())
+        .filter(|event| keys.iter().any(|key| foreign_named(event, key, name)))
+        .map(|event| event.position.event_identity.clone())
         .collect();
     if !foreign.is_empty() {
-        trace.insert("foreign_members".into(), json!(foreign));
+        trace.insert("foreign_named_members".into(), json!(foreign));
     }
     let mut candidates: Vec<(String, Candidate, &'a LifecycleEvent)> = Vec::new();
     for key in keys {
-        let view = merged_for(facts, &key);
+        let view = merged_for(facts, &key, name);
         let Some(candidate) = view::candidate(&view) else {
             continue;
         };
-        // The candidate event itself, for its payload, looked up by the key and not by the name:
-        // the key state counts every event on the resource (design:40, decoder rule 1), so the
-        // interpreter's path-expiry release, which names the resource and no name
-        // (adapters v2_registry/expiry.rs:58-59), is the key's candidate when it is the latest.
-        // An expired or released ENSv2 registration stays ENSv2 and is served unregistered; it
-        // never falls back to an ENSv1 lease (Tate's ruling on TYR-36 step 3). On chain a
-        // registration is over once its expiry has passed, and unregistering sets the expiry to
-        // the current time.
+        // The candidate event itself, for its payload: the name's own event or an unnamed one on
+        // the key. The interpreter's path-expiry release names the resource and no name
+        // (adapters v2_registry/expiry.rs:58-59), so it is the key's candidate when it is the
+        // latest, and the name is served released: an expired or released ENSv2 registration
+        // stays ENSv2 and is served unregistered (Tate's ruling on TYR-36 step 3). On chain a
+        // registration is over once its expiry has passed: the registry then reports no owner
+        // and no resolver for it, and unregistering sets the expiry to the current time.
         // (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L36 @ ens_v2@a971bd64)
         // (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L206 @ ens_v2@a971bd64)
         // (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L255-L258 @ ens_v2@a971bd64)
-        // Today's name-scoped membership (build.sql:322) never sees the release, a served-side
-        // bug the harness records.
+        // (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L313-L316 @ ens_v2@a971bd64)
+        // Today's name-scoped membership (build.sql:322) never sees the unnamed release, a
+        // served-side bug the harness records. Another name's event is never the candidate: the
+        // membership leaves it out, and one found here is traced and the key skipped.
         let event = tagged.iter().find(|tagged| {
             tagged.event.position.event_identity == candidate.position.event_identity
                 && tagged.key.as_deref() == Some(key.as_str())
         });
+        if let Some(foreign) = event.filter(|tagged| {
+            tagged
+                .event
+                .original_logical_name_id
+                .as_deref()
+                .is_some_and(|emitted| emitted != name)
+        }) {
+            trace
+                .entry("foreign_named_candidate")
+                .or_insert_with(|| json!([]))
+                .as_array_mut()
+                .expect("an array")
+                .push(json!(foreign.event.position.event_identity));
+            continue;
+        }
         match event {
             Some(tagged) => candidates.push((key, candidate, tagged.event)),
             None => {
@@ -472,25 +483,4 @@ fn select_v2<'a>(
         event: Some(event),
         lifecycle_key: Some(key.clone()),
     }
-}
-
-/// The merged view of one ENSv2 lifecycle key: a resource's key state with the summaries of the
-/// triples associated with it, or an unassociated triple's summary alone.
-pub(super) fn merged_for(facts: &NameFacts, key: &str) -> MergedView {
-    let associated = facts
-        .triples
-        .iter()
-        .filter(|triple| triple.target.as_deref() == Some(key))
-        .map(|triple| &triple.maxima);
-    if let Some(state) = facts.key_states.get(key) {
-        return view::merged_view(Some(state), associated);
-    }
-    let unassociated = facts
-        .triples
-        .iter()
-        .filter(|triple| {
-            triple.target.is_none() && triple.unassociated_key().as_deref() == Some(key)
-        })
-        .map(|triple| &triple.maxima);
-    view::merged_view(None, associated.chain(unassociated))
 }

@@ -72,7 +72,7 @@ use bigname_storage::{
         compare::{Difference, differences, field, same},
         lifecycle::{
             AuthoritySelection, CONTROL_FIELDS, Clock, NameFacts, NameInput, REGISTRATION_FIELDS,
-            ShadowName, evaluate, load_name_facts, load_shadow_names,
+            ShadowName, evaluate, load_name_facts, load_shadow_names, membership::maxima_of,
         },
         permissions::{
             ResourceInput, effective_operator_rows, grant_json, load_shadow_approvals,
@@ -83,7 +83,7 @@ use bigname_storage::{
             NameAttribution, load_observations, load_registry_nodes, ownerless_registry,
             registry_bindings, registry_generation,
         },
-        rows::{LifecycleEvent, Mark, Maxima},
+        rows::LifecycleEvent,
     },
     load_effective_permissions_by_resource_ids, load_name_current_by_logical_name_ids,
 };
@@ -851,12 +851,23 @@ fn legacy_facts(facts: &NameFacts, ids: &BTreeMap<String, i64>) -> Option<NameFa
     }
     let keys: Vec<String> = out.key_states.keys().cloned().collect();
     for key in keys {
-        let maxima = maxima_of(&out.events, "resource", &key);
+        let maxima = maxima_of(
+            out.events
+                .iter()
+                .filter(|event| event.state_kind == "resource" && event.state_key == key),
+            true,
+        );
         out.key_states.insert(key, maxima);
     }
     let events = out.events.clone();
     for triple in &mut out.triples {
-        triple.maxima = maxima_of(&events, "triple", &triple.state_key());
+        let state_key = triple.state_key();
+        triple.maxima = maxima_of(
+            events
+                .iter()
+                .filter(|event| event.state_kind == "triple" && event.state_key == state_key),
+            false,
+        );
         let Some(winner) = triple.target_position.clone() else {
             continue;
         };
@@ -883,55 +894,6 @@ fn legacy_facts(facts: &NameFacts, ids: &BTreeMap<String, i64>) -> Option<NameFa
         }
     }
     Some(out)
-}
-
-/// The membership maxima of one lifecycle key read from its retained events in their current
-/// positions, the fold of step 2's reducer (crates/project/src/families/lifecycle.rs:388-497).
-fn maxima_of(events: &[LifecycleEvent], state_kind: &str, state_key: &str) -> Maxima {
-    let mut own: Vec<&LifecycleEvent> = events
-        .iter()
-        .filter(|event| event.state_kind == state_kind && event.state_key == state_key)
-        .collect();
-    own.sort_by(|left, right| left.position.cmp(&right.position));
-    let mark = |event: &LifecycleEvent| {
-        Some(Mark {
-            position: event.position.clone(),
-            detail: json!({"kind": event.event_kind}),
-        })
-    };
-    let mut maxima = Maxima::default();
-    for event in own {
-        match event.event_kind.as_str() {
-            "RegistrationGranted" => {
-                maxima.last_grant = mark(event);
-                maxima.last_active = mark(event);
-            }
-            "RegistrationReserved" => {
-                maxima.last_reservation = mark(event);
-                maxima.last_active = mark(event);
-            }
-            "RegistrationReleased" => {
-                maxima.last_release_any = mark(event);
-                if event.is_path_expiry() {
-                    maxima.last_path_expiry = mark(event);
-                } else {
-                    maxima.last_explicit_release = mark(event);
-                }
-            }
-            "RegistrationRenewed" => {
-                if state_kind == "resource"
-                    && event.revived_from_expiry == Some(true)
-                    && maxima.last_path_expiry.is_some()
-                {
-                    maxima.last_revival = mark(event);
-                }
-                maxima.last_renewal = mark(event);
-            }
-            "ExpiryChanged" => maxima.last_expiry_changed = mark(event),
-            _ => {}
-        }
-    }
-    maxima
 }
 
 /// The cause shown for each differing field of one resource, in `diffs` order: only the

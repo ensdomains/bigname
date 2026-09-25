@@ -6,7 +6,8 @@ use serde_json::{Value, json};
 use super::{
     NameFacts,
     admission::{Authority, Probe, REGISTRAR, StagedName},
-    served::{Selected, Tagged, latest, merged_for},
+    membership::merged_for,
+    served::{Selected, Tagged, latest},
 };
 use crate::families::control::{
     position::Position,
@@ -331,7 +332,7 @@ pub(super) fn latest_event_kind(
     }
     let found = if is_v2 {
         selected_key.and_then(|key| {
-            let view = merged_for(facts, key);
+            let view = merged_for(facts, key, &facts.input.logical_name_id);
             let marks: [(&Option<Mark>, &str); 5] = [
                 (&view.last_grant, "RegistrationGranted"),
                 (&view.last_renewal, "RegistrationRenewed"),
