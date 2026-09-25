@@ -653,7 +653,8 @@ for migration_file in \
     "$ROOT/migrations/20260926101300_project_families_wrapper_lifecycle.sql" \
     "$ROOT/migrations/20260926101400_project_families_binding_pairing.sql" \
     "$ROOT/migrations/20260926101500_project_families_pointer_expiry_clear.sql" \
-    "$ROOT/migrations/20260926101600_project_families_registry_owner_event.sql"
+    "$ROOT/migrations/20260926101600_project_families_registry_owner_event.sql" \
+    "$ROOT/migrations/20260926101700_project_families_resolver_destination_index.sql"
 do
     emit_phase_migration "$migration_file" empty-schema | run_psql
 done
@@ -942,7 +943,9 @@ for migration_file in \
     "$ROOT/migrations/20260926101500_project_families_pointer_expiry_clear.sql" \
     "$ROOT/migrations/20260926101500_project_families_pointer_expiry_clear.sql" \
     "$ROOT/migrations/20260926101600_project_families_registry_owner_event.sql" \
-    "$ROOT/migrations/20260926101600_project_families_registry_owner_event.sql"
+    "$ROOT/migrations/20260926101600_project_families_registry_owner_event.sql" \
+    "$ROOT/migrations/20260926101700_project_families_resolver_destination_index.sql" \
+    "$ROOT/migrations/20260926101700_project_families_resolver_destination_index.sql"
 do
     emit_phase_migration "$migration_file" baseline-first | run_psql
 done
