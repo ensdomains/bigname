@@ -11,7 +11,7 @@ use super::*;
 // takes the token's name also writes a named release first (see production_interpret
 // `a_detached_child_expiry_is_released_without_a_name_and_stays_a_v2_tombstone`), and this case
 // leaves that release out so the nameless one decides alone.
-// The name's registration section follows the same selection (Tate's ruling of 2026-09-26): it
+// The name's registration section follows the same selection (product ruling of 2026-09-26): it
 // reads the nameless release on the resource the name was last bound to, so it serves the release
 // too, not the old grant.
 // (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L255-L258 @ ens_v2@a971bd64)
@@ -49,7 +49,21 @@ async fn a_nameless_path_expiry_release_keeps_the_name_on_its_v2_tombstone() -> 
         },
     )
     .await?;
-    sqlx::query("UPDATE normalized_events SET block_number = 9, block_hash = $1 WHERE event_identity = 'nameless-expiry-v2-grant'")
+    // A resolver the registration set, so the released row's resolver suppression is visible.
+    event(
+        &pool,
+        "nameless-expiry-v2-resolver",
+        &logical,
+        Some(&v2_resource),
+        Event {
+            family: "ens_v2_registry_l1",
+            kind: "ResolverChanged",
+            log: 3,
+            after: json!({"resolver":"0x0000000000000000000000000000000000000bee"}),
+        },
+    )
+    .await?;
+    sqlx::query("UPDATE normalized_events SET block_number = 9, block_hash = $1 WHERE event_identity IN ('nameless-expiry-v2-grant', 'nameless-expiry-v2-resolver')")
         .bind(EARLIER_HASH).execute(&pool).await?;
     sqlx::query("INSERT INTO normalized_events (event_identity, namespace, logical_name_id, resource_id, event_kind, source_family, manifest_version, chain_id, block_number, block_hash, transaction_hash, transaction_index, log_index, derivation_kind, canonicality_state, after_state) VALUES ('nameless-expiry-v2-release', 'ens', NULL, $1::uuid, 'RegistrationReleased', 'ens_v2_registry_l1', 1, $2, 10, $3, NULL, NULL, NULL, 'ens_v2_registry_resource_surface', 'canonical', $4)")
         .bind(&v2_resource).bind(CHAIN).bind(HASH)
@@ -99,6 +113,17 @@ async fn a_nameless_path_expiry_release_keeps_the_name_on_its_v2_tombstone() -> 
         ),
         "the registration section serves the nameless release, as authority selection does"
     );
+    // The released row serves no registrant and no resolver, as for any released ENSv2 row.
+    let suppressed: (Option<String>, Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT declared_summary #>> '{registration,registrant}',
+                declared_summary #>> '{resolver,chain_id}',
+                declared_summary #>> '{resolver,address}'
+         FROM name_current WHERE logical_name_id = $1",
+    )
+    .bind(&logical)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(suppressed, (None, None, None));
     db.cleanup().await?;
     Ok(())
 }

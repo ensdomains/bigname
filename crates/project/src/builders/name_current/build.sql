@@ -310,7 +310,7 @@
             SELECT event.event_kind, event.after_state, event.resource_id, event.lifecycle_key
             FROM (SELECT DISTINCT ON (event.lifecycle_key) event.* FROM project_v2_lifecycle_events event
             -- Like authority selection, a release Interpret wrote without a name on the resource
-            -- the name was last bound to is that registration's release (Tate's ruling of
+            -- the name was last bound to is that registration's release (product ruling of
             -- 2026-09-26), so the section serves it as authority selection does. The selected
             -- binding of an ENSv2 name is on that resource.
             WHERE (event.logical_name_id = surface.logical_name_id
@@ -328,6 +328,10 @@
                     AND ((event.event_kind = 'RegistrationReleased' AND later.event_kind IN ('RegistrationGranted', 'RegistrationReserved')) OR (event.event_kind <> 'RegistrationReleased' AND later.event_kind = 'RegistrationReleased'))
                     AND ROW(COALESCE(later.block_number, -1), later.normalized_event_id) > ROW(COALESCE(event.block_number, -1), event.normalized_event_id)
               )
+            -- Inside one block the latest row of a key is the one with the highest
+            -- normalized_event_id, not the latest transaction or log position. Block-boundary
+            -- rows (no transaction or log index) at one position tie the same way in authority
+            -- selection; this is the shape the two_boundary_releases test pins.
             ORDER BY event.lifecycle_key, event.block_number DESC NULLS LAST, event.normalized_event_id DESC) event
             ORDER BY (binding.resource_id IS NOT NULL AND event.lifecycle_key IS NOT DISTINCT FROM binding.resource_id::text AND event.event_kind <> 'RegistrationReleased') DESC,
                      (event.event_kind = 'RegistrationReleased'),

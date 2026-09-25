@@ -5400,10 +5400,10 @@ async fn a_detached_child_expiry_is_released_without_a_name_and_stays_a_v2_tombs
             Some("released".into()),
         )
     );
-    // The registration section reads the same latest fact as authority selection (Tate's ruling
-    // of 2026-09-26): the nameless path-expiry release at block 2, not the named path-cut release
-    // at block 1. So it serves that release's time and the lapsed expiry the entry still holds,
-    // and the control section is unregistered.
+    // The registration section reads the same latest fact as authority selection (product
+    // ruling of 2026-09-26): the nameless path-expiry release at block 2, not the named path-cut
+    // release at block 1. So it serves that release's time and the lapsed expiry the entry still
+    // holds, and the control section is unregistered.
     let details: (
         Option<String>,
         Option<String>,
