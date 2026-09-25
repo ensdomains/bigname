@@ -1690,8 +1690,10 @@ run spends its budget, skips nothing and applies or undoes at least one block.
 A stop, a failed block or an Interpret revision change can still end it early.
 The served redo stays recorded, but the command exits non-zero with "family
 repair incomplete". The shortfall is recorded when the family run takes its
-pending work, before the run starts, and cleared only when a run ends on the
-served block, so a stop before the first family block also fails the command.
+pending work, before the run starts, and cleared only when a run that skipped
+nothing ends on the served block, so a stop before the first family block, or a
+skip while the family marker already stands on the served block, also fails the
+command.
 The error names the served marker, and the family marker when a run ended with
 one; otherwise it says the family marker is unavailable. Rerunning the same
 redo repairs the families once the cause is gone. The run reads the Interpret and Project

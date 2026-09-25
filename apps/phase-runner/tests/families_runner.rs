@@ -196,6 +196,48 @@ async fn a_one_shot_redo_whose_families_stop_short_fails_and_a_rerun_repairs_the
     scratch.cleanup().await
 }
 
+// A skipped family run is a shortfall even when the family marker already stands on the served
+// block: a redo that ends where the served marker was keeps its block and hash, so only the skip
+// shows the families never applied the redo attempt.
+#[tokio::test]
+async fn a_one_shot_redo_whose_family_run_is_skipped_on_the_served_block_fails() -> Result<()> {
+    let scratch = ready_through("families_runner_skip", 30).await?;
+    seed_thirty_blocks_of_work(&scratch).await?;
+    let families = FamilySettings {
+        finish_each_batch: true,
+        ..FamilySettings::default()
+    };
+    redo_project_through(&scratch, families, 30).await?;
+    assert_eq!(
+        marker(&scratch).await?,
+        Some(30),
+        "the families stand on the served block"
+    );
+
+    let late = FamilySettings {
+        token_budget: Duration::ZERO,
+        ..families
+    };
+    let error = redo_project_through(&scratch, late, 30)
+        .await
+        .expect_err("the family run was skipped");
+    assert_eq!(
+        project_state(&scratch).await?,
+        ("completed".into(), Some(30), false)
+    );
+    let message = error.to_string();
+    assert!(message.contains("family repair incomplete"), "{message}");
+    assert!(
+        message.contains("served marker block 30 (")
+            && message.contains("the input token did not read within"),
+        "{message}"
+    );
+
+    redo_project_through(&scratch, families, 30).await?;
+    assert_eq!(marker(&scratch).await?, Some(30));
+    scratch.cleanup().await
+}
+
 // A stop that arrives while the final served batch is being recorded abandons the family run
 // before it starts. The redo still records the served batch, and the command fails with the
 // families reported short; an uncancelled rerun repairs them.
