@@ -193,6 +193,54 @@ async fn a_one_shot_redo_whose_families_stop_short_fails_and_a_rerun_repairs_the
         Arc::new(ProjectPhase::new(scratch.pool().clone()).with_family_settings(families));
     redo_with_phase(&scratch, project, 30).await?;
     assert_eq!(marker(&scratch).await?, Some(30), "the rerun repaired them");
+    assert!(repair_completed_for_current_attempt(&scratch).await?);
+    scratch.cleanup().await
+}
+
+// The token-read failure with the families already on the served block: the run is skipped
+// through the token error path, which reads the marker but repairs nothing. The command fails, and
+// a rerun with the token readable completes the current repair attempt.
+#[tokio::test]
+async fn a_one_shot_redo_whose_token_read_fails_on_the_served_block_fails() -> Result<()> {
+    let scratch = ready_through("families_runner_token_skip", 30).await?;
+    seed_thirty_blocks_of_work(&scratch).await?;
+    let families = FamilySettings {
+        finish_each_batch: true,
+        ..FamilySettings::default()
+    };
+    redo_project_through(&scratch, families, 30).await?;
+    let before = marker_row(&scratch).await?;
+    assert_eq!(before.0, Some(30), "the families stand on the served block");
+
+    let late = FamilySettings {
+        token_budget: Duration::ZERO,
+        ..families
+    };
+    let error = redo_project_through(&scratch, late, 30)
+        .await
+        .expect_err("the token read failed");
+    assert_eq!(
+        project_state(&scratch).await?,
+        ("completed".into(), Some(30), false),
+        "the served redo is recorded"
+    );
+    assert_eq!(
+        marker_row(&scratch).await?,
+        before,
+        "the families did not move"
+    );
+    assert!(!repair_completed_for_current_attempt(&scratch).await?);
+    let message = error.to_string();
+    assert!(message.contains("family repair incomplete"), "{message}");
+    assert!(
+        message.contains("families at block 30 (")
+            && message.contains("served marker block 30 (")
+            && message.contains("the input token did not read within"),
+        "{message}"
+    );
+
+    redo_project_through(&scratch, families, 30).await?;
+    assert!(repair_completed_for_current_attempt(&scratch).await?);
     scratch.cleanup().await
 }
 
@@ -236,6 +284,7 @@ async fn a_one_shot_redo_whose_family_run_is_skipped_on_the_served_block_fails()
         before,
         "nothing family-side committed"
     );
+    assert!(!repair_completed_for_current_attempt(&scratch).await?);
     let message = error.to_string();
     assert!(message.contains("family repair incomplete"), "{message}");
     assert!(
@@ -247,8 +296,31 @@ async fn a_one_shot_redo_whose_family_run_is_skipped_on_the_served_block_fails()
         .execute(scratch.pool())
         .await?;
     redo_project_through(&scratch, families, 30).await?;
-    assert_eq!(marker(&scratch).await?, Some(30));
+    assert!(repair_completed_for_current_attempt(&scratch).await?);
     scratch.cleanup().await
+}
+
+/// Whether the repair record completed the Project redo attempt now on the served row, on the
+/// marker as it stands, at the served block. Marker height alone would not show it.
+async fn repair_completed_for_current_attempt(scratch: &ScratchDatabase) -> Result<bool> {
+    Ok(sqlx::query_scalar(
+        "SELECT EXISTS (
+             SELECT 1 FROM project_repair_record record
+             JOIN chain_phase_state project
+               ON project.chain_id = record.chain_id AND project.phase_name = 'project'
+             JOIN project_family_marker marker ON marker.chain_id = record.chain_id
+             WHERE record.chain_id = $1 AND record.state = 'complete'
+               AND record.attempt = project.redo_attempt_generation
+               AND marker.project_redo_attempt = project.redo_attempt_generation
+               AND record.completed_sequence = marker.sequence
+               AND record.completed_marker_number = marker.current_block_number
+               AND record.completed_marker_hash = marker.current_block_hash
+               AND marker.current_block_number = project.current_block_number
+               AND marker.current_block_hash = project.current_block_hash)",
+    )
+    .bind(CHAIN)
+    .fetch_one(scratch.pool())
+    .await?)
 }
 
 /// The family marker's block, hash and generation.
@@ -305,6 +377,7 @@ async fn a_stop_during_the_final_served_batch_fails_the_one_shot_redo_and_a_reru
         Arc::new(ProjectPhase::new(scratch.pool().clone()).with_family_settings(families));
     redo_with_phase(&scratch, project, 30).await?;
     assert_eq!(marker(&scratch).await?, Some(30), "the rerun repaired them");
+    assert!(repair_completed_for_current_attempt(&scratch).await?);
     scratch.cleanup().await
 }
 

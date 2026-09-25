@@ -406,19 +406,27 @@ impl Phase for ProjectPhase {
                 // runner closes it when it records this batch. The read is bounded so it cannot
                 // hold up the progress write; a failed or late read skips this batch's families,
                 // is counted as a skip, and the next run sees the redo attempt it missed and
-                // rebuilds.
-                let token = match tokio::time::timeout(
-                    self.families.token_budget,
-                    bigname_project::families::input_token(&self.pool, &context.chain_id),
-                )
-                .await
-                {
-                    Ok(Ok(token)) => Ok(token),
-                    Ok(Err(error)) => Err(format!("the input token did not read: {error}")),
-                    Err(_) => Err(format!(
+                // rebuilds. A zero budget skips without starting the read, which a zero-length
+                // timer would otherwise race.
+                let late = || {
+                    format!(
                         "the input token did not read within {:?}",
                         self.families.token_budget
-                    )),
+                    )
+                };
+                let token = if self.families.token_budget.is_zero() {
+                    Err(late())
+                } else {
+                    match tokio::time::timeout(
+                        self.families.token_budget,
+                        bigname_project::families::input_token(&self.pool, &context.chain_id),
+                    )
+                    .await
+                    {
+                        Ok(Ok(token)) => Ok(token),
+                        Ok(Err(error)) => Err(format!("the input token did not read: {error}")),
+                        Err(_) => Err(late()),
+                    }
                 };
                 self.pending_families
                     .lock()
