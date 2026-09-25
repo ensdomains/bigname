@@ -1201,6 +1201,7 @@ CREATE TABLE IF NOT EXISTS project_repair_record (
     completed_input_hash text,
     updated_at timestamptz NOT NULL DEFAULT now(),
     prefix_recorded boolean NOT NULL DEFAULT false,
+    reset_sequence bigint,
     PRIMARY KEY (chain_id),
     CHECK (reason IN ('required_redo_range', 'orphaned_lineage', 'content_hash_rebuild', 'operator_redo')),
     CHECK (state IN ('undoing', 'replaying', 'rebuilding', 'complete')),
@@ -1248,6 +1249,8 @@ COMMENT ON COLUMN project_repair_record.completed_input_hash IS
     'This value is the interpreter content hash the completing loop ran under; null until complete.';
 COMMENT ON COLUMN project_repair_record.updated_at IS
     'This value is when the record last changed.';
+COMMENT ON COLUMN project_repair_record.reset_sequence IS
+    'This value is the family marker generation the rebuild''s reset wrote; null for an undo-then-replay.';
 COMMENT ON COLUMN project_repair_record.prefix_recorded IS
     'This value is true once the replay or rebuild captured its input revision in prefix_interpret_input_content_hash and prefix_interpret_redo_attempt, which may both be null when the chain has no Interpret row; false while undoing.';
 

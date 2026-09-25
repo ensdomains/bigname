@@ -484,3 +484,25 @@ async fn a_key_written_twice_in_one_block_undoes_to_its_state_before_the_block()
     fixture.assert_rebuild_equal(12).await?;
     fixture.cleanup().await
 }
+
+// A rebuild refreshes the family statistics after 1, 2, 4, 8, ... blocks since its reset, counted
+// across runs: a rebuild split over two runs refreshes at each of those points once.
+#[tokio::test]
+async fn a_rebuild_over_two_runs_refreshes_the_statistics_once_per_threshold() -> Result<()> {
+    let fixture = Fixture::new("families_repair_statistics", 40).await?;
+    seed(&fixture, 11..=30).await?;
+    let small = FamilyOptions::new(CONTENT_HASH).with_max_blocks_per_run(5);
+    let first = fixture.apply_with(30, FamilyMode::Rebuild, &small).await;
+    assert_eq!((first.skipped.as_deref(), first.blocks), (None, 5));
+    assert_eq!(
+        first.statistics_refreshes, 3,
+        "after 1, 2 and 4 rebuilt blocks"
+    );
+    let second = fixture.apply_with(30, FamilyMode::Normal, &small).await;
+    assert_eq!((second.skipped.as_deref(), second.blocks), (None, 5));
+    assert_eq!(
+        second.statistics_refreshes, 1,
+        "after 8 rebuilt blocks; 1, 2 and 4 were the first run's"
+    );
+    fixture.cleanup().await
+}

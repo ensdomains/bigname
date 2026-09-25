@@ -30,7 +30,9 @@ impl Run<'_> {
         }
         let (reset, revision) = self.reset(reason, attempt, family, planned).await?;
         outcome.reset = true;
-        self.populate(reset, attempt, &revision, outcome).await
+        let reset_sequence = reset.sequence;
+        self.populate(reset, attempt, reset_sequence, &revision, outcome)
+            .await
     }
 
     /// Resume a rebuild the record says is under way; start it again when its input revision
@@ -60,17 +62,27 @@ impl Run<'_> {
                 .await;
         }
         let revision = revision.expect("checked equal to a recorded prefix");
-        self.populate(family.clone(), record.attempt, &revision, outcome)
-            .await
+        // A record written before the reset generation was kept counts from this run.
+        let reset_sequence = record.reset_sequence.unwrap_or(family.sequence);
+        self.populate(
+            family.clone(),
+            record.attempt,
+            reset_sequence,
+            &revision,
+            outcome,
+        )
+        .await
     }
 
     /// Populate from `family` to the target, visiting only the blocks that carry family work
     /// and then the target itself, so the marker ends at the target. The target's block
-    /// completes the record.
+    /// completes the record. `reset_sequence` is the marker generation the rebuild's reset wrote,
+    /// so the blocks rebuilt since the reset are the generations above it.
     pub(super) async fn populate(
         &mut self,
         mut family: FamilyMarker,
         attempt: i64,
+        reset_sequence: i64,
         revision: &Revision,
         outcome: &mut FamilyOutcome,
     ) -> Result<()> {
@@ -85,15 +97,17 @@ impl Run<'_> {
         }
         let manifests =
             manifests::History::read(self.pool, self.chain_id, self.target.number).await?;
-        for (visited, number) in (0_u64..).zip(blocks) {
+        for number in blocks {
             if !self.budget.take(outcome) {
                 return Ok(());
             }
             // A rebuild grows the families from empty faster than autovacuum samples them, and
             // plans made on empty-table statistics scan whole families per key. Refresh the
-            // statistics after 1, 2, 4, 8, ... rebuilt blocks.
-            if visited > 0 && visited.is_power_of_two() {
+            // statistics after 1, 2, 4, 8, ... blocks rebuilt since the reset, across runs.
+            let rebuilt = u64::try_from(family.sequence - reset_sequence).unwrap_or(0);
+            if rebuilt > 0 && rebuilt.is_power_of_two() {
                 analyze(self.pool, self.chain_id).await;
+                outcome.statistics_refreshes += 1;
             }
             let completes = number == self.target.number;
             let plan = block::Plan {
@@ -168,6 +182,7 @@ impl Run<'_> {
             reason,
             self.target,
             &revision,
+            reset.sequence,
         )
         .await?;
         transaction
