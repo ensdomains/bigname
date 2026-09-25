@@ -166,8 +166,7 @@ pub struct ShadowName {
 }
 
 /// The registration fields the shadow reproduces, compared against the served row. `created_at`
-/// is a whole-history minimum no family stores, so it is not listed. `authority_key` is listed,
-/// but step 2 at b218b2fc retains it nowhere, so the trace says when the read could not see it.
+/// is a whole-history minimum no family stores, so it is not listed.
 pub const REGISTRATION_FIELDS: [&str; 11] = [
     "status",
     "authority_kind",
