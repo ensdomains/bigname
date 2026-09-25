@@ -1672,10 +1672,16 @@ identity families, and a resource's permission rows, restriction block,
 registry binding and registry-operator rows from the grant, approval, wrapper
 and registry families, all at the publication's block clock. The Project fixture
 tests and the phase runner's fixture-corpus run compare each value with what the
-production readers serve at the same publication. A difference passes only as a
-disclosed same-block ordering case, where the canonical order and the old
-generated-id order disagree, or under a named finding about a step 2 family,
-reported rather than patched. Anything else fails the run. These are
+production readers serve at the same publication, field by field. A differing
+field passes in two cases only. The first is a disclosed same-block ordering case:
+reading the same families with that block in the old generated-id order must give
+exactly the served value. The second is a named cause whose own check holds for
+that field. A named cause is either a step 2 family gap, reported rather than
+patched, or a served-side bug. One served-side bug is known today: after an ENSv2
+registration's path expiry, the current reader still serves the registration as
+active. The families serve it as released, because an expired ENSv2 registration
+stays ENSv2 and is unregistered. The run prints those names. Every test asserts
+its counts exactly, and anything else fails the run. These are
 [shadow reads](glossary.md#shadow-read). No API route calls them.
 
 ## Index baseline
