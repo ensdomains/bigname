@@ -51,6 +51,12 @@ decisions kept. Linear TYR-36 step 6.
   labels `ens_v2_sepolia_post_audit` and `ens_v2_sepolia_hackathon` are removed
   too. They were classification, not an authority rule: they chose which reason
   string a refusal carried and never which arm held a name.
+- The wrapper-specific `unsupported` control branch in Project and the
+  wrapper-specific control refusal in the API are removed (ruling R2 of TYR-36).
+  A wrapped ENSv1 name's control section follows the ordinary control fold,
+  like any other ENSv1 name's. The control fields of a name wrapped after its
+  registration are not yet right, since `registry_owner` can hold the account
+  the wrapped token was minted to; that is tracked as TYR-49.
 
 ## 2026-09-25 Amendment: Support Follows The Authority Decision
 
