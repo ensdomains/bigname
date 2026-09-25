@@ -288,7 +288,7 @@ async fn addresses(
 
 /// Whether `chain_id`'s families stand at its served Project marker.
 async fn chain_current(pool: &PgPool, chain_id: &str) -> Result<bool> {
-    Ok(sqlx::query_scalar(
+    sqlx::query_scalar(
         "SELECT EXISTS (
              SELECT 1 FROM bigname_phase.project_family_marker family
              JOIN bigname_phase.chain_phase_state served
@@ -301,7 +301,7 @@ async fn chain_current(pool: &PgPool, chain_id: &str) -> Result<bool> {
     .bind(chain_id)
     .fetch_one(pool)
     .await
-    .with_context(|| format!("failed to read the markers of {chain_id}"))?)
+    .with_context(|| format!("failed to read the markers of {chain_id}"))
 }
 
 /// Every retained address value of a value table as (address, coin type) rows: the row's value,
