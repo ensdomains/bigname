@@ -1165,3 +1165,89 @@ async fn a_real_path_expiry_with_an_ensv1_lease_is_served_from_the_lease() -> Re
     assert_counts(&report, &[], &[]);
     fixture.cleanup().await
 }
+
+/// Item 2 of the TYR-36 step 3 review (Q2): a name with ENSv2 lifecycle events and a Basenames
+/// event, and no open binding, has two event arms and no ENSv1 history, so no authority arm is
+/// selected (name_authority/build.sql:599-620). The selection reads a missing arm as ENSv2
+/// (`COALESCE(selected_authority_arm, 'ens_v2') = 'ens_v2'`, build.sql:347), so its explicit
+/// release is the registration; the presentation reads the same resolved arm, so the release is
+/// served whole: released, no registrant, authority or expiry, control unregistered and nothing
+/// else (ruling R1: a released ENSv2 registration stays ENSv2 and is unregistered).
+#[tokio::test]
+async fn a_release_with_no_selected_arm_is_presented_as_an_ensv2_release() -> Result<()> {
+    let fixture = Fixture::new("families_shadow_null_arm_release", 20).await?;
+    let k1 = uuid(1);
+    v2(
+        &fixture,
+        10,
+        "RegistrationGranted",
+        Some(&k1),
+        json!({"status": "registered", "registrant": ALICE, "expiry": 2_000_000_000u64}),
+    )
+    .await?;
+    fixture
+        .event(
+            Event::new("release-14", 14, 1, "RegistrationReleased", V2_REGISTRY)
+                .name(&name(1))
+                .resource(&k1)
+                .before(json!({"registrant": ALICE}))
+                .after(
+                    json!({"registry_contract_instance_id": "R", "token_id": "7",
+                              "authority_kind": "registrar", "status": "released",
+                              "expiry": 2_000_000_000u64,
+                              "released_at": "2027-01-15T08:02:48+00:00"}),
+                )
+                .raw(json!({"emitting_address": REGISTRY})),
+        )
+        .await?;
+    fixture
+        .write(
+            12,
+            1,
+            "AuthorityTransferred",
+            "basenames_base_registry",
+            Some(&name(1)),
+            None,
+            json!({"node": node(1), "owner": BOB}),
+            REGISTRY,
+        )
+        .await?;
+    let report = publish_and_compare(&fixture, 16).await?;
+    let (served, shadow) = shadow_reads(&fixture, 16).await?;
+    assert_eq!(
+        served.provenance["authority_selection"]["authority_arm"],
+        Value::Null,
+        "no arm is selected"
+    );
+    assert_eq!(
+        Value::Object(shadow.registration.clone()),
+        json!({
+            "status": "released", "authority_kind": null, "authority_key": null,
+            "resource_id": null, "registrant": null, "expiry": null, "registered_at": null,
+            "released_at": "2027-01-15T08:02:48+00:00",
+            "latest_event_kind": "RegistrationReleased",
+        }),
+        "trace {:?}",
+        shadow.trace
+    );
+    assert_eq!(
+        Value::Object(shadow.control.clone()),
+        json!({"status": "unregistered"})
+    );
+    // Today's presentation compares the raw arm with 'ens_v2', so it serves the same release
+    // with its expiry and the control block's live status: the two differences are reported
+    // under their own cause, and nothing else differs.
+    assert_eq!(served.registration("status"), json!("released"));
+    assert_eq!(served.registration("expiry"), json!(2_000_000_000u64));
+    assert_eq!(served.control("status"), json!("released"));
+    let cause = "served_release_presentation_reads_the_raw_arm";
+    assert_counts(
+        &report,
+        &[
+            (&format!("{cause}:registration/expiry"), 1),
+            (&format!("{cause}:control/status"), 1),
+        ],
+        &[],
+    );
+    fixture.cleanup().await
+}

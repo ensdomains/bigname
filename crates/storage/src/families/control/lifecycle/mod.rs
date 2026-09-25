@@ -15,6 +15,7 @@ mod admission;
 mod laterals;
 mod load;
 pub mod membership;
+mod select;
 mod served;
 pub mod view;
 

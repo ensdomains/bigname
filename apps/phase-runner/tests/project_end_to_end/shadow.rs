@@ -46,8 +46,16 @@
 //!   pins it for step 6. Served code is not changed in this branch. A field passes only when the shadow
 //!   selected that unnamed release and the field holds what the ENSv2 path-release presentation
 //!   gives (build.sql:88-95, :101-103): status released, latest kind RegistrationReleased,
-//!   the release's released_at, the lapsed expiry, no registrant or authority, control
-//!   unregistered with nothing else.
+//!   the release's released_at, the expiry the reader's expiry rule gives (the name's latest
+//!   admitted numeric expiry on the key, else the release's own), no registrant or authority,
+//!   control unregistered with nothing else.
+//! - `served_release_presentation_reads_the_raw_arm`: the selection reads a missing authority
+//!   arm as ENSv2 (build.sql:347), so a name with no selected arm can select an ENSv2 release,
+//!   but today's presentation compares the raw arm with 'ens_v2' (build.sql:89, :94, :103) and
+//!   serves that release with its registrant, authority and expiry and a live control block.
+//!   The reader decides both with the one resolved arm and presents the release whole (ruling
+//!   R1). A field passes only when no arm is selected, the shadow presents the whole release,
+//!   and the served value is what the reader traced for the raw-arm presentation.
 //! - `registry_node_position_moved_by_later_write`: F2c sets the node's owner only on
 //!   AuthorityTransferred (crates/project/src/families/registry.rs:69-94) but stamps the row with
 //!   the position of every event that writes it, SubregistryChanged included (:120). A control
@@ -616,18 +624,10 @@ fn shadow_field(shadow: &ShadowName, path: &str) -> Value {
     field(&Value::Object(block.clone()), rest).clone()
 }
 
-/// Whether the shadow value of `diff` is what the ENSv2 path-release presentation gives, for a
-/// name whose selected registration is the interpreter's unnamed path-expiry release
-/// (build.sql:88-95, :101-103). The whole presentation must hold, not only the differing
-/// field: status released, no registrant, authority kind or key, and a control block that is
-/// `{status: unregistered}` with nothing else. The expiry is checked against the release's own
-/// after-state expiry, the value the chain lapsed, not the reader's own expiry candidate; the
-/// reader takes it from the latest named numeric event (served.rs), and on chain the two agree.
-fn serves_the_unnamed_release(shadow: &ShadowName, diff: &Difference) -> bool {
-    let trace = &shadow.trace;
-    if trace.get("selected_unnamed_path_expiry") != Some(&json!(true)) {
-        return false;
-    }
+/// Whether the shadow presents its selected registration as an ENSv2 release, whole: status
+/// released, no registrant, authority kind or key, and a control block that is
+/// `{status: unregistered}` with nothing else (build.sql:88-95, :101-103).
+fn release_presented(shadow: &ShadowName) -> bool {
     let registration = |name: &str| {
         shadow
             .registration
@@ -635,7 +635,7 @@ fn serves_the_unnamed_release(shadow: &ShadowName, diff: &Difference) -> bool {
             .cloned()
             .unwrap_or(Value::Null)
     };
-    let presentation = registration("status") == json!("released")
+    registration("status") == json!("released")
         && registration("registrant").is_null()
         && registration("authority_kind").is_null()
         && registration("authority_key").is_null()
@@ -643,17 +643,32 @@ fn serves_the_unnamed_release(shadow: &ShadowName, diff: &Difference) -> bool {
         && shadow
             .control
             .iter()
-            .all(|(name, value)| name == "status" || value.is_null());
-    if !presentation {
+            .all(|(name, value)| name == "status" || value.is_null())
+}
+
+/// Whether the shadow value of `diff` is what the ENSv2 path-release presentation gives, for a
+/// name whose selected registration is the interpreter's unnamed path-expiry release. The whole
+/// presentation must hold, not only the differing field. The expiry is the reader's expiry
+/// rule: the expiry lateral's value (the latest admitted numeric expiry of the name on the
+/// selected key) when it has one, else the release's own expiry; a later ExpiryChanged or
+/// renewal of the name moves it past the release's own.
+fn serves_the_unnamed_release(shadow: &ShadowName, diff: &Difference) -> bool {
+    let trace = &shadow.trace;
+    if trace.get("selected_unnamed_path_expiry") != Some(&json!(true)) || !release_presented(shadow)
+    {
         return false;
     }
     let traced = |name: &str| trace.get(name).cloned().unwrap_or(Value::Null);
+    let expiry = match traced("expiry_candidate") {
+        Value::Null => traced("selected_expiry"),
+        lateral => lateral,
+    };
     let value = &diff.shadow;
     match diff.field.as_str() {
         "registration/status" => value == &json!("released"),
         "registration/latest_event_kind" => value == &json!("RegistrationReleased"),
         "registration/released_at" => same(value, &traced("selected_released_at")),
-        "registration/expiry" => !value.is_null() && same(value, &traced("selected_expiry")),
+        "registration/expiry" => !value.is_null() && same(value, &expiry),
         "registration/authority_kind"
         | "registration/authority_key"
         | "registration/registrant"
@@ -665,6 +680,25 @@ fn serves_the_unnamed_release(shadow: &ShadowName, diff: &Difference) -> bool {
         "control/status" => value == &json!("unregistered"),
         _ => false,
     }
+}
+
+/// Whether `diff` is the difference between the whole ENSv2 release the shadow presents for a
+/// name with no selected arm and what today's presentation serves for it, which compares the raw
+/// arm with 'ens_v2' (build.sql:89, :94, :103) and so neither clears the release nor closes the
+/// control block. The served value must equal what the reader traced for that presentation.
+fn serves_the_raw_arm_release(input: &NameInput, shadow: &ShadowName, diff: &Difference) -> bool {
+    if input.selection.authority_arm.is_some() || !release_presented(shadow) {
+        return false;
+    }
+    let Some(raw) = shadow.trace.get("raw_arm_presentation") else {
+        return false;
+    };
+    let Some((block, rest)) = diff.field.split_once('/') else {
+        return false;
+    };
+    matches!(block, "registration" | "control")
+        && same(&diff.shadow, &shadow_field(shadow, &diff.field))
+        && same(&diff.served, field(&raw[block], rest))
 }
 
 /// The cause shown for each differing field of one name, in `diffs` order.
@@ -681,6 +715,8 @@ async fn name_excuses(
     for diff in diffs {
         let excuse = if serves_the_unnamed_release(shadow, diff) {
             Excuse::Known("served_membership_skips_unnamed_path_expiry")
+        } else if serves_the_raw_arm_release(input, shadow, diff) {
+            Excuse::Known("served_release_presentation_reads_the_raw_arm")
         } else if diff.field == "registration/authority_key"
             && trace.get("authority_key_stored") == Some(&json!(false))
             && diff.shadow.is_null()
