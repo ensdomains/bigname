@@ -87,3 +87,90 @@ async fn a_nameless_path_expiry_release_keeps_the_name_on_its_v2_tombstone() -> 
     db.cleanup().await?;
     Ok(())
 }
+
+// A block-boundary release and a later indexed reservation in the same block (review thread on
+// the latest-fact ordering). Interpret writes the path-expiry release with no transaction or log
+// index at the start of the block, and a `LabelReserved` later in that block carries its log
+// position. The reservation is the later fact and hands the name to its live ENSv1 lease; with
+// descending NULLS FIRST ordering the release would have sorted after it.
+#[tokio::test]
+async fn a_reservation_after_a_block_boundary_release_in_the_same_block_is_the_later_fact()
+-> Result<()> {
+    let (db, pool) = database("boundary_release_then_reservation").await?;
+    earlier_block(&pool).await?;
+    let logical = surface(&pool, 98, "boundary-reserve.eth", &[]).await?;
+    let v1_resource = open_binding(&pool, &logical, 98, "ens_v1", 1).await?;
+    event(
+        &pool,
+        "boundary-reserve-v1-grant",
+        &logical,
+        Some(&v1_resource),
+        Event {
+            family: "ens_v1_registrar_l1",
+            kind: "RegistrationGranted",
+            log: 1,
+            after: json!({"status":"registered","registrant":"0x0000000000000000000000000000000000000001"}),
+        },
+    )
+    .await?;
+    let (v2_resource, _) = closed_binding_at_block_9(&pool, &logical, 98, "ens_v2").await?;
+    event(
+        &pool,
+        "boundary-reserve-v2-grant",
+        &logical,
+        Some(&v2_resource),
+        Event {
+            family: "ens_v2_registry_l1",
+            kind: "RegistrationGranted",
+            log: 2,
+            after: json!({"status":"registered","registrant":"0x0000000000000000000000000000000000000002"}),
+        },
+    )
+    .await?;
+    sqlx::query("UPDATE normalized_events SET block_number = 9, block_hash = $1 WHERE event_identity = 'boundary-reserve-v2-grant'")
+        .bind(EARLIER_HASH).execute(&pool).await?;
+    // The expiry release at the start of block 10, named, on the registration's resource.
+    event(
+        &pool,
+        "boundary-reserve-v2-release",
+        &logical,
+        Some(&v2_resource),
+        Event {
+            family: "ens_v2_registry_l1",
+            kind: "RegistrationReleased",
+            log: 0,
+            after: json!({"source_event":"RegistryPathExpired","derived_from":"interpreter_state","terminal_reason":"registry_name_binding_expired","status":"released"}),
+        },
+    )
+    .await?;
+    sqlx::query("UPDATE normalized_events SET transaction_hash = NULL, transaction_index = NULL, log_index = NULL WHERE event_identity = 'boundary-reserve-v2-release'")
+        .execute(&pool).await?;
+    // The reservation later in block 10, by name and without a resource.
+    event(
+        &pool,
+        "boundary-reserve-v2-reservation",
+        &logical,
+        None,
+        Event {
+            family: "ens_v2_registry_l1",
+            kind: "RegistrationReserved",
+            log: 5,
+            after: json!({"status":"reserved"}),
+        },
+    )
+    .await?;
+    run(&pool).await?;
+    assert_eq!(
+        authority(&pool, &logical).await?.0.as_deref(),
+        Some("ens_v1"),
+        "the indexed reservation is later than the block-boundary release"
+    );
+    let resource: Option<String> =
+        sqlx::query_scalar("SELECT resource_id::text FROM name_current WHERE logical_name_id = $1")
+            .bind(&logical)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(resource.as_deref(), Some(v1_resource.as_str()));
+    db.cleanup().await?;
+    Ok(())
+}
