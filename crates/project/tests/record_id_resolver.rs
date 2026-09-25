@@ -322,15 +322,21 @@ async fn link_and_version_boundaries_read_the_same_through_the_families() -> Res
 
     // Mutations on the accepted result must fail: another value for an expected field, and a
     // further field that differs.
-    for mutation in [
-        "UPDATE record_inventory_current SET entries = (
+    for (mutation, field) in [
+        (
+            "UPDATE record_inventory_current SET entries = (
              SELECT jsonb_agg(CASE WHEN entry ->> 'record_key' = 'text:url'
                                    THEN jsonb_set(entry, '{value}', '\"c\"') ELSE entry END)
              FROM jsonb_array_elements(entries) entry)
          WHERE resource_id = $1::uuid",
-        "UPDATE record_inventory_current
+            "entries[text:url].value",
+        ),
+        (
+            "UPDATE record_inventory_current
          SET chain_positions = chain_positions || '{\"mutated\": true}'
          WHERE resource_id = $1::uuid",
+            "chain_positions.mutated",
+        ),
     ] {
         let (entries, positions): (Value, Value) = sqlx::query_as(
             "SELECT entries, chain_positions FROM record_inventory_current
@@ -350,9 +356,13 @@ async fn link_and_version_boundaries_read_the_same_through_the_families() -> Res
             1,
         )
         .await?;
+        let error = expected.check(23, &report).expect_err(mutation).to_string();
         assert!(
-            expected.check(23, &report).is_err(),
-            "{mutation}: {report:#?}"
+            error.starts_with(&format!(
+                "the difference at 23 on record_inventory {} is not the expected one",
+                resource(1)
+            )) && error.contains(field),
+            "{mutation}: {error}"
         );
         sqlx::query(
             "UPDATE record_inventory_current SET entries = $2, chain_positions = $3
@@ -383,8 +393,24 @@ async fn link_and_version_boundaries_read_the_same_through_the_families() -> Res
         differences: missing,
         ..Expectations::none()
     };
-    assert!(missing.check(23, &report).is_err());
-    assert!(missing.finish().is_err());
+    // The final count flags the phantom even once the real difference has been counted.
+    let counted = Expectations {
+        differences: missing.differences.clone(),
+        seen: std::sync::Mutex::new(vec![1, 0]),
+        ..Expectations::none()
+    };
+    let stated = format!(
+        "the expected difference at 23 on record_inventory {}",
+        resource(2)
+    );
+    assert_eq!(
+        missing.check(23, &report).expect_err("missing").to_string(),
+        format!("{stated} did not show")
+    );
+    assert_eq!(
+        counted.finish().expect_err("missing").to_string(),
+        format!("{stated} showed 0 times, not 1")
+    );
     db.cleanup().await?;
     Ok(())
 }
