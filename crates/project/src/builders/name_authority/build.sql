@@ -128,6 +128,34 @@
                           AND event.resource_id IS NULL)
                   )
             ) fact
+            -- A reservation whose own expiry is already at or before its block's timestamp is
+            -- never live: an ownerless entry may be written with a past nonzero expiry, and the
+            -- registry reports an entry as available once `block.timestamp >= expiry`. Interpret
+            -- writes its state-derived release in the same block at the block boundary, with no
+            -- transaction or log index, so by position the release would sort before the
+            -- reservation it ends. The reservation takes no part and its release does. The expiry
+            -- is compared with the reservation's own block, not the target block, because a later
+            -- renewal can revive the entry.
+            -- (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L452-L454 @ ens_v2@a971bd64)
+            -- (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L628-L630 @ ens_v2@a971bd64)
+            -- (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L654-L660 @ ens_v2@a971bd64)
+            WHERE NOT EXISTS (
+                SELECT 1
+                FROM project_events reservation
+                JOIN chain_lineage lineage
+                  ON lineage.chain_id = reservation.chain_id
+                 AND lineage.block_hash = reservation.block_hash
+                 AND lineage.block_number = reservation.block_number
+                WHERE reservation.normalized_event_id = fact.normalized_event_id
+                  AND reservation.event_kind = 'RegistrationReserved'
+                  -- An expiry that is not a JSON number leaves the reservation in.
+                  AND CASE
+                          WHEN jsonb_typeof(reservation.after_state -> 'expiry') = 'number'
+                              THEN (reservation.after_state ->> 'expiry')::numeric <=
+                                   extract(epoch FROM lineage.block_timestamp)
+                          ELSE FALSE
+                      END
+            )
             -- A block-boundary fact has no transaction or log index and sorts first in its
             -- block, as in every other position comparison here.
             ORDER BY fact.logical_name_id, fact.block_number DESC,
