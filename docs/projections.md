@@ -1766,6 +1766,11 @@ steps that read them must key on. Each is also stated on its table or column:
   zero address once the token has expired).
 - F7 keeps a `ResolverRecordLinked` whose payload has no resolver; the served
   link reader requires the payload resolver equal to the emitter.
+- F14's node index (`project_address_record_node_index`) is a superset: it
+  keeps every EVM-shaped addr value past a version change, under the
+  `logical_name_id` it was written under, because a later link can keep such a
+  value served. The reader owns the version and link boundary (the table
+  comment, set by migration `20260926101200`).
 - The undo journal is not pruned while the chain has no finalized or safe
   head.
 
