@@ -227,7 +227,10 @@ fn block_time(block: i64) -> i64 {
 // (SurfaceUnbound and the holder revoke; v1/wrapper.rs `name_unwrapped`, which writes no expiry),
 // and a rewrap of the same resource with its own expiry. The raw wrapper row keeps each fact
 // unmasked; the served name masks the fuses and the emancipated state only strictly after the
-// expiry (name_current, `effective_wrapper`).
+// expiry (name_current, `effective_wrapper`). Fuses 65536 is PARENT_CANNOT_CONTROL alone, and an
+// unwrap is refused only once CANNOT_UNWRAP (fuse 1) is burned.
+// (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L10, L18 @ ens_v1@91c966f)
+// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1022-L1025 @ ens_v1@91c966f)
 #[tokio::test]
 async fn the_wrapper_row_stays_raw_through_expiry_unwrap_and_rewrap() -> Result<()> {
     let fixture = Fixture::new("families_retention_rewrap", 20).await?;
@@ -380,6 +383,9 @@ async fn the_wrapper_row_stays_raw_through_expiry_unwrap_and_rewrap() -> Result<
 // lifecycle-aware permissions resource summary (resource_summary.rs, `wrapper_lifecycles`) closes
 // the wrapper restrictions on the unwrap and opens them again on a rewrap; the raw family row keeps
 // the lifecycle both readers need. The served builders are pinned as they are, not corrected.
+// The wrap burns PARENT_CANNOT_CONTROL without CANNOT_UNWRAP, so the unwrap is allowed.
+// (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L10, L18 @ ens_v1@91c966f)
+// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1022-L1025 @ ens_v1@91c966f)
 #[tokio::test]
 async fn an_unwrap_before_expiry_keeps_the_served_name_wrapped_but_closes_the_restrictions()
 -> Result<()> {
