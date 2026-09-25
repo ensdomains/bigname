@@ -103,8 +103,11 @@ async fn disposable_copy_publishes_hydrates_and_reads_each_target() -> Result<()
         .then_some(COPY_CHILDREN_PAGE);
     let shadow = (std::env::var("BIGNAME_END_TO_END_SHADOW").as_deref() == Ok("1"))
         .then_some(COPY_CHILDREN_PAGE);
-    run(&pool, previous, &targets, compare, shadow).await?;
+    let (_, shadows) = run(&pool, previous, &targets, compare, shadow).await?;
     pool.close().await;
+    if shadow.is_some() {
+        shadow::require_clean(&shadows)?;
+    }
     Ok(())
 }
 
@@ -191,33 +194,7 @@ async fn fixture_corpus_publishes_hydrates_reads_and_matches_a_rebuild() -> Resu
         shadows.len() == 2 * targets.len(),
         "every target and every rebuild is shadow compared"
     );
-    for shadow in &shadows {
-        let report = &shadow.report;
-        ensure!(
-            report.current() && report.inventory_rows > 0 && report.primary_tuples > 0,
-            "the {} shadow comparison at {} compared nothing: {report:?}",
-            shadow.stage,
-            shadow.target
-        );
-        ensure!(
-            report.differences.is_empty(),
-            "the family reads differ from today's reads at {} ({}): {:#?}",
-            shadow.target,
-            shadow.stage,
-            report.differences
-        );
-        ensure!(
-            report.node_claims_at_other_resolver.is_empty()
-                && report.address_index_misses.is_empty()
-                && report.classification_fallbacks.is_empty(),
-            "the fixture shows step 2 gaps at {} ({}): {:#?} {:#?} {:#?}",
-            shadow.target,
-            shadow.stage,
-            report.node_claims_at_other_resolver,
-            report.address_index_misses,
-            report.classification_fallbacks
-        );
-    }
+    shadow::require_clean(&shadows)?;
     for compared in &compared {
         // The harness cannot tell whether a dropped key was in the batch's full scope (see
         // `endpoint::Outcome::dropped`), so the fixture must produce none.
