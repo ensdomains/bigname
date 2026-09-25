@@ -42,6 +42,9 @@
 //!   binding equals the shadow one whole, today's binding equals the served one whole, and the
 //!   two select different event identities. The registry-operator rows pass with the binding
 //!   only when the rows computed from each rebuilt binding equal the shadow and served rows.
+//!   That is the binding rebuilt from the log plus the family's approvals, not the operator
+//!   result rebuilt from the log: an approval only the canonical binding uses is checked by the
+//!   account comparison, which compares every approval with its served row and excuses nothing.
 //!
 //! Named causes, each a place where the families and today's builders disagree, reported
 //! rather than patched (step 3 changes no reducer and no served table):
@@ -1776,13 +1779,15 @@ pub fn legacy_facts(
 
 /// The cause shown for each differing field of one resource, in `diffs` order. The permissions
 /// builder's path-expiry drop (permissions.rs:111-133, :391-398) takes the resource's latest
-/// ENSv2 registration event in today's (block, generated id) order. A `permissions_current` or
-/// `resource_restrictions` field passes as a same-block delta only in one direction: today's
-/// order keeps the registration live while the canonical order lapses it, the served value is
+/// ENSv2 registration event in today's (block, generated id) order. A `permissions_current`,
+/// `admin_powers` or `resource_restrictions` field passes as a same-block delta only in one
+/// direction: the resource's retained events rebuilt from the publication-visible log keep the
+/// registration live in today's order and lapse it in the canonical order, the served value is
 /// not empty, the canonical read is empty, and the whole permission read of the resource taken
-/// again from the families in today's order equals it. That read is compared whole, so a wrong subject, power, collision
-/// row or restriction in the families fails. The shadow value is the canonical read itself, so
-/// comparing it with the canonical read checks nothing and is not counted as evidence. The other
+/// again from the families in today's order equals it. That read is compared whole, so a wrong
+/// subject, power, collision row or restriction in the families fails. The shadow value is the
+/// canonical read itself, so comparing it with the canonical read checks nothing and is not
+/// counted as evidence. The other
 /// direction, today's order lapsing the registration, is left a mismatch: the read in that order
 /// is empty, so matching it would only show that the served value is empty.
 pub async fn resource_excuses(
@@ -1810,6 +1815,11 @@ pub async fn resource_excuses(
     .fetch_all(pool)
     .await?;
     let events: Vec<LifecycleEvent> = rows.iter().filter_map(LifecycleEvent::from_row).collect();
+    // The lapse is decided from the resource's retained events rebuilt from the
+    // publication-visible log, so a wrong family row cannot supply the reason for the excuse.
+    let Some(events) = events_from_log(pool, chain, clock.block_number, &events).await? else {
+        return Ok(out);
+    };
     let identities: Vec<String> = events
         .iter()
         .map(|event| event.position.event_identity.clone())

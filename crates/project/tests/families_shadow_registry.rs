@@ -1076,6 +1076,96 @@ async fn a_same_block_binding_delta_moves_the_registry_operator_rows() -> Result
     fixture.cleanup().await
 }
 
+/// Pro Q4 on a5f61182: the operator rows pass with the binding only as far as the approvals
+/// the rows are computed from are right, and those come from the same family table, so an
+/// approval only the canonical binding uses is not checked by that excuse. The operator-delta
+/// fixture with THIRD, the canonical binding's owner, also approving FOURTH: the families
+/// serve FOURTH's row and today's builder OPERATOR's, a same-block delta. Giving the family's
+/// THIRD approval another subject moves the shadow rows and the rows computed from the
+/// canonical rebuild together, so the operator field may still pass; the account comparison,
+/// which compares every approval with its served row and excuses nothing, must fail the run.
+#[tokio::test]
+async fn a_wrong_approval_only_the_canonical_binding_uses_fails_the_account_rows() -> Result<()> {
+    const FOURTH: &str = "0x00000000000000000000000000000000000000dd";
+    let fixture = Fixture::new("families_shadow_registry_canonical_approval", 20).await?;
+    let lease = uuid(1);
+    bound(&fixture, &lease).await?;
+    for (kind, getter) in [
+        ("SubregistryChanged", THIRD),
+        ("AuthorityTransferred", OTHER),
+    ] {
+        fixture
+            .write(
+                11,
+                1,
+                kind,
+                V1_REGISTRY,
+                Some(&name(1)),
+                Some(&lease),
+                json!({"source_event": "NewOwner", "node": node(2), "child_node": node(1),
+                       "owner": OTHER, "owner_getter": getter, "emitter_role": "registry"}),
+                REGISTRY,
+            )
+            .await?;
+    }
+    for (identity, owner, subject) in [
+        ("approval-other", OTHER, OPERATOR),
+        ("approval-third", THIRD, FOURTH),
+    ] {
+        fixture
+            .event(
+                Event::new(identity, 10, 5, "AccountPermissionChanged", V1_REGISTRY)
+                    .at(if owner == OTHER { 0 } else { 1 }, 5)
+                    .after(json!({
+                        "subject": subject, "relation_kind": "operator", "approved": true,
+                        "scope": {"kind": "account", "chain_id": CHAIN,
+                                  "authority_kind": "registry", "authority_contract": REGISTRY,
+                                  "authority_contract_instance_id":
+                                      "00000000-0000-0000-0000-0000000000e5",
+                                  "owner": owner},
+                        "effective_powers": ["registry_control"],
+                        "grant_source": {"kind": "raw_log", "source_event": "ApprovalForAll"},
+                        "revocation_source": null, "inheritance_path": [],
+                        "transfer_behavior": {"mode": "owner_scoped",
+                                              "on_holder_change": "ceases_to_apply"},
+                        "source_event": "ApprovalForAll",
+                    }))
+                    .raw(json!({"emitting_address": REGISTRY})),
+            )
+            .await?;
+    }
+    let report = publish_and_compare(&fixture, 12).await?;
+    shadow_support::assert_counts(
+        &report,
+        &[],
+        &[
+            ("d12_same_block_order:effective_operator_rows", 1),
+            ("d12_same_block_order:registry_binding/event_ids", 1),
+            ("d12_same_block_order:registry_binding/registry_owner", 1),
+        ],
+    );
+    sqlx::query(
+        "UPDATE bigname_phase.project_account_approval SET subject = $1
+         WHERE owner = $2 AND subject = $3",
+    )
+    .bind(OTHER)
+    .bind(THIRD)
+    .bind(FOURTH)
+    .execute(&fixture.pool)
+    .await?;
+    let mutated = shadow_support::compare::compare(&fixture.pool, CHAIN, 12).await?;
+    assert_eq!(
+        failed_fields(&mutated),
+        [
+            "account_permission_state_current",
+            "account_permission_state_current"
+        ],
+        "the served FOURTH approval and the family's wrong one: {:#?}",
+        mutated.lines
+    );
+    fixture.cleanup().await
+}
+
 /// An unnamed registry event of the lease: identity key the lease resource, so it reaches the
 /// lease as its own observation.
 async fn unnamed_on(

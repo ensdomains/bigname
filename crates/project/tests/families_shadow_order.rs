@@ -674,3 +674,70 @@ async fn an_unrelated_triple_in_the_block_is_not_an_association_rival() -> Resul
     assert_eq!(target(&legacy), expected, "the unrelated grant is no rival");
     fixture.cleanup().await
 }
+
+/// Pro Q4 on a5f61182: the path-expiry drop's lapse is decided from the resource's retained
+/// lifecycle events rebuilt from the publication-visible log, not from the family rows. The
+/// unnamed path-expiry release is written first at transaction 0 log 0 and the grant second at
+/// log 1 of block 14, so both orders keep the registration live and both sides serve BOB's row.
+/// Moving the family's release row to log 2, with the key state that folds it, lapses the
+/// registration canonically while today's order keeps it live: the family rows alone would then
+/// supply both the reason for the excuse and the empty shadow. The permission rows must stay a
+/// mismatch, because the release in the log is at log 0.
+#[tokio::test]
+async fn a_family_lapse_the_log_does_not_give_stays_a_mismatch() -> Result<()> {
+    let fixture = Fixture::new("families_shadow_order_family_lapse", 20).await?;
+    let (k1, n1) = (uuid(1), name(1));
+    v2_binding(&fixture, &k1).await?;
+    fixture
+        .event(grant("grant-10", 10, &n1, &k1, ALICE))
+        .await?;
+    fixture
+        .event(registry_grant("permission-11", 11, &k1, BOB))
+        .await?;
+    fixture
+        .event(unnamed_path_expiry("path-expiry-14", 14, &k1).at(0, 0))
+        .await?;
+    fixture
+        .event(grant("grant-14", 14, &n1, &k1, ALICE))
+        .await?;
+    let report = publish_and_compare(&fixture, 16).await?;
+    assert_counts(&report, &[], &[]);
+    assert_eq!(
+        served_rows(&fixture, &k1).await?,
+        vec![json!({"subject": BOB, "effective_powers": ["set_resolver", "set_subregistry"]})]
+    );
+    sqlx::query(
+        "UPDATE bigname_phase.project_lifecycle_event SET log_index = 2
+         WHERE event_identity = 'path-expiry-14'",
+    )
+    .execute(&fixture.pool)
+    .await?;
+    sqlx::query(
+        "UPDATE bigname_phase.project_lifecycle_key_state
+         SET last_path_expiry = jsonb_set(last_path_expiry, '{position,log_index}', '2')
+         WHERE resource_id = $1::uuid",
+    )
+    .bind(&k1)
+    .execute(&fixture.pool)
+    .await?;
+    let mutated = shadow_support::compare::compare(&fixture.pool, CHAIN, 16).await?;
+    let failed: Vec<&str> = mutated
+        .lines
+        .iter()
+        .filter(|line| line.starts_with("SEPOLIA_END_TO_END_SHADOW_MISMATCH"))
+        .filter_map(|line| line.split(" field=").nth(1)?.split(' ').next())
+        .collect();
+    assert!(
+        failed.contains(&"permissions_current"),
+        "a lapse the log does not give must fail: {:#?}",
+        mutated.lines
+    );
+    assert!(
+        !mutated
+            .expected_delta_fields
+            .contains_key("d12_same_block_order:permissions_current"),
+        "{:#?}",
+        mutated.lines
+    );
+    fixture.cleanup().await
+}
