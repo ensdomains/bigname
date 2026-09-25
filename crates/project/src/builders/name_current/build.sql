@@ -38,6 +38,14 @@
                        'registrant', CASE WHEN NOT effective_wrapper.owner_lapsed
                            THEN registrant.registrant END,
                        'expiry', CASE
+                           -- A lapsed ENSv2 registration's expiry is the one its path-expiry
+                           -- release carries: a renewal after its path was cut is written without
+                           -- a name, so the name's own expiry rows can be older. An explicit
+                           -- release clears the expiry below.
+                           WHEN selected_registration.is_v2_lifecycle
+                            AND selected_registration.event_kind = 'RegistrationReleased'
+                            AND selected_registration.after_state ->> 'source_event' = 'RegistryPathExpired'
+                               THEN selected_registration.after_state -> 'expiry'
                            WHEN selected_registration.is_v2_lifecycle
                             AND selected_registration.event_kind IS NOT NULL
                             AND selected_registration.resource_id IS DISTINCT FROM binding.resource_id

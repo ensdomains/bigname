@@ -138,6 +138,7 @@ mod v2_registry_events {
         event ParentUpdated(address indexed parent, string label, address indexed sender);
         event EACRolesChanged(uint256 indexed resource, address indexed account, uint256 oldRoleBitmap, uint256 newRoleBitmap);
         event TransferSingle(address indexed operator, address indexed from, address indexed to, uint256 id, uint256 value);
+        event ExpiryUpdated(uint256 indexed tokenId, uint64 indexed newExpiry, address indexed sender);
     }
 }
 
@@ -5204,18 +5205,18 @@ async fn ens_v2_resource_identity_and_terminal_binding_round_trip() -> Result<()
     scratch.cleanup().await
 }
 
-// A registered child whose path is cut before its own expiry: when the parent's subregistry is
-// cleared, Interpret releases the child by name and closes its ENSv2 binding; when the child's own
-// expiry passes, the token has no name any more, so Interpret writes a second, block-boundary
-// release with the resource and no name. Project keeps the name as a released ENSv2 tombstone on
-// that resource (product ruling of 2026-09-25: an expired ENSv2 registration stays with ENSv2).
-// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L255-L258 @ ens_v2@a971bd64)
-#[tokio::test]
-async fn a_detached_child_expiry_is_released_without_a_name_and_stays_a_v2_tombstone() -> Result<()>
-{
-    let scratch = ScratchDatabase::create("production_interpret_detached_child_expiry").await?;
-    let chain = "interpret-detached-child-expiry";
-    seed_v2_lifecycle_fixture(scratch.pool(), chain).await?;
+/// A child `leaf` registered with `expiry` in a registry that `alice` points at, whose path the
+/// parent clears in block 1. With `renewal`, the child registry then extends the detached token's
+/// expiry at `(block, log)`. The lineage is extended to `through`, one second a block, and
+/// Interpret runs to it.
+async fn detached_child_fixture(
+    pool: &PgPool,
+    chain: &str,
+    expiry: u64,
+    renewal: Option<(i64, i64, u64)>,
+    through: i64,
+) -> Result<()> {
+    seed_v2_lifecycle_fixture(pool, chain).await?;
     let child = ANNOUNCED_REGISTRY;
     sqlx::query(
         "WITH root AS (
@@ -5237,7 +5238,7 @@ async fn a_detached_child_expiry_is_released_without_a_name_and_stays_a_v2_tombs
     .bind(Uuid::new_v4())
     .bind(child)
     .bind(block_hash(chain, 0))
-    .execute(scratch.pool())
+    .execute(pool)
     .await?;
     // The parent stays registered well past the fixture; only the child expires, at block 2.
     let parent = v2_registry_events::LabelRegistered {
@@ -5254,11 +5255,11 @@ async fn a_detached_child_expiry_is_released_without_a_name_and_stays_a_v2_tombs
     )
     .bind(chain)
     .bind(parent.data.to_vec())
-    .execute(scratch.pool())
+    .execute(pool)
     .await?;
     sqlx::query("DELETE FROM raw_logs WHERE chain_id = $1 AND block_number = 2")
         .bind(chain)
-        .execute(scratch.pool())
+        .execute(pool)
         .await?;
     let topology = [
         (
@@ -5268,7 +5269,7 @@ async fn a_detached_child_expiry_is_released_without_a_name_and_stays_a_v2_tombs
                 labelHash: keccak256(b"leaf"),
                 label: "leaf".into(),
                 owner: "0x0000000000000000000000000000000000000061".parse()?,
-                expiry: 2,
+                expiry,
                 sender: SENDER.parse()?,
             }
             .encode_log_data(),
@@ -5312,7 +5313,7 @@ async fn a_detached_child_expiry_is_released_without_a_name_and_stays_a_v2_tombs
     ];
     for (offset, (emitter, event)) in topology.into_iter().enumerate() {
         insert_log_at(
-            scratch.pool(),
+            pool,
             chain,
             1,
             &format!("{chain}-transaction-1"),
@@ -5323,7 +5324,109 @@ async fn a_detached_child_expiry_is_released_without_a_name_and_stays_a_v2_tombs
         )
         .await?;
     }
-    run_engine(scratch.pool(), chain, 1, 2, InterpretRunMode::Normal).await?;
+    for block in 3..=through {
+        sqlx::query(
+            "INSERT INTO chain_lineage (chain_id, block_hash, parent_hash, block_number, block_timestamp, canonicality_state)
+             VALUES ($1, $2, $3, $4, to_timestamp($4), 'canonical')",
+        )
+        .bind(chain)
+        .bind(block_hash(chain, block))
+        .bind(block_hash(chain, block - 1))
+        .bind(block)
+        .execute(pool)
+        .await?;
+    }
+    if let Some((block, log, new_expiry)) = renewal {
+        let renewed = v2_registry_events::ExpiryUpdated {
+            tokenId: versioned_token("leaf", 1),
+            newExpiry: new_expiry,
+            sender: SENDER.parse()?,
+        }
+        .encode_log_data();
+        insert_log_at(
+            pool,
+            chain,
+            block,
+            &format!("{chain}-transaction-{block}"),
+            log,
+            child,
+            renewed.topics(),
+            renewed.data.as_ref(),
+        )
+        .await?;
+    }
+    run_engine(pool, chain, 1, through, InterpretRunMode::Normal).await
+}
+
+const SERVED_FIELDS: &str = "SELECT jsonb_build_object(
+        'authority_arm', provenance #>> '{authority_selection,authority_arm}',
+        'lifecycle_state', provenance #>> '{authority_selection,lifecycle_state}',
+        'resource_id', resource_id, 'surface_binding_id', surface_binding_id,
+        'registration', declared_summary -> 'registration',
+        'control', declared_summary -> 'control',
+        'resolver', declared_summary -> 'resolver')
+    FROM name_current WHERE logical_name_id = $1";
+
+/// Projects `chain` as resumed batches at `targets` and returns the fields `name` serves.
+async fn served_after_resumed_batches(
+    pool: &PgPool,
+    chain: &str,
+    targets: &[i64],
+    name: &str,
+) -> Result<Value> {
+    let engine = ProjectEngine::new(pool.clone());
+    let mut previous: Option<bigname_project::Marker> = None;
+    for &target in targets {
+        let outcome = engine
+            .run_batch(ProjectBatchRequest {
+                chain_id: chain.to_owned(),
+                target_block: target,
+                affected_from_block: previous.as_ref().map_or(0, |marker| marker.number + 1),
+                affected_to_block: target,
+                resume_current: previous.clone(),
+                mode: ProjectRunMode::Normal,
+            })
+            .await?;
+        assert!(outcome.complete);
+        previous = Some(outcome.current);
+    }
+    Ok(sqlx::query_scalar(SERVED_FIELDS)
+        .bind(name)
+        .fetch_one(pool)
+        .await?)
+}
+
+/// Projects `chain` as one batch to `target` and returns the fields `name` serves.
+async fn served_after_one_batch(
+    pool: &PgPool,
+    chain: &str,
+    target: i64,
+    name: &str,
+) -> Result<Value> {
+    run_project(pool, chain, target, 0, target).await?;
+    Ok(sqlx::query_scalar(SERVED_FIELDS)
+        .bind(name)
+        .fetch_one(pool)
+        .await?)
+}
+
+// A registered child whose path is cut before its own expiry: when the parent's subregistry is
+// cleared, Interpret releases the child by name and closes its ENSv2 binding. The child registry
+// then renews the detached token in the same block, from 2 to 3. When that expiry passes, the
+// token has no name any more, so Interpret writes a second, block-boundary release with the
+// resource and no name. Project keeps the name as a released ENSv2 tombstone on that resource
+// (product ruling of 2026-09-25: an expired ENSv2 registration stays with ENSv2), and the
+// registration section serves the same latest fact as authority selection (product ruling of
+// 2026-09-26): the nameless release at block 3, not the named path-cut release at block 1. So it
+// serves that release's time and its expiry, 3, not the grant's 2, and the control section is
+// unregistered.
+// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L255-L258 @ ens_v2@a971bd64)
+#[tokio::test]
+async fn a_detached_child_expiry_is_released_without_a_name_and_stays_a_v2_tombstone() -> Result<()>
+{
+    let scratch = ScratchDatabase::create("production_interpret_detached_child_expiry").await?;
+    let chain = "interpret-detached-child-expiry";
+    detached_child_fixture(scratch.pool(), chain, 2, Some((1, 9, 3)), 3).await?;
 
     // Interpret's shape before Project: a named release where the path was cut, which closes the
     // binding, and a nameless block-boundary release at the child's own expiry.
@@ -5367,7 +5470,7 @@ async fn a_detached_child_expiry_is_released_without_a_name_and_stays_a_v2_tombs
             releases[1].4,
             releases[1].5.as_deref(),
         ),
-        (None, resource, 2, None, None, Some("RegistryPathExpired")),
+        (None, resource, 3, None, None, Some("RegistryPathExpired")),
         "the child's own expiry is released on its resource without a name"
     );
     let open: i64 = sqlx::query_scalar(
@@ -5381,54 +5484,116 @@ async fn a_detached_child_expiry_is_released_without_a_name_and_stays_a_v2_tombs
     .await?;
     assert_eq!(open, 0);
 
-    run_project(scratch.pool(), chain, 2, 0, 2).await?;
-    let served: (Option<String>, Option<String>, Option<Uuid>, Option<String>) = sqlx::query_as(
-        "SELECT provenance #>> '{authority_selection,authority_arm}',
-                provenance #>> '{authority_selection,lifecycle_state}',
-                resource_id, declared_summary #>> '{registration,status}'
-         FROM name_current WHERE logical_name_id = $1",
+    let served = served_after_one_batch(scratch.pool(), chain, 3, &leaf).await?;
+    scratch.cleanup().await?;
+    assert_eq!(
+        (
+            served["authority_arm"].as_str(),
+            served["lifecycle_state"].as_str(),
+            served["resource_id"].as_str(),
+            served["registration"]["status"].as_str(),
+            served["registration"]["latest_event_kind"].as_str(),
+            served["registration"]["released_at"].as_i64(),
+            served["registration"]["expiry"].as_i64(),
+            served["control"]["status"].as_str(),
+        ),
+        (
+            Some("ens_v2"),
+            Some("unregistered"),
+            Some(resource.to_string().as_str()),
+            Some("released"),
+            Some("RegistrationReleased"),
+            Some(3),
+            Some(3),
+            Some("unregistered"),
+        ),
+        "{served}"
+    );
+    Ok(())
+}
+
+// Resumed Project batches must serve what one batch serves for the detached child. They do not
+// yet: the batch at block 3 holds only the release written without a name, and incremental scope
+// does not bring in a name whose closed ENSv2 binding was on that release's resource, so the name
+// keeps the row the block-1 path cut gave it (no `released_at`, no expiry) until something else
+// touches it. One batch reads the later release. Authority selection's reading of the nameless
+// release has the same gap. Ignored until the scope rule lands.
+#[tokio::test]
+#[ignore = "incremental scope does not yet rescope a name for a later release without a name on its closed binding's resource"]
+async fn a_detached_child_expiry_serves_the_same_fields_resumed_and_in_one_batch() -> Result<()> {
+    let chain = "interpret-detached-child-resumed";
+    let resumed_db = ScratchDatabase::create("production_interpret_detached_child_resumed").await?;
+    detached_child_fixture(resumed_db.pool(), chain, 2, Some((1, 9, 3)), 3).await?;
+    let leaf: String = sqlx::query_scalar(
+        "SELECT logical_name_id FROM normalized_events
+         WHERE chain_id = $1 AND event_kind = 'RegistrationReleased'
+           AND logical_name_id IS NOT NULL",
     )
-    .bind(&leaf)
+    .bind(chain)
+    .fetch_one(resumed_db.pool())
+    .await?;
+    let resumed = served_after_resumed_batches(resumed_db.pool(), chain, &[1, 2, 3], &leaf).await?;
+    resumed_db.cleanup().await?;
+    let one_db = ScratchDatabase::create("production_interpret_detached_child_one").await?;
+    detached_child_fixture(one_db.pool(), chain, 2, Some((1, 9, 3)), 3).await?;
+    assert_eq!(
+        served_after_one_batch(one_db.pool(), chain, 3, &leaf).await?,
+        resumed,
+        "resumed batches and one batch serve the same fields"
+    );
+    one_db.cleanup().await
+}
+
+// A detached renewal (Pro review of b83f829c, question 5): the child registered with expiry 20
+// loses its path in block 1, the child registry extends the detached token to 30 in block 2, and
+// the token lapses at 30. Interpret writes the renewal without a name, so the name's own expiry
+// rows still say 20; the nameless release at block 30 carries the lapsed expiry, 30. The
+// registration section serves the release's expiry with its time, 30 and 30, not the older named
+// expiry.
+// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L212-L227 @ ens_v2@a971bd64)
+#[tokio::test]
+async fn a_detached_renewal_gives_the_released_tombstone_its_lapsed_expiry() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_interpret_detached_renewal").await?;
+    let chain = "interpret-detached-renewal";
+    detached_child_fixture(scratch.pool(), chain, 20, Some((2, 0, 30)), 30).await?;
+    let (leaf, resource, block): (String, Uuid, i64) = sqlx::query_as(
+        "SELECT named.logical_name_id, named.resource_id, nameless.block_number
+         FROM normalized_events nameless
+         JOIN normalized_events named
+           ON named.resource_id = nameless.resource_id
+          AND named.logical_name_id IS NOT NULL
+          AND named.event_kind = 'RegistrationReleased'
+         WHERE nameless.chain_id = $1 AND nameless.logical_name_id IS NULL
+           AND nameless.event_kind = 'RegistrationReleased'",
+    )
+    .bind(chain)
     .fetch_one(scratch.pool())
     .await?;
+    assert_eq!(block, 30, "the renewed token lapses at 30");
+    let served = served_after_one_batch(scratch.pool(), chain, 30, &leaf).await?;
+    scratch.cleanup().await?;
     assert_eq!(
-        served,
         (
-            Some("ens_v2".into()),
-            Some("unregistered".into()),
-            Some(resource),
-            Some("released".into()),
-        )
-    );
-    // The registration section reads the same latest fact as authority selection (product
-    // ruling of 2026-09-26): the nameless path-expiry release at block 2, not the named path-cut
-    // release at block 1. So it serves that release's time and the lapsed expiry the entry still
-    // holds, and the control section is unregistered.
-    let details: (
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-    ) = sqlx::query_as(
-        "SELECT declared_summary #>> '{registration,latest_event_kind}',
-                declared_summary #>> '{registration,released_at}',
-                declared_summary #>> '{registration,expiry}',
-                declared_summary #>> '{control,status}'
-         FROM name_current WHERE logical_name_id = $1",
-    )
-    .bind(&leaf)
-    .fetch_one(scratch.pool())
-    .await?;
-    assert_eq!(
-        details,
+            served["authority_arm"].as_str(),
+            served["lifecycle_state"].as_str(),
+            served["resource_id"].as_str(),
+            served["registration"]["status"].as_str(),
+            served["registration"]["released_at"].as_i64(),
+            served["registration"]["expiry"].as_i64(),
+            served["control"]["status"].as_str(),
+        ),
         (
-            Some("RegistrationReleased".into()),
-            Some("2".into()),
-            Some("2".into()),
-            Some("unregistered".into()),
-        )
+            Some("ens_v2"),
+            Some("unregistered"),
+            Some(resource.to_string().as_str()),
+            Some("released"),
+            Some(30),
+            Some(30),
+            Some("unregistered"),
+        ),
+        "{served}"
     );
-    scratch.cleanup().await
+    Ok(())
 }
 
 #[tokio::test]
@@ -8343,6 +8508,12 @@ async fn seed_v2_lifecycle_fixture(pool: &PgPool, chain_id: &str) -> Result<()> 
                 "fragment": "event LabelUnregistered(uint256 indexed tokenId, address indexed sender)",
                 "emitter_roles": ["registry"],
                 "normalized_events": ["RegistrationReleased"]
+            },
+            {
+                "name": "ExpiryUpdated",
+                "fragment": "event ExpiryUpdated(uint256 indexed tokenId, uint64 indexed newExpiry, address indexed sender)",
+                "emitter_roles": ["registry"],
+                "normalized_events": ["SurfaceUnbound", "RegistrationReleased", "ExpiryChanged", "RegistrationRenewed", "PreimageObserved", "SurfaceBound", "RegistrationGranted", "AuthorityTransferred", "ResolverChanged", "SubregistryChanged"]
             }
         ], "calls": [] }
     });
