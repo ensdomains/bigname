@@ -101,10 +101,6 @@
                        WHEN selected_registration.event_kind = 'RegistrationReleased'
                         AND selected_authority.selected_authority_arm = 'ens_v2'
                            THEN jsonb_build_object('status', 'unregistered')
-                       WHEN COALESCE(resource.provenance ->> 'authority_kind',
-                           registration_grant.after_state ->> 'authority_kind') IN ('wrapper', 'name_wrapper')
-                           THEN jsonb_build_object('status', 'unsupported', 'unsupported_reason',
-                               'ENSv1 wrapper effective control is not yet projected')
                        ELSE jsonb_build_object(
                            'status', CASE
                                WHEN selected_registration.event_kind = 'RegistrationReserved'

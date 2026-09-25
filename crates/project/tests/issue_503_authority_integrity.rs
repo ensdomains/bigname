@@ -1895,3 +1895,6 @@ mod child_cutoff;
 
 #[path = "issue_503/migration_readers.rs"]
 mod migration_readers;
+
+#[path = "issue_503/wrapper_control.rs"]
+mod wrapper_control;
