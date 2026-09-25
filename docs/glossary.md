@@ -2150,7 +2150,10 @@ the token version, the reservation carries a versioned token id and no
 resource, so it is not a fact of the released resource, and Interpret writes its
 end as a named release without a resource. A version-zero reservation, such as
 one in a replacement registry, carries its own resource, and its end carries the
-same resource. Either end returns the tombstone. A reservation whose expiry is
+same resource. Either end returns the tombstone. A release on that resource
+counts as the reservation's end only when the name's latest earlier
+reservation-or-registration fact on it is a reservation, so the release of a
+registration that kept the reservation's resource is not one. A reservation whose expiry is
 already at or before its own block's time is never live and does not defer. A
 path-expiry release that Interpret
 writes on the resource without a name, because the token had already lost its
