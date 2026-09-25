@@ -179,7 +179,7 @@ async fn a_one_shot_redo_whose_families_stop_short_fails_and_a_rerun_repairs_the
     let message = error.to_string();
     assert!(message.contains("family repair incomplete"), "{message}");
     assert!(
-        message.contains("14") && message.contains("30"),
+        message.contains("families at block 14 (") && message.contains("served marker block 30 ("),
         "{message}"
     );
 
