@@ -24,6 +24,17 @@ pub(crate) struct ManifestEvent {
     pub(crate) payload: Option<Value>,
 }
 
+#[derive(sqlx::FromRow)]
+struct ManifestRow {
+    manifest_id: i64,
+    event_id: i64,
+    block_number: Option<i64>,
+    namespace: String,
+    source_family: String,
+    rollout_status: Option<String>,
+    payload: Option<Value>,
+}
+
 /// The manifest updates one run read, newest first within each manifest.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct History {
@@ -53,19 +64,12 @@ impl History {
     /// Every manifest update of the chain at or below `through` (or with no block) on the
     /// readable lineage.
     pub(crate) async fn read(pool: &PgPool, chain_id: &str, through: i64) -> Result<Self> {
-        let rows: Vec<(
-            i64,
-            i64,
-            Option<i64>,
-            String,
-            String,
-            Option<String>,
-            Option<Value>,
-        )> = sqlx::query_as(
-            "/* project:families.manifests.read */ SELECT event.source_manifest_id,
-                    event.normalized_event_id, event.block_number, event.namespace,
-                    event.source_family, event.after_state ->> 'rollout_status',
-                    event.after_state -> 'manifest_payload'
+        let rows: Vec<ManifestRow> = sqlx::query_as(
+            "/* project:families.manifests.read */ SELECT
+                    event.source_manifest_id AS manifest_id,
+                    event.normalized_event_id AS event_id, event.block_number, event.namespace,
+                    event.source_family, event.after_state ->> 'rollout_status' AS rollout_status,
+                    event.after_state -> 'manifest_payload' AS payload
              FROM normalized_events event
              LEFT JOIN chain_lineage lineage
                ON lineage.chain_id = event.chain_id AND lineage.block_hash = event.block_hash
@@ -88,25 +92,15 @@ impl History {
         .map_err(|error| ProjectError::database("failed to read the manifest updates", error))?;
         Ok(Self::new(
             rows.into_iter()
-                .map(
-                    |(
-                        manifest_id,
-                        event_id,
-                        block_number,
-                        namespace,
-                        source_family,
-                        rollout_status,
-                        payload,
-                    )| ManifestEvent {
-                        manifest_id,
-                        event_id,
-                        block_number,
-                        namespace,
-                        source_family,
-                        rollout_status,
-                        payload,
-                    },
-                )
+                .map(|row| ManifestEvent {
+                    manifest_id: row.manifest_id,
+                    event_id: row.event_id,
+                    block_number: row.block_number,
+                    namespace: row.namespace,
+                    source_family: row.source_family,
+                    rollout_status: row.rollout_status,
+                    payload: row.payload,
+                })
                 .collect(),
         ))
     }
