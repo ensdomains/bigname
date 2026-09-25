@@ -1681,8 +1681,10 @@ undoes at most 256 blocks (`--project-families-max-blocks`, or
 `BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES_MAX_BLOCKS`), so a rebuild or a long
 catch-up spans several runner cycles. The one-shot `redo` command has no later
 cycle, so after its batch it runs the loop again, in normal mode, until the
-families reach the served marker; a stop or a failed block still ends it early,
-and the next served batch catches up. The run reads the Interpret and Project
+families reach the served marker. A stop, a failed block or an Interpret
+revision change can still end it early. The served redo stays recorded, but the
+command logs an error with the family marker and the served marker and exits
+non-zero; rerunning the same redo repairs the families. The run reads the Interpret and Project
 rows of `chain_phase_state` within 2 seconds or is skipped for that batch.
 `--project-families false` (or `BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES=false`)
 turns the loop off.
