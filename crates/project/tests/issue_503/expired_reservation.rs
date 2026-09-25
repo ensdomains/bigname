@@ -241,3 +241,114 @@ async fn a_live_reservation_in_the_same_shape_hands_the_name_to_ensv1() -> Resul
     );
     Ok(())
 }
+
+// The converse boundary in one block: the old registration's expiry release at the start of block
+// 10, with no transaction or log index, and a reservation of the name later in that block whose
+// numeric expiry is still ahead of the block's timestamp. The reservation is live, so the
+// already-expired rule leaves it in, and it is the later fact: the name goes to its live ENSv1
+// lease. Run in one batch and as two incremental batches.
+#[tokio::test]
+async fn a_live_reservation_after_a_start_of_block_release_hands_the_name_to_ensv1() -> Result<()> {
+    async fn seed_boundary(pool: &PgPool) -> Result<(String, String)> {
+        earlier_block(pool).await?;
+        let logical = surface(pool, 103, "boundary-live.eth", &[]).await?;
+        let v1_resource = open_binding(pool, &logical, 103, "ens_v1", 1).await?;
+        event(
+            pool,
+            "boundary-live-v1-grant",
+            &logical,
+            Some(&v1_resource),
+            Event {
+                family: "ens_v1_registrar_l1",
+                kind: "RegistrationGranted",
+                log: 1,
+                after: json!({"status":"registered","registrant":"0x0000000000000000000000000000000000000001"}),
+            },
+        )
+        .await?;
+        let (v2_resource, _) = closed_binding_at_block_9(pool, &logical, 103, "ens_v2").await?;
+        event(
+            pool,
+            "boundary-live-v2-grant",
+            &logical,
+            Some(&v2_resource),
+            Event {
+                family: "ens_v2_registry_l1",
+                kind: "RegistrationGranted",
+                log: 2,
+                after: json!({"source_event":"LabelRegistered","status":"registered","registrant":"0x0000000000000000000000000000000000000002"}),
+            },
+        )
+        .await?;
+        sqlx::query("UPDATE normalized_events SET block_number = 9, block_hash = $1 WHERE event_identity = 'boundary-live-v2-grant'")
+            .bind(EARLIER_HASH).execute(pool).await?;
+        event(
+            pool,
+            "boundary-live-v2-expiry",
+            &logical,
+            Some(&v2_resource),
+            Event {
+                family: "ens_v2_registry_l1",
+                kind: "RegistrationReleased",
+                log: 0,
+                after: json!({"source_event":"RegistryPathExpired","derived_from":"interpreter_state","terminal_reason":"registry_name_binding_expired","status":"released"}),
+            },
+        )
+        .await?;
+        sqlx::query("UPDATE normalized_events SET transaction_hash = NULL, transaction_index = NULL, log_index = NULL WHERE event_identity = 'boundary-live-v2-expiry'")
+            .execute(pool).await?;
+        event(
+            pool,
+            "boundary-live-reserve",
+            &logical,
+            None,
+            Event {
+                family: "ens_v2_registry_l1",
+                kind: "RegistrationReserved",
+                log: 1,
+                after: json!({"source_event":"LabelReserved","expiry":BLOCK_10_SECONDS + 3_600,"status":"reserved"}),
+            },
+        )
+        .await?;
+        sqlx::query("UPDATE normalized_events SET transaction_index = 1 WHERE event_identity = 'boundary-live-reserve'")
+            .execute(pool).await?;
+        Ok((logical, v1_resource))
+    }
+
+    let (full_db, full) = database("boundary_live_reservation_full").await?;
+    let (logical, v1_resource) = seed_boundary(&full).await?;
+    run(&full).await?;
+    let full_selection = selection(&full, &logical).await?;
+    full_db.cleanup().await?;
+    assert_eq!(
+        (full_selection.0.as_deref(), full_selection.2.as_deref()),
+        (Some("ens_v1"), Some(v1_resource.as_str())),
+        "the live reservation is later than the start-of-block release"
+    );
+    let (incremental_db, incremental) = database("boundary_live_reservation_incremental").await?;
+    seed_boundary(&incremental).await?;
+    let first = Engine::new(incremental.clone())
+        .run_batch(BatchRequest {
+            chain_id: CHAIN.into(),
+            target_block: 9,
+            affected_from_block: 9,
+            affected_to_block: 9,
+            resume_current: None,
+            mode: RunMode::Normal,
+        })
+        .await?
+        .current;
+    Engine::new(incremental.clone())
+        .run_batch(BatchRequest {
+            chain_id: CHAIN.into(),
+            target_block: 10,
+            affected_from_block: 10,
+            affected_to_block: 10,
+            resume_current: Some(first),
+            mode: RunMode::Normal,
+        })
+        .await?;
+    assert_eq!(selection(&incremental, &logical).await?, full_selection);
+    incremental_db.cleanup().await?;
+    Ok(())
+}
