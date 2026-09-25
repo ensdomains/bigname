@@ -321,8 +321,16 @@ async fn a_live_reservation_after_a_start_of_block_release_hands_the_name_to_ens
     let full_selection = selection(&full, &logical).await?;
     full_db.cleanup().await?;
     assert_eq!(
-        (full_selection.0.as_deref(), full_selection.2.as_deref()),
-        (Some("ens_v1"), Some(v1_resource.as_str())),
+        (
+            full_selection.0.as_deref(),
+            full_selection.1.as_deref(),
+            full_selection.2.as_deref()
+        ),
+        (
+            Some("ens_v1"),
+            Some("registered"),
+            Some(v1_resource.as_str())
+        ),
         "the live reservation is later than the start-of-block release"
     );
     let (incremental_db, incremental) = database("boundary_live_reservation_incremental").await?;

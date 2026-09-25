@@ -101,10 +101,10 @@
                 -- The hand-back lasts only while that reservation is live. When a versioned
                 -- reservation is unregistered or lapses, Interpret writes its end as a named
                 -- release without a resource; a registration always has a resource and a path-cut
-                -- release carries it, so a named ENSv2 release without one is a reservation's end. The label is then
-                -- available: the registry answers a zero resolver for it, and a WrapperRegistry
-                -- never falls back to ENSv1 once the expiry is nonzero. The released
-                -- registration the name was last bound to stands again as its tombstone.
+                -- release carries it, so a named ENSv2 release without one is a reservation's end.
+                -- The label is then available: the registry answers a zero resolver for it, and a
+                -- WrapperRegistry never falls back to ENSv1 once the expiry is nonzero. The
+                -- released registration the name was last bound to stands again as its tombstone.
                 -- (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L196-L207 @ ens_v2@a971bd64)
                 -- (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L255-L258 @ ens_v2@a971bd64)
                 -- (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L294-L297 @ ens_v2@a971bd64)
@@ -182,12 +182,12 @@
             -- A released ENSv2 registration stays with ENSv2 whatever ENSv1 holds (product ruling
             -- of 2026-09-25): when the latest lifecycle fact of the registration the name was last
             -- bound to is its release, by `unregister` or by lapsing at expiry, and no ENSv2
-            -- binding is open, the name is the released tombstone even beside a live ENSv1
-            -- lease. A later reservation of the name, with or without a resource, is a later
-            -- lifecycle fact and defers to ENSv1. The contracts never route a registered label back to ENSv1: `unregister`
-            -- writes the release time as the expiry, the registry returns no resolver for an
-            -- expired entry, and a WrapperRegistry stops answering with ENSV1Resolver for a label
-            -- whose stored expiry is nonzero.
+            -- binding is open, the name is the released tombstone even beside a live ENSv1 lease. A
+            -- later reservation of the name, with or without a resource, is a later lifecycle fact
+            -- and defers to ENSv1 while it is live. The contracts never route a registered label
+            -- back to ENSv1: `unregister` writes the release time as the expiry, the registry
+            -- returns no resolver for an expired entry, and a WrapperRegistry stops answering with
+            -- ENSV1Resolver for a label whose stored expiry is nonzero.
             -- (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L196-L207 @ ens_v2@a971bd64)
             -- (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L255-L258 @ ens_v2@a971bd64)
             -- (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L294-L297 @ ens_v2@a971bd64)

@@ -24776,6 +24776,9 @@ fn alice_v2_token(version: u32) -> U256 {
 
 type ServedAuthority = (Option<String>, Option<String>, Option<Uuid>, Option<String>);
 
+/// A reservation row's transaction index, log index, expiry and source event.
+type RevivedReservation = (Option<i64>, Option<i64>, Value, Option<String>);
+
 async fn served_authority(pool: &PgPool, logical_name_id: &str) -> Result<ServedAuthority> {
     Ok(sqlx::query_as(
         "SELECT provenance #>> '{authority_selection,authority_arm}',
@@ -25210,8 +25213,9 @@ async fn a_renewal_revives_an_expired_reservation_and_hands_the_name_to_ensv1_fr
             mode: InterpretRunMode::Normal,
         })
         .await?;
-    let revived: Vec<(Option<i64>, Option<i64>, Value)> = sqlx::query_as(
-        "SELECT transaction_index, log_index, after_state -> 'expiry' FROM normalized_events
+    let revived: Vec<RevivedReservation> = sqlx::query_as(
+        "SELECT transaction_index, log_index, after_state -> 'expiry', after_state ->> 'source_event'
+         FROM normalized_events
          WHERE chain_id = $1 AND logical_name_id = $2 AND event_kind = 'RegistrationReserved'
            AND block_number = 7",
     )
@@ -25221,7 +25225,12 @@ async fn a_renewal_revives_an_expired_reservation_and_hands_the_name_to_ensv1_fr
     .await?;
     assert_eq!(
         revived,
-        vec![(Some(1), Some(1), json!(4_000_000_000_u64))],
+        vec![(
+            Some(1),
+            Some(1),
+            json!(4_000_000_000_u64),
+            Some("ExpiryUpdated".to_owned())
+        )],
         "Interpret writes the revived reservation for the name at the renewal's log"
     );
     let v1_resource: Uuid = sqlx::query_scalar(
