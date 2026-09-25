@@ -28,6 +28,8 @@ tables! {
         ["chain_id", "logical_name_id", "registry_contract_instance_id"];
     WRAPPER_STATE = "project_wrapper_state" ["chain_id", "resource_id"];
     REGISTRY_NODE_STATE = "project_registry_node_state" ["chain_id", "namespace", "node"];
+    REGISTRY_OWNER_EVENT = "project_registry_owner_event"
+        ["chain_id", "namespace", "node", "event_identity"];
     REGISTRY_BINDING_OBSERVATION = "project_registry_binding_observation"
         ["chain_id", "observation_identity"];
     RESOLVER_CLASSIFICATION = "project_resolver_classification" ["chain_id", "resolver_address"];

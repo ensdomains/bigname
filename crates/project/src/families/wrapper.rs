@@ -1,8 +1,9 @@
 //! F2b, NameWrapper state per wrapper resource: the latest PermissionScopeChanged's wrapper
 //! state and fuses, and the latest wrapper expiry (an ExpiryChanged from the wrapper, or from
 //! the registrar when it is the wrapper's NameRenewed), each with the position that set it
-//! (permissions.rs, `modifiers` and `wrapper_expiries`; children.rs). Masks that depend on the
-//! block clock apply at read.
+//! (permissions.rs, `modifiers` and `wrapper_expiries`; children.rs), and the newest wrapper
+//! lifecycle event with the latest unwrap (resource_summary.rs, `wrapper_lifecycles`). Masks
+//! that depend on the block clock apply at read.
 use serde_json::{Value, json};
 use sqlx::{Postgres, Transaction};
 
@@ -16,6 +17,47 @@ use crate::Result;
 
 fn modifier(event: &BlockEvent) -> bool {
     event.event_kind == "PermissionScopeChanged" && event.source_family == "ens_v1_wrapper_l1"
+}
+
+/// A wrapper lifecycle event as the served permissions summary ranks them
+/// (resource_summary.rs, `wrapper_lifecycles`): the NameWrapped mint, the NameUnwrapped epoch
+/// close, or a holder grant or revoke of the resource. Returns its source and whether it leaves
+/// the resource unwrapped.
+fn lifecycle(event: &BlockEvent) -> Option<(&'static str, bool)> {
+    if event.source_family != "ens_v1_wrapper_l1" {
+        return None;
+    }
+    let source_event = raw_text(&event.after, "source_event");
+    match event.event_kind.as_str() {
+        "TokenControlTransferred" if source_event.as_deref() == Some("NameWrapped") => {
+            Some(("NameWrapped", false))
+        }
+        "AuthorityEpochChanged" | "SurfaceUnbound"
+            if source_event.as_deref() == Some("NameUnwrapped") =>
+        {
+            Some(("NameUnwrapped", true))
+        }
+        "PermissionChanged" => {
+            let resource_scope =
+                event.after.pointer("/scope/kind").and_then(Value::as_str) == Some("resource");
+            let powers = event
+                .after
+                .get("effective_powers")
+                .and_then(Value::as_array)?;
+            let relation = event
+                .after
+                .pointer("/grant_source/relation_kind")
+                .or_else(|| event.after.pointer("/revocation_source/relation_kind"))
+                .and_then(Value::as_str);
+            let lifecycle = if powers.is_empty() {
+                ("holder_revoke", true)
+            } else {
+                ("holder_grant", false)
+            };
+            (resource_scope && relation == Some("holder")).then_some(lifecycle)
+        }
+        _ => None,
+    }
 }
 
 fn wrapper_expiry(event: &BlockEvent) -> bool {
@@ -54,7 +96,7 @@ pub(super) async fn apply(
     let table = &tables::WRAPPER_STATE;
     let relevant: Vec<(&BlockEvent, &str)> = events
         .iter()
-        .filter(|event| modifier(event) || wrapper_expiry(event))
+        .filter(|event| modifier(event) || wrapper_expiry(event) || lifecycle(event).is_some())
         .filter_map(|event| Some((event, event.resource_id.as_deref()?)))
         .collect();
     let keys = relevant
@@ -75,7 +117,14 @@ pub(super) async fn apply(
                 text_or_null(event.logical_name_id.clone()),
             );
         }
-        if modifier(event) {
+        if let Some((source, unwrapped)) = lifecycle(event) {
+            set(&mut row, "lifecycle_source", source);
+            set(&mut row, "lifecycle_unwrapped", Value::Bool(unwrapped));
+            set(&mut row, "lifecycle_position", event.position.to_json());
+            if source == "NameUnwrapped" {
+                set(&mut row, "unwrapped_position", event.position.to_json());
+            }
+        } else if modifier(event) {
             let state = raw_text(&event.after, "wrapper_state")
                 .filter(|state| matches!(state.as_str(), "wrapped" | "emancipated" | "locked"));
             set(&mut row, "wrapper_state", text_or_null(state));

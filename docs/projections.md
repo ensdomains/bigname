@@ -103,6 +103,32 @@ timestamps or whose lifecycle changed in the affected range. From either seed,
 it follows only activated canonical ENSv2 subregistry edges to descendants. The
 deleted or orphaned release is not served, and unrelated topology components are
 not admitted.
+The expansion also seeds the node of an `AuthorityTransferred` derived from an
+ENSv1 or Basenames registry `Transfer`, whose `source_event` is `Transfer`. The
+registry emits `Transfer(node, owner)` from `setOwner`, so the event carries the
+transferred node in `node`
+(upstream: .refs/ens_v1/contracts/registry/ENS.sol:L9 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L63-L69 @ ens_v1@91c966f)
+(upstream: .refs/basenames/lib/ens-contracts/contracts/registry/ENS.sol:L8 @ basenames@1809bbc)
+(upstream: .refs/basenames/src/L2/Registry.sol:L100-L103 @ basenames@1809bbc).
+The adapter attaches a logical
+name only when the ownership it tracks for that node, or for a transfer to the
+zero address the registry read it recorded for the node, had already seen the
+node's [name surface](glossary.md#surface-name-surface). So the event can
+arrive without a logical name while the node has an active surface. Project
+rebuilds the child edge of the after state's `node`, and of the before state's
+`node` as a conservative extra candidate, and like any rebuilt child edge the
+walk also rebuilds that node's own subtree. The child row follows the latest
+registry owner of the active surface at that node, so without this seed an
+incremental batch would keep a child that a `Transfer` to the zero address
+removes, while a rebuild drops it. An `AuthorityTransferred` derived from
+`NewOwner` names the parent in `node`, because `setSubnodeOwner` emits
+`NewOwner(node, label, owner)` with the parent node
+(upstream: .refs/ens_v1/contracts/registry/ENS.sol:L6 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L75-L84 @ ens_v1@91c966f)
+(upstream: .refs/basenames/lib/ens-contracts/contracts/registry/ENS.sol:L5 @ basenames@1809bbc)
+(upstream: .refs/basenames/src/L2/Registry.sol:L113-L124 @ basenames@1809bbc).
+It does not take this path; its parent stays ancestor evidence.
 `project_events` remains the single filter for data that builders may serve.
 
 Code that builds a replacement projection row may read normalized events staged
@@ -1646,10 +1672,17 @@ recorded, the phase runner applies the families block by block, each block in
 a transaction of its own, from the [family marker](glossary.md#family-marker)
 (`project_family_marker`) up to the served marker. The served publication never
 waits for them: the families trail it until the loop catches up, and
-`phase_runner_project_family_lag_blocks` reports by how much. One run applies or
+`phase_runner_project_family_lag_blocks` reports by how much. It reads 0 only
+when the family marker is the served block, hash included. A marker above a
+lowered served marker counts the blocks in between, and a marker off the served
+branch (orphaned, or another hash at the served height) counts at least one
+block. One run applies or
 undoes at most 256 blocks (`--project-families-max-blocks`, or
 `BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES_MAX_BLOCKS`), so a rebuild or a long
-catch-up spans several runner cycles. The run reads the Interpret and Project
+catch-up spans several runner cycles. The one-shot `redo` command has no later
+cycle, so after its batch it runs the loop again, in normal mode, until the
+families reach the served marker; a stop or a failed block still ends it early,
+and the next served batch catches up. The run reads the Interpret and Project
 rows of `chain_phase_state` within 2 seconds or is skipped for that batch.
 `--project-families false` (or `BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES=false`)
 turns the loop off.
@@ -1712,7 +1745,9 @@ steps that read them must key on. Each is also stated on its table or column:
   `surface_binding_id` alone.
 - F2c: `AuthorityTransferred` and `SubregistryChanged` both set the owner
   group, so a `SubregistryChanged` after a zero-getter transfer replaces the
-  owner and the served "ownerless" verdict cannot be recovered. An
+  owner and the served "ownerless" verdict cannot be recovered from the node
+  row; `project_registry_owner_event` keeps every owner-setting event of the
+  node by position, with its name, resource and authority kind, for it. An
   observation's `target_resource_id` is the name's ENSv1 or Basenames binding
   active at the block, not the served authority selection.
 - F3: the pointer-family priority is approximated from the F4 and F5 pointer
@@ -1724,6 +1759,11 @@ steps that read them must key on. Each is also stated on its table or column:
 - F4 keeps the ENSv1 registry, registrar and wrapper families only, so a
   `ResolverChanged` of another family with no resource (a Basenames reverse
   node, for instance) lands in no family table.
+- F5 keeps the unnamed resolver clear the interpreter emits at an ENSv2
+  root-registry TLD expiry. The served pointer read takes named
+  `ResolverChanged` only, never sees that clear, and keeps an inventory row the
+  name no longer reaches; the chain agrees with F5 (`getResolver` returns the
+  zero address once the token has expired).
 - F7 keeps a `ResolverRecordLinked` whose payload has no resolver; the served
   link reader requires the payload resolver equal to the emitter.
 - The undo journal is not pruned while the chain has no finalized or safe
