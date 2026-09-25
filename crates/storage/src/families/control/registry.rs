@@ -53,11 +53,14 @@ impl RegistryNode {
 
 /// The registry generation and handoff block of an ENS name (name_authority/build.sql
 /// :815-819): `old` when the 2017 registry recorded the node and the current registry has not,
-/// under arm ens_v1; the handoff block is the first current-registry record.
+/// under arm ens_v1; the handoff block is the first current-registry record. The served fold
+/// reads ENS registry records only (name_authority/build.sql:775-790), so a node of another
+/// namespace, such as a Basenames node F2c also keeps, has no handoff block.
 pub fn registry_generation(
     node: Option<&RegistryNode>,
     authority_arm: Option<&str>,
 ) -> (Option<&'static str>, Option<i64>) {
+    let node = node.filter(|node| node.namespace == "ens");
     let generation = (authority_arm == Some("ens_v1")).then(|| match node {
         Some(node) if node.has_old_record && node.first_current_record_block.is_none() => "old",
         _ => "current",
@@ -345,6 +348,7 @@ mod tests {
     #[test]
     fn generation_is_old_only_before_the_current_registry_records_the_node() {
         let mut node = RegistryNode {
+            namespace: "ens".into(),
             has_old_record: true,
             ..RegistryNode::default()
         };
@@ -352,6 +356,7 @@ mod tests {
             registry_generation(Some(&node), Some("ens_v1")),
             (Some("old"), None)
         );
+        node.namespace = "ens".into();
         node.first_current_record_block = Some(12);
         assert_eq!(
             registry_generation(Some(&node), Some("ens_v1")),
@@ -363,6 +368,11 @@ mod tests {
         );
         assert_eq!(
             registry_generation(None, Some("ens_v1")),
+            (Some("current"), None)
+        );
+        node.namespace = "basenames".into();
+        assert_eq!(
+            registry_generation(Some(&node), Some("ens_v1")),
             (Some("current"), None)
         );
     }

@@ -8,9 +8,11 @@ use sqlx::PgPool;
 
 use super::rows::WrapperRow;
 
-/// `PARENT_CANNOT_CONTROL`-style fuse bit for a `.eth` second-level name (permissions.rs:25).
+/// The fuse the NameWrapper burns on a `.eth` second-level name (permissions.rs:25).
+/// (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L19 @ ens_v1@91c966f)
 pub const IS_DOT_ETH: i64 = 131072;
 /// The `.eth` registrar grace period in seconds (permissions.rs:25).
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L48 @ ens_v1@91c966f)
 pub const GRACE_PERIOD_SECONDS: i128 = 7_776_000;
 
 /// What the wrapper serves at one clock.
@@ -22,8 +24,9 @@ pub struct EffectiveWrapper {
     /// Zero past the wrapper expiry; null when the state, fuses or expiry is unknown
     /// (permissions.rs:311-318, resource_summary.rs:400-407).
     pub fuses: Option<i64>,
-    /// Past its own expiry the NameWrapper reports no owner for an emancipated or locked name
-    /// (build.sql:620-623).
+    /// Past its own expiry the NameWrapper reports no owner for an emancipated or locked name,
+    /// and zero fuses for any name (build.sql:616-623).
+    /// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L843-L856 @ ens_v1@91c966f)
     pub owner_lapsed: bool,
     /// A `.eth` name inside the grace period after its wrapper expiry (permissions.rs:329-335).
     pub in_grace: bool,

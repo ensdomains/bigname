@@ -60,7 +60,10 @@ pub struct ServedGrant {
     pub transfer_behavior: Value,
 }
 
-/// Whether the fuses block a power (permissions.rs:348-377).
+/// Whether the fuses block a power (permissions.rs:348-377): CANNOT_UNWRAP 1, CANNOT_BURN_FUSES
+/// 2, CANNOT_TRANSFER 4, CANNOT_SET_RESOLVER 8, CANNOT_SET_TTL 16, CANNOT_CREATE_SUBDOMAIN 32,
+/// CANNOT_APPROVE 64, PARENT_CANNOT_CONTROL 65536, CAN_EXTEND_EXPIRY 262144.
+/// (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L10-L20 @ ens_v1@91c966f)
 fn blocked(power: &str, wrapper_state: &str, fuses: i64) -> bool {
     match power {
         "resource_control" => wrapper_state == "locked",
