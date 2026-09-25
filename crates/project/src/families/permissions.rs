@@ -345,9 +345,10 @@ fn apply_grant(
             json!({"mode": after.get("transfer_behavior").cloned().unwrap_or(Value::Null)}),
         ),
     );
-    // Revoked is a clear: an empty effective-power array (`grant` admits arrays only), the rows
-    // the served current read drops (permissions.rs, `jsonb_array_length(masked.effective_powers)
-    // > 0`). The revocation source above is provenance only.
+    // Revoked means the grant was cleared: its effective-power array is empty (`grant` admits
+    // arrays only). The served current read also drops grants whose powers its wrapper fuse and
+    // grace masks empty (builders/permissions.rs `masked`); those masks stay on the served side,
+    // so such a grant keeps revoked false here. The revocation source above is provenance only.
     set(
         &mut row,
         "revoked",

@@ -481,9 +481,8 @@ async fn wrapper_numbers_match_the_served_numeric_reads() -> Result<()> {
     fixture.cleanup().await
 }
 
-// A grant is revoked when its effective powers are empty, the rows the served current read
-// drops (permissions.rs, `jsonb_array_length(masked.effective_powers) > 0`); the revocation
-// source is provenance only.
+// A grant is revoked when it was cleared, its effective powers empty; the revocation source is
+// provenance only. The served wrapper fuse and grace masks are not applied here.
 #[tokio::test]
 async fn a_grant_is_revoked_exactly_when_its_powers_are_empty() -> Result<()> {
     let fixture = Fixture::new("families_grant_revoked", 20).await?;
@@ -500,6 +499,20 @@ async fn a_grant_is_revoked_exactly_when_its_powers_are_empty() -> Result<()> {
             BOB,
             json!({"effective_powers": ["set_resolver"], "revocation_source": {"kind": "raw_log"}}),
             false,
+        ),
+        // The adapter's reservation shape: a remaining power beside a revocation source.
+        (
+            WRAPPER,
+            json!({"effective_powers": ["was_reserved"],
+                   "revocation_source": {"kind": "raw_log", "relation_kind": "holder"}}),
+            false,
+        ),
+        // A clear whose revocation source is JSON null.
+        (
+            REGISTRY,
+            json!({"effective_powers": [], "grant_source": {"kind": "raw_log"},
+                   "revocation_source": null}),
+            true,
         ),
     ];
     for (n, (subject, extra, _)) in (1..).zip(&cases) {
