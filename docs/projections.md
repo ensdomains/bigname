@@ -1805,11 +1805,7 @@ AuthorityTransferred, whose generated id is higher, so
 the registry node and the registry binding are read again in today's order from
 the event log, and a binding passes only when it matches the served one whole. The second is a named cause whose own check holds for
 that field. A named cause is either a step 2 family gap, reported rather than
-patched, or a served-side bug. One step 2 gap is not
-excused and fails: the registry node keeps only its latest owner-setting event,
-so when a later transfer the name's admission leaves out, or a later
-SubregistryChanged, set it, the admitted owner is gone. A fixture pins that
-failure for step 2 to close.
+patched, or a served-side bug.
 
 Under Tate's ruling an expired or released ENSv2 registration stays ENSv2 and
 is served unregistered. Three served-side bugs break that rule today, and the

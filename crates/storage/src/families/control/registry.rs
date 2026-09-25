@@ -36,9 +36,73 @@ pub struct RegistryNode {
     pub owner_getter_reason: Option<String>,
     pub has_old_record: bool,
     pub first_current_record_block: Option<i64>,
+    /// Every owner-setting registry event of the node (`project_registry_owner_event`), in the
+    /// canonical order.
+    pub owner_events: Vec<OwnerEvent>,
+}
+
+/// One owner-setting registry event of a node (`project_registry_owner_event`): an
+/// AuthorityTransferred or SubregistryChanged with the name, resource, authority kind and owner
+/// facts it carried. It keeps no `registry_owner` or `owner_word_unmasked`; only the node row
+/// holds them, for its latest owner-setting event.
+#[derive(Clone, Debug)]
+pub struct OwnerEvent {
+    pub position: Position,
+    pub transaction_hash: Option<String>,
+    pub logical_name_id: Option<String>,
+    pub resource_id: Option<String>,
+    pub event_kind: String,
+    pub source_family: String,
+    pub authority_kind: Option<String>,
+    pub owner: Option<String>,
+    pub owner_getter: Option<String>,
+}
+
+impl OwnerEvent {
+    fn from_row(row: &Value) -> Option<Self> {
+        Some(Self {
+            position: Position::of_row(row)?,
+            transaction_hash: text(row, "transaction_hash"),
+            logical_name_id: text(row, "logical_name_id"),
+            resource_id: text(row, "resource_id"),
+            event_kind: text(row, "event_kind")?,
+            source_family: text(row, "source_family")?,
+            authority_kind: text(row, "authority_kind"),
+            owner: lower(row, "owner"),
+            owner_getter: lower(row, "owner_getter"),
+        })
+    }
 }
 
 impl RegistryNode {
+    /// The node's latest AuthorityTransferred in the canonical order, the event the served
+    /// ownerless profile reads (name_authority/stage.rs:201-266).
+    pub fn latest_transfer(&self) -> Option<&OwnerEvent> {
+        self.owner_events
+            .iter()
+            .filter(|event| event.event_kind == "AuthorityTransferred")
+            .max_by(|left, right| left.position.cmp(&right.position))
+    }
+
+    /// The owner an owner-setting event reports to the served control block (build.sql
+    /// :650-663): null when its owner word is unmasked, else its registry_owner, else its owner.
+    /// Only the node row's latest owner-setting event carries the first two, so for any other
+    /// event the owner stands.
+    pub fn reported_owner(&self, event: &OwnerEvent) -> Option<String> {
+        let latest = self
+            .owner_position
+            .as_ref()
+            .is_some_and(|position| position.event_identity == event.position.event_identity);
+        if !latest {
+            return event.owner.clone();
+        }
+        if self.owner_word_unmasked == Some(true) {
+            None
+        } else {
+            self.registry_owner.clone().or_else(|| self.owner.clone())
+        }
+    }
+
     fn from_row(row: &Value) -> Option<Self> {
         Some(Self {
             namespace: text(row, "namespace")?,
@@ -56,6 +120,7 @@ impl RegistryNode {
             first_current_record_block: row
                 .get("first_current_record_block")
                 .and_then(Value::as_i64),
+            owner_events: Vec::new(),
         })
     }
 }
@@ -81,14 +146,16 @@ pub fn registry_generation(
 }
 
 /// Whether the ownerless-registry profile applies (name_authority/build.sql:852-856): the
-/// node's latest owner getter is the zero address, no binding is selected and the arm is not
+/// node's latest AuthorityTransferred reports the zero address as its owner getter
+/// (stage.rs:201-266 reads AuthorityTransferred only), no binding is selected and the arm is not
 /// ENSv2.
 pub fn ownerless_registry(
     node: Option<&RegistryNode>,
     selected_binding: Option<&str>,
     authority_arm: Option<&str>,
 ) -> bool {
-    node.is_some_and(|node| node.owner_getter.as_deref() == Some(ZERO_ADDRESS))
+    node.and_then(RegistryNode::latest_transfer)
+        .is_some_and(|event| event.owner_getter.as_deref() == Some(ZERO_ADDRESS))
         && selected_binding.is_none()
         && authority_arm != Some("ens_v2")
 }
@@ -99,7 +166,7 @@ pub async fn load_registry_nodes(
     chain_id: &str,
     keys: &[(String, String)],
 ) -> Result<BTreeMap<(String, String), RegistryNode>> {
-    let (namespaces, nodes): (Vec<String>, Vec<String>) = keys.iter().cloned().unzip();
+    let (namespaces, nodes_wanted): (Vec<String>, Vec<String>) = keys.iter().cloned().unzip();
     let rows: Vec<Value> = sqlx::query_scalar(
         "/* storage:families.control.registry.nodes */ SELECT to_jsonb(state)
          FROM bigname_phase.project_registry_node_state state
@@ -109,15 +176,43 @@ pub async fn load_registry_nodes(
     )
     .bind(chain_id)
     .bind(&namespaces)
-    .bind(&nodes)
+    .bind(&nodes_wanted)
     .fetch_all(pool)
     .await
     .context("failed to load registry node states")?;
-    Ok(rows
+    let mut nodes: BTreeMap<(String, String), RegistryNode> = rows
         .iter()
         .filter_map(RegistryNode::from_row)
         .map(|node| ((node.namespace.clone(), node.node.clone()), node))
-        .collect())
+        .collect();
+    let events: Vec<(String, String, Value)> = sqlx::query_as(
+        "/* storage:families.control.registry.owner_events */ SELECT event.namespace,
+                event.node, to_jsonb(event)
+         FROM bigname_phase.project_registry_owner_event event
+         JOIN unnest($2::text[], $3::text[]) wanted(namespace, node)
+           ON wanted.namespace = event.namespace AND wanted.node = event.node
+         WHERE event.chain_id = $1",
+    )
+    .bind(chain_id)
+    .bind(&namespaces)
+    .bind(&nodes_wanted)
+    .fetch_all(pool)
+    .await
+    .context("failed to load registry owner events")?;
+    for (namespace, node, row) in events {
+        if let (Some(state), Some(event)) = (
+            nodes.get_mut(&(namespace, node)),
+            OwnerEvent::from_row(&row),
+        ) {
+            state.owner_events.push(event);
+        }
+    }
+    for state in nodes.values_mut() {
+        state
+            .owner_events
+            .sort_by(|left, right| left.position.cmp(&right.position));
+    }
+    Ok(nodes)
 }
 
 /// One registry-binding observation (`project_registry_binding_observation`).

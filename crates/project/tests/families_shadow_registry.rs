@@ -204,13 +204,9 @@ async fn a_zero_registry_owner_keeps_its_getter_facts() -> Result<()> {
 /// holds, then one to OTHER at 12 carrying another resource, which the admission leaves out
 /// (authority_events.sql admits a resource-bearing event only on the selected resource), and the
 /// lease is transferred at 13. The served control block reads the latest admitted events
-/// (build.sql:649-694): owner OWNER, latest kind TokenControlTransferred. F2c keeps the node's
-/// latest owner-setting event with its kind, position and resource, so the reader sees that the
-/// transfer at 12 is not admitted and leaves it out, and the kind agrees; but it keeps only that
-/// latest event, so the admitted transfer at 11 is gone and the shadow serves no owner. Nothing
-/// excuses the owner: the comparison fails on that field alone. A later SubregistryChanged,
-/// which F2c now also records as the owner-setting event, hides an admitted transfer the same
-/// way. Step 2 retention follow-up: keep the name's latest admitted owner-setting transfer.
+/// (build.sql:649-694): owner OWNER, latest kind TokenControlTransferred. F2c keeps every
+/// owner-setting event of the node (`project_registry_owner_event`), so the reader holds the
+/// transfer at 11 under the admission, leaves the one at 12 out, and agrees on both fields.
 #[tokio::test]
 async fn an_excluded_later_transfer_is_not_the_control_owner() -> Result<()> {
     let fixture = Fixture::new("families_shadow_registry_admitted_owner", 20).await?;
@@ -244,40 +240,23 @@ async fn an_excluded_later_transfer_is_not_the_control_owner() -> Result<()> {
         .await?;
     let report = publish_and_compare(&fixture, 16).await?;
     let (served, shadow) = shadow_support::name(&fixture, 16, &name(1)).await?;
+    shadow_support::assert_counts(&report, &[], &[]);
     assert_eq!(served.control("registry_owner"), json!(OWNER));
-    assert_eq!(shadow.control["registry_owner"], Value::Null);
+    assert_eq!(shadow.control["registry_owner"], json!(OWNER));
     assert_eq!(
         served.control("latest_event_kind"),
         json!("TokenControlTransferred")
     );
-    assert_eq!(
-        shadow.control["latest_event_kind"],
-        json!("TokenControlTransferred")
-    );
-    assert!(report.known_discrepancy.is_empty(), "{:#?}", report.lines);
-    assert!(
-        report.expected_delta_fields.is_empty(),
-        "{:#?}",
-        report.lines
-    );
-    assert_eq!(report.mismatched, 1, "{:#?}", report.lines);
-    let mismatched: Vec<&str> = report
-        .lines
-        .iter()
-        .filter(|line| line.starts_with("SEPOLIA_END_TO_END_SHADOW_MISMATCH"))
-        .filter_map(|line| line.split(" field=").nth(1)?.split(' ').next())
-        .collect();
-    assert_eq!(mismatched, vec!["control/registry_owner"]);
     fixture.cleanup().await
 }
 
 /// The shape the removed `registry_node_position_moved_by_later_write` cause covered, from the
 /// fixture corpus: a registry-only name whose node gets an AuthorityTransferred, then an
 /// AuthorityEpochChanged registry_only, then a SubregistryChanged of the parent that names the
-/// node as its child, all in one block. F2c now records the SubregistryChanged as the node's
-/// owner-setting event with its own position, so the reader leaves the node owner out; the
-/// served control block reads the admitted AuthorityEpochChanged, which is later than the
-/// transfer, for both its owner and its latest kind, and the families agree.
+/// node as its child, all in one block. The reader counts the name's admitted
+/// AuthorityTransferred rows F2c keeps and never the SubregistryChanged, as the served lateral
+/// does, and the served control block reads the admitted AuthorityEpochChanged, which is later
+/// than the transfer, for both its owner and its latest kind, so the families agree.
 #[tokio::test]
 async fn a_later_subregistry_write_to_the_node_leaves_the_epoch_owner_equal() -> Result<()> {
     let fixture = Fixture::new("families_shadow_registry_later_write", 20).await?;
@@ -336,13 +315,13 @@ async fn a_later_subregistry_write_to_the_node_leaves_the_epoch_owner_equal() ->
 
 /// Codex thread PRRT_kwDOSJpxAs6l3jx7, the ENSv1 NewOwner shape: one registry log yields a
 /// SubregistryChanged and then an AuthorityTransferred of the child node, at one block,
-/// transaction and log. The families break that tie by event identity and take the
-/// SubregistryChanged last, for the registry-binding observation and for the node's owner
-/// group; today's builders break it by generated id and take the AuthorityTransferred
-/// (permission_resources.rs:41-57, and the control lateral reads only the transfer). Each
-/// differing field passes as a same-block delta only because the families read again in
-/// today's order, the observation and the node taking the AuthorityTransferred, give exactly
-/// the served value.
+/// transaction and log. The registry-binding observation keeps one of them per name: the
+/// families break the tie by event identity and take the SubregistryChanged, today's builder
+/// breaks it by generated id and takes the AuthorityTransferred (permission_resources.rs:41-57),
+/// so the served event id differs. It passes as a same-block delta only because the binding
+/// read again in today's order gives exactly the served binding. The control block reads the
+/// name's admitted AuthorityTransferred rows only, which F2c keeps apart from the
+/// SubregistryChanged, so both sides agree there.
 #[tokio::test]
 async fn a_new_owner_subregistry_and_transfer_at_one_log_is_a_same_block_delta() -> Result<()> {
     let fixture = Fixture::new("families_shadow_registry_new_owner", 20).await?;
@@ -367,11 +346,7 @@ async fn a_new_owner_subregistry_and_transfer_at_one_log_is_a_same_block_delta()
     shadow_support::assert_counts(
         &report,
         &[],
-        &[
-            ("d12_same_block_order:control/latest_event_kind", 1),
-            ("d12_same_block_order:control/registry_owner", 1),
-            ("d12_same_block_order:registry_binding/event_ids", 1),
-        ],
+        &[("d12_same_block_order:registry_binding/event_ids", 1)],
     );
     let (served, shadow) = shadow_support::name(&fixture, 12, &name(1)).await?;
     assert_eq!(served.control("registry_owner"), json!(OTHER));
@@ -379,6 +354,6 @@ async fn a_new_owner_subregistry_and_transfer_at_one_log_is_a_same_block_delta()
         served.control("latest_event_kind"),
         json!("AuthorityTransferred")
     );
-    assert_eq!(shadow.control["registry_owner"], Value::Null);
+    assert_eq!(shadow.control["registry_owner"], json!(OTHER));
     fixture.cleanup().await
 }

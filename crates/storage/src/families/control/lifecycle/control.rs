@@ -11,13 +11,11 @@ use crate::families::control::position::Position;
 /// The control block's registry owner and latest kind (build.sql:649-694), from what the
 /// families keep: the latest admitted ENSv2 transfer or registrar snapshot grant, F1's latest
 /// admitted AuthorityEpochChanged with the owner it reports, an admitted registry-only
-/// SurfaceBound with its bound owner, and, for an ENSv1 or Basenames name, the F2c node's
-/// owner group when the event that set it was an AuthorityTransferred the name's admission
-/// holds (its position and resource are kept apart from the row's last write). F2c keeps only
-/// the latest owner-setting event, so when a SubregistryChanged or an AuthorityTransferred the
-/// admission leaves out set it last, an earlier admitted AuthorityTransferred is not seen and
-/// the comparison fails (fixture
-/// `an_excluded_later_transfer_is_not_the_control_owner`, a step 2 retention follow-up).
+/// SurfaceBound with its bound owner, and, for an ENSv1 or Basenames name, each of the name's
+/// registry AuthorityTransferred events F2c keeps (`project_registry_owner_event`) that the
+/// admission holds. A SubregistryChanged never counts, as in the served lateral. Only the node
+/// row carries the registry_owner and unmasked-word facts, for its latest owner-setting event;
+/// an earlier transfer reports its owner as it stands.
 pub(super) fn control_owner(
     facts: &NameFacts,
     authority: &Authority<'_>,
@@ -53,29 +51,36 @@ pub(super) fn control_owner(
             owners.push((event.position.clone(), owner));
         }
     }
-    if !is_v2
-        && let Some(node) = &facts.registry_node
-        && node.owner_event_kind.as_deref() == Some("AuthorityTransferred")
-        && let Some(position) = &node.owner_position
-        && authority.admits(&Probe {
-            event_kind: "AuthorityTransferred",
-            source_family: registry_family(&node.namespace),
-            resource_id: node.owner_resource_id.as_deref(),
-            authority_kind: "registrar",
-            position,
-            transaction_hash: None,
-            to_address: None,
-            namehash: None,
-            wrapper_linked: false,
-        })
-    {
-        let owner = if node.owner_word_unmasked == Some(true) {
-            None
-        } else {
-            node.registry_owner.clone().or_else(|| node.owner.clone())
-        };
-        owners.push((position.clone(), owner));
-        kinds.push((position.clone(), "AuthorityTransferred"));
+    // The name's own registry transfers the admission holds (build.sql:666 reads the name's
+    // admitted AuthorityTransferred rows), from every owner-setting event F2c keeps.
+    if !is_v2 && let Some(node) = &facts.registry_node {
+        let name = facts.input.logical_name_id.as_str();
+        for event in &node.owner_events {
+            if event.event_kind != "AuthorityTransferred"
+                || event.logical_name_id.as_deref() != Some(name)
+            {
+                continue;
+            }
+            let admitted = authority.admits(&Probe {
+                event_kind: "AuthorityTransferred",
+                source_family: &event.source_family,
+                resource_id: event.resource_id.as_deref(),
+                authority_kind: event
+                    .authority_kind
+                    .as_deref()
+                    .filter(|kind| !kind.is_empty())
+                    .unwrap_or("registrar"),
+                position: &event.position,
+                transaction_hash: event.transaction_hash.as_deref(),
+                to_address: None,
+                namehash: None,
+                wrapper_linked: false,
+            });
+            if admitted {
+                owners.push((event.position.clone(), node.reported_owner(event)));
+                kinds.push((event.position.clone(), "AuthorityTransferred"));
+            }
+        }
     }
     for epoch in admitted_epochs(facts, authority, is_v2, selected_key) {
         owners.push((epoch.position.clone(), epoch.owner));
@@ -88,13 +93,4 @@ pub(super) fn control_owner(
     let kind =
         latest(&facts.order, kinds, |(position, _)| position).map(|(_, kind)| kind.to_owned());
     (owner, kind)
-}
-
-/// The registry family that writes a node of `namespace`.
-fn registry_family(namespace: &str) -> &'static str {
-    if namespace == "basenames" {
-        "basenames_base_registry"
-    } else {
-        "ens_v1_registry_l1"
-    }
 }
