@@ -866,9 +866,9 @@ async fn a_raw_bytes_pair_address_behind_a_lifted_version_is_found_inversely() -
 ///
 /// Step 2's family pairs node-keyed writes only, so for the linked pair it serves the later
 /// `AddrChanged` value where today serves the `AddressChanged` one; the harness names that
-/// difference. The pinned record-id resolver emits only `AddressUpdated` for an address write
-/// (`.refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L174` @ ens_v2@a971bd64), so no
-/// such pair comes from that source.
+/// difference. The pinned record-id resolver emits only `AddressUpdated` for an address write, so
+/// no such pair comes from that source.
+/// (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L174 @ ens_v2@a971bd64)
 #[tokio::test]
 async fn a_record_id_pair_needs_the_sibling_admitted_by_the_linked_arm() -> Result<()> {
     let (db, pool) = database("record_id_pair_admission").await?;
