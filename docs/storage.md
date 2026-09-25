@@ -214,6 +214,18 @@ mandatory full Interpret and Project redos.
 | `project_generation_failures` | phase runner after Project rollback | Append-only audit evidence for a [projection generation failure](glossary.md#projection-generation-failure); never a product projection. |
 | `resolution_divergences` | guarded lookup functions; Project publication may only clear outdated direct observations | Active live/indexed resolver disagreements and retained observations retired after the exact resolver becomes null; diagnostic only. |
 
+Interpret writes `discovery_edges` and `contract_instance_addresses`. A phase
+that reads them may add read-only indexes through its own migration, never
+changing a row, when it records each index here with the statement it serves.
+The owned key families add four, named for their reader:
+
+| Index | Serves |
+| --- | --- |
+| `project_families_discovery_edges_resolver_from_block_idx` | `project:families.classification.activated`: resolver edges that start at the block |
+| `project_families_discovery_edges_resolver_to_block_idx` | `project:families.classification.activated`: resolver edges that stop at the block |
+| `project_families_contract_instance_addresses_from_block_idx` | `project:families.classification.activated`: contract addresses that start at the block |
+| `project_families_contract_instance_addresses_to_block_idx` | `project:families.classification.activated`: contract addresses that stop at the block |
+
 When an ENSv1 BaseRegistrar manifest admits ordinary numeric registration and renewal,
 Interpret retains the registrar resource, token lineage, owner and expiry independently of
 registrar-controller logs. Before an admitted plaintext label is known, these lifecycle rows
