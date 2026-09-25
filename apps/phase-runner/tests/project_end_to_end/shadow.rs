@@ -20,7 +20,9 @@
 //!   events, F1's epoch starts and the binding candidates' SurfaceBounds ordered by their
 //!   generated ids too, and the association winner of
 //!   an affected triple moved only to a grant of the same name, registry and token
-//!   (`v2_lifecycle_events.sql:10-23`), gives exactly the served value for the field. For a
+//!   (`v2_lifecycle_events.sql:10-23`), gives exactly the served value for the field. A
+//!   `control/*` field also needs every owner event, epoch start and SurfaceBound owner the
+//!   families hold for the name to equal its rebuild from the event log. For a
 //!   resource's permission rows, admin powers and restriction block, the path-expiry drop rule of
 //!   permissions.rs:111-133, :391-398 must keep the registration live in today's order and
 //!   lapse it in the canonical order, the served value must not be empty, and the whole read in
@@ -822,19 +824,167 @@ async fn name_excuses(
         let keys = association_keys(pool, chain, &identities).await?;
         if let Some(legacy) = legacy_facts(&facts, &ids, &keys) {
             let counterfactual = evaluate(&legacy, clock);
+            let mut control_holds = None;
             for (index, diff) in diffs.iter().enumerate() {
                 // Only the fields the counterfactual computes: an authority-selection field has
                 // no today's-order value here and stays open.
-                if open(&out, index)
-                    && shadow_field(&counterfactual, &diff.field)
+                if !open(&out, index)
+                    || !shadow_field(&counterfactual, &diff.field)
                         .is_some_and(|value| same(&value, &diff.served))
                 {
-                    out[index] = Excuse::SameBlockOrder;
+                    continue;
                 }
+                // A control field passes only when the families' control facts are what the
+                // event log gives, so a wrong value on the canonically selected event fails.
+                if diff.field.starts_with("control/") {
+                    if control_holds.is_none() {
+                        control_holds = Some(control_facts_hold(pool, chain, &facts).await?);
+                    }
+                    if control_holds != Some(true) {
+                        continue;
+                    }
+                }
+                out[index] = Excuse::SameBlockOrder;
             }
         }
     }
     Ok(out)
+}
+
+/// The owner an authority event reports to the served control block, as step 2 stores it for
+/// an epoch start and a binding candidate (crates/project/src/families/identity.rs
+/// `control_owner`, name_current/build.sql:650-663).
+fn reported_control_owner(after: &Value) -> Option<String> {
+    let unmasked = match after.get("owner_word_unmasked") {
+        Some(Value::Bool(flag)) => *flag,
+        Some(Value::String(text)) => text == "true",
+        _ => false,
+    };
+    if unmasked {
+        return None;
+    }
+    let lower = |name: &str| {
+        after
+            .get(name)
+            .and_then(Value::as_str)
+            .map(str::to_lowercase)
+    };
+    lower("registry_owner").or_else(|| lower("owner"))
+}
+
+/// One event's log row, by identity: kind, name, resource, source family, block, transaction,
+/// log and after-state.
+type LogRow = (
+    String,
+    Option<String>,
+    Option<String>,
+    String,
+    i64,
+    Option<i64>,
+    Option<i64>,
+    Value,
+);
+
+/// Whether every control fact of the name the control block reads, beyond its lifecycle
+/// events, is what the event log gives: each owner-setting event of its node, each epoch
+/// start and each binding candidate's SurfaceBound owner, rebuilt from its event as step 2
+/// derives it.
+async fn control_facts_hold(pool: &PgPool, chain: &str, facts: &NameFacts) -> Result<bool> {
+    let identities: Vec<String> = control_positions(facts)
+        .into_iter()
+        .map(|position| position.event_identity)
+        .collect();
+    let rows: BTreeMap<String, LogRow> = sqlx::query_as::<
+        _,
+        (
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            String,
+            i64,
+            Option<i64>,
+            Option<i64>,
+            Value,
+        ),
+    >(
+        "SELECT event_identity, event_kind, logical_name_id, resource_id::text, source_family,
+                block_number, transaction_index, log_index, after_state
+         FROM normalized_events WHERE chain_id = $1 AND event_identity = ANY($2)",
+    )
+    .bind(chain)
+    .bind(&identities)
+    .fetch_all(pool)
+    .await?
+    .into_iter()
+    .map(|row| {
+        (
+            row.0,
+            (row.1, row.2, row.3, row.4, row.5, row.6, row.7, row.8),
+        )
+    })
+    .collect();
+    let at = |position: &Position| {
+        rows.get(&position.event_identity).filter(|row| {
+            (row.4, row.5, row.6)
+                == (
+                    position.block_number,
+                    position.transaction_index,
+                    position.log_index,
+                )
+        })
+    };
+    let text =
+        |after: &Value, name: &str| after.get(name).and_then(Value::as_str).map(str::to_owned);
+    let lower = |after: &Value, name: &str| text(after, name).map(|value| value.to_lowercase());
+    let owners_hold = facts
+        .registry_node
+        .iter()
+        .flat_map(|node| &node.owner_events)
+        .all(|event| {
+            at(&event.position).is_some_and(|row| {
+                let after = &row.7;
+                row.0 == event.event_kind
+                    && row.1 == event.logical_name_id
+                    && row.2 == event.resource_id
+                    && row.3 == event.source_family
+                    && text(after, "authority_kind") == event.authority_kind
+                    && lower(after, "owner") == event.owner
+                    && lower(after, "registry_owner") == event.registry_owner
+                    && after.get("owner_word_unmasked").and_then(Value::as_bool)
+                        == event.owner_word_unmasked
+                    && lower(after, "owner_getter") == event.owner_getter
+            })
+        });
+    let starts_hold = facts
+        .authority_starts
+        .as_object()
+        .into_iter()
+        .flatten()
+        .all(|(_, start)| {
+            Position::from_json(start).is_some_and(|position| {
+                at(&position).is_some_and(|row| {
+                    let member = |name: &str| start.get(name).and_then(Value::as_str);
+                    let after = &row.7;
+                    member("owner").map(str::to_owned) == reported_control_owner(after)
+                        && member("resource_id") == row.2.as_deref()
+                        && member("authority_kind").map(str::to_owned)
+                            == text(after, "authority_kind")
+                        && member("authority_key").map(str::to_owned)
+                            == text(after, "authority_key")
+                })
+            })
+        });
+    let bounds_hold = facts.candidates.iter().all(|candidate| {
+        candidate
+            .surface_bound_position
+            .as_ref()
+            .is_none_or(|position| {
+                at(position)
+                    .is_some_and(|row| candidate.bound_owner == reported_control_owner(&row.7))
+            })
+    });
+    Ok(owners_hold && starts_hold && bounds_hold)
 }
 
 /// A resource's registry binding as the summary serves it (permission_resources.rs:71-79).

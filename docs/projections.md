@@ -1829,7 +1829,8 @@ their canonical rebuild, the canonical binding equals the shadow one whole,
 today's binding equals the served one whole, and the two select different
 events. The control block's same-block read orders the node's owner-setting
 events, the epoch starts and the registry-only SurfaceBounds by generated id
-too. The second is a named cause whose own check holds for
+too, and a control field passes only when each of those family facts equals its
+rebuild from the event log. The second is a named cause whose own check holds for
 that field. A named cause is either a step 2 family gap, reported rather than
 patched, or a served-side bug.
 

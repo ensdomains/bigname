@@ -679,6 +679,34 @@ async fn a_registry_only_new_owner_transfer_and_epoch_at_one_log_is_a_same_block
     let mut delta: Vec<(&str, usize)> = binding.iter().map(|field| (field.as_str(), 1)).collect();
     delta.push(("d12_same_block_order:control/latest_event_kind", 1));
     shadow_support::assert_counts(&report, &[], &delta);
+    // A wrong owner on the canonically selected transfer must stay a mismatch, though today's
+    // order selects the epoch, which carries the served owner.
+    sqlx::query(
+        "UPDATE bigname_phase.project_registry_owner_event SET owner = $1
+         WHERE event_kind = 'AuthorityTransferred'",
+    )
+    .bind(THIRD)
+    .execute(&fixture.pool)
+    .await?;
+    let mutated = shadow_support::compare::compare(&fixture.pool, CHAIN, 12).await?;
+    assert!(
+        mutated.known_discrepancy.is_empty(),
+        "a wrong transfer owner must not pass: {:#?}",
+        mutated.lines
+    );
+    assert!(
+        !mutated
+            .expected_delta_fields
+            .keys()
+            .any(|field| field.contains(":control/")),
+        "no control field passes: {:#?}",
+        mutated.lines
+    );
+    assert!(
+        failed_fields(&mutated).contains(&"control/registry_owner".to_owned()),
+        "{:#?}",
+        mutated.lines
+    );
     fixture.cleanup().await
 }
 
@@ -732,6 +760,23 @@ async fn a_registry_only_surface_bound_and_transfer_at_one_log_is_a_same_block_d
         &[],
         &[("d12_same_block_order:control/registry_owner", 1)],
     );
+    // A wrong bound owner on the canonically selected SurfaceBound must stay a mismatch, though
+    // today's order still selects the transfer, which carries the served owner.
+    sqlx::query(
+        "UPDATE bigname_phase.project_binding_candidate SET bound_owner = $1
+         WHERE resource_id = $2::uuid",
+    )
+    .bind(THIRD)
+    .bind(&node_resource)
+    .execute(&fixture.pool)
+    .await?;
+    let mutated = shadow_support::compare::compare(&fixture.pool, CHAIN, 12).await?;
+    assert!(
+        mutated.expected_delta_fields.is_empty() && mutated.known_discrepancy.is_empty(),
+        "a wrong bound owner must not pass: {:#?}",
+        mutated.lines
+    );
+    assert_eq!(failed_fields(&mutated), ["control/registry_owner"]);
     fixture.cleanup().await
 }
 
