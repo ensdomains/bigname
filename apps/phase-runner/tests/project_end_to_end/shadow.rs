@@ -92,6 +92,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use bigname_storage::{
+    CURRENT_PERMISSION_SUMMARY_READ_FILTER, DEFAULT_PERMISSIONS_CURRENT_READ_FILTER,
     EffectivePermissionScope,
     families::control::{
         compare::{Difference, differences, field, same},
@@ -389,26 +390,34 @@ pub async fn compare(pool: &PgPool, chain: &str, target: i64) -> Result<Report> 
         }
     }
 
-    // Resources: permission rows, restriction block, registry binding and operator rows.
-    let summaries: Vec<SummaryRow> = sqlx::query_as(
-        "SELECT resource_id::text, authority_kind, root_resource_id::text,
-                    resource_restrictions, registry_owner, registry_contract,
-                    registry_binding_provenance, registry_binding_chain_positions,
-                    provenance -> 'registry_binding_clear_event_id'
-             FROM permissions_current_resource_summary ORDER BY 1",
-    )
+    // Resources: permission rows, restriction block, registry binding and operator rows. Every
+    // served row below is what the serving readers expose: each read takes that reader's own
+    // canonicality predicate (canonicality.rs, effective.rs:26-30), so a stale row of an
+    // orphaned publication is not compared. The names above come through the serving loader,
+    // which applies name_current.rs `DEFAULT_NAME_CURRENT_READ_FILTER`.
+    let summaries: Vec<SummaryRow> = sqlx::query_as(&format!(
+        "SELECT summary.resource_id::text, summary.authority_kind,
+                summary.root_resource_id::text, summary.resource_restrictions,
+                summary.registry_owner, summary.registry_contract,
+                summary.registry_binding_provenance, summary.registry_binding_chain_positions,
+                summary.provenance -> 'registry_binding_clear_event_id'
+         FROM permissions_current_resource_summary summary
+         WHERE {CURRENT_PERMISSION_SUMMARY_READ_FILTER} ORDER BY 1"
+    ))
     .fetch_all(pool)
     .await?;
     let mut resource_ids: BTreeSet<String> = summaries.iter().map(|row| row.0.clone()).collect();
-    let served_grants: Vec<(String, Value)> = sqlx::query_as(
-        "SELECT resource_id::text, jsonb_build_object(
-                    'resource_id', resource_id::text, 'subject', subject, 'scope', scope,
-                    'scope_kind', scope_kind, 'scope_detail', scope_detail,
-                    'effective_powers', effective_powers, 'grant_source', grant_source,
-                    'revocation_source', revocation_source, 'inheritance_path', inheritance_path,
-                    'transfer_behavior', transfer_behavior)
-         FROM permissions_current ORDER BY resource_id, subject, scope",
-    )
+    let served_grants: Vec<(String, Value)> = sqlx::query_as(&format!(
+        "SELECT pc.resource_id::text, jsonb_build_object(
+                    'resource_id', pc.resource_id::text, 'subject', pc.subject,
+                    'scope', pc.scope, 'scope_kind', pc.scope_kind,
+                    'scope_detail', pc.scope_detail, 'effective_powers', pc.effective_powers,
+                    'grant_source', pc.grant_source, 'revocation_source', pc.revocation_source,
+                    'inheritance_path', pc.inheritance_path,
+                    'transfer_behavior', pc.transfer_behavior)
+         FROM permissions_current pc WHERE TRUE {DEFAULT_PERMISSIONS_CURRENT_READ_FILTER}
+         ORDER BY pc.resource_id, pc.subject, pc.scope"
+    ))
     .fetch_all(pool)
     .await?;
     let mut grants_by_resource: BTreeMap<String, Vec<Value>> = BTreeMap::new();
@@ -476,14 +485,15 @@ pub async fn compare(pool: &PgPool, chain: &str, target: i64) -> Result<Report> 
     // The admin powers the served summary derives for each resource (resource_summary.rs
     // :272-297, `v2_admin_powers`): the distinct admin powers of its registry- or root-scoped
     // served rows.
-    let served_admins: BTreeMap<String, Vec<String>> = sqlx::query_as(
-        r"SELECT served.resource_id::text, array_agg(DISTINCT power.value ORDER BY power.value)
-         FROM permissions_current served
-         CROSS JOIN LATERAL jsonb_array_elements_text(served.effective_powers) power
-         WHERE served.scope_kind IN ('registry', 'root')
+    let served_admins: BTreeMap<String, Vec<String>> = sqlx::query_as(&format!(
+        r"SELECT pc.resource_id::text, array_agg(DISTINCT power.value ORDER BY power.value)
+         FROM permissions_current pc
+         CROSS JOIN LATERAL jsonb_array_elements_text(pc.effective_powers) power
+         WHERE pc.scope_kind IN ('registry', 'root')
            AND (power.value LIKE 'admin\_%' OR power.value = 'can_transfer_admin')
-         GROUP BY 1",
-    )
+           {DEFAULT_PERMISSIONS_CURRENT_READ_FILTER}
+         GROUP BY 1"
+    ))
     .fetch_all(pool)
     .await?
     .into_iter()
@@ -627,7 +637,8 @@ pub async fn compare(pool: &PgPool, chain: &str, target: i64) -> Result<Report> 
         report.resources += 1;
     }
 
-    // Account approvals.
+    // Account approvals, under the account half of the operator reader's filter
+    // (effective.rs:26-30); its binding half is the resource summary's, applied above.
     let served_accounts: Vec<Value> = sqlx::query_scalar(
         "SELECT jsonb_build_object('authority_kind', authority_kind,
                     'authority_contract', authority_contract,
@@ -636,7 +647,13 @@ pub async fn compare(pool: &PgPool, chain: &str, target: i64) -> Result<Report> 
                     'approved', approved, 'effective_powers', effective_powers,
                     'grant_source', grant_source, 'revocation_source', revocation_source,
                     'inheritance_path', inheritance_path, 'transfer_behavior', transfer_behavior)
-         FROM account_permission_state_current WHERE chain_id = $1",
+         FROM account_permission_state_current aps
+         WHERE aps.chain_id = $1
+           AND aps.canonicality_summary ->> 'state' IN ('canonical', 'safe', 'finalized')
+           AND (SELECT account_lineage.canonicality_state FROM chain_lineage account_lineage
+                WHERE account_lineage.chain_id = aps.chain_id
+                  AND account_lineage.block_hash = aps.chain_positions ->> 'target_block_hash')
+               IN ('canonical', 'safe', 'finalized')",
     )
     .bind(chain)
     .fetch_all(pool)

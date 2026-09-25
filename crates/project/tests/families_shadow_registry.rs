@@ -1644,3 +1644,69 @@ async fn the_control_guard_and_generated_ids_read_the_published_log_only() -> Re
     }
     Ok(())
 }
+
+/// Codex thread PRRT_kwDOSJpxAs6l8Nw6: the served baseline is what the serving readers expose
+/// (effective.rs:26-30, canonicality.rs `CURRENT_PERMISSION_SUMMARY_READ_FILTER`). A stale
+/// account approval of an orphaned publication and a resource summary whose canonicality
+/// summary is off the canonical lineage are not served, so the comparison does not count them.
+#[tokio::test]
+async fn served_rows_the_serving_readers_exclude_are_not_compared() -> Result<()> {
+    let fixture = Fixture::new("families_shadow_registry_served_filters", 20).await?;
+    let lease = uuid(1);
+    bound(&fixture, &lease).await?;
+    fixture
+        .event(
+            Event::new(
+                "registry-approval",
+                10,
+                5,
+                "AccountPermissionChanged",
+                V1_REGISTRY,
+            )
+            .after(json!({
+                "subject": OPERATOR, "relation_kind": "operator", "approved": true,
+                "scope": {"kind": "account", "chain_id": CHAIN, "authority_kind": "registry",
+                          "authority_contract": REGISTRY,
+                          "authority_contract_instance_id": "00000000-0000-0000-0000-0000000000e5",
+                          "owner": OWNER},
+                "effective_powers": ["registry_control"],
+                "grant_source": {"kind": "raw_log", "source_event": "ApprovalForAll"},
+                "revocation_source": null, "inheritance_path": [],
+                "transfer_behavior": {"mode": "owner_scoped", "on_holder_change": "ceases_to_apply"},
+                "source_event": "ApprovalForAll",
+            }))
+            .raw(json!({"emitting_address": REGISTRY})),
+        )
+        .await?;
+    let report = publish_and_compare(&fixture, 12).await?;
+    shadow_support::assert_counts(&report, &[], &[]);
+    assert_eq!((report.resources, report.accounts), (1, 1));
+    // A stale approval of another subject from an orphaned publication, and the resource's
+    // summary moved off the canonical lineage.
+    sqlx::query(
+        "INSERT INTO account_permission_state_current
+         SELECT (jsonb_populate_record(NULL::account_permission_state_current,
+                    to_jsonb(approval) || jsonb_build_object('subject', $1::text,
+                        'canonicality_summary', approval.canonicality_summary
+                            || '{\"state\": \"orphaned\"}'::jsonb))).*
+         FROM account_permission_state_current approval",
+    )
+    .bind(THIRD)
+    .execute(&fixture.pool)
+    .await?;
+    sqlx::query(
+        "UPDATE permissions_current_resource_summary
+         SET canonicality_summary = canonicality_summary || '{\"state\": \"orphaned\"}'::jsonb",
+    )
+    .execute(&fixture.pool)
+    .await?;
+    let filtered = shadow_support::compare::compare(&fixture.pool, CHAIN, 12).await?;
+    shadow_support::assert_counts(&filtered, &[], &[]);
+    assert_eq!(
+        (filtered.resources, filtered.accounts),
+        (0, 1),
+        "{:#?}",
+        filtered.lines
+    );
+    fixture.cleanup().await
+}

@@ -741,3 +741,37 @@ async fn a_family_lapse_the_log_does_not_give_stays_a_mismatch() -> Result<()> {
     );
     fixture.cleanup().await
 }
+
+/// Codex thread PRRT_kwDOSJpxAs6l8Nw6: a stale permission row of an orphaned publication is
+/// not served (canonicality.rs `DEFAULT_PERMISSIONS_CURRENT_READ_FILTER`), so the comparison
+/// does not count it. The lapse fixture's baseline serves BOB's row on both sides; a copy of it
+/// for ALICE whose canonicality summary is orphaned leaves the comparison equal.
+#[tokio::test]
+async fn a_permission_row_the_serving_reader_excludes_is_not_compared() -> Result<()> {
+    let fixture = Fixture::new("families_shadow_order_served_filter", 20).await?;
+    let (k1, n1) = (uuid(1), name(1));
+    v2_binding(&fixture, &k1).await?;
+    fixture
+        .event(grant("grant-10", 10, &n1, &k1, ALICE))
+        .await?;
+    fixture
+        .event(registry_grant("permission-11", 11, &k1, BOB))
+        .await?;
+    let report = publish_and_compare(&fixture, 16).await?;
+    assert_counts(&report, &[], &[]);
+    sqlx::query(
+        "INSERT INTO permissions_current
+         SELECT (jsonb_populate_record(NULL::permissions_current,
+                    to_jsonb(row) || jsonb_build_object('subject', $1::text,
+                        'canonicality_summary', row.canonicality_summary
+                            || '{\"state\": \"orphaned\"}'::jsonb))).*
+         FROM permissions_current row WHERE row.subject = $2",
+    )
+    .bind(ALICE)
+    .bind(BOB)
+    .execute(&fixture.pool)
+    .await?;
+    let filtered = shadow_support::compare::compare(&fixture.pool, CHAIN, 16).await?;
+    assert_counts(&filtered, &[], &[]);
+    fixture.cleanup().await
+}

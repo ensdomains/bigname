@@ -6,7 +6,9 @@ mod reads;
 mod resource_summary;
 mod types;
 
-pub use canonicality::DEFAULT_PERMISSIONS_CURRENT_READ_FILTER;
+pub use canonicality::{
+    CURRENT_PERMISSION_SUMMARY_READ_FILTER, DEFAULT_PERMISSIONS_CURRENT_READ_FILTER,
+};
 
 pub use effective::{
     explain_bounded_effective_permissions_by_resource_ids,

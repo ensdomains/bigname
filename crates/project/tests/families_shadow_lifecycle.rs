@@ -1604,3 +1604,35 @@ async fn the_corpus_expectation_reads_the_published_log_only() -> Result<()> {
     }
     Ok(())
 }
+
+/// Codex thread PRRT_kwDOSJpxAs6l8Nw6: a name_current row the serving reader excludes
+/// (name_current.rs `DEFAULT_NAME_CURRENT_READ_FILTER`), here one whose canonicality summary is
+/// off the canonical lineage, is not served, so the comparison does not read it. The names
+/// already came through the serving loader, so this pins that rather than fixing it.
+#[tokio::test]
+async fn a_name_the_serving_reader_excludes_is_not_compared() -> Result<()> {
+    let fixture = Fixture::new("families_shadow_served_name_filter", 20).await?;
+    let k1 = uuid(1);
+    v2_binding(&fixture, &k1).await?;
+    v2(
+        &fixture,
+        10,
+        "RegistrationGranted",
+        Some(&k1),
+        json!({"status": "registered", "registrant": ALICE, "expiry": 2_000_000_000u64}),
+    )
+    .await?;
+    let report = publish_and_compare(&fixture, 12).await?;
+    assert_counts(&report, &[], &[]);
+    assert_eq!(report.names, 1);
+    sqlx::query(
+        "UPDATE name_current
+         SET canonicality_summary = canonicality_summary || '{\"state\": \"orphaned\"}'::jsonb",
+    )
+    .execute(&fixture.pool)
+    .await?;
+    let filtered = shadow_support::compare::compare(&fixture.pool, CHAIN, 12).await?;
+    assert_counts(&filtered, &[], &[]);
+    assert_eq!(filtered.names, 0, "{:#?}", filtered.lines);
+    fixture.cleanup().await
+}
