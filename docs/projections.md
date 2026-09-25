@@ -1684,8 +1684,10 @@ undoes at most 256 blocks (`--project-families-max-blocks`, or
 `BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES_MAX_BLOCKS`), so a rebuild or a long
 catch-up spans several runner cycles. The one-shot `redo` command has no later
 cycle, so after its batch it runs the loop again, in normal mode, until the
-families reach the served marker; a stop or a failed block still ends it early,
-and the next served batch catches up. The run reads the Interpret and Project
+families reach the served marker. A stop, a failed block or an Interpret
+revision change can still end it early. The served redo stays recorded, but the
+command logs an error with the family marker and the served marker and exits
+non-zero; rerunning the same redo repairs the families. The run reads the Interpret and Project
 rows of `chain_phase_state` within 2 seconds or is skipped for that batch.
 `--project-families false` (or `BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES=false`)
 turns the loop off.
@@ -1769,6 +1771,11 @@ steps that read them must key on. Each is also stated on its table or column:
   zero address once the token has expired).
 - F7 keeps a `ResolverRecordLinked` whose payload has no resolver; the served
   link reader requires the payload resolver equal to the emitter.
+- F14's node index (`project_address_record_node_index`) is a superset: it
+  keeps every EVM-shaped addr value past a version change, under the
+  `logical_name_id` it was written under, because a later link can keep such a
+  value served. The reader owns the version and link boundary (the table
+  comment, set by migration `20260926101200`).
 - The undo journal is not pruned while the chain has no finalized or safe
   head.
 
