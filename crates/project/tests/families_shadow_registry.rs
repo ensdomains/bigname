@@ -2064,3 +2064,102 @@ async fn canonical_ranks_read_exactly_as_the_canonical_order() -> Result<()> {
     }
     fixture.cleanup().await
 }
+
+/// Pro Q3 on 6c8bdf8b: the retention check derives a registry-only candidate's handoff from the
+/// log as step 2 does (identity.rs `handoff`): the name's ENSv1 lease binding at block 9, then a
+/// registry-only binding of the node at block 11 with its registry-only epoch, makes the second
+/// candidate registry-only with the first as its predecessor and lease. The families' facts
+/// match that derivation; a wrong predecessor position or a wrong lease on the candidate does
+/// not, and refuses every excuse of the name.
+#[tokio::test]
+async fn the_retention_check_derives_a_registry_only_handoff() -> Result<()> {
+    use shadow_support::compare::retention::{RetentionLog, name_differs};
+    let fixture = Fixture::new("families_shadow_registry_handoff", 20).await?;
+    let (lease, node_resource) = (uuid(1), uuid(3));
+    fixture
+        .binding(&uuid(100), &name(1), &lease, "ens_v1", 9, 0, Some(11))
+        .await?;
+    fixture
+        .write(
+            9,
+            0,
+            "SurfaceBound",
+            V1_REGISTRAR,
+            Some(&name(1)),
+            Some(&lease),
+            json!({"authority_kind": "registrar", "state_derived": false,
+                   "registry_contract": REGISTRY, "owner_getter": OWNER}),
+            REGISTRAR,
+        )
+        .await?;
+    fixture
+        .binding(&uuid(101), &name(1), &node_resource, "ens_v1", 11, 9, None)
+        .await?;
+    fixture
+        .write(
+            11,
+            9,
+            "SurfaceBound",
+            "registry_only_binding",
+            Some(&name(1)),
+            Some(&node_resource),
+            json!({"authority_kind": "registry_only", "state_derived": true,
+                   "registry_contract": REGISTRY, "owner": OTHER}),
+            REGISTRY,
+        )
+        .await?;
+    fixture
+        .write(
+            11,
+            10,
+            "AuthorityEpochChanged",
+            V1_REGISTRY,
+            Some(&name(1)),
+            Some(&node_resource),
+            json!({"node": node(1), "authority_kind": "registry_only", "owner": OTHER}),
+            REGISTRY,
+        )
+        .await?;
+    shadow_support::publish(&fixture, 12).await?;
+    let facts = name_facts(&fixture).await?;
+    let handoff = facts
+        .candidates
+        .iter()
+        .find(|candidate| candidate.registry_only)
+        .expect("the registry-only candidate");
+    assert_eq!(
+        handoff.predecessor_resource_id.as_deref(),
+        Some(lease.as_str())
+    );
+    let check = |facts: &bigname_storage::families::control::lifecycle::NameFacts| {
+        let facts = facts.clone();
+        let pool = fixture.pool.clone();
+        async move {
+            let map = [(facts.input.logical_name_id.clone(), facts.clone())].into();
+            let log = RetentionLog::load(&pool, CHAIN, 12, &map).await?;
+            anyhow::Ok(name_differs(&facts, &log))
+        }
+    };
+    assert_eq!(check(&facts).await?, None);
+    for (case, mutate) in [
+        (
+            "predecessor position",
+            (|candidate: &mut bigname_storage::families::control::rows::BindingCandidate| {
+                candidate.predecessor_position = Some(json!({"block_number": 8,
+                    "transaction_index": 0, "log_index": 0, "event_identity": "SurfaceBound:8:0"}));
+            }) as fn(&mut _),
+        ),
+        ("lease", |candidate| {
+            candidate.lease_resource_id = Some(uuid(9));
+        }),
+    ] {
+        let mut mutated = facts.clone();
+        for candidate in &mut mutated.candidates {
+            if candidate.registry_only {
+                mutate(candidate);
+            }
+        }
+        assert!(check(&mutated).await?.is_some(), "{case}");
+    }
+    fixture.cleanup().await
+}

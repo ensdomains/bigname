@@ -8,8 +8,9 @@
 //!
 //! - the binding candidates: every publication-visible surface binding of the name
 //!   (identity.rs `candidates`), with its opening SurfaceBound, the NameWrapper lease, node,
-//!   transaction and emitter that SurfaceBound recorded, and its registry-only handoff
-//!   (identity.rs `handoff`). A handoff lease other than the predecessor's resource was set by a
+//!   transaction and emitter that SurfaceBound recorded, and its registry-only handoff with the
+//!   predecessor's resource and position (identity.rs `handoff`). A handoff lease other than the
+//!   predecessor's resource was set by a
 //!   later registrar grant (identity/lease.rs), which this check does not rebuild, so such a
 //!   candidate refuses every excuse of the name;
 //! - the epoch starts: the canonically latest AuthorityEpochChanged of the name per arm
@@ -28,7 +29,10 @@
 //!   facts (registry.rs `registry_nodes`).
 //!
 //! The older admitted epochs the families do not keep (one start per arm) are not expected
-//! here, so a served value that needs one stays a mismatch.
+//! here, so a served value that needs one stays a mismatch. Not rebuilt here: the wrapper rows,
+//! the other names' candidates the staging passes choose among for an unnamed registrar event
+//! (`lease_candidates`), and a candidate's surface namehash. The stored key-state and triple
+//! maxima are not read by the excuse reads, which fold the events themselves.
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::Result;
@@ -274,7 +278,8 @@ struct Expected<'a> {
     position: Position,
     opening: Option<&'a LogEvent>,
     registry_only: bool,
-    predecessor: Option<&'a LogBinding>,
+    /// The handoff's predecessor and its place in the candidate order.
+    predecessor: Option<(&'a LogBinding, Position)>,
 }
 
 fn expected_candidates<'a>(
@@ -348,7 +353,7 @@ fn expected_candidates<'a>(
             .enumerate()
             .filter(|(_, (position, id, arm))| *arm == orders[index].2 && (position, id) < own)
             .max_by(|(_, left), (_, right)| (&left.0, &left.1).cmp(&(&right.0, &right.1)))
-            .map(|(other, _)| out[other].binding);
+            .map(|(other, (position, _, _))| (out[other].binding, position.clone()));
         out[index].predecessor = predecessor;
     }
     out
@@ -363,7 +368,8 @@ fn candidate_differs(candidate: &BindingCandidate, expected: &Expected<'_>) -> O
     let opening_after = expected.opening.map(|event| &event.after);
     let predecessor = expected
         .predecessor
-        .map(|predecessor| predecessor.resource.clone());
+        .as_ref()
+        .map(|(predecessor, _)| predecessor.resource.clone());
     let checks = [
         ("name", candidate.logical_name_id == binding.name),
         ("resource", candidate.resource_id == binding.resource),
@@ -425,6 +431,17 @@ fn candidate_differs(candidate: &BindingCandidate, expected: &Expected<'_>) -> O
         (
             "predecessor_resource_id",
             candidate.predecessor_resource_id == predecessor,
+        ),
+        (
+            "predecessor_position",
+            candidate
+                .predecessor_position
+                .as_ref()
+                .and_then(Position::from_json)
+                == expected
+                    .predecessor
+                    .as_ref()
+                    .map(|(_, position)| position.clone()),
         ),
         // A lease a later registrar grant replaced (identity/lease.rs) is not rebuilt here.
         (
@@ -552,7 +569,7 @@ pub fn name_differs(facts: &NameFacts, log: &RetentionLog) -> Option<String> {
     let mut resources: BTreeSet<&str> = BTreeSet::new();
     for candidate in &expected {
         resources.insert(candidate.binding.resource.as_str());
-        if let Some(predecessor) = candidate.predecessor {
+        if let Some((predecessor, _)) = &candidate.predecessor {
             resources.insert(predecessor.resource.as_str());
         }
     }
