@@ -15,7 +15,7 @@ pub struct Difference {
     pub shadow: Value,
 }
 
-/// JSON equality with numbers compared by their exact value.
+/// JSON equality under the documented i64/u64/f64 representation rules.
 pub fn same(left: &Value, right: &Value) -> bool {
     match (left, right) {
         (Value::Number(left), Value::Number(right)) => same_number(left, right),
