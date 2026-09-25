@@ -123,8 +123,9 @@ impl ProjectPhase {
         }
     }
 
-    /// Record a chain's families as short of `target` before a finishing run, and clear the entry
-    /// only once they reach it, so a run that is abandoned midway stays reported.
+    /// Record a chain's families as short of `target` when a finishing run takes its pending work,
+    /// before the run is first polled, and clear the entry only once a run ends on the target, so
+    /// a run that is abandoned midway, or before it starts, stays reported.
     fn note_shortfall(
         &self,
         chain_id: &str,
@@ -139,8 +140,9 @@ impl ProjectPhase {
             shortfalls.insert(
                 chain_id.to_owned(),
                 format!(
-                    "chain {chain_id}: the family run toward block {} did not finish",
-                    target.number
+                    "chain {chain_id}: the family run toward served marker block {} ({}) did not \
+                     finish; the family marker is unavailable",
+                    target.number, target.hash
                 ),
             );
             return;
@@ -229,6 +231,12 @@ impl Phase for ProjectPhase {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .remove(chain_id);
+        let finish = self.families.finish_each_batch;
+        // Recorded here, not in the future: a stop can drop the future before its first poll, and
+        // the one-shot redo must still see that its families did not reach the served marker.
+        if finish && let Some((target, _, _)) = &pending {
+            self.note_shortfall(chain_id, target, None);
+        }
         let chain_id = chain_id.to_owned();
         Box::pin(async move {
             let Some((target, mode, token)) = pending else {
@@ -236,10 +244,6 @@ impl Phase for ProjectPhase {
             };
             let options = FamilyOptions::new(bigname_content_hash::INTERPRETER_CONTENT_HASH)
                 .with_max_blocks_per_run(self.families.max_blocks_per_run);
-            let finish = self.families.finish_each_batch;
-            if finish {
-                self.note_shortfall(&chain_id, &target, None);
-            }
             let token = match token {
                 Ok(token) => token,
                 Err(reason) => {
