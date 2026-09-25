@@ -1666,8 +1666,8 @@ discovery edge, address or declaration of it, or the [active manifest
 set](glossary.md#active-manifest-set-family-block), with the
 manifests active at that block, the way the served resolver build does.
 
-These tables are shadows today. Nothing reads them, and no served value
-depends on them. After each Project batch commits and its progress is
+These tables are shadows today. No production serving reader reads them, and
+no served value depends on them; only the family reducers and tests do. After each Project batch commits and its progress is
 recorded, the phase runner applies the families block by block, each block in
 a transaction of its own, from the [family marker](glossary.md#family-marker)
 (`project_family_marker`) up to the served marker. A batch's publication never
