@@ -134,7 +134,7 @@ pub fn registry_generation(
 /// therefore differ, for example for an unnamed transfer whose resource another name's events
 /// carry, for one whose node has no active surface, or when names share a node; where they
 /// differ the comparison fails rather than passing silently. The comparison checks this boolean
-/// only, not the profile's other details.
+/// only, not the other details of the ownerless-registry profile.
 pub fn ownerless_registry(
     node: Option<&RegistryNode>,
     selected_binding: Option<&str>,
