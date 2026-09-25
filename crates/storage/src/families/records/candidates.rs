@@ -1,14 +1,16 @@
 //! The resources whose records may resolve to an address, for the inverse address read.
 //!
-//! The derived inverse address index (F14) keeps an address only for a value positioned after its
-//! partition's latest version change in the canonical order (event identity included); it reads
-//! the served payload, the `AddressChanged` half of a coin-60 pair, from `value` or raw address
-//! bytes. The forward read can still serve a value the index drops, because a later selected link
-//! wins the combined version boundary and lifts the cutoff. So the candidates are the index rows
-//! together with every retained F6 and F7 address value that names the address in any stored
-//! shape (`value`, `address_bytes_hex`, and for a pair `sibling_value` and
-//! `sibling_address_bytes_hex`), with no version cutoff and no arm test, which the forward
-//! inventory assembly then narrows to what is served.
+//! The derived inverse address index (F14) is a superset by design: it keeps every successful
+//! non-zero EVM-shaped address value, whatever its partition's version, under the logical name it
+//! was written under, and leaves the version and link boundary to the reader (derived.rs,
+//! `NODE_INSERT`; docs/projections.md). It reads the served payload, the `AddressChanged` half of
+//! a coin-60 pair, from `value` or raw address bytes. The retained-value scan is the safety net
+//! beside it: the candidates are the index rows together with every retained F6 and F7 address
+//! value that names the address in any stored shape (`value`, `address_bytes_hex`, and for a pair
+//! `sibling_value` and `sibling_address_bytes_hex`), with no version cutoff and no arm test, so a
+//! row the index leaves out, on purpose or not, still reaches the forward inventory assembly,
+//! which narrows the candidates to what is served. The harness names every entry only the scan
+//! found.
 //!
 //! A retained value reaches the resources whose pointer can admit it: a node-keyed value the
 //! pointers at its node and resolver (or at a mirror resolver for that node), a named value also

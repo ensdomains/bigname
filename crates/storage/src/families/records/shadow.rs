@@ -43,8 +43,9 @@ pub struct ShadowReport {
     pub node_claims_at_other_resolver: Vec<String>,
     /// Diagnostic, not an exclusion: every family entry of a name resolving to an address that
     /// the derived address index alone would not have found, as `resolves_to <address> coin
-    /// <coin> resource <id> <record key>`. The family read finds these from the retained values;
-    /// each names a step 2 index gap, and a test that expects none can require the list empty.
+    /// <coin> resource <id> <record key>`. The family read finds these from the retained values.
+    /// The index is meant to be a superset, so a non-empty list is itself a finding about the
+    /// index; a test lists the ones it expects and the end-to-end fixture requires none.
     pub address_index_misses: Vec<String>,
     /// Diagnostic: the resolvers the classification read took from `resolver_current` because
     /// F3 has no served row for them (`resolver <address>`). With F3 written block by block this
