@@ -307,7 +307,7 @@ outcomes, or durable traces.
 | `resolver_current` | chain and resolver address | resolver overview |
 | `record_inventory_current` | resource plus record boundary key | indexed record inventory and values |
 | `primary_names_current` | address, coin type, and namespace | declared primary-name claims |
-| `project_*` owned key families | per family, see [below](#owned-key-families) | no served path yet: the step 3 shadow readers (`crates/storage/src/families/control`) read them in the test harnesses only, until the per-block publication reads them |
+| `project_*` owned key families | per family, see [below](#owned-key-families) | no served path yet: the step 3 [shadow readers](glossary.md#shadow-read) (`crates/storage/src/families/control`) read them in the test harnesses only, until the per-block publication reads them |
 
 `surface_bindings` remains identity history rather than a `_current`
 projection. Exact-name reads ordinarily first select the logical name's

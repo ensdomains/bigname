@@ -2456,8 +2456,8 @@ per-key current state Project keeps for one kind of fact, such as a name's
 binding candidates, a resource's resolver pointer or a resolver's records at a
 node. A block writes only the keys its own events name, and each row holds
 what the latest events of its key left, clears included. No served path reads
-the families until the per-block publication does; the step 3 shadow readers
-read them in the test harnesses only
+the families until the per-block publication does; the step 3
+[shadow readers](#shadow-read) read them in the test harnesses only
 ([projections](projections.md#owned-key-families)).
 
 ## Family marker
