@@ -40,8 +40,8 @@ row. `PermissionChanged` rebuilds every resolver identified by
 metadata is not resolver evidence; resolver-family adapters put the emitting
 resolver in that semantic scope.
 None of these events rebuilds other names that use the resolver. Record and
-record-version events do not contribute to the resolver overview's derived
-sections, so an existing resolver touched only by those kinds is republished at
+record-version events do not contribute to the stored `resolver_current`
+section summaries, so an existing resolver touched only by those kinds is republished at
 the new target without restaging unrelated resolver history. That republish
 path is existing-row only: a record or record-version observation without a
 linked name or resource does not create a resolver row.
