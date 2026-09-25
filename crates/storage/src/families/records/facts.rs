@@ -115,8 +115,9 @@ pub(crate) fn chain_position(
 ///
 /// The switch to the owned key family F3 (`project_resolver_classification`) is per resolver: a
 /// resolver with an F3 row is read from it, and a resolver without one is read from
-/// `resolver_current` and the manifest events the way today's builders read it. No writer fills
-/// F3 yet, so today every read takes the second path.
+/// `resolver_current`. Either way the declaration manifest's namespace is read from the manifest
+/// events the way today's builders read it; F3's own `admission_namespace` is the resolver
+/// edge's admission, not the declaration's.
 #[derive(Clone, Debug, Default)]
 pub struct ResolverClassification {
     pub classification: Value,
@@ -156,34 +157,32 @@ pub async fn load_classification(
     chain_id: &str,
     resolver_address: &str,
 ) -> Result<Option<ResolverClassification>> {
-    let family = sqlx::query(
-        "SELECT classification, support_status, unsupported_reason, manifest_id,
-                admission_namespace
-         FROM bigname_phase.project_resolver_classification
-         WHERE chain_id = $1 AND resolver_address = $2",
-    )
-    .bind(chain_id)
-    .bind(resolver_address)
-    .fetch_optional(pool)
-    .await
-    .with_context(|| format!("failed to load the F3 classification of {resolver_address}"))?;
-    if let Some(family) = family {
-        return Ok(Some(ResolverClassification {
-            classification: family
-                .try_get::<Option<Value>, _>("classification")?
-                .unwrap_or(Value::Null),
-            support_status: family.try_get("support_status")?,
-            unsupported_reason: family.try_get("unsupported_reason")?,
-            manifest_id: family.try_get("manifest_id")?,
-            declaration_namespace: family.try_get("admission_namespace")?,
-        }));
-    }
+    // The F3 row when the resolver has one, else resolver_current; either way the declaration's
+    // namespace comes from its manifest, admitted at the block the families stand at. F3 keeps a
+    // `resolver_manifest_not_active` row for a resolver the served build leaves out; resolver_current
+    // has no row for it either, so it reads as unclassified, as today.
     let row = sqlx::query(
-        "SELECT resolver.declared_summary -> 'classification' AS classification,
-                resolver.support_status, resolver.unsupported_reason,
-                (resolver.provenance ->> 'manifest_id')::bigint AS manifest_id,
-                declaration.namespace AS declaration_namespace
-         FROM bigname_phase.resolver_current resolver
+        "WITH source AS (
+             SELECT classification, support_status, unsupported_reason, manifest_id
+             FROM (
+                 SELECT family.classification, family.support_status,
+                        family.unsupported_reason, family.manifest_id, 0 AS preference
+                 FROM bigname_phase.project_resolver_classification family
+                 WHERE family.chain_id = $1 AND family.resolver_address = $2
+                   AND family.unsupported_reason IS DISTINCT FROM 'resolver_manifest_not_active'
+                 UNION ALL
+                 SELECT resolver.declared_summary -> 'classification',
+                        resolver.support_status, resolver.unsupported_reason,
+                        (resolver.provenance ->> 'manifest_id')::bigint, 1
+                 FROM bigname_phase.resolver_current resolver
+                 WHERE resolver.chain_id = $1 AND resolver.resolver_address = $2
+             ) candidates
+             ORDER BY preference
+             LIMIT 1
+         )
+         SELECT source.classification, source.support_status, source.unsupported_reason,
+                source.manifest_id, declaration.namespace AS declaration_namespace
+         FROM source
          LEFT JOIN (
              SELECT current_block_number AS block FROM bigname_phase.project_family_marker
              WHERE chain_id = $1
@@ -198,7 +197,7 @@ pub async fn load_classification(
               AND lineage.block_hash = manifest.block_hash
               AND lineage.block_number = manifest.block_number
              WHERE manifest.event_kind = 'SourceManifestUpdated'
-               AND manifest.source_manifest_id = (resolver.provenance ->> 'manifest_id')::bigint
+               AND manifest.source_manifest_id = source.manifest_id
                AND (manifest.chain_id = $1
                     OR ($1 = 'base-mainnet' AND manifest.namespace = 'basenames'
                         AND manifest.source_family = 'basenames_execution'
@@ -210,8 +209,7 @@ pub async fn load_classification(
                     OR manifest.block_number <= marker.block)
              ORDER BY manifest.normalized_event_id DESC
              LIMIT 1
-         ) declaration ON declaration.active
-         WHERE resolver.chain_id = $1 AND resolver.resolver_address = $2",
+         ) declaration ON declaration.active",
     )
     .bind(chain_id)
     .bind(resolver_address)

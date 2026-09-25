@@ -18,6 +18,7 @@ const R1: &str = "0x00000000000000000000000000000000000000b1";
 const R2: &str = "0x00000000000000000000000000000000000000b2";
 const R3: &str = "0x00000000000000000000000000000000000000b3";
 const R4: &str = "0x00000000000000000000000000000000000000b4";
+const R5: &str = "0x00000000000000000000000000000000000000b5";
 const NODE: &str = "0x1000000000000000000000000000000000000000000000000000000000000001";
 
 fn position(block: i64, identity: &str) -> Value {
@@ -91,7 +92,9 @@ async fn manifest(
 }
 
 // The classification switch is per resolver. R1 has an F3 row, which wins over its conflicting
-// fallback. R2 and R3 have none and read the fallback at the family marker (block 6): R2's latest
+// fallback; its declaration namespace is its manifest's, not F3's `admission_namespace` (the
+// resolver edge's admission). R5's only F3 row is `resolver_manifest_not_active`, which the served
+// build leaves out, so R5 is unclassified. R2 and R3 have none and read the fallback at the family marker (block 6): R2's latest
 // manifest there is inactive, so it has no declaration even though an older one was active; R3's
 // latest there is active, and a later inactive one past the marker is not read. R4 has neither.
 #[tokio::test]
@@ -107,27 +110,44 @@ async fn the_classification_switch_is_per_resolver_and_bounded_by_the_marker() -
     .bind(hash(6))
     .execute(pool)
     .await?;
-    let (m1, m2, m3) = (
+    let (m0, m1, m2, m3) = (
+        manifest_version(pool, "ens", "r1-f3").await?,
         manifest_version(pool, "basenames", "r1").await?,
         manifest_version(pool, "ens", "r2").await?,
         manifest_version(pool, "ens", "r3").await?,
     );
     resolver_current(pool, R1, ("unsupported", Some("fallback_reason")), m1).await?;
     manifest(pool, m1, 3, "basenames", "active").await?;
-    sqlx::query(
-        "INSERT INTO project_resolver_classification (chain_id, resolver_address, block_number,
-             transaction_index, log_index, event_identity, classification, support_status,
-             manifest_id, admission_namespace)
-         VALUES ($1, $2, 1, 0, 0, 'f3:r1', $3, 'supported', 21, 'ens')",
-    )
-    .bind(CHAIN)
-    .bind(R1)
-    .bind(
-        json!({"role": "public_resolver_v2", "source_family": "ens_v2_resolver_l1",
-        "basis": "manifest_declared_address"}),
-    )
-    .execute(pool)
-    .await?;
+    manifest(pool, m0, 2, "ens", "active").await?;
+    for (resolver, identity, status, reason, manifest_id) in [
+        (R1, "f3:r1", "supported", None, Some(m0)),
+        (
+            R5,
+            "f3:r5",
+            "unsupported",
+            Some("resolver_manifest_not_active"),
+            None,
+        ),
+    ] {
+        sqlx::query(
+            "INSERT INTO project_resolver_classification (chain_id, resolver_address,
+                 block_number, transaction_index, log_index, event_identity, classification,
+                 support_status, unsupported_reason, manifest_id, admission_namespace)
+             VALUES ($1, $2, 1, 0, 0, $3, $4, $5, $6, $7, 'basenames')",
+        )
+        .bind(CHAIN)
+        .bind(resolver)
+        .bind(identity)
+        .bind(
+            json!({"role": "public_resolver_v2", "source_family": "ens_v2_resolver_l1",
+            "basis": "manifest_declared_address"}),
+        )
+        .bind(status)
+        .bind(reason)
+        .bind(manifest_id)
+        .execute(pool)
+        .await?;
+    }
     resolver_current(pool, R2, ("supported", None), m2).await?;
     manifest(pool, m2, 3, "ens", "active").await?;
     manifest(pool, m2, 5, "ens", "deprecated").await?;
@@ -139,7 +159,7 @@ async fn the_classification_switch_is_per_resolver_and_bounded_by_the_marker() -
         .await?
         .context("R1 is classified")?;
     assert!(r1.supported());
-    assert_eq!(r1.manifest_id, Some(21));
+    assert_eq!(r1.manifest_id, Some(m0));
     assert_eq!(r1.declaration_namespace.as_deref(), Some("ens"));
     let r2 = load_family_resolver_classification(pool, CHAIN, R2)
         .await?
@@ -152,11 +172,14 @@ async fn the_classification_switch_is_per_resolver_and_bounded_by_the_marker() -
         .context("R3 is classified")?;
     assert_eq!(r3.manifest_id, Some(m3));
     assert_eq!(r3.declaration_namespace.as_deref(), Some("ens"));
-    assert!(
-        load_family_resolver_classification(pool, CHAIN, R4)
-            .await?
-            .is_none()
-    );
+    for unclassified in [R4, R5] {
+        assert!(
+            load_family_resolver_classification(pool, CHAIN, unclassified)
+                .await?
+                .is_none(),
+            "{unclassified}"
+        );
+    }
     fixture.cleanup().await
 }
 
