@@ -23,8 +23,14 @@
 //! keep (`project_end_to_end/endpoint.rs`). That is a reader-value comparison against a full
 //! rebuild, not the rollback benchmark's contract oracle. The next target continues from that
 //! rebuilt state.
+//!
+//! With `BIGNAME_END_TO_END_SHADOW=1` (always on the fixture) each target, and each rebuild when
+//! compared, also compares the owned key family readers with today's readers
+//! (`project_end_to_end/shadow.rs`). Production serves today's tables either way.
 #[path = "project_end_to_end/endpoint.rs"]
 mod endpoint;
+#[path = "project_end_to_end/shadow.rs"]
+mod shadow;
 #[allow(dead_code)]
 mod support;
 
@@ -95,7 +101,9 @@ async fn disposable_copy_publishes_hydrates_and_reads_each_target() -> Result<()
     let targets = parse_targets(&std::env::var("BIGNAME_BENCHMARK_TARGETS")?)?;
     let compare = (std::env::var("BIGNAME_END_TO_END_COMPARE").as_deref() == Ok("1"))
         .then_some(COPY_CHILDREN_PAGE);
-    run(&pool, previous, &targets, compare).await?;
+    let shadow = (std::env::var("BIGNAME_END_TO_END_SHADOW").as_deref() == Ok("1"))
+        .then_some(COPY_CHILDREN_PAGE);
+    run(&pool, previous, &targets, compare, shadow).await?;
     pool.close().await;
     Ok(())
 }
@@ -170,8 +178,35 @@ async fn fixture_corpus_publishes_hydrates_reads_and_matches_a_rebuild() -> Resu
     .execute(pool)
     .await?;
     require_disposable_copy(pool).await?;
-    let compared = run(pool, previous, &targets, Some(FIXTURE_CHILDREN_PAGE)).await?;
+    let (compared, shadows) = run(
+        pool,
+        previous,
+        &targets,
+        Some(FIXTURE_CHILDREN_PAGE),
+        Some(FIXTURE_CHILDREN_PAGE),
+    )
+    .await?;
     ensure!(compared.len() == targets.len(), "every target is compared");
+    ensure!(
+        shadows.len() == 2 * targets.len(),
+        "every target and every rebuild is shadow compared"
+    );
+    for shadow in &shadows {
+        let report = &shadow.report;
+        ensure!(
+            report.current() && report.inventory_rows > 0 && report.primary_tuples > 0,
+            "the {} shadow comparison at {} compared nothing: {report:?}",
+            shadow.stage,
+            shadow.target
+        );
+        ensure!(
+            report.differences.is_empty(),
+            "the family reads differ from today's reads at {} ({}): {:#?}",
+            shadow.target,
+            shadow.stage,
+            report.differences
+        );
+    }
     for compared in &compared {
         // The harness cannot tell whether a dropped key was in the batch's full scope (see
         // `endpoint::Outcome::dropped`), so the fixture must produce none.
@@ -282,7 +317,8 @@ async fn run(
     previous: i64,
     targets: &[i64],
     compare: Option<u64>,
-) -> Result<Vec<Compared>> {
+    shadow: Option<u64>,
+) -> Result<(Vec<Compared>, Vec<shadow::Shadow>)> {
     let _ = tracing_subscriber::fmt()
         .with_env_filter("bigname_project::batch=info,bigname_project::families=info")
         .with_target(false)
@@ -310,6 +346,7 @@ async fn run(
     }
     let mut resume = load_marker(pool, previous).await?;
     let mut compared = Vec::new();
+    let mut shadows = Vec::new();
     ensure!(
         publication(pool).await? == (Some(previous), Some(resume.hash.clone()), false),
         "Project is not published at the requested previous marker"
@@ -412,6 +449,9 @@ async fn run(
             hash.as_deref() == Some(INTERPRETER_CONTENT_HASH),
             "the publication does not carry this binary's interpreter hash"
         );
+        if let Some(page_size) = shadow {
+            shadows.push(shadow::compare(pool, CHAIN, &target, page_size, "incremental").await?);
+        }
         if let (Some(children_page), Some(baseline)) = (compare, baseline) {
             let retention = endpoint::Retention::load(
                 pool,
@@ -423,10 +463,13 @@ async fn run(
             compared.push(
                 compare_with_rebuild(pool, &project, &target, children_page, &retention).await?,
             );
+            if let Some(page_size) = shadow {
+                shadows.push(shadow::compare(pool, CHAIN, &target, page_size, "rebuild").await?);
+            }
         }
         resume = target;
     }
-    Ok(compared)
+    Ok((compared, shadows))
 }
 
 /// Reads every name and subname the batch left, rebuilds the target from scratch and commits it,
