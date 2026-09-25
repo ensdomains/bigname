@@ -153,6 +153,14 @@ mod tests {
             requests.len(),
             corpus.resolvers.len() * RESOLVER_INCLUDE_VARIANTS.len()
         );
+        // The overview no longer accepts `include`; a request that sends it is `400
+        // invalid_input`, so the gate must not build one.
+        assert!(
+            requests
+                .iter()
+                .all(|request| request.url.query_pairs().all(|(key, _)| key != "include")),
+            "{requests:?}"
+        );
         assert!(
             requests
                 .iter()
