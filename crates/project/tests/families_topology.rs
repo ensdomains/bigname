@@ -239,3 +239,36 @@ async fn an_alias_without_an_active_flag_is_stored_active() -> Result<()> {
     }
     fixture.cleanup().await
 }
+
+// The served children build lower-cases a child edge's owner (children.rs, `lower(COALESCE(
+// owner_getter, owner))`), and the family columns are documented lower-cased, so a checksummed
+// payload is stored lower-cased.
+#[tokio::test]
+async fn a_child_edge_stores_its_owner_and_owner_getter_lower_cased() -> Result<()> {
+    let fixture = Fixture::new("families_child_edge_case", 20).await?;
+    fixture
+        .write(
+            10,
+            1,
+            "SubregistryChanged",
+            "ens_v1_registry_l1",
+            None,
+            None,
+            json!({"source_event": "NewOwner", "node": node(1), "child_node": node(9),
+                   "labelhash": node(99),
+                   "owner": "0x00000000000000000000000000000000000000Aa",
+                   "owner_getter": "0x00000000000000000000000000000000000000Bb"}),
+            REGISTRY,
+        )
+        .await?;
+    fixture.apply(10, FamilyMode::Normal).await;
+    let edges = fixture.rows("project_child_edge_candidate").await?;
+    assert_eq!(
+        columns(&edges[0], &["owner", "owner_getter"]),
+        json!({"owner": "0x00000000000000000000000000000000000000aa",
+               "owner_getter": "0x00000000000000000000000000000000000000bb"})
+    );
+    fixture.assert_undo_restores(10).await?;
+    fixture.assert_rebuild_equal(10).await?;
+    fixture.cleanup().await
+}

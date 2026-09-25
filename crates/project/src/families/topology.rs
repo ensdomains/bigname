@@ -157,12 +157,12 @@ pub(super) async fn apply(
             set(
                 &mut row,
                 "owner",
-                text_or_null(raw_text(&event.after, "owner")),
+                text_or_null(raw_lower(&event.after, "owner")),
             );
             set(
                 &mut row,
                 "owner_getter",
-                text_or_null(raw_text(&event.after, "owner_getter")),
+                text_or_null(raw_lower(&event.after, "owner_getter")),
             );
             set(
                 &mut row,
