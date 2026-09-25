@@ -2118,6 +2118,224 @@ mod numeric_short_lease_connected {
         Ok(())
     }
 
+    // Interpret-to-Project coverage for a migrated name that is then released on ENSv2 (Pro review
+    // of PR 953, question 5). The captured registration, TokenResource and migration receipts and a
+    // synthetic `LabelUnregistered` go through the adapter and the writer, and nothing rewrites the
+    // normalized rows. The successor identifiers, the predecessor closure, the successor binding
+    // position and the release closure are checked in the written rows before Project runs.
+    #[tokio::test]
+    async fn raw_migration_then_v2_release_is_written_before_project_serves_it() -> Result<()> {
+        use alloy_sol_types::{SolEvent, sol};
+        use bigname_adapters::schema_v2::{RawBlockInput, RawLogInput};
+        sol! {
+            event LabelRegistered(uint256 indexed tokenId, bytes32 indexed labelHash, string label, address owner, uint64 expiry, address indexed sender);
+            event TokenResource(uint256 indexed tokenId, uint256 indexed resource);
+            event LabelUnregistered(uint256 indexed tokenId, address indexed sender);
+        }
+        const RELEASE_BLOCK: i64 = 417;
+        let mut input = fixture::input()?;
+        let expected = fixture::fixture()?;
+        let logical = format!("ens:{}", expected["node"].as_str().unwrap());
+        let topic = |hash: alloy_primitives::B256| format!("{hash:#x}");
+        let migration_log = |signature| {
+            input
+                .raw_logs
+                .iter()
+                .find(|raw| {
+                    raw.block_number == fixture::MIGRATION_BLOCK
+                        && raw.topics.first() == Some(&topic(signature))
+                })
+                .cloned()
+                .context("captured ENSv2 migration log")
+        };
+        let registered = migration_log(LabelRegistered::SIGNATURE_HASH)?;
+        let linked = migration_log(TokenResource::SIGNATURE_HASH)?;
+        let token: alloy_primitives::U256 = registered.topics[1].parse()?;
+        let after_expiry = input
+            .blocks
+            .iter()
+            .find(|block| block.block_number == fixture::AFTER_EXPIRY_BLOCK)
+            .context("after-expiry block")?
+            .clone();
+        let release_block = RawBlockInput {
+            block_hash: format!("0x{RELEASE_BLOCK:064x}"),
+            block_number: RELEASE_BLOCK,
+            block_timestamp: after_expiry.block_timestamp + time::Duration::seconds(12),
+            ..after_expiry
+        };
+        let release = LabelUnregistered {
+            tokenId: token,
+            sender: expected["expected_owner"].as_str().unwrap().parse()?,
+        }
+        .encode_log_data();
+        input.raw_logs.push(RawLogInput {
+            chain_id: fixture::CHAIN.to_owned(),
+            block_hash: release_block.block_hash.clone(),
+            block_number: RELEASE_BLOCK,
+            block_timestamp: release_block.block_timestamp,
+            canonicality_state: "canonical".to_owned(),
+            transaction_hash: format!("0x{:064x}", 0x417_u64),
+            transaction_index: 0,
+            log_index: 0,
+            emitting_address: registered.emitting_address.clone(),
+            topics: release.topics().iter().map(|hash| topic(*hash)).collect(),
+            data: release.data.to_vec(),
+        });
+        input.blocks.push(release_block.clone());
+
+        let database = database(&input).await?;
+        let pool = database.pool();
+        let result = async {
+            let mut session = None;
+            let mut marker = None;
+            for (from, to) in [
+                (403, 403),
+                (405, 406),
+                (407, 414),
+                (415, 415),
+                (416, 416),
+                (RELEASE_BLOCK, RELEASE_BLOCK),
+            ] {
+                let part = fixture::range(&input, from, to);
+                let (output, next) = adapter::prepare_schema_v2_batch_incremental(
+                    part.clone(),
+                    session.take(),
+                    StateCacheCapacity::Unlimited,
+                )?
+                .finish(Vec::new())?;
+                session = Some(next);
+                write(pool, &part, &output).await?;
+                if to == fixture::MIGRATION_BLOCK {
+                    // Successor identifiers: the activated migration names the ENSv2 binding and
+                    // resource the registration opened, at the TokenResource log.
+                    let successor: (Uuid, Uuid, i64, i64, i64, Uuid) = sqlx::query_as(
+                        "SELECT binding.surface_binding_id, binding.resource_id,
+                                binding.block_number,
+                                (binding.provenance ->> 'transaction_index')::bigint,
+                                (binding.provenance ->> 'log_index')::bigint,
+                                grant_event.resource_id
+                         FROM surface_bindings binding
+                         JOIN normalized_events grant_event
+                           ON grant_event.logical_name_id = binding.logical_name_id
+                          AND grant_event.event_kind = 'RegistrationGranted'
+                          AND grant_event.source_family = 'ens_v2_registry_l1'
+                         WHERE binding.logical_name_id = $1 AND binding.authority_arm = 'ens_v2'",
+                    )
+                    .bind(&logical)
+                    .fetch_one(pool)
+                    .await?;
+                    assert_eq!(
+                        successor.1, successor.5,
+                        "the grant is on the bound resource"
+                    );
+                    assert_eq!(
+                        (successor.2, successor.3, successor.4),
+                        (
+                            fixture::MIGRATION_BLOCK,
+                            linked.transaction_index,
+                            linked.log_index
+                        ),
+                        "the successor binding opens at the TokenResource log"
+                    );
+                    let migration: (String, Option<String>, Option<String>) = sqlx::query_as(
+                        "SELECT consumer_visibility::text,
+                                after_state #>> '{successor_binding,binding_id}',
+                                after_state #>> '{successor_binding,resource_id}'
+                         FROM normalized_events
+                         WHERE logical_name_id = $1 AND event_kind = 'MigrationApplied'",
+                    )
+                    .bind(&logical)
+                    .fetch_one(pool)
+                    .await?;
+                    assert_eq!(
+                        migration,
+                        (
+                            "activated".to_owned(),
+                            Some(successor.0.to_string()),
+                            Some(successor.1.to_string()),
+                        )
+                    );
+                    // Predecessor closure: no ENSv1 binding of the name stays open.
+                    let open_v1: i64 = sqlx::query_scalar(
+                        "SELECT count(*) FROM surface_bindings
+                         WHERE logical_name_id = $1 AND authority_arm = 'ens_v1'
+                           AND active_to IS NULL",
+                    )
+                    .bind(&logical)
+                    .fetch_one(pool)
+                    .await?;
+                    assert_eq!(open_v1, 0, "the migration closes the ENSv1 predecessor");
+                }
+                if to == RELEASE_BLOCK {
+                    // Release closure: the ENSv2 binding closes at the release, which is written
+                    // on its resource at the unregister log.
+                    let closure: (Option<time::OffsetDateTime>, i64, Option<i64>, Option<i64>) =
+                        sqlx::query_as(
+                            "SELECT binding.active_to, release.block_number,
+                                    release.transaction_index, release.log_index
+                             FROM surface_bindings binding
+                             JOIN normalized_events release
+                               ON release.resource_id = binding.resource_id
+                              AND release.event_kind = 'RegistrationReleased'
+                              AND release.after_state ->> 'source_event' = 'LabelUnregistered'
+                             WHERE binding.logical_name_id = $1
+                               AND binding.authority_arm = 'ens_v2'",
+                        )
+                        .bind(&logical)
+                        .fetch_one(pool)
+                        .await?;
+                    assert_eq!(
+                        closure,
+                        (
+                            Some(release_block.block_timestamp),
+                            RELEASE_BLOCK,
+                            Some(0),
+                            Some(0)
+                        )
+                    );
+                }
+                marker = Some(project(pool, from, to, marker).await?);
+            }
+            // Project serves the released ENSv2 registration, keeps the migration as history and
+            // starts the epoch at the successor binding.
+            let served: (
+                Option<String>,
+                Option<String>,
+                Option<String>,
+                Option<String>,
+                Value,
+            ) = sqlx::query_as(
+                "SELECT provenance #>> '{authority_selection,authority_arm}',
+                        provenance #>> '{authority_selection,lifecycle_state}',
+                        provenance #>> '{authority_selection,proof_kind}',
+                        declared_summary #>> '{registration,status}',
+                        provenance #> '{authority_selection,epoch_start_position}'
+                 FROM name_current WHERE logical_name_id = $1",
+            )
+            .bind(&logical)
+            .fetch_one(pool)
+            .await?;
+            assert_eq!(
+                served,
+                (
+                    Some("ens_v2".to_owned()),
+                    Some("unregistered".to_owned()),
+                    Some("migration_authority_transition".to_owned()),
+                    Some("released".to_owned()),
+                    serde_json::json!({
+                        "block_number": fixture::MIGRATION_BLOCK,
+                        "transaction_index": linked.transaction_index,
+                        "log_index": linked.log_index,
+                    }),
+                )
+            );
+            Ok(())
+        }
+        .await;
+        database.cleanup().await?;
+        result
+    }
+
     #[tokio::test]
     async fn later_readable_timestamp_does_not_move_public_registered_at() -> Result<()> {
         let mut input = fixture::input()?;
