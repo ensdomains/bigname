@@ -53,7 +53,8 @@ fn assert_query_values(endpoint: &str, parameter: &str, expected: &[&str]) {
     assert_eq!(
         actual,
         expected.iter().map(|value| (*value).to_owned()).collect(),
-        "{endpoint} must rotate every documented {parameter} value"
+        "{endpoint} must send exactly these {parameter} values, none when the set is empty (the \
+         resolver overview takes no include)"
     );
 }
 
