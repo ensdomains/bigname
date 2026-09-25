@@ -244,6 +244,18 @@ impl Chain {
         .await?)
     }
 
+    /// The raw `children_current` rows of `parent`, write timestamps and publication targets
+    /// included, so a row the batch left alone compares equal to its earlier self.
+    async fn raw_children(&self, parent: &str) -> Result<Vec<Value>> {
+        Ok(sqlx::query_scalar(
+            "SELECT to_jsonb(row) FROM children_current row
+             WHERE parent_logical_name_id = $1 ORDER BY child_logical_name_id",
+        )
+        .bind(parent)
+        .fetch_all(self.pool())
+        .await?)
+    }
+
     async fn cleanup(self) -> Result<()> {
         self.scratch.cleanup().await
     }
@@ -339,6 +351,131 @@ async fn zero_transfer_of_a_surfaced_child_matches_a_rebuild() -> Result<()> {
     ensure!(
         served == expected,
         "incremental children differ from the rebuild:\nincremental {served:#?}\nrebuild {expected:#?}"
+    );
+    incremental.cleanup().await?;
+    rebuilt.cleanup().await
+}
+
+/// `first.eth` with two children from the ENSv1 registry: `changed`, and `sibling`, whose own
+/// surface holds a child `deep`.
+async fn siblings_before(chain: &Chain) -> Result<(String, String)> {
+    let first_node = word(0x1001);
+    let first = chain
+        .surface(&first_node, "first.eth", &[word(0x2001), word(ETH)], 1)
+        .await?;
+    let sibling = chain
+        .surface(
+            &word(2),
+            "sibling.first.eth",
+            &[word(0x5002), word(0x2001), word(ETH)],
+            1,
+        )
+        .await?;
+    for (child, label) in [(1, "changed"), (2, "sibling"), (3, "deep")] {
+        chain.label(&word(0x5000 + child), label).await?;
+    }
+    for (identity, parent, child) in [
+        ("changed", first_node.clone(), 1),
+        ("sibling", first_node.clone(), 2),
+        ("deep", word(2), 3),
+    ] {
+        chain
+            .event(
+                identity,
+                None,
+                None,
+                "ens_v1_registry_l1",
+                "SubregistryChanged",
+                2,
+                json!({"source_event": "NewOwner", "node": parent, "child_node": word(child),
+                       "labelhash": word(0x5000 + child), "owner": address(0xa000 + child)}),
+                &address(0xe1),
+            )
+            .await?;
+    }
+    Ok((first, sibling))
+}
+
+/// A NewOwner that changes `changed`'s owner. The adapter derives both a SubregistryChanged
+/// and an AuthorityTransferred from the one log, with the same payload: `node` is the parent
+/// and `child_node` the child.
+async fn siblings_after(chain: &Chain) -> Result<()> {
+    let payload = json!({"source_event": "NewOwner", "node": word(0x1001),
+                         "child_node": word(1), "labelhash": word(0x5001),
+                         "owner": address(0xa011)});
+    for kind in ["SubregistryChanged", "AuthorityTransferred"] {
+        chain
+            .event(
+                &format!("changed-owner-{kind}"),
+                None,
+                None,
+                "ens_v1_registry_l1",
+                kind,
+                8,
+                payload.clone(),
+                &address(0xe1),
+            )
+            .await?;
+    }
+    Ok(())
+}
+
+// An owner-changing NewOwner rebuilds the changed child's edge and matches a rebuild, and leaves
+// an unrelated sibling and its descendant as the earlier publication wrote them: the
+// AuthorityTransferred derived from NewOwner names the parent in `node`, which must not scope
+// the parent's other children.
+#[tokio::test]
+async fn new_owner_leaves_unrelated_siblings_alone() -> Result<()> {
+    let mut incremental = Chain::new("scope_siblings_incremental", 12).await?;
+    let mut rebuilt = Chain::new("scope_siblings_rebuild", 12).await?;
+    let (first, sibling) = siblings_before(&incremental).await?;
+    siblings_before(&rebuilt).await?;
+    incremental.publish(6).await?;
+    let changed = format!("ens:{}", word(1));
+    let untouched = |rows: Vec<Value>| -> Vec<Value> {
+        rows.into_iter()
+            .filter(|row| row["child_logical_name_id"] != json!(changed))
+            .collect()
+    };
+    let sibling_rows_before = untouched(incremental.raw_children(&first).await?);
+    let deep_rows_before = incremental.raw_children(&sibling).await?;
+    ensure!(
+        sibling_rows_before.len() == 1 && deep_rows_before.len() == 1,
+        "{sibling_rows_before:#?} {deep_rows_before:#?}"
+    );
+
+    siblings_after(&incremental).await?;
+    siblings_after(&rebuilt).await?;
+    incremental.publish(9).await?;
+    rebuilt.publish(9).await?;
+    let owner: Option<String> =
+        sqlx::query_scalar("SELECT owner FROM children_current WHERE child_logical_name_id = $1")
+            .bind(&changed)
+            .fetch_one(incremental.pool())
+            .await?;
+    ensure!(owner == Some(address(0xa011)), "{owner:?}");
+    let served = incremental.children().await?;
+    let expected = rebuilt.children().await?;
+    ensure!(
+        served == expected,
+        "incremental children differ from the rebuild:\nincremental {served:#?}\nrebuild {expected:#?}"
+    );
+    let sibling_rows_after = untouched(incremental.raw_children(&first).await?);
+    let deep_rows_after = incremental.raw_children(&sibling).await?;
+    ensure!(
+        sibling_rows_after == sibling_rows_before && deep_rows_after == deep_rows_before,
+        "the NewOwner rebuilt unrelated rows:\nbefore {sibling_rows_before:#?} {deep_rows_before:#?}\nafter {sibling_rows_after:#?} {deep_rows_after:#?}"
+    );
+    ensure!(
+        sibling_rows_after
+            .iter()
+            .chain(&deep_rows_after)
+            .all(
+                |row| row.pointer("/chain_positions/target_block_number") == Some(&json!(6))
+                    && row.pointer("/canonicality_summary/target_block_hash")
+                        == Some(&json!(hash(6)))
+            ),
+        "{sibling_rows_after:#?} {deep_rows_after:#?}"
     );
     incremental.cleanup().await?;
     rebuilt.cleanup().await
