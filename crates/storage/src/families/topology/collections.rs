@@ -129,7 +129,8 @@ pub async fn load_resolver_links_shadow(
     .await
 }
 
-/// `/roles`: resolver-scoped `project_grant` rows whose effective powers are non-empty. The
+/// `/roles`: resolver-scoped `project_grant` rows whose effective powers are non-empty and whose
+/// resource is readable, as the served permissions read filter requires. The
 /// wrapper, grace and expiry-retirement masks are not applied yet, so the powers are the stored,
 /// unmasked ones, which resolver-scoped ENSv2 grants carry unmasked today. `event_ids` holds the
 /// grant's last event only, because the family row keeps no evidence arrays. Parity with the
@@ -154,6 +155,18 @@ pub async fn load_resolver_roles_shadow(
             WHERE grant_row.chain_id = $1
               AND grant_row.scope = 'resolver:' || $1 || ':' || $2
               AND jsonb_array_length(grant_row.effective_powers) > 0
+              -- The grant's resource must be readable, as the served permissions read filter
+              -- requires of its resource and that resource's block.
+              AND EXISTS (
+                  SELECT 1
+                  FROM bigname_phase.resources resource
+                  JOIN bigname_phase.chain_lineage resource_lineage
+                    ON resource_lineage.chain_id = resource.chain_id
+                   AND resource_lineage.block_hash = resource.block_hash
+                   AND resource_lineage.block_number = resource.block_number
+                  WHERE resource.resource_id = grant_row.resource_id
+                    AND resource.canonicality_state IN ('canonical', 'safe', 'finalized')
+                    AND resource_lineage.canonicality_state IN ('canonical', 'safe', 'finalized'))
         )";
     page(pool, items, chain_id, resolver_address, None, after, limit).await
 }
