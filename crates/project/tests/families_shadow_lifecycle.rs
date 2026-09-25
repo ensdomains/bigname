@@ -478,9 +478,8 @@ async fn synthesised_events_in_one_block_take_the_identity_order() -> Result<()>
     );
     // Pro Q3 on a5f61182: a wrong expiry on the canonically selected grant, the log and the
     // served rows unchanged, makes the families' expiry wrong while today's order still selects
-    // a-expiry, which carries the served one. Both expiry fields must stay mismatches, because
-    // the canonical read of the events rebuilt from the log gives 2,000,000,000; the latest
-    // kind, which the grant's expiry does not decide, keeps its same-block delta.
+    // a-expiry, which carries the served one. The retained grant no longer equals its log
+    // rebuild, so the name gets no excuse at all: both expiry fields and the latest kind fail.
     sqlx::query(
         "UPDATE bigname_phase.project_lifecycle_event
          SET expiry = '2200000000'::jsonb, expiry_seconds = 2200000000
@@ -491,17 +490,16 @@ async fn synthesised_events_in_one_block_take_the_identity_order() -> Result<()>
     let mutated = shadow_support::compare::compare(&fixture.pool, CHAIN, 12).await?;
     assert_eq!(
         failed_fields(&mutated),
-        ["control/expiry", "registration/expiry"],
+        [
+            "control/expiry",
+            "registration/expiry",
+            "registration/latest_event_kind"
+        ],
         "a wrong canonical expiry must not pass: {:#?}",
         mutated.lines
     );
-    assert_eq!(
-        mutated.expected_delta_fields,
-        [(
-            "d12_same_block_order:registration/latest_event_kind".to_owned(),
-            1
-        )]
-        .into(),
+    assert!(
+        mutated.expected_delta_fields.is_empty(),
         "{:#?}",
         mutated.lines
     );

@@ -1013,8 +1013,9 @@ fn gives(read: Option<&ShadowName>, field: &str, value: &Value) -> bool {
 /// Every cause then rests on the name's retained lifecycle events rebuilt from the
 /// publication-visible log, not on the family rows: read in the canonical order (through the
 /// refolding path, so the stored key states and triple summaries are not read either) they
-/// must give the field's shadow value, so a wrong fact on a retained lifecycle row fails the
-/// fields it decides. Facts the retention check does not rebuild are listed in `retention.rs`.
+/// must give the field's shadow value. Each retained row must also equal its rebuild whole, so
+/// a wrong fact on a retained lifecycle row fails every field of the name. Facts the retention
+/// check does not rebuild are listed in `retention.rs`.
 fn name_excuses(
     prefetched: &ExcuseInputs,
     clock: &Clock,
@@ -1037,6 +1038,17 @@ fn name_excuses(
     let Some(from_log) = log_facts_in(facts, &prefetched.log, &prefetched.snapshots) else {
         return out;
     };
+    // Every retained row must also equal its rebuild whole: the shadow read the family rows,
+    // so a wrong payload the rebuild drops would otherwise leave a shadow value the log does
+    // not give, reclassified rather than failed.
+    if facts
+        .events
+        .iter()
+        .zip(&from_log.events)
+        .any(|(row, log)| format!("{row:?}") != format!("{log:?}"))
+    {
+        return out;
+    }
     let canonical = evaluate(&in_canonical_ranks(&from_log), clock);
     // Every excuse also needs the families' identity facts, the epoch starts and the binding
     // candidates' SurfaceBounds, to be what the log gives, since both blocks read them, and a

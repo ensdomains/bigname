@@ -421,7 +421,7 @@ async fn a_missing_resource_event_row_fails_the_permission_excuse() -> Result<()
 /// the permission rows refolds the family rows, so a retained resource event must equal its
 /// log rebuild, payload included, before the rows can pass. In the same-block release shape,
 /// the release's family row given another terminal reason, its identity, position and key
-/// state unchanged, leaves the permission rows a mismatch.
+/// state unchanged, leaves the permission rows a mismatch, and the name's fields too.
 #[tokio::test]
 async fn a_wrong_payload_on_a_retained_resource_event_fails_the_permission_excuse() -> Result<()> {
     let fixture = Fixture::new("families_shadow_order_resource_payload", 20).await?;
@@ -459,10 +459,10 @@ async fn a_wrong_payload_on_a_retained_resource_event_fails_the_permission_excus
         "a wrong retained payload must fail the permission rows: {:#?}",
         mutated.lines
     );
+    // Name 1 reads the same corrupt row: its fields are mismatches too, neither the named
+    // cause nor a same-block delta, because every retained row must equal its log rebuild.
     assert!(
-        !mutated
-            .expected_delta_fields
-            .contains_key("d12_same_block_order:permissions_current"),
+        mutated.expected_delta_fields.is_empty() && mutated.known_discrepancy.is_empty(),
         "{:#?}",
         mutated.lines
     );
