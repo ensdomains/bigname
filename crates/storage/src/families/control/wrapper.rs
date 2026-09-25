@@ -28,7 +28,11 @@ pub struct EffectiveWrapper {
     /// and zero fuses for any name (build.sql:616-623).
     /// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L843-L856 @ ens_v1@91c966f)
     pub owner_lapsed: bool,
-    /// A `.eth` name inside the grace period after its wrapper expiry (permissions.rs:329-335).
+    /// A `.eth` name (the effective fuses carry IS_DOT_ETH) whose clock is inside the last
+    /// grace period before its wrapper expiry: `expiry - GRACE_PERIOD < clock`
+    /// (permissions.rs:329-335). The NameWrapper expiry of a `.eth` name already includes the
+    /// registrar grace period, so the grace window ends at the wrapper expiry itself; past it
+    /// the effective fuses are zero and the name is never in grace.
     pub in_grace: bool,
 }
 
