@@ -116,8 +116,8 @@ async fn selected_authority(
 }
 
 // Each mutation breaks one thing the old exact-name profile gate checked. Support now follows the
-// authority decision alone, so a mutation that leaves the selected ENSv2 registration without an
-// authority refusal serves it, and only a mutation that breaks authority selection stays refused.
+// authority decision alone, and none of these mutations changes that decision: the name's open
+// ENSv2 binding is selected with no authority refusal in every case, so each one is served.
 // Authority selection does not check the proof's manifest (`missing_manifest`, `inactive_manifest`,
 // `wrong_proof_family`, `wrong_namespace`, `unadmitted_latest_proof` keep their proof); Interpret
 // writes events only from active manifests, so these rows exist only in fixtures.
@@ -128,7 +128,7 @@ async fn selected_authority(
 // support decision checks proof association any more: the migration is history, and selection
 // reads only the open ENSv2 binding.
 #[tokio::test]
-async fn migration_boundary_mutations_refuse_only_through_authority_selection() -> Result<()> {
+async fn migration_history_mutations_do_not_gate_current_v2_authority() -> Result<()> {
     for case in [
         "supported",
         "missing",
