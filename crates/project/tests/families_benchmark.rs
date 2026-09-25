@@ -238,7 +238,8 @@ async fn family_block_timings() -> Result<()> {
         let text = std::fs::read(log)?;
         let start = usize::try_from(log_offset)?.min(text.len());
         let follow_text = String::from_utf8_lossy(&text[start..]);
-        // (statement tag, whether it reads the manifest updates)
+        // (whether it is the per-run manifest read, whether it reads the manifest updates); the
+        // counts are totals over the whole follow, printed, not asserted.
         let statements: Vec<(bool, bool)> = follow_text
             .split("Query Text:")
             .skip(1)
@@ -264,7 +265,7 @@ async fn family_block_timings() -> Result<()> {
             .filter(|(run, reads)| !*run && *reads)
             .count();
         println!(
-            "FAMILY_BENCHMARK follow blocks={followed} runs={} manifest_reads_per_run={run_reads} \
+            "FAMILY_BENCHMARK follow blocks={followed} runs={} manifest_read_statements={run_reads} \
              manifest_reads_in_block_statements={block_reads}",
             300 - base
         );
