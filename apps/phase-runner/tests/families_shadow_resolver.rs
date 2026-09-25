@@ -570,6 +570,41 @@ async fn classification_rows_are_compared_in_full() -> Result<()> {
     fixture.cleanup().await
 }
 
+// A later pointer on a resource that is not the name's selected one does not move the name:
+// today's name row takes its resolver from the selected authority's events
+// (crates/project/src/builders/name_current/build.sql, the `resolver` lateral), so `one.eth`
+// stays bound to the first resolver and is not bound to the second.
+#[tokio::test]
+async fn bound_names_follow_the_selected_resource_not_the_newest_pointer() -> Result<()> {
+    let mut fixture = Fixture::new("families_shadow_bound_selected", 12).await?;
+    let first = address(0xd1);
+    let second = address(0xd2);
+    fixture
+        .declare_resolvers(RESOLVER, &[&first, &second])
+        .await?;
+    let one = name(&fixture, 1, "one", "declared_registry_path").await?;
+    point(&fixture, "one-first", &one, &first, 2).await?;
+    let other = uuid(0xa101);
+    fixture.resource(&other, 3).await?;
+    fixture
+        .event(
+            "one-other-resource-second",
+            Some(&one.logical),
+            Some(&other),
+            REGISTRY,
+            "ResolverChanged",
+            3,
+            json!({"resolver": second}),
+            &address(0xf1),
+        )
+        .await?;
+    fixture.publish(4).await?;
+    let report = fixture.compare(1).await?;
+    unexpected(&report, &[])?;
+    ensure!(report.bound_names == 1, "{}", report.line());
+    fixture.cleanup().await
+}
+
 // The declaration fallback reads a manifest's latest update before asking whether it is active,
 // as today's manifest staging does (crates/project/src/stage.rs, `create_manifests`): a manifest
 // whose newest update retires it declares nothing, even though an older update was active.
