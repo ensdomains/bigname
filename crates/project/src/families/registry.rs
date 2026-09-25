@@ -192,6 +192,21 @@ fn owner_event(rows: &mut RowSet, chain: &Value, event: &BlockEvent, node: &str)
         "owner_getter_reason",
         text_or_null(raw_text(after, "owner_getter_reason")),
     );
+    // The same fields the node row keeps for its latest event, so an earlier event that wins
+    // the control owner still has them.
+    set(
+        &mut row,
+        "registry_owner",
+        text_or_null(raw_lower(after, "registry_owner")),
+    );
+    set(
+        &mut row,
+        "owner_word_unmasked",
+        after
+            .get("owner_word_unmasked")
+            .and_then(Value::as_bool)
+            .map_or(Value::Null, Value::Bool),
+    );
     put(rows, table, row, event)
 }
 

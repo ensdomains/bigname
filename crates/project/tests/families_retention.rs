@@ -4,8 +4,8 @@
 mod families_support;
 
 use anyhow::Result;
-use bigname_project::families::FamilyMode;
-use families_support::{Fixture, uuid};
+use bigname_project::{BatchRequest, Engine, RunMode, families::FamilyMode};
+use families_support::{CHAIN, Fixture, uuid};
 use serde_json::{Value, json};
 
 const WRAPPER: &str = "0x00000000000000000000000000000000000000e3";
@@ -186,6 +186,270 @@ async fn every_owner_setting_registry_event_of_a_node_is_kept() -> Result<()> {
                    "authority_kind": "registry_only", "owner": OWNER, "owner_getter": OWNER,
                    "owner_getter_reason": null, "block_number": 12, "log_index": 2,
                    "event_identity": "SubregistryChanged:12:2", "source_family": registry}),
+        ]
+    );
+    fixture.assert_undo_restores(12).await?;
+    fixture.assert_rebuild_equal(12).await?;
+    fixture.cleanup().await
+}
+
+/// The served wrapper of a name after a served build to `target`: name_current's
+/// `wrapper_state` and fuses, masked against the target block's clock.
+async fn served_wrapper(fixture: &Fixture, logical_name_id: &str, target: i64) -> Result<Value> {
+    Engine::new(fixture.pool.clone())
+        .run_batch(BatchRequest {
+            chain_id: CHAIN.to_owned(),
+            target_block: target,
+            affected_from_block: 0,
+            affected_to_block: target,
+            resume_current: None,
+            mode: RunMode::Normal,
+        })
+        .await?;
+    Ok(sqlx::query_scalar(
+        "SELECT jsonb_build_object('wrapper_state', declared_summary -> 'wrapper_state',
+                                   'fuses', declared_summary #> '{wrapper_fuses,fuses}')
+         FROM name_current WHERE logical_name_id = $1",
+    )
+    .bind(logical_name_id)
+    .fetch_optional(&fixture.pool)
+    .await?
+    .unwrap_or(Value::Null))
+}
+
+/// A block's timestamp in the fixture lineage.
+fn block_time(block: i64) -> i64 {
+    1_800_000_000 + block * 12
+}
+
+// A wrap whose wrapper expiry equals block 12's timestamp, an unwrap and a new expiry in the same
+// block, and a rewrap of the same resource. The raw wrapper row keeps each fact unmasked; the
+// served name masks the fuses and a locked state only strictly after the expiry (name_current,
+// `effective_wrapper`).
+#[tokio::test]
+async fn the_wrapper_row_stays_raw_through_expiry_unwrap_and_rewrap() -> Result<()> {
+    let fixture = Fixture::new("families_retention_rewrap", 20).await?;
+    let (logical, resource) = (name(3), uuid(3));
+    fixture
+        .binding(&uuid(30), &logical, &resource, "ens_v1", 10, 0, None)
+        .await?;
+    let wrapper = "ens_v1_wrapper_l1";
+    let wrap = |log: i64, kind: &'static str, after: Value| (log, kind, after);
+    for (log, kind, after) in [
+        wrap(
+            1,
+            "TokenControlTransferred",
+            json!({"source_event": "NameWrapped", "to": HOLDER}),
+        ),
+        wrap(
+            2,
+            "PermissionScopeChanged",
+            json!({"source_event": "NameWrapped", "wrapper_state": "locked", "fuses": 65537}),
+        ),
+        wrap(
+            3,
+            "ExpiryChanged",
+            json!({"source_event": "NameWrapped", "expiry": block_time(12)}),
+        ),
+    ] {
+        fixture
+            .write(
+                10,
+                log,
+                kind,
+                wrapper,
+                Some(&logical),
+                Some(&resource),
+                after,
+                WRAPPER,
+            )
+            .await?;
+    }
+    let raw = [
+        "wrapper_state",
+        "fuses",
+        "expiry_seconds",
+        "lifecycle_source",
+        "lifecycle_unwrapped",
+        "unwrapped_position",
+    ];
+    let mut seen = Vec::new();
+    for target in [11, 12, 13] {
+        fixture.apply(target, FamilyMode::Normal).await;
+        seen.push((
+            target,
+            columns(&fixture.rows("project_wrapper_state").await?[0], &raw),
+            served_wrapper(&fixture, &logical, target).await?,
+        ));
+    }
+    // Block 14: the unwrap and a new expiry in one block.
+    fixture
+        .write(
+            14,
+            1,
+            "AuthorityEpochChanged",
+            wrapper,
+            Some(&logical),
+            Some(&resource),
+            json!({"source_event": "NameUnwrapped", "node": node(3)}),
+            WRAPPER,
+        )
+        .await?;
+    fixture
+        .write(
+            14,
+            2,
+            "ExpiryChanged",
+            wrapper,
+            Some(&logical),
+            Some(&resource),
+            json!({"source_event": "NameUnwrapped", "expiry": block_time(30)}),
+            WRAPPER,
+        )
+        .await?;
+    fixture.apply(14, FamilyMode::Normal).await;
+    seen.push((
+        14,
+        columns(&fixture.rows("project_wrapper_state").await?[0], &raw),
+        served_wrapper(&fixture, &logical, 14).await?,
+    ));
+    // Block 15: a rewrap of the same resource.
+    fixture
+        .write(
+            15,
+            1,
+            "TokenControlTransferred",
+            wrapper,
+            Some(&logical),
+            Some(&resource),
+            json!({"source_event": "NameWrapped", "to": HOLDER}),
+            WRAPPER,
+        )
+        .await?;
+    fixture
+        .write(
+            15,
+            2,
+            "PermissionScopeChanged",
+            wrapper,
+            Some(&logical),
+            Some(&resource),
+            json!({"source_event": "NameWrapped", "wrapper_state": "wrapped", "fuses": 0}),
+            WRAPPER,
+        )
+        .await?;
+    fixture.apply(15, FamilyMode::Normal).await;
+    seen.push((
+        15,
+        columns(&fixture.rows("project_wrapper_state").await?[0], &raw),
+        served_wrapper(&fixture, &logical, 15).await?,
+    ));
+    let wrapped_raw = |expiry: i64, fuses: i64, state: &str, source: &str, unwrapped: Value| {
+        let lifecycle_unwrapped = source == "NameUnwrapped";
+        json!({"wrapper_state": state, "fuses": fuses, "expiry_seconds": expiry,
+               "lifecycle_source": source, "lifecycle_unwrapped": lifecycle_unwrapped,
+               "unwrapped_position": unwrapped})
+    };
+    let unwrap = at(14, 1, "AuthorityEpochChanged:14:1");
+    let locked = json!({"wrapper_state": "locked", "fuses": 65537});
+    let expected = vec![
+        // Before the expiry and at it (expiry equal to the block time) nothing is masked.
+        (
+            11,
+            wrapped_raw(block_time(12), 65537, "locked", "NameWrapped", Value::Null),
+            locked.clone(),
+        ),
+        (
+            12,
+            wrapped_raw(block_time(12), 65537, "locked", "NameWrapped", Value::Null),
+            locked.clone(),
+        ),
+        // Just after it the served name drops the locked state and its fuses; the row does not.
+        (
+            13,
+            wrapped_raw(block_time(12), 65537, "locked", "NameWrapped", Value::Null),
+            json!({"wrapper_state": null, "fuses": null}),
+        ),
+        // The unwrap and a new expiry in one block: the row keeps both; the served name, which
+        // does not read the lifecycle, serves the locked state again under the new expiry.
+        (
+            14,
+            wrapped_raw(
+                block_time(30),
+                65537,
+                "locked",
+                "NameUnwrapped",
+                unwrap.clone(),
+            ),
+            locked,
+        ),
+        // The rewrap is the newest lifecycle event and the unwrap stays recorded.
+        (
+            15,
+            wrapped_raw(block_time(30), 0, "wrapped", "NameWrapped", unwrap),
+            json!({"wrapper_state": "wrapped", "fuses": 0}),
+        ),
+    ];
+    assert_eq!(seen, expected);
+    fixture.assert_undo_restores(15).await?;
+    fixture.assert_rebuild_equal(15).await?;
+    fixture.cleanup().await
+}
+
+// The node row keeps registry_owner and the unmasked-word flag of its latest owner-setting event
+// only. When an earlier transfer wins the control owner, the reader needs them from that event, so
+// each owner-event row carries them too.
+#[tokio::test]
+async fn an_earlier_transfer_keeps_its_registry_owner_and_unmasked_flag() -> Result<()> {
+    const REGISTRY: &str = "0x00000000000000000000000000000000000000a3";
+    const OWNER: &str = "0x00000000000000000000000000000000000000c1";
+    const RECORDED: &str = "0x00000000000000000000000000000000000000c2";
+    let fixture = Fixture::new("families_retention_owner_word", 20).await?;
+    let registry = "ens_v1_registry_l1";
+    let resource = uuid(4);
+    fixture
+        .write(
+            10,
+            1,
+            "AuthorityTransferred",
+            registry,
+            Some(&name(4)),
+            Some(&resource),
+            json!({"node": node(4), "owner": OWNER, "owner_getter": OWNER,
+                   "registry_owner": RECORDED, "owner_word_unmasked": true}),
+            REGISTRY,
+        )
+        .await?;
+    fixture
+        .write(
+            12,
+            1,
+            "SubregistryChanged",
+            registry,
+            Some(&name(4)),
+            Some(&resource),
+            json!({"child_node": node(4), "owner": OWNER, "owner_getter": OWNER}),
+            REGISTRY,
+        )
+        .await?;
+    fixture.apply(12, FamilyMode::Normal).await;
+    let rows = fixture.rows("project_registry_owner_event").await?;
+    let kept: Vec<Value> = rows
+        .iter()
+        .map(|row| {
+            columns(
+                row,
+                &["event_identity", "registry_owner", "owner_word_unmasked"],
+            )
+        })
+        .collect();
+    assert_eq!(
+        kept,
+        [
+            json!({"event_identity": "AuthorityTransferred:10:1", "registry_owner": RECORDED,
+                   "owner_word_unmasked": true}),
+            json!({"event_identity": "SubregistryChanged:12:1", "registry_owner": null,
+                   "owner_word_unmasked": null}),
         ]
     );
     fixture.assert_undo_restores(12).await?;

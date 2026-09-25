@@ -2498,7 +2498,9 @@ the manifests a family block classifies resolvers under: for every manifest
 the chain reads, its latest `SourceManifestUpdated` event at or below the block
 (or with no block) on the readable lineage, and those that are active with a
 payload. The block records the set's key, `manifest_id:event_id` per manifest,
-as `admission_manifests`; a different key reclassifies every stored resolver. A
+as `admission_manifests`; a different key reclassifies every stored resolver
+and every address an active resolver edge reaches, so an edge-only resolver
+whose origin manifest returns gets its row back. A
 family run reads the manifest updates once, before its first block. Distinct
 from the retired [admission epoch](#admission-epoch).
 

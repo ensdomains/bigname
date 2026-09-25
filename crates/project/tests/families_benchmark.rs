@@ -144,24 +144,55 @@ async fn family_block_timings() -> Result<()> {
         "FAMILY_BENCHMARK rebuild_to={base} elapsed_ms={}",
         started.elapsed().as_millis()
     );
-    // The seed writes every binding at its opening SurfaceBound's log, as the adapter does, so
-    // every candidate pairs with it and a wrapped one carries its wrapper lease.
-    let (unpaired, wrapped, wrapped_bindings): (i64, i64, i64) = sqlx::query_as(
-        "SELECT count(*) FILTER (WHERE candidate.event_identity LIKE 'binding:%'),
-                count(*) FILTER (WHERE candidate.wrapped_registrar_resource_id IS NOT NULL),
-                (SELECT count(*) FROM normalized_events event
-                 WHERE event.event_kind = 'SurfaceBound'
-                   AND event.source_family = 'ens_v1_wrapper_l1')
-         FROM project_binding_candidate candidate",
-    )
-    .fetch_one(&pool)
-    .await?;
+    // The seed writes every binding at its opening SurfaceBound's log, as the adapter does. Each
+    // binding the rebuild reached (through the base) must have one candidate at that
+    // SurfaceBound's identity and position, on the binding's resource, carrying the wrapper
+    // lease the SurfaceBound recorded when it is a NameWrapper one.
+    let (bindings, without_bound, mismatched, candidates, leases): (i64, i64, i64, i64, i64) =
+        sqlx::query_as(
+            "WITH expected AS (
+                 SELECT binding.surface_binding_id, binding.resource_id, bound.event_identity,
+                        bound.block_number, bound.transaction_index, bound.log_index,
+                        CASE WHEN bound.source_family = 'ens_v1_wrapper_l1'
+                             THEN (bound.after_state ->> 'wrapped_registrar_resource_id')::uuid
+                        END AS lease
+                 FROM surface_bindings binding
+                 LEFT JOIN normalized_events bound
+                   ON bound.chain_id = binding.chain_id AND bound.event_kind = 'SurfaceBound'
+                  AND bound.logical_name_id = binding.logical_name_id
+                  AND bound.resource_id = binding.resource_id
+                  AND bound.block_number = binding.block_number
+                  AND bound.transaction_index =
+                      (binding.provenance ->> 'transaction_index')::bigint
+                  AND bound.log_index = (binding.provenance ->> 'log_index')::bigint
+                 WHERE binding.chain_id = $1 AND binding.block_number <= $2
+             )
+             SELECT count(*),
+                    count(*) FILTER (WHERE expected.event_identity IS NULL),
+                    count(*) FILTER (WHERE candidate.surface_binding_id IS NULL
+                        OR (candidate.event_identity, candidate.block_number,
+                            candidate.transaction_index, candidate.log_index,
+                            candidate.resource_id)
+                           IS DISTINCT FROM (expected.event_identity, expected.block_number,
+                            expected.transaction_index, expected.log_index,
+                            expected.resource_id)
+                        OR candidate.wrapped_registrar_resource_id
+                           IS DISTINCT FROM expected.lease),
+                    (SELECT count(*) FROM project_binding_candidate WHERE chain_id = $1),
+                    count(expected.lease)
+             FROM expected
+             LEFT JOIN project_binding_candidate candidate USING (surface_binding_id)",
+        )
+        .bind(CHAIN)
+        .bind(base)
+        .fetch_one(&pool)
+        .await?;
     println!(
-        "FAMILY_BENCHMARK unpaired_bindings={unpaired} wrapped_with_lease={wrapped} \
-         wrapper_surface_bounds={wrapped_bindings}"
+        "FAMILY_BENCHMARK bindings={bindings} without_surface_bound={without_bound} \
+         mismatched_candidates={mismatched} candidates={candidates} wrapper_leases={leases}"
     );
     ensure!(
-        unpaired == 0 && wrapped == wrapped_bindings,
+        bindings > 0 && without_bound == 0 && mismatched == 0 && candidates == bindings,
         "seed bindings do not pair with their SurfaceBound"
     );
     // The plans cover the follow, the undo and the replay; the rebuild ran without them.

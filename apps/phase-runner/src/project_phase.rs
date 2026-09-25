@@ -37,8 +37,8 @@ pub struct FamilySettings {
     pub token_budget: Duration,
     /// Whether a family run that spends its block budget is followed at once by another until
     /// the families reach the served marker. The one-shot `redo` command sets it, since no later
-    /// batch follows it; the supervised run leaves it off so a long rebuild never holds up the
-    /// next served batch.
+    /// batch follows it. The supervised run leaves it off: the batch's publication is already
+    /// committed, and the next batch waits for one budgeted family run rather than a series.
     pub finish_each_batch: bool,
 }
 
@@ -258,8 +258,8 @@ impl Phase for ProjectPhase {
             )
             .await;
             self.report_families(&chain_id, &outcome);
-            // A later run continues a rebuild or repair in normal mode: the redo's own mode
-            // would start it again.
+            // Later runs continue in normal mode: in the redo's own mode an unfinished rebuild
+            // would start again.
             while finish
                 && outcome.budget_exhausted
                 && outcome.skipped.is_none()
