@@ -1399,13 +1399,17 @@ async fn a_wrong_fact_on_the_canonically_selected_transfer_stays_a_mismatch() ->
     let (served, shadow) = shadow_support::name(&fixture, 12, &name(1)).await?;
     assert_eq!(served.control("registry_owner"), json!(CAROL));
     assert_eq!(shadow.control["registry_owner"], json!(BOB));
-    let delta = report.expected_delta_fields.clone();
-    assert!(
-        delta.contains_key("d12_same_block_order:control/registry_owner"),
-        "{:#?}",
-        report.lines
+    // The recipient is also the registrant both blocks report.
+    assert_counts(
+        &report,
+        &[],
+        &[
+            ("d12_same_block_order:control/registrant", 1),
+            ("d12_same_block_order:control/registry_owner", 1),
+            ("d12_same_block_order:registration/registrant", 1),
+        ],
     );
-    assert_eq!(report.mismatched, 0, "{:#?}", report.lines);
+    let delta = report.expected_delta_fields.clone();
     for (case, update) in [
         ("unmasked word", "owner_word_unmasked = true"),
         (
@@ -1475,13 +1479,20 @@ async fn an_unnamed_release_expiry_is_checked_against_the_log() -> Result<()> {
     assert_eq!(served.registration("expiry"), Value::Null);
     assert_eq!(shadow.registration["expiry"], json!(1_800_000_150u64));
     let cause = "served_membership_skips_unnamed_path_expiry:registration/expiry";
-    assert_eq!(report.mismatched, 0, "{:#?}", report.lines);
-    assert_eq!(
-        report.known_discrepancy.get(cause),
-        Some(&1),
-        "{:#?}",
-        report.lines
-    );
+    let known: Vec<String> = [
+        "control/registrant",
+        "control/status",
+        "registration/authority_kind",
+        "registration/expiry",
+        "registration/latest_event_kind",
+        "registration/registrant",
+        "registration/status",
+    ]
+    .iter()
+    .map(|field| format!("served_membership_skips_unnamed_path_expiry:{field}"))
+    .collect();
+    let known: Vec<(&str, usize)> = known.iter().map(|field| (field.as_str(), 1)).collect();
+    assert_counts(&report, &known, &[]);
     sqlx::query(
         "UPDATE bigname_phase.project_lifecycle_event
          SET expiry = '1800000999'::jsonb, expiry_seconds = 1800000999

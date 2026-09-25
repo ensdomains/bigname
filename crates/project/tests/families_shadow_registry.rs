@@ -825,7 +825,12 @@ async fn a_binding_candidate_is_checked_against_its_surface_bound() -> Result<()
     let fixture = Fixture::new("families_shadow_registry_candidate_facts", 20).await?;
     let node_resource = uuid(3);
     one_log_bound(&fixture, &node_resource).await?;
-    publish_and_compare(&fixture, 12).await?;
+    let report = publish_and_compare(&fixture, 12).await?;
+    shadow_support::assert_counts(
+        &report,
+        &[],
+        &[("d12_same_block_order:control/registry_owner", 1)],
+    );
     let facts = name_facts(&fixture).await?;
     assert!(shadow_support::compare::control_facts_hold(&fixture.pool, CHAIN, 12, &facts).await?);
     let index = facts
