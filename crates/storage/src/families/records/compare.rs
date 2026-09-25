@@ -247,6 +247,13 @@ pub fn check_compatibility_pairs(
     inventory: &FamilyRecordInventory,
     expected: &[CompatibilityPair],
 ) -> Vec<Difference> {
+    compare_pairs(expected, &inventory.compatibility_pairs)
+}
+
+/// [`check_compatibility_pairs`] over the two pair lists. A row serves at most one pair per record
+/// key, so a repeated record key on either side is always a difference, even when both sides
+/// repeat it identically.
+fn compare_pairs(expected: &[CompatibilityPair], family: &[CompatibilityPair]) -> Vec<Difference> {
     let mut differences = Vec::new();
     let duplicates = |pairs: &[CompatibilityPair]| {
         let mut seen = BTreeSet::new();
@@ -256,18 +263,20 @@ pub fn check_compatibility_pairs(
             .map(|pair| json!(pair.record_key))
             .collect::<Vec<_>>()
     };
-    push(
-        &mut differences,
-        "compatibility_pairs.duplicates",
-        Value::Array(duplicates(expected)),
-        Value::Array(duplicates(&inventory.compatibility_pairs)),
-    );
+    let (expected_duplicates, family_duplicates) = (duplicates(expected), duplicates(family));
+    if !expected_duplicates.is_empty() || !family_duplicates.is_empty() {
+        differences.push(Difference {
+            field: "compatibility_pairs.duplicates".to_owned(),
+            today: Some(Value::Array(expected_duplicates)),
+            family: Some(Value::Array(family_duplicates)),
+        });
+    }
     let view = |pairs: &[CompatibilityPair]| Value::Array(pairs.iter().map(pair_view).collect());
     diff(
         &mut differences,
         "compatibility_pairs",
         &view(expected),
-        &view(&inventory.compatibility_pairs),
+        &view(family),
     );
     differences
 }
@@ -538,6 +547,46 @@ mod tests {
         );
         let fields: Vec<&str> = differences.iter().map(|d| d.field.as_str()).collect();
         assert_eq!(fields, ["entries.order"]);
+    }
+
+    fn pair(value: i64) -> CompatibilityPair {
+        let position = |log: i64| FamilyPosition {
+            block_number: 1,
+            transaction_index: Some(0),
+            log_index: Some(log),
+            event_identity: format!("event-{log}"),
+        };
+        CompatibilityPair {
+            record_key: "addr:60".into(),
+            value_event_id: Some(value),
+            value_position: position(value),
+            sibling_event_id: Some(value + 1),
+            sibling_position: position(value + 1),
+        }
+    }
+
+    #[test]
+    fn a_repeated_pair_is_a_difference_on_either_side_and_on_both() {
+        let duplicates = |expected: &[CompatibilityPair], family: &[CompatibilityPair]| {
+            compare_pairs(expected, family)
+                .into_iter()
+                .find(|difference| difference.field == "compatibility_pairs.duplicates")
+                .map(|difference| (difference.today, difference.family))
+        };
+        let (one, twice) = ([pair(1)], [pair(1), pair(1)]);
+        assert_eq!(
+            duplicates(&twice, &one),
+            Some((Some(json!(["addr:60"])), Some(json!([]))))
+        );
+        assert_eq!(
+            duplicates(&one, &twice),
+            Some((Some(json!([])), Some(json!(["addr:60"]))))
+        );
+        assert_eq!(
+            duplicates(&twice, &twice),
+            Some((Some(json!(["addr:60"])), Some(json!(["addr:60"]))))
+        );
+        assert_eq!(duplicates(&one, &one), None);
     }
 
     #[test]
