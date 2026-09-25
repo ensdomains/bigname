@@ -44,7 +44,8 @@ pub struct RegistryNode {
 /// One owner-setting registry event of a node (`project_registry_owner_event`): an
 /// AuthorityTransferred or SubregistryChanged with the name, resource, authority kind and owner
 /// facts it carried. It keeps no `registry_owner` or `owner_word_unmasked`; only the node row
-/// holds them, for its latest owner-setting event.
+/// holds them, for its latest owner-setting event, which under a NewOwner is the
+/// SubregistryChanged of the transfer's log and never the transfer.
 #[derive(Clone, Debug)]
 pub struct OwnerEvent {
     pub position: Position,
@@ -87,7 +88,8 @@ impl RegistryNode {
     /// The owner an owner-setting event reports to the served control block (build.sql
     /// :650-663): null when its owner word is unmasked, else its registry_owner, else its owner.
     /// Only the node row's latest owner-setting event carries the first two, so for any other
-    /// event the owner stands.
+    /// event the owner stands; under a NewOwner that is every transfer, since the
+    /// SubregistryChanged of its log sorts after it.
     pub fn reported_owner(&self, event: &OwnerEvent) -> Option<String> {
         let latest = self
             .owner_position
