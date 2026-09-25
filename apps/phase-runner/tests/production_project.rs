@@ -24788,15 +24788,10 @@ async fn served_authority(pool: &PgPool, logical_name_id: &str) -> Result<Served
     .await?)
 }
 
-/// Blocks 5 and 6 of the release-then-reserve sequence through Interpret and Project: beside a
-/// live ENSv1 lease the ENSv2 registration is unregistered in block 5 (a released ENSv2 tombstone),
-/// and the label is reserved again in block 6 with `reservation_expiry`, which hands the name to
-/// the ENSv1 lease on incremental and full runs. Returns the name and the released ENSv2 resource.
-async fn release_then_reserve(
-    pool: &PgPool,
-    chain: &str,
-    reservation_expiry: u64,
-) -> Result<(String, Uuid)> {
+/// The ENSv2 registration beside a live ENSv1 lease, unregistered in block 5 and run through
+/// Interpret and Project: the name is a released ENSv2 tombstone. Returns the name and the released
+/// ENSv2 resource.
+async fn release_at_block_5(pool: &PgPool, chain: &str) -> Result<(String, Uuid)> {
     let logical_name_id = seed_dual_open_cross_arm_fixture(pool, chain, 4).await?;
     let unregistered = LabelUnregistered {
         tokenId: alice_v2_token(0),
@@ -24843,13 +24838,18 @@ async fn release_then_reserve(
             Some("released".into()),
         )
     );
+    Ok((logical_name_id, v2_resource))
+}
 
+/// A `LabelReserved` of the label with a versioned token id and `expiry` in block 6, run through
+/// Interpret.
+async fn reserve_at_block_6(pool: &PgPool, chain: &str, expiry: u64) -> Result<()> {
     insert_lineage_block(pool, chain, 6).await?;
     let reserved = LabelReserved {
         tokenId: alice_v2_token(1),
         labelHash: keccak256(b"alice"),
         label: "alice".into(),
-        expiry: reservation_expiry,
+        expiry,
         sender: SENDER.parse()?,
     }
     .encode_log_data();
@@ -24876,6 +24876,20 @@ async fn release_then_reserve(
             mode: InterpretRunMode::Normal,
         })
         .await?;
+    Ok(())
+}
+
+/// Blocks 5 and 6 of the release-then-reserve sequence through Interpret and Project: beside a
+/// live ENSv1 lease the ENSv2 registration is unregistered in block 5 (a released ENSv2 tombstone),
+/// and the label is reserved again in block 6 with `reservation_expiry`, which hands the name to
+/// the ENSv1 lease on incremental and full runs. Returns the name and the released ENSv2 resource.
+async fn release_then_reserve(
+    pool: &PgPool,
+    chain: &str,
+    reservation_expiry: u64,
+) -> Result<(String, Uuid)> {
+    let (logical_name_id, v2_resource) = release_at_block_5(pool, chain).await?;
+    reserve_at_block_6(pool, chain, reservation_expiry).await?;
     // Interpret's shape: the reservation names the label but carries no resource, and opens no
     // ENSv2 binding.
     let reservation: Vec<(Option<Uuid>, Value)> = sqlx::query_as(
@@ -25122,6 +25136,147 @@ async fn a_lapsed_reservation_after_a_v2_release_gives_the_name_back_to_its_v2_t
     scratch.cleanup().await
 }
 
+// A reservation already expired when written, then revived. Beside a live ENSv1 lease the ENSv2
+// registration is released in block 5, and in block 6 the label is reserved with an expiry equal
+// to block 6's timestamp, so the entry is available from the start and the released ENSv2
+// tombstone stays. In block 7 a root `ROLE_RENEW` holder renews the expired entry, which the
+// registry allows for a nonzero expiry; the entry is reserved again from block 7, and Interpret
+// writes a fresh reservation for the name at that log. The name goes to its live ENSv1 lease from
+// block 7, through the new reservation: the block 6 reservation stays out because its own expiry
+// was already due at its own block.
+// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L212-L227 @ ens_v2@a971bd64)
+// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L601-L611 @ ens_v2@a971bd64)
+// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L452-L454 @ ens_v2@a971bd64)
+#[tokio::test]
+async fn a_renewal_revives_an_expired_reservation_and_hands_the_name_to_ensv1_from_its_block()
+-> Result<()> {
+    let scratch = ScratchDatabase::create("project_v2_revived_expired_reservation").await?;
+    let chain = CHAIN;
+    let pool = scratch.pool();
+    let (logical_name_id, v2_resource) = release_at_block_5(pool, chain).await?;
+    // `insert_lineage_block` stamps block n at n seconds: expired when written.
+    reserve_at_block_6(pool, chain, 6).await?;
+    run_project(
+        pool,
+        chain,
+        Some(Marker {
+            number: 5,
+            hash: block_hash(chain, 5),
+        }),
+        RunMode::Normal,
+        6,
+        6,
+    )
+    .await?;
+    let tombstone = (
+        Some("ens_v2".into()),
+        Some("unregistered".into()),
+        Some(v2_resource),
+        Some("released".into()),
+    );
+    assert_eq!(
+        served_authority(pool, &logical_name_id).await?,
+        tombstone,
+        "a reservation expired when written does not take the name"
+    );
+
+    insert_lineage_block(pool, chain, 7).await?;
+    let renewed = ExpiryUpdated {
+        tokenId: alice_v2_token(1),
+        newExpiry: 4_000_000_000,
+        sender: SENDER.parse()?,
+    }
+    .encode_log_data();
+    insert_raw_event_at(
+        pool,
+        chain,
+        7,
+        1,
+        1,
+        V2_REGISTRY,
+        renewed.topics(),
+        renewed.data.as_ref(),
+    )
+    .await?;
+    InterpretEngine::new(pool.clone())
+        .run_batch(InterpretRequest {
+            chain_id: chain.into(),
+            from_block: 7,
+            to_block: 7,
+            resume_current: Some(InterpretMarker {
+                number: 6,
+                hash: block_hash(chain, 6),
+            }),
+            mode: InterpretRunMode::Normal,
+        })
+        .await?;
+    let revived: Vec<(Option<i64>, Option<i64>, Value)> = sqlx::query_as(
+        "SELECT transaction_index, log_index, after_state -> 'expiry' FROM normalized_events
+         WHERE chain_id = $1 AND logical_name_id = $2 AND event_kind = 'RegistrationReserved'
+           AND block_number = 7",
+    )
+    .bind(chain)
+    .bind(&logical_name_id)
+    .fetch_all(pool)
+    .await?;
+    assert_eq!(
+        revived,
+        vec![(Some(1), Some(1), json!(4_000_000_000_u64))],
+        "Interpret writes the revived reservation for the name at the renewal's log"
+    );
+    let v1_resource: Uuid = sqlx::query_scalar(
+        "SELECT resource_id FROM surface_bindings
+         WHERE chain_id = $1 AND logical_name_id = $2 AND authority_arm = 'ens_v1'
+           AND active_to IS NULL",
+    )
+    .bind(chain)
+    .bind(&logical_name_id)
+    .fetch_one(pool)
+    .await?;
+    run_project(
+        pool,
+        chain,
+        Some(Marker {
+            number: 6,
+            hash: block_hash(chain, 6),
+        }),
+        RunMode::Normal,
+        7,
+        7,
+    )
+    .await?;
+    normalize_projection_clocks(pool).await?;
+    assert_eq!(
+        served_authority(pool, &logical_name_id).await?,
+        (
+            Some("ens_v1".into()),
+            Some("registered".into()),
+            Some(v1_resource),
+            Some("active".into()),
+        ),
+        "the revived reservation hands the name to the live ENSv1 lease from block 7"
+    );
+    let incremental: Value = sqlx::query_scalar(
+        "SELECT to_jsonb(current) FROM name_current current WHERE logical_name_id = $1",
+    )
+    .bind(&logical_name_id)
+    .fetch_one(pool)
+    .await?;
+    run_project(pool, chain, None, RunMode::Normal, 0, 7).await?;
+    normalize_projection_clocks(pool).await?;
+    let fresh: Value = sqlx::query_scalar(
+        "SELECT to_jsonb(current) FROM name_current current WHERE logical_name_id = $1",
+    )
+    .bind(&logical_name_id)
+    .fetch_one(pool)
+    .await?;
+    assert_eq!(incremental, fresh);
+    // One batch to block 6 alone leaves the tombstone: the block 6 reservation never counts.
+    run_project(pool, chain, None, RunMode::Normal, 0, 6).await?;
+    assert_eq!(served_authority(pool, &logical_name_id).await?, tombstone);
+    scratch.cleanup().await
+}
+
 async fn assert_reservation_selects_v1(
     pool: &PgPool,
     chain: &str,
@@ -25252,6 +25407,12 @@ async fn seed_dual_open_cross_arm_fixture(
                 "event LabelReserved(uint256 indexed tokenId, bytes32 indexed labelHash, string label, uint64 expiry, address indexed sender)",
                 &["registry"],
                 &["RegistrationReserved"],
+            ),
+            (
+                "ExpiryUpdated",
+                "event ExpiryUpdated(uint256 indexed tokenId, uint64 indexed newExpiry, address indexed sender)",
+                &["registry"],
+                &["ExpiryChanged", "RegistrationRenewed"],
             ),
         ],
     )
