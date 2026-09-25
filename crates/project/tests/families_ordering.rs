@@ -389,3 +389,77 @@ async fn boundary_facts_keep_identity_order() -> Result<()> {
     );
     settle(fixture).await
 }
+
+// The one known cross-source pair at one log, the disclosed precondition of the amendment: a
+// NameWrapped log writes the registry-node pointer twice with the same resolver. The wrapper's
+// own ResolverChanged carries ordinal 5 (adapters authority_transition.rs:489-497), and
+// the registry-read surface materialization, sourced to the registry manifest, carries ordinal 0
+// (authority_transition.rs:200-320). Ordinals restart per source (normalized.rs:118-131), so
+// the families keep the wrapper row, the name's authority after NameWrapped. The served read
+// breaks the tie by normalized_event_id DESC (builders/record_inventory/mirror.rs:105-109) and
+// keeps the registry row the adapter inserted last, so the two differ in provenance only.
+#[tokio::test]
+async fn name_wrapped_pointer_keeps_the_wrapper_row() -> Result<()> {
+    const RESOLVER: &str = "0x00000000000000000000000000000000000000d4";
+    let fixture = Fixture::new("families_ordering_name_wrapped_pointer", 20).await?;
+    let wrapper = uuid(1);
+    let anchor = uuid(2);
+    fixture.surface(&name(), NODE).await?;
+    fixture.resource(&wrapper).await?;
+    fixture.resource(&anchor).await?;
+    let prefix = |manifest: i64| {
+        format!(
+            "ens_v1_unwrapped_authority:{manifest}:{CHAIN}:{}:0xtx12_0:5",
+            hash(12)
+        )
+    };
+    let wrapper_identity = format!(
+        "{}:ResolverChanged:authority:NameWrapped:{RESOLVER}:5",
+        prefix(6133)
+    );
+    let registry_identity = format!(
+        "{}:ResolverChanged:surface-materialization:{NODE}:{anchor}:{RESOLVER}:0",
+        prefix(6131)
+    );
+    for (identity, family, resource) in [
+        (&wrapper_identity, WRAPPER_FAMILY, &wrapper),
+        (&registry_identity, "ens_v1_registry_l1", &anchor),
+    ] {
+        fixture
+            .event(
+                Event::new(identity, 12, 5, "ResolverChanged", family)
+                    .name(&name())
+                    .resource(resource)
+                    .after(json!({"resolver": RESOLVER, "node": NODE})),
+            )
+            .await?;
+    }
+    fixture.apply(12, FamilyMode::Normal).await;
+    let pointers: Vec<(String, Option<String>, String, String)> = sqlx::query_as(
+        "SELECT resolver_address, resource_id::text, source_family, event_identity
+         FROM project_registry_pointer",
+    )
+    .fetch_all(&fixture.pool)
+    .await?;
+    assert_eq!(
+        pointers,
+        vec![(
+            RESOLVER.to_owned(),
+            Some(wrapper.clone()),
+            WRAPPER_FAMILY.to_owned(),
+            wrapper_identity.clone()
+        )],
+        "ordinal 5 is the later fact of the log: the wrapper row wins"
+    );
+    let served: String = sqlx::query_scalar(
+        "SELECT source_family FROM normalized_events
+         WHERE event_kind = 'ResolverChanged' ORDER BY normalized_event_id DESC LIMIT 1",
+    )
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(
+        served, "ens_v1_registry_l1",
+        "the served tie-break keeps the other source's row, with the same resolver"
+    );
+    settle(fixture).await
+}

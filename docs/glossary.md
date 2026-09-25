@@ -2532,9 +2532,13 @@ approval clear, the old holder's revoke, the new holder's grant, a retained
 delegate's re-grant) end on what the adapter wrote last. A synthesised event
 has no transaction or log position, sorts before every transaction of its
 block and keeps the identity byte order, since its trailing number is not an
-emission index. The ordinal restarts per source, so facts of two sources at
-one log interleave by ordinal; the order is exact on the precondition that no
-key is written by two sources at one log. Owned key family reducers, the
+emission index. Ordinals are per source, so facts of two sources at one log
+interleave by ordinal, and that cross-source order is a disclosed
+precondition: where two sources write one key from one log, the fact with the
+higher ordinal (then the higher identity bytes) wins, and it may differ from
+the served read in provenance only. Its one
+known instance is the NameWrapped registry-node pointer
+([projections](projections.md#owned-key-families)). Owned key family reducers, the
 dedupe of repeated deliveries and every position comparison use it
 ([projections](projections.md#owned-key-families)). A served reader ported to
 it (step 7) must parse the ordinal the same way:

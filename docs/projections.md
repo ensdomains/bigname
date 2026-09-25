@@ -1749,10 +1749,19 @@ A NameWrapper transfer writes the delegate approval clear, the old holder's
 revoke, the new holder's grant and a retained delegate's re-grant at one log,
 so the name stays wrapped after a holder-to-holder transfer and a recipient
 that was the approved delegate keeps its holder powers. Facts with no
-transaction or log keep the identity byte order. The ordinal restarts per
-source, so two sources at one log interleave by ordinal; that is exact only
-while no key is written by two sources at one log, a precondition on the
-adapter that `families_ordering.rs` pins with a collision fixture. The served
+transaction or log keep the identity byte order. Ordinals are per source:
+the ordinal restarts for each source of a log, so the comparator's order
+between two sources at one log is a disclosed precondition, not the adapter's
+write order. Cross-source facts of one log carry independent ordinals; where
+two sources write one key from one log, the fact with the higher ordinal (then
+the higher identity bytes) wins, not the one inserted last, and the served read
+may differ by provenance only. The one known instance is a
+NameWrapped log, which writes the registry-node pointer from the wrapper
+(ordinal 5) and from the registry-read surface materialization (ordinal 0)
+with the same resolver: the families keep the wrapper row, the name's
+authority after NameWrapped, while the served read's generated-id tie-break
+keeps the registry row, so only `resource_id` and `source_family` differ
+(`families_ordering.rs`, `name_wrapped_pointer_keeps_the_wrapper_row`). The served
 builders break the same ties by generated id today; the step that ports a
 served reader to the families (step 7) must use this rule with the SQL parse
 the glossary gives, not a bare bigint cast.
