@@ -198,7 +198,8 @@ async fn a_one_shot_redo_whose_families_stop_short_fails_and_a_rerun_repairs_the
 
 // A skipped family run is a shortfall even when the family marker already stands on the served
 // block: a redo that ends where the served marker was keeps its block and hash, so only the skip
-// shows the families never applied the redo attempt.
+// shows the families never applied the redo attempt. Here the repair's first marker write fails
+// before it commits, so the marker stays on block 30.
 #[tokio::test]
 async fn a_one_shot_redo_whose_family_run_is_skipped_on_the_served_block_fails() -> Result<()> {
     let scratch = ready_through("families_runner_skip", 30).await?;
@@ -208,34 +209,57 @@ async fn a_one_shot_redo_whose_family_run_is_skipped_on_the_served_block_fails()
         ..FamilySettings::default()
     };
     redo_project_through(&scratch, families, 30).await?;
-    assert_eq!(
-        marker(&scratch).await?,
-        Some(30),
-        "the families stand on the served block"
-    );
+    let before = marker_row(&scratch).await?;
+    assert_eq!(before.0, Some(30), "the families stand on the served block");
 
-    let late = FamilySettings {
-        token_budget: Duration::ZERO,
-        ..families
-    };
-    let error = redo_project_through(&scratch, late, 30)
+    sqlx::query(
+        "CREATE FUNCTION refuse_marker() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN RAISE EXCEPTION 'injected family failure'; END $$",
+    )
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query(
+        "CREATE TRIGGER refuse_marker BEFORE INSERT OR UPDATE ON project_family_marker
+         FOR EACH ROW EXECUTE FUNCTION refuse_marker()",
+    )
+    .execute(scratch.pool())
+    .await?;
+    let error = redo_project_through(&scratch, families, 30)
         .await
         .expect_err("the family run was skipped");
     assert_eq!(
         project_state(&scratch).await?,
         ("completed".into(), Some(30), false)
     );
+    assert_eq!(
+        marker_row(&scratch).await?,
+        before,
+        "nothing family-side committed"
+    );
     let message = error.to_string();
     assert!(message.contains("family repair incomplete"), "{message}");
     assert!(
-        message.contains("served marker block 30 (")
-            && message.contains("the input token did not read within"),
+        message.contains("families at block 30 (") && message.contains("served marker block 30 ("),
         "{message}"
     );
 
+    sqlx::query("DROP TRIGGER refuse_marker ON project_family_marker")
+        .execute(scratch.pool())
+        .await?;
     redo_project_through(&scratch, families, 30).await?;
     assert_eq!(marker(&scratch).await?, Some(30));
     scratch.cleanup().await
+}
+
+/// The family marker's block, hash and generation.
+async fn marker_row(scratch: &ScratchDatabase) -> Result<(Option<i64>, Option<String>, i64)> {
+    Ok(sqlx::query_as(
+        "SELECT current_block_number, current_block_hash, sequence
+         FROM project_family_marker WHERE chain_id = $1",
+    )
+    .bind(CHAIN)
+    .fetch_one(scratch.pool())
+    .await?)
 }
 
 // A stop that arrives while the final served batch is being recorded abandons the family run
