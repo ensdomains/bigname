@@ -131,7 +131,10 @@
                       -- The latest earlier fact among the name's reservations and
                       -- registrations must be a reservation of the same registry instance and
                       -- token. A release at the block boundary is compared as the end of its
-                      -- block, as below.
+                      -- block, as below. A registry instance or token id that is missing or JSON
+                      -- null is never a match: the equality is NULL and IS TRUE rejects it, even
+                      -- when both sides are null. Every writer of these rows, derived ones
+                      -- included, must keep the concrete registry instance and token id on both.
                       OR (event.event_kind = 'RegistrationReleased'
                           AND event.resource_id IS NULL
                           AND (
