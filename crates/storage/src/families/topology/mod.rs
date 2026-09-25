@@ -5,16 +5,18 @@
 //! `project_parent_subregistry`, `project_child_registration_state`, `project_wrapper_state`,
 //! `project_name_state`, `project_binding_candidate`,
 //! `project_resource_pointer`, `project_resolver_classification`, `project_name_alias`,
-//! `project_resolver_alias`, `project_resolver_link`, `project_grant`), the identity tables and
-//! the interim reads of [`shims`] only. No served route calls them: the phase-runner harness
+//! `project_resolver_alias`, `project_resolver_link`, `project_grant`), the identity and lineage
+//! tables, and the interim reads [`shims`] lists, some of which are still inline reads of
+//! `name_current`, `resolver_current` and `normalized_events`. No served route calls them: the phase-runner harness
 //! compares them with the served readers at one publication, until the per-block publication
 //! (docs/glossary.md, "Per-block publication") serves from them.
 //!
 //! Every reader takes a storage keyset position and nothing else: no publication token,
 //! generation or request time. Time-dependent filters read the block timestamp of the family
 //! marker (`project_family_marker`). Where a reader picks the latest of several events it orders
-//! them by block number, transaction index, log index, then event identity, and never by the
-//! generated normalized event id.
+//! them by block number, transaction index, log index, then event identity, not by the generated
+//! normalized event id. The one exception is the declaration fallback, which takes each
+//! manifest's latest update by normalized event id as today's manifest staging does.
 mod children;
 mod children_page;
 mod collections;

@@ -1,6 +1,8 @@
-//! Reads these readers need that are not yet computed from the family tables, one small
-//! function each, so the family read that replaces one replaces exactly one function. Every
-//! function names the interim source it reads today.
+//! Reads these readers need that are not yet computed from the family tables. The ones in this
+//! file are one small function each, so the family read that replaces one replaces exactly one
+//! function; every function names the interim source it reads today. Several other interim reads
+//! stay inline in the reader queries and are listed after them, so not every interim dependency
+//! is one replaceable function.
 //!
 //! - [`selected_binding`]: the name's selected binding. Interim: `name_current.surface_binding_id`
 //!   joined to its `project_binding_candidate` row, until the selection among a name's binding
@@ -20,31 +22,67 @@
 //!   `normalized_events`, because `project_registry_node_state` keys a Transfer by the node it
 //!   carries and cannot attribute it through its name or resource.
 //!
-//! Interim reads and known gaps outside this file:
+//! Inline reads of served projection tables. Each must be replaced by a family read before step 7
+//! serves the reader that holds it:
+//!
+//! - `/aliases` (`collections.rs`), binding arm: reads `name_current` directly for the selected
+//!   binding, resource and token lineage ids, the raw name and namehash it returns, and the
+//!   shared current-name readability predicates (`DEFAULT_NAME_CURRENT_READ_FILTER`). That is
+//!   both its eligibility and its payload, and more than [`selected_binding`].
+//! - `load_bound_names_shadow` (`resolver.rs`): only the resolver match comes from
+//!   `project_resource_pointer`. The name's eligibility, the registration, release and control
+//!   checks, the namespace filter and the page order are `name_current` columns, the same
+//!   predicate block as `load_phase_resolver_bound_name_rows`, and the returned rows are the
+//!   served rows, hydrated through `load_phase_name_current_rows_by_ids`. A serving-only name is
+//!   admitted through `resolver_current.declared_summary.bindings.status`, which the F3
+//!   classification row does not replace.
+//! - `load_bound_names_shadow` takes a name's selected resource from `name_current.resource_id`,
+//!   else its serving resource, to pick the one pointer that counts. Today's name row instead
+//!   takes the latest of the selected authority's pointer and the serving pointer, by block,
+//!   transaction index and log index, then normalized event id, descending with nulls last (the
+//!   `resolver` lateral of name_current/build.sql). So a name with a non-null selected resource A
+//!   and a distinct serving resource B differs when B's pointer wins that order and names another
+//!   resolver: the served row follows B, the shadow follows A. It also differs when A has no
+//!   pointer and B has an eligible serving pointer, since the non-null A blocks the fallback to
+//!   B. No fixture covers either case.
+//! - The subnames page (`children_page.rs`) takes a child's registration and expiry times, and
+//!   the released status its expiry fence checks, from the served `name_current.declared_summary`
+//!   through `push_registered_at_timestamp_expr` and `push_expires_at_timestamp_expr`, the same
+//!   expressions today's page uses. The timestamp sorts and the fence therefore compare one
+//!   served column on both sides.
+//!
+//! Inline reads of `normalized_events`:
+//!
+//! - The declaration fallback in `load_resolver_shadow` (`resolver.rs`) reads the latest
+//!   `SourceManifestUpdated` of each manifest. Interim: it covers a resolver with no
+//!   classification row and has no place once the table is complete, so it goes before step 7.
+//! - [`attributed_zero_owner`], above. Interim, to be replaced before step 7.
+//! - `/links` (`collections.rs`) looks up each link's event by identity for its block hash and
+//!   transaction hash, and the wildcard arm of `load_name_topology_shadow` (`name_topology.rs`)
+//!   looks up the boundary event for its id and block hash. These are metadata lookups by key
+//!   and are intended to stay as inputs.
+//!
+//! The identity and lineage tables the readers join (`name_surfaces`, `resources`,
+//! `surface_bindings`, `token_lineages`, `chain_lineage`) and the label and discovery tables are
+//! inputs, not served projections, and are intended to stay.
+//!
+//! Known gaps outside this file:
 //!
 //! - `/roles` (`collections.rs`) mirrors only the resource predicate of the served permissions
-//!   read filter. The grant row's own canonicality and the publication block have no counterpart,
-//!   because `project_grant` carries no block hash, so between a reorg of the granting block and
-//!   the family undo that removes the grant, the shadow keeps a grant today's reader drops.
-//! - `load_bound_names_shadow` (`resolver.rs`) takes a name's selected resource from
-//!   `name_current.resource_id`, else its serving resource, to pick the one pointer that counts,
-//!   until the selection is computed from the binding candidates. The proxy prefers
-//!   `resource_id`. Today's name row takes the later, by position, of the selected authority's
-//!   pointer and the serving pointer (the `resolver` lateral of name_current/build.sql), so a name
-//!   with both a selected resource and a distinct serving resource whose pointer is later follows
-//!   the serving one there and the selected one here. No fixture covers a name with both.
+//!   read filter, so for corresponding grant facts the served results are contained in the
+//!   shadow's. The filter's other two predicates have no counterpart, because `project_grant`
+//!   carries no block hash or row state: a readable resource can sit beside a grant row whose own
+//!   canonicality state is unreadable, and the publication block can be orphaned. Orphaning the
+//!   publication need not orphan the granting event, so no family undo may ever remove the grant.
+//!   In both cases today's reader drops a grant the shadow keeps. Row-state and publication-lineage
+//!   parity are prerequisites for serving `/roles` from the families, with the masks and the
+//!   `grant_event` provenance.
 //! - The children surface filter (`CHILD_SURFACE_FILTER`, `children.rs`) drops every child whose
 //!   surface is unreadable. Today's `DEFAULT_CHILDREN_CURRENT_READ_FILTER` also keeps such a child
 //!   when `provenance.label.source = 'label_preimage'`. No current writer sets that key: the only
 //!   `children_current` writer (crates/project/src/builders/children.rs) builds its provenance
 //!   without a `label` object, so the branch is unreachable today and the family rows carry no
 //!   label source to mirror it with. If a writer starts setting it, the shadow must learn it.
-//! - The subnames page (`children_page.rs`) takes a child's registration and expiry times, and
-//!   the released status its expiry fence checks, from the served `name_current.declared_summary`
-//!   through `push_registered_at_timestamp_expr` and `push_expires_at_timestamp_expr`, the same
-//!   expressions today's page uses. The timestamp sorts and the fence therefore compare one
-//!   served column on both sides; step 7 must replace that read with one over the lifecycle
-//!   families.
 use anyhow::{Context, Result};
 use sqlx::PgPool;
 use uuid::Uuid;

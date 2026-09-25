@@ -131,16 +131,18 @@ pub async fn load_resolver_links_shadow(
 
 /// `/roles`: resolver-scoped `project_grant` rows whose effective powers are non-empty and whose
 /// resource, and that resource's block, are readable. That mirrors only the resource predicate of
-/// the served permissions read filter (`DEFAULT_PERMISSIONS_CURRENT_READ_FILTER`). Its other two
-/// predicates, the grant row's own canonicality and the publication block, have no counterpart
-/// here, because the family row carries no block hash; between a reorg of the granting block and
-/// the family undo that removes the grant, the two readers can differ. The
-/// wrapper, grace and expiry-retirement masks are not applied yet, so the powers are the stored,
+/// the served permissions read filter (`DEFAULT_PERMISSIONS_CURRENT_READ_FILTER`), so for
+/// corresponding grant facts the served results are contained in these. Its other two predicates,
+/// the grant row's own canonicality state and the publication block's lineage, have no
+/// counterpart here, because the family row carries neither. A readable resource can sit beside
+/// an unreadable grant row state, and an orphaned publication block need not orphan the granting
+/// event, so no family undo may remove the grant; in both cases today's reader drops a grant this
+/// one keeps. The wrapper, grace and expiry-retirement masks are not applied yet, so the powers are the stored,
 /// unmasked ones, which resolver-scoped ENSv2 grants carry unmasked today. `event_ids` holds the
 /// grant's last event only, because the family row keeps no evidence arrays. Parity with the
 /// served collection is therefore row parity before the API's enrichment; the `grant_event`
-/// provenance the API attaches and the masks must both land before `/roles` can be served from
-/// here.
+/// provenance the API attaches, the masks, and row-state and publication-lineage parity must all
+/// land before `/roles` can be served from here.
 pub async fn load_resolver_roles_shadow(
     pool: &PgPool,
     chain_id: &str,
@@ -160,8 +162,8 @@ pub async fn load_resolver_roles_shadow(
               AND grant_row.scope = 'resolver:' || $1 || ':' || $2
               AND jsonb_array_length(grant_row.effective_powers) > 0
               -- The grant's resource must be readable, the one predicate of the served
-              -- permissions read filter the family row can check; the grant row's own block and
-              -- the publication block have no counterpart, since it carries no block hash.
+              -- permissions read filter the family row can check; the grant row's own state and
+              -- the publication block's lineage have no counterpart, since it carries neither.
               AND EXISTS (
                   SELECT 1
                   FROM bigname_phase.resources resource
