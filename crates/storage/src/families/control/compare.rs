@@ -1,9 +1,10 @@
 //! Field-by-field comparison of a served JSON block with its shadow. Integers serde_json holds
 //! as i64 or u64 compare exactly, signed against unsigned, so two integers past 2^53 that a float
 //! would merge stay apart. Every other number is an f64 by the time it is parsed (a fraction, an
-//! exponent form, an integer past u64::MAX), and those compare as f64: a float equals an
-//! integer only when it holds exactly that integer, and two integers past u64::MAX that round to
-//! one f64 compare equal. A numeric string is a string and never equals a number.
+//! exponent form, an integer past u64::MAX or below i64::MIN), and those compare as f64: a float
+//! equals an integer only when it holds exactly that integer, and two integers out of the i64
+//! and u64 range that round to one f64 compare equal, as does one that rounds onto a bound
+//! (-2^63 - 1 equals i64::MIN). A numeric string is a string and never equals a number.
 use serde_json::{Number, Value};
 
 /// One field whose served and shadow values differ.
@@ -149,6 +150,14 @@ mod tests {
         assert!(same(
             &parsed("18446744073709551616"),
             &parsed("18446744073709551617")
+        ));
+        // Below i64::MIN the same holds, and one past the bound rounds onto it: -2^63 - 1
+        // parses to the f64 -2^63, which holds i64::MIN exactly.
+        assert!(same(&parsed("-9223372036854775809"), &json!(i64::MIN)));
+        assert!(!same(&parsed("-9223372036854777856"), &json!(i64::MIN)));
+        assert!(same(
+            &parsed("-9223372036854775809"),
+            &parsed("-9223372036854775810")
         ));
     }
 }
