@@ -42,12 +42,14 @@ decisions kept. Linear TYR-36 step 6.
   (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L255-L258 @ ens_v2@a971bd64)
   (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L294-L297 @ ens_v2@a971bd64)
 - The name's registration section follows the same selection (product ruling
-  of 2026-09-26). A path-expiry release that Interpret writes without a name, on
-  the resource the name was last bound to, counts there as it does for
-  authority selection, so a name cut from its registry path whose only release
-  is that one reads as released, not as its old grant. When a named path-cut
-  release comes before that expiry release, the served release, `released_at`
-  and `expiry` come from the later expiry release.
+  of 2026-09-26). It is one selection, not two: when authority selection
+  chooses a released ENSv2 tombstone, the registration section serves the
+  lifecycle fact that decided it, on the tombstone's resource and binding. A
+  path-expiry release that Interpret writes without a name, on the resource the
+  name was last bound to, is such a fact, so a name cut from its registry path
+  whose only release is that one reads as released, not as its old grant. When
+  a named path-cut release comes before that expiry release, the served
+  release, `released_at` and `expiry` come from the later expiry release.
 - An activated ENSv1→ENSv2 migration and a positive ENSv2 child registration
   are no longer [authority proofs](../glossary.md#authority-proof). The
   migration is served history (`migrated_at`, `is_migrated`) and selects no

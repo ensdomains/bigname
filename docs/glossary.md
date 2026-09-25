@@ -2150,8 +2150,11 @@ the token version, the reservation carries a versioned token id and no
 resource, so it is not a fact of the released resource, and Interpret writes its
 end as a named release without a resource. That resource-less end counts only
 when the name's latest earlier reservation-or-registration fact is a
-reservation with the same registry instance and token id, so the end of an
-older reservation in another registry does not end a later one. A version-zero reservation, such as
+reservation with the same registry instance and token id, both present and
+not null on the end and on that reservation, so the end of an older reservation
+in another registry does not end a later one. A registry instance or token id
+that is missing or null on either row is unknown and never matches, not even
+another unknown one. A version-zero reservation, such as
 one in a replacement registry, carries its own resource, and its end carries the
 same resource. Either end returns the tombstone. A release on that resource
 counts as the reservation's end only when, among the name's reservations on any
@@ -2165,9 +2168,10 @@ path-expiry release that Interpret
 writes on the resource without a name, because the token had already lost its
 name, still counts as that registration's release. Its current registration
 lifecycle is unregistered and its selected arm is `ens_v2`, bound to the
-released resource. The name's registration section reads the same
-release and serves it as released (product ruling of 2026-09-26). When a named
-path-cut release comes before it, the served release, `released_at` and
+released resource. The name's registration section serves the lifecycle fact
+authority selection chose for a released tombstone, this release included, on
+the tombstone's resource and binding (product ruling of 2026-09-26). When a
+named path-cut release comes before it, the served release, `released_at` and
 `expiry` come from this later release.
 This follows the ENSv2 contracts, which never route a label that has been
 registered back to ENSv1: `unregister` burns the token and writes the release
