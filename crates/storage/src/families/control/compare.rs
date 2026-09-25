@@ -1,6 +1,9 @@
-//! Field-by-field comparison of a served JSON block with its shadow. Numbers compare by exact
-//! value, so a jsonb `1000` and a Rust `1000` agree however each was produced, and two integers
-//! past 2^53 that a float would merge stay apart.
+//! Field-by-field comparison of a served JSON block with its shadow. Integers serde_json holds
+//! as i64 or u64 compare exactly, signed against unsigned, so two integers past 2^53 that a float
+//! would merge stay apart. Every other number is an f64 by the time it is parsed (a fraction, an
+//! exponent form, an integer past u64::MAX), and those compare as f64: a float equals an
+//! integer only when it holds exactly that integer, and two integers past u64::MAX that round to
+//! one f64 compare equal. A numeric string is a string and never equals a number.
 use serde_json::{Number, Value};
 
 /// One field whose served and shadow values differ.
@@ -40,9 +43,9 @@ fn integer(number: &Number) -> Option<i128> {
         .or_else(|| number.as_u64().map(i128::from))
 }
 
-/// Two JSON numbers by exact value: integers as integers, never through a float, so on-chain
-/// values past 2^53 stay apart; a float equals an integer only when it holds exactly that
-/// integer, so a jsonb `1000.0` equals `1000`.
+/// Two JSON numbers: i64 and u64 integers exactly, never through a float, so on-chain values
+/// past 2^53 stay apart; a float equals an integer only when it holds exactly that integer, so a
+/// jsonb `1000.0` equals `1000`; two floats compare as f64.
 fn same_number(left: &Number, right: &Number) -> bool {
     match (integer(left), integer(right)) {
         (Some(left), Some(right)) => left == right,
@@ -116,5 +119,36 @@ mod tests {
         assert!(!same(&json!(9_007_199_254_740_992.0f64), &high));
         assert!(same(&json!(9_007_199_254_740_992.0f64), &low));
         assert!(!same(&json!(1000.5), &json!(1000)));
+    }
+
+    fn parsed(text: &str) -> Value {
+        serde_json::from_str(text).unwrap()
+    }
+
+    #[test]
+    fn the_integer_bounds_exponents_strings_fractions_and_out_of_range_values() {
+        // i64::MAX and u64::MAX exactly, and the signed and unsigned forms of one value agree.
+        assert!(same(&json!(i64::MAX), &json!(i64::MAX as u64)));
+        assert!(!same(&json!(i64::MAX), &json!(i64::MAX as u64 + 1)));
+        assert!(same(&json!(u64::MAX), &parsed("18446744073709551615")));
+        assert!(!same(&json!(u64::MAX), &json!(u64::MAX - 1)));
+        assert!(!same(&json!(i64::MIN), &json!(i64::MIN + 1)));
+        // An exponent form parses as a float and equals the integer it holds exactly.
+        assert!(same(&parsed("1e3"), &json!(1000)));
+        assert!(same(&parsed("1E19"), &json!(10_000_000_000_000_000_000u64)));
+        assert!(!same(&parsed("1e3"), &json!(1001)));
+        // A numeric string is not a number.
+        assert!(!same(&json!("1000"), &json!(1000)));
+        assert!(!same(&json!("1000"), &parsed("1e3")));
+        // Fractions compare as f64: equal text is equal, and a float sum is not a decimal.
+        assert!(same(&parsed("0.1"), &parsed("0.1")));
+        assert!(!same(&json!(0.1 + 0.2), &parsed("0.3")));
+        // Past u64::MAX an integer is a float: it never equals u64::MAX, but two such
+        // integers that round to one f64 compare equal.
+        assert!(!same(&parsed("18446744073709551616"), &json!(u64::MAX)));
+        assert!(same(
+            &parsed("18446744073709551616"),
+            &parsed("18446744073709551617")
+        ));
     }
 }
