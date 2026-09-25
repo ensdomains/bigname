@@ -211,6 +211,47 @@ async fn the_nonempty_absence_marker_keeps_the_default_off_coin_60_in_both_reade
                 "marked {marked} coin {coin}"
             );
         }
+        // Mutation: today's served default row shadowing coin 60 is what the marker produces.
+        // Dropping coin 60 from it, as a reader ignoring the marker would, must be reported
+        // against the family read.
+        if marked {
+            let dropped = sqlx::query(
+                "UPDATE address_records_current
+                 SET provenance = jsonb_set(provenance, '{shadowed_coin_types}',
+                                            (provenance -> 'shadowed_coin_types') - '60')
+                 WHERE coin_type = '2147483648' AND provenance -> 'shadowed_coin_types' ? '60'",
+            )
+            .execute(&pool)
+            .await?;
+            assert_eq!(dropped.rows_affected(), 1);
+            let report =
+                compare_family_reads(&pool, fixture.chain, Some((13, block_hash(13))), 50).await?;
+            let key = format!("resolves_to {LATER20} coin 2147483648");
+            let fields: Vec<_> = report
+                .differences
+                .iter()
+                .filter(|(listed, _)| *listed == key)
+                .flat_map(|(_, differences)| differences.clone())
+                .collect();
+            assert!(
+                fields.iter().any(|difference| {
+                    difference
+                        .field
+                        .ends_with(".provenance.shadowed_coin_types")
+                        && difference
+                            .family
+                            .as_ref()
+                            .and_then(Value::as_array)
+                            .is_some_and(|coins| coins.contains(&json!("60")))
+                        && difference
+                            .today
+                            .as_ref()
+                            .and_then(Value::as_array)
+                            .is_some_and(|coins| !coins.contains(&json!("60")))
+                }),
+                "{report:#?}"
+            );
+        }
         database.cleanup().await?;
     }
     Ok(())
