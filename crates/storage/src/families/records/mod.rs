@@ -10,17 +10,39 @@
 //! transaction index, log index, then the event identity as bytes, with a synthesised event's
 //! missing positions first), so a same-position tie can resolve differently from today's readers,
 //! which break it by the generated event id.
+mod assemble;
+mod compare;
+mod facts;
+mod inventory;
 mod links;
+mod mirror;
+mod payload;
 mod pointer;
+mod resolves_to;
+mod reverse;
+mod rows;
+mod serving;
+mod shadow;
 
 use serde_json::Value;
 use sqlx::{Row, postgres::PgRow};
 
+pub use compare::{
+    Difference, check_compatibility_pairs, compare_address_records, compare_primary_name,
+    compare_record_inventory,
+};
+pub use inventory::{
+    CompatibilityPair, FamilyAttribution, FamilyRecordInventory, load_family_record_inventory,
+    load_family_record_inventory_detail,
+};
 pub use links::{
     DEFAULT_RECORD_NODE, FamilyAliasSourcePointer, FamilyLink, FamilyWildcardSource, LinkSelection,
     load_family_alias_source_pointer, load_family_link_selection, load_family_wildcard_source,
 };
 pub use pointer::{FamilyResourcePointer, load_family_resource_pointer};
+pub use resolves_to::load_family_address_records_page;
+pub use reverse::{FamilyReverseClaim, load_family_reverse_claim};
+pub use shadow::{ShadowReport, compare_family_reads};
 
 /// The resolver address a clear writes: the zero address, or the empty string for a pointer event
 /// without a resolver.
