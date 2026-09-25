@@ -29,6 +29,7 @@ use sqlx::{Postgres, Transaction};
 use super::{
     input::{BlockEvent, Position},
     keys::{self, ZERO_ADDRESS},
+    manifests,
     reduce::{Context, in_family, key_of, load_rows, raw_lower, set},
     store::{Row, RowSet},
     tables,
@@ -144,7 +145,7 @@ pub(super) async fn apply(
         .chain(pointer_deltas.keys().map(|(address, _)| address.clone()))
         .chain(activated.iter().cloned())
         .collect();
-    if context.epoch_changed {
+    if context.manifests_changed {
         let stored: Vec<String> = sqlx::query_scalar(
             "/* project:families.classification.stored */ SELECT resolver_address
              FROM project_resolver_classification WHERE chain_id = $1",
@@ -231,7 +232,11 @@ pub(super) async fn apply(
         for (column, value) in result {
             set(&mut row, column, value.clone());
         }
-        set(&mut row, "admission_manifests", context.epoch);
+        set(
+            &mut row,
+            "admission_manifests",
+            context.manifests.key.as_str(),
+        );
         set(&mut row, "summary_version", SUMMARY_VERSION.to_string());
         if let Some(event) = last_event.get(&address) {
             event.write_position(&mut row);
@@ -292,8 +297,9 @@ async fn activated(
     transaction: &mut Transaction<'_, Postgres>,
     context: &Context<'_>,
 ) -> Result<BTreeSet<String>> {
+    let manifests = manifests::input(3);
     let addresses: Vec<String> = sqlx::query_scalar(&format!(
-        "/* project:families.classification.activated */ WITH {MANIFESTS},
+        "/* project:families.classification.activated */ WITH {manifests},
          edges AS (
              SELECT edge.chain_id, edge.to_contract_instance_id FROM discovery_edges edge
              WHERE edge.chain_id = $1 AND edge.edge_kind = 'resolver'
@@ -325,6 +331,7 @@ async fn activated(
     ))
     .bind(context.chain_id)
     .bind(context.block.number)
+    .bind(&context.manifests.rows)
     .fetch_all(&mut **transaction)
     .await
     .map_err(|error| ProjectError::database("failed to read resolver activations", error))
@@ -358,8 +365,9 @@ async fn classify(
                    "upgrades": object(row, "upgrades")})
         })
         .collect();
+    let manifests = manifests::input(4);
     let rows: Vec<Value> = sqlx::query_scalar(&format!(
-        "/* project:families.classification.classify */ WITH {MANIFESTS},
+        "/* project:families.classification.classify */ WITH {manifests},
          input AS (
              SELECT item ->> 'resolver_address' AS resolver_address, item
              FROM jsonb_array_elements($3::jsonb) item
@@ -369,6 +377,7 @@ async fn classify(
     .bind(context.chain_id)
     .bind(context.block.number)
     .bind(Value::Array(input))
+    .bind(&context.manifests.rows)
     .fetch_all(&mut **transaction)
     .await
     .map_err(|error| ProjectError::database("failed to classify resolvers", error))

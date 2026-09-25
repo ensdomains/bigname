@@ -12,6 +12,7 @@ use self::transitions::Transition;
 use super::{
     FamilyMode, FamilyOptions, FamilyOutcome, block,
     input::{self, InputToken, Revision},
+    manifests,
     marker::{self, FamilyMarker},
     reduce,
     repair::{self, NewRepair, Reason, Record, State},
@@ -275,6 +276,11 @@ impl Run<'_> {
             .current
             .as_ref()
             .map_or(0, |marker| marker.number + 1);
+        if from > self.target.number {
+            return Ok(());
+        }
+        let manifests =
+            manifests::History::read(self.pool, self.chain_id, self.target.number).await?;
         for number in from..=self.target.number {
             if !self.budget.take(outcome) {
                 return Ok(());
@@ -293,6 +299,7 @@ impl Run<'_> {
                 bootstrap: false,
                 revision,
                 role,
+                manifests: &manifests,
             };
             let (next, stats) = block::apply(self.pool, self.chain_id, number, &plan, self.options)
                 .await

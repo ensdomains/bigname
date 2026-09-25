@@ -7,6 +7,7 @@ use crate::{
     families::{
         FamilyOutcome, block,
         input::{self, InputToken, Revision},
+        manifests,
         marker::{self, FamilyMarker},
         repair::{self, NewRepair, Reason, Record},
         tables,
@@ -82,6 +83,8 @@ impl Run<'_> {
         if blocks.last() != Some(&self.target.number) {
             blocks.push(self.target.number);
         }
+        let manifests =
+            manifests::History::read(self.pool, self.chain_id, self.target.number).await?;
         for (visited, number) in (0_u64..).zip(blocks) {
             if !self.budget.take(outcome) {
                 return Ok(());
@@ -100,6 +103,7 @@ impl Run<'_> {
                 bootstrap: !completes,
                 revision,
                 role: block::Role::Rebuild { attempt, completes },
+                manifests: &manifests,
             };
             let (next, stats) = block::apply(self.pool, self.chain_id, number, &plan, self.options)
                 .await

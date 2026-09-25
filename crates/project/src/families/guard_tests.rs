@@ -63,6 +63,7 @@ async fn apply(pool: &PgPool, number: i64, predecessor: Option<&Marker>) -> crat
         bootstrap: false,
         revision: &NO_INTERPRET,
         role: block::Role::Follow,
+        manifests: &crate::families::manifests::History::default(),
     };
     block::apply(pool, CHAIN, number, &plan, &FamilyOptions::new("guard"))
         .await
@@ -149,6 +150,7 @@ async fn apply_as(
         bootstrap: false,
         revision: &NO_INTERPRET,
         role,
+        manifests: &crate::families::manifests::History::default(),
     };
     block::apply(pool, CHAIN, number, &plan, &FamilyOptions::new("guard"))
         .await
