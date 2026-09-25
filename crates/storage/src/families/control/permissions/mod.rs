@@ -341,6 +341,8 @@ pub struct OperatorRow {
     pub resource_id: String,
     pub subject: String,
     pub scope: String,
+    /// The account scope's parts, as the served row's scope carries them.
+    pub scope_detail: Value,
     pub effective_powers: Value,
     pub grant_source: Value,
     pub inheritance_path: Value,
@@ -375,6 +377,12 @@ pub fn effective_operator_rows(
                 "account:{chain_id}:{}:{}:{}",
                 approval.authority_kind, approval.authority_contract, approval.owner
             ),
+            scope_detail: json!({
+                "chain_id": chain_id,
+                "authority_kind": approval.authority_kind,
+                "authority_contract": approval.authority_contract,
+                "owner": approval.owner,
+            }),
             effective_powers: approval.effective_powers.clone(),
             grant_source: approval.grant_source.clone(),
             inheritance_path: approval.inheritance_path.clone(),

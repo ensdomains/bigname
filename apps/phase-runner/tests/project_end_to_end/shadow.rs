@@ -433,10 +433,21 @@ pub async fn compare(pool: &PgPool, chain: &str, target: i64) -> Result<Report> 
     let mut served_operators: BTreeMap<String, BTreeMap<(String, String), Value>> = BTreeMap::new();
     for chunk in ids.chunks(NAME_CHUNK) {
         for row in load_effective_permissions_by_resource_ids(pool, chunk, None).await? {
-            if matches!(row.scope, EffectivePermissionScope::Account { .. }) {
+            if let EffectivePermissionScope::Account {
+                chain_id,
+                authority_kind,
+                authority_contract,
+                owner,
+            } = &row.scope
+            {
                 let scope = row.scope.storage_key();
                 let value = json!({
-                    "subject": row.subject, "scope": scope,
+                    "subject": row.subject, "scope": scope, "scope_kind": "account",
+                    "scope_detail": {
+                        "chain_id": chain_id, "authority_kind": authority_kind,
+                        "authority_contract": authority_contract, "owner": owner,
+                    },
+                    "record_resource_selector": row.record_resource_selector,
                     "grant_relation": row.grant_relation.map(|_| "operator"),
                     "effective_powers": row.effective_powers, "grant_source": row.grant_source,
                     "revocation_source": row.revocation_source,
@@ -547,6 +558,8 @@ pub async fn compare(pool: &PgPool, chain: &str, target: i64) -> Result<Report> 
                     .map(|row| {
                         let value = json!({
                             "subject": row.subject, "scope": row.scope,
+                            "scope_kind": "account", "scope_detail": row.scope_detail,
+                            "record_resource_selector": null,
                             "grant_relation": "operator",
                             "effective_powers": row.effective_powers,
                             "grant_source": row.grant_source, "revocation_source": null,

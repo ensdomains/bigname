@@ -397,6 +397,12 @@ async fn an_unwrap_that_revokes_no_holder_grant_is_not_seen() -> Result<()> {
         "the families do not"
     );
     assert!(report.known_discrepancy.is_empty(), "{:#?}", report.lines);
+    assert!(
+        report.expected_delta_fields.is_empty(),
+        "{:#?}",
+        report.lines
+    );
+    assert_eq!(report.mismatched, 1, "{:#?}", report.lines);
     let mismatched: Vec<&str> = report
         .lines
         .iter()

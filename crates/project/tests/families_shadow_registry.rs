@@ -270,3 +270,66 @@ async fn an_excluded_later_transfer_is_not_the_control_owner() -> Result<()> {
     assert_eq!(mismatched, vec!["control/registry_owner"]);
     fixture.cleanup().await
 }
+
+/// The shape the removed `registry_node_position_moved_by_later_write` cause covered, from the
+/// fixture corpus: a registry-only name whose node gets an AuthorityTransferred, then an
+/// AuthorityEpochChanged registry_only, then a SubregistryChanged of the parent that names the
+/// node as its child, all in one block. F2c now records the SubregistryChanged as the node's
+/// owner-setting event with its own position, so the reader leaves the node owner out; the
+/// served control block reads the admitted AuthorityEpochChanged, which is later than the
+/// transfer, for both its owner and its latest kind, and the families agree.
+#[tokio::test]
+async fn a_later_subregistry_write_to_the_node_leaves_the_epoch_owner_equal() -> Result<()> {
+    let fixture = Fixture::new("families_shadow_registry_later_write", 20).await?;
+    let node_resource = uuid(3);
+    fixture
+        .binding(&uuid(100), &name(1), &node_resource, "ens_v1", 10, 1, None)
+        .await?;
+    fixture
+        .write(
+            10,
+            9,
+            "AuthorityTransferred",
+            V1_REGISTRY,
+            Some(&name(1)),
+            Some(&node_resource),
+            json!({"source_event": "NewOwner", "node": node(1), "owner": OWNER,
+                   "owner_getter": OWNER}),
+            REGISTRY,
+        )
+        .await?;
+    fixture
+        .write(
+            10,
+            11,
+            "AuthorityEpochChanged",
+            V1_REGISTRY,
+            Some(&name(1)),
+            Some(&node_resource),
+            json!({"node": node(1), "authority_kind": "registry_only", "owner": OWNER}),
+            REGISTRY,
+        )
+        .await?;
+    fixture
+        .write(
+            10,
+            12,
+            "SubregistryChanged",
+            V1_REGISTRY,
+            Some(&name(1)),
+            Some(&node_resource),
+            json!({"source_event": "NewOwner", "node": node(2), "child_node": node(1),
+                   "owner": OWNER}),
+            REGISTRY,
+        )
+        .await?;
+    let report = publish_and_compare(&fixture, 12).await?;
+    shadow_support::assert_counts(&report, &[], &[]);
+    let (served, _) = shadow_support::name(&fixture, 12, &name(1)).await?;
+    assert_eq!(served.control("registry_owner"), json!(OWNER));
+    assert_eq!(
+        served.control("latest_event_kind"),
+        json!("AuthorityEpochChanged")
+    );
+    fixture.cleanup().await
+}
