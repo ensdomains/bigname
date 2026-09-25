@@ -650,6 +650,67 @@ async fn a_named_address_write_at_another_node_is_found_inversely() -> Result<()
 
 const INVERSE_A: &str = "0x5555555555555555555555555555555555555555";
 
+// A normalized record whose `value` is an explicit JSON null, as
+// crates/project/testdata/sql/stage/linked_records_fixture.sql sets up, is a success to today's
+// builder (`after_state ? 'value'`). The family row keeps that status though its value column
+// reads back empty, and the family entry must be today's entry. Today's own row reader rejects
+// that entry (a success without a value), so the harness cannot run here; the entries are compared
+// as stored.
+#[tokio::test]
+async fn an_explicit_null_value_is_served_as_today_serves_it() -> Result<()> {
+    let (db, pool) = database("record_id_explicit_null").await?;
+    seed(&pool).await?;
+    sqlx::query("INSERT INTO chain_lineage (chain_id,block_hash,block_number,block_timestamp,canonicality_state) VALUES ($1,$2,19,to_timestamp(19::double precision),'canonical')").bind(CHAIN).bind(hash(19)).execute(&pool).await?;
+    event(
+        &pool,
+        "explicit-null",
+        19,
+        0,
+        "RecordChanged",
+        Some(1),
+        json!({"source_event":"TextChanged","node":node(1),"resolver":RESOLVER,"record_key":"text:url","record_family":"text","selector_key":"url","value":null}),
+    )
+    .await?;
+    let outcome = Engine::new(pool.clone())
+        .run_batch(BatchRequest {
+            chain_id: CHAIN.to_owned(),
+            target_block: 19,
+            affected_from_block: 10,
+            affected_to_block: 19,
+            resume_current: None,
+            mode: RunMode::Normal,
+        })
+        .await?;
+    family_shadow::rebuild_families_at(&pool, &outcome.current).await?;
+    let url = |entries: &Value| {
+        entries
+            .as_array()
+            .and_then(|entries| {
+                entries
+                    .iter()
+                    .find(|entry| entry["record_key"] == "text:url")
+            })
+            .cloned()
+    };
+    let today = url(&inventory(&pool, 1).await?["entries"]);
+    assert_eq!(
+        today.as_ref().map(|entry| &entry["status"]),
+        Some(&json!("success")),
+        "{today:?}"
+    );
+    let family = bigname_storage::families::records::load_family_record_inventory_detail(
+        &pool,
+        CHAIN,
+        resource(1).parse()?,
+        bigname_storage::families::records::FamilyAttribution::Given(Default::default()),
+    )
+    .await?
+    .expect("a family row");
+    assert_eq!(url(&family.row.entries), today);
+    db.cleanup().await?;
+    Ok(())
+}
+
 // ABI content types come from the writes the selected record holds, so a write made before a
 // name links to the record counts, and a name without an exact link reads the default record.
 #[tokio::test]

@@ -156,6 +156,12 @@ impl Expectations {
 
 /// Rebuild the families at `target` and compare, without judging the report.
 pub async fn shadow_report_at(pool: &PgPool, target: &Marker) -> Result<ShadowReport> {
+    let chain_id = rebuild_families_at(pool, target).await?;
+    compare_family_reads_on(pool, &chain_id, target).await
+}
+
+/// Rebuild the families at `target` without comparing; returns the chain.
+pub async fn rebuild_families_at(pool: &PgPool, target: &Marker) -> Result<String> {
     let chain_id: String = sqlx::query_scalar(
         "SELECT chain_id FROM bigname_phase.chain_lineage
          WHERE block_number = $1 AND block_hash = $2 LIMIT 1",
@@ -179,9 +185,17 @@ pub async fn shadow_report_at(pool: &PgPool, target: &Marker) -> Result<ShadowRe
         "the families stopped before the served marker: {:?}",
         outcome.skipped
     );
+    Ok(chain_id)
+}
+
+async fn compare_family_reads_on(
+    pool: &PgPool,
+    chain_id: &str,
+    target: &Marker,
+) -> Result<ShadowReport> {
     let report = compare_family_reads(
         pool,
-        &chain_id,
+        chain_id,
         Some((target.number, target.hash.clone())),
         1,
     )

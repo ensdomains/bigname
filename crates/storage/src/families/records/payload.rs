@@ -141,9 +141,9 @@ pub(crate) fn entry(
     } else {
         stored_status.unwrap_or_else(|| status(payload))
     };
-    let unsupported = payload.get("value").is_none()
-        && payload.get("contenthash_hex").is_none()
-        && payload.get("address_bytes_hex").is_none();
+    // From the status, not from which keys the payload has: a payload rebuilt from the family
+    // row's columns has no `value` for an explicit JSON null, which today serves as a success.
+    let unsupported = status == "unsupported";
     let mut entry = Map::new();
     entry.insert("record_key".into(), json!(text(payload, "record_key")));
     entry.insert("record_family".into(), json!(family));
@@ -254,6 +254,17 @@ mod tests {
             Some(json!({"record_key": "text:url", "record_family": "text",
                         "selector_key": "url", "status": "unsupported",
                         "unsupported_reason": "value_not_retained_in_normalized_events"}))
+        );
+    }
+
+    #[test]
+    fn a_retained_success_without_a_value_column_is_not_unsupported() {
+        let rebuilt = json!({"record_key": "text:url", "record_family": "text",
+                             "selector_key": "url"});
+        assert_eq!(
+            entry(&rebuilt, Some("success"), false),
+            Some(json!({"record_key": "text:url", "record_family": "text",
+                        "selector_key": "url", "status": "success"}))
         );
     }
 
