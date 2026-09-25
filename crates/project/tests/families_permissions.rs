@@ -657,3 +657,66 @@ async fn a_grant_records_the_registration_it_was_written_under() -> Result<()> {
     fixture.assert_rebuild_equal(12).await?;
     fixture.cleanup().await
 }
+
+// A RegistrationReleased between the registration and the grant does not move the grant's
+// registration_position: the rule takes grants and reservations only.
+#[tokio::test]
+async fn a_release_before_the_grant_leaves_its_registration_position() -> Result<()> {
+    let fixture = Fixture::new("families_grant_registration_release", 20).await?;
+    let resource = uuid(6);
+    let registration = json!({"registry_contract_instance_id": "registry", "token_id": "1"});
+    fixture
+        .write(
+            10,
+            1,
+            "RegistrationGranted",
+            "ens_v2_registry_l1",
+            None,
+            Some(&resource),
+            registration.clone(),
+            REGISTRY,
+        )
+        .await?;
+    fixture
+        .write(
+            11,
+            1,
+            "RegistrationReleased",
+            "ens_v2_registry_l1",
+            None,
+            Some(&resource),
+            registration,
+            REGISTRY,
+        )
+        .await?;
+    fixture
+        .write(
+            12,
+            1,
+            "PermissionChanged",
+            "ens_v2_registry_l1",
+            None,
+            Some(&resource),
+            json!({"subject": ALICE, "effective_powers": ["set_resolver"],
+                   "scope": {"kind": "registry", "chain_id": "ethereum-sepolia",
+                             "registry_address": REGISTRY},
+                   "grant_source": {"kind": "raw_log"}, "inheritance_path": [],
+                   "transfer_behavior": "stays"}),
+            REGISTRY,
+        )
+        .await?;
+    fixture.apply(12, FamilyMode::Normal).await;
+    let rows = fixture.rows("project_grant").await?;
+    assert_eq!(
+        rows.iter()
+            .map(|row| json!([
+                row["registration_position"]["block_number"],
+                row["registration_position"]["log_index"]
+            ]))
+            .collect::<Vec<_>>(),
+        vec![json!([10, 1])]
+    );
+    fixture.assert_undo_restores(12).await?;
+    fixture.assert_rebuild_equal(12).await?;
+    fixture.cleanup().await
+}
