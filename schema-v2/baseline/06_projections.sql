@@ -1737,11 +1737,15 @@ CREATE TABLE IF NOT EXISTS project_wrapper_state (
     expiry_seconds numeric,
     expiry_position jsonb,
     owner_word_unmasked boolean,
+    lifecycle_source text,
+    lifecycle_unwrapped boolean,
+    lifecycle_position jsonb,
+    unwrapped_position jsonb,
     PRIMARY KEY (chain_id, resource_id),
     CHECK ((transaction_index IS NULL) = (log_index IS NULL))
 );
 COMMENT ON TABLE project_wrapper_state IS
-    'Project-owned wrapper state of family F2b per wrapper resource: the latest wrapper_state and fuses and the latest wrapper expiry, unmasked; masks are applied at read against the block clock. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
+    'Project-owned wrapper state of family F2b per wrapper resource: the latest wrapper_state and fuses, the latest wrapper expiry, and the newest wrapper lifecycle event with the latest unwrap, unmasked; masks are applied at read against the block clock. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
 COMMENT ON COLUMN project_wrapper_state.chain_id IS
     'This value is the chain.';
 COMMENT ON COLUMN project_wrapper_state.resource_id IS
@@ -1770,6 +1774,14 @@ COMMENT ON COLUMN project_wrapper_state.expiry_position IS
     'This value is that ExpiryChanged''s position.';
 COMMENT ON COLUMN project_wrapper_state.owner_word_unmasked IS
     'This value is the latest owner_word_unmasked flag the wrapper events carried.';
+COMMENT ON COLUMN project_wrapper_state.lifecycle_source IS
+    'This value is the source of the newest wrapper lifecycle event of the resource: NameWrapped, NameUnwrapped, holder_grant or holder_revoke (resource_summary.rs wrapper_lifecycles).';
+COMMENT ON COLUMN project_wrapper_state.lifecycle_unwrapped IS
+    'This value is true when the newest wrapper lifecycle event leaves the resource unwrapped: a NameUnwrapped or a holder revoke with no powers. The served wrapper restrictions are served only while it is false.';
+COMMENT ON COLUMN project_wrapper_state.lifecycle_position IS
+    'This value is the canonical position of the newest wrapper lifecycle event.';
+COMMENT ON COLUMN project_wrapper_state.unwrapped_position IS
+    'This value is the canonical position of the latest NameUnwrapped of the resource, kept when a later mint or holder grant becomes the newest lifecycle event.';
 
 CREATE TABLE IF NOT EXISTS project_registry_node_state (
     chain_id text NOT NULL,
