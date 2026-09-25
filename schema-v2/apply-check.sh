@@ -644,7 +644,8 @@ for migration_file in \
     "$ROOT/migrations/20260926100400_project_families_permissions.sql" \
     "$ROOT/migrations/20260926100500_project_families_topology.sql" \
     "$ROOT/migrations/20260926100600_project_families_addresses.sql" \
-    "$ROOT/migrations/20260926100700_project_families_input_token.sql"
+    "$ROOT/migrations/20260926100700_project_families_input_token.sql" \
+    "$ROOT/migrations/20260926100800_project_families_fidelity.sql"
 do
     emit_phase_migration "$migration_file" empty-schema | run_psql
 done
@@ -915,7 +916,9 @@ for migration_file in \
     "$ROOT/migrations/20260926100600_project_families_addresses.sql" \
     "$ROOT/migrations/20260926100600_project_families_addresses.sql" \
     "$ROOT/migrations/20260926100700_project_families_input_token.sql" \
-    "$ROOT/migrations/20260926100700_project_families_input_token.sql"
+    "$ROOT/migrations/20260926100700_project_families_input_token.sql" \
+    "$ROOT/migrations/20260926100800_project_families_fidelity.sql" \
+    "$ROOT/migrations/20260926100800_project_families_fidelity.sql"
 do
     emit_phase_migration "$migration_file" baseline-first | run_psql
 done
@@ -4173,6 +4176,7 @@ BEGIN
             ('project_reverse_node_claim'),
             ('project_claim_normalization'),
             ('project_address_name_fold'),
+            ('project_address_controller_candidate'),
             ('project_address_name_index'),
             ('project_address_record_node_index'),
             ('project_address_record_id_index'),
@@ -4275,6 +4279,7 @@ BEGIN
             ('project_reverse_node_claim'),
             ('project_claim_normalization'),
             ('project_address_name_fold'),
+            ('project_address_controller_candidate'),
             ('project_address_name_index'),
             ('project_address_record_node_index'),
             ('project_address_record_id_index'),

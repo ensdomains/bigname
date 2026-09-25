@@ -192,9 +192,9 @@ async fn child_edges_and_the_v2_subregistry_keep_their_latest_clears_included() 
             ))
             .collect::<Vec<_>>(),
         vec![
-            json!({"parent_node": node(1), "child_node": node(9), "authority_arm": "ens_v1_registry_l1",
+            json!({"parent_node": node(1), "child_node": node(9), "authority_arm": "ens_v1",
                    "owner": "0x0000000000000000000000000000000000000000", "block_number": 11}),
-            json!({"parent_node": node(2), "child_node": node(9), "authority_arm": "ens_v1_registry_l1",
+            json!({"parent_node": node(2), "child_node": node(9), "authority_arm": "ens_v1",
                    "owner": OWNER, "block_number": 10}),
         ]
     );

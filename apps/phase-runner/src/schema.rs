@@ -66,6 +66,7 @@ const EXPECTED_TABLES: &[&str] = &[
     "project_reverse_node_claim",
     "project_claim_normalization",
     "project_address_name_fold",
+    "project_address_controller_candidate",
     "project_address_name_index",
     "project_address_record_node_index",
     "project_address_record_id_index",

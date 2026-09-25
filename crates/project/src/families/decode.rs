@@ -5,7 +5,14 @@
 //! the resource as its wrapped registrar lease at that node, leaving out the transfer that moves
 //! the token into the wrapper in the wrap's own transaction. A named row keeps its own name. The
 //! result is informational: the read recomputes the two passes from the immutable original.
-use std::collections::BTreeMap;
+//!
+//! A pass names a row only through one name. Every candidate a pass admits carries the row's
+//! namehash (the direct pass compares the candidate's surface namehash, the wrapper pass its
+//! recorded node), and a logical name id is `<namespace>:<namehash>`, so two admitted
+//! candidates can differ only in namespace. A registrar lease belongs to one namespace, so that
+//! does not happen; if it ever did, the pass names nothing rather than picking one, where the
+//! served UPDATE would take whichever candidate row it met first.
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::Value;
 use sqlx::{Postgres, Transaction};
@@ -29,6 +36,15 @@ pub(crate) struct Candidates {
 
 fn text(row: &Row, column: &str) -> Option<String> {
     row.get(column).and_then(Value::as_str).map(str::to_owned)
+}
+
+/// Whether `text` is a hyphenated uuid, the shape every resource id has.
+fn is_uuid(text: &str) -> bool {
+    text.len() == 36
+        && text.char_indices().all(|(index, character)| match index {
+            8 | 13 | 18 | 23 => character == '-',
+            _ => character.is_ascii_hexdigit(),
+        })
 }
 
 fn decodable(event: &BlockEvent) -> bool {
@@ -63,6 +79,8 @@ impl Candidates {
             .filter_map(|event| event.resource_id.clone())
             .chain(arrived.iter().cloned())
             .collect();
+        // Only a well-formed resource id can name a candidate's uuid columns.
+        leases.retain(|lease| is_uuid(lease));
         leases.sort();
         leases.dedup();
         if leases.is_empty() {
@@ -75,8 +93,8 @@ impl Candidates {
             "/* project:families.decode.lease_candidates */ SELECT to_jsonb(candidate)
              FROM project_binding_candidate candidate
              WHERE candidate.chain_id = $1
-               AND (candidate.resource_id::text = ANY($2)
-                    OR candidate.wrapped_registrar_resource_id::text = ANY($2))",
+               AND (candidate.resource_id = ANY($2::uuid[])
+                    OR candidate.wrapped_registrar_resource_id = ANY($2::uuid[]))",
         )
         .bind(context.chain_id)
         .bind(&leases)
@@ -131,12 +149,21 @@ impl Candidates {
                     && text(candidate, "transaction_hash") == text(row, "transaction_hash")
                     && lower(text(candidate, "emitting_address")) == text(row, "to_address"))
         });
-        let first = |candidates: &mut dyn Iterator<Item = &Row>| {
-            candidates
+        let only = |candidates: &mut dyn Iterator<Item = &Row>| {
+            let names: BTreeSet<String> = candidates
                 .filter_map(|candidate| text(candidate, "logical_name_id"))
-                .min()
+                .collect();
+            let count = names.len();
+            match count {
+                1 => Ok(names.into_iter().next().unwrap_or_default()),
+                _ => Err(count),
+            }
         };
-        first(&mut direct.into_iter()).or_else(|| first(&mut wrapped.into_iter()))
+        match only(&mut direct.into_iter()) {
+            Ok(name) => Some(name),
+            Err(0) => only(&mut wrapped.into_iter()).ok(),
+            Err(_) => None,
+        }
     }
 }
 
@@ -190,9 +217,78 @@ pub(crate) async fn redecode(
             continue;
         }
         if let Some(name) = candidates.decode(&row) {
-            row.insert("decoded_logical_name_id".to_owned(), Value::String(name));
-            rows.put(table, row).map_err(in_family(table.name))?;
+            row.insert(
+                "decoded_logical_name_id".to_owned(),
+                Value::String(name.clone()),
+            );
+            rows.put(table, row.clone())
+                .map_err(in_family(table.name))?;
+            super::identity::successor_grant(transaction, context, rows, &name, &row).await?;
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::{Candidates, Row};
+
+    fn row(value: serde_json::Value) -> Row {
+        match value {
+            serde_json::Value::Object(row) => row,
+            _ => unreachable!(),
+        }
+    }
+
+    fn grant() -> Row {
+        row(json!({
+            "event_kind": "RegistrationGranted", "source_family": "ens_v1_registrar_l1",
+            "resource_id": "lease", "namehash": "0xab", "original_logical_name_id": null,
+        }))
+    }
+
+    fn direct(name: &str) -> Row {
+        row(json!({"logical_name_id": name, "resource_id": "lease", "surface_namehash": "0xAB"}))
+    }
+
+    #[test]
+    fn a_pass_names_a_row_through_one_name_only() {
+        let one = Candidates {
+            rows: vec![direct("ens:0xab"), direct("ens:0xab")],
+            arrived: Vec::new(),
+        };
+        assert_eq!(
+            one.decode(&grant()).as_deref(),
+            Some("ens:0xab"),
+            "two candidates of one name agree"
+        );
+
+        // Candidates carrying the row's namehash can differ only in namespace; the pass then
+        // names nothing, and the wrapper pass is not consulted.
+        let wrapper = row(json!({
+            "logical_name_id": "ens:0xab", "wrapped_registrar_resource_id": "lease",
+            "node": "0xab",
+        }));
+        let two = Candidates {
+            rows: vec![
+                direct("ens:0xab"),
+                direct("basenames:0xab"),
+                wrapper.clone(),
+            ],
+            arrived: Vec::new(),
+        };
+        assert_eq!(two.decode(&grant()), None);
+
+        let wrapped_only = Candidates {
+            rows: vec![wrapper],
+            arrived: Vec::new(),
+        };
+        assert_eq!(
+            wrapped_only.decode(&grant()).as_deref(),
+            Some("ens:0xab"),
+            "with no direct candidate the wrapper pass names the row"
+        );
+    }
 }

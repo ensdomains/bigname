@@ -6,6 +6,8 @@
 //! maxima of the reducer table; a resource-bearing ENSv2 grant or reservation points its
 //! triple's association at its resource, and nothing else moves when it does. The per-registry
 //! child row keeps the latest Granted, Renewed or Released with the existence flag.
+mod registrant;
+
 use serde_json::{Map, Value, json};
 use sqlx::{Postgres, Transaction};
 
@@ -201,8 +203,17 @@ pub(super) async fn apply(
         set(&mut row, "chain_id", context.chain_id);
         retained_columns(&mut row, event);
         let decoded = candidates.decode(&row);
-        set(&mut row, "decoded_logical_name_id", text_or_null(decoded));
-        put(rows, table, row, event)?;
+        set(
+            &mut row,
+            "decoded_logical_name_id",
+            text_or_null(decoded.clone()),
+        );
+        event.write_position(&mut row);
+        rows.put(table, row.clone())
+            .map_err(in_family(table.name))?;
+        if let Some(name) = event.logical_name_id.clone().or(decoded) {
+            super::identity::successor_grant(transaction, context, rows, &name, &row).await?;
+        }
         if event.event_kind != "TokenControlTransferred" {
             let table = match key {
                 StateKey::Resource(_) => &tables::LIFECYCLE_KEY_STATE,
@@ -241,7 +252,8 @@ pub(super) async fn apply(
             child_row(rows, key, event)?;
         }
     }
-    decode::redecode(transaction, context, &candidates, rows).await
+    decode::redecode(transaction, context, &candidates, rows).await?;
+    registrant::fold_registrants(transaction, context, rows).await
 }
 
 fn child_row(rows: &mut RowSet, key: Row, event: &BlockEvent) -> Result<()> {
@@ -314,11 +326,18 @@ fn retained_columns(row: &mut Map<String, Value>, event: &BlockEvent) {
     );
     set(row, "resource_id", text_or_null(event.resource_id.clone()));
     set(row, "source_family", event.source_family.clone());
-    let authority_kind = raw_text(after, "authority_kind").filter(|kind| !kind.is_empty());
+    // Stored as the payload has it, null when absent: the served name block reports it so
+    // (name_current/build.sql:30), and the admission reads default it to registrar
+    // (authority_events.sql, COALESCE(NULLIF(authority_kind, ''), 'registrar')).
     set(
         row,
         "authority_kind",
-        authority_kind.unwrap_or_else(|| "registrar".to_owned()),
+        text_or_null(raw_text(after, "authority_kind")),
+    );
+    set(
+        row,
+        "authority_key",
+        text_or_null(raw_text(after, "authority_key")),
     );
     set(
         row,
@@ -426,13 +445,13 @@ fn maxima(row: &mut Map<String, Value>, event: &BlockEvent, context: &Context<'_
                 })
                 .flatten()
                 .unwrap_or(context.block.timestamp_seconds);
-            let authority = raw_text(after, "authority_kind").filter(|kind| !kind.is_empty());
             set(
                 row,
                 "last_grant",
                 json!({
                     "position": position, "registrant": raw_lower(after, "registrant"),
-                    "expiry": expiry, "authority_kind": authority.unwrap_or_else(|| "registrar".to_owned()),
+                    "expiry": expiry, "authority_kind": raw_text(after, "authority_kind"),
+                    "authority_key": raw_text(after, "authority_key"),
                     "status": text("status"), "registered_at": registered_at,
                 }),
             );
