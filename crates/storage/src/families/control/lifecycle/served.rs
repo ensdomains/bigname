@@ -155,6 +155,19 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> ShadowName {
     );
     trace.insert("selected_key".into(), opt_text(selected_key.as_deref()));
     trace.insert("identity_mismatch".into(), json!(mismatch));
+    // A selected release emitted without a name: the path-expiry release the interpreter
+    // synthesises. The harness reads these to check that the shadow serves the release.
+    let unnamed_release = selected.event.filter(|event| {
+        event.original_logical_name_id.is_none() && event.event_kind == "RegistrationReleased"
+    });
+    trace.insert(
+        "selected_unnamed_path_expiry".into(),
+        json!(unnamed_release.is_some_and(LifecycleEvent::is_path_expiry)),
+    );
+    if let Some(release) = unnamed_release {
+        trace.insert("selected_released_at".into(), release.released_at.clone());
+        trace.insert("selected_expiry".into(), release.expiry.clone());
+    }
     trace.insert(
         "admitted".into(),
         json!(
@@ -201,6 +214,7 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> ShadowName {
         .and_then(servable_expiry);
 
     let expiry_seconds = expiry_candidate(&in_scope);
+    trace.insert("expiry_candidate".into(), json!(expiry_seconds));
     let selected_expiry = || {
         selected
             .event
@@ -224,7 +238,8 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> ShadowName {
         selected_key.as_deref(),
     );
     let context = authority_context(facts, &authority, &in_scope, is_v2, selected_key.as_deref());
-    trace.insert("authority_key_retained".into(), json!(context.key_retained));
+    trace.insert("authority_key_stored".into(), json!(context.key_stored));
+    trace.insert("authority_context_event".into(), context.event.clone());
     let latest_event_kind =
         latest_event_kind(facts, &selected, &in_scope, is_v2, selected_key.as_deref());
 
@@ -391,11 +406,22 @@ fn select_v2<'a>(
         let Some(candidate) = view::candidate(&view) else {
             continue;
         };
-        // The candidate event itself, for its payload; it must be one of the name's events.
+        // The candidate event itself, for its payload, looked up by the key and not by the name:
+        // the key state counts every event on the resource (design:40, decoder rule 1), so the
+        // interpreter's path-expiry release, which names the resource and no name
+        // (adapters v2_registry/expiry.rs:58-59), is the key's candidate when it is the latest.
+        // An expired or released ENSv2 registration stays ENSv2 and is served unregistered; it
+        // never falls back to an ENSv1 lease (Tate's ruling on TYR-36 step 3). On chain a
+        // registration is over once its expiry has passed, and unregistering sets the expiry to
+        // the current time.
+        // (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L36 @ ens_v2@a971bd64)
+        // (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L206 @ ens_v2@a971bd64)
+        // (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L255-L258 @ ens_v2@a971bd64)
+        // Today's name-scoped membership (build.sql:322) never sees the release, a served-side
+        // bug the harness records.
         let event = tagged.iter().find(|tagged| {
             tagged.event.position.event_identity == candidate.position.event_identity
                 && tagged.key.as_deref() == Some(key.as_str())
-                && tagged.event.original_logical_name_id.as_deref() == Some(name)
         });
         match event {
             Some(tagged) => candidates.push((key, candidate, tagged.event)),

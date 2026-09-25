@@ -22,12 +22,12 @@ use std::collections::BTreeMap;
 use serde_json::{Map, Value};
 
 use super::{
-    position::bound_of,
+    position::{Position, bound_of},
     registry::RegistryNode,
     rows::{BindingCandidate, LifecycleEvent, Maxima, WrapperRow},
 };
 
-pub use load::load_shadow_names;
+pub use load::{load_name_facts, load_shadow_names};
 
 /// The F1 selection outputs the admission reads (name_authority/build.sql:793-850), as the
 /// served row's `provenance.authority_selection` carries them.
@@ -106,6 +106,8 @@ pub struct TripleFacts {
     pub key: [String; 3],
     pub maxima: Maxima,
     pub target: Option<String>,
+    /// The position of the grant or reservation that won the association.
+    pub target_position: Option<Position>,
 }
 
 impl TripleFacts {

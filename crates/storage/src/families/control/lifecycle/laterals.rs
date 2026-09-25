@@ -160,18 +160,24 @@ pub(super) fn registrant(
 pub(super) struct AuthorityContext {
     pub(super) kind: Value,
     pub(super) key: Value,
-    /// Whether the families hold the winning event's authority key. Step 2 at b218b2fc keeps
-    /// the authority kind of a retained grant but not its key, nor the key of an
-    /// AuthorityEpochChanged or a registry-only SurfaceBound; the read takes the key from the
-    /// retained row or the key state's `last_grant` when a later step 2 revision stores it.
-    pub(super) key_retained: bool,
+    /// Whether the family place that would hold the winning event's authority key exists: the
+    /// retained row's `authority_key` column or the `last_grant` member for a grant, the start
+    /// position's member for an AuthorityEpochChanged, the binding candidate's column for a
+    /// registry-only SurfaceBound. It says whether the place exists, not whether the value is
+    /// null. Step 2 at b218b2fc has none of the three, so it is false there.
+    pub(super) key_stored: bool,
+    /// The identity of the winning event, for the harness.
+    pub(super) event: Value,
 }
 
 /// The latest admitted grant, AuthorityEpochChanged or state-derived registry-only SurfaceBound
 /// (build.sql:393-420). Grants read their retained authority kind; the AuthorityEpochChanged is
 /// F1's latest per arm and the SurfaceBound is the binding candidate. A successor lease granted
 /// under a registry-only binding's handoff names the registration, not the authority, and is
-/// left out (build.sql:405-416).
+/// left out (build.sql:405-416). Step 2 at b218b2fc writes the predecessor as the lease
+/// (crates/project/src/families/identity.rs:378-383) where the served fold takes the successor
+/// (name_authority/stage.rs:60, :81-119), so this exclusion cannot fire until step 2 folds the
+/// successor lease.
 pub(super) fn authority_context(
     facts: &NameFacts,
     authority: &Authority<'_>,
@@ -227,28 +233,33 @@ pub(super) fn authority_context(
             wrapper_linked: false,
         };
         if authority.admits(&probe) {
-            found.push((position.clone(), json!("registry_only"), None));
+            let key = candidate
+                .authority_key_stored
+                .then(|| json!(candidate.authority_key));
+            found.push((position.clone(), json!("registry_only"), key));
         }
     }
     match latest(found, |(position, _, _)| position) {
-        Some((_, kind, key)) => AuthorityContext {
+        Some((position, kind, key)) => AuthorityContext {
             kind,
-            key_retained: key.is_some(),
+            key_stored: key.is_some(),
             key: key.unwrap_or(Value::Null),
+            event: json!(position.event_identity),
         },
         None => AuthorityContext {
             kind: Value::Null,
             key: Value::Null,
-            key_retained: true,
+            key_stored: true,
+            event: Value::Null,
         },
     }
 }
 
-/// A retained grant's authority key: its own column, else the `last_grant` maximum of the key
-/// state or triple summary that holds the same grant; None when neither carries one.
+/// A retained grant's authority key: its own column, else the `last_grant` member of the key
+/// state or triple summary that holds the same grant; None when neither place exists.
 fn grant_authority_key(facts: &NameFacts, grant: &LifecycleEvent) -> Option<Value> {
-    if let Some(key) = &grant.authority_key {
-        return Some(json!(key));
+    if grant.authority_key_stored {
+        return Some(json!(grant.authority_key));
     }
     facts
         .key_states

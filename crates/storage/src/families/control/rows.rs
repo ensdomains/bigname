@@ -43,6 +43,8 @@ pub struct LifecycleEvent {
     /// `after_state ->> 'authority_key'`. Step 2 at b218b2fc retains no such column, so this is
     /// read when a later step 2 revision adds it and is None until then.
     pub authority_key: Option<String>,
+    /// Whether the row has an `authority_key` column at all.
+    pub authority_key_stored: bool,
     pub transaction_hash: Option<String>,
     pub to_address: Option<String>,
     pub namehash: Option<String>,
@@ -66,7 +68,8 @@ pub struct LifecycleEvent {
 }
 
 impl LifecycleEvent {
-    pub(crate) fn from_row(row: &Value) -> Option<Self> {
+    /// Decode a `to_jsonb(project_lifecycle_event)` row.
+    pub fn from_row(row: &Value) -> Option<Self> {
         Some(Self {
             state_kind: text(row, "state_kind")?,
             state_key: text(row, "state_key")?,
@@ -78,6 +81,7 @@ impl LifecycleEvent {
             source_family: text(row, "source_family")?,
             authority_kind: text(row, "authority_kind").unwrap_or_else(|| "registrar".into()),
             authority_key: text(row, "authority_key"),
+            authority_key_stored: row.get("authority_key").is_some(),
             transaction_hash: text(row, "transaction_hash"),
             to_address: lower(row, "to_address"),
             namehash: lower(row, "namehash"),
@@ -180,7 +184,7 @@ pub struct Maxima {
 }
 
 impl Maxima {
-    pub(crate) fn from_row(row: &Value) -> Self {
+    pub fn from_row(row: &Value) -> Self {
         Self {
             last_grant: Mark::of(row, "last_grant"),
             last_reservation: Mark::of(row, "last_reservation"),
@@ -212,6 +216,10 @@ pub struct BindingCandidate {
     pub log_index: Option<i64>,
     pub state_derived: Option<bool>,
     pub authority_kind: Option<String>,
+    /// The SurfaceBound's after-state authority key, when step 2 stores it.
+    pub authority_key: Option<String>,
+    /// Whether the candidate row has an `authority_key` column at all.
+    pub authority_key_stored: bool,
     pub registry_only: bool,
     pub predecessor_resource_id: Option<String>,
     pub predecessor_position: Option<Value>,
@@ -237,6 +245,8 @@ impl BindingCandidate {
             log_index: row.get("log_index").and_then(Value::as_i64),
             state_derived: flag(row, "state_derived"),
             authority_kind: text(row, "authority_kind"),
+            authority_key: text(row, "authority_key"),
+            authority_key_stored: row.get("authority_key").is_some(),
             registry_only: flag(row, "registry_only").unwrap_or(false),
             predecessor_resource_id: text(row, "predecessor_resource_id"),
             predecessor_position: row

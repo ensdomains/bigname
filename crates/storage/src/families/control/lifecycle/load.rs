@@ -9,6 +9,7 @@ use sqlx::PgPool;
 
 use super::{Clock, NameFacts, NameInput, ShadowName, TripleFacts, evaluate};
 use crate::families::control::{
+    position::Position,
     registry::load_registry_nodes,
     rows::{BindingCandidate, LifecycleEvent, Maxima, text},
     wrapper::load_wrapper_rows,
@@ -100,28 +101,36 @@ pub async fn load_name_facts(
             text(row, "token_id").unwrap_or_default(),
         ])
     };
-    let targets: BTreeMap<[String; 3], String> = associations
+    let targets: BTreeMap<[String; 3], (String, Option<Position>)> = associations
         .iter()
-        .filter_map(|row| Some((triple_key(row)?, text(row, "target_resource_id")?)))
+        .filter_map(|row| {
+            Some((
+                triple_key(row)?,
+                (text(row, "target_resource_id")?, Position::of_row(row)),
+            ))
+        })
         .collect();
     let mut triples: Vec<TripleFacts> = summaries
         .iter()
         .filter_map(|row| {
             let key = triple_key(row)?;
+            let target = targets.get(&key).cloned();
             Some(TripleFacts {
-                target: targets.get(&key).cloned(),
+                target: target.as_ref().map(|(resource, _)| resource.clone()),
+                target_position: target.and_then(|(_, position)| position),
                 key,
                 maxima: Maxima::from_row(row),
             })
         })
         .collect();
     // An association whose triple has no null-resource event yet still names a key.
-    for (key, target) in &targets {
+    for (key, (target, position)) in &targets {
         if !triples.iter().any(|triple| &triple.key == key) {
             triples.push(TripleFacts {
                 key: key.clone(),
                 maxima: Maxima::default(),
                 target: Some(target.clone()),
+                target_position: position.clone(),
             });
         }
     }
@@ -138,7 +147,7 @@ pub async fn load_name_facts(
     for name in names {
         resources.extend(name.selection.resource_id.clone());
     }
-    resources.extend(targets.values().cloned());
+    resources.extend(targets.values().map(|(resource, _)| resource.clone()));
     let resource_list: Vec<String> = resources.iter().cloned().collect();
     let key_state_rows: Vec<Value> = sqlx::query_scalar(
         "/* storage:families.control.lifecycle.key_states */ SELECT to_jsonb(state)
