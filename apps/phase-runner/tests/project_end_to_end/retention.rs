@@ -37,7 +37,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::Result;
 use bigname_storage::families::control::{
-    lifecycle::NameFacts, position::Position, rows::BindingCandidate,
+    lifecycle::{NameFacts, namespace_of},
+    position::Position,
+    rows::BindingCandidate,
 };
 use serde_json::{Value, json};
 use sqlx::PgPool;
@@ -111,10 +113,6 @@ fn family_resources(facts: &NameFacts) -> BTreeSet<String> {
     );
     out.extend(facts.key_states.keys().cloned());
     out
-}
-
-fn namespace_of(name: &str) -> &str {
-    name.split_once(':').map_or("", |(namespace, _)| namespace)
 }
 
 impl RetentionLog {

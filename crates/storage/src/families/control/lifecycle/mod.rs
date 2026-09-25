@@ -30,7 +30,7 @@ use super::{
     rows::{BindingCandidate, LifecycleEvent, Maxima, WrapperRow},
 };
 
-pub use load::{load_name_facts, load_shadow_names};
+pub use load::{load_name_facts, load_shadow_names, namespace_of};
 
 /// The F1 selection outputs the admission reads (name_authority/build.sql:793-850), as the
 /// served row's `provenance.authority_selection` carries them.

@@ -32,7 +32,9 @@ async fn json_rows(
         .with_context(|| format!("failed to run {}", sql.lines().next().unwrap_or(sql)))
 }
 
-fn namespace_of(name: &str) -> &str {
+/// The namespace of a logical name id: the part before the first `:`, or `ens` when the id
+/// has none. The shadow harness's retention check reads owner events by the same rule.
+pub fn namespace_of(name: &str) -> &str {
     name.split_once(':')
         .map_or("ens", |(namespace, _)| namespace)
 }
