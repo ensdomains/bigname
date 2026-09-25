@@ -137,8 +137,15 @@ const PRINTED: usize = 400;
 /// the fixture-corpus test because every other comparing test in its binary is ignored.
 static REPORTS: Mutex<Vec<Counted>> = Mutex::new(Vec::new());
 
-/// One printed report's target, same-block delta fields and named-cause fields.
-pub type Counted = (i64, BTreeMap<String, usize>, BTreeMap<String, usize>);
+/// One printed report's target, same-block delta fields and named-cause fields, and the
+/// fixture corpus's expected named-cause fields read at the same publication when the
+/// comparison was asked for them (`Options::corpus`).
+pub type Counted = (
+    i64,
+    BTreeMap<String, usize>,
+    BTreeMap<String, usize>,
+    Option<BTreeMap<String, usize>>,
+);
 
 /// The counted fields of the reports printed so far, emptying the list.
 pub fn take_reports() -> Vec<Counted> {
@@ -167,6 +174,8 @@ pub struct Report {
     /// serves active: the served-side bug of `served_membership_skips_unnamed_path_expiry`.
     pub served_side_bug_names: Vec<String>,
     pub lines: Vec<String>,
+    /// `corpus_expectation` at this publication, when asked for (`Options::corpus`).
+    pub corpus_expected: Option<BTreeMap<String, usize>>,
 }
 
 /// Why one differing field passes, if it does.
@@ -248,6 +257,7 @@ impl Report {
                 target,
                 self.expected_delta_fields.clone(),
                 self.known_discrepancy.clone(),
+                self.corpus_expected.clone(),
             ));
         }
     }
@@ -267,17 +277,54 @@ type SummaryRow = (
     Option<Value>,
 );
 
-pub async fn compare(pool: &PgPool, chain: &str, target: i64) -> Result<Report> {
-    compare_in_chunks(pool, chain, target, NAME_CHUNK).await
+/// How one comparison runs.
+#[derive(Clone, Copy, Debug)]
+pub struct Options {
+    /// Names read at a time. Every name's result must not depend on which other names share
+    /// its chunk; the fixtures compare chunkings to check that.
+    pub chunk: usize,
+    /// Also read the fixture corpus's expected named-cause counts (`corpus_expectation`) at
+    /// this publication, into `Report::corpus_expected`.
+    pub corpus: bool,
 }
 
-/// `compare` with the names read `chunk` at a time. Every name's result must not depend on
-/// which other names share its chunk; the fixtures compare chunkings to check that.
+impl Default for Options {
+    fn default() -> Self {
+        Self {
+            chunk: NAME_CHUNK,
+            corpus: false,
+        }
+    }
+}
+
+pub async fn compare(pool: &PgPool, chain: &str, target: i64) -> Result<Report> {
+    compare_with(pool, chain, target, Options::default()).await
+}
+
+/// `compare` with the names read `chunk` at a time.
 pub async fn compare_in_chunks(
     pool: &PgPool,
     chain: &str,
     target: i64,
     chunk: usize,
+) -> Result<Report> {
+    compare_with(
+        pool,
+        chain,
+        target,
+        Options {
+            chunk,
+            ..Options::default()
+        },
+    )
+    .await
+}
+
+pub async fn compare_with(
+    pool: &PgPool,
+    chain: &str,
+    target: i64,
+    options: Options,
 ) -> Result<Report> {
     let mut report = Report::default();
     let timestamp: i64 = sqlx::query_scalar(
@@ -301,7 +348,7 @@ pub async fn compare_in_chunks(
             .fetch_all(pool)
             .await?;
     let mut attributions = BTreeMap::new();
-    for names in keys.chunks(chunk) {
+    for names in keys.chunks(options.chunk) {
         let rows = load_name_current_by_logical_name_ids(pool, names).await?;
         let inputs: Vec<NameInput> = rows
             .values()
@@ -739,6 +786,9 @@ pub async fn compare_in_chunks(
             diffs.into_iter().map(|diff| (diff, Excuse::None)).collect(),
         );
         report.accounts += 1;
+    }
+    if options.corpus {
+        report.corpus_expected = Some(corpus_expectation(pool, chain, target).await?);
     }
     Ok(report)
 }
@@ -2076,21 +2126,19 @@ pub fn one_report_per_target(reports: &[Counted], targets: &[i64]) -> Result<()>
     Ok(())
 }
 
-/// The fixture corpus's counted fields, asserted exactly against `corpus_expectation` at each
-/// target. No same-block delta may pass on the corpus.
-pub async fn assert_fixture_corpus_counts(
-    pool: &PgPool,
-    chain: &str,
-    targets: &[i64],
-) -> Result<()> {
+/// The fixture corpus's counted fields, asserted exactly against `corpus_expectation` read by
+/// the same comparison at the same publication (`Options::corpus`). No same-block delta may
+/// pass on the corpus.
+pub fn assert_fixture_corpus_counts(targets: &[i64]) -> Result<()> {
     let reports = take_reports();
     one_report_per_target(&reports, targets)?;
-    for (target, delta, known) in reports {
+    for (target, delta, known, expected) in reports {
         anyhow::ensure!(
             delta.is_empty(),
             "target {target}: same-block deltas {delta:?}"
         );
-        let expected = corpus_expectation(pool, chain, target).await?;
+        let expected =
+            expected.with_context(|| format!("target {target}: no corpus expectation read"))?;
         anyhow::ensure!(
             known == expected,
             "target {target}: counted {known:?}, the event log gives {expected:?}"
@@ -2100,16 +2148,35 @@ pub async fn assert_fixture_corpus_counts(
 }
 
 /// The corpus's named-cause counts at `target`, read from its publication-visible event log
-/// (`published`, every event reference) without the family readers (crates/project/tests/rebuild_performance/seed.sql): an ENSv2 name whose
+/// (`published`, every event reference) without the family readers
+/// (crates/project/tests/rebuild_performance/seed.sql), over exactly the names the harness
+/// compares: those the serving loader returns, with the resource it serves. An ENSv2 name whose
 /// interpreter path-expiry release (the `expired` rows, no name, the token resource) is not
 /// followed on that resource by a grant, reservation or named release is served active today
 /// and released by the families: eight fields each, and the two control-owner fields again for
-/// those whose token was transferred before the target.
+/// those whose token was transferred before the target. The oracle is the seed's: other
+/// histories are not covered.
 pub async fn corpus_expectation(
     pool: &PgPool,
     chain: &str,
     target: i64,
 ) -> Result<BTreeMap<String, usize>> {
+    let keys: Vec<String> =
+        sqlx::query_scalar("SELECT logical_name_id FROM name_current ORDER BY 1")
+            .fetch_all(pool)
+            .await?;
+    let (mut names, mut resources): (Vec<String>, Vec<String>) = (Vec::new(), Vec::new());
+    for chunk in keys.chunks(NAME_CHUNK) {
+        for row in load_name_current_by_logical_name_ids(pool, chunk)
+            .await?
+            .values()
+        {
+            if let Some(resource) = row.resource_id {
+                names.push(row.logical_name_id.clone());
+                resources.push(resource.to_string());
+            }
+        }
+    }
     let sql = format!(
         "SELECT name.logical_name_id, EXISTS (
                     SELECT 1 FROM normalized_events transfer
@@ -2118,7 +2185,7 @@ pub async fn corpus_expectation(
                       AND transfer.logical_name_id = name.logical_name_id
                       AND transfer.event_kind = 'TokenControlTransferred'
                       AND {transfer})
-         FROM name_current name
+         FROM unnest($3::text[], $4::uuid[]) name(logical_name_id, resource_id)
          JOIN normalized_events release ON release.resource_id = name.resource_id
          WHERE release.chain_id = $2
            AND release.logical_name_id IS NULL
@@ -2141,6 +2208,8 @@ pub async fn corpus_expectation(
     let expired: Vec<(String, bool)> = sqlx::query_as(&sql)
         .bind(target)
         .bind(chain)
+        .bind(&names)
+        .bind(&resources)
         .fetch_all(pool)
         .await?;
     let cause = "served_membership_skips_unnamed_path_expiry";

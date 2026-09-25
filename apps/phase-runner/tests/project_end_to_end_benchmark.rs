@@ -97,7 +97,7 @@ async fn disposable_copy_publishes_hydrates_and_reads_each_target() -> Result<()
     let targets = parse_targets(&std::env::var("BIGNAME_BENCHMARK_TARGETS")?)?;
     let compare = (std::env::var("BIGNAME_END_TO_END_COMPARE").as_deref() == Ok("1"))
         .then_some(COPY_CHILDREN_PAGE);
-    run(&pool, previous, &targets, compare).await?;
+    run(&pool, previous, &targets, compare, false).await?;
     pool.close().await;
     Ok(())
 }
@@ -173,9 +173,9 @@ async fn fixture_corpus_publishes_hydrates_reads_and_matches_a_rebuild() -> Resu
     .await?;
     require_disposable_copy(pool).await?;
     shadow::take_reports();
-    let compared = run(pool, previous, &targets, Some(FIXTURE_CHILDREN_PAGE)).await?;
+    let compared = run(pool, previous, &targets, Some(FIXTURE_CHILDREN_PAGE), true).await?;
     ensure!(compared.len() == targets.len(), "every target is compared");
-    shadow::assert_fixture_corpus_counts(pool, CHAIN, &targets).await?;
+    shadow::assert_fixture_corpus_counts(&targets)?;
     for compared in &compared {
         // The harness cannot tell whether a dropped key was in the batch's full scope (see
         // `endpoint::Outcome::dropped`), so the fixture must produce none.
@@ -205,7 +205,7 @@ async fn fixture_corpus_publishes_hydrates_reads_and_matches_a_rebuild() -> Resu
 #[test]
 fn the_corpus_counts_take_one_report_per_target() {
     let report =
-        |target: i64| -> shadow::Counted { (target, Default::default(), Default::default()) };
+        |target: i64| -> shadow::Counted { (target, Default::default(), Default::default(), None) };
     assert!(shadow::one_report_per_target(&[report(35), report(40)], &[35, 40]).is_ok());
     assert!(shadow::one_report_per_target(&[report(40), report(35)], &[35, 40]).is_ok());
     for (case, reports, targets) in [
@@ -325,6 +325,7 @@ async fn run(
     previous: i64,
     targets: &[i64],
     compare: Option<u64>,
+    corpus: bool,
 ) -> Result<Vec<Compared>> {
     let _ = tracing_subscriber::fmt()
         .with_env_filter("bigname_project::batch=info,bigname_project::families=info")
@@ -442,7 +443,13 @@ async fn run(
         );
         if compare.is_some() {
             // The family readers beside the served readers at the same publication.
-            let report = shadow::compare(pool, CHAIN, number).await?;
+            // With `corpus`, the comparison also reads the fixture corpus's expected counts at
+            // this publication, which the corpus test asserts after the run.
+            let options = shadow::Options {
+                corpus,
+                ..shadow::Options::default()
+            };
+            let report = shadow::compare_with(pool, CHAIN, number, options).await?;
             report.print(number);
             ensure!(
                 report.mismatched == 0,

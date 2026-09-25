@@ -1519,7 +1519,9 @@ async fn an_unnamed_release_expiry_is_checked_against_the_log() -> Result<()> {
 /// Codex thread PRRT_kwDOSJpxAs6l8A2X: the corpus expectation reads the same publication-visible
 /// events as the comparison. An unnamed path-expiry release counts its name on eight fields; the
 /// release made a candidate, or moved to an orphaned hash of its block, counts nothing, and a
-/// later grant that is a candidate does not stop it counting.
+/// later grant that is a candidate does not stop it counting. Pro Q9 on 6c8bdf8b: it also counts
+/// exactly the names the harness compares, so a name_current row the serving reader excludes
+/// counts nothing.
 #[tokio::test]
 async fn the_corpus_expectation_reads_the_published_log_only() -> Result<()> {
     use shadow_support::compare::corpus_expectation;
@@ -1529,6 +1531,7 @@ async fn the_corpus_expectation_reads_the_published_log_only() -> Result<()> {
         "unactivated",
         "wrong lineage",
         "candidate later grant",
+        "stale name",
     ] {
         let fixture = Fixture::new("families_shadow_corpus_expectation", 20).await?;
         let k1 = uuid(1);
@@ -1590,10 +1593,18 @@ async fn the_corpus_expectation_reads_the_published_log_only() -> Result<()> {
                 .execute(&fixture.pool)
                 .await?;
             }
+            "stale name" => {
+                sqlx::query(
+                    "UPDATE name_current SET canonicality_summary =
+                         canonicality_summary || '{\"state\": \"orphaned\"}'::jsonb",
+                )
+                .execute(&fixture.pool)
+                .await?;
+            }
             _ => {}
         }
         let expected = corpus_expectation(&fixture.pool, CHAIN, 16).await?;
-        let counted = !matches!(case, "unactivated" | "wrong lineage");
+        let counted = !matches!(case, "unactivated" | "wrong lineage" | "stale name");
         assert_eq!(
             expected.len(),
             if counted { 8 } else { 0 },
@@ -2211,5 +2222,58 @@ async fn every_name_gets_the_same_result_in_any_chunk() -> Result<()> {
     );
     assert_eq!(reports[0], reports[1]);
     assert_eq!(reports[0], reports[2]);
+    fixture.cleanup().await
+}
+
+/// Pro Q9 on 6c8bdf8b: the corpus expectation is read by the comparison itself, at the
+/// publication its report is for, rather than once after every target has run. Replacing the
+/// release's block with another at the same height afterwards removes the release from the
+/// log, so a later read counts nothing, but the report keeps what its own publication gave.
+#[tokio::test]
+async fn the_corpus_expectation_is_read_at_the_report_publication() -> Result<()> {
+    use shadow_support::compare::{Options, compare_with, corpus_expectation};
+    const REPLACEMENT: &str = "0x00000000000000000000000000000000000000000000000000000000000bee14";
+    let fixture = Fixture::new("families_shadow_corpus_snapshot", 20).await?;
+    let k1 = uuid(1);
+    v2_binding(&fixture, &k1).await?;
+    v2(
+        &fixture,
+        10,
+        "RegistrationGranted",
+        Some(&k1),
+        json!({"status": "registered", "registrant": ALICE, "expiry": 1_800_000_100u64}),
+    )
+    .await?;
+    unnamed_path_expiry(&fixture, "path-expiry", 14, &k1, 1_800_000_150).await?;
+    shadow_support::publish(&fixture, 16).await?;
+    let options = Options {
+        corpus: true,
+        ..Options::default()
+    };
+    let report = compare_with(&fixture.pool, CHAIN, 16, options).await?;
+    let recorded = report.corpus_expected.expect("read with the report");
+    assert_eq!(recorded.len(), 8, "{recorded:?}");
+    sqlx::query(
+        "UPDATE chain_lineage SET canonicality_state = 'orphaned'
+         WHERE chain_id = $1 AND block_number = 14",
+    )
+    .bind(CHAIN)
+    .execute(&fixture.pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO chain_lineage (chain_id, block_hash, parent_hash, block_number,
+             block_timestamp, canonicality_state)
+         VALUES ($1, $2, $3, 14, to_timestamp(1800000168), 'canonical')",
+    )
+    .bind(CHAIN)
+    .bind(REPLACEMENT)
+    .bind(support::hash(13))
+    .execute(&fixture.pool)
+    .await?;
+    assert!(
+        corpus_expectation(&fixture.pool, CHAIN, 16)
+            .await?
+            .is_empty()
+    );
     fixture.cleanup().await
 }
