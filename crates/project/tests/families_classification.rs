@@ -194,8 +194,8 @@ async fn resolvers_are_classified_at_their_block_and_again_when_a_declaration_st
     fixture.cleanup().await
 }
 
-// A manifest update changes the admission epoch: every stored resolver is classified again under
-// it, without moving the row's position.
+// A manifest update changes the active manifest set: every stored resolver is classified again
+// under it, without moving the row's position.
 #[tokio::test]
 async fn a_manifest_update_reclassifies_every_resolver_in_place() -> Result<()> {
     let fixture = Fixture::new("families_classification_epoch", 20).await?;
@@ -233,7 +233,7 @@ async fn a_manifest_update_reclassifies_every_resolver_in_place() -> Result<()> 
         ),
         json!({"support_status": "supported", "block_number": 10,
                "event_identity": "ResolverChanged:10:1"}),
-        "reclassified under the new epoch, still at the event that named it"
+        "reclassified under the new manifest set, still at the event that named it"
     );
     assert_ne!(rows[0]["admission_manifests"], before);
     fixture.assert_undo_restores(12).await?;

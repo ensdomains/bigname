@@ -12,6 +12,7 @@ use self::transitions::Transition;
 use super::{
     FamilyMode, FamilyOptions, FamilyOutcome, block,
     input::{self, InputToken, Revision},
+    manifests,
     marker::{self, FamilyMarker},
     reduce,
     repair::{self, NewRepair, Reason, Record, State},
@@ -95,6 +96,14 @@ pub(super) async fn run(
         }
         FamilyMode::Redo { from, .. } if *from < 1 => Some(Reason::of_redo(session)),
         FamilyMode::Normal if attempt > recorded => Some(Reason::OperatorRedo),
+        // Families another binary wrote: a served rebuild whose family run was skipped leaves
+        // them, and nothing else would rebuild them.
+        _ if family.current.is_some()
+            && family.input_content_hash.as_deref()
+                != Some(options.input_content_hash.as_str()) =>
+        {
+            Some(Reason::ContentHashRebuild)
+        }
         _ if family.current.is_none() && rebuilding.is_none() => Some(Reason::ContentHashRebuild),
         _ => None,
     };
@@ -275,6 +284,11 @@ impl Run<'_> {
             .current
             .as_ref()
             .map_or(0, |marker| marker.number + 1);
+        if from > self.target.number {
+            return Ok(());
+        }
+        let manifests =
+            manifests::History::read(self.pool, self.chain_id, self.target.number).await?;
         for number in from..=self.target.number {
             if !self.budget.take(outcome) {
                 return Ok(());
@@ -293,6 +307,7 @@ impl Run<'_> {
                 bootstrap: false,
                 revision,
                 role,
+                manifests: &manifests,
             };
             let (next, stats) = block::apply(self.pool, self.chain_id, number, &plan, self.options)
                 .await

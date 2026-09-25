@@ -63,6 +63,7 @@ async fn apply(pool: &PgPool, number: i64, predecessor: Option<&Marker>) -> crat
         bootstrap: false,
         revision: &NO_INTERPRET,
         role: block::Role::Follow,
+        manifests: &crate::families::manifests::History::default(),
     };
     block::apply(pool, CHAIN, number, &plan, &FamilyOptions::new("guard"))
         .await
@@ -149,6 +150,7 @@ async fn apply_as(
         bootstrap: false,
         revision: &NO_INTERPRET,
         role,
+        manifests: &crate::families::manifests::History::default(),
     };
     block::apply(pool, CHAIN, number, &plan, &FamilyOptions::new("guard"))
         .await
@@ -221,6 +223,7 @@ fn an_active_repair_keeps_the_undo_rows_above_its_trusted_base() {
         completed_sequence: None,
         completed_marker: None,
         completed_input_hash: None,
+        reset_sequence: None,
     };
     assert_eq!(
         record.retention_floor(),

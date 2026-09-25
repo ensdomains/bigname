@@ -2461,8 +2461,8 @@ with the per-block publication describes planned behaviour.
 
 `project_family_marker`: the block and hash a chain's [owned key
 families](#owned-key-family) stand at, the generation (`sequence`) every block
-and undo advances, and the input token, input revision and admission epoch the
-last block read. A block or undo applies only against the generation it
+and undo advances, and the input token, input revision and [active manifest
+set](#active-manifest-set-family-block) key the last block read. A block or undo applies only against the generation it
 planned from.
 
 ## Family undo journal
@@ -2489,3 +2489,22 @@ the Interpret row's `input_content_hash` and `redo_attempt_generation` a family
 block read inside its own transaction, recorded on the family marker; nothing
 while Interpret is in redo, and the block then waits. Distinct from the retired [raw-log input
 revision](#input-revision-raw-log-input-revision).
+
+## Active manifest set (family block)
+
+the manifests a family block classifies resolvers under: for every manifest
+the chain reads, its latest `SourceManifestUpdated` event at or below the block
+(or with no block) on the readable lineage, and those that are active with a
+payload. The block records the set's key, `manifest_id:event_id` per manifest,
+as `admission_manifests`; a different key reclassifies every stored resolver. A
+family run reads the manifest updates once, before its first block. Distinct
+from the retired [admission epoch](#admission-epoch).
+
+## Canonical event order
+
+the one order Project applies a chain's events in (D12): block number, then
+transaction index, then log index, then `event_identity` compared as bytes
+(`COLLATE "C"` in SQL). A synthesised event has no transaction or log position
+and sorts before every transaction of its block. Owned key family reducers,
+the dedupe of repeated deliveries and every position comparison use it
+([projections](projections.md#owned-key-families)).
