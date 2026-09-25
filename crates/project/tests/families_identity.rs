@@ -6,7 +6,7 @@ mod families_support;
 
 use anyhow::Result;
 use bigname_project::families::FamilyMode;
-use families_support::{Fixture, uuid};
+use families_support::{CHAIN, Event, Fixture, uuid};
 use serde_json::{Value, json};
 
 const REGISTRY: &str = "0x00000000000000000000000000000000000000e1";
@@ -87,6 +87,80 @@ async fn a_name_keeps_its_migration_and_each_arms_epoch_start() -> Result<()> {
         columns(start, &["block_number", "authority_kind", "resource_id"]),
         json!({"block_number": 11, "authority_kind": "registry_only", "resource_id": resource}),
         "the arm keeps its latest epoch start"
+    );
+    fixture.assert_undo_restores(12).await?;
+    fixture.assert_rebuild_equal(12).await?;
+    fixture.cleanup().await
+}
+
+/// F1 keys a name per chain, like every other family table, so one chain's run neither reads nor
+/// overwrites another chain's row for the same logical name. Today a logical name's surface
+/// belongs to one chain (name_surfaces keys on logical_name_id alone and normalized_events
+/// references it by chain), so the test drops that reference to let a second chain carry the
+/// name. Each chain then reads only its own epoch start.
+#[tokio::test]
+async fn each_chain_keeps_its_own_epoch_start_for_one_name() -> Result<()> {
+    const OTHER: &str = "other-chain";
+    let fixture = Fixture::new("families_identity_chain_key", 20).await?;
+    fixture.lineage(OTHER, 20).await?;
+    sqlx::query(
+        "ALTER TABLE normalized_events
+             DROP CONSTRAINT normalized_events_chain_id_logical_name_id_fkey",
+    )
+    .execute(&fixture.pool)
+    .await?;
+    fixture
+        .write(
+            10,
+            1,
+            "AuthorityEpochChanged",
+            "ens_v1_registrar_l1",
+            Some(&name(1)),
+            None,
+            json!({"authority_kind": "registrar"}),
+            REGISTRAR,
+        )
+        .await?;
+    let named = name(1);
+    fixture
+        .event(
+            Event::new(
+                "other:AuthorityEpochChanged:11:1",
+                11,
+                1,
+                "AuthorityEpochChanged",
+                "ens_v1_registry_l1",
+            )
+            .on(OTHER)
+            .name(&named)
+            .after(json!({"authority_kind": "registry_only"}))
+            .raw(json!({"emitting_address": REGISTRY})),
+        )
+        .await?;
+    fixture.apply(12, FamilyMode::Normal).await;
+    fixture.apply_on(OTHER, 12).await;
+    let starts: Vec<(String, Value)> = sqlx::query_as(
+        "SELECT chain_id, authority_start_positions -> 'ens_v1'
+         FROM project_name_state WHERE logical_name_id = $1 ORDER BY chain_id",
+    )
+    .bind(&named)
+    .fetch_all(&fixture.pool)
+    .await?;
+    let starts: Vec<Value> = starts
+        .into_iter()
+        .map(|(chain, start)| {
+            json!({"chain": chain, "block_number": start["block_number"],
+                   "authority_kind": start["authority_kind"]})
+        })
+        .collect();
+    let mut expected = vec![
+        json!({"chain": CHAIN, "block_number": 10, "authority_kind": "registrar"}),
+        json!({"chain": OTHER, "block_number": 11, "authority_kind": "registry_only"}),
+    ];
+    expected.sort_by_key(|start| start["chain"].as_str().map(str::to_owned));
+    assert_eq!(
+        starts, expected,
+        "each chain keeps its own row and epoch start"
     );
     fixture.assert_undo_restores(12).await?;
     fixture.assert_rebuild_equal(12).await?;

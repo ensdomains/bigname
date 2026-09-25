@@ -120,6 +120,13 @@ impl Fixture {
             .execute(&mut *connection)
             .await?;
         drop(connection);
+        let fixture = Self { database, pool };
+        fixture.lineage(CHAIN, blocks).await?;
+        Ok(fixture)
+    }
+
+    /// Canonical blocks `0..=blocks` of `chain`, with the same hashes and times as `CHAIN`'s.
+    pub async fn lineage(&self, chain: &str, blocks: i64) -> Result<()> {
         sqlx::query(
             "INSERT INTO chain_lineage (chain_id, block_hash, parent_hash, block_number,
                  block_timestamp, canonicality_state)
@@ -128,11 +135,27 @@ impl Fixture {
                     block, to_timestamp(1800000000 + block * 12), 'canonical'
              FROM generate_series(0, $2) block",
         )
-        .bind(CHAIN)
+        .bind(chain)
         .bind(blocks)
-        .execute(&pool)
+        .execute(&self.pool)
         .await?;
-        Ok(Self { database, pool })
+        Ok(())
+    }
+
+    /// One family run of `chain` to `target` in normal mode.
+    pub async fn apply_on(&self, chain: &str, target: i64) -> FamilyOutcome {
+        let token = families::input_token(&self.pool, chain)
+            .await
+            .expect("the input token reads");
+        families::apply(
+            &self.pool,
+            chain,
+            &marker(target),
+            FamilyMode::Normal,
+            &token,
+            &FamilyOptions::new(CONTENT_HASH),
+        )
+        .await
     }
 
     pub async fn cleanup(self) -> Result<()> {
@@ -219,7 +242,7 @@ impl Fixture {
         .bind(event.resource)
         .bind(event.kind)
         .bind(event.family)
-        .bind(CHAIN)
+        .bind(event.chain)
         .bind(event.block)
         .bind(hash(event.block))
         .bind(transaction_hash)
@@ -234,6 +257,16 @@ impl Fixture {
 
     /// A name surface, which events that carry a logical name reference.
     pub async fn surface(&self, logical_name_id: &str, namehash: &str) -> Result<()> {
+        self.surface_on(CHAIN, logical_name_id, namehash).await
+    }
+
+    /// A name surface of `chain`.
+    pub async fn surface_on(
+        &self,
+        chain: &str,
+        logical_name_id: &str,
+        namehash: &str,
+    ) -> Result<()> {
         sqlx::query(
             "INSERT INTO name_surfaces (logical_name_id, namespace, raw_name, raw_labels,
                  dns_encoded_name, namehash, labelhashes, normalizer_version, visibility_state,
@@ -244,7 +277,7 @@ impl Fixture {
         )
         .bind(logical_name_id)
         .bind(namehash)
-        .bind(CHAIN)
+        .bind(chain)
         .bind(hash(0))
         .execute(&self.pool)
         .await?;
@@ -270,6 +303,7 @@ impl Fixture {
 
 pub struct Event<'a> {
     pub identity: &'a str,
+    pub chain: &'a str,
     pub block: i64,
     pub position: Option<(i64, i64)>,
     pub kind: &'a str,
@@ -285,6 +319,7 @@ impl<'a> Event<'a> {
     pub fn new(identity: &'a str, block: i64, log: i64, kind: &'a str, family: &'a str) -> Self {
         Self {
             identity,
+            chain: CHAIN,
             block,
             position: Some((0, log)),
             kind,
@@ -295,6 +330,11 @@ impl<'a> Event<'a> {
             after: json!({}),
             raw: json!({"emitting_address": "0x00000000000000000000000000000000000000a4"}),
         }
+    }
+
+    pub fn on(mut self, chain: &'a str) -> Self {
+        self.chain = chain;
+        self
     }
 
     pub fn name(mut self, name: &'a str) -> Self {

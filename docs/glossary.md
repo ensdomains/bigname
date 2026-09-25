@@ -2541,9 +2541,29 @@ from the retired [admission epoch](#admission-epoch).
 
 ## Canonical event order
 
-the one order Project applies a chain's events in (D12): block number, then
-transaction index, then log index, then `event_identity` compared as bytes
-(`COLLATE "C"` in SQL). A synthesised event has no transaction or log position
-and sorts before every transaction of its block. Owned key family reducers,
-the dedupe of repeated deliveries and every position comparison use it
-([projections](projections.md#owned-key-families)).
+the one order Project applies a chain's events in (D12, amended by Tate on
+2026-09-26): block number, then transaction index, then log index, then, for an
+event with both a transaction and a log index, the emission ordinal its
+`event_identity` ends with, then `event_identity` compared as bytes
+(`COLLATE "C"` in SQL). The emission ordinal is the identity's final
+`:`-separated segment when that is a nonempty run of ASCII digits no greater
+than 4294967295, leading zeros allowed; any other suffix has none, and none
+sorts first. Several facts of one log therefore apply in the order the adapter
+wrote them: a NameWrapper transfer's resource-scoped facts (the delegate
+approval clear, the old holder's revoke, the new holder's grant, a retained
+delegate's re-grant) end on what the adapter wrote last. A synthesised event
+has no transaction or log position, sorts before every transaction of its
+block and keeps the identity byte order, since its trailing number is not an
+emission index. Ordinals are per source, so facts of two sources at one log
+interleave by ordinal, and that cross-source order is a disclosed
+precondition: where two sources write one key from one log, the fact with the
+higher ordinal (then the higher identity bytes) wins, and it may differ from
+the served read in provenance only. Its one
+known instance is the NameWrapped registry-node pointer
+([projections](projections.md#owned-key-families)). Owned key family reducers, the
+dedupe of repeated deliveries and every position comparison use it
+([projections](projections.md#owned-key-families)). A served reader ported to
+it (step 7) must parse the ordinal the same way:
+`CASE WHEN m[1]::numeric <= 4294967295 THEN m[1]::bigint END` over
+`regexp_match(event_identity, ':([0-9]+)$') m`, only when both indexes are
+present, ordered `NULLS FIRST`; never a bare bigint cast.

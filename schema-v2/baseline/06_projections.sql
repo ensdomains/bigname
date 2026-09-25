@@ -1268,7 +1268,7 @@ CREATE TABLE IF NOT EXISTS project_name_state (
     migration_position jsonb,
     migrated_at timestamptz,
     authority_start_positions jsonb NOT NULL DEFAULT '{}'::jsonb,
-    PRIMARY KEY (namespace, logical_name_id),
+    PRIMARY KEY (chain_id, namespace, logical_name_id),
     CHECK ((transaction_index IS NULL) = (log_index IS NULL))
 );
 COMMENT ON TABLE project_name_state IS
@@ -1278,7 +1278,7 @@ COMMENT ON COLUMN project_name_state.namespace IS
 COMMENT ON COLUMN project_name_state.logical_name_id IS
     'This value identifies the name.';
 COMMENT ON COLUMN project_name_state.chain_id IS
-    'This value is the chain whose events wrote the row.';
+    'This value is the chain whose events wrote the row; each chain keeps its own row for a name.';
 COMMENT ON COLUMN project_name_state.block_number IS
     'This value is the block number of the event that last wrote the row.';
 COMMENT ON COLUMN project_name_state.transaction_index IS

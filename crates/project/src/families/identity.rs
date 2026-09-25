@@ -61,17 +61,19 @@ async fn names(
         })
         .filter_map(|event| Some((event, event.logical_name_id.as_deref()?)))
         .collect();
+    let key = |event: &BlockEvent, name: &str| {
+        key_of(
+            table,
+            [json!(context.chain_id), json!(event.namespace), json!(name)],
+        )
+    };
     let keys = relevant
         .iter()
-        .map(|(event, name)| key_of(table, [json!(event.namespace), json!(name)]))
+        .map(|(event, name)| key(event, name))
         .collect();
     load_rows(transaction, rows, table, keys).await?;
     for (event, name) in relevant {
-        let mut row = current(
-            rows,
-            table,
-            &key_of(table, [json!(event.namespace), json!(name)]),
-        );
+        let mut row = current(rows, table, &key(event, name));
         set(&mut row, "chain_id", context.chain_id);
         if event.event_kind == "MigrationApplied" {
             set(
