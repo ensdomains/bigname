@@ -60,6 +60,33 @@ pub async fn load_name_facts(
     chain_id: &str,
     names: &[NameInput],
 ) -> Result<Vec<NameFacts>> {
+    load_name_facts_replacing(pool, chain_id, names, &[]).await
+}
+
+/// Each loaded binding candidate whose binding id one of `replaced` carries, taken from
+/// `replaced` instead.
+fn replace(loaded: Vec<BindingCandidate>, replaced: &[BindingCandidate]) -> Vec<BindingCandidate> {
+    loaded
+        .into_iter()
+        .map(|candidate| {
+            replaced
+                .iter()
+                .find(|other| other.surface_binding_id == candidate.surface_binding_id)
+                .cloned()
+                .unwrap_or(candidate)
+        })
+        .collect()
+}
+
+/// `load_name_facts` with the binding candidates of `replaced` standing in for the stored rows
+/// of the same binding id, everything they reach loaded as if stored: the harness's
+/// counterfactual for a candidate step 2 wrote differently. The shadow read never replaces one.
+pub async fn load_name_facts_replacing(
+    pool: &PgPool,
+    chain_id: &str,
+    names: &[NameInput],
+    replaced: &[BindingCandidate],
+) -> Result<Vec<NameFacts>> {
     let ids: Vec<String> = names
         .iter()
         .map(|name| name.logical_name_id.clone())
@@ -76,6 +103,7 @@ pub async fn load_name_facts(
     .iter()
     .filter_map(BindingCandidate::from_row)
     .collect();
+    let candidates = replace(candidates, replaced);
     let summaries = json_rows(
         pool,
         "/* storage:families.control.lifecycle.triple_summaries */ SELECT to_jsonb(summary)
@@ -201,7 +229,7 @@ pub async fn load_name_facts(
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
-    let lease_candidates: Vec<BindingCandidate> = json_rows(
+    let mut lease_candidates: Vec<BindingCandidate> = json_rows(
         pool,
         "/* storage:families.control.lifecycle.lease_candidates */ SELECT to_jsonb(candidate)
          FROM bigname_phase.project_binding_candidate candidate
@@ -215,6 +243,20 @@ pub async fn load_name_facts(
     .iter()
     .filter_map(BindingCandidate::from_row)
     .collect();
+    lease_candidates = replace(lease_candidates, replaced);
+    for candidate in replaced {
+        let reaches = |resource: Option<&str>| {
+            resource.is_some_and(|lease| leases.iter().any(|l| l == lease))
+        };
+        if (reaches(Some(&candidate.resource_id))
+            || reaches(candidate.wrapped_registrar_resource_id.as_deref()))
+            && !lease_candidates
+                .iter()
+                .any(|other| other.surface_binding_id == candidate.surface_binding_id)
+        {
+            lease_candidates.push(candidate.clone());
+        }
+    }
 
     let wrappers = load_wrapper_rows(pool, chain_id, &resource_list).await?;
     let authority_kinds: Vec<(String, Option<String>)> = sqlx::query_as(

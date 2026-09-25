@@ -277,3 +277,68 @@ async fn a_row_several_names_match_is_named_for_none_of_them() -> Result<()> {
     assert_eq!(trace(&fixture, 16, &name(1)).await?["staged"], Value::Null);
     fixture.cleanup().await
 }
+
+/// A NameWrapper SurfaceBound at another log than its binding's provenance. Step 2 pairs a
+/// binding with the SurfaceBound at the transaction and log index its provenance records
+/// (crates/project/src/families/identity.rs `opening_event`), so the binding at log 1 has no
+/// opening event here and its candidate carries no wrapper metadata; pass two cannot name the
+/// unnamed lease rows for the name and the registration keeps nothing of the lease. Today's
+/// stage reads the NameWrapper SurfaceBound itself and serves the lease. The harness counts
+/// each differing field under `binding_candidate_pairs_its_surface_bound_by_log` only when the
+/// families, with the candidate given its block's SurfaceBound, give the served value.
+#[tokio::test]
+async fn a_wrapper_surface_bound_at_another_log_leaves_the_candidate_unpaired() -> Result<()> {
+    let fixture = Fixture::new("families_shadow_admission_unpaired_wrapper", 20).await?;
+    let (lease, wrapper) = (uuid(1), uuid(2));
+    fixture
+        .binding(&uuid(100), &name(1), &wrapper, "ens_v1", 9, 1, None)
+        .await?;
+    let first = name(1);
+    fixture
+        .event(wrapper_bound("wrap-1", &first, &wrapper, &lease))
+        .await?;
+    fixture
+        .event(
+            Event::new("scope-10", 10, 3, "PermissionScopeChanged", V1_WRAPPER)
+                .name(&first)
+                .resource(&wrapper)
+                .after(
+                    json!({"source_event": "NameWrapped", "node": node(1), "fuses": 0,
+                              "wrapper_state": "wrapped", "expiry": 2_200_000_000u64}),
+                )
+                .raw(json!({"emitting_address": WRAPPER})),
+        )
+        .await?;
+    fixture.resource(&lease).await?;
+    unnamed(
+        &fixture,
+        "grant-10",
+        10,
+        "RegistrationGranted",
+        &lease,
+        json!({"status": "registered", "registrant": ALICE, "expiry": 2_000_000_000u64}),
+    )
+    .await?;
+    let report = publish_and_compare(&fixture, 16).await?;
+    let counted: Vec<String> = [
+        "control/expiry",
+        "control/registrant",
+        "control/status",
+        "registration/authority_kind",
+        "registration/expiry",
+        "registration/latest_event_kind",
+        "registration/registered_at",
+        "registration/registrant",
+        "registration/resource_id",
+    ]
+    .iter()
+    .map(|field| format!("binding_candidate_pairs_its_surface_bound_by_log:{field}"))
+    .collect();
+    let known: Vec<(&str, usize)> = counted.iter().map(|field| (field.as_str(), 1)).collect();
+    assert_counts(&report, &known, &[]);
+    let (served, shadow) = shadow_support::name(&fixture, 16, &name(1)).await?;
+    assert_eq!(served.registration("resource_id"), json!(lease));
+    assert_eq!(shadow.registration["resource_id"], Value::Null);
+    assert_eq!(trace(&fixture, 16, &name(1)).await?["staged"], Value::Null);
+    fixture.cleanup().await
+}

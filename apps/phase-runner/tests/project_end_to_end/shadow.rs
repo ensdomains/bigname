@@ -60,6 +60,17 @@
 //!   The reader decides both with the one resolved arm and presents the release whole (ruling
 //!   R1). A field passes only when no arm is selected, the shadow presents the whole release,
 //!   and the served value is what the reader traced for the raw-arm presentation.
+//! - `binding_candidate_pairs_its_surface_bound_by_log`: step 2 pairs a binding with the
+//!   SurfaceBound at the transaction and log index its provenance records
+//!   (crates/project/src/families/identity.rs `opening_event`), and a binding with no such event
+//!   gets a candidate with no wrapper metadata, so the NameWrapper staging pass cannot name the
+//!   wrapped lease's unnamed registrar rows for it. Today's stage reads the NameWrapper
+//!   SurfaceBound itself (name_authority/stage.rs:149-198). A field passes only when the
+//!   candidate has no opening SurfaceBound, its block has a NameWrapper SurfaceBound of the same
+//!   name and resource that recorded a lease, and the families loaded again with the candidate
+//!   given that event's wrapper metadata give exactly the served value. The seed corpus binds at
+//!   log 1 and wraps at log 5; whether a chain binding can carry another log than its
+//!   SurfaceBound is a step 2 question, reported rather than patched.
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::Mutex,
@@ -73,7 +84,8 @@ use bigname_storage::{
         lifecycle::view::registration_lapsed,
         lifecycle::{
             AuthoritySelection, CONTROL_FIELDS, Clock, NameFacts, NameInput, REGISTRATION_FIELDS,
-            ShadowName, evaluate, load_name_facts, load_shadow_names, membership::maxima_of,
+            ShadowName, evaluate, load_name_facts, load_name_facts_replacing, load_shadow_names,
+            membership::maxima_of,
         },
         permissions::{
             ResourceInput, ShadowPermissions, effective_operator_rows, grant_json,
@@ -84,7 +96,7 @@ use bigname_storage::{
             NameAttribution, load_observations, load_registry_nodes, ownerless_registry,
             registry_bindings, registry_generation,
         },
-        rows::LifecycleEvent,
+        rows::{BindingCandidate, LifecycleEvent},
     },
     load_effective_permissions_by_resource_ids, load_name_current_by_logical_name_ids,
 };
@@ -764,7 +776,27 @@ async fn name_excuses(
         return Ok(out);
     };
 
+    // The same families with each binding candidate step 2 left unpaired given its block's
+    // NameWrapper SurfaceBound of the same name and resource, as today's stage reads it.
     let open = |out: &[Excuse], index: usize| out[index] == Excuse::None;
+    let paired = wrapper_bounds_at_another_log(pool, chain, &facts).await?;
+    if !paired.is_empty() {
+        let counterfactual =
+            load_name_facts_replacing(pool, chain, std::slice::from_ref(input), &paired)
+                .await?
+                .pop()
+                .map(|facts| evaluate(&facts, clock));
+        if let Some(counterfactual) = counterfactual {
+            for (index, diff) in diffs.iter().enumerate() {
+                if open(&out, index)
+                    && same(&shadow_field(&counterfactual, &diff.field), &diff.served)
+                {
+                    out[index] = Excuse::Known("binding_candidate_pairs_its_surface_bound_by_log");
+                }
+            }
+        }
+    }
+
     // The same families read in today's generated-id order at the selectors that use it.
     if out.contains(&Excuse::None) {
         let identities: Vec<String> = facts
@@ -787,6 +819,68 @@ async fn name_excuses(
     }
     Ok(out)
 }
+
+/// The name's binding candidates that step 2 wrote with no opening SurfaceBound, each given the
+/// wrapper metadata of the latest NameWrapper SurfaceBound of its name and resource in its block,
+/// read from the event log. Step 2 pairs a binding with the SurfaceBound at the transaction and
+/// log index its provenance records (crates/project/src/families/identity.rs `opening_event`);
+/// today's stage reads the NameWrapper SurfaceBound itself (name_authority/stage.rs:149-158).
+async fn wrapper_bounds_at_another_log(
+    pool: &PgPool,
+    chain: &str,
+    facts: &NameFacts,
+) -> Result<Vec<BindingCandidate>> {
+    let mut out = Vec::new();
+    for candidate in &facts.candidates {
+        if candidate.surface_bound_position.is_some()
+            || candidate.wrapped_registrar_resource_id.is_some()
+        {
+            continue;
+        }
+        let row: Option<WrapperBound> = sqlx::query_as(
+            "SELECT after_state ->> 'wrapped_registrar_resource_id',
+                    lower(after_state ->> 'node'), transaction_hash,
+                    lower(raw_fact_ref ->> 'emitting_address'),
+                    NULLIF(after_state ->> 'authority_kind', ''),
+                    (after_state ->> 'state_derived')::boolean
+             FROM normalized_events
+             WHERE chain_id = $1 AND event_kind = 'SurfaceBound'
+               AND source_family = 'ens_v1_wrapper_l1'
+               AND logical_name_id = $2 AND resource_id = $3::uuid AND block_number = $4
+               AND after_state ->> 'wrapped_registrar_resource_id' IS NOT NULL
+               AND canonicality_state IN ('canonical', 'safe', 'finalized')
+             ORDER BY transaction_index DESC NULLS LAST, log_index DESC NULLS LAST,
+                      convert_to(event_identity, 'UTF8') DESC
+             LIMIT 1",
+        )
+        .bind(chain)
+        .bind(&candidate.logical_name_id)
+        .bind(&candidate.resource_id)
+        .bind(candidate.block_number)
+        .fetch_optional(pool)
+        .await?;
+        if let Some((lease, node, transaction_hash, emitter, kind, state_derived)) = row {
+            let mut paired = candidate.clone();
+            paired.wrapped_registrar_resource_id = lease;
+            paired.node = node;
+            paired.transaction_hash = transaction_hash;
+            paired.emitting_address = emitter;
+            paired.authority_kind = kind;
+            paired.state_derived = state_derived;
+            out.push(paired);
+        }
+    }
+    Ok(out)
+}
+
+type WrapperBound = (
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<bool>,
+);
 
 /// The generated ids of events, by identity.
 pub async fn generated_ids(
@@ -986,7 +1080,12 @@ pub async fn resource_excuses(
 /// - an ENSv2 name whose interpreter path-expiry release (the `expired` rows, no name, the token
 ///   resource) is not followed on that resource by a grant, reservation or named release is served
 ///   active today and released by the families: eight fields each, and the two control-owner
-///   fields again for those whose token was transferred before the target.
+///   fields again for those whose token was transferred before the target;
+/// - a wrapped name whose surface binding records another log than its NameWrapper SurfaceBound
+///   (the seed binds at log 1 and wraps at log 5) has a binding candidate with no wrapper
+///   metadata, so the families leave its unnamed lease rows unstaged where today's stage names
+///   them: the lease's resource, authority kind and registration time once it is granted, the
+///   expiry and latest kind again once it is renewed, the registrant again once its token moved.
 ///
 /// No same-block delta may pass on the corpus.
 pub async fn assert_fixture_corpus_counts(pool: &PgPool) -> Result<()> {
@@ -1022,6 +1121,31 @@ pub async fn assert_fixture_corpus_counts(pool: &PgPool) -> Result<()> {
         .bind(target)
         .fetch_all(pool)
         .await?;
+        let (granted, renewed, moved): (i64, i64, i64) = sqlx::query_as(
+            "SELECT count(*) FILTER (WHERE lease.granted), count(*) FILTER (WHERE lease.renewed),
+                    count(*) FILTER (WHERE lease.moved)
+             FROM name_current name
+             JOIN surface_bindings binding ON binding.logical_name_id = name.logical_name_id
+             JOIN normalized_events bound
+               ON bound.event_kind = 'SurfaceBound' AND bound.source_family = 'ens_v1_wrapper_l1'
+              AND bound.logical_name_id = binding.logical_name_id
+              AND bound.resource_id = binding.resource_id
+              AND bound.block_number = binding.block_number
+              AND bound.log_index IS DISTINCT FROM (binding.provenance ->> 'log_index')::bigint
+             CROSS JOIN LATERAL (
+                 SELECT bool_or(event.event_kind = 'RegistrationGranted') AS granted,
+                        bool_or(event.event_kind = 'RegistrationRenewed') AS renewed,
+                        bool_or(event.event_kind = 'TokenControlTransferred') AS moved
+                 FROM normalized_events event
+                 WHERE event.resource_id::text = bound.after_state ->> 'wrapped_registrar_resource_id'
+                   AND event.logical_name_id IS NULL
+                   AND event.source_family = 'ens_v1_registrar_l1'
+                   AND event.block_number <= $1) lease
+             WHERE binding.block_number <= $1",
+        )
+        .bind(target)
+        .fetch_one(pool)
+        .await?;
         let cause = "served_membership_skips_unnamed_path_expiry";
         let transferred = expired
             .iter()
@@ -1045,6 +1169,28 @@ pub async fn assert_fixture_corpus_counts(pool: &PgPool) -> Result<()> {
         for field in ["control/latest_event_kind", "control/registry_owner"] {
             if transferred > 0 {
                 expected.insert(format!("{cause}:{field}"), transferred);
+            }
+        }
+        let unpaired = "binding_candidate_pairs_its_surface_bound_by_log";
+        for (fields, count) in [
+            (
+                &[
+                    "registration/resource_id",
+                    "registration/authority_kind",
+                    "registration/registered_at",
+                ][..],
+                granted,
+            ),
+            (
+                &["registration/expiry", "registration/latest_event_kind"][..],
+                renewed,
+            ),
+            (&["registration/registrant"][..], moved),
+        ] {
+            for field in fields {
+                if count > 0 {
+                    expected.insert(format!("{unpaired}:{field}"), usize::try_from(count)?);
+                }
             }
         }
         anyhow::ensure!(
