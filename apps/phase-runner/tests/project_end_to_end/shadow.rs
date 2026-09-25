@@ -17,7 +17,8 @@
 //!   and reading the same families again in today's generated-id order where today's builders
 //!   use it (ENSv2 membership by block and id, the laterals by block, transaction, log and id),
 //!   every position kept so the authority admission is unchanged, the node's owner-setting
-//!   events and F1's epoch starts ordered by their generated ids too, and the association winner of
+//!   events, F1's epoch starts and the binding candidates' SurfaceBounds ordered by their
+//!   generated ids too, and the association winner of
 //!   an affected triple moved only to a grant of the same name, registry and token
 //!   (`v2_lifecycle_events.sql:10-23`), gives exactly the served value for the field. For a
 //!   resource's permission rows and restriction block, the path-expiry drop rule of
@@ -1010,7 +1011,8 @@ async fn bindings_in_todays_order(
 }
 
 /// The positions of the control-block events the lifecycle family does not retain: the node's
-/// owner-setting registry events (`project_registry_owner_event`) and F1's epoch starts.
+/// owner-setting registry events (`project_registry_owner_event`), F1's epoch starts and the
+/// binding candidates' SurfaceBounds, which feed the control owner as registry-only bindings.
 fn control_positions(facts: &NameFacts) -> Vec<Position> {
     let owners = facts
         .registry_node
@@ -1021,7 +1023,11 @@ fn control_positions(facts: &NameFacts) -> Vec<Position> {
         .as_object()
         .into_iter()
         .flat_map(|starts| starts.values().filter_map(Position::from_json));
-    owners.chain(starts).collect()
+    let bounds = facts
+        .candidates
+        .iter()
+        .filter_map(|candidate| candidate.surface_bound_position.clone());
+    owners.chain(starts).chain(bounds).collect()
 }
 
 /// The generated ids of events, by identity.

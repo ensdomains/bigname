@@ -509,3 +509,56 @@ async fn a_registry_only_new_owner_transfer_and_epoch_at_one_log_is_a_same_block
     shadow_support::assert_counts(&report, &[], &delta);
     fixture.cleanup().await
 }
+
+/// Item 4 of the ea047c04..2533ef55 review: a state-derived registry-only SurfaceBound and a
+/// registry AuthorityTransferred at one block, transaction and log, the SurfaceBound pushed
+/// first. Both feed the control owner (build.sql:664-667). The canonical order puts the
+/// SurfaceBound last (its identity sorts after the transfer's) and reports its bound owner;
+/// today's order puts the transfer last (higher id) and reports its owner. The same-block read
+/// orders the binding candidates' SurfaceBound positions by generated id too, so the owner is a
+/// same-block delta.
+#[tokio::test]
+async fn a_registry_only_surface_bound_and_transfer_at_one_log_is_a_same_block_delta() -> Result<()>
+{
+    let fixture = Fixture::new("families_shadow_registry_one_log_bound", 20).await?;
+    let node_resource = uuid(3);
+    fixture
+        .binding(&uuid(100), &name(1), &node_resource, "ens_v1", 10, 9, None)
+        .await?;
+    fixture
+        .write(
+            10,
+            9,
+            "SurfaceBound",
+            "registry_only_binding",
+            Some(&name(1)),
+            Some(&node_resource),
+            json!({"authority_kind": "registry_only", "state_derived": true,
+                   "registry_contract": REGISTRY, "owner": OTHER}),
+            REGISTRY,
+        )
+        .await?;
+    fixture
+        .write(
+            10,
+            9,
+            "AuthorityTransferred",
+            V1_REGISTRY,
+            Some(&name(1)),
+            Some(&node_resource),
+            json!({"node": node(1), "owner": OWNER, "owner_getter": OWNER,
+                   "emitter_role": "registry"}),
+            REGISTRY,
+        )
+        .await?;
+    let report = publish_and_compare(&fixture, 12).await?;
+    let (served, shadow) = shadow_support::name(&fixture, 12, &name(1)).await?;
+    assert_eq!(served.control("registry_owner"), json!(OWNER));
+    assert_eq!(shadow.control["registry_owner"], json!(OTHER));
+    shadow_support::assert_counts(
+        &report,
+        &[],
+        &[("d12_same_block_order:control/registry_owner", 1)],
+    );
+    fixture.cleanup().await
+}
