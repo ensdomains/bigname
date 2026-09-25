@@ -8,6 +8,8 @@ use bigname_metrics::{IntGaugeVec, MetricsRegistry};
 use sqlx::{FromRow, PgPool};
 use tokio::sync::Notify;
 
+use super::project_steps::ProjectStepFeed;
+
 /// Tells the metrics task that a batch committed, so it refreshes the served-lag
 /// gauges soon after the commit instead of at the next refresh tick. This is a
 /// notification, not sampling of every block: commits that arrive together share
@@ -17,6 +19,9 @@ use tokio::sync::Notify;
 pub struct RunnerMetricsFeed {
     committed: Arc<Notify>,
     configured_chains: Arc<Mutex<BTreeSet<String>>>,
+    /// The step of a full-rebuild or redo Project run; the feed is the engine's
+    /// step observer.
+    pub(super) project_steps: ProjectStepFeed,
 }
 
 impl RunnerMetricsFeed {
@@ -26,6 +31,7 @@ impl RunnerMetricsFeed {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .insert(chain.to_owned());
+        self.project_steps.seed_chain(chain);
     }
 
     pub fn batch_committed(&self) {

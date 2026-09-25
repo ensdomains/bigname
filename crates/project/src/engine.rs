@@ -1,6 +1,10 @@
+use std::sync::Arc;
+
 use sqlx::PgPool;
 
-use crate::{ProjectError, Result, builders, integrity, publish, scope, stage};
+use crate::{
+    ProjectError, Result, StepObserver, builders, integrity, publish, scope, stage, steps::Steps,
+};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Marker {
@@ -34,11 +38,20 @@ pub struct BatchOutcome {
 
 pub struct Engine {
     pool: PgPool,
+    step_observer: Option<Arc<dyn StepObserver>>,
 }
 
 impl Engine {
     pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            step_observer: None,
+        }
+    }
+
+    pub fn with_step_observer(mut self, observer: Arc<dyn StepObserver>) -> Self {
+        self.step_observer = Some(observer);
+        self
     }
 
     pub async fn run_batch(&self, request: BatchRequest) -> Result<BatchOutcome> {
@@ -57,7 +70,13 @@ impl Engine {
             })?;
         revalidate_target(&mut transaction, &request.chain_id, &target).await?;
 
-        let row_count = derive(&mut transaction, &request, &target).await?;
+        let long_run = request.mode == RunMode::Redo || request.resume_current.is_none();
+        let steps = Steps::new(
+            self.step_observer.as_deref().filter(|_| long_run),
+            &request.chain_id,
+        );
+        let row_count = derive(&mut transaction, &request, &target, &steps).await?;
+        steps.enter("commit");
         transaction.commit().await.map_err(|error| {
             ProjectError::database("failed to commit atomic project publication", error)
         })?;
@@ -75,9 +94,11 @@ async fn derive(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     request: &BatchRequest,
     target: &Marker,
+    steps: &Steps<'_>,
 ) -> Result<u64> {
     let mut stage_start = std::time::Instant::now();
     let full_rebuild = matches!(request.mode, RunMode::Normal) && request.resume_current.is_none();
+    steps.enter("prepare");
     stage::prepare(transaction, &request.chain_id, target).await?;
     tracing::debug!(
         stage = "prepare",
@@ -85,6 +106,7 @@ async fn derive(
         "Project stage completed"
     );
     stage_start = std::time::Instant::now();
+    steps.enter("scope");
     scope::initialize(
         transaction,
         &request.chain_id,
@@ -104,6 +126,7 @@ async fn derive(
         "Project stage completed"
     );
     stage_start = std::time::Instant::now();
+    steps.enter("inputs");
     stage::inputs(transaction, &request.chain_id, target, full_rebuild).await?;
     tracing::debug!(
         stage = "inputs",
@@ -111,13 +134,14 @@ async fn derive(
         "Project stage completed"
     );
     stage_start = std::time::Instant::now();
-    builders::build_all(transaction, &request.chain_id, target, full_rebuild).await?;
+    builders::build_all(transaction, &request.chain_id, target, full_rebuild, steps).await?;
     tracing::debug!(
         stage = "builders",
         elapsed_ms = stage_start.elapsed().as_millis() as u64,
         "Project stage completed"
     );
     stage_start = std::time::Instant::now();
+    steps.enter("integrity");
     integrity::assert_publishable(transaction, &request.chain_id, target).await?;
     tracing::debug!(
         stage = "integrity",
@@ -125,6 +149,7 @@ async fn derive(
         "Project stage completed"
     );
     stage_start = std::time::Instant::now();
+    steps.enter("publish");
     let row_count = publish::swap(transaction, &request.chain_id, full_rebuild).await?
         + builders::child_registrations::publish(
             transaction,
