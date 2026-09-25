@@ -143,6 +143,29 @@ fn swapped_repeated_address_keys_differ_per_occurrence() {
 }
 
 #[test]
+fn a_changed_binding_is_one_entry_removed_and_one_added() {
+    let bound = |binding: u128| AddressRecordCurrentEntry {
+        surface_binding_id: Some(uuid::Uuid::from_u128(binding)),
+        ..address("a", "1")
+    };
+    let differences = compare_address_records(&[bound(1)], &[bound(2)]);
+    let key = |binding: u128| {
+        format!(
+            "entries[a|{}|{}]",
+            uuid::Uuid::nil(),
+            uuid::Uuid::from_u128(binding)
+        )
+    };
+    let sides: Vec<(String, bool, bool)> = differences
+        .into_iter()
+        .map(|d| (d.field, d.today.is_some(), d.family.is_some()))
+        .collect();
+    assert_eq!(sides, [(key(1), true, false), (key(2), false, true)]);
+}
+
+/// Robustness for supplied sequences: two bindings of one name in swapped order stay apart. The
+/// normal Surface query lists one row per name, so this is not evidence that it returns both.
+#[test]
 fn entries_of_one_name_under_two_bindings_are_not_paired_by_position() {
     let bound = |binding: u128, value: &str| AddressRecordCurrentEntry {
         surface_binding_id: Some(uuid::Uuid::from_u128(binding)),

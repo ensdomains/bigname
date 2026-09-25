@@ -357,9 +357,11 @@ fn address_entry(entry: &AddressRecordCurrentEntry) -> Value {
 
 /// The complete sequence of names resolving to an address, every page of both readers, entry by
 /// entry under `<logical name id>|<record resource id>|<surface binding id or ->`, then the order
-/// of the common entries. The surface binding keeps the entries a surface dedupe lists for one
-/// name and record resource apart, so they are never paired by position. A missing entry is one
-/// difference and every later entry is still compared.
+/// of the common entries. That key aligns entries across the two sides for the comparison; it is
+/// not today's row identity (one row per address, coin type and logical name). An entry whose
+/// binding or record resource changed therefore shows as one keyed entry removed and another
+/// added, not as a field change. A missing entry is one difference and every later entry is
+/// still compared.
 pub fn compare_address_records(
     today: &[AddressRecordCurrentEntry],
     family: &[AddressRecordCurrentEntry],
