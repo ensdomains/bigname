@@ -148,7 +148,8 @@ pub(crate) fn is_mirror_pointer(
 }
 
 /// Walk the ENSv1 registry for a mirror pointer: at most one `project_registry_pointer` probe per
-/// label of the queried name, then one classification probe for the nearest resolver.
+/// label of the queried name, then one classification probe for the nearest resolver. A tie at one
+/// depth follows the canonical event order, never the generated event id.
 pub(crate) async fn evaluate_family_mirror(
     pool: &PgPool,
     chain_id: &str,
@@ -217,7 +218,9 @@ async fn nearest(
          JOIN bigname_phase.project_registry_pointer registry
            ON registry.chain_id = $1 AND registry.namespace = surface.namespace
           AND registry.node = walk.node
-         ORDER BY walk.ancestor_depth ASC, registry.normalized_event_id DESC",
+         ORDER BY walk.ancestor_depth ASC, registry.block_number DESC,
+                  registry.transaction_index DESC NULLS LAST, registry.log_index DESC NULLS LAST,
+                  registry.event_identity COLLATE \"C\" DESC",
     )
     .bind(chain_id)
     .bind(&namespace)
