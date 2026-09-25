@@ -1,10 +1,14 @@
 //! The subnames page over the family child relation, with today's page semantics
-//! (crates/storage/src/children/page.rs): the optional prefix, the expiry fence with its null treatment, the name and
-//! timestamp sorts, and the keyset cursor. The total is an exact count over the same filtered
-//! relation, taken in the same statement as the page; there is no maintained child count,
-//! because eligibility depends on the parent's current state. The expiry fence reads the family
-//! marker's block timestamp unless the caller fixes `evaluated_at`, never the database's
-//! transaction time.
+//! (crates/storage/src/children/page.rs): the optional prefix, the expiry fence with its null
+//! treatment, the name and timestamp sorts, and the keyset cursor. The total is an exact count
+//! over the same filtered relation, taken in the same statement as the page; there is no
+//! maintained child count, because eligibility depends on the parent's current state. The expiry
+//! fence reads the family marker's block timestamp unless the caller fixes `evaluated_at`, never
+//! the database's transaction time.
+//!
+//! Interim: the registration and expiry times the timestamp sorts and the fence use, and the
+//! released status the fence checks, come from the served `name_current.declared_summary`, not
+//! from the families (see the interim list in `shims.rs`). Step 7 must replace that read.
 use anyhow::{Context, Result, bail};
 use sqlx::{PgPool, Postgres, QueryBuilder, Row, postgres::PgRow, types::time::OffsetDateTime};
 
