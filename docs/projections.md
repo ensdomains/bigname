@@ -1805,15 +1805,7 @@ AuthorityTransferred, whose generated id is higher, so
 the registry node and the registry binding are read again in today's order from
 the event log, and a binding passes only when it matches the served one whole. The second is a named cause whose own check holds for
 that field. A named cause is either a step 2 family gap, reported rather than
-patched, or a served-side bug. One cause comes from the fixture corpus rather
-than the chain: step 2 pairs a binding with the SurfaceBound at the log its
-provenance records, as the adapter emits them from one log, but the corpus seed
-binds wrapped names at one log and wraps them at another. Those candidates keep no
-wrapper metadata, and the families leave their leases' unnamed rows unstaged
-where today's stage names them. Its check reloads the families with that
-candidate given the block's SurfaceBound and must then give the served value.
-The seed is fixed on step 2's branch, and the cause goes with the next merge of
-it. One step 2 gap is not
+patched, or a served-side bug. One step 2 gap is not
 excused and fails: the registry node keeps only its latest owner-setting event,
 so when a later transfer the name's admission leaves out, or a later
 SubregistryChanged, set it, the admitted owner is gone. A fixture pins that
