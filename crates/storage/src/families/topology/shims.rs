@@ -20,8 +20,12 @@
 //!   `normalized_events`, because `project_registry_node_state` keys a Transfer by the node it
 //!   carries and cannot attribute it through its name or resource.
 //!
-//! Two interim reads live outside this file:
+//! Interim reads and known gaps outside this file:
 //!
+//! - `/roles` (`collections.rs`) mirrors only the resource predicate of the served permissions
+//!   read filter. The grant row's own canonicality and the publication block have no counterpart,
+//!   because `project_grant` carries no block hash, so between a reorg of the granting block and
+//!   the family undo that removes the grant, the shadow keeps a grant today's reader drops.
 //! - `load_bound_names_shadow` (`resolver.rs`) takes a name's selected resource from
 //!   `name_current.resource_id`, else its serving resource, to pick the one pointer that counts,
 //!   until the selection is computed from the binding candidates.

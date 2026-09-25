@@ -130,7 +130,11 @@ pub async fn load_resolver_links_shadow(
 }
 
 /// `/roles`: resolver-scoped `project_grant` rows whose effective powers are non-empty and whose
-/// resource is readable, as the served permissions read filter requires. The
+/// resource, and that resource's block, are readable. That mirrors only the resource predicate of
+/// the served permissions read filter (`DEFAULT_PERMISSIONS_CURRENT_READ_FILTER`). Its other two
+/// predicates, the grant row's own canonicality and the publication block, have no counterpart
+/// here, because the family row carries no block hash; between a reorg of the granting block and
+/// the family undo that removes the grant, the two readers can differ. The
 /// wrapper, grace and expiry-retirement masks are not applied yet, so the powers are the stored,
 /// unmasked ones, which resolver-scoped ENSv2 grants carry unmasked today. `event_ids` holds the
 /// grant's last event only, because the family row keeps no evidence arrays. Parity with the
@@ -155,8 +159,9 @@ pub async fn load_resolver_roles_shadow(
             WHERE grant_row.chain_id = $1
               AND grant_row.scope = 'resolver:' || $1 || ':' || $2
               AND jsonb_array_length(grant_row.effective_powers) > 0
-              -- The grant's resource must be readable, as the served permissions read filter
-              -- requires of its resource and that resource's block.
+              -- The grant's resource must be readable, the one predicate of the served
+              -- permissions read filter the family row can check; the grant row's own block and
+              -- the publication block have no counterpart, since it carries no block hash.
               AND EXISTS (
                   SELECT 1
                   FROM bigname_phase.resources resource
