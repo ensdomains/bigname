@@ -1191,6 +1191,50 @@ async fn a_root_name_holding_a_zero_link_pairs_record_id_zero() -> Result<()> {
     Ok(())
 }
 
+/// Both address readers list every chain's names for an address. A name another chain lists
+/// there is compared only if that chain's families stand at its served marker; otherwise the
+/// comparison refuses rather than report or hide a difference from an incomparable snapshot.
+#[tokio::test]
+async fn an_address_listed_on_a_lagging_chain_stops_the_comparison() -> Result<()> {
+    let (db, pool) = database("record_id_other_chain").await?;
+    seed(&pool).await?;
+    sqlx::query("INSERT INTO chain_lineage (chain_id,block_hash,block_number,block_timestamp,canonicality_state) VALUES ($1,$2,19,to_timestamp(19),'canonical')").bind(CHAIN).bind(hash(19)).execute(&pool).await?;
+    event(&pool, "named-address", 19, 0, "RecordChanged", Some(1), json!({"source_event":"AddressChanged","node":node(1),"resolver":RESOLVER,"record_key":"addr:60","record_family":"addr","selector_key":"60","coin_type":"60","value":INVERSE_A})).await?;
+    run(&pool, 19, None, RunMode::Normal).await?;
+    let copied = sqlx::query(
+        "INSERT INTO address_records_current
+         SELECT (jsonb_populate_record(NULL::address_records_current, to_jsonb(row)
+                 || jsonb_build_object('logical_name_id', $2::text, 'namehash', $3::text,
+                                       'raw_name', 'record3.eth',
+                                       'surface_binding_id', $4::uuid, 'resource_id', $5::uuid,
+                                       'record_resource_id', $5::uuid,
+                                       'provenance', row.provenance
+                                           || '{\"chain_id\":\"base-sepolia\"}'))).*
+         FROM address_records_current row WHERE row.address = $1",
+    )
+    .bind(INVERSE_A)
+    .bind(format!("ens:{}", node(3)))
+    .bind(node(3))
+    .bind(resource(103))
+    .bind(resource(3))
+    .execute(&pool)
+    .await?;
+    assert_eq!(copied.rows_affected(), 1);
+    // Today's reader serves a row only on its chain's canonical lineage.
+    sqlx::query("INSERT INTO chain_lineage (chain_id,block_hash,block_number,block_timestamp,canonicality_state) VALUES ('base-sepolia',$1,19,to_timestamp(19),'canonical')").bind(hash(19)).execute(&pool).await?;
+    let error = bigname_storage::families::records::compare_family_reads(
+        &pool,
+        CHAIN,
+        Some((19, hash(19))),
+        10,
+    )
+    .await
+    .expect_err("a lagging chain's names are not compared");
+    assert!(format!("{error:#}").contains("base-sepolia"), "{error:#}");
+    db.cleanup().await?;
+    Ok(())
+}
+
 // A normalized record whose `value` is an explicit JSON null, as
 // crates/project/testdata/sql/stage/linked_records_fixture.sql sets up, is a success to today's
 // builder (`after_state ? 'value'`). The family row keeps that status though its value column

@@ -245,10 +245,29 @@ async fn addresses(
             keys.insert((address.clone(), coin_type.to_owned()));
         }
     }
+    // Both readers list every chain's names for an address. The markers were checked for
+    // `chain_id` only, so any other chain a listing names must stand at its own served marker,
+    // or its rows would be compared at incomparable snapshots.
+    let mut checked = BTreeSet::from([chain_id.to_owned()]);
     for (address, coin_type) in keys {
         let (today, today_pages) = all_today_pages(pool, &address, &coin_type, page_size).await?;
         let (family, family_pages, misses) =
             all_family_pages(pool, &address, &coin_type, page_size).await?;
+        let chains: BTreeSet<String> = today
+            .iter()
+            .chain(&family)
+            .filter_map(|entry| entry.provenance.get("chain_id").and_then(Value::as_str))
+            .filter(|chain| !checked.contains(*chain))
+            .map(str::to_owned)
+            .collect();
+        for other in chains {
+            ensure!(
+                chain_current(pool, &other).await?,
+                "resolves_to {address} coin {coin_type} lists names on {other}, whose families \
+                 do not stand at its served marker; the address comparison is not evidence"
+            );
+            checked.insert(other);
+        }
         report.address_pages += today_pages.len();
         report.address_entries += today.len();
         report
@@ -265,6 +284,24 @@ async fn addresses(
         }
     }
     Ok(())
+}
+
+/// Whether `chain_id`'s families stand at its served Project marker.
+async fn chain_current(pool: &PgPool, chain_id: &str) -> Result<bool> {
+    Ok(sqlx::query_scalar(
+        "SELECT EXISTS (
+             SELECT 1 FROM bigname_phase.project_family_marker family
+             JOIN bigname_phase.chain_phase_state served
+               ON served.chain_id = family.chain_id AND served.phase_name = 'project'
+             WHERE family.chain_id = $1
+               AND family.current_block_number = served.current_block_number
+               AND family.current_block_hash = served.current_block_hash
+         )",
+    )
+    .bind(chain_id)
+    .fetch_one(pool)
+    .await
+    .with_context(|| format!("failed to read the markers of {chain_id}"))?)
 }
 
 /// Every retained address value of a value table as (address, coin type) rows: the row's value,
