@@ -247,3 +247,110 @@ async fn alias_and_wildcard_topology_match_the_served_names() -> Result<()> {
     );
     fixture.cleanup().await
 }
+
+/// A name `raw_name` under `.eth` with node `0x1<n>` and the given labelhashes, bound to its own
+/// resource with `binding_kind`.
+async fn deep_name(
+    fixture: &Fixture,
+    n: u64,
+    raw_name: &str,
+    labels: &[String],
+    binding_kind: &str,
+) -> Result<Name> {
+    let logical = fixture
+        .surface("ens", &word(0x1000 + n), raw_name, labels, 1)
+        .await?;
+    let resource = uuid(0xa000 + n);
+    fixture
+        .binding(
+            &uuid(0xb000 + n),
+            &logical,
+            &resource,
+            binding_kind,
+            "ens_v2",
+            1,
+        )
+        .await?;
+    Ok(Name { logical, resource })
+}
+
+// A wildcard name's resolver hop from a mixed-case ResolverChanged: the builder copies the
+// payload's `resolver` as spelled (crates/project/src/builders/name_topology.rs), and
+// `serialize_projected_topologies` (name_topology/serialization.rs) then rewrites the stored
+// topology through `ResolutionTopology`, whose addresses serialize in canonical lowercase. So the
+// served spelling is lowercase, which is what the shadow serves from the lowercased pointer row.
+// The longest ancestor with a binding and a non-zero pointer is the source: a longer ancestor
+// with a binding but no pointer is passed over.
+#[tokio::test]
+async fn wildcard_path_keeps_the_served_resolver_spelling_across_ancestors() -> Result<()> {
+    let mut fixture = Fixture::new("families_shadow_topology_casing", 12).await?;
+    let outer_resolver = "0xAbCdEf0000000000000000000000000000000C11";
+    let inner_resolver = "0x00000000000000000000000000000000DeAdBeEf";
+    let eth = word(ETH);
+    let wild = deep_name(
+        &fixture,
+        11,
+        "wild.eth",
+        &[word(0x2011), eth.clone()],
+        "declared_registry_path",
+    )
+    .await?;
+    let inner = deep_name(
+        &fixture,
+        12,
+        "b.wild.eth",
+        &[word(0x2012), word(0x2011), eth.clone()],
+        "declared_registry_path",
+    )
+    .await?;
+    // Bound, never pointed: not a source.
+    deep_name(
+        &fixture,
+        13,
+        "y.wild.eth",
+        &[word(0x2013), word(0x2011), eth.clone()],
+        "declared_registry_path",
+    )
+    .await?;
+    let through_inner = deep_name(
+        &fixture,
+        14,
+        "a.b.wild.eth",
+        &[word(0x2014), word(0x2012), word(0x2011), eth.clone()],
+        "observed_wildcard_path",
+    )
+    .await?;
+    let through_outer = deep_name(
+        &fixture,
+        15,
+        "x.y.wild.eth",
+        &[word(0x2015), word(0x2013), word(0x2011), eth],
+        "observed_wildcard_path",
+    )
+    .await?;
+    point(&fixture, "outer-point", &wild, outer_resolver, 2).await?;
+    point(&fixture, "inner-point", &inner, inner_resolver, 3).await?;
+    fixture.publish(4).await?;
+    let report = fixture.compare(1).await?;
+    unexpected(&report, &[])?;
+    for (name, source, resolver) in [
+        (&through_inner, &inner, inner_resolver),
+        (&through_outer, &wild, outer_resolver),
+    ] {
+        let served = served_topology(&fixture, &name.logical)
+            .await?
+            .unwrap_or_default();
+        let topology = load_name_topology_shadow(fixture.pool(), &name.logical)
+            .await?
+            .unwrap_or_default();
+        let canonical = json!(resolver.to_ascii_lowercase());
+        ensure!(
+            served == topology
+                && served.pointer("/resolver_path/0/address") == Some(&canonical)
+                && served.pointer("/wildcard/source/logical_name_id")
+                    == Some(&json!(source.logical)),
+            "served {served}, shadow {topology}"
+        );
+    }
+    fixture.cleanup().await
+}
