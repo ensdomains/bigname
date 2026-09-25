@@ -333,3 +333,52 @@ async fn a_later_subregistry_write_to_the_node_leaves_the_epoch_owner_equal() ->
     );
     fixture.cleanup().await
 }
+
+/// Codex thread PRRT_kwDOSJpxAs6l3jx7, the ENSv1 NewOwner shape: one registry log yields a
+/// SubregistryChanged and then an AuthorityTransferred of the child node, at one block,
+/// transaction and log. The families break that tie by event identity and take the
+/// SubregistryChanged last, for the registry-binding observation and for the node's owner
+/// group; today's builders break it by generated id and take the AuthorityTransferred
+/// (permission_resources.rs:41-57, and the control lateral reads only the transfer). Each
+/// differing field passes as a same-block delta only because the families read again in
+/// today's order, the observation and the node taking the AuthorityTransferred, give exactly
+/// the served value.
+#[tokio::test]
+async fn a_new_owner_subregistry_and_transfer_at_one_log_is_a_same_block_delta() -> Result<()> {
+    let fixture = Fixture::new("families_shadow_registry_new_owner", 20).await?;
+    let lease = uuid(1);
+    bound(&fixture, &lease).await?;
+    for kind in ["SubregistryChanged", "AuthorityTransferred"] {
+        fixture
+            .write(
+                11,
+                1,
+                kind,
+                V1_REGISTRY,
+                Some(&name(1)),
+                Some(&lease),
+                json!({"source_event": "NewOwner", "node": node(2), "child_node": node(1),
+                       "owner": OTHER, "owner_getter": OTHER, "emitter_role": "registry"}),
+                REGISTRY,
+            )
+            .await?;
+    }
+    let report = publish_and_compare(&fixture, 12).await?;
+    shadow_support::assert_counts(
+        &report,
+        &[],
+        &[
+            ("d12_same_block_order:control/latest_event_kind", 1),
+            ("d12_same_block_order:control/registry_owner", 1),
+            ("d12_same_block_order:registry_binding/event_ids", 1),
+        ],
+    );
+    let (served, shadow) = shadow_support::name(&fixture, 12, &name(1)).await?;
+    assert_eq!(served.control("registry_owner"), json!(OTHER));
+    assert_eq!(
+        served.control("latest_event_kind"),
+        json!("AuthorityTransferred")
+    );
+    assert_eq!(shadow.control["registry_owner"], Value::Null);
+    fixture.cleanup().await
+}
