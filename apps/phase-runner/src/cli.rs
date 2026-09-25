@@ -16,8 +16,13 @@ use crate::{
     },
     error::{ErrorKind, RunnerError, RunnerResult},
     phase::{BlockRange, PhaseName},
+    project_phase::FamilySettings,
     runner::RedoPhase,
 };
+
+#[path = "cli_families.rs"]
+mod families;
+use families::ProjectFamiliesArgs;
 
 #[path = "cli_capacity.rs"]
 mod capacity;
@@ -171,14 +176,8 @@ struct RunArgs {
     )]
     hydration_rpc_urls: Vec<String>,
 
-    #[arg(
-        long,
-        env = "BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES",
-        default_value_t = true,
-        action = clap::ArgAction::Set,
-        help = "follow each committed Project batch with the owned key families: true or false"
-    )]
-    project_families: bool,
+    #[command(flatten)]
+    project_families: ProjectFamiliesArgs,
 }
 
 #[derive(Debug, Args)]
@@ -260,14 +259,8 @@ struct RedoArgs {
     )]
     hydration_rpc_urls: Vec<String>,
 
-    #[arg(
-        long,
-        env = "BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES",
-        default_value_t = true,
-        action = clap::ArgAction::Set,
-        help = "follow each committed Project batch with the owned key families: true or false"
-    )]
-    project_families: bool,
+    #[command(flatten)]
+    project_families: ProjectFamiliesArgs,
 }
 
 #[derive(Clone, Debug, Args)]
@@ -302,7 +295,7 @@ pub enum ResolvedCommand {
         manifests_root: PathBuf,
         runtime: RuntimeConfig,
         hydration_rpc_urls: bigname_lookup::ChainRpcUrls,
-        project_families: bool,
+        project_families: FamilySettings,
     },
     Redo {
         database_url: String,
@@ -318,7 +311,7 @@ pub enum ResolvedCommand {
         range: BlockRange,
         watch_set_coverage_attestations: BTreeMap<String, String>,
         hydration_rpc_urls: bigname_lookup::ChainRpcUrls,
-        project_families: bool,
+        project_families: FamilySettings,
     },
     Rewind {
         database_url: String,
@@ -397,7 +390,7 @@ fn resolve_run(args: RunArgs) -> RunnerResult<ResolvedCommand> {
         manifests_root: args.manifests.manifests_root,
         runtime,
         hydration_rpc_urls,
-        project_families: args.project_families,
+        project_families: args.project_families.into(),
     })
 }
 
@@ -454,7 +447,7 @@ fn resolve_redo(args: RedoArgs) -> RunnerResult<ResolvedCommand> {
         range,
         watch_set_coverage_attestations,
         hydration_rpc_urls: resolve_hydration_rpc_urls(&args.hydration_rpc_urls)?,
-        project_families: args.project_families,
+        project_families: args.project_families.into(),
     })
 }
 

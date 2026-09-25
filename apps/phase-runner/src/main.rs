@@ -111,8 +111,8 @@ async fn main() -> Result<()> {
                     )),
                     Arc::new(
                         ProjectPhase::with_hydration(database.pool().clone(), hydration_rpc_urls)
-                            .with_families(project_families)
-                            .with_metrics_feed(metrics_feed.clone()),
+                            .with_family_settings(project_families)
+                            .with_metrics(metrics_feed.clone()),
                     ),
                     Arc::new(VerifyPhase::new(verification_database)),
                     Arc::new(LivePhase::with_engine(ingest_engine)),
@@ -222,8 +222,8 @@ async fn main() -> Result<()> {
                 ));
                 let project = Arc::new(
                     ProjectPhase::with_hydration(database.pool().clone(), hydration_rpc_urls)
-                        .with_families(project_families)
-                        .with_metrics_feed(metrics_feed.clone()),
+                        .with_family_settings(project_families)
+                        .with_metrics(metrics_feed.clone()),
                 );
                 let phases = if phase.requires_verify() {
                     let verification_database_url =

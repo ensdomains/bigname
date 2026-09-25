@@ -7,7 +7,7 @@ use sqlx::PgPool;
 
 use super::{
     FamilyOptions, block,
-    guard_tests::{CHAIN, database, hash},
+    guard_tests::{CHAIN, NO_INTERPRET, database, hash},
     marker,
     store::{Row, RowSet},
     tables::{self, TableSpec},
@@ -78,31 +78,26 @@ async fn publish(
     predecessor: Option<&Marker>,
     changes: Vec<(&'static TableSpec, Row, Option<Row>)>,
 ) -> Result<()> {
+    let sequence = marker::read(pool, CHAIN).await?.sequence;
     let plan = block::Plan {
         predecessor,
+        sequence,
         contiguous: true,
         bootstrap: false,
+        revision: &NO_INTERPRET,
+        role: block::Role::Follow,
     };
-    let (mut transaction, prior, header) = block::open(pool, CHAIN, number, &plan).await?;
+    let mut opened = block::open(pool, CHAIN, number, &plan).await?;
     let mut rows = RowSet::default();
     for (table, key, after) in changes {
-        rows.load(&mut transaction, table, [key.clone()]).await?;
+        rows.load(&mut opened.transaction, table, [key.clone()])
+            .await?;
         match after {
             Some(after) => rows.put(table, after)?,
             None => rows.delete(table, &key)?,
         }
     }
-    block::publish(
-        transaction,
-        CHAIN,
-        &header,
-        &prior,
-        &rows,
-        &plan,
-        (None, None),
-        &FamilyOptions::new("undo"),
-    )
-    .await?;
+    block::publish(opened, CHAIN, &rows, &plan, &FamilyOptions::new("undo")).await?;
     Ok(())
 }
 
@@ -130,6 +125,30 @@ async fn snapshot(pool: &PgPool) -> Result<Vec<(String, String)>> {
     .await?;
     snapshot.push(("marker".to_owned(), marker.unwrap_or_default()));
     Ok(snapshot)
+}
+
+/// Undo the block the marker stands on under an undoing repair record whose target is `pending`.
+async fn undo_one(pool: &PgPool, pending: i64) -> Result<Option<Marker>> {
+    sqlx::query(
+        "INSERT INTO project_repair_record (chain_id, attempt, reason, replay_target_number,
+             replay_target_hash, state, pending_undo_target)
+         VALUES ($1, 0, 'operator_redo', 99, 'target', 'undoing', $2)
+         ON CONFLICT (chain_id) DO UPDATE SET state = 'undoing', pending_undo_target = $2,
+             prefix_interpret_input_content_hash = NULL, prefix_interpret_redo_attempt = NULL,
+             prefix_recorded = false",
+    )
+    .bind(CHAIN)
+    .bind(pending)
+    .execute(pool)
+    .await?;
+    let family = marker::read(pool, CHAIN).await?;
+    Ok(undo::undo_block(pool, CHAIN, &family, 0)
+        .await?
+        .map(|restored| restored.current)
+        .unwrap_or(Some(Marker {
+            number: -1,
+            hash: "not journalled".to_owned(),
+        })))
 }
 
 fn key(table: &'static TableSpec, row: &Row) -> Row {
@@ -206,8 +225,7 @@ async fn undoing_a_block_restores_every_family_row_and_the_marker_byte_for_byte(
         "block 11 changed the families"
     );
 
-    let restored = undo::undo_block(&pool, CHAIN, &at(11)).await?;
-    assert_eq!(restored.and_then(|marker| marker.current), Some(at(10)));
+    assert_eq!(undo_one(&pool, 10).await?, Some(at(10)));
     assert_eq!(
         snapshot(&pool).await?,
         before,
@@ -227,8 +245,7 @@ async fn undoing_a_block_restores_every_family_row_and_the_marker_byte_for_byte(
     assert_eq!(journalled, vec![10], "the undone block's journal is gone");
 
     // Undoing block 10 as well empties every table and the marker.
-    let empty = undo::undo_block(&pool, CHAIN, &at(10)).await?;
-    assert_eq!(empty.and_then(|marker| marker.current), None);
+    assert_eq!(undo_one(&pool, 9).await?, None);
     for (name, rows) in snapshot(&pool).await? {
         if name != "marker" {
             assert_eq!(rows, "[]", "{name} is empty after undoing its only block");
@@ -236,12 +253,20 @@ async fn undoing_a_block_restores_every_family_row_and_the_marker_byte_for_byte(
     }
 
     // A block the journal does not hold cannot be undone and leaves everything as it was.
+    sqlx::query("DELETE FROM project_repair_record WHERE chain_id = $1")
+        .bind(CHAIN)
+        .execute(&pool)
+        .await?;
     publish(&pool, 10, None, Vec::new()).await?;
     sqlx::query("DELETE FROM project_family_undo WHERE chain_id = $1")
         .bind(CHAIN)
         .execute(&pool)
         .await?;
-    assert_eq!(undo::undo_block(&pool, CHAIN, &at(10)).await?, None);
+    assert_eq!(
+        undo_one(&pool, 9).await?.map(|marker| marker.number),
+        Some(-1),
+        "the journal no longer holds block 10"
+    );
     assert_eq!(marker::read(&pool, CHAIN).await?.current, Some(at(10)));
     database.cleanup().await
 }
