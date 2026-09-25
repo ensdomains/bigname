@@ -79,8 +79,8 @@ pub(super) fn push_history_cursor_cte<'a>(
         builder.push("::text AS chain_id, ");
         builder.push_bind(position.block_hash.as_deref());
         builder.push("::text AS block_hash, ");
-        builder.push_bind(position.transaction_hash.as_deref());
-        builder.push("::text AS transaction_hash, ");
+        builder.push_bind(position.transaction_index);
+        builder.push("::bigint AS transaction_index, ");
         builder.push_bind(position.log_index);
         builder.push("::bigint AS log_index, ");
         builder.push_bind(&cursor.event_identity);
@@ -94,7 +94,7 @@ pub(super) fn push_history_cursor_cte<'a>(
                 block_number,
                 chain_id,
                 block_hash,
-                transaction_hash,
+                transaction_index,
                 log_index,
                 event_identity
             FROM normalized_events
@@ -134,7 +134,9 @@ pub(super) fn push_history_cursor_block_bound(
 
 /// Keyset continuation predicate. `later` sorts after `earlier` in the canonical
 /// descending order; the ascending direction swaps the two rows because it is
-/// the exact reverse of that order.
+/// the exact reverse of that order. Within a block the transaction index and the
+/// log index compare with a missing value as -1, the placement the order gives a
+/// null: after every transaction newest first, before every one oldest first.
 pub(super) fn push_history_cursor_after(
     builder: &mut QueryBuilder<'_, Postgres>,
     order: HistoryOrder,
@@ -176,22 +178,14 @@ pub(super) fn push_history_cursor_after(
                                                     OR (
                                                         {later}.block_hash IS NOT DISTINCT FROM {earlier}.block_hash
                                                         AND (
-                                                            CASE WHEN {later}.transaction_hash IS NULL THEN 1 ELSE 0 END
-                                                                > CASE WHEN {earlier}.transaction_hash IS NULL THEN 1 ELSE 0 END
+                                                            COALESCE({later}.transaction_index, -1) < COALESCE({earlier}.transaction_index, -1)
                                                             OR (
-                                                                CASE WHEN {later}.transaction_hash IS NULL THEN 1 ELSE 0 END
-                                                                    = CASE WHEN {earlier}.transaction_hash IS NULL THEN 1 ELSE 0 END
+                                                                COALESCE({later}.transaction_index, -1) = COALESCE({earlier}.transaction_index, -1)
                                                                 AND (
-                                                                    {later}.transaction_hash < {earlier}.transaction_hash
+                                                                    COALESCE({later}.log_index, -1) < COALESCE({earlier}.log_index, -1)
                                                                     OR (
-                                                                        {later}.transaction_hash IS NOT DISTINCT FROM {earlier}.transaction_hash
-                                                                        AND (
-                                                                            COALESCE({later}.log_index, -1) < COALESCE({earlier}.log_index, -1)
-                                                                            OR (
-                                                                                COALESCE({later}.log_index, -1) = COALESCE({earlier}.log_index, -1)
-                                                                                AND {later}.event_identity < {earlier}.event_identity
-                                                                            )
-                                                                        )
+                                                                        COALESCE({later}.log_index, -1) = COALESCE({earlier}.log_index, -1)
+                                                                        AND {later}.event_identity < {earlier}.event_identity
                                                                     )
                                                                 )
                                                             )
@@ -220,7 +214,8 @@ pub(super) fn history_cursor_from_row(row: &HistoryEvent) -> HistoryCursor {
             block_number: row.block_number,
             chain_id: row.chain_id.clone(),
             block_hash: row.block_hash.clone(),
-            transaction_hash: row.transaction_hash.clone(),
+            transaction_index: row.transaction_index,
+            transaction_hash: None,
             log_index: row.log_index,
         }),
     }
@@ -244,7 +239,7 @@ pub async fn load_history_anchor_position(
         .context("failed to configure a history cursor anchor read")?;
     super::redo::ensure_interpret_not_redo(&mut transaction).await?;
     let row = sqlx::query(
-        "SELECT block_number, chain_id, block_hash, transaction_hash, log_index
+        "SELECT block_number, chain_id, block_hash, transaction_index, log_index
              FROM bigname_phase.normalized_events
              WHERE event_identity = $1",
     )
@@ -261,9 +256,60 @@ pub async fn load_history_anchor_position(
             block_number: sqlx::Row::try_get(&row, "block_number")?,
             chain_id: sqlx::Row::try_get(&row, "chain_id")?,
             block_hash: sqlx::Row::try_get(&row, "block_hash")?,
-            transaction_hash: sqlx::Row::try_get(&row, "transaction_hash")?,
+            transaction_index: sqlx::Row::try_get(&row, "transaction_index")?,
+            transaction_hash: None,
             log_index: sqlx::Row::try_get(&row, "log_index")?,
         })
     })
     .transpose()
+}
+
+/// The transaction index a cursor issued before the history order compared transaction indexes
+/// continues from: `position` carries its anchor's transaction hash and no index. The index is
+/// read from the anchor row, or, when that row is gone, from any other event of the same
+/// transaction in the same block, because the index belongs to the transaction. `None` when
+/// neither exists. It reads under the same Interpret redo check as
+/// [`load_history_anchor_position`].
+pub async fn load_history_transaction_index(
+    pool: &PgPool,
+    event_identity: &str,
+    position: &HistoryPosition,
+) -> Result<Option<i64>> {
+    let mut transaction = pool
+        .begin()
+        .await
+        .context("failed to begin a history cursor transaction read")?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+        .execute(&mut *transaction)
+        .await
+        .context("failed to configure a history cursor transaction read")?;
+    super::redo::ensure_interpret_not_redo(&mut transaction).await?;
+    // The second arm reads one block's rows through `normalized_events_block_idx`.
+    let index = sqlx::query_scalar::<_, i64>(
+        "SELECT transaction_index FROM (
+             (SELECT transaction_index, 0 AS preference
+              FROM bigname_phase.normalized_events
+              WHERE event_identity = $1 AND transaction_index IS NOT NULL)
+             UNION ALL
+             (SELECT transaction_index, 1 AS preference
+              FROM bigname_phase.normalized_events
+              WHERE chain_id = $2 AND block_hash = $3 AND transaction_hash = $4
+                AND transaction_index IS NOT NULL
+              LIMIT 1)
+         ) found
+         ORDER BY preference
+         LIMIT 1",
+    )
+    .bind(event_identity)
+    .bind(position.chain_id.as_deref())
+    .bind(position.block_hash.as_deref())
+    .bind(position.transaction_hash.as_deref())
+    .fetch_optional(&mut *transaction)
+    .await
+    .context("failed to load a history cursor transaction index")?;
+    transaction
+        .commit()
+        .await
+        .context("failed to commit a history cursor transaction read")?;
+    Ok(index)
 }

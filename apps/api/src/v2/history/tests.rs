@@ -11,7 +11,8 @@ fn sample_cursor() -> HistoryCursor {
             block_number: Some(21_000_000),
             chain_id: Some("ethereum-mainnet".to_owned()),
             block_hash: Some("0xb1".to_owned()),
-            transaction_hash: Some("0xt1".to_owned()),
+            transaction_index: Some(2),
+            transaction_hash: None,
             log_index: Some(4),
         }),
     }
