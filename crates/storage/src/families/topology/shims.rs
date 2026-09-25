@@ -28,7 +28,11 @@
 //!   the family undo that removes the grant, the shadow keeps a grant today's reader drops.
 //! - `load_bound_names_shadow` (`resolver.rs`) takes a name's selected resource from
 //!   `name_current.resource_id`, else its serving resource, to pick the one pointer that counts,
-//!   until the selection is computed from the binding candidates.
+//!   until the selection is computed from the binding candidates. The proxy prefers
+//!   `resource_id`. Today's name row takes the later, by position, of the selected authority's
+//!   pointer and the serving pointer (the `resolver` lateral of name_current/build.sql), so a name
+//!   with both a selected resource and a distinct serving resource whose pointer is later follows
+//!   the serving one there and the selected one here. No fixture covers a name with both.
 //! - The subnames page (`children_page.rs`) takes a child's registration and expiry times, and
 //!   the released status its expiry fence checks, from the served `name_current.declared_summary`
 //!   through `push_registered_at_timestamp_expr` and `push_expires_at_timestamp_expr`, the same

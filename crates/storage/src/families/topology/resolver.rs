@@ -178,7 +178,9 @@ pub async fn load_resolver_shadow(
 /// `project_resource_pointer`. A name's pointer is the one on its selected resource
 /// (interim: `name_current.resource_id`, else its serving resource), as today's name row takes its
 /// resolver from the selected authority's events; a pointer on another resource of the name does
-/// not move it. Same keyset and order as the served reader.
+/// not move it. Today's row can also follow a later serving pointer when the name has both a
+/// selected and a distinct serving resource; this proxy follows the selected one (see `shims.rs`).
+/// Same keyset and order as the served reader.
 pub async fn load_bound_names_shadow(
     pool: &PgPool,
     chain_id: &str,
