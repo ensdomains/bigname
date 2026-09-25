@@ -44,7 +44,7 @@ pub(super) fn select_v2<'a>(
     let mut candidates: Vec<(String, Candidate, &'a LifecycleEvent)> = Vec::new();
     for key in keys {
         let view = merged_for(facts, &key, name);
-        let Some(candidate) = view::candidate(&view) else {
+        let Some(candidate) = view::candidate(&view, &facts.order) else {
             continue;
         };
         // The candidate event itself, for its payload: the name's own event or an unnamed one on
@@ -109,6 +109,7 @@ pub(super) fn select_v2<'a>(
             .iter()
             .map(|(key, candidate, _)| (key.as_str(), candidate)),
         binding_resource,
+        &facts.order,
     );
     let Some((key, candidate, event)) = winner.map(|index| &candidates[index]) else {
         return Selected {

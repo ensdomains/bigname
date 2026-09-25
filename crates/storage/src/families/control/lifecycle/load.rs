@@ -9,7 +9,7 @@ use sqlx::PgPool;
 
 use super::{Clock, NameFacts, NameInput, ShadowName, TripleFacts, evaluate};
 use crate::families::control::{
-    position::Position,
+    position::{EventOrder, Position},
     registry::load_registry_nodes,
     rows::{BindingCandidate, LifecycleEvent, Maxima, text},
     wrapper::load_wrapper_rows,
@@ -336,6 +336,7 @@ pub async fn load_name_facts(
                     input.namehash.to_ascii_lowercase(),
                 ))
                 .cloned(),
+            order: EventOrder::Canonical,
         });
     }
     Ok(out)

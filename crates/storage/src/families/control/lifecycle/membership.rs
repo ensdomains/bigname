@@ -75,10 +75,39 @@ pub(super) fn foreign_named(event: &LifecycleEvent, key: &str, name: &str) -> bo
             .is_some_and(|emitted| emitted != name)
 }
 
+/// The retained events of one ENSv2 lifecycle key that are `name`'s membership: the resource's
+/// events without another name's, and the null-resource events of every triple whose association
+/// targets the key, or of an unassociated triple whose own key it is.
+pub(super) fn members<'a>(facts: &'a NameFacts, key: &str, name: &str) -> Vec<&'a LifecycleEvent> {
+    let triples: Vec<String> = facts
+        .triples
+        .iter()
+        .filter(|triple| match &triple.target {
+            Some(target) => target == key,
+            None => triple.unassociated_key().as_deref() == Some(key),
+        })
+        .map(|triple| triple.state_key())
+        .collect();
+    facts
+        .events
+        .iter()
+        .filter(|event| match event.state_kind.as_str() {
+            "resource" => event.state_key == key && !foreign_named(event, key, name),
+            "triple" => triples.contains(&event.state_key),
+            _ => false,
+        })
+        .collect()
+}
+
 /// The merged view of one ENSv2 lifecycle key for `name`: the resource's key state, or its
 /// retained events without another name's when it holds any, merged with the summaries of the
-/// triples associated with it; or an unassociated triple's summary alone.
+/// triples associated with it; or an unassociated triple's summary alone. In the harness's
+/// same-block counterfactual the view is the members folded in that order instead.
 pub(super) fn merged_for(facts: &NameFacts, key: &str, name: &str) -> view::MergedView {
+    if facts.order != EventOrder::Canonical {
+        let folded = maxima_of(members(facts, key, name), true, &facts.order);
+        return view::merged_view(Some(&folded), []);
+    }
     let associated = facts
         .triples
         .iter()

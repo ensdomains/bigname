@@ -80,14 +80,15 @@ pub struct Candidate {
 
 /// The candidate of one key: candidate_active, candidate_path and candidate_explicit with the
 /// witness rule, latest of the three (design:63, restating build.sql:322-334 under D12).
-pub fn candidate(view: &MergedView) -> Option<Candidate> {
+pub fn candidate(view: &MergedView, order: &EventOrder) -> Option<Candidate> {
+    let after = |left: &Position, right: &Position| order.membership(left, right).is_gt();
     let active = view.last_active.as_ref();
     let mut found: Vec<Candidate> = Vec::new();
     if let Some(active) = active {
         let released_after = view
             .last_release_any
             .as_ref()
-            .is_some_and(|release| release.position > active.position);
+            .is_some_and(|release| after(&release.position, &active.position));
         if !released_after {
             found.push(Candidate {
                 kind: CandidateKind::Active,
@@ -97,7 +98,7 @@ pub fn candidate(view: &MergedView) -> Option<Candidate> {
         }
     }
     if let Some(path) = &view.last_path_expiry
-        && active.is_none_or(|active| active.position < path.position)
+        && active.is_none_or(|active| after(&path.position, &active.position))
     {
         found.push(Candidate {
             kind: CandidateKind::PathExpiry,
@@ -106,10 +107,10 @@ pub fn candidate(view: &MergedView) -> Option<Candidate> {
         });
     }
     if let (Some(explicit), Some(active)) = (&view.last_explicit_release, active)
-        && active.position < explicit.position
+        && after(&explicit.position, &active.position)
     {
         let path_between = view.last_path_expiry.as_ref().is_some_and(|path| {
-            active.position < path.position && path.position < explicit.position
+            after(&path.position, &active.position) && after(&explicit.position, &path.position)
         });
         if !path_between {
             found.push(Candidate {
@@ -121,7 +122,7 @@ pub fn candidate(view: &MergedView) -> Option<Candidate> {
     }
     found
         .into_iter()
-        .max_by(|left, right| left.position.cmp(&right.position))
+        .max_by(|left, right| order.membership(&left.position, &right.position))
 }
 
 /// The cross-key preference of build.sql:336-340 over one candidate per key: the binding
@@ -130,6 +131,7 @@ pub fn candidate(view: &MergedView) -> Option<Candidate> {
 pub fn preferred<'a>(
     keys: impl IntoIterator<Item = (&'a str, &'a Candidate)>,
     binding_resource: Option<&str>,
+    order: &EventOrder,
 ) -> Option<usize> {
     keys.into_iter()
         .enumerate()
@@ -141,7 +143,7 @@ pub fn preferred<'a>(
             };
             rank(left_key, left)
                 .cmp(&rank(right_key, right))
-                .then_with(|| left.position.cmp(&right.position))
+                .then_with(|| order.membership(&left.position, &right.position))
         })
         .map(|(index, _)| index)
 }
@@ -201,7 +203,7 @@ mod tests {
             last_explicit_release: mark(30, None),
             ..MergedView::default()
         };
-        let chosen = candidate(&view).expect("a candidate");
+        let chosen = candidate(&view, &EventOrder::Canonical).expect("a candidate");
         assert_eq!(chosen.kind, CandidateKind::PathExpiry);
         assert_eq!(chosen.position.block_number, 20);
     }
@@ -214,7 +216,7 @@ mod tests {
             last_explicit_release: mark(30, None),
             ..MergedView::default()
         };
-        let chosen = candidate(&view).expect("a candidate");
+        let chosen = candidate(&view, &EventOrder::Canonical).expect("a candidate");
         assert_eq!(chosen.kind, CandidateKind::Explicit);
     }
 
@@ -251,11 +253,14 @@ mod tests {
         };
         let keys = [("k1", &released), ("k2", &live)];
         assert_eq!(
-            preferred(keys, Some("k1")),
+            preferred(keys, Some("k1"), &EventOrder::Canonical),
             Some(1),
             "a live key beats a released binding key"
         );
         let both_released = [("k1", &released), ("k2", &released)];
-        assert_eq!(preferred(both_released, Some("k2")), Some(1));
+        assert_eq!(
+            preferred(both_released, Some("k2"), &EventOrder::Canonical),
+            Some(1)
+        );
     }
 }

@@ -12,9 +12,11 @@
 //!
 //! - `d12_same_block_order` (brief section 4.3, counted as `expected_delta`): the item's retained
 //!   lifecycle events hold a block whose canonical order disagrees with the generated-id order,
-//!   and reading the same families again with that block put in generated-id order (the
-//!   association winner of an affected triple moved with it, `v2_lifecycle_events.sql:19`)
-//!   gives exactly the served value for the field. For a resource's permission rows and
+//!   and reading the same families again in today's generated-id order where today's builders
+//!   use it (ENSv2 membership by block and id, the laterals by block, transaction, log and id),
+//!   every position kept so the authority admission is unchanged, and the association winner of
+//!   an affected triple moved only to a grant of the same name, registry and token
+//!   (`v2_lifecycle_events.sql:10-23`), gives exactly the served value for the field. For a resource's permission rows and
 //!   restriction block the path-expiry drop rule of permissions.rs:111-133, :391-398 must answer
 //!   differently in the two orders, the whole read in today's order must equal the served value
 //!   and the whole canonical read the shadow value.
@@ -784,7 +786,7 @@ async fn name_excuses(
         }
     }
 
-    // The same families read with each disagreeing block in generated-id order.
+    // The same families read in today's generated-id order at the selectors that use it.
     if out.contains(&Excuse::None) {
         let identities: Vec<String> = facts
             .events
@@ -792,7 +794,8 @@ async fn name_excuses(
             .map(|event| event.position.event_identity.clone())
             .collect();
         let ids = generated_ids(pool, chain, &identities).await?;
-        if let Some(legacy) = legacy_facts(&facts, &ids) {
+        let keys = association_keys(pool, chain, &identities).await?;
+        if let Some(legacy) = legacy_facts(&facts, &ids, &keys) {
             let counterfactual = evaluate(&legacy, clock);
             for (index, diff) in diffs.iter().enumerate() {
                 if open(&out, index)
@@ -928,7 +931,7 @@ async fn latest_admitted_transfer(
 }
 
 /// The generated ids of events, by identity.
-async fn generated_ids(
+pub async fn generated_ids(
     pool: &PgPool,
     chain: &str,
     identities: &[String],
@@ -945,88 +948,82 @@ async fn generated_ids(
     .collect())
 }
 
-/// The name's facts with every block whose canonical order disagrees with the generated-id order
-/// put in generated-id order: the old two-part order of build.sql:322-335,
-/// v2_lifecycle_events.sql:19 and expiry_retirement.rs, which D12 replaced. The maxima are read
-/// again from the retained events in that order, and a triple's association winner that sat in
-/// such a block moves to the latest resource-bearing grant or reservation of the name in that
-/// block. None when no block changes or an event has no generated id.
-fn legacy_facts(facts: &NameFacts, ids: &BTreeMap<String, i64>) -> Option<NameFacts> {
-    let mut blocks: BTreeMap<i64, BTreeMap<String, &LifecycleEvent>> = BTreeMap::new();
+/// The registry identifier and token id of events, by identity, as today's association keys
+/// them (v2_lifecycle_events.sql:14-19).
+pub async fn association_keys(
+    pool: &PgPool,
+    chain: &str,
+    identities: &[String],
+) -> Result<BTreeMap<String, (String, String)>> {
+    Ok(
+        sqlx::query_as::<_, (String, Option<String>, Option<String>)>(
+            "SELECT event_identity,
+                COALESCE(after_state ->> 'registry_contract_instance_id',
+                         raw_fact_ref ->> 'emitting_address', after_state ->> 'registry'),
+                after_state ->> 'token_id'
+         FROM normalized_events WHERE chain_id = $1 AND event_identity = ANY($2)",
+        )
+        .bind(chain)
+        .bind(identities)
+        .fetch_all(pool)
+        .await?
+        .into_iter()
+        .filter_map(|(identity, registry, token)| Some((identity, (registry?, token?))))
+        .collect(),
+    )
+}
+
+/// The name's facts read in today's generated-id order where today's builders use it
+/// (`EventOrder::Generated`: ENSv2 membership in block and generated id, build.sql:322-340; the
+/// laterals in block, transaction, log and generated id, build.sql:307-308), with every event
+/// kept at its own position, so the authority admission, whose bounds compare positions,
+/// admits exactly what the canonical read admits. A triple whose association winner sits in a
+/// block whose two orders disagree moves to the latest grant or reservation, in today's order,
+/// of that block with the same name, registry identifier and token id: today's association
+/// (v2_lifecycle_events.sql:10-23). None when no block of the name's events reads differently
+/// in the two orders or an event has no generated id.
+pub fn legacy_facts(
+    facts: &NameFacts,
+    ids: &BTreeMap<String, i64>,
+    triple_keys: &BTreeMap<String, (String, String)>,
+) -> Option<NameFacts> {
+    let mut blocks: BTreeMap<i64, Vec<&LifecycleEvent>> = BTreeMap::new();
     for event in &facts.events {
+        ids.get(&event.position.event_identity)?;
         blocks
             .entry(event.position.block_number)
             .or_default()
-            .insert(event.position.event_identity.clone(), event);
+            .push(event);
     }
-    let mut moved: BTreeMap<String, Position> = BTreeMap::new();
-    for (block, events) in &blocks {
-        if events.len() < 2 {
-            continue;
-        }
-        let mut canonical: Vec<&LifecycleEvent> = events.values().copied().collect();
-        canonical.sort_by(|left, right| left.position.cmp(&right.position));
-        let mut legacy = canonical.clone();
-        for event in &legacy {
-            ids.get(&event.position.event_identity)?;
-        }
-        legacy.sort_by_key(|event| ids[&event.position.event_identity]);
-        if canonical
-            .iter()
-            .zip(&legacy)
-            .all(|(left, right)| left.position.event_identity == right.position.event_identity)
-        {
-            continue;
-        }
-        for (rank, event) in legacy.iter().enumerate() {
-            moved.insert(
-                event.position.event_identity.clone(),
-                Position {
-                    block_number: *block,
-                    transaction_index: Some(0),
-                    log_index: Some(rank as i64),
-                    event_identity: event.position.event_identity.clone(),
-                },
-            );
-        }
-    }
-    if moved.is_empty() {
+    let disagreeing: BTreeSet<i64> = blocks
+        .iter()
+        .filter(|(_, events)| {
+            let mut canonical: Vec<&LifecycleEvent> = events.to_vec();
+            canonical.sort_by(|left, right| left.position.cmp(&right.position));
+            let mut today = canonical.clone();
+            today.sort_by_key(|event| ids[&event.position.event_identity]);
+            canonical
+                .iter()
+                .zip(&today)
+                .any(|(left, right)| left.position.event_identity != right.position.event_identity)
+        })
+        .map(|(block, _)| *block)
+        .collect();
+    if disagreeing.is_empty() {
         return None;
     }
     let mut out = facts.clone();
-    for event in &mut out.events {
-        if let Some(position) = moved.get(&event.position.event_identity) {
-            event.position = position.clone();
-        }
-    }
-    let keys: Vec<String> = out.key_states.keys().cloned().collect();
-    for key in keys {
-        let maxima = maxima_of(
-            out.events
-                .iter()
-                .filter(|event| event.state_kind == "resource" && event.state_key == key),
-            true,
-            &EventOrder::Canonical,
-        );
-        out.key_states.insert(key, maxima);
-    }
-    let events = out.events.clone();
+    out.order = EventOrder::Generated(ids.clone());
     for triple in &mut out.triples {
-        let state_key = triple.state_key();
-        triple.maxima = maxima_of(
-            events
-                .iter()
-                .filter(|event| event.state_kind == "triple" && event.state_key == state_key),
-            false,
-            &EventOrder::Canonical,
-        );
         let Some(winner) = triple.target_position.clone() else {
             continue;
         };
-        if !moved.contains_key(&winner.event_identity) {
+        if !disagreeing.contains(&winner.block_number) {
             continue;
         }
-        let rival = events
+        let key = (triple.key[1].clone(), triple.key[2].clone());
+        let rival = facts
+            .events
             .iter()
             .filter(|event| {
                 event.state_kind == "resource"
@@ -1038,8 +1035,9 @@ fn legacy_facts(facts: &NameFacts, ids: &BTreeMap<String, i64>) -> Option<NameFa
                         "RegistrationGranted" | "RegistrationReserved"
                     )
                     && event.position.block_number == winner.block_number
+                    && triple_keys.get(&event.position.event_identity) == Some(&key)
             })
-            .max_by(|left, right| left.position.cmp(&right.position));
+            .max_by_key(|event| ids[&event.position.event_identity]);
         if let Some(rival) = rival {
             triple.target = rival.resource_id.clone();
             triple.target_position = Some(rival.position.clone());

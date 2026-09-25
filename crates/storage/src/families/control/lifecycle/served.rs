@@ -1,6 +1,6 @@
 //! The served registration and control values of one name, from its loaded facts. Each function
 //! restates one lateral of name_current/build.sql over the retained events; every "latest" is
-//! the latest under the canonical order.
+//! the latest under the facts' order, the canonical order in every read.
 use std::collections::BTreeMap;
 
 use serde_json::{Map, Value, json};
@@ -8,14 +8,15 @@ use serde_json::{Map, Value, json};
 use super::{
     Clock, NameFacts, ShadowName,
     admission::{Authority, Probe, StagedName},
+    control::control_owner,
     laterals::{
-        authority_context, control_owner, expiry_candidate, format_utc, latest_event_kind,
-        registered_at, registrant, registrar_resource,
+        authority_context, expiry_candidate, format_utc, latest_event_kind, registered_at,
+        registrant, registrar_resource,
     },
     select::select_v2,
 };
 use crate::families::control::{
-    position::Position,
+    position::{EventOrder, Position},
     rows::LifecycleEvent,
     wrapper::{effective_wrapper, servable_expiry},
 };
@@ -41,13 +42,16 @@ impl Selected<'_> {
     }
 }
 
+/// The latest item under the laterals' order: the canonical order in a read, today's order in
+/// the harness's same-block counterfactual.
 pub(super) fn latest<T>(
+    order: &EventOrder,
     items: impl IntoIterator<Item = T>,
     position: impl for<'b> Fn(&'b T) -> &'b Position,
 ) -> Option<T> {
     items
         .into_iter()
-        .max_by(|left, right| position(left).cmp(position(right)))
+        .max_by(|left, right| order.lateral(position(left), position(right)))
 }
 
 fn opt_text(value: Option<&str>) -> Value {
@@ -120,6 +124,7 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> ShadowName {
     } else {
         Selected {
             event: latest(
+                &facts.order,
                 tagged.iter().filter(|tagged| {
                     tagged.staged == StagedName::Ours
                         && tagged.admitted
@@ -201,6 +206,7 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> ShadowName {
         .collect();
 
     let grant = latest(
+        &facts.order,
         in_scope
             .iter()
             .filter(|tagged| tagged.event.event_kind == "RegistrationGranted"),
@@ -220,7 +226,7 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> ShadowName {
         .filter(|row| row.wrapper_state.is_some() && !is_v2)
         .and_then(servable_expiry);
 
-    let expiry_seconds = expiry_candidate(&in_scope);
+    let expiry_seconds = expiry_candidate(&facts.order, &in_scope);
     trace.insert("expiry_candidate".into(), json!(expiry_seconds));
     let selected_expiry = || {
         selected
@@ -247,6 +253,7 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> ShadowName {
     };
 
     let registrant = registrant(
+        &facts.order,
         &authority,
         &tagged,
         &in_scope,
@@ -349,6 +356,7 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> ShadowName {
             selected.event.and_then(|event| event.status.clone())
         } else {
             latest(
+                &facts.order,
                 in_scope
                     .iter()
                     .filter(|tagged| tagged.event.status.is_some()),

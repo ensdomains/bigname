@@ -12,6 +12,7 @@
 //! events of the name through the authority admission, as the laterals of build.sql read
 //! `project_authority_events`, ordered by the canonical order instead of the code's orderings.
 mod admission;
+mod control;
 mod laterals;
 mod load;
 pub mod membership;
@@ -24,7 +25,7 @@ use std::collections::BTreeMap;
 use serde_json::{Map, Value};
 
 use super::{
-    position::{Position, bound_of},
+    position::{EventOrder, Position, bound_of},
     registry::RegistryNode,
     rows::{BindingCandidate, LifecycleEvent, Maxima, WrapperRow},
 };
@@ -146,6 +147,9 @@ pub struct NameFacts {
     pub authority_starts: Value,
     /// The name's ENSv1 or Basenames registry node (F2c), for the control block.
     pub registry_node: Option<RegistryNode>,
+    /// The order the read takes its "latest" in: canonical in every read, today's generated-id
+    /// order only in the harness's same-block counterfactual.
+    pub order: EventOrder,
 }
 
 /// The shadow of one name's registration and control blocks.

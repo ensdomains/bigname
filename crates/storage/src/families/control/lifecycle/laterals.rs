@@ -1,18 +1,27 @@
 //! The summary laterals of name_current/build.sql, each restated over the admitted retained
-//! events of the name (or of the selected ENSv2 lifecycle key) and ordered by the canonical
-//! order.
+//! events of the name (or of the selected ENSv2 lifecycle key) and ordered by the facts'
+//! order, the canonical order in every read.
 use serde_json::{Value, json};
 
 use super::{
     NameFacts,
     admission::{Authority, Probe, REGISTRAR, StagedName},
-    membership::merged_for,
+    membership::{members, merged_for},
     served::{Selected, Tagged, latest},
 };
 use crate::families::control::{
-    position::Position,
+    position::{EventOrder, Position},
     rows::{LifecycleEvent, Mark},
 };
+
+/// The five kinds `latest_event_kind` reads (build.sql:58-63).
+const FIVE_KINDS: [&str; 5] = [
+    "RegistrationGranted",
+    "RegistrationRenewed",
+    "RegistrationReleased",
+    "RegistrationReserved",
+    "ExpiryChanged",
+];
 
 /// The registration time of the latest admitted grant: its block's timestamp, or a registrar
 /// snapshot's own registration time (build.sql:374-380).
@@ -37,8 +46,9 @@ pub(super) fn registered_at(facts: &NameFacts, grant: &LifecycleEvent) -> Value 
 /// The expiry lateral (build.sql:496-533): the latest admitted grant, or renewal, release or
 /// ExpiryChanged with a JSON-number expiry, leaving out the wrapper's ExpiryChanged; its
 /// converted seconds, null for a grant without a numeric expiry.
-pub(super) fn expiry_candidate(in_scope: &[&Tagged<'_>]) -> Option<i64> {
+pub(super) fn expiry_candidate(order: &EventOrder, in_scope: &[&Tagged<'_>]) -> Option<i64> {
     latest(
+        order,
         in_scope.iter().filter(|tagged| {
             let event = tagged.event;
             let wrapper_expiry = event.event_kind == "ExpiryChanged"
@@ -65,6 +75,7 @@ pub(super) fn expiry_candidate(in_scope: &[&Tagged<'_>]) -> Option<i64> {
 /// custody transfer into the wrapper and without a registrar release of a lease a wrapper of the
 /// name stands for; a release names its before-state registrant.
 pub(super) fn registrant(
+    order: &EventOrder,
     authority: &Authority<'_>,
     tagged: &[Tagged<'_>],
     in_scope: &[&Tagged<'_>],
@@ -154,7 +165,8 @@ pub(super) fn registrant(
                 && !released_under_wrapper(tagged.event)
                 && value(tagged.event).is_some()
         });
-    latest(candidates, |tagged| &tagged.event.position).and_then(|tagged| value(tagged.event))
+    latest(order, candidates, |tagged| &tagged.event.position)
+        .and_then(|tagged| value(tagged.event))
 }
 
 /// The authority kind and key the registration serves (build.sql:393-420).
@@ -240,7 +252,7 @@ pub(super) fn authority_context(
             found.push((position.clone(), json!("registry_only"), key));
         }
     }
-    match latest(found, |(position, _, _)| position) {
+    match latest(&facts.order, found, |(position, _, _)| position) {
         Some((position, kind, key)) => AuthorityContext {
             kind,
             key_stored: key.is_some(),
@@ -332,7 +344,20 @@ pub(super) fn latest_event_kind(
     }
     let found = if is_v2 {
         selected_key.and_then(|key| {
-            let view = merged_for(facts, key, &facts.input.logical_name_id);
+            let name = &facts.input.logical_name_id;
+            if facts.order != EventOrder::Canonical {
+                // The counterfactual reads the key's members themselves in today's lateral order
+                // (build.sql:366-371), not the maxima folded in its membership order.
+                return latest(
+                    &facts.order,
+                    members(facts, key, name)
+                        .into_iter()
+                        .filter(|event| FIVE_KINDS.contains(&event.event_kind.as_str())),
+                    |event| &event.position,
+                )
+                .map(|event| event.event_kind.clone());
+            }
+            let view = merged_for(facts, key, name);
             let marks: [(&Option<Mark>, &str); 5] = [
                 (&view.last_grant, "RegistrationGranted"),
                 (&view.last_renewal, "RegistrationRenewed"),
@@ -341,6 +366,7 @@ pub(super) fn latest_event_kind(
                 (&view.last_expiry_changed, "ExpiryChanged"),
             ];
             latest(
+                &facts.order,
                 marks
                     .into_iter()
                     .filter_map(|(mark, kind)| mark.as_ref().map(|mark| (mark, kind))),
@@ -350,16 +376,10 @@ pub(super) fn latest_event_kind(
         })
     } else {
         latest(
-            in_scope.iter().filter(|tagged| {
-                matches!(
-                    tagged.event.event_kind.as_str(),
-                    "RegistrationGranted"
-                        | "RegistrationRenewed"
-                        | "RegistrationReleased"
-                        | "RegistrationReserved"
-                        | "ExpiryChanged"
-                )
-            }),
+            &facts.order,
+            in_scope
+                .iter()
+                .filter(|tagged| FIVE_KINDS.contains(&tagged.event.event_kind.as_str())),
             |tagged| &tagged.event.position,
         )
         .map(|tagged| tagged.event.event_kind.clone())
@@ -385,70 +405,6 @@ pub(super) fn registrar_resource<'a>(
         .max_by(|left, right| left.order().cmp(&right.order()))
         .and_then(|candidate| candidate.wrapped_registrar_resource_id.as_deref());
     Some(wrapped.unwrap_or(resource))
-}
-
-/// The control block's registry owner and latest kind (build.sql:649-694), from what the
-/// families keep: the latest admitted ENSv2 transfer or registrar snapshot grant, and the F2c
-/// node's latest owner for an ENSv1 or Basenames name. F2c keeps the owner without the position,
-/// resource or admission of the AuthorityTransferred that set it, and no family keeps an
-/// AuthorityEpochChanged's owner, so this part is an approximation: when a later transfer the
-/// name's admission leaves out set the node's owner, this read serves that owner and the
-/// comparison fails (fixture `an_excluded_later_transfer_is_not_the_control_owner_and_is_not_excused`,
-/// a step 2 retention follow-up).
-pub(super) fn control_owner(
-    facts: &NameFacts,
-    authority: &Authority<'_>,
-    in_scope: &[&Tagged<'_>],
-    is_v2: bool,
-    selected_key: Option<&str>,
-) -> (Option<String>, Option<String>) {
-    let mut owners: Vec<(Position, Option<String>, &str)> = Vec::new();
-    let mut kinds: Vec<(Position, &str)> = Vec::new();
-    for tagged in in_scope {
-        let event = tagged.event;
-        let masked = event.owner_word_unmasked == Some(true);
-        if event.event_kind == "TokenControlTransferred" {
-            kinds.push((event.position.clone(), "TokenControlTransferred"));
-            if is_v2 {
-                let owner = if masked {
-                    None
-                } else {
-                    event.to_address.clone()
-                };
-                owners.push((event.position.clone(), owner, "TokenControlTransferred"));
-            }
-        }
-        if event.event_kind == "RegistrationGranted"
-            && event.state_derived == Some(true)
-            && event.registrar_surface_snapshot == Some(true)
-        {
-            let owner = if masked {
-                None
-            } else {
-                event.owner_getter.clone()
-            };
-            owners.push((event.position.clone(), owner, "RegistrationGranted"));
-        }
-    }
-    if !is_v2
-        && let Some(node) = &facts.registry_node
-        && let Some(position) = &node.position
-    {
-        let owner = if node.owner_word_unmasked == Some(true) {
-            None
-        } else {
-            node.registry_owner.clone().or_else(|| node.owner.clone())
-        };
-        owners.push((position.clone(), owner, "AuthorityTransferred"));
-        kinds.push((position.clone(), "AuthorityTransferred"));
-    }
-    // An AuthorityEpochChanged decides the kind; F1 keeps no owner for it.
-    for (position, _, _) in admitted_epochs(facts, authority, is_v2, selected_key) {
-        kinds.push((position, "AuthorityEpochChanged"));
-    }
-    let owner = latest(owners, |(position, _, _)| position).and_then(|(_, owner, _)| owner);
-    let kind = latest(kinds, |(position, _)| position).map(|(_, kind)| kind.to_owned());
-    (owner, kind)
 }
 
 /// `to_char(to_timestamp(seconds) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')` for

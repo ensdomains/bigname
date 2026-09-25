@@ -11,13 +11,18 @@ mod shadow_support;
 mod support;
 
 use anyhow::Result;
-use bigname_storage::families::control::{
-    compare::Difference, lifecycle::Clock, permissions::ResourceInput,
+use bigname_storage::{
+    families::control::{
+        compare::Difference,
+        lifecycle::{AuthoritySelection, Clock, NameFacts, NameInput, evaluate, load_name_facts},
+        permissions::ResourceInput,
+    },
+    load_name_current_by_logical_name_ids,
 };
 use serde_json::{Value, json};
 use shadow_support::{
     assert_counts,
-    compare::{Excuse, resource_excuses},
+    compare::{Excuse, association_keys, generated_ids, legacy_facts, resource_excuses},
     publish_and_compare,
     wrapper::timestamp,
 };
@@ -250,5 +255,201 @@ async fn a_same_block_path_expiry_before_a_grant_passes_only_with_both_values() 
         Excuse::None,
         "a wrong restriction must fail"
     );
+    fixture.cleanup().await
+}
+
+/// Name 1's facts as the harness loads them, with the counterfactual that reads them in today's
+/// order.
+async fn facts_and_legacy(fixture: &Fixture) -> Result<(NameFacts, NameFacts)> {
+    let rows = load_name_current_by_logical_name_ids(&fixture.pool, &[name(1)]).await?;
+    let row = &rows[&name(1)];
+    let input = NameInput {
+        logical_name_id: row.logical_name_id.clone(),
+        namehash: row.namehash.to_ascii_lowercase(),
+        selection: AuthoritySelection::from_provenance(&row.provenance),
+    };
+    let facts = load_name_facts(&fixture.pool, CHAIN, &[input])
+        .await?
+        .pop()
+        .expect("name 1 has facts");
+    let identities: Vec<String> = facts
+        .events
+        .iter()
+        .map(|event| event.position.event_identity.clone())
+        .collect();
+    let ids = generated_ids(&fixture.pool, CHAIN, &identities).await?;
+    let keys = association_keys(&fixture.pool, CHAIN, &identities).await?;
+    let legacy =
+        legacy_facts(&facts, &ids, &keys).expect("a block reads differently in today's order");
+    Ok((facts, legacy))
+}
+
+fn admitted(facts: &NameFacts, target: i64) -> Value {
+    let clock = Clock {
+        block_number: target,
+        timestamp_seconds: timestamp(target),
+    };
+    evaluate(facts, &clock).trace["admitted"].clone()
+}
+
+/// An ENSv2 event of name 1 on `resource` at `(transaction 0, log)`.
+fn v2_event<'a>(
+    identity: &'a str,
+    block: i64,
+    log: i64,
+    kind: &'a str,
+    name: &'a str,
+    resource: Option<&'a str>,
+    after: Value,
+) -> Event<'a> {
+    let mut after = after;
+    after["registry_contract_instance_id"] = after
+        .get("registry_contract_instance_id")
+        .cloned()
+        .unwrap_or(json!("R"));
+    after["token_id"] = after.get("token_id").cloned().unwrap_or(json!("7"));
+    after["authority_kind"] = json!("registrar");
+    let mut event = Event::new(identity, block, log, kind, V2_REGISTRY)
+        .name(name)
+        .after(after)
+        .raw(json!({"emitting_address": REGISTRY}));
+    if let Some(resource) = resource {
+        event = event.resource(resource);
+    }
+    event
+}
+
+/// Item 4 of the TYR-36 step 3 review (Q7): the same-block counterfactual reads the name's
+/// facts in today's order at the selectors that use it and keeps every position, so the
+/// authority admission, whose epoch bound compares three-part positions (authority_events.sql
+/// :262-311), admits exactly what it admits in the canonical read. Name 1 has a migration proof
+/// at block 12, log 5, and in that block an ExpiryChanged at log 7, written first, and a renewal
+/// at log 3: the generated ids and the canonical order disagree, and the ExpiryChanged is
+/// admitted after the epoch start in both reads. Rewriting positions would have moved it before
+/// the bound and changed what the laterals read, an admission change no same-block excuse may
+/// rest on.
+#[tokio::test]
+async fn the_order_counterfactual_keeps_the_admission_of_a_reordered_block() -> Result<()> {
+    let fixture = Fixture::new("families_shadow_order_admission", 20).await?;
+    let (k1, n1) = (uuid(1), name(1));
+    v2_binding(&fixture, &k1).await?;
+    fixture
+        .event(grant("grant-10", 10, &n1, &k1, ALICE))
+        .await?;
+    fixture
+        .event(
+            Event::new(
+                "migration-12",
+                12,
+                5,
+                "MigrationApplied",
+                "ens_v2_migration_l1",
+            )
+            .name(&n1)
+            .after(json!({"migration_path": "unlocked_wrapped",
+                              "successor_binding": {"binding_id": uuid(100), "resource_id": k1}})),
+        )
+        .await?;
+    fixture
+        .event(v2_event(
+            "expiry-12",
+            12,
+            7,
+            "ExpiryChanged",
+            &n1,
+            Some(&k1),
+            json!({"expiry": 2_200_000_000u64}),
+        ))
+        .await?;
+    fixture
+        .event(v2_event(
+            "renewal-12",
+            12,
+            3,
+            "RegistrationRenewed",
+            &n1,
+            Some(&k1),
+            json!({"expiry": 2_100_000_000u64}),
+        ))
+        .await?;
+    let report = publish_and_compare(&fixture, 16).await?;
+    assert_counts(&report, &[], &[]);
+    let (facts, legacy) = facts_and_legacy(&fixture).await?;
+    assert_eq!(
+        facts.input.selection.epoch_start,
+        Some((12, 0, 5)),
+        "the proof opens the epoch mid-block"
+    );
+    assert_eq!(admitted(&facts, 16), json!(["expiry-12"]));
+    assert_eq!(admitted(&legacy, 16), admitted(&facts, 16));
+    fixture.cleanup().await
+}
+
+/// Item 4 of the TYR-36 step 3 review (Q7): today's association takes the latest linked grant
+/// of the same name, registry and token (v2_lifecycle_events.sql:10-23), so the counterfactual
+/// may move a triple's association only to a grant of that complete triple. Name 1 has a grant
+/// of triple (R, 7) on K1 at log 5 and, in the same block, a grant of the unrelated triple
+/// (R2, 9) on K2 at log 1 written after it, then a null-resource ExpiryChanged of (R, 7). The
+/// block's two orders disagree, but the unrelated grant is no rival: the triple stays on K1.
+#[tokio::test]
+async fn an_unrelated_triple_in_the_block_is_not_an_association_rival() -> Result<()> {
+    let fixture = Fixture::new("families_shadow_order_unrelated_triple", 20).await?;
+    let (k1, k2, n1) = (uuid(1), uuid(2), name(1));
+    v2_binding(&fixture, &k1).await?;
+    fixture.resource(&k2).await?;
+    fixture
+        .event(v2_event(
+            "grant-r7",
+            12,
+            5,
+            "RegistrationGranted",
+            &n1,
+            Some(&k1),
+            json!({"status": "registered", "registrant": ALICE, "expiry": 2_000_000_000u64}),
+        ))
+        .await?;
+    fixture
+        .event(v2_event(
+            "grant-r2-9",
+            12,
+            1,
+            "RegistrationGranted",
+            &n1,
+            Some(&k2),
+            json!({"status": "registered", "registrant": BOB, "expiry": 2_000_000_000u64,
+                   "registry_contract_instance_id": "R2", "token_id": "9"}),
+        ))
+        .await?;
+    fixture
+        .event(v2_event(
+            "expiry-r7",
+            14,
+            1,
+            "ExpiryChanged",
+            &n1,
+            None,
+            json!({"expiry": 2_100_000_000u64}),
+        ))
+        .await?;
+    publish_and_compare(&fixture, 16).await?;
+    let (facts, legacy) = facts_and_legacy(&fixture).await?;
+    let target = |facts: &NameFacts| {
+        facts
+            .triples
+            .iter()
+            .find(|triple| triple.key[1] == "R" && triple.key[2] == "7")
+            .map(|triple| {
+                (
+                    triple.target.clone(),
+                    triple
+                        .target_position
+                        .as_ref()
+                        .map(|position| position.event_identity.clone()),
+                )
+            })
+    };
+    let expected = Some((Some(k1.clone()), Some("grant-r7".to_owned())));
+    assert_eq!(target(&facts), expected);
+    assert_eq!(target(&legacy), expected, "the unrelated grant is no rival");
     fixture.cleanup().await
 }
