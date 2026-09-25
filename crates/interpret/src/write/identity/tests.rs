@@ -2208,11 +2208,11 @@ mod numeric_short_lease_connected {
                 if to == fixture::MIGRATION_BLOCK {
                     // Successor identifiers: the activated migration names the ENSv2 binding and
                     // resource the registration opened, at the TokenResource log.
-                    let successor: (Uuid, Uuid, i64, i64, i64, Uuid) = sqlx::query_as(
+                    let successor: (Uuid, Uuid, i64, i64, i64, Uuid) = sqlx::query_as(&format!(
                         "SELECT binding.surface_binding_id, binding.resource_id,
                                 binding.block_number,
-                                (binding.provenance ->> 'transaction_index')::bigint,
-                                (binding.provenance ->> 'log_index')::bigint,
+                                (binding.provenance ->> '{tx}')::bigint,
+                                (binding.provenance ->> '{log}')::bigint,
                                 grant_event.resource_id
                          FROM surface_bindings binding
                          JOIN normalized_events grant_event
@@ -2220,7 +2220,9 @@ mod numeric_short_lease_connected {
                           AND grant_event.event_kind = 'RegistrationGranted'
                           AND grant_event.source_family = 'ens_v2_registry_l1'
                          WHERE binding.logical_name_id = $1 AND binding.authority_arm = 'ens_v2'",
-                    )
+                        tx = adapter::seam::TRANSACTION_INDEX_KEY,
+                        log = adapter::seam::LOG_INDEX_KEY,
+                    ))
                     .bind(&logical)
                     .fetch_one(pool)
                     .await?;
@@ -2324,8 +2326,8 @@ mod numeric_short_lease_connected {
                     Some("released".to_owned()),
                     serde_json::json!({
                         "block_number": fixture::MIGRATION_BLOCK,
-                        "transaction_index": linked.transaction_index,
-                        "log_index": linked.log_index,
+                        (adapter::seam::TRANSACTION_INDEX_KEY): linked.transaction_index,
+                        (adapter::seam::LOG_INDEX_KEY): linked.log_index,
                     }),
                 )
             );
