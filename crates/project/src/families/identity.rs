@@ -152,8 +152,11 @@ fn opening_event<'a>(events: &'a [BlockEvent], binding: &Row) -> Option<&'a Bloc
 }
 
 /// A binding's position in the canonical event order: its opening SurfaceBound's position, else
-/// its own block and provenance index with the identity `binding:<surface binding id>` (a
-/// binding with no SurfaceBound in the block, which the adapters do not emit today).
+/// its own block and provenance index with the identity `binding:<surface binding id>`. The
+/// fallback applies to any binding without a matching opener in the block, whether the adapter
+/// dropped the SurfaceBound or an opener fails the match above; the candidate is still stored,
+/// without the opener-derived fields (`normalized_event_id`, `state_derived`, the authority
+/// metadata), and nothing is reported.
 fn binding_position(binding: &Row, opening: Option<&BlockEvent>) -> Position {
     if let Some(event) = opening {
         return event.position.clone();
