@@ -790,6 +790,7 @@ fn serves_the_raw_arm_release(input: &NameInput, shadow: &ShadowName, diff: &Dif
 async fn without_unnamed_release(
     pool: &PgPool,
     chain: &str,
+    target: i64,
     facts: &NameFacts,
 ) -> Result<NameFacts> {
     let mut membership = facts.clone();
@@ -803,7 +804,8 @@ async fn without_unnamed_release(
         .iter()
         .map(|event| event.position.event_identity.clone())
         .collect();
-    membership.order = EventOrder::Generated(generated_ids(pool, chain, &identities).await?);
+    membership.order =
+        EventOrder::Generated(generated_ids(pool, chain, target, &identities).await?);
     Ok(membership)
 }
 
@@ -834,7 +836,7 @@ async fn name_excuses(
         .collect();
     let without_release = if unnamed.contains(&true) {
         Some(evaluate(
-            &without_unnamed_release(pool, chain, &facts).await?,
+            &without_unnamed_release(pool, chain, clock.block_number, &facts).await?,
             clock,
         ))
     } else {
@@ -872,7 +874,7 @@ async fn name_excuses(
                     .map(|position| position.event_identity),
             )
             .collect();
-        let ids = generated_ids(pool, chain, &identities).await?;
+        let ids = generated_ids(pool, chain, clock.block_number, &identities).await?;
         let keys = association_keys(pool, chain, &identities).await?;
         if let Some(legacy) = legacy_facts(&facts, &ids, &keys) {
             let counterfactual = evaluate(&legacy, clock);
@@ -1384,18 +1386,24 @@ pub fn control_positions(facts: &NameFacts) -> Vec<Position> {
     owners.chain(starts).chain(bounds).collect()
 }
 
-/// The generated ids of events, by identity.
+/// The generated ids of events, by identity, among canonical events of the published blocks,
+/// the predicate the registry-binding and control-fact reads use. An event whose log row is no
+/// longer canonical, or lies past the target, has no id here, so a read that needs it has no
+/// today's order.
 pub async fn generated_ids(
     pool: &PgPool,
     chain: &str,
+    target: i64,
     identities: &[String],
 ) -> Result<BTreeMap<String, i64>> {
     Ok(sqlx::query_as::<_, (String, i64)>(
         "SELECT event_identity, normalized_event_id FROM normalized_events
-         WHERE chain_id = $1 AND event_identity = ANY($2)",
+         WHERE chain_id = $1 AND event_identity = ANY($2) AND block_number <= $3
+           AND canonicality_state IN ('canonical', 'safe', 'finalized')",
     )
     .bind(chain)
     .bind(identities)
+    .bind(target)
     .fetch_all(pool)
     .await?
     .into_iter()
@@ -1561,7 +1569,7 @@ pub async fn resource_excuses(
         .iter()
         .map(|event| event.position.event_identity.clone())
         .collect();
-    let ids = generated_ids(pool, chain, &identities).await?;
+    let ids = generated_ids(pool, chain, clock.block_number, &identities).await?;
     if !events
         .iter()
         .all(|event| ids.contains_key(&event.position.event_identity))

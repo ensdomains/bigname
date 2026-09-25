@@ -476,6 +476,32 @@ async fn synthesised_events_in_one_block_take_the_identity_order() -> Result<()>
             ("d12_same_block_order:control/expiry", 1),
         ],
     );
+    // Codex thread PRRT_kwDOSJpxAs6l7vYS: an event the family still holds whose log row is no
+    // longer canonical has no readable generated id, so the block's today's order is unknown
+    // and the differences stay mismatches rather than same-block deltas.
+    sqlx::query(
+        "UPDATE normalized_events SET canonicality_state = 'orphaned'
+         WHERE chain_id = $1 AND event_identity = 'a-expiry'",
+    )
+    .bind(CHAIN)
+    .execute(&fixture.pool)
+    .await?;
+    let mutated = shadow_support::compare::compare(&fixture.pool, CHAIN, 12).await?;
+    assert!(
+        mutated.expected_delta_fields.is_empty() && mutated.known_discrepancy.is_empty(),
+        "an orphaned event must not order the block: {:#?}",
+        mutated.lines
+    );
+    assert_eq!(
+        failed_fields(&mutated),
+        [
+            "control/expiry",
+            "registration/expiry",
+            "registration/latest_event_kind"
+        ],
+        "{:#?}",
+        mutated.lines
+    );
     fixture.cleanup().await
 }
 

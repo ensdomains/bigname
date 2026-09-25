@@ -449,7 +449,7 @@ async fn facts_and_legacy(fixture: &Fixture) -> Result<(NameFacts, NameFacts)> {
                 .map(|position| position.event_identity),
         )
         .collect();
-    let ids = generated_ids(&fixture.pool, CHAIN, &identities).await?;
+    let ids = generated_ids(&fixture.pool, CHAIN, 16, &identities).await?;
     let keys = association_keys(&fixture.pool, CHAIN, &identities).await?;
     let legacy =
         legacy_facts(&facts, &ids, &keys).expect("a block reads differently in today's order");
@@ -569,7 +569,7 @@ async fn the_order_counterfactual_keeps_the_admission_of_a_reordered_block() -> 
                 .map(|position| position.event_identity.clone()),
         )
         .collect();
-    let mut ids = generated_ids(&fixture.pool, CHAIN, &identities).await?;
+    let mut ids = generated_ids(&fixture.pool, CHAIN, 16, &identities).await?;
     let keys = association_keys(&fixture.pool, CHAIN, &identities).await?;
     ids.remove(&controls[0].event_identity);
     assert!(legacy_facts(&facts, &ids, &keys).is_none());
