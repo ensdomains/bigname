@@ -318,6 +318,18 @@ async fn a_linked_pair_at_the_mirror_address_is_expected_for_the_mirrored_name()
         .await?;
     // Today serves the linked value through the mirror's own address.
     let v2 = inventory(&pool, V2_RESOURCE).await?;
+    let served = v2["entries"]
+        .as_array()
+        .and_then(|entries| {
+            entries
+                .iter()
+                .find(|entry| entry["record_key"] == "addr:60")
+        })
+        .context("served addr:60")?;
+    assert_eq!(
+        served["value"], "0x6666666666666666666666666666666666666666",
+        "the AddressChanged half is served: {v2}"
+    );
     assert_eq!(
         v2["provenance"]["record_link_event_ids"],
         json!([ids[0]]),

@@ -1158,6 +1158,19 @@ async fn a_root_name_holding_a_zero_link_pairs_record_id_zero() -> Result<()> {
         json!([link]),
         "{provenance}"
     );
+    let served: Value = sqlx::query_scalar(
+        "SELECT entry -> 'value' FROM record_inventory_current,
+                jsonb_array_elements(entries) entry
+         WHERE resource_id = $1::uuid AND entry ->> 'record_key' = 'addr:60'",
+    )
+    .bind(resource(50))
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        served,
+        json!(INVERSE_A),
+        "the AddressChanged half is served"
+    );
     assert!(
         provenance["record_event_ids"]
             .as_array()
