@@ -1828,7 +1828,9 @@ each event under the key step 2 derives, and the node's owner-setting events. A
 name's checks then read its retained lifecycle events rebuilt from that log
 rather than the family rows, and those rebuilt events read in the canonical
 order must give the shadow value, so a missing, extra or misfiled retained
-event, or a wrong fact on one, fails the fields it decides. The wrapper rows,
+event fails the fields it decides. Each family row must also equal its rebuild
+whole, so a wrong fact on a retained event leaves every differing field of the
+name, or of the resource it sits on, a mismatch. The wrapper rows,
 other names' candidates and a candidate's surface namehash are not rebuilt, and
 the retained decoded name is not read, so a wrong value there is not caught by
 these checks. A differing field passes in two cases only. The first is a disclosed same-block ordering case: reading the

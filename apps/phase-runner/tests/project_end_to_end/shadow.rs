@@ -1014,8 +1014,8 @@ fn gives(read: Option<&ShadowName>, field: &str, value: &Value) -> bool {
 /// publication-visible log, not on the family rows: read in the canonical order (through the
 /// refolding path, so the stored key states and triple summaries are not read either) they
 /// must give the field's shadow value. Each retained row must also equal its rebuild whole, so
-/// a wrong fact on a retained lifecycle row fails every field of the name. Facts the retention
-/// check does not rebuild are listed in `retention.rs`.
+/// a wrong fact on a retained lifecycle row leaves every differing field of the name a
+/// mismatch. Facts the retention check does not rebuild are listed in `retention.rs`.
 fn name_excuses(
     prefetched: &ExcuseInputs,
     clock: &Clock,
