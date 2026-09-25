@@ -1106,7 +1106,8 @@ async fn a_root_reversal_moves_the_child_restrictions_as_a_same_block_delta() ->
 
 /// Pro r5 Q6 on c23e3e5b, overlapping admin powers: the child's holder and the root's admin
 /// both hold `admin_renew`, so `renew` is unlocked on the child in both orders and nothing
-/// differs. With `admin_renew` removed only from the child's aggregate, today's read of the
+/// differs. With `admin_renew` removed only from the child's aggregate (its row deleted, as the
+/// reducer leaves an emptied aggregate), today's read of the
 /// child's block still unlocks `renew` through the live root and equals the served block, while
 /// the canonical read, the root lapsed, locks it and equals the corrupt shadow: the restriction
 /// block alone could pass as the root-reversal delta. The child's own admin powers still differ
@@ -1126,8 +1127,26 @@ async fn a_child_admin_power_the_root_also_holds_still_fails_the_report() -> Res
             ("d12_same_block_order:resource_restrictions", 1),
         ],
     );
+    // The child's holder is the aggregate's one holder and `admin_renew` its one admin power.
+    // Dropping that power empties the object, and the reducer deletes an empty aggregate row
+    // (crates/project/src/families/permissions.rs:386-396), so the row gone is what a reducer
+    // that lost the power would leave.
     let holders = admin_aggregate(&fixture, &child).await?;
-    set_admin_aggregate(&fixture, &child, &every_holder(&holders, &[])).await?;
+    assert_eq!(
+        holders
+            .as_object()
+            .map(|holders| holders.values().collect::<Vec<_>>()),
+        Some(vec![&json!(["admin_renew"])]),
+        "{holders}"
+    );
+    let deleted = sqlx::query(
+        "DELETE FROM bigname_phase.project_resource_admin_aggregate WHERE resource_id = $1::uuid",
+    )
+    .bind(&child)
+    .execute(&fixture.pool)
+    .await?
+    .rows_affected();
+    assert_eq!(deleted, 1);
     let mutated = shadow_support::compare::compare(&fixture.pool, CHAIN, 16).await?;
     // The child's restriction block passes as the root-reversal delta, as the rule allows; the
     // child's admin powers are the one mismatch, and they fail the run.
