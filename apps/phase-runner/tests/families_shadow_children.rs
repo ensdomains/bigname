@@ -1163,3 +1163,93 @@ async fn child_filters_sort_page_and_expire_at_the_block_clock() -> Result<()> {
     unexpected(&report, &[])?;
     fixture.cleanup().await
 }
+
+// Backslash is the escape character of both readers' prefix patterns, so a prefix holding one
+// must still match literally: `a\` alone, `a\%` and `a\_`. Each decoy would match only if a
+// backslash in the prefix escaped the character after it (`a%four` for `a\%` and `a\`,
+// `a_five` for `a\_`). Kept apart from the clock fixture so its totals and orders stay as they
+// are; the prefixes run through the whole filter matrix and are then checked by name.
+#[tokio::test]
+async fn child_prefixes_match_backslashes_literally() -> Result<()> {
+    const PREFIXES: &[&str] = &["a\\", "a\\%", "a\\_"];
+    let mut fixture = Fixture::new("families_shadow_children_backslash", 12).await?;
+    let (parent_id, _, parent_labels) = parent(&fixture, 1, "slash").await?;
+    let registry = uuid(0xf2);
+    fixture.contract(&registry, &address(0xf2), 1).await?;
+    fixture
+        .event(
+            "subregistry-slash",
+            Some(&parent_id),
+            None,
+            V2_REGISTRY,
+            "SubregistryChanged",
+            2,
+            json!({"subregistry": address(0xf2)}),
+            &address(0xe3),
+        )
+        .await?;
+    for (n, label) in [
+        (1, "a\\one"),
+        (2, "a\\%two"),
+        (3, "a\\_three"),
+        (4, "a%four"),
+        (5, "a_five"),
+        (6, "ab"),
+    ] {
+        let labelhash = word(0x6100 + n);
+        fixture.label(&labelhash, label, true).await?;
+        let mut labels = vec![labelhash];
+        labels.extend(parent_labels.iter().cloned());
+        let logical = fixture
+            .surface(
+                "ens",
+                &word(0x7100 + n),
+                &format!("{label}.slash.eth"),
+                &labels,
+                1,
+            )
+            .await?;
+        expiring_registration(
+            &fixture,
+            &format!("granted-{n}"),
+            &logical,
+            &registry,
+            2,
+            None,
+        )
+        .await?;
+    }
+    fixture.publish(4).await?;
+    let report = fixture.compare_with_prefixes(1, PREFIXES).await?;
+    unexpected(&report, &[])?;
+    let pool = fixture.pool();
+    for (prefix, expected) in [
+        (
+            "a\\",
+            vec![
+                "a\\%two.slash.eth",
+                "a\\_three.slash.eth",
+                "a\\one.slash.eth",
+            ],
+        ),
+        ("a\\%", vec!["a\\%two.slash.eth"]),
+        ("a\\_", vec!["a\\_three.slash.eth"]),
+    ] {
+        let filter = ChildrenCurrentPageFilter {
+            q: Some(prefix),
+            ..ChildrenCurrentPageFilter::default()
+        };
+        let (served_total, served, shadow_total, shadowed) =
+            shadow::walk_children(pool, &parent_id, &filter, 1).await?;
+        let mut names = display_names(&served);
+        names.sort_unstable();
+        ensure!(
+            names == expected
+                && served == shadowed
+                && served_total == expected.len() as u64
+                && shadow_total == served_total,
+            "{prefix}: served {served:?}, shadow {shadowed:?}"
+        );
+    }
+    fixture.cleanup().await
+}
