@@ -133,7 +133,9 @@ struct RecordRow {
 impl From<RecordRow> for Record {
     fn from(row: RecordRow) -> Self {
         let marker = |number: Option<i64>, hash: Option<String>| {
-            number.zip(hash).map(|(number, hash)| Marker { number, hash })
+            number
+                .zip(hash)
+                .map(|(number, hash)| Marker { number, hash })
         };
         Self {
             attempt: row.attempt,
@@ -209,7 +211,11 @@ pub(crate) fn require_unchanged(
     planned: Option<&Record>,
 ) -> Result<()> {
     if locked != planned {
-        return Err(fence_error(chain_id, "the one the loop planned from", locked));
+        return Err(fence_error(
+            chain_id,
+            "the one the loop planned from",
+            locked,
+        ));
     }
     Ok(())
 }

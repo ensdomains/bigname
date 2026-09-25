@@ -37,8 +37,7 @@ pub(crate) async fn undo_block(
     let locked = marker::lock(&mut transaction, chain_id).await?;
     marker::require(chain_id, &locked, Some(current), expected.sequence)?;
     let record = repair::lock(&mut transaction, chain_id).await?;
-    let record =
-        repair::require_state(chain_id, record.as_ref(), attempt, repair::State::Undoing)?;
+    let record = repair::require_state(chain_id, record.as_ref(), attempt, repair::State::Undoing)?;
     let journal: Vec<(String, String, Option<Value>)> = sqlx::query_as(
         "/* project:families.undo.journal */ SELECT family, key, before_image
          FROM project_family_undo
@@ -135,8 +134,7 @@ pub(crate) async fn start_replay(
         expected.sequence,
     )?;
     let record = repair::lock(&mut transaction, chain_id).await?;
-    let record =
-        repair::require_state(chain_id, record.as_ref(), attempt, repair::State::Undoing)?;
+    let record = repair::require_state(chain_id, record.as_ref(), attempt, repair::State::Undoing)?;
     let base = locked
         .current
         .as_ref()

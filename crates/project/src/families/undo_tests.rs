@@ -90,7 +90,8 @@ async fn publish(
     let mut opened = block::open(pool, CHAIN, number, &plan).await?;
     let mut rows = RowSet::default();
     for (table, key, after) in changes {
-        rows.load(&mut opened.transaction, table, [key.clone()]).await?;
+        rows.load(&mut opened.transaction, table, [key.clone()])
+            .await?;
         match after {
             Some(after) => rows.put(table, after)?,
             None => rows.delete(table, &key)?,

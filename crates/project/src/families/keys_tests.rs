@@ -180,7 +180,11 @@ fn one_event_delivered_twice_under_different_generated_ids_is_applied_once() {
 
 #[test]
 fn disagreeing_deliveries_of_one_identity_keep_the_first_in_order_and_count_an_anomaly() {
-    let mut early = event("RegistrationGranted", "ens_v2_registry_l1", json!({"expiry": 1}));
+    let mut early = event(
+        "RegistrationGranted",
+        "ens_v2_registry_l1",
+        json!({"expiry": 1}),
+    );
     early.normalized_event_id = 9;
     let mut late = early.clone();
     late.normalized_event_id = 1;
@@ -200,7 +204,10 @@ fn disagreeing_deliveries_of_one_identity_keep_the_first_in_order_and_count_an_a
         .collect::<Vec<_>>();
     assert_eq!(
         kept,
-        [("fixture:1", json!({"expiry": 0})), ("fixture:between", json!({}))],
+        [
+            ("fixture:1", json!({"expiry": 0})),
+            ("fixture:between", json!({}))
+        ],
         "the generated ids 9 and 1 play no part"
     );
 }

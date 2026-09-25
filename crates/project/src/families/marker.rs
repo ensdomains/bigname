@@ -114,7 +114,6 @@ fn text(image: &Value, field: &str) -> Option<String> {
     image.get(field).and_then(Value::as_str).map(str::to_owned)
 }
 
-
 #[derive(sqlx::FromRow)]
 struct MarkerRow {
     current_block_number: Option<i64>,
@@ -170,10 +169,10 @@ pub(crate) async fn read(pool: &sqlx::PgPool, chain_id: &str) -> Result<FamilyMa
         "/* project:families.marker.read */ SELECT {MARKER_COLUMNS}
          FROM project_family_marker WHERE chain_id = $1"
     ))
-        .bind(chain_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|error| ProjectError::database("failed to read the family marker", error))?;
+    .bind(chain_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| ProjectError::database("failed to read the family marker", error))?;
     Ok(row.map(FamilyMarker::from).unwrap_or_default())
 }
 
@@ -194,10 +193,10 @@ pub(crate) async fn lock(
         "/* project:families.marker.lock */ SELECT {MARKER_COLUMNS}
          FROM project_family_marker WHERE chain_id = $1 FOR UPDATE"
     ))
-        .bind(chain_id)
-        .fetch_one(&mut **transaction)
-        .await
-        .map_err(|error| ProjectError::database("failed to lock the family marker", error))?;
+    .bind(chain_id)
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(|error| ProjectError::database("failed to lock the family marker", error))?;
     Ok(row.into())
 }
 

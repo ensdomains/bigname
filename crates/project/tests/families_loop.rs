@@ -181,14 +181,19 @@ async fn each_block_records_the_input_token_it_read_and_waits_out_an_interpret_r
 
     fixture.interpret_row("interpret-hash-b", 4, true).await?;
     let waiting = fixture.apply(11, FamilyMode::Normal).await;
-    let skipped = waiting.skipped.expect("no block applies while Interpret is in redo");
+    let skipped = waiting
+        .skipped
+        .expect("no block applies while Interpret is in redo");
     assert!(skipped.contains("Interpret is in redo"), "{skipped}");
     assert_eq!(fixture.marker().await?.0, Some(10));
 
     fixture.interpret_row("interpret-hash-b", 4, false).await?;
     let resumed = fixture.apply(12, FamilyMode::Normal).await;
     assert_eq!(resumed.skipped, None);
-    assert!(resumed.revision_adopted, "no Project redo followed the rewrite");
+    assert!(
+        resumed.revision_adopted,
+        "no Project redo followed the rewrite"
+    );
     assert_eq!(fixture.marker().await?.0, Some(12));
     assert_eq!(
         fixture.marker_revision().await?,

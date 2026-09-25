@@ -6,10 +6,10 @@ use std::{sync::Arc, time::Duration};
 use anyhow::Result;
 use phase_runner::{
     INTERPRETER_CONTENT_HASH,
-    project_phase::FamilySettings,
     capacity::CapacityGuard,
     config::{CapacityConfig, ChainConfig, SeedBasis, SourceConfig, TimingConfig},
     phase::{BlockRange, LoopbackPhase, PhaseName, PhaseSet},
+    project_phase::FamilySettings,
     project_phase::ProjectPhase,
     runner::{PhaseRunner, RedoPhase},
     state::PhaseStore,
@@ -100,7 +100,11 @@ async fn a_late_input_token_skips_the_families_and_the_next_batch_catches_up() -
         project_state(&scratch).await?,
         ("completed".into(), Some(3), false)
     );
-    assert_eq!(marker(&scratch).await?, None, "the families skipped the batch");
+    assert_eq!(
+        marker(&scratch).await?,
+        None,
+        "the families skipped the batch"
+    );
 
     redo_project(&scratch).await?;
     assert_eq!(marker(&scratch).await?, Some(3), "the next batch caught up");
