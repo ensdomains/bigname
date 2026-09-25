@@ -23,7 +23,8 @@
 //!   (`v2_lifecycle_events.sql:10-23`), gives exactly the served value for the field. Those
 //!   reads take the name's retained lifecycle events rebuilt from the publication-visible log,
 //!   not the family rows, and the same rebuild read in the canonical order must give the
-//!   shadow value; every named cause below needs that too. Every name field also needs each
+//!   shadow value; every named cause below needs that too. Every name excuse, this one and
+//!   the named causes, also needs each
 //!   epoch start (its kind, name and arm) and binding candidate's SurfaceBound (its kind, name,
 //!   resource, authority kind and key, state-derived flag and owner) the families hold for the
 //!   name to equal its rebuild from that log, since the registration's authority kind and key
@@ -866,9 +867,17 @@ fn name_excuses(
         return out;
     };
     let canonical = evaluate(&in_canonical_ranks(&from_log), clock);
+    // Every excuse also needs the families' identity facts, the epoch starts and the binding
+    // candidates' SurfaceBounds, to be what the log gives, since both blocks read them, and a
+    // control field the node's owner-setting events too.
+    let held = control_fact_checks_in(facts, &prefetched.log);
     let log_gives_shadow: Vec<bool> = diffs
         .iter()
-        .map(|diff| gives(Some(&canonical), &diff.field, &diff.shadow))
+        .map(|diff| {
+            held.identity
+                && (held.owners || !diff.field.starts_with("control/"))
+                && gives(Some(&canonical), &diff.field, &diff.shadow)
+        })
         .collect();
     // The unnamed-release cause passes a field only when today's name-scoped membership gives
     // the served value: the events rebuilt from the log, read in today's order without the
@@ -907,7 +916,6 @@ fn name_excuses(
         return out;
     };
     let today = evaluate(&legacy, clock);
-    let mut checks = None;
     for (index, diff) in diffs.iter().enumerate() {
         // Only the fields both reads compute: an authority-selection field has no today's-order
         // value here and stays open.
@@ -915,16 +923,6 @@ fn name_excuses(
             || !log_gives_shadow[index]
             || !gives(Some(&today), &diff.field, &diff.served)
         {
-            continue;
-        }
-        // Both blocks also read the families' identity facts, the epoch starts and the binding
-        // candidates' SurfaceBounds, and the control block the node's owner-setting events:
-        // those must be what the event log gives too.
-        if checks.is_none() {
-            checks = Some(control_fact_checks_in(facts, &prefetched.log));
-        }
-        let held = checks.as_ref().expect("checked above");
-        if !held.identity || (diff.field.starts_with("control/") && !held.owners) {
             continue;
         }
         out[index] = Excuse::SameBlockOrder;

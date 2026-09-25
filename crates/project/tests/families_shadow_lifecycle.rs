@@ -1636,3 +1636,67 @@ async fn a_name_the_serving_reader_excludes_is_not_compared() -> Result<()> {
     assert_eq!(filtered.names, 0, "{:#?}", filtered.lines);
     fixture.cleanup().await
 }
+
+/// Adversarial review of 6c8bdf8b, note 1: the named causes need the name's identity facts to
+/// match the log too, as the same-block case does. Under an unnamed path-expiry release, an
+/// epoch start the families hold that the log does not give (here one pointing at the grant,
+/// which is no AuthorityEpochChanged) leaves the released name's fields mismatches rather than
+/// the named cause. The start carries no resource, so the reader skips it and the shadow read
+/// is unchanged; only the check fails.
+#[tokio::test]
+async fn a_wrong_epoch_start_under_an_unnamed_release_is_not_the_named_cause() -> Result<()> {
+    let fixture = Fixture::new("families_shadow_unnamed_release_start", 20).await?;
+    let k1 = uuid(1);
+    v2_binding(&fixture, &k1).await?;
+    v2(
+        &fixture,
+        10,
+        "RegistrationGranted",
+        Some(&k1),
+        json!({"status": "registered", "registrant": ALICE, "expiry": 1_800_000_100u64}),
+    )
+    .await?;
+    unnamed_path_expiry(&fixture, "path-expiry", 14, &k1, 1_800_000_150).await?;
+    let report = publish_and_compare(&fixture, 16).await?;
+    let cause = "served_membership_skips_unnamed_path_expiry";
+    let known: Vec<String> = [
+        "control/expiry",
+        "control/registrant",
+        "control/status",
+        "registration/authority_kind",
+        "registration/latest_event_kind",
+        "registration/registrant",
+        "registration/status",
+    ]
+    .iter()
+    .map(|field| format!("{cause}:{field}"))
+    .collect();
+    let known: Vec<(&str, usize)> = known.iter().map(|field| (field.as_str(), 1)).collect();
+    assert_counts(&report, &known, &[]);
+    let (_, before) = shadow_reads(&fixture, 16).await?;
+    sqlx::query(
+        "INSERT INTO bigname_phase.project_name_state (namespace, logical_name_id, chain_id,
+             block_number, transaction_index, log_index, event_identity,
+             authority_start_positions)
+         VALUES ('ens', $1, $2, 10, 0, 1, 'RegistrationGranted:10:1',
+                 jsonb_build_object('ens_v2', jsonb_build_object(
+                     'block_number', 10, 'transaction_index', 0, 'log_index', 1,
+                     'event_identity', 'RegistrationGranted:10:1',
+                     'authority_kind', 'registrar', 'authority_key', NULL, 'owner', NULL,
+                     'resource_id', NULL)))",
+    )
+    .bind(name(1))
+    .bind(CHAIN)
+    .execute(&fixture.pool)
+    .await?;
+    let (_, after) = shadow_reads(&fixture, 16).await?;
+    assert_eq!(after, before, "the reader skips the start");
+    let mutated = shadow_support::compare::compare(&fixture.pool, CHAIN, 16).await?;
+    assert!(
+        mutated.known_discrepancy.is_empty() && mutated.expected_delta_fields.is_empty(),
+        "a wrong epoch start must not pass as the named cause: {:#?}",
+        mutated.lines
+    );
+    assert_eq!(failed_fields(&mutated).len(), 7, "{:#?}", mutated.lines);
+    fixture.cleanup().await
+}
