@@ -1056,3 +1056,112 @@ async fn a_topology_rebind_keeps_each_name_to_its_own_events_on_the_shared_key()
     assert_eq!(shadow.registration["status"], json!("released"));
     fixture.cleanup().await
 }
+
+/// The real path-expiry shape for a name the interpreter knows: at the expiry block the adapter
+/// closes the name's ENSv2 binding and emits a named SurfaceUnbound and a named path-expiry
+/// release on the token resource (crates/adapters/src/schema_v2/protocol/v2_registry/
+/// topology.rs:251-296). Here the name also has an open ENSv1 lease from before its ENSv2
+/// registration. The served name authority then selects arm ens_v1, because nothing is open on
+/// ENSv2 and an ENSv1 binding is (name_authority/build.sql:611-618), so today's row serves the
+/// live ENSv1 lease. Under Tate's ruling an expired ENSv2 registration stays ENSv2 and is served
+/// unregistered, so that is a second served-side bug. Step 3 cannot see it: the shadow takes the
+/// authority selection from the served row as input (selection is step 6's work), follows it to
+/// the ENSv1 lease and agrees with the served row. This test pins the served arm so the bug stays
+/// visible until step 6 changes the selection.
+#[tokio::test]
+async fn a_real_path_expiry_with_an_ensv1_lease_is_served_from_the_lease() -> Result<()> {
+    let fixture = Fixture::new("families_shadow_real_path_expiry", 20).await?;
+    let (lease, k1) = (uuid(2), uuid(1));
+    fixture
+        .binding(&uuid(102), &name(1), &lease, "ens_v1", 5, 0, None)
+        .await?;
+    fixture
+        .write(
+            5,
+            0,
+            "SurfaceBound",
+            V1_REGISTRAR,
+            Some(&name(1)),
+            Some(&lease),
+            json!({"authority_kind": "registrar", "state_derived": false}),
+            REGISTRAR,
+        )
+        .await?;
+    v1(
+        &fixture,
+        6,
+        "RegistrationGranted",
+        &lease,
+        json!({"status": "registered", "registrant": BOB, "expiry": 2_000_000_000u64}),
+    )
+    .await?;
+    fixture
+        .binding(&uuid(100), &name(1), &k1, "ens_v2", 9, 0, Some(14))
+        .await?;
+    fixture
+        .write(
+            9,
+            0,
+            "SurfaceBound",
+            V2_REGISTRY,
+            Some(&name(1)),
+            Some(&k1),
+            json!({"authority_kind": "registrar", "state_derived": false}),
+            REGISTRY,
+        )
+        .await?;
+    v2(
+        &fixture,
+        10,
+        "RegistrationGranted",
+        Some(&k1),
+        json!({"status": "registered", "registrant": ALICE, "expiry": 1_800_000_150u64}),
+    )
+    .await?;
+    let mut unbound = path_expiry(1_800_000_150);
+    unbound["registry_contract_instance_id"] = json!("R");
+    unbound["token_id"] = json!("7");
+    unbound["topology_rebind"] = json!(true);
+    let mut released = path_expiry(1_800_000_150);
+    released["registry_contract_instance_id"] = json!("R");
+    released["token_id"] = json!("7");
+    released["status"] = json!("released");
+    released["released_at"] = json!(1_800_000_168u64);
+    for (identity, kind, after) in [
+        ("x:SurfaceUnbound:expiry:R:7", "SurfaceUnbound", unbound),
+        (
+            "x:RegistrationReleased:expiry:R:7",
+            "RegistrationReleased",
+            released,
+        ),
+    ] {
+        fixture
+            .event(
+                Event::new(identity, 14, 0, kind, V2_REGISTRY)
+                    .name(&name(1))
+                    .resource(&k1)
+                    .before(json!({"status": "registered", "registrant": ALICE}))
+                    .after(after)
+                    .raw(json!({"emitting_address": REGISTRY}))
+                    .synthesised(),
+            )
+            .await?;
+    }
+    let report = publish_and_compare(&fixture, 16).await?;
+    let (served, shadow) = shadow_support::name(&fixture, 16, &name(1)).await?;
+    // Pinned today: the served row routes the expired ENSv2 name back to the ENSv1 lease, and
+    // the shadow, taking that selection as input, agrees. Nothing is counted, so the harness
+    // cannot see this flavour of the bug.
+    assert_eq!(
+        served.provenance["authority_selection"]["authority_arm"],
+        json!("ens_v1")
+    );
+    assert_eq!(served.registration("status"), json!("active"));
+    assert_eq!(served.registration("registrant"), json!(BOB));
+    assert_eq!(served.registration("resource_id"), json!(lease));
+    assert_eq!(shadow.registration["status"], json!("active"));
+    assert_eq!(shadow.registration["registrant"], json!(BOB));
+    assert!(report.served_side_bug_names.is_empty());
+    assert_counts(&report, &[], &[]);
+    fixture.cleanup().await
+}

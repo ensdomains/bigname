@@ -33,10 +33,15 @@
 //!   Tate's ruling: an expired or released ENSv2 registration stays ENSv2 and is served
 //!   unregistered, and never falls back to an ENSv1 lease (only a RESERVED entry defers to
 //!   ENSv1). So the reader selects the release, serves it released and closes the control
-//!   block. Today's name-scoped membership (build.sql:322, :366-367) never sees the release and
-//!   serves the registration active: a served-side bug, recorded here with its names and count
-//!   on the `SEPOLIA_END_TO_END_SHADOW_SERVED_SIDE_BUG` line, not a rule the reader copies.
-//!   Served code is not changed in this branch. A field passes only when the shadow
+//!   block. Today's name-scoped membership (build.sql:322, :366-367) never sees the unnamed
+//!   release and serves the registration active: a served-side bug, recorded here with the
+//!   names and count this harness finds in that shape on the
+//!   `SEPOLIA_END_TO_END_SHADOW_SERVED_SIDE_BUG` line, not a rule the reader copies. The
+//!   fallback half of the ruling is not observable here: when the interpreter knows the name it
+//!   also closes the ENSv2 binding, the served name authority then selects an open ENSv1 lease
+//!   (name_authority/build.sql:611-618), and the shadow takes that selection as input and
+//!   agrees; the lifecycle fixture `a_real_path_expiry_with_an_ensv1_lease_is_served_from_the_lease`
+//!   pins it for step 6. Served code is not changed in this branch. A field passes only when the shadow
 //!   selected that unnamed release and the field holds what the ENSv2 path-release presentation
 //!   gives (build.sql:88-95, :101-103): status released, latest kind RegistrationReleased,
 //!   the release's released_at, the lapsed expiry, no registrant or authority, control

@@ -1677,11 +1677,21 @@ field passes in two cases only. The first is a disclosed same-block ordering cas
 reading the same families with that block in the old generated-id order must give
 exactly the served value. The second is a named cause whose own check holds for
 that field. A named cause is either a step 2 family gap, reported rather than
-patched, or a served-side bug. One served-side bug is known today: after an ENSv2
-registration's path expiry, the current reader still serves the registration as
-active. The families serve it as released, because an expired ENSv2 registration
-stays ENSv2 and is unregistered. The run prints those names. Every test asserts
-its counts exactly, and anything else fails the run. These are
+patched, or a served-side bug. Under Tate's ruling an expired or released ENSv2
+registration stays ENSv2 and is served unregistered. Two served-side bugs break
+that rule today, and the harness can see only the first:
+
+- When the interpreter's path-expiry release names only the token resource, the
+  current reader never sees it and serves the registration as active. The
+  families serve it as released. The run prints the names it finds in this shape.
+- When the interpreter knows the name, it also closes the ENSv2 binding at expiry.
+  If the name has an open ENSv1 lease, the served name authority then selects arm
+  ens_v1 and serves that lease. The shadow reads take the authority selection from
+  the served row as input, because the selection belongs to plan step 6. They
+  follow it and agree, so nothing is counted. A fixture pins the served arm, and
+  step 6 has to fix it.
+
+Every test asserts its counts exactly, and anything else fails the run. These are
 [shadow reads](glossary.md#shadow-read). No API route calls them.
 
 ## Index baseline
