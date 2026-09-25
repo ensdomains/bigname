@@ -650,7 +650,8 @@ for migration_file in \
     "$ROOT/migrations/20260926101000_project_families_rebuild_reset_sequence.sql" \
     "$ROOT/migrations/20260926101100_project_families_disclosures.sql" \
     "$ROOT/migrations/20260926101200_project_families_node_index_name.sql" \
-    "$ROOT/migrations/20260926101300_project_families_wrapper_lifecycle.sql"
+    "$ROOT/migrations/20260926101300_project_families_wrapper_lifecycle.sql" \
+    "$ROOT/migrations/20260926101400_project_families_binding_pairing.sql"
 do
     emit_phase_migration "$migration_file" empty-schema | run_psql
 done
@@ -933,7 +934,9 @@ for migration_file in \
     "$ROOT/migrations/20260926101200_project_families_node_index_name.sql" \
     "$ROOT/migrations/20260926101200_project_families_node_index_name.sql" \
     "$ROOT/migrations/20260926101300_project_families_wrapper_lifecycle.sql" \
-    "$ROOT/migrations/20260926101300_project_families_wrapper_lifecycle.sql"
+    "$ROOT/migrations/20260926101300_project_families_wrapper_lifecycle.sql" \
+    "$ROOT/migrations/20260926101400_project_families_binding_pairing.sql" \
+    "$ROOT/migrations/20260926101400_project_families_binding_pairing.sql"
 do
     emit_phase_migration "$migration_file" baseline-first | run_psql
 done
