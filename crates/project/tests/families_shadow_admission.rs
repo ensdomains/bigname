@@ -301,30 +301,70 @@ fn failed_fields(report: &shadow_support::compare::Report) -> Vec<String> {
 /// block, transaction and log: `c`, unnamed on L at node 1, to Carol, then `b` and `a`, named
 /// for name 1, to Bob and Alice, written in that order so their generated ids run a > b > c.
 /// Pass one names `c` for name 1 through the candidate's namehash, so the canonical order takes
-/// `c` (Carol) and today's order `a` (Alice): both registrants are same-block deltas. Name 2 is
-/// bound to lease M, a bystander whose candidate the second mutation moves.
+/// `c` (Carol) and today's order `a` (Alice): both registrants are same-block deltas. Name 2 is a
+/// bystander placed by `second`.
 async fn staged_transfer_race(fixture: &Fixture) -> Result<(String, String)> {
-    let (lease, other_lease) = (uuid(1), uuid(3));
-    for (binding, logical, resource, log) in [
-        (uuid(100), name(1), &lease, 0),
-        (uuid(101), name(2), &other_lease, 3),
-    ] {
+    staged_race(fixture, Second::OtherLease).await
+}
+
+/// Where the race puts name 2.
+enum Second {
+    /// Bound directly to its own lease M (`uuid(3)`), which no staging pass of L reads.
+    OtherLease,
+    /// Bound directly to lease L too, at its own node, so pass one of L reads its candidate
+    /// and passes it over.
+    OnLease,
+    /// Bound to NameWrapper resource W (`uuid(2)`), whose SurfaceBound recorded L at node 1
+    /// (the shape of `a_direct_binding_of_one_name_wins_over_another_names_wrapper`), so pass
+    /// two of L would match it; pass one matches name 1 first.
+    WrapperOnLease,
+}
+
+/// The race with name 2 placed by `second`. Returns L and name 2's resource.
+async fn staged_race(fixture: &Fixture, second: Second) -> Result<(String, String)> {
+    let lease = uuid(1);
+    let placed = match second {
+        Second::OtherLease => Some(uuid(3)),
+        Second::OnLease => Some(lease.clone()),
+        Second::WrapperOnLease => None,
+    };
+    let mut bound = vec![(uuid(100), name(1), lease.clone(), 0)];
+    bound.extend(
+        placed
+            .clone()
+            .map(|resource| (uuid(101), name(2), resource, 3)),
+    );
+    for (binding, logical, resource, log) in &bound {
         fixture
-            .binding(&binding, &logical, resource, "ens_v1", 9, log, None)
+            .binding(binding, logical, resource, "ens_v1", 9, *log, None)
             .await?;
         fixture
             .write(
                 9,
-                log,
+                *log,
                 "SurfaceBound",
                 V1_REGISTRAR,
-                Some(&logical),
+                Some(logical),
                 Some(resource),
                 json!({"authority_kind": "registrar", "state_derived": false}),
                 REGISTRAR,
             )
             .await?;
     }
+    let second_resource = match placed {
+        Some(resource) => resource,
+        None => {
+            let wrapper = uuid(2);
+            fixture
+                .binding(&uuid(101), &name(2), &wrapper, "ens_v1", 9, 2, None)
+                .await?;
+            let second = name(2);
+            fixture
+                .event(wrapper_bound("wrap-2", &second, &wrapper, &lease))
+                .await?;
+            wrapper
+        }
+    };
     fixture
         .write(
             10,
@@ -351,7 +391,7 @@ async fn staged_transfer_race(fixture: &Fixture) -> Result<(String, String)> {
         }
         fixture.event(event.after(after)).await?;
     }
-    Ok((lease, other_lease))
+    Ok((lease, second_resource))
 }
 
 const RACE_DELTA: [(&str, usize); 2] = [
@@ -439,6 +479,120 @@ async fn a_wrong_candidate_of_another_name_on_the_lease_stays_a_mismatch() -> Re
         "{:#?}",
         mutated.lines
     );
+    fixture.cleanup().await
+}
+
+/// The adversarial pass on ba2ffbd5, the load path for another name on the lease that is not
+/// in the chunk (retention.rs `RetentionLog::load`, the names on an unnamed registrar event's
+/// lease): name 2 is bound directly to L at its own node and reads equal, so only name 1 has
+/// facts, in one chunk and in chunks of one. Its candidate is loaded from the log, and the
+/// race's same-block deltas stay excused. Then only name 2's candidate loses its surface
+/// namehash. Pass one of L still names `c` for name 1 alone and name 2 still reads equal, so the
+/// outcome is unchanged, but the candidates staging read are not what the log gives and both
+/// registrants of name 1 are mismatches.
+#[tokio::test]
+async fn another_names_binding_on_the_lease_outside_the_chunk_is_checked() -> Result<()> {
+    let fixture = Fixture::new("families_shadow_admission_foreign_binding", 20).await?;
+    staged_race(&fixture, Second::OnLease).await?;
+    let report = publish_and_compare(&fixture, 12).await?;
+    assert_counts(&report, &[], &RACE_DELTA);
+    assert_eq!(
+        (report.names, report.expected_delta, report.mismatched),
+        (2, 1, 0),
+        "{:#?}",
+        report.lines
+    );
+    let chunked = shadow_support::compare::compare_in_chunks(&fixture.pool, CHAIN, 12, 1).await?;
+    assert_counts(&chunked, &[], &RACE_DELTA);
+    let updated = sqlx::query(
+        "UPDATE bigname_phase.project_binding_candidate SET surface_namehash = NULL
+         WHERE surface_binding_id = $1::uuid",
+    )
+    .bind(uuid(101))
+    .execute(&fixture.pool)
+    .await?
+    .rows_affected();
+    assert_eq!(updated, 1);
+    let (_, shadow) = shadow_support::name(&fixture, 12, &name(1)).await?;
+    assert_eq!(
+        shadow.control["registrant"],
+        json!(CAROL),
+        "pass one still names `c`"
+    );
+    for mutated in [
+        shadow_support::compare::compare(&fixture.pool, CHAIN, 12).await?,
+        shadow_support::compare::compare_in_chunks(&fixture.pool, CHAIN, 12, 1).await?,
+    ] {
+        assert!(
+            mutated.known_discrepancy.is_empty() && mutated.expected_delta_fields.is_empty(),
+            "{:#?}",
+            mutated.lines
+        );
+        assert_eq!(mutated.mismatched, 1, "{:#?}", mutated.lines);
+        assert_eq!(
+            failed_fields(&mutated),
+            ["control/registrant", "registration/registrant"],
+            "{:#?}",
+            mutated.lines
+        );
+    }
+    fixture.cleanup().await
+}
+
+/// The adversarial pass on ba2ffbd5, another name's wrapper-recorded candidate: name 2 is bound
+/// to NameWrapper resource W, whose SurfaceBound recorded L at node 1, so pass two of L would
+/// match it across names; pass one names `c` for name 1 first. Name 2 reads equal and has no
+/// facts, so its candidate is loaded through its SurfaceBound and the race's deltas stay
+/// excused, in one chunk and in chunks of one. Then only name 2's wrapper candidate loses its
+/// node. Pass one still wins and name 2 still reads equal, but the candidates staging read are
+/// not what the log gives and both registrants of name 1 are mismatches.
+#[tokio::test]
+async fn another_names_wrapper_candidate_on_the_lease_goes_through_the_staging_check() -> Result<()>
+{
+    let fixture = Fixture::new("families_shadow_admission_foreign_wrapper", 20).await?;
+    staged_race(&fixture, Second::WrapperOnLease).await?;
+    let report = publish_and_compare(&fixture, 12).await?;
+    assert_counts(&report, &[], &RACE_DELTA);
+    assert_eq!(
+        (report.names, report.expected_delta, report.mismatched),
+        (2, 1, 0),
+        "{:#?}",
+        report.lines
+    );
+    let chunked = shadow_support::compare::compare_in_chunks(&fixture.pool, CHAIN, 12, 1).await?;
+    assert_counts(&chunked, &[], &RACE_DELTA);
+    let updated = sqlx::query(
+        "UPDATE bigname_phase.project_binding_candidate SET node = NULL
+         WHERE surface_binding_id = $1::uuid AND node IS NOT NULL",
+    )
+    .bind(uuid(101))
+    .execute(&fixture.pool)
+    .await?
+    .rows_affected();
+    assert_eq!(updated, 1);
+    let (_, shadow) = shadow_support::name(&fixture, 12, &name(1)).await?;
+    assert_eq!(
+        shadow.control["registrant"],
+        json!(CAROL),
+        "pass one still names `c`"
+    );
+    for mutated in [
+        shadow_support::compare::compare(&fixture.pool, CHAIN, 12).await?,
+        shadow_support::compare::compare_in_chunks(&fixture.pool, CHAIN, 12, 1).await?,
+    ] {
+        assert!(
+            mutated.known_discrepancy.is_empty() && mutated.expected_delta_fields.is_empty(),
+            "{:#?}",
+            mutated.lines
+        );
+        assert_eq!(mutated.mismatched, 1, "{:#?}", mutated.lines);
+        assert_eq!(
+            failed_fields(&mutated),
+            ["control/registrant", "registration/registrant"],
+            "{:#?}",
+            mutated.lines
+        );
+    }
     fixture.cleanup().await
 }
 
