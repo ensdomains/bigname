@@ -949,10 +949,11 @@ fn display_names(rows: &[FamilyChildRow]) -> Vec<&str> {
 }
 
 // The subnames filters at the block clock. ENSv2 children have mixed null and non-null expiries
-// and registration times (two are bound, so their grant gives them one), labels a prefix must match literally (`_` and `%`), and an expiry
-// exactly at the publication's time, which the fence keeps. An expiry-sorted, fenced page is
-// then continued from one publication into the next at the new block's time, after a child on
-// the remaining pages expired in between. Every page's rows, total and cursor are compared.
+// and registration times (two are bound, so their grant gives them one), labels a prefix must
+// match literally (`_` and `%`), and an expiry exactly at the publication's time, which the
+// fence keeps. An expiry-sorted, fenced page is then continued from one publication into the
+// next at the new block's time, after a child on the remaining pages expired in between. Every
+// page's rows, total and cursor are compared.
 #[tokio::test]
 async fn child_filters_sort_page_and_expire_at_the_block_clock() -> Result<()> {
     const PREFIXES: &[&str] = &["a_", "a%"];

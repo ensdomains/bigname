@@ -48,7 +48,8 @@ pub struct Fixture {
 }
 
 impl Fixture {
-    /// A chain with canonical blocks `0..=blocks`, Ingest and Interpret complete through the last.
+    /// A chain with observed blocks `0..=blocks` that each publication promotes along its path,
+    /// and Ingest and Interpret complete through the last.
     pub async fn new(prefix: &str, blocks: i64) -> Result<Self> {
         let scratch = ScratchDatabase::create(prefix).await?;
         let pool = scratch.pool().clone();
