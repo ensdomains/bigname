@@ -52,11 +52,14 @@ impl Fixture {
     pub async fn new(prefix: &str, blocks: i64) -> Result<Self> {
         let scratch = ScratchDatabase::create(prefix).await?;
         let pool = scratch.pool().clone();
+        // Observed, not canonical: each publication promotes its own path. A canonical block
+        // above the published head would be orphaned by the publication, which stamps an
+        // Interpret redo, and the families do not apply while Interpret is in redo.
         for number in 0..=blocks {
             sqlx::query(
                 "INSERT INTO chain_lineage (chain_id, block_hash, parent_hash, block_number,
                      block_timestamp, canonicality_state)
-                 VALUES ($1, $2, $3, $4, to_timestamp($5::bigint + $4), 'canonical')",
+                 VALUES ($1, $2, $3, $4, to_timestamp($5::bigint + $4), 'observed')",
             )
             .bind(CHAIN)
             .bind(hash(number))
