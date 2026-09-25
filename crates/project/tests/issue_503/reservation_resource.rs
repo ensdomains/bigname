@@ -674,7 +674,6 @@ const REGISTRY_A: &str = "0000000a-0000-0000-0000-00000000000a";
 const REGISTRY_B: &str = "0000000b-0000-0000-0000-00000000000b";
 const REGISTRY_C: &str = "0000000c-0000-0000-0000-00000000000c";
 const TOKEN_B1: &str = "0x00000000000000000000000000000000000000000000000000000000000000b1";
-const TOKEN_C1: &str = "0x00000000000000000000000000000000000000000000000000000000000000c1";
 const TOKEN_A0: &str = "0x00000000000000000000000000000000000000000000000000000000000000a0";
 
 // (a) The resource-less reservation B1 in registry B, then a live reservation A0 with its own
@@ -711,15 +710,17 @@ async fn a_resourceless_release_does_not_end_a_later_reservation_with_a_resource
     Ok(())
 }
 
-// (b) Two resource-less reservations of the name from different registry instances and tokens:
-// B1, then C1 after the parent points at registry C, then B1 is unregistered. Both reservations
-// and the release have no resource, so only their registry and token tell them apart. C1 is live,
-// so ENSv1 stays selected.
+// (b) Two resource-less reservations of the name from different registry instances with the same
+// token id: B1, then C1 after the parent points at registry C, then B1 is unregistered. A token id
+// is the labelhash with the token version in its low bits, so the same label at the same version
+// has the same token id in both registries, and only the registry instance tells the two apart.
+// Neither the reservations nor the release have a resource. C1 is live, so ENSv1 stays selected.
+// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L649-L651 @ ens_v2@a971bd64)
 #[tokio::test]
 async fn a_resourceless_release_does_not_end_another_resourceless_reservation() -> Result<()> {
     let facts = [
         versioned_reservation("b1-reserve", REGISTRY_B, TOKEN_B1, 10, 1),
-        versioned_reservation("c1-reserve", REGISTRY_C, TOKEN_C1, 10, 2),
+        versioned_reservation("c1-reserve", REGISTRY_C, TOKEN_B1, 10, 2),
         versioned_release("b1-release", REGISTRY_B, TOKEN_B1, 11, 1),
     ];
     let (v1_resource, block_10, block_11) = sequence_selections(
