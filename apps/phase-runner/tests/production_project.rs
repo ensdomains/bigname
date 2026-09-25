@@ -24776,6 +24776,41 @@ fn alice_v2_token(version: u32) -> U256 {
 
 type ServedAuthority = (Option<String>, Option<String>, Option<Uuid>, Option<String>);
 
+/// The registry instance and token id on the name's ENSv2 reservations and releases from
+/// `from_block` on, in chain order. Interpret matches a resource-less release to its reservation by
+/// these two keys, so each row must carry both, concretely. `restore_v2_registration` accepts no
+/// registry instance, so this pins the invariant on real Interpret output, restorations included.
+async fn assert_reservation_identity_kept(
+    pool: &PgPool,
+    chain: &str,
+    logical_name_id: &str,
+    from_block: i64,
+    expected_rows: usize,
+) -> Result<()> {
+    let rows: Vec<(String, i64, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT event_kind, block_number,
+                after_state ->> 'registry_contract_instance_id', after_state ->> 'token_id'
+         FROM normalized_events
+         WHERE chain_id = $1 AND logical_name_id = $2 AND block_number >= $3
+           AND event_kind IN ('RegistrationReserved', 'RegistrationReleased')
+           AND source_family = 'ens_v2_registry_l1'
+         ORDER BY block_number, transaction_index NULLS FIRST, log_index NULLS FIRST,
+                  normalized_event_id",
+    )
+    .bind(chain)
+    .bind(logical_name_id)
+    .bind(from_block)
+    .fetch_all(pool)
+    .await?;
+    assert_eq!(rows.len(), expected_rows, "{rows:?}");
+    let (_, _, registry, token) = &rows[0];
+    assert!(registry.is_some() && token.is_some(), "{rows:?}");
+    for row in &rows {
+        assert_eq!((&row.2, &row.3), (registry, token), "{rows:?}");
+    }
+    Ok(())
+}
+
 /// A reservation row's transaction index, log index, expiry and source event.
 type RevivedReservation = (Option<i64>, Option<i64>, Value, Option<String>);
 
@@ -25088,6 +25123,8 @@ async fn a_reservation_after_a_v2_release_hands_the_name_to_its_live_v1_lease_wh
         vec![None],
         "the reservation's end is written for the name without a resource"
     );
+    // The block 6 reservation and its block 7 end carry the same registry instance and token.
+    assert_reservation_identity_kept(scratch.pool(), chain, &logical_name_id, 6, 2).await?;
     assert_tombstone_returns_at_block_7(scratch.pool(), chain, &logical_name_id, v2_resource)
         .await?;
     scratch.cleanup().await
@@ -25134,6 +25171,8 @@ async fn a_lapsed_reservation_after_a_v2_release_gives_the_name_back_to_its_v2_t
         vec![(None, None, None)],
         "the lapse is written for the name at the block boundary without a resource"
     );
+    // The block 6 reservation and the block 7 lapse carry the same registry instance and token.
+    assert_reservation_identity_kept(scratch.pool(), chain, &logical_name_id, 6, 2).await?;
     assert_tombstone_returns_at_block_7(scratch.pool(), chain, &logical_name_id, v2_resource)
         .await?;
     scratch.cleanup().await
@@ -25233,6 +25272,9 @@ async fn a_renewal_revives_an_expired_reservation_and_hands_the_name_to_ensv1_fr
         )],
         "Interpret writes the revived reservation for the name at the renewal's log"
     );
+    // The block 6 reservation, its derived release and the block 7 restoration all carry the same
+    // registry instance and token.
+    assert_reservation_identity_kept(pool, chain, &logical_name_id, 6, 3).await?;
     let v1_resource: Uuid = sqlx::query_scalar(
         "SELECT resource_id FROM surface_bindings
          WHERE chain_id = $1 AND logical_name_id = $2 AND authority_arm = 'ens_v1'
