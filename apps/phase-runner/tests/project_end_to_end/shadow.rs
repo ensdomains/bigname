@@ -94,8 +94,8 @@ use std::{
 
 use anyhow::{Context, Result};
 use bigname_storage::{
-    CURRENT_PERMISSION_SUMMARY_READ_FILTER, DEFAULT_PERMISSIONS_CURRENT_READ_FILTER,
-    EffectivePermissionScope,
+    ACCOUNT_APPROVAL_READ_FILTER, CURRENT_PERMISSION_SUMMARY_READ_FILTER,
+    DEFAULT_PERMISSIONS_CURRENT_READ_FILTER, EffectivePermissionScope,
     families::control::{
         compare::{Difference, differences, field, same},
         lifecycle::view::registration_lapsed,
@@ -407,7 +407,7 @@ pub async fn compare(pool: &PgPool, chain: &str, target: i64) -> Result<Report> 
 
     // Resources: permission rows, restriction block, registry binding and operator rows. Every
     // served row below is what the serving readers expose: each read takes that reader's own
-    // canonicality predicate (canonicality.rs, effective.rs:26-30), so a stale row of an
+    // canonicality predicate (canonicality.rs, effective.rs), so a stale row of an
     // orphaned publication is not compared. The names above come through the serving loader,
     // which applies name_current.rs `DEFAULT_NAME_CURRENT_READ_FILTER`.
     let summaries: Vec<SummaryRow> = sqlx::query_as(&format!(
@@ -653,8 +653,9 @@ pub async fn compare(pool: &PgPool, chain: &str, target: i64) -> Result<Report> 
     }
 
     // Account approvals, under the account half of the operator reader's filter
-    // (effective.rs:26-30); its binding half is the resource summary's, applied above.
-    let served_accounts: Vec<Value> = sqlx::query_scalar(
+    // (`ACCOUNT_APPROVAL_READ_FILTER`); its binding half is the resource summary's, applied
+    // above.
+    let served_accounts: Vec<Value> = sqlx::query_scalar(&format!(
         "SELECT jsonb_build_object('authority_kind', authority_kind,
                     'authority_contract', authority_contract,
                     'authority_contract_instance_id', authority_contract_instance_id::text,
@@ -663,13 +664,8 @@ pub async fn compare(pool: &PgPool, chain: &str, target: i64) -> Result<Report> 
                     'grant_source', grant_source, 'revocation_source', revocation_source,
                     'inheritance_path', inheritance_path, 'transfer_behavior', transfer_behavior)
          FROM account_permission_state_current aps
-         WHERE aps.chain_id = $1
-           AND aps.canonicality_summary ->> 'state' IN ('canonical', 'safe', 'finalized')
-           AND (SELECT account_lineage.canonicality_state FROM chain_lineage account_lineage
-                WHERE account_lineage.chain_id = aps.chain_id
-                  AND account_lineage.block_hash = aps.chain_positions ->> 'target_block_hash')
-               IN ('canonical', 'safe', 'finalized')",
-    )
+         WHERE aps.chain_id = $1 {ACCOUNT_APPROVAL_READ_FILTER}"
+    ))
     .bind(chain)
     .fetch_all(pool)
     .await?;

@@ -1646,7 +1646,7 @@ async fn the_control_guard_and_generated_ids_read_the_published_log_only() -> Re
 }
 
 /// Codex thread PRRT_kwDOSJpxAs6l8Nw6: the served baseline is what the serving readers expose
-/// (effective.rs:26-30, canonicality.rs `CURRENT_PERMISSION_SUMMARY_READ_FILTER`). A stale
+/// (`ACCOUNT_APPROVAL_READ_FILTER`, `CURRENT_PERMISSION_SUMMARY_READ_FILTER`). A stale
 /// account approval of an orphaned publication and a resource summary whose canonicality
 /// summary is off the canonical lineage are not served, so the comparison does not count them.
 #[tokio::test]
