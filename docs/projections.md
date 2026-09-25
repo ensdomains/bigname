@@ -1699,7 +1699,9 @@ reports the family marker in one of three ways:
 - a run that was abandoned before it returned (its future dropped by a stop)
   reports the family marker as unavailable;
 - a run that returned reports the marker it observed;
-- a run that returned without a readable marker reports "no block".
+- a run that returned with no family marker at all reports "no block"; a
+  marker whose hash is off the readable lineage is still reported as its block
+  and hash.
 
 A stop leaves family completion unconfirmed rather than failed: the final
 family block can commit before the stop drops the run, and the command still
