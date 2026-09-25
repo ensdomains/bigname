@@ -2,7 +2,9 @@
 -- step 2) that cite the adapter lines behind the binding pairing and the
 -- pinned registry lines behind the F5 TLD-expiry clear, in place of the plain
 -- statements migrations 101400 and 101500 wrote, and state the numeric ranges
--- the F2b wrapper fuses and expiry keep, in place of the 100100 statements.
+-- the F2b wrapper fuses and expiry keep, in place of the 100100 statements,
+-- and the rule behind project_grant.registration_position, in place of the
+-- 100400 statement.
 -- Comments only; no column, index or row changes. An empty schema-migration
 -- database has no phase baseline yet, so this migration is a no-op there and
 -- phase-runner init-schema installs the same comments.
@@ -27,6 +29,10 @@ $ddl$;
 EXECUTE $ddl$
 COMMENT ON COLUMN bigname_phase.project_wrapper_state.expiry_seconds IS
     'This value is the latest wrapper expiry when a JSON number whose value is from 0 to 18446744073709551615, compared by value as the served numeric read does (address_names.rs wrapper_expiries, children.rs latest_wrapper_expiries), so 1.0 and 1.5 count as those numbers; null otherwise.'
+$ddl$;
+EXECUTE $ddl$
+COMMENT ON COLUMN bigname_phase.project_grant.registration_position IS
+    'This value is the position of the resource''s latest RegistrationGranted or RegistrationReserved before the grant, counting earlier events of the grant''s own block: the registration the grant was written under, by the rule F2a keeps as last_active. It is new state for the per-block publisher, not a copy of a served value: the served permissions read has no per-grant registration and masks by the resource''s current registration (builders/permissions.rs v2_registration_current). Null when the resource has no earlier grant or reservation.'
 $ddl$;
 END
 $migration$;

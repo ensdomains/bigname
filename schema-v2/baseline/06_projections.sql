@@ -2467,7 +2467,7 @@ COMMENT ON COLUMN project_grant.transfer_behavior IS
 COMMENT ON COLUMN project_grant.revoked IS
     'This value is true when the effective powers are empty; the row stays as a clear.';
 COMMENT ON COLUMN project_grant.registration_position IS
-    'This value is the position of the resource''s latest grant or reservation when the grant was written, the registration the grant belongs to.';
+    'This value is the position of the resource''s latest RegistrationGranted or RegistrationReserved before the grant, counting earlier events of the grant''s own block: the registration the grant was written under, by the rule F2a keeps as last_active. It is new state for the per-block publisher, not a copy of a served value: the served permissions read has no per-grant registration and masks by the resource''s current registration (builders/permissions.rs v2_registration_current). Null when the resource has no earlier grant or reservation.';
 
 CREATE TABLE IF NOT EXISTS project_resource_admin_aggregate (
     chain_id text NOT NULL,
