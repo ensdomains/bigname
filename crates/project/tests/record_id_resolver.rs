@@ -389,6 +389,67 @@ async fn link_and_version_boundaries_read_the_same_through_the_families() -> Res
     Ok(())
 }
 
+// A link and a version change at one position (both synthesised, so no transaction or log)
+// resolve by event identity: when the link comes later, it is the boundary and a value written
+// before both is served; when the version comes later, it cuts that value off. The events are
+// inserted in identity order, so today's generated ids agree and every read compares equal.
+#[tokio::test]
+async fn a_link_and_version_at_one_position_follow_event_identity() -> Result<()> {
+    let (db, pool) = database("record_id_boundary_tie").await?;
+    seed(&pool).await?;
+    for n in 19..=20 {
+        sqlx::query("INSERT INTO chain_lineage (chain_id,block_hash,block_number,block_timestamp,canonicality_state) VALUES ($1,$2,$3,to_timestamp($3::double precision),'canonical')").bind(CHAIN).bind(hash(n)).bind(n).execute(&pool).await?;
+    }
+    let version = |n: i64| json!({"source_event":"VersionChanged","node":node(n),"resolver":RESOLVER,"record_version":"1"});
+    text(&pool, "record-four", 19, 0, 4, "four").await?;
+    text(&pool, "record-five", 19, 1, 5, "five").await?;
+    event(
+        &pool,
+        "tie-a-version-one",
+        20,
+        0,
+        "RecordVersionChanged",
+        Some(1),
+        version(1),
+    )
+    .await?;
+    link(&pool, "tie-b-link-one", 20, 1, Some(1), 4).await?;
+    link(&pool, "tie-c-link-three", 20, 2, Some(3), 5).await?;
+    event(
+        &pool,
+        "tie-d-version-three",
+        20,
+        3,
+        "RecordVersionChanged",
+        Some(3),
+        version(3),
+    )
+    .await?;
+    sqlx::query("UPDATE normalized_events SET transaction_hash = NULL, transaction_index = NULL, log_index = NULL WHERE event_identity LIKE 'tie-%'").execute(&pool).await?;
+    run(&pool, 20, None, RunMode::Normal).await?;
+    let linked = inventory(&pool, 1).await?;
+    assert_eq!(
+        linked["boundary"]["event_kind"], "ResolverRecordLinked",
+        "{linked}"
+    );
+    assert_text(&pool, 1, "four").await?;
+    let cut = inventory(&pool, 3).await?;
+    assert_eq!(
+        cut["boundary"]["event_kind"], "RecordVersionChanged",
+        "{cut}"
+    );
+    assert!(
+        cut["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|entry| entry["record_key"] != "text:url"),
+        "{cut}"
+    );
+    db.cleanup().await?;
+    Ok(())
+}
+
 // Names resolving to an address are found from every retained address value, not only the
 // derived address index, which drops a value positioned at or before its partition's version
 // change. A link that outranks that version keeps the value served (value at 19, version at 20,
