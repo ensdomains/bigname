@@ -1837,8 +1837,10 @@ when the family observations equal their canonical rebuild, the canonical
 binding equals the shadow one whole, today's binding equals the served one
 whole, and the two select different events. The control block's same-block read
 orders the node's owner-setting events, the epoch starts and the registry-only
-SurfaceBounds by generated id too, and a control field passes only when each of
-those family facts equals its rebuild from the event log. The second is a named
+SurfaceBounds by generated id too. A name field passes only when the epoch
+starts and the SurfaceBounds, which the registration's authority kind and key
+read too, equal their rebuild from the event log, and a control field only when
+the owner-setting events do as well. The second is a named
 cause whose own check holds for that field. Both named causes are served-side
 bugs. A step 2 family gap is never a named cause: its fields stay mismatches and
 fail the run until the owning reducer is fixed.
