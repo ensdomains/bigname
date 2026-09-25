@@ -1,5 +1,7 @@
 #[path = "support/bounded_attribution.rs"]
 mod bounded_attribution;
+#[path = "support/family_shadow.rs"]
+mod family_shadow;
 
 use anyhow::Result;
 use bigname_project::{BatchRequest, Engine, Marker, RunMode};
@@ -185,6 +187,110 @@ async fn record_history_survives_relinks_and_excludes_later_unselected_writes() 
         cleared,
         "cleared history rebuild drift"
     );
+    db.cleanup().await?;
+    Ok(())
+}
+
+// The combined version boundary as the family readers see it (TYR-36 step 4): a link after a
+// version keeps a value written before both, a version after a link cuts it off, and a later
+// write is served again. Every run also compares the family reads with today's reads.
+#[tokio::test]
+async fn link_and_version_boundaries_read_the_same_through_the_families() -> Result<()> {
+    let (db, pool) = database("record_id_boundaries").await?;
+    seed(&pool).await?;
+    for n in 19..=23 {
+        sqlx::query("INSERT INTO chain_lineage (chain_id,block_hash,block_number,block_timestamp,canonicality_state) VALUES ($1,$2,$3,to_timestamp($3::double precision),'canonical')").bind(CHAIN).bind(hash(n)).bind(n).execute(&pool).await?;
+    }
+    let version = |n: i64| json!({"source_event":"VersionChanged","node":node(n),"resolver":RESOLVER,"record_version":"1"});
+    text(&pool, "record-four", 19, 0, 4, "four").await?;
+    text(&pool, "record-five-early", 19, 1, 5, "five early").await?;
+    event(
+        &pool,
+        "version-one",
+        20,
+        0,
+        "RecordVersionChanged",
+        Some(1),
+        version(1),
+    )
+    .await?;
+    link(&pool, "link-c-five", 20, 1, Some(3), 5).await?;
+    link(&pool, "link-a-four", 21, 0, Some(1), 4).await?;
+    event(
+        &pool,
+        "version-three",
+        21,
+        1,
+        "RecordVersionChanged",
+        Some(3),
+        version(3),
+    )
+    .await?;
+    run(&pool, 21, None, RunMode::Normal).await?;
+    assert_text(&pool, 1, "four").await?;
+    let cut = inventory(&pool, 3).await?;
+    assert_eq!(
+        cut["boundary"]["event_kind"], "RecordVersionChanged",
+        "{cut}"
+    );
+    assert!(
+        cut["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|entry| entry["record_key"] != "text:url"),
+        "{cut}"
+    );
+    text(&pool, "record-five-late", 22, 0, 5, "five late").await?;
+    run(&pool, 22, Some(21), RunMode::Normal).await?;
+    assert_text(&pool, 3, "five late").await?;
+
+    // Two synthesised writes of one record key in one block have no transaction or log position.
+    // Today's reader breaks the tie by the generated event id, so the later insert (`tie-a`)
+    // wins; the canonical order breaks it by event identity as bytes, so `tie-b` wins. This is
+    // the disclosed canonical-order change, asserted as the answer.
+    text(&pool, "tie-b", 23, 0, 4, "b").await?;
+    text(&pool, "tie-a", 23, 1, 4, "a").await?;
+    sqlx::query("UPDATE normalized_events SET transaction_hash = NULL, transaction_index = NULL, log_index = NULL WHERE event_identity IN ('tie-a', 'tie-b')").execute(&pool).await?;
+    let outcome = Engine::new(pool.clone())
+        .run_batch(BatchRequest {
+            chain_id: CHAIN.to_owned(),
+            target_block: 23,
+            affected_from_block: 23,
+            affected_to_block: 23,
+            resume_current: Some(Marker {
+                number: 22,
+                hash: hash(22),
+            }),
+            mode: RunMode::Normal,
+        })
+        .await?;
+    assert_text(&pool, 1, "a").await?;
+    let tied = format!("record_inventory {}", resource(1));
+    let report =
+        family_shadow::compare_family_reads_at(&pool, &outcome.current, |key| key == tied).await?;
+    let (_, differences) = report
+        .differences
+        .iter()
+        .find(|(key, _)| *key == tied)
+        .expect("the tie resolves differently");
+    let entries = differences
+        .iter()
+        .find(|difference| difference.field == "entries")
+        .expect("the served value differs");
+    let url = |entries: &Value| {
+        entries
+            .as_array()
+            .and_then(|entries| {
+                entries
+                    .iter()
+                    .find(|entry| entry["record_key"] == "text:url")
+            })
+            .map(|entry| entry["value"].clone())
+    };
+    assert_eq!(url(&entries.today), Some(json!("a")));
+    assert_eq!(url(&entries.family), Some(json!("b")));
+    assert_eq!(report.differences.len(), 1, "{report:#?}");
     db.cleanup().await?;
     Ok(())
 }
@@ -684,7 +790,7 @@ async fn assert_history(pool: &PgPool, id: i64, present: &[&str], absent: &[&str
 }
 
 async fn run(pool: &PgPool, target: i64, previous: Option<i64>, mode: RunMode) -> Result<()> {
-    Engine::new(pool.clone())
+    let outcome = Engine::new(pool.clone())
         .run_batch(BatchRequest {
             chain_id: CHAIN.to_owned(),
             target_block: target,
@@ -698,6 +804,7 @@ async fn run(pool: &PgPool, target: i64, previous: Option<i64>, mode: RunMode) -
         })
         .await?;
     bounded_attribution::assert_bounded_record_attribution_matches_inventory(pool).await?;
+    family_shadow::assert_family_reads_match(pool, &outcome.current).await?;
     Ok(())
 }
 async fn inventory(pool: &PgPool, id: i64) -> Result<Value> {
@@ -1005,6 +1112,19 @@ async fn official_sepolia_direct_resolver_projects_ensip19_default_for_missing_e
     )
     .await?;
     run(&pool, target, None, RunMode::Normal).await?;
+    // Step 2 finding, kept visible: the inverse address index derives an address from a value
+    // row's `value` only (crates/project/src/families/derived.rs:162 and :197), so this
+    // `AddressChanged`, which carries only `address_bytes_hex`, has no index row and the family
+    // page of names resolving to the address misses the name today's page serves.
+    let report = family_shadow::assert_family_reads_match(
+        &pool,
+        &Marker {
+            number: target,
+            hash: hash(target),
+        },
+    )
+    .await?;
+    assert_eq!(report.address_index_findings.len(), 1, "{report:#?}");
     // A direct node-keyed declaration has no link state, so the section is unsupported
     // by kind rather than reported empty.
     assert_eq!(

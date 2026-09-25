@@ -1,3 +1,6 @@
+#[path = "support/family_shadow.rs"]
+mod family_shadow;
+
 use anyhow::Result;
 use bigname_project::{BatchRequest, Engine, Marker, RunMode};
 use bigname_test_support::{TestDatabase, TestDatabaseConfig};
@@ -27,15 +30,20 @@ async fn reverse_node_claims_follow_resolver_storage_in_full_incremental_and_red
         Some(("success", Some("owner.eth"))),
         Some(("success", Some("owner.eth"))),
     ];
+    let mut unrepresented = Vec::new();
     for (index, expected) in expected.into_iter().enumerate() {
         let block = index as i64 + 1;
-        run(
+        if run(
             &pool,
             block,
             (block > 1).then_some(block - 1),
             RunMode::Normal,
         )
-        .await?;
+        .await?
+            > 0
+        {
+            unrepresented.push(block);
+        }
         let incremental = snapshot(&pool).await?;
         match expected {
             None => assert!(incremental.is_none()),
@@ -51,6 +59,14 @@ async fn reverse_node_claims_follow_resolver_storage_in_full_incremental_and_red
         run(&pool, block, None, RunMode::Normal).await?;
         assert_eq!(snapshot(&pool).await?, incremental, "full block {block}");
     }
+    // Step 2 finding: the node claim family keeps one row per node, so while the node points at
+    // OTHER (block 4) or its latest name record was written at OTHER (block 11), the older record
+    // at the current resolver that today's reader serves is not in the families.
+    assert_eq!(
+        unrepresented,
+        [4, 11],
+        "reverse claims the families cannot represent"
+    );
     let surfaces: i64 = sqlx::query_scalar("SELECT count(*) FROM name_surfaces")
         .fetch_one(&pool)
         .await?;
@@ -237,8 +253,11 @@ fn hash(block: i64) -> String {
     format!("0x{block:064x}")
 }
 
-async fn run(pool: &PgPool, block: i64, previous: Option<i64>, mode: RunMode) -> Result<()> {
-    Engine::new(pool.clone())
+/// Run Project, then compare the family reads with today's. Returns the blocks' reverse claims the
+/// node claim family cannot represent (one row per node, so a node whose latest name record was
+/// written at another resolver than its current one loses the older record at the current one).
+async fn run(pool: &PgPool, block: i64, previous: Option<i64>, mode: RunMode) -> Result<usize> {
+    let outcome = Engine::new(pool.clone())
         .run_batch(BatchRequest {
             chain_id: CHAIN.to_owned(),
             target_block: block,
@@ -251,7 +270,8 @@ async fn run(pool: &PgPool, block: i64, previous: Option<i64>, mode: RunMode) ->
             mode,
         })
         .await?;
-    Ok(())
+    let report = family_shadow::assert_family_reads_match(pool, &outcome.current).await?;
+    Ok(report.node_claim_findings.len())
 }
 
 async fn snapshot(pool: &PgPool) -> Result<Option<Value>> {

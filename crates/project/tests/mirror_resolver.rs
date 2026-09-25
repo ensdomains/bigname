@@ -5,6 +5,8 @@
 
 #[path = "support/bounded_attribution.rs"]
 mod bounded_attribution;
+#[path = "support/family_shadow.rs"]
+mod family_shadow;
 
 use anyhow::{Context, Result};
 use bigname_project::{BatchOutcome, BatchRequest, Engine, Marker, RunMode};
@@ -1417,6 +1419,7 @@ async fn run(
     assert!(outcome.complete);
     assert_eq!(outcome.target.number, target_block);
     bounded_attribution::assert_bounded_record_attribution_matches_inventory(pool).await?;
+    family_shadow::assert_family_reads_match(pool, &outcome.current).await?;
     Ok(outcome)
 }
 
