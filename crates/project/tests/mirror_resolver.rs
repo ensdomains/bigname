@@ -451,6 +451,16 @@ async fn a_record_id_sibling_at_the_substituted_resolver_does_not_pair() -> Resu
         json!([ids[0]]),
         "{v2}"
     );
+    // Today does not attribute the record-id sibling at all: no arm admits it, so it is in
+    // neither the served events nor the attributed events, and cannot be a pair's sibling.
+    for field in ["record_event_ids", "attributed_event_ids"] {
+        assert!(
+            v2["provenance"][field]
+                .as_array()
+                .is_some_and(|listed| !listed.contains(&json!(ids[2]))),
+            "{field}: {v2}"
+        );
+    }
     // Neither side pairs, so the comparison is clean.
     let report = family_shadow::shadow_report_at(&pool, &outcome.current).await?;
     assert!(report.current(), "{report:#?}");

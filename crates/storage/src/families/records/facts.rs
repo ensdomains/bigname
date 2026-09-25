@@ -157,10 +157,11 @@ pub async fn load_classification(
     chain_id: &str,
     resolver_address: &str,
 ) -> Result<Option<ResolverClassification>> {
-    // Both sources key resolvers lower-case. The F3 row when the resolver has one, else resolver_current; either way the declaration's
-    // namespace comes from its manifest, admitted at the block the families stand at. F3 keeps a
-    // `resolver_manifest_not_active` row for a resolver the served build leaves out; resolver_current
-    // has no row for it either, so it reads as unclassified, as today.
+    // Both sources key resolvers lower-case. The F3 row when the resolver has one, else
+    // resolver_current; either way the declaration's namespace comes from its manifest, admitted
+    // at the block the families stand at. F3 keeps a `resolver_manifest_not_active` row for a
+    // resolver the served build leaves out; resolver_current has no row for it either, so it
+    // reads as unclassified, as today.
     let row = sqlx::query(
         "WITH source AS (
              SELECT classification, support_status, unsupported_reason, manifest_id

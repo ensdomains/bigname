@@ -1243,7 +1243,48 @@ async fn an_address_listed_on_a_lagging_chain_stops_the_comparison() -> Result<(
     )
     .await
     .expect_err("a lagging chain's names are not compared");
-    assert!(format!("{error:#}").contains("base-sepolia"), "{error:#}");
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("base-sepolia") && message.contains("served marker"),
+        "{message}"
+    );
+    // Once that chain's families stand at its served marker, its names are compared like any
+    // other: today lists the second chain's name, the family read (which has none) does not.
+    let copied = sqlx::query(
+        "INSERT INTO project_family_marker
+         SELECT (jsonb_populate_record(NULL::project_family_marker,
+                 to_jsonb(row) || '{\"chain_id\":\"base-sepolia\"}')).*
+         FROM project_family_marker row WHERE row.chain_id = $1",
+    )
+    .bind(CHAIN)
+    .execute(&pool)
+    .await?;
+    assert_eq!(copied.rows_affected(), 1);
+    sqlx::query(
+        "INSERT INTO chain_phase_state
+             (chain_id, phase_name, current_block_number, current_block_hash)
+         VALUES ('base-sepolia', 'project', 19, $1)",
+    )
+    .bind(hash(19))
+    .execute(&pool)
+    .await?;
+    let report = bigname_storage::families::records::compare_family_reads(
+        &pool,
+        CHAIN,
+        Some((19, hash(19))),
+        10,
+    )
+    .await?;
+    let key = format!("resolves_to {INVERSE_A} coin 60");
+    let counted = report
+        .differences
+        .iter()
+        .filter(|(listed, _)| *listed == key)
+        .flat_map(|(_, differences)| differences.iter())
+        .any(|d| {
+            d.field == "entries.count" && d.today == Some(json!(2)) && d.family == Some(json!(1))
+        });
+    assert!(counted, "{report:#?}");
     db.cleanup().await?;
     Ok(())
 }

@@ -125,6 +125,12 @@ fn a_difference_or_a_diagnostic_fails_the_run() {
     let mut lagging = clean();
     lagging.report.family_marker = Some((4, "0x04".to_owned()));
     assert!(require_clean(&[lagging]).is_err());
+    let mut no_rows = clean();
+    no_rows.report.inventory_rows = 0;
+    assert!(require_clean(&[no_rows]).is_err());
+    let mut no_tuples = clean();
+    no_tuples.report.primary_tuples = 0;
+    assert!(require_clean(&[no_tuples]).is_err());
     let mut gap = clean();
     gap.report
         .classification_fallbacks
