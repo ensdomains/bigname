@@ -349,8 +349,8 @@ impl Publication {
 /// fails. That validates the endpoints only. The reads between them are separate pool reads,
 /// not one snapshot, so a change from the publication to another and back between the two
 /// checks (a reorg or redo at the same height that returns) is not seen, and the reads could mix
-/// the two. The harness is meant for a quiescent target, such as the disposable copy; whether to
-/// run it in one repeatable-read transaction is open.
+/// the two. The harness is meant for a quiescent target, such as the disposable copy. Running it
+/// in one repeatable-read transaction is Tate's decision.
 async fn fence(pool: &PgPool, chain: &str, publication: &Publication) -> Result<()> {
     let (readable, families, served): (bool, bool, bool) = sqlx::query_as(
         "SELECT EXISTS (SELECT 1 FROM chain_lineage

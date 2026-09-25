@@ -1909,7 +1909,13 @@ the served one and the canonical read the shadow one. The canonical side is the
 families read against themselves, so the rule is sound for the report, not for
 the field: a wrong root value leaves the root's own admin powers a mismatch, and
 a wrong child admin power the live root also holds can let the child's block
-pass while the child's own admin powers stay a mismatch; either fails the run. These checks run for
+pass while the child's own admin powers stay a mismatch; either fails the run.
+The resource-side excuse reads the wrapper rows too: the permission rows and
+restriction block it reads in both orders come through the resource's wrapper
+row, which masks the powers when it has a modifier
+(crates/storage/src/families/control/permissions/grants.rs:84). It has no
+wrapper refusal; that side is the families read against themselves, the same
+disclosed class as the root rule. These checks run for
 the items that differ: a family value equal to the served one is not a
 difference. One ENSv1 NewOwner log yields a
 SubregistryChanged and an AuthorityTransferred at one position; the families keep
