@@ -437,12 +437,26 @@ async fn run(
                 "the family readers differ from the served readers at {number}: {:#}",
                 shadow::describe(&report)
             );
-            // While project_resolver_classification is unfilled the shadow classifies from the
-            // declaration manifest; its mirror must still be the served one.
+            // Step 2 fills project_resolver_classification block by block and the comparison runs
+            // once the families have caught up, so every resolver is read from its row and
+            // compared in full. A resolver on the declaration fallback, or with no shadow
+            // classification at all, would only have its mirror compared, so it fails here.
+            let partial: Vec<(&String, &&str)> = report
+                .classification_sources
+                .iter()
+                .filter(|(_, source)| **source != "family")
+                .collect();
             ensure!(
-                report.f3_unfilled_mirror_differs == 0,
-                "the declaration fallback serves a different mirror at {number}: {:#}",
-                shadow::describe(&report)
+                report.f3_unfilled == 0 && partial.is_empty(),
+                "resolvers compared only in part at {number}: {partial:?}; {}",
+                report.line()
+            );
+            // The corpus declares every resolver it uses, so step 2's extra
+            // resolver_manifest_not_active rows must not appear either.
+            ensure!(
+                report.f3_extra_not_active.is_empty(),
+                "extra resolver_manifest_not_active rows at {number}: {:?}",
+                report.f3_extra_not_active
             );
         }
         if let (Some(children_page), Some(baseline)) = (compare, baseline) {
