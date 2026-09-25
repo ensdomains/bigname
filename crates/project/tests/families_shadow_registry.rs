@@ -733,6 +733,79 @@ async fn a_registry_only_new_owner_transfer_and_epoch_at_one_log_is_a_same_block
     fixture.cleanup().await
 }
 
+/// Three registry AuthorityTransferred events of name 1's node at one block, transaction and
+/// log after its registry-only epoch, identities c, b and a written in that order to THIRD,
+/// OTHER and OWNER: the canonical order takes c, today's takes a. With c's owner-event row
+/// deleted, the shadow and a canonical read of the rest give OTHER and today's order over them
+/// still gives the served OWNER; the log holds c for the node, so no control field may pass.
+#[tokio::test]
+async fn a_missing_decisive_owner_event_stays_a_mismatch() -> Result<()> {
+    let fixture = Fixture::new("families_shadow_registry_missing_owner", 20).await?;
+    let node_resource = uuid(3);
+    fixture
+        .binding(&uuid(100), &name(1), &node_resource, "ens_v1", 10, 1, None)
+        .await?;
+    fixture
+        .write(
+            10,
+            2,
+            "AuthorityEpochChanged",
+            V1_REGISTRY,
+            Some(&name(1)),
+            Some(&node_resource),
+            json!({"node": node(1), "authority_kind": "registry_only", "owner": ZERO}),
+            REGISTRY,
+        )
+        .await?;
+    for (identity, owner) in [("c", THIRD), ("b", OTHER), ("a", OWNER)] {
+        fixture
+            .event(
+                Event::new(identity, 11, 1, "AuthorityTransferred", V1_REGISTRY)
+                    .name(&name(1))
+                    .resource(&node_resource)
+                    .after(
+                        json!({"node": node(1), "owner": owner, "owner_getter": owner,
+                                  "emitter_role": "registry"}),
+                    )
+                    .raw(json!({"emitting_address": REGISTRY})),
+            )
+            .await?;
+    }
+    let report = publish_and_compare(&fixture, 12).await?;
+    let (served, shadow) = shadow_support::name(&fixture, 12, &name(1)).await?;
+    assert_eq!(served.control("registry_owner"), json!(OWNER));
+    assert_eq!(shadow.control["registry_owner"], json!(THIRD));
+    assert!(
+        report
+            .expected_delta_fields
+            .contains_key("d12_same_block_order:control/registry_owner"),
+        "{:#?}",
+        report.lines
+    );
+    sqlx::query(
+        "DELETE FROM bigname_phase.project_registry_owner_event WHERE event_identity = 'c'",
+    )
+    .execute(&fixture.pool)
+    .await?;
+    let (_, shadow) = shadow_support::name(&fixture, 12, &name(1)).await?;
+    assert_eq!(shadow.control["registry_owner"], json!(OTHER));
+    let mutated = shadow_support::compare::compare(&fixture.pool, CHAIN, 12).await?;
+    assert!(
+        !mutated
+            .expected_delta_fields
+            .keys()
+            .any(|field| field.contains(":control/")),
+        "a missing owner event must not pass: {:#?}",
+        mutated.lines
+    );
+    assert!(
+        failed_fields(&mutated).contains(&"control/registry_owner".to_owned()),
+        "{:#?}",
+        mutated.lines
+    );
+    fixture.cleanup().await
+}
+
 /// A state-derived registry-only SurfaceBound of name 1 on `node_resource` (bound owner OTHER)
 /// and a registry AuthorityTransferred (OWNER) at block 10, transaction 0, log 9, the
 /// SurfaceBound written first.

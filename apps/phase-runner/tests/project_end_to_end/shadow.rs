@@ -28,9 +28,13 @@
 //!   epoch start (its kind, name and arm) and binding candidate's SurfaceBound (its kind, name,
 //!   resource, authority kind and key, state-derived flag and owner) the families hold for the
 //!   name to equal its rebuild from that log, since the registration's authority kind and key
-//!   read them too, and a `control/*` field every owner-setting event of its node. For a
+//!   read them too, and a `control/*` field every owner-setting event of its node. Before
+//!   any of that, the families must hold exactly the retained facts the log gives the name
+//!   under step 2's retention rules, in both directions (`retention.rs`): a fact they lack is
+//!   read by neither rebuild, so it could not fail them. For a
 //!   resource's permission rows, admin powers and restriction block, the path-expiry drop rule of
-//!   permissions.rs:111-133, :391-398 must keep the registration live in today's order and
+//!   permissions.rs:111-133, :391-398, read from exactly the retained events the log gives the
+//!   resource, must keep the registration live in today's order and
 //!   lapse it in the canonical order, the served value must not be empty, and the whole read in
 //!   today's order must equal it. A served empty value against a canonical row is a mismatch.
 //!   For the registry binding, the observations are rebuilt from the publication-visible event
@@ -119,6 +123,9 @@ use bigname_storage::{
 use serde_json::{Value, json};
 use sqlx::PgPool;
 use uuid::Uuid;
+
+#[path = "retention.rs"]
+pub mod retention;
 
 const NAME_CHUNK: usize = 500;
 /// Difference lines printed per comparison; the counters count all of them.
@@ -859,6 +866,11 @@ fn name_excuses(
     let Some(facts) = prefetched.facts.get(&input.logical_name_id) else {
         return out;
     };
+    // The families must hold exactly the retained facts the log gives the name: a fact they
+    // lack is read by neither rebuild below, so it could not fail them.
+    if retention::name_differs(facts, &prefetched.retention).is_some() {
+        return out;
+    }
     let Some(from_log) = log_facts_in(facts, &prefetched.log) else {
         return out;
     };
@@ -952,11 +964,15 @@ pub struct LogEvent {
     /// The generated normalized event id.
     pub id: i64,
     pub kind: String,
+    pub namespace: String,
     pub name: Option<String>,
     pub resource: Option<String>,
     pub family: String,
     pub position: Position,
     pub transaction_hash: Option<String>,
+    /// The raw fact's emitting address, lower-cased, none when blank (step 2
+    /// `BlockEvent::emitting_address`, crates/project/src/families/input.rs:84-86, :100-106).
+    pub emitter: Option<String>,
     pub before: Value,
     pub after: Value,
 }
@@ -968,7 +984,27 @@ pub async fn published_log(
     target: i64,
     identities: &[String],
 ) -> Result<BTreeMap<String, LogEvent>> {
+    published_where(
+        pool,
+        chain,
+        target,
+        "event.event_identity = ANY($2)",
+        identities,
+    )
+    .await
+}
+
+/// The publication-visible events (`published`) that also meet `condition`, which reads
+/// `values` as the text array `$2`, by identity.
+pub async fn published_where(
+    pool: &PgPool,
+    chain: &str,
+    target: i64,
+    condition: &str,
+    values: &[String],
+) -> Result<BTreeMap<String, LogEvent>> {
     type Row = (
+        String,
         String,
         String,
         Option<String>,
@@ -977,44 +1013,51 @@ pub async fn published_log(
         i64,
         Option<i64>,
         Option<i64>,
+        Option<String>,
         Option<String>,
         Value,
         Value,
         i64,
     );
     let sql = format!(
-        "SELECT event.event_identity, event.event_kind, event.logical_name_id,
+        "SELECT event.event_identity, event.event_kind, event.namespace, event.logical_name_id,
                 event.resource_id::text, event.source_family, event.block_number,
                 event.transaction_index, event.log_index, event.transaction_hash,
+                CASE WHEN jsonb_typeof(event.raw_fact_ref -> 'emitting_address')
+                               IN ('string', 'number')
+                          AND btrim(event.raw_fact_ref ->> 'emitting_address') <> ''
+                     THEN lower(event.raw_fact_ref ->> 'emitting_address') END,
                 event.before_state, event.after_state, event.normalized_event_id
          FROM normalized_events event
-         WHERE event.chain_id = $1 AND event.event_identity = ANY($2) AND {}",
+         WHERE event.chain_id = $1 AND ({condition}) AND {}",
         published("$3")
     );
     Ok(sqlx::query_as::<_, Row>(&sql)
         .bind(chain)
-        .bind(identities)
+        .bind(values)
         .bind(target)
         .fetch_all(pool)
         .await?
         .into_iter()
         .map(|row| {
             let position = Position {
-                block_number: row.5,
-                transaction_index: row.6,
-                log_index: row.7,
+                block_number: row.6,
+                transaction_index: row.7,
+                log_index: row.8,
                 event_identity: row.0.clone(),
             };
             let event = LogEvent {
-                id: row.11,
+                id: row.13,
                 kind: row.1,
-                name: row.2,
-                resource: row.3,
-                family: row.4,
+                namespace: row.2,
+                name: row.3,
+                resource: row.4,
+                family: row.5,
                 position,
-                transaction_hash: row.8,
-                before: row.9,
-                after: row.10,
+                transaction_hash: row.9,
+                emitter: row.10,
+                before: row.11,
+                after: row.12,
             };
             (row.0, event)
         })
@@ -1151,6 +1194,8 @@ pub struct ExcuseInputs {
     pub log: BTreeMap<String, LogEvent>,
     pub ids: BTreeMap<String, i64>,
     pub keys: BTreeMap<String, (String, String)>,
+    /// What the log gives the names under step 2's retention rules.
+    pub retention: retention::RetentionLog,
 }
 
 impl ExcuseInputs {
@@ -1191,11 +1236,13 @@ impl ExcuseInputs {
             .map(|(identity, event)| (identity.clone(), event.id))
             .collect();
         let keys = association_keys(pool, chain, target, &identities).await?;
+        let retention = retention::RetentionLog::load(pool, chain, target, &facts).await?;
         Ok(Self {
             facts,
             log,
             ids,
             keys,
+            retention,
         })
     }
 }
@@ -1893,6 +1940,23 @@ pub async fn resource_excuses(
     .fetch_all(pool)
     .await?;
     let events: Vec<LifecycleEvent> = rows.iter().filter_map(LifecycleEvent::from_row).collect();
+    // The families must hold exactly the retained events the log gives the resource.
+    let family: BTreeSet<String> = events
+        .iter()
+        .map(|event| event.position.event_identity.clone())
+        .collect();
+    if family.len() != events.len()
+        || !retention::resource_events_hold(
+            pool,
+            chain,
+            clock.block_number,
+            &input.resource_id,
+            &family,
+        )
+        .await?
+    {
+        return Ok(out);
+    }
     // The lapse is decided from the resource's retained events rebuilt from the
     // publication-visible log, so a wrong family row cannot supply the reason for the excuse.
     let Some(events) = events_from_log(pool, chain, clock.block_number, &events).await? else {

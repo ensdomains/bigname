@@ -1700,3 +1700,159 @@ async fn a_wrong_epoch_start_under_an_unnamed_release_is_not_the_named_cause() -
     assert_eq!(failed_fields(&mutated).len(), 7, "{:#?}", mutated.lines);
     fixture.cleanup().await
 }
+
+/// Three admitted transfers of name 1 at one block, transaction and log, identities a, b and c
+/// to Alice, Bob and Carol, written c first so their generated ids run a > b > c. The canonical
+/// order takes c (the identity sorts last) and today's order takes a (the highest id), so the
+/// recipient is a same-block delta.
+async fn three_transfers_at_one_log(fixture: &Fixture, resource: &str) -> Result<()> {
+    const CAROL: &str = "0x00000000000000000000000000000000000000cc";
+    const GRANTEE: &str = "0x00000000000000000000000000000000000000dd";
+    v2_binding(fixture, resource).await?;
+    v2(
+        fixture,
+        10,
+        "RegistrationGranted",
+        Some(resource),
+        json!({"status": "registered", "registrant": GRANTEE, "expiry": 2_000_000_000u64}),
+    )
+    .await?;
+    for (identity, to) in [("c", CAROL), ("b", BOB), ("a", ALICE)] {
+        fixture
+            .event(
+                Event::new(identity, 11, 0, "TokenControlTransferred", V2_REGISTRY)
+                    .name(&name(1))
+                    .resource(resource)
+                    .after(
+                        json!({"registry_contract_instance_id": "R", "token_id": "7",
+                                  "authority_kind": "registrar", "from": GRANTEE, "to": to}),
+                    )
+                    .raw(json!({"emitting_address": REGISTRY}))
+                    .synthesised(),
+            )
+            .await?;
+    }
+    Ok(())
+}
+
+/// Pro Q3 on 6c8bdf8b: with the retained row of the canonically selected transfer c deleted,
+/// the shadow and a canonical read of the remaining events both give Bob, and today's order over
+/// them still gives the served Alice. The log holds c under the name's resource, so the families
+/// lack a retained event the reducer keeps: no field of the name may pass.
+#[tokio::test]
+async fn a_missing_decisive_transfer_row_stays_a_mismatch() -> Result<()> {
+    let fixture = Fixture::new("families_shadow_missing_transfer", 20).await?;
+    let k1 = uuid(1);
+    three_transfers_at_one_log(&fixture, &k1).await?;
+    let report = publish_and_compare(&fixture, 12).await?;
+    let (served, shadow) = shadow_support::name(&fixture, 12, &name(1)).await?;
+    assert_eq!(served.control("registry_owner"), json!(ALICE));
+    assert_eq!(
+        shadow.control["registry_owner"],
+        json!("0x00000000000000000000000000000000000000cc")
+    );
+    let delta = [
+        ("d12_same_block_order:control/registrant", 1),
+        ("d12_same_block_order:control/registry_owner", 1),
+        ("d12_same_block_order:registration/registrant", 1),
+    ];
+    assert_counts(&report, &[], &delta);
+    sqlx::query("DELETE FROM bigname_phase.project_lifecycle_event WHERE event_identity = 'c'")
+        .execute(&fixture.pool)
+        .await?;
+    let (_, shadow) = shadow_support::name(&fixture, 12, &name(1)).await?;
+    assert_eq!(shadow.control["registry_owner"], json!(BOB));
+    let mutated = shadow_support::compare::compare(&fixture.pool, CHAIN, 12).await?;
+    assert!(
+        mutated.known_discrepancy.is_empty() && mutated.expected_delta_fields.is_empty(),
+        "a missing decisive transfer must not pass: {:#?}",
+        mutated.lines
+    );
+    assert_eq!(
+        failed_fields(&mutated),
+        [
+            "control/registrant",
+            "control/registry_owner",
+            "registration/registrant"
+        ],
+        "{:#?}",
+        mutated.lines
+    );
+    fixture.cleanup().await
+}
+
+/// Pro Q3 on 6c8bdf8b: the same shape with the name's binding candidate deleted. The shadow
+/// still reads the selected resource, but the families no longer hold the candidate the
+/// surface binding gives, so the same-block deltas must not pass.
+#[tokio::test]
+async fn a_missing_binding_candidate_stays_a_mismatch() -> Result<()> {
+    let fixture = Fixture::new("families_shadow_missing_candidate", 20).await?;
+    let k1 = uuid(1);
+    three_transfers_at_one_log(&fixture, &k1).await?;
+    publish_and_compare(&fixture, 12).await?;
+    sqlx::query("DELETE FROM bigname_phase.project_binding_candidate WHERE logical_name_id = $1")
+        .bind(name(1))
+        .execute(&fixture.pool)
+        .await?;
+    let mutated = shadow_support::compare::compare(&fixture.pool, CHAIN, 12).await?;
+    assert!(
+        mutated.known_discrepancy.is_empty() && mutated.expected_delta_fields.is_empty(),
+        "a missing candidate must not pass: {:#?}",
+        mutated.lines
+    );
+    assert!(
+        failed_fields(&mutated).contains(&"control/registry_owner".to_owned()),
+        "{:#?}",
+        mutated.lines
+    );
+    fixture.cleanup().await
+}
+
+/// Pro Q3 on 6c8bdf8b: the three-transfer shape with the name's ENSv2 epoch start at block 9
+/// deleted from the families. The log holds the AuthorityEpochChanged whose latest per arm the
+/// families keep, so the families lack a fact both reads use and the same-block deltas must not
+/// pass, though the start decides none of the differing fields.
+#[tokio::test]
+async fn a_missing_epoch_start_stays_a_mismatch() -> Result<()> {
+    let fixture = Fixture::new("families_shadow_missing_start", 20).await?;
+    let k1 = uuid(1);
+    three_transfers_at_one_log(&fixture, &k1).await?;
+    fixture
+        .write(
+            9,
+            1,
+            "AuthorityEpochChanged",
+            V2_REGISTRY,
+            Some(&name(1)),
+            Some(&k1),
+            json!({"authority_kind": "registrar", "owner": ALICE}),
+            REGISTRY,
+        )
+        .await?;
+    let report = publish_and_compare(&fixture, 12).await?;
+    let delta = [
+        ("d12_same_block_order:control/registrant", 1),
+        ("d12_same_block_order:control/registry_owner", 1),
+        ("d12_same_block_order:registration/registrant", 1),
+    ];
+    assert_counts(&report, &[], &delta);
+    sqlx::query(
+        "UPDATE bigname_phase.project_name_state SET authority_start_positions = '{}'
+         WHERE logical_name_id = $1",
+    )
+    .bind(name(1))
+    .execute(&fixture.pool)
+    .await?;
+    let mutated = shadow_support::compare::compare(&fixture.pool, CHAIN, 12).await?;
+    assert!(
+        mutated.known_discrepancy.is_empty() && mutated.expected_delta_fields.is_empty(),
+        "a missing epoch start must not pass: {:#?}",
+        mutated.lines
+    );
+    assert!(
+        failed_fields(&mutated).contains(&"control/registry_owner".to_owned()),
+        "{:#?}",
+        mutated.lines
+    );
+    fixture.cleanup().await
+}

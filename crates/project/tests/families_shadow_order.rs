@@ -369,6 +369,54 @@ async fn a_same_block_release_after_a_grant_passes_only_from_the_families_read()
     fixture.cleanup().await
 }
 
+/// Pro Q3 and Q5 on 6c8bdf8b: the same-block release shape with the family row of the block-10
+/// grant deleted. The lapse still reads the same in both orders, but the log holds the grant on
+/// the resource, so the families lack a retained event the reducer keeps and the permission
+/// rows must not pass.
+#[tokio::test]
+async fn a_missing_resource_event_row_fails_the_permission_excuse() -> Result<()> {
+    let fixture = Fixture::new("families_shadow_order_missing_event", 20).await?;
+    let (k1, n1) = (uuid(1), name(1));
+    v2_binding(&fixture, &k1).await?;
+    fixture
+        .event(grant("grant-10", 10, &n1, &k1, ALICE))
+        .await?;
+    fixture
+        .event(registry_grant("permission-11", 11, &k1, BOB))
+        .await?;
+    fixture
+        .event(unnamed_path_expiry("path-expiry-14", 14, &k1).at(0, 2))
+        .await?;
+    fixture
+        .event(grant("grant-14", 14, &n1, &k1, ALICE))
+        .await?;
+    let report = publish_and_compare(&fixture, 16).await?;
+    assert_counts(&report, &RELEASED_NAME, &DELTA);
+    sqlx::query(
+        "DELETE FROM bigname_phase.project_lifecycle_event WHERE event_identity = 'grant-10'",
+    )
+    .execute(&fixture.pool)
+    .await?;
+    let mutated = shadow_support::compare::compare(&fixture.pool, CHAIN, 16).await?;
+    let failed: Vec<&str> = mutated
+        .lines
+        .iter()
+        .filter(|line| line.starts_with("SEPOLIA_END_TO_END_SHADOW_MISMATCH"))
+        .filter_map(|line| line.split(" field=").nth(1)?.split(' ').next())
+        .collect();
+    assert!(
+        failed.contains(&"permissions_current"),
+        "a missing retained event must fail the permission rows: {:#?}",
+        mutated.lines
+    );
+    assert!(
+        mutated.expected_delta_fields.is_empty() && mutated.known_discrepancy.is_empty(),
+        "{:#?}",
+        mutated.lines
+    );
+    fixture.cleanup().await
+}
+
 /// Codex thread PRRT_kwDOSJpxAs6l4hOv: the passing direction of the same-block release with
 /// BOB's registry grant carrying an admin power. Today's order keeps the registration live and
 /// serves the admin power from BOB's row (resource_summary.rs:272-297); the canonical order
