@@ -864,3 +864,33 @@ async fn one_epoch_converting_two_candidates_gives_each_its_own_lease() -> Resul
     fixture.assert_rebuild_equal(16).await?;
     fixture.cleanup().await
 }
+
+// A binding whose block carries no activated event (its SurfaceBound dropped by the adapter's
+// reconcile, the F1 pairing precondition failing) still gets its candidate row on the normal
+// path, block by block, and a rebuild visits its block too, so both keep the row.
+#[tokio::test]
+async fn a_binding_in_a_block_without_events_survives_a_rebuild() -> Result<()> {
+    let fixture = Fixture::new("families_identity_binding_only_block", 20).await?;
+    let (lease, registry) = (uuid(1), uuid(2));
+    bound(&fixture, 101, &lease, 10, Some(11)).await?;
+    fixture
+        .binding(&uuid(102), &name(1), &registry, "ens_v1", 11, 1, None)
+        .await?;
+    registrar_event(&fixture, 12, 1, "RegistrationReleased", &lease, json!({})).await?;
+    fixture.apply(10, FamilyMode::Normal).await;
+    fixture.apply(11, FamilyMode::Normal).await;
+    fixture.apply(12, FamilyMode::Normal).await;
+    let rows = fixture.rows("project_binding_candidate").await?;
+    let unpaired = rows
+        .iter()
+        .find(|row| row["surface_binding_id"] == json!(uuid(102)))
+        .map(|row| columns(row, &["block_number", "event_identity"]));
+    assert_eq!(
+        unpaired,
+        Some(json!({"block_number": 11, "event_identity": format!("binding:{}", uuid(102))})),
+        "the normal path keeps the unpaired binding at its own position"
+    );
+    fixture.assert_undo_restores(12).await?;
+    fixture.assert_rebuild_equal(12).await?;
+    fixture.cleanup().await
+}

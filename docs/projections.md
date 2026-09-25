@@ -1744,8 +1744,9 @@ A Project redo undoes the families from their journal down to the block before
 the redo range and replays them to the served marker. A marker left on a block
 that is no longer readable is undone the same way. A redo below the kept
 journal, a redo attempt the families never saw, or a served rebuild clears the
-families and rebuilds them from the blocks that carry events or start or stop
-a resolver activation. So do families whose marker records a content hash
+families and rebuilds them from the blocks that carry events or surface
+bindings or start or stop a resolver activation, so a rebuild visits every
+block the normal path writes a binding candidate in. So do families whose marker records a content hash
 other than the running binary's, which covers a served rebuild whose family run
 was skipped. An undo journal the families refuse, such as one whose prior
 markers form a cycle, does not trigger a rebuild: every run that needs it
