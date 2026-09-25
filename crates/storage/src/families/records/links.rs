@@ -38,6 +38,17 @@ pub struct LinkSelection {
 }
 
 impl LinkSelection {
+    /// The record id an active link selects: `None` when the selection is empty or a clear to
+    /// `0`, as when the exact link is absent or a clear and the default link is a clear too. The
+    /// raw [`LinkSelection::record_id`] keeps `0` in that case, and the clear events still
+    /// contribute to the version boundary and the provenance through
+    /// [`LinkSelection::contributing_links`].
+    pub fn active_record_id(&self) -> Option<&str> {
+        self.record_id
+            .as_deref()
+            .filter(|record_id| *record_id != "0")
+    }
+
     /// The links that take part in the record selection: the exact link whenever it exists, and
     /// the default link when the exact link is absent or a clear. Both are version boundary
     /// candidates.
@@ -231,6 +242,31 @@ mod tests {
         assert_eq!(selection.exact_link_event_id, Some(2));
         assert_eq!(selection.default_link_event_id, Some(1));
         assert_eq!(selection.contributing_links().count(), 2);
+    }
+
+    #[test]
+    fn a_cleared_default_keeps_its_raw_selection_and_boundary_but_selects_no_record() {
+        let selection = select(None, Some(link(DEFAULT_RECORD_NODE, "0", 3))).expect("a selection");
+        assert_eq!(selection.record_id.as_deref(), Some("0"));
+        assert_eq!(selection.active_record_id(), None);
+        assert_eq!(selection.exact_link_event_id, None);
+        assert_eq!(selection.default_link_event_id, Some(3));
+        assert_eq!(
+            selection
+                .contributing_links()
+                .map(|link| link.normalized_event_id)
+                .collect::<Vec<_>>(),
+            [Some(3)]
+        );
+        let exact_clear = select(
+            Some(link("0x01", "0", 4)),
+            Some(link(DEFAULT_RECORD_NODE, "0", 3)),
+        )
+        .expect("a selection");
+        assert_eq!(exact_clear.active_record_id(), None);
+        assert_eq!(exact_clear.contributing_links().count(), 2);
+        let active = select(Some(link("0x01", "7", 4)), None).expect("a selection");
+        assert_eq!(active.active_record_id(), Some("7"));
     }
 
     #[test]
