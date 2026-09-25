@@ -2143,12 +2143,16 @@ live ENSv1 lease, an open ENSv1 registrar, registry or wrapper binding, and any
 ENSv1 fact recorded after the release leave it in place. Only a later ENSv2
 reservation of the label, which defers to ENSv1 like any
 [premigration reservation](#premigration-reservation), or a new ENSv2
-registration changes the name's arm. The reservation counts by name: after
-`unregister` bumps the token version, the reservation carries a versioned token
-id and no resource, so it is not a fact of the released resource. A path-expiry
-release that Interpret writes on the resource without a name, because the token
-had already lost its name, still counts as that registration's release. Its current registration lifecycle is
-unregistered and its selected arm is `ens_v2`, bound to the released resource.
+registration changes the name's arm. The reservation defers to ENSv1 only while
+it is live: when it is unregistered or lapses, the label is available again and
+the tombstone returns. The reservation counts by name: after `unregister` bumps
+the token version, the reservation carries a versioned token id and no
+resource, so it is not a fact of the released resource, and Interpret writes its
+end as a named release without a resource. A path-expiry release that Interpret
+writes on the resource without a name, because the token had already lost its
+name, still counts as that registration's release. Its current registration
+lifecycle is unregistered and its selected arm is `ens_v2`, bound to the
+released resource.
 This follows the ENSv2 contracts, which never route a label that has been
 registered back to ENSv1: `unregister` burns the token and writes the release
 time as the entry's expiry, which nothing sets back to zero

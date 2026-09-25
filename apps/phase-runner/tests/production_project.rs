@@ -24796,7 +24796,8 @@ async fn served_authority(pool: &PgPool, logical_name_id: &str) -> Result<Served
 // (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L196-L207 @ ens_v2@a971bd64)
 // (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L649-L651 @ ens_v2@a971bd64)
 #[tokio::test]
-async fn a_reservation_after_a_v2_release_hands_the_name_to_its_live_v1_lease() -> Result<()> {
+async fn a_reservation_after_a_v2_release_hands_the_name_to_its_live_v1_lease_while_it_lasts()
+-> Result<()> {
     let scratch = ScratchDatabase::create("project_v2_release_then_reservation").await?;
     let chain = CHAIN;
     let logical_name_id = seed_dual_open_cross_arm_fixture(scratch.pool(), chain, 4).await?;
@@ -24957,6 +24958,95 @@ async fn a_reservation_after_a_v2_release_hands_the_name_to_its_live_v1_lease() 
     .fetch_one(scratch.pool())
     .await?;
     assert_eq!(incremental_row, fresh_row);
+
+    // The hand-back lasts only while the reservation is live. `unregister` of the reserved entry
+    // sets its expiry to now, the registry then answers a zero resolver for the label, and a
+    // WrapperRegistry never falls back to ENSv1 once the expiry is nonzero. Interpret writes the
+    // reservation's end with the name and no resource, and the released ENSv2 tombstone returns.
+    // (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L196-L207 @ ens_v2@a971bd64)
+    // (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L255-L258 @ ens_v2@a971bd64)
+    // (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L294-L297 @ ens_v2@a971bd64)
+    insert_lineage_block(scratch.pool(), chain, 7).await?;
+    let reservation_ended = LabelUnregistered {
+        tokenId: alice_v2_token(1),
+        sender: SENDER.parse()?,
+    }
+    .encode_log_data();
+    insert_raw_event_at(
+        scratch.pool(),
+        chain,
+        7,
+        1,
+        1,
+        V2_REGISTRY,
+        reservation_ended.topics(),
+        reservation_ended.data.as_ref(),
+    )
+    .await?;
+    InterpretEngine::new(scratch.pool().clone())
+        .run_batch(InterpretRequest {
+            chain_id: chain.into(),
+            from_block: 7,
+            to_block: 7,
+            resume_current: Some(InterpretMarker {
+                number: 6,
+                hash: block_hash(chain, 6),
+            }),
+            mode: InterpretRunMode::Normal,
+        })
+        .await?;
+    let reservation_release: Vec<Option<Uuid>> = sqlx::query_scalar(
+        "SELECT resource_id FROM normalized_events
+         WHERE chain_id = $1 AND logical_name_id = $2 AND event_kind = 'RegistrationReleased'
+           AND block_number = 7",
+    )
+    .bind(chain)
+    .bind(&logical_name_id)
+    .fetch_all(scratch.pool())
+    .await?;
+    assert_eq!(
+        reservation_release,
+        vec![None],
+        "the reservation's end is written for the name without a resource"
+    );
+    run_project(
+        scratch.pool(),
+        chain,
+        Some(Marker {
+            number: 6,
+            hash: block_hash(chain, 6),
+        }),
+        RunMode::Normal,
+        7,
+        7,
+    )
+    .await?;
+    normalize_projection_clocks(scratch.pool()).await?;
+    assert_eq!(
+        served_authority(scratch.pool(), &logical_name_id).await?,
+        (
+            Some("ens_v2".into()),
+            Some("unregistered".into()),
+            Some(v2_resource),
+            Some("released".into()),
+        ),
+        "the released ENSv2 tombstone returns once the reservation ends"
+    );
+    let ended_incremental: Value = sqlx::query_scalar(
+        "SELECT to_jsonb(current) FROM name_current current WHERE logical_name_id = $1",
+    )
+    .bind(&logical_name_id)
+    .fetch_one(scratch.pool())
+    .await?;
+    run_project(scratch.pool(), chain, None, RunMode::Normal, 0, 7).await?;
+    normalize_projection_clocks(scratch.pool()).await?;
+    let ended_fresh: Value = sqlx::query_scalar(
+        "SELECT to_jsonb(current) FROM name_current current WHERE logical_name_id = $1",
+    )
+    .bind(&logical_name_id)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(ended_incremental, ended_fresh);
     scratch.cleanup().await
 }
 

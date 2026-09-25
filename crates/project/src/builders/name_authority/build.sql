@@ -98,7 +98,20 @@
                 -- (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L201-L205 @ ens_v2@a971bd64)
                 -- (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L649-L651 @ ens_v2@a971bd64)
                 -- (upstream: .refs/ens_v2/contracts/src/utils/LibLabel.sol:L15-L17 @ ens_v2@a971bd64)
-                SELECT event.logical_name_id, event.resource_id, event.event_kind,
+                -- The hand-back lasts only while that reservation is live. When it is unregistered
+                -- or lapses, Interpret writes its end as a named release without a resource;
+                -- a registration always has a resource and a path-cut release carries it, so a
+                -- named ENSv2 release without one is a reservation's end. The label is then
+                -- available: the registry answers a zero resolver for it, and a WrapperRegistry
+                -- never falls back to ENSv1 once the expiry is nonzero. The released
+                -- registration the name was last bound to stands again as its tombstone.
+                -- (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L196-L207 @ ens_v2@a971bd64)
+                -- (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L255-L258 @ ens_v2@a971bd64)
+                -- (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L294-L297 @ ens_v2@a971bd64)
+                SELECT event.logical_name_id,
+                       CASE WHEN event.event_kind = 'RegistrationReleased'
+                           THEN binding.resource_id ELSE event.resource_id END,
+                       event.event_kind,
                        event.block_number, event.transaction_index, event.log_index,
                        event.normalized_event_id
                 FROM project_events event
@@ -108,8 +121,12 @@
                       'ens_v2_root_l1', 'ens_v2_registry_l1',
                       'ens_v2_registrar_l1'
                   )
-                  AND event.event_kind = 'RegistrationReserved'
-                  AND event.resource_id IS DISTINCT FROM binding.resource_id
+                  AND (
+                      (event.event_kind = 'RegistrationReserved'
+                       AND event.resource_id IS DISTINCT FROM binding.resource_id)
+                      OR (event.event_kind = 'RegistrationReleased'
+                          AND event.resource_id IS NULL)
+                  )
             ) fact
             -- A block-boundary fact has no transaction or log index and sorts first in its
             -- block, as in every other position comparison here.
