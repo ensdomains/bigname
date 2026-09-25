@@ -291,6 +291,8 @@ pub(super) const CHILD_DISPLAY_NAME: &str = "COALESCE(
 
 /// The page read filter on the child surface: a child with no surface passes, a surfaced child
 /// must be readable (crates/storage/src/children.rs, `DEFAULT_CHILDREN_CURRENT_READ_FILTER`).
+/// That filter's third branch, a `label_preimage` label source, is not mirrored: no current
+/// writer sets it (see the interim list in `shims.rs`).
 pub(super) const CHILD_SURFACE_FILTER: &str = "
     AND (child_surface.logical_name_id IS NULL
          OR (child_surface.canonicality_state::text IN ('canonical', 'safe', 'finalized')

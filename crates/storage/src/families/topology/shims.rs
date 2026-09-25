@@ -33,6 +33,12 @@
 //!   pointer and the serving pointer (the `resolver` lateral of name_current/build.sql), so a name
 //!   with both a selected resource and a distinct serving resource whose pointer is later follows
 //!   the serving one there and the selected one here. No fixture covers a name with both.
+//! - The children surface filter (`CHILD_SURFACE_FILTER`, `children.rs`) drops every child whose
+//!   surface is unreadable. Today's `DEFAULT_CHILDREN_CURRENT_READ_FILTER` also keeps such a child
+//!   when `provenance.label.source = 'label_preimage'`. No current writer sets that key: the only
+//!   `children_current` writer (crates/project/src/builders/children.rs) builds its provenance
+//!   without a `label` object, so the branch is unreachable today and the family rows carry no
+//!   label source to mirror it with. If a writer starts setting it, the shadow must learn it.
 //! - The subnames page (`children_page.rs`) takes a child's registration and expiry times, and
 //!   the released status its expiry fence checks, from the served `name_current.declared_summary`
 //!   through `push_registered_at_timestamp_expr` and `push_expires_at_timestamp_expr`, the same
