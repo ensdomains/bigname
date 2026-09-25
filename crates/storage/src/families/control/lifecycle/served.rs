@@ -66,6 +66,7 @@ pub(super) fn authority_of(facts: &NameFacts) -> Authority<'_> {
         name: &facts.input.logical_name_id,
         selection,
         candidates: &facts.candidates,
+        lease_candidates: &facts.lease_candidates,
         binding: selection.surface_binding_id.as_deref().and_then(|id| {
             facts
                 .candidates
@@ -179,6 +180,20 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> ShadowName {
     if let Some(release) = unnamed_release {
         trace.insert("selected_released_at".into(), release.released_at.clone());
         trace.insert("selected_expiry".into(), release.expiry.clone());
+    }
+    let staged: Map<String, Value> = facts
+        .events
+        .iter()
+        .filter_map(|event| {
+            let pass = authority.staged_by(event)?;
+            Some((
+                event.position.event_identity.clone(),
+                json!(format!("{pass:?}")),
+            ))
+        })
+        .collect();
+    if !staged.is_empty() {
+        trace.insert("staged".into(), Value::Object(staged));
     }
     trace.insert(
         "admitted".into(),

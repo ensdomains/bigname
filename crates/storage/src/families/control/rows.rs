@@ -264,10 +264,16 @@ impl BindingCandidate {
         })
     }
 
-    /// A NameWrapper binding: step 2 records the transaction and emitter only for a
-    /// SurfaceBound from ens_v1_wrapper_l1 (families/identity.rs, `candidate_row`).
+    /// A NameWrapper binding: step 2 records the transaction, the emitter, the wrapped registrar
+    /// lease and the node only for a SurfaceBound from ens_v1_wrapper_l1
+    /// (families/identity.rs, `candidate_row`), so any one of them marks it. A NameWrapper
+    /// SurfaceBound with none of the four is not recognised (step 2 retention follow-up: keep
+    /// the SurfaceBound's source family on the candidate).
     pub fn is_wrapper(&self) -> bool {
-        self.transaction_hash.is_some() || self.emitting_address.is_some()
+        self.transaction_hash.is_some()
+            || self.emitting_address.is_some()
+            || self.wrapped_registrar_resource_id.is_some()
+            || self.node.is_some()
     }
 
     /// The order stage.rs compares candidates in: block, transaction and log with a missing one

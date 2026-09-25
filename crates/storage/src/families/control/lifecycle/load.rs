@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 use serde_json::Value;
 use sqlx::PgPool;
 
-use super::{Clock, NameFacts, NameInput, ShadowName, TripleFacts, evaluate};
+use super::{Clock, NameFacts, NameInput, ShadowName, TripleFacts, admission::REGISTRAR, evaluate};
 use crate::families::control::{
     position::{EventOrder, Position},
     registry::load_registry_nodes,
@@ -190,6 +190,31 @@ pub async fn load_name_facts(
         .iter()
         .filter_map(LifecycleEvent::from_row)
         .collect();
+    // The candidates of every name the staging passes choose among for the unnamed registrar
+    // rows loaded (decode.rs:41-106 loads the same set).
+    let leases: Vec<String> = events
+        .iter()
+        .filter(|event| {
+            event.original_logical_name_id.is_none() && event.source_family == REGISTRAR
+        })
+        .filter_map(|event| event.resource_id.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let lease_candidates: Vec<BindingCandidate> = json_rows(
+        pool,
+        "/* storage:families.control.lifecycle.lease_candidates */ SELECT to_jsonb(candidate)
+         FROM bigname_phase.project_binding_candidate candidate
+         WHERE candidate.chain_id = $1
+           AND (candidate.resource_id::text = ANY($2)
+                OR candidate.wrapped_registrar_resource_id::text = ANY($2))",
+        chain_id,
+        &leases,
+    )
+    .await?
+    .iter()
+    .filter_map(BindingCandidate::from_row)
+    .collect();
 
     let wrappers = load_wrapper_rows(pool, chain_id, &resource_list).await?;
     let authority_kinds: Vec<(String, Option<String>)> = sqlx::query_as(
@@ -311,9 +336,24 @@ pub async fn load_name_facts(
             })
             .cloned()
             .collect();
+        let own_leases: BTreeSet<&str> = own_events
+            .iter()
+            .filter_map(|event| event.resource_id.as_deref())
+            .collect();
         out.push(NameFacts {
             input: input.clone(),
             candidates: own,
+            lease_candidates: lease_candidates
+                .iter()
+                .filter(|candidate| {
+                    own_leases.contains(candidate.resource_id.as_str())
+                        || candidate
+                            .wrapped_registrar_resource_id
+                            .as_deref()
+                            .is_some_and(|lease| own_leases.contains(lease))
+                })
+                .cloned()
+                .collect(),
             key_states: key_states
                 .iter()
                 .filter(|(resource, _)| own_resources.contains(*resource))

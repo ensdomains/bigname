@@ -132,6 +132,10 @@ impl TripleFacts {
 pub struct NameFacts {
     pub input: NameInput,
     pub candidates: Vec<BindingCandidate>,
+    /// Every binding candidate, of any name, of a registrar lease an unnamed retained event of
+    /// the name sits on or that a NameWrapper candidate recorded as its lease: the staging passes
+    /// name such an event over all of them.
+    pub lease_candidates: Vec<BindingCandidate>,
     pub key_states: BTreeMap<String, Maxima>,
     pub triples: Vec<TripleFacts>,
     pub events: Vec<LifecycleEvent>,

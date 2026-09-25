@@ -79,6 +79,10 @@ pub(crate) struct Authority<'a> {
     pub(crate) selection: &'a AuthoritySelection,
     /// Every binding candidate of the name.
     pub(crate) candidates: &'a [BindingCandidate],
+    /// Every binding candidate, of any name, of a registrar lease an unnamed retained event of
+    /// the name sits on or that a NameWrapper candidate recorded as its lease: the two staging
+    /// passes decide among all of them.
+    pub(crate) lease_candidates: &'a [BindingCandidate],
     /// The selected binding (`project_bindings`, name_authority/stage.rs:277-280).
     pub(crate) binding: Option<&'a BindingCandidate>,
     /// Whether the selected resource has a NameWrapper PermissionScopeChanged (F2b).
@@ -91,39 +95,55 @@ fn distinct(left: Option<&str>, right: Option<&str>) -> bool {
     left != right
 }
 
-impl<'a> Authority<'a> {
-    /// Staging pass one (stage.rs:149-158): a binding candidate of the row's resource whose
-    /// surface namehash is the row's namehash.
-    fn direct_binding(&self, event: &LifecycleEvent) -> bool {
-        let Some(resource) = event.resource_id.as_deref() else {
-            return false;
-        };
-        self.candidates.iter().any(|candidate| {
-            candidate.resource_id == resource
-                && candidate.surface_namehash.is_some()
-                && candidate.surface_namehash.as_deref() == event.namehash.as_deref()
-        })
-    }
+/// Which staging pass named an unnamed registrar row.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Pass {
+    /// Pass one: a binding of the row's resource whose surface namehash is the row's.
+    Direct,
+    /// Pass two: a NameWrapper candidate that recorded the row's resource as its lease at the
+    /// row's node, leaving out the custody transfer into the wrapper.
+    Wrapper,
+}
 
-    /// Staging pass two (stage.rs:174-198): a NameWrapper SurfaceBound of the name that
-    /// recorded the row's resource as its lease at the row's node, leaving out the transfer
-    /// into the wrapper in the wrap's own transaction.
-    fn wrapper_binding(&self, event: &LifecycleEvent) -> bool {
-        let Some(resource) = event.resource_id.as_deref() else {
-            return false;
-        };
-        self.candidates.iter().any(|wrapper| {
-            wrapper.is_wrapper()
-                && wrapper.wrapped_registrar_resource_id.as_deref() == Some(resource)
-                && wrapper.node.is_some()
-                && wrapper.node.as_deref() == event.namehash.as_deref()
-                && custody_passes(
-                    &event.event_kind,
-                    event.transaction_hash.as_deref(),
-                    event.to_address.as_deref(),
-                    wrapper,
-                )
-        })
+impl<'a> Authority<'a> {
+    /// The name the two staging passes give an unnamed registrar row, over the candidates of
+    /// every name (stage.rs:149-158 and :174-198; decode.rs:110-139): pass one first, and pass
+    /// two only when pass one matches no name, each taking the least matching name. Today's
+    /// stage names the row in an UPDATE that takes one unspecified match when several names
+    /// match; the least name is the step 2 decoder's choice. The NameWrapper columns
+    /// (`wrapped_registrar_resource_id`, `node`) exist only on a NameWrapper candidate, so pass
+    /// two needs no other wrapper evidence.
+    fn attachment(&self, event: &LifecycleEvent) -> Option<(&'a str, Pass)> {
+        let resource = event.resource_id.as_deref()?;
+        let direct = self
+            .lease_candidates
+            .iter()
+            .filter(|candidate| {
+                candidate.resource_id == resource
+                    && candidate.surface_namehash.is_some()
+                    && candidate.surface_namehash.as_deref() == event.namehash.as_deref()
+            })
+            .map(|candidate| candidate.logical_name_id.as_str())
+            .min();
+        if let Some(name) = direct {
+            return Some((name, Pass::Direct));
+        }
+        self.lease_candidates
+            .iter()
+            .filter(|wrapper| {
+                wrapper.wrapped_registrar_resource_id.as_deref() == Some(resource)
+                    && wrapper.node.is_some()
+                    && wrapper.node.as_deref() == event.namehash.as_deref()
+                    && custody_passes(
+                        &event.event_kind,
+                        event.transaction_hash.as_deref(),
+                        event.to_address.as_deref(),
+                        wrapper,
+                    )
+            })
+            .map(|wrapper| wrapper.logical_name_id.as_str())
+            .min()
+            .map(|name| (name, Pass::Wrapper))
     }
 
     fn stageable(event: &LifecycleEvent) -> bool {
@@ -132,24 +152,30 @@ impl<'a> Authority<'a> {
             && STAGED_KINDS.contains(&event.event_kind.as_str())
     }
 
+    /// The pass that named an unnamed registrar row for this name, if one did.
+    pub(crate) fn staged_by(&self, event: &LifecycleEvent) -> Option<Pass> {
+        if !Self::stageable(event) {
+            return None;
+        }
+        self.attachment(event)
+            .filter(|(name, _)| *name == self.name)
+            .map(|(_, pass)| pass)
+    }
+
     /// The name the event carries after both staging passes.
     pub(crate) fn staged_name(&self, event: &LifecycleEvent) -> StagedName {
         match event.original_logical_name_id.as_deref() {
             Some(name) if name == self.name => StagedName::Ours,
             Some(_) => StagedName::Other,
-            None if Self::stageable(event)
-                && (self.direct_binding(event) || self.wrapper_binding(event)) =>
-            {
-                StagedName::Ours
-            }
+            None if self.staged_by(event).is_some() => StagedName::Ours,
             None => StagedName::Unnamed,
         }
     }
 
-    /// Membership in `project_wrapper_linked_events`: emitted unnamed, not named by pass one,
-    /// named by pass two (design:111).
+    /// Membership in `project_wrapper_linked_events`: emitted unnamed and named for this name by
+    /// pass two (design:111).
     pub(crate) fn wrapper_linked(&self, event: &LifecycleEvent) -> bool {
-        Self::stageable(event) && !self.direct_binding(event) && self.wrapper_binding(event)
+        self.staged_by(event) == Some(Pass::Wrapper)
     }
 
     /// The selected NameWrapper SurfaceBounds: wrapper candidates of the name at the selected
@@ -450,6 +476,7 @@ mod tests {
             selection: &selection,
             candidates: &candidates,
             binding: Some(&selected),
+            lease_candidates: &candidates,
             wrapper_modifier: false,
             events: &[],
         };
