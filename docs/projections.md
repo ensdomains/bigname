@@ -1814,7 +1814,8 @@ transaction and log still break the tie by binding id, as the served stage does,
 and a fixture pins that. The Project fixture
 tests and the phase runner's fixture-corpus run compare each value with what the
 production readers serve at the same publication, field by field. Every log
-read these checks make takes only the publication-visible events: activated,
+read these checks make takes only the
+[publication-visible events](glossary.md#publication-visible-event): activated,
 canonical, at the canonical lineage's hash for their height and at or below the
 target, the set family intake reads. A name's checks read its retained lifecycle
 events rebuilt from that log rather than the family rows, and those rebuilt

@@ -1946,6 +1946,15 @@ row is told apart from a live one. Operator diagnostics read this table; product
 routes do not.
 
 <a id="raw-fact"></a>
+## Publication-visible event
+
+a normalized event a publication at a target block can read: activated
+(`consumer_visibility = 'activated'`), `canonical`, `safe` or `finalized`
+([canonicality](#canonicality)), at or below the target, and at the hash the
+canonical lineage holds for its height. It is the set family intake reads
+(`crates/project/src/families/input.rs`), and every log read a
+[shadow read](#shadow-read)'s checks make takes only these events.
+
 ## Raw facts
 
 the stored record of what was observed on chain: selected
