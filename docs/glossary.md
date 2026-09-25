@@ -2154,9 +2154,12 @@ reservation with the same registry instance and token id, so the end of an
 older reservation in another registry does not end a later one. A version-zero reservation, such as
 one in a replacement registry, carries its own resource, and its end carries the
 same resource. Either end returns the tombstone. A release on that resource
-counts as the reservation's end only when the name's latest earlier
-reservation-or-registration fact on it is a reservation, so the release of a
-registration that kept the reservation's resource is not one. A reservation whose expiry is
+counts as the reservation's end only when, among the name's reservations on any
+resource and the registrations on the released resource, nameless ones
+included, the latest earlier fact is a reservation on that resource. So the
+release of a registration that kept the reservation's resource is not one, and
+neither is a release on one resource after a later reservation of the name on
+another. A reservation whose expiry is
 already at or before its own block's time is never live and does not defer. A
 path-expiry release that Interpret
 writes on the resource without a name, because the token had already lost its
