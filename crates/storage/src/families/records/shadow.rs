@@ -346,34 +346,48 @@ async fn expected_pairs(
     pool: &PgPool,
     today: Option<&RecordInventoryCurrentRow>,
 ) -> Result<BTreeSet<i64>> {
-    let ids: Vec<i64> = today
-        .and_then(|row| row.provenance.get("record_event_ids"))
-        .and_then(Value::as_array)
-        .map(|ids| ids.iter().filter_map(Value::as_i64).collect())
-        .unwrap_or_default();
-    if ids.is_empty() {
+    let ids = |field: &str| -> Vec<i64> {
+        today
+            .and_then(|row| row.provenance.get(field))
+            .and_then(Value::as_array)
+            .map(|ids| ids.iter().filter_map(Value::as_i64).collect())
+            .unwrap_or_default()
+    };
+    let (values, attributed) = (ids("record_event_ids"), ids("attributed_event_ids"));
+    if values.is_empty() {
         return Ok(BTreeSet::new());
     }
+    // As today's `coin60_siblings`: the sibling is attributed to the same resource and sits one
+    // log later in the same transaction, compared null-safely. A node-keyed sibling is attributed
+    // when today's row lists it; a named one when it shares the value's name and resolver.
     let pairs: Vec<i64> = sqlx::query_scalar(
         "SELECT value.normalized_event_id
          FROM bigname_phase.normalized_events value
          JOIN bigname_phase.normalized_events sibling
            ON sibling.chain_id = value.chain_id AND sibling.block_hash = value.block_hash
-          AND sibling.transaction_index = value.transaction_index
+          AND sibling.transaction_hash IS NOT DISTINCT FROM value.transaction_hash
+          AND sibling.transaction_index IS NOT DISTINCT FROM value.transaction_index
           AND sibling.log_index = value.log_index + 1
           AND sibling.event_kind = 'RecordChanged'
           AND sibling.after_state ->> 'source_event' = 'AddrChanged'
           AND sibling.after_state ->> 'record_key' = 'addr:60'
-          AND lower(sibling.after_state ->> 'node') IS NOT DISTINCT FROM
-              lower(value.after_state ->> 'node')
-          AND lower(sibling.after_state ->> 'resolver') IS NOT DISTINCT FROM
-              lower(value.after_state ->> 'resolver')
+          AND (
+              sibling.normalized_event_id = ANY($2::bigint[])
+              OR (
+                  sibling.logical_name_id = value.logical_name_id
+                  AND lower(COALESCE(NULLIF(sibling.after_state ->> 'resolver', ''),
+                                     NULLIF(sibling.raw_fact_ref ->> 'emitting_address', '')))
+                    = lower(COALESCE(NULLIF(value.after_state ->> 'resolver', ''),
+                                     NULLIF(value.raw_fact_ref ->> 'emitting_address', '')))
+              )
+          )
          WHERE value.normalized_event_id = ANY($1::bigint[])
            AND value.event_kind = 'RecordChanged'
            AND value.after_state ->> 'source_event' = 'AddressChanged'
            AND value.after_state ->> 'record_key' = 'addr:60'",
     )
-    .bind(&ids)
+    .bind(&values)
+    .bind(&attributed)
     .fetch_all(pool)
     .await
     .context("failed to find the coin-60 pairs today's row serves")?;
