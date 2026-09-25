@@ -143,6 +143,15 @@ async fn a_wrapper_candidate_without_transaction_or_emitter_still_names_its_leas
         .binding(&uuid(100), &name(1), &wrapper, "ens_v1", 9, 2, None)
         .await?;
     let first = name(1);
+    // The block synthesised both the binding and its SurfaceBound: neither carries a transaction
+    // or log index, which is how step 2 pairs them (identity.rs opening_event).
+    sqlx::query(
+        "UPDATE surface_bindings SET provenance = provenance - 'transaction_index' - 'log_index'
+         WHERE surface_binding_id = $1::uuid",
+    )
+    .bind(uuid(100))
+    .execute(&fixture.pool)
+    .await?;
     fixture
         .event(
             wrapper_bound("wrap-1", &first, &wrapper, &lease)
@@ -195,12 +204,12 @@ async fn a_wrapper_candidate_without_transaction_or_emitter_still_names_its_leas
 
 /// Item 8 of the TYR-36 step 3 review (Q3), several names matching one row. Two names with one
 /// namehash in different namespaces are both bound to lease L, so pass one matches the unnamed
-/// grant for both. The families name it for exactly one, the least name, as the step 2
-/// decoder does. Today's stage names it in an UPDATE that takes one unspecified match
-/// (stage.rs:149-158), so the served side of this shape is not asserted: only that the shadow
-/// gives the row to one name.
+/// grant for both. The step 2 decoder names a row through one name only and names nothing when
+/// several match, and the families read it the same way: neither name stages the grant. Today's
+/// stage names it in an UPDATE that takes one unspecified match (stage.rs:149-158), so the
+/// served side of this shape is not asserted.
 #[tokio::test]
-async fn a_row_several_names_match_is_named_for_the_least_name_only() -> Result<()> {
+async fn a_row_several_names_match_is_named_for_none_of_them() -> Result<()> {
     let fixture = Fixture::new("families_shadow_admission_multi_name", 20).await?;
     let lease = uuid(1);
     let other = format!("basenames:{}", node(1));
@@ -264,10 +273,7 @@ async fn a_row_several_names_match_is_named_for_the_least_name_only() -> Result<
     )
     .await?;
     publish_and_compare(&fixture, 16).await?;
-    assert_eq!(
-        trace(&fixture, 16, &other).await?["staged"],
-        json!({"grant-10": "Direct"})
-    );
+    assert_eq!(trace(&fixture, 16, &other).await?["staged"], Value::Null);
     assert_eq!(trace(&fixture, 16, &name(1)).await?["staged"], Value::Null);
     fixture.cleanup().await
 }

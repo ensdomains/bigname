@@ -11,7 +11,7 @@ use super::{
 };
 use crate::families::control::{
     position::{EventOrder, Position},
-    rows::{LifecycleEvent, Mark},
+    rows::{BindingCandidate, LifecycleEvent, Mark},
 };
 
 /// The five kinds `latest_event_kind` reads (build.sql:58-63).
@@ -173,24 +173,51 @@ pub(super) fn registrant(
 pub(super) struct AuthorityContext {
     pub(super) kind: Value,
     pub(super) key: Value,
-    /// Whether the family place that would hold the winning event's authority key exists: the
-    /// retained row's `authority_key` column or the `last_grant` member for a grant, the start
-    /// position's member for an AuthorityEpochChanged, the binding candidate's column for a
-    /// registry-only SurfaceBound. It says whether the place exists, not whether the value is
-    /// null. Step 2 at b218b2fc has none of the three, so it is false there.
-    pub(super) key_stored: bool,
     /// The identity of the winning event, for the harness.
     pub(super) event: Value,
 }
 
+/// The name's state-derived registry-only SurfaceBounds the admission holds, as their binding
+/// candidates (the SurfaceBound arm of build.sql:396-399 and :664-665).
+pub(super) fn admitted_registry_only<'a>(
+    facts: &'a NameFacts,
+    authority: &Authority<'_>,
+    is_v2: bool,
+    selected_key: Option<&str>,
+) -> Vec<(&'a Position, &'a BindingCandidate)> {
+    facts
+        .candidates
+        .iter()
+        .filter(|candidate| {
+            candidate.state_derived == Some(true)
+                && candidate.authority_kind.as_deref() == Some("registry_only")
+                && (!is_v2 || Some(candidate.resource_id.as_str()) == selected_key)
+        })
+        .filter_map(|candidate| {
+            let position = candidate.surface_bound_position.as_ref()?;
+            authority
+                .admits(&Probe {
+                    event_kind: "SurfaceBound",
+                    source_family: "registry_only_binding",
+                    resource_id: Some(&candidate.resource_id),
+                    authority_kind: "registry_only",
+                    position,
+                    transaction_hash: None,
+                    to_address: None,
+                    namehash: None,
+                    wrapper_linked: false,
+                })
+                .then_some((position, candidate))
+        })
+        .collect()
+}
+
 /// The latest admitted grant, AuthorityEpochChanged or state-derived registry-only SurfaceBound
-/// (build.sql:393-420). Grants read their retained authority kind; the AuthorityEpochChanged is
-/// F1's latest per arm and the SurfaceBound is the binding candidate. A successor lease granted
-/// under a registry-only binding's handoff names the registration, not the authority, and is
-/// left out (build.sql:405-416). Step 2 at b218b2fc writes the predecessor as the lease
-/// (crates/project/src/families/identity.rs:378-383) where the served fold takes the successor
-/// (name_authority/stage.rs:60, :81-119), so this exclusion cannot fire until step 2 folds the
-/// successor lease.
+/// (build.sql:393-420), with the authority kind and key its after-state carries: the retained
+/// grant's columns, F1's latest AuthorityEpochChanged per arm, the binding candidate's
+/// SurfaceBound. A successor lease granted under a registry-only binding's handoff names the
+/// registration, not the authority, and is left out (build.sql:405-416); step 2 folds the
+/// successor as the handoff's lease (`lease_resource_id`, name_authority/stage.rs:60, :81-119).
 pub(super) fn authority_context(
     facts: &NameFacts,
     authority: &Authority<'_>,
@@ -206,7 +233,7 @@ pub(super) fn authority_context(
                 && binding.lease_resource_id != binding.predecessor_resource_id
         })
     };
-    let mut found: Vec<(Position, Value, Option<Value>)> = in_scope
+    let mut found: Vec<(Position, Value, Value)> = in_scope
         .iter()
         .filter(|tagged| {
             tagged.event.event_kind == "RegistrationGranted" && !successor_lease(tagged.event)
@@ -214,85 +241,53 @@ pub(super) fn authority_context(
         .map(|tagged| {
             (
                 tagged.event.position.clone(),
-                json!(tagged.event.authority_kind),
-                grant_authority_key(facts, tagged.event),
+                json!(tagged.event.authority_kind_raw),
+                json!(tagged.event.authority_key),
             )
         })
         .collect();
-    for (position, kind, key) in admitted_epochs(facts, authority, is_v2, selected_key) {
-        found.push((position, kind, key));
+    for epoch in admitted_epochs(facts, authority, is_v2, selected_key) {
+        found.push((epoch.position, epoch.kind, epoch.key));
     }
-    for candidate in &facts.candidates {
-        if candidate.state_derived != Some(true)
-            || candidate.authority_kind.as_deref() != Some("registry_only")
-        {
-            continue;
-        }
-        let Some(position) = &candidate.surface_bound_position else {
-            continue;
-        };
-        if is_v2 && Some(candidate.resource_id.as_str()) != selected_key {
-            continue;
-        }
-        let probe = Probe {
-            event_kind: "SurfaceBound",
-            source_family: "registry_only_binding",
-            resource_id: Some(&candidate.resource_id),
-            authority_kind: "registry_only",
-            position,
-            transaction_hash: None,
-            to_address: None,
-            namehash: None,
-            wrapper_linked: false,
-        };
-        if authority.admits(&probe) {
-            let key = candidate
-                .authority_key_stored
-                .then(|| json!(candidate.authority_key));
-            found.push((position.clone(), json!("registry_only"), key));
-        }
+    for (position, candidate) in admitted_registry_only(facts, authority, is_v2, selected_key) {
+        found.push((
+            position.clone(),
+            json!("registry_only"),
+            json!(candidate.authority_key),
+        ));
     }
     match latest(&facts.order, found, |(position, _, _)| position) {
         Some((position, kind, key)) => AuthorityContext {
             kind,
-            key_stored: key.is_some(),
-            key: key.unwrap_or(Value::Null),
+            key,
             event: json!(position.event_identity),
         },
         None => AuthorityContext {
             kind: Value::Null,
             key: Value::Null,
-            key_stored: true,
             event: Value::Null,
         },
     }
 }
 
-/// A retained grant's authority key: its own column, else the `last_grant` member of the key
-/// state or triple summary that holds the same grant; None when neither place exists.
-fn grant_authority_key(facts: &NameFacts, grant: &LifecycleEvent) -> Option<Value> {
-    if grant.authority_key_stored {
-        return Some(json!(grant.authority_key));
-    }
-    facts
-        .key_states
-        .values()
-        .chain(facts.triples.iter().map(|triple| &triple.maxima))
-        .filter_map(|maxima| maxima.last_grant.as_ref())
-        .find(|mark| mark.position == grant.position)
-        .and_then(|mark| mark.detail.get("authority_key").cloned())
+/// One admitted AuthorityEpochChanged: its position, and the authority kind, key and control
+/// owner its after-state carries.
+pub(super) struct Epoch {
+    pub(super) position: Position,
+    pub(super) kind: Value,
+    pub(super) key: Value,
+    pub(super) owner: Option<String>,
 }
 
 /// The name's AuthorityEpochChanged events the admission holds, from F1's latest per arm
-/// (`project_name_state.authority_start_positions`): position, authority kind and, when F1 keeps
-/// it, authority key. F1 keeps one epoch per arm, so an older admitted epoch behind a later one
-/// of the same arm is not seen.
+/// (`project_name_state.authority_start_positions`). F1 keeps one epoch per arm, so an older
+/// admitted epoch behind a later one of the same arm is not seen.
 pub(super) fn admitted_epochs(
     facts: &NameFacts,
     authority: &Authority<'_>,
     is_v2: bool,
     selected_key: Option<&str>,
-) -> Vec<(Position, Value, Option<Value>)> {
+) -> Vec<Epoch> {
     let mut found = Vec::new();
     let Some(starts) = facts.authority_starts.as_object() else {
         return found;
@@ -319,11 +314,16 @@ pub(super) fn admitted_epochs(
             wrapper_linked: false,
         };
         if authority.admits(&probe) {
-            found.push((
-                position.clone(),
-                start.get("authority_kind").cloned().unwrap_or(Value::Null),
-                start.get("authority_key").cloned(),
-            ));
+            let member = |name: &str| start.get(name).cloned().unwrap_or(Value::Null);
+            found.push(Epoch {
+                kind: member("authority_kind"),
+                key: member("authority_key"),
+                owner: start
+                    .get("owner")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                position,
+            });
         }
     }
     found

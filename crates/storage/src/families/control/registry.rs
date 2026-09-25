@@ -20,9 +20,15 @@ pub const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
 pub struct RegistryNode {
     pub namespace: String,
     pub node: String,
-    /// The position of the last event that wrote the row, which may be a SubregistryChanged
-    /// rather than the AuthorityTransferred that set the owner.
+    /// The position of the last event that wrote the row.
     pub position: Option<Position>,
+    /// The kind of the event that last set the owner group: AuthorityTransferred or
+    /// SubregistryChanged.
+    pub owner_event_kind: Option<String>,
+    /// That event's position, apart from the row's last write.
+    pub owner_position: Option<Position>,
+    /// That event's resource.
+    pub owner_resource_id: Option<String>,
     pub owner: Option<String>,
     pub registry_owner: Option<String>,
     pub owner_word_unmasked: Option<bool>,
@@ -38,6 +44,9 @@ impl RegistryNode {
             namespace: text(row, "namespace")?,
             node: text(row, "node")?,
             position: Position::of_row(row),
+            owner_event_kind: text(row, "owner_event_kind"),
+            owner_position: row.get("owner_position").and_then(Position::from_json),
+            owner_resource_id: text(row, "owner_resource_id"),
             owner: lower(row, "owner"),
             registry_owner: lower(row, "registry_owner"),
             owner_word_unmasked: flag(row, "owner_word_unmasked"),
@@ -115,7 +124,12 @@ pub async fn load_registry_nodes(
 #[derive(Clone, Debug)]
 pub struct Observation {
     pub resource_id: String,
+    /// The event's name, null for an unnamed observation.
+    pub logical_name_id: Option<String>,
     pub attributed_via: String,
+    /// The resource the observation reaches after the block, under the name's ENSv1 or
+    /// Basenames binding for a name-attributed row.
+    pub target_resource_id: String,
     pub position: Position,
     pub event_kind: String,
     pub registry_owner: Option<String>,
@@ -131,7 +145,9 @@ impl Observation {
     fn from_row(row: &Value) -> Option<Self> {
         Some(Self {
             resource_id: text(row, "resource_id")?,
+            logical_name_id: text(row, "logical_name_id"),
             attributed_via: text(row, "attributed_via")?,
+            target_resource_id: text(row, "target_resource_id")?,
             position: Position::of_row(row)?,
             event_kind: text(row, "event_kind")?,
             registry_owner: lower(row, "registry_owner"),
@@ -141,13 +157,6 @@ impl Observation {
             clear_event_identity: text(row, "clear_event_identity"),
             normalized_event_id: row.get("normalized_event_id").and_then(Value::as_i64),
         })
-    }
-
-    /// The name a name-attributed observation was written for.
-    pub fn logical_name_id(&self) -> Option<&str> {
-        self.provenance
-            .get("logical_name_id")
-            .and_then(Value::as_str)
     }
 }
 
@@ -178,39 +187,31 @@ pub struct RegistryBinding {
 /// The registry binding of every resource the observations reach. Today's builder keys the
 /// observations by `COALESCE(logical_name_id, resource_id)`, takes the latest per key, moves a
 /// name-addressed AuthorityTransferred or SubregistryChanged to the name's current resource under
-/// arm ens_v1 or basenames, then takes the latest per resource. Step 2 keeps the latest
-/// observation per (resource, own or name) and records the name in the provenance, so the read
-/// regroups the name rows by that name first.
+/// arm ens_v1 or basenames, then takes the latest per resource. Step 2 keeps one row per that
+/// key with the resource it reaches under the name's ENSv1 or Basenames binding. The served
+/// move reads the served name row's selection, so a name `names` carries is moved by that
+/// selection (a name whose arm is ENSv2 stays on the event's own resource), and any other row
+/// reaches its stored target.
 pub fn registry_bindings(
     observations: &[Observation],
     names: &BTreeMap<String, NameAttribution>,
 ) -> BTreeMap<String, RegistryBinding> {
-    let mut latest_per_key: BTreeMap<String, &Observation> = BTreeMap::new();
-    for observation in observations {
-        let key = match (
-            observation.attributed_via.as_str(),
-            observation.logical_name_id(),
-        ) {
-            ("name", Some(name)) => format!("name:{name}"),
-            _ => format!("resource:{}", observation.resource_id),
-        };
-        let entry = latest_per_key.entry(key).or_insert(observation);
-        if observation.position > entry.position {
-            *entry = observation;
-        }
-    }
     let mut per_resource: BTreeMap<String, &Observation> = BTreeMap::new();
-    for observation in latest_per_key.values() {
-        let redirected = matches!(
-            observation.event_kind.as_str(),
-            "AuthorityTransferred" | "SubregistryChanged"
-        )
-        .then(|| observation.logical_name_id())
-        .flatten()
-        .and_then(|name| names.get(name))
-        .filter(|name| matches!(name.authority_arm.as_deref(), Some("ens_v1" | "basenames")))
-        .and_then(|name| name.current_resource_id.clone());
-        let resource = redirected.unwrap_or_else(|| observation.resource_id.clone());
+    for observation in observations {
+        let resource = match observation
+            .logical_name_id
+            .as_deref()
+            .filter(|_| observation.attributed_via == "name")
+            .and_then(|name| names.get(name))
+        {
+            Some(name) if matches!(name.authority_arm.as_deref(), Some("ens_v1" | "basenames")) => {
+                name.current_resource_id
+                    .clone()
+                    .unwrap_or_else(|| observation.resource_id.clone())
+            }
+            Some(_) => observation.resource_id.clone(),
+            None => observation.target_resource_id.clone(),
+        };
         let entry = per_resource.entry(resource).or_insert(observation);
         if observation.position > entry.position {
             *entry = observation;
@@ -257,8 +258,8 @@ impl RegistryBinding {
     }
 }
 
-/// Every registry-binding observation of the chain. The name rows are regrouped by the name in
-/// their provenance, which no column indexes (brief tripwire 2), so the read takes the table
+/// Every registry-binding observation of the chain. A resource's binding can come from a row
+/// keyed by any name whose target it is, which no column indexes, so the read takes the table
 /// whole; it serves the harness only.
 pub async fn load_observations(pool: &PgPool, chain_id: &str) -> Result<Vec<Observation>> {
     let rows: Vec<Value> = sqlx::query_scalar(
@@ -287,7 +288,9 @@ mod tests {
     ) -> Observation {
         Observation {
             resource_id: resource.into(),
+            logical_name_id: name.map(str::to_owned),
             attributed_via: via.into(),
+            target_resource_id: resource.into(),
             position: Position {
                 block_number: block,
                 transaction_index: Some(0),
@@ -297,7 +300,7 @@ mod tests {
             event_kind: kind.into(),
             registry_owner: applicable.then(|| "0x00000000000000000000000000000000000000aa".into()),
             registry_contract: Some("0x00000000000000000000000000000000000000bb".into()),
-            provenance: json!({"logical_name_id": name, "raw_fact_ref": {"emitting_address": "0xbb"}}),
+            provenance: json!({"raw_fact_ref": {"emitting_address": "0xbb"}}),
             applicable,
             clear_event_identity: (!applicable).then(|| format!("e{block}")),
             normalized_event_id: Some(block),

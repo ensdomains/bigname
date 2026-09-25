@@ -276,7 +276,6 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> ShadowName {
         selected_key.as_deref(),
     );
     let context = authority_context(facts, &authority, &in_scope, is_v2, selected_key.as_deref());
-    trace.insert("authority_key_stored".into(), json!(context.key_stored));
     trace.insert("authority_context_event".into(), context.event.clone());
     let latest_event_kind =
         latest_event_kind(facts, &selected, &in_scope, is_v2, selected_key.as_deref());
@@ -355,7 +354,7 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> ShadowName {
     let control_unsupported = event_resource
         .and_then(|resource| facts.resource_authority_kinds.get(resource))
         .map(String::as_str)
-        .or_else(|| grant.map(|grant| grant.authority_kind.as_str()))
+        .or_else(|| grant.and_then(|grant| grant.authority_kind_raw.as_deref()))
         .is_some_and(|kind| matches!(kind, "wrapper" | "name_wrapper"));
     let live_control = || {
         let mut control = Map::new();

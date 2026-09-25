@@ -60,28 +60,6 @@
 //!   The reader decides both with the one resolved arm and presents the release whole (ruling
 //!   R1). A field passes only when no arm is selected, the shadow presents the whole release,
 //!   and the served value is what the reader traced for the raw-arm presentation.
-//! - `registry_node_position_moved_by_later_write`: F2c sets the node's owner only on
-//!   AuthorityTransferred (crates/project/src/families/registry.rs:69-94) but stamps the row with
-//!   the position of every event that writes it, SubregistryChanged included (:120). A control
-//!   `latest_event_kind` or `registry_owner` field passes only when the node's latest
-//!   AuthorityTransferred (any name or resource) is also the name's latest one the authority
-//!   admission holds, carries the owner the node row holds, is not the row's position, and
-//!   reading the name again with its position gives exactly the served value. When a later
-//!   transfer the admission leaves out set the row's owner, the families cannot recover the
-//!   admitted one and the field fails (step 2 retention follow-up).
-//! - `authority_kind_defaulted_to_registrar`: the retained lifecycle row stores `authority_kind`
-//!   with a `registrar` default when the event's after-state has none
-//!   (crates/project/src/families/lifecycle.rs:317-322), while the served block serves null
-//!   (build.sql:30 from :394). `registration/authority_kind` passes only when served is null,
-//!   the shadow is `registrar`, and the winning event's after-state has no authority kind.
-//! - `authority_key_not_stored`: the registration's `authority_key` is the winning grant's,
-//!   AuthorityEpochChanged's or registry-only SurfaceBound's after-state key (build.sql:31,
-//!   :393-420). Step 2 at b218b2fc has no place for it: no `authority_key` column on the retained
-//!   row (crates/project/src/families/lifecycle.rs:306-380), no member in `last_grant`
-//!   (:432-437) or in `authority_start_positions` (crates/project/src/families/identity.rs:92-95),
-//!   no column on the binding candidate. `registration/authority_key` passes only when the trace
-//!   says the winning event's place does not exist and the shadow is null; once step 2 adds the
-//!   place, a difference fails even when the stored value is null.
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::Mutex,
@@ -95,14 +73,13 @@ use bigname_storage::{
         lifecycle::view::registration_lapsed,
         lifecycle::{
             AuthoritySelection, CONTROL_FIELDS, Clock, NameFacts, NameInput, REGISTRATION_FIELDS,
-            ShadowName, admits_named_event, evaluate, load_name_facts, load_shadow_names,
-            membership::maxima_of,
+            ShadowName, evaluate, load_name_facts, load_shadow_names, membership::maxima_of,
         },
         permissions::{
             ResourceInput, ShadowPermissions, effective_operator_rows, grant_json,
             load_shadow_approvals, load_shadow_permissions, load_shadow_permissions_in,
         },
-        position::{EventOrder, Position},
+        position::EventOrder,
         registry::{
             NameAttribution, load_observations, load_registry_nodes, ownerless_registry,
             registry_bindings, registry_generation,
@@ -766,24 +743,12 @@ async fn name_excuses(
     shadow: &ShadowName,
     diffs: &[Difference],
 ) -> Result<Vec<Excuse>> {
-    let trace = &shadow.trace;
     let mut out = Vec::with_capacity(diffs.len());
     for diff in diffs {
         let excuse = if serves_the_unnamed_release(shadow, diff) {
             Excuse::Known("served_membership_skips_unnamed_path_expiry")
         } else if serves_the_raw_arm_release(input, shadow, diff) {
             Excuse::Known("served_release_presentation_reads_the_raw_arm")
-        } else if diff.field == "registration/authority_key"
-            && trace.get("authority_key_stored") == Some(&json!(false))
-            && diff.shadow.is_null()
-        {
-            Excuse::Known("authority_key_not_stored")
-        } else if diff.field == "registration/authority_kind"
-            && diff.served.is_null()
-            && diff.shadow == json!("registrar")
-            && winner_has_no_authority_kind(pool, chain, trace).await?
-        {
-            Excuse::Known("authority_kind_defaulted_to_registrar")
         } else {
             Excuse::None
         };
@@ -799,43 +764,7 @@ async fn name_excuses(
         return Ok(out);
     };
 
-    // The registry node row's position, when a later write moved it off the AuthorityTransferred
-    // that set its owner. That transfer must be the name's latest admitted one (the served
-    // control lateral reads the admitted events, build.sql:649-694), the node's latest transfer
-    // of any name or resource, and carry the owner the node row holds; otherwise the families
-    // cannot show which transfer the row's owner came from and nothing is excused.
-    let owner_fields = ["control/latest_event_kind", "control/registry_owner"];
     let open = |out: &[Excuse], index: usize| out[index] == Excuse::None;
-    if !input.selection.is_v2()
-        && diffs
-            .iter()
-            .enumerate()
-            .any(|(index, diff)| open(&out, index) && owner_fields.contains(&diff.field.as_str()))
-        && let Some(node) = &facts.registry_node
-        && let Some(transferred) =
-            latest_authority_transferred(pool, chain, &node.namespace, &node.node, clock).await?
-        && latest_admitted_transfer(pool, chain, &facts, clock)
-            .await?
-            .is_some_and(|admitted| admitted == transferred)
-        && node.position.as_ref() != Some(&transferred.position)
-        && node.registry_owner.clone().or_else(|| node.owner.clone()) == transferred.owner
-        && node.owner_word_unmasked == transferred.owner_word_unmasked
-    {
-        let mut moved = facts.clone();
-        if let Some(node) = moved.registry_node.as_mut() {
-            node.position = Some(transferred.position);
-        }
-        let counterfactual = evaluate(&moved, clock);
-        for (index, diff) in diffs.iter().enumerate() {
-            if open(&out, index)
-                && owner_fields.contains(&diff.field.as_str())
-                && same(&shadow_field(&counterfactual, &diff.field), &diff.served)
-            {
-                out[index] = Excuse::Known("registry_node_position_moved_by_later_write");
-            }
-        }
-    }
-
     // The same families read in today's generated-id order at the selectors that use it.
     if out.contains(&Excuse::None) {
         let identities: Vec<String> = facts
@@ -857,127 +786,6 @@ async fn name_excuses(
         }
     }
     Ok(out)
-}
-
-/// Whether the event the authority context selected carries no authority kind in its
-/// after-state, read from the event log.
-async fn winner_has_no_authority_kind(
-    pool: &PgPool,
-    chain: &str,
-    trace: &serde_json::Map<String, Value>,
-) -> Result<bool> {
-    let Some(identity) = trace.get("authority_context_event").and_then(Value::as_str) else {
-        return Ok(false);
-    };
-    let kind: Option<Option<String>> = sqlx::query_scalar(
-        "SELECT NULLIF(after_state ->> 'authority_kind', '') FROM normalized_events
-         WHERE chain_id = $1 AND event_identity = $2",
-    )
-    .bind(chain)
-    .bind(identity)
-    .fetch_optional(pool)
-    .await?;
-    Ok(matches!(kind, Some(None)))
-}
-
-/// A registry AuthorityTransferred read from the event log: its position and the owner the
-/// served control lateral and the F2c node row read from it.
-#[derive(Debug, PartialEq, Eq)]
-struct Transfer {
-    position: Position,
-    owner: Option<String>,
-    owner_word_unmasked: Option<bool>,
-}
-
-const TRANSFERS: &str = "SELECT block_number, transaction_index, log_index, event_identity,
-            resource_id::text, NULLIF(after_state ->> 'authority_kind', ''), source_family,
-            lower(COALESCE(after_state ->> 'registry_owner', after_state ->> 'owner')),
-            (after_state ->> 'owner_word_unmasked')::boolean
-     FROM normalized_events
-     WHERE chain_id = $1 AND block_number <= $2 AND event_kind = 'AuthorityTransferred'
-       AND source_family IN ('ens_v1_registry_l1', 'basenames_base_registry')
-       AND canonicality_state IN ('canonical', 'safe', 'finalized')";
-
-type TransferRow = (
-    i64,
-    Option<i64>,
-    Option<i64>,
-    String,
-    Option<String>,
-    Option<String>,
-    String,
-    Option<String>,
-    Option<bool>,
-);
-
-fn transfer(row: &TransferRow) -> Transfer {
-    Transfer {
-        position: Position {
-            block_number: row.0,
-            transaction_index: row.1,
-            log_index: row.2,
-            event_identity: row.3.clone(),
-        },
-        owner: row.7.clone(),
-        owner_word_unmasked: row.8,
-    }
-}
-
-/// The latest AuthorityTransferred of a registry node at the clock's block, of any name or
-/// resource, from the event log, in the canonical order: the transfer whose owner the F2c node
-/// row holds (crates/project/src/families/registry.rs:69-94).
-async fn latest_authority_transferred(
-    pool: &PgPool,
-    chain: &str,
-    namespace: &str,
-    node: &str,
-    clock: &Clock,
-) -> Result<Option<Transfer>> {
-    let rows: Vec<TransferRow> = sqlx::query_as(&format!(
-        "{TRANSFERS} AND namespace = $3
-           AND lower(COALESCE(NULLIF(after_state ->> 'child_node', ''),
-                              after_state ->> 'node')) = $4"
-    ))
-    .bind(chain)
-    .bind(clock.block_number)
-    .bind(namespace)
-    .bind(node)
-    .fetch_all(pool)
-    .await?;
-    Ok(rows
-        .iter()
-        .map(transfer)
-        .max_by(|left, right| left.position.cmp(&right.position)))
-}
-
-/// The latest AuthorityTransferred of the name that the name's authority admission holds, the
-/// set the served control lateral reads (build.sql:649-694 over project_authority_events).
-async fn latest_admitted_transfer(
-    pool: &PgPool,
-    chain: &str,
-    facts: &NameFacts,
-    clock: &Clock,
-) -> Result<Option<Transfer>> {
-    let rows: Vec<TransferRow> = sqlx::query_as(&format!("{TRANSFERS} AND logical_name_id = $3"))
-        .bind(chain)
-        .bind(clock.block_number)
-        .bind(&facts.input.logical_name_id)
-        .fetch_all(pool)
-        .await?;
-    Ok(rows
-        .iter()
-        .filter(|row| {
-            admits_named_event(
-                facts,
-                "AuthorityTransferred",
-                &row.6,
-                row.4.as_deref(),
-                row.5.as_deref().unwrap_or("registrar"),
-                &transfer(row).position,
-            )
-        })
-        .map(transfer)
-        .max_by(|left, right| left.position.cmp(&right.position)))
 }
 
 /// The generated ids of events, by identity.
@@ -1178,9 +986,7 @@ pub async fn resource_excuses(
 /// - an ENSv2 name whose interpreter path-expiry release (the `expired` rows, no name, the token
 ///   resource) is not followed on that resource by a grant, reservation or named release is served
 ///   active today and released by the families: eight fields each, and the two control-owner
-///   fields again for those whose token was transferred before the target;
-/// - a registry-only name whose node has an AuthorityEpochChanged and a later fixture
-///   SubregistryChanged moves its F2c node row off the AuthorityTransferred: one field each.
+///   fields again for those whose token was transferred before the target.
 ///
 /// No same-block delta may pass on the corpus.
 pub async fn assert_fixture_corpus_counts(pool: &PgPool) -> Result<()> {
@@ -1216,22 +1022,6 @@ pub async fn assert_fixture_corpus_counts(pool: &PgPool) -> Result<()> {
         .bind(target)
         .fetch_all(pool)
         .await?;
-        let moved: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM name_current name
-             WHERE EXISTS (
-                     SELECT 1 FROM normalized_events epoch
-                     WHERE epoch.logical_name_id = name.logical_name_id
-                       AND epoch.event_kind = 'AuthorityEpochChanged'
-                       AND epoch.block_number <= $1)
-               AND EXISTS (
-                     SELECT 1 FROM normalized_events later
-                     WHERE later.event_identity LIKE 'fixture:subname:%'
-                       AND later.after_state ->> 'child_node' = name.namehash
-                       AND later.block_number <= $1)",
-        )
-        .bind(target)
-        .fetch_one(pool)
-        .await?;
         let cause = "served_membership_skips_unnamed_path_expiry";
         let transferred = expired
             .iter()
@@ -1256,12 +1046,6 @@ pub async fn assert_fixture_corpus_counts(pool: &PgPool) -> Result<()> {
             if transferred > 0 {
                 expected.insert(format!("{cause}:{field}"), transferred);
             }
-        }
-        if moved > 0 {
-            expected.insert(
-                "registry_node_position_moved_by_later_write:control/latest_event_kind".into(),
-                usize::try_from(moved)?,
-            );
         }
         anyhow::ensure!(
             known == expected,

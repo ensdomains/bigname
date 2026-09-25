@@ -590,12 +590,12 @@ async fn an_ensv1_release_names_its_before_state_registrant() -> Result<()> {
     fixture.cleanup().await
 }
 
-/// Step 2 finding, kept visible: a grant whose after-state has no `authority_kind` is retained
-/// as `registrar` (crates/project/src/families/lifecycle.rs:317-322) while the served block reads
-/// the raw after-state and serves null (build.sql:30, :394). The comparison counts it under its
-/// name rather than as a mismatch.
+/// A grant whose after-state has no `authority_kind`: step 2 retains the kind raw, null when
+/// absent (migration 20260926100800), and the served block reads the raw after-state and serves
+/// null (build.sql:30, :394). The families agree; the old `authority_kind_defaulted_to_registrar`
+/// cause is gone, so a difference here fails.
 #[tokio::test]
-async fn a_grant_without_authority_kind_is_the_known_default_discrepancy() -> Result<()> {
+async fn a_grant_without_authority_kind_is_served_null_by_both() -> Result<()> {
     let fixture = Fixture::new("families_shadow_authority_kind", 20).await?;
     let k1 = uuid(1);
     v2_binding(&fixture, &k1).await?;
@@ -613,17 +613,10 @@ async fn a_grant_without_authority_kind_is_the_known_default_discrepancy() -> Re
         )
         .await?;
     let report = publish_and_compare(&fixture, 12).await?;
-    assert_counts(
-        &report,
-        &[(
-            "authority_kind_defaulted_to_registrar:registration/authority_kind",
-            1,
-        )],
-        &[],
-    );
+    assert_counts(&report, &[], &[]);
     let (served, shadow) = shadow_support::name(&fixture, 12, &name(1)).await?;
     assert_eq!(served.registration("authority_kind"), Value::Null);
-    assert_eq!(shadow.registration["authority_kind"], json!("registrar"));
+    assert_eq!(shadow.registration["authority_kind"], Value::Null);
     fixture.cleanup().await
 }
 
@@ -821,13 +814,11 @@ async fn a_renewal_serves_its_expiry_only_when_it_is_a_number() -> Result<()> {
     Ok(())
 }
 
-/// Step 2 finding, kept visible: the served registration names the winning grant's
-/// `authority_key` (build.sql:31, :393-420), and step 2 retains that key nowhere a reader can
-/// see it (not on the retained row, the key state's `last_grant`, or F1's start positions). The
-/// comparison counts it under its name; it closes once step 2 stores the key, because the
-/// reader already reads each of those places.
+/// The served registration names the winning grant's `authority_key` (build.sql:31,
+/// :393-420); step 2 retains it on the lifecycle row (migration 20260926100800), so the families
+/// serve the same key and a difference fails.
 #[tokio::test]
-async fn a_grant_authority_key_is_the_known_unretained_key() -> Result<()> {
+async fn a_grant_authority_key_is_read_from_the_retained_row() -> Result<()> {
     let fixture = Fixture::new("families_shadow_authority_key", 20).await?;
     let k1 = uuid(1);
     v2_binding(&fixture, &k1).await?;
@@ -841,19 +832,10 @@ async fn a_grant_authority_key_is_the_known_unretained_key() -> Result<()> {
     )
     .await?;
     let report = publish_and_compare(&fixture, 12).await?;
+    assert_counts(&report, &[], &[]);
     let (served, shadow) = shadow_support::name(&fixture, 12, &name(1)).await?;
     assert_eq!(served.registration("authority_key"), json!("registrar:k1"));
-    if shadow.trace["authority_key_stored"] == json!(false) {
-        assert_eq!(shadow.registration["authority_key"], Value::Null);
-        assert_counts(
-            &report,
-            &[("authority_key_not_stored:registration/authority_key", 1)],
-            &[],
-        );
-    } else {
-        assert_eq!(shadow.registration["authority_key"], json!("registrar:k1"));
-        assert_counts(&report, &[], &[]);
-    }
+    assert_eq!(shadow.registration["authority_key"], json!("registrar:k1"));
     fixture.cleanup().await
 }
 

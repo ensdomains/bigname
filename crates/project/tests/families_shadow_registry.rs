@@ -202,17 +202,17 @@ async fn a_zero_registry_owner_keeps_its_getter_facts() -> Result<()> {
 /// Items 3 and 5 of the TYR-36 step 3 review (Q7, Q5), the control owner under the authority
 /// admission. Name 1's node gets an AuthorityTransferred to OWNER at 11, which the admission
 /// holds, then one to OTHER at 12 carrying another resource, which the admission leaves out
-/// (authority_events.sql admits a resource-bearing event only on the selected resource); the
-/// lease is transferred at 13 and a SubregistryChanged at 15 stamps the F2c node row. The
-/// served control block reads the latest admitted events (build.sql:649-694): owner OWNER,
-/// latest kind TokenControlTransferred. F2c keeps only the node's latest owner, OTHER, with the
-/// position of its latest write and nothing about the transfer that set it, so the families
-/// cannot recover the admitted transfer and both fields differ. The registry-position exception
-/// must not excuse either: the node's latest transfer is not the name's latest admitted one.
-/// Step 2 retention follow-up: keep the owner-setting transfer's identity, position, resource
-/// and admission evidence on the node row.
+/// (authority_events.sql admits a resource-bearing event only on the selected resource), and the
+/// lease is transferred at 13. The served control block reads the latest admitted events
+/// (build.sql:649-694): owner OWNER, latest kind TokenControlTransferred. F2c keeps the node's
+/// latest owner-setting event with its kind, position and resource, so the reader sees that the
+/// transfer at 12 is not admitted and leaves it out, and the kind agrees; but it keeps only that
+/// latest event, so the admitted transfer at 11 is gone and the shadow serves no owner. Nothing
+/// excuses the owner: the comparison fails on that field alone. A later SubregistryChanged,
+/// which F2c now also records as the owner-setting event, hides an admitted transfer the same
+/// way. Step 2 retention follow-up: keep the name's latest admitted owner-setting transfer.
 #[tokio::test]
-async fn an_excluded_later_transfer_is_not_the_control_owner_and_is_not_excused() -> Result<()> {
+async fn an_excluded_later_transfer_is_not_the_control_owner() -> Result<()> {
     let fixture = Fixture::new("families_shadow_registry_admitted_owner", 20).await?;
     let lease = uuid(1);
     bound(&fixture, &lease).await?;
@@ -242,29 +242,17 @@ async fn an_excluded_later_transfer_is_not_the_control_owner_and_is_not_excused(
             REGISTRAR,
         )
         .await?;
-    fixture
-        .write(
-            15,
-            1,
-            "SubregistryChanged",
-            V1_REGISTRY,
-            Some(&name(1)),
-            None,
-            json!({"node": node(1), "subregistry": REGISTRY}),
-            REGISTRY,
-        )
-        .await?;
     let report = publish_and_compare(&fixture, 16).await?;
     let (served, shadow) = shadow_support::name(&fixture, 16, &name(1)).await?;
     assert_eq!(served.control("registry_owner"), json!(OWNER));
+    assert_eq!(shadow.control["registry_owner"], Value::Null);
     assert_eq!(
         served.control("latest_event_kind"),
         json!("TokenControlTransferred")
     );
-    assert_eq!(shadow.control["registry_owner"], json!(OTHER));
     assert_eq!(
         shadow.control["latest_event_kind"],
-        json!("AuthorityTransferred")
+        json!("TokenControlTransferred")
     );
     assert!(report.known_discrepancy.is_empty(), "{:#?}", report.lines);
     assert!(
@@ -279,9 +267,6 @@ async fn an_excluded_later_transfer_is_not_the_control_owner_and_is_not_excused(
         .filter(|line| line.starts_with("SEPOLIA_END_TO_END_SHADOW_MISMATCH"))
         .filter_map(|line| line.split(" field=").nth(1)?.split(' ').next())
         .collect();
-    assert_eq!(
-        mismatched,
-        vec!["control/registry_owner", "control/latest_event_kind"]
-    );
+    assert_eq!(mismatched, vec!["control/registry_owner"]);
     fixture.cleanup().await
 }

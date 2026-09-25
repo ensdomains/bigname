@@ -5,6 +5,8 @@
 //! candidates on every read, never read from the name step 2 decoded (design:111); step 2 does
 //! the same at write time in crates/project/src/families/decode.rs:110-140, and this is a
 //! deliberate second copy because the storage crate cannot depend on the Project crate.
+use std::collections::BTreeSet;
+
 use crate::families::control::{
     position::{Position, bound_of},
     rows::{BindingCandidate, LifecycleEvent},
@@ -91,8 +93,11 @@ pub(crate) struct Authority<'a> {
     pub(crate) events: &'a [LifecycleEvent],
 }
 
-fn distinct(left: Option<&str>, right: Option<&str>) -> bool {
-    left != right
+/// The one name of a pass's matches, none when several names match.
+fn only(names: BTreeSet<&str>) -> Option<&str> {
+    (names.len() == 1)
+        .then(|| names.into_iter().next())
+        .flatten()
 }
 
 /// Which staging pass named an unnamed registrar row.
@@ -108,14 +113,16 @@ pub(crate) enum Pass {
 impl<'a> Authority<'a> {
     /// The name the two staging passes give an unnamed registrar row, over the candidates of
     /// every name (stage.rs:149-158 and :174-198; decode.rs:110-139): pass one first, and pass
-    /// two only when pass one matches no name, each taking the least matching name. Today's
-    /// stage names the row in an UPDATE that takes one unspecified match when several names
-    /// match; the least name is the step 2 decoder's choice. The NameWrapper columns
+    /// two only when pass one matches no name. A pass names the row only through one name: a
+    /// logical name id is `<namespace>:<namehash>` and every match carries the row's namehash,
+    /// so two names can match only across namespaces, which a registrar lease does not span;
+    /// if it ever did, the pass names nothing, as the step 2 decoder does, where today's stage
+    /// UPDATE would take whichever match it met first. The NameWrapper columns
     /// (`wrapped_registrar_resource_id`, `node`) exist only on a NameWrapper candidate, so pass
     /// two needs no other wrapper evidence.
     fn attachment(&self, event: &LifecycleEvent) -> Option<(&'a str, Pass)> {
         let resource = event.resource_id.as_deref()?;
-        let direct = self
+        let direct: BTreeSet<&'a str> = self
             .lease_candidates
             .iter()
             .filter(|candidate| {
@@ -124,11 +131,12 @@ impl<'a> Authority<'a> {
                     && candidate.surface_namehash.as_deref() == event.namehash.as_deref()
             })
             .map(|candidate| candidate.logical_name_id.as_str())
-            .min();
-        if let Some(name) = direct {
-            return Some((name, Pass::Direct));
+            .collect();
+        if !direct.is_empty() {
+            return only(direct).map(|name| (name, Pass::Direct));
         }
-        self.lease_candidates
+        let wrapped: BTreeSet<&'a str> = self
+            .lease_candidates
             .iter()
             .filter(|wrapper| {
                 wrapper.wrapped_registrar_resource_id.as_deref() == Some(resource)
@@ -142,8 +150,8 @@ impl<'a> Authority<'a> {
                     )
             })
             .map(|wrapper| wrapper.logical_name_id.as_str())
-            .min()
-            .map(|name| (name, Pass::Wrapper))
+            .collect();
+        only(wrapped).map(|name| (name, Pass::Wrapper))
     }
 
     fn stageable(event: &LifecycleEvent) -> bool {
@@ -409,8 +417,8 @@ pub(crate) fn custody_passes(
     wrapper: &BindingCandidate,
 ) -> bool {
     event_kind != "TokenControlTransferred"
-        || distinct(transaction_hash, wrapper.transaction_hash.as_deref())
-        || distinct(to_address, wrapper.emitting_address.as_deref())
+        || transaction_hash != wrapper.transaction_hash.as_deref()
+        || to_address != wrapper.emitting_address.as_deref()
 }
 
 #[cfg(test)]
@@ -431,7 +439,7 @@ mod tests {
             state_derived: None,
             authority_kind: None,
             authority_key: None,
-            authority_key_stored: false,
+            bound_owner: None,
             registry_only: false,
             predecessor_resource_id: None,
             predecessor_position: None,

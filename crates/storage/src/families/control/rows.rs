@@ -38,13 +38,14 @@ pub struct LifecycleEvent {
     pub decoded_logical_name_id: Option<String>,
     pub resource_id: Option<String>,
     pub source_family: String,
-    /// `COALESCE(NULLIF(after_state ->> 'authority_kind', ''), 'registrar')`.
+    /// `COALESCE(NULLIF(after_state ->> 'authority_kind', ''), 'registrar')`, the kind the
+    /// admission reads (authority_events.sql).
     pub authority_kind: String,
-    /// `after_state ->> 'authority_key'`. Step 2 at b218b2fc retains no such column, so this is
-    /// read when a later step 2 revision adds it and is None until then.
+    /// `after_state ->> 'authority_kind'` as the row stores it, null when absent: the kind the
+    /// served name block reports (name_current/build.sql:30).
+    pub authority_kind_raw: Option<String>,
+    /// `after_state ->> 'authority_key'`.
     pub authority_key: Option<String>,
-    /// Whether the row has an `authority_key` column at all.
-    pub authority_key_stored: bool,
     pub transaction_hash: Option<String>,
     pub to_address: Option<String>,
     pub namehash: Option<String>,
@@ -79,9 +80,11 @@ impl LifecycleEvent {
             decoded_logical_name_id: text(row, "decoded_logical_name_id"),
             resource_id: text(row, "resource_id"),
             source_family: text(row, "source_family")?,
-            authority_kind: text(row, "authority_kind").unwrap_or_else(|| "registrar".into()),
+            authority_kind: text(row, "authority_kind")
+                .filter(|kind| !kind.is_empty())
+                .unwrap_or_else(|| "registrar".into()),
+            authority_kind_raw: text(row, "authority_kind"),
             authority_key: text(row, "authority_key"),
-            authority_key_stored: row.get("authority_key").is_some(),
             transaction_hash: text(row, "transaction_hash"),
             to_address: lower(row, "to_address"),
             namehash: lower(row, "namehash"),
@@ -216,10 +219,11 @@ pub struct BindingCandidate {
     pub log_index: Option<i64>,
     pub state_derived: Option<bool>,
     pub authority_kind: Option<String>,
-    /// The SurfaceBound's after-state authority key, when step 2 stores it.
+    /// The SurfaceBound's after-state authority key.
     pub authority_key: Option<String>,
-    /// Whether the candidate row has an `authority_key` column at all.
-    pub authority_key_stored: bool,
+    /// The owner the SurfaceBound reports to the served control block (build.sql:650-671),
+    /// positioned at `surface_bound_position`.
+    pub bound_owner: Option<String>,
     pub registry_only: bool,
     pub predecessor_resource_id: Option<String>,
     pub predecessor_position: Option<Value>,
@@ -246,7 +250,7 @@ impl BindingCandidate {
             state_derived: flag(row, "state_derived"),
             authority_kind: text(row, "authority_kind"),
             authority_key: text(row, "authority_key"),
-            authority_key_stored: row.get("authority_key").is_some(),
+            bound_owner: lower(row, "bound_owner"),
             registry_only: flag(row, "registry_only").unwrap_or(false),
             predecessor_resource_id: text(row, "predecessor_resource_id"),
             predecessor_position: row
