@@ -1382,7 +1382,9 @@ fn logged_registration_time(event: &LogEvent) -> Option<i64> {
 
 /// What the name excuses read, loaded once for a chunk of differing names: their facts, and the
 /// publication-visible log rows, generated ids and association keys of every lifecycle and
-/// control event those facts name.
+/// control event those facts name. A chunk with no differing names, or no events, reads
+/// nothing.
+#[derive(Default)]
 pub struct ExcuseInputs {
     pub facts: BTreeMap<String, NameFacts>,
     pub log: BTreeMap<String, LogEvent>,
@@ -1402,15 +1404,14 @@ impl ExcuseInputs {
         target: i64,
         names: &[NameInput],
     ) -> Result<Self> {
-        let facts: BTreeMap<String, NameFacts> = if names.is_empty() {
-            BTreeMap::new()
-        } else {
-            load_name_facts(pool, chain, names)
-                .await?
-                .into_iter()
-                .map(|facts| (facts.input.logical_name_id.clone(), facts))
-                .collect()
-        };
+        if names.is_empty() {
+            return Ok(Self::default());
+        }
+        let facts: BTreeMap<String, NameFacts> = load_name_facts(pool, chain, names)
+            .await?
+            .into_iter()
+            .map(|facts| (facts.input.logical_name_id.clone(), facts))
+            .collect();
         let identities: Vec<String> = facts
             .values()
             .flat_map(|facts| {
@@ -1427,12 +1428,18 @@ impl ExcuseInputs {
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect();
-        let log = published_log(pool, chain, target, &identities).await?;
+        let (log, keys) = if identities.is_empty() {
+            (BTreeMap::new(), BTreeMap::new())
+        } else {
+            (
+                published_log(pool, chain, target, &identities).await?,
+                association_keys(pool, chain, target, &identities).await?,
+            )
+        };
         let ids = log
             .iter()
             .map(|(identity, event)| (identity.clone(), event.id))
             .collect();
-        let keys = association_keys(pool, chain, target, &identities).await?;
         let retention = retention::RetentionLog::load(pool, chain, target, &facts).await?;
         let seconds: Vec<i64> = log
             .values()
@@ -1440,14 +1447,18 @@ impl ExcuseInputs {
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect();
-        let snapshots = sqlx::query_as::<_, (i64, Value)>(
-            "SELECT seconds, to_jsonb(to_timestamp(seconds)) FROM unnest($1::bigint[]) seconds",
-        )
-        .bind(&seconds)
-        .fetch_all(pool)
-        .await?
-        .into_iter()
-        .collect();
+        let snapshots = if seconds.is_empty() {
+            BTreeMap::new()
+        } else {
+            sqlx::query_as::<_, (i64, Value)>(
+                "SELECT seconds, to_jsonb(to_timestamp(seconds)) FROM unnest($1::bigint[]) seconds",
+            )
+            .bind(&seconds)
+            .fetch_all(pool)
+            .await?
+            .into_iter()
+            .collect()
+        };
         Ok(Self {
             facts,
             log,

@@ -164,7 +164,7 @@ impl RetentionLog {
             .values()
             .map(|facts| {
                 format!(
-                    "{}|{}",
+                    "{}:{}",
                     namespace_of(&facts.input.logical_name_id),
                     facts.input.namehash.to_ascii_lowercase()
                 )
@@ -175,13 +175,26 @@ impl RetentionLog {
                 pool,
                 chain,
                 target,
+                // The node is the child node when there is one, else the node. Each arm is
+                // written in the expression and partial predicate of
+                // normalized_events_project_name_child_idx and _node_idx (migration
+                // 20260917161000), so the planner can read both through the indexes.
                 &format!(
-                    "event.event_kind IN ('SubregistryChanged', 'AuthorityTransferred')
-                     AND event.source_family IN ({})
-                     AND event.namespace || '|' || lower(COALESCE(
-                             NULLIF(event.after_state ->> 'child_node', ''),
-                             event.after_state ->> 'node')) = ANY($2)",
-                    sql_list(&V1_REGISTRIES)
+                    "(event.event_kind IN ('SubregistryChanged', 'AliasChanged')
+                      OR (event.event_kind = 'AuthorityTransferred'
+                          AND event.source_family IN ({registries})))
+                     AND event.event_kind IN ('SubregistryChanged', 'AuthorityTransferred')
+                     AND event.source_family IN ({registries})
+                     AND ((event.namespace || ':' || lower(event.after_state ->> 'child_node'))
+                              IS NOT NULL
+                          AND event.namespace || ':' || lower(event.after_state ->> 'child_node')
+                              = ANY($2)
+                       OR (event.namespace || ':' || lower(event.after_state ->> 'node'))
+                              IS NOT NULL
+                          AND event.namespace || ':' || lower(event.after_state ->> 'node')
+                              = ANY($2)
+                          AND NULLIF(event.after_state ->> 'child_node', '') IS NULL)",
+                    registries = sql_list(&V1_REGISTRIES)
                 ),
                 &nodes,
             )
