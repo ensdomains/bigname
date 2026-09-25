@@ -157,7 +157,7 @@ pub async fn load_classification(
     chain_id: &str,
     resolver_address: &str,
 ) -> Result<Option<ResolverClassification>> {
-    // The F3 row when the resolver has one, else resolver_current; either way the declaration's
+    // Both sources key resolvers lower-case. The F3 row when the resolver has one, else resolver_current; either way the declaration's
     // namespace comes from its manifest, admitted at the block the families stand at. F3 keeps a
     // `resolver_manifest_not_active` row for a resolver the served build leaves out; resolver_current
     // has no row for it either, so it reads as unclassified, as today.
@@ -212,7 +212,7 @@ pub async fn load_classification(
          ) declaration ON declaration.active",
     )
     .bind(chain_id)
-    .bind(resolver_address)
+    .bind(resolver_address.to_ascii_lowercase())
     .fetch_optional(pool)
     .await
     .with_context(|| format!("failed to load the classification of resolver {resolver_address}"))?;

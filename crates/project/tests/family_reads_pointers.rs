@@ -172,6 +172,15 @@ async fn the_classification_switch_is_per_resolver_and_bounded_by_the_marker() -
         .context("R3 is classified")?;
     assert_eq!(r3.manifest_id, Some(m3));
     assert_eq!(r3.declaration_namespace.as_deref(), Some("ens"));
+    // A checksummed or otherwise mixed-case address reads the same classification, from either
+    // source.
+    for (resolver, manifest_id) in [(R1, m0), (R2, m2)] {
+        let mixed = format!("0x{}", resolver[2..].to_ascii_uppercase());
+        let classification = load_family_resolver_classification(pool, CHAIN, &mixed)
+            .await?
+            .with_context(|| format!("{mixed} is classified"))?;
+        assert_eq!(classification.manifest_id, Some(manifest_id), "{mixed}");
+    }
     for unclassified in [R4, R5] {
         assert!(
             load_family_resolver_classification(pool, CHAIN, unclassified)
