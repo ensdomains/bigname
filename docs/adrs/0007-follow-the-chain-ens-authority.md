@@ -5,6 +5,7 @@ Date: 2026-09-24
 Amended: 2026-09-25 (support follows the authority decision without a registrar qualification)
 Amended: 2026-09-25 (the remaining ENSv2 authority exceptions are removed)
 Amended: 2026-09-25 (a released or expired ENSv2 registration stays with ENSv2, product ruling)
+Amended: 2026-09-26 (the registration section follows authority selection for a nameless path-expiry release, Tate's ruling)
 
 ## 2026-09-25 Amendment: The Remaining ENSv2 Authority Exceptions Are Removed
 
@@ -40,6 +41,11 @@ decisions kept. Linear TYR-36 step 6.
   (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L196-L207 @ ens_v2@a971bd64)
   (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L255-L258 @ ens_v2@a971bd64)
   (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L294-L297 @ ens_v2@a971bd64)
+- The name's registration section follows the same selection (Tate's ruling of
+  2026-09-26). A path-expiry release that Interpret writes without a name, on
+  the resource the name was last bound to, counts there as it does for
+  authority selection, so a name cut from its registry path whose only release
+  is that one reads as released, not as its old grant.
 - An activated ENSv1→ENSv2 migration and a positive ENSv2 child registration
   are no longer [authority proofs](../glossary.md#authority-proof). The
   migration is served history (`migrated_at`, `is_migrated`) and selects no
