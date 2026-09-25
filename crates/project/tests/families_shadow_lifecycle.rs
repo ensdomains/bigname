@@ -422,6 +422,73 @@ async fn two_grants_on_two_keys_in_one_transaction_serve_the_binding_key() -> Re
 /// one, while today's order takes the higher generated id, the expiry change `a-expiry`. The
 /// families serve the D12 answer, the production answer differs, and the difference is counted as
 /// the disclosed same-block delta (brief section 4.3).
+/// Step 2's amended D12 (39990c38) in the shadow reader: a release and then a grant written
+/// from one log, identities ending with their emission ordinals 0 and 1 as the adapter writes
+/// them (adapters schema_v2/normalized.rs:118-131). The family keeps each kind's maximum in its
+/// own column, and the reader compares them across kinds. Compared as text, the grant
+/// (`RegistrationGranted`) sorts before the release (`RegistrationReleased`) and the reader would
+/// take the release as latest and serve the name released, which the harness would disclose as a
+/// same-block ordering delta; in emission order the grant is latest, as today's builder reads it
+/// (the grant is written second and has the higher generated id), and the name reads equal.
+#[tokio::test]
+async fn a_release_then_a_grant_from_one_log_take_the_emission_order() -> Result<()> {
+    let fixture = Fixture::new("families_shadow_d12_emission", 20).await?;
+    let k1 = uuid(1);
+    v2_binding(&fixture, &k1).await?;
+    v2(
+        &fixture,
+        10,
+        "RegistrationGranted",
+        Some(&k1),
+        json!({"status": "registered", "registrant": ALICE, "expiry": 2_000_000_000u64}),
+    )
+    .await?;
+    for (identity, kind, after) in [
+        (
+            "0xtx14:1:RegistrationReleased:0",
+            "RegistrationReleased",
+            json!({"status": "released"}),
+        ),
+        (
+            "0xtx14:1:RegistrationGranted:1",
+            "RegistrationGranted",
+            json!({"status": "registered", "registrant": BOB, "expiry": 2_100_000_000u64}),
+        ),
+    ] {
+        let mut after = after;
+        after["registry_contract_instance_id"] = json!("R");
+        after["token_id"] = json!("7");
+        after["authority_kind"] = json!("registrar");
+        fixture
+            .event(
+                Event::new(identity, 14, 1, kind, V2_REGISTRY)
+                    .name(&name(1))
+                    .resource(&k1)
+                    .after(after)
+                    .raw(json!({"emitting_address": REGISTRY})),
+            )
+            .await?;
+    }
+    let report = publish_and_compare(&fixture, 16).await?;
+    assert_counts(&report, &[], &[]);
+    assert_eq!(
+        (report.equal, report.mismatched),
+        (report.names + report.resources, 0),
+        "{:#?}",
+        report.lines
+    );
+    let (served, trace) = assert_name_equal(&fixture, 16).await?;
+    assert_eq!(trace["key_candidates"][0]["kind"], json!("Active"));
+    assert_eq!(served.registration("status"), json!("active"));
+    assert_eq!(served.registration("registrant"), json!(BOB));
+    assert_eq!(served.control("status"), json!("registered"));
+    assert_eq!(
+        served.registration("latest_event_kind"),
+        json!("RegistrationGranted")
+    );
+    fixture.cleanup().await
+}
+
 #[tokio::test]
 async fn synthesised_events_in_one_block_take_the_identity_order() -> Result<()> {
     let fixture = Fixture::new("families_shadow_d12_synthesised", 20).await?;

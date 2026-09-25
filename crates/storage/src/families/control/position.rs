@@ -1,7 +1,9 @@
-//! The canonical event order (TYR-36 D12): block number, transaction index, log index, then the
-//! event identity compared as a byte string. An event with no transaction or log position (a
-//! block-boundary event the interpreter synthesises) sorts before every transaction of its
-//! block. Generated normalized event ids never take part.
+//! The canonical event order (TYR-36 D12 as amended on 2026-09-26, the project crate's
+//! families/position.rs): block number, transaction index, log index, then, when the event has
+//! both a transaction and a log index, the emission ordinal its identity ends with, then the
+//! event identity compared as a byte string. `None` sorts first at each step, so an event with
+//! no transaction or log position (a block-boundary event the interpreter synthesises) sorts
+//! before every transaction of its block. Generated normalized event ids never take part.
 use std::{cmp::Ordering, collections::BTreeMap};
 
 use serde_json::Value;
@@ -22,6 +24,7 @@ impl Ord for Position {
             .cmp(&other.block_number)
             .then(self.transaction_index.cmp(&other.transaction_index))
             .then(self.log_index.cmp(&other.log_index))
+            .then_with(|| self.emission_ordinal().cmp(&other.emission_ordinal()))
             .then_with(|| {
                 self.event_identity
                     .as_bytes()
@@ -37,6 +40,21 @@ impl PartialOrd for Position {
 }
 
 impl Position {
+    /// The emission ordinal, as the project crate reads it: the identity's final `:`-separated
+    /// segment when the event has a transaction and a log index and that segment is a nonempty
+    /// run of ASCII digits no greater than `u32::MAX`. The adapter's raw-log identities end with
+    /// the fact's index in its log (adapters schema_v2/normalized.rs:118-131); boundary facts
+    /// and family-internal identities have none.
+    pub fn emission_ordinal(&self) -> Option<u32> {
+        self.transaction_index?;
+        self.log_index?;
+        let (_, tail) = self.event_identity.rsplit_once(':')?;
+        if tail.is_empty() || !tail.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        tail.parse().ok()
+    }
+
     /// A position stored as one JSON object: the family rows' secondary positions and the
     /// `position` member of their jsonb maxima.
     pub fn from_json(value: &Value) -> Option<Self> {
@@ -158,6 +176,20 @@ mod tests {
         // log order decides.
         assert!(at(5, Some((2, 5)), "b") < at(5, Some((3, 1)), "a"));
         assert!(at(5, Some((2, 1)), "z") < at(5, Some((2, 2)), "a"));
+    }
+
+    #[test]
+    fn facts_of_one_log_fold_in_emission_order() {
+        // ":10" after ":9" when both are emission ordinals of one log, whatever the text before.
+        assert!(
+            at(5, Some((1, 1)), "x:holder:revoke:z:9") < at(5, Some((1, 1)), "x:holder:grant:a:10")
+        );
+        // No ordinal sorts first; a segment past u32::MAX or with a non-digit is no ordinal.
+        assert!(at(5, Some((1, 1)), "z:holder") < at(5, Some((1, 1)), "a:0"));
+        assert_eq!(at(5, Some((1, 1)), "a:4294967296").emission_ordinal(), None);
+        assert_eq!(at(5, Some((1, 1)), "a:007").emission_ordinal(), Some(7));
+        assert_eq!(at(5, Some((1, 1)), "a:-1").emission_ordinal(), None);
+        assert_eq!(at(5, None, "a:7").emission_ordinal(), None);
     }
 
     #[test]
