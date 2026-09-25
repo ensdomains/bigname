@@ -104,8 +104,8 @@ available; retry after indexing is ready". An Interpret redo that is active or
 ran during the read returns the redo retry. Both are temporary: retry the same
 request with the same cursor, which continues once the publication is available
 or the redo has finished. A cursor issued before this rule whose row no longer
-exists, and a cursor carrying a transaction hash whose row and whole
-transaction no longer exist, return the restart once, and only those require
+exists, and a cursor carrying a transaction hash whose row and its
+transaction in that block no longer exist, return the restart once, and only those require
 restarting without the cursor. A parameter that pins a history walk to
 one block may be added later; it is not part of this contract.
 
