@@ -25,11 +25,13 @@
 //!   permissions.rs:111-133, :391-398 must keep the registration live in today's order and
 //!   lapse it in the canonical order, the served value must not be empty, and the whole read in
 //!   today's order must equal it. A served empty value against a canonical row is a mismatch.
-//!   The same read in today's order also takes, for each registry-binding observation, the
-//!   event of the higher generated id where two share one block, transaction and log (the
-//!   SubregistryChanged and AuthorityTransferred of one ENSv1 NewOwner), read from the event
-//!   log, and chooses each resource's binding by generated id at equal positions; a
-//!   `registry_binding/*` field passes only when that whole binding equals the served one.
+//!   For the registry binding, every observation is rebuilt from the event log twice where
+//!   producer events share one block, transaction and log (the SubregistryChanged and
+//!   AuthorityTransferred of one ENSv1 NewOwner): canonically, the greater event identity, and
+//!   in today's order, the higher generated id. A `registry_binding/*` field passes only when
+//!   every family observation reaching the resource equals its canonical rebuild, the canonical
+//!   binding equals the shadow one whole, today's binding equals the served one whole, and the
+//!   two select different events.
 //!
 //! Named causes, each a place where the families and today's builders disagree, reported
 //! rather than patched (step 3 changes no reducer and no served table):
@@ -471,7 +473,7 @@ pub async fn compare(pool: &PgPool, chain: &str, target: i64) -> Result<Report> 
     .await?
     .into_iter()
     .collect();
-    let mut legacy_bindings: Option<BTreeMap<String, RegistryBinding>> = None;
+    let mut binding_orders: Option<BindingOrders> = None;
     for resource in &resource_ids {
         let mut binding_values: Option<(Value, Value)> = None;
         let shadow = &shadows[resource];
@@ -580,27 +582,23 @@ pub async fn compare(pool: &PgPool, chain: &str, target: i64) -> Result<Report> 
             &diffs,
         )
         .await?;
-        // The registry binding read again in today's order: the observations of each identity
-        // and each resource tie-broken by generated id (permission_resources.rs:41-57). Every
-        // `registry_binding/*` field passes as a same-block delta only when that whole binding
-        // equals the served one and differs from the canonical one.
+        // The registry binding rebuilt from the event log in both orders: the observations of
+        // each identity tie-broken canonically and by generated id (permission_resources.rs
+        // :41-57). Every `registry_binding/*` field passes as a same-block delta only when the
+        // families' observations that reach the resource are exactly what the log gives, the
+        // canonical rebuild equals the shadow binding, the today's-order rebuild equals the
+        // served one, and the two select different events.
         if let Some((served_binding, shadow_binding)) = &binding_values
             && diffs.iter().zip(&excuses).any(|(diff, excuse)| {
                 diff.field.starts_with("registry_binding/") && *excuse == Excuse::None
             })
         {
-            if legacy_bindings.is_none() {
-                legacy_bindings = Some(
-                    bindings_in_todays_order(pool, chain, &observations, &attributions).await?,
-                );
+            if binding_orders.is_none() {
+                binding_orders =
+                    Some(rebuilt_bindings(pool, chain, &observations, &attributions).await?);
             }
-            let legacy = legacy_bindings
-                .as_ref()
-                .and_then(|bindings| bindings.get(resource))
-                .cloned()
-                .unwrap_or_default();
-            let legacy = binding_json(&legacy);
-            if same(&legacy, served_binding) && !same(&legacy, shadow_binding) {
+            let orders = binding_orders.as_ref().expect("rebuilt above");
+            if orders.same_block_delta(resource, served_binding, shadow_binding) {
                 for (diff, excuse) in diffs.iter().zip(excuses.iter_mut()) {
                     if diff.field.starts_with("registry_binding/") && *excuse == Excuse::None {
                         *excuse = Excuse::SameBlockOrder;
@@ -864,6 +862,8 @@ fn is_address(value: Option<&str>) -> bool {
 /// An observation identity and its block, transaction and log.
 type RivalKey = (String, i64, Option<i64>, Option<i64>);
 
+/// One producer event at an observation's position: identity key, event identity, name,
+/// resource, block, transaction, log, generated id, kind, derived contract and extras.
 type RivalRow = (
     String,
     String,
@@ -878,19 +878,113 @@ type RivalRow = (
     Value,
 );
 
-/// Every resource's registry binding with the families' observations read in today's order.
-/// F2c keeps one observation per identity, the canonical latest, so when two producer events
-/// of one identity share a block, transaction and log (the SubregistryChanged and
-/// AuthorityTransferred of one ENSv1 NewOwner), the one today's builder takes, the higher
-/// generated id, is read from the event log and stands in, its columns derived as step 2
-/// derives them (crates/project/src/families/registry.rs `observations`). The resources are
-/// then chosen in (block, transaction, log, generated id) order.
-async fn bindings_in_todays_order(
+/// Every resource's registry binding rebuilt from the event log in the canonical order and in
+/// today's order, with the resources an observation the log does not reproduce reaches.
+struct BindingOrders {
+    canonical: BTreeMap<String, RegistryBinding>,
+    legacy: BTreeMap<String, RegistryBinding>,
+    unverified: BTreeSet<String>,
+}
+
+impl BindingOrders {
+    /// Whether a resource's binding difference is a same-block ordering delta: every family
+    /// observation reaching it is what the log gives, the canonical rebuild equals the shadow
+    /// binding, the today's-order rebuild equals the served one, and the two select different
+    /// events.
+    fn same_block_delta(&self, resource: &str, served: &Value, shadow: &Value) -> bool {
+        if self.unverified.contains(resource) {
+            return false;
+        }
+        let (Some(canonical), Some(legacy)) =
+            (self.canonical.get(resource), self.legacy.get(resource))
+        else {
+            return false;
+        };
+        let selected = |binding: &RegistryBinding| {
+            binding
+                .position
+                .as_ref()
+                .map(|position| position.event_identity.clone())
+                .or_else(|| binding.clear_event_identity.clone())
+        };
+        let (canonical_json, legacy_json) = (binding_json(canonical), binding_json(legacy));
+        same(&canonical_json, shadow)
+            && same(&legacy_json, served)
+            && !same(&legacy_json, &canonical_json)
+            && selected(canonical).is_some()
+            && selected(legacy).is_some()
+            && selected(canonical) != selected(legacy)
+    }
+}
+
+/// The observation step 2 derives from one producer event (crates/project/src/families/
+/// registry.rs `observations`), with the target the family row holds when the event reaches its
+/// resource the same way, else the event's own resource.
+fn observation_of(row: &RivalRow, family: &Observation) -> Observation {
+    let through_name = row.2.is_some()
+        && matches!(
+            row.8.as_deref(),
+            Some("AuthorityTransferred" | "SubregistryChanged")
+        );
+    let owner = (row.8.as_deref() != Some("SurfaceUnbound"))
+        .then(|| row.10["owner_getter"].as_str().map(str::to_owned))
+        .flatten();
+    let applicable = is_address(owner.as_deref())
+        && owner.as_deref() != Some("0x0000000000000000000000000000000000000000")
+        && is_address(row.9.as_deref());
+    Observation {
+        resource_id: row.3.clone(),
+        logical_name_id: row.2.clone(),
+        attributed_via: if through_name { "name" } else { "own" }.to_owned(),
+        target_resource_id: if through_name == (family.attributed_via == "name") {
+            family.target_resource_id.clone()
+        } else {
+            row.3.clone()
+        },
+        position: Position {
+            block_number: row.4,
+            transaction_index: row.5,
+            log_index: row.6,
+            event_identity: row.1.clone(),
+        },
+        event_kind: row.8.clone().unwrap_or_default(),
+        registry_owner: owner,
+        registry_contract: row.9.clone(),
+        provenance: json!({"raw_fact_ref": row.10["raw_fact_ref"]}),
+        applicable,
+        clear_event_identity: (!applicable).then(|| row.1.clone()),
+        normalized_event_id: Some(row.7),
+    }
+}
+
+/// Whether a family observation is exactly the one rebuilt from its event.
+fn same_observation(family: &Observation, rebuilt: &Observation) -> bool {
+    family.position == rebuilt.position
+        && family.resource_id == rebuilt.resource_id
+        && family.logical_name_id == rebuilt.logical_name_id
+        && family.attributed_via == rebuilt.attributed_via
+        && family.event_kind == rebuilt.event_kind
+        && family.registry_owner == rebuilt.registry_owner
+        && family.registry_contract == rebuilt.registry_contract
+        && family.applicable == rebuilt.applicable
+        && family.clear_event_identity == rebuilt.clear_event_identity
+        && family.normalized_event_id == rebuilt.normalized_event_id
+}
+
+/// Every resource's registry binding rebuilt from the event log, in both orders. F2c keeps one
+/// observation per identity, the canonical latest, so when two producer events of one identity
+/// share a block, transaction and log (the SubregistryChanged and AuthorityTransferred of one
+/// ENSv1 NewOwner), the canonical rebuild takes the greater event identity and today's the
+/// greater generated id, each derived as step 2 derives it. A family observation whose
+/// canonical rebuild differs from it (or that the log does not have) marks the resources it
+/// reaches unverified. The resources are then chosen in the canonical order and in (block,
+/// transaction, log, generated id) order.
+async fn rebuilt_bindings(
     pool: &PgPool,
     chain: &str,
     observations: &[Observation],
     names: &BTreeMap<String, NameAttribution>,
-) -> Result<BTreeMap<String, RegistryBinding>> {
+) -> Result<BindingOrders> {
     let blocks: Vec<i64> = observations
         .iter()
         .map(|o| o.position.block_number)
@@ -901,9 +995,8 @@ async fn bindings_in_todays_order(
         .collect();
     let logs: Vec<Option<i64>> = observations.iter().map(|o| o.position.log_index).collect();
     let rows: Vec<RivalRow> = sqlx::query_as(
-        r#"SELECT DISTINCT ON (COALESCE(event.logical_name_id, event.resource_id::text),
-                   event.block_number, event.transaction_index, event.log_index)
-               COALESCE(event.logical_name_id, event.resource_id::text), event.event_identity,
+        r#"SELECT DISTINCT COALESCE(event.logical_name_id, event.resource_id::text),
+               event.event_identity,
                event.logical_name_id, event.resource_id::text, event.block_number,
                event.transaction_index, event.log_index, event.normalized_event_id,
                event.event_kind,
@@ -930,9 +1023,7 @@ async fn bindings_in_todays_order(
                     AND event.source_family IN ('ens_v1_registrar_l1',
                                                 'basenames_base_registrar')))
            AND event.resource_id IS NOT NULL
-           AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
-         ORDER BY COALESCE(event.logical_name_id, event.resource_id::text), event.block_number,
-                  event.transaction_index, event.log_index, event.normalized_event_id DESC"#,
+           AND event.canonicality_state IN ('canonical', 'safe', 'finalized')"#,
     )
     .bind(chain)
     .bind(&blocks)
@@ -940,74 +1031,69 @@ async fn bindings_in_todays_order(
     .bind(&logs)
     .fetch_all(pool)
     .await?;
-    let rivals: BTreeMap<RivalKey, &RivalRow> = rows
+    let mut groups: BTreeMap<RivalKey, Vec<&RivalRow>> = BTreeMap::new();
+    for row in &rows {
+        groups
+            .entry((row.0.clone(), row.4, row.5, row.6))
+            .or_default()
+            .push(row);
+    }
+    let reached = |observation: &Observation| {
+        registry_bindings_in(
+            std::slice::from_ref(observation),
+            names,
+            &EventOrder::Canonical,
+        )
+        .into_keys()
+        .next()
+    };
+    let mut unverified = BTreeSet::new();
+    let (mut canonical, mut legacy) = (Vec::new(), Vec::new());
+    for observation in observations {
+        let identity = observation
+            .logical_name_id
+            .clone()
+            .unwrap_or_else(|| observation.resource_id.clone());
+        let position = &observation.position;
+        let group = groups
+            .get(&(
+                identity,
+                position.block_number,
+                position.transaction_index,
+                position.log_index,
+            ))
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let by_identity = group.iter().max_by(|left, right| left.1.cmp(&right.1));
+        let by_id = group.iter().max_by_key(|row| row.7);
+        let (Some(by_identity), Some(by_id)) = (by_identity, by_id) else {
+            unverified.extend(reached(observation));
+            canonical.push(observation.clone());
+            legacy.push(observation.clone());
+            continue;
+        };
+        let rebuilt = observation_of(by_identity, observation);
+        if !same_observation(observation, &rebuilt) {
+            unverified.extend(reached(observation));
+            unverified.extend(reached(&rebuilt));
+        }
+        canonical.push(rebuilt);
+        legacy.push(observation_of(by_id, observation));
+    }
+    let ids: BTreeMap<String, i64> = legacy
         .iter()
-        .map(|row| ((row.0.clone(), row.4, row.5, row.6), row))
-        .collect();
-    let mut ids = BTreeMap::new();
-    let legacy: Vec<Observation> = observations
-        .iter()
-        .map(|observation| {
-            let identity = observation
-                .logical_name_id
-                .clone()
-                .unwrap_or_else(|| observation.resource_id.clone());
-            let position = &observation.position;
-            let rival = rivals
-                .get(&(
-                    identity,
-                    position.block_number,
-                    position.transaction_index,
-                    position.log_index,
-                ))
-                .filter(|rival| Some(rival.7) != observation.normalized_event_id);
-            let Some(rival) = rival else {
-                return observation.clone();
-            };
-            let through_name = rival.2.is_some()
-                && matches!(
-                    rival.8.as_deref(),
-                    Some("AuthorityTransferred" | "SubregistryChanged")
-                );
-            let owner = (rival.8.as_deref() != Some("SurfaceUnbound"))
-                .then(|| rival.10["owner_getter"].as_str().map(str::to_owned))
-                .flatten();
-            let applicable = is_address(owner.as_deref())
-                && owner.as_deref() != Some("0x0000000000000000000000000000000000000000")
-                && is_address(rival.9.as_deref());
-            Observation {
-                resource_id: rival.3.clone(),
-                logical_name_id: rival.2.clone(),
-                attributed_via: if through_name { "name" } else { "own" }.to_owned(),
-                target_resource_id: if through_name == (observation.attributed_via == "name") {
-                    observation.target_resource_id.clone()
-                } else {
-                    rival.3.clone()
-                },
-                position: Position {
-                    event_identity: rival.1.clone(),
-                    ..position.clone()
-                },
-                event_kind: rival.8.clone().unwrap_or_default(),
-                registry_owner: owner,
-                registry_contract: rival.9.clone(),
-                provenance: json!({"raw_fact_ref": rival.10["raw_fact_ref"]}),
-                applicable,
-                clear_event_identity: (!applicable).then(|| rival.1.clone()),
-                normalized_event_id: Some(rival.7),
-            }
+        .filter_map(|observation| {
+            Some((
+                observation.position.event_identity.clone(),
+                observation.normalized_event_id?,
+            ))
         })
         .collect();
-    for observation in &legacy {
-        if let Some(id) = observation.normalized_event_id {
-            ids.insert(observation.position.event_identity.clone(), id);
-        }
-    }
-    Ok(registry_bindings_in(
-        &legacy,
-        names,
-        &EventOrder::Generated(ids),
-    ))
+    Ok(BindingOrders {
+        canonical: registry_bindings_in(&canonical, names, &EventOrder::Canonical),
+        legacy: registry_bindings_in(&legacy, names, &EventOrder::Generated(ids)),
+        unverified,
+    })
 }
 
 /// The positions of the control-block events the lifecycle family does not retain: the node's

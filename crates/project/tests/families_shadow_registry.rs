@@ -12,13 +12,14 @@ mod support;
 use anyhow::Result;
 use serde_json::{Value, json};
 use shadow_support::publish_and_compare;
-use support::{Fixture, uuid};
+use support::{CHAIN, Event, Fixture, uuid};
 
 const REGISTRAR: &str = "0x00000000000000000000000000000000000000e3";
 const REGISTRY: &str = "0x00000000000000000000000000000000000000e5";
 const OWNER: &str = "0x00000000000000000000000000000000000000aa";
 const ZERO: &str = "0x0000000000000000000000000000000000000000";
 const OTHER: &str = "0x00000000000000000000000000000000000000bb";
+const THIRD: &str = "0x00000000000000000000000000000000000000cc";
 const V1_REGISTRAR: &str = "ens_v1_registrar_l1";
 const V1_REGISTRY: &str = "ens_v1_registry_l1";
 
@@ -434,7 +435,174 @@ async fn a_new_owner_subregistry_and_transfer_at_one_log_is_a_same_block_delta()
         json!("AuthorityTransferred")
     );
     assert_eq!(shadow.control["registry_owner"], json!(OTHER));
+
+    // Each mutation of the canonical SubregistryChanged observation, its identity and position
+    // unchanged, must stay a mismatch: the families' value is checked against the observation
+    // rebuilt from the event log, not only the today's-order rebuild against the served one.
+    let original: Value = sqlx::query_scalar(
+        "SELECT to_jsonb(observation) FROM bigname_phase.project_registry_binding_observation
+         observation WHERE chain_id = $1 AND observation_identity = $2",
+    )
+    .bind(CHAIN)
+    .bind(name(1))
+    .fetch_one(&fixture.pool)
+    .await?;
+    for (case, update, fields) in [
+        (
+            "registry owner",
+            "registry_owner = '0x00000000000000000000000000000000000000aa'",
+            &[
+                "registry_binding/event_ids",
+                "registry_binding/registry_owner",
+            ][..],
+        ),
+        (
+            "registry contract",
+            "registry_contract = '0x00000000000000000000000000000000000000bb'",
+            &[
+                "registry_binding/event_ids",
+                "registry_binding/registry_contract",
+            ][..],
+        ),
+        (
+            "applicability and clear",
+            "applicable = false, clear_event_identity = event_identity",
+            &[
+                "registry_binding/block_number",
+                "registry_binding/clear_event_id",
+                "registry_binding/event_ids",
+                "registry_binding/log_index",
+                "registry_binding/registry_contract",
+                "registry_binding/registry_owner",
+                "registry_binding/transaction_index",
+            ][..],
+        ),
+        (
+            "event attribution",
+            "normalized_event_id = 999999",
+            &["registry_binding/event_ids"][..],
+        ),
+        (
+            "missing id",
+            "normalized_event_id = NULL",
+            &["registry_binding/event_ids"][..],
+        ),
+    ] {
+        sqlx::query(&format!(
+            "UPDATE bigname_phase.project_registry_binding_observation SET {update}
+             WHERE chain_id = $1 AND observation_identity = $2"
+        ))
+        .bind(CHAIN)
+        .bind(name(1))
+        .execute(&fixture.pool)
+        .await?;
+        let mutated = shadow_support::compare::compare(&fixture.pool, CHAIN, 12).await?;
+        assert!(
+            mutated.expected_delta_fields.is_empty(),
+            "{case} must not pass as a same-block delta: {:#?}",
+            mutated.lines
+        );
+        assert_eq!(
+            failed_fields(&mutated),
+            fields,
+            "{case}: {:#?}",
+            mutated.lines
+        );
+        sqlx::query(
+            "UPDATE bigname_phase.project_registry_binding_observation observation
+             SET registry_owner = saved.registry_owner,
+                 registry_contract = saved.registry_contract, applicable = saved.applicable,
+                 clear_event_identity = saved.clear_event_identity,
+                 normalized_event_id = saved.normalized_event_id
+             FROM jsonb_populate_record(
+                 NULL::bigname_phase.project_registry_binding_observation, $1) saved
+             WHERE observation.chain_id = saved.chain_id
+               AND observation.observation_identity = saved.observation_identity",
+        )
+        .bind(&original)
+        .execute(&fixture.pool)
+        .await?;
+        let restored = shadow_support::compare::compare(&fixture.pool, CHAIN, 12).await?;
+        shadow_support::assert_counts(
+            &restored,
+            &[],
+            &[("d12_same_block_order:registry_binding/event_ids", 1)],
+        );
+    }
     fixture.cleanup().await
+}
+
+/// The fields a comparison fails on, sorted.
+fn failed_fields(report: &shadow_support::compare::Report) -> Vec<String> {
+    let mut fields: Vec<String> = report
+        .lines
+        .iter()
+        .filter(|line| line.starts_with("SEPOLIA_END_TO_END_SHADOW_MISMATCH"))
+        .filter_map(|line| Some(line.split(" field=").nth(1)?.split(' ').next()?.to_owned()))
+        .collect();
+    fields.sort();
+    fields
+}
+
+/// Three producer events of name 1 at one block, transaction and log, written in each of the
+/// six orders: a SubregistryChanged whose getter is THIRD and two AuthorityTransferred events
+/// whose getters are OWNER and OTHER. The families keep the SubregistryChanged, the greatest
+/// identity, in every order; today's builder keeps the last one written, the highest generated
+/// id. When that is the SubregistryChanged nothing differs; otherwise the registry owner and
+/// event ids of the binding are same-block deltas, and the served owner is the getter of the
+/// last event written.
+#[tokio::test]
+async fn three_producer_events_at_one_log_in_every_order() -> Result<()> {
+    let events = [
+        ("SubregistryChanged:11:1", "SubregistryChanged", THIRD),
+        ("AuthorityTransferred:11:1:a", "AuthorityTransferred", OWNER),
+        ("AuthorityTransferred:11:1:b", "AuthorityTransferred", OTHER),
+    ];
+    let orders = [
+        [0, 1, 2],
+        [0, 2, 1],
+        [1, 0, 2],
+        [1, 2, 0],
+        [2, 0, 1],
+        [2, 1, 0],
+    ];
+    for (index, order) in orders.iter().enumerate() {
+        let fixture = Fixture::new(&format!("families_shadow_registry_three_{index}"), 20).await?;
+        let lease = uuid(1);
+        bound(&fixture, &lease).await?;
+        for &event in order {
+            let (identity, kind, getter) = events[event];
+            fixture
+                .event(
+                    Event::new(identity, 11, 1, kind, V1_REGISTRY)
+                        .name(&name(1))
+                        .resource(&lease)
+                        .after(json!({"source_event": "NewOwner", "node": node(2),
+                                      "child_node": node(1), "owner": OTHER,
+                                      "owner_getter": getter, "emitter_role": "registry"}))
+                        .raw(json!({"emitting_address": REGISTRY})),
+                )
+                .await?;
+        }
+        let report = publish_and_compare(&fixture, 12).await?;
+        let last = events[order[2]];
+        let served = summary(&fixture, &lease).await?.expect("summarised");
+        assert_eq!(served["registry_owner"], json!(last.2), "order {order:?}");
+        if last.1 == "SubregistryChanged" {
+            shadow_support::assert_counts(&report, &[], &[]);
+        } else {
+            shadow_support::assert_counts(
+                &report,
+                &[],
+                &[
+                    ("d12_same_block_order:registry_binding/event_ids", 1),
+                    ("d12_same_block_order:registry_binding/registry_owner", 1),
+                ],
+            );
+        }
+        fixture.cleanup().await?;
+    }
+    Ok(())
 }
 
 /// Scoped review of ea047c04, F1: a registry-only NewOwner yields a SubregistryChanged, an
