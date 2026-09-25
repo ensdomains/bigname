@@ -472,6 +472,10 @@ fn release(identity: &'static str, resource: Option<&'static str>, block: i64, l
 // version zero on registry A (resource A0) and registered there, and that registration is later
 // unregistered. A0 carried a reservation of the name, but its release ends the registration that
 // replaced it, not a reservation, so ENSv1 stays selected while B1 is live.
+// The rows are hand-built to isolate the registration check: Interpret would not write them in
+// this order. It names a reservation only while its registry is on the name's path, and a grant on
+// the path opens a binding, so in Interpret output A0's named facts would come before B0, as they
+// do in the two-registry test below.
 #[tokio::test]
 async fn a_registrations_release_does_not_end_the_reservation_it_replaced() -> Result<()> {
     let facts = [
