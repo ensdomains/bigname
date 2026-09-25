@@ -13,11 +13,8 @@ use crate::families::control::position::Position;
 /// admitted AuthorityEpochChanged with the owner it reports, an admitted registry-only
 /// SurfaceBound with its bound owner, and, for an ENSv1 or Basenames name, each of the name's
 /// registry AuthorityTransferred events F2c keeps (`project_registry_owner_event`) that the
-/// admission holds. A SubregistryChanged never counts, as in the served lateral. Only the node
-/// row carries the registry_owner and unmasked-word facts, and only for its latest
-/// owner-setting event. Under a NewOwner that event is the SubregistryChanged of the same log,
-/// never the transfer, so a transfer always reports its owner as it stands: an unmasked owner
-/// word, which the served block reports as null, shows as the plain owner and fails.
+/// admission holds, each reporting its own registry_owner and unmasked-word facts. A
+/// SubregistryChanged never counts, as in the served lateral.
 pub(super) fn control_owner(
     facts: &NameFacts,
     authority: &Authority<'_>,
