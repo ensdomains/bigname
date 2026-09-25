@@ -1758,9 +1758,12 @@ async fn probe(pool: &PgPool, address: &str, coin: &str) -> Result<usize> {
 // Each case adds exact records after the default and states how many names each probe finds:
 // D for ETH, Base, Optimism and the ineligible coin 0, then the exact address where it differs.
 // An exact record with an address shadows the default for its coin, and so does one whose value
-// is not retained (unsupported); a cleared exact record falls back to the default. Every run also
-// compares every stored key, with coin 60 and Base added for D, and each probe requires both
-// readers to list the same names.
+// is not retained (unsupported: nothing shows its stored bytes are empty); a cleared exact record
+// falls back to the default. The resolver falls back only when the coin's stored bytes are empty
+// and the coin is an EVM coin.
+// (upstream: .refs/ens_v2/contracts/src/resolver/AbstractRecordResolver.sol:L172-L178 @ ens_v2@a971bd64)
+// Every run also compares every stored key, with coin 60 and Base added for D, and each probe
+// requires both readers to list the same names.
 #[tokio::test]
 async fn exact_records_and_the_default_address_answer_alike_through_the_families() -> Result<()> {
     type Record = (&'static str, Value);
