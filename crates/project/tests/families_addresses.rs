@@ -476,3 +476,37 @@ async fn a_grant_named_later_puts_its_registrant_in_the_index() -> Result<()> {
     fixture.assert_rebuild_equal(11).await?;
     fixture.cleanup().await
 }
+
+// A named write keeps the name it was written under on its index row, so the inverse read finds a
+// value whose node is not the name's namehash by the name, as the forward inventory does.
+#[tokio::test]
+async fn a_named_value_indexes_the_name_it_was_written_under() -> Result<()> {
+    let fixture = Fixture::new("families_addresses_named_node", 20).await?;
+    let name = format!("ens:{}", node(7));
+    fixture
+        .write(
+            10,
+            1,
+            "RecordChanged",
+            "ens_v1_resolver_l1",
+            Some(&name),
+            None,
+            json!({"node": node(8), "resolver": R1, "record_key": "addr:60",
+                   "record_family": "addr", "selector_key": "60", "value": DAVE,
+                   "source_event": "AddressChanged"}),
+            R1,
+        )
+        .await?;
+    fixture.apply(10, FamilyMode::Normal).await;
+    assert_eq!(
+        index(
+            &fixture.rows("project_address_record_node_index").await?,
+            &["address", "coin_type", "node", "logical_name_id"]
+        ),
+        vec![json!({"address": DAVE, "coin_type": "60", "node": node(8),
+                    "logical_name_id": name})]
+    );
+    fixture.assert_undo_restores(10).await?;
+    fixture.assert_rebuild_equal(10).await?;
+    fixture.cleanup().await
+}

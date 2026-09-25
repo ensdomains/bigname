@@ -191,10 +191,12 @@ const NODE_DELETE: &str = "/* project:families.derived.node_delete */
 /// the record inventory builds an entry's value (record_inventory.rs:357-381).
 const NODE_INSERT: &str = r#"/* project:families.derived.node_insert */
     INSERT INTO project_address_record_node_index
-        (address, coin_type, chain_id, resolver_address, node)
-    SELECT DISTINCT value.address, value.coin_type, $1, value.resolver_address, value.node
+        (address, coin_type, chain_id, resolver_address, node, logical_name_id)
+    SELECT DISTINCT value.address, value.coin_type, $1, value.resolver_address, value.node,
+           COALESCE(value.logical_name_id, '')
     FROM (
-        SELECT record.resolver_address, record.node, record.arm, record.arm_identity,
+        SELECT record.resolver_address, record.node, record.logical_name_id,
+               record.arm, record.arm_identity,
                record.block_number, record.transaction_index, record.log_index,
                record.event_identity,
                record.selector_key::numeric::text AS coin_type,

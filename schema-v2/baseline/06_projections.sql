@@ -2956,10 +2956,11 @@ CREATE TABLE IF NOT EXISTS project_address_record_node_index (
     chain_id text NOT NULL,
     resolver_address text NOT NULL,
     node text NOT NULL,
-    PRIMARY KEY (address, coin_type, chain_id, resolver_address, node)
+    logical_name_id text NOT NULL DEFAULT '',
+    PRIMARY KEY (address, coin_type, chain_id, resolver_address, node, logical_name_id)
 );
 COMMENT ON TABLE project_address_record_node_index IS
-    'Project-owned inverse address record index of family F14 for node-keyed values, re-derived from project_node_record_value and never journalled. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
+    'Project-owned inverse address record index of family F14 for node-keyed values, re-derived from project_node_record_value and never journalled. It holds every successful EVM-shaped addr value whatever its partition''s version, with the name it was written under; readers apply the version and link boundary. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
 COMMENT ON COLUMN project_address_record_node_index.address IS
     'This value is the lower-cased address.';
 COMMENT ON COLUMN project_address_record_node_index.coin_type IS
@@ -2970,8 +2971,13 @@ COMMENT ON COLUMN project_address_record_node_index.resolver_address IS
     'This value is the resolver.';
 COMMENT ON COLUMN project_address_record_node_index.node IS
     'This value is the node.';
+COMMENT ON COLUMN project_address_record_node_index.logical_name_id IS
+    'This value is the name the value was written under, empty for a value written with no name; a named write whose node is not the name''s namehash is found by it.';
 CREATE INDEX IF NOT EXISTS project_address_record_node_index_node_idx
     ON project_address_record_node_index (chain_id, resolver_address, node);
+CREATE INDEX IF NOT EXISTS project_address_record_node_index_name_idx
+    ON project_address_record_node_index (chain_id, logical_name_id)
+    WHERE logical_name_id <> '';
 
 CREATE TABLE IF NOT EXISTS project_address_record_id_index (
     address text NOT NULL,
