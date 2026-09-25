@@ -647,6 +647,15 @@ async fn inverse_address_reads_find_values_the_address_index_drops() -> Result<(
         .collect();
     resources.sort();
     assert_eq!(resources, [resource(1), resource(2)]);
+    let mut misses = index_misses_without_index(&pool, INVERSE_A).await?;
+    misses.sort();
+    assert_eq!(
+        misses,
+        [
+            (resource(1), "addr:60".to_owned()),
+            (resource(2), "addr:60".to_owned())
+        ]
+    );
     db.cleanup().await?;
     Ok(())
 }
@@ -690,6 +699,32 @@ async fn a_named_address_write_at_another_node_is_found_inversely() -> Result<()
     assert_eq!(listed, 1, "today lists the named write");
     db.cleanup().await?;
     Ok(())
+}
+
+/// The index misses of `address`'s coin-60 names through the paged family read, as (record
+/// resource, record key); call it with the index rows removed.
+async fn index_misses_without_index(pool: &PgPool, address: &str) -> Result<Vec<(String, String)>> {
+    let records =
+        bigname_storage::families::records::load_family_address_records(pool, address, "60")
+            .await?;
+    let page = bigname_storage::families::records::page_family_address_records(
+        pool,
+        &records,
+        None,
+        bigname_storage::AddressNamesCurrentDedupe::Surface,
+        None,
+        None,
+        bigname_storage::AddressNamesCurrentSort::Name,
+        bigname_storage::AddressNamesCurrentOrder::Asc,
+        None,
+        10,
+    )
+    .await?;
+    Ok(page
+        .index_misses
+        .into_iter()
+        .map(|(resource, key)| (resource.to_string(), key))
+        .collect())
 }
 
 const INVERSE_A: &str = "0x5555555555555555555555555555555555555555";
@@ -787,6 +822,38 @@ async fn a_raw_bytes_pair_address_behind_a_lifted_version_is_found_inversely() -
     .fetch_one(&pool)
     .await?;
     assert_eq!(listed, 1, "today lists the raw-bytes address");
+    // With no index rows, the paged family read names the entry only the retained values found.
+    assert_eq!(
+        index_misses_without_index(&pool, &lower).await?,
+        [(resource(1), "addr:60".to_owned())]
+    );
+    // With today's rows for the address removed as well, only the retained-value listing (the
+    // pair's sibling raw bytes) puts the address in the comparison, which then reports that the
+    // family lists a name today does not.
+    sqlx::query("DELETE FROM address_records_current WHERE address = $1")
+        .bind(&lower)
+        .execute(&pool)
+        .await?;
+    let report = bigname_storage::families::records::compare_family_reads(
+        &pool,
+        CHAIN,
+        Some((21, hash(21))),
+        1,
+    )
+    .await?;
+    let key = format!("resolves_to {lower} coin 60");
+    let differences = report
+        .differences
+        .iter()
+        .find(|(listed, _)| *listed == key)
+        .map(|(_, differences)| differences.clone())
+        .unwrap_or_default();
+    assert!(
+        differences
+            .iter()
+            .any(|d| d.field == "entries.count" && d.today == Some(json!(0))),
+        "{report:#?}"
+    );
     db.cleanup().await?;
     Ok(())
 }
