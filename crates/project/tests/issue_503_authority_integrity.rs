@@ -144,11 +144,13 @@ async fn event_in_tx(
         .bind(identity).bind(logical).bind(resource).bind(event.kind).bind(event.family).bind(CHAIN).bind(HASH).bind(event.log).bind(event.after).bind(tx).fetch_one(pool).await?)
 }
 
-/// What the name serves: its resource and binding and the registration, control and resolver
-/// sections of its summary.
+/// What the name serves: its authority arm and lifecycle, its resource and binding, and the
+/// registration, control and resolver sections of its summary.
 async fn served(pool: &PgPool, logical: &str) -> Result<Value> {
     Ok(sqlx::query_scalar(
         "SELECT jsonb_build_object(
+                'authority_arm', provenance #>> '{authority_selection,authority_arm}',
+                'lifecycle_state', provenance #>> '{authority_selection,lifecycle_state}',
                 'resource_id', resource_id, 'surface_binding_id', surface_binding_id,
                 'registration', declared_summary -> 'registration',
                 'control', declared_summary -> 'control',

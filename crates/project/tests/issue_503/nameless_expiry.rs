@@ -12,17 +12,20 @@ use super::*;
 // `a_detached_child_expiry_is_released_without_a_name_and_stays_a_v2_tombstone`), and this case
 // leaves that release out so the nameless one decides alone.
 // The name's registration section follows the same selection (product ruling of 2026-09-26): it
-// reads the nameless release on the resource the name was last bound to, so it serves the release
-// too, not the old grant.
+// serves the release authority selection chose, not the old grant, as batches at blocks 9 and 10
+// and as one batch.
 // (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L255-L258 @ ens_v2@a971bd64)
-#[tokio::test]
-async fn a_nameless_path_expiry_release_keeps_the_name_on_its_v2_tombstone() -> Result<()> {
-    let (db, pool) = database("nameless_path_expiry").await?;
-    earlier_block(&pool).await?;
-    let logical = surface(&pool, 97, "nameless-expiry.eth", &[]).await?;
-    let v1_resource = open_binding(&pool, &logical, 97, "ens_v1", 1).await?;
+//
+/// The synthetic nameless-release shape: a live ENSv1 lease, an ENSv2 grant and resolver in block 9
+/// on a binding closed before block 10, and the release at the start of block 10 on that
+/// resource without a name.
+async fn seed_nameless_release(pool: PgPool) -> Result<String> {
+    let pool = &pool;
+    earlier_block(pool).await?;
+    let logical = surface(pool, 97, "nameless-expiry.eth", &[]).await?;
+    let v1_resource = open_binding(pool, &logical, 97, "ens_v1", 1).await?;
     event(
-        &pool,
+        pool,
         "nameless-expiry-v1-grant",
         &logical,
         Some(&v1_resource),
@@ -34,10 +37,9 @@ async fn a_nameless_path_expiry_release_keeps_the_name_on_its_v2_tombstone() -> 
         },
     )
     .await?;
-    let (v2_resource, v2_binding) =
-        closed_binding_at_block_9(&pool, &logical, 97, "ens_v2").await?;
+    let (v2_resource, _) = closed_binding_at_block_9(pool, &logical, 97, "ens_v2").await?;
     event(
-        &pool,
+        pool,
         "nameless-expiry-v2-grant",
         &logical,
         Some(&v2_resource),
@@ -51,7 +53,7 @@ async fn a_nameless_path_expiry_release_keeps_the_name_on_its_v2_tombstone() -> 
     .await?;
     // A resolver the registration set, so the released row's resolver suppression is visible.
     event(
-        &pool,
+        pool,
         "nameless-expiry-v2-resolver",
         &logical,
         Some(&v2_resource),
@@ -64,67 +66,48 @@ async fn a_nameless_path_expiry_release_keeps_the_name_on_its_v2_tombstone() -> 
     )
     .await?;
     sqlx::query("UPDATE normalized_events SET block_number = 9, block_hash = $1 WHERE event_identity IN ('nameless-expiry-v2-grant', 'nameless-expiry-v2-resolver')")
-        .bind(EARLIER_HASH).execute(&pool).await?;
+        .bind(EARLIER_HASH).execute(pool).await?;
     sqlx::query("INSERT INTO normalized_events (event_identity, namespace, logical_name_id, resource_id, event_kind, source_family, manifest_version, chain_id, block_number, block_hash, transaction_hash, transaction_index, log_index, derivation_kind, canonicality_state, after_state) VALUES ('nameless-expiry-v2-release', 'ens', NULL, $1::uuid, 'RegistrationReleased', 'ens_v2_registry_l1', 1, $2, 10, $3, NULL, NULL, NULL, 'ens_v2_registry_resource_surface', 'canonical', $4)")
         .bind(&v2_resource).bind(CHAIN).bind(HASH)
         .bind(json!({"source_event":"RegistryPathExpired","derived_from":"interpreter_state","terminal_reason":"registry_name_binding_expired","status":"released"}))
-        .execute(&pool).await?;
-    run(&pool).await?;
-    assert_eq!(
-        authority(&pool, &logical).await?.0.as_deref(),
-        Some("ens_v2"),
-        "the nameless expiry release keeps the name with ENSv2"
-    );
-    assert_eq!(
-        lifecycle_state(&pool, &logical).await?.as_deref(),
-        Some("unregistered")
-    );
-    type Served = (
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-    );
-    let served: Served = sqlx::query_as(
-        "SELECT resource_id::text, surface_binding_id::text,
-                declared_summary #>> '{registration,status}',
-                declared_summary #>> '{registration,latest_event_kind}',
-                declared_summary #>> '{control,status}'
-         FROM name_current WHERE logical_name_id = $1",
-    )
-    .bind(&logical)
-    .fetch_one(&pool)
-    .await?;
+        .execute(pool).await?;
+    Ok(logical)
+}
+
+#[tokio::test]
+async fn a_nameless_path_expiry_release_keeps_the_name_on_its_v2_tombstone() -> Result<()> {
+    let served = served_both_ways("nameless_path_expiry", seed_nameless_release).await?;
     assert_eq!(
         (
-            served.0.as_deref(),
-            served.1.as_deref(),
-            served.2.as_deref(),
-            served.3.as_deref(),
-            served.4.as_deref(),
+            served["authority_arm"].as_str(),
+            served["lifecycle_state"].as_str(),
+            served["resource_id"].as_str(),
+            served["surface_binding_id"].as_str(),
+            served["registration"]["status"].as_str(),
+            served["registration"]["latest_event_kind"].as_str(),
+            served["control"]["status"].as_str(),
         ),
         (
-            Some(v2_resource.as_str()),
-            Some(v2_binding.as_str()),
+            Some("ens_v2"),
+            Some("unregistered"),
+            Some(uuid(15, 97).as_str()),
+            Some(uuid(16, 97).as_str()),
             Some("released"),
             Some("RegistrationReleased"),
             Some("unregistered"),
         ),
-        "the registration section serves the nameless release, as authority selection does"
+        "the registration section serves the nameless release, as authority selection does: {served}"
     );
     // The released row serves no registrant and no resolver, as for any released ENSv2 row.
-    let suppressed: (Option<String>, Option<String>, Option<String>) = sqlx::query_as(
-        "SELECT declared_summary #>> '{registration,registrant}',
-                declared_summary #>> '{resolver,chain_id}',
-                declared_summary #>> '{resolver,address}'
-         FROM name_current WHERE logical_name_id = $1",
-    )
-    .bind(&logical)
-    .fetch_one(&pool)
-    .await?;
-    assert_eq!(suppressed, (None, None, None));
-    db.cleanup().await?;
+    assert_eq!(
+        (
+            served["registration"]["registrant"].as_str(),
+            served["resolver"]["chain_id"].as_str(),
+            served["resolver"]["address"].as_str(),
+        ),
+        (None, None, None),
+        "{served}"
+    );
     Ok(())
 }
 
