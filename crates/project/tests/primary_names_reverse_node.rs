@@ -134,6 +134,77 @@ async fn explicit_tuple_claims_keep_their_existing_path() -> Result<()> {
     Ok(())
 }
 
+// Retention gap, kept precise: today's reverse claim follows the latest ResolverChanged at the
+// reverse node from any source family. An ENSv2 registry pointer with no resource or name lands
+// in neither the ENSv1 registry-node pointer family (F4) nor the resource pointer family (F5), so
+// the family read finds no resolver for the node and no claim.
+#[tokio::test]
+async fn an_unnamed_ens_v2_reverse_node_pointer_is_outside_the_pointer_families() -> Result<()> {
+    let (database, pool) = database("unnamed_v2_pointer").await?;
+    for block in 1..=2 {
+        sqlx::query("INSERT INTO chain_lineage (chain_id,block_hash,block_number,block_timestamp,canonicality_state) VALUES ($1,$2,$3,to_timestamp($3::double precision),'canonical')")
+            .bind(CHAIN).bind(hash(block)).bind(block).execute(&pool).await?;
+    }
+    event(
+        &pool,
+        2,
+        0,
+        "ReverseChanged",
+        json!({
+            "source_event":"ReverseClaimed", "address":ADDRESS,
+            "coin_type":"60", "namespace":"ens", "reverse_node":NODE
+        }),
+    )
+    .await?;
+    event_in(
+        &pool,
+        "ens_v2_registry_l1",
+        2,
+        1,
+        "ResolverChanged",
+        json!({"node":NODE,"resolver":RESOLVER}),
+    )
+    .await?;
+    name(&pool, 2, 2, RESOLVER, json!("alice.eth")).await?;
+    let key = format!("primary_name {ADDRESS} ens 60");
+    let shadow = Expectations {
+        // Today follows the pointer (event 2) to the name record (event 3); the family read has
+        // neither the resolver nor the claim.
+        differences: vec![ExpectedDifference {
+            target: 2,
+            key,
+            fields: vec![
+                ("claim_name_is_normalized".into(), json!(true), json!(false)),
+                (
+                    "claim_provenance.claim_event_id".into(),
+                    json!(3),
+                    json!(ABSENT),
+                ),
+                (
+                    "claim_provenance.resolver_address".into(),
+                    json!(RESOLVER),
+                    json!(ABSENT),
+                ),
+                (
+                    "claim_provenance.resolver_event_id".into(),
+                    json!(2),
+                    json!(ABSENT),
+                ),
+                ("claim_status".into(), json!("success"), json!("not_found")),
+                ("raw_claim_name".into(), json!("alice.eth"), Value::Null),
+            ],
+            times: 1,
+        }],
+        ..Expectations::none()
+    };
+    run(&pool, 2, None, RunMode::Normal, &shadow).await?;
+    shadow.finish()?;
+    let today = snapshot(&pool).await?.expect("today's claim");
+    assert_eq!(today["raw_claim_name"], "alice.eth");
+    database.cleanup().await?;
+    Ok(())
+}
+
 async fn seed(pool: &PgPool) -> Result<()> {
     for block in 1..=11 {
         sqlx::query("INSERT INTO chain_lineage (chain_id,block_hash,block_number,block_timestamp,canonicality_state) VALUES ($1,$2,$3,to_timestamp($3::double precision),'canonical')")
@@ -236,6 +307,17 @@ async fn event(pool: &PgPool, block: i64, log: i64, kind: &str, after: Value) ->
         "ResolverChanged" | "AuthorityTransferred" => "ens_v1_registry_l1",
         _ => "ens_v1_resolver_l1",
     };
+    event_in(pool, family, block, log, kind, after).await
+}
+
+async fn event_in(
+    pool: &PgPool,
+    family: &str,
+    block: i64,
+    log: i64,
+    kind: &str,
+    after: Value,
+) -> Result<()> {
     sqlx::query("INSERT INTO normalized_events (event_identity,namespace,event_kind,source_family,manifest_version,chain_id,block_number,block_hash,transaction_hash,transaction_index,log_index,derivation_kind,canonicality_state,after_state) VALUES ($1,'ens',$2,$3,1,$4,$5,$6,$6,0,$7,'ens_v1_unwrapped_authority','canonical',$8)")
         .bind(format!("{block}:{log}")).bind(kind).bind(family).bind(CHAIN)
         .bind(block).bind(hash(block)).bind(log).bind(after).execute(pool).await?;
