@@ -221,6 +221,11 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> ShadowName {
             .event
             .map_or(Value::Null, |event| event.expiry.clone())
     };
+    // A selected release keeps the expiry lateral's value (build.sql:39-53), read from the
+    // name's admitted events. The interpreter's unnamed path-expiry release is not one of them
+    // (it carries no name, so staging leaves it Unnamed), so its presentation takes the expiry
+    // of the latest named event with a numeric expiry, not the release's own; on chain the two
+    // agree, because the release carries the expiry that lapsed.
     let registration_expiry = if mismatch {
         selected_expiry()
     } else if let Some(seconds) = expiry_seconds {

@@ -101,7 +101,9 @@ const NAME_CHUNK: usize = 500;
 const PRINTED: usize = 400;
 
 /// The counted fields of every printed report in this process, by target, for the tests that
-/// assert them exactly.
+/// assert them exactly. It is process-wide: a test that reads it clears it first
+/// (`take_reports`) and must not share its process with another comparing test, which holds for
+/// the fixture-corpus test because every other comparing test in its binary is ignored.
 static REPORTS: Mutex<Vec<Counted>> = Mutex::new(Vec::new());
 
 /// One printed report's target, same-block delta fields and named-cause fields.
@@ -602,26 +604,42 @@ fn shadow_field(shadow: &ShadowName, path: &str) -> Value {
 
 /// Whether the shadow value of `diff` is what the ENSv2 path-release presentation gives, for a
 /// name whose selected registration is the interpreter's unnamed path-expiry release
-/// (build.sql:88-95, :101-103).
-fn serves_the_unnamed_release(trace: &serde_json::Map<String, Value>, diff: &Difference) -> bool {
+/// (build.sql:88-95, :101-103). The whole presentation must hold, not only the differing
+/// field: status released, no registrant, authority kind or key, and a control block that is
+/// `{status: unregistered}` with nothing else. The expiry is checked against the release's own
+/// after-state expiry, the value the chain lapsed, not the reader's own expiry candidate; the
+/// reader takes it from the latest named numeric event (served.rs), and on chain the two agree.
+fn serves_the_unnamed_release(shadow: &ShadowName, diff: &Difference) -> bool {
+    let trace = &shadow.trace;
     if trace.get("selected_unnamed_path_expiry") != Some(&json!(true)) {
         return false;
     }
+    let registration = |name: &str| {
+        shadow
+            .registration
+            .get(name)
+            .cloned()
+            .unwrap_or(Value::Null)
+    };
+    let presentation = registration("status") == json!("released")
+        && registration("registrant").is_null()
+        && registration("authority_kind").is_null()
+        && registration("authority_key").is_null()
+        && shadow.control.get("status") == Some(&json!("unregistered"))
+        && shadow
+            .control
+            .iter()
+            .all(|(name, value)| name == "status" || value.is_null());
+    if !presentation {
+        return false;
+    }
     let traced = |name: &str| trace.get(name).cloned().unwrap_or(Value::Null);
-    let shadow = &diff.shadow;
+    let value = &diff.shadow;
     match diff.field.as_str() {
-        "registration/status" => shadow == &json!("released"),
-        "registration/latest_event_kind" => shadow == &json!("RegistrationReleased"),
-        "registration/released_at" => same(shadow, &traced("selected_released_at")),
-        "registration/expiry" => {
-            let candidate = traced("expiry_candidate");
-            let lapsed = if candidate.is_null() {
-                traced("selected_expiry")
-            } else {
-                candidate
-            };
-            !shadow.is_null() && same(shadow, &lapsed)
-        }
+        "registration/status" => value == &json!("released"),
+        "registration/latest_event_kind" => value == &json!("RegistrationReleased"),
+        "registration/released_at" => same(value, &traced("selected_released_at")),
+        "registration/expiry" => !value.is_null() && same(value, &traced("selected_expiry")),
         "registration/authority_kind"
         | "registration/authority_key"
         | "registration/registrant"
@@ -629,8 +647,8 @@ fn serves_the_unnamed_release(trace: &serde_json::Map<String, Value>, diff: &Dif
         | "control/registrant"
         | "control/registry_owner"
         | "control/latest_event_kind"
-        | "control/unsupported_reason" => shadow.is_null(),
-        "control/status" => shadow == &json!("unregistered"),
+        | "control/unsupported_reason" => value.is_null(),
+        "control/status" => value == &json!("unregistered"),
         _ => false,
     }
 }
@@ -647,7 +665,7 @@ async fn name_excuses(
     let trace = &shadow.trace;
     let mut out = Vec::with_capacity(diffs.len());
     for diff in diffs {
-        let excuse = if serves_the_unnamed_release(trace, diff) {
+        let excuse = if serves_the_unnamed_release(shadow, diff) {
             Excuse::Known("served_membership_skips_unnamed_path_expiry")
         } else if diff.field == "registration/authority_key"
             && trace.get("authority_key_stored") == Some(&json!(false))
@@ -657,7 +675,7 @@ async fn name_excuses(
         } else if diff.field == "registration/authority_kind"
             && diff.served.is_null()
             && diff.shadow == json!("registrar")
-            && winner_has_no_authority_kind(pool, trace).await?
+            && winner_has_no_authority_kind(pool, chain, trace).await?
         {
             Excuse::Known("authority_kind_defaulted_to_registrar")
         } else {
@@ -729,6 +747,7 @@ async fn name_excuses(
 /// after-state, read from the event log.
 async fn winner_has_no_authority_kind(
     pool: &PgPool,
+    chain: &str,
     trace: &serde_json::Map<String, Value>,
 ) -> Result<bool> {
     let Some(identity) = trace.get("authority_context_event").and_then(Value::as_str) else {
@@ -736,8 +755,9 @@ async fn winner_has_no_authority_kind(
     };
     let kind: Option<Option<String>> = sqlx::query_scalar(
         "SELECT NULLIF(after_state ->> 'authority_kind', '') FROM normalized_events
-         WHERE event_identity = $1",
+         WHERE chain_id = $1 AND event_identity = $2",
     )
+    .bind(chain)
     .bind(identity)
     .fetch_optional(pool)
     .await?;
