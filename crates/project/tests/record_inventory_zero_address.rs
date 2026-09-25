@@ -6,6 +6,9 @@ mod family_shadow;
 use anyhow::{Context, Result};
 use bigname_domain::resolver_read::{IndexedRecordStatus, evaluate_indexed_record};
 use bigname_project::{BatchOutcome, BatchRequest, Engine, Marker, RunMode};
+use bigname_storage::families::records::{
+    FamilyAttribution, compare_family_reads, load_family_record_inventory_detail,
+};
 use bigname_test_support::{TestDatabase, TestDatabaseConfig};
 use serde_json::{Value, json};
 use sqlx::{PgPool, raw_sql};
@@ -478,6 +481,110 @@ async fn zero_address_projection_converges_across_replay_modes() -> Result<()> {
     Ok(())
 }
 
+// The coin-60 pair rule in the canonical order (TYR-36 step 4): the `AddressChanged` half at
+// log n and the `AddrChanged` half at log n + 1 of one transaction serve the `AddressChanged`
+// payload at its own position, each half is tested against a version boundary at its own
+// position, and a later write wins. The halves carry different values here so the served half is
+// visible. Each run also compares the family reads with today's reads.
+/// The status and value a case serves for `addr:60`; `None` when it serves no record.
+type Served = (IndexedRecordStatus, Option<&'static str>);
+
+#[tokio::test]
+async fn coin60_pairs_serve_the_address_changed_half_at_its_own_position() -> Result<()> {
+    let expectations: [(&str, Option<Served>, usize); 6] = [
+        (
+            "ens_v1_pair_after_boundary",
+            Some((IndexedRecordStatus::Success, Some(NONZERO20))),
+            1,
+        ),
+        ("ens_v1_pair_before_boundary", None, 0),
+        (
+            "ens_v1_pair_then_later_write",
+            Some((IndexedRecordStatus::Success, Some(LATER20))),
+            0,
+        ),
+        (
+            "ens_v1_pair_clear",
+            Some((IndexedRecordStatus::NotFound, None)),
+            1,
+        ),
+        (
+            "ens_v1_address_changed_alone",
+            Some((IndexedRecordStatus::Success, Some(NONZERO20))),
+            0,
+        ),
+        (
+            "ens_v1_older_write_then_boundary_then_pair",
+            Some((IndexedRecordStatus::Success, Some(NONZERO20))),
+            1,
+        ),
+    ];
+    for (id, expected, pairs) in expectations {
+        let fixture = case(id)?;
+        let (database, pool) = database(&format!("{id}_pair")).await?;
+        seed(&pool, fixture).await?;
+        let outcome = run_window(&pool, 11, 0, 11, None, RunMode::Normal).await?;
+        let row: Value = sqlx::query_scalar(
+            "SELECT to_jsonb(row) FROM record_inventory_current row WHERE resource_id = $1::uuid",
+        )
+        .bind(RESOURCE)
+        .fetch_one(&pool)
+        .await?;
+        match expected {
+            Some((status, value)) => assert_entry_and_answer(&row, "addr:60", status, value),
+            None => assert!(
+                row["entries"]
+                    .as_array()
+                    .is_some_and(|entries| entries.iter().all(|e| e["record_key"] != "addr:60")),
+                "{id}: {row}"
+            ),
+        }
+        let family = load_family_record_inventory_detail(
+            &pool,
+            fixture.chain,
+            RESOURCE.parse()?,
+            FamilyAttribution::Given(Default::default()),
+        )
+        .await?
+        .with_context(|| format!("{id}: no family row"))?;
+        assert_eq!(family.compatibility_pairs.len(), pairs, "{id}");
+        for pair in &family.compatibility_pairs {
+            // The served position is the `AddressChanged` half's own, log 3 of transaction 1.
+            assert_eq!(pair.value_position.log_index, Some(3), "{id}");
+            assert_eq!(pair.sibling_position.log_index, Some(4), "{id}");
+            assert!(
+                family.row.provenance["record_event_ids"]
+                    .as_array()
+                    .is_some_and(|ids| ids.contains(&json!(pair.value_event_id))
+                        && !ids.contains(&json!(pair.sibling_event_id))),
+                "{id}: {}",
+                family.row.provenance
+            );
+        }
+        // Step 2 finding: the inverse address index reads the `AddrChanged` half's own value,
+        // so when the halves carry different addresses the served `AddressChanged` address has
+        // no index row and the family page of names resolving to it is empty.
+        let report = compare_family_reads(
+            &pool,
+            fixture.chain,
+            Some((outcome.current.number, outcome.current.hash.clone())),
+            1,
+        )
+        .await?;
+        let halves_differ = matches!(
+            id,
+            "ens_v1_pair_after_boundary" | "ens_v1_older_write_then_boundary_then_pair"
+        );
+        assert_eq!(
+            report.address_index_findings.len(),
+            usize::from(halves_differ),
+            "{id}: {report:#?}"
+        );
+        database.cleanup().await?;
+    }
+    Ok(())
+}
+
 async fn assert_terminal(fixture: &Case) -> Result<()> {
     let row = project_case_at(fixture, 13, Execution::FromZero).await?;
     assert_entry_and_answer(
@@ -682,6 +789,98 @@ fn cases() -> &'static [Case] {
                 IndexedRecordStatus::Success,
                 Some(ZERO20),
             ),
+            fixture(
+                "ens_v1_pair_after_boundary",
+                "ens",
+                "ethereum-mainnet",
+                "ens_v1_registry_l1",
+                "ens_v1_resolver_l1",
+                "ens_v1",
+                vec![
+                    version(11, 2, 1),
+                    scalar(11, 3, 1, "AddressChanged", "60", NONZERO20),
+                    scalar(11, 4, 1, "AddrChanged", "60", LATER20),
+                ],
+                "addr:60",
+                IndexedRecordStatus::Success,
+                Some(NONZERO20),
+            ),
+            fixture(
+                "ens_v1_pair_before_boundary",
+                "ens",
+                "ethereum-mainnet",
+                "ens_v1_registry_l1",
+                "ens_v1_resolver_l1",
+                "ens_v1",
+                vec![
+                    scalar(11, 3, 1, "AddressChanged", "60", NONZERO20),
+                    scalar(11, 4, 1, "AddrChanged", "60", LATER20),
+                    version(11, 5, 1),
+                ],
+                "addr:60",
+                IndexedRecordStatus::NotFound,
+                None,
+            ),
+            fixture(
+                "ens_v1_pair_then_later_write",
+                "ens",
+                "ethereum-mainnet",
+                "ens_v1_registry_l1",
+                "ens_v1_resolver_l1",
+                "ens_v1",
+                vec![
+                    scalar(11, 3, 1, "AddressChanged", "60", NONZERO20),
+                    scalar(11, 4, 1, "AddrChanged", "60", NONZERO20),
+                    scalar(11, 5, 1, "AddrChanged", "60", LATER20),
+                ],
+                "addr:60",
+                IndexedRecordStatus::Success,
+                Some(LATER20),
+            ),
+            fixture(
+                "ens_v1_pair_clear",
+                "ens",
+                "ethereum-mainnet",
+                "ens_v1_registry_l1",
+                "ens_v1_resolver_l1",
+                "ens_v1",
+                vec![
+                    scalar(11, 3, 1, "AddressChanged", "60", "0x"),
+                    scalar(11, 4, 1, "AddrChanged", "60", ZERO20),
+                ],
+                "addr:60",
+                IndexedRecordStatus::NotFound,
+                None,
+            ),
+            fixture(
+                "ens_v1_address_changed_alone",
+                "ens",
+                "ethereum-mainnet",
+                "ens_v1_registry_l1",
+                "ens_v1_resolver_l1",
+                "ens_v1",
+                vec![scalar(11, 3, 1, "AddressChanged", "60", NONZERO20)],
+                "addr:60",
+                IndexedRecordStatus::Success,
+                Some(NONZERO20),
+            ),
+            fixture(
+                "ens_v1_older_write_then_boundary_then_pair",
+                "ens",
+                "ethereum-mainnet",
+                "ens_v1_registry_l1",
+                "ens_v1_resolver_l1",
+                "ens_v1",
+                vec![
+                    scalar(11, 1, 1, "AddrChanged", "60", LATER20),
+                    version(11, 2, 1),
+                    scalar(11, 3, 1, "AddressChanged", "60", NONZERO20),
+                    scalar(11, 4, 1, "AddrChanged", "60", LATER20),
+                ],
+                "addr:60",
+                IndexedRecordStatus::Success,
+                Some(NONZERO20),
+            ),
         ]
     })
 }
@@ -763,6 +962,16 @@ fn flat(block: i64, coin: &str, value: &str) -> FixtureEvent {
             "record_family": "addr", "selector_key": coin, "source_event": "AddressChanged",
             "coin_type": coin, "address_bytes_hex": value, "value_retained": false
         }),
+    )
+}
+
+fn version(block: i64, log_index: i64, transaction: i64) -> FixtureEvent {
+    event(
+        block,
+        log_index,
+        transaction,
+        json!({"node": NODE, "resolver": RESOLVER, "source_event": "VersionChanged",
+               "record_version": "1"}),
     )
 }
 

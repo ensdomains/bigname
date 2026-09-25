@@ -2,6 +2,9 @@
 //! (`provenance.record_event_ids`), so these cases run the production Project engine and then the
 //! shared storage read the records and lookup routes use. They pin that Project's resolver
 //! selection, version resets, and ENSv1 mirror rules decide which ABI writes count.
+#[path = "support/family_shadow.rs"]
+mod family_shadow;
+
 use anyhow::{Context, Result};
 use bigname_project::{BatchRequest, Engine, Marker, RunMode};
 use bigname_storage::{
@@ -527,6 +530,7 @@ impl Fixture {
             })
             .await?;
         assert!(outcome.complete);
+        family_shadow::assert_family_reads_match(&self.pool, &outcome.current).await?;
         Ok(())
     }
 
