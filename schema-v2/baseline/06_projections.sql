@@ -1113,6 +1113,12 @@ CREATE TABLE IF NOT EXISTS project_family_marker (
     interpret_input_content_hash text,
     interpret_redo_attempt bigint,
     state text NOT NULL,
+    interpret_redo_in_progress boolean,
+    project_redo_attempt bigint,
+    project_redo_mode text,
+    project_redo_from bigint,
+    project_redo_to bigint,
+    admission_epoch text,
     PRIMARY KEY (chain_id),
     CHECK ((current_block_number IS NULL) = (current_block_hash IS NULL)),
     CHECK (state IN ('live', 'bootstrap_pending')),
@@ -1133,11 +1139,23 @@ COMMENT ON COLUMN project_family_marker.input_content_hash IS
 COMMENT ON COLUMN project_family_marker.sequence IS
     'This value counts every family block and every family undo applied on the chain; it only grows. It is the explicit publication generation of the design, named so because schema-v2 reserves generation for authorised columns.';
 COMMENT ON COLUMN project_family_marker.interpret_input_content_hash IS
-    'This value is the Interpret row''s input_content_hash read before the block, the first half of the input revision; null while Interpret was in redo.';
+    'This value is the Interpret row''s input_content_hash the last block read inside its own transaction, the first half of the input revision.';
 COMMENT ON COLUMN project_family_marker.interpret_redo_attempt IS
-    'This value is the Interpret row''s redo_attempt_generation read before the block, the second half of the input revision; null while Interpret was in redo.';
+    'This value is the Interpret row''s redo_attempt_generation the last block read inside its own transaction, the second half of the input revision.';
 COMMENT ON COLUMN project_family_marker.state IS
     'This value is live when the marker follows the served publication and bootstrap_pending while a rebuild is populating the families.';
+COMMENT ON COLUMN project_family_marker.interpret_redo_in_progress IS
+    'This value is the Interpret row''s redo_in_progress the last block read; always false after a block, since no block applies while Interpret is in redo, and null on a reset marker.';
+COMMENT ON COLUMN project_family_marker.project_redo_attempt IS
+    'This value is the Project row''s redo_attempt_generation the last block read inside its own transaction.';
+COMMENT ON COLUMN project_family_marker.project_redo_mode IS
+    'This value is the Project row''s redo_mode the last block read, null when no redo was open.';
+COMMENT ON COLUMN project_family_marker.project_redo_from IS
+    'This value is the Project row''s redo_from_block_number the last block read.';
+COMMENT ON COLUMN project_family_marker.project_redo_to IS
+    'This value is the Project row''s redo_to_block_number the last block read.';
+COMMENT ON COLUMN project_family_marker.admission_epoch IS
+    'This value names the latest SourceManifestUpdated event of every manifest the chain reads, as the last block saw it; a block that sees another epoch classifies every stored resolver again.';
 
 CREATE TABLE IF NOT EXISTS project_family_undo (
     chain_id text NOT NULL,
@@ -1182,6 +1200,7 @@ CREATE TABLE IF NOT EXISTS project_repair_record (
     completed_marker_hash text,
     completed_input_hash text,
     updated_at timestamptz NOT NULL DEFAULT now(),
+    prefix_recorded boolean NOT NULL DEFAULT false,
     PRIMARY KEY (chain_id),
     CHECK (reason IN ('required_redo_range', 'orphaned_lineage', 'content_hash_rebuild', 'operator_redo')),
     CHECK (state IN ('undoing', 'replaying', 'rebuilding', 'complete')),
@@ -1189,7 +1208,9 @@ CREATE TABLE IF NOT EXISTS project_repair_record (
     CHECK (state = 'complete' OR (completed_sequence IS NULL AND completed_marker_number IS NULL AND completed_marker_hash IS NULL AND completed_input_hash IS NULL)),
     CHECK (state <> 'undoing' OR (prefix_interpret_input_content_hash IS NULL AND prefix_interpret_redo_attempt IS NULL)),
     CHECK ((trusted_base_number IS NULL) = (trusted_base_hash IS NULL)),
-    CHECK (state <> 'rebuilding' OR trusted_base_number IS NULL)
+    CHECK (state <> 'rebuilding' OR trusted_base_number IS NULL),
+    CONSTRAINT project_repair_record_prefix_recorded_check
+        CHECK (state <> 'undoing' OR NOT prefix_recorded)
 );
 COMMENT ON TABLE project_repair_record IS
     'Project-owned repair record: the durable description of the latest family undo-then-replay or rebuild of a chain, its attempt, reason, trusted base, replay target, state, input revision and completion identity. Undo never rewrites it. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
@@ -1227,6 +1248,8 @@ COMMENT ON COLUMN project_repair_record.completed_input_hash IS
     'This value is the interpreter content hash the completing loop ran under; null until complete.';
 COMMENT ON COLUMN project_repair_record.updated_at IS
     'This value is when the record last changed.';
+COMMENT ON COLUMN project_repair_record.prefix_recorded IS
+    'This value is true once the replay or rebuild captured its input revision in prefix_interpret_input_content_hash and prefix_interpret_redo_attempt, which may both be null when the chain has no Interpret row; false while undoing.';
 
 CREATE TABLE IF NOT EXISTS project_name_state (
     namespace text NOT NULL,

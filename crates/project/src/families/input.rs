@@ -117,14 +117,16 @@ pub(crate) struct BlockHeader {
     pub(crate) timestamp: Value,
 }
 
-/// Lock block `number`'s readable lineage row for the transaction and read its predecessor.
-pub(crate) async fn lock_block(
+/// Read block `number`'s readable lineage row and its predecessor's hash. It is a plain read,
+/// not a lock: Ingest can orphan the block while the family transaction runs, and the families
+/// then stand on an orphaned block that the next run finds off the readable lineage and undoes.
+pub(crate) async fn read_block(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
     number: i64,
 ) -> Result<Option<BlockHeader>> {
     let row: Option<(String, Option<String>, i64, Value)> = sqlx::query_as(
-        "/* project:families.input.lock_block */ SELECT lineage.block_hash,
+        "/* project:families.input.read_block */ SELECT lineage.block_hash,
                 COALESCE(lineage.parent_hash, (
                     SELECT previous.block_hash FROM chain_lineage previous
                     WHERE previous.chain_id = lineage.chain_id
@@ -135,14 +137,13 @@ pub(crate) async fn lock_block(
                 to_jsonb(lineage.block_timestamp)
          FROM chain_lineage lineage
          WHERE lineage.chain_id = $1 AND lineage.block_number = $2
-           AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
-         FOR SHARE",
+           AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')",
     )
     .bind(chain_id)
     .bind(number)
     .fetch_optional(&mut **transaction)
     .await
-    .map_err(|error| ProjectError::database("failed to lock family block lineage", error))?;
+    .map_err(|error| ProjectError::database("failed to read family block lineage", error))?;
     Ok(row.map(
         |(hash, predecessor_hash, timestamp_seconds, timestamp)| BlockHeader {
             number,
@@ -172,12 +173,12 @@ type EventRow = (
 );
 
 /// The block's activated canonical events at its readable hash, in the canonical event order,
-/// each normalized event once.
+/// each event identity once, with the count of disagreeing duplicate deliveries dropped.
 pub(crate) async fn block_events(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
     block: &BlockHeader,
-) -> Result<Vec<BlockEvent>> {
+) -> Result<(Vec<BlockEvent>, u64)> {
     let rows: Vec<EventRow> = sqlx::query_as(
         "/* project:families.input.block_events */ SELECT event.normalized_event_id,
                 event.event_identity, event.namespace, event.logical_name_id,
@@ -234,31 +235,69 @@ pub(crate) async fn block_events(
             },
         )
         .collect::<Vec<_>>();
-    order(&mut events);
-    Ok(events)
+    let anomalies = order(&mut events);
+    Ok((events, anomalies))
 }
 
-/// Sort into the canonical order and keep each normalized event once.
-pub(crate) fn order(events: &mut Vec<BlockEvent>) {
-    events.sort_by(|left, right| {
-        left.position
-            .cmp(&right.position)
-            .then(left.normalized_event_id.cmp(&right.normalized_event_id))
+/// Sort into the canonical order and keep each event once by its event identity. Generated
+/// normalized event ids never take part: two deliveries of one event under different generated
+/// ids are one event. When deliveries of one identity disagree (a different position or payload),
+/// the first in the canonical order is kept, deliveries at one position fall back to their
+/// payload text so the choice does not depend on read order, and each dropped disagreeing
+/// delivery is returned as an anomaly for the caller to count and log.
+pub(crate) fn order(events: &mut Vec<BlockEvent>) -> u64 {
+    events.sort_by_cached_key(|event| (event.position.clone(), event.payload_text()));
+    let mut anomalies = 0;
+    let mut kept = std::collections::HashMap::<String, String>::new();
+    events.retain(|event| match kept.entry(event.position.event_identity.clone()) {
+        std::collections::hash_map::Entry::Occupied(first) => {
+            if *first.get() != event.fingerprint() {
+                anomalies += 1;
+            }
+            false
+        }
+        std::collections::hash_map::Entry::Vacant(slot) => {
+            slot.insert(event.fingerprint());
+            true
+        }
     });
-    let mut seen = std::collections::BTreeSet::new();
-    events.retain(|event| seen.insert(event.normalized_event_id));
+    anomalies
 }
 
-/// Blocks in `from..=to` that carry an activated canonical event, ascending. A rebuild visits
-/// only these: a block with no event owns no family fact.
-pub(crate) async fn event_blocks(
+impl BlockEvent {
+    /// The event's content without its generated id, compared as text.
+    fn payload_text(&self) -> String {
+        json!([
+            self.namespace,
+            self.logical_name_id,
+            self.resource_id,
+            self.event_kind,
+            self.source_family,
+            self.source_manifest_id,
+            self.transaction_hash,
+            self.before,
+            self.after,
+            self.raw_fact_ref,
+        ])
+        .to_string()
+    }
+
+    /// Position and content, the parts two deliveries of one event must agree on.
+    fn fingerprint(&self) -> String {
+        format!("{:?}{}", self.position, self.payload_text())
+    }
+}
+
+/// Blocks in `from..=to` that carry family work, ascending: an activated canonical event. A
+/// rebuild visits only these: a block with no event owns no family fact.
+pub(crate) async fn work_blocks(
     pool: &sqlx::PgPool,
     chain_id: &str,
     from: i64,
     to: i64,
 ) -> Result<Vec<i64>> {
     sqlx::query_scalar(
-        "/* project:families.input.event_blocks */ SELECT DISTINCT event.block_number
+        "/* project:families.input.work_blocks */ SELECT DISTINCT event.block_number
          FROM normalized_events event
          JOIN chain_lineage lineage
            ON lineage.chain_id = event.chain_id
@@ -296,9 +335,15 @@ pub(crate) async fn readable_hash(
     .map_err(|error| ProjectError::database("failed to read a readable family block hash", error))
 }
 
+/// The input revision: the Interpret row's content hash and redo attempt
+/// (docs/projections.md, "Owned key families").
+pub type Revision = (Option<String>, Option<i64>);
+
 /// The input token: the Interpret row's redo state and content hash and the Project row's redo
-/// session fence. The Project phase reads it right after its batch commits, while a redo is still
-/// open, and hands it to the loop. Step 2 records it and aborts nothing.
+/// session fence. Every family block reads it inside its own transaction and records it on the
+/// marker; the Project phase also reads it once before recording a batch's progress, while a
+/// finished redo's session is still open on the Project row, for the attempt and reason of that
+/// redo.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct InputToken {
     pub interpret_input_content_hash: Option<String>,
@@ -312,17 +357,15 @@ pub struct InputToken {
 }
 
 impl InputToken {
-    /// The input revision: the Interpret row's content hash and redo attempt, taken only while
-    /// Interpret is not in redo. `None` while it is.
-    pub fn revision(&self) -> (Option<&str>, Option<i64>) {
-        if self.interpret_redo_in_progress {
-            (None, None)
-        } else {
+    /// The input revision, `None` while Interpret is in redo: a block never applies, and a
+    /// replay never starts, against a half-rewritten input.
+    pub fn revision(&self) -> Option<Revision> {
+        (!self.interpret_redo_in_progress).then(|| {
             (
-                self.interpret_input_content_hash.as_deref(),
+                self.interpret_input_content_hash.clone(),
                 self.interpret_redo_attempt_generation,
             )
-        }
+        })
     }
 }
 
@@ -337,24 +380,19 @@ type TokenRow = (
     Option<String>,
 );
 
-pub async fn input_token(pool: &sqlx::PgPool, chain_id: &str) -> Result<InputToken> {
-    let row: TokenRow = sqlx::query_as(
-        "/* project:families.input.input_token */ SELECT interpret.input_content_hash,
-                interpret.redo_attempt_generation, interpret.redo_in_progress,
-                project.redo_attempt_generation, project.redo_mode,
-                project.redo_from_block_number, project.redo_to_block_number, project.last_error
-         FROM (SELECT 1) anchor
-         LEFT JOIN chain_phase_state interpret
-           ON interpret.chain_id = $1 AND interpret.phase_name = 'interpret'
-         LEFT JOIN chain_phase_state project
-           ON project.chain_id = $1 AND project.phase_name = 'project'",
-    )
-    .bind(chain_id)
-    .fetch_one(pool)
-    .await
-    .map_err(|error| ProjectError::database("failed to read the family input token", error))?;
+const TOKEN_SQL: &str = "/* project:families.input.input_token */ SELECT interpret.input_content_hash,
+        interpret.redo_attempt_generation, interpret.redo_in_progress,
+        project.redo_attempt_generation, project.redo_mode,
+        project.redo_from_block_number, project.redo_to_block_number, project.last_error
+ FROM (SELECT 1) anchor
+ LEFT JOIN chain_phase_state interpret
+   ON interpret.chain_id = $1 AND interpret.phase_name = 'interpret'
+ LEFT JOIN chain_phase_state project
+   ON project.chain_id = $1 AND project.phase_name = 'project'";
+
+fn token_from_row(row: TokenRow) -> InputToken {
     let (hash, interpret_attempt, in_redo, project_attempt, mode, from, to, last_error) = row;
-    Ok(InputToken {
+    InputToken {
         interpret_input_content_hash: hash,
         interpret_redo_attempt_generation: interpret_attempt,
         interpret_redo_in_progress: in_redo.unwrap_or(false),
@@ -363,5 +401,62 @@ pub async fn input_token(pool: &sqlx::PgPool, chain_id: &str) -> Result<InputTok
         project_redo_from: from,
         project_redo_to: to,
         project_last_error: last_error,
-    })
+    }
+}
+
+/// Read the input token outside any family transaction.
+pub async fn input_token(pool: &sqlx::PgPool, chain_id: &str) -> Result<InputToken> {
+    let row: TokenRow = sqlx::query_as(TOKEN_SQL)
+        .bind(chain_id)
+        .fetch_one(pool)
+        .await
+        .map_err(|error| ProjectError::database("failed to read the family input token", error))?;
+    Ok(token_from_row(row))
+}
+
+/// Read the input token inside a family transaction, so the block, undo or transition that
+/// records it is the one that saw it.
+pub(crate) async fn token_in(
+    transaction: &mut Transaction<'_, Postgres>,
+    chain_id: &str,
+) -> Result<InputToken> {
+    let row: TokenRow = sqlx::query_as(TOKEN_SQL)
+        .bind(chain_id)
+        .fetch_one(&mut **transaction)
+        .await
+        .map_err(|error| ProjectError::database("failed to read the family input token", error))?;
+    Ok(token_from_row(row))
+}
+
+/// The admission epoch: which SourceManifestUpdated event is the latest of every manifest the
+/// chain reads, as one text. Manifest sync writes these events without a chain position, so the
+/// latest per manifest is the latest written, the order stage.rs `create_manifests` uses. A
+/// change means the resolver classifications were made under another declaration epoch.
+pub(crate) async fn admission_epoch(
+    transaction: &mut Transaction<'_, Postgres>,
+    chain_id: &str,
+) -> Result<String> {
+    sqlx::query_scalar(
+        "/* project:families.input.admission_epoch */ SELECT COALESCE(string_agg(
+                latest.manifest_id::text || ':' || latest.manifest_event_id::text, ','
+                ORDER BY latest.manifest_id), '')
+         FROM (
+             SELECT DISTINCT ON (event.source_manifest_id)
+                    event.source_manifest_id AS manifest_id,
+                    event.normalized_event_id AS manifest_event_id
+             FROM normalized_events event
+             WHERE (event.chain_id = $1
+                    OR ($1 = 'base-mainnet' AND event.namespace = 'basenames'
+                        AND event.source_family = 'basenames_execution'
+                        AND event.chain_id = 'ethereum-mainnet'))
+               AND event.event_kind = 'SourceManifestUpdated'
+               AND event.source_manifest_id IS NOT NULL
+               AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
+             ORDER BY event.source_manifest_id, event.normalized_event_id DESC
+         ) latest",
+    )
+    .bind(chain_id)
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(|error| ProjectError::database("failed to read the admission epoch", error))
 }

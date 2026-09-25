@@ -18,6 +18,10 @@ pub(crate) struct Context<'a> {
     pub(crate) chain_id: &'a str,
     pub(crate) block: &'a BlockHeader,
     pub(crate) keys: &'a BlockKeys,
+    /// The admission epoch the block read inside its transaction.
+    pub(crate) epoch: &'a str,
+    /// Whether it differs from the one the previous block recorded.
+    pub(crate) epoch_changed: bool,
 }
 
 /// Name the family in a reducer error, so a skipped block says which family failed.

@@ -643,7 +643,8 @@ for migration_file in \
     "$ROOT/migrations/20260926100300_project_families_records.sql" \
     "$ROOT/migrations/20260926100400_project_families_permissions.sql" \
     "$ROOT/migrations/20260926100500_project_families_topology.sql" \
-    "$ROOT/migrations/20260926100600_project_families_addresses.sql"
+    "$ROOT/migrations/20260926100600_project_families_addresses.sql" \
+    "$ROOT/migrations/20260926100700_project_families_input_token.sql"
 do
     emit_phase_migration "$migration_file" empty-schema | run_psql
 done
@@ -912,7 +913,9 @@ for migration_file in \
     "$ROOT/migrations/20260926100500_project_families_topology.sql" \
     "$ROOT/migrations/20260926100500_project_families_topology.sql" \
     "$ROOT/migrations/20260926100600_project_families_addresses.sql" \
-    "$ROOT/migrations/20260926100600_project_families_addresses.sql"
+    "$ROOT/migrations/20260926100600_project_families_addresses.sql" \
+    "$ROOT/migrations/20260926100700_project_families_input_token.sql" \
+    "$ROOT/migrations/20260926100700_project_families_input_token.sql"
 do
     emit_phase_migration "$migration_file" baseline-first | run_psql
 done

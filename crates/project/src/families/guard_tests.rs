@@ -51,22 +51,22 @@ pub(super) async fn database() -> Result<(TestDatabase, PgPool)> {
     Ok((database, pool))
 }
 
+/// The revision a chain with no Interpret row reads.
+pub(super) const NO_INTERPRET: crate::families::Revision = (None, None);
+
 async fn apply(pool: &PgPool, number: i64, predecessor: Option<&Marker>) -> crate::Result<()> {
+    let sequence = marker::read(pool, CHAIN).await?.sequence;
     let plan = block::Plan {
         predecessor,
+        sequence,
         contiguous: true,
         bootstrap: false,
+        revision: &NO_INTERPRET,
+        role: block::Role::Follow,
     };
-    block::apply(
-        pool,
-        CHAIN,
-        number,
-        &plan,
-        (None, None),
-        &FamilyOptions::new("guard"),
-    )
-    .await
-    .map(|_| ())
+    block::apply(pool, CHAIN, number, &plan, &FamilyOptions::new("guard"))
+        .await
+        .map(|_| ())
 }
 
 #[tokio::test]

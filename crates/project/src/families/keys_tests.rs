@@ -153,7 +153,7 @@ fn synthesised_events_sort_first_and_among_themselves_by_their_identity_text() {
         synthesised("ens_v2:1:c:0xb:RegistrationReleased:expiry:r:1:9", 2),
         synthesised("ens_v2:1:c:0xb:RegistrationReleased:expiry:r:1:10", 3),
     ];
-    order(&mut events);
+    assert_eq!(order(&mut events), 0);
     let identities = events
         .iter()
         .map(|event| event.position.event_identity.as_str())
@@ -169,9 +169,38 @@ fn synthesised_events_sort_first_and_among_themselves_by_their_identity_text() {
 }
 
 #[test]
-fn one_normalized_event_listed_twice_is_applied_once() {
+fn one_event_delivered_twice_under_different_generated_ids_is_applied_once() {
     let first = event("RegistrationGranted", "ens_v2_registry_l1", json!({}));
-    let mut events = vec![first.clone(), first];
-    order(&mut events);
+    let mut second = first.clone();
+    second.normalized_event_id = 2;
+    let mut events = vec![second, first];
+    assert_eq!(order(&mut events), 0, "identical deliveries are no anomaly");
     assert_eq!(events.len(), 1);
+}
+
+#[test]
+fn disagreeing_deliveries_of_one_identity_keep_the_first_in_order_and_count_an_anomaly() {
+    let mut early = event("RegistrationGranted", "ens_v2_registry_l1", json!({"expiry": 1}));
+    early.normalized_event_id = 9;
+    let mut late = early.clone();
+    late.normalized_event_id = 1;
+    late.position.log_index = Some(5);
+    late.after = json!({"expiry": 2});
+    let mut between = event("ExpiryChanged", "ens_v2_registry_l1", json!({}));
+    between.position.log_index = Some(3);
+    between.position.event_identity = "fixture:between".to_owned();
+    // Same position, different payload: the choice follows the payload text, not read order.
+    let mut twin = early.clone();
+    twin.after = json!({"expiry": 0});
+    let mut events = vec![late, between.clone(), early.clone(), twin];
+    assert_eq!(order(&mut events), 2);
+    let kept = events
+        .iter()
+        .map(|event| (event.position.event_identity.as_str(), event.after.clone()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        kept,
+        [("fixture:1", json!({"expiry": 0})), ("fixture:between", json!({}))],
+        "the generated ids 9 and 1 play no part"
+    );
 }

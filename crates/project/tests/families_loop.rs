@@ -166,10 +166,11 @@ async fn served_digest(fixture: &Fixture) -> Result<Vec<String>> {
     Ok(digest)
 }
 
-// The marker records the input revision each block read: the Interpret row's content hash and
-// redo attempt, or nothing while Interpret is in redo.
+// Every block reads the input token inside its own transaction and records it on the marker. No
+// block applies while Interpret is in redo: the run stops as a skip and the next run resumes.
 #[tokio::test]
-async fn each_block_records_the_interpret_revision_it_read() -> Result<()> {
+async fn each_block_records_the_input_token_it_read_and_waits_out_an_interpret_redo() -> Result<()>
+{
     let fixture = Fixture::new("families_loop_revision", 20).await?;
     fixture.interpret_row("interpret-hash-a", 3, false).await?;
     fixture.apply(10, FamilyMode::Normal).await;
@@ -179,15 +180,27 @@ async fn each_block_records_the_interpret_revision_it_read() -> Result<()> {
     );
 
     fixture.interpret_row("interpret-hash-b", 4, true).await?;
-    fixture.apply(11, FamilyMode::Normal).await;
-    assert_eq!(fixture.marker().await?.0, Some(11), "the block still ran");
-    assert_eq!(fixture.marker_revision().await?, (None, None));
+    let waiting = fixture.apply(11, FamilyMode::Normal).await;
+    let skipped = waiting.skipped.expect("no block applies while Interpret is in redo");
+    assert!(skipped.contains("Interpret is in redo"), "{skipped}");
+    assert_eq!(fixture.marker().await?.0, Some(10));
 
     fixture.interpret_row("interpret-hash-b", 4, false).await?;
-    fixture.apply(12, FamilyMode::Normal).await;
+    let resumed = fixture.apply(12, FamilyMode::Normal).await;
+    assert_eq!(resumed.skipped, None);
+    assert!(resumed.revision_adopted, "no Project redo followed the rewrite");
+    assert_eq!(fixture.marker().await?.0, Some(12));
     assert_eq!(
         fixture.marker_revision().await?,
         (Some("interpret-hash-b".to_owned()), Some(4))
     );
+    let token: (Option<bool>, Option<i64>, Option<String>) = sqlx::query_as(
+        "SELECT interpret_redo_in_progress, project_redo_attempt, admission_epoch
+         FROM project_family_marker WHERE chain_id = $1",
+    )
+    .bind(CHAIN)
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(token, (Some(false), Some(0), Some(String::new())));
     fixture.cleanup().await
 }
