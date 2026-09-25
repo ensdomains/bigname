@@ -1,14 +1,14 @@
 //! The resources whose records may resolve to an address, for the inverse address read.
 //!
 //! The derived inverse address index (F14) keeps an address only for a value positioned after its
-//! partition's latest version change by block, transaction and log, and reads only a value row's
-//! own `value`. The forward read can still serve a value the index drops: a later selected link
-//! wins the combined version boundary and lifts the cutoff, a value that shares the version's
-//! block, transaction and log comes after it by event identity, an `AddressChanged` value is kept
-//! only as `address_bytes_hex` or as the `sibling_value` of a coin-60 pair. So the candidates are
-//! the index rows together with every retained F6 and F7 address value that names the address in
-//! any of those columns, with no version cutoff and no arm test, which the forward inventory
-//! assembly then narrows to what is served.
+//! partition's latest version change in the canonical order (event identity included); it reads
+//! the served payload, the `AddressChanged` half of a coin-60 pair, from `value` or raw address
+//! bytes. The forward read can still serve a value the index drops, because a later selected link
+//! wins the combined version boundary and lifts the cutoff. So the candidates are the index rows
+//! together with every retained F6 and F7 address value that names the address in any stored
+//! shape (`value`, `address_bytes_hex`, and for a pair `sibling_value` and
+//! `sibling_address_bytes_hex`), with no version cutoff and no arm test, which the forward
+//! inventory assembly then narrows to what is served.
 //!
 //! A retained value reaches the resources whose pointer can admit it: a node-keyed value the
 //! pointers at its node and resolver (or at a mirror resolver for that node), a named value also
@@ -52,12 +52,17 @@ pub(crate) async fn candidate_resources(
              FROM bigname_phase.{table}
              WHERE record_family = 'addr' AND selector_key ~ '^[0-9]{{1,30}}$'
                AND selector_key::numeric::text = ANY($2::text[])
-               AND $1 IN ({}, {}, lower(address_bytes_hex))",
+               AND $1 IN ({}, {}, lower(address_bytes_hex), {})",
             value_text("value"),
             if table == "project_node_record_value" {
                 value_text("sibling_value")
             } else {
                 "NULL".to_owned()
+            },
+            if table == "project_node_record_value" {
+                "lower(sibling_address_bytes_hex)"
+            } else {
+                "NULL"
             }
         )
     };

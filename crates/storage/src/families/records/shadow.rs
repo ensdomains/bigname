@@ -266,7 +266,7 @@ async fn addresses(
 }
 
 /// Every retained address value of a value table as (address, coin type) rows: the row's value,
-/// its coin-60 pair sibling's value and its raw address bytes.
+/// its raw address bytes, and its coin-60 pair sibling's value and raw address bytes.
 fn retained_addresses(table: &str, with_sibling: bool) -> String {
     let text = |column: &str| {
         format!(
@@ -274,16 +274,19 @@ fn retained_addresses(table: &str, with_sibling: bool) -> String {
                         ELSE COALESCE({column} ->> 'value', {column} ->> 'bytes') END)"
         )
     };
-    let sibling = if with_sibling {
-        text("value.sibling_value")
+    let (sibling, sibling_bytes) = if with_sibling {
+        (
+            text("value.sibling_value"),
+            "lower(value.sibling_address_bytes_hex)",
+        )
     } else {
-        "NULL".to_owned()
+        ("NULL".to_owned(), "NULL")
     };
     format!(
         "SELECT candidate.address, value.selector_key::numeric::text AS coin_type
          FROM bigname_phase.{table} value
-         CROSS JOIN LATERAL (VALUES ({}), ({sibling}), (lower(value.address_bytes_hex)))
-             candidate (address)
+         CROSS JOIN LATERAL (VALUES ({}), ({sibling}), (lower(value.address_bytes_hex)),
+                                    ({sibling_bytes})) candidate (address)
          WHERE value.chain_id = $1 AND value.record_family = 'addr'
            AND value.selector_key ~ '^[0-9]{{1,30}}$' AND candidate.address IS NOT NULL",
         text("value.value"),

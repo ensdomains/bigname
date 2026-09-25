@@ -649,6 +649,98 @@ async fn a_named_address_write_at_another_node_is_found_inversely() -> Result<()
 }
 
 const INVERSE_A: &str = "0x5555555555555555555555555555555555555555";
+/// The raw-bytes address of the pair case, mixed case as a resolver may emit it.
+const RAW_PAIR_MIXED: &str = "0x77777777777777777777777777777777777777Ab";
+
+// A coin-60 pair whose `AddressChanged` half carries its address only as raw bytes (and a
+// different `AddrChanged` value), before a version reset that a later link lifts: the forward read
+// serves the raw-bytes address, which the family keeps only as the pair's
+// `sibling_address_bytes_hex`. Both inverse readers must list the name for it, from mixed-case
+// input too, and the index alone misses it.
+#[tokio::test]
+async fn a_raw_bytes_pair_address_behind_a_lifted_version_is_found_inversely() -> Result<()> {
+    let (db, pool) = database("record_id_raw_pair").await?;
+    seed(&pool).await?;
+    for n in 19..=21 {
+        sqlx::query("INSERT INTO chain_lineage (chain_id,block_hash,block_number,block_timestamp,canonicality_state) VALUES ($1,$2,$3,to_timestamp($3::double precision),'canonical')").bind(CHAIN).bind(hash(n)).bind(n).execute(&pool).await?;
+    }
+    event(
+        &pool,
+        "raw-pair-address",
+        19,
+        0,
+        "RecordChanged",
+        Some(1),
+        json!({"source_event":"AddressChanged","node":node(1),"resolver":RESOLVER,"record_key":"addr:60","record_family":"addr","selector_key":"60","coin_type":"60","value_retained":false,"address_bytes_hex":RAW_PAIR_MIXED}),
+    )
+    .await?;
+    event(
+        &pool,
+        "raw-pair-addr",
+        19,
+        1,
+        "RecordChanged",
+        Some(1),
+        json!({"source_event":"AddrChanged","node":node(1),"resolver":RESOLVER,"record_key":"addr:60","record_family":"addr","selector_key":"60","coin_type":"60","value":INVERSE_A}),
+    )
+    .await?;
+    event(
+        &pool,
+        "raw-pair-version",
+        20,
+        0,
+        "RecordVersionChanged",
+        Some(1),
+        json!({"source_event":"VersionChanged","node":node(1),"resolver":RESOLVER,"record_version":"1"}),
+    )
+    .await?;
+    link(&pool, "raw-pair-link", 21, 0, Some(1), 3).await?;
+    let lower = RAW_PAIR_MIXED.to_ascii_lowercase();
+    let expected = Expectations {
+        index_misses: vec![(
+            21,
+            format!(
+                "resolves_to {lower} coin 60 resource {} addr:60",
+                resource(1)
+            ),
+        )],
+        ..Expectations::none()
+    };
+    run_expecting(&pool, 21, None, RunMode::Normal, &expected).await?;
+    for address in [lower.as_str(), RAW_PAIR_MIXED] {
+        let page = bigname_storage::families::records::load_family_address_records_page(
+            &pool,
+            address,
+            "60",
+            None,
+            bigname_storage::AddressNamesCurrentDedupe::Surface,
+            None,
+            None,
+            bigname_storage::AddressNamesCurrentSort::Name,
+            bigname_storage::AddressNamesCurrentOrder::Asc,
+            None,
+            10,
+        )
+        .await?;
+        let resources: Vec<_> = page
+            .entries
+            .iter()
+            .map(|entry| entry.record_resource_id.to_string())
+            .collect();
+        assert_eq!(resources, [resource(1)], "{address}");
+    }
+    let listed: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM address_records_current
+         WHERE address = $1 AND record_resource_id = $2::uuid",
+    )
+    .bind(&lower)
+    .bind(resource(1))
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(listed, 1, "today lists the raw-bytes address");
+    db.cleanup().await?;
+    Ok(())
+}
 
 // A normalized record whose `value` is an explicit JSON null, as
 // crates/project/testdata/sql/stage/linked_records_fixture.sql sets up, is a success to today's
