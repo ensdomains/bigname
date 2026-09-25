@@ -1652,7 +1652,13 @@ record-id records with resolver links, grants and account approvals, aliases,
 child edges, reverse tuples and claims, and the address associations. Each row
 belongs to one key and holds what the latest events of that key left, clears
 included: a zero pointer, record id `0`, a revoked grant or an inactive alias
-stays a row. A row goes only when nothing remains for its key.
+stays a row. A row goes only when nothing remains for its key. Each grant also
+carries `registration_position`, state new to the families rather than a copy of
+a served value: the position of the resource's latest `RegistrationGranted` or
+`RegistrationReserved` before the grant, earlier events of the grant's own block
+included, so the publishing steps can tell which registration of the resource a
+grant was written under. The served permissions read keeps no such value and
+masks by the resource's current registration.
 
 Registration and lease state also keeps every registration, renewal, release,
 reservation, expiry change and token transfer of a lease or ENSv2 triple as a
