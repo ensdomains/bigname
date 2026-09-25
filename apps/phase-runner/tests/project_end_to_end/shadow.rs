@@ -989,11 +989,13 @@ fn gives(read: Option<&ShadowName>, field: &str, value: &Value) -> bool {
         .is_some_and(|computed| same(&computed, value))
 }
 
-/// The cause shown for each differing field of one name, in `diffs` order. Every cause rests
-/// on the name's retained lifecycle events rebuilt from the publication-visible log, not on the
-/// family rows: read in the canonical order (through the refolding path, so the stored key
-/// states and triple summaries are not read either) they must give the field's shadow value,
-/// so a wrong fact on a family row fails the fields it decides and no other.
+/// The cause shown for each differing field of one name, in `diffs` order. The families must
+/// first hold exactly the retained facts the log gives the name (`retention::name_differs`).
+/// Every cause then rests on the name's retained lifecycle events rebuilt from the
+/// publication-visible log, not on the family rows: read in the canonical order (through the
+/// refolding path, so the stored key states and triple summaries are not read either) they
+/// must give the field's shadow value, so a wrong fact on a retained lifecycle row fails the
+/// fields it decides. Facts the retention check does not rebuild are listed in `retention.rs`.
 fn name_excuses(
     prefetched: &ExcuseInputs,
     clock: &Clock,

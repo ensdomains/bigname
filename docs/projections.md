@@ -1817,11 +1817,21 @@ production readers serve at the same publication, field by field. Every log
 read these checks make takes only the
 [publication-visible events](glossary.md#publication-visible-event): activated,
 canonical, at the canonical lineage's hash for their height and at or below the
-target, the set family intake reads. A name's checks read its retained lifecycle
-events rebuilt from that log rather than the family rows, and those rebuilt
-events read in the canonical order must give the shadow value, so a wrong fact
-on a family row fails the fields it decides. A differing field passes in two
-cases only. The first is a disclosed same-block ordering case: reading the
+target, the set family intake reads. A comparison is for one publication, a
+height and its block's hash: before its first read and after its last, the block
+must be readable and the families and the served publication must both stand on
+it, or it reports nothing. Before any difference of a name or resource can pass,
+the families must hold exactly the retained facts the log gives it under step
+2's retention rules, in both directions: the binding candidates with their
+handoffs, the epoch starts, triples, key states and retained lifecycle events,
+each event under the key step 2 derives, and the node's owner-setting events. A
+name's checks then read its retained lifecycle events rebuilt from that log
+rather than the family rows, and those rebuilt events read in the canonical
+order must give the shadow value, so a missing, extra or misfiled retained
+event, or a wrong fact on one, fails the fields it decides. The wrapper rows,
+other names' candidates and a candidate's surface namehash are not rebuilt, and
+the retained decoded name is not read, so a wrong value there is not caught by
+these checks. A differing field passes in two cases only. The first is a disclosed same-block ordering case: reading the
 rebuilt events with that block in the old generated-id order must give exactly
 the served value. For a resource's permission rows, admin powers and restriction
 block it passes only in one direction: the resource's rebuilt events keep the
@@ -1843,8 +1853,9 @@ starts and the SurfaceBounds, which the registration's authority kind and key
 read too, equal their rebuild from the event log, and a control field only when
 the owner-setting events do as well. The second is a named
 cause whose own check holds for that field. Both named causes are served-side
-bugs. A step 2 family gap is never a named cause: its fields stay mismatches and
-fail the run until the owning reducer is fixed.
+bugs. A step 2 family gap is never a named cause: where it changes a compared
+field and the checks above see it, the field stays a mismatch and fails the run
+until the owning reducer is fixed.
 
 Under Tate's ruling an expired or released ENSv2 registration stays ENSv2 and
 is served unregistered. Three served-side bugs break that rule today, and the
