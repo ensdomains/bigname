@@ -2290,6 +2290,16 @@ but general public reads are not enabled; (2) *shadow comparison*:
 running a new read surface in parallel with an existing one and diffing
 responses during a migration (the identity route's `profile=shadow`).
 
+## Shadow read
+
+a value computed from the [owned key families](#owned-key-family) by the
+readers in `bigname_storage::families::control`, compared with the value the
+production reader serves from today's tables at the same publication. Shadow
+reads run only in tests and the fixture-corpus harness. A difference passes only
+as a disclosed same-block ordering case or under a named family finding, and
+no API response uses a shadow read
+([projections](projections.md#owned-key-families)).
+
 ## Sidecar
 
 a retired legacy companion-table pattern that precomputed

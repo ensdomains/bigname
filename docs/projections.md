@@ -1636,8 +1636,8 @@ gives it. The address-to-name and address-to-record index rows are not kept
 state: after every block and every undo they are derived again for the keys the
 block touched. The resolver classification table exists but is not filled yet.
 
-These tables are shadows today. Nothing reads them, and no served value
-depends on them. After each Project batch commits and its progress is
+These tables are shadows today. No served response reads them, and no served
+value depends on them. After each Project batch commits and its progress is
 recorded, the phase runner applies the families block by block, each block in
 a transaction of its own, from the family marker (`project_family_marker`) up
 to the served marker. A block applies only on top of the block before it on
@@ -1664,6 +1664,19 @@ until then they cost one extra pass per batch, reported as
 `phase_runner_project_families_seconds`,
 `phase_runner_project_family_lag_blocks` and
 `phase_runner_project_family_skips_total`.
+
+The first readers of these tables live in the storage crate
+(`bigname_storage::families::control`) and run only in tests. They rebuild a
+name's registration and control blocks from the lease, wrapper, registry and
+identity families, and a resource's permission rows, restriction block,
+registry binding and registry-operator rows from the grant, approval, wrapper
+and registry families, all at the publication's block clock. The Project fixture
+tests and the phase runner's fixture-corpus run compare each value with what the
+production readers serve at the same publication. A difference passes only as a
+disclosed same-block ordering case, where the canonical order and the old
+generated-id order disagree, or under a named finding about a step 2 family,
+reported rather than patched. Anything else fails the run. These are
+[shadow reads](glossary.md#shadow-read). No API route calls them.
 
 ## Index baseline
 
