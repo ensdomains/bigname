@@ -20,6 +20,7 @@ const OWNER: &str = "0x00000000000000000000000000000000000000aa";
 const ZERO: &str = "0x0000000000000000000000000000000000000000";
 const OTHER: &str = "0x00000000000000000000000000000000000000bb";
 const THIRD: &str = "0x00000000000000000000000000000000000000cc";
+const OPERATOR: &str = "0x00000000000000000000000000000000000000e1";
 const V1_REGISTRAR: &str = "ens_v1_registrar_l1";
 const V1_REGISTRY: &str = "ens_v1_registry_l1";
 
@@ -856,6 +857,73 @@ async fn a_bindingless_zero_transfer_then_a_subregistry_write_is_ownerless() -> 
     assert_eq!(
         selection(&fixture).await?["ownerless_registry"],
         json!(true)
+    );
+    fixture.cleanup().await
+}
+
+/// Codex thread PRRT_kwDOSJpxAs6l63Qy: a registry-binding same-block delta that changes the
+/// binding's owner moves the registry-operator rows with it. A SubregistryChanged whose getter
+/// is THIRD and an AuthorityTransferred whose getter is OTHER share one log, written in that
+/// order; OTHER has approved OPERATOR on the registry. Today's binding is the transfer's
+/// (OTHER), so the summary serves OPERATOR's row; the canonical binding is the
+/// SubregistryChanged's (THIRD), so the families serve none. The operator difference passes
+/// only because the rows computed from each rebuilt binding equal the served and shadow rows.
+#[tokio::test]
+async fn a_same_block_binding_delta_moves_the_registry_operator_rows() -> Result<()> {
+    let fixture = Fixture::new("families_shadow_registry_operator_delta", 20).await?;
+    let lease = uuid(1);
+    bound(&fixture, &lease).await?;
+    for (kind, getter) in [
+        ("SubregistryChanged", THIRD),
+        ("AuthorityTransferred", OTHER),
+    ] {
+        fixture
+            .write(
+                11,
+                1,
+                kind,
+                V1_REGISTRY,
+                Some(&name(1)),
+                Some(&lease),
+                json!({"source_event": "NewOwner", "node": node(2), "child_node": node(1),
+                       "owner": OTHER, "owner_getter": getter, "emitter_role": "registry"}),
+                REGISTRY,
+            )
+            .await?;
+    }
+    fixture
+        .event(
+            Event::new(
+                "registry-approval",
+                10,
+                5,
+                "AccountPermissionChanged",
+                V1_REGISTRY,
+            )
+            .after(json!({
+                "subject": OPERATOR, "relation_kind": "operator", "approved": true,
+                "scope": {"kind": "account", "chain_id": CHAIN, "authority_kind": "registry",
+                          "authority_contract": REGISTRY,
+                          "authority_contract_instance_id": "00000000-0000-0000-0000-0000000000e5",
+                          "owner": OTHER},
+                "effective_powers": ["registry_control"],
+                "grant_source": {"kind": "raw_log", "source_event": "ApprovalForAll"},
+                "revocation_source": null, "inheritance_path": [],
+                "transfer_behavior": {"mode": "owner_scoped", "on_holder_change": "ceases_to_apply"},
+                "source_event": "ApprovalForAll",
+            }))
+            .raw(json!({"emitting_address": REGISTRY})),
+        )
+        .await?;
+    let report = publish_and_compare(&fixture, 12).await?;
+    shadow_support::assert_counts(
+        &report,
+        &[],
+        &[
+            ("d12_same_block_order:effective_operator_rows", 1),
+            ("d12_same_block_order:registry_binding/event_ids", 1),
+            ("d12_same_block_order:registry_binding/registry_owner", 1),
+        ],
     );
     fixture.cleanup().await
 }

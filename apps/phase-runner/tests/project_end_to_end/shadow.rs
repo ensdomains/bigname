@@ -34,6 +34,8 @@
 //!   every family observation reaching the resource equals its canonical rebuild, the canonical
 //!   binding equals the shadow one whole, today's binding equals the served one whole, and the
 //!   two select different events.
+//!   The registry-operator rows pass with the binding only when the rows computed from each
+//!   rebuilt binding equal the shadow and served rows.
 //!
 //! Named causes, each a place where the families and today's builders disagree, reported
 //! rather than patched (step 3 changes no reducer and no served table):
@@ -88,7 +90,7 @@ use bigname_storage::{
             ShadowName, evaluate, load_name_facts, load_shadow_names, membership::maxima_of,
         },
         permissions::{
-            ResourceInput, ShadowPermissions, effective_operator_rows, grant_json,
+            ResourceInput, ServedApproval, ShadowPermissions, effective_operator_rows, grant_json,
             load_shadow_approvals, load_shadow_permissions, load_shadow_permissions_in,
         },
         position::{EventOrder, Position},
@@ -546,28 +548,9 @@ pub async fn compare(pool: &PgPool, chain: &str, target: i64) -> Result<Report> 
                     ..diff
                 }),
             );
-            let computed: BTreeMap<(String, String), Value> =
-                effective_operator_rows(chain, resource, &binding, &approvals)
-                    .into_iter()
-                    .map(|row| {
-                        let value = json!({
-                            "subject": row.subject, "scope": row.scope,
-                            "scope_kind": "account", "scope_detail": row.scope_detail,
-                            "record_resource_selector": null,
-                            "grant_relation": "operator",
-                            "effective_powers": row.effective_powers,
-                            "grant_source": row.grant_source, "revocation_source": null,
-                            "inheritance_path": row.inheritance_path,
-                            "transfer_behavior": row.transfer_behavior,
-                        });
-                        ((row.subject, row.scope), value)
-                    })
-                    .collect();
+            let computed = operator_rows_json(chain, resource, &binding, &approvals);
             let served = served_operators.get(resource).cloned().unwrap_or_default();
-            let (served, computed) = (
-                Value::Array(served.into_values().collect()),
-                Value::Array(computed.into_values().collect()),
-            );
+            let served = Value::Array(served.into_values().collect());
             if !same(&served, &computed) {
                 diffs.push(Difference {
                     field: "effective_operator_rows".into(),
@@ -590,10 +573,17 @@ pub async fn compare(pool: &PgPool, chain: &str, target: i64) -> Result<Report> 
         // families' observations that reach the resource are exactly what the log gives, the
         // canonical rebuild equals the shadow binding, the today's-order rebuild equals the
         // served one, and the two select different events.
+        // The registry-operator rows follow the binding's owner and contract, so they pass with
+        // it only when the rows computed from each rebuilt binding equal the served and shadow
+        // rows.
+        let follows_binding = |field: &str| {
+            field.starts_with("registry_binding/") || field == "effective_operator_rows"
+        };
         if let Some((served_binding, shadow_binding)) = &binding_values
-            && diffs.iter().zip(&excuses).any(|(diff, excuse)| {
-                diff.field.starts_with("registry_binding/") && *excuse == Excuse::None
-            })
+            && diffs
+                .iter()
+                .zip(&excuses)
+                .any(|(diff, excuse)| follows_binding(&diff.field) && *excuse == Excuse::None)
         {
             if binding_orders.is_none() {
                 binding_orders =
@@ -601,8 +591,21 @@ pub async fn compare(pool: &PgPool, chain: &str, target: i64) -> Result<Report> 
             }
             let orders = binding_orders.as_ref().expect("rebuilt above");
             if orders.same_block_delta(resource, served_binding, shadow_binding) {
+                let rows = |bindings: &BTreeMap<String, RegistryBinding>| {
+                    let binding = bindings.get(resource).cloned().unwrap_or_default();
+                    operator_rows_json(chain, resource, &binding, &approvals)
+                };
+                let (canonical_rows, legacy_rows) = (rows(&orders.canonical), rows(&orders.legacy));
                 for (diff, excuse) in diffs.iter().zip(excuses.iter_mut()) {
-                    if diff.field.starts_with("registry_binding/") && *excuse == Excuse::None {
+                    if *excuse != Excuse::None {
+                        continue;
+                    }
+                    let passes = if diff.field == "effective_operator_rows" {
+                        same(&canonical_rows, &diff.shadow) && same(&legacy_rows, &diff.served)
+                    } else {
+                        diff.field.starts_with("registry_binding/")
+                    };
+                    if passes {
                         *excuse = Excuse::SameBlockOrder;
                     }
                 }
@@ -985,6 +988,34 @@ async fn control_facts_hold(pool: &PgPool, chain: &str, facts: &NameFacts) -> Re
             })
     });
     Ok(owners_hold && starts_hold && bounds_hold)
+}
+
+/// A resource's registry-operator rows as the effective-permission reader adds them, from its
+/// registry binding and the account approvals, in (subject, scope) order.
+fn operator_rows_json(
+    chain: &str,
+    resource: &str,
+    binding: &RegistryBinding,
+    approvals: &[ServedApproval],
+) -> Value {
+    let rows: BTreeMap<(String, String), Value> =
+        effective_operator_rows(chain, resource, binding, approvals)
+            .into_iter()
+            .map(|row| {
+                let value = json!({
+                    "subject": row.subject, "scope": row.scope,
+                    "scope_kind": "account", "scope_detail": row.scope_detail,
+                    "record_resource_selector": null,
+                    "grant_relation": "operator",
+                    "effective_powers": row.effective_powers,
+                    "grant_source": row.grant_source, "revocation_source": null,
+                    "inheritance_path": row.inheritance_path,
+                    "transfer_behavior": row.transfer_behavior,
+                });
+                ((row.subject, row.scope), value)
+            })
+            .collect();
+    Value::Array(rows.into_values().collect())
 }
 
 /// A resource's registry binding as the summary serves it (permission_resources.rs:71-79).
