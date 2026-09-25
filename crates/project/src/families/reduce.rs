@@ -153,9 +153,10 @@ pub(crate) fn namehash_of(logical_name_id: &str) -> Option<String> {
 
 /// A JSON number whose value lies from 0 to `high`, as `jsonb_typeof(value) = 'number' AND
 /// (... ->> field)::numeric BETWEEN 0 AND high` reads it: the value decides, not its spelling, so
-/// `1.0`, `1.5` and `1e3` count as the numbers they are. Numbers arrive as serde numbers without
-/// arbitrary precision, an integer exactly and anything else as the nearest f64; a non-integral
-/// value within 2048 of 2^64 - 1 is indistinguishable from 2^64 and reads as out of range.
+/// `1.0`, `1.5` and `1000.0` count as the numbers they are (a jsonb literal `1e3` is already
+/// numeric 1000). Numbers arrive as serde numbers without arbitrary precision, an integer
+/// exactly and anything else as the nearest f64; a non-integral value within 2048 of 2^64 - 1
+/// is indistinguishable from 2^64 and reads as out of range.
 pub(crate) fn json_number_between(value: Option<&Value>, high: u64) -> Option<&serde_json::Number> {
     let Some(Value::Number(number)) = value else {
         return None;

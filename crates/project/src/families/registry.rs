@@ -256,6 +256,12 @@ fn address(value: Option<&str>) -> bool {
 /// before the cutoff and ends at or after it (name_authority/build.sql:4-12). A binding opened
 /// in the block starts at the block time plus its log's microseconds, so the block's integer
 /// time would miss it and keep the binding it closed.
+///
+/// The cutoff comes from the lineage row at the block's number and hash, which `read_block`
+/// read as readable in this transaction; the cutoff read does not filter canonicality, so an
+/// orphaning since then still finds it. Were the row gone, the query would return no rows and
+/// every named observation of the block would fall back to its own resource: no rows, never a
+/// binding read at a wrong time.
 async fn current_resources(
     transaction: &mut Transaction<'_, Postgres>,
     context: &Context<'_>,

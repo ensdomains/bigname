@@ -385,7 +385,9 @@ async fn wrapper_numbers_match_the_served_numeric_reads() -> Result<()> {
         json!(1),
         json!(1.0),
         json!(1.5),
-        json!(1e3),
+        // json!(1e3) is the f64 1000.0, which jsonb receives spelled 1000.0. A literal 1e3 in
+        // a jsonb payload becomes numeric 1000 and is kept on both sides as an integer.
+        json!(1000.0),
         json!(-1),
         json!(-0.0),
         json!(-0.5),
