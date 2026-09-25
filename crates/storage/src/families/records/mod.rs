@@ -46,8 +46,8 @@ pub use links::{
 };
 pub use pointer::{FamilyResourcePointer, load_family_resource_pointer};
 pub use resolves_to::{
-    FamilyAddressRecordsPage, load_family_address_records_page,
-    load_family_address_records_page_detail,
+    FamilyAddressRecords, FamilyAddressRecordsPage, load_family_address_records,
+    load_family_address_records_page, page_family_address_records,
 };
 pub use reverse::{FamilyReverseClaim, load_family_reverse_claim};
 pub use shadow::{ShadowReport, compare_family_reads};

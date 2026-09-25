@@ -183,32 +183,32 @@ pub async fn load_family_address_records_page(
     cursor: Option<&AddressNamesCurrentSortedCursor>,
     page_size: u64,
 ) -> Result<AddressRecordsCurrentPage> {
-    Ok(load_family_address_records_page_detail(
-        pool, address, coin_type, namespaces, dedupe_by, q, authority, sort, order, cursor,
-        page_size,
-    )
-    .await?
-    .page)
+    let records = load_family_address_records(pool, address, coin_type).await?;
+    let page = page_family_address_records(
+        pool, &records, namespaces, dedupe_by, q, authority, sort, order, cursor, page_size,
+    );
+    Ok(page.await?.page)
 }
 
-/// [`load_family_address_records_page`] with the entries only the retained values found.
-#[allow(clippy::too_many_arguments)]
-pub async fn load_family_address_records_page_detail(
+/// Every served record of the families that resolves to an address for a coin type (with its
+/// ENSIP-19 default fallback), before name eligibility and paging. Finding the candidates scans
+/// every retained address value (no index serves it) and assembles a record inventory per
+/// candidate, so a caller that pages through an address loads this once and pages over it with
+/// [`page_family_address_records`]. Only the harness reads it.
+pub struct FamilyAddressRecords {
+    address: String,
+    coin_type: String,
+    records: Vec<RecordRow>,
+    /// Per candidate resource, the coin types the derived index found it through.
+    indexed: BTreeMap<Uuid, BTreeSet<String>>,
+}
+
+/// Load [`FamilyAddressRecords`] for `address` and `coin_type`.
+pub async fn load_family_address_records(
     pool: &PgPool,
     address: &str,
     coin_type: &str,
-    namespaces: Option<&[String]>,
-    dedupe_by: AddressNamesCurrentDedupe,
-    q: Option<&str>,
-    authority: Option<&str>,
-    sort: AddressNamesCurrentSort,
-    order: AddressNamesCurrentOrder,
-    cursor: Option<&AddressNamesCurrentSortedCursor>,
-    page_size: u64,
-) -> Result<FamilyAddressRecordsPage> {
-    if sort != AddressNamesCurrentSort::Name || authority.is_some() {
-        bail!("the family address reader supports the name sort without an authority filter");
-    }
+) -> Result<FamilyAddressRecords> {
     let address = address.to_ascii_lowercase();
     let mut coin_types = vec![coin_type.to_owned()];
     if may_fall_back(coin_type) {
@@ -234,8 +234,43 @@ pub async fn load_family_address_records_page_detail(
         };
         records.extend(record_rows(&chain_id, &inventory, &address));
     }
+    Ok(FamilyAddressRecords {
+        address,
+        coin_type: coin_type.to_owned(),
+        records,
+        indexed,
+    })
+}
+
+/// One page over loaded [`FamilyAddressRecords`]; the arguments after `records` are those of
+/// `load_address_records_current_page`.
+#[allow(clippy::too_many_arguments)]
+pub async fn page_family_address_records(
+    pool: &PgPool,
+    records: &FamilyAddressRecords,
+    namespaces: Option<&[String]>,
+    dedupe_by: AddressNamesCurrentDedupe,
+    q: Option<&str>,
+    authority: Option<&str>,
+    sort: AddressNamesCurrentSort,
+    order: AddressNamesCurrentOrder,
+    cursor: Option<&AddressNamesCurrentSortedCursor>,
+    page_size: u64,
+) -> Result<FamilyAddressRecordsPage> {
+    if sort != AddressNamesCurrentSort::Name || authority.is_some() {
+        bail!("the family address reader supports the name sort without an authority filter");
+    }
     let page = page(
-        pool, &address, coin_type, &records, namespaces, dedupe_by, q, order, cursor, page_size,
+        pool,
+        &records.address,
+        &records.coin_type,
+        &records.records,
+        namespaces,
+        dedupe_by,
+        q,
+        order,
+        cursor,
+        page_size,
     )
     .await?;
     let index_misses = page
@@ -243,9 +278,10 @@ pub async fn load_family_address_records_page_detail(
         .iter()
         .filter(|entry| {
             let coin = entry.record_key.trim_start_matches("addr:");
-            indexed
+            records
+                .indexed
                 .get(&entry.record_resource_id)
-                .is_none_or(|coins: &BTreeSet<String>| !coins.contains(coin))
+                .is_none_or(|coins| !coins.contains(coin))
         })
         .map(|entry| (entry.record_resource_id, entry.record_key.clone()))
         .collect();

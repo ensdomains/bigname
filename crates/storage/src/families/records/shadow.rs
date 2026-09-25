@@ -14,8 +14,8 @@ use uuid::Uuid;
 
 use super::{
     Difference, FamilyAttribution, check_compatibility_pairs, compare_address_records,
-    compare_primary_name, compare_record_inventory, load_family_address_records_page_detail,
-    load_family_record_inventory_detail, load_family_reverse_claim,
+    compare_primary_name, compare_record_inventory, load_family_address_records,
+    load_family_record_inventory_detail, load_family_reverse_claim, page_family_address_records,
 };
 use crate::{
     AddressNamesCurrentDedupe, AddressNamesCurrentOrder, AddressNamesCurrentSort,
@@ -307,13 +307,14 @@ async fn all_family_pages(
     coin_type: &str,
     page_size: u64,
 ) -> Result<FamilyPages> {
+    // The candidates and their inventories are loaded once; every page reads the same rows.
+    let records = load_family_address_records(pool, address, coin_type).await?;
     let (mut entries, mut pages, mut misses, mut cursor) =
         (Vec::new(), Vec::new(), Vec::new(), None);
     loop {
-        let page = load_family_address_records_page_detail(
+        let page = page_family_address_records(
             pool,
-            address,
-            coin_type,
+            &records,
             None,
             AddressNamesCurrentDedupe::Surface,
             None,
