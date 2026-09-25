@@ -2148,7 +2148,10 @@ it is live: when it is unregistered or lapses, the label is available again and
 the tombstone returns. The reservation counts by name: after `unregister` bumps
 the token version, the reservation carries a versioned token id and no
 resource, so it is not a fact of the released resource, and Interpret writes its
-end as a named release without a resource. A version-zero reservation, such as
+end as a named release without a resource. That resource-less end counts only
+when the name's latest earlier reservation-or-registration fact is a
+reservation with the same registry instance and token id, so the end of an
+older reservation in another registry does not end a later one. A version-zero reservation, such as
 one in a replacement registry, carries its own resource, and its end carries the
 same resource. Either end returns the tombstone. A release on that resource
 counts as the reservation's end only when the name's latest earlier
