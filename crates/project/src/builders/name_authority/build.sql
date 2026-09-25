@@ -62,7 +62,8 @@
             -- (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L195-L207 @ ens_v2@a971bd64)
             SELECT DISTINCT ON (fact.logical_name_id)
                    fact.logical_name_id, fact.resource_id, fact.event_kind,
-                   fact.block_number, fact.transaction_index, fact.log_index
+                   fact.block_number, fact.transaction_index, fact.log_index,
+                   fact.normalized_event_id
             FROM (
                 SELECT binding.logical_name_id, event.resource_id, event.event_kind,
                        event.block_number, event.transaction_index, event.log_index,
@@ -255,8 +256,12 @@
             -- (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L196-L207 @ ens_v2@a971bd64)
             -- (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L255-L258 @ ens_v2@a971bd64)
             -- (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L294-L297 @ ens_v2@a971bd64)
+            -- The winning fact is kept apart from the tombstone's resource: an end of a
+            -- reservation can have no resource, or another one, and still restore the tombstone of
+            -- the registration the name was last bound to. `name_current` serves that fact.
             SELECT lifecycle.logical_name_id,
-                   lifecycle.resource_id AS released_v2_resource_id
+                   lifecycle.resource_id AS released_v2_resource_id,
+                   lifecycle.normalized_event_id AS released_v2_event_id
             FROM latest_v2_lifecycle lifecycle
             WHERE lifecycle.event_kind = 'RegistrationReleased'
               AND NOT EXISTS (
@@ -448,7 +453,7 @@
                        THEN 'migration_authority_transition' END AS proof_kind,
                    migration.proof_event_id, migration.proof_event_identity,
                    migration.transition_id,
-                   released.released_v2_resource_id,
+                   released.released_v2_resource_id, released.released_v2_event_id,
                    released_v1.released_v1_resource_id, released_v1.released_v1_binding_id,
                    -- The arm was selected from event history with nothing open: the sole arm with
                    -- history, or ENSv1 when both arms have history and no ENSv2 release tombstone
@@ -574,6 +579,12 @@
                    WHEN selected.selected_binding_id IS NULL THEN 'unregistered'
                    ELSE 'registered'
                END AS lifecycle_state,
+               -- A released ENSv2 tombstone's resource and the lifecycle fact that decided it,
+               -- which the registration section serves as its release.
+               CASE WHEN selected.selected_authority_arm = 'ens_v2'
+                   THEN selected.released_v2_resource_id END AS released_v2_resource_id,
+               CASE WHEN selected.selected_authority_arm = 'ens_v2'
+                   THEN selected.released_v2_event_id END AS released_v2_event_id,
                CASE
                    WHEN ownerless_profile.eligible THEN NULL
                    WHEN selected.selected_binding_id IS NULL THEN 'current_authority_not_projected'

@@ -144,6 +144,22 @@ async fn event_in_tx(
         .bind(identity).bind(logical).bind(resource).bind(event.kind).bind(event.family).bind(CHAIN).bind(HASH).bind(event.log).bind(event.after).bind(tx).fetch_one(pool).await?)
 }
 
+/// What the name serves: its resource and binding and the registration, control and resolver
+/// sections of its summary.
+async fn served(pool: &PgPool, logical: &str) -> Result<Value> {
+    Ok(sqlx::query_scalar(
+        "SELECT jsonb_build_object(
+                'resource_id', resource_id, 'surface_binding_id', surface_binding_id,
+                'registration', declared_summary -> 'registration',
+                'control', declared_summary -> 'control',
+                'resolver', declared_summary -> 'resolver')
+         FROM name_current WHERE logical_name_id = $1",
+    )
+    .bind(logical)
+    .fetch_one(pool)
+    .await?)
+}
+
 async fn run(pool: &PgPool) -> bigname_project::Result<()> {
     Engine::new(pool.clone())
         .run_batch(BatchRequest {

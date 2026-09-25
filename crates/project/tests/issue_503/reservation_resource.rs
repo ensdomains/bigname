@@ -433,6 +433,7 @@ async fn sequence_selections(
     let block_10 = selection(&incremental, &logical).await?;
     project(&incremental, 11, Some(at_10)).await?;
     let block_11 = selection(&incremental, &logical).await?;
+    let served_11 = served(&incremental, &logical).await?;
     incremental_db.cleanup().await?;
     let (full_db, full) = database(&format!("{prefix}_full")).await?;
     seed_sequence(&full, index, name, facts).await?;
@@ -441,6 +442,11 @@ async fn sequence_selections(
         selection(&full, &logical).await?,
         block_11,
         "{prefix}: one batch and incremental batches agree"
+    );
+    assert_eq!(
+        served(&full, &logical).await?,
+        served_11,
+        "{prefix}: one batch and incremental batches serve the same fields"
     );
     full_db.cleanup().await?;
     Ok((v1_resource, block_10, block_11))
@@ -894,5 +900,57 @@ async fn a_resourceless_release_without_a_known_identity_ends_nothing() -> Resul
             "{case}: an unknown identity is not a match"
         );
     }
+    Ok(())
+}
+
+// One selection, not two (Pro review of b83f829c, question 1): after B0's release, B/T is reserved
+// in registry B, then C/T with the same token in registry C, then C/T is unregistered. Authority
+// selection's latest fact is C/T's end, which restores the released ENSv2 tombstone on B0. The
+// registration section serves that same fact on B0's resource and binding: before, its own fold
+// kept B/T's older reservation, served `reserved` and dropped the binding.
+#[tokio::test]
+async fn a_tombstone_restored_by_a_resourceless_release_serves_that_release() -> Result<()> {
+    let facts = [
+        versioned_reservation("bt-reserve", REGISTRY_B, TOKEN_B1, 10, 1),
+        versioned_reservation("ct-reserve", REGISTRY_C, TOKEN_B1, 10, 2),
+        versioned_release("ct-release", REGISTRY_C, TOKEN_B1, 11, 1),
+    ];
+    let (_, _, block_11) = sequence_selections(
+        "tombstone_after_ct_release",
+        122,
+        "tombstone-ct.eth",
+        &facts,
+    )
+    .await?;
+    assert_eq!(
+        block_11,
+        (
+            Some("ens_v2".to_owned()),
+            Some("unregistered".to_owned()),
+            Some(uuid(15, 122))
+        )
+    );
+    let (db, pool) = database("tombstone_after_ct_release_served").await?;
+    let (logical, _, _) = seed_sequence(&pool, 122, "tombstone-ct.eth", &facts).await?;
+    project(&pool, 11, None).await?;
+    let served = served(&pool, &logical).await?;
+    assert_eq!(
+        (
+            served["resource_id"].as_str(),
+            served["surface_binding_id"].as_str(),
+            served["registration"]["status"].as_str(),
+            served["registration"]["latest_event_kind"].as_str(),
+            served["control"]["status"].as_str(),
+        ),
+        (
+            Some(uuid(15, 122).as_str()),
+            Some(uuid(16, 122).as_str()),
+            Some("released"),
+            Some("RegistrationReleased"),
+            Some("unregistered"),
+        ),
+        "{served}"
+    );
+    db.cleanup().await?;
     Ok(())
 }
