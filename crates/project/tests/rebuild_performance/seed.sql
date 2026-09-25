@@ -15,7 +15,8 @@
 -- `AddrChanged` sibling, other coins, text records, version bumps) for the ENSv1 names.
 -- Every known name's binding pairs with a SurfaceBound at the same (transaction, log), as the
 -- adapter guarantees. That adds one `seed:bound:` event per known non-wrapped name; the wrapped
--- names already carried theirs. No served count changes.
+-- names already carried theirs. Served row counts before and after that change were not
+-- compared; four served builders read SurfaceBound, so they may differ from the older seed.
 INSERT INTO chain_lineage (chain_id, block_hash, block_number, block_timestamp, canonicality_state)
 SELECT '__CHAIN__', '0x' || lpad(to_hex(block), 64, '0'), block,
        to_timestamp(1700000000 + block * 12), 'canonical'::canonicality_state

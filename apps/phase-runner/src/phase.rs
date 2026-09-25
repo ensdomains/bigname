@@ -244,6 +244,13 @@ pub trait Phase: Send + Sync {
         Box::pin(async {})
     }
 
+    /// Checked once an operator redo of the chain has finished and been recorded. An error fails
+    /// the redo command without undoing its recorded work; Project reports owned key families
+    /// that its finishing runs left short of the served marker.
+    fn after_redo(&self, _chain_id: &str) -> RunnerResult<()> {
+        Ok(())
+    }
+
     fn revalidates_completed(
         &self,
         _chain_id: &str,

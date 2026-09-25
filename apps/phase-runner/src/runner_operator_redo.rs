@@ -60,7 +60,11 @@ impl PhaseRunner {
             RedoPhase::Phase(phase) => {
                 Box::pin(self.redo_phase(chain, phase, range, cancellation)).await
             }
-        }
+        }?;
+        // The redo is recorded; work that follows it and fell short fails the command.
+        PhaseName::ALL
+            .into_iter()
+            .try_for_each(|name| self.phases.get(name).after_redo(&chain.chain_id))
     }
 
     /// Race the pre-batch setup against a stop. The batch loop that follows handles
