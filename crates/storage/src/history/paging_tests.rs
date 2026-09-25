@@ -423,9 +423,9 @@ async fn explain_page(
 
 /// A product cursor at `event_identity`: its id and its full history position.
 async fn cursor_at(connection: &mut PgConnection, event_identity: &str) -> Result<HistoryCursor> {
-    let (normalized_event_id, block_number, chain_id, block_hash, transaction_hash, log_index) =
+    let (normalized_event_id, block_number, chain_id, block_hash, transaction_index, log_index) =
         sqlx::query_as(
-            "SELECT normalized_event_id, block_number, chain_id, block_hash, transaction_hash,
+            "SELECT normalized_event_id, block_number, chain_id, block_hash, transaction_index,
                     log_index
              FROM normalized_events WHERE event_identity = $1",
         )
@@ -439,7 +439,8 @@ async fn cursor_at(connection: &mut PgConnection, event_identity: &str) -> Resul
             block_number,
             chain_id,
             block_hash,
-            transaction_hash,
+            transaction_index,
+            transaction_hash: None,
             log_index,
         }),
     })

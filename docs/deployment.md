@@ -1135,6 +1135,30 @@ installs before the matching API serves, as for any rotation. Until then the
 API refuses to serve the new build's snapshots, as described above, so no
 request sees an empty table as a complete answer.
 
+### Child registration history ordered by transaction index
+
+The build that orders history rows within a block by transaction index changes
+the ordering key of
+[`child_registration_events`](projections.md#child-registration-events) from
+the event's transaction hash to its transaction index, or -1 when the event has
+none. It changes `crates/project/src`, so it rotates the
+[interpreter content hash](glossary.md#interpreter-content-hash) for every
+chain. Schema-migration
+`20260926120000_child_registration_events_transaction_index_key.sql` converts
+an existing table: it drops `child_registration_events_parent_history_idx`,
+rewrites every row's `transaction_order_key` from its event in
+`normalized_events` by `event_identity` (a row whose event is gone gets -1 and
+is never served), changes the column to `bigint` with a `>= -1` check, and
+rebuilds the index on the same columns. The column change rewrites the whole
+table and, with the index rebuild, holds an exclusive lock on it until the
+migration commits, so name history with `include=child_registrations` waits
+for it. Apply it in the deployment's planned migration window; its running
+time on the Sepolia table has not been measured yet. A fresh schema gets the
+new column from `init-schema`, and a rerun on a table that already has the
+`bigint` key only resets the column and index comments. The full Project
+rebuild the rotation requires rewrites every row again, so the backfill only
+keeps the table consistent with the new readers until that rebuild finishes.
+
 ### ENSv1 mirror ancestor gate
 
 The build that stops deriving an

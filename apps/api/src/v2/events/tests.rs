@@ -42,6 +42,7 @@ fn storage_event(event_kind: &str, logical_name_id: Option<&str>) -> StorageHist
         block_hash: Some("0xblock".to_owned()),
         block_timestamp: None,
         transaction_hash: Some("0xtx".to_owned()),
+        transaction_index: Some(0),
         log_index: Some(5),
         raw_fact_ref: json!({}),
         derivation_kind: "direct".to_owned(),

@@ -371,7 +371,10 @@ pub(super) fn push_history_order(builder: &mut QueryBuilder<'_, Postgres>, order
 
 /// `Asc` is the exact reverse of the canonical `Desc` sort, including null
 /// placement, so the keyset predicate can be derived by swapping the compared
-/// rows. For a read bound to one chain, `normalized_events_chain_block_number_desc_idx`
+/// rows. Within a block, rows follow transaction index, log index, then
+/// `event_identity`; a row with no transaction index sorts before every
+/// transaction of its block, so last newest first and first oldest first. The
+/// transaction hash is not an ordering key. For a read bound to one chain, `normalized_events_chain_block_number_desc_idx`
 /// on `(chain_id, block_number DESC NULLS LAST)` serves the leading key of both:
 /// `Desc` reads it forward and `Asc` reads it backward (`ASC NULLS FIRST`). The
 /// remaining keys only break ties within a block. The ascending
@@ -387,7 +390,7 @@ pub(super) fn push_history_order_terms(
             ne.block_number DESC NULLS LAST,
             ne.chain_id ASC NULLS LAST,
             ne.block_hash DESC NULLS LAST,
-            ne.transaction_hash DESC NULLS LAST,
+            ne.transaction_index DESC NULLS LAST,
             ne.log_index DESC NULLS LAST,
             ne.event_identity DESC
         "#,
@@ -397,7 +400,7 @@ pub(super) fn push_history_order_terms(
             ne.block_number ASC NULLS FIRST,
             ne.chain_id DESC NULLS FIRST,
             ne.block_hash ASC NULLS FIRST,
-            ne.transaction_hash ASC NULLS FIRST,
+            ne.transaction_index ASC NULLS FIRST,
             ne.log_index ASC NULLS FIRST,
             ne.event_identity ASC
         "#,
@@ -408,3 +411,7 @@ pub(super) fn push_history_order_terms(
 #[cfg(test)]
 #[path = "paging_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "d12_order_tests.rs"]
+mod d12_order_tests;

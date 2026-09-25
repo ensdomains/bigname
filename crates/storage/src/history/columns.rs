@@ -54,6 +54,7 @@ pub(super) fn push_history_columns(
             ne.block_hash,
             rb.block_timestamp,
             ne.transaction_hash,
+            ne.transaction_index,
             ne.log_index,
             ne.raw_fact_ref,
             ne.derivation_kind,

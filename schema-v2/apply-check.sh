@@ -531,7 +531,7 @@ intentional_phase_migration_skips=()
 refusal_assertions_passed=0
 expected_refusal_assertions=263
 predecessor_shape_proof_count=0
-expected_predecessor_shape_proof_count=46
+expected_predecessor_shape_proof_count=47
 refusal_probe_seconds=0
 timing_started=$SECONDS
 
@@ -643,7 +643,8 @@ for migration_file in \
     "$ROOT/migrations/20260926100300_project_families_records.sql" \
     "$ROOT/migrations/20260926100400_project_families_permissions.sql" \
     "$ROOT/migrations/20260926100500_project_families_topology.sql" \
-    "$ROOT/migrations/20260926100600_project_families_addresses.sql"
+    "$ROOT/migrations/20260926100600_project_families_addresses.sql" \
+    "$ROOT/migrations/20260926120000_child_registration_events_transaction_index_key.sql"
 do
     emit_phase_migration "$migration_file" empty-schema | run_psql
 done
@@ -912,7 +913,9 @@ for migration_file in \
     "$ROOT/migrations/20260926100500_project_families_topology.sql" \
     "$ROOT/migrations/20260926100500_project_families_topology.sql" \
     "$ROOT/migrations/20260926100600_project_families_addresses.sql" \
-    "$ROOT/migrations/20260926100600_project_families_addresses.sql"
+    "$ROOT/migrations/20260926100600_project_families_addresses.sql" \
+    "$ROOT/migrations/20260926120000_child_registration_events_transaction_index_key.sql" \
+    "$ROOT/migrations/20260926120000_child_registration_events_transaction_index_key.sql"
 do
     emit_phase_migration "$migration_file" baseline-first | run_psql
 done
@@ -990,8 +993,9 @@ DROP TABLE expected_address_record_comments;
 SQL
 } | run_psql
 # The child-registration membership table is additive. Drop the fresh baseline
-# table, recreate it from the schema-migration, and require the same columns,
-# constraints, indexes, and comments as the baseline; then prove a rerun keeps it.
+# table, recreate it from the schema-migration and move its transaction key to the
+# transaction index, and require the same columns, constraints, indexes, and
+# comments as the baseline; then prove a rerun of both keeps it.
 {
     printf 'SET search_path TO "%s";\n' "$scratch_schema"
     cat <<'SQL'
@@ -1020,6 +1024,7 @@ WHERE classoid = 'pg_class'::regclass AND indrelid = 'child_registration_events'
 DROP TABLE child_registration_events;
 SQL
     emit_phase_migration "$ROOT/migrations/20260923150000_child_registration_events.sql" preceding-shape
+    emit_phase_migration "$ROOT/migrations/20260926120000_child_registration_events_transaction_index_key.sql" preceding-shape
     cat <<'SQL'
 CREATE TEMP TABLE actual_child_registration_shape AS
 SELECT 'column' AS kind, attname::text AS name,
@@ -1060,10 +1065,14 @@ DROP TABLE expected_child_registration_shape;
 DROP TABLE actual_child_registration_shape;
 SQL
     emit_phase_migration "$ROOT/migrations/20260923150000_child_registration_events.sql" baseline-first
+    emit_phase_migration "$ROOT/migrations/20260926120000_child_registration_events_transaction_index_key.sql" baseline-first
 } | run_psql
 assert_migration_context_count "$ROOT/migrations/20260923150000_child_registration_events.sql" empty-schema 1
 assert_migration_context_count "$ROOT/migrations/20260923150000_child_registration_events.sql" preceding-shape 1
 assert_migration_context_count "$ROOT/migrations/20260923150000_child_registration_events.sql" baseline-first 3
+assert_migration_context_count "$ROOT/migrations/20260926120000_child_registration_events_transaction_index_key.sql" empty-schema 1
+assert_migration_context_count "$ROOT/migrations/20260926120000_child_registration_events_transaction_index_key.sql" preceding-shape 1
+assert_migration_context_count "$ROOT/migrations/20260926120000_child_registration_events_transaction_index_key.sql" baseline-first 3
 # The reverse index previously required authority identity even when a name had
 # a readable serving resource. Prove that exact predecessor upgrades and that
 # repeat application preserves the required record-resource identity.

@@ -97,11 +97,14 @@ pub(super) fn push_declaration_manifest(
     );
 }
 
-/// The chain position Project orders events by, with missing parts first.
+/// The canonical event position: block number, transaction index and log index with missing
+/// parts first, then `event_identity`, so an event with no transaction position sorts before
+/// every transaction of its block and exact-position ties follow the identity. The generated
+/// normalized event id never takes part. It is a row value, compared field by field.
 pub(super) fn position(alias: &str) -> String {
     format!(
-        "ARRAY[COALESCE({alias}.block_number, -1), COALESCE({alias}.transaction_index, -1),
-               COALESCE({alias}.log_index, -1), {alias}.normalized_event_id]"
+        "ROW(COALESCE({alias}.block_number, -1), COALESCE({alias}.transaction_index, -1),
+             COALESCE({alias}.log_index, -1), {alias}.event_identity)"
     )
 }
 

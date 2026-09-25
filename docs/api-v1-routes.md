@@ -62,8 +62,12 @@ The history collections, `/v1/events`, name history (with or without
 `include=child_registrations`), and address history, are
 [history walks](glossary.md#history-walk), not snapshots.
 A history cursor holds the position of the last row it returned in the history
-order: block number, chain, block hash, transaction hash, log index, and the
-row's `event_identity` as the final tiebreaker. It binds the route's anchors,
+order: block number, chain, block hash, transaction index, log index, and the
+row's `event_identity` as the final tiebreaker. Within one block, rows follow
+the order their transactions and logs ran in. A row with no transaction position, such
+as a release derived from an expiry at the block boundary, sorts before every
+transaction of its block: last in its block newest first, first oldest first.
+The transaction hash a row carries is not an ordering key. It binds the route's anchors,
 filters, and sort like any cursor, but no publication and no evaluation time. A
 continuation reads whatever is published when it runs and returns the rows
 after that position, whether or not the row the cursor came from still exists.
@@ -86,14 +90,23 @@ position; that is the same walk rule, not an error. A history cursor returns
 `400 invalid_input` when it is malformed or replayed against a different query,
 before publication admission. A history cursor issued before this rule names
 its last row instead of carrying its position: its publication token is
-ignored and it resumes from that row's position. Three distinct `409 stale`
+ignored and it resumes from that row's position. A history cursor issued while
+the history order still compared transaction hashes carries its row's
+transaction hash instead of its transaction index. It is accepted: the
+transaction index is read from its row, or, when that row is gone, from any
+other event of the same transaction in the same block, and the walk continues
+from that position; the next cursor carries the transaction index. Because
+rows of different transactions in one block used to sort by transaction hash,
+such a continuation can land on a different neighbour inside the cursor's
+block than it would have before. Three distinct `409 stale`
 outcomes remain. A requested namespace with no publication returns "not
 available; retry after indexing is ready". An Interpret redo that is active or
 ran during the read returns the redo retry. Both are temporary: retry the same
 request with the same cursor, which continues once the publication is available
 or the redo has finished. A cursor issued before this rule whose row no longer
-exists returns the restart once, and only that one requires restarting without
-the cursor. A parameter that pins a history walk to
+exists, and a cursor carrying a transaction hash whose row and its
+transaction in that block no longer exist, return the restart once, and only those require
+restarting without the cursor. A parameter that pins a history walk to
 one block may be added later; it is not part of this contract.
 
 These current-state and history collections still reject `at`,
@@ -1812,7 +1825,11 @@ pipeline fields; `GET /v1/diagnostics/events` remains the raw surface.
 `include=child_registrations` merges the registrations of the requested name's
 direct children (its [direct child
 registrations](glossary.md#direct-child-registration)) into its history: one collection, one chain-position order,
-one cursor. It adds rows, not fields. A child row has exactly the fields any
+one cursor. A child row takes its place in the history order by its block,
+transaction index, log index, and `event_identity`, exactly as a row of the
+name does, so a page boundary can fall between the rows of one block whichever
+kind they are, and a block holding child registrations in several transactions
+lists them in transaction order. It adds rows, not fields. A child row has exactly the fields any
 `registration` row has, and `include=data` and `include=raw` expand it the same
 way.
 

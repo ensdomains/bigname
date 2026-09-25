@@ -35,6 +35,7 @@ pub(super) fn decode_history_event(row: PgRow) -> Result<HistoryEvent> {
         block_hash: crate::sql_row::get(&row, "block_hash")?,
         block_timestamp: crate::sql_row::get(&row, "block_timestamp")?,
         transaction_hash: crate::sql_row::get(&row, "transaction_hash")?,
+        transaction_index: crate::sql_row::get(&row, "transaction_index")?,
         log_index: crate::sql_row::get(&row, "log_index")?,
         raw_fact_ref: crate::sql_row::get(&row, "raw_fact_ref")?,
         derivation_kind: crate::sql_row::get(&row, "derivation_kind")?,

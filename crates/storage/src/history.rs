@@ -46,7 +46,7 @@ pub use child_registrations::{
     load_name_history_page_with_child_registrations,
 };
 pub use event_page::{load_event_history_page, load_event_history_page_with_redo_policy};
-pub use keyset::load_history_anchor_position;
+pub use keyset::{load_history_anchor_position, load_history_transaction_index};
 pub use options::{
     ChainBlockRange, HistoryBlockWindow, HistoryOrder, HistoryPageOptions, HistoryScope,
 };
@@ -78,6 +78,7 @@ pub struct HistoryEvent {
     pub block_hash: Option<String>,
     pub block_timestamp: Option<OffsetDateTime>,
     pub transaction_hash: Option<String>,
+    pub transaction_index: Option<i64>,
     pub log_index: Option<i64>,
     pub raw_fact_ref: Value,
     pub derivation_kind: String,
@@ -111,6 +112,12 @@ pub struct HistoryPosition {
     pub block_number: Option<i64>,
     pub chain_id: Option<String>,
     pub block_hash: Option<String>,
+    /// The transaction's index in its block. The history order compares it; a missing index
+    /// sorts before every transaction of the block.
+    pub transaction_index: Option<i64>,
+    /// The transaction hash a cursor issued before the order compared transaction indexes
+    /// carries. The order never reads it; it only lets such a cursor find its transaction's
+    /// index (`load_history_transaction_index`).
     pub transaction_hash: Option<String>,
     pub log_index: Option<i64>,
 }

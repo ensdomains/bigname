@@ -261,6 +261,7 @@ mod tests {
             block_hash: Some("0xblock".to_owned()),
             block_timestamp: Some(OffsetDateTime::from_unix_timestamp(1_700_000_123).unwrap()),
             transaction_hash: Some("0xtx".to_owned()),
+            transaction_index: Some(0),
             log_index: Some(4),
             raw_fact_ref: json!({"kind": "raw_log"}),
             derivation_kind: "direct".to_owned(),

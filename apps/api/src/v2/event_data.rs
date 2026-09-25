@@ -240,6 +240,7 @@ mod tests {
             block_hash: Some("0xblock".to_owned()),
             block_timestamp: None,
             transaction_hash: Some("0xtx".to_owned()),
+            transaction_index: Some(0),
             log_index: Some(0),
             raw_fact_ref: json!({
                 "kind": "raw_log",

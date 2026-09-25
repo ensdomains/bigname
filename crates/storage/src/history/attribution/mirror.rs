@@ -21,7 +21,7 @@ use sqlx::{PgConnection, Postgres, QueryBuilder, Row};
 use uuid::Uuid;
 
 use super::sql::{
-    CLEARED, ENS_V1_POINTER_FAMILIES, ENS_V2_POINTER_FAMILIES, push_declaration_manifest,
+    CLEARED, ENS_V1_POINTER_FAMILIES, ENS_V2_POINTER_FAMILIES, position, push_declaration_manifest,
     push_pointer_ctes, push_readable_event, push_readable_surface,
 };
 
@@ -254,7 +254,7 @@ fn push_mirror_writes<'a>(
         candidates AS (
             SELECT walk.resource_id, walk.chain_id, walk.ancestor_depth, walk.queried_node,
                    registry.mirrored_pointer_namespace, registry.mirrored_resolver_address,
-                   registry.mirrored_pointer_event_id
+                   registry.mirrored_pointer_position
             FROM walk
             JOIN bigname_phase.name_surfaces surface
               ON surface.namespace = walk.namespace
@@ -270,7 +270,7 @@ fn push_mirror_writes<'a>(
             JOIN LATERAL (
                 SELECT registry.namespace AS mirrored_pointer_namespace,
                        lower(registry.after_state ->> 'resolver') AS mirrored_resolver_address,
-                       registry.normalized_event_id AS mirrored_pointer_event_id
+                       {} AS mirrored_pointer_position
                 FROM bigname_phase.normalized_events registry
                 WHERE registry.chain_id = walk.chain_id
                   AND registry.event_kind = 'ResolverChanged'
@@ -279,7 +279,8 @@ fn push_mirror_writes<'a>(
                                registry.after_state ->> 'node') IS NOT NULL
                   AND lower(COALESCE(registry.after_state ->> 'child_node', registry.after_state ->> 'namehash',
                                      registry.after_state ->> 'node')) = lower(surface.namehash)
-                  AND registry.namespace = surface.namespace"
+                  AND registry.namespace = surface.namespace",
+        position("registry")
     ));
     push_readable_event(builder, "registry", published);
     builder.push(format!(
@@ -287,7 +288,7 @@ fn push_mirror_writes<'a>(
                 ORDER BY registry.block_number DESC NULLS LAST,
                          registry.transaction_index DESC NULLS LAST,
                          registry.log_index DESC NULLS LAST,
-                         registry.normalized_event_id DESC
+                         registry.event_identity DESC
                 LIMIT 1
             ) registry
               ON registry.mirrored_resolver_address IS NOT NULL
@@ -296,7 +297,7 @@ fn push_mirror_writes<'a>(
         nearest AS (
             SELECT DISTINCT ON (resource_id) *
             FROM candidates
-            ORDER BY resource_id, ancestor_depth ASC, mirrored_pointer_event_id DESC
+            ORDER BY resource_id, ancestor_depth ASC, mirrored_pointer_position DESC
         ),
         followed AS (
             SELECT nearest.*

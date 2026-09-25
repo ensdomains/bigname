@@ -1018,7 +1018,7 @@ CREATE TABLE IF NOT EXISTS child_registration_events (
     chain_id text NOT NULL,
     block_number bigint NOT NULL,
     block_hash text NOT NULL,
-    transaction_order_key text NOT NULL,
+    transaction_order_key bigint NOT NULL,
     log_order_key bigint NOT NULL,
     event_kind text NOT NULL,
     manifest_version bigint NOT NULL,
@@ -1039,6 +1039,7 @@ CREATE TABLE IF NOT EXISTS child_registration_events (
     CHECK (btrim(chain_id) <> ''),
     CHECK (block_number >= 0),
     CHECK (btrim(block_hash) <> ''),
+    CHECK (transaction_order_key >= -1),
     CHECK (log_order_key >= -1),
     CHECK (event_kind IN ('RegistrationGranted', 'LabelRegistered')),
     CHECK (manifest_version >= 0),
@@ -1078,7 +1079,7 @@ COMMENT ON COLUMN child_registration_events.block_number IS
 COMMENT ON COLUMN child_registration_events.block_hash IS
     'This value is the event block hash, a history order key and the readable-lineage check.';
 COMMENT ON COLUMN child_registration_events.transaction_order_key IS
-    'This value is the event transaction hash, or an empty string when the event has none, so it orders as history orders a missing hash.';
+    'This value is the event transaction index in its block, or -1 when the event has none, so it orders as history orders a missing index.';
 COMMENT ON COLUMN child_registration_events.log_order_key IS
     'This value is the event log index, or -1 when the event has none, so it orders as history orders a missing index.';
 COMMENT ON COLUMN child_registration_events.event_kind IS
@@ -1096,7 +1097,7 @@ COMMENT ON COLUMN child_registration_events.last_recomputed_at IS
 COMMENT ON COLUMN child_registration_events.inserted_at IS
     'This Project-owned maintenance time records the first insertion of the row.';
 COMMENT ON INDEX child_registration_events_parent_history_idx IS
-    'This bounded index serves one parent''s child registrations in history order on one chain, in both directions. Every key is a bounded identifier or hash.';
+    'This bounded index serves one parent''s child registrations in history order on one chain, in both directions. Every key is a bounded identifier, hash or number.';
 COMMENT ON INDEX child_registration_events_chain_block_idx IS
     'This bounded index lets Project replace one chain''s rows by block range.';
 
