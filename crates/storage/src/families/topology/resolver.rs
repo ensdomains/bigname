@@ -107,13 +107,33 @@ pub async fn load_resolver_shadow(
             summary_version,
         }));
     }
-    let position = json_position(
-        "jsonb_build_object('block_number', COALESCE(manifest.block_number, -1),
-             'transaction_index', manifest.transaction_index, 'log_index', manifest.log_index,
-             'event_identity', manifest.event_identity)",
-    );
-    let declared: Option<(Value, Option<i64>, String)> = sqlx::query_as(&format!(
-        "SELECT jsonb_strip_nulls(jsonb_build_object(
+    // The latest readable update of each manifest at or below the family marker's block, in
+    // the order today's manifest staging uses (crates/project/src/stage.rs,
+    // `create_manifests`: latest written first); only then is it asked whether it is active.
+    let declared: Option<(Value, Option<i64>, String)> = sqlx::query_as(
+        "WITH clock AS (
+             SELECT current_block_number AS block_number
+             FROM bigname_phase.project_family_marker WHERE chain_id = $1
+         ), latest AS (
+             SELECT DISTINCT ON (event.source_manifest_id)
+                    event.source_manifest_id, event.normalized_event_id, event.namespace,
+                    event.source_family, event.after_state
+             FROM bigname_phase.normalized_events event
+             LEFT JOIN bigname_phase.chain_lineage lineage
+               ON lineage.chain_id = event.chain_id
+              AND lineage.block_hash = event.block_hash
+              AND lineage.block_number = event.block_number
+             WHERE event.chain_id = $1
+               AND event.event_kind = 'SourceManifestUpdated'
+               AND event.source_manifest_id IS NOT NULL
+               AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
+               AND (event.block_hash IS NULL
+                    OR lineage.canonicality_state IN ('canonical', 'safe', 'finalized'))
+               AND (event.block_number IS NULL
+                    OR event.block_number <= (SELECT block_number FROM clock))
+             ORDER BY event.source_manifest_id, event.normalized_event_id DESC
+         )
+         SELECT jsonb_strip_nulls(jsonb_build_object(
                     'source_family', manifest.source_family,
                     'role', declaration ->> 'role',
                     'mirror', CASE WHEN declaration ->> 'role' = 'ensv1_mirror_resolver'
@@ -121,20 +141,17 @@ pub async fn load_resolver_shadow(
                             'mirrored_source_family', 'ens_v1_resolver_l1',
                             'mirrored_registry_source_family', 'ens_v1_registry_l1',
                             'mirrored_registry_address', lower(manifest.after_state
-                                #>> '{{manifest_payload,correlation_addresses,ens_v1_registry}}')))
+                                #>> '{manifest_payload,correlation_addresses,ens_v1_registry}')))
                         END)),
                 manifest.source_manifest_id, manifest.namespace
-         FROM bigname_phase.normalized_events manifest
+         FROM latest manifest
          CROSS JOIN LATERAL jsonb_array_elements(COALESCE(
-             manifest.after_state #> '{{manifest_payload,contracts}}', '[]'::jsonb)) declaration
-         WHERE manifest.event_kind = 'SourceManifestUpdated'
-           AND manifest.chain_id = $1
-           AND manifest.after_state ->> 'rollout_status' = 'active'
-           AND manifest.canonicality_state IN ('canonical', 'safe', 'finalized')
+             manifest.after_state #> '{manifest_payload,contracts}', '[]'::jsonb)) declaration
+         WHERE manifest.after_state ->> 'rollout_status' = 'active'
            AND lower(declaration ->> 'address') = $2
-         ORDER BY {position} DESC
-         LIMIT 1"
-    ))
+         ORDER BY manifest.normalized_event_id DESC
+         LIMIT 1",
+    )
     .bind(chain_id)
     .bind(&address)
     .fetch_optional(pool)
