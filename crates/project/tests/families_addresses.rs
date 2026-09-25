@@ -741,3 +741,70 @@ async fn a_named_write_keeps_its_name_through_a_rebinding_versions_and_a_link() 
     fixture.assert_rebuild_equal(16).await?;
     fixture.cleanup().await
 }
+
+// A registrar transfer the adapter emitted unnamed reaches the name's fold only when a later
+// binding names its row. The fold's token holder is the latest transfer's recipient, so the
+// transfer named later replaces an earlier named one.
+#[tokio::test]
+async fn a_transfer_named_later_becomes_the_name_folds_token_holder() -> Result<()> {
+    let fixture = Fixture::new("families_addresses_decoded_transfer", 20).await?;
+    let lease = uuid(6);
+    let registrar = "ens_v1_registrar_l1";
+    fixture
+        .write(
+            9,
+            1,
+            "TokenControlTransferred",
+            registrar,
+            Some(&name(4)),
+            Some(&lease),
+            json!({"namehash": node(4), "to": CAROL}),
+            R1,
+        )
+        .await?;
+    fixture
+        .write(
+            10,
+            1,
+            "TokenControlTransferred",
+            registrar,
+            None,
+            Some(&lease),
+            json!({"namehash": node(4), "to": DAVE}),
+            R1,
+        )
+        .await?;
+    fixture.apply(10, FamilyMode::Normal).await;
+    fixture
+        .binding(&uuid(106), &name(4), &lease, "ens_v1", 11, 1, None)
+        .await?;
+    fixture
+        .write(
+            11,
+            1,
+            "SurfaceBound",
+            registrar,
+            Some(&name(4)),
+            Some(&lease),
+            json!({"authority_kind": "registrar"}),
+            R1,
+        )
+        .await?;
+    fixture.apply(11, FamilyMode::Normal).await;
+    let fold = fixture.rows("project_address_name_fold").await?;
+    let fold = fold
+        .iter()
+        .find(|row| row["logical_name_id"] == json!(name(4)))
+        .expect("the name has a fold row");
+    assert_eq!(
+        (
+            fold["token_holder"].clone(),
+            fold["token_holder_position"]["block_number"].clone()
+        ),
+        (json!(DAVE), json!(10)),
+        "the later transfer, named at 11, is the token holder"
+    );
+    fixture.assert_undo_restores(11).await?;
+    fixture.assert_rebuild_equal(11).await?;
+    fixture.cleanup().await
+}
