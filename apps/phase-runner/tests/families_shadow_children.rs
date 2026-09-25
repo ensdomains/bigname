@@ -19,7 +19,6 @@ use bigname_storage::{
 };
 use serde_json::json;
 use shadow_fixture::{CHAIN, Fixture, ZERO_ADDRESS, address, unexpected, uuid, word};
-use sqlx::PgPool;
 use sqlx::types::time::OffsetDateTime;
 
 const V1_REGISTRY: &str = "ens_v1_registry_l1";
@@ -238,66 +237,26 @@ async fn ens_v1_edges_match_the_served_children() -> Result<()> {
     transfer(&fixture, "kept-transfer", 5, &owner(55), 8).await?;
     transfer(&fixture, "surfaced-zero", 8, ZERO_ADDRESS, 8).await?;
     fixture.publish(9).await?;
-    // Expected difference: the served incremental batch keeps the surfaced child the zero
-    // Transfer at block 8 removed. The children scope takes only an event's `child_node`
-    // (crates/project/src/scope.rs:204-212) and a registry Transfer carries `node`, so the child's
-    // row is never restaged; a rebuild at the same block drops it, as the shadow does.
+    // The zero Transfer at block 8 removes the surfaced child from both readers. The served
+    // incremental batch used to keep it until a rebuild, because the children scope took only an
+    // event's `child_node`; main's #958 restages transferred child edges, so the served page now
+    // drops it at once and matches the shadow under every filter.
     let report = fixture.compare(2).await?;
+    unexpected(&report, &[])?;
     let surfaced = format!("ens:{}", word(8));
-    // The difference is exactly that row, under the filters that serve it, which are all of them.
     let (_, clock) = shadow::publication(fixture.pool(), CHAIN).await?;
-    let pin = SurfacedChildPin {
-        parent: &first,
-        row: FamilyChildRow {
-            parent_logical_name_id: first.clone(),
-            child_logical_name_id: surfaced.clone(),
-            namespace: "ens".to_owned(),
-            canonical_display_name: "surfaced.first.eth".to_owned(),
-            namehash: word(8),
-            labelhash: Some(word(0x5008)),
-            owner: Some(owner(8)),
-            registrant: None,
-        },
-        filters: shadow::child_filters(clock, true, &[]),
-        // Each sort in both orders, with and without the expiry fence: the child has no expiry,
-        // so the fence keeps it.
-        serving: (0..12).collect(),
-    };
-    let expected = pin.check(fixture.pool()).await?;
-    // A second difference on the exempted row still fails: a changed served owner leaves the
-    // known difference in place but breaks the pin.
-    sqlx::query("UPDATE children_current SET owner = $2 WHERE child_logical_name_id = $1")
-        .bind(&surfaced)
-        .bind(owner(99))
-        .execute(fixture.pool())
-        .await?;
-    ensure!(
-        pin.check(fixture.pool()).await.is_err(),
-        "a changed owner on the exempted row passed the pin"
-    );
-    unexpected(&fixture.compare(2).await?, &expected)?;
-    sqlx::query("UPDATE children_current SET owner = $2 WHERE child_logical_name_id = $1")
-        .bind(&surfaced)
-        .bind(owner(8))
-        .execute(fixture.pool())
-        .await?;
-    unexpected(&report, &expected)?;
-    let served: Vec<String> = sqlx::query_scalar(
-        "SELECT child_logical_name_id FROM children_current
-         WHERE parent_logical_name_id = $1 ORDER BY 1",
-    )
-    .bind(&first)
-    .fetch_all(fixture.pool())
-    .await?;
-    let shadowed = shadow::shadow_children(fixture.pool(), &first).await?;
-    let extra: Vec<&String> = served
-        .iter()
-        .filter(|child| !shadowed.contains(*child))
-        .collect();
-    ensure!(
-        extra == [&surfaced],
-        "served {served:?}, shadow {shadowed:?}"
-    );
+    for (index, filter) in shadow::child_filters(clock, true, &[]).iter().enumerate() {
+        let (served_total, served, shadow_total, shadowed) =
+            shadow::walk_children(fixture.pool(), &first, filter, 2).await?;
+        ensure!(
+            served == shadowed
+                && served_total == shadow_total
+                && !served
+                    .iter()
+                    .any(|row| row.child_logical_name_id == surfaced),
+            "filter {index}: served {served_total} {served:?}, shadow {shadow_total} {shadowed:?}"
+        );
+    }
     for filter in [
         ChildrenCurrentPageFilter::default(),
         ChildrenCurrentPageFilter {
@@ -952,59 +911,6 @@ async fn rejected_migration_evidence_hides_a_locked_parents_children() -> Result
         fixture.cleanup().await?;
     }
     Ok(())
-}
-
-/// A child the served table keeps and the shadow drops: under each filter in `serving` the served
-/// rows are the shadow rows plus exactly `row`, whole, and the served total is one higher; under
-/// every other filter both serve the same rows. Returns the mismatch keys it explains.
-struct SurfacedChildPin<'a> {
-    parent: &'a str,
-    row: FamilyChildRow,
-    filters: Vec<ChildrenCurrentPageFilter<'static>>,
-    serving: Vec<usize>,
-}
-
-impl SurfacedChildPin<'_> {
-    async fn check(&self, pool: &PgPool) -> Result<Vec<String>> {
-        let mut keys = Vec::new();
-        for (index, filter) in self.filters.iter().enumerate() {
-            let (served_total, served_rows, shadow_total, shadow_rows) =
-                shadow::walk_children(pool, self.parent, filter, 2).await?;
-            let id = &self.row.child_logical_name_id;
-            let exceptional: Vec<&FamilyChildRow> = served_rows
-                .iter()
-                .filter(|row| &row.child_logical_name_id == id)
-                .collect();
-            let without: Vec<FamilyChildRow> = served_rows
-                .iter()
-                .filter(|row| &row.child_logical_name_id != id)
-                .cloned()
-                .collect();
-            ensure!(
-                !shadow_rows
-                    .iter()
-                    .any(|row| &row.child_logical_name_id == id),
-                "filter {index}: the shadow serves {id}"
-            );
-            if self.serving.contains(&index) {
-                ensure!(
-                    exceptional == [&self.row]
-                        && without == shadow_rows
-                        && served_total == shadow_total + 1,
-                    "filter {index}: served {served_total} {served_rows:?}, \
-                     shadow {shadow_total} {shadow_rows:?}"
-                );
-                keys.push(format!("children of {} filter {index}", self.parent));
-            } else {
-                ensure!(
-                    served_rows == shadow_rows && served_total == shadow_total,
-                    "filter {index}: served {served_total} {served_rows:?}, \
-                     shadow {shadow_total} {shadow_rows:?}"
-                );
-            }
-        }
-        Ok(keys)
-    }
 }
 
 /// An ENSv2 registration granted in `registry` with the given expiry, or none.
