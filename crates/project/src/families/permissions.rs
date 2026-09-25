@@ -282,10 +282,13 @@ fn apply_grant(rows: &mut RowSet, chain: &Value, grant: &Grant<'_>) -> Result<()
             json!({"mode": after.get("transfer_behavior").cloned().unwrap_or(Value::Null)}),
         ),
     );
+    // Revoked is a clear: an empty effective-power array (`grant` admits arrays only), the rows
+    // the served current read drops (permissions.rs, `jsonb_array_length(masked.effective_powers)
+    // > 0`). The revocation source above is provenance only.
     set(
         &mut row,
         "revoked",
-        after.get("revocation_source").is_some_and(Value::is_object),
+        powers.as_array().is_some_and(Vec::is_empty),
     );
     row.entry("registration_position").or_insert(Value::Null);
     put(rows, table, row, event)?;

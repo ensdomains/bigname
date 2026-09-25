@@ -480,3 +480,57 @@ async fn wrapper_numbers_match_the_served_numeric_reads() -> Result<()> {
     fixture.assert_rebuild_equal(10).await?;
     fixture.cleanup().await
 }
+
+// A grant is revoked when its effective powers are empty, the rows the served current read
+// drops (permissions.rs, `jsonb_array_length(masked.effective_powers) > 0`); the revocation
+// source is provenance only.
+#[tokio::test]
+async fn a_grant_is_revoked_exactly_when_its_powers_are_empty() -> Result<()> {
+    let fixture = Fixture::new("families_grant_revoked", 20).await?;
+    let resource = uuid(3);
+    let scope =
+        json!({"kind": "registry", "chain_id": "ethereum-sepolia", "registry_address": REGISTRY});
+    let cases = [
+        (
+            ALICE,
+            json!({"effective_powers": [], "grant_source": {"kind": "raw_log"}}),
+            true,
+        ),
+        (
+            BOB,
+            json!({"effective_powers": ["set_resolver"], "revocation_source": {"kind": "raw_log"}}),
+            false,
+        ),
+    ];
+    for (n, (subject, extra, _)) in (1..).zip(&cases) {
+        let mut after = json!({"subject": subject, "scope": scope, "inheritance_path": [],
+                               "transfer_behavior": "stays"});
+        if let (Value::Object(after), Value::Object(extra)) = (&mut after, extra.clone()) {
+            after.extend(extra);
+        }
+        fixture
+            .write(
+                10,
+                n,
+                "PermissionChanged",
+                "ens_v2_registry_l1",
+                None,
+                Some(&resource),
+                after,
+                REGISTRY,
+            )
+            .await?;
+    }
+    fixture.apply(10, FamilyMode::Normal).await;
+    let rows = fixture.rows("project_grant").await?;
+    for (subject, _, revoked) in cases {
+        let row = rows
+            .iter()
+            .find(|row| row["subject"] == json!(subject))
+            .expect("each subject has a grant row");
+        assert_eq!(row["revoked"], json!(revoked), "{subject}");
+    }
+    fixture.assert_undo_restores(10).await?;
+    fixture.assert_rebuild_equal(10).await?;
+    fixture.cleanup().await
+}
