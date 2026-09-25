@@ -1837,7 +1837,12 @@ the served value. For a resource's permission rows, admin powers and restriction
 block it passes only in one direction: the resource's rebuilt events keep the
 registration live in today's order and lapse it canonically, the served value is
 not empty, and the families read in today's order give it. A served empty value
-against a family row is a mismatch. One ENSv1 NewOwner log yields a
+against a family row is a mismatch. A live registration's restriction block
+reads its registry root's admin powers, so it also passes when only the root's
+lapse differs between the orders and the whole block read in today's order and
+in the canonical order equals the served and shadow block. These checks run for
+the items that differ: a family value equal to the served one is not a
+difference. One ENSv1 NewOwner log yields a
 SubregistryChanged and an AuthorityTransferred at one position; the families keep
 the SubregistryChanged, whose identity sorts last, and today's builders the
 AuthorityTransferred, whose generated id is higher, as the registry-binding

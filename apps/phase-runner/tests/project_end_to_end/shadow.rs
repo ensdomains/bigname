@@ -42,6 +42,9 @@
 //!   resource, must keep the registration live in today's order and
 //!   lapse it in the canonical order, the served value must not be empty, and the whole read in
 //!   today's order must equal it. A served empty value against a canonical row is a mismatch.
+//!   A live registration's restriction block also passes when only its registry root's lapse
+//!   differs between the orders and the whole block read in each order equals the served and
+//!   shadow block respectively (`resource_excuses`).
 //!   For the registry binding, the observations are rebuilt from the publication-visible event
 //!   log (activated, canonical, at the canonical lineage's hash, at or below the target: the set
 //!   family intake reads), independently of the families: for each observation identity (the name, else the
