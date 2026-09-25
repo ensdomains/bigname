@@ -1721,13 +1721,28 @@ field passes in two cases only. The first is a disclosed same-block ordering cas
 reading the same families with that block in the old generated-id order must give
 exactly the served value. The second is a named cause whose own check holds for
 that field. A named cause is either a step 2 family gap, reported rather than
-patched, or a served-side bug. Under Tate's ruling an expired or released ENSv2
-registration stays ENSv2 and is served unregistered. Two served-side bugs break
-that rule today, and the harness can see only the first:
+patched, or a served-side bug. One step 2 gap is named today: step 2 pairs a
+binding with the SurfaceBound at the log its provenance records, so a wrapped
+binding whose NameWrapper SurfaceBound sits at another log keeps no wrapper
+metadata, and the families leave its lease's unnamed rows unstaged where today's
+stage names them. Its check reloads the families with that candidate given the
+block's SurfaceBound and must then give the served value. Another gap is not
+excused and fails: the registry node keeps only its latest owner-setting event,
+so when a later transfer the name's admission leaves out, or a later
+SubregistryChanged, set it, the admitted owner is gone. A fixture pins that
+failure for step 2 to close.
+
+Under Tate's ruling an expired or released ENSv2 registration stays ENSv2 and
+is served unregistered. Three served-side bugs break that rule today, and the
+harness can see the first two:
 
 - When the interpreter's path-expiry release names only the token resource, the
   current reader never sees it and serves the registration as active. The
   families serve it as released. The run prints the names it finds in this shape.
+- When a name has no selected authority arm, the selection reads the missing
+  arm as ENSv2 and can select an ENSv2 release, but the presentation compares
+  the raw arm with ENSv2 and serves that release as live. The families decide
+  both with one resolved arm and serve it released.
 - When the interpreter knows the name, it also closes the ENSv2 binding at expiry.
   If the name has an open ENSv1 lease, the served name authority then selects arm
   ens_v1 and serves that lease. The shadow reads take the authority selection from
@@ -1735,7 +1750,10 @@ that rule today, and the harness can see only the first:
   follow it and agree, so nothing is counted. A fixture pins the served arm, and
   step 6 has to fix it.
 
-Every test asserts its counts exactly, and anything else fails the run. These are
+The comparison covers the fields the readers list. It leaves out `created_at`,
+the lapsed registration's authority, the child rows and the whole-history
+evidence columns. Every test asserts its counted fields exactly, and a differing
+listed field with no disclosed case or named cause fails the run. These are
 [shadow reads](glossary.md#shadow-read). No API route calls them.
 
 ## Index baseline
