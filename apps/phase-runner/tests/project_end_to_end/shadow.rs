@@ -66,7 +66,9 @@
 //!   gives (build.sql:88-95, :101-103): status released, latest kind RegistrationReleased,
 //!   the release's released_at, the expiry the reader's expiry rule gives (the name's latest
 //!   admitted numeric expiry on the key, else the release's own), no registrant or authority,
-//!   control unregistered with nothing else.
+//!   control unregistered with nothing else; and the served value must be what today's
+//!   name-scoped membership gives, the families read in today's order without the unnamed
+//!   release.
 //! - `served_release_presentation_reads_the_raw_arm`: the selection reads a missing authority
 //!   arm as ENSv2 (build.sql:347), so a name with no selected arm can select an ENSv2 release,
 //!   but today's presentation compares the raw arm with 'ens_v2' (build.sql:89, :94, :103) and
@@ -780,6 +782,29 @@ fn serves_the_raw_arm_release(input: &NameInput, shadow: &ShadowName, diff: &Dif
         && same(&diff.served, field(&raw[block], rest))
 }
 
+/// The name's facts as today's name-scoped membership reads them: without the interpreter's
+/// unnamed path-expiry releases, every key folded from its retained events in today's
+/// generated-id order.
+async fn without_unnamed_release(
+    pool: &PgPool,
+    chain: &str,
+    facts: &NameFacts,
+) -> Result<NameFacts> {
+    let mut membership = facts.clone();
+    membership.events.retain(|event| {
+        !(event.original_logical_name_id.is_none()
+            && event.event_kind == "RegistrationReleased"
+            && event.is_path_expiry())
+    });
+    let identities: Vec<String> = membership
+        .events
+        .iter()
+        .map(|event| event.position.event_identity.clone())
+        .collect();
+    membership.order = EventOrder::Generated(generated_ids(pool, chain, &identities).await?);
+    Ok(membership)
+}
+
 /// The cause shown for each differing field of one name, in `diffs` order.
 async fn name_excuses(
     pool: &PgPool,
@@ -789,9 +814,37 @@ async fn name_excuses(
     shadow: &ShadowName,
     diffs: &[Difference],
 ) -> Result<Vec<Excuse>> {
+    if diffs.is_empty() {
+        return Ok(Vec::new());
+    }
+    let Some(facts) = load_name_facts(pool, chain, std::slice::from_ref(input))
+        .await?
+        .pop()
+    else {
+        return Ok(vec![Excuse::None; diffs.len()]);
+    };
+    // The unnamed-release cause passes a field only when today's name-scoped membership gives
+    // the served value: the families read in today's order without the unnamed path-expiry
+    // release (build.sql:322, :366-367 build membership by name).
+    let unnamed: Vec<bool> = diffs
+        .iter()
+        .map(|diff| serves_the_unnamed_release(shadow, diff))
+        .collect();
+    let without_release = if unnamed.contains(&true) {
+        Some(evaluate(
+            &without_unnamed_release(pool, chain, &facts).await?,
+            clock,
+        ))
+    } else {
+        None
+    };
     let mut out = Vec::with_capacity(diffs.len());
-    for diff in diffs {
-        let excuse = if serves_the_unnamed_release(shadow, diff) {
+    for (index, diff) in diffs.iter().enumerate() {
+        let membership_gives_served = without_release
+            .as_ref()
+            .and_then(|membership| shadow_field(membership, &diff.field))
+            .is_some_and(|value| same(&value, &diff.served));
+        let excuse = if unnamed[index] && membership_gives_served {
             Excuse::Known("served_membership_skips_unnamed_path_expiry")
         } else if serves_the_raw_arm_release(input, shadow, diff) {
             Excuse::Known("served_release_presentation_reads_the_raw_arm")
@@ -803,12 +856,6 @@ async fn name_excuses(
     if out.iter().all(|excuse| *excuse != Excuse::None) {
         return Ok(out);
     }
-    let Some(facts) = load_name_facts(pool, chain, std::slice::from_ref(input))
-        .await?
-        .pop()
-    else {
-        return Ok(out);
-    };
 
     let open = |out: &[Excuse], index: usize| out[index] == Excuse::None;
     // The same families read in today's generated-id order at the selectors that use it.

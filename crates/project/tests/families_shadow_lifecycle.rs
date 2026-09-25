@@ -13,7 +13,7 @@ use anyhow::Result;
 use bigname_storage::families::control::lifecycle::ShadowName;
 use serde_json::{Value, json};
 use shadow_support::{Served, assert_counts, publish_and_compare};
-use support::{Event, Fixture, uuid};
+use support::{CHAIN, Event, Fixture, uuid};
 
 const REGISTRY: &str = "0x00000000000000000000000000000000000000e5";
 const ALICE: &str = "0x00000000000000000000000000000000000000aa";
@@ -962,7 +962,70 @@ async fn an_unnamed_path_expiry_on_the_resource_serves_the_release() -> Result<(
         served.registration("latest_event_kind"),
         json!("RegistrationRenewed")
     );
+
+    // Codex threads PRRT_kwDOSJpxAs6l43wy and PRRT_kwDOSJpxAs6l4hOz: the named cause passes a
+    // field only when today's name-scoped membership, the families read without the unnamed
+    // release, gives the served value. A served status the membership does not give, and a
+    // wrong expiry in the families that the shadow presents, each stay a mismatch.
+    let snapshot: Value =
+        sqlx::query_scalar("SELECT declared_summary FROM name_current WHERE logical_name_id = $1")
+            .bind(name(1))
+            .fetch_one(&fixture.pool)
+            .await?;
+    sqlx::query(
+        "UPDATE name_current
+         SET declared_summary = jsonb_set(declared_summary, '{registration,status}', '\"reserved\"')
+         WHERE logical_name_id = $1",
+    )
+    .bind(name(1))
+    .execute(&fixture.pool)
+    .await?;
+    let mutated = shadow_support::compare::compare(&fixture.pool, CHAIN, 16).await?;
+    assert_eq!(
+        failed_fields(&mutated),
+        ["registration/status"],
+        "a served status the membership does not give: {:#?}",
+        mutated.lines
+    );
+    sqlx::query("UPDATE name_current SET declared_summary = $2 WHERE logical_name_id = $1")
+        .bind(name(1))
+        .bind(&snapshot)
+        .execute(&fixture.pool)
+        .await?;
+    sqlx::query(
+        "UPDATE bigname_phase.project_lifecycle_event
+         SET expiry = '1800000999'::jsonb, expiry_seconds = 1800000999
+         WHERE event_kind = 'RegistrationRenewed'",
+    )
+    .execute(&fixture.pool)
+    .await?;
+    let mutated = shadow_support::compare::compare(&fixture.pool, CHAIN, 16).await?;
+    assert!(
+        failed_fields(&mutated).contains(&"registration/expiry".to_owned()),
+        "a wrong family expiry: {:#?}",
+        mutated.lines
+    );
+    assert!(
+        !mutated
+            .known_discrepancy
+            .keys()
+            .any(|field| field.ends_with(":registration/expiry")),
+        "{:#?}",
+        mutated.lines
+    );
     fixture.cleanup().await
+}
+
+/// The fields a comparison fails on, sorted.
+fn failed_fields(report: &shadow_support::compare::Report) -> Vec<String> {
+    let mut fields: Vec<String> = report
+        .lines
+        .iter()
+        .filter(|line| line.starts_with("SEPOLIA_END_TO_END_SHADOW_MISMATCH"))
+        .filter_map(|line| Some(line.split(" field=").nth(1)?.split(' ').next()?.to_owned()))
+        .collect();
+    fields.sort();
+    fields
 }
 
 /// A subregistry rebind moves resource K1 from name 1 to name 2 in one raw log: the adapter
