@@ -231,11 +231,20 @@ pub(crate) async fn undo_target(
         readable.insert((number, hash.clone()), block_readable);
         path.insert((number, hash), prior);
     }
+    // A well-formed journal only steps down, but a malformed one can name a marker already
+    // visited; refuse it rather than follow it forever.
+    let mut visited = std::collections::BTreeSet::new();
     let mut at = current.clone();
     loop {
         let key = (at.number, at.hash.clone());
         if at.number <= limit && readable.get(&key).copied().unwrap_or(false) {
             return Ok(Some(at));
+        }
+        if !visited.insert(key.clone()) {
+            return Err(ProjectError::data_integrity(format!(
+                "the family undo journal of chain {chain_id} has a cycle at block {} ({})",
+                at.number, at.hash
+            )));
         }
         match path.get(&key) {
             Some(Some(prior)) => at = prior.clone(),
