@@ -6,8 +6,9 @@ use bigname_storage::{
 
 // `migrated_at` and the `is_migrated` filter read the activated migration only while ENSv2 is the
 // selected arm (Pro review of PR 953, question 6). These cases read both storage readers directly
-// after Project: a migrated name whose ENSv2 registration was released keeps both, and a migrated
-// name whose selection changes to ENSv1 loses both.
+// after Project: a migrated name whose ENSv2 registration was released stays with ENSv2 and keeps
+// both, also beside a later live ENSv1 lease (product ruling of 2026-09-25), and a migrated name
+// whose selection changes to ENSv1 through a later ENSv2 reservation loses both.
 
 const V1_REGISTRANT: &str = "0x0000000000000000000000000000000000000071";
 const V2_REGISTRANT: &str = "0x0000000000000000000000000000000000000072";
@@ -135,7 +136,7 @@ async fn migration_readers_follow_the_selected_arm_after_a_v2_release() -> Resul
         },
     )
     .await?;
-    // Relet: an ENSv1 lease granted after the release is live.
+    // Relet: an ENSv1 lease granted after the release is live; the release still holds.
     let (relet, _) = released_migrated_name(&pool, 83, "relet.eth").await?;
     live_v1_lease(&pool, &relet, 83, 5).await?;
     // Active: a migrated name whose ENSv2 registration is current, for the positive filter.
@@ -183,7 +184,7 @@ async fn migration_readers_follow_the_selected_arm_after_a_v2_release() -> Resul
     for (logical, arm) in [
         (&retained, "ens_v2"),
         (&reserved, "ens_v1"),
-        (&relet, "ens_v1"),
+        (&relet, "ens_v2"),
     ] {
         assert_eq!(
             authority(&pool, logical).await?.0.as_deref(),
@@ -198,7 +199,7 @@ async fn migration_readers_follow_the_selected_arm_after_a_v2_release() -> Resul
         active.clone(),
     ];
     let timestamps = load_name_migration_transition_timestamps(&pool, &names).await?;
-    let mut expected_migrated = vec![retained.clone(), active.clone()];
+    let mut expected_migrated = vec![retained.clone(), active.clone(), relet.clone()];
     expected_migrated.sort();
     assert_eq!(
         timestamps.keys().cloned().collect::<Vec<_>>(),
@@ -214,13 +215,13 @@ async fn migration_readers_follow_the_selected_arm_after_a_v2_release() -> Resul
             .await?
             .is_empty()
     );
-    // The ENSv1-selected names are held by their live lease, so the ownership reader lists them
-    // for the lease registrant, and only under is_migrated=false.
-    let mut not_migrated = is_migrated_names(&pool, V1_REGISTRANT, false).await?;
-    not_migrated.sort();
-    let mut expected = vec![reserved.clone(), relet.clone()];
-    expected.sort();
-    assert_eq!(not_migrated, expected);
+    // The ENSv1-selected name is held by its live lease, so the ownership reader lists it for the
+    // lease registrant, and only under is_migrated=false. The relet name is released under ENSv2,
+    // so its lease registrant holds no current relation to it.
+    assert_eq!(
+        is_migrated_names(&pool, V1_REGISTRANT, false).await?,
+        vec![reserved.clone()]
+    );
     assert!(
         is_migrated_names(&pool, V1_REGISTRANT, true)
             .await?

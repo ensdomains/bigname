@@ -928,14 +928,15 @@ async fn released_wrapper_registry_child_with_an_open_v1_binding_publishes_no_re
     .bind(CHILD)
     .fetch_one(&pool)
     .await?;
-    // Before the product ruling on released ENSv2 names, the sole open ENSv1 binding holds the
-    // name.
+    // The released registration stays with ENSv2 whatever ENSv1 holds (product ruling of
+    // 2026-09-25), so `name_current` agrees with the omitted relation: released under ENSv2.
+    // Before the ruling the sole open ENSv1 binding held the name.
     assert_eq!(
         authority,
         (
-            Some("ens_v1".into()),
-            Some("registered".into()),
-            Some(V1_RESOURCE.into())
+            Some("ens_v2".into()),
+            Some("unregistered".into()),
+            Some(V2_RESOURCE.into())
         )
     );
     Ok(())

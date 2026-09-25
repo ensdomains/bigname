@@ -77,48 +77,27 @@
             ORDER BY event.logical_name_id, event.block_number DESC,
                      event.transaction_index DESC, event.log_index DESC,
                      event.normalized_event_id DESC
-        ), latest_v1_fact AS (
-            -- For ENSv1 it is the latest lease grant, renewal or release, or registry ownership
-            -- change. Expiry maintenance and token transfers do not start or end a holding.
-            SELECT DISTINCT ON (event.logical_name_id)
-                   event.logical_name_id, event.block_number, event.transaction_index,
-                   event.log_index
-            FROM project_events event
-            WHERE event.logical_name_id IS NOT NULL
-              AND event.source_family LIKE 'ens_v1_%'
-              AND event.event_kind IN (
-                  'RegistrationGranted', 'RegistrationRenewed', 'RegistrationReleased',
-                  'AuthorityTransferred', 'AuthorityEpochChanged'
-              )
-            ORDER BY event.logical_name_id, event.block_number DESC,
-                     event.transaction_index DESC NULLS LAST, event.log_index DESC NULLS LAST,
-                     event.normalized_event_id DESC
         ), released_v2_authority AS (
-            -- A released ENSv2 registration is the name's latest lifecycle fact when no ENSv1
-            -- lease or registry ownership change follows it. It is served as a released
-            -- tombstone only while neither arm holds the name: a live ENSv1 lease still answers
-            -- `ownerOf` and holds it.
-            -- (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L71-L76 @ ens_v1@91c966f)
+            -- A released ENSv2 registration stays with ENSv2 whatever ENSv1 holds (product ruling
+            -- of 2026-09-25): when the latest lifecycle fact of the registration the name was last
+            -- bound to is its release, by `unregister` or by lapsing at expiry, and no ENSv2
+            -- binding is open, the name is the released tombstone even beside a live ENSv1
+            -- lease. A later reservation of the label is a later lifecycle fact and defers to
+            -- ENSv1. The contracts never route a registered label back to ENSv1: `unregister`
+            -- writes the release time as the expiry, the registry returns no resolver for an
+            -- expired entry, and a WrapperRegistry stops answering with ENSV1Resolver for a label
+            -- whose stored expiry is nonzero.
+            -- (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L196-L207 @ ens_v2@a971bd64)
+            -- (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L255-L258 @ ens_v2@a971bd64)
+            -- (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L294-L297 @ ens_v2@a971bd64)
             SELECT lifecycle.logical_name_id,
                    lifecycle.resource_id AS released_v2_resource_id
             FROM latest_v2_lifecycle lifecycle
-            LEFT JOIN latest_v1_fact v1 USING (logical_name_id)
             WHERE lifecycle.event_kind = 'RegistrationReleased'
               AND NOT EXISTS (
                   SELECT 1 FROM open_bindings open
                   WHERE open.logical_name_id = lifecycle.logical_name_id
-              )
-              AND (
-                  v1.logical_name_id IS NULL
-                  OR (
-                      lifecycle.block_number,
-                      COALESCE(lifecycle.transaction_index, -1),
-                      COALESCE(lifecycle.log_index, -1)
-                  ) > (
-                      v1.block_number,
-                      COALESCE(v1.transaction_index, -1),
-                      COALESCE(v1.log_index, -1)
-                  )
+                    AND open.authority_arm = 'ens_v2'
               )
         ), migration_history AS (
             -- The latest ENSv1->ENSv2 migration of the name. It is served history (the
@@ -285,14 +264,14 @@
                        -- Follow the chain (docs/adrs/0007-follow-the-chain-ens-authority.md). Only a
                        -- registered ENSv2 entry opens an ENSv2 binding, and it decides the name
                        -- whatever ENSv1 holds, without a proof; a reservation opens none and
-                       -- defers to ENSv1. Only arms that hold the name now are candidates.
+                       -- defers to ENSv1.
                        -- (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/universalResolver/libraries/LibResolution.sol:L58-L85 @ ens_v2_sepolia_20260916@366de741)
                        -- (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/resolver/ENSV1Resolver.sol:L40-L43 @ ens_v2_sepolia_20260916@366de741)
                        WHEN COALESCE(summary.has_ens_v2, false) THEN 'ens_v2'
-                       WHEN summary.arm_count = 1 THEN summary.sole_arm
-                       -- Nothing is open on either arm: a released ENSv2 registration that is the
-                       -- latest lifecycle fact leaves a released tombstone.
+                       -- A released or expired ENSv2 registration stays with ENSv2 as a released
+                       -- tombstone, before any ENSv1 binding is considered.
                        WHEN released.logical_name_id IS NOT NULL THEN 'ens_v2'
+                       WHEN summary.arm_count = 1 THEN summary.sole_arm
                        -- Nothing is open on either arm: ENSv1 history decides first, as it
                        -- would for a name with no ENSv2 entry.
                        WHEN summary.logical_name_id IS NULL

@@ -567,17 +567,17 @@ async fn closed_binding_at_block_9(
 // either arm. The ENSv1 release is a holding-changing fact, unlike the expiry maintenance in
 // `expected_delta_equal_position_v1_expiry_residue_keeps_the_v2_tombstone` (phase-runner
 // production_project), which does not take part.
-// Rule: an ENSv2 release leaves the released ENSv2 tombstone only when it is strictly later than
-// the latest ENSv1 lease or registry ownership fact, so the tie goes to ENSv1, which serves its
-// released lease as the released ENSv1 tombstone.
+// Rule: a released ENSv2 registration stays with ENSv2 whatever ENSv1 holds (product ruling of
+// 2026-09-25), so ENSv1 fact positions no longer take part and the tie leaves the released ENSv2
+// tombstone. Before the ruling the tie went to ENSv1, which served its released lease.
 #[tokio::test]
-async fn an_equal_position_v1_lease_release_ties_to_v1_against_a_v2_release() -> Result<()> {
+async fn an_equal_position_v1_lease_release_leaves_the_v2_release_in_place() -> Result<()> {
     let (db, pool) = database("tie_v1_release_v2_release").await?;
     earlier_block(&pool).await?;
     let logical = surface(&pool, 76, "tie-release.eth", &[]).await?;
-    let (v1_resource, v1_binding) =
-        closed_binding_at_block_9(&pool, &logical, 76, "ens_v1").await?;
-    let (v2_resource, _) = closed_binding_at_block_9(&pool, &logical, 77, "ens_v2").await?;
+    let (v1_resource, _) = closed_binding_at_block_9(&pool, &logical, 76, "ens_v1").await?;
+    let (v2_resource, v2_binding) =
+        closed_binding_at_block_9(&pool, &logical, 77, "ens_v2").await?;
     for (identity, resource, family, kind, log, after) in [
         (
             "tie-v1-grant",
@@ -635,7 +635,7 @@ async fn an_equal_position_v1_lease_release_ties_to_v1_against_a_v2_release() ->
     run(&pool).await?;
     assert_eq!(
         authority(&pool, &logical).await?,
-        (Some("ens_v1".into()), None, None, None)
+        (Some("ens_v2".into()), None, None, None)
     );
     assert_eq!(
         lifecycle_state(&pool, &logical).await?.as_deref(),
@@ -653,8 +653,8 @@ async fn an_equal_position_v1_lease_release_ties_to_v1_against_a_v2_release() ->
     assert_eq!(
         (resource.as_deref(), binding.as_deref(), status.as_deref()),
         (
-            Some(v1_resource.as_str()),
-            Some(v1_binding.as_str()),
+            Some(v2_resource.as_str()),
+            Some(v2_binding.as_str()),
             Some("released")
         )
     );
@@ -662,17 +662,15 @@ async fn an_equal_position_v1_lease_release_ties_to_v1_against_a_v2_release() ->
     Ok(())
 }
 
-// Expected delta (TYR-36 step 6). An ENSv2 registration was released, and an ENSv1 lease granted
-// after the release is live now.
-// Before: the release qualified as an ENSv2 release tombstone because no ENSv1 fact preceded it,
-// and the tombstone held the name over the live lease (arm `ens_v2`, registration `released`).
-// After: the live ENSv1 lease holds the name (arm `ens_v1`, supported, registration `active`).
-// Chain fact: `BaseRegistrarImplementation.ownerOf` answers for a lease until its expiry, while
-// the released ENSv2 token was burned with its expiry set to the release time.
-// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L71-L76 @ ens_v1@91c966f)
-// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L195-L207 @ ens_v2@a971bd64)
+// An ENSv2 registration was released, and an ENSv1 lease granted after the release is live now.
+// The released ENSv2 registration stays with ENSv2 (product ruling of 2026-09-25): the name is
+// the released ENSv2 tombstone (arm `ens_v2`, registration `released`), as it was before step 6.
+// Chain fact: `unregister` writes the release time as the entry's expiry and the registry returns
+// no resolver for an expired entry; nothing on ENSv2 reads the ENSv1 lease.
+// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L196-L207 @ ens_v2@a971bd64)
+// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L255-L258 @ ens_v2@a971bd64)
 #[tokio::test]
-async fn expected_delta_a_live_v1_lease_after_a_v2_release_selects_v1() -> Result<()> {
+async fn a_live_v1_lease_after_a_v2_release_leaves_the_v2_tombstone() -> Result<()> {
     let (db, pool) = database("delta_live_v1_after_v2_release").await?;
     let logical = surface(&pool, 73, "live-after-release.eth", &[]).await?;
     let v2_resource = closed_v2_binding_at(&pool, &logical, 73, 1, 0).await?;
@@ -719,7 +717,7 @@ async fn expected_delta_a_live_v1_lease_after_a_v2_release_selects_v1() -> Resul
     run(&pool).await?;
     assert_eq!(
         authority(&pool, &logical).await?,
-        (Some("ens_v1".into()), None, None, None)
+        (Some("ens_v2".into()), None, None, None)
     );
     let (resource, status): (Option<String>, Option<String>) = sqlx::query_as(
         "SELECT resource_id::text, declared_summary #>> '{registration,status}'
@@ -728,9 +726,10 @@ async fn expected_delta_a_live_v1_lease_after_a_v2_release_selects_v1() -> Resul
     .bind(&logical)
     .fetch_one(&pool)
     .await?;
+    assert_ne!(resource.as_deref(), Some(v1_resource.as_str()));
     assert_eq!(
         (resource.as_deref(), status.as_deref()),
-        (Some(v1_resource.as_str()), Some("active"))
+        (Some(v2_resource.as_str()), Some("released"))
     );
     db.cleanup().await?;
     Ok(())
@@ -810,7 +809,8 @@ async fn a_wrapped_v1_tombstone_with_v2_history_reads_unregistered() -> Result<(
         )
         .await?;
     }
-    // The earlier ENSv1 binding keeps this ENSv2 release from qualifying as a tombstone.
+    // A later reservation of the ENSv2 label keeps this ENSv2 release from standing as a
+    // tombstone: the reservation is the registration's latest lifecycle fact and defers to ENSv1.
     let v2_resource = closed_v2_binding_at(&pool, &logical, 73, 7, 0).await?;
     for (log, kind, after) in [
         (
@@ -819,6 +819,7 @@ async fn a_wrapped_v1_tombstone_with_v2_history_reads_unregistered() -> Result<(
             json!({"status":"registered","registrant":"0x0000000000000000000000000000000000000002"}),
         ),
         (8, "RegistrationReleased", json!({"status":"unregistered"})),
+        (9, "RegistrationReserved", json!({"status":"reserved"})),
     ] {
         event(
             &pool,
@@ -844,7 +845,7 @@ async fn a_wrapped_v1_tombstone_with_v2_history_reads_unregistered() -> Result<(
         Event {
             family: "ens_v1_registrar_l1",
             kind: "RegistrationReleased",
-            log: 9,
+            log: 10,
             after: json!({"source_event":"RegistrationReleased","released_at":5,"namehash":logical.trim_start_matches("ens:"),"expiry":4}),
         },
     )
@@ -905,11 +906,18 @@ async fn closed_binding(pool: &PgPool, logical: &str, index: u16, arm: &str) -> 
     Ok(resource)
 }
 
-// Sepolia group A: the name is live on ENSv1, and its ENSv2 label was reserved, granted and
-// released again. ENSv2 holds nothing now, so the historical ENSv2 grant is not a current
-// candidate and ENSv1 keeps the name.
+// Expected delta (product ruling of 2026-09-25). Sepolia group A: the name is live on ENSv1, and
+// its ENSv2 label was reserved, granted and released again.
+// Before: ENSv2 held nothing now, so ENSv1 kept the name (arm `ens_v1`).
+// After: the released ENSv2 registration stays with ENSv2 as the released tombstone whatever
+// ENSv1 holds (arm `ens_v2`, registration `released`).
+// Chain fact: `unregister` writes the release time as the entry's expiry and the registry returns
+// no resolver for an expired entry, so nothing on ENSv2 routes the label back to ENSv1.
+// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L196-L207 @ ens_v2@a971bd64)
+// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L255-L258 @ ens_v2@a971bd64)
 #[tokio::test]
-async fn a_live_v1_name_whose_v2_grant_was_released_selects_v1() -> Result<()> {
+async fn expected_delta_a_live_v1_name_whose_v2_grant_was_released_stays_released_on_v2()
+-> Result<()> {
     let (db, pool) = database("overlap_released_v2_grant").await?;
     let logical = surface(&pool, 60, "released-grant.eth", &["ens_v1"]).await?;
     let v2_resource = closed_binding(&pool, &logical, 60, "ens_v2").await?;
@@ -939,21 +947,22 @@ async fn a_live_v1_name_whose_v2_grant_was_released_selects_v1() -> Result<()> {
     run(&pool).await?;
     assert_eq!(
         authority(&pool, &logical).await?,
-        (Some("ens_v1".into()), None, None, None)
+        (Some("ens_v2".into()), None, None, None)
     );
-    // Coverage describes the selected ENSv1 arm, not the name's released ENSv2 history.
-    let coverage: Value = sqlx::query_scalar(
-        "SELECT declared_summary -> 'coverage' FROM name_current WHERE logical_name_id = $1",
+    assert_eq!(
+        lifecycle_state(&pool, &logical).await?.as_deref(),
+        Some("unregistered")
+    );
+    let (resource, status): (Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT resource_id::text, declared_summary #>> '{registration,status}'
+         FROM name_current WHERE logical_name_id = $1",
     )
     .bind(&logical)
     .fetch_one(&pool)
     .await?;
     assert_eq!(
-        (
-            &coverage["source_classes_considered"],
-            &coverage["enumeration_basis"]
-        ),
-        (&json!(["ensv1_registry_path"]), &json!("exact_name"))
+        (resource.as_deref(), status.as_deref()),
+        (Some(v2_resource.as_str()), Some("released"))
     );
     db.cleanup().await?;
     Ok(())
@@ -997,12 +1006,15 @@ async fn a_v2_registration_after_the_v1_lease_ended_selects_v2() -> Result<()> {
     Ok(())
 }
 
-// Nothing is open on either arm, the name has history on both, and its latest ENSv1 registry
-// owner is a known zero. ENSv1 decides, so the name serves the ownerless-registry profile
-// rather than being refused for its ENSv2 history.
+// Expected delta (product ruling of 2026-09-25). Nothing is open on either arm, the name's ENSv2
+// registration was released, and its latest ENSv1 registry owner, written after the release, is a
+// known zero.
+// Before: the later ENSv1 fact let ENSv1 decide, so the name served the ownerless-registry profile.
+// After: the released ENSv2 registration stays with ENSv2 (arm `ens_v2`, registration `released`).
+// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L196-L207 @ ens_v2@a971bd64)
 #[tokio::test]
-async fn an_ownerless_v1_registry_name_with_v2_history_serves_the_ownerless_profile() -> Result<()>
-{
+async fn expected_delta_an_ownerless_v1_registry_name_with_a_released_v2_registration_stays_on_v2()
+-> Result<()> {
     let (db, pool) = database("overlap_ownerless_both_history").await?;
     let logical = surface(&pool, 66, "ownerless-both.eth", &[]).await?;
     let v1_resource = closed_binding(&pool, &logical, 66, "ens_v1").await?;
@@ -1060,21 +1072,39 @@ async fn an_ownerless_v1_registry_name_with_v2_history_serves_the_ownerless_prof
     )
     .await?;
     run(&pool).await?;
+    // Before the product ruling of 2026-09-25 the later ENSv1 owner clear let ENSv1 decide and the
+    // name served the ownerless-registry profile; the released ENSv2 registration now stays with
+    // ENSv2 whatever ENSv1 records, and the ownerless profile never applies under ENSv2.
     assert_eq!(
         authority(&pool, &logical).await?,
-        (Some("ens_v1".into()), None, None, None)
+        (Some("ens_v2".into()), None, None, None)
     );
-    let (support, reason, status): (String, Option<String>, Option<String>) = sqlx::query_as(
+    let (support, reason, status, resource): (
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    ) = sqlx::query_as(
         "SELECT support_status, unsupported_reason,
-                declared_summary #>> '{registration,status}'
+                declared_summary #>> '{registration,status}', resource_id::text
          FROM name_current WHERE logical_name_id = $1",
     )
     .bind(&logical)
     .fetch_one(&pool)
     .await?;
     assert_eq!(
-        (support.as_str(), reason, status.as_deref()),
-        ("supported", None, Some("unregistered"))
+        (
+            support.as_str(),
+            reason,
+            status.as_deref(),
+            resource.as_deref()
+        ),
+        (
+            "supported",
+            None,
+            Some("released"),
+            Some(v2_resource.as_str())
+        )
     );
     db.cleanup().await?;
     Ok(())
@@ -1285,10 +1315,14 @@ async fn root_registry_names_follow_the_ordinary_rule_beside_ensv1() -> Result<(
     Ok(())
 }
 
-// Historical ENSv2 evidence is not a current ENSv2 candidate, so `eth`'s open ENSv1 binding keeps
-// it, as for any other name.
+// Expected delta (product ruling of 2026-09-25). `eth` had an ENSv2 registration that was
+// released, and has an open ENSv1 binding.
+// Before: the released ENSv2 registration was history and the open ENSv1 binding kept `eth`.
+// After: `eth` follows the same rule as every other name, so the released registration stays with
+// ENSv2 and `eth` is the released ENSv2 tombstone beside its ENSv1 binding.
+// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L255-L258 @ ens_v2@a971bd64)
 #[tokio::test]
-async fn eth_with_historical_only_v2_evidence_stays_on_v1() -> Result<()> {
+async fn expected_delta_eth_with_a_released_v2_registration_stays_released_on_v2() -> Result<()> {
     let (db, pool) = database("issue503_shared_historical_v2").await?;
     let logical = surface(&pool, 15, "eth", &["ens_v1"]).await?;
     let v2_resource = uuid(2, 15);
@@ -1314,7 +1348,11 @@ async fn eth_with_historical_only_v2_evidence_stays_on_v1() -> Result<()> {
     run(&pool).await?;
     assert_eq!(
         authority(&pool, &logical).await?,
-        (Some("ens_v1".into()), None, None, None)
+        (Some("ens_v2".into()), None, None, None)
+    );
+    assert_eq!(
+        lifecycle_state(&pool, &logical).await?.as_deref(),
+        Some("unregistered")
     );
     db.cleanup().await?;
     Ok(())

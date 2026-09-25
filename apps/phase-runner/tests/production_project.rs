@@ -11579,13 +11579,14 @@ async fn a_v2_child_registration_is_served_without_a_child_proof() -> Result<()>
     .await?;
     assert_eq!(authority["authority_arm"], "ens_v2");
 
-    // Expected delta (TYR-36 step 6). The child's ENSv2 registration is released while its ENSv1
-    // lease is still live. Before, the positive child registration proof kept the name on ENSv2 as
-    // a released tombstone. After, the live ENSv1 lease holds the name. Chain fact:
-    // `BaseRegistrarImplementation.ownerOf` answers for a live lease, and `unregister` burned the
-    // ENSv2 token and set its expiry to the release time.
-    // (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L71-L76 @ ens_v1@91c966f)
-    // (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L195-L207 @ ens_v2@a971bd64)
+    // The child's ENSv2 registration is released while its ENSv1 lease is still live. The name
+    // stays with ENSv2 as a released tombstone (product ruling of 2026-09-25): `unregister` sets
+    // the ENSv2 expiry to the release time, the expired entry answers a zero resolver, and a
+    // WrapperRegistry child whose expiry is set is no longer migratable, so the ENSv1 lease never
+    // takes the name back. Only a later ENSv2 reservation would defer to ENSv1.
+    // (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L196-L207 @ ens_v2@a971bd64)
+    // (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L255-L258 @ ens_v2@a971bd64)
+    // (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L294-L297 @ ens_v2@a971bd64)
     for block in 6..=7 {
         insert_lineage_block(scratch.pool(), chain, block).await?;
     }
@@ -11626,8 +11627,9 @@ async fn a_v2_child_registration_is_served_without_a_child_proof() -> Result<()>
     .bind(&logical_name_id)
     .fetch_one(scratch.pool())
     .await?;
-    assert_eq!(released.1["authority_arm"], "ens_v1");
-    assert_eq!(released.0["registration"]["status"], "active");
+    assert_eq!(released.1["authority_arm"], "ens_v2");
+    assert_eq!(released.1["resource_id"], v2_resource);
+    assert_eq!(released.0["registration"]["status"], "released");
     assert!(released.1.get("proof_kind").is_none());
     scratch.cleanup().await
 }
@@ -17765,7 +17767,7 @@ async fn project_redo_retracts_a_missing_reverse_resolver_pointer() -> Result<()
 }
 
 #[tokio::test]
-async fn mixed_authority_v2_expiry_hands_the_name_to_its_live_v1_registration() -> Result<()> {
+async fn mixed_authority_v2_expiry_keeps_the_name_on_v2_as_released() -> Result<()> {
     let scratch = ScratchDatabase::create("project_mixed_authority_v2_expiry").await?;
     // Once served, the name projects a topology, which needs a known chain.
     let chain = CHAIN;
@@ -17842,12 +17844,19 @@ async fn mixed_authority_v2_expiry_hands_the_name_to_its_live_v1_registration() 
     .bind(&logical_name_id)
     .fetch_optional(scratch.pool())
     .await?;
-    // Once the ENSv2 registration expires only the ENSv1 arm holds the name.
+    // Once the ENSv2 registration expires the name stays with ENSv2 as a released tombstone,
+    // although its ENSv1 binding is still open (product ruling of 2026-09-25). An expired entry
+    // answers a zero resolver, so the ENSv1 lease does not take the name back.
+    // (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L255-L258 @ ens_v2@a971bd64)
     let incremental = incremental.expect("the name stays projected after the ENSv2 expiry");
     assert_eq!(incremental["unsupported_reason"], Value::Null);
+    let selection = &incremental["provenance"]["authority_selection"];
+    assert_eq!(selection["authority_arm"], "ens_v2");
+    assert_eq!(selection["lifecycle_state"], "unregistered");
+    assert_eq!(selection["resource_id"], v2_resource.to_string());
     assert_eq!(
-        incremental["provenance"]["authority_selection"]["authority_arm"],
-        "ens_v1"
+        incremental.pointer("/declared_summary/registration/status"),
+        Some(&json!("released"))
     );
 
     run_project(scratch.pool(), chain, None, RunMode::Normal, 0, 6).await?;
@@ -17863,7 +17872,7 @@ async fn mixed_authority_v2_expiry_hands_the_name_to_its_live_v1_registration() 
 }
 
 #[tokio::test]
-async fn mixed_authority_expiry_release_serves_the_v1_summary_on_both_paths() -> Result<()> {
+async fn mixed_authority_expiry_serves_the_released_v2_summary_on_both_paths() -> Result<()> {
     let incremental = ScratchDatabase::create("project_mixed_authority_summary_guard").await?;
     let fresh = ScratchDatabase::create("project_mixed_authority_summary_guard_fresh").await?;
     // Once served, the name projects a topology, which needs a known chain.
@@ -17954,33 +17963,28 @@ async fn mixed_authority_expiry_release_serves_the_v1_summary_on_both_paths() ->
     .await?;
     assert_eq!(incremental_row, fresh_row);
     assert_eq!(incremental_row["unsupported_reason"], Value::Null);
+    // The expired ENSv2 registration stays selected (product ruling of 2026-09-25), so the
+    // summary is the released ENSv2 tombstone on both paths and no ENSv1 lease field leaks in.
     assert_eq!(
         incremental_row["provenance"]["authority_selection"]["authority_arm"],
-        "ens_v1"
+        "ens_v2"
     );
     assert_eq!(
         (
             incremental_row.pointer("/declared_summary/registration/registrant"),
-            incremental_row.pointer("/declared_summary/registration/expiry"),
             incremental_row.pointer("/declared_summary/registration/authority_kind"),
+            incremental_row.pointer("/declared_summary/registration/authority_key"),
             incremental_row.pointer("/declared_summary/registration/status"),
             incremental_row.pointer("/declared_summary/control/status"),
         ),
         (
-            Some(&json!(OWNER)),
-            Some(&json!(4_000_000_000_i64)),
-            Some(&json!("registrar")),
-            Some(&json!("active")),
             Some(&Value::Null),
+            Some(&Value::Null),
+            Some(&Value::Null),
+            Some(&json!("released")),
+            Some(&json!("unregistered")),
         ),
-        "after the ENSv2 expiry the live ENSv1 registration supplies the summary",
-    );
-    assert!(
-        incremental_row
-            .pointer("/declared_summary/registration/authority_key")
-            .and_then(Value::as_str)
-            .is_some_and(|key| key.starts_with("registrar:")),
-        "the ENSv1 registrar lease keys the registration: {incremental_row}"
+        "after the ENSv2 expiry the released ENSv2 registration supplies the summary",
     );
 
     incremental.cleanup().await?;
