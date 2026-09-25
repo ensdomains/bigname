@@ -303,7 +303,7 @@ pub(crate) async fn work_blocks(
 ) -> Result<Vec<i64>> {
     sqlx::query_scalar(&format!(
         "/* project:families.input.work_blocks */ WITH {manifests}
-         SELECT block_number FROM (
+         SELECT work.block_number FROM (
              SELECT event.block_number
              FROM normalized_events event
              JOIN chain_lineage lineage
@@ -340,6 +340,12 @@ pub(crate) async fn work_blocks(
              WHERE declaration ->> 'start_block' ~ '^[0-9]+$'
                AND (declaration ->> 'start_block')::bigint BETWEEN $3 AND $2
          ) work
+         -- An activation below the retained lineage has no block to apply; the first readable
+         -- work block classifies under it.
+         WHERE EXISTS (
+             SELECT 1 FROM chain_lineage lineage
+             WHERE lineage.chain_id = $1 AND lineage.block_number = work.block_number
+               AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized'))
          ORDER BY 1",
         manifests = super::classification::MANIFESTS,
     ))

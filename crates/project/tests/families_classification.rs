@@ -384,3 +384,37 @@ async fn a_resolver_edge_that_starts_creates_the_row_at_its_block() -> Result<()
     fixture.assert_rebuild_equal(13).await?;
     fixture.cleanup().await
 }
+
+// A declaration that starts below the retained lineage has no block to visit: a rebuild skips it
+// and classifies under it at the first readable block.
+#[tokio::test]
+async fn a_rebuild_skips_activations_below_the_retained_lineage() -> Result<()> {
+    let fixture = Fixture::new("families_classification_retained", 20).await?;
+    sqlx::query("DELETE FROM chain_lineage WHERE chain_id = $1 AND block_number < 5")
+        .bind(CHAIN)
+        .execute(&fixture.pool)
+        .await?;
+    manifest(
+        &fixture,
+        None,
+        "ens_v1_resolver_l1",
+        5,
+        json!({"contracts": [
+            {"address": R1, "role": "public_resolver", "start_block": 2}
+        ]}),
+    )
+    .await?;
+    pointer(&fixture, 10, 1, 1, R1).await?;
+    let rebuilt = fixture.apply(14, FamilyMode::Rebuild).await;
+    assert_eq!(rebuilt.skipped, None);
+    assert_eq!(
+        classifications(&fixture).await?,
+        vec![
+            json!({"resolver_address": R1, "support_status": "supported",
+                    "unsupported_reason": null, "block_number": 10,
+                    "event_identity": "ResolverChanged:10:1",
+                    "source_family": "ens_v1_resolver_l1", "role": "public_resolver"})
+        ]
+    );
+    fixture.cleanup().await
+}
