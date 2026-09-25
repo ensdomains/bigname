@@ -647,7 +647,8 @@ for migration_file in \
     "$ROOT/migrations/20260926100700_project_families_input_token.sql" \
     "$ROOT/migrations/20260926100800_project_families_fidelity.sql" \
     "$ROOT/migrations/20260926100900_project_families_activation_indexes.sql" \
-    "$ROOT/migrations/20260926101000_project_families_rebuild_reset_sequence.sql"
+    "$ROOT/migrations/20260926101000_project_families_rebuild_reset_sequence.sql" \
+    "$ROOT/migrations/20260926101100_project_families_disclosures.sql"
 do
     emit_phase_migration "$migration_file" empty-schema | run_psql
 done
@@ -924,7 +925,9 @@ for migration_file in \
     "$ROOT/migrations/20260926100900_project_families_activation_indexes.sql" \
     "$ROOT/migrations/20260926100900_project_families_activation_indexes.sql" \
     "$ROOT/migrations/20260926101000_project_families_rebuild_reset_sequence.sql" \
-    "$ROOT/migrations/20260926101000_project_families_rebuild_reset_sequence.sql"
+    "$ROOT/migrations/20260926101000_project_families_rebuild_reset_sequence.sql" \
+    "$ROOT/migrations/20260926101100_project_families_disclosures.sql" \
+    "$ROOT/migrations/20260926101100_project_families_disclosures.sql"
 do
     emit_phase_migration "$migration_file" baseline-first | run_psql
 done

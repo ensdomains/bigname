@@ -1701,6 +1701,34 @@ generation and the content hash still match. A rebuild refreshes the planner
 statistics of the family tables after 1, 2, 4, 8, ... blocks rebuilt since its
 reset, counted across runs from the generation the reset recorded.
 
+The families differ from the served build in these known places, which the
+steps that read them must key on. Each is also stated on its table or column:
+
+- F1: an `AuthorityEpochChanged` `registry_only` at an earlier block than a
+  binding does not mark the binding registry-only; the served handoff takes an
+  epoch on the name and resource at any position. Two synthesised bindings of
+  one name at the same position order by `event_identity`, then
+  `surface_binding_id`; the served selection orders them by
+  `surface_binding_id` alone.
+- F2c: `AuthorityTransferred` and `SubregistryChanged` both set the owner
+  group, so a `SubregistryChanged` after a zero-getter transfer replaces the
+  owner and the served "ownerless" verdict cannot be recovered. An
+  observation's `target_resource_id` is the name's ENSv1 or Basenames binding
+  active at the block, not the served authority selection.
+- F3: the pointer-family priority is approximated from the F4 and F5 pointer
+  rows that name the resolver, so an unnamed ENSv2 pointer can outrank an
+  ENSv1 event proposal. A resolver with candidates but no active manifest keeps
+  one `resolver_manifest_not_active` row. Discovery-edge and address activity
+  honours the wall-clock `deactivated_at` as the served build does, and a
+  manifest update with no block applies to every block.
+- F4 keeps the ENSv1 registry, registrar and wrapper families only, so a
+  `ResolverChanged` of another family with no resource (a Basenames reverse
+  node, for instance) lands in no family table.
+- F7 keeps a `ResolverRecordLinked` whose payload has no resolver; the served
+  link reader requires the payload resolver equal to the emitter.
+- The undo journal is not pruned while the chain has no finalized or safe
+  head.
+
 Tests compare every family table and the marker, less its generation, as
 ordered JSON text before a block and after its undo, and compare the
 incremental families with a rebuild from scratch; both run the same reducers,
