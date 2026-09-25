@@ -93,20 +93,30 @@ impl Expectations {
                 expected.key
             );
         }
+        // The note lists compare as multisets: their order carries no meaning.
         let stated = |list: &[(i64, String)]| -> Vec<String> {
-            list.iter()
+            let mut keys: Vec<String> = list
+                .iter()
                 .filter(|(at, _)| *at == target)
                 .map(|(_, key)| key.clone())
-                .collect()
+                .collect();
+            keys.sort();
+            keys
+        };
+        let sorted = |list: &[String]| -> Vec<String> {
+            let mut keys = list.to_vec();
+            keys.sort();
+            keys
         };
         ensure!(
-            report.address_index_misses == stated(&self.index_misses),
+            sorted(&report.address_index_misses) == stated(&self.index_misses),
             "index misses at {target}: expected {:#?}, got {:#?}",
             stated(&self.index_misses),
             report.address_index_misses
         );
         ensure!(
-            report.node_claims_at_other_resolver == stated(&self.node_claims_at_other_resolver),
+            sorted(&report.node_claims_at_other_resolver)
+                == stated(&self.node_claims_at_other_resolver),
             "node claims at another resolver at {target}: expected {:#?}, got {:#?}",
             stated(&self.node_claims_at_other_resolver),
             report.node_claims_at_other_resolver
