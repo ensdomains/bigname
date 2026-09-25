@@ -28,6 +28,14 @@ struct Shape {
     owned_release: bool,
 }
 
+/// The registry instance Interpret writes on the reservation and its derived release.
+const EXPIRED_REGISTRY: &str = "0000000e-0000-0000-0000-00000000000e";
+
+/// The reservation's token id, written on the reservation and its derived release.
+fn expired_token(index: u16) -> String {
+    format!("0x{index:064x}")
+}
+
 const RESOURCELESS: Shape = Shape {
     derived_release: true,
     own_resource: false,
@@ -109,7 +117,7 @@ async fn seed(
             family: "ens_v2_registry_l1",
             kind: "RegistrationReserved",
             log: 1,
-            after: json!({"source_event":"LabelReserved","expiry":expiry,"status":"reserved"}),
+            after: json!({"source_event":"LabelReserved","expiry":expiry,"status":"reserved","registry_contract_instance_id":EXPIRED_REGISTRY,"token_id":expired_token(index)}),
         },
     )
     .await?;
@@ -125,7 +133,7 @@ async fn seed(
                 family: "ens_v2_registry_l1",
                 kind: "RegistrationReleased",
                 log: 0,
-                after: json!({"source_event":"RegistryPathExpired","derived_from":"interpreter_state","terminal_reason":"registry_name_binding_expired","expiry":expiry,"status":"released"}),
+                after: json!({"source_event":"RegistryPathExpired","derived_from":"interpreter_state","terminal_reason":"registry_name_binding_expired","expiry":expiry,"status":"released","registry_contract_instance_id":EXPIRED_REGISTRY,"token_id":expired_token(index)}),
             },
         )
         .await?;

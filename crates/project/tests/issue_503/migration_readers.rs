@@ -16,6 +16,10 @@ const V2_REGISTRANT: &str = "0x0000000000000000000000000000000000000072";
 /// Block 10's timestamp in seconds, where every `MigrationApplied` here is written: `database`
 /// writes it as 2026-08-26T00:00:00Z.
 const MIGRATION_BLOCK_SECONDS: i64 = 1_787_702_400;
+/// The registry instance and versioned token id Interpret writes on the re-reservation and on its
+/// end, which is how the end is matched to the reservation.
+const READERS_REGISTRY: &str = "0000000b-0000-0000-0000-000000000082";
+const READERS_TOKEN: &str = "0x0000000000000000000000000000000000000000000000000000000000008201";
 const BLOCK_11_HASH: &str = "0x0000000000000000000000000000000000000000000000000000000000000511";
 
 /// `migrated_at` as each name's block time in seconds.
@@ -148,7 +152,7 @@ async fn migration_readers_follow_the_selected_arm_after_a_v2_release() -> Resul
             family: "ens_v2_registry_l1",
             kind: "RegistrationReserved",
             log: 5,
-            after: json!({"status":"reserved"}),
+            after: json!({"status":"reserved","registry_contract_instance_id":READERS_REGISTRY,"token_id":READERS_TOKEN}),
         },
     )
     .await?;
@@ -262,7 +266,7 @@ async fn migration_readers_follow_the_selected_arm_after_a_v2_release() -> Resul
             family: "ens_v2_registry_l1",
             kind: "RegistrationReleased",
             log: 0,
-            after: json!({"source_event":"LabelUnregistered","status":"released"}),
+            after: json!({"source_event":"LabelUnregistered","status":"released","registry_contract_instance_id":READERS_REGISTRY,"token_id":READERS_TOKEN}),
         },
     )
     .await?;

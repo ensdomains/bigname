@@ -102,9 +102,13 @@
                 -- reservation is unregistered or lapses, Interpret writes its end as a named
                 -- release without a resource; a registration always has a resource and a path-cut
                 -- release carries it, so a named ENSv2 release without one is a reservation's end.
-                -- The label is then available: the registry answers a zero resolver for it, and a
-                -- WrapperRegistry never falls back to ENSv1 once the expiry is nonzero. The
-                -- released registration the name was last bound to stands again as its tombstone.
+                -- It ends the name's current reservation only when that reservation is the same
+                -- entry: without a resource, the registry instance and token id Interpret writes
+                -- on both rows tell reservations apart, so the end of an older reservation in
+                -- another registry does not end a later one. The label is then available: the
+                -- registry answers a zero resolver for it, and a WrapperRegistry never falls back
+                -- to ENSv1 once the expiry is nonzero. The released registration the name was
+                -- last bound to stands again as its tombstone.
                 -- (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L196-L207 @ ens_v2@a971bd64)
                 -- (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L255-L258 @ ens_v2@a971bd64)
                 -- (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L294-L297 @ ens_v2@a971bd64)
@@ -124,8 +128,39 @@
                   AND (
                       (event.event_kind = 'RegistrationReserved'
                        AND event.resource_id IS DISTINCT FROM binding.resource_id)
+                      -- The latest earlier fact among the name's reservations and
+                      -- registrations must be a reservation of the same registry instance and
+                      -- token. A release at the block boundary is compared as the end of its
+                      -- block, as below.
                       OR (event.event_kind = 'RegistrationReleased'
-                          AND event.resource_id IS NULL)
+                          AND event.resource_id IS NULL
+                          AND (
+                              SELECT witness.event_kind = 'RegistrationReserved'
+                                     AND witness.after_state ->> 'registry_contract_instance_id'
+                                         = event.after_state ->> 'registry_contract_instance_id'
+                                     AND witness.after_state ->> 'token_id'
+                                         = event.after_state ->> 'token_id'
+                              FROM project_events witness
+                              WHERE witness.source_family IN (
+                                    'ens_v2_root_l1', 'ens_v2_registry_l1',
+                                    'ens_v2_registrar_l1'
+                                )
+                                AND witness.logical_name_id = event.logical_name_id
+                                AND witness.event_kind IN (
+                                    'RegistrationReserved', 'RegistrationGranted'
+                                )
+                                AND (witness.block_number,
+                                     COALESCE(witness.transaction_index, -1),
+                                     COALESCE(witness.log_index, -1))
+                                    < (event.block_number,
+                                       COALESCE(event.transaction_index, 9223372036854775807),
+                                       COALESCE(event.log_index, 9223372036854775807))
+                              ORDER BY witness.block_number DESC,
+                                       COALESCE(witness.transaction_index, -1) DESC,
+                                       COALESCE(witness.log_index, -1) DESC,
+                                       witness.normalized_event_id DESC
+                              LIMIT 1
+                          ) IS TRUE)
                       -- A version-zero reservation carries its own resource, and so does its
                       -- release when it is unregistered or lapses. That release ends the
                       -- reservation of this name like a resource-less one, but only when the
