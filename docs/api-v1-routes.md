@@ -375,11 +375,12 @@ collection route carry neither header.
   [`architecture.md`](architecture.md#ensv1ensv2-current-authority). A name
   with facts on both ENSv1 and ENSv2 follows the chain
   ([ADR 0007](adrs/0007-follow-the-chain-ens-authority.md)): a current ENSv2
-  registration is selected without a migration proof, a live ENSv1 registration
-  is selected otherwise, and a name neither arm holds follows its latest
-  lifecycle fact, which can leave a
-  [released ENSv2 authority](glossary.md#released-v2-authority) tombstone, so
-  such a name is no longer refused. A selected ENSv2 registration with no
+  registration is selected without a migration proof, a released or expired
+  ENSv2 registration with no later ENSv2 reservation stays with ENSv2 as a
+  [released ENSv2 authority](glossary.md#released-v2-authority) tombstone
+  whatever ENSv1 holds, a live ENSv1 registration is selected otherwise, and a
+  name with no open binding follows its history, so such a name is no longer
+  refused. A selected ENSv2 registration with no
   authority refusal is served; it needs no `ETHRegistrar` event, ENSv1→ENSv2
   migration proof or child-registration proof. The earlier reasons
   `conflicting_current_ens_authority` (Mainnet) and

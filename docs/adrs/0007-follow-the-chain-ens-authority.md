@@ -4,6 +4,7 @@ Status: Accepted
 Date: 2026-09-24
 Amended: 2026-09-25 (support follows the authority decision without a registrar qualification)
 Amended: 2026-09-25 (the remaining ENSv2 authority exceptions are removed)
+Amended: 2026-09-25 (a released or expired ENSv2 registration stays with ENSv2, product ruling)
 
 ## 2026-09-25 Amendment: The Remaining ENSv2 Authority Exceptions Are Removed
 
@@ -18,18 +19,24 @@ decisions kept. Linear TYR-36 step 6.
   four names ordinary root-registry registrations.
   (upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ETHRegistry.ts:L36-L48 @ ens_v2_sepolia_20260916@366de741)
   (upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ReverseMirror.ts:L25-L37 @ ens_v2_sepolia_20260916@366de741)
-- The released ENSv2 tombstone no longer holds a name over a live ENSv1
-  lease. The released ENSv2 regime, the rule that kept a released name under
-  ENSv2 across its later facts so that a regrant continued the old ENSv2
-  authority and later ENSv1 facts stayed history, is removed. A name that neither arm
-  holds now follows its latest lifecycle fact: a released ENSv2 registration
-  that no ENSv1 lease or registry ownership change follows is served as the
-  [released v2 authority](../glossary.md#released-v2-authority) tombstone, and
-  otherwise ENSv1 history decides as below. A live ENSv1 lease holds the name
-  even when it began after an ENSv2 release, because `ownerOf` still answers
-  for it.
-  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L195-L207 @ ens_v2@a971bd64)
-  (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L71-L76 @ ens_v1@91c966f)
+- The released ENSv2 regime, the rule that kept a released name under ENSv2
+  across its later facts so that a regrant continued the old ENSv2 authority,
+  is removed, and a simpler rule takes its place (product ruling of
+  2026-09-25): a released or expired ENSv2 registration stays with ENSv2. When
+  the latest lifecycle fact of the ENSv2 registration a name was last bound to
+  is its release, by `unregister` or by lapsing at expiry, and no ENSv2
+  registration is current, the name is served as the
+  [released v2 authority](../glossary.md#released-v2-authority) tombstone,
+  unregistered, whatever ENSv1 holds, a live ENSv1 lease included. Only a
+  later ENSv2 reservation, which defers to ENSv1 like any reservation, or a
+  new ENSv2 registration changes that. The ENSv2 contracts never route such a
+  label back to ENSv1: `unregister` writes the release time as the entry's
+  expiry, the registry returns no resolver for an expired entry, and a
+  `WrapperRegistry` stops answering with `ENSV1Resolver` for any label whose
+  stored expiry is nonzero.
+  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L196-L207 @ ens_v2@a971bd64)
+  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L255-L258 @ ens_v2@a971bd64)
+  (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L294-L297 @ ens_v2@a971bd64)
 - An activated ENSv1→ENSv2 migration and a positive ENSv2 child registration
   are no longer [authority proofs](../glossary.md#authority-proof). The
   migration is served history (`migrated_at`, `is_migrated`) and selects no
@@ -206,13 +213,19 @@ Resolver finds no resolver and the lookup fails.
 (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/universalResolver/AbstractNormalizedUniversalResolver.sol:L406-L408 @ ens_v2_sepolia_20260916@366de741)
 bigname instead lets ENSv1 decide such a name, which is what the ENSv1 registry
 itself records. The premigration reservation normally covers every live ENSv1
-name, so this case arises only for a live ENSv1 name whose reservation was
-used and released, or that was registered on ENSv1 after the premigration
-snapshot. The difference is listed in
+name, so this case arises only for a live ENSv1 name that never had an ENSv2
+registration: one registered on ENSv1 after the premigration snapshot, or whose
+reservation lapsed without being used. A name whose ENSv2 registration was
+released stays with ENSv2 under the 2026-09-25 amendment, as the Universal
+Resolver does. The difference is listed in
 [`upstream.md`](../upstream.md#ensv1-authority-without-an-ensv2-entry).
 
 ## Consequences
 
+- Under the 2026-09-25 amendment, a name live on ENSv1 whose ENSv2
+  registration was granted and released (466 of the Sepolia names counted on
+  2026-09-23 had that shape) reads as released under ENSv2, not as its ENSv1
+  lease.
 - Names that were identity-only with `independent_ens_deployments_overlap` or
   `conflicting_current_ens_authority` get a selected authority. A name with a
   current ENSv2 registration selects ENSv2; any other such name selects ENSv1,

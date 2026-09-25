@@ -2135,24 +2135,27 @@ lease's original registration time and current state. The lease's original rows 
 <a id="released-v2-authority"></a>
 ## Released v2 authority
 
-the authority tombstone left when an ENSv2 registration is released or
-unregistered and neither arm holds the name now. The release must be the
-latest lifecycle fact of the registration the name was last bound to, and no
-ENSv1 lease grant, renewal or release, ENSv1 registry ownership change, or
-ENSv1 [authority anchor](#anchor) move (`AuthorityEpochChanged`, such as a wrap or unwrap)
-may follow it; ENSv1 expiry updates and token transfers do not count. An ENSv1
-fact at exactly the release's block, transaction and log position counts as
-following it, so such a tie goes to ENSv1: no tombstone is left and ENSv1
-history decides. Facts Interpret writes at a block boundary carry no
-transaction or log index, which is how two of them can share a position. Its current
-registration lifecycle is unregistered and its selected arm is `ens_v2`, bound
-to the released resource. A live ENSv1 lease or a current ENSv2 registration
-holds the name instead, whatever the order of their facts: `unregister` burns
-the ENSv2 token and sets its expiry to the release time, while
-`BaseRegistrarImplementation.ownerOf` answers for an ENSv1 lease until its own
-expiry.
-(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L195-L207 @ ens_v2@a971bd64)
-(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L71-L76 @ ens_v1@91c966f)
+the authority tombstone left when an ENSv2 registration is released, whether
+by `unregister` or by lapsing at its expiry, and no ENSv2 registration is
+current. It applies when the release is the latest lifecycle fact of the ENSv2
+registration the name was last bound to, and it holds whatever ENSv1 holds: a
+live ENSv1 lease, an open ENSv1 registrar, registry or wrapper binding, and any
+ENSv1 fact recorded after the release leave it in place. Only a later ENSv2
+reservation of the label, which defers to ENSv1 like any
+[premigration reservation](#premigration-reservation), or a new ENSv2
+registration changes the name's arm. Its current registration lifecycle is
+unregistered and its selected arm is `ens_v2`, bound to the released resource.
+This follows the ENSv2 contracts, which never route a label that has been
+registered back to ENSv1: `unregister` burns the token and writes the release
+time as the entry's expiry, which nothing sets back to zero
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L196-L207 @ ens_v2@a971bd64);
+the registry returns no resolver for an expired entry
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L255-L258 @ ens_v2@a971bd64);
+and a migration `WrapperRegistry` treats any label with a nonzero stored expiry
+as ENSv2's for good, so it no longer answers with `ENSV1Resolver` for it
+(upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L180-L187 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L294-L297 @ ens_v2@a971bd64).
+Product ruling of 2026-09-25 (Linear TYR-36 step 6).
 
 <a id="released-v1-authority"></a>
 ## Released v1 authority

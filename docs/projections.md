@@ -286,10 +286,11 @@ name without a proof, the root, `eth`, `reverse`, and `addr.reverse` included,
 follows the chain
 ([ADR 0007](adrs/0007-follow-the-chain-ens-authority.md)): a current ENSv2
 binding selects ENSv2, with its epoch starting at that binding and a migration
-recorded only as history, a live ENSv1 binding selects ENSv1 otherwise, and a name neither arm
-holds follows its latest lifecycle fact, which leaves a released ENSv2
-registration with nothing later on ENSv1 as a
-[released v2 authority](glossary.md#released-v2-authority) tombstone.
+recorded only as history; a released or expired ENSv2 registration with no
+later ENSv2 reservation stays with ENSv2 as a
+[released v2 authority](glossary.md#released-v2-authority) tombstone whatever
+ENSv1 holds; a live ENSv1 binding selects ENSv1 otherwise; and a name with no
+open binding follows its history.
 
 ## Exact-name projection
 
@@ -668,12 +669,12 @@ ENSv1→ENSv2 migration path: `unwrapped`, `unlocked_wrapped`, and
 through their [migration registry](glossary.md#migration-registry-wrapperregistry).
 An unknown activated path is a Project data-integrity failure. Child authority
 selection then keeps only the arm the child's own authority selects; cross-era
-recency never chooses the arm. A released ENSv2 child publishes no ENSv2
-relation, and publishes its ENSv1 relation only when its own selected arm is
-ENSv1 and the relation survived that filter. Any entry the child has had in the
-parent's migration registry, released or not, makes it non-migratable, so a
-released child of a locked parent publishes no relation even when its own name
-selects ENSv1. A surviving locked-path row cites the matched association's stable
+recency never chooses the arm. A released ENSv2 child is a released v2
+authority tombstone and publishes no relation on either arm; a child publishes
+its ENSv1 relation only when its own selected arm is ENSv1 and the relation
+survived that filter. Any entry the child has had in the parent's migration
+registry, released or not, makes it non-migratable, so a released child of a
+locked parent publishes no relation while its ENSv1 wrapper binding is open. A surviving locked-path row cites the matched association's stable
 logical-edge and correlation identities plus its source manifest; its row-level
 manifest version therefore accounts for the association that authorized the
 migration registry. Its `normalized_event_ids`, `event_identities`,

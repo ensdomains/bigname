@@ -164,10 +164,9 @@ selected inside that epoch. A migrated name keeps both eras in history. While
 its ENSv2 registration is current, registration, control, resolver, expiry,
 address relations, and permissions come only from its ENSv2 resource, and
 retained ENSv1 facts remain history and provenance that do not make the current
-read unsupported. After an ENSv2 release the name follows its latest lifecycle
-fact like any other name: with no later ENSv1 lease or registry change it is a
-[released v2 authority](glossary.md#released-v2-authority) tombstone, and a live
-ENSv1 lease makes ENSv1 current again. Slice 2C applies this rule to the
+read unsupported. After an ENSv2 release or expiry the name stays with ENSv2
+as a [released v2 authority](glossary.md#released-v2-authority) tombstone,
+whatever ENSv1 holds; only a later ENSv2 reservation hands it back to ENSv1. Slice 2C applies this rule to the
 exact-name projection, the name-detail response, and per-result batch-lookup
 records. Slice 2D makes the address-name, permission, search, primary-name, and
 address-history collections consume that selected current registration, but
@@ -240,18 +239,17 @@ first removes an ENSv1 relation below a parent on the `unwrapped`,
 [migratable child](glossary.md#migratable-child). Once that child migrates or
 otherwise obtains a current ENSv2
 registration, the published relation is the ENSv2 one and the retained ENSv1
-relation is residue. A released ENSv2 child publishes no ENSv2 relation, and
-its ENSv1 relation only when its own selected arm is ENSv1 and parent
-reachability kept it. An entry in the parent's
+relation is residue. A released ENSv2 child is a
+[released v2 authority](glossary.md#released-v2-authority) tombstone and
+publishes no relation on either arm. An entry in the parent's
 [migration registry](glossary.md#migration-registry-wrapperregistry), released or
-not, makes the child non-migratable for good, so a released child of a locked
-parent publishes no relation, whether its name is a
-[released v2 authority](glossary.md#released-v2-authority) tombstone or selects
-ENSv1. Any other child follows the chain
-([ADR 0007](adrs/0007-follow-the-chain-ens-authority.md)): a current ENSv2
-registration selects its ENSv2 relation, a live ENSv1 registration selects its
-ENSv1 relation, and a child neither arm holds follows its latest lifecycle
-fact. Event
+not, also makes the child non-migratable for good, so a released child of a
+locked parent publishes no relation while its ENSv1 wrapper binding is open, and
+`name_current` agrees that it is released under ENSv2. Any other child follows
+the chain ([ADR 0007](adrs/0007-follow-the-chain-ens-authority.md)): a current
+ENSv2 registration selects its ENSv2 relation, a live ENSv1 registration
+selects its ENSv1 relation, and a child with no open binding follows its
+history. Event
 recency never picks the arm. Only a pair whose child has no selected authority
 at all and whose two arms disagree is omitted; it is neither an ambiguous
 product row nor a publication failure. A current child registration in the
