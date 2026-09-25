@@ -2167,7 +2167,7 @@ async fn lapse_evidence(
 /// same-block delta in one direction: the rebuilt events keep the registration live in today's
 /// order and lapse it in the canonical order, the served value is not empty, the canonical read
 /// is empty, and the whole permission read of the resource taken again from the families in
-/// today's order equals it. That read is compared whole, so a wrong subject, power, collision
+/// today's order, its registry root's events in today's order too, equals it. That read is compared whole, so a wrong subject, power, collision
 /// row or restriction in the families fails. The shadow value is the canonical read itself, so
 /// comparing it with the canonical read checks nothing and is not counted as evidence. The
 /// other direction, today's order lapsing the registration, is left a mismatch: the read in
@@ -2223,6 +2223,15 @@ pub async fn resource_excuses(
         _ => None,
     };
     if own == (false, true) {
+        // The read also refolds the root's admin powers, so the root's events take their
+        // generated ids too: today's order for both resources, and no excuse unless the
+        // root's retained events also match the log.
+        if let Some(root) = input.root_resource_id.as_deref() {
+            let Some((_, root_ids)) = lapse_evidence(pool, chain, target, root).await? else {
+                return Ok(out);
+            };
+            ids.extend(root_ids);
+        }
         let legacy = read(EventOrder::Generated(ids)).await?;
         let canonical = read(EventOrder::Canonical).await?;
         for (index, diff) in diffs.iter().enumerate() {
