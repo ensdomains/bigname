@@ -1722,7 +1722,12 @@ reading the same families with that block in the old generated-id order must giv
 exactly the served value. For a resource's permission rows and restriction block
 it passes only in one direction: today's order keeps the registration live, the
 served value is not empty, and the families read in that order give it. A served
-empty value against a family row is a mismatch. The second is a named cause whose own check holds for
+empty value against a family row is a mismatch. One ENSv1 NewOwner log yields a
+SubregistryChanged and an AuthorityTransferred at one position; the families keep
+the SubregistryChanged, whose identity sorts last, and today's builders the
+AuthorityTransferred, whose generated id is higher, so
+the registry node and the registry binding are read again in today's order from
+the event log, and a binding passes only when it matches the served one whole. The second is a named cause whose own check holds for
 that field. A named cause is either a step 2 family gap, reported rather than
 patched, or a served-side bug. One cause comes from the fixture corpus rather
 than the chain: step 2 pairs a binding with the SurfaceBound at the log its
