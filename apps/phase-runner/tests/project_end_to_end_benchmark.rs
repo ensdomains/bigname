@@ -23,8 +23,15 @@
 //! keep (`project_end_to_end/endpoint.rs`). That is a reader-value comparison against a full
 //! rebuild, not the rollback benchmark's contract oracle. The next target continues from that
 //! rebuilt state.
+//!
+//! In the same mode, once the owned key families reach each target, the step 5 family readers
+//! (`bigname_storage::families::topology`) must serve what the served subname, topology, resolver
+//! and resolver collection readers serve at that publication (`project_end_to_end/shadow.rs`).
 #[path = "project_end_to_end/endpoint.rs"]
 mod endpoint;
+#[allow(dead_code)]
+#[path = "project_end_to_end/shadow.rs"]
+mod shadow;
 #[allow(dead_code)]
 mod support;
 
@@ -412,6 +419,24 @@ async fn run(
             hash.as_deref() == Some(INTERPRETER_CONTENT_HASH),
             "the publication does not carry this binary's interpreter hash"
         );
+        if let Some(children_page) = compare {
+            let report = shadow::compare(
+                pool,
+                CHAIN,
+                shadow::Settings {
+                    children_page,
+                    collection_page: children_page,
+                    every_child_filter: children_page == FIXTURE_CHILDREN_PAGE,
+                },
+            )
+            .await?;
+            eprintln!("{}", report.line());
+            ensure!(
+                report.mismatches.is_empty(),
+                "the family readers differ from the served readers at {number}: {:#}",
+                shadow::describe(&report)
+            );
+        }
         if let (Some(children_page), Some(baseline)) = (compare, baseline) {
             let retention = endpoint::Retention::load(
                 pool,
