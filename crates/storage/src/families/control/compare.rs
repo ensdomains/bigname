@@ -5,6 +5,9 @@
 //! equals an integer only when it holds exactly that integer, and two integers out of the i64
 //! and u64 range that round to one f64 compare equal, as does one that rounds onto a bound
 //! (-2^63 - 1 equals i64::MIN). A numeric string is a string and never equals a number.
+//! Every compared numeric field has a uint64 or smaller domain on chain, so a real served value
+//! always takes the exact integer arm; a false equality needs both sides out of range, and a
+//! family value past u64::MAX against an in-range served value compares unequal.
 use serde_json::{Number, Value};
 
 /// One field whose served and shadow values differ.
