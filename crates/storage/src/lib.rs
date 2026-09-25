@@ -14,6 +14,7 @@ mod address_names;
 mod api_preflight;
 mod children;
 mod evm_primitives;
+pub mod families;
 mod history;
 mod identity;
 mod identity_facade;
