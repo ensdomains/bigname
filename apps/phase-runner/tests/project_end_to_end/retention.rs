@@ -21,7 +21,9 @@
 //! - the retained lifecycle events: every event of the six retained kinds whose key
 //!   (lifecycle.rs `state_key`) falls in the name's scope, which the loader builds from the
 //!   candidates, the selection, the association targets and the key states the name last named
-//!   (load.rs:137-160, :306-338);
+//!   (load.rs:137-160, :306-338), each filed under that key, since the reader partitions the
+//!   events by it (membership.rs:66-99). The decoded name the family also keeps is not read by
+//!   this comparison, so its corruption is not detected;
 //! - the node's owner-setting registry events and its old-record and first-current-record
 //!   facts (registry.rs `registry_nodes`).
 //!
@@ -602,22 +604,29 @@ pub fn name_differs(facts: &NameFacts, log: &RetentionLog) -> Option<String> {
         return Some("key states".into());
     }
 
-    // Retained lifecycle events whose key falls in the scope.
-    let expected_events: BTreeSet<&str> = log
+    // Retained lifecycle events whose key falls in the scope, each filed under the key step 2
+    // derives from its log row: the reader partitions the events by that key.
+    let expected_events: BTreeMap<&str, (&str, String)> = log
         .events
         .iter()
-        .filter(|(_, event)| {
-            retained_key(event).is_some_and(|(kind, key)| match kind {
+        .filter_map(|(identity, event)| {
+            let (kind, key) = retained_key(event)?;
+            let in_scope = match kind {
                 "resource" => resources.contains(key.as_str()),
                 _ => triples.contains_key(&key),
-            })
+            };
+            in_scope.then_some((identity.as_str(), (kind, key)))
         })
-        .map(|(identity, _)| identity.as_str())
         .collect();
-    let family_events: BTreeSet<&str> = facts
+    let family_events: BTreeMap<&str, (&str, String)> = facts
         .events
         .iter()
-        .map(|event| event.position.event_identity.as_str())
+        .map(|event| {
+            (
+                event.position.event_identity.as_str(),
+                (event.state_kind.as_str(), event.state_key.clone()),
+            )
+        })
         .collect();
     if family_events.len() != facts.events.len() || family_events != expected_events {
         return Some("retained events".into());

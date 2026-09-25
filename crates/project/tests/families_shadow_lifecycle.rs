@@ -1856,3 +1856,66 @@ async fn a_missing_epoch_start_stays_a_mismatch() -> Result<()> {
     );
     fixture.cleanup().await
 }
+
+/// Pro Q4 on 6c8bdf8b: the family keeps each retained event under the key step 2 derives from
+/// its log row, and the reader partitions events by that key. Refiling the canonically selected
+/// transfer c under a fresh resource S drops it from the name's facts: the shadow and a
+/// canonical read of the rest give Bob while today's order still gives the served Alice.
+/// Refiling it under the name's own triple keeps it loaded, and the reader still gives Carol,
+/// but the placement is not what step 2 derives. Neither may pass.
+#[tokio::test]
+async fn a_transfer_refiled_under_another_key_stays_a_mismatch() -> Result<()> {
+    let fixture = Fixture::new("families_shadow_refiled_transfer", 20).await?;
+    let k1 = uuid(1);
+    three_transfers_at_one_log(&fixture, &k1).await?;
+    publish_and_compare(&fixture, 12).await?;
+    let triple = json!([name(1), "R", "7"]).to_string();
+    for (case, kind, key) in [
+        ("a fresh resource", "resource", uuid(9)),
+        ("the name's triple", "triple", triple),
+    ] {
+        sqlx::query(
+            "UPDATE bigname_phase.project_lifecycle_event SET state_kind = $1, state_key = $2
+             WHERE event_identity = 'c'",
+        )
+        .bind(kind)
+        .bind(&key)
+        .execute(&fixture.pool)
+        .await?;
+        let mutated = shadow_support::compare::compare(&fixture.pool, CHAIN, 12).await?;
+        assert!(
+            mutated.known_discrepancy.is_empty() && mutated.expected_delta_fields.is_empty(),
+            "{case}: a refiled transfer must not pass: {:#?}",
+            mutated.lines
+        );
+    }
+    fixture.cleanup().await
+}
+
+/// Pro Q4 on 6c8bdf8b: the decoded name of a retained row is loaded but not read by this
+/// comparison (admission recomputes an unnamed event's name from its resource, namehash and
+/// binding candidates), so corrupting it changes neither the shadow nor the report. This pins
+/// that the comparison does not detect decoded-name corruption.
+#[tokio::test]
+async fn a_wrong_decoded_name_changes_nothing_the_comparison_reads() -> Result<()> {
+    let fixture = Fixture::new("families_shadow_decoded_name", 20).await?;
+    let k1 = uuid(1);
+    three_transfers_at_one_log(&fixture, &k1).await?;
+    let report = publish_and_compare(&fixture, 12).await?;
+    let (_, before) = shadow_support::name(&fixture, 12, &name(1)).await?;
+    sqlx::query(
+        "UPDATE bigname_phase.project_lifecycle_event SET decoded_logical_name_id = $1
+         WHERE chain_id = $2",
+    )
+    .bind(name(2))
+    .bind(CHAIN)
+    .execute(&fixture.pool)
+    .await?;
+    let (_, after) = shadow_support::name(&fixture, 12, &name(1)).await?;
+    assert_eq!(after, before);
+    let mutated = shadow_support::compare::compare(&fixture.pool, CHAIN, 12).await?;
+    assert_eq!(mutated.lines, report.lines);
+    assert_eq!(mutated.expected_delta_fields, report.expected_delta_fields);
+    assert_eq!(mutated.mismatched, report.mismatched);
+    fixture.cleanup().await
+}
