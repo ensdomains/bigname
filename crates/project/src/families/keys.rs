@@ -218,6 +218,16 @@ pub(crate) fn record_resolver(event: &BlockEvent) -> Option<String> {
     )
 }
 
+/// The resolver a `ResolverRecordLinked` belongs to: the contract that emitted it, admitted
+/// only when the resolver its payload names is that contract (resolvers/collections/links.sql
+/// reads a resolver's links by emitter and payload resolver together). A link one contract emits
+/// for another resolver belongs to no one.
+pub(crate) fn link_resolver(event: &BlockEvent) -> Option<String> {
+    let emitter = lower(text(&event.raw_fact_ref, "emitting_address"))?;
+    let named = lower(event.after_text("resolver"));
+    (named.is_none() || named.as_deref() == Some(emitter.as_str())).then_some(emitter)
+}
+
 /// Derive every key the block's events own.
 pub(crate) fn derive(events: &[BlockEvent]) -> BlockKeys {
     let mut keys = BlockKeys::default();
@@ -355,23 +365,22 @@ fn derive_records(event: &BlockEvent, keys: &mut BlockKeys) {
                     [resolver, lower(event.after_text("node"))],
                 );
             }
-            if kind == "RecordChanged" && event.after_text("record_key").as_deref() == Some("name")
+            if kind == "RecordVersionChanged"
+                || event.after_text("record_key").as_deref() == Some("name")
             {
                 keys.add(
                     Space::NodeClaim,
                     [
                         Some(event.namespace.clone()),
                         lower(event.after_text("node")),
+                        lower(event.after_text("resolver")),
                     ],
                 );
             }
         }
         "ResolverRecordLinked" => keys.add(
             Space::Link,
-            [
-                lower(event.after_text("resolver")),
-                lower(event.after_text("node")),
-            ],
+            [link_resolver(event), lower(event.after_text("node"))],
         ),
         _ => {}
     }

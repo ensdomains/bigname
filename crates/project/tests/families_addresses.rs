@@ -1,6 +1,6 @@
-//! F13 and F14 through the family loop: the per-name controller fold with its token holder and
-//! registrant, the (address, name, relation) index derived from it, and the inverse record
-//! indexes derived from node and record-id `addr` values. Undo restores the index rows with
+//! F13 and F14 through the family loop: the per-name controller fold with its token holder, the
+//! controller candidates, the candidate-complete (address, name, relation) index derived from
+//! them and F2a, and the inverse record indexes derived from node and record-id `addr` values. Undo restores the index rows with
 //! their base rows, and a rebuild derives the same rows.
 mod families_support;
 
@@ -90,21 +90,46 @@ async fn names_fold_their_controller_and_index_every_relation() -> Result<()> {
             ]
         ),
         json!({"controller": null, "controller_action": "revoke", "controller_subject": BOB,
-               "token_holder": DAVE, "registrant": CAROL})
+               "token_holder": DAVE, "registrant": DAVE}),
+        "the registrant is the latest retained F2a row that reports one: the transfer at 12"
     );
     assert_eq!(folds[0]["controller_position"]["log_index"], json!(2));
     assert_eq!(folds[0]["controller_position"]["block_number"], json!(12));
+    let candidates = fixture.rows("project_address_controller_candidate").await?;
+    let mut candidates = index(
+        &candidates,
+        &["block_number", "log_index", "action", "subject"],
+    );
+    candidates.sort_by_key(|row| (row["block_number"].as_i64(), row["log_index"].as_i64()));
     assert_eq!(
-        index(
-            &fixture.rows("project_address_name_index").await?,
-            &["address", "relation"]
-        ),
+        candidates,
         vec![
-            json!({"address": CAROL, "relation": "registrant"}),
-            json!({"address": DAVE, "relation": "effective_controller"}),
-            json!({"address": DAVE, "relation": "token_holder"}),
+            json!({"block_number": 10, "log_index": 1, "action": "set", "subject": ALICE.to_lowercase()}),
+            json!({"block_number": 11, "log_index": 1, "action": "set", "subject": BOB}),
+            json!({"block_number": 11, "log_index": 2, "action": "revoke", "subject": ALICE.to_lowercase()}),
+            json!({"block_number": 12, "log_index": 2, "action": "revoke", "subject": BOB}),
         ],
-        "the revoked controller falls back to the token holder"
+        "every controller event stays a candidate with its own position"
+    );
+    let mut relations = index(
+        &fixture.rows("project_address_name_index").await?,
+        &["address", "relation"],
+    );
+    relations.sort_by_key(Value::to_string);
+    let mut expected = vec![
+        json!({"address": ALICE.to_lowercase(), "relation": "effective_controller"}),
+        json!({"address": BOB, "relation": "effective_controller"}),
+    ];
+    for address in [CAROL, DAVE] {
+        for relation in ["registrant", "token_holder", "effective_controller"] {
+            expected.push(json!({"address": address, "relation": relation}));
+        }
+    }
+    expected.sort_by_key(Value::to_string);
+    assert_eq!(
+        relations, expected,
+        "the index holds every address a relation can take; the read-time fold and masks \
+         narrow it (the registrant and the transfer recipient come from F2a)"
     );
 
     fixture.assert_undo_restores(12).await?;
@@ -156,8 +181,12 @@ async fn a_masked_owner_word_clears_the_controller() -> Result<()> {
         json!("0x0000000000000000000000000000000000000000")
     );
     assert_eq!(
-        fixture.rows("project_address_name_index").await?,
-        Vec::<Value>::new()
+        index(
+            &fixture.rows("project_address_name_index").await?,
+            &["address", "relation"]
+        ),
+        vec![json!({"address": ALICE.to_lowercase(), "relation": "effective_controller"})],
+        "the earlier transfer stays a candidate; the masked owner word never indexes an address"
     );
     fixture.assert_undo_restores(11).await?;
     fixture.assert_rebuild_equal(11).await?;
@@ -280,6 +309,163 @@ async fn addr_values_index_their_address_until_a_version_change() -> Result<()> 
         fixture.rows("project_address_record_node_index").await?,
         Vec::<Value>::new()
     );
+    fixture.assert_undo_restores(11).await?;
+    fixture.assert_rebuild_equal(11).await?;
+    fixture.cleanup().await
+}
+
+// The served value of a coin-60 pair is its AddressChanged half (record_inventory.rs,
+// `ranked_records`): when the two halves carry different addresses, only that one is indexed. A
+// value carried as address_bytes_hex is indexed like a value payload, and a value ordered after
+// the version change only by its event identity (two synthesised events of one block) is kept.
+#[tokio::test]
+async fn the_index_holds_the_served_half_of_a_pair_and_hex_payloads() -> Result<()> {
+    let fixture = Fixture::new("families_addresses_pair", 20).await?;
+    let v1 = "ens_v1_resolver_l1";
+    let record = |node_hex: String, source: &str, payload: Value| {
+        let mut after = json!({"node": node_hex, "resolver": R1, "record_key": "addr:60",
+                               "record_family": "addr", "selector_key": "60",
+                               "source_event": source});
+        for (field, value) in payload.as_object().cloned().unwrap_or_default() {
+            after[field] = value;
+        }
+        after
+    };
+    fixture
+        .write(
+            10,
+            4,
+            "RecordChanged",
+            v1,
+            None,
+            None,
+            record(
+                node(1),
+                "AddressChanged",
+                json!({"value": {"bytes": ALICE}}),
+            ),
+            R1,
+        )
+        .await?;
+    fixture
+        .write(
+            10,
+            5,
+            "RecordChanged",
+            v1,
+            None,
+            None,
+            record(node(1), "AddrChanged", json!({"value": BOB})),
+            R1,
+        )
+        .await?;
+    fixture
+        .write(
+            10,
+            7,
+            "RecordChanged",
+            v1,
+            None,
+            None,
+            record(
+                node(2),
+                "AddressChanged",
+                json!({"address_bytes_hex": CAROL}),
+            ),
+            R1,
+        )
+        .await?;
+    // Two synthesised events of block 11 at node 3: the version change sorts before the value
+    // only by identity.
+    fixture
+        .event(
+            families_support::Event::new("11:a-version", 11, 0, "RecordVersionChanged", v1)
+                .synthesised()
+                .after(json!({"node": node(3), "resolver": R1, "version": "1"}))
+                .raw(json!({"emitting_address": R1})),
+        )
+        .await?;
+    fixture
+        .event(
+            families_support::Event::new("11:b-value", 11, 0, "RecordChanged", v1)
+                .synthesised()
+                .after(record(node(3), "AddressChanged", json!({"value": DAVE})))
+                .raw(json!({"emitting_address": R1})),
+        )
+        .await?;
+    fixture.apply(11, FamilyMode::Normal).await;
+    let mut rows = index(
+        &fixture.rows("project_address_record_node_index").await?,
+        &["address", "node"],
+    );
+    rows.sort_by_key(Value::to_string);
+    let mut expected = vec![
+        json!({"address": ALICE.to_lowercase(), "node": node(1)}),
+        json!({"address": CAROL, "node": node(2)}),
+        json!({"address": DAVE, "node": node(3)}),
+    ];
+    expected.sort_by_key(Value::to_string);
+    assert_eq!(
+        rows, expected,
+        "the AddrChanged half's own address is not indexed"
+    );
+    fixture.assert_undo_restores(11).await?;
+    fixture.assert_rebuild_equal(11).await?;
+    fixture.cleanup().await
+}
+
+// An unnamed registrar grant is named when a binding candidate of its lease arrives a block
+// later; its registrant then enters the name's index, since the registrant is read from F2a.
+#[tokio::test]
+async fn a_grant_named_later_puts_its_registrant_in_the_index() -> Result<()> {
+    let fixture = Fixture::new("families_addresses_decoded", 20).await?;
+    let lease = uuid(5);
+    let registrar = "ens_v1_registrar_l1";
+    fixture
+        .write(
+            10,
+            1,
+            "RegistrationGranted",
+            registrar,
+            None,
+            Some(&lease),
+            json!({"namehash": node(4), "registrant": CAROL}),
+            R1,
+        )
+        .await?;
+    fixture.apply(10, FamilyMode::Normal).await;
+    assert_eq!(
+        fixture.rows("project_address_name_index").await?,
+        Vec::<Value>::new(),
+        "an unnamed grant indexes nothing"
+    );
+    fixture
+        .binding(&uuid(105), &name(4), &lease, "ens_v1", 11, 1, None)
+        .await?;
+    fixture
+        .write(
+            11,
+            1,
+            "SurfaceBound",
+            registrar,
+            Some(&name(4)),
+            Some(&lease),
+            json!({"authority_kind": "registrar"}),
+            R1,
+        )
+        .await?;
+    fixture.apply(11, FamilyMode::Normal).await;
+    let mut rows = index(
+        &fixture.rows("project_address_name_index").await?,
+        &["address", "logical_name_id", "relation"],
+    );
+    rows.sort_by_key(Value::to_string);
+    let mut expected: Vec<Value> = ["registrant", "token_holder", "effective_controller"]
+        .into_iter()
+        .map(|relation| json!({"address": CAROL, "logical_name_id": name(4), "relation": relation}))
+        .collect();
+    expected.sort_by_key(Value::to_string);
+    assert_eq!(rows, expected);
     fixture.assert_undo_restores(11).await?;
     fixture.assert_rebuild_equal(11).await?;
     fixture.cleanup().await

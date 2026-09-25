@@ -51,22 +51,22 @@ pub(super) async fn database() -> Result<(TestDatabase, PgPool)> {
     Ok((database, pool))
 }
 
+/// The revision a chain with no Interpret row reads.
+pub(super) const NO_INTERPRET: crate::families::Revision = (None, None);
+
 async fn apply(pool: &PgPool, number: i64, predecessor: Option<&Marker>) -> crate::Result<()> {
+    let sequence = marker::read(pool, CHAIN).await?.sequence;
     let plan = block::Plan {
         predecessor,
+        sequence,
         contiguous: true,
         bootstrap: false,
+        revision: &NO_INTERPRET,
+        role: block::Role::Follow,
     };
-    block::apply(
-        pool,
-        CHAIN,
-        number,
-        &plan,
-        (None, None),
-        &FamilyOptions::new("guard"),
-    )
-    .await
-    .map(|_| ())
+    block::apply(pool, CHAIN, number, &plan, &FamilyOptions::new("guard"))
+        .await
+        .map(|_| ())
 }
 
 #[tokio::test]
@@ -115,4 +115,125 @@ async fn a_block_whose_parent_is_not_the_marker_is_refused() -> Result<()> {
         "the refused block wrote nothing"
     );
     database.cleanup().await
+}
+
+/// A repair record in `state` at `attempt`, trusted base 10, target 12.
+async fn record(pool: &PgPool, state: &str, attempt: i64) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO project_repair_record (chain_id, attempt, reason, trusted_base_number,
+             trusted_base_hash, replay_target_number, replay_target_hash, state,
+             prefix_recorded)
+         VALUES ($1, $2, 'operator_redo', 10, $3, 12, $4, $5, $5 <> 'undoing')",
+    )
+    .bind(CHAIN)
+    .bind(attempt)
+    .bind(hash(10))
+    .bind(hash(12))
+    .bind(state)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn apply_as(
+    pool: &PgPool,
+    number: i64,
+    predecessor: Option<&Marker>,
+    sequence: i64,
+    role: block::Role,
+) -> crate::Result<()> {
+    let plan = block::Plan {
+        predecessor,
+        sequence,
+        contiguous: true,
+        bootstrap: false,
+        revision: &NO_INTERPRET,
+        role,
+    };
+    block::apply(pool, CHAIN, number, &plan, &FamilyOptions::new("guard"))
+        .await
+        .map(|_| ())
+}
+
+// Every block is fenced on the marker generation it planned from and on the repair record its
+// role names: a stale generation, a replay under another attempt, or a replay while the record
+// is still undoing all write nothing.
+#[tokio::test]
+async fn a_block_is_fenced_by_the_generation_and_the_repair_attempt_it_planned_from() -> Result<()>
+{
+    let (database, pool) = database().await?;
+    apply(&pool, 10, None).await.map_err(anyhow::Error::msg)?;
+    let ten = Marker {
+        number: 10,
+        hash: hash(10),
+    };
+    let sequence = marker::read(&pool, CHAIN).await?.sequence;
+    let stale = apply_as(&pool, 11, Some(&ten), sequence - 1, block::Role::Follow).await;
+    assert!(stale.is_err(), "a stale marker generation is refused");
+
+    record(&pool, "undoing", 1).await?;
+    let replay = |attempt| block::Role::Replay {
+        attempt,
+        completes: false,
+    };
+    let early = apply_as(&pool, 11, Some(&ten), sequence, replay(1)).await;
+    assert!(early.is_err(), "no replay while the record is undoing");
+    sqlx::query("UPDATE project_repair_record SET state = 'replaying', prefix_recorded = true")
+        .execute(&pool)
+        .await?;
+    let other = apply_as(&pool, 11, Some(&ten), sequence, replay(2)).await;
+    assert!(other.is_err(), "a replay of another attempt is refused");
+    let follow = apply_as(&pool, 11, Some(&ten), sequence, block::Role::Follow).await;
+    assert!(follow.is_err(), "no plain follow while a repair is active");
+    assert_eq!(marker::read(&pool, CHAIN).await?.current, Some(ten.clone()));
+
+    apply_as(&pool, 11, Some(&ten), sequence, replay(1))
+        .await
+        .map_err(anyhow::Error::msg)?;
+    assert_eq!(
+        marker::read(&pool, CHAIN)
+            .await?
+            .current
+            .map(|marker| marker.number),
+        Some(11)
+    );
+    database.cleanup().await
+}
+
+#[test]
+fn an_active_repair_keeps_the_undo_rows_above_its_trusted_base() {
+    use super::repair::{Record, State};
+    let mut record = Record {
+        attempt: 1,
+        reason: "operator_redo".to_owned(),
+        trusted_base: Some(Marker {
+            number: 10,
+            hash: hash(10),
+        }),
+        replay_target: Marker {
+            number: 20,
+            hash: hash(20),
+        },
+        state: State::Undoing,
+        prefix_revision: None,
+        invalidation_from: None,
+        pending_undo_target: Some(8),
+        completed_sequence: None,
+        completed_marker: None,
+        completed_input_hash: None,
+    };
+    assert_eq!(
+        record.retention_floor(),
+        Some(9),
+        "the pending undo target bounds it"
+    );
+    record.pending_undo_target = None;
+    record.state = State::Replaying;
+    assert_eq!(record.retention_floor(), Some(11));
+    record.state = State::Complete;
+    assert_eq!(
+        record.retention_floor(),
+        None,
+        "a finished repair keeps nothing"
+    );
 }

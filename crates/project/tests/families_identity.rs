@@ -201,6 +201,31 @@ async fn binding_candidates_keep_their_bound_facts_and_registry_only_predecessor
         "the replaced binding is the latest earlier candidate of the arm"
     );
     assert_eq!(
+        columns(
+            &candidates[2],
+            &[
+                "predecessor_wrapped_registrar_resource_id",
+                "predecessor_node"
+            ]
+        ),
+        json!({"predecessor_wrapped_registrar_resource_id": lease, "predecessor_node": node(1)}),
+        "a NameWrapper predecessor carries the registrar lease it recorded"
+    );
+    assert_eq!(
+        candidates[2]["lease_position"], candidates[2]["predecessor_position"],
+        "until a successor grant, the lease stands at the predecessor"
+    );
+    assert_eq!(
+        columns(
+            &candidates[1],
+            &["event_identity", "surface_bound_position"]
+        ),
+        json!({"event_identity": "SurfaceBound:11:2",
+               "surface_bound_position": {"block_number": 11, "transaction_index": 0,
+                                          "log_index": 2, "event_identity": "SurfaceBound:11:2"}}),
+        "a candidate carries the identity of the SurfaceBound that opened it"
+    );
+    assert_eq!(
         candidates[2]["predecessor_position"]["block_number"],
         json!(11)
     );
@@ -286,5 +311,225 @@ async fn registry_nodes_fold_the_old_registry_and_observations_keep_their_clear(
     );
     fixture.assert_undo_restores(12).await?;
     fixture.assert_rebuild_equal(12).await?;
+    fixture.cleanup().await
+}
+
+// Two bindings of one name and resource opened by two logs of one block (one per arm, since a
+// name's bindings of one arm cannot overlap) each carry their own SurfaceBound, and an epoch
+// that arrives a block later turns both registry-only.
+#[tokio::test]
+async fn each_binding_keeps_its_own_surface_bound_and_a_later_epoch_makes_it_registry_only()
+-> Result<()> {
+    let fixture = Fixture::new("families_identity_own_event", 20).await?;
+    let (lease, registry) = (uuid(1), uuid(2));
+    let (first, second, third) = (uuid(101), uuid(102), uuid(103));
+    fixture
+        .binding(&first, &name(1), &lease, "ens_v1", 10, 1, Some(11))
+        .await?;
+    fixture
+        .write(10, 1, "SurfaceBound", "ens_v1_registrar_l1", Some(&name(1)), Some(&lease),
+            json!({"authority_kind": "registrar", "authority_key": "first", "state_derived": false}),
+            REGISTRAR)
+        .await?;
+    fixture
+        .binding(&second, &name(1), &registry, "ens_v1", 11, 1, None)
+        .await?;
+    fixture
+        .write(11, 1, "SurfaceBound", "ens_v1_registry_l1", Some(&name(1)), Some(&registry),
+            json!({"authority_kind": "registry_only", "authority_key": "second", "state_derived": true}),
+            REGISTRY)
+        .await?;
+    fixture
+        .binding(&third, &name(1), &registry, "ens_v2", 11, 3, None)
+        .await?;
+    fixture
+        .write(11, 3, "SurfaceBound", "ens_v1_registry_l1", Some(&name(1)), Some(&registry),
+            json!({"authority_kind": "registry_only", "authority_key": "third", "state_derived": true}),
+            REGISTRY)
+        .await?;
+    fixture
+        .write(
+            12,
+            1,
+            "AuthorityEpochChanged",
+            "ens_v1_registry_l1",
+            Some(&name(1)),
+            Some(&registry),
+            json!({"authority_kind": "registry_only"}),
+            REGISTRY,
+        )
+        .await?;
+    fixture.apply(11, FamilyMode::Normal).await;
+    let mut candidates = fixture.rows("project_binding_candidate").await?;
+    candidates.sort_by_key(|row| {
+        row["log_index"].as_i64().unwrap_or_default()
+            + 100 * row["block_number"].as_i64().unwrap_or_default()
+    });
+    assert_eq!(
+        candidates
+            .iter()
+            .map(|row| columns(row, &["event_identity", "authority_key", "registry_only"]))
+            .collect::<Vec<_>>(),
+        vec![
+            json!({"event_identity": "SurfaceBound:10:1", "authority_key": "first", "registry_only": false}),
+            json!({"event_identity": "SurfaceBound:11:1", "authority_key": "second", "registry_only": false}),
+            json!({"event_identity": "SurfaceBound:11:3", "authority_key": "third", "registry_only": false}),
+        ],
+        "each binding is associated with the SurfaceBound at its own log"
+    );
+
+    fixture.apply(12, FamilyMode::Normal).await;
+    let mut candidates = fixture.rows("project_binding_candidate").await?;
+    candidates.sort_by_key(|row| {
+        row["log_index"].as_i64().unwrap_or_default()
+            + 100 * row["block_number"].as_i64().unwrap_or_default()
+    });
+    assert_eq!(
+        candidates
+            .iter()
+            .map(|row| columns(row, &["registry_only", "predecessor_resource_id"]))
+            .collect::<Vec<_>>(),
+        vec![
+            json!({"registry_only": false, "predecessor_resource_id": null}),
+            json!({"registry_only": true, "predecessor_resource_id": lease}),
+            json!({"registry_only": true, "predecessor_resource_id": null}),
+        ],
+        "the later epoch marks both bindings of the resource; each predecessor is the latest \
+         earlier candidate of its own arm"
+    );
+    fixture.assert_undo_restores(12).await?;
+    fixture.assert_rebuild_equal(12).await?;
+    fixture.cleanup().await
+}
+
+// A registry-only binding's lease moves to a later registrar grant of the name on another
+// resource once the predecessor's lease was released before that grant (stage.rs:47-135).
+#[tokio::test]
+async fn a_successor_grant_after_a_release_becomes_the_handoff_lease() -> Result<()> {
+    let fixture = Fixture::new("families_identity_successor", 20).await?;
+    let (lease, registry, successor, stray) = (uuid(1), uuid(2), uuid(3), uuid(4));
+    let namehash = node(1);
+    fixture
+        .binding(&uuid(101), &name(1), &lease, "ens_v1", 10, 1, Some(11))
+        .await?;
+    fixture
+        .write(
+            10,
+            1,
+            "SurfaceBound",
+            "ens_v1_registrar_l1",
+            Some(&name(1)),
+            Some(&lease),
+            json!({"authority_kind": "registrar"}),
+            REGISTRAR,
+        )
+        .await?;
+    fixture
+        .binding(&uuid(102), &name(1), &registry, "ens_v1", 11, 1, None)
+        .await?;
+    fixture
+        .write(
+            11,
+            1,
+            "SurfaceBound",
+            "ens_v1_registry_l1",
+            Some(&name(1)),
+            Some(&registry),
+            json!({"authority_kind": "registry_only", "state_derived": true,
+                   "owner": OWNER.to_uppercase().replace("0X", "0x")}),
+            REGISTRY,
+        )
+        .await?;
+    fixture
+        .write(
+            11,
+            2,
+            "AuthorityEpochChanged",
+            "ens_v1_registry_l1",
+            Some(&name(1)),
+            Some(&registry),
+            json!({"authority_kind": "registry_only"}),
+            REGISTRY,
+        )
+        .await?;
+    // A grant before any release of the predecessor's lease does not move the lease.
+    fixture
+        .write(
+            12,
+            1,
+            "RegistrationGranted",
+            "ens_v1_registrar_l1",
+            Some(&name(1)),
+            Some(&stray),
+            json!({"namehash": namehash, "registrant": OWNER}),
+            REGISTRAR,
+        )
+        .await?;
+    fixture
+        .write(
+            13,
+            1,
+            "RegistrationReleased",
+            "ens_v1_registrar_l1",
+            Some(&name(1)),
+            Some(&lease),
+            json!({"namehash": namehash}),
+            REGISTRAR,
+        )
+        .await?;
+    fixture
+        .write(
+            13,
+            2,
+            "RegistrationGranted",
+            "ens_v1_registrar_l1",
+            Some(&name(1)),
+            Some(&successor),
+            json!({"namehash": namehash, "registrant": OWNER, "authority_key": "registrar-key"}),
+            REGISTRAR,
+        )
+        .await?;
+    fixture.apply(12, FamilyMode::Normal).await;
+    let owner = fixture
+        .rows("project_binding_candidate")
+        .await?
+        .into_iter()
+        .find(|row| row["registry_only"] == json!(true))
+        .map(|row| columns(&row, &["bound_owner", "surface_bound_position"]));
+    assert_eq!(
+        owner,
+        Some(
+            json!({"bound_owner": OWNER, "surface_bound_position": {"block_number": 11,
+                    "transaction_index": 0, "log_index": 1, "event_identity": "SurfaceBound:11:1"}})
+        ),
+        "the registry-only SurfaceBound keeps the owner the served control block reads"
+    );
+    let lease_of = |rows: &[Value]| {
+        rows.iter()
+            .find(|row| row["registry_only"] == json!(true))
+            .map(|row| columns(row, &["lease_resource_id", "lease_position"]))
+    };
+    let rows = fixture.rows("project_binding_candidate").await?;
+    assert_eq!(
+        lease_of(&rows).map(|lease| lease["lease_resource_id"].clone()),
+        Some(json!(lease)),
+        "no release of the predecessor yet: the lease stands at the predecessor"
+    );
+    fixture.apply(13, FamilyMode::Normal).await;
+    let rows = fixture.rows("project_binding_candidate").await?;
+    assert_eq!(
+        lease_of(&rows),
+        Some(json!({"lease_resource_id": successor,
+                    "lease_position": {"block_number": 13, "transaction_index": 0, "log_index": 2,
+                                       "event_identity": "RegistrationGranted:13:2"}}))
+    );
+    let grants = fixture.rows("project_lifecycle_key_state").await?;
+    let grant = grants
+        .iter()
+        .find(|row| row["resource_id"] == json!(successor))
+        .expect("the successor lease has a state row");
+    assert_eq!(grant["last_grant"]["authority_key"], json!("registrar-key"));
+    fixture.assert_undo_restores(13).await?;
+    fixture.assert_rebuild_equal(13).await?;
     fixture.cleanup().await
 }

@@ -103,6 +103,7 @@ async fn a_redo_undoes_to_the_range_predecessor_and_replays_to_a_complete_record
             "replay_target_hash": hash(14),
             "prefix_interpret_input_content_hash": "interpret-hash",
             "prefix_interpret_redo_attempt": 2,
+            "prefix_recorded": true,
             "invalidation_from": null,
             "pending_undo_target": null,
             "completed_sequence": sequence,
@@ -138,6 +139,7 @@ async fn a_redo_below_the_retained_journal_rebuilds_from_scratch() -> Result<()>
     let fixture = Fixture::new("families_undo_depth", 20).await?;
     let dropped = seed(&fixture).await?;
     let shallow = FamilyOptions::new(CONTENT_HASH).with_retained_undo_depth(2);
+    fixture.heads(20, 20, 20).await?;
     fixture.apply_with(14, FamilyMode::Normal, &shallow).await;
     assert_eq!(fixture.journalled_blocks().await?, vec![12, 13, 14]);
 

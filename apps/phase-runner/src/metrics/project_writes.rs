@@ -24,6 +24,7 @@ pub(super) struct Pending {
     rows: BTreeMap<(String, &'static str, &'static str), u64>,
     families: BTreeMap<String, (f64, u64)>,
     family_skips: BTreeMap<String, u64>,
+    family_anomalies: BTreeMap<String, u64>,
 }
 
 impl PendingProjectWrites {
@@ -52,6 +53,11 @@ impl PendingProjectWrites {
         );
         let skips = pending.family_skips.entry(chain.to_owned()).or_default();
         *skips += u64::from(outcome.skipped.is_some());
+        let anomalies = pending
+            .family_anomalies
+            .entry(chain.to_owned())
+            .or_default();
+        *anomalies += outcome.duplicate_anomalies;
     }
 
     pub(super) fn take(&self) -> Pending {
@@ -70,6 +76,7 @@ pub(super) struct ProjectWriteGauges {
     families_seconds: GaugeVec,
     family_lag: IntGaugeVec,
     family_skips: IntCounterVec,
+    family_anomalies: IntCounterVec,
 }
 
 impl ProjectWriteGauges {
@@ -121,8 +128,15 @@ impl ProjectWriteGauges {
             )?,
             family_skips: registry.int_counter_vec(
                 "phase_runner_project_family_skips_total",
-                "Family loops that stopped on a failing block and left the families behind the \
-                 served marker.",
+                "Family loops that stopped early and left the families behind the served marker: \
+                 a failing block, a changed input revision, Interpret in redo, or an input token \
+                 that did not read in time.",
+                &["chain"],
+            )?,
+            family_anomalies: registry.int_counter_vec(
+                "phase_runner_project_family_duplicate_anomalies_total",
+                "Deliveries of one normalized event identity whose position or payload disagreed \
+                 with the one the family loop kept.",
                 &["chain"],
             )?,
         })
@@ -139,6 +153,11 @@ impl ProjectWriteGauges {
         }
         for (chain, skips) in pending.family_skips {
             self.family_skips.with_label_values(&[&chain]).inc_by(skips);
+        }
+        for (chain, anomalies) in pending.family_anomalies {
+            self.family_anomalies
+                .with_label_values(&[&chain])
+                .inc_by(anomalies);
         }
         for ((chain, table, kind), rows) in pending.rows {
             self.rows_written

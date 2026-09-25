@@ -60,6 +60,7 @@ pub const FAMILY_TABLES: &[&str] = &[
     "project_reverse_node_claim",
     "project_claim_normalization",
     "project_address_name_fold",
+    "project_address_controller_candidate",
     "project_address_name_index",
     "project_address_record_node_index",
     "project_address_record_id_index",
@@ -422,6 +423,46 @@ impl Fixture {
         .bind(hash)
         .bind(attempt)
         .bind(in_redo)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// The chain's published safe and finalized blocks, which bound undo retention.
+    pub async fn heads(&self, latest: i64, safe: i64, finalized: i64) -> Result<()> {
+        for (state, through) in [("safe", safe), ("finalized", finalized)] {
+            sqlx::query(
+                "UPDATE chain_lineage SET canonicality_state = $2::canonicality_state
+                 WHERE chain_id = $1 AND block_number <= $3
+                   AND canonicality_state IN ('canonical', 'safe')
+                   AND canonicality_state::text <> $2",
+            )
+            .bind(CHAIN)
+            .bind(state)
+            .bind(through)
+            .execute(&self.pool)
+            .await?;
+        }
+        sqlx::query(
+            "INSERT INTO chain_heads (chain_id, latest_block_hash, latest_block_number,
+                 safe_block_hash, safe_block_number, finalized_block_hash,
+                 finalized_block_number)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)
+             ON CONFLICT (chain_id) DO UPDATE SET
+                 latest_block_hash = EXCLUDED.latest_block_hash,
+                 latest_block_number = EXCLUDED.latest_block_number,
+                 safe_block_hash = EXCLUDED.safe_block_hash,
+                 safe_block_number = EXCLUDED.safe_block_number,
+                 finalized_block_hash = EXCLUDED.finalized_block_hash,
+                 finalized_block_number = EXCLUDED.finalized_block_number",
+        )
+        .bind(CHAIN)
+        .bind(hash(latest))
+        .bind(latest)
+        .bind(hash(safe))
+        .bind(safe)
+        .bind(hash(finalized))
+        .bind(finalized)
         .execute(&self.pool)
         .await?;
         Ok(())

@@ -1,19 +1,23 @@
 //! F2c, registry ownership. An ENSv1 or Basenames registry node keeps the latest owner the
 //! registry reported with its zero-owner getter facts, whether the 2017 registry ever recorded
 //! the node and the first block of a current-registry record (name_authority/build.sql,
-//! `registry_records`). A resource keeps its latest registry-binding observation, one row for
-//! events attributed through the resource itself and one for events attributed through a name
-//! (permission_resources.rs).
+//! `registry_records`); the owner group carries the position and resource of the event that set
+//! it. Each observation identity (the name, else the resource) keeps its latest registry-binding
+//! observation with the resource it reaches (permission_resources.rs).
+use std::collections::BTreeMap;
+
 use serde_json::{Value, json};
 use sqlx::{Postgres, Transaction};
 
 use super::{
     input::BlockEvent,
-    reduce::{Context, current, key_of, load_rows, put, raw_lower, raw_text, set, text_or_null},
+    reduce::{
+        Context, current, in_family, key_of, load_rows, put, raw_lower, raw_text, set, text_or_null,
+    },
     store::RowSet,
     tables,
 };
-use crate::Result;
+use crate::{ProjectError, Result};
 
 const V1_REGISTRIES: [&str; 2] = ["ens_v1_registry_l1", "basenames_base_registry"];
 const V1_REGISTRARS: [&str; 2] = ["ens_v1_registrar_l1", "basenames_base_registrar"];
@@ -66,32 +70,40 @@ async fn registry_nodes(
             &key_of(table, [chain.clone(), json!(event.namespace), json!(node)]),
         );
         let after = &event.after;
-        if event.event_kind == "AuthorityTransferred" {
-            set(&mut row, "owner", text_or_null(raw_lower(after, "owner")));
-            set(
-                &mut row,
-                "owner_getter",
-                text_or_null(raw_lower(after, "owner_getter")),
-            );
-            set(
-                &mut row,
-                "owner_getter_reason",
-                text_or_null(raw_text(after, "owner_getter_reason")),
-            );
-            set(
-                &mut row,
-                "owner_word_unmasked",
-                after
-                    .get("owner_word_unmasked")
-                    .and_then(Value::as_bool)
-                    .map_or(Value::Null, Value::Bool),
-            );
-            set(
-                &mut row,
-                "registry_owner",
-                text_or_null(raw_lower(after, "registry_owner")),
-            );
-        }
+        // Both registry producers report the owner (name_authority/stage.rs:200-261); the
+        // owner group keeps the position and resource of the event that set it, apart from
+        // the row's own last-write position.
+        set(&mut row, "owner", text_or_null(raw_lower(after, "owner")));
+        set(
+            &mut row,
+            "owner_getter",
+            text_or_null(raw_lower(after, "owner_getter")),
+        );
+        set(
+            &mut row,
+            "owner_getter_reason",
+            text_or_null(raw_text(after, "owner_getter_reason")),
+        );
+        set(
+            &mut row,
+            "owner_word_unmasked",
+            after
+                .get("owner_word_unmasked")
+                .and_then(Value::as_bool)
+                .map_or(Value::Null, Value::Bool),
+        );
+        set(
+            &mut row,
+            "registry_owner",
+            text_or_null(raw_lower(after, "registry_owner")),
+        );
+        set(&mut row, "owner_event_kind", event.event_kind.clone());
+        set(&mut row, "owner_position", event.position.to_json());
+        set(
+            &mut row,
+            "owner_resource_id",
+            text_or_null(event.resource_id.clone()),
+        );
         let role = raw_text(after, "emitter_role");
         set(&mut row, "emitter_role", text_or_null(role.clone()));
         set(
@@ -122,9 +134,17 @@ async fn registry_nodes(
     Ok(())
 }
 
-/// A registry-binding observation the resource summary reads: owner, contract and whether it
-/// applies.
-fn observation(event: &BlockEvent) -> Option<(&str, &'static str)> {
+/// A registry-binding observation the resource summary reads (permission_resources.rs:10-60):
+/// its observation identity, the name when the event carries one, the event's resource and
+/// whether it reaches its resource through the name's current resource.
+struct Observation<'a> {
+    identity: String,
+    name: Option<&'a str>,
+    resource: &'a str,
+    through_name: bool,
+}
+
+fn observation(event: &BlockEvent) -> Option<Observation<'_>> {
     let family = event.source_family.as_str();
     let kind = event.event_kind.as_str();
     let producer = matches!(
@@ -133,12 +153,15 @@ fn observation(event: &BlockEvent) -> Option<(&str, &'static str)> {
     ) && (V1_REGISTRIES.contains(&family)
         || (matches!(kind, "SurfaceBound" | "SurfaceUnbound") && V1_REGISTRARS.contains(&family)));
     producer.then_some(())?;
-    let via = if event.logical_name_id.is_some() {
-        "name"
-    } else {
-        "own"
-    };
-    Some((event.resource_id.as_deref()?, via))
+    let resource = event.resource_id.as_deref()?;
+    let name = event.logical_name_id.as_deref();
+    Some(Observation {
+        identity: name.unwrap_or(resource).to_owned(),
+        name,
+        resource,
+        through_name: name.is_some()
+            && matches!(kind, "AuthorityTransferred" | "SubregistryChanged"),
+    })
 }
 
 fn address(value: Option<&str>) -> bool {
@@ -151,6 +174,78 @@ fn address(value: Option<&str>) -> bool {
     })
 }
 
+/// The names' current ENSv1 or Basenames resource after the block: the binding of those arms
+/// active at the block's time, the latest opened when two are.
+async fn current_resources(
+    transaction: &mut Transaction<'_, Postgres>,
+    context: &Context<'_>,
+    names: &[String],
+) -> Result<BTreeMap<String, String>> {
+    if names.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "/* project:families.registry.current_resources */ SELECT DISTINCT ON
+                (binding.logical_name_id) binding.logical_name_id, binding.resource_id::text
+         FROM surface_bindings binding
+         WHERE binding.chain_id = $1 AND binding.logical_name_id = ANY($2)
+           AND binding.authority_arm IN ('ens_v1', 'basenames')
+           AND binding.canonicality_state IN ('canonical', 'safe', 'finalized')
+           AND binding.block_number <= $3
+           AND binding.active_from <= to_timestamp($4)
+           AND (binding.active_to IS NULL OR binding.active_to > to_timestamp($4))
+         ORDER BY binding.logical_name_id, binding.active_from DESC,
+                  binding.surface_binding_id DESC",
+    )
+    .bind(context.chain_id)
+    .bind(names)
+    .bind(context.block.number)
+    .bind(context.block.timestamp_seconds as f64)
+    .fetch_all(&mut **transaction)
+    .await
+    .map_err(|error| ProjectError::database("failed to read names' current resources", error))
+    .map_err(in_family(tables::REGISTRY_BINDING_OBSERVATION.name))?;
+    Ok(rows.into_iter().collect())
+}
+
+/// The names whose current binding may have moved in this block: every name a SurfaceBound
+/// or SurfaceUnbound of the block names, and every name with a binding row of the block.
+async fn rebound_names(
+    transaction: &mut Transaction<'_, Postgres>,
+    context: &Context<'_>,
+    events: &[BlockEvent],
+) -> Result<Vec<String>> {
+    let mut names: Vec<String> = sqlx::query_scalar(
+        "/* project:families.registry.rebound_names */ SELECT DISTINCT binding.logical_name_id
+         FROM surface_bindings binding
+         WHERE binding.chain_id = $1 AND binding.block_number = $2 AND binding.block_hash = $3
+           AND binding.canonicality_state IN ('canonical', 'safe', 'finalized')",
+    )
+    .bind(context.chain_id)
+    .bind(context.block.number)
+    .bind(&context.block.hash)
+    .fetch_all(&mut **transaction)
+    .await
+    .map_err(|error| ProjectError::database("failed to read the block's bound names", error))
+    .map_err(in_family(tables::REGISTRY_BINDING_OBSERVATION.name))?;
+    names.extend(
+        events
+            .iter()
+            .filter(|event| matches!(event.event_kind.as_str(), "SurfaceBound" | "SurfaceUnbound"))
+            .filter_map(|event| event.logical_name_id.clone()),
+    );
+    names.sort();
+    names.dedup();
+    Ok(names)
+}
+
+/// Each observation identity keeps its latest observation (DISTINCT ON the identity,
+/// permission_resources.rs:10-11). A named AuthorityTransferred or SubregistryChanged reaches the
+/// name's current resource, else its own (:36-40, COALESCE(current_name.resource_id,
+/// event.resource_id)); `target_resource_id` holds that resource as it stands after the block,
+/// and a block that moves a name's current binding moves the target of the name's row with it,
+/// the name's current resource before and after the block. The resource summary then takes,
+/// per target resource, the latest of the rows that reach it (:52-57).
 async fn observations(
     transaction: &mut Transaction<'_, Postgres>,
     context: &Context<'_>,
@@ -159,20 +254,38 @@ async fn observations(
 ) -> Result<()> {
     let table = &tables::REGISTRY_BINDING_OBSERVATION;
     let chain = json!(context.chain_id);
-    let relevant: Vec<(&BlockEvent, (&str, &str))> = events
+    let relevant: Vec<(&BlockEvent, Observation<'_>)> = events
         .iter()
         .filter_map(|event| Some((event, observation(event)?)))
         .collect();
+    let rebound = rebound_names(transaction, context, events).await?;
+    if relevant.is_empty() && rebound.is_empty() {
+        return Ok(());
+    }
+    let mut names: Vec<String> = relevant
+        .iter()
+        .filter(|(_, observation)| observation.through_name)
+        .filter_map(|(_, observation)| observation.name.map(str::to_owned))
+        .chain(rebound.iter().cloned())
+        .collect();
+    names.sort();
+    names.dedup();
+    let targets = current_resources(transaction, context, &names).await?;
     let keys = relevant
         .iter()
-        .map(|(_, (resource, via))| key_of(table, [chain.clone(), json!(resource), json!(via)]))
+        .map(|(_, observation)| key_of(table, [chain.clone(), json!(observation.identity)]))
+        .chain(
+            rebound
+                .iter()
+                .map(|name| key_of(table, [chain.clone(), json!(name)])),
+        )
         .collect();
     load_rows(transaction, rows, table, keys).await?;
-    for (event, (resource, via)) in relevant {
+    for (event, observation) in relevant {
         let mut row = current(
             rows,
             table,
-            &key_of(table, [chain.clone(), json!(resource), json!(via)]),
+            &key_of(table, [chain.clone(), json!(observation.identity)]),
         );
         let after = &event.after;
         let owner = (event.event_kind != "SurfaceUnbound")
@@ -193,6 +306,27 @@ async fn observations(
         let applicable = address(owner.as_deref())
             && owner.as_deref() != Some(ZERO_ADDRESS)
             && address(contract.as_deref());
+        let target = observation
+            .through_name
+            .then(|| observation.name.and_then(|name| targets.get(name)))
+            .flatten()
+            .map_or(observation.resource, String::as_str);
+        set(
+            &mut row,
+            "logical_name_id",
+            text_or_null(observation.name.map(str::to_owned)),
+        );
+        set(&mut row, "resource_id", observation.resource);
+        set(
+            &mut row,
+            "attributed_via",
+            if observation.through_name {
+                "name"
+            } else {
+                "own"
+            },
+        );
+        set(&mut row, "target_resource_id", target);
         set(&mut row, "event_kind", event.event_kind.clone());
         set(&mut row, "registry_owner", text_or_null(owner));
         set(&mut row, "registry_contract", text_or_null(contract));
@@ -212,6 +346,23 @@ async fn observations(
             },
         );
         put(rows, table, row, event)?;
+    }
+    // A name whose current binding moved: its row, when it reaches the resource through the
+    // name, follows the name to its new current resource.
+    for name in rebound {
+        let key = key_of(table, [chain.clone(), json!(name)]);
+        let Some(mut row) = rows.get(table, &key).cloned() else {
+            continue;
+        };
+        if row.get("attributed_via").and_then(Value::as_str) != Some("name") {
+            continue;
+        }
+        let own = row.get("resource_id").cloned().unwrap_or(Value::Null);
+        let target = targets.get(&name).map_or(own, |resource| json!(resource));
+        if row.get("target_resource_id") != Some(&target) {
+            set(&mut row, "target_resource_id", target);
+            rows.put(table, row).map_err(in_family(table.name))?;
+        }
     }
     Ok(())
 }

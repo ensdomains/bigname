@@ -242,6 +242,158 @@ fn served_gauges_reconcile_chains_the_query_no_longer_returns() -> Result<()> {
 }
 
 #[test]
+fn exports_the_active_step_of_a_long_project_run() -> Result<()> {
+    use bigname_project::{PROJECT_STEPS, StepObserver};
+
+    let feed = RunnerMetricsFeed::default();
+    feed.seed_chain("idle-chain");
+    let metrics = PipelineMetrics::new(
+        900,
+        RunnerLoopHeartbeat::default(),
+        RunnerPhaseProgress::default(),
+    )?;
+    feed.project_step("rebuilding", Some("resolver"));
+    metrics.project_steps.apply(&feed.project_steps.snapshot());
+
+    let scrape = metrics.registry.encode()?;
+    for metric_type in [
+        "# TYPE phase_runner_project_step gauge",
+        "# TYPE phase_runner_project_step_index gauge",
+        "# TYPE phase_runner_project_step_total gauge",
+    ] {
+        assert!(scrape.contains(metric_type), "missing {metric_type}");
+    }
+    let resolver = PROJECT_STEPS.iter().position(|step| *step == "resolver");
+    for (line, value) in [
+        (
+            "phase_runner_project_step{chain=\"rebuilding\",step=\"resolver\"}",
+            1,
+        ),
+        (
+            "phase_runner_project_step{chain=\"rebuilding\",step=\"prepare\"}",
+            0,
+        ),
+        (
+            "phase_runner_project_step_index{chain=\"rebuilding\"}",
+            resolver.map_or(-1, |index| i64::try_from(index + 1).unwrap_or(-1)),
+        ),
+        (
+            "phase_runner_project_step_total{chain=\"rebuilding\"}",
+            i64::try_from(PROJECT_STEPS.len())?,
+        ),
+        ("phase_runner_project_step_index{chain=\"idle-chain\"}", 0),
+        ("phase_runner_project_step_total{chain=\"idle-chain\"}", 0),
+    ] {
+        assert!(
+            scrape.contains(&format!("{line} {value}\n")),
+            "missing {line} {value}"
+        );
+    }
+
+    feed.project_step("rebuilding", None);
+    metrics.project_steps.apply(&feed.project_steps.snapshot());
+    let scrape = metrics.registry.encode()?;
+    for step in PROJECT_STEPS {
+        assert!(scrape.contains(&format!(
+            "phase_runner_project_step{{chain=\"rebuilding\",step=\"{step}\"}} 0\n"
+        )));
+    }
+    assert!(scrape.contains("phase_runner_project_step_index{chain=\"rebuilding\"} 0\n"));
+    assert!(scrape.contains("phase_runner_project_step_total{chain=\"rebuilding\"} 0\n"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_step_change_does_not_signal_the_commit_wakeup() {
+    use bigname_project::StepObserver;
+
+    let feed = RunnerMetricsFeed::default();
+    feed.project_step("rebuilding", Some("prepare"));
+    let wait = Duration::from_millis(50);
+    assert!(
+        tokio::time::timeout(wait, feed.project_steps.changed())
+            .await
+            .is_ok()
+    );
+    assert!(tokio::time::timeout(wait, feed.committed()).await.is_err());
+}
+
+#[tokio::test]
+async fn the_step_worker_reaches_idle_without_the_served_lag_worker() -> Result<()> {
+    use bigname_project::{PROJECT_STEPS, StepObserver};
+
+    let feed = RunnerMetricsFeed::default();
+    feed.seed_chain("rebuilding");
+    let metrics = PipelineMetrics::new(
+        900,
+        RunnerLoopHeartbeat::default(),
+        RunnerPhaseProgress::default(),
+    )?;
+    metrics.project_steps.apply(&feed.project_steps.snapshot());
+    metrics.refresh_success.set(1);
+    let cancellation = CancellationToken::new();
+    // Only the step worker runs: no served-lag refresh ever starts or finishes, as if
+    // one were held pending for the whole test.
+    let worker = tokio::spawn(project_step_loop(
+        metrics.project_steps.clone(),
+        feed.project_steps.clone(),
+        cancellation.clone(),
+    ));
+    let resolver = PROJECT_STEPS
+        .iter()
+        .position(|step| *step == "resolver")
+        .map_or(-1, |index| i64::try_from(index + 1).unwrap_or(-1));
+    let index_is = |value: i64| {
+        let line = format!("phase_runner_project_step_index{{chain=\"rebuilding\"}} {value}\n");
+        let registry = metrics.registry.clone();
+        async move {
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+            loop {
+                if registry.encode()?.contains(&line) {
+                    return Ok::<_, anyhow::Error>(());
+                }
+                ensure!(
+                    tokio::time::Instant::now() < deadline,
+                    "the step worker never exported {line}"
+                );
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        }
+    };
+
+    feed.project_step("rebuilding", Some("resolver"));
+    index_is(resolver).await?;
+    feed.project_step("rebuilding", None);
+    index_is(0).await?;
+
+    // Changes recorded back to back share one wakeup; the worker applies the latest
+    // snapshot, which is idle.
+    feed.project_step("rebuilding", Some("resolver"));
+    index_is(resolver).await?;
+    for step in ["integrity", "publish", "commit"] {
+        feed.project_step("rebuilding", Some(step));
+    }
+    feed.project_step("rebuilding", None);
+    index_is(0).await?;
+    let scrape = metrics.registry.encode()?;
+    for step in PROJECT_STEPS {
+        assert!(scrape.contains(&format!(
+            "phase_runner_project_step{{chain=\"rebuilding\",step=\"{step}\"}} 0\n"
+        )));
+    }
+    assert!(scrape.contains("phase_runner_project_step_total{chain=\"rebuilding\"} 0\n"));
+    assert_eq!(
+        metrics.refresh_success.get(),
+        1,
+        "step changes leave the refresh flag alone"
+    );
+
+    cancellation.cancel();
+    tokio::time::timeout(Duration::from_secs(2), worker).await??;
+    Ok(())
+}
+
+#[test]
 fn served_lag_is_unavailable_without_both_sides() {
     assert_eq!(served_lag::served_lag(Some(104), Some(100)), 4);
     assert_eq!(
@@ -426,6 +578,7 @@ fn family_loops_set_their_own_time_and_lag_and_count_skips() -> Result<()> {
             marker: Some(marker(current)),
             elapsed_ms,
             skipped: skipped.map(str::to_owned),
+            duplicate_anomalies: u64::from(skipped.is_none()),
             ..Default::default()
         }
     };
@@ -442,6 +595,7 @@ fn family_loops_set_their_own_time_and_lag_and_count_skips() -> Result<()> {
         "phase_runner_project_families_seconds{chain=\"ethereum-sepolia\"} 0.25\n",
         "phase_runner_project_family_lag_blocks{chain=\"ethereum-sepolia\"} 0\n",
         "phase_runner_project_family_skips_total{chain=\"ethereum-sepolia\"} 1\n",
+        "phase_runner_project_family_duplicate_anomalies_total{chain=\"ethereum-sepolia\"} 1\n",
     ] {
         assert!(scrape.contains(line), "missing {line}");
     }

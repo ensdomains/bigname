@@ -2457,23 +2457,35 @@ the batch builders and the tables they fill. It is not built yet. Until it
 ships the families are unread, and a doc that describes a change taking effect
 with the per-block publication describes planned behaviour.
 
-## Family undo record
+## Family marker
+
+`project_family_marker`: the block and hash a chain's [owned key
+families](#owned-key-family) stand at, the generation (`sequence`) every block
+and undo advances, and the input token, input revision and admission epoch the
+last block read. A block or undo applies only against the generation it
+planned from.
+
+## Family undo journal
 
 the rows of `project_family_undo`: for every owned key family row a block
 changed, the row as it was before the block (or nothing, when the block
 created it), plus the family marker before the block. Undoing the block puts
-those images back and returns the marker; the last 256 blocks are kept.
+those images back and returns the marker. Rows are kept back to the lowest of
+256 blocks below the marker, the finalized block, the safe block and an active
+repair's floor ([projections](projections.md#owned-key-families)).
 
 ## Repair record
 
 `project_repair_record`: the latest undo-then-replay or rebuild of a chain's
 owned key families, with the Project redo attempt that caused it, its reason,
-the block it trusts, the block it replays to, its state and, when complete,
-the marker it finished at. Undo never rewrites it.
+the block it trusts, the block it replays to, its state (`undoing`,
+`replaying`, `rebuilding` or `complete`) and, when complete, the marker,
+generation and input content hash it finished with. Each state change commits
+in the same transaction as the reset, undo or block it describes.
 
 ## Family input revision
 
 the Interpret row's `input_content_hash` and `redo_attempt_generation` a family
-block read before it ran, recorded on the family marker; nothing while
-Interpret is in redo. Distinct from the retired [raw-log input
+block read inside its own transaction, recorded on the family marker; nothing
+while Interpret is in redo, and the block then waits. Distinct from the retired [raw-log input
 revision](#input-revision-raw-log-input-revision).
