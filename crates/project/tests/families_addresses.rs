@@ -194,7 +194,7 @@ async fn a_masked_owner_word_clears_the_controller() -> Result<()> {
 }
 
 #[tokio::test]
-async fn addr_values_index_their_address_until_a_version_change() -> Result<()> {
+async fn addr_values_index_their_address_past_a_version_change() -> Result<()> {
     let fixture = Fixture::new("families_addresses_records", 20).await?;
     let addr = |node_hex: String, coin: &str, value: Value| {
         json!({"node": node_hex, "resolver": R1, "record_key": format!("addr:{coin}"),
@@ -272,16 +272,17 @@ async fn addr_values_index_their_address_until_a_version_change() -> Result<()> 
         .await?;
     fixture.apply(10, FamilyMode::Normal).await;
     let lower = ALICE.to_lowercase();
+    let node_one = vec![
+        json!({"address": lower, "coin_type": "60", "resolver_address": R1, "node": node(1)}),
+        json!({"address": BOB, "coin_type": "2147483658", "resolver_address": R1,
+               "node": node(1)}),
+    ];
     assert_eq!(
         index(
             &fixture.rows("project_address_record_node_index").await?,
             &["address", "coin_type", "resolver_address", "node"]
         ),
-        vec![
-            json!({"address": lower, "coin_type": "60", "resolver_address": R1, "node": node(1)}),
-            json!({"address": BOB, "coin_type": "2147483658", "resolver_address": R1,
-                   "node": node(1)}),
-        ]
+        node_one
     );
     assert_eq!(
         index(
@@ -291,7 +292,9 @@ async fn addr_values_index_their_address_until_a_version_change() -> Result<()> 
         vec![json!({"address": CAROL, "coin_type": "60", "record_id": "7"})]
     );
 
-    // A version change at node 1 drops its values from the index; undo brings them back.
+    // A version change at node 1 keeps its values in the index: a later link can keep a value
+    // below the version served (record_inventory.rs, the combined boundary), so readers apply the
+    // boundary and the index stays a superset.
     fixture
         .write(
             11,
@@ -306,8 +309,11 @@ async fn addr_values_index_their_address_until_a_version_change() -> Result<()> 
         .await?;
     fixture.apply(11, FamilyMode::Normal).await;
     assert_eq!(
-        fixture.rows("project_address_record_node_index").await?,
-        Vec::<Value>::new()
+        index(
+            &fixture.rows("project_address_record_node_index").await?,
+            &["address", "coin_type", "resolver_address", "node"]
+        ),
+        node_one
     );
     fixture.assert_undo_restores(11).await?;
     fixture.assert_rebuild_equal(11).await?;

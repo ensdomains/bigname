@@ -182,9 +182,11 @@ const NODE_DELETE: &str = "/* project:families.derived.node_delete */
     WHERE index.chain_id = $1 AND index.resolver_address = touched.resolver_address
       AND index.node = touched.node";
 
-/// One row per successful non-zero EVM-shaped `addr` value at the node written after its
-/// partition's latest version change in the canonical event order, the event identity
-/// included (address_records.rs `record_entries`). The value is the served one: the
+/// One row per successful non-zero EVM-shaped `addr` value at the node, whatever its
+/// partition's version: a later link can keep a value below the latest version served, since the
+/// record inventory admits a value by the boundary of its version and its links combined, so
+/// readers apply that boundary and the index stays a superset (address_records.rs
+/// `record_entries`). The value is the served one: the
 /// AddressChanged half of a coin-60 pair, its `value` payload else its `address_bytes_hex`, as
 /// the record inventory builds an entry's value (record_inventory.rs:357-381).
 const NODE_INSERT: &str = r#"/* project:families.derived.node_insert */
@@ -217,18 +219,8 @@ const NODE_INSERT: &str = r#"/* project:families.derived.node_insert */
         WHERE record.chain_id = $1 AND served.status = 'success'
           AND record.record_family = 'addr' AND record.selector_key ~ '^[0-9]{1,30}$'
     ) value
-    LEFT JOIN project_node_record_partition partition
-      ON partition.chain_id = $1 AND partition.resolver_address = value.resolver_address
-     AND partition.arm = value.arm AND partition.arm_identity = value.arm_identity
     WHERE value.address ~ '^0x[0-9a-f]{40}$'
       AND value.address <> '0x0000000000000000000000000000000000000000'
-      AND (partition.version_position IS NULL
-           OR (value.block_number, COALESCE(value.transaction_index, -1),
-               COALESCE(value.log_index, -1), value.event_identity COLLATE "C")
-              > ((partition.version_position ->> 'block_number')::bigint,
-                 COALESCE((partition.version_position ->> 'transaction_index')::bigint, -1),
-                 COALESCE((partition.version_position ->> 'log_index')::bigint, -1),
-                 (partition.version_position ->> 'event_identity') COLLATE "C"))
     ON CONFLICT DO NOTHING"#;
 
 const RECORD_ID_DELETE: &str = "/* project:families.derived.record_id_delete */
