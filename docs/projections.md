@@ -1823,11 +1823,12 @@ empty value against a family row is a mismatch. One ENSv1 NewOwner log yields a
 SubregistryChanged and an AuthorityTransferred at one position; the families keep
 the SubregistryChanged, whose identity sorts last, and today's builders the
 AuthorityTransferred, whose generated id is higher, as the registry-binding
-observation of the name. So each observation is rebuilt from the event log in
-both orders, and a binding field passes only when the family observations equal
-their canonical rebuild, the canonical binding equals the shadow one whole,
-today's binding equals the served one whole, and the two select different
-events. The control block's same-block read orders the node's owner-setting
+observation of the name. So the observations are rebuilt from the published
+event log in both orders, each identity's latest event chosen from the log and
+not from the family row, and a binding field passes only when the family
+observations equal their canonical rebuild, the canonical binding equals the
+shadow one whole, today's binding equals the served one whole, and the two
+select different events. The control block's same-block read orders the node's owner-setting
 events, the epoch starts and the registry-only SurfaceBounds by generated id
 too, and a control field passes only when each of those family facts equals its
 rebuild from the event log. The second is a named cause whose own check holds for

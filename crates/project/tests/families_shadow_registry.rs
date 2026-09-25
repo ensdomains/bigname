@@ -927,3 +927,198 @@ async fn a_same_block_binding_delta_moves_the_registry_operator_rows() -> Result
     );
     fixture.cleanup().await
 }
+
+/// An unnamed registry event of the lease: identity key the lease resource, so it reaches the
+/// lease as its own observation.
+async fn unnamed_on(
+    fixture: &Fixture,
+    identity: &str,
+    block: i64,
+    resource: &str,
+    getter: &str,
+) -> Result<i64> {
+    fixture
+        .event(
+            Event::new(identity, block, 1, "AuthorityTransferred", V1_REGISTRY)
+                .resource(resource)
+                .after(json!({"owner": getter, "owner_getter": getter,
+                              "emitter_role": "registry"}))
+                .raw(json!({"emitting_address": REGISTRY})),
+        )
+        .await
+}
+
+/// A named NewOwner-shaped registry event of name 1 on the lease.
+async fn named_on(
+    fixture: &Fixture,
+    identity: &str,
+    kind: &str,
+    resource: &str,
+    getter: &str,
+) -> Result<i64> {
+    fixture
+        .event(
+            Event::new(identity, 11, 1, kind, V1_REGISTRY)
+                .name(&name(1))
+                .resource(resource)
+                .after(
+                    json!({"source_event": "NewOwner", "node": node(2), "child_node": node(1),
+                              "owner": OTHER, "owner_getter": getter,
+                              "emitter_role": "registry"}),
+                )
+                .raw(json!({"emitting_address": REGISTRY})),
+        )
+        .await
+}
+
+/// Pro Q1 on 6cc8aa1e, the coherent stale row. Two observation identities reach the lease: the
+/// lease itself (A, unnamed events) and name 1 (B). At block 10 A has z-10 (getter OWNER); at
+/// block 11, one position, A has z-11 (THIRD) and B has m-11 (a SubregistryChanged, FOURTH) and
+/// then a-11 (an AuthorityTransferred, OTHER), written in that order. Canonically A keeps z-11,
+/// B keeps m-11 and the lease takes z-11, the greatest identity; today B keeps a-11 and the
+/// lease takes it, the highest id. That is a legitimate same-block delta. Replacing A's family
+/// row with its whole, self-consistent block-10 predecessor makes the families' binding m-11:
+/// wrong, and it must stay a mismatch, because the rebuild takes A's latest event from the
+/// event log rather than the position the family row names.
+#[tokio::test]
+async fn a_coherent_stale_observation_row_stays_a_mismatch() -> Result<()> {
+    const FOURTH: &str = "0x00000000000000000000000000000000000000dd";
+    let fixture = Fixture::new("families_shadow_registry_stale_row", 20).await?;
+    let lease = uuid(1);
+    bound(&fixture, &lease).await?;
+    let old_id = unnamed_on(&fixture, "z-10", 10, &lease, OWNER).await?;
+    unnamed_on(&fixture, "z-11", 11, &lease, THIRD).await?;
+    named_on(&fixture, "m-11", "SubregistryChanged", &lease, FOURTH).await?;
+    named_on(&fixture, "a-11", "AuthorityTransferred", &lease, OTHER).await?;
+    let report = publish_and_compare(&fixture, 12).await?;
+    shadow_support::assert_counts(
+        &report,
+        &[],
+        &[
+            ("d12_same_block_order:registry_binding/event_ids", 1),
+            ("d12_same_block_order:registry_binding/registry_owner", 1),
+        ],
+    );
+    assert_eq!(
+        summary(&fixture, &lease).await?.expect("summarised")["registry_owner"],
+        json!(OTHER)
+    );
+    sqlx::query(
+        "UPDATE bigname_phase.project_registry_binding_observation
+         SET block_number = 10, transaction_index = 0, log_index = 1, event_identity = 'z-10',
+             normalized_event_id = $3, registry_owner = $4
+         WHERE chain_id = $1 AND observation_identity = $2",
+    )
+    .bind(CHAIN)
+    .bind(&lease)
+    .bind(old_id)
+    .bind(OWNER)
+    .execute(&fixture.pool)
+    .await?;
+    let mutated = shadow_support::compare::compare(&fixture.pool, CHAIN, 12).await?;
+    assert!(
+        mutated.expected_delta_fields.is_empty() && mutated.known_discrepancy.is_empty(),
+        "a stale family row must not pass: {:#?}",
+        mutated.lines
+    );
+    assert_eq!(
+        failed_fields(&mutated),
+        [
+            "registry_binding/event_ids",
+            "registry_binding/registry_owner"
+        ],
+        "{:#?}",
+        mutated.lines
+    );
+    fixture.cleanup().await
+}
+
+/// Pro Q1 on 6cc8aa1e: two AuthorityTransferred events of name 1 at one position with the same
+/// payload and distinct identities, b written first. The families keep b (the greater
+/// identity), today a (the higher id); the binding differs only in the event it names, an
+/// event_ids-only same-block delta.
+#[tokio::test]
+async fn two_same_payload_events_with_distinct_identities_differ_in_event_ids_only() -> Result<()> {
+    let fixture = Fixture::new("families_shadow_registry_same_payload", 20).await?;
+    let lease = uuid(1);
+    bound(&fixture, &lease).await?;
+    named_on(
+        &fixture,
+        "AuthorityTransferred:11:1:b",
+        "AuthorityTransferred",
+        &lease,
+        OTHER,
+    )
+    .await?;
+    named_on(
+        &fixture,
+        "AuthorityTransferred:11:1:a",
+        "AuthorityTransferred",
+        &lease,
+        OTHER,
+    )
+    .await?;
+    let report = publish_and_compare(&fixture, 12).await?;
+    shadow_support::assert_counts(
+        &report,
+        &[],
+        &[("d12_same_block_order:registry_binding/event_ids", 1)],
+    );
+    fixture.cleanup().await
+}
+
+/// Pro Q1 on 6cc8aa1e: each condition of the registry-binding delta rejects on its own, the
+/// others holding. The event log's identities are unique (normalized_events.event_identity),
+/// so two deliveries of one identity cannot differ by id there; the same-identity case is
+/// the selected-identity condition below.
+#[test]
+fn each_condition_of_the_binding_delta_rejects_on_its_own() {
+    use bigname_storage::families::control::{position::Position, registry::RegistryBinding};
+    use shadow_support::compare::{BindingOrders, binding_json};
+    use std::collections::{BTreeMap, BTreeSet};
+
+    let binding = |identity: &str, owner: &str, id: i64| RegistryBinding {
+        registry_owner: Some(owner.to_owned()),
+        registry_contract: Some(REGISTRY.to_owned()),
+        position: Some(Position {
+            block_number: 11,
+            transaction_index: Some(0),
+            log_index: Some(1),
+            event_identity: identity.to_owned(),
+        }),
+        normalized_event_id: Some(id),
+        ..RegistryBinding::default()
+    };
+    let orders =
+        |canonical: RegistryBinding, legacy: RegistryBinding, unverified: bool| BindingOrders {
+            canonical: BTreeMap::from([("r".to_owned(), canonical)]),
+            legacy: BTreeMap::from([("r".to_owned(), legacy)]),
+            unverified: if unverified {
+                BTreeSet::from(["r".to_owned()])
+            } else {
+                BTreeSet::new()
+            },
+        };
+    let (m, a) = (binding("m", THIRD, 3), binding("a", OTHER, 4));
+    let (shadow, served) = (binding_json(&m), binding_json(&a));
+    assert!(orders(m.clone(), a.clone(), false).same_block_delta("r", &served, &shadow));
+    // A canonical rebuild that is not the shadow value.
+    assert!(
+        !orders(binding("m", OWNER, 3), a.clone(), false).same_block_delta("r", &served, &shadow)
+    );
+    // A today's rebuild that is not the served value.
+    assert!(
+        !orders(m.clone(), binding("a", OWNER, 4), false).same_block_delta("r", &served, &shadow)
+    );
+    // Both orders select one event identity, however their ids differ.
+    let same_identity = binding("m", OTHER, 4);
+    assert!(
+        !orders(m.clone(), same_identity.clone(), false).same_block_delta(
+            "r",
+            &binding_json(&same_identity),
+            &shadow
+        )
+    );
+    // A resource an unverified family observation reaches.
+    assert!(!orders(m, a, true).same_block_delta("r", &served, &shadow));
+}
