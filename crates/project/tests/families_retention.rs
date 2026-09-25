@@ -395,3 +395,64 @@ async fn the_wrapper_row_stays_raw_through_expiry_unwrap_and_rewrap() -> Result<
     fixture.assert_rebuild_equal(15).await?;
     fixture.cleanup().await
 }
+
+// The node row keeps registry_owner and the unmasked-word flag of its latest owner-setting event
+// only. When an earlier transfer wins the control owner, the reader needs them from that event, so
+// each owner-event row carries them too.
+#[tokio::test]
+async fn an_earlier_transfer_keeps_its_registry_owner_and_unmasked_flag() -> Result<()> {
+    const REGISTRY: &str = "0x00000000000000000000000000000000000000a3";
+    const OWNER: &str = "0x00000000000000000000000000000000000000c1";
+    const RECORDED: &str = "0x00000000000000000000000000000000000000c2";
+    let fixture = Fixture::new("families_retention_owner_word", 20).await?;
+    let registry = "ens_v1_registry_l1";
+    let resource = uuid(4);
+    fixture
+        .write(
+            10,
+            1,
+            "AuthorityTransferred",
+            registry,
+            Some(&name(4)),
+            Some(&resource),
+            json!({"node": node(4), "owner": OWNER, "owner_getter": OWNER,
+                   "registry_owner": RECORDED, "owner_word_unmasked": true}),
+            REGISTRY,
+        )
+        .await?;
+    fixture
+        .write(
+            12,
+            1,
+            "SubregistryChanged",
+            registry,
+            Some(&name(4)),
+            Some(&resource),
+            json!({"child_node": node(4), "owner": OWNER, "owner_getter": OWNER}),
+            REGISTRY,
+        )
+        .await?;
+    fixture.apply(12, FamilyMode::Normal).await;
+    let rows = fixture.rows("project_registry_owner_event").await?;
+    let kept: Vec<Value> = rows
+        .iter()
+        .map(|row| {
+            columns(
+                row,
+                &["event_identity", "registry_owner", "owner_word_unmasked"],
+            )
+        })
+        .collect();
+    assert_eq!(
+        kept,
+        [
+            json!({"event_identity": "AuthorityTransferred:10:1", "registry_owner": RECORDED,
+                   "owner_word_unmasked": true}),
+            json!({"event_identity": "SubregistryChanged:12:1", "registry_owner": null,
+                   "owner_word_unmasked": null}),
+        ]
+    );
+    fixture.assert_undo_restores(12).await?;
+    fixture.assert_rebuild_equal(12).await?;
+    fixture.cleanup().await
+}

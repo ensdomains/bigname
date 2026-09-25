@@ -1868,6 +1868,8 @@ CREATE TABLE IF NOT EXISTS project_registry_owner_event (
     owner text,
     owner_getter text,
     owner_getter_reason text,
+    registry_owner text,
+    owner_word_unmasked boolean,
     PRIMARY KEY (chain_id, namespace, node, event_identity),
     CHECK ((transaction_index IS NULL) = (log_index IS NULL))
 );
@@ -1907,6 +1909,10 @@ COMMENT ON COLUMN project_registry_owner_event.owner_getter IS
     'This value is the lower-cased owner_getter of the event.';
 COMMENT ON COLUMN project_registry_owner_event.owner_getter_reason IS
     'This value is the owner_getter_reason of the event.';
+COMMENT ON COLUMN project_registry_owner_event.registry_owner IS
+    'This value is the lower-cased registry_owner of the event, as the node row keeps it for its latest event.';
+COMMENT ON COLUMN project_registry_owner_event.owner_word_unmasked IS
+    'This value is the owner_word_unmasked flag of the event, as the node row keeps it for its latest event.';
 
 CREATE TABLE IF NOT EXISTS project_registry_binding_observation (
     chain_id text NOT NULL,
