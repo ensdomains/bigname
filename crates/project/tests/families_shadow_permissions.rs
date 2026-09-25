@@ -879,3 +879,155 @@ async fn a_transfer_to_the_delegate_from_one_log_drops_the_recipients_holder_row
     );
     fixture.cleanup().await
 }
+
+/// Codex thread PRRT_kwDOSJpxAs6l9h_u: a live ENSv2 registration's locked roles read its
+/// registry root's admin powers (resource_summary.rs:272-325), which the root's own path-expiry
+/// drop decides. The root holds a grant at block 10 and its `admin_renew` admin at 11; at block
+/// 14 the interpreter's path-expiry release of the root (log 2) is written before a new grant
+/// of it (log 1). The canonical order takes the release last and lapses the root, so the
+/// families lock every role of the child; today's order takes the grant (higher id), keeps the
+/// root live and serves `renew` unlocked. The child's restriction block differs only through
+/// its root, and passes as a same-block delta only when the whole block read in today's order
+/// equals the served one and the canonical read the shadow one. A wrong admin role in the
+/// families, on the root or on the child, leaves the child's block a mismatch.
+#[tokio::test]
+async fn a_root_reversal_moves_the_child_restrictions_as_a_same_block_delta() -> Result<()> {
+    let fixture = Fixture::new("families_shadow_permissions_root_reversal", 20).await?;
+    let (child, root) = (uuid(1), uuid(50));
+    for (resource, upstream) in [(&child, CHILD_WORD), (&root, ZERO_WORD)] {
+        fixture.resource(resource).await?;
+        sqlx::query("UPDATE resources SET provenance = $2 WHERE resource_id = $1::uuid")
+            .bind(resource)
+            .bind(json!({"adapter": "ens_v2_permissions", "chain_id": CHAIN,
+                         "source_family": "ens_v2_registry_l1", "registry_address": V2_REGISTRY,
+                         "registry_contract_instance_id": V2_INSTANCE,
+                         "upstream_resource": upstream}))
+            .execute(&fixture.pool)
+            .await?;
+    }
+    fixture
+        .binding(&uuid(100), &name(1), &child, "ens_v2", 9, 0, None)
+        .await?;
+    fixture
+        .write(
+            9,
+            1,
+            "SurfaceBound",
+            "ens_v2_registry_l1",
+            Some(&name(1)),
+            Some(&child),
+            json!({"authority_kind": "ens_v2_registry", "state_derived": false}),
+            V2_REGISTRY,
+        )
+        .await?;
+    let grant_after = |token: &str| {
+        json!({"authority_kind": "ens_v2_registry", "registry_contract_instance_id": V2_INSTANCE,
+               "token_id": token, "status": "registered", "registrant": HOLDER,
+               "expiry": 2_000_000_000u64, "state_derived": false})
+    };
+    fixture
+        .write(
+            10,
+            1,
+            "RegistrationGranted",
+            "ens_v2_registry_l1",
+            Some(&name(1)),
+            Some(&child),
+            grant_after("5001"),
+            V2_REGISTRY,
+        )
+        .await?;
+    role(
+        &fixture,
+        false,
+        10,
+        &child,
+        HOLDER,
+        &["unregister", "set_resolver"],
+    )
+    .await?;
+    let root_grant = |identity: &'static str, block: i64| {
+        support::Event::new(
+            identity,
+            block,
+            1,
+            "RegistrationGranted",
+            "ens_v2_registry_l1",
+        )
+        .resource(&root)
+        .after(grant_after("9001"))
+        .raw(json!({"emitting_address": V2_REGISTRY}))
+    };
+    fixture.event(root_grant("root-grant-10", 10)).await?;
+    role(&fixture, true, 11, &root, ROOT_ADMIN, &["admin_renew"]).await?;
+    fixture
+        .event(
+            support::Event::new(
+                "root-path-expiry",
+                14,
+                2,
+                "RegistrationReleased",
+                "ens_v2_registry_l1",
+            )
+            .resource(&root)
+            .after(json!({"source_event": "RegistryPathExpired",
+                              "derived_from": "interpreter_state",
+                              "terminal_reason": "registry_name_binding_expired",
+                              "expiry": 1_800_000_100u64,
+                              "registry_contract_instance_id": V2_INSTANCE,
+                              "token_id": "9001"}))
+            .raw(json!({"emitting_address": V2_REGISTRY})),
+        )
+        .await?;
+    fixture.event(root_grant("root-grant-14", 14)).await?;
+    let report = publish_and_compare(&fixture, 16).await?;
+    assert_eq!(
+        locked_roles(&fixture, &child).await?,
+        Some(json!({"kind": "ens_v2_registry",
+                    "locked_roles": ["unregister", "set_subregistry", "set_resolver", "transfer"]})),
+        "today's order keeps the root live and serves renew unlocked"
+    );
+    // The root's own rows, admin powers and restriction block are the resource's own lapse
+    // delta; the child's restriction block is the second restriction delta.
+    shadow_support::assert_counts(
+        &report,
+        &[],
+        &[
+            ("d12_same_block_order:admin_powers", 1),
+            ("d12_same_block_order:permissions_current", 1),
+            ("d12_same_block_order:resource_restrictions", 2),
+        ],
+    );
+    for (case, resource) in [("root admin", &root), ("child admin", &child)] {
+        sqlx::query(
+            "UPDATE bigname_phase.project_resource_admin_aggregate
+             SET admin_powers = '[\"admin_set_resolver\"]'::jsonb WHERE resource_id = $1::uuid",
+        )
+        .bind(resource)
+        .execute(&fixture.pool)
+        .await?;
+        let mutated = shadow_support::compare::compare(&fixture.pool, CHAIN, 16).await?;
+        assert!(
+            mutated.lines.iter().any(|line| {
+                line.starts_with("SEPOLIA_END_TO_END_SHADOW_MISMATCH")
+                    && line.contains(&format!("key={child} "))
+                    && line.contains("field=resource_restrictions")
+            }),
+            "{case}: a wrong admin must leave the child's block a mismatch: {:#?}",
+            mutated.lines
+        );
+        sqlx::query(
+            "UPDATE bigname_phase.project_resource_admin_aggregate
+             SET admin_powers = $2 WHERE resource_id = $1::uuid",
+        )
+        .bind(resource)
+        .bind(if resource == &root {
+            json!(["admin_renew"])
+        } else {
+            json!([])
+        })
+        .execute(&fixture.pool)
+        .await?;
+    }
+    fixture.cleanup().await
+}

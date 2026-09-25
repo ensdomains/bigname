@@ -2097,19 +2097,67 @@ pub fn legacy_facts(
     Some(out)
 }
 
+/// A resource's retained lifecycle events rebuilt from the publication-visible log, with their
+/// generated ids: None unless the families hold exactly the retained events the log gives the
+/// resource, each is at its logged position, and the log names every generated id.
+async fn lapse_evidence(
+    pool: &PgPool,
+    chain: &str,
+    target: i64,
+    resource: &str,
+) -> Result<Option<(Vec<LifecycleEvent>, BTreeMap<String, i64>)>> {
+    let rows: Vec<Value> = sqlx::query_scalar(
+        "SELECT to_jsonb(event) FROM project_lifecycle_event event
+         WHERE event.chain_id = $1 AND event.state_kind = 'resource' AND event.state_key = $2",
+    )
+    .bind(chain)
+    .bind(resource)
+    .fetch_all(pool)
+    .await?;
+    let events: Vec<LifecycleEvent> = rows.iter().filter_map(LifecycleEvent::from_row).collect();
+    let family: BTreeSet<String> = events
+        .iter()
+        .map(|event| event.position.event_identity.clone())
+        .collect();
+    if family.len() != events.len()
+        || !retention::resource_events_hold(pool, chain, target, resource, &family).await?
+    {
+        return Ok(None);
+    }
+    let Some(events) = events_from_log(pool, chain, target, &events).await? else {
+        return Ok(None);
+    };
+    let identities: Vec<String> = family.into_iter().collect();
+    let ids = generated_ids(pool, chain, target, &identities).await?;
+    if !identities.iter().all(|identity| ids.contains_key(identity)) {
+        return Ok(None);
+    }
+    Ok(Some((events, ids)))
+}
+
 /// The cause shown for each differing field of one resource, in `diffs` order. The permissions
 /// builder's path-expiry drop (permissions.rs:111-133, :391-398) takes the resource's latest
-/// ENSv2 registration event in today's (block, generated id) order. A `permissions_current`,
-/// `admin_powers` or `resource_restrictions` field passes as a same-block delta only in one
-/// direction: the resource's retained events rebuilt from the publication-visible log keep the
-/// registration live in today's order and lapse it in the canonical order, the served value is
-/// not empty, the canonical read is empty, and the whole permission read of the resource taken
-/// again from the families in today's order equals it. That read is compared whole, so a wrong
-/// subject, power, collision row or restriction in the families fails. The shadow value is the
-/// canonical read itself, so comparing it with the canonical read checks nothing and is not
-/// counted as evidence. The other
-/// direction, today's order lapsing the registration, is left a mismatch: the read in that order
-/// is empty, so matching it would only show that the served value is empty.
+/// ENSv2 registration event in today's (block, generated id) order. Every lapse below is decided
+/// from the resource's retained events rebuilt from the publication-visible log, and only when
+/// the families hold exactly the retained events the log gives it (`lapse_evidence`).
+///
+/// A `permissions_current`, `admin_powers` or `resource_restrictions` field passes as a
+/// same-block delta in one direction: the rebuilt events keep the registration live in today's
+/// order and lapse it in the canonical order, the served value is not empty, the canonical read
+/// is empty, and the whole permission read of the resource taken again from the families in
+/// today's order equals it. That read is compared whole, so a wrong subject, power, collision
+/// row or restriction in the families fails. The shadow value is the canonical read itself, so
+/// comparing it with the canonical read checks nothing and is not counted as evidence. The
+/// other direction, today's order lapsing the registration, is left a mismatch: the read in
+/// that order is empty, so matching it would only show that the served value is empty.
+///
+/// A live registration's restriction block also reads its registry root's admin powers
+/// (resource_summary.rs:272-325), which the root's own drop decides. When the resource lapses
+/// the same way in both orders and its root lapses in one only, `resource_restrictions` passes
+/// when the whole block read in today's order equals the served one, the whole block read in
+/// the canonical order through the refolding path (both resources' events ranked canonically,
+/// so the stored key states are not read) equals the shadow one, and the two differ. Both are
+/// non-empty blocks, so both directions carry evidence.
 pub async fn resource_excuses(
     pool: &PgPool,
     chain: &str,
@@ -2126,80 +2174,97 @@ pub async fn resource_excuses(
     }) {
         return Ok(out);
     }
-    let rows: Vec<Value> = sqlx::query_scalar(
-        "SELECT to_jsonb(event) FROM project_lifecycle_event event
-         WHERE event.chain_id = $1 AND event.state_kind = 'resource' AND event.state_key = $2",
-    )
-    .bind(chain)
-    .bind(&input.resource_id)
-    .fetch_all(pool)
-    .await?;
-    let events: Vec<LifecycleEvent> = rows.iter().filter_map(LifecycleEvent::from_row).collect();
-    // The families must hold exactly the retained events the log gives the resource.
-    let family: BTreeSet<String> = events
-        .iter()
-        .map(|event| event.position.event_identity.clone())
-        .collect();
-    if family.len() != events.len()
-        || !retention::resource_events_hold(
-            pool,
-            chain,
-            clock.block_number,
-            &input.resource_id,
-            &family,
-        )
-        .await?
-    {
-        return Ok(out);
-    }
-    // The lapse is decided from the resource's retained events rebuilt from the
-    // publication-visible log, so a wrong family row cannot supply the reason for the excuse.
-    let Some(events) = events_from_log(pool, chain, clock.block_number, &events).await? else {
+    let target = clock.block_number;
+    let Some((events, mut ids)) = lapse_evidence(pool, chain, target, &input.resource_id).await?
+    else {
         return Ok(out);
     };
-    let identities: Vec<String> = events
-        .iter()
-        .map(|event| event.position.event_identity.clone())
-        .collect();
-    let ids = generated_ids(pool, chain, clock.block_number, &identities).await?;
-    if !events
-        .iter()
-        .all(|event| ids.contains_key(&event.position.event_identity))
-    {
-        return Ok(out);
-    }
-    let today = EventOrder::Generated(ids);
-    let lapsed = |order: &EventOrder| registration_lapsed(&maxima_of(&events, true, order), order);
-    if lapsed(&today) || !lapsed(&EventOrder::Canonical) {
-        return Ok(out);
-    }
+    let lapsed = |events: &[LifecycleEvent], order: &EventOrder| {
+        registration_lapsed(&maxima_of(events, true, order), order)
+    };
+    let own = (
+        lapsed(&events, &EventOrder::Generated(ids.clone())),
+        lapsed(&events, &EventOrder::Canonical),
+    );
     let read = |order: EventOrder| async move {
         load_shadow_permissions_in(pool, chain, clock, std::slice::from_ref(input), &order)
             .await
             .map(|mut reads| reads.remove(&input.resource_id).unwrap_or_default())
     };
-    let legacy = read(today).await?;
-    let canonical = read(EventOrder::Canonical).await?;
     let value = |read: &ShadowPermissions, field: &str| match field {
         "permissions_current" => Some(Value::Array(read.grants.iter().map(grant_json).collect())),
         "admin_powers" => Some(json!(read.admin_powers)),
         "resource_restrictions" => Some(read.restrictions.clone().unwrap_or(Value::Null)),
         _ => None,
     };
+    if own == (false, true) {
+        let legacy = read(EventOrder::Generated(ids)).await?;
+        let canonical = read(EventOrder::Canonical).await?;
+        for (index, diff) in diffs.iter().enumerate() {
+            let (Some(legacy), Some(canonical)) =
+                (value(&legacy, &diff.field), value(&canonical, &diff.field))
+            else {
+                continue;
+            };
+            let empty = |value: &Value| match value {
+                Value::Null => true,
+                Value::Array(rows) => rows.is_empty(),
+                _ => false,
+            };
+            if !empty(&diff.served)
+                && empty(&canonical)
+                && same(&legacy, &diff.served)
+                && !same(&legacy, &canonical)
+            {
+                out[index] = Excuse::SameBlockOrder;
+            }
+        }
+        return Ok(out);
+    }
+    // The restriction block through the root.
+    let (Some(root), false) = (input.root_resource_id.as_deref(), own.0 != own.1) else {
+        return Ok(out);
+    };
+    if !diffs
+        .iter()
+        .any(|diff| diff.field == "resource_restrictions")
+    {
+        return Ok(out);
+    }
+    let Some((root_events, root_ids)) = lapse_evidence(pool, chain, target, root).await? else {
+        return Ok(out);
+    };
+    if lapsed(&root_events, &EventOrder::Generated(root_ids.clone()))
+        == lapsed(&root_events, &EventOrder::Canonical)
+    {
+        return Ok(out);
+    }
+    let mut positions: Vec<Position> = events
+        .iter()
+        .chain(&root_events)
+        .map(|event| event.position.clone())
+        .collect();
+    positions.sort();
+    positions.dedup_by(|left, right| left.event_identity == right.event_identity);
+    let ranks: BTreeMap<String, i64> = positions
+        .into_iter()
+        .enumerate()
+        .map(|(rank, position)| (position.event_identity, rank as i64))
+        .collect();
+    ids.extend(root_ids);
+    let legacy = read(EventOrder::Generated(ids)).await?;
+    let canonical = read(EventOrder::Generated(ranks)).await?;
     for (index, diff) in diffs.iter().enumerate() {
+        if diff.field != "resource_restrictions" {
+            continue;
+        }
         let (Some(legacy), Some(canonical)) =
             (value(&legacy, &diff.field), value(&canonical, &diff.field))
         else {
             continue;
         };
-        let empty = |value: &Value| match value {
-            Value::Null => true,
-            Value::Array(rows) => rows.is_empty(),
-            _ => false,
-        };
-        if !empty(&diff.served)
-            && empty(&canonical)
-            && same(&legacy, &diff.served)
+        if same(&legacy, &diff.served)
+            && same(&canonical, &diff.shadow)
             && !same(&legacy, &canonical)
         {
             out[index] = Excuse::SameBlockOrder;
