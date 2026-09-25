@@ -534,3 +534,111 @@ async fn a_grant_is_revoked_exactly_when_its_powers_are_empty() -> Result<()> {
     fixture.assert_rebuild_equal(10).await?;
     fixture.cleanup().await
 }
+
+// A grant records the registration it belongs to: the resource's latest RegistrationGranted or
+// RegistrationReserved before it, the F2a last_active rule, counting earlier events of its own
+// block. A registration later in the block does not move an earlier grant's.
+#[tokio::test]
+async fn a_grant_records_the_registration_it_was_written_under() -> Result<()> {
+    let fixture = Fixture::new("families_grant_registration", 20).await?;
+    let (resource, bare) = (uuid(4), uuid(5));
+    let scope =
+        json!({"kind": "registry", "chain_id": "ethereum-sepolia", "registry_address": REGISTRY});
+    let grant = |subject: &str| {
+        json!({"subject": subject, "scope": scope, "effective_powers": ["set_resolver"],
+               "grant_source": {"kind": "raw_log"}, "inheritance_path": [],
+               "transfer_behavior": "stays"})
+    };
+    let registration = json!({"registry_contract_instance_id": "registry", "token_id": "1"});
+    fixture
+        .write(
+            10,
+            1,
+            "RegistrationGranted",
+            "ens_v2_registry_l1",
+            None,
+            Some(&resource),
+            registration.clone(),
+            REGISTRY,
+        )
+        .await?;
+    fixture
+        .write(
+            11,
+            1,
+            "PermissionChanged",
+            "ens_v2_registry_l1",
+            None,
+            Some(&resource),
+            grant(ALICE),
+            REGISTRY,
+        )
+        .await?;
+    fixture.apply(11, FamilyMode::Normal).await;
+    fixture
+        .write(
+            12,
+            1,
+            "RegistrationReserved",
+            "ens_v2_registry_l1",
+            None,
+            Some(&resource),
+            registration.clone(),
+            REGISTRY,
+        )
+        .await?;
+    fixture
+        .write(
+            12,
+            2,
+            "PermissionChanged",
+            "ens_v2_registry_l1",
+            None,
+            Some(&resource),
+            grant(BOB),
+            REGISTRY,
+        )
+        .await?;
+    fixture
+        .write(
+            12,
+            3,
+            "PermissionChanged",
+            "ens_v2_registry_l1",
+            None,
+            Some(&bare),
+            grant(ALICE),
+            REGISTRY,
+        )
+        .await?;
+    fixture
+        .write(
+            12,
+            4,
+            "RegistrationGranted",
+            "ens_v2_registry_l1",
+            None,
+            Some(&resource),
+            registration,
+            REGISTRY,
+        )
+        .await?;
+    fixture.apply(12, FamilyMode::Normal).await;
+    let rows = fixture.rows("project_grant").await?;
+    let registration_of = |resource: &str, subject: &str| {
+        rows.iter()
+            .find(|row| row["resource_id"] == json!(resource) && row["subject"] == json!(subject))
+            .map(|row| {
+                json!([
+                    row["registration_position"]["block_number"],
+                    row["registration_position"]["log_index"]
+                ])
+            })
+    };
+    assert_eq!(registration_of(&resource, ALICE), Some(json!([10, 1])));
+    assert_eq!(registration_of(&resource, BOB), Some(json!([12, 1])));
+    assert_eq!(registration_of(&bare, ALICE), Some(json!([null, null])));
+    fixture.assert_undo_restores(12).await?;
+    fixture.assert_rebuild_equal(12).await?;
+    fixture.cleanup().await
+}

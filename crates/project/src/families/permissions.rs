@@ -11,7 +11,7 @@ use sqlx::{Postgres, Transaction};
 
 use super::reduce::in_family;
 use super::{
-    input::BlockEvent,
+    input::{BlockEvent, Position},
     keys,
     reduce::{
         Context, current, json_boolean, key_of, load_rows, put, raw_lower, raw_text, set,
@@ -130,8 +130,25 @@ pub(super) async fn apply(
         aggregate_keys,
     )
     .await?;
+    let registration_keys = grants
+        .iter()
+        .map(|grant| {
+            key_of(
+                &tables::LIFECYCLE_KEY_STATE,
+                [chain.clone(), json!(grant.resource)],
+            )
+        })
+        .collect();
+    load_rows(
+        transaction,
+        rows,
+        &tables::LIFECYCLE_KEY_STATE,
+        registration_keys,
+    )
+    .await?;
     for grant in &grants {
-        apply_grant(rows, &chain, grant)?;
+        let registration = registration_position(rows, &chain, events, grant);
+        apply_grant(rows, &chain, grant, registration)?;
     }
 
     let approvals: Vec<(Vec<Value>, &BlockEvent)> = events
@@ -230,7 +247,53 @@ fn approval_key(event: &BlockEvent) -> Option<Vec<Value>> {
     ])
 }
 
-fn apply_grant(rows: &mut RowSet, chain: &Value, grant: &Grant<'_>) -> Result<()> {
+/// The registration a grant belongs to: the resource's latest RegistrationGranted or
+/// RegistrationReserved before the grant, the rule F2a keeps as `last_active` (lifecycle.rs
+/// `maxima`). The lifecycle family folds this block's events after permissions, so its stored
+/// row ends at the previous block and the block's earlier registration events are added here.
+/// The served permissions read has no per-grant registration: it masks by the resource's
+/// current registration (permissions.rs `v2_registration_current`).
+fn registration_position(
+    rows: &RowSet,
+    chain: &Value,
+    events: &[BlockEvent],
+    grant: &Grant<'_>,
+) -> Value {
+    let in_block = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event.event_kind.as_str(),
+                "RegistrationGranted" | "RegistrationReserved"
+            ) && event.resource_id.as_deref() == Some(grant.resource)
+                && event.position < grant.event.position
+        })
+        .map(|event| event.position.clone())
+        .max();
+    let stored = || {
+        rows.get(
+            &tables::LIFECYCLE_KEY_STATE,
+            &key_of(
+                &tables::LIFECYCLE_KEY_STATE,
+                [chain.clone(), json!(grant.resource)],
+            ),
+        )
+        .and_then(|row| row.get("last_active"))
+        .and_then(|active| active.get("position"))
+        .and_then(Value::as_object)
+        .and_then(Position::of_row)
+    };
+    in_block
+        .or_else(stored)
+        .map_or(Value::Null, |position| position.to_json())
+}
+
+fn apply_grant(
+    rows: &mut RowSet,
+    chain: &Value,
+    grant: &Grant<'_>,
+    registration: Value,
+) -> Result<()> {
     let event = grant.event;
     let after = &event.after;
     let table = &tables::GRANT;
@@ -290,7 +353,7 @@ fn apply_grant(rows: &mut RowSet, chain: &Value, grant: &Grant<'_>) -> Result<()
         "revoked",
         powers.as_array().is_some_and(Vec::is_empty),
     );
-    row.entry("registration_position").or_insert(Value::Null);
+    set(&mut row, "registration_position", registration);
     put(rows, table, row, event)?;
 
     // The holder's admin powers under a registry or root scope, kept per holder.
