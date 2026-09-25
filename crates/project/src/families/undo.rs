@@ -168,29 +168,54 @@ pub(crate) async fn undo_target(
     limit: i64,
 ) -> Result<Option<crate::Marker>> {
     type Step = (i64, String, Option<i64>, Option<String>, bool, bool);
+    // Walk the journalled prior markers down from `current` in SQL, stopping below the first
+    // readable marker at or under `limit`, so a shallow undo reads a few rows however much
+    // journal a chain without finality heads has kept.
     let steps: Vec<Step> = sqlx::query_as(
-        "/* project:families.undo.path */ SELECT journal.block_number, journal.block_hash,
-                (journal.before_image ->> 'current_block_number')::bigint,
-                journal.before_image ->> 'current_block_hash',
+        "/* project:families.undo.path */ WITH RECURSIVE step AS (
+             SELECT journal.block_number, journal.block_hash,
+                    (journal.before_image ->> 'current_block_number')::bigint AS prior_number,
+                    journal.before_image ->> 'current_block_hash' AS prior_hash
+             FROM project_family_undo journal
+             WHERE journal.chain_id = $1 AND journal.family = 'marker'
+               AND journal.block_number = $2 AND journal.block_hash = $3
+             UNION
+             SELECT journal.block_number, journal.block_hash,
+                    (journal.before_image ->> 'current_block_number')::bigint,
+                    journal.before_image ->> 'current_block_hash'
+             FROM step
+             JOIN project_family_undo journal
+               ON journal.chain_id = $1 AND journal.family = 'marker'
+              AND journal.block_number = step.prior_number
+              AND journal.block_hash = step.prior_hash
+             WHERE NOT (step.block_number <= $4 AND EXISTS (
+                 SELECT 1 FROM chain_lineage lineage
+                 WHERE lineage.chain_id = $1
+                   AND lineage.block_number = step.block_number
+                   AND lineage.block_hash = step.block_hash
+                   AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')))
+         )
+         SELECT step.block_number, step.block_hash, step.prior_number, step.prior_hash,
                 EXISTS (
                     SELECT 1 FROM chain_lineage lineage
-                    WHERE lineage.chain_id = journal.chain_id
-                      AND lineage.block_number = journal.block_number
-                      AND lineage.block_hash = journal.block_hash
+                    WHERE lineage.chain_id = $1
+                      AND lineage.block_number = step.block_number
+                      AND lineage.block_hash = step.block_hash
                       AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
                 ),
                 EXISTS (
                     SELECT 1 FROM chain_lineage lineage
-                    WHERE lineage.chain_id = journal.chain_id
-                      AND lineage.block_number =
-                          (journal.before_image ->> 'current_block_number')::bigint
-                      AND lineage.block_hash = journal.before_image ->> 'current_block_hash'
+                    WHERE lineage.chain_id = $1
+                      AND lineage.block_number = step.prior_number
+                      AND lineage.block_hash = step.prior_hash
                       AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
                 )
-         FROM project_family_undo journal
-         WHERE journal.chain_id = $1 AND journal.family = 'marker'",
+         FROM step",
     )
     .bind(chain_id)
+    .bind(current.number)
+    .bind(&current.hash)
+    .bind(limit)
     .fetch_all(pool)
     .await
     .map_err(|error| ProjectError::database("failed to read the family undo path", error))?;
