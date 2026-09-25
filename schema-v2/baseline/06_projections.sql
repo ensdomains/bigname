@@ -1155,7 +1155,7 @@ COMMENT ON COLUMN project_family_marker.project_redo_from IS
 COMMENT ON COLUMN project_family_marker.project_redo_to IS
     'This value is the Project row''s redo_to_block_number the last block read.';
 COMMENT ON COLUMN project_family_marker.admission_manifests IS
-    'This value names the latest SourceManifestUpdated event of every manifest the chain reads, as the last block saw it; a block that sees another epoch classifies every stored resolver again.';
+    'This value is the key of the active manifest set the last block classified under: manifest_id:event_id of the latest SourceManifestUpdated event of every manifest the chain reads, at or below the block or with no block. A family run reads the manifest updates once, so an update written during a run applies from the next run; a block that sees another key classifies every stored resolver again. An update with no block applies to every block, so it is not tied to the block it was written at.';
 
 CREATE TABLE IF NOT EXISTS project_family_undo (
     chain_id text NOT NULL,
@@ -1168,7 +1168,7 @@ CREATE TABLE IF NOT EXISTS project_family_undo (
     CHECK (btrim(block_hash) <> '')
 );
 COMMENT ON TABLE project_family_undo IS
-    'Project-owned undo record of the owned key families: per applied block, the image each family row had before the block first changed it, plus the prior marker under family marker. Undoing a block restores these images; rows below the retained depth are pruned as the marker advances. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
+    'Project-owned undo record of the owned key families: per applied block, the image each family row had before the block first changed it, plus the prior marker under family marker. Undoing a block restores these images. Rows are kept back to the lowest of 256 blocks below the marker, the finalized block, the safe block and an active repair''s floor; with no finalized or safe head nothing is pruned, so the journal grows by every block until the heads appear and is then pruned in one delete. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
 COMMENT ON COLUMN project_family_undo.chain_id IS
     'This value is the chain of the block.';
 COMMENT ON COLUMN project_family_undo.block_number IS
@@ -1201,6 +1201,7 @@ CREATE TABLE IF NOT EXISTS project_repair_record (
     completed_input_hash text,
     updated_at timestamptz NOT NULL DEFAULT now(),
     prefix_recorded boolean NOT NULL DEFAULT false,
+    reset_sequence bigint,
     PRIMARY KEY (chain_id),
     CHECK (reason IN ('required_redo_range', 'orphaned_lineage', 'content_hash_rebuild', 'operator_redo')),
     CHECK (state IN ('undoing', 'replaying', 'rebuilding', 'complete')),
@@ -1248,6 +1249,8 @@ COMMENT ON COLUMN project_repair_record.completed_input_hash IS
     'This value is the interpreter content hash the completing loop ran under; null until complete.';
 COMMENT ON COLUMN project_repair_record.updated_at IS
     'This value is when the record last changed.';
+COMMENT ON COLUMN project_repair_record.reset_sequence IS
+    'This value is the family marker generation the rebuild''s reset wrote; null for an undo-then-replay.';
 COMMENT ON COLUMN project_repair_record.prefix_recorded IS
     'This value is true once the replay or rebuild captured its input revision in prefix_interpret_input_content_hash and prefix_interpret_redo_attempt, which may both be null when the chain has no Interpret row; false while undoing.';
 
@@ -1335,7 +1338,7 @@ CREATE TABLE IF NOT EXISTS project_binding_candidate (
 COMMENT ON TABLE project_binding_candidate IS
     'Project-owned binding candidates of family F1: every surface binding of a name, selected or not, with the registry-only handoff facts and the wrapper facts the authority admission reads at publication. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
 COMMENT ON COLUMN project_binding_candidate.surface_binding_id IS
-    'This value identifies the surface binding.';
+    'This value identifies the surface binding. It orders candidates only after the whole position: two bindings of one name at the same position with no transaction or log (synthesised) order by event_identity and then this id, where the served selection orders equal (block, transaction, log) by surface_binding_id descending without the identity.';
 COMMENT ON COLUMN project_binding_candidate.logical_name_id IS
     'This value is the bound name.';
 COMMENT ON COLUMN project_binding_candidate.namespace IS
@@ -1369,7 +1372,7 @@ COMMENT ON COLUMN project_binding_candidate.state_derived IS
 COMMENT ON COLUMN project_binding_candidate.authority_kind IS
     'This value is the authority_kind of the SurfaceBound that opened the binding.';
 COMMENT ON COLUMN project_binding_candidate.registry_only IS
-    'This value is true once an AuthorityEpochChanged registry_only was seen on this name and resource, in the binding''s block or later.';
+    'This value is true once an AuthorityEpochChanged registry_only was seen on this name and resource, in the binding''s block or later. An epoch at an earlier block than the binding does not set it, where the served REGISTRY_ONLY_HANDOFFS (name_authority/stage.rs:127-134) takes an epoch on the name and resource at any position.';
 COMMENT ON COLUMN project_binding_candidate.predecessor_resource_id IS
     'This value is the resource of the latest candidate of the same name and arm positioned before a registry-only binding.';
 COMMENT ON COLUMN project_binding_candidate.predecessor_position IS
@@ -1829,7 +1832,7 @@ COMMENT ON COLUMN project_registry_node_state.has_old_record IS
 COMMENT ON COLUMN project_registry_node_state.first_current_record_block IS
     'This value is the first block with an emitter_role registry event for the node.';
 COMMENT ON COLUMN project_registry_node_state.owner_event_kind IS
-    'This value is the kind of the registry event that last set the owner group: AuthorityTransferred or SubregistryChanged, both of which report the owner (name_authority/stage.rs:200-261).';
+    'This value is the kind of the registry event that last set the owner group: AuthorityTransferred or SubregistryChanged, both of which report the owner (name_authority/stage.rs:200-261). Either overwrites the group, so a SubregistryChanged after an AuthorityTransferred whose getter was zero replaces the owner; the served ownerless verdict, which reads AuthorityTransferred only, cannot be recovered from this row.';
 COMMENT ON COLUMN project_registry_node_state.owner_position IS
     'This value is the position of that event, apart from the row''s last-write position.';
 COMMENT ON COLUMN project_registry_node_state.owner_resource_id IS
@@ -1920,7 +1923,7 @@ CREATE TABLE IF NOT EXISTS project_resolver_classification (
     CHECK (support_status IN ('supported', 'unsupported'))
 );
 COMMENT ON TABLE project_resolver_classification IS
-    'Project-owned resolver classification of family F3, pinned to the block that last classified it: resolver_current without its sampled sections, from the candidate accumulators the row keeps and the discovery edges, declarations and manifests active at that block. A resolver is classified again when an event names it, a pointer moves to or from it, a resolver edge, its address or a declaration of it starts or stops, and when the admission epoch changes. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
+    'Project-owned resolver classification of family F3, pinned to the block that last classified it: resolver_current without its sampled sections, from the candidate accumulators the row keeps and the discovery edges, declarations and manifests active at that block. A resolver is classified again when an event names it, a pointer moves to or from it, a resolver edge, its address or a declaration of it starts or stops, and when the active manifest set changes. Edge and address activity also honours deactivated_at, a wall-clock time as in the served build, so a classification can differ from a later rebuild once an edge is deactivated. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
 COMMENT ON COLUMN project_resolver_classification.chain_id IS
     'This value is the chain.';
 COMMENT ON COLUMN project_resolver_classification.resolver_address IS
@@ -1940,7 +1943,7 @@ COMMENT ON COLUMN project_resolver_classification.classification IS
 COMMENT ON COLUMN project_resolver_classification.support_status IS
     'This value is supported or unsupported.';
 COMMENT ON COLUMN project_resolver_classification.unsupported_reason IS
-    'This value is the reason when unsupported: resolver_not_declared, resolver_implementation_unknown, resolver_implementation_not_declared, or resolver_manifest_not_active for a resolver with candidates but no active manifest of its family, which the served build leaves out.';
+    'This value is the reason when unsupported: resolver_not_declared, resolver_implementation_unknown, resolver_implementation_not_declared, or resolver_manifest_not_active for a resolver with candidates but no active manifest of its family, which the served build leaves out (one such row per resolver).';
 COMMENT ON COLUMN project_resolver_classification.manifest_id IS
     'This value is the declaring manifest.';
 COMMENT ON COLUMN project_resolver_classification.manifest_event_id IS
@@ -1952,11 +1955,11 @@ COMMENT ON COLUMN project_resolver_classification.summary_version IS
 COMMENT ON COLUMN project_resolver_classification.observed_families IS
     'This value maps each resolver family an event proposed the resolver under to its best priority: 3 for an ENSv2 Upgraded proxy, an AliasChanged and either side of a ResolverChanged, 4 for either side of a PermissionChanged scope (resolver/build.sql:5-86).';
 COMMENT ON COLUMN project_resolver_classification.pointer_families IS
-    'This value maps each resolver family to the number of F4 and F5 pointer rows pointing at the resolver now, standing for the priority 2 name pointers.';
+    'This value maps each resolver family to the number of F4 and F5 pointer rows pointing at the resolver now, standing for the priority 2 name pointers. It approximates the served candidates: an unnamed ENSv2 pointer row counts here though the served build has no candidate for it, so a resolver with an ENSv1 event proposal and such a pointer can classify under ens_v2_resolver_l1 here and ens_v1_resolver_l1 served.';
 COMMENT ON COLUMN project_resolver_classification.upgrades IS
     'This value maps each family to the latest Upgraded of the proxy: its position, implementation and normalized event id.';
 COMMENT ON COLUMN project_resolver_classification.admission_manifests IS
-    'This value is the admission epoch the classification was made under (project_family_marker.admission_manifests).';
+    'This value is the key of the active manifest set the classification was made under (project_family_marker.admission_manifests).';
 
 CREATE TABLE IF NOT EXISTS project_registry_pointer (
     chain_id text NOT NULL,
@@ -1974,7 +1977,7 @@ CREATE TABLE IF NOT EXISTS project_registry_pointer (
     CHECK ((transaction_index IS NULL) = (log_index IS NULL))
 );
 COMMENT ON TABLE project_registry_pointer IS
-    'Project-owned ENSv1 registry-node resolver pointer of family F4: the latest ResolverChanged per node, clears included. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
+    'Project-owned ENSv1 registry-node resolver pointer of family F4: the latest ResolverChanged per node, clears included, from the ENSv1 registry, registrar and wrapper families only (record_inventory/mirror.rs:100). A ResolverChanged of another family with no resource, such as a Basenames reverse node pointer, lands in neither F4 nor F5, where the served reverse-claim resolver (builders/primary_names.rs:103-113) reads the latest ResolverChanged at the node from any family. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
 COMMENT ON COLUMN project_registry_pointer.chain_id IS
     'This value is the chain.';
 COMMENT ON COLUMN project_registry_pointer.namespace IS
@@ -2304,7 +2307,7 @@ CREATE TABLE IF NOT EXISTS project_resolver_link (
     CHECK ((transaction_index IS NULL) = (log_index IS NULL))
 );
 COMMENT ON TABLE project_resolver_link IS
-    'Project-owned resolver links of family F7: per resolver and node, the latest ResolverRecordLinked; record id 0 is an explicit clear. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
+    'Project-owned resolver links of family F7: per resolver and node, the latest ResolverRecordLinked; record id 0 is an explicit clear. A link whose payload carries no resolver is kept, where the served links.sql requires the payload resolver to be present and equal to the emitter. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
 COMMENT ON COLUMN project_resolver_link.chain_id IS
     'This value is the chain.';
 COMMENT ON COLUMN project_resolver_link.resolver_address IS

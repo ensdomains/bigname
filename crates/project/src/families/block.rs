@@ -1,10 +1,11 @@
 //! One family block in its own transaction: lock the shadow marker and require the planned
-//! predecessor and generation, read the block's lineage row, read the input token and admission
-//! epoch inside the transaction and require the input revision the block must apply under, check
-//! the repair record's state for the block's role, read the block's events, derive its owned
-//! keys, reduce, journal the before-images and the prior marker, write, advance the marker with
-//! the token and epoch it read, prune the journal below the retention floor, complete a repair
-//! whose target this block publishes, and commit.
+//! predecessor and generation, read the block's lineage row, read the input token inside the
+//! transaction and require the input revision the block must apply under, check the repair
+//! record's state for the block's role, take the active manifest set at the block from the run's
+//! manifest read, read the block's events, derive its owned keys, reduce, journal the
+//! before-images and the prior marker, write, advance the marker with the token and manifest set
+//! it used, prune the journal below the retention floor, complete a repair whose target this
+//! block publishes, and commit.
 use std::{collections::BTreeMap, time::Instant};
 
 use serde_json::{Value, json};
@@ -13,7 +14,7 @@ use sqlx::{PgPool, Postgres, Transaction};
 use super::{
     FamilyOptions, input,
     input::Revision,
-    keys,
+    keys, manifests,
     marker::{self, FamilyMarker, RecordedToken},
     reduce, repair, store,
 };
@@ -44,6 +45,8 @@ pub(crate) struct Plan<'a> {
     /// The input revision the block must read inside its transaction.
     pub(crate) revision: &'a Revision,
     pub(crate) role: Role,
+    /// The manifest updates the run read once; the block takes its active set from them.
+    pub(crate) manifests: &'a manifests::History,
 }
 
 /// What one block wrote.
@@ -101,8 +104,9 @@ pub(crate) async fn apply(
         chain_id,
         block: &opened.block,
         keys: &keys,
-        epoch: &opened.epoch,
-        epoch_changed: opened.prior.admission_manifests.as_deref() != Some(opened.epoch.as_str()),
+        manifests: &opened.manifests,
+        manifests_changed: opened.prior.admission_manifests.as_deref()
+            != Some(opened.manifests.key.as_str()),
     };
     reduce::apply(&mut opened.transaction, &context, &events, &mut rows).await?;
     let (next, mut stats) = publish(opened, chain_id, &rows, plan, options).await?;
@@ -118,7 +122,7 @@ pub(crate) struct Opened {
     pub(crate) block: input::BlockHeader,
     token: input::InputToken,
     record: Option<repair::Record>,
-    pub(crate) epoch: String,
+    pub(crate) manifests: manifests::ActiveSet,
 }
 
 /// Begin the block's transaction and pass its fences: the marker generation and predecessor,
@@ -187,19 +191,19 @@ pub(crate) async fn open(
             )?;
         }
     }
-    let epoch = input::admission_manifests(&mut transaction, chain_id, number).await?;
+    let manifests = plan.manifests.at(number);
     Ok(Opened {
         transaction,
         prior,
         block,
         token,
         record,
-        epoch,
+        manifests,
     })
 }
 
 /// Journal and write the block's changed rows, journal the prior marker, advance the marker with
-/// the token and epoch the block read, prune the journal, complete a repair whose target this is
+/// the token and manifest set the block used, prune the journal, complete a repair whose target this is
 /// and commit.
 pub(crate) async fn publish(
     opened: Opened,
@@ -214,7 +218,7 @@ pub(crate) async fn publish(
         block,
         token,
         record,
-        epoch,
+        manifests,
     } = opened;
     let mut stats = write(&mut transaction, chain_id, &block, rows).await?;
     journal_marker(&mut transaction, chain_id, &block, &prior).await?;
@@ -228,7 +232,7 @@ pub(crate) async fn publish(
         timestamp_seconds: Some(block.timestamp_seconds),
         input_content_hash: Some(options.input_content_hash.clone()),
         token: RecordedToken::of(&token),
-        admission_manifests: Some(epoch),
+        admission_manifests: Some(manifests.key),
         bootstrap: plan.bootstrap,
     };
     marker::advance(&mut transaction, chain_id, &next).await?;

@@ -12,21 +12,21 @@ IF to_regclass('bigname_phase.name_current') IS NULL THEN
 END IF;
 
 EXECUTE $ddl$
-CREATE INDEX IF NOT EXISTS discovery_edges_resolver_from_block_idx
+CREATE INDEX IF NOT EXISTS project_families_discovery_edges_resolver_from_block_idx
     ON bigname_phase.discovery_edges (chain_id, active_from_block_number)
     WHERE edge_kind = 'resolver'
 $ddl$;
 EXECUTE $ddl$
-CREATE INDEX IF NOT EXISTS discovery_edges_resolver_to_block_idx
+CREATE INDEX IF NOT EXISTS project_families_discovery_edges_resolver_to_block_idx
     ON bigname_phase.discovery_edges (chain_id, active_to_block_number)
     WHERE edge_kind = 'resolver' AND active_to_block_number IS NOT NULL
 $ddl$;
 EXECUTE $ddl$
-CREATE INDEX IF NOT EXISTS contract_instance_addresses_from_block_idx
+CREATE INDEX IF NOT EXISTS project_families_contract_instance_addresses_from_block_idx
     ON bigname_phase.contract_instance_addresses (chain_id, active_from_block_number)
 $ddl$;
 EXECUTE $ddl$
-CREATE INDEX IF NOT EXISTS contract_instance_addresses_to_block_idx
+CREATE INDEX IF NOT EXISTS project_families_contract_instance_addresses_to_block_idx
     ON bigname_phase.contract_instance_addresses (chain_id, active_to_block_number)
     WHERE active_to_block_number IS NOT NULL
 $ddl$;

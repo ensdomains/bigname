@@ -1,6 +1,6 @@
 //! The shadow marker: how far the owned-key families have been applied, with the generation every
-//! family block and every family undo advances, and the input token and admission epoch the last
-//! block read inside its own transaction. It is not the served marker; the Project row of
+//! family block and every family undo advances, and the input token and active manifest set key
+//! the last block read inside its own transaction. It is not the served marker; the Project row of
 //! `chain_phase_state` keeps that role until the families are read.
 use serde_json::{Value, json};
 use sqlx::{Postgres, Transaction};

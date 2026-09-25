@@ -104,6 +104,7 @@ async fn a_redo_undoes_to_the_range_predecessor_and_replays_to_a_complete_record
             "prefix_interpret_input_content_hash": "interpret-hash",
             "prefix_interpret_redo_attempt": 2,
             "prefix_recorded": true,
+            "reset_sequence": null,
             "invalidation_from": null,
             "pending_undo_target": null,
             "completed_sequence": sequence,

@@ -1636,7 +1636,8 @@ gives it. The address-to-name and address-to-record index rows are not kept
 state: after every block and every undo they are derived again for the keys the
 block touched. Resolver classification classifies a resolver at the block that
 changed its candidates, the pointers that name it, its proxy upgrades, a
-discovery edge, address or declaration of it, or the admission epoch, with the
+discovery edge, address or declaration of it, or the [active manifest
+set](glossary.md#active-manifest-set-family-block), with the
 manifests active at that block, the way the served resolver build does.
 
 These tables are shadows today. No served response reads them, and no served
@@ -1662,12 +1663,16 @@ Interpret row's content hash and redo attempt, the [family input
 revision](glossary.md#family-input-revision), and stops the run, counted as a
 skip, when that revision differs from the one the run applies under or
 Interpret is in redo; the next run adopts the new revision or waits. The block
-records that revision and the whole input token on the marker. It writes the
+records that revision and the whole input token on the marker. The run reads
+the chain's manifest updates once, before its first block; each block takes its
+active manifest set from that read and records the set's key, so an update
+written during a run applies from the next run. The block writes the
 before-image of every row it changes and the prior marker to the [family undo
 journal](glossary.md#family-undo-journal) (`project_family_undo`) and advances
 the marker. A block's events are taken once per `event_identity`, which
 `normalized_events` already keeps unique; two deliveries of one identity that
-disagree keep the first in the canonical order and count on
+disagree keep the first in the [canonical event
+order](glossary.md#canonical-event-order) and count on
 `phase_runner_project_family_duplicate_anomalies_total`. A failure stops the
 loop for that batch and leaves the served publication and its progress as they
 were; the next batch catches up from where the marker stands.
@@ -1682,7 +1687,9 @@ the redo range and replays them to the served marker. A marker left on a block
 that is no longer readable is undone the same way. A redo below the kept
 journal, a redo attempt the families never saw, or a served rebuild clears the
 families and rebuilds them from the blocks that carry events or start or stop
-a resolver activation. The repair record describes the latest of these: its
+a resolver activation. So do families whose marker records a content hash
+other than the running binary's, which covers a served rebuild whose family run
+was skipped. The repair record describes the latest of these: its
 attempt, reason, trusted base, replay target, state (`undoing`, `replaying`,
 `rebuilding` or `complete`) and, once done, the marker, generation and input
 content hash it completed with. Each transition commits with the work it
@@ -1691,7 +1698,36 @@ move to replaying, and the final replayed or rebuilt block with the
 completion. A run that stops between blocks is resumed by the next. A redo
 retried after it completed is recognised only while the marker, its
 generation and the content hash still match. A rebuild refreshes the planner
-statistics of the family tables as they grow.
+statistics of the family tables after 1, 2, 4, 8, ... blocks rebuilt since its
+reset, counted across runs from the generation the reset recorded.
+
+The families differ from the served build in these known places, which the
+steps that read them must key on. Each is also stated on its table or column:
+
+- F1: an `AuthorityEpochChanged` `registry_only` at an earlier block than a
+  binding does not mark the binding registry-only; the served handoff takes an
+  epoch on the name and resource at any position. Two synthesised bindings of
+  one name at the same position order by `event_identity`, then
+  `surface_binding_id`; the served selection orders them by
+  `surface_binding_id` alone.
+- F2c: `AuthorityTransferred` and `SubregistryChanged` both set the owner
+  group, so a `SubregistryChanged` after a zero-getter transfer replaces the
+  owner and the served "ownerless" verdict cannot be recovered. An
+  observation's `target_resource_id` is the name's ENSv1 or Basenames binding
+  active at the block, not the served authority selection.
+- F3: the pointer-family priority is approximated from the F4 and F5 pointer
+  rows that name the resolver, so an unnamed ENSv2 pointer can outrank an
+  ENSv1 event proposal. A resolver with candidates but no active manifest keeps
+  one `resolver_manifest_not_active` row. Discovery-edge and address activity
+  honours the wall-clock `deactivated_at` as the served build does, and a
+  manifest update with no block applies to every block.
+- F4 keeps the ENSv1 registry, registrar and wrapper families only, so a
+  `ResolverChanged` of another family with no resource (a Basenames reverse
+  node, for instance) lands in no family table.
+- F7 keeps a `ResolverRecordLinked` whose payload has no resolver; the served
+  link reader requires the payload resolver equal to the emitter.
+- The undo journal is not pruned while the chain has no finalized or safe
+  head.
 
 Tests compare every family table and the marker, less its generation, as
 ordered JSON text before a block and after its undo, and compare the

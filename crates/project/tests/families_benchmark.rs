@@ -166,11 +166,54 @@ async fn family_block_timings() -> Result<()> {
     } else {
         pool
     };
+    let log = std::env::var("FAMILY_BENCHMARK_LOG").ok();
+    let log_offset = log
+        .as_ref()
+        .and_then(|log| std::fs::metadata(log).ok())
+        .map_or(0, |metadata| metadata.len());
     let mut follow = Vec::new();
     for number in base + 1..=300 {
         follow.extend(run(&pool, number, FamilyMode::Normal).await?.block_ms);
     }
+    let followed = follow.len();
     distribution("follow", follow);
+    // With every statement explained, count the follow's statements that read the manifest
+    // updates from normalized_events.
+    if let (Some(log), Some("0")) = (&log, min_ms.as_deref()) {
+        let text = std::fs::read(log)?;
+        let start = usize::try_from(log_offset)?.min(text.len());
+        let follow_text = String::from_utf8_lossy(&text[start..]);
+        // (statement tag, whether it reads the manifest updates)
+        let statements: Vec<(bool, bool)> = follow_text
+            .split("Query Text:")
+            .skip(1)
+            .map(|statement| {
+                let text: Vec<&str> = statement
+                    .lines()
+                    .take_while(|line| !line.starts_with("Query Parameters"))
+                    .collect();
+                (
+                    text.iter()
+                        .any(|line| line.contains("project:families.manifests.read")),
+                    text.iter()
+                        .any(|line| line.contains("'SourceManifestUpdated'")),
+                )
+            })
+            .collect();
+        let run_reads = statements
+            .iter()
+            .filter(|(run, reads)| *run && *reads)
+            .count();
+        let block_reads = statements
+            .iter()
+            .filter(|(run, reads)| !*run && *reads)
+            .count();
+        println!(
+            "FAMILY_BENCHMARK follow blocks={followed} runs={} manifest_reads_per_run={run_reads} \
+             manifest_reads_in_block_statements={block_reads}",
+            300 - base
+        );
+    }
 
     let started = Instant::now();
     let undone = families::undo_to(&pool, CHAIN, base).await?;
