@@ -307,7 +307,7 @@ outcomes, or durable traces.
 | `resolver_current` | chain and resolver address | resolver overview |
 | `record_inventory_current` | resource plus record boundary key | indexed record inventory and values |
 | `primary_names_current` | address, coin type, and namespace | declared primary-name claims |
-| `project_*` owned key families | per family, see [below](#owned-key-families) | none yet: unread shadows until the per-block publication reads them |
+| `project_*` owned key families | per family, see [below](#owned-key-families) | no served path yet: the step 3 shadow readers (`crates/storage/src/families/control`) read them in the test harnesses only, until the per-block publication reads them |
 
 `surface_bindings` remains identity history rather than a `_current`
 projection. Exact-name reads ordinarily first select the logical name's
@@ -1877,7 +1877,8 @@ new truth family.
   replay coordination, not projection writes.
 - Project reads canonical interpreted input and owns every projection write.
   Project also owns the [owned key families](#owned-key-families), their
-  marker, undo journal and repair record; they are unread shadows.
+  marker, undo journal and repair record; no served path reads them. The
+  step 3 shadow readers read them in the test harnesses only.
 - The API reads projections and request-scoped lookup output.
 - Storage exposes typed reads and phase publication boundaries; it does not
   grant adapters or API handlers a projection write shortcut.
