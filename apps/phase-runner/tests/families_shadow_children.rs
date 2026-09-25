@@ -795,8 +795,11 @@ async fn child_surface(
 // `project_latest_registry_owner`): by the name it carries, else by the latest named event of
 // its resource and family, else by an active surface at its node. An inactive surface at the
 // node attributes nothing, while a name or resource attributes whatever node the Transfer
-// carries. An event can only name a name that has a surface, so the name and resource cases use
-// inactive surfaces and Transfers of another node.
+// carries. The phase schema's `normalized_events_chain_id_logical_name_id_fkey`
+// (schema-v2/baseline/05_normalized_events.sql) requires an event's name to have a surface, so a
+// Transfer naming a child with no surface at all cannot be stored; the name and resource cases use
+// inactive surfaces and Transfers of another node instead. (The legacy public schema under
+// migrations/ has no such key, but the phase readers and this fixture run on the phase schema.)
 #[tokio::test]
 async fn zero_owner_attribution_follows_the_served_precedence() -> Result<()> {
     let mut fixture = Fixture::new("families_shadow_children_owner", 12).await?;
