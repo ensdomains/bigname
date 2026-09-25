@@ -201,15 +201,25 @@ async fn seed_direct_scope(
     }
 
     // A changed registry edge rebuilds the child's edge; the parent node is an ancestor whose
-    // evidence stages without restaging its other children.
-    for (table, columns) in [
+    // evidence stages without restaging its other children. A registry Transfer names the
+    // transferred node itself in `node`, so that node's own edge is rebuilt too: the adapter
+    // attaches a logical name only once it has linked the node's authority, and the child row
+    // follows the latest registry owner of the node's active surface.
+    for (table, columns, event_kinds) in [
         (
             "project_scope_children",
             "(event.after_state ->> 'child_node'), (event.before_state ->> 'child_node')",
+            "'SubregistryChanged', 'AuthorityTransferred'",
         ),
         (
             "project_scope_ancestors",
             "(event.after_state ->> 'node'), (event.before_state ->> 'node')",
+            "'SubregistryChanged', 'AuthorityTransferred'",
+        ),
+        (
+            "project_scope_children",
+            "(event.after_state ->> 'node'), (event.before_state ->> 'node')",
+            "'AuthorityTransferred'",
         ),
     ] {
         let statement = format!(
@@ -219,7 +229,7 @@ async fn seed_direct_scope(
              CROSS JOIN LATERAL (
                  VALUES {columns}
              ) candidate(node)
-             WHERE event.event_kind IN ('SubregistryChanged', 'AuthorityTransferred')
+             WHERE event.event_kind IN ({event_kinds})
                AND event.source_family IN (
                    'ens_v1_registry_l1', 'basenames_base_registry'
                )
@@ -412,6 +422,62 @@ async fn include_alias_and_wildcard_scope(
            AND binding_lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
            AND ancestor.canonicality_state IN ('canonical', 'safe', 'finalized')
            AND ancestor_lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+           AND binding.active_from < (
+               SELECT block_timestamp + interval '1 second' FROM chain_lineage
+               WHERE chain_id = $1 AND block_hash = $3 AND block_number = $2
+           )
+           AND (
+               binding.active_to IS NULL OR binding.active_to >= (
+                   SELECT block_timestamp + interval '1 second' FROM chain_lineage
+                   WHERE chain_id = $1 AND block_hash = $3 AND block_number = $2
+               )
+           )
+         UNION
+         -- A scoped ancestor's wildcard descendants: the wildcard topology reads the ancestor's
+         -- pointer by raw-name suffix, which the registry-edge topology walk never follows.
+         SELECT descendant.logical_name_id
+         FROM name_surfaces scoped
+         JOIN project_scope_names scope
+           ON scope.logical_name_id = scoped.logical_name_id
+         JOIN chain_lineage scoped_lineage
+           ON scoped_lineage.chain_id = scoped.chain_id
+          AND scoped_lineage.block_hash = scoped.block_hash
+          AND scoped_lineage.block_number = scoped.block_number
+         CROSS JOIN LATERAL (
+             SELECT candidate.*
+             FROM name_surfaces candidate
+             -- The containment matches name_surfaces_project_label_hashes_idx without the top
+             -- label (unless it is the only one), whose entry lists nearly every name; the
+             -- raw-name suffix decides the match, as in the wildcard topology builder.
+             WHERE candidate.namespace = scoped.namespace
+               AND candidate.chain_id = scoped.chain_id
+               AND label_hashes(candidate.raw_labels) @> label_hashes(
+                   scoped.raw_labels[1:greatest(cardinality(scoped.raw_labels) - 1, 1)]
+               )
+               AND candidate.raw_name LIKE '%.' || scoped.raw_name
+             OFFSET 0
+         ) descendant
+         JOIN chain_lineage descendant_lineage
+           ON descendant_lineage.chain_id = descendant.chain_id
+          AND descendant_lineage.block_hash = descendant.block_hash
+          AND descendant_lineage.block_number = descendant.block_number
+         JOIN surface_bindings binding
+           ON binding.logical_name_id = descendant.logical_name_id
+          AND binding.binding_kind = 'observed_wildcard_path'
+         JOIN chain_lineage binding_lineage
+           ON binding_lineage.chain_id = binding.chain_id
+          AND binding_lineage.block_hash = binding.block_hash
+          AND binding_lineage.block_number = binding.block_number
+         WHERE scoped.chain_id = $1
+           AND scoped.raw_name <> ''
+           AND cardinality(scoped.raw_labels) > 0
+           AND binding.block_number <= $2
+           AND scoped.canonicality_state IN ('canonical', 'safe', 'finalized')
+           AND scoped_lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+           AND descendant.canonicality_state IN ('canonical', 'safe', 'finalized')
+           AND descendant_lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+           AND binding.canonicality_state IN ('canonical', 'safe', 'finalized')
+           AND binding_lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
            AND binding.active_from < (
                SELECT block_timestamp + interval '1 second' FROM chain_lineage
                WHERE chain_id = $1 AND block_hash = $3 AND block_number = $2

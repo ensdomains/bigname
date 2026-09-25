@@ -95,6 +95,22 @@ timestamps or whose lifecycle changed in the affected range. From either seed,
 it follows only activated canonical ENSv2 subregistry edges to descendants. The
 deleted or orphaned release is not served, and unrelated topology components are
 not admitted.
+The expansion also seeds two names that an event changes without naming them.
+An ENSv1 or Basenames registry `AuthorityTransferred` (a `Transfer`) carries the
+transferred node in `node`, not `child_node`, and the adapter attaches a logical
+name only when it has already linked that node's authority. Project rebuilds
+the child edge of the after and before state's `node` of every such event, as
+it does for a `child_node`. The child row follows the latest registry owner of
+the active surface at that node, so without this seed an incremental batch
+would keep a child that a `Transfer` to the zero address removes, while a
+rebuild drops it. A name bound through an `observed_wildcard_path` binding
+reads its topology from the nearest ancestor surface with a resolver, matched
+by raw-name suffix in the same namespace, and that link is not a registry edge
+the walk follows. A scoped name with such a binding adds those ancestors, and a
+scoped name also adds every descendant surface whose `observed_wildcard_path`
+binding is active at the target, so the descendant's resolver hop and version
+boundary follow a change to the ancestor's pointer as they do in a rebuild. No
+interpreter producer writes `observed_wildcard_path` bindings yet.
 `project_events` remains the single filter for data that builders may serve.
 
 Code that builds a replacement projection row may read normalized events staged
