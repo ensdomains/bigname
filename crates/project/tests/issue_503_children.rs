@@ -1010,12 +1010,21 @@ async fn association_retraction_converges(
 // Review thread on scope.rs (TYR-36 step 6). A parent's migration registry creation association
 // becomes unreadable through an Interpret redo while the child's ENSv2 grant in that registry
 // stays outside the redo range. Without a readable association the locked parent publishes no
-// ENSv1 child, so the grant decides nothing either way and the child stays hidden.
+// ENSv1 child, so the grant decides nothing either way and the child stays hidden. It runs with
+// the parent's subregistry pointer inside the redo range and outside it, and each redo matches a
+// fresh rebuild.
 #[tokio::test]
 async fn a_retracted_migration_registry_association_with_child_history_converges_on_redo()
 -> Result<()> {
-    let seen = association_retraction_converges("issue503_assoc_retract_history", true, 11).await?;
-    assert_eq!(seen, (false, false));
+    for pointer_block in [11, 10] {
+        let seen = association_retraction_converges(
+            &format!("issue503_assoc_retract_history_{pointer_block}"),
+            true,
+            pointer_block,
+        )
+        .await?;
+        assert_eq!(seen, (false, false), "pointer at block {pointer_block}");
+    }
     Ok(())
 }
 
