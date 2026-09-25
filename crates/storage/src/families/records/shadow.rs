@@ -191,8 +191,11 @@ async fn inventory(pool: &PgPool, chain_id: &str, report: &mut ShadowReport) -> 
 }
 
 /// The ENSIP-19 default coin type (`0x80000000`).
+/// (upstream: .refs/ens_v1/contracts/utils/ENSIP19.sol:L9-L10 @ ens_v1@91c966f)
 const DEFAULT_COIN_TYPE: &str = "2147483648";
-/// Coins the default answers that the comparison adds: ETH, and Base (`0x80000000 | 8453`).
+/// Coins the default answers that the comparison adds: ETH (60, chain 1), and Base
+/// (`0x80000000 | 8453`), both EVM coins by `chainFromCoinType`.
+/// (upstream: .refs/ens_v1/contracts/utils/ENSIP19.sol:L26-L31 @ ens_v1@91c966f)
 const FALLBACK_COIN_TYPES: [&str; 2] = ["60", "2147492101"];
 
 async fn addresses(
@@ -226,8 +229,11 @@ async fn addresses(
     .fetch_all(pool)
     .await
     .context("failed to list the addresses to compare")?;
-    // A default-address row answers every eligible EVM coin, which no stored row names, so for
-    // each address with one the comparison adds coin 60 and Base's coin to exercise the fallback.
+    // A default-address row answers every eligible EVM coin whose own address is empty, which no
+    // stored row names, so for each address with one the comparison adds coin 60 and Base's coin
+    // to exercise the fallback.
+    // (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L80-L85 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v2/contracts/src/resolver/AbstractRecordResolver.sol:L172-L178 @ ens_v2@a971bd64)
     let mut keys: BTreeSet<(String, String)> = keys.into_iter().collect();
     let defaults: Vec<String> = keys
         .iter()
