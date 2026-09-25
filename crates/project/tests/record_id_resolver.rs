@@ -616,9 +616,10 @@ async fn inverse_address_reads_find_values_the_address_index_drops() -> Result<(
     assert_eq!(
         fields,
         [format!(
-            "entries[ens:{}|{}].provenance.mutated",
+            "entries[ens:{}|{}|{}].provenance.mutated",
             node(2),
-            resource(2)
+            resource(2),
+            resource(102)
         )],
         "{report:#?}"
     );

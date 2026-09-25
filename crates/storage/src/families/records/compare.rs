@@ -347,8 +347,10 @@ fn address_entry(entry: &AddressRecordCurrentEntry) -> Value {
 }
 
 /// The complete sequence of names resolving to an address, every page of both readers, entry by
-/// entry under `<logical name id>|<record resource id>`, then the order of the common entries. A
-/// missing entry is one difference and every later entry is still compared.
+/// entry under `<logical name id>|<record resource id>|<surface binding id or ->`, then the order
+/// of the common entries. The surface binding keeps the entries a surface dedupe lists for one
+/// name and record resource apart, so they are never paired by position. A missing entry is one
+/// difference and every later entry is still compared.
 pub fn compare_address_records(
     today: &[AddressRecordCurrentEntry],
     family: &[AddressRecordCurrentEntry],
@@ -358,7 +360,13 @@ pub fn compare_address_records(
         let mut map = Map::new();
         let mut order = Vec::new();
         for entry in entries {
-            let base = format!("{}|{}", entry.logical_name_id, entry.record_resource_id);
+            let binding = entry
+                .surface_binding_id
+                .map_or_else(|| "-".to_owned(), |id| id.to_string());
+            let base = format!(
+                "{}|{}|{binding}",
+                entry.logical_name_id, entry.record_resource_id
+            );
             let mut key = base.clone();
             let mut occurrence = 1;
             while map.contains_key(&key) {
@@ -494,7 +502,7 @@ mod tests {
             &["cursor-b".into()],
         );
         let fields: Vec<&str> = differences.iter().map(|d| d.field.as_str()).collect();
-        let key = format!("a|{}", uuid::Uuid::nil());
+        let key = format!("a|{}|-", uuid::Uuid::nil());
         assert_eq!(
             fields,
             [format!("entries[{key}].provenance.value").as_str(), "pages"]
@@ -507,7 +515,7 @@ mod tests {
             &[address("a", "1"), address("a", "2")],
             &[address("a", "1"), address("a", "3")],
         );
-        let key = format!("a|{}", uuid::Uuid::nil());
+        let key = format!("a|{}|-", uuid::Uuid::nil());
         assert_eq!(
             differences,
             [Difference {
@@ -516,6 +524,20 @@ mod tests {
                 family: Some(json!("3")),
             }]
         );
+    }
+
+    #[test]
+    fn entries_of_one_name_under_two_bindings_are_not_paired_by_position() {
+        let bound = |binding: u128, value: &str| AddressRecordCurrentEntry {
+            surface_binding_id: Some(uuid::Uuid::from_u128(binding)),
+            ..address("a", value)
+        };
+        let differences = compare_address_records(
+            &[bound(1, "1"), bound(2, "2")],
+            &[bound(2, "2"), bound(1, "1")],
+        );
+        let fields: Vec<&str> = differences.iter().map(|d| d.field.as_str()).collect();
+        assert_eq!(fields, ["entries.order"]);
     }
 
     #[test]
