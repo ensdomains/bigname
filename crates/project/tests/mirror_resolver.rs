@@ -263,6 +263,101 @@ async fn mirrored_name_serves_the_ensv1_inventory_with_mirror_provenance() -> Re
     Ok(())
 }
 
+/// Today selects a mirrored resource's linked records against the mirror's own address (the
+/// resource's pointer before substitution) and attributes them by resource alone
+/// (`linked_records.rs`, `project_selected_records`; `record_inventory.rs`, the linked arm of
+/// `attributed_events`). A linked `AddressChanged` value and `AddrChanged` one log later at the
+/// mirror's address therefore pair for the mirrored resource, and the harness must expect that
+/// pair.
+#[tokio::test]
+async fn a_linked_pair_at_the_mirror_address_is_expected_for_the_mirrored_name() -> Result<()> {
+    let fixture = Fixture::declared("mirror_linked_pair", V1Side::Projected);
+    let (database, pool) = database(fixture.id).await?;
+    seed(&pool, &fixture).await?;
+    let node = bigname_lookup::ens_namehash_hex(NAME)?;
+    // After the seeded ENSv1 records, the latest at `base + 3`.
+    let block = fixture.base + 4;
+    extend_chain(&pool, block, block).await?;
+    let mut ids = Vec::new();
+    for (identity, log, kind, after) in [
+        (
+            "linked-link",
+            20,
+            "ResolverRecordLinked",
+            json!({"source_event":"Linked","storage_model":"resolver_record_id","resolver":MIRROR,"node":node,"resolver_record_id":"7","dns_encoded_name":"0x066d6972726f7207666978747572650000"}),
+        ),
+        (
+            "linked-value",
+            21,
+            "RecordChanged",
+            json!({"source_event":"AddressChanged","storage_model":"resolver_record_id","resolver":MIRROR,"resolver_record_id":"7","record_key":"addr:60","record_family":"addr","selector_key":"60","coin_type":"60","value_retained":true,"value":"0x6666666666666666666666666666666666666666"}),
+        ),
+        (
+            "linked-sibling",
+            22,
+            "RecordChanged",
+            json!({"source_event":"AddrChanged","storage_model":"resolver_record_id","resolver":MIRROR,"resolver_record_id":"7","record_key":"addr:60","record_family":"addr","selector_key":"60","coin_type":"60","value_retained":true,"value":ROOT_OWNER}),
+        ),
+    ] {
+        let id: i64 = sqlx::query_scalar("INSERT INTO normalized_events (event_identity,namespace,event_kind,source_family,manifest_version,chain_id,block_number,block_hash,transaction_hash,transaction_index,log_index,derivation_kind,canonicality_state,after_state,raw_fact_ref) VALUES ($1,'ens',$2,'ens_v2_resolver_l1',1,$3,$4,$5,$6,0,$7,'ens_v2_resolver','canonical',$8,$9) RETURNING normalized_event_id")
+            .bind(format!("{}:{identity}", fixture.id)).bind(kind).bind(CHAIN).bind(block)
+            .bind(block_hash(block)).bind(format!("0x{:064x}", block * 1000)).bind(log)
+            .bind(after).bind(json!({"emitting_address": MIRROR})).fetch_one(&pool).await?;
+        ids.push(id);
+    }
+    let target = block;
+    let outcome = Engine::new(pool.clone())
+        .run_batch(BatchRequest {
+            chain_id: CHAIN.to_owned(),
+            target_block: target,
+            affected_from_block: 0,
+            affected_to_block: target,
+            resume_current: None,
+            mode: RunMode::Normal,
+        })
+        .await?;
+    // Today serves the linked value through the mirror's own address.
+    let v2 = inventory(&pool, V2_RESOURCE).await?;
+    assert_eq!(
+        v2["provenance"]["record_link_event_ids"],
+        json!([ids[0]]),
+        "{v2}"
+    );
+    assert!(
+        v2["provenance"]["record_event_ids"]
+            .as_array()
+            .is_some_and(|served| served.contains(&json!(ids[1]))),
+        "{v2}"
+    );
+    // The family serves no pair here; the harness must still expect today's.
+    let report = family_shadow::shadow_report_at(&pool, &outcome.current).await?;
+    let position = |identity: &str, log: i64| {
+        json!({"block_number": block, "transaction_index": 0, "log_index": log,
+               "event_identity": format!("{}:{identity}", fixture.id)})
+    };
+    let pair = json!({
+        "record_key": "addr:60",
+        "value_event_id": ids[1], "value_position": position("linked-value", 21),
+        "sibling_event_id": ids[2], "sibling_position": position("linked-sibling", 22),
+    });
+    let named = report
+        .differences
+        .iter()
+        .find(|(key, _)| *key == format!("record_inventory {V2_RESOURCE}"))
+        .map(|(_, differences)| differences.clone())
+        .unwrap_or_default();
+    assert!(
+        named.iter().any(|difference| {
+            difference.field == "compatibility_pairs[addr:60]"
+                && difference.today == Some(pair.clone())
+                && difference.family.is_none()
+        }),
+        "{report:#?}"
+    );
+    database.cleanup().await?;
+    Ok(())
+}
+
 #[tokio::test]
 async fn mirrored_inventory_converges_across_incremental_and_redo_execution() -> Result<()> {
     let fixture = Fixture::declared("mirror_replay", V1Side::Projected);

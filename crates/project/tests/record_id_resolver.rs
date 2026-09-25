@@ -1063,6 +1063,134 @@ async fn a_record_id_pair_needs_the_sibling_admitted_by_the_linked_arm() -> Resu
     Ok(())
 }
 
+/// For the root name, whose namehash is the default node, the exact link and the default link are
+/// the same `Linked` event. When it links record id 0, today's selection (`linked_records.rs`,
+/// `project_selected_records`: the exact record id unless it is `0`, else the default's) takes
+/// record id 0 from that same link, so record id 0's writes serve the root name and a linked
+/// `AddressChanged` value pairs with the linked `AddrChanged` one log later. The harness must
+/// expect that pair.
+#[tokio::test]
+async fn a_root_name_holding_a_zero_link_pairs_record_id_zero() -> Result<()> {
+    let (db, pool) = database("record_id_root_zero_link").await?;
+    seed(&pool).await?;
+    sqlx::query("INSERT INTO chain_lineage (chain_id,block_hash,block_number,block_timestamp,canonicality_state) VALUES ($1,$2,19,to_timestamp(19),'canonical')").bind(CHAIN).bind(hash(19)).execute(&pool).await?;
+    event(
+        &pool,
+        "upgrade-other",
+        10,
+        8,
+        "Upgraded",
+        None,
+        json!({"proxy_address":OTHER,"implementation":IMPLEMENTATION}),
+    )
+    .await?;
+    let root = format!("ens:{}", hash(0));
+    sqlx::query("INSERT INTO name_surfaces (logical_name_id,namespace,raw_name,raw_labels,dns_encoded_name,namehash,labelhashes,normalizer_version,visibility_state,chain_id,block_hash,block_number,canonicality_state) VALUES ($1,'ens','',ARRAY[]::text[],'\\x00'::bytea,$2,ARRAY[]::text[],'fixture','active',$3,$4,10,'canonical')")
+        .bind(&root).bind(hash(0)).bind(CHAIN).bind(hash(10)).execute(&pool).await?;
+    sqlx::query("INSERT INTO resources (resource_id,chain_id,block_hash,block_number,canonicality_state) VALUES ($1::uuid,$2,$3,10,'canonical')").bind(resource(50)).bind(CHAIN).bind(hash(10)).execute(&pool).await?;
+    sqlx::query("INSERT INTO surface_bindings (surface_binding_id,logical_name_id,resource_id,binding_kind,authority_arm,active_from,chain_id,block_hash,block_number,canonicality_state) VALUES ($1::uuid,$2,$3::uuid,'declared_registry_path','ens_v2',to_timestamp(10),$4,$5,10,'canonical')").bind(resource(150)).bind(&root).bind(resource(50)).bind(CHAIN).bind(hash(10)).execute(&pool).await?;
+    let registry_manifest: i64 = sqlx::query_scalar(
+        "SELECT manifest_id FROM manifest_versions WHERE source_family = 'ens_v2_registry_l1'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    sqlx::query("INSERT INTO normalized_events (event_identity,namespace,logical_name_id,resource_id,event_kind,source_family,manifest_version,chain_id,block_number,block_hash,transaction_hash,transaction_index,log_index,derivation_kind,canonicality_state,after_state,raw_fact_ref,source_manifest_id) VALUES ('root-pointer','ens',$1,$2::uuid,'ResolverChanged','ens_v2_registry_l1',1,$3,19,$4,$5,0,9,'ens_v2_registry_resource_surface','canonical',$6,$7,$8)")
+        .bind(&root).bind(resource(50)).bind(CHAIN).bind(hash(19)).bind(hash(1900))
+        .bind(json!({"source_event":"ResolverUpdated","resolver":OTHER,"sender":REGISTRY,"token_id":hash(0)}))
+        .bind(json!({"emitting_address":REGISTRY})).bind(registry_manifest).execute(&pool).await?;
+    let address = |source: &str, value: &str| json!({"source_event":source,"storage_model":"resolver_record_id","resolver":OTHER,"resolver_record_id":"0","record_key":"addr:60","record_family":"addr","selector_key":"60","coin_type":"60","value_retained":true,"value":value});
+    event(&pool,"root-zero-link",19,0,"ResolverRecordLinked",None,json!({"source_event":"Linked","storage_model":"resolver_record_id","resolver":OTHER,"node":hash(0),"resolver_record_id":"0","dns_encoded_name":"0x00"})).await?;
+    event(
+        &pool,
+        "root-zero-value",
+        19,
+        1,
+        "RecordChanged",
+        None,
+        address("AddressChanged", INVERSE_A),
+    )
+    .await?;
+    event(
+        &pool,
+        "root-zero-sibling",
+        19,
+        2,
+        "RecordChanged",
+        None,
+        address("AddrChanged", "0x6666666666666666666666666666666666666666"),
+    )
+    .await?;
+    let id = |identity: &'static str| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT normalized_event_id FROM normalized_events WHERE event_identity = $1",
+            )
+            .bind(identity)
+            .fetch_one(&pool)
+            .await
+        }
+    };
+    let (link, value, sibling) = (
+        id("root-zero-link").await?,
+        id("root-zero-value").await?,
+        id("root-zero-sibling").await?,
+    );
+    let outcome = Engine::new(pool.clone())
+        .run_batch(BatchRequest {
+            chain_id: CHAIN.to_owned(),
+            target_block: 19,
+            affected_from_block: 10,
+            affected_to_block: 19,
+            resume_current: None,
+            mode: RunMode::Normal,
+        })
+        .await?;
+    // Today serves record id 0's value for the root name through its zero link.
+    let provenance: Value = sqlx::query_scalar(
+        "SELECT provenance FROM record_inventory_current WHERE resource_id = $1::uuid",
+    )
+    .bind(resource(50))
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        provenance["record_link_event_ids"],
+        json!([link]),
+        "{provenance}"
+    );
+    assert!(
+        provenance["record_event_ids"]
+            .as_array()
+            .is_some_and(|served| served.contains(&json!(value))),
+        "{provenance}"
+    );
+    let report = family_shadow::shadow_report_at(&pool, &outcome.current).await?;
+    let position = |identity: &str, log: i64| {
+        json!({"block_number": 19, "transaction_index": 0, "log_index": log,
+               "event_identity": identity})
+    };
+    let pair = json!({
+        "record_key": "addr:60",
+        "value_event_id": value, "value_position": position("root-zero-value", 1),
+        "sibling_event_id": sibling, "sibling_position": position("root-zero-sibling", 2),
+    });
+    let differences = report
+        .differences
+        .iter()
+        .find(|(key, _)| *key == format!("record_inventory {}", resource(50)))
+        .map(|(_, differences)| differences.clone())
+        .unwrap_or_default();
+    assert!(
+        differences.iter().any(|difference| {
+            difference.field == "compatibility_pairs[addr:60]"
+                && difference.today == Some(pair.clone())
+        }),
+        "{report:#?}"
+    );
+    db.cleanup().await?;
+    Ok(())
+}
+
 // A normalized record whose `value` is an explicit JSON null, as
 // crates/project/testdata/sql/stage/linked_records_fixture.sql sets up, is a success to today's
 // builder (`after_state ? 'value'`). The family row keeps that status though its value column

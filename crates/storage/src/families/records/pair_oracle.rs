@@ -15,9 +15,13 @@
 //!   classified supported and manifest-declared (ENSv1 resolver, or ENSv2 PublicResolverV2), in
 //!   the declaration's family, and for an ENSv2 write in the pointer's namespace and the
 //!   declaration's manifest, with that manifest admitted in the pointer's namespace;
-//! - linked: a record-id write with `storage_model = resolver_record_id`, the pointer's resolver
-//!   named explicitly in its payload, and the record id the resource selects (its exact link
-//!   unless that selects record id 0, else the default link; `linked_records.rs`).
+//! - linked: a record-id write with `storage_model = resolver_record_id`, the resource's own
+//!   pointer resolver named explicitly in its payload, and the record id the resource selects (its
+//!   exact link's record id unless that is 0, else the default link's; `linked_records.rs`,
+//!   `project_selected_records`). Today selects links before the mirror substitution and joins
+//!   them by resource alone, so for a mirrored resource this arm reads the mirror's own address,
+//!   not the substituted ENSv1 resolver. For the root name the exact and default links are the
+//!   same event, so a zero link there selects record id 0.
 //!
 //! The join is per resource, not per arm: a named value pairs with a node-keyed sibling, and
 //! halves of different manifests pair. Only events today stages count (activated, canonical on a
@@ -29,6 +33,7 @@ use anyhow::{Context, Result};
 use serde_json::Value;
 use sqlx::{PgPool, Row};
 
+use super::links::DEFAULT_RECORD_NODE;
 use super::{CompatibilityPair, FamilyPosition};
 use crate::RecordInventoryCurrentRow;
 
@@ -36,6 +41,9 @@ use crate::RecordInventoryCurrentRow;
 struct Pointer {
     logical_name_id: String,
     resolver_address: String,
+    /// The resource's own pointer resolver, which the linked arm reads: the mirror itself for a
+    /// mirrored resource (`provenance.resolver_address`), otherwise `resolver_address`.
+    record_resolver: String,
     namehash: Option<String>,
     source_family: Option<String>,
     namespace: Option<String>,
@@ -93,9 +101,12 @@ async fn pointer(pool: &PgPool, row: &RecordInventoryCurrentRow) -> Result<Optio
     .await
     .context("failed to read the pointer today's row was built through")?;
     let (source_family, namespace, surface_namehash) = found.unwrap_or_default();
+    let resolver_address = resolver_address.to_ascii_lowercase();
     Ok(Some(Pointer {
         logical_name_id,
-        resolver_address: resolver_address.to_ascii_lowercase(),
+        record_resolver: text(provenance, "resolver_address")
+            .map_or_else(|| resolver_address.clone(), |own| own.to_ascii_lowercase()),
+        resolver_address,
         namehash: namehash
             .map(|namehash| namehash.to_ascii_lowercase())
             .or(surface_namehash),
@@ -174,24 +185,25 @@ pub(crate) async fn expected_pairs(
                AND manifest.rollout_status = 'active' AND manifest.payload IS NOT NULL
                AND manifest.namespace = $7::text
          ),
-         -- The exact link unless it selects record id 0, else the default link; provenance
-         -- lists the default link only in that case.
+         -- As `project_selected_records`: the exact link's record id unless it is 0, else the
+         -- default link's. Provenance lists the default link only in that case; at the root
+         -- name both are the same link.
+         links AS (
+             SELECT lower(link.after_state ->> 'node') AS node,
+                    link.after_state ->> 'resolver_record_id' AS record_id
+             FROM bigname_phase.normalized_events link
+             WHERE link.normalized_event_id = ANY($9::bigint[])
+               AND link.event_kind = 'ResolverRecordLinked'
+         ),
          selected AS (
-             SELECT COALESCE(
-                 (SELECT link.after_state ->> 'resolver_record_id'
-                  FROM bigname_phase.normalized_events link
-                  WHERE link.normalized_event_id = ANY($9::bigint[])
-                    AND link.event_kind = 'ResolverRecordLinked'
-                    AND lower(link.after_state ->> 'node') = $5::text
-                    AND link.after_state ->> 'resolver_record_id' <> '0'
-                  LIMIT 1),
-                 (SELECT link.after_state ->> 'resolver_record_id'
-                  FROM bigname_phase.normalized_events link
-                  WHERE link.normalized_event_id = ANY($9::bigint[])
-                    AND link.event_kind = 'ResolverRecordLinked'
-                    AND lower(link.after_state ->> 'node') IS DISTINCT FROM $5::text
-                  LIMIT 1)
-             ) AS record_id
+             SELECT CASE WHEN exact.record_id <> '0' THEN exact.record_id
+                         ELSE defaults.record_id END AS record_id
+             FROM (SELECT 1) one
+             LEFT JOIN LATERAL (SELECT record_id FROM links WHERE node = $5::text LIMIT 1) exact
+               ON TRUE
+             LEFT JOIN LATERAL (SELECT record_id FROM links WHERE node = '{DEFAULT_RECORD_NODE}'
+                                LIMIT 1) defaults
+               ON TRUE
          )
          SELECT value.normalized_event_id AS value_id, value.block_number AS value_block,
                 value.transaction_index AS value_transaction, value.log_index AS value_log,
@@ -251,7 +263,7 @@ pub(crate) async fn expected_pairs(
                    AND {EFFECTIVE_RESOLVER} = $4
                    AND $6::text IN ('ens_v2_registry_l1', 'ens_v2_root_l1'))
                -- linked
-               OR (lower(sibling.after_state ->> 'resolver') = $4
+               OR (lower(sibling.after_state ->> 'resolver') = $10
                    AND sibling.after_state ->> 'storage_model' = 'resolver_record_id'
                    AND sibling.after_state ->> 'resolver_record_id' = selected.record_id)
            )
@@ -267,6 +279,7 @@ pub(crate) async fn expected_pairs(
         .bind(&pointer.namespace)
         .bind(served_block)
         .bind(ids(today, "record_link_event_ids"))
+        .bind(&pointer.record_resolver)
         .fetch_all(pool)
         .await
         .context("failed to find the coin-60 pairs today's row serves")?;
