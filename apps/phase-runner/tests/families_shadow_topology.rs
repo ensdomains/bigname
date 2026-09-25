@@ -165,7 +165,7 @@ async fn alias_and_wildcard_topology_match_the_served_names() -> Result<()> {
         .await?;
     }
     point(&fixture, "wild-point", &ancestor, &wildcard_resolver, 2).await?;
-    fixture
+    let version_event = fixture
         .event(
             "wild-version",
             Some(&ancestor.logical),
@@ -205,20 +205,33 @@ async fn alias_and_wildcard_topology_match_the_served_names() -> Result<()> {
     // The difference is exactly the boundary: the served topology still bounds at block 3, the
     // shadow at block 7, and with the shadow's boundaries put in, the served topology is the
     // shadow's.
-    let boundary = "/version_boundaries/topology_version_boundary/chain_position/block_number";
-    let mut served = served_topology(&fixture, &wildcard.logical)
-        .await?
-        .unwrap_or_default();
-    let shadowed = load_name_topology_shadow(fixture.pool(), &wildcard.logical)
-        .await?
-        .unwrap_or_default();
+    // The difference, pinned in full: the served boundaries are the version event at block 3 and
+    // the shadow's the zero pointer at block 7, each exactly, and nothing else differs.
+    let pin = WildcardPin {
+        logical: &wildcard.logical,
+        ancestor: &ancestor,
+        version_event,
+    };
+    pin.check(&fixture).await?;
+    // A second difference inside the exempted boundary still fails: a changed served block hash
+    // leaves the known difference in place but breaks the pin.
+    sqlx::query(
+        "UPDATE name_current SET declared_summary = jsonb_set(declared_summary,
+             '{topology,version_boundaries,record_version_boundary,chain_position,block_hash}',
+             '\"another-hash\"')
+         WHERE logical_name_id = $1",
+    )
+    .bind(&wildcard.logical)
+    .execute(fixture.pool())
+    .await?;
     ensure!(
-        served.pointer(boundary) == Some(&json!(3))
-            && shadowed.pointer(boundary) == Some(&json!(7)),
-        "served {served}, shadow {shadowed}"
+        pin.check(&fixture).await.is_err(),
+        "a changed boundary hash passed the pin"
     );
-    served["version_boundaries"] = shadowed["version_boundaries"].clone();
-    ensure!(served == shadowed, "served {served}, shadow {shadowed}");
+    unexpected(
+        &fixture.compare(1).await?,
+        &[format!("topology of {}", wildcard.logical)],
+    )?;
     unexpected(&report, &[format!("topology of {}", wildcard.logical)])?;
     fixture.rebuild().await?;
     let report = fixture.compare(1).await?;
@@ -353,4 +366,63 @@ async fn wildcard_path_keeps_the_served_resolver_spelling_across_ancestors() -> 
         );
     }
     fixture.cleanup().await
+}
+
+/// The wildcard boundary difference of `alias_and_wildcard_topology_match_the_served_names`.
+struct WildcardPin<'a> {
+    logical: &'a str,
+    ancestor: &'a Name,
+    version_event: i64,
+}
+
+impl WildcardPin<'_> {
+    /// Both boundary objects exactly as expected, and the two topologies equal once the
+    /// boundaries are set aside.
+    async fn check(&self, fixture: &Fixture) -> Result<()> {
+        let mut served = served_topology(fixture, self.logical)
+            .await?
+            .unwrap_or_default();
+        let mut shadowed = load_name_topology_shadow(fixture.pool(), self.logical)
+            .await?
+            .unwrap_or_default();
+        let boundary = |block: i64, event_id: Value, event_kind: Value| async move {
+            let timestamp: Value = sqlx::query_scalar("SELECT to_jsonb(to_timestamp($1::bigint))")
+                .bind(shadow_fixture::EPOCH + block)
+                .fetch_one(fixture.pool())
+                .await?;
+            let one = json!({
+                "logical_name_id": self.ancestor.logical,
+                "resource_id": self.ancestor.resource,
+                "normalized_event_id": event_id,
+                "event_kind": event_kind,
+                "chain_position": {
+                    "chain_id": shadow_fixture::CHAIN,
+                    "block_number": block,
+                    "block_hash": shadow_fixture::hash(block),
+                    "timestamp": timestamp,
+                },
+            });
+            anyhow::Ok(json!({
+                "topology_version_boundary": one.clone(),
+                "record_version_boundary": one,
+            }))
+        };
+        let served_boundaries =
+            boundary(3, json!(self.version_event), json!("RecordVersionChanged")).await?;
+        let shadow_boundaries = boundary(7, Value::Null, Value::Null).await?;
+        ensure!(
+            served["version_boundaries"] == served_boundaries,
+            "served {}",
+            served["version_boundaries"]
+        );
+        ensure!(
+            shadowed["version_boundaries"] == shadow_boundaries,
+            "shadow {}",
+            shadowed["version_boundaries"]
+        );
+        served["version_boundaries"] = Value::Null;
+        shadowed["version_boundaries"] = Value::Null;
+        ensure!(served == shadowed, "served {served}, shadow {shadowed}");
+        Ok(())
+    }
 }

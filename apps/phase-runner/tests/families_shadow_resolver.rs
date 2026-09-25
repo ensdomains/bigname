@@ -17,6 +17,7 @@ use bigname_storage::families::topology::{
 };
 use serde_json::{Value, json};
 use shadow_fixture::{CHAIN, Fixture, ZERO_ADDRESS, ZERO_NODE, address, unexpected, uuid, word};
+use sqlx::PgPool;
 
 const REGISTRY: &str = "ens_v2_registry_l1";
 const RESOLVER: &str = "ens_v2_resolver_l1";
@@ -373,36 +374,34 @@ async fn resolver_collections_and_bound_names_match_the_served_readers() -> Resu
     // /links reads only the resolver's own logs
     // (apps/api/src/v2/resolvers/collections/links.sql:14-17). The stranger's link replaces
     // record 5 at the first resolver in the family and not in the served reader.
-    // The difference is exactly that row: the served collection keeps record 5 at the first
-    // name's node, the shadow serves the stranger's record 13 there, and every other row and the
-    // total agree.
-    let (height, _) = shadow::publication(fixture.pool(), CHAIN).await?;
-    let served =
-        shadow::served_collection(fixture.pool(), CHAIN, &first, "links", height, None, 1_000)
-            .await?;
-    let shadowed =
-        load_resolver_links_shadow(fixture.pool(), CHAIN, &first, "ens", None, 1_000).await?;
-    let records_at = |page: &FamilyCollectionPage| -> Vec<Value> {
-        page.rows
-            .iter()
-            .filter(|(_, node, _)| node == &one.node)
-            .map(|(_, _, item)| item["record_id"].clone())
-            .collect()
+    // The difference is exactly that row, pinned in full: the served collection keeps the first
+    // resolver's own link of record 5 at the first name's node, the shadow serves the stranger's
+    // record 13 there, each row whole with its ordering keys, and every other row and the total
+    // agree.
+    let pin = LinkPin {
+        resolver: &first,
+        node: &one.node,
+        name: &one.logical,
+        served: ("link-one", "5"),
+        shadow: ("link-stranger", "13"),
     };
-    let others = |page: &FamilyCollectionPage| -> Vec<(String, String, Value)> {
-        page.rows
-            .iter()
-            .filter(|(_, node, _)| node != &one.node)
-            .cloned()
-            .collect()
-    };
+    pin.check(fixture.pool()).await?;
+    // A second difference on the exempted row still fails: a changed position of the family's
+    // link leaves the known difference in place but breaks the pin.
+    sqlx::query(
+        "UPDATE project_resolver_link SET log_index = log_index + 50
+         WHERE chain_id = $1 AND resolver_address = $2 AND node = $3",
+    )
+    .bind(CHAIN)
+    .bind(&first)
+    .bind(&one.node)
+    .execute(fixture.pool())
+    .await?;
     ensure!(
-        records_at(&served) == [json!("5")]
-            && records_at(&shadowed) == [json!("13")]
-            && others(&served) == others(&shadowed)
-            && served.total_count == shadowed.total_count,
-        "served {served:?}, shadow {shadowed:?}"
+        pin.check(fixture.pool()).await.is_err(),
+        "a changed link position passed the pin"
     );
+    unexpected(&fixture.compare(1).await?, &[format!("links of {first}")])?;
     unexpected(&report, &[format!("links of {first}")])?;
     ensure!(report.bound_names == 4, "{}", report.line());
     fixture.cleanup().await
@@ -543,4 +542,90 @@ async fn classification_rows_are_compared_in_full() -> Result<()> {
     let report = fixture.compare(1).await?;
     unexpected(&report, &[format!("resolver {orphan}")])?;
     fixture.cleanup().await
+}
+
+/// The `/links` difference at one node: the served collection serves the link event `served`
+/// and the shadow the link event `shadow`, each as `(event identity, record id)`.
+struct LinkPin<'a> {
+    resolver: &'a str,
+    node: &'a str,
+    name: &'a str,
+    served: (&'a str, &'a str),
+    shadow: (&'a str, &'a str),
+}
+
+impl LinkPin<'_> {
+    /// The whole collection row a link event makes at this node: its ordering keys and its item,
+    /// built from the interpreted event itself.
+    async fn row(
+        &self,
+        pool: &PgPool,
+        identity: &str,
+        record: &str,
+    ) -> Result<(String, String, Value)> {
+        let item: Value = sqlx::query_scalar(
+            "SELECT jsonb_build_object(
+                 'record_id', $2::text, 'namehash', $3::text, 'default', false,
+                 'logical_name_id', $4::text, 'name', surface.raw_name, 'namespace', 'ens',
+                 'normalized_event_id', event.normalized_event_id,
+                 'chain_position', jsonb_build_object(
+                     'chain_id', event.chain_id, 'block_number', event.block_number,
+                     'block_hash', event.block_hash, 'transaction_hash', event.transaction_hash,
+                     'log_index', event.log_index,
+                     'timestamp', to_char(lineage.block_timestamp AT TIME ZONE 'UTC',
+                                          'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')))
+             FROM normalized_events event
+             JOIN chain_lineage lineage
+               ON lineage.chain_id = event.chain_id AND lineage.block_hash = event.block_hash
+             JOIN name_surfaces surface ON surface.logical_name_id = $4
+             WHERE event.event_identity = $1",
+        )
+        .bind(identity)
+        .bind(record)
+        .bind(self.node)
+        .bind(self.name)
+        .fetch_one(pool)
+        .await?;
+        Ok((format!("{record:0>78}"), self.node.to_owned(), item))
+    }
+
+    async fn check(&self, pool: &PgPool) -> Result<()> {
+        let (height, _) = shadow::publication(pool, CHAIN).await?;
+        let served =
+            shadow::served_collection(pool, CHAIN, self.resolver, "links", height, None, 1_000)
+                .await?;
+        let shadowed =
+            load_resolver_links_shadow(pool, CHAIN, self.resolver, "ens", None, 1_000).await?;
+        let at_node = |page: &FamilyCollectionPage| -> Vec<(String, String, Value)> {
+            page.rows
+                .iter()
+                .filter(|(_, node, _)| node == self.node)
+                .cloned()
+                .collect()
+        };
+        let others = |page: &FamilyCollectionPage| -> Vec<(String, String, Value)> {
+            page.rows
+                .iter()
+                .filter(|(_, node, _)| node != self.node)
+                .cloned()
+                .collect()
+        };
+        let expected_served = self.row(pool, self.served.0, self.served.1).await?;
+        let expected_shadow = self.row(pool, self.shadow.0, self.shadow.1).await?;
+        ensure!(
+            at_node(&served) == [expected_served.clone()],
+            "served {:?}, expected {expected_served:?}",
+            at_node(&served)
+        );
+        ensure!(
+            at_node(&shadowed) == [expected_shadow.clone()],
+            "shadow {:?}, expected {expected_shadow:?}",
+            at_node(&shadowed)
+        );
+        ensure!(
+            others(&served) == others(&shadowed) && served.total_count == shadowed.total_count,
+            "served {served:?}, shadow {shadowed:?}"
+        );
+        Ok(())
+    }
 }
