@@ -1908,3 +1908,6 @@ mod nameless_expiry;
 
 #[path = "issue_503/expired_reservation.rs"]
 mod expired_reservation;
+
+#[path = "issue_503/reservation_resource.rs"]
+mod reservation_resource;

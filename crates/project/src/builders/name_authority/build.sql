@@ -98,10 +98,10 @@
                 -- (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L201-L205 @ ens_v2@a971bd64)
                 -- (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L649-L651 @ ens_v2@a971bd64)
                 -- (upstream: .refs/ens_v2/contracts/src/utils/LibLabel.sol:L15-L17 @ ens_v2@a971bd64)
-                -- The hand-back lasts only while that reservation is live. When it is unregistered
-                -- or lapses, Interpret writes its end as a named release without a resource;
-                -- a registration always has a resource and a path-cut release carries it, so a
-                -- named ENSv2 release without one is a reservation's end. The label is then
+                -- The hand-back lasts only while that reservation is live. When a versioned
+                -- reservation is unregistered or lapses, Interpret writes its end as a named
+                -- release without a resource; a registration always has a resource and a path-cut
+                -- release carries it, so a named ENSv2 release without one is a reservation's end. The label is then
                 -- available: the registry answers a zero resolver for it, and a WrapperRegistry
                 -- never falls back to ENSv1 once the expiry is nonzero. The released
                 -- registration the name was last bound to stands again as its tombstone.
@@ -126,6 +126,22 @@
                        AND event.resource_id IS DISTINCT FROM binding.resource_id)
                       OR (event.event_kind = 'RegistrationReleased'
                           AND event.resource_id IS NULL)
+                      -- A version-zero reservation carries its own resource, and so does its
+                      -- release when it is unregistered or lapses. That release ends the
+                      -- reservation of this name like a resource-less one.
+                      OR (event.event_kind = 'RegistrationReleased'
+                          AND event.resource_id IS DISTINCT FROM binding.resource_id
+                          AND EXISTS (
+                              SELECT 1
+                              FROM project_events reservation
+                              WHERE reservation.logical_name_id = event.logical_name_id
+                                AND reservation.resource_id = event.resource_id
+                                AND reservation.event_kind = 'RegistrationReserved'
+                                AND reservation.source_family IN (
+                                    'ens_v2_root_l1', 'ens_v2_registry_l1',
+                                    'ens_v2_registrar_l1'
+                                )
+                          ))
                   )
             ) fact
             -- A reservation whose own expiry is already at or before its block's timestamp is
