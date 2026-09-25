@@ -387,9 +387,10 @@ unregister or expiry is then decided like any other release (below): the name
 is [`released v2 authority`](glossary.md#released-v2-authority), and neither
 the [ENSv1 husk](glossary.md#ensv1-husk) nor a later ENSv1 lease or registry
 change takes it back, so it keeps `migrated_at` and `is_migrated`. Only a later
-ENSv2 reservation of the label hands the name to ENSv1; the name then drops
-`migrated_at` and `is_migrated`, which are served only with
-`authority=ens_v2`. The unlocked controller's
+ENSv2 reservation of the label hands the name to ENSv1, and only while that
+reservation is live; the name drops `migrated_at` and `is_migrated`, which are
+served only with `authority=ens_v2`, during that ENSv1 selection and gets them
+back when the reservation ends and the released ENSv2 tombstone returns. The unlocked controller's
 registrar-token path transfers the ENSv1 registry position and registrar token
 to the Graveyard before claiming the reserved ENSv2 registration. Its
 unlocked-wrapped path first unwraps into the Graveyard, which also transfers the
@@ -514,10 +515,13 @@ When the name has an open ENSv2 binding, which only a registered ENSv2 entry
 creates, Project selects ENSv2 whatever ENSv1 holds; its authority epoch starts
 at that binding, and a migration is recorded only as history. Without one, a
 name whose ENSv2 registration it was last bound to has been released, by
-`unregister` or by lapsing at expiry, with no later ENSv2 reservation, is a
+`unregister` or by lapsing at expiry, with no later ENSv2 reservation that is
+still live, is a
 [released v2 authority](glossary.md#released-v2-authority) tombstone whatever
 ENSv1 holds, a live ENSv1 lease included: the ENSv2 contracts never route a
-registered label back to ENSv1. Otherwise ENSv1 decides: its open binding is
+registered label back to ENSv1. Ending that reservation, by `unregister` or by
+lapsing, restores the released ENSv2 selection, and a reservation already
+expired when it is written is never live. Otherwise ENSv1 decides: its open binding is
 selected. A name with no open binding on either arm follows its ENSv1
 authority events when it has any, and its ENSv2 events otherwise. That selects a released ENSv1 lease as a
 [released v1 authority](glossary.md#released-v1-authority) tombstone, serves the

@@ -321,10 +321,11 @@ follows the chain
 ([ADR 0007](adrs/0007-follow-the-chain-ens-authority.md)): a current ENSv2
 binding selects ENSv2, with its epoch starting at that binding and a migration
 recorded only as history; a released or expired ENSv2 registration with no
-later ENSv2 reservation stays with ENSv2 as a
+later ENSv2 reservation that is still live stays with ENSv2 as a
 [released v2 authority](glossary.md#released-v2-authority) tombstone whatever
-ENSv1 holds; a live ENSv1 binding selects ENSv1 otherwise; and a name with no
-open binding follows its history.
+ENSv1 holds, and ending that reservation restores the tombstone; a live ENSv1
+binding selects ENSv1 otherwise; and a name with no open binding follows its
+history.
 
 ## Exact-name projection
 

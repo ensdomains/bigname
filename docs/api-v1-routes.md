@@ -376,9 +376,11 @@ collection route carry neither header.
   with facts on both ENSv1 and ENSv2 follows the chain
   ([ADR 0007](adrs/0007-follow-the-chain-ens-authority.md)): a current ENSv2
   registration is selected without a migration proof, a released or expired
-  ENSv2 registration with no later ENSv2 reservation stays with ENSv2 as a
+  ENSv2 registration with no later ENSv2 reservation that is still live stays
+  with ENSv2 as a
   [released ENSv2 authority](glossary.md#released-v2-authority) tombstone
-  whatever ENSv1 holds, a live ENSv1 registration is selected otherwise, and a
+  whatever ENSv1 holds (ending that reservation restores the tombstone), a
+  live ENSv1 registration is selected otherwise, and a
   name with no open binding follows its history, so such a name is no longer
   refused. A selected ENSv2 registration with no
   authority refusal is served; it needs no `ETHRegistrar` event, ENSv1→ENSv2

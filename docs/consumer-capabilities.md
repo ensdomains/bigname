@@ -166,7 +166,9 @@ address relations, and permissions come only from its ENSv2 resource, and
 retained ENSv1 facts remain history and provenance that do not make the current
 read unsupported. After an ENSv2 release or expiry the name stays with ENSv2
 as a [released v2 authority](glossary.md#released-v2-authority) tombstone,
-whatever ENSv1 holds; only a later ENSv2 reservation hands it back to ENSv1. Slice 2C applies this rule to the
+whatever ENSv1 holds; only a later ENSv2 reservation hands it back to ENSv1,
+and only while that reservation is live. Ending the reservation restores the
+released ENSv2 selection. Slice 2C applies this rule to the
 exact-name projection, the name-detail response, and per-result batch-lookup
 records. Slice 2D makes the address-name, permission, search, primary-name, and
 address-history collections consume that selected current registration, but

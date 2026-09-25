@@ -28,8 +28,11 @@ decisions kept. Linear TYR-36 step 6.
   registration is current, the name is served as the
   [released v2 authority](../glossary.md#released-v2-authority) tombstone,
   unregistered, whatever ENSv1 holds, a live ENSv1 lease included. Only a
-  later ENSv2 reservation, which defers to ENSv1 like any reservation, or a
-  new ENSv2 registration changes that. The ENSv2 contracts never route such a
+  new ENSv2 registration, or a later ENSv2 reservation that is still live,
+  changes that. The reservation defers to ENSv1 like any reservation, but only
+  while it is live: when it is unregistered or lapses, the released ENSv2
+  selection returns, and a reservation already expired when it is written
+  never defers. The ENSv2 contracts never route such a
   label back to ENSv1: `unregister` writes the release time as the entry's
   expiry, the registry returns no resolver for an expired entry, and a
   `WrapperRegistry` stops answering with `ENSV1Resolver` for any label whose
@@ -143,9 +146,11 @@ scripts, and the chain does not need it to decide who holds a name.
 > **Superseded in part.** This section is the original 2026-09-24 decision,
 > kept as the record of what was decided then. The two 2026-09-25 amendments at
 > the top of this ADR supersede it where they differ: no authority proof,
-> released regime or shared-infrastructure classification remains, an
-> activated migration is served history only, and support needs no further
-> qualification. Read the amendments for the current rule.
+> released regime or shared-infrastructure classification remains, a
+> released or expired ENSv2 registration stays with ENSv2 except while a later
+> ENSv2 reservation of the label is live, an activated migration is served
+> history only, and support needs no further qualification. Read the
+> amendments for the current rule.
 
 bigname follows the chain. For an ordinary ENS name:
 
@@ -228,9 +233,12 @@ Resolver does. The difference is listed in
   lease.
 - Names that were identity-only with `independent_ens_deployments_overlap` or
   `conflicting_current_ens_authority` get a selected authority. A name with a
-  current ENSv2 registration selects ENSv2; any other such name selects ENSv1,
-  including as a released ENSv1 registration. On Sepolia this covers all 652
-  names refused on 2026-09-23. When this ADR was accepted, a name whose
+  current ENSv2 registration selects ENSv2. A name whose ENSv2 registration
+  was released or has expired selects ENSv2 as a released tombstone, except
+  while a later ENSv2 reservation of the label is live, when it selects its
+  live ENSv1 registration until the reservation ends. Any other such name
+  selects ENSv1, including as a released ENSv1 registration. On Sepolia this
+  covers all 652 names refused on 2026-09-23. When this ADR was accepted, a name whose
   selected arm is ENSv2 also needed a per-name exact-name profile
   qualification (an admitted `ETHRegistrar` event, a proven ENSv1→ENSv2
   migration successor, or a positive child registration proof) and otherwise stayed
