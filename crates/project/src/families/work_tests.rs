@@ -5,8 +5,9 @@ use anyhow::Result;
 use serde_json::json;
 
 use super::{
-    guard_tests::{CHAIN, database},
-    input, manifests,
+    FamilyOptions, block,
+    guard_tests::{CHAIN, NO_INTERPRET, database},
+    input, manifests, marker,
 };
 
 async fn blockless_update(pool: &sqlx::PgPool, start_block: i64) -> Result<()> {
@@ -42,6 +43,9 @@ async fn blockless_update(pool: &sqlx::PgPool, start_block: i64) -> Result<()> {
     Ok(())
 }
 
+// The update lands after the history is captured and before the work list is built, so this
+// shows the work list reads no manifests of its own; the window after the work list is the next
+// test.
 #[tokio::test]
 async fn the_work_list_takes_declaration_starts_from_the_captured_history() -> Result<()> {
     let (database, pool) = database().await?;
@@ -57,6 +61,64 @@ async fn the_work_list_takes_declaration_starts_from_the_captured_history() -> R
     let later = manifests::History::read(&pool, CHAIN, 12).await?;
     let blocks = input::work_blocks(&pool, CHAIN, 1, 12, &later).await?;
     assert_eq!(blocks, [7]);
+    database.cleanup().await?;
+    Ok(())
+}
+
+// The planning-to-population window itself: the work list is materialized, the update lands,
+// and the population step then applies under the history the run captured. Neither the work list
+// nor the block's classification sees the update; a block applied under a history read afterwards
+// does.
+#[tokio::test]
+async fn an_update_after_the_work_list_is_invisible_to_the_blocks_populated_under_it() -> Result<()>
+{
+    let (database, pool) = database().await?;
+    let captured = manifests::History::read(&pool, CHAIN, 11).await?;
+    let blocks = input::work_blocks(&pool, CHAIN, 1, 11, &captured).await?;
+    assert!(
+        blocks.is_empty(),
+        "nothing is declared or active: {blocks:?}"
+    );
+    blockless_update(&pool, 7).await?;
+    // Population visits the work list and then the target, as `populate` does.
+    let options = FamilyOptions::new("work");
+    let populate = |number: i64, history: &manifests::History| {
+        let history = history.clone();
+        let (pool, options) = (&pool, &options);
+        async move {
+            let family = marker::read(pool, CHAIN).await?;
+            let plan = block::Plan {
+                predecessor: family.current.as_ref(),
+                sequence: family.sequence,
+                contiguous: false,
+                bootstrap: false,
+                revision: &NO_INTERPRET,
+                role: block::Role::Follow,
+                manifests: &history,
+            };
+            block::apply(pool, CHAIN, number, &plan, options).await?;
+            anyhow::Ok(marker::read(pool, CHAIN).await?.admission_manifests)
+        }
+    };
+    let admitted = populate(11, &captured).await?;
+    assert_eq!(
+        admitted.as_deref(),
+        Some(captured.at(11).key.as_str()),
+        "block 11 classified under the captured history"
+    );
+    let later = manifests::History::read(&pool, CHAIN, 12).await?;
+    assert_ne!(
+        later.at(11).key,
+        captured.at(11).key,
+        "the update changes the active set at block 11"
+    );
+    assert_eq!(input::work_blocks(&pool, CHAIN, 1, 11, &later).await?, [7]);
+    let admitted = populate(12, &later).await?;
+    assert_eq!(
+        admitted.as_deref(),
+        Some(later.at(12).key.as_str()),
+        "a block applied under a fresh history classifies under the update"
+    );
     database.cleanup().await?;
     Ok(())
 }

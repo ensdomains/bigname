@@ -8,7 +8,10 @@ use phase_runner::{
     INTERPRETER_CONTENT_HASH,
     capacity::CapacityGuard,
     config::{CapacityConfig, ChainConfig, SeedBasis, SourceConfig, TimingConfig},
-    phase::{BlockRange, LoopbackPhase, PhaseName, PhaseSet},
+    phase::{
+        AfterProgressFuture, BlockRange, CompletedPhaseFuture, LoopbackPhase, Phase,
+        PhaseBatchOutcome, PhaseContext, PhaseFuture, PhaseName, PhaseSet, RunMode,
+    },
     project_phase::FamilySettings,
     project_phase::ProjectPhase,
     runner::{PhaseRunner, RedoPhase},
@@ -193,6 +196,104 @@ async fn a_one_shot_redo_whose_families_stop_short_fails_and_a_rerun_repairs_the
     scratch.cleanup().await
 }
 
+// A stop that arrives while the final served batch is being recorded abandons the family run
+// before it starts. The redo still records the served batch, and the command fails with the
+// families reported short; an uncancelled rerun repairs them.
+#[tokio::test]
+async fn a_stop_during_the_final_served_batch_fails_the_one_shot_redo_and_a_rerun_repairs_it()
+-> Result<()> {
+    let scratch = ready_through("families_runner_stop", 30).await?;
+    seed_thirty_blocks_of_work(&scratch).await?;
+    let families = FamilySettings {
+        max_blocks_per_run: 10,
+        finish_each_batch: true,
+        ..FamilySettings::default()
+    };
+    let stop = CancellationToken::new();
+    let project = Arc::new(StopAfterFinalBatch {
+        inner: ProjectPhase::new(scratch.pool().clone()).with_family_settings(families),
+        stop: stop.clone(),
+    });
+    let error = redo_with_phase_and_stop(&scratch, project, 30, stop)
+        .await
+        .expect_err("the stop abandoned the family run");
+    assert_eq!(
+        project_state(&scratch).await?,
+        ("completed".into(), Some(30), false),
+        "the served batch is recorded"
+    );
+    assert_eq!(
+        marker(&scratch).await?,
+        None,
+        "the family run never started"
+    );
+    let message = error.to_string();
+    assert!(message.contains("family repair incomplete"), "{message}");
+    assert!(
+        message.contains("served marker block 30 (")
+            && message.contains("the family marker is unavailable"),
+        "{message}"
+    );
+
+    let project =
+        Arc::new(ProjectPhase::new(scratch.pool().clone()).with_family_settings(families));
+    redo_with_phase(&scratch, project, 30).await?;
+    assert_eq!(marker(&scratch).await?, Some(30), "the rerun repaired them");
+    scratch.cleanup().await
+}
+
+/// Project, with a stop raised as soon as its final batch returns, so the stop is pending while
+/// the runner records that batch and wins the select against the family run.
+struct StopAfterFinalBatch {
+    inner: ProjectPhase,
+    stop: CancellationToken,
+}
+
+impl Phase for StopAfterFinalBatch {
+    fn name(&self) -> PhaseName {
+        self.inner.name()
+    }
+
+    fn preflight(
+        &self,
+        chain_id: &str,
+        sources: &[SourceConfig],
+        mode: &RunMode,
+    ) -> phase_runner::error::RunnerResult<()> {
+        self.inner.preflight(chain_id, sources, mode)
+    }
+
+    fn run_batch(&self, context: PhaseContext) -> PhaseFuture<'_> {
+        Box::pin(async move {
+            let outcome = self.inner.run_batch(context).await;
+            if matches!(outcome, Ok(PhaseBatchOutcome::Complete(_))) {
+                self.stop.cancel();
+            }
+            outcome
+        })
+    }
+
+    fn after_progress_recorded(&self, chain_id: &str) -> AfterProgressFuture<'_> {
+        self.inner.after_progress_recorded(chain_id)
+    }
+
+    fn after_redo(&self, chain_id: &str) -> phase_runner::error::RunnerResult<()> {
+        self.inner.after_redo(chain_id)
+    }
+
+    fn revalidates_completed(
+        &self,
+        chain_id: &str,
+        sources: &[SourceConfig],
+    ) -> phase_runner::error::RunnerResult<bool> {
+        self.inner.revalidates_completed(chain_id, sources)
+    }
+
+    fn revalidate_completed(&self, context: PhaseContext) -> CompletedPhaseFuture<'_> {
+        self.inner.revalidate_completed(context)
+    }
+}
+
 /// One event per block 1 to 30, so a family rebuild has thirty blocks of work.
 async fn seed_thirty_blocks_of_work(scratch: &ScratchDatabase) -> Result<()> {
     sqlx::query(
@@ -250,6 +351,15 @@ async fn redo_with_phase(
     project: Arc<ProjectPhase>,
     head: i64,
 ) -> Result<()> {
+    redo_with_phase_and_stop(scratch, project, head, CancellationToken::new()).await
+}
+
+async fn redo_with_phase_and_stop(
+    scratch: &ScratchDatabase,
+    project: Arc<dyn Phase>,
+    head: i64,
+    stop: CancellationToken,
+) -> Result<()> {
     PhaseRunner::new(
         scratch.runner(),
         PhaseSet::with_ingest_interpret_and_project(
@@ -269,7 +379,7 @@ async fn redo_with_phase(
         &chain_config()?,
         RedoPhase::Phase(PhaseName::Project),
         BlockRange::new(0, head)?,
-        CancellationToken::new(),
+        stop,
     )
     .await?;
     Ok(())
