@@ -272,3 +272,51 @@ async fn a_child_edge_stores_its_owner_and_owner_getter_lower_cased() -> Result<
     fixture.assert_rebuild_equal(10).await?;
     fixture.cleanup().await
 }
+
+// Both alias readers take `(after_state ->> 'active')::boolean`, so every spelling PostgreSQL
+// reads as a boolean decides the flag: case-insensitive and trimmed, unique prefixes of true,
+// false, yes, no, on and off, and 1 or 0, as text or as a JSON number.
+#[tokio::test]
+async fn an_alias_active_flag_reads_as_postgresql_reads_a_boolean() -> Result<()> {
+    let fixture = Fixture::new("families_alias_boolean", 20).await?;
+    let spellings = [
+        (json!("off"), false),
+        (json!(" No "), false),
+        (json!("0"), false),
+        (json!(0), false),
+        (json!("fal"), false),
+        (json!("n"), false),
+        (json!("ON"), true),
+        (json!("1"), true),
+        (json!(1), true),
+        (json!("ye"), true),
+    ];
+    for (n, (active, _)) in (1..).zip(&spellings) {
+        fixture
+            .write(
+                10,
+                n,
+                "AliasChanged",
+                "ens_v2_resolver_l1",
+                Some(&name(u64::try_from(100 + n)?)),
+                None,
+                json!({"resolver": RESOLVER, "to_logical_name_id": name(2), "active": active}),
+                RESOLVER,
+            )
+            .await?;
+    }
+    fixture.apply(10, FamilyMode::Normal).await;
+    let rows = fixture.rows("project_name_alias").await?;
+    let mut stored: Vec<(String, Option<bool>)> = rows
+        .iter()
+        .map(|row| (row["logical_name_id"].to_string(), row["active"].as_bool()))
+        .collect();
+    stored.sort();
+    let mut expected: Vec<(String, Option<bool>)> = (1..)
+        .zip(&spellings)
+        .map(|(n, (_, flag))| (json!(name(100 + n)).to_string(), Some(*flag)))
+        .collect();
+    expected.sort();
+    assert_eq!(stored, expected);
+    fixture.cleanup().await
+}
