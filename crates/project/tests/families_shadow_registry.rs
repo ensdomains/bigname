@@ -784,3 +784,33 @@ async fn an_older_admitted_epoch_behind_an_excluded_one_is_a_retention_gap() -> 
     );
     fixture.cleanup().await
 }
+
+/// Pro Q3 on ea047c04, the positive ownerless profile: name 1 has no binding, and its node gets
+/// an AuthorityTransferred naming it whose getter reads the zero address, then a
+/// SubregistryChanged of the node. The latest transfer is still the zero-getter one, so both
+/// sides serve the profile. Only the eligibility is compared: the served getter reason and
+/// resource are not.
+#[tokio::test]
+async fn a_bindingless_zero_transfer_then_a_subregistry_write_is_ownerless() -> Result<()> {
+    let fixture = Fixture::new("families_shadow_registry_ownerless", 20).await?;
+    transferred(&fixture, 11, ZERO, "registry").await?;
+    fixture
+        .write(
+            12,
+            1,
+            "SubregistryChanged",
+            V1_REGISTRY,
+            Some(&name(1)),
+            None,
+            json!({"node": node(1), "owner": OTHER, "emitter_role": "registry"}),
+            REGISTRY,
+        )
+        .await?;
+    let report = publish_and_compare(&fixture, 16).await?;
+    shadow_support::assert_counts(&report, &[], &[]);
+    assert_eq!(
+        selection(&fixture).await?["ownerless_registry"],
+        json!(true)
+    );
+    fixture.cleanup().await
+}
