@@ -786,3 +786,96 @@ async fn an_unwrap_and_an_expiry_update_in_one_block_in_both_orders() -> Result<
     }
     Ok(())
 }
+
+/// The second one-log transfer shape (Codex thread PRRT_kwDOSJpxAs6l4hOw): the recipient of a
+/// wrapped transfer is the token's approved delegate. `_beforeTransfer` clears the approval, so
+/// the adapter emits the delegate's token-approval revoke before the holder rows from the same
+/// log, and relies on the recipient's holder grant being the later row
+/// (adapters schema_v2/protocol/v1/wrapper/transfer.rs:141-146). Both rows fold to one family
+/// grant key, the resource, subject and resource scope. Today's builder keeps the grant, the
+/// higher generated id, and serves the recipient's holder row; the family keeps the canonical
+/// latest, the revoke, whose identity (`token_approval`) sorts after the grant's (`holder`),
+/// and serves no row for the recipient. The same step 2 cause drops the restriction block (the
+/// old holder's revoke sorts after the grant). Pinned as mismatches with no excuse.
+#[tokio::test]
+async fn a_transfer_to_the_delegate_from_one_log_drops_the_recipients_holder_row() -> Result<()> {
+    let fixture = Fixture::new("families_shadow_permissions_one_log_delegate", 20).await?;
+    let fuses = PARENT_CANNOT_CONTROL;
+    let resource = wrapped(&fixture, fuses, timestamp(TARGET) + 1_000_000).await?;
+    permission_changed(
+        &fixture,
+        12,
+        1,
+        &resource,
+        NEXT_HOLDER,
+        "token_approval",
+        &["extend_subname_expiry"],
+        "Approval",
+        true,
+    )
+    .await?;
+    for (relation, powers, action, subject, grant) in [
+        (
+            "token_approval",
+            &["extend_subname_expiry"][..],
+            "revoke",
+            NEXT_HOLDER,
+            false,
+        ),
+        ("holder", HOLDER_POWERS, "revoke", HOLDER, false),
+        ("holder", HOLDER_POWERS, "grant", NEXT_HOLDER, true),
+    ] {
+        let identity = format!("0xtx13:1:PermissionChanged:{relation}:0:{action}:{subject}");
+        fixture
+            .event(
+                Event::new(&identity, 13, 1, "PermissionChanged", V1_WRAPPER)
+                    .name(&name(1))
+                    .resource(&resource)
+                    .before(permission(
+                        subject,
+                        relation,
+                        powers,
+                        "TransferSingle",
+                        !grant,
+                    ))
+                    .after(permission(
+                        subject,
+                        relation,
+                        powers,
+                        "TransferSingle",
+                        grant,
+                    ))
+                    .raw(json!({"emitting_address": WRAPPER})),
+            )
+            .await?;
+    }
+    let report = publish_and_compare(&fixture, TARGET).await?;
+    let served = rows(&fixture, &resource).await?;
+    assert!(
+        served
+            .iter()
+            .any(|(subject, relation, _)| subject == NEXT_HOLDER && relation == "holder"),
+        "today's builder serves the recipient's holder row: {served:?}"
+    );
+    assert!(
+        report.expected_delta_fields.is_empty()
+            && report.known_discrepancy.is_empty()
+            && report.mismatched == 1,
+        "{:#?}",
+        report.lines
+    );
+    let mut failed: Vec<&str> = report
+        .lines
+        .iter()
+        .filter(|line| line.starts_with("SEPOLIA_END_TO_END_SHADOW_MISMATCH"))
+        .filter_map(|line| line.split(" field=").nth(1)?.split(' ').next())
+        .collect();
+    failed.sort_unstable();
+    assert_eq!(
+        failed,
+        ["permissions_current", "resource_restrictions"],
+        "{:#?}",
+        report.lines
+    );
+    fixture.cleanup().await
+}
