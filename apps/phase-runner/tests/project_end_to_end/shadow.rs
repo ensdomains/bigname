@@ -970,6 +970,9 @@ fn is_address(value: Option<&str>) -> bool {
     })
 }
 
+/// An observation identity and its block, transaction and log.
+type RivalKey = (String, i64, Option<i64>, Option<i64>);
+
 type RivalRow = (
     String,
     String,
@@ -1046,7 +1049,7 @@ async fn bindings_in_todays_order(
     .bind(&logs)
     .fetch_all(pool)
     .await?;
-    let rivals: BTreeMap<(String, i64, Option<i64>, Option<i64>), &RivalRow> = rows
+    let rivals: BTreeMap<RivalKey, &RivalRow> = rows
         .iter()
         .map(|row| ((row.0.clone(), row.4, row.5, row.6), row))
         .collect();
