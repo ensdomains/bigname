@@ -7,8 +7,17 @@ use serde_json::{Value, json};
 
 use crate::families::control::{rows::WrapperRow, wrapper::restrictions};
 
-/// The ENSv2 roles a token-scoped admin can lock, with the admin power that keeps each open
-/// (resource_summary.rs:427-433).
+/// The token-scoped ENSv2 roles, each with the admin power that can still change it
+/// (resource_summary.rs:427-433). A role is locked when neither the registration's nor its
+/// root's admins hold that power: an account can grant a regular role only while it holds the
+/// matching admin role, its roles on the registry root count on every token, and a token's
+/// settable roles are regular roles only, so no admin role can be granted on a registration
+/// after it is registered. `transfer` has no regular role: `can_transfer_admin` is itself the
+/// role that authorizes token transfers.
+/// (upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L409-L425 @ ens_v2@a971bd64)
+/// (upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L452-L455 @ ens_v2@a971bd64)
+/// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L545-L572 @ ens_v2@a971bd64)
+/// (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L23-L45 @ ens_v2@a971bd64)
 const ROLES: [(&str, &str); 5] = [
     ("unregister", "admin_unregister"),
     ("renew", "admin_renew"),
