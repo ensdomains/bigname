@@ -7,9 +7,17 @@
 //! block, transaction and log comes after it by event identity, an `AddressChanged` value is kept
 //! only as `address_bytes_hex` or as the `sibling_value` of a coin-60 pair. So the candidates are
 //! the index rows together with every retained F6 and F7 address value that names the address in
-//! any of those columns, with no version cutoff: a superset, which the forward inventory assembly
-//! then narrows to what is served. Which candidates only the retained values found is kept, per
-//! resource and coin type, so the harness can name each entry the index alone would miss.
+//! any of those columns, with no version cutoff and no arm test, which the forward inventory
+//! assembly then narrows to what is served.
+//!
+//! A retained value reaches the resources whose pointer can admit it: a node-keyed value the
+//! pointers at its node and resolver (or at a mirror resolver for that node), a named value also
+//! the pointers of its own resource or of its logical name's namehash at its resolver (the named
+//! arm admits by logical name with no node test), and a record-id value every pointer at its
+//! resolver. Those are the conditions under which the forward read's arms and link selection
+//! (`rows.rs`, `links.rs`) can load the value, so every resource that serves the address is a
+//! candidate. Which candidates only the retained values found is kept, per resource and coin type,
+//! so the harness can name each entry the index alone would miss.
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result};
@@ -55,12 +63,13 @@ pub(crate) async fn candidate_resources(
     };
     let sql = format!(
         "WITH keys AS (
-             SELECT chain_id, resolver_address, node, NULL::text AS record_id, coin_type,
+             SELECT chain_id, resolver_address, node, NULL::text AS record_id,
+                    NULL::uuid AS named_resource, NULL::text AS named_namehash, coin_type,
                     true AS indexed
              FROM bigname_phase.project_address_record_node_index
              WHERE address = $1 AND coin_type = ANY($2::text[])
              UNION ALL
-             SELECT chain_id, resolver_address, NULL, record_id, coin_type, true
+             SELECT chain_id, resolver_address, NULL, record_id, NULL, NULL, coin_type, true
              FROM bigname_phase.project_address_record_id_index
              WHERE address = $1 AND coin_type = ANY($2::text[])
              UNION ALL
@@ -82,7 +91,8 @@ pub(crate) async fn candidate_resources(
          JOIN bigname_phase.project_resource_pointer pointer
            ON pointer.chain_id = keys.chain_id
           AND (
-              (keys.node IS NOT NULL AND pointer.namehash = keys.node
+              ((pointer.namehash = keys.node OR pointer.resource_id = keys.named_resource
+                OR pointer.namehash = keys.named_namehash)
                AND (pointer.resolver_address = keys.resolver_address
                     OR pointer.resolver_address IN (
                         SELECT mirror.resolver_address FROM mirrors mirror
@@ -91,8 +101,17 @@ pub(crate) async fn candidate_resources(
                   AND pointer.resolver_address = keys.resolver_address)
           )
          GROUP BY pointer.chain_id, pointer.resource_id, keys.coin_type",
-        retained("project_node_record_value", "node, NULL::text AS record_id"),
-        retained("project_record_id_value", "NULL::text, record_id"),
+        retained(
+            "project_node_record_value",
+            "node, NULL::text AS record_id,
+             CASE WHEN arm = 'named' THEN resource_id END AS named_resource,
+             CASE WHEN arm = 'named' THEN lower(split_part(arm_identity, ':', 2)) END
+                 AS named_namehash"
+        ),
+        retained(
+            "project_record_id_value",
+            "NULL::text, record_id, NULL::uuid, NULL::text"
+        ),
     );
     let rows = sqlx::query(&sql)
         .bind(address)

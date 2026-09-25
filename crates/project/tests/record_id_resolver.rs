@@ -580,6 +580,47 @@ async fn inverse_address_reads_find_values_the_address_index_drops() -> Result<(
     Ok(())
 }
 
+// A named write is admitted by its logical name alone, with no node test, so a named address
+// write whose node is not the name's namehash is served forward and must be found inversely.
+#[tokio::test]
+async fn a_named_address_write_at_another_node_is_found_inversely() -> Result<()> {
+    let (db, pool) = database("record_id_named_other_node").await?;
+    seed(&pool).await?;
+    sqlx::query("INSERT INTO chain_lineage (chain_id,block_hash,block_number,block_timestamp,canonicality_state) VALUES ($1,$2,19,to_timestamp(19::double precision),'canonical')").bind(CHAIN).bind(hash(19)).execute(&pool).await?;
+    event(
+        &pool,
+        "named-other-node",
+        19,
+        0,
+        "RecordChanged",
+        Some(1),
+        json!({"source_event":"AddressChanged","node":node(7),"resolver":RESOLVER,"record_key":"addr:60","record_family":"addr","selector_key":"60","coin_type":"60","value":INVERSE_A}),
+    )
+    .await?;
+    let expected = Expectations {
+        index_misses: vec![(
+            19,
+            format!(
+                "resolves_to {INVERSE_A} coin 60 resource {} addr:60",
+                resource(1)
+            ),
+        )],
+        ..Expectations::none()
+    };
+    run_expecting(&pool, 19, None, RunMode::Normal, &expected).await?;
+    let listed: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM address_records_current
+         WHERE address = $1 AND record_resource_id = $2::uuid",
+    )
+    .bind(INVERSE_A)
+    .bind(resource(1))
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(listed, 1, "today lists the named write");
+    db.cleanup().await?;
+    Ok(())
+}
+
 const INVERSE_A: &str = "0x5555555555555555555555555555555555555555";
 
 // ABI content types come from the writes the selected record holds, so a write made before a
