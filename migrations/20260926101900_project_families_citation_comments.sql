@@ -24,7 +24,7 @@ COMMENT ON COLUMN bigname_phase.project_resource_pointer.resolver_address IS
 $ddl$;
 EXECUTE $ddl$
 COMMENT ON COLUMN bigname_phase.project_wrapper_state.fuses IS
-    'This value is the fuses of the latest PermissionScopeChanged when a JSON number whose value is an integer from 0 to 9223372036854775807, the range the served modifiers read before casting to bigint (builders/permissions.rs modifiers, address_names.rs scope_modifiers); null otherwise. A non-integral spelling such as 1.0 fails that served cast and the Project batch, so it never reaches a served row.'
+    'This value is the fuses of the latest PermissionScopeChanged when a JSON number whose value is an integer from 0 to 9223372036854775807, the range builders/permissions.rs modifiers and address_names.rs scope_modifiers read before casting to bigint; null otherwise. The served children and name blocks read a narrower range, 0 to 4294967295 (children.rs:146-148, name_current/build.sql:541-544), so a publisher for those two readers must reapply it; the NameWrapper emits fuses as uint32 (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L27-L37 @ ens_v1@91c966f), so the ranges differ only for a value the contract never emits. A non-integral spelling such as 1.0 fails the served bigint cast and the Project batch, so it never reaches a served row.'
 $ddl$;
 EXECUTE $ddl$
 COMMENT ON COLUMN bigname_phase.project_wrapper_state.expiry_seconds IS
