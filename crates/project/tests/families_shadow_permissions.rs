@@ -24,11 +24,11 @@ use shadow_support::{
     publish, publish_and_compare,
     wrapper::{
         CANNOT_UNWRAP, DELEGATE, GRACE_PERIOD, HOLDER, HOLDER_POWERS, IS_DOT_ETH, OPERATOR,
-        PARENT_CANNOT_CONTROL, WRAPPER, approval, name, node, permission_changed, timestamp,
-        wrapped, wrapper_event,
+        PARENT_CANNOT_CONTROL, V1_WRAPPER, WRAPPER, approval, name, node, permission,
+        permission_changed, timestamp, wrapped, wrapper_event,
     },
 };
-use support::{CHAIN, Fixture, uuid};
+use support::{CHAIN, Event, Fixture, uuid};
 use uuid::Uuid;
 
 const NEXT_HOLDER: &str = "0x00000000000000000000000000000000000000a2";
@@ -658,4 +658,131 @@ async fn a_lapsed_registration_drops_its_rows_and_the_root_keeps_its_admin() -> 
     let known: Vec<(&str, usize)> = known.iter().map(|field| (field.as_str(), 1)).collect();
     shadow_support::assert_counts(&report, &known, &[]);
     fixture.cleanup().await
+}
+
+/// Pro Q5 on ea047c04, conflicting lifecycle events at one position. A NameWrapper
+/// TransferSingle emits the old holder's revoke and then the new holder's grant from one log
+/// (adapters schema_v2/protocol/v1/wrapper/transfer.rs:158-159), their identities ending
+/// `holder:0:revoke:<old>` and `holder:0:grant:<new>`. Today's summary ranks wrapper lifecycle
+/// events by position and then generated id (resource_summary.rs:172-196), so the grant, pushed
+/// second, is the latest and the restriction block stays. The wrapper family takes the
+/// canonical latest, the revoke, whose identity sorts after the grant's, and reads the name as
+/// unwrapped, so it serves no restriction block. This is a step 2 reducer gap on an ordinary
+/// chain shape, pinned as a mismatch with no excuse.
+#[tokio::test]
+async fn a_holder_transfer_from_one_log_drops_the_family_restrictions() -> Result<()> {
+    let fixture = Fixture::new("families_shadow_permissions_one_log_transfer", 20).await?;
+    let fuses = PARENT_CANNOT_CONTROL;
+    let expiry = timestamp(TARGET) + 1_000_000;
+    let resource = wrapped(&fixture, fuses, expiry).await?;
+    for (subject, action, grant) in [(HOLDER, "revoke", false), (NEXT_HOLDER, "grant", true)] {
+        let identity = format!("0xtx13:1:PermissionChanged:holder:0:{action}:{subject}");
+        fixture
+            .event(
+                Event::new(&identity, 13, 1, "PermissionChanged", V1_WRAPPER)
+                    .name(&name(1))
+                    .resource(&resource)
+                    .before(permission(
+                        subject,
+                        "holder",
+                        HOLDER_POWERS,
+                        "TransferSingle",
+                        !grant,
+                    ))
+                    .after(permission(
+                        subject,
+                        "holder",
+                        HOLDER_POWERS,
+                        "TransferSingle",
+                        grant,
+                    ))
+                    .raw(json!({"emitting_address": WRAPPER})),
+            )
+            .await?;
+    }
+    let report = publish_and_compare(&fixture, TARGET).await?;
+    let served: Option<Value> = sqlx::query_scalar(
+        "SELECT resource_restrictions FROM permissions_current_resource_summary
+         WHERE resource_id = $1::uuid",
+    )
+    .bind(&resource)
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(
+        served,
+        Some(
+            json!({"kind": "ens_v1_wrapper", "wrapper_state": "emancipated", "fuses": fuses,
+                    "expiry_seconds": expiry})
+        ),
+        "today's summary keeps the block through the transfer"
+    );
+    assert!(
+        report.expected_delta_fields.is_empty()
+            && report.known_discrepancy.is_empty()
+            && report.mismatched == 1,
+        "{:#?}",
+        report.lines
+    );
+    let failed: Vec<&String> = report
+        .lines
+        .iter()
+        .filter(|line| line.starts_with("SEPOLIA_END_TO_END_SHADOW_MISMATCH"))
+        .collect();
+    assert_eq!(failed.len(), 1, "{:#?}", report.lines);
+    assert!(
+        failed[0].contains("field=resource_restrictions") && failed[0].ends_with("shadow=null"),
+        "{:#?}",
+        report.lines
+    );
+    fixture.cleanup().await
+}
+
+/// Pro Q5 on ea047c04: an unwrap and a wrapper expiry update in one block, in both log orders,
+/// read exactly at the new expiry and one block after it. The unwrap gate and the expiry mask
+/// are separate: whichever log comes first, the name is unwrapped, so neither side serves a
+/// restriction block, and every name and resource equals its family read at both blocks.
+#[tokio::test]
+async fn an_unwrap_and_an_expiry_update_in_one_block_in_both_orders() -> Result<()> {
+    for (index, unwrap_first) in [true, false].into_iter().enumerate() {
+        let fixture = Fixture::new(
+            &format!("families_shadow_permissions_unwrap_expiry_{index}"),
+            20,
+        )
+        .await?;
+        let fuses = PARENT_CANNOT_CONTROL;
+        let resource = wrapped(&fixture, fuses, timestamp(TARGET) + 1_000_000).await?;
+        let (unwrap_log, expiry_log) = if unwrap_first { (1, 2) } else { (2, 1) };
+        let mut events = vec![
+            (
+                unwrap_log,
+                "AuthorityEpochChanged",
+                json!({"source_event": "NameUnwrapped", "node": node(1),
+                       "authority_kind": "wrapper"}),
+            ),
+            (
+                expiry_log,
+                "ExpiryChanged",
+                json!({"source_event": "ExpiryExtended", "node": node(1),
+                       "expiry": timestamp(14), "authority_kind": "wrapper"}),
+            ),
+        ];
+        events.sort_by_key(|(log, _, _)| *log);
+        for (log, kind, after) in events {
+            wrapper_event(&fixture, 12, log, kind, &resource, json!({}), after).await?;
+        }
+        for target in [14, 15] {
+            let report = publish_and_compare(&fixture, target).await?;
+            shadow_support::assert_counts(&report, &[], &[]);
+            let served: Option<Value> = sqlx::query_scalar(
+                "SELECT resource_restrictions FROM permissions_current_resource_summary
+                 WHERE resource_id = $1::uuid",
+            )
+            .bind(&resource)
+            .fetch_one(&fixture.pool)
+            .await?;
+            assert_eq!(served, None, "unwrap first {unwrap_first}, target {target}");
+        }
+        fixture.cleanup().await?;
+    }
+    Ok(())
 }
