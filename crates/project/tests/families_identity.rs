@@ -533,3 +533,128 @@ async fn a_successor_grant_after_a_release_becomes_the_handoff_lease() -> Result
     fixture.assert_rebuild_equal(13).await?;
     fixture.cleanup().await
 }
+
+// The epoch can arrive after the successor grant: the binding opens, the predecessor's lease is
+// released and a qualifying registrar grant follows, and only then does an AuthorityEpochChanged
+// mark the binding registry-only. The served handoff reads the epoch without a position
+// (stage.rs:128-135) and the grant after the binding and the release (stage.rs:84-127), so the
+// converted candidate's lease is that earlier grant, not the predecessor.
+#[tokio::test]
+async fn an_epoch_after_the_successor_grant_takes_that_grant_as_the_lease() -> Result<()> {
+    let fixture = Fixture::new("families_identity_late_epoch", 20).await?;
+    let (lease, registry, successor, early) = (uuid(1), uuid(2), uuid(3), uuid(4));
+    let namehash = node(1);
+    fixture
+        .binding(&uuid(101), &name(1), &lease, "ens_v1", 10, 1, Some(11))
+        .await?;
+    fixture
+        .write(
+            10,
+            1,
+            "SurfaceBound",
+            "ens_v1_registrar_l1",
+            Some(&name(1)),
+            Some(&lease),
+            json!({"authority_kind": "registrar"}),
+            REGISTRAR,
+        )
+        .await?;
+    fixture
+        .write(
+            10,
+            2,
+            "RegistrationReleased",
+            "ens_v1_registrar_l1",
+            Some(&name(1)),
+            Some(&lease),
+            json!({"namehash": namehash}),
+            REGISTRAR,
+        )
+        .await?;
+    // After the release but before the registry-only binding opens: never the lease.
+    fixture
+        .write(
+            10,
+            3,
+            "RegistrationGranted",
+            "ens_v1_registrar_l1",
+            Some(&name(1)),
+            Some(&early),
+            json!({"namehash": namehash, "registrant": OWNER}),
+            REGISTRAR,
+        )
+        .await?;
+    fixture
+        .binding(&uuid(102), &name(1), &registry, "ens_v1", 11, 1, None)
+        .await?;
+    fixture
+        .write(
+            11,
+            1,
+            "SurfaceBound",
+            "ens_v1_registry_l1",
+            Some(&name(1)),
+            Some(&registry),
+            json!({"authority_kind": "registry_only", "state_derived": true}),
+            REGISTRY,
+        )
+        .await?;
+    fixture
+        .write(
+            12,
+            1,
+            "RegistrationGranted",
+            "ens_v1_registrar_l1",
+            Some(&name(1)),
+            Some(&successor),
+            json!({"namehash": namehash, "registrant": OWNER}),
+            REGISTRAR,
+        )
+        .await?;
+    fixture
+        .write(
+            13,
+            1,
+            "AuthorityEpochChanged",
+            "ens_v1_registry_l1",
+            Some(&name(1)),
+            Some(&registry),
+            json!({"authority_kind": "registry_only"}),
+            REGISTRY,
+        )
+        .await?;
+    fixture.apply(12, FamilyMode::Normal).await;
+    let rows = fixture.rows("project_binding_candidate").await?;
+    assert!(
+        rows.iter().all(|row| row["registry_only"] == json!(false)),
+        "no epoch yet: no candidate is registry-only"
+    );
+    fixture.apply(13, FamilyMode::Normal).await;
+    let rows = fixture.rows("project_binding_candidate").await?;
+    let handoff = rows
+        .iter()
+        .find(|row| row["registry_only"] == json!(true))
+        .map(|row| {
+            columns(
+                row,
+                &[
+                    "predecessor_resource_id",
+                    "lease_resource_id",
+                    "lease_position",
+                ],
+            )
+        });
+    assert_eq!(
+        handoff,
+        Some(
+            json!({"predecessor_resource_id": lease, "lease_resource_id": successor,
+                    "lease_position": {"block_number": 12, "transaction_index": 0,
+                                       "log_index": 1,
+                                       "event_identity": "RegistrationGranted:12:1"}})
+        ),
+        "the epoch converts the binding and the grant already retained becomes the lease"
+    );
+    fixture.assert_undo_restores(13).await?;
+    fixture.assert_rebuild_equal(13).await?;
+    fixture.cleanup().await
+}

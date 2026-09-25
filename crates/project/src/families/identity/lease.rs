@@ -96,6 +96,48 @@ pub(crate) async fn successor_grant(
     Ok(())
 }
 
+/// Re-read the name's retained registrar grants once an epoch turns an existing candidate
+/// registry-only. The served handoff reads the epoch at any position (stage.rs:128-135), so a
+/// grant retained before the epoch arrived can already be the lease; `successor_grant` skipped it
+/// then, the candidate not being registry-only yet. The grants from `from` on are replayed in
+/// canonical order, so the latest qualifying one is the lease. This block's own grants reach
+/// `successor_grant` when the lifecycle family runs after identity.
+pub(super) async fn retained_grants(
+    transaction: &mut Transaction<'_, Postgres>,
+    context: &Context<'_>,
+    rows: &mut RowSet,
+    name: &str,
+    from: i64,
+) -> Result<()> {
+    let stored: Vec<Value> = sqlx::query_scalar(
+        "/* project:families.identity.retained_grants */ SELECT to_jsonb(retained)
+         FROM project_lifecycle_event retained
+         WHERE retained.chain_id = $1 AND retained.source_family = 'ens_v1_registrar_l1'
+           AND retained.event_kind = 'RegistrationGranted'
+           AND (retained.original_logical_name_id = $2 OR retained.decoded_logical_name_id = $2)
+           AND retained.block_number >= $3",
+    )
+    .bind(context.chain_id)
+    .bind(name)
+    .bind(from)
+    .fetch_all(&mut **transaction)
+    .await
+    .map_err(|error| ProjectError::database("failed to read the name's retained grants", error))
+    .map_err(in_family(tables::BINDING_CANDIDATE.name))?;
+    let mut grants: Vec<(Position, Row)> = stored
+        .into_iter()
+        .filter_map(|value| match value {
+            Value::Object(row) => Some((Position::of_row(&row)?, row)),
+            _ => None,
+        })
+        .collect();
+    grants.sort_by(|left, right| left.0.cmp(&right.0));
+    for (_, grant) in grants {
+        successor_grant(transaction, context, rows, name, &grant).await?;
+    }
+    Ok(())
+}
+
 /// Whether a registrar RegistrationReleased of `resource` is retained before `position`,
 /// counting this block's own retained rows.
 async fn released_before(

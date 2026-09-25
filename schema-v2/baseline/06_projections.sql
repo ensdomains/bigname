@@ -1681,6 +1681,9 @@ CREATE INDEX IF NOT EXISTS project_lifecycle_event_unnamed_lease_idx
       AND original_logical_name_id IS NULL AND decoded_logical_name_id IS NULL;
 CREATE INDEX IF NOT EXISTS project_lifecycle_event_decoded_name_idx
     ON project_lifecycle_event (chain_id, decoded_logical_name_id);
+CREATE INDEX IF NOT EXISTS project_lifecycle_event_registrar_grant_name_idx
+    ON project_lifecycle_event (chain_id, original_logical_name_id)
+    WHERE source_family = 'ens_v1_registrar_l1' AND event_kind = 'RegistrationGranted';
 
 CREATE TABLE IF NOT EXISTS project_child_registration_state (
     chain_id text NOT NULL,
