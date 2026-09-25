@@ -194,7 +194,7 @@ async fn a_masked_owner_word_clears_the_controller() -> Result<()> {
 }
 
 #[tokio::test]
-async fn addr_values_index_their_address_until_a_version_change() -> Result<()> {
+async fn addr_values_index_their_address_past_a_version_change() -> Result<()> {
     let fixture = Fixture::new("families_addresses_records", 20).await?;
     let addr = |node_hex: String, coin: &str, value: Value| {
         json!({"node": node_hex, "resolver": R1, "record_key": format!("addr:{coin}"),
@@ -272,16 +272,17 @@ async fn addr_values_index_their_address_until_a_version_change() -> Result<()> 
         .await?;
     fixture.apply(10, FamilyMode::Normal).await;
     let lower = ALICE.to_lowercase();
+    let node_one = vec![
+        json!({"address": lower, "coin_type": "60", "resolver_address": R1, "node": node(1)}),
+        json!({"address": BOB, "coin_type": "2147483658", "resolver_address": R1,
+               "node": node(1)}),
+    ];
     assert_eq!(
         index(
             &fixture.rows("project_address_record_node_index").await?,
             &["address", "coin_type", "resolver_address", "node"]
         ),
-        vec![
-            json!({"address": lower, "coin_type": "60", "resolver_address": R1, "node": node(1)}),
-            json!({"address": BOB, "coin_type": "2147483658", "resolver_address": R1,
-                   "node": node(1)}),
-        ]
+        node_one
     );
     assert_eq!(
         index(
@@ -291,7 +292,9 @@ async fn addr_values_index_their_address_until_a_version_change() -> Result<()> 
         vec![json!({"address": CAROL, "coin_type": "60", "record_id": "7"})]
     );
 
-    // A version change at node 1 drops its values from the index; undo brings them back.
+    // A version change at node 1 keeps its values in the index: a later link can keep a value
+    // below the version served (record_inventory.rs, the combined boundary), so readers apply the
+    // boundary and the index stays a superset.
     fixture
         .write(
             11,
@@ -306,8 +309,11 @@ async fn addr_values_index_their_address_until_a_version_change() -> Result<()> 
         .await?;
     fixture.apply(11, FamilyMode::Normal).await;
     assert_eq!(
-        fixture.rows("project_address_record_node_index").await?,
-        Vec::<Value>::new()
+        index(
+            &fixture.rows("project_address_record_node_index").await?,
+            &["address", "coin_type", "resolver_address", "node"]
+        ),
+        node_one
     );
     fixture.assert_undo_restores(11).await?;
     fixture.assert_rebuild_equal(11).await?;
@@ -468,5 +474,39 @@ async fn a_grant_named_later_puts_its_registrant_in_the_index() -> Result<()> {
     assert_eq!(rows, expected);
     fixture.assert_undo_restores(11).await?;
     fixture.assert_rebuild_equal(11).await?;
+    fixture.cleanup().await
+}
+
+// A named write keeps the name it was written under on its index row, so the inverse read finds a
+// value whose node is not the name's namehash by the name, as the forward inventory does.
+#[tokio::test]
+async fn a_named_value_indexes_the_name_it_was_written_under() -> Result<()> {
+    let fixture = Fixture::new("families_addresses_named_node", 20).await?;
+    let name = format!("ens:{}", node(7));
+    fixture
+        .write(
+            10,
+            1,
+            "RecordChanged",
+            "ens_v1_resolver_l1",
+            Some(&name),
+            None,
+            json!({"node": node(8), "resolver": R1, "record_key": "addr:60",
+                   "record_family": "addr", "selector_key": "60", "value": DAVE,
+                   "source_event": "AddressChanged"}),
+            R1,
+        )
+        .await?;
+    fixture.apply(10, FamilyMode::Normal).await;
+    assert_eq!(
+        index(
+            &fixture.rows("project_address_record_node_index").await?,
+            &["address", "coin_type", "node", "logical_name_id"]
+        ),
+        vec![json!({"address": DAVE, "coin_type": "60", "node": node(8),
+                    "logical_name_id": name})]
+    );
+    fixture.assert_undo_restores(10).await?;
+    fixture.assert_rebuild_equal(10).await?;
     fixture.cleanup().await
 }

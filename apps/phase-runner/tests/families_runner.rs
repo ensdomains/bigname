@@ -111,9 +111,111 @@ async fn a_late_input_token_skips_the_families_and_the_next_batch_catches_up() -
     scratch.cleanup().await
 }
 
+// A one-shot redo whose family rebuild needs more blocks than one run's budget: nothing calls the
+// family loop after the command returns, so the command finishes the rebuild before it does.
+#[tokio::test]
+async fn a_one_shot_redo_finishes_a_family_rebuild_longer_than_one_budget() -> Result<()> {
+    let scratch = ready_through("families_runner_budget", 30).await?;
+    seed_thirty_blocks_of_work(&scratch).await?;
+    redo_project_through(
+        &scratch,
+        FamilySettings {
+            max_blocks_per_run: 10,
+            finish_each_batch: true,
+            ..FamilySettings::default()
+        },
+        30,
+    )
+    .await?;
+    assert_eq!(
+        project_state(&scratch).await?,
+        ("completed".into(), Some(30), false)
+    );
+    assert_eq!(
+        marker(&scratch).await?,
+        Some(30),
+        "the family rebuild finished before the command returned"
+    );
+    scratch.cleanup().await
+}
+
+// A one-shot redo whose family runs stop short of the served marker, here on a failing block,
+// reports it: the served redo is recorded, the command fails, and rerunning it repairs the
+// families.
+#[tokio::test]
+async fn a_one_shot_redo_whose_families_stop_short_fails_and_a_rerun_repairs_them() -> Result<()> {
+    let scratch = ready_through("families_runner_short", 30).await?;
+    seed_thirty_blocks_of_work(&scratch).await?;
+    sqlx::query(
+        "CREATE FUNCTION refuse_block_15() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN
+             IF NEW.current_block_number = 15 THEN RAISE EXCEPTION 'injected family failure'; END IF;
+             RETURN NEW;
+         END $$",
+    )
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query(
+        "CREATE TRIGGER refuse_block_15 BEFORE INSERT OR UPDATE ON project_family_marker
+         FOR EACH ROW EXECUTE FUNCTION refuse_block_15()",
+    )
+    .execute(scratch.pool())
+    .await?;
+    let families = FamilySettings {
+        max_blocks_per_run: 10,
+        finish_each_batch: true,
+        ..FamilySettings::default()
+    };
+    let project =
+        Arc::new(ProjectPhase::new(scratch.pool().clone()).with_family_settings(families));
+    let error = redo_with_phase(&scratch, project, 30)
+        .await
+        .expect_err("the families stopped short of the served marker");
+    assert_eq!(
+        project_state(&scratch).await?,
+        ("completed".into(), Some(30), false)
+    );
+    assert_eq!(marker(&scratch).await?, Some(14), "block 15 was refused");
+    let message = error.to_string();
+    assert!(message.contains("family repair incomplete"), "{message}");
+    assert!(
+        message.contains("14") && message.contains("30"),
+        "{message}"
+    );
+
+    sqlx::query("DROP TRIGGER refuse_block_15 ON project_family_marker")
+        .execute(scratch.pool())
+        .await?;
+    let project =
+        Arc::new(ProjectPhase::new(scratch.pool().clone()).with_family_settings(families));
+    redo_with_phase(&scratch, project, 30).await?;
+    assert_eq!(marker(&scratch).await?, Some(30), "the rerun repaired them");
+    scratch.cleanup().await
+}
+
+/// One event per block 1 to 30, so a family rebuild has thirty blocks of work.
+async fn seed_thirty_blocks_of_work(scratch: &ScratchDatabase) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO normalized_events (event_identity, namespace, event_kind, source_family,
+             manifest_version, chain_id, block_number, block_hash, derivation_kind,
+             canonicality_state, after_state)
+         SELECT 'budget:' || block, 'ens', 'PreimageObserved', 'budget_probe', 1, $1, block,
+                $1 || '-block-' || block, 'ens_v2_registry_resource_surface', 'canonical', '{}'
+         FROM generate_series(1, 30) block",
+    )
+    .bind(CHAIN)
+    .execute(scratch.pool())
+    .await?;
+    Ok(())
+}
+
 async fn ready(prefix: &str) -> Result<ScratchDatabase> {
+    ready_through(prefix, 3).await
+}
+
+async fn ready_through(prefix: &str, head: i64) -> Result<ScratchDatabase> {
     let scratch = ScratchDatabase::create(prefix).await?;
-    seed_lineage(scratch.pool(), CHAIN, 3).await?;
+    seed_lineage(scratch.pool(), CHAIN, head).await?;
     sqlx::query("UPDATE chain_lineage SET canonicality_state = 'canonical' WHERE chain_id = $1")
         .bind(CHAIN)
         .execute(scratch.pool())
@@ -121,7 +223,7 @@ async fn ready(prefix: &str) -> Result<ScratchDatabase> {
     PhaseStore::new(scratch.pool().clone())
         .initialize_chain(CHAIN)
         .await?;
-    seed_completed_extent(scratch.pool(), 3).await?;
+    seed_completed_extent(scratch.pool(), head).await?;
     Ok(scratch)
 }
 
@@ -130,12 +232,30 @@ async fn redo_project(scratch: &ScratchDatabase) -> Result<()> {
 }
 
 async fn redo_project_with(scratch: &ScratchDatabase, families: FamilySettings) -> Result<()> {
+    redo_project_through(scratch, families, 3).await
+}
+
+async fn redo_project_through(
+    scratch: &ScratchDatabase,
+    families: FamilySettings,
+    head: i64,
+) -> Result<()> {
+    let project =
+        Arc::new(ProjectPhase::new(scratch.pool().clone()).with_family_settings(families));
+    redo_with_phase(scratch, project, head).await
+}
+
+async fn redo_with_phase(
+    scratch: &ScratchDatabase,
+    project: Arc<ProjectPhase>,
+    head: i64,
+) -> Result<()> {
     PhaseRunner::new(
         scratch.runner(),
         PhaseSet::with_ingest_interpret_and_project(
             Arc::new(LoopbackPhase::new(PhaseName::Ingest)),
             Arc::new(LoopbackPhase::new(PhaseName::Interpret)),
-            Arc::new(ProjectPhase::new(scratch.pool().clone()).with_family_settings(families)),
+            project,
         )?,
         CapacityGuard::system(CapacityConfig::default()),
         "families-runner",
@@ -148,7 +268,7 @@ async fn redo_project_with(scratch: &ScratchDatabase, families: FamilySettings) 
     .redo(
         &chain_config()?,
         RedoPhase::Phase(PhaseName::Project),
-        BlockRange::new(0, 3)?,
+        BlockRange::new(0, head)?,
         CancellationToken::new(),
     )
     .await?;

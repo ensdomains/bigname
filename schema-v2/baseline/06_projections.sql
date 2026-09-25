@@ -1364,7 +1364,7 @@ COMMENT ON COLUMN project_binding_candidate.transaction_index IS
 COMMENT ON COLUMN project_binding_candidate.log_index IS
     'This value is the log index of the binding''s position: the position of the SurfaceBound that opened it (the block''s SurfaceBound of the same name and resource at the transaction and log index of the binding''s provenance), else the binding''s own block and provenance index with the identity binding:<surface_binding_id>. Null with transaction_index for a synthesised event.';
 COMMENT ON COLUMN project_binding_candidate.event_identity IS
-    'This value is the event identity of the binding''s position: the position of the SurfaceBound that opened it (the block''s SurfaceBound of the same name and resource at the transaction and log index of the binding''s provenance), else the binding''s own block and provenance index with the identity binding:<surface_binding_id>. It is the final tiebreak of the canonical event order, compared as bytes; two bindings one event opened are ordered by surface_binding_id.';
+    'This value is the event identity of the binding''s position: the position of the SurfaceBound that opened it (the block''s SurfaceBound of the same name and resource at the transaction and log index of the binding''s provenance), else the binding''s own block and provenance index with the identity binding:<surface_binding_id>. It is the final tiebreak of the canonical event order, compared as bytes; two bindings one event opened are ordered by surface_binding_id. The pairing is exact: the adapter writes a log-sourced binding and its SurfaceBound from one raw log with that log''s provenance (adapters schema_v2/identity.rs), and a block-boundary binding and its SurfaceBound from one block with no transaction or log. A binding:<surface_binding_id> identity therefore means the adapter''s reconcile dropped the SurfaceBound, never that the SurfaceBound sits at another position.';
 COMMENT ON COLUMN project_binding_candidate.normalized_event_id IS
     'This value names the SurfaceBound that opened the binding in normalized_events as attribution only; it never takes part in ordering.';
 COMMENT ON COLUMN project_binding_candidate.state_derived IS
@@ -1737,11 +1737,15 @@ CREATE TABLE IF NOT EXISTS project_wrapper_state (
     expiry_seconds numeric,
     expiry_position jsonb,
     owner_word_unmasked boolean,
+    lifecycle_source text,
+    lifecycle_unwrapped boolean,
+    lifecycle_position jsonb,
+    unwrapped_position jsonb,
     PRIMARY KEY (chain_id, resource_id),
     CHECK ((transaction_index IS NULL) = (log_index IS NULL))
 );
 COMMENT ON TABLE project_wrapper_state IS
-    'Project-owned wrapper state of family F2b per wrapper resource: the latest wrapper_state and fuses and the latest wrapper expiry, unmasked; masks are applied at read against the block clock. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
+    'Project-owned wrapper state of family F2b per wrapper resource: the latest wrapper_state and fuses, the latest wrapper expiry, and the newest wrapper lifecycle event with the latest unwrap, unmasked; masks are applied at read against the block clock. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
 COMMENT ON COLUMN project_wrapper_state.chain_id IS
     'This value is the chain.';
 COMMENT ON COLUMN project_wrapper_state.resource_id IS
@@ -1770,6 +1774,14 @@ COMMENT ON COLUMN project_wrapper_state.expiry_position IS
     'This value is that ExpiryChanged''s position.';
 COMMENT ON COLUMN project_wrapper_state.owner_word_unmasked IS
     'This value is the latest owner_word_unmasked flag the wrapper events carried.';
+COMMENT ON COLUMN project_wrapper_state.lifecycle_source IS
+    'This value is the source of the newest wrapper lifecycle event of the resource: NameWrapped, NameUnwrapped, holder_grant or holder_revoke (resource_summary.rs wrapper_lifecycles).';
+COMMENT ON COLUMN project_wrapper_state.lifecycle_unwrapped IS
+    'This value is true when the newest wrapper lifecycle event leaves the resource unwrapped: a NameUnwrapped or a holder revoke with no powers. The served wrapper restrictions are served only while it is false.';
+COMMENT ON COLUMN project_wrapper_state.lifecycle_position IS
+    'This value is the canonical position of the newest wrapper lifecycle event.';
+COMMENT ON COLUMN project_wrapper_state.unwrapped_position IS
+    'This value is the canonical position of the latest NameUnwrapped of the resource, kept when a later mint or holder grant becomes the newest lifecycle event.';
 
 CREATE TABLE IF NOT EXISTS project_registry_node_state (
     chain_id text NOT NULL,
@@ -1832,11 +1844,69 @@ COMMENT ON COLUMN project_registry_node_state.has_old_record IS
 COMMENT ON COLUMN project_registry_node_state.first_current_record_block IS
     'This value is the first block with an emitter_role registry event for the node.';
 COMMENT ON COLUMN project_registry_node_state.owner_event_kind IS
-    'This value is the kind of the registry event that last set the owner group: AuthorityTransferred or SubregistryChanged, both of which report the owner (name_authority/stage.rs:200-261). Either overwrites the group, so a SubregistryChanged after an AuthorityTransferred whose getter was zero replaces the owner; the served ownerless verdict, which reads AuthorityTransferred only, cannot be recovered from this row.';
+    'This value is the kind of the registry event that last set the owner group: AuthorityTransferred or SubregistryChanged, both of which report the owner (name_authority/stage.rs:200-261). Either overwrites the group, so a SubregistryChanged after an AuthorityTransferred whose getter was zero replaces the owner; the served ownerless verdict, which reads AuthorityTransferred only, cannot be recovered from this row, and project_registry_owner_event keeps every owner-setting event for it.';
 COMMENT ON COLUMN project_registry_node_state.owner_position IS
     'This value is the position of that event, apart from the row''s last-write position.';
 COMMENT ON COLUMN project_registry_node_state.owner_resource_id IS
     'This value is that event''s resource.';
+
+CREATE TABLE IF NOT EXISTS project_registry_owner_event (
+    chain_id text NOT NULL,
+    namespace text NOT NULL,
+    node text NOT NULL,
+    block_number bigint NOT NULL,
+    transaction_index bigint,
+    log_index bigint,
+    event_identity text NOT NULL,
+    normalized_event_id bigint,
+    transaction_hash text,
+    logical_name_id text,
+    resource_id uuid,
+    event_kind text NOT NULL,
+    source_family text NOT NULL,
+    authority_kind text,
+    owner text,
+    owner_getter text,
+    owner_getter_reason text,
+    PRIMARY KEY (chain_id, namespace, node, event_identity),
+    CHECK ((transaction_index IS NULL) = (log_index IS NULL))
+);
+COMMENT ON TABLE project_registry_owner_event IS
+    'Project-owned owner-setting registry events of family F2c: every AuthorityTransferred and SubregistryChanged an ENSv1 or Basenames registry reported for a node, keyed by position, with the name, resource, authority kind and owner facts each carried. The node row keeps only the latest owner group, which a SubregistryChanged after a zero-getter transfer replaces; the served ownerless verdict and owner history are recovered from these rows. Unpruned; a row leaves only when undo removes its block. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
+COMMENT ON COLUMN project_registry_owner_event.chain_id IS
+    'This value is the chain.';
+COMMENT ON COLUMN project_registry_owner_event.namespace IS
+    'This value is the namespace.';
+COMMENT ON COLUMN project_registry_owner_event.node IS
+    'This value is the lower-cased node the event addresses: child_node, else node.';
+COMMENT ON COLUMN project_registry_owner_event.block_number IS
+    'This value is the event''s block number.';
+COMMENT ON COLUMN project_registry_owner_event.transaction_index IS
+    'This value is the event''s transaction index; null with log_index for a synthesised event, which sorts before every transaction of its block.';
+COMMENT ON COLUMN project_registry_owner_event.log_index IS
+    'This value is the event''s log index; null with transaction_index for a synthesised event.';
+COMMENT ON COLUMN project_registry_owner_event.event_identity IS
+    'This value is the event identity, the final tiebreak of the canonical event order, compared as bytes.';
+COMMENT ON COLUMN project_registry_owner_event.normalized_event_id IS
+    'This value names the event in normalized_events as attribution only; it never takes part in ordering.';
+COMMENT ON COLUMN project_registry_owner_event.transaction_hash IS
+    'This value is the event''s transaction hash, null for a synthesised event.';
+COMMENT ON COLUMN project_registry_owner_event.logical_name_id IS
+    'This value is the event''s name, null when it carried none.';
+COMMENT ON COLUMN project_registry_owner_event.resource_id IS
+    'This value is the event''s resource.';
+COMMENT ON COLUMN project_registry_owner_event.event_kind IS
+    'This value is AuthorityTransferred or SubregistryChanged.';
+COMMENT ON COLUMN project_registry_owner_event.source_family IS
+    'This value is the registry source family.';
+COMMENT ON COLUMN project_registry_owner_event.authority_kind IS
+    'This value is the after-state authority_kind of the event.';
+COMMENT ON COLUMN project_registry_owner_event.owner IS
+    'This value is the lower-cased owner the event reported.';
+COMMENT ON COLUMN project_registry_owner_event.owner_getter IS
+    'This value is the lower-cased owner_getter of the event.';
+COMMENT ON COLUMN project_registry_owner_event.owner_getter_reason IS
+    'This value is the owner_getter_reason of the event.';
 
 CREATE TABLE IF NOT EXISTS project_registry_binding_observation (
     chain_id text NOT NULL,
@@ -2040,7 +2110,7 @@ COMMENT ON COLUMN project_resource_pointer.event_identity IS
 COMMENT ON COLUMN project_resource_pointer.normalized_event_id IS
     'This value names the event that last wrote the row in normalized_events as attribution only; it never takes part in ordering.';
 COMMENT ON COLUMN project_resource_pointer.resolver_address IS
-    'This value is the lower-cased resolver of the latest ResolverChanged on the resource, named or not, clears included.';
+    'This value is the lower-cased resolver of the latest ResolverChanged on the resource, named or not, clears included. At an ENSv2 root-registry TLD expiry the interpreter emits the resolver clear with no logical name (adapters schema_v2/protocol/v2_registry/expiry.rs); this row keeps that clear, where the served pointer read takes named ResolverChanged only (builders/linked_records.rs, project_record_pointer_latest) and never sees it, so the served inventory keeps a row the name no longer reaches. The chain agrees with this row: getResolver returns the zero address once the token has expired.';
 COMMENT ON COLUMN project_resource_pointer.pointer_position IS
     'This value is that ResolverChanged''s position.';
 COMMENT ON COLUMN project_resource_pointer.namespace IS
@@ -2956,10 +3026,11 @@ CREATE TABLE IF NOT EXISTS project_address_record_node_index (
     chain_id text NOT NULL,
     resolver_address text NOT NULL,
     node text NOT NULL,
-    PRIMARY KEY (address, coin_type, chain_id, resolver_address, node)
+    logical_name_id text NOT NULL DEFAULT '',
+    PRIMARY KEY (address, coin_type, chain_id, resolver_address, node, logical_name_id)
 );
 COMMENT ON TABLE project_address_record_node_index IS
-    'Project-owned inverse address record index of family F14 for node-keyed values, re-derived from project_node_record_value and never journalled. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
+    'Project-owned inverse address record index of family F14 for node-keyed values, re-derived from project_node_record_value and never journalled. It holds every successful EVM-shaped addr value whatever its partition''s version, with the name it was written under; readers apply the version and link boundary. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
 COMMENT ON COLUMN project_address_record_node_index.address IS
     'This value is the lower-cased address.';
 COMMENT ON COLUMN project_address_record_node_index.coin_type IS
@@ -2970,8 +3041,13 @@ COMMENT ON COLUMN project_address_record_node_index.resolver_address IS
     'This value is the resolver.';
 COMMENT ON COLUMN project_address_record_node_index.node IS
     'This value is the node.';
+COMMENT ON COLUMN project_address_record_node_index.logical_name_id IS
+    'This value is the name the value was written under, empty for a value written with no name; a named write whose node is not the name''s namehash is found by it.';
 CREATE INDEX IF NOT EXISTS project_address_record_node_index_node_idx
     ON project_address_record_node_index (chain_id, resolver_address, node);
+CREATE INDEX IF NOT EXISTS project_address_record_node_index_name_idx
+    ON project_address_record_node_index (chain_id, logical_name_id)
+    WHERE logical_name_id <> '';
 
 CREATE TABLE IF NOT EXISTS project_address_record_id_index (
     address text NOT NULL,
