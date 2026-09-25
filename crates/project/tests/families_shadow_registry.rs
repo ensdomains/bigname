@@ -357,3 +357,80 @@ async fn a_new_owner_subregistry_and_transfer_at_one_log_is_a_same_block_delta()
     assert_eq!(shadow.control["registry_owner"], json!(OTHER));
     fixture.cleanup().await
 }
+
+/// Scoped review of ea047c04, F1: a registry-only NewOwner yields a SubregistryChanged, an
+/// AuthorityTransferred and, when the authority resource changes, an AuthorityEpochChanged
+/// registry_only from one raw log, at one block, transaction and log, in that push order. The
+/// canonical order breaks the tie by identity and takes the transfer last (`E` sorts before
+/// `T`); today's lateral takes the epoch change, whose generated id is higher
+/// (build.sql:689-693). Both report one owner, so only the latest kind differs, and it passes
+/// as a same-block delta only because the families read again in today's order, the owner
+/// event and the epoch start included, give exactly the served kind.
+#[tokio::test]
+async fn a_registry_only_new_owner_transfer_and_epoch_at_one_log_is_a_same_block_delta()
+-> Result<()> {
+    let fixture = Fixture::new("families_shadow_registry_one_log_epoch", 20).await?;
+    let node_resource = uuid(3);
+    fixture
+        .binding(&uuid(100), &name(1), &node_resource, "ens_v1", 10, 1, None)
+        .await?;
+    for (kind, after) in [
+        (
+            "SubregistryChanged",
+            json!({"source_event": "NewOwner", "node": node(2), "child_node": node(1),
+                   "owner": OWNER}),
+        ),
+        (
+            "AuthorityTransferred",
+            json!({"source_event": "NewOwner", "node": node(2), "child_node": node(1),
+                   "owner": OWNER, "owner_getter": OWNER}),
+        ),
+        (
+            "AuthorityEpochChanged",
+            json!({"node": node(1), "authority_kind": "registry_only", "owner": OWNER}),
+        ),
+    ] {
+        fixture
+            .write(
+                10,
+                9,
+                kind,
+                V1_REGISTRY,
+                Some(&name(1)),
+                Some(&node_resource),
+                after,
+                REGISTRY,
+            )
+            .await?;
+    }
+    let report = publish_and_compare(&fixture, 12).await?;
+    let (served, shadow) = shadow_support::name(&fixture, 12, &name(1)).await?;
+    assert_eq!(
+        served.control("latest_event_kind"),
+        json!("AuthorityEpochChanged")
+    );
+    assert_eq!(
+        shadow.control["latest_event_kind"],
+        json!("AuthorityTransferred")
+    );
+    assert_eq!(served.control("registry_owner"), json!(OWNER));
+    // The registry binding of the node is the NewOwner shape of
+    // `a_new_owner_subregistry_and_transfer_at_one_log_is_a_same_block_delta`: the families keep
+    // the SubregistryChanged, which carries no getter and so clears the binding, and today's
+    // builder keeps the transfer; each binding field passes only because the whole binding read
+    // in today's order equals the served one.
+    let binding = [
+        "block_number",
+        "clear_event_id",
+        "event_ids",
+        "log_index",
+        "registry_contract",
+        "registry_owner",
+        "transaction_index",
+    ]
+    .map(|field| format!("d12_same_block_order:registry_binding/{field}"));
+    let mut delta: Vec<(&str, usize)> = binding.iter().map(|field| (field.as_str(), 1)).collect();
+    delta.push(("d12_same_block_order:control/latest_event_kind", 1));
+    shadow_support::assert_counts(&report, &[], &delta);
+    fixture.cleanup().await
+}

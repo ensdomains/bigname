@@ -16,7 +16,8 @@
 //!   lifecycle events hold a block whose canonical order disagrees with the generated-id order,
 //!   and reading the same families again in today's generated-id order where today's builders
 //!   use it (ENSv2 membership by block and id, the laterals by block, transaction, log and id),
-//!   every position kept so the authority admission is unchanged, and the association winner of
+//!   every position kept so the authority admission is unchanged, the node's owner-setting
+//!   events and F1's epoch starts ordered by their generated ids too, and the association winner of
 //!   an affected triple moved only to a grant of the same name, registry and token
 //!   (`v2_lifecycle_events.sql:10-23`), gives exactly the served value for the field. For a
 //!   resource's permission rows and restriction block, the path-expiry drop rule of
@@ -813,6 +814,11 @@ async fn name_excuses(
             .events
             .iter()
             .map(|event| event.position.event_identity.clone())
+            .chain(
+                control_positions(&facts)
+                    .into_iter()
+                    .map(|position| position.event_identity),
+            )
             .collect();
         let ids = generated_ids(pool, chain, &identities).await?;
         let keys = association_keys(pool, chain, &identities).await?;
@@ -1003,6 +1009,21 @@ async fn bindings_in_todays_order(
     ))
 }
 
+/// The positions of the control-block events the lifecycle family does not retain: the node's
+/// owner-setting registry events (`project_registry_owner_event`) and F1's epoch starts.
+fn control_positions(facts: &NameFacts) -> Vec<Position> {
+    let owners = facts
+        .registry_node
+        .iter()
+        .flat_map(|node| node.owner_events.iter().map(|event| event.position.clone()));
+    let starts = facts
+        .authority_starts
+        .as_object()
+        .into_iter()
+        .flat_map(|starts| starts.values().filter_map(Position::from_json));
+    owners.chain(starts).collect()
+}
+
 /// The generated ids of events, by identity.
 pub async fn generated_ids(
     pool: &PgPool,
@@ -1060,25 +1081,47 @@ pub fn legacy_facts(
     ids: &BTreeMap<String, i64>,
     triple_keys: &BTreeMap<String, (String, String)>,
 ) -> Option<NameFacts> {
-    let mut blocks: BTreeMap<i64, Vec<&LifecycleEvent>> = BTreeMap::new();
+    let mut blocks: BTreeMap<i64, Vec<Position>> = BTreeMap::new();
     for event in &facts.events {
         ids.get(&event.position.event_identity)?;
         blocks
             .entry(event.position.block_number)
             .or_default()
-            .push(event);
+            .push(event.position.clone());
+    }
+    // The owner events and epoch starts the control block reads are ordered too, where the
+    // event log names them.
+    for position in control_positions(facts) {
+        if ids.contains_key(&position.event_identity) {
+            blocks
+                .entry(position.block_number)
+                .or_default()
+                .push(position);
+        }
     }
     let disagreeing: BTreeSet<i64> = blocks
         .iter()
-        .filter(|(_, events)| {
-            let mut canonical: Vec<&LifecycleEvent> = events.to_vec();
-            canonical.sort_by(|left, right| left.position.cmp(&right.position));
-            let mut today = canonical.clone();
-            today.sort_by_key(|event| ids[&event.position.event_identity]);
-            canonical
-                .iter()
-                .zip(&today)
-                .any(|(left, right)| left.position.event_identity != right.position.event_identity)
+        .filter(|(_, positions)| {
+            let mut canonical: Vec<&Position> = positions.iter().collect();
+            canonical.sort();
+            canonical.dedup_by(|left, right| left.event_identity == right.event_identity);
+            // Membership orders by generated id alone, the laterals by transaction, log and id.
+            let mut membership = canonical.clone();
+            membership.sort_by_key(|position| ids[&position.event_identity]);
+            let mut lateral = canonical.clone();
+            lateral.sort_by_key(|position| {
+                (
+                    position.transaction_index,
+                    position.log_index,
+                    ids[&position.event_identity],
+                )
+            });
+            [membership, lateral].iter().any(|today| {
+                canonical
+                    .iter()
+                    .zip(today)
+                    .any(|(left, right)| left.event_identity != right.event_identity)
+            })
         })
         .map(|(block, _)| *block)
         .collect();
