@@ -199,10 +199,13 @@ fn active(event: &BlockEvent) -> Value {
     })
 }
 
-/// PostgreSQL's boolean input: trimmed, case-insensitive, `1` or `0`, or a unique prefix of
-/// `true`, `false`, `yes`, `no`, `on` or `off` (`o` alone is ambiguous).
+/// PostgreSQL's boolean input: trimmed of ASCII space, tab, line feed, carriage return, vertical
+/// tab and form feed only (not Unicode whitespace), case-insensitive, `1` or `0`, or a unique
+/// prefix of `true`, `false`, `yes`, `no`, `on` or `off` (`o` alone is ambiguous).
 fn postgres_boolean(text: &str) -> Option<bool> {
-    let text = text.trim().to_ascii_lowercase();
+    let text = text
+        .trim_matches([' ', '\t', '\n', '\r', '\u{b}', '\u{c}'])
+        .to_ascii_lowercase();
     if text.is_empty() {
         return None;
     }
@@ -246,6 +249,8 @@ mod tests {
             ("2", None),
             ("maybe", None),
             ("truex", None),
+            ("\u{b}off\u{c}", Some(false)),
+            ("\u{a0}off\u{a0}", None),
         ] {
             assert_eq!(postgres_boolean(text), flag, "{text:?}");
         }

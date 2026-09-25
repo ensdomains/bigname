@@ -320,3 +320,111 @@ async fn an_alias_active_flag_reads_as_postgresql_reads_a_boolean() -> Result<()
     assert_eq!(stored, expected);
     fixture.cleanup().await
 }
+
+// A differential check against PostgreSQL itself: every value goes through the served readers'
+// cast, `COALESCE((after_state ->> 'active')::boolean, true)`, and through the family reducer.
+// Where the cast accepts the value, both alias tables hold its result; where it rejects it (the
+// served batch would fail), both hold the documented active fallback.
+#[tokio::test]
+async fn an_alias_active_flag_matches_the_served_boolean_cast() -> Result<()> {
+    let fixture = Fixture::new("families_alias_boolean_cast", 20).await?;
+    let mut values: Vec<Value> = [
+        "t",
+        "tr",
+        "tru",
+        "true",
+        "f",
+        "fa",
+        "fal",
+        "fals",
+        "false",
+        "y",
+        "ye",
+        "yes",
+        "n",
+        "no",
+        "on",
+        "of",
+        "off",
+        "1",
+        "0",
+        "TrUe",
+        "FALSE",
+        "Off",
+        "yEs",
+        "o",
+        "",
+        "   ",
+        "junk",
+        "truex",
+        "2",
+        "01",
+        "\u{a0}off\u{a0}",
+        "\u{2003}on",
+        "off\u{3000}",
+        "\u{85}no",
+    ]
+    .into_iter()
+    .map(|text| json!(text))
+    .collect();
+    for space in [' ', '\t', '\n', '\r', '\u{b}', '\u{c}'] {
+        values.push(json!(format!("{space}off{space}")));
+        values.push(json!(format!("{space}{space}yes")));
+    }
+    values.extend([
+        json!(true),
+        json!(false),
+        Value::Null,
+        json!(0),
+        json!(1),
+        json!(2),
+        json!(1.0),
+    ]);
+    let mut expected = Vec::new();
+    for (n, value) in (1..).zip(&values) {
+        let cast: std::result::Result<Option<bool>, sqlx::Error> = sqlx::query_scalar(
+            "SELECT COALESCE((jsonb_build_object('active', $1::jsonb) ->> 'active')::boolean, true)",
+        )
+        .bind(value)
+        .fetch_one(&fixture.pool)
+        .await;
+        let flag = match cast {
+            Ok(flag) => flag.expect("COALESCE is never null"),
+            Err(sqlx::Error::Database(error)) => {
+                assert_eq!(error.code().as_deref(), Some("22P02"), "{value:?}: {error}");
+                true
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let logical = name(u64::try_from(200 + n)?);
+        fixture
+            .write(
+                10,
+                n,
+                "AliasChanged",
+                "ens_v2_resolver_l1",
+                Some(&logical),
+                None,
+                json!({"resolver": RESOLVER, "to_logical_name_id": name(2), "active": value}),
+                RESOLVER,
+            )
+            .await?;
+        expected.push((value.clone(), logical, flag));
+    }
+    fixture.apply(10, FamilyMode::Normal).await;
+    for table in ["project_name_alias", "project_resolver_alias"] {
+        let rows = fixture.rows(table).await?;
+        assert_eq!(rows.len(), expected.len(), "{table}");
+        for (value, logical, flag) in &expected {
+            let row = rows
+                .iter()
+                .find(|row| {
+                    row["logical_name_id"] == json!(logical)
+                        || row["alias_identity"] == json!(logical)
+                })
+                .unwrap_or_else(|| panic!("{table}: no row for {value:?}"));
+            assert_eq!(row["active"], json!(flag), "{table}: {value:?}");
+        }
+    }
+    fixture.cleanup().await
+}
