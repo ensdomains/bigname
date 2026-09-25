@@ -296,8 +296,9 @@ impl BlockEvent {
 /// is; classification.rs, `activated`). The declaration start blocks come from the manifest
 /// history the run captured (`manifests::History::declaration_starts`), the one population
 /// classifies under, not from a read of their own. A rebuild visits only these: any other block
-/// owns no family fact. At most `limit` blocks are returned, the lowest first, so a run reads the
-/// next chunk of its budget rather than every remaining block.
+/// owns no family fact. At most `limit` blocks are returned, the lowest first. That bounds the
+/// rows returned and retained by the caller; how much of each source the query scans, and the
+/// UNION's deduplication, remain plan-dependent.
 pub(crate) async fn work_blocks(
     pool: &sqlx::PgPool,
     chain_id: &str,
