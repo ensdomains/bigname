@@ -271,3 +271,79 @@ async fn undoing_a_block_restores_every_family_row_and_the_marker_byte_for_byte(
     assert_eq!(marker::read(&pool, CHAIN).await?.current, Some(at(10)));
     database.cleanup().await
 }
+
+/// A marker journal row for `block` whose before-image names `prior` as the marker it replaced.
+async fn journal_step(pool: &PgPool, block: Marker, prior: Marker) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO project_family_undo (chain_id, block_number, block_hash, family, key,
+             before_image)
+         VALUES ($1, $2, $3, 'marker', $1,
+                 jsonb_build_object('current_block_number', $4::bigint,
+                                    'current_block_hash', $5::text))",
+    )
+    .bind(CHAIN)
+    .bind(block.number)
+    .bind(&block.hash)
+    .bind(prior.number)
+    .bind(&prior.hash)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+fn integrity_error(result: crate::Result<Option<Marker>>) -> String {
+    let error = result.expect_err("a cyclic journal is refused");
+    let message = error.to_string();
+    assert!(message.contains("cycle"), "{message}");
+    message
+}
+
+// A journal whose marker names itself as its predecessor is malformed; the walk refuses it rather
+// than following it forever.
+#[tokio::test]
+async fn an_undo_path_that_names_itself_is_refused() -> Result<()> {
+    let (database, pool) = database().await?;
+    journal_step(&pool, at(10), at(10)).await?;
+    integrity_error(undo::undo_target(&pool, CHAIN, &at(10), 8).await);
+    database.cleanup().await?;
+    Ok(())
+}
+
+// The same for two markers that name each other above the limit.
+#[tokio::test]
+async fn an_undo_path_with_a_two_marker_cycle_is_refused() -> Result<()> {
+    let (database, pool) = database().await?;
+    journal_step(&pool, at(10), at(9)).await?;
+    journal_step(&pool, at(9), at(10)).await?;
+    integrity_error(undo::undo_target(&pool, CHAIN, &at(10), 8).await);
+    database.cleanup().await?;
+    Ok(())
+}
+
+// A readable predecessor at or below the limit is the target even when it has no journal row of
+// its own; a chain that runs out above the limit, or reaches it only below retention, rebuilds; a
+// current marker already readable at or below the limit is its own target.
+#[tokio::test]
+async fn the_undo_path_ends_on_a_readable_marker_or_runs_out() -> Result<()> {
+    let (database, pool) = database().await?;
+    journal_step(&pool, at(10), at(9)).await?;
+    journal_step(&pool, at(9), at(8)).await?;
+    assert_eq!(
+        undo::undo_target(&pool, CHAIN, &at(10), 8).await?,
+        Some(at(8)),
+        "the dangling predecessor 8 is readable and at the limit"
+    );
+    assert_eq!(
+        undo::undo_target(&pool, CHAIN, &at(10), 5).await?,
+        None,
+        "the journal runs out at 8, above the limit"
+    );
+    journal_step(&pool, at(7), at(6)).await?;
+    assert_eq!(
+        undo::undo_target(&pool, CHAIN, &at(7), 8).await?,
+        Some(at(7)),
+        "the current marker is readable and under the limit"
+    );
+    database.cleanup().await?;
+    Ok(())
+}

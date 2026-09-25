@@ -531,7 +531,7 @@ intentional_phase_migration_skips=()
 refusal_assertions_passed=0
 expected_refusal_assertions=263
 predecessor_shape_proof_count=0
-expected_predecessor_shape_proof_count=46
+expected_predecessor_shape_proof_count=47
 refusal_probe_seconds=0
 timing_started=$SECONDS
 
@@ -656,7 +656,8 @@ for migration_file in \
     "$ROOT/migrations/20260926101600_project_families_registry_owner_event.sql" \
     "$ROOT/migrations/20260926101700_project_families_resolver_destination_index.sql" \
     "$ROOT/migrations/20260926101800_project_families_owner_event_registry_owner.sql" \
-    "$ROOT/migrations/20260926101900_project_families_citation_comments.sql"
+    "$ROOT/migrations/20260926101900_project_families_citation_comments.sql" \
+    "$ROOT/migrations/20260926102000_project_families_name_state_chain_key.sql"
 do
     emit_phase_migration "$migration_file" empty-schema | run_psql
 done
@@ -951,7 +952,9 @@ for migration_file in \
     "$ROOT/migrations/20260926101800_project_families_owner_event_registry_owner.sql" \
     "$ROOT/migrations/20260926101800_project_families_owner_event_registry_owner.sql" \
     "$ROOT/migrations/20260926101900_project_families_citation_comments.sql" \
-    "$ROOT/migrations/20260926101900_project_families_citation_comments.sql"
+    "$ROOT/migrations/20260926101900_project_families_citation_comments.sql" \
+    "$ROOT/migrations/20260926102000_project_families_name_state_chain_key.sql" \
+    "$ROOT/migrations/20260926102000_project_families_name_state_chain_key.sql"
 do
     emit_phase_migration "$migration_file" baseline-first | run_psql
 done
@@ -982,6 +985,47 @@ BEGIN
     END IF;
 END $$;
 SQL
+} | run_psql
+# project_name_state shipped keyed without its chain. The reshape migration must
+# clear the owned key families and restore the baseline key and chain comment.
+{
+    printf 'SET search_path TO "%s";\n' "$scratch_schema"
+    cat <<'SQL'
+CREATE TEMP TABLE expected_name_state_key AS
+SELECT pg_get_constraintdef(oid) AS definition,
+       col_description('project_name_state'::regclass,
+           (SELECT attnum FROM pg_attribute
+            WHERE attrelid = 'project_name_state'::regclass AND attname = 'chain_id')) AS comment
+FROM pg_constraint
+WHERE conrelid = 'project_name_state'::regclass AND contype = 'p';
+ALTER TABLE project_name_state
+    DROP CONSTRAINT project_name_state_pkey,
+    ADD PRIMARY KEY (namespace, logical_name_id);
+INSERT INTO project_name_state (namespace, logical_name_id, chain_id, block_number,
+    event_identity)
+VALUES ('ens', 'ens:0x01', 'apply-check', 1, 'apply-check:1');
+SQL
+    emit_phase_migration "$ROOT/migrations/20260926102000_project_families_name_state_chain_key.sql" preceding-shape
+    cat <<'SQL'
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint, expected_name_state_key expected
+        WHERE conrelid = 'project_name_state'::regclass AND contype = 'p'
+          AND pg_get_constraintdef(oid) = expected.definition
+          AND col_description('project_name_state'::regclass,
+                  (SELECT attnum FROM pg_attribute
+                   WHERE attrelid = 'project_name_state'::regclass AND attname = 'chain_id'))
+              = expected.comment
+    ) THEN
+        RAISE EXCEPTION 'name state key upgrade differs from the baseline';
+    END IF;
+    IF EXISTS (SELECT 1 FROM project_name_state) THEN
+        RAISE EXCEPTION 'name state key upgrade kept a row written under the older key';
+    END IF;
+END $$;
+SQL
+    emit_phase_migration "$ROOT/migrations/20260926102000_project_families_name_state_chain_key.sql" baseline-first
 } | run_psql
 # The address-record table shipped before its column comments. The additive
 # comment migration must restore all current comments without rewriting that migration.

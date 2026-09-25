@@ -11,9 +11,12 @@ use sqlx::{Postgres, Transaction};
 
 use super::reduce::in_family;
 use super::{
-    input::BlockEvent,
+    input::{BlockEvent, Position},
     keys,
-    reduce::{Context, current, key_of, load_rows, put, raw_lower, raw_text, set, text_or_null},
+    reduce::{
+        Context, current, json_boolean, key_of, load_rows, put, raw_lower, raw_text, set,
+        text_or_null,
+    },
     store::RowSet,
     tables,
 };
@@ -127,8 +130,25 @@ pub(super) async fn apply(
         aggregate_keys,
     )
     .await?;
+    let registration_keys = grants
+        .iter()
+        .map(|grant| {
+            key_of(
+                &tables::LIFECYCLE_KEY_STATE,
+                [chain.clone(), json!(grant.resource)],
+            )
+        })
+        .collect();
+    load_rows(
+        transaction,
+        rows,
+        &tables::LIFECYCLE_KEY_STATE,
+        registration_keys,
+    )
+    .await?;
     for grant in &grants {
-        apply_grant(rows, &chain, grant)?;
+        let registration = registration_position(rows, &chain, events, grant);
+        apply_grant(rows, &chain, grant, registration)?;
     }
 
     let approvals: Vec<(Vec<Value>, &BlockEvent)> = events
@@ -147,8 +167,11 @@ pub(super) async fn apply(
     load_rows(transaction, rows, &tables::ACCOUNT_APPROVAL, approval_keys).await?;
     for (key, event) in approvals {
         let table = &tables::ACCOUNT_APPROVAL;
-        // An approval whose flag does not read as a boolean has nothing to store.
-        let Some(flag) = event.after.get("approved").and_then(approved) else {
+        // The flag as the served `(after_state ->> 'approved')::boolean` reads it. A flag that
+        // reads as no boolean (a spelling PostgreSQL rejects, or null) fails every served batch:
+        // the cast aborts it, or the NOT NULL column refuses the row. That input cannot coexist
+        // with a served batch, so the family keeps nothing for the event rather than guess.
+        let Some(flag) = event.after.get("approved").and_then(json_boolean) else {
             continue;
         };
         let mut row = current(
@@ -206,19 +229,6 @@ pub(super) async fn apply(
     Ok(())
 }
 
-/// `(... ->> 'approved')::boolean`.
-fn approved(value: &Value) -> Option<bool> {
-    match value {
-        Value::Bool(flag) => Some(*flag),
-        Value::String(text) => match text.trim().to_ascii_lowercase().as_str() {
-            "true" | "t" | "yes" | "on" | "1" => Some(true),
-            "false" | "f" | "no" | "off" | "0" => Some(false),
-            _ => None,
-        },
-        _ => None,
-    }
-}
-
 /// The approval key an AccountPermissionChanged the builder admits addresses.
 fn approval_key(event: &BlockEvent) -> Option<Vec<Value>> {
     if event.event_kind != "AccountPermissionChanged" {
@@ -237,7 +247,53 @@ fn approval_key(event: &BlockEvent) -> Option<Vec<Value>> {
     ])
 }
 
-fn apply_grant(rows: &mut RowSet, chain: &Value, grant: &Grant<'_>) -> Result<()> {
+/// The registration a grant belongs to: the resource's latest RegistrationGranted or
+/// RegistrationReserved before the grant, the rule F2a keeps as `last_active` (lifecycle.rs
+/// `maxima`). The lifecycle family folds this block's events after permissions, so its stored
+/// row ends at the previous block and the block's earlier registration events are added here.
+/// The served permissions read has no per-grant registration: it masks by the resource's
+/// current registration (permissions.rs `v2_registration_current`).
+fn registration_position(
+    rows: &RowSet,
+    chain: &Value,
+    events: &[BlockEvent],
+    grant: &Grant<'_>,
+) -> Value {
+    let in_block = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event.event_kind.as_str(),
+                "RegistrationGranted" | "RegistrationReserved"
+            ) && event.resource_id.as_deref() == Some(grant.resource)
+                && event.position < grant.event.position
+        })
+        .map(|event| event.position.clone())
+        .max();
+    let stored = || {
+        rows.get(
+            &tables::LIFECYCLE_KEY_STATE,
+            &key_of(
+                &tables::LIFECYCLE_KEY_STATE,
+                [chain.clone(), json!(grant.resource)],
+            ),
+        )
+        .and_then(|row| row.get("last_active"))
+        .and_then(|active| active.get("position"))
+        .and_then(Value::as_object)
+        .and_then(Position::of_row)
+    };
+    in_block
+        .or_else(stored)
+        .map_or(Value::Null, |position| position.to_json())
+}
+
+fn apply_grant(
+    rows: &mut RowSet,
+    chain: &Value,
+    grant: &Grant<'_>,
+    registration: Value,
+) -> Result<()> {
     let event = grant.event;
     let after = &event.after;
     let table = &tables::GRANT;
@@ -289,12 +345,16 @@ fn apply_grant(rows: &mut RowSet, chain: &Value, grant: &Grant<'_>) -> Result<()
             json!({"mode": after.get("transfer_behavior").cloned().unwrap_or(Value::Null)}),
         ),
     );
+    // Revoked means the grant was cleared: its effective-power array is empty (`grant` admits
+    // arrays only). The served current read also drops grants whose powers its wrapper fuse and
+    // grace masks empty (builders/permissions.rs `masked`); those masks stay on the served side,
+    // so such a grant keeps revoked false here. The revocation source above is provenance only.
     set(
         &mut row,
         "revoked",
-        after.get("revocation_source").is_some_and(Value::is_object),
+        powers.as_array().is_some_and(Vec::is_empty),
     );
-    row.entry("registration_position").or_insert(Value::Null);
+    set(&mut row, "registration_position", registration);
     put(rows, table, row, event)?;
 
     // The holder's admin powers under a registry or root scope, kept per holder.

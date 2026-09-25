@@ -123,8 +123,9 @@ impl ProjectPhase {
         }
     }
 
-    /// Record a chain's families as short of `target` before a finishing run, and clear the entry
-    /// only once they reach it, so a run that is abandoned midway stays reported.
+    /// Record a chain's families as short of `target` when a finishing run takes its pending work,
+    /// before the run is first polled, and clear the entry only once a run that skipped nothing
+    /// ends on the target, so a run that is abandoned midway, or before it starts, stays reported.
     fn note_shortfall(
         &self,
         chain_id: &str,
@@ -139,13 +140,16 @@ impl ProjectPhase {
             shortfalls.insert(
                 chain_id.to_owned(),
                 format!(
-                    "chain {chain_id}: the family run toward block {} did not finish",
-                    target.number
+                    "chain {chain_id}: the family run toward served marker block {} ({}) did not \
+                     finish; the family marker is unavailable",
+                    target.number, target.hash
                 ),
             );
             return;
         };
-        if outcome.lag_blocks() == 0 {
+        // A skip is a shortfall even at lag 0: a redo that ends on the served marker's own block
+        // and hash leaves a family marker already there looking current.
+        if outcome.skipped.is_none() && outcome.lag_blocks() == 0 {
             shortfalls.remove(chain_id);
             return;
         }
@@ -229,6 +233,12 @@ impl Phase for ProjectPhase {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .remove(chain_id);
+        let finish = self.families.finish_each_batch;
+        // Recorded here, not in the future: a stop can drop the future before its first poll, and
+        // the one-shot redo must still see that its families did not reach the served marker.
+        if finish && let Some((target, _, _)) = &pending {
+            self.note_shortfall(chain_id, target, None);
+        }
         let chain_id = chain_id.to_owned();
         Box::pin(async move {
             let Some((target, mode, token)) = pending else {
@@ -236,10 +246,6 @@ impl Phase for ProjectPhase {
             };
             let options = FamilyOptions::new(bigname_content_hash::INTERPRETER_CONTENT_HASH)
                 .with_max_blocks_per_run(self.families.max_blocks_per_run);
-            let finish = self.families.finish_each_batch;
-            if finish {
-                self.note_shortfall(&chain_id, &target, None);
-            }
             let token = match token {
                 Ok(token) => token,
                 Err(reason) => {
@@ -400,19 +406,27 @@ impl Phase for ProjectPhase {
                 // runner closes it when it records this batch. The read is bounded so it cannot
                 // hold up the progress write; a failed or late read skips this batch's families,
                 // is counted as a skip, and the next run sees the redo attempt it missed and
-                // rebuilds.
-                let token = match tokio::time::timeout(
-                    self.families.token_budget,
-                    bigname_project::families::input_token(&self.pool, &context.chain_id),
-                )
-                .await
-                {
-                    Ok(Ok(token)) => Ok(token),
-                    Ok(Err(error)) => Err(format!("the input token did not read: {error}")),
-                    Err(_) => Err(format!(
+                // rebuilds. A zero budget skips without starting the read, which a zero-length
+                // timer would otherwise race.
+                let late = || {
+                    format!(
                         "the input token did not read within {:?}",
                         self.families.token_budget
-                    )),
+                    )
+                };
+                let token = if self.families.token_budget.is_zero() {
+                    Err(late())
+                } else {
+                    match tokio::time::timeout(
+                        self.families.token_budget,
+                        bigname_project::families::input_token(&self.pool, &context.chain_id),
+                    )
+                    .await
+                    {
+                        Ok(Ok(token)) => Ok(token),
+                        Ok(Err(error)) => Err(format!("the input token did not read: {error}")),
+                        Err(_) => Err(late()),
+                    }
                 };
                 self.pending_families
                     .lock()

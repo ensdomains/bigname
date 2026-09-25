@@ -61,17 +61,19 @@ async fn names(
         })
         .filter_map(|event| Some((event, event.logical_name_id.as_deref()?)))
         .collect();
+    let key = |event: &BlockEvent, name: &str| {
+        key_of(
+            table,
+            [json!(context.chain_id), json!(event.namespace), json!(name)],
+        )
+    };
     let keys = relevant
         .iter()
-        .map(|(event, name)| key_of(table, [json!(event.namespace), json!(name)]))
+        .map(|(event, name)| key(event, name))
         .collect();
     load_rows(transaction, rows, table, keys).await?;
     for (event, name) in relevant {
-        let mut row = current(
-            rows,
-            table,
-            &key_of(table, [json!(event.namespace), json!(name)]),
-        );
+        let mut row = current(rows, table, &key(event, name));
         set(&mut row, "chain_id", context.chain_id);
         if event.event_kind == "MigrationApplied" {
             set(
@@ -152,8 +154,11 @@ fn opening_event<'a>(events: &'a [BlockEvent], binding: &Row) -> Option<&'a Bloc
 }
 
 /// A binding's position in the canonical event order: its opening SurfaceBound's position, else
-/// its own block and provenance index with the identity `binding:<surface binding id>` (a
-/// binding with no SurfaceBound in the block, which the adapters do not emit today).
+/// its own block and provenance index with the identity `binding:<surface binding id>`. The
+/// fallback applies to any binding without a matching opener in the block, whether the adapter
+/// dropped the SurfaceBound or an opener fails the match above; the candidate is still stored,
+/// without the opener-derived fields (`normalized_event_id`, `state_derived`, the authority
+/// metadata), and nothing is reported.
 fn binding_position(binding: &Row, opening: Option<&BlockEvent>) -> Position {
     if let Some(event) = opening {
         return event.position.clone();
@@ -306,6 +311,8 @@ async fn candidates(
         by_name.entry(name).or_default().push(row.clone());
         rows.put(table, row).map_err(in_family(table.name))?;
     }
+    // The earliest block of a candidate each name's epochs converted, to re-read its grants.
+    let mut converted: BTreeMap<String, i64> = BTreeMap::new();
     for event in epochs {
         let name = event.logical_name_id.clone().unwrap_or_default();
         let earlier: Vec<Row> = by_name.get(&name).cloned().unwrap_or_default();
@@ -315,6 +322,12 @@ async fn candidates(
         }) {
             let mut row = candidate.clone();
             handoff(&mut row, Some(&earlier));
+            if let Some(block) = Position::of_row(&row).map(|position| position.block_number) {
+                converted
+                    .entry(name.clone())
+                    .and_modify(|from| *from = (*from).min(block))
+                    .or_insert(block);
+            }
             if let Some(slot) = by_name.get_mut(&name).and_then(|rows| {
                 rows.iter_mut()
                     .find(|other| other["surface_binding_id"] == row["surface_binding_id"])
@@ -323,6 +336,9 @@ async fn candidates(
             }
             rows.put(table, row).map_err(in_family(table.name))?;
         }
+    }
+    for (name, from) in converted {
+        lease::retained_grants(transaction, context, rows, &name, from).await?;
     }
     Ok(())
 }

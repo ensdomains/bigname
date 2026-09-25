@@ -251,7 +251,17 @@ fn address(value: Option<&str>) -> bool {
 }
 
 /// The names' current ENSv1 or Basenames resource after the block: the binding of those arms
-/// active at the block's time, the latest opened when two are.
+/// open at the end of the block, the latest opened when two are. The end of the block is the
+/// served cutoff, the block's timestamp plus one second, with a binding open when it starts
+/// before the cutoff and ends at or after it (name_authority/build.sql:4-12). A binding opened
+/// in the block starts at the block time plus its log's microseconds, so the block's integer
+/// time would miss it and keep the binding it closed.
+///
+/// The cutoff comes from the lineage row at the block's number and hash, which `read_block`
+/// read as readable in this transaction; the cutoff read does not filter canonicality, so an
+/// orphaning since then still finds it. Were the row gone, the query would return no rows and
+/// every named observation of the block would fall back to its own resource: no rows, never a
+/// binding read at a wrong time.
 async fn current_resources(
     transaction: &mut Transaction<'_, Postgres>,
     context: &Context<'_>,
@@ -264,19 +274,25 @@ async fn current_resources(
         "/* project:families.registry.current_resources */ SELECT DISTINCT ON
                 (binding.logical_name_id) binding.logical_name_id, binding.resource_id::text
          FROM surface_bindings binding
+         CROSS JOIN (
+             SELECT lineage.block_timestamp + interval '1 second' AS cutoff
+             FROM chain_lineage lineage
+             WHERE lineage.chain_id = $1 AND lineage.block_number = $3
+               AND lineage.block_hash = $4
+         ) target_time
          WHERE binding.chain_id = $1 AND binding.logical_name_id = ANY($2)
            AND binding.authority_arm IN ('ens_v1', 'basenames')
            AND binding.canonicality_state IN ('canonical', 'safe', 'finalized')
            AND binding.block_number <= $3
-           AND binding.active_from <= to_timestamp($4)
-           AND (binding.active_to IS NULL OR binding.active_to > to_timestamp($4))
+           AND binding.active_from < target_time.cutoff
+           AND (binding.active_to IS NULL OR binding.active_to >= target_time.cutoff)
          ORDER BY binding.logical_name_id, binding.active_from DESC,
                   binding.surface_binding_id DESC",
     )
     .bind(context.chain_id)
     .bind(names)
     .bind(context.block.number)
-    .bind(context.block.timestamp_seconds as f64)
+    .bind(&context.block.hash)
     .fetch_all(&mut **transaction)
     .await
     .map_err(|error| ProjectError::database("failed to read names' current resources", error))

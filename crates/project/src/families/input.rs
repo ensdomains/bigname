@@ -6,51 +6,7 @@ use sqlx::{Postgres, Transaction};
 
 use crate::{ProjectError, Result};
 
-/// The canonical event order (docs/projections.md, "Owned key families"): block number,
-/// transaction index, log index, then the event identity compared as bytes. A synthesised event
-/// has no transaction or log position and sorts before every transaction of its block. The
-/// derived ordering compares the fields in this order and puts `None` first.
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub(crate) struct Position {
-    pub(crate) block_number: i64,
-    pub(crate) transaction_index: Option<i64>,
-    pub(crate) log_index: Option<i64>,
-    pub(crate) event_identity: String,
-}
-
-impl Position {
-    /// The four position columns every family row carries for its last owning event.
-    pub(crate) fn write_columns(&self, row: &mut Map<String, Value>) {
-        row.insert("block_number".into(), json!(self.block_number));
-        row.insert("transaction_index".into(), json!(self.transaction_index));
-        row.insert("log_index".into(), json!(self.log_index));
-        row.insert("event_identity".into(), json!(self.event_identity));
-    }
-
-    /// A secondary position stored as one JSON object beside the row's own position.
-    pub(crate) fn to_json(&self) -> Value {
-        json!({
-            "block_number": self.block_number,
-            "transaction_index": self.transaction_index,
-            "log_index": self.log_index,
-            "event_identity": self.event_identity,
-        })
-    }
-
-    /// The row's own position, when the row has one.
-    pub(crate) fn of_row(row: &Map<String, Value>) -> Option<Self> {
-        Self::from_object(row)
-    }
-
-    fn from_object(object: &Map<String, Value>) -> Option<Self> {
-        Some(Self {
-            block_number: object.get("block_number")?.as_i64()?,
-            transaction_index: object.get("transaction_index").and_then(Value::as_i64),
-            log_index: object.get("log_index").and_then(Value::as_i64),
-            event_identity: object.get("event_identity")?.as_str()?.to_owned(),
-        })
-    }
-}
+pub(crate) use super::position::Position;
 
 /// One activated canonical event of the block.
 #[derive(Clone, Debug)]
@@ -290,19 +246,23 @@ impl BlockEvent {
     }
 }
 
-/// Blocks in `from..=to` that carry family work, ascending: an activated canonical event, or a
-/// resolver activation the F3 classification is pinned to (a resolver edge or its target's
+/// Blocks in `from..=to` that carry family work, ascending: an activated canonical event, a
+/// readable surface binding (identity.rs `candidates` reads each block's bindings, events or
+/// not), or a resolver activation the F3 classification is pinned to (a resolver edge or its target's
 /// contract address that starts or stops there, or a manifest declaration whose start block it
 /// is; classification.rs, `activated`). The declaration start blocks come from the manifest
 /// history the run captured (`manifests::History::declaration_starts`), the one population
 /// classifies under, not from a read of their own. A rebuild visits only these: any other block
-/// owns no family fact.
+/// owns no family fact. At most `limit` blocks are returned, the lowest first. That bounds the
+/// rows returned and retained by the caller; how much of each source the query scans, and the
+/// UNION's deduplication, remain plan-dependent.
 pub(crate) async fn work_blocks(
     pool: &sqlx::PgPool,
     chain_id: &str,
     from: i64,
     to: i64,
     manifests: &super::manifests::History,
+    limit: i64,
 ) -> Result<Vec<i64>> {
     sqlx::query_scalar(
         "/* project:families.input.work_blocks */
@@ -316,6 +276,16 @@ pub(crate) async fn work_blocks(
              WHERE event.chain_id = $1 AND event.block_number BETWEEN $3 AND $2
                AND event.consumer_visibility = 'activated'
                AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
+               AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+             UNION
+             SELECT binding.block_number
+             FROM surface_bindings binding
+             JOIN chain_lineage lineage
+               ON lineage.chain_id = binding.chain_id
+              AND lineage.block_number = binding.block_number
+              AND lineage.block_hash = binding.block_hash
+             WHERE binding.chain_id = $1 AND binding.block_number BETWEEN $3 AND $2
+               AND binding.canonicality_state IN ('canonical', 'safe', 'finalized')
                AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
              UNION
              SELECT boundary.block_number
@@ -344,12 +314,14 @@ pub(crate) async fn work_blocks(
              SELECT 1 FROM chain_lineage lineage
              WHERE lineage.chain_id = $1 AND lineage.block_number = work.block_number
                AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized'))
-         ORDER BY 1",
+         ORDER BY 1
+         LIMIT $5",
     )
     .bind(chain_id)
     .bind(to)
     .bind(from)
     .bind(manifests.declaration_starts(from, to))
+    .bind(limit)
     .fetch_all(pool)
     .await
     .map_err(|error| ProjectError::database("failed to list family work blocks", error))

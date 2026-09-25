@@ -215,7 +215,7 @@ mandatory full Interpret and Project redos.
 | `resolution_divergences` | guarded lookup functions; Project publication may only clear outdated direct observations | Active live/indexed resolver disagreements and retained observations retired after the exact resolver becomes null; diagnostic only. |
 
 Interpret writes `discovery_edges` and `contract_instance_addresses`. A phase
-that reads them may add read-only indexes through its own migration, never
+that reads them may add read-only indexes through its own schema-migration, never
 changing a row, when it records each index here with the statement it serves.
 The owned key families add five, named for their reader:
 

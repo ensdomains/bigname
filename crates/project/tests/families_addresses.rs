@@ -741,3 +741,154 @@ async fn a_named_write_keeps_its_name_through_a_rebinding_versions_and_a_link() 
     fixture.assert_rebuild_equal(16).await?;
     fixture.cleanup().await
 }
+
+// A registrar transfer the adapter emitted unnamed reaches the name's fold only when a later
+// binding names its row. The fold's token holder is the latest transfer's recipient, so the
+// transfer named later replaces an earlier named one.
+#[tokio::test]
+async fn a_transfer_named_later_becomes_the_name_folds_token_holder() -> Result<()> {
+    let fixture = Fixture::new("families_addresses_decoded_transfer", 20).await?;
+    let lease = uuid(6);
+    let registrar = "ens_v1_registrar_l1";
+    fixture
+        .write(
+            9,
+            1,
+            "TokenControlTransferred",
+            registrar,
+            Some(&name(4)),
+            Some(&lease),
+            json!({"namehash": node(4), "to": CAROL}),
+            R1,
+        )
+        .await?;
+    fixture
+        .write(
+            10,
+            1,
+            "TokenControlTransferred",
+            registrar,
+            None,
+            Some(&lease),
+            json!({"namehash": node(4), "to": DAVE}),
+            R1,
+        )
+        .await?;
+    fixture.apply(10, FamilyMode::Normal).await;
+    fixture
+        .binding(&uuid(106), &name(4), &lease, "ens_v1", 11, 1, None)
+        .await?;
+    fixture
+        .write(
+            11,
+            1,
+            "SurfaceBound",
+            registrar,
+            Some(&name(4)),
+            Some(&lease),
+            json!({"authority_kind": "registrar"}),
+            R1,
+        )
+        .await?;
+    fixture.apply(11, FamilyMode::Normal).await;
+    let fold = fixture.rows("project_address_name_fold").await?;
+    let fold = fold
+        .iter()
+        .find(|row| row["logical_name_id"] == json!(name(4)))
+        .expect("the name has a fold row");
+    assert_eq!(
+        (
+            fold["token_holder"].clone(),
+            fold["token_holder_position"]["block_number"].clone()
+        ),
+        (json!(DAVE), json!(10)),
+        "the later transfer, named at 11, is the token holder"
+    );
+    fixture.assert_undo_restores(11).await?;
+    fixture.assert_rebuild_equal(11).await?;
+    fixture.cleanup().await
+}
+
+/// Runs `transfers` (block, log, named, recipient) on one lease of name 4, applies to 10, binds
+/// the name at 11 so the unnamed ones are named then, and returns the fold's token holder with
+/// its block and log after the undo and rebuild checks.
+async fn token_holder_after_naming(
+    prefix: &str,
+    transfers: &[(i64, i64, bool, &str)],
+) -> Result<Value> {
+    let fixture = Fixture::new(prefix, 20).await?;
+    let lease = uuid(6);
+    let registrar = "ens_v1_registrar_l1";
+    for (block, log, named, to) in transfers {
+        fixture
+            .write(
+                *block,
+                *log,
+                "TokenControlTransferred",
+                registrar,
+                named.then(|| name(4)).as_deref(),
+                Some(&lease),
+                json!({"namehash": node(4), "to": to}),
+                R1,
+            )
+            .await?;
+    }
+    fixture.apply(10, FamilyMode::Normal).await;
+    fixture
+        .binding(&uuid(106), &name(4), &lease, "ens_v1", 11, 1, None)
+        .await?;
+    fixture
+        .write(
+            11,
+            1,
+            "SurfaceBound",
+            registrar,
+            Some(&name(4)),
+            Some(&lease),
+            json!({"authority_kind": "registrar"}),
+            R1,
+        )
+        .await?;
+    fixture.apply(11, FamilyMode::Normal).await;
+    let fold = fixture.rows("project_address_name_fold").await?;
+    let holder = fold
+        .iter()
+        .find(|row| row["logical_name_id"] == json!(name(4)))
+        .map(|row| {
+            json!([
+                row["token_holder"],
+                row["token_holder_position"]["block_number"],
+                row["token_holder_position"]["log_index"]
+            ])
+        })
+        .expect("the name has a fold row");
+    fixture.assert_undo_restores(11).await?;
+    fixture.assert_rebuild_equal(11).await?;
+    fixture.cleanup().await?;
+    Ok(holder)
+}
+
+// A transfer named later that is older than the held one leaves the token holder alone
+// (registrant.rs, the strict comparison with token_holder_position).
+#[tokio::test]
+async fn an_older_transfer_named_later_keeps_the_token_holder() -> Result<()> {
+    let holder = token_holder_after_naming(
+        "families_addresses_older_named_later",
+        &[(9, 1, false, CAROL), (10, 1, true, DAVE)],
+    )
+    .await?;
+    assert_eq!(holder, json!([DAVE, 10, 1]));
+    Ok(())
+}
+
+// Two transfers in one block both named later: the later log is the token holder.
+#[tokio::test]
+async fn two_transfers_named_later_in_one_block_take_the_later_log() -> Result<()> {
+    let holder = token_holder_after_naming(
+        "families_addresses_two_named_later",
+        &[(9, 1, false, CAROL), (9, 2, false, DAVE)],
+    )
+    .await?;
+    assert_eq!(holder, json!([DAVE, 9, 2]));
+    Ok(())
+}

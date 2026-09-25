@@ -77,7 +77,8 @@ pub(super) fn push_selected<'a>(
                        AS migration_registry_contract_instance_id
             FROM parent CROSS JOIN clock
             JOIN bigname_phase.project_name_state state
-              ON state.namespace = parent.namespace
+              ON state.chain_id = parent.chain_id
+             AND state.namespace = parent.namespace
              AND state.logical_name_id = parent.logical_name_id
              AND state.migration_position IS NOT NULL
             LEFT JOIN bigname_phase.project_parent_subregistry subregistry

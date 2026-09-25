@@ -11,7 +11,10 @@ use sqlx::{Postgres, Transaction};
 use super::{
     input::BlockEvent,
     keys,
-    reduce::{Context, current, key_of, load_rows, put, raw_lower, raw_text, set, text_or_null},
+    reduce::{
+        Context, current, json_boolean, key_of, load_rows, put, raw_lower, raw_text, set,
+        text_or_null,
+    },
     store::{Row, RowSet},
     tables,
 };
@@ -157,12 +160,12 @@ pub(super) async fn apply(
             set(
                 &mut row,
                 "owner",
-                text_or_null(raw_text(&event.after, "owner")),
+                text_or_null(raw_lower(&event.after, "owner")),
             );
             set(
                 &mut row,
                 "owner_getter",
-                text_or_null(raw_text(&event.after, "owner_getter")),
+                text_or_null(raw_lower(&event.after, "owner_getter")),
             );
             set(
                 &mut row,
@@ -187,13 +190,11 @@ pub(super) async fn apply(
 }
 
 /// The event's active flag, active when it carries none, as both alias readers take it
-/// (`COALESCE((after_state ->> 'active')::boolean, true)`).
+/// (`COALESCE((after_state ->> 'active')::boolean, true)`). A text or number is read the way
+/// PostgreSQL reads a boolean; a spelling it rejects fails the served batch, and is kept active
+/// here.
 fn active(event: &BlockEvent) -> Value {
-    Value::Bool(match field(event, "active") {
-        Value::Bool(flag) => flag,
-        Value::String(text) => !matches!(text.trim().to_ascii_lowercase().as_str(), "false" | "f"),
-        _ => true,
-    })
+    Value::Bool(json_boolean(&field(event, "active")).unwrap_or(true))
 }
 
 #[cfg(test)]

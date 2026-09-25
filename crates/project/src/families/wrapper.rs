@@ -9,7 +9,9 @@ use sqlx::{Postgres, Transaction};
 
 use super::{
     input::BlockEvent,
-    reduce::{Context, current, key_of, load_rows, put, raw_text, set, text_or_null},
+    reduce::{
+        Context, current, json_number_between, key_of, load_rows, put, raw_text, set, text_or_null,
+    },
     store::RowSet,
     tables,
 };
@@ -23,6 +25,17 @@ fn modifier(event: &BlockEvent) -> bool {
 /// (resource_summary.rs, `wrapper_lifecycles`): the NameWrapped mint, the NameUnwrapped epoch
 /// close, or a holder grant or revoke of the resource. Returns its source and whether it leaves
 /// the resource unwrapped.
+///
+/// The pinned NameWrapper emits NameWrapped only from `_wrap`, right after minting the node's
+/// token, and NameUnwrapped on two burns: `_unwrap` burns the token and hands the registry node
+/// to the owner, and a mint over a still-held token first burns it and emits NameUnwrapped to
+/// the zero address, so a re-wrap closes the old epoch before the new NameWrapped
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L878-L903 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1022-L1031 @ ens_v1@91c966f).
+/// The un-admitted `upgrade` path burns the token without NameUnwrapped; like every burn it
+/// revokes the holder, and that holder revoke, not an epoch close, leaves the resource unwrapped
+/// here, as in the served ranking
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L483-L509 @ ens_v1@91c966f).
 fn lifecycle(event: &BlockEvent) -> Option<(&'static str, bool)> {
     if event.source_family != "ens_v1_wrapper_l1" {
         return None;
@@ -75,24 +88,6 @@ fn wrapper_expiry(event: &BlockEvent) -> bool {
                 && raw_text(&event.after, "authority_kind").as_deref() == Some("wrapper")))
 }
 
-/// A JSON number within `[low, high]`, as its numeric text.
-fn bounded(value: Option<&Value>, high: &str) -> Value {
-    let Some(Value::Number(number)) = value else {
-        return Value::Null;
-    };
-    let text = number.to_string();
-    let integral = !text.contains(['.', 'e', 'E']);
-    let negative = text.starts_with('-');
-    let fits = integral
-        && !negative
-        && (text.len() < high.len() || (text.len() == high.len() && text.as_str() <= high));
-    if fits {
-        Value::Number(number.clone())
-    } else {
-        Value::Null
-    }
-}
-
 pub(super) async fn apply(
     transaction: &mut Transaction<'_, Postgres>,
     context: &Context<'_>,
@@ -138,14 +133,22 @@ pub(super) async fn apply(
             set(
                 &mut row,
                 "fuses",
-                bounded(event.after.get("fuses"), "9223372036854775807"),
+                // The served modifiers cast the in-range value to bigint (permissions.rs
+                // `modifiers`, address_names.rs `scope_modifiers`), which rejects a non-integral
+                // spelling and fails the served batch, so only an integer reaches a served row.
+                json_number_between(event.after.get("fuses"), i64::MAX.unsigned_abs())
+                    .filter(|number| number.is_u64())
+                    .map_or(Value::Null, |number| Value::Number(number.clone())),
             );
             set(&mut row, "wrapper_state_position", event.position.to_json());
         } else {
             set(
                 &mut row,
                 "expiry_seconds",
-                bounded(event.after.get("expiry"), "18446744073709551615"),
+                // The served expiry is the numeric value (address_names.rs `wrapper_expiries`,
+                // children.rs `latest_wrapper_expiries`), fractional or not.
+                json_number_between(event.after.get("expiry"), u64::MAX)
+                    .map_or(Value::Null, |number| Value::Number(number.clone())),
             );
             set(&mut row, "expiry_position", event.position.to_json());
         }
