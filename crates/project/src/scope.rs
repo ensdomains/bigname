@@ -207,6 +207,12 @@ async fn seed_direct_scope(
     // through the linked authority or, for a zero owner, the node's registry read anchor, so it
     // can arrive without one while the node has an active surface; the child row follows that
     // surface's latest registry owner. The before-state `node` is a conservative extra candidate.
+    // `setOwner` emits `Transfer(node, owner)` with the transferred node, while `setSubnodeOwner`
+    // emits `NewOwner(node, label, owner)` with the parent node:
+    // (upstream: .refs/ens_v1/contracts/registry/ENS.sol:L6-L9 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L63-L84 @ ens_v1@91c966f)
+    // (upstream: .refs/basenames/lib/ens-contracts/contracts/registry/ENS.sol:L5-L8 @ basenames@1809bbc)
+    // (upstream: .refs/basenames/src/L2/Registry.sol:L100-L124 @ basenames@1809bbc)
     for (seed, table, columns, events) in [
         (
             "project_scope_children",
