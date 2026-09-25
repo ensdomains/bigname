@@ -68,28 +68,38 @@ pub async fn load_family_reverse_claim(
     let claim_identity: Option<String> = if node_claimed {
         match (&reverse_node, &pointer) {
             (Some(node), Some((_, Some(resolver)))) => {
+                // The claim at the node's current resolver. While the family keeps one row per
+                // node, a row at another resolver means the claim today's reader serves is lost.
                 let claim = sqlx::query(
-                    "SELECT event_identity, resolver_address
+                    "SELECT event_identity
                      FROM bigname_phase.project_reverse_node_claim
-                     WHERE namespace = $1 AND reverse_node = $2 AND chain_id = $3",
+                     WHERE namespace = $1 AND reverse_node = $2 AND chain_id = $3
+                       AND resolver_address = $4",
                 )
                 .bind(namespace)
                 .bind(node)
                 .bind(chain_id)
+                .bind(resolver)
                 .fetch_optional(pool)
                 .await
                 .context("failed to load the family reverse node claim")?;
                 match claim {
-                    Some(claim) => {
-                        let at: Option<String> = claim.try_get("resolver_address")?;
-                        if at.as_deref() == Some(resolver.as_str()) {
-                            Some(claim.try_get("event_identity")?)
-                        } else {
-                            node_claim_at_other_resolver = true;
-                            None
-                        }
+                    Some(claim) => Some(claim.try_get("event_identity")?),
+                    None => {
+                        node_claim_at_other_resolver = sqlx::query_scalar(
+                            "SELECT EXISTS (
+                                 SELECT 1 FROM bigname_phase.project_reverse_node_claim
+                                 WHERE namespace = $1 AND reverse_node = $2 AND chain_id = $3
+                             )",
+                        )
+                        .bind(namespace)
+                        .bind(node)
+                        .bind(chain_id)
+                        .fetch_one(pool)
+                        .await
+                        .context("failed to probe the family reverse node claims")?;
+                        None
                     }
-                    None => None,
                 }
             }
             _ => None,

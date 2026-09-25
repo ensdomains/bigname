@@ -144,10 +144,12 @@ pub fn compare_record_inventory(
     differences
 }
 
-/// The canonical order's answer for every coin-60 pair a family row serves: the value event is the
-/// `AddressChanged` half at log n, its sibling the `AddrChanged` half at log n + 1 of the same
-/// transaction, the provenance lists the value event and not the sibling, and the row's served
-/// position is the value event's own. Returns what does not hold.
+/// Shape checks for every coin-60 pair a family row serves: the value event is the
+/// `AddressChanged` half at log n and its sibling the `AddrChanged` half at log n + 1 of the same
+/// transaction, and the row's `record_event_ids` reproduce today's provenance, which lists the
+/// value event and not the sibling. The design's provenance names both events (item 6); that is
+/// not served yet, so the row keeps today's shape and [`super::CompatibilityPair`] carries the
+/// sibling for step 7. Returns what does not hold.
 pub fn check_compatibility_pairs(inventory: &FamilyRecordInventory) -> Vec<Difference> {
     let mut differences = Vec::new();
     let ids = &inventory.row.provenance["record_event_ids"];
@@ -173,7 +175,7 @@ pub fn check_compatibility_pairs(inventory: &FamilyRecordInventory) -> Vec<Diffe
         );
         push(
             &mut differences,
-            &format!("pair {} value event listed", pair.record_key),
+            &format!("pair {} provenance as today", pair.record_key),
             Value::Bool(true),
             Value::Bool(listed(pair.value_event_id) && !listed(pair.sibling_event_id)),
         );

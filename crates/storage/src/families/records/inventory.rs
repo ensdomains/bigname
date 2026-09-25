@@ -37,7 +37,9 @@ pub enum FamilyAttribution {
 }
 
 /// A coin-60 pair a row serves: the `AddressChanged` half is the value event, the `AddrChanged`
-/// half one log later its compatibility sibling.
+/// half one log later its compatibility sibling. The row's provenance lists only the value event,
+/// as today's does; the sibling is carried here for the design's provenance, which names both
+/// (step 7).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CompatibilityPair {
     pub record_key: String,
