@@ -1741,6 +1741,22 @@ order](glossary.md#canonical-event-order) and count on
 loop for that batch and leaves the served publication and its progress as they
 were; the next batch catches up from where the marker stands.
 
+Several facts of one log apply in the order the adapter wrote them: within one
+block, transaction and log the trailing emission ordinal of `event_identity`
+decides before the identity bytes (D12 as amended by Tate on 2026-09-26; the
+[canonical event order](glossary.md#canonical-event-order) states the parse).
+A NameWrapper transfer writes the delegate approval clear, the old holder's
+revoke, the new holder's grant and a retained delegate's re-grant at one log,
+so the name stays wrapped after a holder-to-holder transfer and a recipient
+that was the approved delegate keeps its holder powers. Facts with no
+transaction or log keep the identity byte order. The ordinal restarts per
+source, so two sources at one log interleave by ordinal; that is exact only
+while no key is written by two sources at one log, a precondition on the
+adapter that `families_ordering.rs` pins with a collision fixture. The served
+builders break the same ties by generated id today; the step that ports a
+served reader to the families (step 7) must use this rule with the SQL parse
+the glossary gives, not a bare bigint cast.
+
 Undo rows are kept back to the lowest of: 256 blocks below the family marker,
 the chain's finalized block, its safe block, and the block an active repair
 still has to undo to or replay from. Without a finalized and a safe block
