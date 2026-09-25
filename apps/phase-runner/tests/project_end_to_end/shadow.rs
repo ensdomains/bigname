@@ -21,7 +21,7 @@
 //!   generated ids too, and the association winner of
 //!   an affected triple moved only to a grant of the same name, registry and token
 //!   (`v2_lifecycle_events.sql:10-23`), gives exactly the served value for the field. For a
-//!   resource's permission rows and restriction block, the path-expiry drop rule of
+//!   resource's permission rows, admin powers and restriction block, the path-expiry drop rule of
 //!   permissions.rs:111-133, :391-398 must keep the registration live in today's order and
 //!   lapse it in the canonical order, the served value must not be empty, and the whole read in
 //!   today's order must equal it. A served empty value against a canonical row is a mismatch.
@@ -1278,7 +1278,7 @@ pub async fn resource_excuses(
     if !diffs.iter().any(|diff| {
         matches!(
             diff.field.as_str(),
-            "permissions_current" | "resource_restrictions"
+            "permissions_current" | "admin_powers" | "resource_restrictions"
         )
     }) {
         return Ok(out);
@@ -1317,6 +1317,7 @@ pub async fn resource_excuses(
     let canonical = read(EventOrder::Canonical).await?;
     let value = |read: &ShadowPermissions, field: &str| match field {
         "permissions_current" => Some(Value::Array(read.grants.iter().map(grant_json).collect())),
+        "admin_powers" => Some(json!(read.admin_powers)),
         "resource_restrictions" => Some(read.restrictions.clone().unwrap_or(Value::Null)),
         _ => None,
     };

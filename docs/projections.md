@@ -1816,7 +1816,7 @@ tests and the phase runner's fixture-corpus run compare each value with what the
 production readers serve at the same publication, field by field. A differing
 field passes in two cases only. The first is a disclosed same-block ordering case:
 reading the same families with that block in the old generated-id order must give
-exactly the served value. For a resource's permission rows and restriction block
+exactly the served value. For a resource's permission rows, admin powers and restriction block
 it passes only in one direction: today's order keeps the registration live, the
 served value is not empty, and the families read in that order give it. A served
 empty value against a family row is a mismatch. One ENSv1 NewOwner log yields a

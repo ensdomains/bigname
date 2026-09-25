@@ -367,6 +367,62 @@ async fn a_same_block_release_after_a_grant_passes_only_from_the_families_read()
     fixture.cleanup().await
 }
 
+/// Codex thread PRRT_kwDOSJpxAs6l4hOv: the passing direction of the same-block release with
+/// BOB's registry grant carrying an admin power. Today's order keeps the registration live and
+/// serves the admin power from BOB's row (resource_summary.rs:272-297); the canonical order
+/// lapses it and the families serve no admin powers (permissions/mod.rs, `admins`). The admin
+/// difference has the same cause as the permission rows and passes the same way: the families
+/// read again in today's order give exactly the served admin powers.
+#[tokio::test]
+async fn a_same_block_release_moves_the_admin_powers_with_the_rows() -> Result<()> {
+    let fixture = Fixture::new("families_shadow_order_permissions_admin", 20).await?;
+    let (k1, n1) = (uuid(1), name(1));
+    v2_binding(&fixture, &k1).await?;
+    fixture
+        .event(grant("grant-10", 10, &n1, &k1, ALICE))
+        .await?;
+    fixture
+        .event(
+            Event::new("permission-11", 11, 1, "PermissionChanged", V2_REGISTRY)
+                .resource(&k1)
+                .after(json!({
+                    "subject": BOB,
+                    "scope": {"kind": "registry", "chain_id": CHAIN, "registry_address": REGISTRY},
+                    "effective_powers": ["admin_set_resolver", "set_resolver"],
+                    "grant_source": {"kind": "raw_log", "source_event": "EACRolesChanged"},
+                    "revocation_source": null, "inheritance_path": [], "transfer_behavior": {},
+                    "source_event": "EACRolesChanged",
+                }))
+                .raw(json!({"emitting_address": REGISTRY})),
+        )
+        .await?;
+    fixture
+        .event(unnamed_path_expiry("path-expiry-14", 14, &k1).at(0, 2))
+        .await?;
+    fixture
+        .event(grant("grant-14", 14, &n1, &k1, ALICE))
+        .await?;
+    let report = publish_and_compare(&fixture, 16).await?;
+    let served: Vec<String> = sqlx::query_scalar(
+        r"SELECT DISTINCT power.value FROM permissions_current served
+          CROSS JOIN LATERAL jsonb_array_elements_text(served.effective_powers) power
+          WHERE served.resource_id = $1::uuid AND power.value LIKE 'admin\_%'",
+    )
+    .bind(&k1)
+    .fetch_all(&fixture.pool)
+    .await?;
+    assert_eq!(served, vec!["admin_set_resolver".to_owned()]);
+    assert_counts(
+        &report,
+        &RELEASED_NAME,
+        &[
+            ("d12_same_block_order:admin_powers", 1),
+            ("d12_same_block_order:permissions_current", 1),
+        ],
+    );
+    fixture.cleanup().await
+}
+
 /// Name 1's facts as the harness loads them, with the counterfactual that reads them in today's
 /// order.
 async fn facts_and_legacy(fixture: &Fixture) -> Result<(NameFacts, NameFacts)> {
