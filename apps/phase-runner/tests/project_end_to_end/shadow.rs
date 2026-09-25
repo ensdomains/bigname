@@ -16,9 +16,15 @@
 //!   `/links` and `/roles` pages and totals against the served collection statements (the API's
 //!   own SQL files, and a copy of its inline roles statement).
 //!
+//! The `/roles` comparison is row parity before the API's enrichment: address, registration,
+//! powers and record selector as the collection statement returns them. It does not cover the
+//! `grant_event` provenance the API attaches afterwards, the evidence ids (the family row keeps
+//! none), or the wrapper, grace and expiry masks, which the shadow reader does not apply yet.
+//! Those are prerequisites for serving `/roles` from the families.
+//!
 //! Excluded, by design: `children_current`'s provenance, chain positions, canonicality summary
-//! and manifest version (per-row target blocks the families do not keep), and `/roles` evidence
-//! ids (the evidence arrays leave the F8 row). Named expected deltas are counted, not failed.
+//! and manifest version (per-row target blocks the families do not keep). Named expected deltas
+//! are counted, not failed.
 use std::{
     collections::{BTreeMap, BTreeSet},
     time::Instant,
@@ -43,8 +49,11 @@ use sqlx::{PgPool, types::time::OffsetDateTime};
 pub struct Settings {
     pub children_page: u64,
     pub collection_page: u64,
-    /// Compare the timestamp sorts and the expiry fence too, not only the default page.
+    /// Compare every sort in both orders, with and without the expiry fence, not only the
+    /// default page.
     pub every_child_filter: bool,
+    /// Name prefixes to compare, each as a fenced name-ordered page.
+    pub prefixes: &'static [&'static str],
 }
 
 /// One difference between a served read and its shadow. `key` names the read exactly (for
@@ -180,35 +189,47 @@ pub async fn compare(pool: &PgPool, chain: &str, settings: Settings) -> Result<R
     Ok(report)
 }
 
-/// The subnames filters the comparison reads: the default page, and with `every` also the expiry
-/// sort behind the expiry fence at `clock`, the registration sort descending, and the fence alone
-/// descending. A filter's index in this list is the `filter` number in a mismatch key.
+/// The subnames filters the comparison reads: the default page alone, or with `every` each sort
+/// (name, expiry, registration) in both orders, with and without the expiry fence at `clock`,
+/// then one name-ordered page per prefix in `prefixes`, fenced. A filter's index in this list is
+/// the `filter` number in a mismatch key.
 pub fn child_filters(
     clock: OffsetDateTime,
     every: bool,
+    prefixes: &[&'static str],
 ) -> Vec<ChildrenCurrentPageFilter<'static>> {
     let default = ChildrenCurrentPageFilter::default();
-    let mut filters = vec![default];
-    if every {
-        filters.extend([
-            ChildrenCurrentPageFilter {
+    if !every {
+        return vec![default];
+    }
+    let mut filters = Vec::new();
+    for sort in [
+        ChildrenCurrentSort::Name,
+        ChildrenCurrentSort::ExpiresAt,
+        ChildrenCurrentSort::RegisteredAt,
+    ] {
+        for order in [ChildrenCurrentOrder::Asc, ChildrenCurrentOrder::Desc] {
+            filters.push(ChildrenCurrentPageFilter {
+                sort,
+                order,
+                ..default
+            });
+            filters.push(ChildrenCurrentPageFilter {
+                sort,
+                order,
                 include_expired: false,
                 evaluated_at: Some(clock),
-                sort: ChildrenCurrentSort::ExpiresAt,
                 ..default
-            },
-            ChildrenCurrentPageFilter {
-                sort: ChildrenCurrentSort::RegisteredAt,
-                order: ChildrenCurrentOrder::Desc,
-                ..default
-            },
-            ChildrenCurrentPageFilter {
-                include_expired: false,
-                evaluated_at: Some(clock),
-                order: ChildrenCurrentOrder::Desc,
-                ..default
-            },
-        ]);
+            });
+        }
+    }
+    for prefix in prefixes {
+        filters.push(ChildrenCurrentPageFilter {
+            q: Some(prefix),
+            include_expired: false,
+            evaluated_at: Some(clock),
+            ..default
+        });
     }
     filters
 }
@@ -256,7 +277,7 @@ pub async fn walk_children(
     ))
 }
 
-fn wire(row: &ChildrenCurrentRow) -> FamilyChildRow {
+pub fn wire(row: &ChildrenCurrentRow) -> FamilyChildRow {
     FamilyChildRow {
         parent_logical_name_id: row.parent_logical_name_id.clone(),
         child_logical_name_id: row.child_logical_name_id.clone(),
@@ -292,7 +313,7 @@ async fn children(
     .fetch_all(pool)
     .await?;
     report.parents = parents.len();
-    let filters = child_filters(clock, settings.every_child_filter);
+    let filters = child_filters(clock, settings.every_child_filter, settings.prefixes);
     for parent in &parents {
         for (index, filter) in filters.iter().enumerate() {
             let mut served_cursor: Option<ChildrenCurrentKeysetCursor> = None;
@@ -672,7 +693,8 @@ pub async fn served_collection(
     })
 }
 
-/// `/roles` evidence ids are excluded: F8 drops the evidence arrays from the row.
+/// `/roles` evidence ids are excluded: F8 drops the evidence arrays from the row. What remains is
+/// the pre-enrichment row; `grant_event` provenance and the masks are not compared.
 fn comparable(section: &str, page: &FamilyCollectionPage) -> Vec<(String, String, Value)> {
     page.rows
         .iter()

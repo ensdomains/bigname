@@ -13,7 +13,7 @@ mod support;
 
 use anyhow::{Context, Result, ensure};
 use bigname_storage::{
-    ChildrenCurrentPageFilter,
+    ChildrenCurrentPageFilter, ChildrenCurrentSort,
     families::topology::{FamilyChildRow, load_children_shadow_page},
     load_children_current_page_filtered,
 };
@@ -258,8 +258,10 @@ async fn ens_v1_edges_match_the_served_children() -> Result<()> {
             owner: Some(owner(8)),
             registrant: None,
         },
-        filters: shadow::child_filters(clock, true),
-        serving: vec![0, 1, 2, 3],
+        filters: shadow::child_filters(clock, true, &[]),
+        // Each sort in both orders, with and without the expiry fence: the child has no expiry,
+        // so the fence keeps it.
+        serving: (0..12).collect(),
     };
     let expected = pin.check(fixture.pool()).await?;
     // A second difference on the exempted row still fails: a changed served owner leaves the
@@ -1000,4 +1002,204 @@ impl SurfacedChildPin<'_> {
         }
         Ok(keys)
     }
+}
+
+/// An ENSv2 registration granted in `registry` with the given expiry, or none.
+async fn expiring_registration(
+    fixture: &Fixture,
+    identity: &str,
+    logical: &str,
+    registry: &str,
+    block: i64,
+    expiry: Option<i64>,
+) -> Result<()> {
+    let mut after = json!({"registry_contract_instance_id": registry, "status": "registered",
+                           "registrant": owner(1)});
+    if let Some(expiry) = expiry {
+        after["expiry"] = json!(expiry);
+    }
+    fixture
+        .event(
+            identity,
+            Some(logical),
+            None,
+            V2_REGISTRY,
+            "RegistrationGranted",
+            block,
+            after,
+            &address(0xe3),
+        )
+        .await?;
+    Ok(())
+}
+
+fn display_names(rows: &[FamilyChildRow]) -> Vec<&str> {
+    rows.iter()
+        .map(|row| row.canonical_display_name.as_str())
+        .collect()
+}
+
+// The subnames filters at the block clock. ENSv2 children have mixed null and non-null expiries
+// and registration times, labels a prefix must match literally (`_` and `%`), and an expiry
+// exactly at the publication's time, which the fence keeps. An expiry-sorted, fenced page is
+// then continued from one publication into the next at the new block's time, after a child on
+// the remaining pages expired in between. Every page's rows, total and cursor are compared.
+#[tokio::test]
+async fn child_filters_sort_page_and_expire_at_the_block_clock() -> Result<()> {
+    const PREFIXES: &[&str] = &["a_", "a%"];
+    let mut fixture = Fixture::new("families_shadow_children_clock", 12).await?;
+    let (parent_id, _, parent_labels) = parent(&fixture, 1, "clock").await?;
+    let registry = uuid(0xf1);
+    fixture.contract(&registry, &address(0xf1), 1).await?;
+    fixture
+        .event(
+            "subregistry-clock",
+            Some(&parent_id),
+            None,
+            V2_REGISTRY,
+            "SubregistryChanged",
+            2,
+            json!({"subregistry": address(0xf1)}),
+            &address(0xe3),
+        )
+        .await?;
+    let epoch = shadow_fixture::EPOCH;
+    let cases: [(u64, &str, Option<i64>, i64); 6] = [
+        (1, "a_one", Some(epoch + 6), 2),
+        (2, "a%two", Some(epoch + 1_000_000), 2),
+        (3, "bthree", Some(epoch + 8), 3),
+        (4, "anull", None, 3),
+        (5, "zeta", Some(epoch + 1_000_000), 4),
+        (6, "a_b", Some(epoch + 7), 4),
+    ];
+    for (n, label, expiry, block) in cases {
+        let labelhash = word(0x6000 + n);
+        fixture.label(&labelhash, label, true).await?;
+        let mut labels = vec![labelhash];
+        labels.extend(parent_labels.iter().cloned());
+        let logical = fixture
+            .surface(
+                "ens",
+                &word(0x7000 + n),
+                &format!("{label}.clock.eth"),
+                &labels,
+                1,
+            )
+            .await?;
+        expiring_registration(
+            &fixture,
+            &format!("granted-{label}"),
+            &logical,
+            &registry,
+            block,
+            expiry,
+        )
+        .await?;
+    }
+    fixture.publish(6).await?;
+    let report = fixture.compare_with_prefixes(1, PREFIXES).await?;
+    unexpected(&report, &[])?;
+    let pool = fixture.pool();
+    let (_, clock) = shadow::publication(pool, CHAIN).await?;
+    ensure!(clock.unix_timestamp() == epoch + 6, "{clock}");
+
+    // The fence at block 6 keeps the child whose expiry is exactly block 6's time.
+    let fenced = ChildrenCurrentPageFilter {
+        include_expired: false,
+        evaluated_at: Some(clock),
+        ..ChildrenCurrentPageFilter::default()
+    };
+    let (served_total, served, shadow_total, shadowed) =
+        shadow::walk_children(pool, &parent_id, &fenced, 10).await?;
+    ensure!(
+        served == shadowed
+            && served_total == 6
+            && shadow_total == 6
+            && display_names(&served).contains(&"a_one.clock.eth"),
+        "{served:?}"
+    );
+    // Prefixes match literally: `_` and `%` are not wildcards.
+    for (prefix, expected) in [
+        ("a_", vec!["a_b.clock.eth", "a_one.clock.eth"]),
+        ("a%", vec!["a%two.clock.eth"]),
+    ] {
+        let filter = ChildrenCurrentPageFilter {
+            q: Some(prefix),
+            ..fenced
+        };
+        let (served_total, served, shadow_total, shadowed) =
+            shadow::walk_children(pool, &parent_id, &filter, 1).await?;
+        ensure!(
+            display_names(&served) == expected
+                && served == shadowed
+                && served_total == expected.len() as u64
+                && shadow_total == served_total,
+            "{prefix}: served {served:?}, shadow {shadowed:?}"
+        );
+    }
+
+    // The first expiry-sorted, fenced page at block 6, then its continuation at block 9's time.
+    let by_expiry = |at| ChildrenCurrentPageFilter {
+        sort: ChildrenCurrentSort::ExpiresAt,
+        include_expired: false,
+        evaluated_at: Some(at),
+        ..ChildrenCurrentPageFilter::default()
+    };
+    let served =
+        load_children_current_page_filtered(pool, &parent_id, &by_expiry(clock), None, 2).await?;
+    let shadowed = load_children_shadow_page(pool, &parent_id, &by_expiry(clock), None, 2).await?;
+    let served_rows: Vec<FamilyChildRow> = served.rows.iter().map(shadow::wire).collect();
+    ensure!(
+        served_rows == shadowed.rows
+            && served.total_count == shadowed.total_count
+            && served.next_cursor == shadowed.next_cursor
+            && display_names(&served_rows) == ["a_one.clock.eth", "a_b.clock.eth"],
+        "served {served:?}, shadow {shadowed:?}"
+    );
+    let mut served_cursor = served
+        .next_cursor
+        .context("more than one page at block 6")?;
+    let mut shadow_cursor = served_cursor.clone();
+    fixture.publish(9).await?;
+    let pool = fixture.pool();
+    let (_, later) = shadow::publication(pool, CHAIN).await?;
+    ensure!(later.unix_timestamp() == epoch + 9, "{later}");
+    let mut continued = Vec::new();
+    loop {
+        let served = load_children_current_page_filtered(
+            pool,
+            &parent_id,
+            &by_expiry(later),
+            Some(&served_cursor),
+            2,
+        )
+        .await?;
+        let shadowed =
+            load_children_shadow_page(pool, &parent_id, &by_expiry(later), Some(&shadow_cursor), 2)
+                .await?;
+        let served_rows: Vec<FamilyChildRow> = served.rows.iter().map(shadow::wire).collect();
+        ensure!(
+            served_rows == shadowed.rows
+                && served.total_count == shadowed.total_count
+                && served.next_cursor == shadowed.next_cursor,
+            "served {served:?}, shadow {shadowed:?}"
+        );
+        // Block 9's fence counts only the children not expired by then.
+        ensure!(served.total_count == 3, "{}", served.total_count);
+        continued.extend(served_rows);
+        match (served.next_cursor, shadowed.next_cursor) {
+            (Some(served_next), Some(shadow_next)) => {
+                served_cursor = served_next;
+                shadow_cursor = shadow_next;
+            }
+            _ => break,
+        }
+    }
+    ensure!(
+        display_names(&continued) == ["a%two.clock.eth", "zeta.clock.eth", "anull.clock.eth"],
+        "{continued:?}"
+    );
+    let report = fixture.compare_with_prefixes(1, PREFIXES).await?;
+    unexpected(&report, &[])?;
+    fixture.cleanup().await
 }

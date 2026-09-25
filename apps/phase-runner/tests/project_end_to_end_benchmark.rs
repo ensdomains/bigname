@@ -427,6 +427,7 @@ async fn run(
                     children_page,
                     collection_page: children_page,
                     every_child_filter: children_page == FIXTURE_CHILDREN_PAGE,
+                    prefixes: &[],
                 },
             )
             .await?;

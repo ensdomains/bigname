@@ -438,6 +438,15 @@ impl Fixture {
 
     /// The shadow comparison at the current publication, over small pages and every filter.
     pub async fn compare(&self, page: u64) -> Result<shadow::Report> {
+        self.compare_with_prefixes(page, &[]).await
+    }
+
+    /// The comparison with a fenced name-ordered page per prefix too.
+    pub async fn compare_with_prefixes(
+        &self,
+        page: u64,
+        prefixes: &'static [&'static str],
+    ) -> Result<shadow::Report> {
         let report = shadow::compare(
             self.pool(),
             CHAIN,
@@ -445,6 +454,7 @@ impl Fixture {
                 children_page: page,
                 collection_page: page,
                 every_child_filter: true,
+                prefixes,
             },
         )
         .await?;

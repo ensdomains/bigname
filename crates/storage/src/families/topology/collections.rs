@@ -132,7 +132,10 @@ pub async fn load_resolver_links_shadow(
 /// `/roles`: resolver-scoped `project_grant` rows whose effective powers are non-empty. The
 /// wrapper, grace and expiry-retirement masks are not applied yet, so the powers are the stored,
 /// unmasked ones, which resolver-scoped ENSv2 grants carry unmasked today. `event_ids` holds the
-/// grant's last event only, because the family row keeps no evidence arrays.
+/// grant's last event only, because the family row keeps no evidence arrays. Parity with the
+/// served collection is therefore row parity before the API's enrichment; the `grant_event`
+/// provenance the API attaches and the masks must both land before `/roles` can be served from
+/// here.
 pub async fn load_resolver_roles_shadow(
     pool: &PgPool,
     chain_id: &str,
