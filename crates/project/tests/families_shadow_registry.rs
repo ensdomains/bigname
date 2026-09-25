@@ -2374,3 +2374,99 @@ async fn another_chain_account_approvals_are_not_compared() -> Result<()> {
     assert_eq!(counts(&report), counts(&baseline), "{:#?}", report.lines);
     fixture.cleanup().await
 }
+
+/// Codex thread PRRT_kwDOSJpxAs6mBimG: the NewOwner shape of
+/// `a_new_owner_subregistry_and_transfer_at_one_log_is_a_same_block_delta`, in the block that
+/// also moves name 1 from `lease` to `successor`: the old binding closes and the new one opens at
+/// the block time plus microseconds, as the interpreter writes them. Step 2 reads the name's
+/// current resource at the served end-of-block cutoff, the block time plus one second
+/// (registry.rs `current_resources`), and targets the observation at `successor`; the rebuild
+/// must read the bindings at the same cutoff, so it agrees and the event-id difference passes as
+/// the legitimate same-block delta. Read at the block's integer time, the rebuild would still
+/// see the closed binding and refuse it.
+#[tokio::test]
+async fn a_binding_opened_in_the_transfer_block_is_the_rebuilt_target() -> Result<()> {
+    let fixture = Fixture::new("families_shadow_registry_in_block_binding", 20).await?;
+    let (lease, successor) = (uuid(1), uuid(2));
+    fixture
+        .binding(&uuid(100), &name(1), &lease, "ens_v1", 9, 0, Some(11))
+        .await?;
+    fixture
+        .binding(&uuid(101), &name(1), &successor, "ens_v1", 11, 0, None)
+        .await?;
+    // The interpreter's times carry the log's microseconds (build.sql:4-12): the new binding
+    // moves first, so the two never overlap.
+    for (column, binding) in [("active_from", uuid(101)), ("active_to", uuid(100))] {
+        sqlx::query(&format!(
+            "UPDATE surface_bindings SET {column} = {column} + interval '5 microseconds'
+             WHERE surface_binding_id = $1::uuid"
+        ))
+        .bind(binding)
+        .execute(&fixture.pool)
+        .await?;
+    }
+    for (block, resource) in [(9, &lease), (11, &successor)] {
+        fixture
+            .write(
+                block,
+                0,
+                "SurfaceBound",
+                V1_REGISTRAR,
+                Some(&name(1)),
+                Some(resource),
+                json!({"authority_kind": "registrar", "state_derived": false,
+                       "registry_contract": REGISTRY, "owner_getter": OWNER}),
+                REGISTRAR,
+            )
+            .await?;
+    }
+    for (block, resource) in [(10, &lease), (11, &successor)] {
+        fixture
+            .write(
+                block,
+                2,
+                "RegistrationGranted",
+                V1_REGISTRAR,
+                Some(&name(1)),
+                Some(resource),
+                json!({"authority_kind": "registrar", "status": "registered",
+                       "registrant": OWNER, "expiry": 2_000_000_000u64}),
+                REGISTRAR,
+            )
+            .await?;
+    }
+    for kind in ["SubregistryChanged", "AuthorityTransferred"] {
+        fixture
+            .write(
+                11,
+                1,
+                kind,
+                V1_REGISTRY,
+                Some(&name(1)),
+                Some(&successor),
+                json!({"source_event": "NewOwner", "node": node(2), "child_node": node(1),
+                       "owner": OTHER, "owner_getter": OTHER, "emitter_role": "registry"}),
+                REGISTRY,
+            )
+            .await?;
+    }
+    let report = publish_and_compare(&fixture, 11).await?;
+    let target: String = sqlx::query_scalar(
+        "SELECT target_resource_id::text FROM bigname_phase.project_registry_binding_observation
+         WHERE chain_id = $1 AND observation_identity = $2",
+    )
+    .bind(CHAIN)
+    .bind(name(1))
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(
+        target, successor,
+        "step 2 targets the binding opened in the block"
+    );
+    shadow_support::assert_counts(
+        &report,
+        &[],
+        &[("d12_same_block_order:registry_binding/event_ids", 1)],
+    );
+    fixture.cleanup().await
+}

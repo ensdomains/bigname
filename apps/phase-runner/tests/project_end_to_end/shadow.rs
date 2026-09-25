@@ -1793,7 +1793,11 @@ fn same_observation(family: &Observation, rebuilt: &Observation) -> bool {
 /// canonical order (block, transaction, log, event identity), as F2c keeps it, and today's
 /// rebuild the latest in (block, transaction, log, generated id), as the served summary does
 /// (permission_resources.rs:10-11); each is derived as step 2 derives it, with its target
-/// read from the name's current binding at the publication. A family observation that is not
+/// read from the name's current binding at the publication's served end-of-block cutoff, the
+/// block time plus one second, open when it starts before the cutoff and ends at or after it,
+/// as step 2 reads it (crates/project/src/families/registry.rs `current_resources`), so a
+/// binding opened or closed in the block at the block time plus microseconds is read the same
+/// way. A family observation that is not
 /// exactly its identity's canonical rebuild, or an identity one side has and the other lacks,
 /// marks the resources it reaches unverified. The resources are then chosen in the canonical
 /// order and in (block, transaction, log, generated id) order.
@@ -1852,8 +1856,9 @@ async fn rebuilt_bindings(
            AND binding.authority_arm IN ('ens_v1', 'basenames')
            AND binding.canonicality_state IN ('canonical', 'safe', 'finalized')
            AND binding.block_number <= $3
-           AND binding.active_from <= to_timestamp($4)
-           AND (binding.active_to IS NULL OR binding.active_to > to_timestamp($4))
+           AND binding.active_from < to_timestamp($4) + interval '1 second'
+           AND (binding.active_to IS NULL
+                OR binding.active_to >= to_timestamp($4) + interval '1 second')
          ORDER BY binding.logical_name_id, binding.active_from DESC,
                   binding.surface_binding_id DESC",
     )
