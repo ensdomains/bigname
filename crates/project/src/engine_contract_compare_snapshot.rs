@@ -9,8 +9,10 @@ use std::{
 pub(in crate::engine) struct Snapshot {
     directory: PathBuf,
     preserve: bool,
-    /// The rows the API selects a publication by: every chain's Project phase row and stored
-    /// head. Derivation never writes them, so all three snapshots of one comparison must agree.
+    /// The rows the API selects a publication by: every chain's Project phase row, with the row
+    /// version (`xmin`) readers take as the served generation, and stored head. Derivation never
+    /// writes them, so all three snapshots of one comparison must agree, and a rewrite that
+    /// keeps every value still counts as a change.
     pub(in crate::engine) publication: Value,
 }
 impl Drop for Snapshot {
@@ -80,7 +82,7 @@ pub(in crate::engine) async fn publication_record(
         "SELECT jsonb_build_object(
              'project', (SELECT COALESCE(jsonb_agg(row ORDER BY row.chain_id), '[]') FROM (
                  SELECT chain_id, current_block_number, current_block_hash, input_content_hash,
-                        phase_status, redo_in_progress
+                        phase_status, redo_in_progress, xmin::text AS row_xmin
                  FROM chain_phase_state WHERE phase_name = 'project') row),
              'heads', (SELECT COALESCE(jsonb_agg(to_jsonb(head) ORDER BY head.chain_id), '[]')
                  FROM chain_heads head))",

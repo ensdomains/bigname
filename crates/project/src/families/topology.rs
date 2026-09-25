@@ -61,9 +61,19 @@ fn edge_key(chain: &Value, event: &BlockEvent) -> Option<Row> {
             json!(event.namespace),
             json!(raw_lower(after, "node")?),
             json!(raw_lower(after, "child_node")?),
-            json!(event.source_family),
+            json!(edge_arm(&event.source_family)),
         ],
     ))
+}
+
+/// The authority arm of an ENSv1 or Basenames registry edge, as children.rs:271-273 names it:
+/// `basenames` for the Basenames registry, `ens_v1` for the ENSv1 registry.
+pub(crate) fn edge_arm(source_family: &str) -> &'static str {
+    if source_family == "basenames_base_registry" {
+        "basenames"
+    } else {
+        "ens_v1"
+    }
 }
 
 fn subregistry_key(chain: &Value, event: &BlockEvent) -> Option<Row> {
@@ -184,4 +194,15 @@ fn active(event: &BlockEvent) -> Value {
         Value::String(text) => !matches!(text.trim().to_ascii_lowercase().as_str(), "false" | "f"),
         _ => true,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::edge_arm;
+
+    #[test]
+    fn an_edge_carries_the_canonical_authority_arm_of_its_registry() {
+        assert_eq!(edge_arm("ens_v1_registry_l1"), "ens_v1");
+        assert_eq!(edge_arm("basenames_base_registry"), "basenames");
+    }
 }

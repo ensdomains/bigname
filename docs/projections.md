@@ -1634,36 +1634,76 @@ row of its own, never pruned. Each row keeps the name the adapter emitted,
 which nothing rewrites, beside the name the ENSv1 registrar and wrapper linking
 gives it. The address-to-name and address-to-record index rows are not kept
 state: after every block and every undo they are derived again for the keys the
-block touched. The resolver classification table exists but is not filled yet.
+block touched. Resolver classification classifies a resolver at the block that
+changed its candidates, the pointers that name it, its proxy upgrades, a
+discovery edge, address or declaration of it, or the admission epoch, with the
+manifests active at that block, the way the served resolver build does.
 
 These tables are shadows today. Nothing reads them, and no served value
 depends on them. After each Project batch commits and its progress is
 recorded, the phase runner applies the families block by block, each block in
-a transaction of its own, from the family marker (`project_family_marker`) up
-to the served marker. A block applies only on top of the block before it on
-the readable lineage. It records the before-image of every row it changes and
-the prior marker in `project_family_undo`, advances the marker, and drops
-journal rows more than 256 blocks below it. A failure stops the loop for that
-batch, leaves the served publication and its progress as they were, and the
-next batch catches up from where the marker stands. `--project-families false`
-(or `BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES=false`) turns the loop off.
+a transaction of its own, from the [family marker](glossary.md#family-marker)
+(`project_family_marker`) up to the served marker. The served publication never
+waits for them: the families trail it until the loop catches up, and
+`phase_runner_project_family_lag_blocks` reports by how much. One run applies or
+undoes at most 256 blocks (`--project-families-max-blocks`, or
+`BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES_MAX_BLOCKS`), so a rebuild or a long
+catch-up spans several runner cycles. The run reads the Interpret and Project
+rows of `chain_phase_state` within 2 seconds or is skipped for that batch.
+`--project-families false` (or `BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES=false`)
+turns the loop off.
+
+A block applies only on top of the block before it on the readable lineage.
+Inside its transaction it locks the family marker and the [repair
+record](glossary.md#repair-record) (`project_repair_record`) and requires both
+as the run planned them: the marker's generation (`sequence`, advanced by every
+block and undo) and the repair's state and attempt. It then reads the
+Interpret row's content hash and redo attempt, the [family input
+revision](glossary.md#family-input-revision), and stops the run, counted as a
+skip, when that revision differs from the one the run applies under or
+Interpret is in redo; the next run adopts the new revision or waits. The block
+records that revision and the whole input token on the marker. It writes the
+before-image of every row it changes and the prior marker to the [family undo
+journal](glossary.md#family-undo-journal) (`project_family_undo`) and advances
+the marker. A block's events are taken once per `event_identity`, which
+`normalized_events` already keeps unique; two deliveries of one identity that
+disagree keep the first in the canonical order and count on
+`phase_runner_project_family_duplicate_anomalies_total`. A failure stops the
+loop for that batch and leaves the served publication and its progress as they
+were; the next batch catches up from where the marker stands.
+
+Undo rows are kept back to the lowest of: 256 blocks below the family marker,
+the chain's finalized block, its safe block, and the block an active repair
+still has to undo to or replay from. Without a finalized and a safe block
+nothing is pruned.
 
 A Project redo undoes the families from their journal down to the block before
 the redo range and replays them to the served marker. A marker left on a block
 that is no longer readable is undone the same way. A redo below the kept
 journal, a redo attempt the families never saw, or a served rebuild clears the
-families and rebuilds them from the blocks that carry events. The repair
-record (`project_repair_record`) describes the latest of these: its attempt,
-reason, trusted base, replay target, state and, once done, the marker it
-completed at. Each step is its own transaction, so a run that stops between
-blocks is resumed by the next. Each block also records the Interpret row's
-content hash and redo attempt it read, or nothing while Interpret is in redo.
+families and rebuilds them from the blocks that carry events or start or stop
+a resolver activation. The repair record describes the latest of these: its
+attempt, reason, trusted base, replay target, state (`undoing`, `replaying`,
+`rebuilding` or `complete`) and, once done, the marker, generation and input
+content hash it completed with. Each transition commits with the work it
+describes: the reset commits with the rebuild's intent, the last undo with the
+move to replaying, and the final replayed or rebuilt block with the
+completion. A run that stops between blocks is resumed by the next. A redo
+retried after it completed is recognised only while the marker, its
+generation and the content hash still match. A rebuild refreshes the planner
+statistics of the family tables as they grow.
+
+Tests compare every family table and the marker, less its generation, as
+ordered JSON text before a block and after its undo, and compare the
+incremental families with a rebuild from scratch; both run the same reducers,
+so they cannot catch a mistake the two share.
 
 The per-block publication will read these tables in place of the builders;
-until then they cost one extra pass per batch, reported as
-`phase_runner_project_families_seconds`,
-`phase_runner_project_family_lag_blocks` and
-`phase_runner_project_family_skips_total`.
+until then they cost one extra pass per batch after the served commit,
+reported as `phase_runner_project_families_seconds`,
+`phase_runner_project_family_lag_blocks`,
+`phase_runner_project_family_skips_total` and
+`phase_runner_project_family_duplicate_anomalies_total`.
 
 ## Index baseline
 

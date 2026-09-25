@@ -5,7 +5,8 @@
 //! family, namespace and declaration manifest. The partition keeps its latest version event; each
 //! record key keeps its latest write and, for the `AddrChanged` half of a coin-60 pair, the
 //! `AddressChanged` half one log earlier. Record-id writes keep the latest value per record id
-//! and key; a resolver link keeps the latest record id per node, `0` included.
+//! and key; a resolver link keeps the latest record id per node, `0` included, and belongs to
+//! the resolver that emitted it only when its payload names that resolver.
 use serde_json::{Value, json};
 use sqlx::{Postgres, Transaction};
 
@@ -102,6 +103,10 @@ fn write_value(row: &mut Row, event: &BlockEvent) {
     set(row, "source_family", event.source_family.clone());
     set(row, "namespace", event.namespace.clone());
     set(row, "source_manifest_id", json!(event.source_manifest_id));
+    // A name record's claim input as the event carried it (reverse claims read it).
+    for field in ["raw_name", "raw_name_bytes"] {
+        set(row, field, after.get(field).cloned().unwrap_or(Value::Null));
+    }
 }
 
 pub(super) async fn apply(
@@ -165,10 +170,9 @@ pub(super) async fn apply(
         .iter()
         .filter(|event| event.event_kind == "ResolverRecordLinked")
     {
-        if let (Some(resolver), Some(node)) = (
-            raw_lower(&event.after, "resolver"),
-            raw_lower(&event.after, "node"),
-        ) {
+        if let (Some(resolver), Some(node)) =
+            (keys::link_resolver(event), raw_lower(&event.after, "node"))
+        {
             links.push(key_of(
                 &tables::RESOLVER_LINK,
                 [chain.clone(), json!(resolver), json!(node)],
@@ -270,17 +274,25 @@ fn write(rows: &mut RowSet, chain: &Value, event: &BlockEvent) -> Result<()> {
             .zip(previous.get("log_index").and_then(Value::as_i64))
             .is_some_and(|(log, earlier)| earlier + 1 == log))
     .then(|| {
-        (
-            previous.get("value").cloned().unwrap_or(Value::Null),
+        let column = |name: &str| previous.get(name).cloned().unwrap_or(Value::Null);
+        [
+            column("value"),
             super::input::Position::of_row(&previous)
                 .map_or(Value::Null, |position| position.to_json()),
-        )
+            column("status"),
+            column("address_bytes_hex"),
+        ]
     });
     let mut row = previous;
     write_value(&mut row, event);
-    let (sibling_value, sibling_position) = sibling.unwrap_or((Value::Null, Value::Null));
+    // The served record of the pair is the AddressChanged half (record_inventory.rs,
+    // `ranked_records`): its status and both payload shapes stay beside this half's own.
+    let [sibling_value, sibling_position, sibling_status, sibling_hex] =
+        sibling.unwrap_or([Value::Null, Value::Null, Value::Null, Value::Null]);
     set(&mut row, "sibling_value", sibling_value);
     set(&mut row, "sibling_position", sibling_position);
+    set(&mut row, "sibling_status", sibling_status);
+    set(&mut row, "sibling_address_bytes_hex", sibling_hex);
     set(&mut row, "node", node);
     set(
         &mut row,
@@ -296,10 +308,9 @@ fn write(rows: &mut RowSet, chain: &Value, event: &BlockEvent) -> Result<()> {
 }
 
 fn link(rows: &mut RowSet, chain: &Value, event: &BlockEvent) -> Result<()> {
-    let (Some(resolver), Some(node)) = (
-        raw_lower(&event.after, "resolver"),
-        raw_lower(&event.after, "node"),
-    ) else {
+    let (Some(resolver), Some(node)) =
+        (keys::link_resolver(event), raw_lower(&event.after, "node"))
+    else {
         return Ok(());
     };
     let table = &tables::RESOLVER_LINK;
