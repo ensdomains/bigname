@@ -3,8 +3,8 @@
 //! claim, read through today's readers and through the family readers, compared field by field.
 //! It runs only when the family marker equals the served marker; otherwise the families lag and
 //! the comparison is not evidence. Every difference is reported; nothing is set apart. The
-//! diagnostics beside them (index misses, node claims at another resolver) say why a family read
-//! took another path, and never hold a difference.
+//! diagnostics beside them (index misses, node claims at another resolver, classification
+//! fallbacks) say why a family read took another path, and never hold a difference.
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result, ensure};
@@ -37,15 +37,18 @@ pub struct ShadowReport {
     pub primary_tuples: usize,
     pub differences: Vec<(String, Vec<Difference>)>,
     /// Diagnostic: the reverse tuples whose node has a claim in the family only at another
-    /// resolver than its current one (`primary_name <address> <namespace> <coin type>`). While
-    /// the claim family keeps one row per node, this is where it loses the claim today's reader
-    /// serves; any difference on such a tuple is still in `differences`.
+    /// resolver than its current one (`primary_name <address> <namespace> <coin type>`); any
+    /// difference on such a tuple is still in `differences`.
     pub node_claims_at_other_resolver: Vec<String>,
     /// Diagnostic, not an exclusion: every family entry of a name resolving to an address that
     /// the derived address index alone would not have found, as `resolves_to <address> coin
     /// <coin> resource <id> <record key>`. The family read finds these from the retained values;
     /// each names a step 2 index gap, and a test that expects none can require the list empty.
     pub address_index_misses: Vec<String>,
+    /// Diagnostic: the resolvers the classification read took from `resolver_current` because
+    /// F3 has no served row for them (`resolver <address>`). With F3 written block by block this
+    /// is empty; a test that expects none can require it.
+    pub classification_fallbacks: Vec<String>,
 }
 
 impl ShadowReport {
@@ -96,6 +99,23 @@ pub async fn compare_family_reads(
     inventory(pool, chain_id, &mut report).await?;
     addresses(pool, chain_id, page_size, &mut report).await?;
     primary(pool, chain_id, &mut report).await?;
+    report.classification_fallbacks = sqlx::query_scalar(
+        "SELECT 'resolver ' || resolver.resolver_address
+         FROM bigname_phase.resolver_current resolver
+         WHERE resolver.chain_id = $1
+           AND NOT EXISTS (
+               SELECT 1 FROM bigname_phase.project_resolver_classification family
+               WHERE family.chain_id = resolver.chain_id
+                 AND family.resolver_address = resolver.resolver_address
+                 AND family.unsupported_reason
+                     IS DISTINCT FROM 'resolver_manifest_not_active'
+           )
+         ORDER BY 1",
+    )
+    .bind(chain_id)
+    .fetch_all(pool)
+    .await
+    .context("failed to list the resolvers classified without F3")?;
     Ok(report)
 }
 

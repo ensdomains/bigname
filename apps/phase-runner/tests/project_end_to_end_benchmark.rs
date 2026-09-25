@@ -208,12 +208,14 @@ async fn fixture_corpus_publishes_hydrates_reads_and_matches_a_rebuild() -> Resu
         );
         ensure!(
             report.node_claims_at_other_resolver.is_empty()
-                && report.address_index_misses.is_empty(),
-            "the fixture shows step 2 gaps at {} ({}): {:#?} {:#?}",
+                && report.address_index_misses.is_empty()
+                && report.classification_fallbacks.is_empty(),
+            "the fixture shows step 2 gaps at {} ({}): {:#?} {:#?} {:#?}",
             shadow.target,
             shadow.stage,
             report.node_claims_at_other_resolver,
-            report.address_index_misses
+            report.address_index_misses,
+            report.classification_fallbacks
         );
     }
     for compared in &compared {

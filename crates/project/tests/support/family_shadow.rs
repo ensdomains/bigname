@@ -45,6 +45,8 @@ pub struct Expectations {
     pub index_misses: Vec<(i64, String)>,
     /// `(target, tuple key)`: reverse tuples whose node claim is only at another resolver.
     pub node_claims_at_other_resolver: Vec<(i64, String)>,
+    /// `(target, resolver)`: resolvers classified from `resolver_current` because F3 has no row.
+    pub classification_fallbacks: Vec<(i64, String)>,
     /// How often each expected difference showed so far; leave it at its default.
     pub seen: Mutex<Vec<usize>>,
 }
@@ -121,6 +123,12 @@ impl Expectations {
             stated(&self.node_claims_at_other_resolver),
             report.node_claims_at_other_resolver
         );
+        ensure!(
+            sorted(&report.classification_fallbacks) == stated(&self.classification_fallbacks),
+            "classification fallbacks at {target}: expected {:#?}, got {:#?}",
+            stated(&self.classification_fallbacks),
+            report.classification_fallbacks
+        );
         let mut seen = self.seen.lock().expect("expectation counts");
         seen.resize(self.differences.len(), 0);
         for (index, hit) in matched.into_iter().enumerate() {
@@ -185,7 +193,7 @@ pub async fn shadow_report_at(pool: &PgPool, target: &Marker) -> Result<ShadowRe
     eprintln!(
         "FAMILY_SHADOW target={} inventory_rows={} compatibility_pairs={} address_pages={} \
          address_entries={} primary_tuples={} differences={} node_claims_at_other_resolver={} \
-         address_index_misses={}",
+         address_index_misses={} classification_fallbacks={}",
         target.number,
         report.inventory_rows,
         report.compatibility_pairs,
@@ -194,7 +202,8 @@ pub async fn shadow_report_at(pool: &PgPool, target: &Marker) -> Result<ShadowRe
         report.primary_tuples,
         report.differences.len(),
         report.node_claims_at_other_resolver.len(),
-        report.address_index_misses.len()
+        report.address_index_misses.len(),
+        report.classification_fallbacks.len(),
     );
     Ok(report)
 }
