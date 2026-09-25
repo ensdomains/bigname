@@ -1,3 +1,4 @@
+/* project:scope.wrapper_names_from_registrars */
 -- Each correlated probe is bounded by a newly consumed resource or name. OFFSET (0) keeps
 -- these bounds even for a broad frontier; the generic OFFSET 0 removal must not undo them.
 -- Deduplicate the resource/name relationship before checking its wrapper history.

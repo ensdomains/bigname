@@ -38,7 +38,7 @@ pub(super) async fn stage_pointers(
 ) -> Result<()> {
     crate::stage::mirror_evidence::create(transaction).await?;
     crate::stage::mirror_evidence::classifications(transaction, chain_id).await?;
-    let pointer_sql = r#"
+    let pointer_sql = r#"/* project:builders.record_inventory.mirror.stage_pointers.create_mirror_pointers */
         CREATE TEMP TABLE project_mirror_pointers ON COMMIT DROP AS
         SELECT pointer.*,
                resolver.support_status AS mirror_support_status,
@@ -66,7 +66,7 @@ pub(super) async fn stage_pointers(
         .map_err(|error| {
             ProjectError::database("failed to stage mirror resolver pointers", error)
         })?;
-    sqlx::query("CREATE INDEX ON project_mirror_pointers (resource_id)")
+    sqlx::query("/* project:builders.record_inventory.mirror.stage_pointers.index_mirror_pointers_resource_id */ CREATE INDEX ON project_mirror_pointers (resource_id)")
         .execute(&mut **transaction)
         .await
         .map_err(|error| {
@@ -74,7 +74,7 @@ pub(super) async fn stage_pointers(
         })?;
 
     let selection = format!(
-        r#"
+        r#"/* project:builders.record_inventory.mirror.stage_pointers.create_mirror_selection */
         CREATE TEMP TABLE project_mirror_selection ON COMMIT DROP AS
         WITH registry_state AS (
             -- The ENSv1 registry's current resolver per node: the latest canonical registry-side
@@ -198,7 +198,7 @@ pub(super) async fn stage_pointers(
             ProjectError::database("failed to select mirrored ENSv1 resolvers", error)
         })?;
     sqlx::query(
-        r#"
+        r#"/* project:builders.record_inventory.mirror.stage_pointers.create_mirror_substituted_pointers */
         CREATE TEMP TABLE project_mirror_substituted_pointers ON COMMIT DROP AS
         SELECT mirror.resource_id,
                mirror.logical_name_id,
@@ -230,8 +230,8 @@ pub(super) async fn stage_pointers(
         ProjectError::database("failed to substitute mirrored resolver pointers", error)
     })?;
     for statement in [
-        "CREATE INDEX ON project_mirror_selection (resource_id)",
-        "CREATE INDEX ON project_mirror_substituted_pointers (resource_id)",
+        "/* project:builders.record_inventory.mirror.stage_pointers.index_mirror_selection_resource_id */ CREATE INDEX ON project_mirror_selection (resource_id)",
+        "/* project:builders.record_inventory.mirror.stage_pointers.index_mirror_substituted_pointers_resource_id */ CREATE INDEX ON project_mirror_substituted_pointers (resource_id)",
     ] {
         sqlx::query(statement)
             .execute(&mut **transaction)
@@ -293,7 +293,7 @@ pub(super) async fn build(
     target: &Marker,
 ) -> Result<()> {
     let finish = format!(
-        r#"
+        r#"/* project:builders.record_inventory.mirror.build.update_stage_record_inventory_current */
         UPDATE project_stage_record_inventory_current inventory
         SET provenance = inventory.provenance || jsonb_build_object(
                 'resolver_address', mirror.resolver_address,
@@ -332,7 +332,7 @@ pub(super) async fn build(
         })?;
 
     let unsupported = format!(
-        r#"
+        r#"/* project:builders.record_inventory.mirror.build.insert_stage_record_inventory_current */
         WITH classified AS (
             SELECT mirror.*,
                    CASE

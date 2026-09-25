@@ -1,3 +1,4 @@
+/* project:stage.history.names */
 SELECT matched.normalized_event_id
 FROM (
     SELECT logical_name_id FROM project_scope_names

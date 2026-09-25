@@ -11,7 +11,7 @@ pub(super) async fn include_registry_read_anchors(
         &super::frontier::query(
             transaction,
             "registry_read_anchors",
-            "INSERT INTO project_scope_resources
+            "/* project:scope.resolver.include_registry_read_anchors */ INSERT INTO project_scope_resources
          SELECT DISTINCT pointer.resource_id
          FROM project_scope_names scope
          JOIN LATERAL (
@@ -59,7 +59,7 @@ pub(super) async fn include_permission_resources(
     // that ever named a shared resolver. Their resources are builder input only: they never enter
     // delete-and-publish resource scope.
     sqlx::query(
-        "INSERT INTO project_scope_resolver_candidate_events (
+        "/* project:scope.resolver.include_permission_resources.insert_scope_resolver_candidate_events_from_resolver_current */ INSERT INTO project_scope_resolver_candidate_events (
              normalized_event_id, resource_id
          )
          SELECT event.normalized_event_id, event.resource_id
@@ -94,7 +94,7 @@ pub(super) async fn include_permission_resources(
         ProjectError::database("failed to scope resolver permission resources", error)
     })?;
     let replacement_candidates = format!(
-        "INSERT INTO project_scope_resolver_candidate_events (
+        "/* project:scope.resolver.include_permission_resources.insert_scope_resolver_candidate_events_from_scope_retracted_resolver_evidence */ INSERT INTO project_scope_resolver_candidate_events (
              normalized_event_id, resource_id
          )
          SELECT replacement.normalized_event_id, replacement.resource_id
@@ -150,7 +150,7 @@ pub(super) async fn include_permission_resources(
             ProjectError::database("failed to replace retracted resolver candidates", error)
         })?;
     sqlx::query(
-        "INSERT INTO project_scope_resolver_candidate_resources
+        "/* project:scope.resolver.include_permission_resources.insert_scope_resolver_candidate_resources */ INSERT INTO project_scope_resolver_candidate_resources
          SELECT DISTINCT resource_id
          FROM project_scope_resolver_candidate_events
          WHERE resource_id IS NOT NULL
@@ -186,12 +186,12 @@ pub(super) async fn include_resource_pointers(
     // resource. Redo needs the former to retract losing output, while the latter set lets
     // inventory classify whichever pointer's name has the first staged readable surface.
     // Unchanged resolver summaries can be republished without staging their unrelated history.
-    sqlx::query("ANALYZE project_scope_resources")
+    sqlx::query("/* project:scope.resolver.include_resource_pointers.analyze_scope_resources */ ANALYZE project_scope_resources")
         .execute(&mut **transaction)
         .await
         .map_err(|error| ProjectError::database("failed to analyze resource scope", error))?;
     let permission_history = format!(
-        "INSERT INTO project_scope_resolver_permission_history
+        "/* project:scope.resolver.include_resource_pointers.insert_scope_resolver_permission_history */ INSERT INTO project_scope_resolver_permission_history
          SELECT lower(candidate.resolver_address)
          FROM project_scope_resources scope
          JOIN LATERAL (
@@ -230,7 +230,7 @@ pub(super) async fn include_resource_pointers(
         })?;
 
     sqlx::query(
-        "INSERT INTO project_scope_resolvers
+        "/* project:scope.resolver.include_resource_pointers.insert_scope_resolvers */ INSERT INTO project_scope_resolvers
          SELECT lower(pointer.resolver_address)
          FROM (
              SELECT inventory.provenance ->> 'resolver_address' AS resolver_address
@@ -300,7 +300,7 @@ pub(super) async fn include_link_targets(
         "project_scope_resolvers",
     ] {
         sqlx::query(&format!(
-            r#"
+            r#"/* project:scope.resolver.include_link_targets */
         INSERT INTO {table}
         SELECT DISTINCT lower(row.resolver_address)
         FROM resolver_current row
@@ -349,14 +349,14 @@ pub(super) async fn classify_unchanged(
     // also needs only its pointer resolver's existing classification. In either case, republish
     // the existing resolver summary at the new target without staging unrelated history. Redo and
     // resolver-entity changes are excluded because their keys are in resolver_dependents.
-    sqlx::query("DELETE FROM project_scope_resolver_passthrough")
+    sqlx::query("/* project:scope.resolver.classify_unchanged.delete_scope_resolver_passthrough */ DELETE FROM project_scope_resolver_passthrough")
         .execute(&mut **transaction)
         .await
         .map_err(|error| {
             ProjectError::database("failed to reset record-only resolver scope", error)
         })?;
     let passthrough_scope = format!(
-        "INSERT INTO project_scope_resolver_passthrough
+        "/* project:scope.resolver.classify_unchanged.insert_scope_resolver_passthrough */ INSERT INTO project_scope_resolver_passthrough
          SELECT lower(current.resolver_address)
          FROM resolver_current current
          JOIN project_scope_resolvers scope

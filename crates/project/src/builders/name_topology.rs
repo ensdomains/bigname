@@ -42,12 +42,12 @@ pub(in crate::builders) async fn project(
 /// an incremental build never publishes.
 async fn key_by_name(transaction: &mut Transaction<'_, Postgres>) -> Result<()> {
     for statement in [
-        "CREATE INDEX ON project_stage_name_current (logical_name_id)",
+        "/* project:builders.name_topology.key_by_name.index_stage_name_current_logical_name_id */ CREATE INDEX ON project_stage_name_current (logical_name_id)",
         // Unnamed, so the statistics object lives in the stage's own temporary namespace; a name
         // would put it in the current schema and outlive the stage.
-        "CREATE STATISTICS ON (jsonb_typeof(declared_summary -> 'topology'))
+        "/* project:builders.name_topology.key_by_name.statistics */ CREATE STATISTICS ON (jsonb_typeof(declared_summary -> 'topology'))
          FROM project_stage_name_current",
-        "ANALYZE project_stage_name_current",
+        "/* project:builders.name_topology.key_by_name.analyze_stage_name_current */ ANALYZE project_stage_name_current",
     ] {
         sqlx::query(statement)
             .execute(&mut **transaction)
@@ -61,7 +61,7 @@ async fn key_by_name(transaction: &mut Transaction<'_, Postgres>) -> Result<()> 
 
 async fn project_ownerless_ens_topology(transaction: &mut Transaction<'_, Postgres>) -> Result<()> {
     sqlx::query(
-        r#"
+        r#"/* project:builders.name_topology.project_ownerless_ens_topology */
         UPDATE project_stage_name_current name
         SET declared_summary = jsonb_set(
             name.declared_summary,
@@ -126,7 +126,7 @@ async fn project_ownerless_ens_topology(transaction: &mut Transaction<'_, Postgr
 
 async fn project_alias_topology(transaction: &mut Transaction<'_, Postgres>) -> Result<()> {
     sqlx::query(
-        r#"
+        r#"/* project:builders.name_topology.project_alias_topology */
         UPDATE project_stage_name_current name
         SET declared_summary = jsonb_set(
             name.declared_summary,
@@ -252,7 +252,7 @@ async fn project_alias_topology(transaction: &mut Transaction<'_, Postgres>) -> 
 
 async fn project_wildcard_topology(transaction: &mut Transaction<'_, Postgres>) -> Result<()> {
     sqlx::query(
-        r#"
+        r#"/* project:builders.name_topology.project_wildcard_topology */
         UPDATE project_stage_name_current name
         SET declared_summary = jsonb_set(
             name.declared_summary,
@@ -397,7 +397,7 @@ async fn project_basenames_transport(
     target: &Marker,
 ) -> Result<()> {
     sqlx::query(
-        r#"
+        r#"/* project:builders.name_topology.project_basenames_transport */
         UPDATE project_stage_name_current name
         SET declared_summary = jsonb_set(
             name.declared_summary,

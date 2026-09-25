@@ -15,7 +15,7 @@ pub(super) async fn include_registry_registrations(
     target_block: i64,
 ) -> Result<()> {
     sqlx::query(
-        r#"
+        r#"/* project:scope.registry_root */
         WITH changed_roots AS (
             SELECT DISTINCT event.after_state ->> 'registry_contract_instance_id' AS registry
             FROM project_changed_events event

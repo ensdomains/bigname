@@ -4,7 +4,7 @@ use crate::{Marker, ProjectError, Result};
 
 pub(super) async fn load(pool: &PgPool, chain_id: &str) -> Result<Marker> {
     sqlx::query_as::<_, (i64, String)>(
-        "SELECT latest_block_number, latest_block_hash FROM chain_heads WHERE chain_id = $1",
+        "/* project:hydration.head.load */ SELECT latest_block_number, latest_block_hash FROM chain_heads WHERE chain_id = $1",
     )
     .bind(chain_id)
     .fetch_optional(pool)
@@ -16,7 +16,7 @@ pub(super) async fn load(pool: &PgPool, chain_id: &str) -> Result<Marker> {
 
 pub(super) async fn interpret_redo_pending(pool: &PgPool, chain_id: &str) -> Result<bool> {
     sqlx::query_scalar(
-        "SELECT EXISTS (
+        "/* project:hydration.head.interpret_redo_pending */ SELECT EXISTS (
              SELECT 1 FROM chain_phase_state
              WHERE chain_id = $1 AND phase_name = 'interpret'
                AND redo_in_progress
@@ -34,7 +34,7 @@ pub(super) async fn require_same(
     head: &Marker,
 ) -> Result<()> {
     let current: Option<i64> = sqlx::query_scalar(
-        "SELECT latest_block_number FROM chain_heads
+        "/* project:hydration.head.require_same */ SELECT latest_block_number FROM chain_heads
          WHERE chain_id = $1 AND latest_block_number = $2 AND latest_block_hash = $3
          FOR SHARE",
     )

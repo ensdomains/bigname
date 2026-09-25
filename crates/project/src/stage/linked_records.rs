@@ -44,7 +44,7 @@ pub(super) async fn include(
 // The ID table contains exactly the rows inserted by events::create and this
 // statement. Returning IDs from the INSERT preserves same-statement duplicates
 // while preventing duplicates on subsequent includes without rereading wide rows.
-const INCLUDE_SQL: &str = r#"WITH inserted AS (
+const INCLUDE_SQL: &str = r#"/* project:stage.linked_records */ WITH inserted AS (
         INSERT INTO project_events
         SELECT event.* FROM normalized_events event
         JOIN project_scope_resolvers scope

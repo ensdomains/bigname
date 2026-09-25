@@ -22,7 +22,7 @@ pub(super) async fn build(
     Ok(())
 }
 
-pub(in crate::builders) const BUILD_PRIMARY_NAMES: &str = r#"
+pub(in crate::builders) const BUILD_PRIMARY_NAMES: &str = r#"/* project:builders.primary_names.build_primary_names */
         WITH reverse_candidates AS (
             SELECT event.*,
                    event.after_state ->> 'address' AS address,
@@ -144,7 +144,7 @@ pub(in crate::builders) const BUILD_PRIMARY_NAMES: &str = r#"
 
 async fn stage_claim_normalization(transaction: &mut Transaction<'_, Postgres>) -> Result<()> {
     sqlx::query(
-        "CREATE TEMP TABLE project_primary_claim_normalization (
+        "/* project:builders.primary_names.stage_claim_normalization.create_primary_claim_normalization */ CREATE TEMP TABLE project_primary_claim_normalization (
              normalized_event_id bigint PRIMARY KEY,
              claim_status text NOT NULL,
              raw_claim_name text,
@@ -159,7 +159,7 @@ async fn stage_claim_normalization(transaction: &mut Transaction<'_, Postgres>) 
     })?;
 
     let claims = sqlx::query(
-        "SELECT normalized_event_id,
+        "/* project:builders.primary_names.stage_claim_normalization.select_claims */ SELECT normalized_event_id,
                 CASE WHEN jsonb_typeof(after_state -> 'raw_name') = 'string'
                      THEN after_state ->> 'raw_name' END AS raw_name,
                 (after_state ? 'raw_name_bytes'
@@ -202,7 +202,7 @@ async fn stage_claim_normalization(transaction: &mut Transaction<'_, Postgres>) 
             })?;
         let claim = classify_claim(raw_name.as_deref(), has_raw_name_bytes);
         sqlx::query(
-            "INSERT INTO project_primary_claim_normalization (
+            "/* project:builders.primary_names.stage_claim_normalization.insert_primary_claim_normalization */ INSERT INTO project_primary_claim_normalization (
                  normalized_event_id, claim_status, raw_claim_name,
                  claim_name_is_normalized, unsupported_reason
              ) VALUES ($1, $2, $3, $4, $5)",

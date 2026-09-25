@@ -12,7 +12,7 @@ pub(super) async fn include_changed_migration_registry_members(
     target_block: i64,
 ) -> Result<()> {
     sqlx::query(
-        "INSERT INTO project_scope_names
+        "/* project:scope.authority.include_changed_child_proofs */ INSERT INTO project_scope_names
          SELECT DISTINCT registration.logical_name_id
          FROM migration_discovery_associations association
          JOIN chain_lineage association_lineage
@@ -62,7 +62,7 @@ pub(super) async fn include_topology_dependents(
     target_block: i64,
 ) -> Result<()> {
     sqlx::query(
-        "WITH promoted AS (
+        "/* project:scope.authority.include_topology_dependents.insert_scope_children */ WITH promoted AS (
          SELECT child.logical_name_id
          FROM (
              SELECT logical_name_id FROM project_scope_children
@@ -106,7 +106,7 @@ pub(super) async fn include_topology_dependents(
     })?;
     loop {
         let added = sqlx::query(
-            r#"
+            r#"/* project:scope.authority.include_topology_dependents.insert_scope_expiry_names */
             INSERT INTO project_scope_expiry_names
             SELECT DISTINCT registration.logical_name_id
             FROM project_scope_expiry_names parent
@@ -257,7 +257,7 @@ pub(super) async fn include_topology_dependents(
     }
     for table in ["project_scope_names", "project_scope_children"] {
         let statement = format!(
-            "INSERT INTO {table}
+            "/* project:scope.authority.include_topology_dependents.insert_{table} */ INSERT INTO {table}
              SELECT logical_name_id FROM project_scope_expiry_names
              ON CONFLICT DO NOTHING"
         );
@@ -280,7 +280,7 @@ pub(super) async fn include_latest_arm_resources(
         &super::frontier::query(
             transaction,
             "latest_arm_resources",
-            "INSERT INTO project_scope_resources
+            "/* project:scope.authority.include_latest_arm_resources */ INSERT INTO project_scope_resources
          SELECT DISTINCT ON (binding.logical_name_id, binding.authority_arm)
                 binding.resource_id
          FROM project_scope_names scope

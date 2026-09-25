@@ -1,3 +1,4 @@
+/* project:builders.name_authority.build */
         CREATE TEMP TABLE project_name_authority ON COMMIT DROP AS
         WITH target_time AS (
             SELECT block_timestamp + interval '1 second' AS cutoff

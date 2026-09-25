@@ -514,3 +514,48 @@ fn pinned_outcome() -> PhaseBatchOutcome {
         ..PhaseProgress::default()
     })
 }
+
+#[test]
+fn project_batches_set_last_batch_gauges_and_add_up_written_rows() -> Result<()> {
+    let metrics = PipelineMetrics::new(
+        900,
+        RunnerLoopHeartbeat::default(),
+        RunnerPhaseProgress::default(),
+    )?;
+    let feed = RunnerMetricsFeed::default();
+    let batch = |blocks: u64, inserted: u64, deleted: u64| bigname_project::WriteSummary {
+        blocks,
+        changed_events: blocks * 3,
+        staged_events: blocks * 40,
+        scope_keys: [("names", blocks * 2), ("resources", blocks)].into(),
+        deleted: [("name_current", deleted)].into(),
+        inserted: [("name_current", inserted), ("child_registration_events", 1)].into(),
+        stage_elapsed_ms: [("scope", 250), ("publish", 1_500)].into(),
+    };
+    // Two batches commit before the metrics task wakes: the gauges show the second, the counter
+    // adds both.
+    feed.project_batch("ethereum-sepolia", &batch(1, 5, 4));
+    feed.project_batch("ethereum-sepolia", &batch(2, 7, 6));
+    metrics.project_writes.apply(feed.take_project_writes());
+    // Nothing is pending after an apply, so a refresh with no new batch changes nothing.
+    metrics.project_writes.apply(feed.take_project_writes());
+
+    let scrape = metrics.registry.encode()?;
+    for line in [
+        "# TYPE phase_runner_project_rows_written_total counter",
+        "# TYPE phase_runner_project_stage_duration_seconds gauge",
+        "phase_runner_project_batch_blocks{chain=\"ethereum-sepolia\"} 2\n",
+        "phase_runner_project_changed_events{chain=\"ethereum-sepolia\"} 6\n",
+        "phase_runner_project_staged_events{chain=\"ethereum-sepolia\"} 80\n",
+        "phase_runner_project_scope_keys{chain=\"ethereum-sepolia\",scope=\"names\"} 4\n",
+        "phase_runner_project_scope_keys{chain=\"ethereum-sepolia\",scope=\"resources\"} 2\n",
+        "phase_runner_project_rows_written_total{chain=\"ethereum-sepolia\",kind=\"inserted\",table=\"name_current\"} 12\n",
+        "phase_runner_project_rows_written_total{chain=\"ethereum-sepolia\",kind=\"deleted\",table=\"name_current\"} 10\n",
+        "phase_runner_project_rows_written_total{chain=\"ethereum-sepolia\",kind=\"inserted\",table=\"child_registration_events\"} 2\n",
+        "phase_runner_project_stage_duration_seconds{chain=\"ethereum-sepolia\",stage=\"publish\"} 1.5\n",
+        "phase_runner_project_stage_duration_seconds{chain=\"ethereum-sepolia\",stage=\"scope\"} 0.25\n",
+    ] {
+        assert!(scrape.contains(line), "missing {line}");
+    }
+    Ok(())
+}

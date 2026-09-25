@@ -24,7 +24,7 @@ async fn candidates(
 ) -> Result<()> {
     validate_parent_migration_paths(transaction).await?;
     sqlx::query(
-        r#"
+        r#"/* project:builders.children.candidates.create_child_candidates */
         CREATE TEMP TABLE project_child_candidates ON COMMIT DROP AS
         WITH target_time AS (
             SELECT extract(epoch FROM block_timestamp) AS epoch_seconds,
@@ -450,7 +450,7 @@ async fn candidates(
     .map_err(|error| ProjectError::database("failed to stage child candidates", error))?;
 
     sqlx::query(
-        "CREATE INDEX ON project_child_candidates (
+        "/* project:builders.children.candidates.index_child_candidates_parent_logical_name_id */ CREATE INDEX ON project_child_candidates (
              parent_logical_name_id, child_logical_name_id
          )",
     )
@@ -463,7 +463,7 @@ async fn validate_parent_migration_paths(
     transaction: &mut Transaction<'_, Postgres>,
 ) -> Result<()> {
     let invalid: Option<(String, Option<String>)> = sqlx::query_as(
-        "SELECT logical_name_id, migration_path FROM (
+        "/* project:builders.children.validate_parent_migration_paths */ SELECT logical_name_id, migration_path FROM (
              SELECT DISTINCT ON (logical_name_id) logical_name_id,
                     after_state ->> 'migration_path' AS migration_path FROM project_events
              WHERE source_family = 'ens_v2_migration_l1' AND event_kind = 'MigrationApplied'
@@ -492,7 +492,7 @@ async fn publish(
     target: &Marker,
 ) -> Result<()> {
     sqlx::query(
-        r#"
+        r#"/* project:builders.children.publish */
         WITH selected AS (
             SELECT candidate.*,
                    row_number() OVER (

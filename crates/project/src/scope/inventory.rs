@@ -12,7 +12,7 @@ pub(super) async fn include_changed_node_record_dependents(
     // Collapse repeated record writes and resolve their surfaces before shared-resolver joins.
     // Keep namespace and manifest in the key: only the v2 arm requires their declaration match.
     sqlx::query(
-        "CREATE TEMP TABLE project_changed_node_record_keys ON COMMIT DROP AS
+        "/* project:scope.inventory.include_changed_node_record_dependents.create_changed_node_record_keys */ CREATE TEMP TABLE project_changed_node_record_keys ON COMMIT DROP AS
          WITH records AS MATERIALIZED (
              SELECT DISTINCT chain_id, namespace, source_manifest_id, source_family,
                     lower(after_state ->> 'node') AS node,
@@ -35,7 +35,7 @@ pub(super) async fn include_changed_node_record_dependents(
     .execute(&mut **transaction)
     .await
     .map_err(|error| ProjectError::database("failed to stage changed node record keys", error))?;
-    sqlx::query("ANALYZE project_changed_node_record_keys")
+    sqlx::query("/* project:scope.inventory.include_changed_node_record_dependents.analyze_changed_node_record_keys */ ANALYZE project_changed_node_record_keys")
         .execute(&mut **transaction)
         .await
         .map_err(|error| {
@@ -46,7 +46,7 @@ pub(super) async fn include_changed_node_record_dependents(
     // A broad inventory-first stage would evaluate malformed IDs from unrelated inventories.
     // Retain every historical pointer here; the final equality selects the exact published ID.
     sqlx::query(
-        "CREATE TEMP TABLE project_changed_node_record_dependents ON COMMIT DROP AS
+        "/* project:scope.inventory.include_changed_node_record_dependents.create_changed_node_record_dependents */ CREATE TEMP TABLE project_changed_node_record_dependents ON COMMIT DROP AS
          WITH candidates AS MATERIALIZED (
              SELECT pointer.logical_name_id, inventory.resource_id,
                     pointer.normalized_event_id,
@@ -102,7 +102,7 @@ pub(super) async fn include_changed_node_record_dependents(
     })?;
 
     sqlx::query(
-        "INSERT INTO project_scope_names
+        "/* project:scope.inventory.include_changed_node_record_dependents.insert_scope_names */ INSERT INTO project_scope_names
          SELECT logical_name_id FROM project_changed_node_record_dependents
          ON CONFLICT DO NOTHING",
     )
@@ -112,7 +112,7 @@ pub(super) async fn include_changed_node_record_dependents(
         ProjectError::database("failed to scope changed node-only record names", error)
     })?;
     sqlx::query(
-        "INSERT INTO project_scope_resources
+        "/* project:scope.inventory.include_changed_node_record_dependents.insert_scope_resources */ INSERT INTO project_scope_resources
          SELECT resource_id FROM project_changed_node_record_dependents
          ON CONFLICT DO NOTHING",
     )
@@ -130,7 +130,7 @@ pub(super) async fn include_changed_record_consumers(
     target_block: i64,
 ) -> Result<()> {
     // Temporary tables have no autovacuum statistics; replay windows can contain many records.
-    sqlx::query("ANALYZE project_changed_events")
+    sqlx::query("/* project:scope.inventory.include_changed_record_consumers.analyze_changed_events */ ANALYZE project_changed_events")
         .execute(&mut **transaction)
         .await
         .map_err(|error| {
@@ -153,7 +153,7 @@ pub(super) async fn include_changed_record_consumers(
     // Match Basenames candidates before checking pointer evidence: the correlated guard must
     // not prevent a composite hash join or cast pointer IDs from unrelated inventory rows.
     sqlx::query(
-        "WITH attributed_records AS MATERIALIZED (
+        "/* project:scope.inventory.include_changed_record_consumers.insert_scope_names */ WITH attributed_records AS MATERIALIZED (
              SELECT DISTINCT event.logical_name_id,
                     lower(event.raw_fact_ref ->> 'emitting_address') AS address
              FROM project_changed_events event
@@ -266,10 +266,10 @@ pub(super) async fn close(
     target: &Marker,
     evidence_only: bool,
 ) -> Result<()> {
-    sqlx::query("CREATE TEMP TABLE project_inventory_seen_resources (resource_id uuid PRIMARY KEY) ON COMMIT DROP")
+    sqlx::query("/* project:scope.inventory.close.create_inventory_seen_resources */ CREATE TEMP TABLE project_inventory_seen_resources (resource_id uuid PRIMARY KEY) ON COMMIT DROP")
         .execute(&mut **transaction).await
         .map_err(|error| ProjectError::database("failed to create inventory frontier", error))?;
-    sqlx::query("CREATE TEMP TABLE project_inventory_frontier_resources (resource_id uuid PRIMARY KEY) ON COMMIT DROP")
+    sqlx::query("/* project:scope.inventory.close.create_inventory_frontier_resources */ CREATE TEMP TABLE project_inventory_frontier_resources (resource_id uuid PRIMARY KEY) ON COMMIT DROP")
         .execute(&mut **transaction).await
         .map_err(|e| ProjectError::database("failed to create inventory keys", e))?;
     let mut mirror_strategy = mirror::stage(transaction, chain_id, target.number).await?;
@@ -292,7 +292,7 @@ pub(super) async fn close(
         super::close_binding_scope(transaction, chain_id, target).await?;
         if scope_size(transaction).await? == before {
             mirror::finish(transaction, mirror_strategy).await?;
-            sqlx::query("DROP TABLE project_mirror_seen_resources, project_mirror_seen_names, project_mirror_changed_nodes, project_inventory_seen_resources, project_inventory_frontier_resources")
+            sqlx::query("/* project:scope.inventory.close.drop_mirror_seen_resources */ DROP TABLE project_mirror_seen_resources, project_mirror_seen_names, project_mirror_changed_nodes, project_inventory_seen_resources, project_inventory_frontier_resources")
                 .execute(&mut **transaction)
                 .await
                 .map_err(|error| {
@@ -305,7 +305,7 @@ pub(super) async fn close(
 
 async fn scope_size(transaction: &mut Transaction<'_, Postgres>) -> Result<(i64, i64)> {
     sqlx::query_as(
-        "SELECT (SELECT count(*) FROM project_scope_names),
+        "/* project:scope.inventory.scope_size */ SELECT (SELECT count(*) FROM project_scope_names),
                 (SELECT count(*) FROM project_scope_resources)",
     )
     .fetch_one(&mut **transaction)
@@ -338,12 +338,12 @@ async fn include_pointer_names(
         )
         .await;
     }
-    sqlx::query("TRUNCATE project_inventory_frontier_resources")
+    sqlx::query("/* project:scope.inventory.include_pointer_names.truncate_inventory_frontier_resources */ TRUNCATE project_inventory_frontier_resources")
         .execute(&mut **transaction)
         .await
         .map_err(|e| ProjectError::database("failed to clear inventory frontier", e))?;
     let count = sqlx::query(
-        "WITH added AS (
+        "/* project:scope.inventory.include_pointer_names.insert_inventory_frontier_resources */ WITH added AS (
              INSERT INTO project_inventory_seen_resources
              SELECT scope.resource_id FROM project_scope_resources scope
              WHERE NOT EXISTS (SELECT 1 FROM project_inventory_seen_resources seen
@@ -355,11 +355,11 @@ async fn include_pointer_names(
     .await
     .map_err(|e| ProjectError::database("failed to populate inventory frontier", e))?
     .rows_affected();
-    sqlx::query("ANALYZE project_inventory_frontier_resources")
+    sqlx::query("/* project:scope.inventory.include_pointer_names.analyze_inventory_frontier_resources */ ANALYZE project_inventory_frontier_resources")
         .execute(&mut **transaction)
         .await
         .map_err(|e| ProjectError::database("failed to analyze inventory frontier", e))?;
-    let statement = "INSERT INTO project_scope_names
+    let statement = "/* project:scope.inventory.include_pointer_names.insert_scope_names */ INSERT INTO project_scope_names
          SELECT DISTINCT event.logical_name_id
          FROM project_inventory_frontier_resources scope
          JOIN LATERAL (

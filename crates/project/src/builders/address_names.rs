@@ -24,7 +24,7 @@ pub(super) async fn build(
     Ok(())
 }
 
-pub(in crate::builders) const BUILD_ADDRESS_NAMES: &str = r#"
+pub(in crate::builders) const BUILD_ADDRESS_NAMES: &str = r#"/* project:builders.address_names */
         WITH RECURSIVE target_time AS (
             SELECT extract(epoch FROM lineage.block_timestamp) AS epoch_seconds
             FROM chain_lineage lineage

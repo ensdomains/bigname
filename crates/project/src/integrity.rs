@@ -42,7 +42,7 @@ async fn assert_exact_name_authority(
     target: &Marker,
 ) -> Result<()> {
     let conflict = sqlx::query(
-        r#"
+        r#"/* project:integrity.assert_exact_name_authority */
         WITH target_time AS (
             SELECT block_timestamp + interval '1 second' AS cutoff,
                    canonicality_state
@@ -260,7 +260,7 @@ async fn assert_child_authority(
     target: &Marker,
 ) -> Result<()> {
     let conflict = sqlx::query(
-        r#"
+        r#"/* project:integrity.assert_child_authority */
         WITH target_lineage AS (
             SELECT canonicality_state
             FROM chain_lineage

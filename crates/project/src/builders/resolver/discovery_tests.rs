@@ -200,7 +200,7 @@ async fn scoped_discovery_preserves_all_ten_project_outputs() -> Result<()> {
                 .await?;
             crate::builders::build_all(&mut tx, CHAIN, &target, full, &Default::default()).await?;
             crate::integrity::assert_publishable(&mut tx, CHAIN, &target).await?;
-            crate::publish::swap(&mut tx, CHAIN, full).await?;
+            crate::publish::swap(&mut tx, CHAIN, full, &mut Default::default()).await?;
             let result = outputs(&mut tx).await?;
             ensure!(
                 !result[0].is_empty() && !result[6].is_empty(),

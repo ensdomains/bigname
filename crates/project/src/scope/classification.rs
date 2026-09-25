@@ -12,7 +12,7 @@ pub(super) async fn include_changed_declaration_winners(
     // same namespace. The builder filters `active_discovery_admissions.source_family` only for
     // its separate non-declaration row, so that column must not filter this check.
     sqlx::query(
-        "WITH winning_declaration AS (
+        "/* project:scope.classification.include_changed_declaration_winners */ WITH winning_declaration AS (
              SELECT DISTINCT ON (declaration.resolver_address)
                     declaration.resolver_address,
                     declaration.namespace AS classification_admission_namespace,
@@ -104,7 +104,7 @@ pub(super) async fn include_scope(
     target_block: i64,
 ) -> Result<()> {
     sqlx::query(
-        "INSERT INTO project_scope_resolver_dependents
+        "/* project:scope.classification.include_scope.insert_scope_resolver_dependents */ INSERT INTO project_scope_resolver_dependents
          SELECT lower(live.resolver_address) FROM resolver_current live
          LEFT JOIN project_manifests manifest
            ON manifest.manifest_id = (live.provenance ->> 'manifest_id')::bigint
@@ -193,7 +193,7 @@ pub(super) async fn include_scope(
     include_changed_declaration_winners(transaction, chain_id, target_block).await?;
 
     sqlx::query(
-        "INSERT INTO project_scope_resolvers
+        "/* project:scope.classification.include_scope.insert_scope_resolvers */ INSERT INTO project_scope_resolvers
          SELECT resolver_address FROM project_scope_resolver_dependents
          ON CONFLICT DO NOTHING",
     )

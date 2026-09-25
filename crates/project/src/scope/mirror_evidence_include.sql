@@ -1,3 +1,4 @@
+/* project:scope.mirror_evidence_include.insert_scope_resources */
 WITH full_links AS MATERIALIZED (
  SELECT link.* FROM project_mirror_frontier_resources scope JOIN project_mirror_links link
    ON link.mirror_resource_id = scope.resource_id
@@ -28,6 +29,7 @@ INSERT INTO project_scope_resources
 SELECT mirror_resource_id FROM selected_links
 ON CONFLICT DO NOTHING;
 
+/* project:scope.mirror_evidence_include.insert_mirror_evidence_names */
 -- Only affected mirror resources publish. Consulted nodes are read dependencies.
 INSERT INTO project_mirror_evidence_names
 SELECT DISTINCT link.consulted_logical_name_id
@@ -35,6 +37,7 @@ FROM project_scope_resources scope
 JOIN project_mirror_links link ON link.mirror_resource_id = scope.resource_id
 ON CONFLICT DO NOTHING;
 
+/* project:scope.mirror_evidence_include.insert_mirror_evidence_nodes */
 INSERT INTO project_mirror_evidence_nodes
 SELECT DISTINCT link.namespace, link.namehash
 FROM project_scope_resources scope

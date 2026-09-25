@@ -17,7 +17,7 @@ pub(super) async fn build(
     target: &Marker,
 ) -> Result<()> {
     sqlx::query(
-        r#"
+        r#"/* project:builders.address_records */
         WITH record_entries AS (
             SELECT inventory.resource_id,
                    inventory.record_version_boundary_key,

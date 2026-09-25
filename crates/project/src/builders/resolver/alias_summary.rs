@@ -8,7 +8,7 @@ pub(super) async fn stage(
     sample_limit: i32,
 ) -> Result<()> {
     sqlx::query(
-        r#"
+        r#"/* project:builders.resolver.alias_summary */
         CREATE TEMP TABLE project_resolver_alias_summary ON COMMIT DROP AS
         WITH alias_candidates AS (
             SELECT candidate.*,

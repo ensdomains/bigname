@@ -23,7 +23,7 @@ pub(super) async fn create(
         event_source
     };
     let mut statement = format!(
-        "CREATE TEMP TABLE project_events ON COMMIT DROP AS
+        "/* project:stage.events.create.create_events */ CREATE TEMP TABLE project_events ON COMMIT DROP AS
          SELECT event.*
          FROM {event_source}
          LEFT JOIN chain_lineage lineage
@@ -47,9 +47,9 @@ pub(super) async fn create(
     let reference = false;
     if !full_rebuild && !reference {
         for create in [
-            "CREATE TEMP TABLE project_events ON COMMIT DROP AS
+            "/* project:stage.events.create.create_empty_events */ CREATE TEMP TABLE project_events ON COMMIT DROP AS
                  SELECT * FROM normalized_events WITH NO DATA",
-            "CREATE TEMP TABLE project_staged_event_ids (
+            "/* project:stage.events.create.create_staged_event_ids */ CREATE TEMP TABLE project_staged_event_ids (
                  normalized_event_id bigint PRIMARY KEY
              ) ON COMMIT DROP",
         ] {
@@ -82,14 +82,14 @@ pub(super) async fn create(
             .map_err(|error| ProjectError::database("failed to stage canonical events", error))?;
     }
     for statement in [
-        "CREATE INDEX ON project_events (logical_name_id, normalized_event_id)",
-        "CREATE INDEX ON project_events (resource_id, normalized_event_id)",
-        "CREATE INDEX ON project_events (event_kind, normalized_event_id)",
-        "CREATE INDEX ON project_events (event_kind, chain_id, normalized_event_id)",
+        "/* project:stage.events.create.index_events_logical_name_id */ CREATE INDEX ON project_events (logical_name_id, normalized_event_id)",
+        "/* project:stage.events.create.index_events_resource_id */ CREATE INDEX ON project_events (resource_id, normalized_event_id)",
+        "/* project:stage.events.create.index_events_event_kind */ CREATE INDEX ON project_events (event_kind, normalized_event_id)",
+        "/* project:stage.events.create.index_events_event_kind_chain */ CREATE INDEX ON project_events (event_kind, chain_id, normalized_event_id)",
         // Resolver pointers and records are looked up by node, once per reverse claim in primary
         // names. The index covers every row: the planner reads expression statistics only from
         // a complete index, and with a partial one it guessed hundreds of rows per node.
-        "CREATE INDEX ON project_events (lower(after_state ->> 'node'))",
+        "/* project:stage.events.create.index_events_after_state */ CREATE INDEX ON project_events (lower(after_state ->> 'node'))",
     ] {
         sqlx::query(statement)
             .execute(&mut **transaction)
@@ -101,7 +101,7 @@ pub(super) async fn create(
 
 // Retain the inserted IDs without rereading the wide event stage. Initial scope IDs may
 // include events rejected by visibility or lineage admission and cannot serve this purpose.
-const SCOPED_EVENTS_SQL: &str = r#"
+const SCOPED_EVENTS_SQL: &str = r#"/* project:stage.events.scoped_events_sql */
 WITH inserted AS (
     INSERT INTO project_events
     SELECT event.*
