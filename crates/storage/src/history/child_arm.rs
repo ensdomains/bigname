@@ -3,9 +3,11 @@
 //!
 //! The arm is keyed by the parent and served by `child_registration_events_parent_history_idx`
 //! (`parent_logical_name_id, chain_id, block_number, block_hash, transaction_order_key,
-//! log_order_key, event_identity`). Within one parent and chain that key order is the history
-//! order, so the keyset bound below is one row comparison on the index and a page reads at most
-//! `page_size + 1` membership rows whatever else the table holds.
+//! log_order_key, event_identity`). `transaction_order_key` and `log_order_key` are the event's
+//! transaction index and log index with -1 for a missing one, so within one parent and chain that
+//! key order is the history order, the keyset bound below is one row comparison on the index,
+//! and a page reads at most `page_size + 1` membership rows whatever else the table holds. The
+//! arm's limit therefore keeps exactly the rows the merged order takes.
 
 use std::cmp::Ordering;
 
@@ -156,7 +158,7 @@ fn push_membership_matches_event(builder: &mut QueryBuilder<'_, Postgres>) {
          AND ne.chain_id = m.chain_id
          AND ne.block_number = m.block_number
          AND ne.block_hash = m.block_hash
-         AND COALESCE(ne.transaction_hash, '') = m.transaction_order_key
+         AND COALESCE(ne.transaction_index, -1) = m.transaction_order_key
          AND COALESCE(ne.log_index, -1) = m.log_order_key
          AND ne.logical_name_id = m.child_logical_name_id
         "#,
@@ -184,13 +186,13 @@ pub(super) struct CursorPosition {
     pub(super) arm_chain_order: Option<i32>,
     pub(super) block_number: Option<i64>,
     pub(super) block_hash: Option<String>,
-    pub(super) transaction_hash: Option<String>,
+    pub(super) transaction_index: Option<i64>,
     pub(super) log_index: Option<i64>,
     pub(super) event_identity: String,
 }
 
 /// The arm's rows after the cursor, as an index bound. History orders `block_number DESC NULLS
-/// LAST, chain_id ASC NULLS LAST, block_hash DESC NULLS LAST, transaction_hash DESC NULLS LAST,
+/// LAST, chain_id ASC NULLS LAST, block_hash DESC NULLS LAST, transaction_index DESC NULLS LAST,
 /// log_index DESC NULLS LAST, event_identity DESC`, and `asc` is its exact reverse. The arm has
 /// one chain, so the cursor's chain only decides whether the cursor's own block is included.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -205,7 +207,7 @@ pub(super) enum ChildArmBound {
         operator: &'static str,
         block_number: i64,
         block_hash: String,
-        transaction_order_key: String,
+        transaction_order_key: i64,
         log_order_key: i64,
         event_identity: String,
     },
@@ -234,7 +236,7 @@ impl ChildArmBound {
                 arm_chain_order,
                 block_number: position.block_number,
                 block_hash: position.block_hash.clone(),
-                transaction_hash: position.transaction_hash.clone(),
+                transaction_index: position.transaction_index,
                 log_index: position.log_index,
                 event_identity: cursor.event_identity.clone(),
             }));
@@ -245,7 +247,7 @@ impl ChildArmBound {
                          WHEN $2 < chain_id THEN -1
                          WHEN $2 > chain_id THEN 1
                          ELSE 0 END AS arm_chain_order,
-                    block_number, block_hash, transaction_hash, log_index, event_identity
+                    block_number, block_hash, transaction_index, log_index, event_identity
              FROM bigname_phase.normalized_events WHERE event_identity = $1",
         )
         .bind(event_identity)
@@ -285,7 +287,7 @@ impl ChildArmBound {
                 operator: if descending { "<" } else { ">" },
                 block_number,
                 block_hash: block_hash.clone(),
-                transaction_order_key: cursor.transaction_hash.clone().unwrap_or_default(),
+                transaction_order_key: cursor.transaction_index.unwrap_or(-1),
                 log_order_key: cursor.log_index.unwrap_or(-1),
                 event_identity: cursor.event_identity.clone(),
             },
@@ -321,7 +323,7 @@ impl ChildArmBound {
                 builder.push(", ");
                 builder.push_bind(block_hash);
                 builder.push(", ");
-                builder.push_bind(transaction_order_key);
+                builder.push_bind(*transaction_order_key);
                 builder.push(", ");
                 builder.push_bind(*log_order_key);
                 builder.push(", ");
@@ -341,7 +343,7 @@ mod tests {
             arm_chain_order: chain_order,
             block_number: block,
             block_hash: hash.map(str::to_owned),
-            transaction_hash: None,
+            transaction_index: None,
             log_index: None,
             event_identity: "anchor".to_owned(),
         }
@@ -383,7 +385,7 @@ mod tests {
     #[test]
     fn a_same_chain_cursor_bounds_the_whole_index_key() {
         let same = CursorPosition {
-            transaction_hash: None,
+            transaction_index: None,
             log_index: None,
             ..cursor(Some(0), Some(7), Some("0x07"))
         };
@@ -396,11 +398,11 @@ mod tests {
         else {
             panic!("a same-chain positioned cursor bounds the row key");
         };
-        // A missing transaction hash or log index sorts last descending, like the keys stored
+        // A missing transaction index or log index sorts last descending, like the keys stored
         // for it.
         assert_eq!(
-            (operator, transaction_order_key.as_str(), log_order_key),
-            ("<", "", -1)
+            (operator, transaction_order_key, log_order_key),
+            ("<", -1, -1)
         );
     }
 }

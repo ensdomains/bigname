@@ -395,6 +395,7 @@ include!("tests/v2_history_paging.rs");
 include!("tests/v2_history_keyset.rs");
 include!("tests/v2_history_keyset_walk.rs");
 include!("tests/v2_history_d12.rs");
+include!("tests/v2_history_d12_children.rs");
 include!("tests/v2_history_child_registrations.rs");
 include!("tests/v2_diag_events.rs");
 include!("tests/v2_address_names.rs");

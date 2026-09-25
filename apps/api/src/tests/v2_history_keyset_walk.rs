@@ -94,6 +94,7 @@ async fn hkw_move_event(
 ) -> Result<()> {
     let hash = format!("0xhistory{block}");
     let transaction = format!("0xtx{block}");
+    // The moved row is its block's only transaction, at index 0.
     let moved = sqlx::query(
         "UPDATE bigname_phase.normalized_events
          SET block_number = $2, block_hash = $3, transaction_hash = $4,
@@ -111,14 +112,13 @@ async fn hkw_move_event(
     anyhow::ensure!(moved == 1, "{event_identity} must exist");
     sqlx::query(
         "UPDATE bigname_phase.child_registration_events
-         SET block_number = $2, block_hash = $3, transaction_order_key = $4, log_order_key = $5,
+         SET block_number = $2, block_hash = $3, transaction_order_key = 0, log_order_key = $4,
              target_block_number = $2, target_block_hash = $3
          WHERE event_identity = $1",
     )
     .bind(event_identity)
     .bind(block)
     .bind(&hash)
-    .bind(&transaction)
     .bind(log_index)
     .execute(&database.pool)
     .await?;

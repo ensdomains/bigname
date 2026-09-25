@@ -20,7 +20,7 @@ async fn seed_child_registration_memberships(
              manifest_version, target_block_number, target_block_hash
          )
          SELECT $1, ne.event_identity, ne.logical_name_id, ne.namespace, ne.chain_id,
-                ne.block_number, ne.block_hash, COALESCE(ne.transaction_hash, ''),
+                ne.block_number, ne.block_hash, COALESCE(ne.transaction_index, -1),
                 COALESCE(ne.log_index, -1), ne.event_kind, ne.manifest_version,
                 ne.block_number, ne.block_hash
          FROM bigname_phase.normalized_events ne

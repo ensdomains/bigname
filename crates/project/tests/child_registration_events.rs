@@ -281,15 +281,89 @@ fn seeded_rows() -> Vec<(String, String, String, i64, String)> {
 async fn membership_follows_event_time_names_and_keeps_history() -> Result<()> {
     let (database, pool) = database("child_registration_membership").await?;
     seed(&pool).await?;
+    sqlx::query(
+        "UPDATE normalized_events SET transaction_index = 4 WHERE event_identity = 'a-p-grant'",
+    )
+    .execute(&pool)
+    .await?;
     project(&pool, 13, None, RunMode::Normal).await?;
     assert_eq!(rows(&pool).await?, seeded_rows());
-    let (order_key, log_key, provenance): (String, i64, Value) = sqlx::query_as(
+    let (order_key, log_key, provenance): (i64, i64, Value) = sqlx::query_as(
         "SELECT transaction_order_key, log_order_key, provenance FROM child_registration_events WHERE event_identity = 'a-p-grant'",
     )
     .fetch_one(&pool)
     .await?;
-    assert_eq!((order_key.as_str(), log_key), ("0xtx10", 2));
+    // The transaction order key is the event's transaction index, not its hash.
+    assert_eq!((order_key, log_key), (4, 2));
     assert_eq!(provenance["source_family"], json!(V2));
+    database.cleanup().await
+}
+
+/// The schema-migration that moves the key from the transaction hash to the transaction index
+/// backfills every published row from its event, gives a row whose event is gone the -1 key, and
+/// leaves an already migrated table alone on a rerun.
+#[tokio::test]
+async fn transaction_key_migration_backfills_the_transaction_index() -> Result<()> {
+    const MIGRATION: &str = include_str!(
+        "../../../migrations/20260926120000_child_registration_events_transaction_index_key.sql"
+    );
+    let (database, pool) = database("child_registration_key_migration").await?;
+    seed(&pool).await?;
+    sqlx::query(
+        "UPDATE normalized_events SET transaction_index = 4 WHERE event_identity = 'a-p-grant'",
+    )
+    .execute(&pool)
+    .await?;
+    project(&pool, 13, None, RunMode::Normal).await?;
+    let migrated: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT event_identity, transaction_order_key FROM child_registration_events
+         ORDER BY parent_logical_name_id, event_identity",
+    )
+    .fetch_all(&pool)
+    .await?;
+    // The table as the earlier schema-migration left it: the key held the transaction hash.
+    raw_sql(
+        "DROP INDEX child_registration_events_parent_history_idx;
+         ALTER TABLE child_registration_events
+             DROP CONSTRAINT child_registration_events_transaction_order_key_check;
+         ALTER TABLE child_registration_events
+             ALTER COLUMN transaction_order_key TYPE text USING transaction_order_key::text;
+         UPDATE child_registration_events membership
+         SET transaction_order_key = COALESCE(event.transaction_hash, '')
+         FROM normalized_events event
+         WHERE event.event_identity = membership.event_identity;
+         CREATE INDEX child_registration_events_parent_history_idx
+             ON child_registration_events (parent_logical_name_id, chain_id, block_number,
+                 block_hash, transaction_order_key, log_order_key, event_identity);
+         INSERT INTO child_registration_events
+             SELECT parent_logical_name_id, 'gone-event', child_logical_name_id, namespace,
+                    chain_id, block_number, block_hash, '0xgone', log_order_key, event_kind,
+                    manifest_version, provenance, target_block_number, target_block_hash,
+                    last_recomputed_at, inserted_at
+             FROM child_registration_events WHERE event_identity = 'a-p-grant';",
+    )
+    .execute(&pool)
+    .await?;
+    for _ in 0..2 {
+        raw_sql(MIGRATION).execute(&pool).await?;
+    }
+    let mut backfilled: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT event_identity, transaction_order_key FROM child_registration_events
+         ORDER BY parent_logical_name_id, event_identity",
+    )
+    .fetch_all(&pool)
+    .await?;
+    let gone = backfilled
+        .iter()
+        .position(|(identity, _)| identity == "gone-event")
+        .map(|index| backfilled.remove(index));
+    assert_eq!(gone, Some(("gone-event".to_owned(), -1)));
+    // Every other row holds the key the Project stage writes, the index 4 included.
+    assert!(
+        migrated.contains(&("a-p-grant".to_owned(), 4)),
+        "{migrated:?}"
+    );
+    assert_eq!(backfilled, migrated);
     database.cleanup().await
 }
 

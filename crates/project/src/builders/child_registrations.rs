@@ -91,7 +91,7 @@ pub(super) async fn build(
          )
          SELECT parent.parent_logical_name_id, event.event_identity, event.logical_name_id,
                 child.namespace, event.chain_id, event.block_number, event.block_hash,
-                COALESCE(event.transaction_hash, ''), COALESCE(event.log_index, -1),
+                COALESCE(event.transaction_index, -1), COALESCE(event.log_index, -1),
                 event.event_kind, event.manifest_version,
                 jsonb_build_object(
                     'normalized_event_id', event.normalized_event_id,
