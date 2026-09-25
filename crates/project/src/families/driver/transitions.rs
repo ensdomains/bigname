@@ -82,8 +82,7 @@ impl Run<'_> {
         if blocks.last() != Some(&self.target.number) {
             blocks.push(self.target.number);
         }
-        let mut visited: u64 = 0;
-        for number in blocks {
+        for (visited, number) in (0_u64..).zip(blocks) {
             if !self.budget.take(outcome) {
                 return Ok(());
             }
@@ -93,7 +92,6 @@ impl Run<'_> {
             if visited > 0 && visited.is_power_of_two() {
                 analyze(self.pool, self.chain_id).await;
             }
-            visited += 1;
             let completes = number == self.target.number;
             let plan = block::Plan {
                 predecessor: family.current.as_ref(),
