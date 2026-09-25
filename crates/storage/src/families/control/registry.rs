@@ -130,9 +130,11 @@ pub fn registry_generation(
 /// (stage.rs:201-268 reads AuthorityTransferred only), no binding is selected and the arm is not
 /// ENSv2. Today's stage keys the transfers by name: the event's name, else the latest named
 /// event of its resource and family, else the active surface of its node. The families key them
-/// by node, which is the name's namehash, so they differ only for an unnamed transfer whose
-/// resource another name's events carry, or whose node has no active surface: the shadow counts
-/// it and today's stage does not, and the comparison fails rather than passing silently.
+/// by node, which is the name's namehash. The node-keyed and name-keyed latest transfer can
+/// therefore differ, for example for an unnamed transfer whose resource another name's events
+/// carry, for one whose node has no active surface, or when names share a node; where they
+/// differ the comparison fails rather than passing silently. The comparison checks this boolean
+/// only, not the profile's other details.
 pub fn ownerless_registry(
     node: Option<&RegistryNode>,
     selected_binding: Option<&str>,
