@@ -1009,5 +1009,30 @@ async fn another_chain_served_rows_are_not_compared() -> Result<()> {
         "{:#?}",
         report.lines
     );
+    // Adversarial pass on 5bf7fca1 (item 7): the other chain's permission row on this chain's
+    // resource id, an admin power for another subject, is neither a grant nor an admin power of
+    // the resource here (the admin read scopes by provenance chain too).
+    sqlx::query(
+        "INSERT INTO permissions_current
+         SELECT (jsonb_populate_record(NULL::permissions_current,
+                    to_jsonb(row) || jsonb_build_object('subject', $1::text,
+                        'effective_powers', '[\"admin_set_resolver\"]'::jsonb,
+                        'provenance', row.provenance || $2::jsonb))).*
+         FROM permissions_current row WHERE row.resource_id = $3::uuid AND row.subject = $4",
+    )
+    .bind("0x00000000000000000000000000000000000000cc")
+    .bind(&chain)
+    .bind(&k1)
+    .bind(BOB)
+    .execute(&fixture.pool)
+    .await?;
+    let admins = shadow_support::compare::compare(&fixture.pool, CHAIN, 16).await?;
+    assert_counts(&admins, &[], &[]);
+    assert_eq!(
+        (admins.names, admins.resources, admins.equal),
+        (baseline.names, baseline.resources, baseline.equal),
+        "{:#?}",
+        admins.lines
+    );
     fixture.cleanup().await
 }

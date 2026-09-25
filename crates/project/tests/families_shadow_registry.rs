@@ -2163,3 +2163,214 @@ async fn the_retention_check_derives_a_registry_only_handoff() -> Result<()> {
     }
     fixture.cleanup().await
 }
+
+/// Adversarial pass on 5bf7fca1 (item 7): a registry-only handoff whose lease a later registrar
+/// grant replaced is not derived by the retention check (retention.rs), so the name gets no
+/// excuse, and a legitimate same-block delta on the successor lease is reported as a mismatch.
+/// The handoff of `the_retention_check_derives_a_registry_only_handoff`, then the registrar
+/// releases the predecessor lease at block 12 and grants the name on a new resource at block
+/// 13, which step 2 makes the candidate's lease (identity/lease.rs). At block 14 two synthesised
+/// renewals of the new lease sit in one block: D12 orders them by identity bytes and takes
+/// `b-renew`, today's order the higher generated id, `a-renew`. With the predecessor lease that
+/// would be the disclosed same-block delta; here it stays a mismatch.
+#[tokio::test]
+async fn a_successor_replaced_handoff_lease_leaves_a_same_block_delta_a_mismatch() -> Result<()> {
+    use shadow_support::compare::retention::{RetentionLog, name_differs};
+    let fixture = Fixture::new("families_shadow_registry_successor", 20).await?;
+    let (lease, node_resource, successor) = (uuid(1), uuid(3), uuid(4));
+    fixture
+        .binding(&uuid(100), &name(1), &lease, "ens_v1", 9, 0, Some(11))
+        .await?;
+    fixture
+        .write(
+            9,
+            0,
+            "SurfaceBound",
+            V1_REGISTRAR,
+            Some(&name(1)),
+            Some(&lease),
+            json!({"authority_kind": "registrar", "state_derived": false,
+                   "registry_contract": REGISTRY, "owner_getter": OWNER}),
+            REGISTRAR,
+        )
+        .await?;
+    fixture
+        .binding(&uuid(101), &name(1), &node_resource, "ens_v1", 11, 9, None)
+        .await?;
+    fixture
+        .write(
+            11,
+            9,
+            "SurfaceBound",
+            "registry_only_binding",
+            Some(&name(1)),
+            Some(&node_resource),
+            json!({"authority_kind": "registry_only", "state_derived": true,
+                   "registry_contract": REGISTRY, "owner": OTHER}),
+            REGISTRY,
+        )
+        .await?;
+    fixture
+        .write(
+            11,
+            10,
+            "AuthorityEpochChanged",
+            V1_REGISTRY,
+            Some(&name(1)),
+            Some(&node_resource),
+            json!({"node": node(1), "authority_kind": "registry_only", "owner": OTHER}),
+            REGISTRY,
+        )
+        .await?;
+    fixture
+        .write(
+            12,
+            0,
+            "RegistrationReleased",
+            V1_REGISTRAR,
+            Some(&name(1)),
+            Some(&lease),
+            json!({"authority_kind": "registrar", "status": "released"}),
+            REGISTRAR,
+        )
+        .await?;
+    fixture
+        .write(
+            13,
+            0,
+            "RegistrationGranted",
+            V1_REGISTRAR,
+            Some(&name(1)),
+            Some(&successor),
+            json!({"authority_kind": "registrar", "namehash": node(1), "status": "registered",
+                   "registrant": OWNER, "expiry": 2_000_000_000u64}),
+            REGISTRAR,
+        )
+        .await?;
+    for (identity, expiry) in [("b-renew", 2_200_000_000u64), ("a-renew", 2_100_000_000u64)] {
+        fixture
+            .event(
+                Event::new(identity, 14, 0, "RegistrationRenewed", V1_REGISTRAR)
+                    .name(&name(1))
+                    .resource(&successor)
+                    .after(json!({"authority_kind": "registrar", "expiry": expiry}))
+                    .raw(json!({"emitting_address": REGISTRAR}))
+                    .synthesised(),
+            )
+            .await?;
+    }
+    let report = publish_and_compare(&fixture, 15).await?;
+    let facts = name_facts(&fixture).await?;
+    let handoff = facts
+        .candidates
+        .iter()
+        .find(|candidate| candidate.registry_only)
+        .expect("the registry-only candidate");
+    assert_eq!(
+        (
+            handoff.predecessor_resource_id.as_deref(),
+            handoff.lease_resource_id.as_deref()
+        ),
+        (Some(lease.as_str()), Some(successor.as_str())),
+        "step 2 replaced the handoff's lease with the later grant"
+    );
+    let map = [(facts.input.logical_name_id.clone(), facts.clone())].into();
+    let log = RetentionLog::load(&fixture.pool, CHAIN, 15, &map).await?;
+    assert!(
+        name_differs(&facts, &log).is_some(),
+        "the retention check does not derive a successor lease"
+    );
+    assert!(
+        report.expected_delta_fields.is_empty() && report.known_discrepancy.is_empty(),
+        "{:#?}",
+        report.lines
+    );
+    // Served 2,100,000,000 (today's order), shadow 2,200,000,000 (D12).
+    assert_eq!(
+        failed_fields(&report),
+        ["control/expiry", "registration/expiry"],
+        "{:#?}",
+        report.lines
+    );
+    fixture.cleanup().await
+}
+
+/// Adversarial pass on 5bf7fca1 (item 7), the account half of
+/// `another_chain_served_rows_are_not_compared`: a second chain's copy of the account approval,
+/// readable on that chain's own lineage, is that chain's account row. It is neither an account
+/// approval nor an operator row of this chain's resource, so the report stays the baseline.
+#[tokio::test]
+async fn another_chain_account_approvals_are_not_compared() -> Result<()> {
+    const OTHER_CHAIN: &str = "other-chain";
+    let fixture = Fixture::new("families_shadow_registry_other_chain_accounts", 20).await?;
+    let lease = uuid(1);
+    bound(&fixture, &lease).await?;
+    fixture
+        .event(
+            Event::new(
+                "registry-approval",
+                10,
+                5,
+                "AccountPermissionChanged",
+                V1_REGISTRY,
+            )
+            .after(json!({
+                "subject": OPERATOR, "relation_kind": "operator", "approved": true,
+                "scope": {"kind": "account", "chain_id": CHAIN, "authority_kind": "registry",
+                          "authority_contract": REGISTRY,
+                          "authority_contract_instance_id": "00000000-0000-0000-0000-0000000000e5",
+                          "owner": OWNER},
+                "effective_powers": ["registry_control"],
+                "grant_source": {"kind": "raw_log", "source_event": "ApprovalForAll"},
+                "revocation_source": null, "inheritance_path": [],
+                "transfer_behavior": {"mode": "owner_scoped", "on_holder_change": "ceases_to_apply"},
+                "source_event": "ApprovalForAll",
+            }))
+            .raw(json!({"emitting_address": REGISTRY})),
+        )
+        .await?;
+    let baseline = publish_and_compare(&fixture, 12).await?;
+    shadow_support::assert_counts(&baseline, &[], &[]);
+    let counts = |report: &shadow_support::compare::Report| {
+        (
+            report.names,
+            report.resources,
+            report.accounts,
+            report.equal,
+            report.mismatched,
+        )
+    };
+    assert_eq!(
+        (baseline.resources, baseline.accounts),
+        (1, 1),
+        "{:#?}",
+        baseline.lines
+    );
+    sqlx::query(
+        "INSERT INTO chain_lineage (chain_id, block_hash, parent_hash, block_number,
+             block_timestamp, canonicality_state)
+         SELECT $2, block_hash, parent_hash, block_number, block_timestamp, canonicality_state
+         FROM chain_lineage WHERE chain_id = $1",
+    )
+    .bind(CHAIN)
+    .bind(OTHER_CHAIN)
+    .execute(&fixture.pool)
+    .await?;
+    // The same approval on the other chain, for another subject, so a read that ignored the
+    // chain would count a second account and a second operator row.
+    sqlx::query(
+        "INSERT INTO account_permission_state_current
+         SELECT (jsonb_populate_record(NULL::account_permission_state_current,
+                    to_jsonb(approval) || jsonb_build_object('chain_id', $1::text,
+                        'subject', $2::text))).*
+         FROM account_permission_state_current approval",
+    )
+    .bind(OTHER_CHAIN)
+    .bind(THIRD)
+    .execute(&fixture.pool)
+    .await?;
+    let report = shadow_support::compare::compare(&fixture.pool, CHAIN, 12).await?;
+    shadow_support::assert_counts(&report, &[], &[]);
+    assert_eq!(counts(&report), counts(&baseline), "{:#?}", report.lines);
+    fixture.cleanup().await
+}
