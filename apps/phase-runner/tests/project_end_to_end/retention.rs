@@ -28,13 +28,16 @@
 //! - the node's owner-setting registry events and its old-record and first-current-record
 //!   facts (registry.rs `registry_nodes`).
 //!
-//! - each candidate's surface namehash, the namehash part of its name (identity.rs:398-402).
+//! - each candidate's surface namehash, the namehash part of its name (identity.rs:398-402);
+//! - the staging candidates of every unnamed registrar event of the name: the candidates, of any
+//!   name, bound on the event's lease or whose NameWrapper SurfaceBound recorded it
+//!   (`lease_candidates`, admission.rs `attachment`), each its log derivation.
 //!
 //! The older admitted epochs the families do not keep (one start per arm) are not expected
-//! here, so a served value that needs one stays a mismatch. Not rebuilt here: the wrapper rows
-//! and the other names' candidates the staging passes choose among for an unnamed registrar
-//! event (`lease_candidates`). The stored key-state and triple maxima are not read by the excuse
-//! reads, which fold the events themselves.
+//! here, so a served value that needs one stays a mismatch. The wrapper rows (F2b) are not
+//! rebuilt: a name that reads one gets no excuse, since they decide the wrapped-lease admission
+//! and the wrapper presentation. The stored key-state and triple maxima are not read by the
+//! excuse reads, which fold the events themselves.
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::Result;
@@ -65,6 +68,8 @@ const V2_FAMILIES: [&str; 3] = [
 ];
 /// The registries whose owner-setting events a node keeps (registry.rs:23, :37-47).
 const V1_REGISTRIES: [&str; 2] = ["ens_v1_registry_l1", "basenames_base_registry"];
+const REGISTRAR: &str = "ens_v1_registrar_l1";
+const WRAPPER: &str = "ens_v1_wrapper_l1";
 const TRANSFER: &str = "TokenControlTransferred";
 
 fn sql_list(values: &[&str]) -> String {
@@ -95,6 +100,10 @@ pub struct LogBinding {
 pub struct RetentionLog {
     pub bindings: Vec<LogBinding>,
     pub events: BTreeMap<String, LogEvent>,
+    /// The SurfaceBound and AuthorityEpochChanged events of the other names the staging passes
+    /// choose among (their bindings are in `bindings`), kept apart so the name's own checks
+    /// read exactly what they read before.
+    pub staging: BTreeMap<String, LogEvent>,
 }
 
 /// The resources the families' facts of a name reach.
@@ -202,8 +211,87 @@ impl RetentionLog {
             )
             .await?,
         );
-        Ok(Self { bindings, events })
+        // The other names whose candidates the staging passes read for an unnamed registrar
+        // event (load.rs `lease_candidates`): a binding on the event's lease, or a NameWrapper
+        // SurfaceBound that recorded the lease.
+        let leases: Vec<String> = events
+            .values()
+            .filter(|event| event.name.is_none() && event.family == REGISTRAR)
+            .filter_map(|event| event.resource.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let mut staging = BTreeMap::new();
+        let mut bindings = bindings;
+        if !leases.is_empty() {
+            let mut others: BTreeSet<String> = bound_names(pool, chain, target, &leases)
+                .await?
+                .into_iter()
+                .collect();
+            others.extend(
+                published_where(
+                    pool,
+                    chain,
+                    target,
+                    &format!(
+                        "event.event_kind = 'SurfaceBound' AND event.source_family = '{WRAPPER}'
+                         AND event.after_state ->> 'wrapped_registrar_resource_id' = ANY($2)"
+                    ),
+                    &leases,
+                )
+                .await?
+                .into_values()
+                .filter_map(|event| event.name),
+            );
+            let others: Vec<String> = others
+                .into_iter()
+                .filter(|other| !facts.contains_key(other))
+                .collect();
+            if !others.is_empty() {
+                bindings.extend(load_bindings(pool, chain, target, &others).await?);
+                staging = published_where(
+                    pool,
+                    chain,
+                    target,
+                    "event.logical_name_id = ANY($2)
+                     AND event.event_kind IN ('SurfaceBound', 'AuthorityEpochChanged')",
+                    &others,
+                )
+                .await?;
+            }
+        }
+        Ok(Self {
+            bindings,
+            events,
+            staging,
+        })
     }
+}
+
+/// The names with a publication-visible surface binding on one of `resources`.
+async fn bound_names(
+    pool: &PgPool,
+    chain: &str,
+    target: i64,
+    resources: &[String],
+) -> Result<Vec<String>> {
+    Ok(sqlx::query_scalar(
+        "SELECT DISTINCT binding.logical_name_id
+         FROM surface_bindings binding
+         JOIN chain_lineage lineage
+           ON lineage.chain_id = binding.chain_id
+          AND lineage.block_number = binding.block_number
+          AND lineage.block_hash = binding.block_hash
+          AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+         WHERE binding.chain_id = $1 AND binding.resource_id::text = ANY($2)
+           AND binding.canonicality_state IN ('canonical', 'safe', 'finalized')
+           AND binding.block_number <= $3",
+    )
+    .bind(chain)
+    .bind(resources)
+    .bind(target)
+    .fetch_all(pool)
+    .await?)
 }
 
 /// The publication-visible surface bindings of `names`: canonical, at the canonical lineage's
@@ -375,9 +463,7 @@ fn expected_candidates<'a>(
 /// Why the family candidate differs from its derivation, None when it does not.
 fn candidate_differs(candidate: &BindingCandidate, expected: &Expected<'_>) -> Option<String> {
     let binding = expected.binding;
-    let wrapper = expected
-        .opening
-        .filter(|event| event.family == "ens_v1_wrapper_l1");
+    let wrapper = expected.opening.filter(|event| event.family == WRAPPER);
     let opening_after = expected.opening.map(|event| &event.after);
     let predecessor = expected
         .predecessor
@@ -478,6 +564,81 @@ fn candidate_differs(candidate: &BindingCandidate, expected: &Expected<'_>) -> O
         .map(|(field, _)| format!("candidate {} {field}", binding.id))
 }
 
+/// Why the staging candidates of the name's unnamed registrar events are not what the log gives,
+/// None when they are. Staging chooses among the candidates of every name whose binding is on
+/// the event's lease or whose NameWrapper SurfaceBound recorded it (admission.rs `attachment`),
+/// so each of those, the name's own and every other name's, must be its log derivation, and the
+/// families must hold exactly them.
+fn staging_candidates_differ(facts: &NameFacts, log: &RetentionLog) -> Option<String> {
+    let leases: BTreeSet<&str> = facts
+        .events
+        .iter()
+        .filter(|event| {
+            event.original_logical_name_id.is_none() && event.source_family == REGISTRAR
+        })
+        .filter_map(|event| event.resource_id.as_deref())
+        .collect();
+    if leases.is_empty() {
+        return None;
+    }
+    let on_lease = |resource: &str, wrapped: Option<&str>| {
+        leases.contains(resource) || wrapped.is_some_and(|lease| leases.contains(lease))
+    };
+    let family: BTreeMap<&str, &BindingCandidate> = facts
+        .lease_candidates
+        .iter()
+        .filter(|candidate| {
+            on_lease(
+                &candidate.resource_id,
+                candidate.wrapped_registrar_resource_id.as_deref(),
+            )
+        })
+        .map(|candidate| (candidate.surface_binding_id.as_str(), candidate))
+        .collect();
+    let all_events = || log.events.values().chain(log.staging.values());
+    let mut names: BTreeSet<&str> = log
+        .bindings
+        .iter()
+        .filter(|binding| leases.contains(binding.resource.as_str()))
+        .map(|binding| binding.name.as_str())
+        .collect();
+    names.extend(
+        all_events()
+            .filter(|event| event.kind == "SurfaceBound" && event.family == WRAPPER)
+            .filter(|event| {
+                raw_text(&event.after, "wrapped_registrar_resource_id")
+                    .is_some_and(|lease| leases.contains(lease.as_str()))
+            })
+            .filter_map(|event| event.name.as_deref()),
+    );
+    let mut expected_ids = BTreeSet::new();
+    for name in names {
+        let mut seen = BTreeSet::new();
+        let named: Vec<&LogEvent> = all_events()
+            .filter(|event| event.name.as_deref() == Some(name))
+            .filter(|event| seen.insert(event.position.event_identity.as_str()))
+            .collect();
+        for expected in expected_candidates(name, &named, &log.bindings) {
+            let wrapped = expected
+                .opening
+                .filter(|event| event.family == WRAPPER)
+                .and_then(|event| raw_text(&event.after, "wrapped_registrar_resource_id"));
+            if !on_lease(&expected.binding.resource, wrapped.as_deref()) {
+                continue;
+            }
+            let Some(candidate) = family.get(expected.binding.id.as_str()) else {
+                return Some(format!("staging candidate {} missing", expected.binding.id));
+            };
+            if let Some(reason) = candidate_differs(candidate, &expected) {
+                return Some(format!("staging {reason}"));
+            }
+            expected_ids.insert(expected.binding.id.as_str());
+        }
+    }
+    (family.keys().copied().collect::<BTreeSet<_>>() != expected_ids)
+        .then(|| "staging candidates".into())
+}
+
 /// Why the families' facts of the name are not exactly what the log gives under step 2's
 /// retention rules, None when they are.
 pub fn name_differs(facts: &NameFacts, log: &RetentionLog) -> Option<String> {
@@ -508,6 +669,15 @@ pub fn name_differs(facts: &NameFacts, log: &RetentionLog) -> Option<String> {
         if let Some(reason) = candidate_differs(family[candidate.binding.id.as_str()], candidate) {
             return Some(reason);
         }
+    }
+    if let Some(reason) = staging_candidates_differ(facts, log) {
+        return Some(reason);
+    }
+    // The wrapper rows (F2b) are not rebuilt from the log. They decide the wrapped-lease
+    // admission (served.rs `authority_of`, admission.rs `wrapped_lease`) and the wrapper
+    // presentation, so a name that reads one gets no excuse.
+    if !facts.wrappers.is_empty() {
+        return Some("wrapper rows".into());
     }
 
     // Epoch starts: the latest AuthorityEpochChanged of the name per arm.

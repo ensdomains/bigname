@@ -395,3 +395,146 @@ async fn a_wrong_candidate_surface_namehash_stays_a_mismatch() -> Result<()> {
     );
     fixture.cleanup().await
 }
+
+/// Pro r5 Q3 on c23e3e5b, another name's staging candidate: the staging passes choose among the
+/// candidates of every name on the unnamed row's lease (admission.rs `attachment`). A family
+/// candidate of name 2 on lease L at node 1, which no binding of the log gives, makes pass one
+/// ambiguous, so `c` is named for no one: the shadow and the canonical read of the rebuilt events
+/// give Bob, today's order Alice. Name 2's own values do not change. The staging candidates of
+/// L are not what the log gives, so both registrants of name 1 stay mismatches.
+#[tokio::test]
+async fn a_wrong_candidate_of_another_name_on_the_lease_stays_a_mismatch() -> Result<()> {
+    let fixture = Fixture::new("families_shadow_admission_foreign_candidate", 20).await?;
+    let (lease, _) = staged_transfer_race(&fixture).await?;
+    let report = publish_and_compare(&fixture, 12).await?;
+    assert_counts(&report, &[], &RACE_DELTA);
+    let inserted = sqlx::query(
+        "INSERT INTO bigname_phase.project_binding_candidate
+         SELECT (jsonb_populate_record(NULL::bigname_phase.project_binding_candidate,
+                    to_jsonb(candidate) || jsonb_build_object(
+                        'surface_binding_id', $2::text, 'resource_id', $3::text,
+                        'surface_namehash', $4::text))).*
+         FROM bigname_phase.project_binding_candidate candidate
+         WHERE candidate.surface_binding_id = $1::uuid",
+    )
+    .bind(uuid(101))
+    .bind(uuid(102))
+    .bind(&lease)
+    .bind(node(1))
+    .execute(&fixture.pool)
+    .await?
+    .rows_affected();
+    assert_eq!(inserted, 1);
+    let (_, shadow) = shadow_support::name(&fixture, 12, &name(1)).await?;
+    assert_eq!(shadow.control["registrant"], json!(BOB));
+    let mutated = shadow_support::compare::compare(&fixture.pool, CHAIN, 12).await?;
+    assert!(
+        mutated.known_discrepancy.is_empty() && mutated.expected_delta_fields.is_empty(),
+        "{:#?}",
+        mutated.lines
+    );
+    assert_eq!(
+        failed_fields(&mutated),
+        ["control/registrant", "registration/registrant"],
+        "{:#?}",
+        mutated.lines
+    );
+    fixture.cleanup().await
+}
+
+/// Pro r5 Q3 on c23e3e5b, the wrapper rows: name 1 is bound to NameWrapper resource W, whose
+/// SurfaceBound recorded lease L at node 1, and W carries a NameWrapped modifier. L's unnamed
+/// grant at 8 and two synthesised unnamed renewals at 12, `b-renew` (2,200,000,000) written
+/// before `a-renew` (2,100,000,000), are named for name 1 by pass two and admitted as the
+/// wrapped lease's events, which needs the wrapper row's modifier (admission.rs `wrapped_lease`).
+/// The canonical order takes `b-renew`, today's `a-renew`: a same-block delta on both expiries.
+/// The harness does not rebuild the wrapper rows from the log, so a name that reads one gets no
+/// excuse: the delta is refused, and a wrong modifier (the row's state position cleared) is too.
+#[tokio::test]
+async fn a_name_that_reads_a_wrapper_row_gets_no_excuse() -> Result<()> {
+    let fixture = Fixture::new("families_shadow_admission_wrapper_modifier", 20).await?;
+    let (lease, wrapper) = (uuid(1), uuid(2));
+    fixture
+        .binding(&uuid(100), &name(1), &wrapper, "ens_v1", 9, 2, None)
+        .await?;
+    let first = name(1);
+    fixture
+        .event(wrapper_bound("wrap-1", &first, &wrapper, &lease))
+        .await?;
+    fixture
+        .event(
+            Event::new("scope-10", 10, 3, "PermissionScopeChanged", V1_WRAPPER)
+                .name(&first)
+                .resource(&wrapper)
+                .after(
+                    json!({"source_event": "NameWrapped", "node": node(1), "fuses": 0,
+                              "wrapper_state": "wrapped", "expiry": 2_200_000_000u64}),
+                )
+                .raw(json!({"emitting_address": WRAPPER})),
+        )
+        .await?;
+    fixture.resource(&lease).await?;
+    unnamed(
+        &fixture,
+        "grant-8",
+        8,
+        "RegistrationGranted",
+        &lease,
+        json!({"status": "registered", "registrant": ALICE, "expiry": 2_000_000_000u64}),
+    )
+    .await?;
+    for (identity, expiry) in [("b-renew", 2_200_000_000u64), ("a-renew", 2_100_000_000u64)] {
+        fixture
+            .event(
+                Event::new(identity, 12, 0, "RegistrationRenewed", V1_REGISTRAR)
+                    .resource(&lease)
+                    .after(json!({"authority_kind": "registrar", "namehash": node(1),
+                                  "expiry": expiry}))
+                    .raw(json!({"emitting_address": REGISTRAR}))
+                    .synthesised(),
+            )
+            .await?;
+    }
+    let report = publish_and_compare(&fixture, 16).await?;
+    let refused = ["control/expiry", "registration/expiry"];
+    assert!(
+        report.known_discrepancy.is_empty() && report.expected_delta_fields.is_empty(),
+        "{:#?}",
+        report.lines
+    );
+    assert_eq!(failed_fields(&report), refused, "{:#?}", report.lines);
+    let updated = sqlx::query(
+        "UPDATE bigname_phase.project_wrapper_state SET wrapper_state_position = NULL
+         WHERE resource_id = $1::uuid",
+    )
+    .bind(&wrapper)
+    .execute(&fixture.pool)
+    .await?
+    .rows_affected();
+    assert_eq!(updated, 1);
+    // Without the modifier the lease's events are not admitted for name 1: the shadow holds no
+    // registration, and every field it moves is a mismatch.
+    let mutated = shadow_support::compare::compare(&fixture.pool, CHAIN, 16).await?;
+    assert!(
+        mutated.known_discrepancy.is_empty() && mutated.expected_delta_fields.is_empty(),
+        "{:#?}",
+        mutated.lines
+    );
+    assert_eq!(
+        failed_fields(&mutated),
+        [
+            "control/expiry",
+            "control/registrant",
+            "control/status",
+            "registration/authority_kind",
+            "registration/expiry",
+            "registration/latest_event_kind",
+            "registration/registered_at",
+            "registration/registrant",
+            "registration/resource_id"
+        ],
+        "{:#?}",
+        mutated.lines
+    );
+    fixture.cleanup().await
+}

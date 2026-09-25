@@ -1859,10 +1859,12 @@ rather than the family rows, and those rebuilt events read in the canonical
 order must give the shadow value, so a missing, extra or misfiled retained
 event fails the fields it decides. Each family row must also equal its rebuild
 whole, so a wrong fact on a retained event leaves every differing field of the
-name, or of the resource it sits on, a mismatch. The wrapper rows,
-other names' candidates and a candidate's surface namehash are not rebuilt, and
-the retained decoded name is not read, so a wrong value there is not caught by
-these checks. A differing field passes in two cases only. The first is a disclosed same-block ordering case: reading the
+name, or of the resource it sits on, a mismatch. Each candidate's surface
+namehash must be the namehash part of its name, and the staging candidates of
+every unnamed registrar event of the name, whichever name they belong to, must
+be what the log gives. The wrapper rows are not rebuilt from the log, so a name
+that reads one gets no excuse. The retained decoded name is not read, so a wrong
+value there is not caught by these checks. A differing field passes in two cases only. The first is a disclosed same-block ordering case: reading the
 rebuilt events with that block in the old generated-id order must give exactly
 the served value. For a resource's permission rows, admin powers and restriction
 block it passes only in one direction: the resource's rebuilt events keep the
