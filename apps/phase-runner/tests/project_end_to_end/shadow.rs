@@ -1124,8 +1124,8 @@ pub fn legacy_facts(
 /// ENSv2 registration event in today's (block, generated id) order. A `permissions_current` or
 /// `resource_restrictions` field passes as a same-block delta only in one direction: today's
 /// order keeps the registration live while the canonical order lapses it, the served value is
-/// not empty, and the whole permission read of the resource taken again from the families in
-/// today's order equals it. That read is compared whole, so a wrong subject, power, collision
+/// not empty, the canonical read is empty, and the whole permission read of the resource taken
+/// again from the families in today's order equals it. That read is compared whole, so a wrong subject, power, collision
 /// row or restriction in the families fails. The shadow value is the canonical read itself, so
 /// comparing it with the canonical read checks nothing and is not counted as evidence. The other
 /// direction, today's order lapsing the registration, is left a mismatch: the read in that order
@@ -1189,12 +1189,16 @@ pub async fn resource_excuses(
         else {
             continue;
         };
-        let served_empty = match &diff.served {
+        let empty = |value: &Value| match value {
             Value::Null => true,
             Value::Array(rows) => rows.is_empty(),
             _ => false,
         };
-        if !served_empty && same(&legacy, &diff.served) && !same(&legacy, &canonical) {
+        if !empty(&diff.served)
+            && empty(&canonical)
+            && same(&legacy, &diff.served)
+            && !same(&legacy, &canonical)
+        {
             out[index] = Excuse::SameBlockOrder;
         }
     }
