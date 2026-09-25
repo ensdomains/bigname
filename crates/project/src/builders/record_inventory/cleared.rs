@@ -15,7 +15,7 @@ pub(super) async fn build(
     target: &Marker,
 ) -> Result<()> {
     sqlx::query(
-        r#"
+        r#"/* project:builders.record_inventory.cleared */
         WITH cleared_pointers AS (
             SELECT latest.*
             FROM project_record_pointer_latest latest

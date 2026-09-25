@@ -32,9 +32,9 @@ pub(super) async fn build(
         "project_changed_events"
     };
     for statement in [
-        "CREATE TEMP TABLE project_stage_child_registration_events
+        "/* project:builders.child_registrations.build.create_stage_child_registration_events */ CREATE TEMP TABLE project_stage_child_registration_events
          (LIKE child_registration_events INCLUDING DEFAULTS) ON COMMIT DROP",
-        "CREATE TEMP TABLE project_child_registration_parents (
+        "/* project:builders.child_registrations.build.create_child_registration_parents */ CREATE TEMP TABLE project_child_registration_parents (
              child_logical_name_id text PRIMARY KEY,
              parent_logical_name_id text NOT NULL
          ) ON COMMIT DROP",
@@ -48,7 +48,7 @@ pub(super) async fn build(
     }
 
     let mut children = QueryBuilder::<Postgres>::new(
-        "SELECT DISTINCT child.logical_name_id, child.namespace, child.labelhashes",
+        "/* project:builders.child_registrations.build.select_children */ SELECT DISTINCT child.logical_name_id, child.namespace, child.labelhashes",
     );
     push_qualifying_events(&mut children, source, false);
     let children = children
@@ -74,7 +74,7 @@ pub(super) async fn build(
         })
         .unzip();
     sqlx::query(
-        "INSERT INTO project_child_registration_parents
+        "/* project:builders.child_registrations.build.insert_child_registration_parents */ INSERT INTO project_child_registration_parents
          SELECT * FROM unnest($1::text[], $2::text[])",
     )
     .bind(&child_ids)
@@ -84,7 +84,7 @@ pub(super) async fn build(
     .map_err(|error| ProjectError::database("failed to stage child registration parents", error))?;
 
     let mut insert = QueryBuilder::<Postgres>::new(
-        "INSERT INTO project_stage_child_registration_events (
+        "/* project:builders.child_registrations.build.insert_stage_child_registration_events */ INSERT INTO project_stage_child_registration_events (
              parent_logical_name_id, event_identity, child_logical_name_id, namespace,
              chain_id, block_number, block_hash, transaction_order_key, log_order_key,
              event_kind, manifest_version, provenance, target_block_number, target_block_hash
@@ -121,12 +121,13 @@ pub(crate) async fn publish(
     full_rebuild: bool,
     from_block: i64,
     to_block: i64,
-) -> Result<u64> {
+    summary: &mut crate::engine::WriteSummary,
+) -> Result<()> {
     let delete = if full_rebuild {
-        sqlx::query("DELETE FROM child_registration_events WHERE chain_id = $1").bind(chain_id)
+        sqlx::query("/* project:builders.child_registrations.publish.delete_all */ DELETE FROM child_registration_events WHERE chain_id = $1").bind(chain_id)
     } else {
         sqlx::query(
-            "DELETE FROM child_registration_events row
+            "/* project:builders.child_registrations.publish.delete_window */ DELETE FROM child_registration_events row
              WHERE row.chain_id = $1
                AND row.block_number >= $2
                AND (
@@ -144,11 +145,14 @@ pub(crate) async fn publish(
         .bind(from_block)
         .bind(to_block)
     };
-    delete.execute(&mut **transaction).await.map_err(|error| {
-        ProjectError::database("failed to clear child registration scope", error)
-    })?;
+    let deleted = delete
+        .execute(&mut **transaction)
+        .await
+        .map_err(|error| ProjectError::database("failed to clear child registration scope", error))?
+        .rows_affected();
+    summary.deleted.insert("child_registration_events", deleted);
     let inserted = sqlx::query(
-        "INSERT INTO child_registration_events
+        "/* project:builders.child_registrations.publish.upsert */ INSERT INTO child_registration_events
          SELECT * FROM project_stage_child_registration_events
          ON CONFLICT (parent_logical_name_id, event_identity) DO UPDATE SET
              child_logical_name_id = EXCLUDED.child_logical_name_id,
@@ -169,7 +173,10 @@ pub(crate) async fn publish(
     .await
     .map_err(|error| ProjectError::database("failed to publish child registrations", error))?
     .rows_affected();
-    Ok(inserted)
+    summary
+        .inserted
+        .insert("child_registration_events", inserted);
+    Ok(())
 }
 
 /// `FROM … WHERE` over the staged events that can be a direct child registration: an activated,

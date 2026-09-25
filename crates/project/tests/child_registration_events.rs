@@ -418,3 +418,117 @@ async fn a_redo_below_a_reorged_block_drops_its_orphaned_rows() -> Result<()> {
     assert_eq!(rows(&pool).await?, expected);
     database.cleanup().await
 }
+
+const SERVED_TABLES: [&str; 11] = [
+    "name_current",
+    "children_current",
+    "permissions_current",
+    "account_permission_state_current",
+    "permissions_current_resource_summary",
+    "record_inventory_current",
+    "resolver_current",
+    "address_names_current",
+    "address_records_current",
+    "primary_names_current",
+    "child_registration_events",
+];
+
+async fn table_rows(pool: &PgPool) -> Result<Vec<u64>> {
+    let mut counts = Vec::new();
+    for table in SERVED_TABLES {
+        let count: i64 = sqlx::query_scalar(&format!("SELECT count(*) FROM {table}"))
+            .fetch_one(pool)
+            .await?;
+        counts.push(u64::try_from(count)?);
+    }
+    Ok(counts)
+}
+
+/// Every served table ends each batch with the rows it had, less the rows the summary says the
+/// batch deleted, plus the rows it says the batch inserted.
+async fn assert_summary_matches_row_deltas(
+    pool: &PgPool,
+    request: BatchRequest,
+) -> Result<bigname_project::WriteSummary> {
+    let before = table_rows(pool).await?;
+    let summary = Engine::new(pool.clone())
+        .run_batch(request)
+        .await?
+        .write_summary;
+    let after = table_rows(pool).await?;
+    for ((table, before), after) in SERVED_TABLES.into_iter().zip(before).zip(after) {
+        let deleted = summary.deleted.get(table).copied();
+        let inserted = summary.inserted.get(table).copied();
+        assert_eq!(
+            Some(after),
+            deleted
+                .zip(inserted)
+                .map(|(deleted, inserted)| before - deleted + inserted),
+            "{table}: {before} rows before, {after} after, summary {summary:?}"
+        );
+    }
+    assert_eq!(
+        summary.stage_elapsed_ms.keys().copied().collect::<Vec<_>>(),
+        [
+            "builders",
+            "inputs",
+            "integrity",
+            "prepare",
+            "publish",
+            "scope"
+        ]
+    );
+    Ok(summary)
+}
+
+#[tokio::test]
+async fn the_write_summary_counts_the_rows_each_batch_replaced() -> Result<()> {
+    let (database, pool) = database("child_registration_write_summary").await?;
+    seed(&pool).await?;
+    let request = |target: i64, resume: Option<i64>, from: i64, mode: RunMode| BatchRequest {
+        chain_id: CHAIN.into(),
+        target_block: target,
+        affected_from_block: from,
+        affected_to_block: target,
+        resume_current: resume.map(|number| Marker {
+            number,
+            hash: hash(number),
+        }),
+        mode,
+    };
+
+    let full =
+        assert_summary_matches_row_deltas(&pool, request(10, None, 0, RunMode::Normal)).await?;
+    assert_eq!((full.blocks, full.changed_events), (11, 0));
+    assert_eq!(full.inserted["child_registration_events"], 1);
+    assert!(full.staged_events > 0);
+
+    let incremental =
+        assert_summary_matches_row_deltas(&pool, request(12, Some(10), 11, RunMode::Normal))
+            .await?;
+    assert_eq!(incremental.blocks, 2);
+    assert!(incremental.changed_events > 0);
+    assert!(incremental.scope_keys["names"] > 0);
+    assert_eq!(
+        incremental.scope_keys.keys().copied().collect::<Vec<_>>(),
+        [
+            "account_permissions",
+            "children",
+            "names",
+            "primary",
+            "resolvers",
+            "resources"
+        ]
+    );
+
+    // A redo of block 12 deletes and republishes its rows.
+    let redo =
+        assert_summary_matches_row_deltas(&pool, request(12, Some(11), 12, RunMode::Redo)).await?;
+    assert_eq!(redo.blocks, 1);
+    assert!(redo.deleted["child_registration_events"] > 0);
+    assert_eq!(
+        redo.deleted["child_registration_events"],
+        redo.inserted["child_registration_events"]
+    );
+    database.cleanup().await
+}

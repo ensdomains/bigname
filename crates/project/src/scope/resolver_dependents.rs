@@ -7,7 +7,7 @@ pub(super) async fn include(
     chain_id: &str,
 ) -> Result<()> {
     sqlx::query(
-        "INSERT INTO project_scope_resources
+        "/* project:scope.resolver_dependents.include.insert_scope_resources */ INSERT INTO project_scope_resources
          SELECT inventory.resource_id
          FROM record_inventory_current inventory
          JOIN project_scope_resolver_dependents scope
@@ -32,7 +32,7 @@ pub(super) async fn include(
     .map_err(|error| ProjectError::database("failed to scope resolver resources", error))?;
 
     sqlx::query(
-        "INSERT INTO project_scope_names
+        "/* project:scope.resolver_dependents.include.insert_scope_names */ INSERT INTO project_scope_names
          SELECT inventory.provenance ->> 'logical_name_id'
          FROM record_inventory_current inventory
          JOIN project_scope_resolver_dependents scope
@@ -60,7 +60,7 @@ pub(super) async fn include(
 
 pub(super) async fn seed(transaction: &mut Transaction<'_, Postgres>) -> Result<()> {
     sqlx::query(
-        "INSERT INTO project_scope_resolver_dependents
+        "/* project:scope.resolver_dependents.seed */ INSERT INTO project_scope_resolver_dependents
          SELECT lower(address)
          FROM (
              SELECT after_state ->> 'proxy_address' AS address

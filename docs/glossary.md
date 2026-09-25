@@ -2304,6 +2304,17 @@ a named group of contracts on one chain that owns one slice
 of protocol authority (for example `ens_v1_registrar_l1`). The unit of manifest
 admission, capability ownership, replay coverage, and provenance attribution.
 
+## Statement identifier
+
+the `/* project:<name> */` comment every Project statement starts with. The
+name is the statement's source file under `crates/project/src`, with `.` for
+`/` and without the extension, followed by the statement where the file holds
+more than one (`publish.insert.name_current`, `builders.name_authority.build`).
+PostgreSQL keeps a leading comment in slow-log lines, `pg_stat_activity` and
+`pg_stat_statements`, and ignores it when it computes a query id, so the
+identifier names the statement behind a slow batch without splitting its
+statistics.
+
 <a id="surface-binding"></a>
 <a id="surface-name-surface"></a>
 ## Surface (name surface)
@@ -2429,3 +2440,14 @@ state. (upstream: .refs/ens_v1/contracts/wrapper/README.md:L99 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/wrapper/README.md:L101 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/wrapper/README.md:L103 @ ens_v1@91c966f)
 (upstream: .refs/ens_v1/contracts/wrapper/README.md:L109 @ ens_v1@91c966f)
+
+## Write summary
+
+what one Project batch read and wrote, counted inside its transaction: the
+blocks in its affected range, the changed events that seeded its scope, the
+events it staged for the builders, the keys in each scope when publication
+starts, the rows publication deleted from and inserted into each served table,
+and the elapsed time of each derivation stage. The engine returns it with the
+batch outcome and logs it; the phase runner exports it as the
+`phase_runner_project_*` metrics ([pipeline monitoring
+runbook](runbooks/pipeline-monitoring.md#project-batch-writes)).

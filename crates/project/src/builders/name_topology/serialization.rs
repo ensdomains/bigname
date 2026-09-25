@@ -60,14 +60,14 @@ pub(in crate::builders) async fn serialize_projected_topologies_in_pages(
 /// when `bounded`, `$2` the last key of the page before, which the page starts after.
 pub(in crate::builders) fn page_statement(bounded: bool) -> &'static str {
     if bounded {
-        "SELECT logical_name_id, declared_summary -> 'topology' AS topology
+        "/* project:builders.name_topology.serialization.page_after */ SELECT logical_name_id, declared_summary -> 'topology' AS topology
          FROM project_stage_name_current
          WHERE jsonb_typeof(declared_summary -> 'topology') = 'object'
            AND logical_name_id > $2
          ORDER BY logical_name_id
          LIMIT $1"
     } else {
-        "SELECT logical_name_id, declared_summary -> 'topology' AS topology
+        "/* project:builders.name_topology.serialization.first_page */ SELECT logical_name_id, declared_summary -> 'topology' AS topology
          FROM project_stage_name_current
          WHERE jsonb_typeof(declared_summary -> 'topology') = 'object'
          ORDER BY logical_name_id
@@ -104,7 +104,7 @@ pub(in crate::builders) fn update_page<'a>(
     page: &'a [(String, Value)],
 ) -> QueryBuilder<'a, Postgres> {
     let mut update = QueryBuilder::<Postgres>::new(format!(
-        "{prefix}UPDATE project_stage_name_current AS name SET declared_summary = jsonb_set(\
+        "/* project:builders.name_topology.serialization.update_page */ {prefix}UPDATE project_stage_name_current AS name SET declared_summary = jsonb_set(\
          name.declared_summary, '{{topology}}', serialized.topology, true) FROM ("
     ));
     update.push_values(page.iter(), |mut values, (logical_name_id, topology)| {

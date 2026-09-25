@@ -18,12 +18,14 @@ pub(super) async fn query(
             continue;
         }
         let frontier = format!("project_binding_frontier_{kind}");
-        sqlx::query(&format!("TRUNCATE {frontier}"))
-            .execute(&mut **transaction)
-            .await
-            .map_err(|e| ProjectError::database("failed to clear binding frontier", e))?;
+        sqlx::query(&format!(
+            "/* project:scope.frontier.truncate_{frontier} */ TRUNCATE {frontier}"
+        ))
+        .execute(&mut **transaction)
+        .await
+        .map_err(|e| ProjectError::database("failed to clear binding frontier", e))?;
         let count = sqlx::query(&format!(
-            "WITH added AS (INSERT INTO project_binding_seen_{kind}
+            "/* project:scope.frontier.insert_{frontier} */ WITH added AS (INSERT INTO project_binding_seen_{kind}
              SELECT $1, scope.{column} FROM project_scope_{kind} scope
              WHERE NOT EXISTS (SELECT 1 FROM project_binding_seen_{kind} seen
                  WHERE seen.operator = $1 AND seen.{column} = scope.{column})
@@ -36,10 +38,12 @@ pub(super) async fn query(
         .map_err(|e| ProjectError::database("failed to populate binding frontier", e))?
         .rows_affected();
         keys += count;
-        sqlx::query(&format!("ANALYZE {frontier}"))
-            .execute(&mut **transaction)
-            .await
-            .map_err(|e| ProjectError::database("failed to analyze binding frontier", e))?;
+        sqlx::query(&format!(
+            "/* project:scope.frontier.analyze_{frontier} */ ANALYZE {frontier}"
+        ))
+        .execute(&mut **transaction)
+        .await
+        .map_err(|e| ProjectError::database("failed to analyze binding frontier", e))?;
         result = result
             .replace(&format!("FROM {source}"), &format!("FROM {frontier} "))
             .replace(&format!("JOIN {source}"), &format!("JOIN {frontier} "));

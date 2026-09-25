@@ -9,7 +9,7 @@ pub(super) async fn include_retracted_roots(
     to_block: i64,
 ) -> Result<()> {
     sqlx::query(
-        "INSERT INTO project_scope_expiry_names
+        "/* project:scope.expiry.include_retracted_roots */ INSERT INTO project_scope_expiry_names
          SELECT DISTINCT logical_name_id
          FROM project_redo_expiry_roots
          WHERE chain_id = $1
@@ -39,7 +39,7 @@ pub(super) async fn include_expiring_names(
     target_block: i64,
 ) -> Result<()> {
     sqlx::query(
-        r#"
+        r#"/* project:scope.expiry.include_expiring_names */
         WITH affected_times AS (
             SELECT COALESCE((
                        SELECT extract(epoch FROM prior.block_timestamp)

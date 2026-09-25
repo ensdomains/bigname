@@ -10,11 +10,11 @@ pub(super) async fn close(
     // Frontier probes return few rows through endpoint indexes, but PostgreSQL can price the
     // combined branches above jit_above_cost on a large history. Compiling every iteration then
     // costs more than the indexed work, so keep JIT off only while topology scope is closed.
-    let previous_jit = sqlx::query_scalar::<_, String>("SHOW jit")
+    let previous_jit = sqlx::query_scalar::<_, String>("/* project:scope.topology.jit */ SHOW jit")
         .fetch_one(&mut **transaction)
         .await
         .map_err(|error| ProjectError::database("failed to read topology JIT", error))?;
-    sqlx::query("SET LOCAL jit = off")
+    sqlx::query("/* project:scope.topology.close.disable_jit */ SET LOCAL jit = off")
         .execute(&mut **transaction)
         .await
         .map_err(|error| ProjectError::database("failed to disable topology JIT", error))?;
@@ -22,7 +22,7 @@ pub(super) async fn close(
     include_changed_current_edges(transaction, chain_id).await?;
     // A name whose own state changed rebuilds its edge rows (as child and as parent).
     sqlx::query(
-        "INSERT INTO project_scope_children
+        "/* project:scope.topology.close.insert_scope_children_seeds */ INSERT INTO project_scope_children
          SELECT logical_name_id FROM project_scope_names
          ON CONFLICT DO NOTHING",
     )
@@ -33,7 +33,7 @@ pub(super) async fn close(
     // the tree in both directions. Names reached only as ancestors walk upward: a parent touched
     // by one child's edge stages its own evidence without restaging its other children.
     sqlx::query(
-        "INSERT INTO project_scope_topology_pending (logical_name_id, descend)
+        "/* project:scope.topology.close.queue_seeds */ INSERT INTO project_scope_topology_pending (logical_name_id, descend)
          SELECT logical_name_id, bool_or(descend)
          FROM (
              SELECT logical_name_id, true AS descend FROM project_scope_names
@@ -49,12 +49,12 @@ pub(super) async fn close(
     .map_err(|error| ProjectError::database("failed to seed topology frontier", error))?;
 
     loop {
-        sqlx::query("TRUNCATE project_scope_topology_current, project_scope_topology_candidates")
+        sqlx::query("/* project:scope.topology.close.truncate_scope_topology_current */ TRUNCATE project_scope_topology_current, project_scope_topology_candidates")
             .execute(&mut **transaction)
             .await
             .map_err(|error| ProjectError::database("failed to reset topology frontier", error))?;
         let moved = sqlx::query(
-            "WITH moved AS (
+            "/* project:scope.topology.close.insert_scope_topology_current */ WITH moved AS (
                  DELETE FROM project_scope_topology_pending
                  RETURNING logical_name_id, descend
              )
@@ -69,7 +69,7 @@ pub(super) async fn close(
             break;
         }
         sqlx::query(
-            "INSERT INTO project_scope_topology_seen (logical_name_id, descend)
+            "/* project:scope.topology.close.insert_scope_topology_seen */ INSERT INTO project_scope_topology_seen (logical_name_id, descend)
              SELECT logical_name_id, descend FROM project_scope_topology_current
              ON CONFLICT (logical_name_id) DO UPDATE
                  SET descend = project_scope_topology_seen.descend OR EXCLUDED.descend",
@@ -83,7 +83,7 @@ pub(super) async fn close(
         include_v1_event_edges(transaction, chain_id, target_block, V1_PARENT_EDGE_SQLS).await?;
         include_v2_parent_edges(transaction, chain_id, target_block).await?;
         sqlx::query(
-            "INSERT INTO project_scope_ancestors
+            "/* project:scope.topology.close.insert_scope_ancestors */ INSERT INTO project_scope_ancestors
              SELECT logical_name_id FROM project_scope_topology_candidates
              ON CONFLICT DO NOTHING",
         )
@@ -91,7 +91,7 @@ pub(super) async fn close(
         .await
         .map_err(|error| ProjectError::database("failed to retain topology ancestors", error))?;
         sqlx::query(
-            "INSERT INTO project_scope_topology_pending (logical_name_id, descend)
+            "/* project:scope.topology.close.queue_ancestors */ INSERT INTO project_scope_topology_pending (logical_name_id, descend)
              SELECT candidate.logical_name_id, false
              FROM project_scope_topology_candidates candidate
              LEFT JOIN project_scope_topology_seen seen USING (logical_name_id)
@@ -104,11 +104,11 @@ pub(super) async fn close(
 
         // Downward: only names whose own state changed (or that a changed ancestor reached)
         // rebuild their child families.
-        sqlx::query("TRUNCATE project_scope_topology_candidates")
+        sqlx::query("/* project:scope.topology.close.truncate_scope_topology_candidates */ TRUNCATE project_scope_topology_candidates")
             .execute(&mut **transaction)
             .await
             .map_err(|error| ProjectError::database("failed to reset topology frontier", error))?;
-        sqlx::query("DELETE FROM project_scope_topology_current WHERE NOT descend")
+        sqlx::query("/* project:scope.topology.close.delete_scope_topology_current */ DELETE FROM project_scope_topology_current WHERE NOT descend")
             .execute(&mut **transaction)
             .await
             .map_err(|error| ProjectError::database("failed to narrow topology frontier", error))?;
@@ -116,7 +116,7 @@ pub(super) async fn close(
         include_v1_event_edges(transaction, chain_id, target_block, V1_CHILD_EDGE_SQLS).await?;
         include_v2_child_edges(transaction, chain_id, target_block).await?;
         sqlx::query(
-            "INSERT INTO project_scope_children
+            "/* project:scope.topology.close.insert_scope_children_candidates */ INSERT INTO project_scope_children
              SELECT logical_name_id FROM project_scope_topology_candidates
              ON CONFLICT DO NOTHING",
         )
@@ -124,7 +124,7 @@ pub(super) async fn close(
         .await
         .map_err(|error| ProjectError::database("failed to retain topology candidates", error))?;
         sqlx::query(
-            "INSERT INTO project_scope_topology_pending (logical_name_id, descend)
+            "/* project:scope.topology.close.queue_descendants */ INSERT INTO project_scope_topology_pending (logical_name_id, descend)
              SELECT candidate.logical_name_id, true
              FROM project_scope_topology_candidates candidate
              LEFT JOIN project_scope_topology_seen seen USING (logical_name_id)
@@ -143,7 +143,7 @@ async fn restore_jit(
     transaction: &mut Transaction<'_, Postgres>,
     previous_jit: &str,
 ) -> Result<()> {
-    sqlx::query("SELECT set_config('jit', $1, true)")
+    sqlx::query("/* project:scope.topology.restore_jit */ SELECT set_config('jit', $1, true)")
         .bind(previous_jit)
         .execute(&mut **transaction)
         .await
@@ -153,10 +153,10 @@ async fn restore_jit(
 
 async fn create_frontier_tables(transaction: &mut Transaction<'_, Postgres>) -> Result<()> {
     for statement in [
-        "CREATE TEMP TABLE project_scope_topology_pending (logical_name_id text PRIMARY KEY, descend boolean NOT NULL DEFAULT false) ON COMMIT DROP",
-        "CREATE TEMP TABLE project_scope_topology_current (logical_name_id text PRIMARY KEY, descend boolean NOT NULL DEFAULT false) ON COMMIT DROP",
-        "CREATE TEMP TABLE project_scope_topology_seen (logical_name_id text PRIMARY KEY, descend boolean NOT NULL DEFAULT false) ON COMMIT DROP",
-        "CREATE TEMP TABLE project_scope_topology_candidates (logical_name_id text PRIMARY KEY) ON COMMIT DROP",
+        "/* project:scope.topology.create_frontier_tables.create_scope_topology_pending */ CREATE TEMP TABLE project_scope_topology_pending (logical_name_id text PRIMARY KEY, descend boolean NOT NULL DEFAULT false) ON COMMIT DROP",
+        "/* project:scope.topology.create_frontier_tables.create_scope_topology_current */ CREATE TEMP TABLE project_scope_topology_current (logical_name_id text PRIMARY KEY, descend boolean NOT NULL DEFAULT false) ON COMMIT DROP",
+        "/* project:scope.topology.create_frontier_tables.create_scope_topology_seen */ CREATE TEMP TABLE project_scope_topology_seen (logical_name_id text PRIMARY KEY, descend boolean NOT NULL DEFAULT false) ON COMMIT DROP",
+        "/* project:scope.topology.create_frontier_tables.create_scope_topology_candidates */ CREATE TEMP TABLE project_scope_topology_candidates (logical_name_id text PRIMARY KEY) ON COMMIT DROP",
     ] {
         sqlx::query(statement)
             .execute(&mut **transaction)
@@ -171,7 +171,7 @@ async fn include_changed_current_edges(
     chain_id: &str,
 ) -> Result<()> {
     sqlx::query(
-        "WITH edges AS (
+        "/* project:scope.topology.include_changed_current_edges */ WITH edges AS (
              SELECT child.parent_logical_name_id, child.child_logical_name_id
              FROM project_changed_events changed
              CROSS JOIN LATERAL (
@@ -207,7 +207,7 @@ async fn include_current_child_edges(
     chain_id: &str,
 ) -> Result<()> {
     sqlx::query(
-        "WITH edges AS (
+        "/* project:scope.topology.include_current_child_edges */ WITH edges AS (
              SELECT child.parent_logical_name_id, child.child_logical_name_id
              FROM project_scope_topology_current scope
              CROSS JOIN LATERAL (
@@ -236,7 +236,7 @@ async fn include_current_parent_edges(
     chain_id: &str,
 ) -> Result<()> {
     sqlx::query(
-        "WITH edges AS (
+        "/* project:scope.topology.include_current_parent_edges */ WITH edges AS (
              SELECT child.parent_logical_name_id, child.child_logical_name_id
              FROM project_scope_topology_current scope
              CROSS JOIN LATERAL (
@@ -263,7 +263,7 @@ async fn include_current_parent_edges(
     Ok(())
 }
 
-pub(crate) const V1_AFTER_NODE_SQL: &str = r#"
+pub(crate) const V1_AFTER_NODE_SQL: &str = r#"/* project:scope.topology.v1_after_node_sql */
 WITH edges AS (
     SELECT event.namespace || ':' || lower(event.after_state ->> 'node') AS parent_id,
            event.namespace || ':' || lower(event.after_state ->> 'child_node') AS child_id
@@ -298,7 +298,7 @@ SELECT parent_id FROM edges UNION SELECT child_id FROM edges
 ON CONFLICT DO NOTHING
 "#;
 
-pub(crate) const V1_AFTER_CHILD_SQL: &str = r#"
+pub(crate) const V1_AFTER_CHILD_SQL: &str = r#"/* project:scope.topology.v1_after_child_sql */
 WITH edges AS (
     SELECT event.namespace || ':' || lower(event.after_state ->> 'node') AS parent_id,
            event.namespace || ':' || lower(event.after_state ->> 'child_node') AS child_id
@@ -333,7 +333,7 @@ SELECT parent_id FROM edges UNION SELECT child_id FROM edges
 ON CONFLICT DO NOTHING
 "#;
 
-pub(crate) const V1_BEFORE_NODE_SQL: &str = r#"
+pub(crate) const V1_BEFORE_NODE_SQL: &str = r#"/* project:scope.topology.v1_before_node_sql */
 WITH edges AS (
     SELECT event.namespace || ':' || lower(event.before_state ->> 'node') AS parent_id,
            event.namespace || ':' || lower(event.before_state ->> 'child_node') AS child_id
@@ -368,7 +368,7 @@ SELECT parent_id FROM edges UNION SELECT child_id FROM edges
 ON CONFLICT DO NOTHING
 "#;
 
-pub(crate) const V1_BEFORE_CHILD_SQL: &str = r#"
+pub(crate) const V1_BEFORE_CHILD_SQL: &str = r#"/* project:scope.topology.v1_before_child_sql */
 WITH edges AS (
     SELECT event.namespace || ':' || lower(event.before_state ->> 'node') AS parent_id,
            event.namespace || ':' || lower(event.before_state ->> 'child_node') AS child_id
@@ -442,7 +442,7 @@ async fn include_v2_child_edges(
     target_block: i64,
 ) -> Result<()> {
     sqlx::query(
-        "WITH edges AS (
+        "/* project:scope.topology.include_v2_child_edges */ WITH edges AS (
              SELECT DISTINCT topology.logical_name_id AS parent_id,
                     registration.logical_name_id AS child_id
              FROM project_scope_topology_current scope
@@ -515,7 +515,7 @@ async fn include_v2_parent_edges(
     target_block: i64,
 ) -> Result<()> {
     sqlx::query(
-        "WITH edges AS (
+        "/* project:scope.topology.include_v2_parent_edges */ WITH edges AS (
              SELECT DISTINCT topology.logical_name_id AS parent_id,
                     registration.logical_name_id AS child_id
              FROM project_scope_topology_current scope

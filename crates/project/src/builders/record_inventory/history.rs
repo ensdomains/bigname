@@ -27,10 +27,12 @@ pub(super) async fn build(
         "project_record_pointers",
         "project_stage_resolver_current",
     ] {
-        sqlx::query(&format!("ANALYZE {table}"))
-            .execute(&mut **transaction)
-            .await
-            .map_err(|error| ProjectError::database("failed to analyze pointer stages", error))?;
+        sqlx::query(&format!(
+            "/* project:builders.record_inventory.history.build.analyze_{table} */ ANALYZE {table}"
+        ))
+        .execute(&mut **transaction)
+        .await
+        .map_err(|error| ProjectError::database("failed to analyze pointer stages", error))?;
     }
     sqlx::query(ATTRIBUTE_RECORD_HISTORY)
         .bind(chain_id)
@@ -42,7 +44,7 @@ pub(super) async fn build(
                 error,
             )
         })?;
-    sqlx::query("CREATE INDEX ON project_record_history_attribution (resource_id)")
+    sqlx::query("/* project:builders.record_inventory.history.build.index_record_history_attribution_resource_id */ CREATE INDEX ON project_record_history_attribution (resource_id)")
         .execute(&mut **transaction)
         .await
         .map_err(|error| {
@@ -51,7 +53,7 @@ pub(super) async fn build(
     Ok(())
 }
 
-pub(in crate::builders) const ATTRIBUTE_RECORD_HISTORY: &str = r#"
+pub(in crate::builders) const ATTRIBUTE_RECORD_HISTORY: &str = r#"/* project:builders.record_inventory.history.attribute_record_history */
         CREATE TEMP TABLE project_record_history_attribution ON COMMIT DROP AS
         SELECT pointer.resource_id, event.normalized_event_id
         FROM project_record_pointer_history pointer

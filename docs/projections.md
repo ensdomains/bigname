@@ -23,6 +23,14 @@ allowing a winning fork to retract losing-fork output. It stages the affected
 scope in connection-local tables and publishes the related projection rows and
 phase state transactionally.
 
+Every statement a batch sends starts with a [statement
+identifier](glossary.md#statement-identifier), and every batch returns a
+[write summary](glossary.md#write-summary) of the keys it scoped and the rows
+it deleted and inserted per served table. Neither changes what is published:
+the identifier is a comment, and the counts are read from the temporary scope
+tables and from the row counts PostgreSQL returns for each publication
+statement.
+
 Normal incremental Project work starts from events and identity rows in the
 `(previous, target]` block window. Name- or resource-local events initially
 select only that name or resource. `RecordChanged`, `RecordVersionChanged`,
@@ -95,6 +103,32 @@ timestamps or whose lifecycle changed in the affected range. From either seed,
 it follows only activated canonical ENSv2 subregistry edges to descendants. The
 deleted or orphaned release is not served, and unrelated topology components are
 not admitted.
+The expansion also seeds the node of an `AuthorityTransferred` derived from an
+ENSv1 or Basenames registry `Transfer`, whose `source_event` is `Transfer`. The
+registry emits `Transfer(node, owner)` from `setOwner`, so the event carries the
+transferred node in `node`
+(upstream: .refs/ens_v1/contracts/registry/ENS.sol:L9 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L63-L69 @ ens_v1@91c966f)
+(upstream: .refs/basenames/lib/ens-contracts/contracts/registry/ENS.sol:L8 @ basenames@1809bbc)
+(upstream: .refs/basenames/src/L2/Registry.sol:L100-L103 @ basenames@1809bbc).
+The adapter attaches a logical
+name only when the ownership it tracks for that node, or for a transfer to the
+zero address the registry read it recorded for the node, had already seen the
+node's [name surface](glossary.md#surface-name-surface). So the event can
+arrive without a logical name while the node has an active surface. Project
+rebuilds the child edge of the after state's `node`, and of the before state's
+`node` as a conservative extra candidate, and like any rebuilt child edge the
+walk also rebuilds that node's own subtree. The child row follows the latest
+registry owner of the active surface at that node, so without this seed an
+incremental batch would keep a child that a `Transfer` to the zero address
+removes, while a rebuild drops it. An `AuthorityTransferred` derived from
+`NewOwner` names the parent in `node`, because `setSubnodeOwner` emits
+`NewOwner(node, label, owner)` with the parent node
+(upstream: .refs/ens_v1/contracts/registry/ENS.sol:L6 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L75-L84 @ ens_v1@91c966f)
+(upstream: .refs/basenames/lib/ens-contracts/contracts/registry/ENS.sol:L5 @ basenames@1809bbc)
+(upstream: .refs/basenames/src/L2/Registry.sol:L113-L124 @ basenames@1809bbc).
+It does not take this path; its parent stays ancestor evidence.
 `project_events` remains the single filter for data that builders may serve.
 
 Code that builds a replacement projection row may read normalized events staged

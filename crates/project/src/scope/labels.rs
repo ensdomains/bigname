@@ -11,7 +11,7 @@ pub(super) async fn include_changed_children(
     chain_id: &str,
 ) -> Result<()> {
     let states = sqlx::query_scalar::<_, Value>(
-        "SELECT after_state
+        "/* project:scope.labels.select_changed_labels */ SELECT after_state
          FROM project_changed_events
          WHERE after_state ?| ARRAY[
              'raw_label', 'raw_label_hex', 'raw_labels', 'raw_labels_hex'
@@ -35,7 +35,7 @@ pub(super) async fn include_changed_children(
     // children_current_labelhash_idx is namespace-leading, so the SQL keeps one indexable branch
     // per admitted namespace; extend this UNION when another namespace is admitted.
     sqlx::query(
-        "WITH changed_labels AS MATERIALIZED (
+        "/* project:scope.labels.insert_scope_ancestors */ WITH changed_labels AS MATERIALIZED (
              SELECT
                     preimage.labelhash,
                     preimage.raw_label,

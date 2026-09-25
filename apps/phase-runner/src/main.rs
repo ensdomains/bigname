@@ -108,10 +108,11 @@ async fn main() -> Result<()> {
                         database.pool().clone(),
                         &runtime.capacity,
                     )),
-                    Arc::new(ProjectPhase::with_hydration(
-                        database.pool().clone(),
-                        hydration_rpc_urls,
-                    )),
+                    Arc::new(
+                        ProjectPhase::with_hydration(database.pool().clone(), hydration_rpc_urls)
+                            .with_metrics_feed(metrics_feed.clone())
+                            .with_step_observer(Arc::new(metrics_feed.clone())),
+                    ),
                     Arc::new(VerifyPhase::new(verification_database)),
                     Arc::new(LivePhase::with_engine(ingest_engine)),
                 )?;
@@ -217,10 +218,11 @@ async fn main() -> Result<()> {
                     database.pool().clone(),
                     &capacity,
                 ));
-                let project = Arc::new(ProjectPhase::with_hydration(
-                    database.pool().clone(),
-                    hydration_rpc_urls,
-                ));
+                let project = Arc::new(
+                    ProjectPhase::with_hydration(database.pool().clone(), hydration_rpc_urls)
+                        .with_metrics_feed(metrics_feed.clone())
+                        .with_step_observer(Arc::new(metrics_feed.clone())),
+                );
                 let phases = if phase.requires_verify() {
                     let verification_database_url =
                         verification_database_url.as_deref().ok_or_else(|| {

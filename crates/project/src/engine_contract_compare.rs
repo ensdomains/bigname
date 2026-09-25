@@ -11,7 +11,7 @@ pub(crate) mod audit;
 #[cfg(test)]
 #[path = "engine_contract_compare_snapshot.rs"]
 mod snapshot;
-pub(super) use snapshot::{Expectations, Snapshot, Snapshots, compare};
+pub(super) use snapshot::{Expectations, Snapshot, Snapshots, assert_same_output, compare};
 
 pub(super) const TABLES: &[(&str, &str)] = &[
     ("name_current", "logical_name_id"),
@@ -36,6 +36,10 @@ pub(super) const TABLES: &[(&str, &str)] = &[
         "address,coin_type,logical_name_id",
     ),
     ("primary_names_current", "address,coin_type,namespace"),
+    (
+        "child_registration_events",
+        "parent_logical_name_id,event_identity",
+    ),
 ];
 
 #[derive(Default)]
@@ -46,14 +50,22 @@ pub(super) struct Scopes {
     resolvers: BTreeSet<String>,
     accounts: BTreeSet<Vec<String>>,
     primary: BTreeSet<Vec<String>>,
+    /// The batch's affected blocks: child registration rows are replaced by block, not by key.
+    window: (i64, i64),
+    /// Blocks above the window that published child registration rows sit on and that are no
+    /// longer readable canonical lineage. The publisher deletes those rows too.
+    orphaned_child_blocks: BTreeSet<(i64, String)>,
     audit_inputs: Value,
 }
 impl Scopes {
     fn evidence(&self) -> Value {
-        json!({"names":self.names,"resources":self.resources,"children":self.children,"resolvers":self.resolvers,"accounts":self.accounts,"primary":self.primary,"audit_inputs":self.audit_inputs})
+        json!({"names":self.names,"resources":self.resources,"children":self.children,"resolvers":self.resolvers,"accounts":self.accounts,"primary":self.primary,"window":self.window,"orphaned_child_blocks":self.orphaned_child_blocks,"audit_inputs":self.audit_inputs})
     }
 
-    pub(super) async fn capture(tx: &mut Transaction<'_, Postgres>) -> Result<Self> {
+    pub(super) async fn capture(
+        tx: &mut Transaction<'_, Postgres>,
+        window: (i64, i64),
+    ) -> Result<Self> {
         async fn single(
             tx: &mut Transaction<'_, Postgres>,
             table: &str,
@@ -91,7 +103,27 @@ impl Scopes {
         } else {
             Value::Null
         };
+        // The publisher's window delete, evaluated on the rows it runs against. Captured before
+        // publication (as the mandatory scope is) it holds every orphaned row the delete removes;
+        // captured after publication it is empty, because the delete already removed them.
+        let orphaned_child_blocks = sqlx::query_as::<_, (i64, String)>(
+            "SELECT DISTINCT row.block_number, row.block_hash FROM child_registration_events row
+             WHERE row.chain_id = 'ethereum-sepolia' AND row.block_number > $1
+               AND NOT EXISTS (
+                   SELECT 1 FROM chain_lineage lineage
+                   WHERE lineage.chain_id = row.chain_id
+                     AND lineage.block_number = row.block_number
+                     AND lineage.block_hash = row.block_hash
+                     AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized'))",
+        )
+        .bind(window.1)
+        .fetch_all(&mut **tx)
+        .await?
+        .into_iter()
+        .collect();
         Ok(Self {
+            window,
+            orphaned_child_blocks,
             audit_inputs,
             names: single(tx, "project_scope_names", "logical_name_id").await?,
             resources: single(tx, "project_scope_resources", "resource_id").await?,
@@ -146,6 +178,22 @@ impl Scopes {
                     || member(&self.resources, "resource_id")
                     || member(&self.resources, "record_resource_id")
             }
+            // The publisher's incremental delete, whatever names the rows belong to: this chain's
+            // rows at or above the window start that are inside the window or whose block is no
+            // longer readable canonical lineage. The audit supports only incremental Sepolia, so
+            // the full-rebuild delete never applies.
+            "child_registration_events" => {
+                let block = row["block_number"]
+                    .as_i64()
+                    .ok_or_else(|| anyhow::anyhow!("missing child registration block"))?;
+                row["chain_id"] == "ethereum-sepolia"
+                    && block >= self.window.0
+                    && (block <= self.window.1
+                        || row["block_hash"].as_str().is_some_and(|hash| {
+                            self.orphaned_child_blocks
+                                .contains(&(block, hash.to_owned()))
+                        }))
+            }
             "resolver_current" => {
                 let address = row["resolver_address"]
                     .as_str()
@@ -199,7 +247,10 @@ impl Target {
             Ok(())
         }
         let mut transformed = meaningful(baseline);
-        if table == "primary_names_current" {
+        if table == "child_registration_events" {
+            replace(&mut transformed, "/target_block_number", json!(self.number))?;
+            replace(&mut transformed, "/target_block_hash", json!(self.hash))?;
+        } else if table == "primary_names_current" {
             replace(
                 &mut transformed,
                 "/claim_provenance/target_block_number",

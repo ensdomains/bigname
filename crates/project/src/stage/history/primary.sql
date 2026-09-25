@@ -1,3 +1,4 @@
+/* project:stage.history.primary */
 SELECT matched.normalized_event_id
 FROM project_scope_primary scope
 CROSS JOIN LATERAL (

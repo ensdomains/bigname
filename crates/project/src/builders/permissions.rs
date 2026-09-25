@@ -12,7 +12,7 @@ pub(super) async fn build(
 ) -> Result<()> {
     // Permission rows fold resource-keyed history; no output follows historical resolver pointers.
     let permissions_query = [
-        "WITH ",
+        "/* project:builders.permissions.build */ WITH ",
         expiry_retirement::V2_RESOURCE_REVIVALS_CTE,
         r#"
         , target_time AS (
@@ -427,8 +427,12 @@ pub(super) async fn build(
 /// publishes, and the stage may hold rows an incremental build never publishes.
 async fn key_by_resource(transaction: &mut Transaction<'_, Postgres>, stage: &str) -> Result<()> {
     for statement in [
-        format!("CREATE INDEX ON {stage} (resource_id)"),
-        format!("ANALYZE {stage}"),
+        format!(
+            "/* project:builders.permissions.key_by_resource.index_{stage}_resource_id */ CREATE INDEX ON {stage} (resource_id)"
+        ),
+        format!(
+            "/* project:builders.permissions.key_by_resource.analyze_{stage} */ ANALYZE {stage}"
+        ),
     ] {
         sqlx::query(&statement)
             .execute(&mut **transaction)
