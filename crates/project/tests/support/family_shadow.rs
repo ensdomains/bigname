@@ -15,12 +15,24 @@ use bigname_storage::families::records::{ShadowReport, compare_family_reads};
 use sqlx::PgPool;
 
 /// Rebuild the families at `target`, compare, and require no difference outside `expected`, a
-/// predicate over the difference key (for a disclosed canonical-order change or a known step 2
-/// gap the test names).
+/// predicate over the difference key (for a disclosed canonical-order change the test names), and
+/// no step 2 gap finding at all.
 pub async fn compare_family_reads_at(
     pool: &PgPool,
     target: &Marker,
     expected: impl Fn(&str) -> bool,
+) -> Result<ShadowReport> {
+    compare_family_reads_with(pool, target, expected, |_| false).await
+}
+
+/// [`compare_family_reads_at`] that also accepts the step 2 gap findings (node claims the family
+/// cannot represent, address pages the index cannot answer) whose key `gap` accepts. Every other
+/// gap finding fails, so a reader bug cannot hide in a gap bucket.
+pub async fn compare_family_reads_with(
+    pool: &PgPool,
+    target: &Marker,
+    expected: impl Fn(&str) -> bool,
+    gap: impl Fn(&str) -> bool,
 ) -> Result<ShadowReport> {
     let chain_id: String = sqlx::query_scalar(
         "SELECT chain_id FROM bigname_phase.chain_lineage
@@ -80,10 +92,30 @@ pub async fn compare_family_reads_at(
         "family reads differ from today's reads at {}: {unexpected:#?}",
         target.number
     );
+    let unexpected_gaps: Vec<_> = report
+        .node_claim_findings
+        .iter()
+        .chain(&report.address_index_findings)
+        .filter(|(key, _)| !gap(key))
+        .collect();
+    ensure!(
+        unexpected_gaps.is_empty(),
+        "family reads show step 2 gaps the test does not expect at {}: {unexpected_gaps:#?}",
+        target.number
+    );
     Ok(report)
 }
 
 /// [`compare_family_reads_at`] with no expected difference.
 pub async fn assert_family_reads_match(pool: &PgPool, target: &Marker) -> Result<ShadowReport> {
     compare_family_reads_at(pool, target, |_| false).await
+}
+
+/// [`assert_family_reads_match`] that accepts the step 2 gap findings whose key `gap` accepts.
+pub async fn assert_family_reads_match_with_gaps(
+    pool: &PgPool,
+    target: &Marker,
+    gap: impl Fn(&str) -> bool,
+) -> Result<ShadowReport> {
+    compare_family_reads_with(pool, target, |_| false, gap).await
 }

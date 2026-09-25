@@ -270,7 +270,11 @@ async fn run(pool: &PgPool, block: i64, previous: Option<i64>, mode: RunMode) ->
             mode,
         })
         .await?;
-    let report = family_shadow::assert_family_reads_match(pool, &outcome.current).await?;
+    let report =
+        family_shadow::assert_family_reads_match_with_gaps(pool, &outcome.current, |key| {
+            key.starts_with("primary_name ")
+        })
+        .await?;
     Ok(report.node_claim_findings.len())
 }
 

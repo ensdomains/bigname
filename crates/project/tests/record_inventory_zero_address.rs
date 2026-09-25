@@ -552,6 +552,9 @@ async fn coin60_pairs_serve_the_address_changed_half_at_its_own_position() -> Re
             // The served position is the `AddressChanged` half's own, log 3 of transaction 1.
             assert_eq!(pair.value_position.log_index, Some(3), "{id}");
             assert_eq!(pair.sibling_position.log_index, Some(4), "{id}");
+            // The row reproduces today's provenance, which lists only the value event. The
+            // design's provenance names both events; the pair carries the sibling for step 7.
+            assert!(pair.sibling_event_id.is_some(), "{id}");
             assert!(
                 family.row.provenance["record_event_ids"]
                     .as_array()
@@ -1076,7 +1079,12 @@ async fn run_window(
         })
         .await?;
     bounded_attribution::assert_bounded_record_attribution_matches_inventory(pool).await?;
-    family_shadow::assert_family_reads_match(pool, &outcome.current).await?;
+    // Only the pair cases whose halves carry different addresses may miss the address index,
+    // for the served `AddressChanged` address; the pair case counts them exactly.
+    family_shadow::assert_family_reads_match_with_gaps(pool, &outcome.current, |key| {
+        key == format!("resolves_to {NONZERO20} coin 60")
+    })
+    .await?;
     assert!(outcome.complete);
     assert_eq!(outcome.current, outcome.target);
     assert_eq!(outcome.target.number, target_block);

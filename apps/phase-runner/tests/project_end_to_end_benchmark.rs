@@ -206,6 +206,14 @@ async fn fixture_corpus_publishes_hydrates_reads_and_matches_a_rebuild() -> Resu
             shadow.stage,
             report.differences
         );
+        ensure!(
+            report.node_claim_findings.is_empty() && report.address_index_findings.is_empty(),
+            "the fixture shows step 2 gaps at {} ({}): {:#?} {:#?}",
+            shadow.target,
+            shadow.stage,
+            report.node_claim_findings,
+            report.address_index_findings
+        );
     }
     for compared in &compared {
         // The harness cannot tell whether a dropped key was in the batch's full scope (see

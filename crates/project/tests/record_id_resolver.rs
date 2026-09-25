@@ -804,9 +804,16 @@ async fn run(pool: &PgPool, target: i64, previous: Option<i64>, mode: RunMode) -
         })
         .await?;
     bounded_attribution::assert_bounded_record_attribution_matches_inventory(pool).await?;
-    family_shadow::assert_family_reads_match(pool, &outcome.current).await?;
+    // Only the address-bytes-only write of the ENSIP-19 case may miss the address index.
+    family_shadow::assert_family_reads_match_with_gaps(pool, &outcome.current, |key| {
+        key.starts_with(&format!("resolves_to {ADDRESS_BYTES_ONLY} coin "))
+    })
+    .await?;
     Ok(())
 }
+
+/// The address the ENSIP-19 case writes as `address_bytes_hex` only (a step 2 index gap).
+const ADDRESS_BYTES_ONLY: &str = "0x3333333333333333333333333333333333333333";
 async fn inventory(pool: &PgPool, id: i64) -> Result<Value> {
     Ok(sqlx::query_scalar("SELECT jsonb_build_object('entries',entries,'last_change',last_change,'boundary',record_version_boundary,'provenance',provenance,'support',support_status) FROM record_inventory_current WHERE resource_id=$1::uuid")
         .bind(resource(id)).fetch_one(pool).await?)
@@ -1096,7 +1103,7 @@ async fn official_sepolia_direct_resolver_projects_ensip19_default_for_missing_e
         json!({"resolver":address,"node":node(1)}),
     )
     .await?;
-    let value = "0x3333333333333333333333333333333333333333";
+    let value = ADDRESS_BYTES_ONLY;
     event(
         &pool,
         "public-default",
@@ -1116,12 +1123,13 @@ async fn official_sepolia_direct_resolver_projects_ensip19_default_for_missing_e
     // row's `value` only (crates/project/src/families/derived.rs:162 and :197), so this
     // `AddressChanged`, which carries only `address_bytes_hex`, has no index row and the family
     // page of names resolving to the address misses the name today's page serves.
-    let report = family_shadow::assert_family_reads_match(
+    let report = family_shadow::assert_family_reads_match_with_gaps(
         &pool,
         &Marker {
             number: target,
             hash: hash(target),
         },
+        |key| key.starts_with(&format!("resolves_to {ADDRESS_BYTES_ONLY} coin ")),
     )
     .await?;
     assert_eq!(report.address_index_findings.len(), 1, "{report:#?}");
