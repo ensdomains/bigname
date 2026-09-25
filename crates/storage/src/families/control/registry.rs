@@ -42,9 +42,7 @@ pub struct RegistryNode {
 
 /// One owner-setting registry event of a node (`project_registry_owner_event`): an
 /// AuthorityTransferred or SubregistryChanged with the name, resource, authority kind and owner
-/// facts it carried. It keeps no `registry_owner` or `owner_word_unmasked`; only the node row
-/// holds them, for its latest owner-setting event, which under a NewOwner is the
-/// SubregistryChanged of the transfer's log and never the transfer.
+/// facts it carried, including its own `registry_owner` and `owner_word_unmasked`.
 #[derive(Clone, Debug)]
 pub struct OwnerEvent {
     pub position: Position,
@@ -55,6 +53,8 @@ pub struct OwnerEvent {
     pub source_family: String,
     pub authority_kind: Option<String>,
     pub owner: Option<String>,
+    pub registry_owner: Option<String>,
+    pub owner_word_unmasked: Option<bool>,
     pub owner_getter: Option<String>,
 }
 
@@ -69,8 +69,20 @@ impl OwnerEvent {
             source_family: text(row, "source_family")?,
             authority_kind: text(row, "authority_kind"),
             owner: lower(row, "owner"),
+            registry_owner: lower(row, "registry_owner"),
+            owner_word_unmasked: flag(row, "owner_word_unmasked"),
             owner_getter: lower(row, "owner_getter"),
         })
+    }
+
+    /// The owner this event reports to the served control block (build.sql:650-663): null when
+    /// its owner word is unmasked, else its registry_owner, else its owner.
+    pub fn reported_owner(&self) -> Option<String> {
+        if self.owner_word_unmasked == Some(true) {
+            None
+        } else {
+            self.registry_owner.clone().or_else(|| self.owner.clone())
+        }
     }
 }
 
@@ -82,26 +94,6 @@ impl RegistryNode {
             .iter()
             .filter(|event| event.event_kind == "AuthorityTransferred")
             .max_by(|left, right| left.position.cmp(&right.position))
-    }
-
-    /// The owner an owner-setting event reports to the served control block (build.sql
-    /// :650-663): null when its owner word is unmasked, else its registry_owner, else its owner.
-    /// Only the node row's latest owner-setting event carries the first two, so for any other
-    /// event the owner stands; under a NewOwner that is every transfer, since the
-    /// SubregistryChanged of its log sorts after it.
-    pub fn reported_owner(&self, event: &OwnerEvent) -> Option<String> {
-        let latest = self
-            .owner_position
-            .as_ref()
-            .is_some_and(|position| position.event_identity == event.position.event_identity);
-        if !latest {
-            return event.owner.clone();
-        }
-        if self.owner_word_unmasked == Some(true) {
-            None
-        } else {
-            self.registry_owner.clone().or_else(|| self.owner.clone())
-        }
     }
 
     fn from_row(row: &Value) -> Option<Self> {

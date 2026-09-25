@@ -79,7 +79,7 @@ pub(super) fn control_owner(
                 wrapper_linked: false,
             });
             if admitted {
-                owners.push((event.position.clone(), node.reported_owner(event)));
+                owners.push((event.position.clone(), event.reported_owner()));
                 kinds.push((event.position.clone(), "AuthorityTransferred"));
             }
         }

@@ -250,6 +250,81 @@ async fn an_excluded_later_transfer_is_not_the_control_owner() -> Result<()> {
     fixture.cleanup().await
 }
 
+/// Name 1's node gets an admitted AuthorityTransferred at 11 carrying `extra` in its payload,
+/// then one at 12 on another resource that the admission leaves out, so the node row's latest
+/// owner-setting event is the excluded one. The served control block reads the transfer at 11
+/// (build.sql:650-663): null under an unmasked owner word, else its registry_owner, else its
+/// owner. Step 2 keeps both facts on every owner-event row, so the reader takes them from the
+/// transfer at 11 itself and agrees.
+async fn earlier_transfer_wins(label: &str, extra: Value) -> Result<(Value, Value)> {
+    let fixture = Fixture::new(label, 20).await?;
+    let lease = uuid(1);
+    bound(&fixture, &lease).await?;
+    let mut payload = json!({"node": node(1), "owner": OWNER, "owner_getter": OWNER,
+                             "emitter_role": "registry"});
+    for (key, value) in extra.as_object().into_iter().flatten() {
+        payload[key] = value.clone();
+    }
+    fixture
+        .write(
+            11,
+            1,
+            "AuthorityTransferred",
+            V1_REGISTRY,
+            Some(&name(1)),
+            None,
+            payload,
+            REGISTRY,
+        )
+        .await?;
+    fixture
+        .write(
+            12,
+            1,
+            "AuthorityTransferred",
+            V1_REGISTRY,
+            Some(&name(1)),
+            Some(&uuid(2)),
+            json!({"node": node(1), "owner": OTHER, "owner_getter": OTHER,
+                   "emitter_role": "registry"}),
+            REGISTRY,
+        )
+        .await?;
+    let report = publish_and_compare(&fixture, 16).await?;
+    let (served, shadow) = shadow_support::name(&fixture, 16, &name(1)).await?;
+    shadow_support::assert_counts(&report, &[], &[]);
+    let owners = (
+        served.control("registry_owner"),
+        shadow.control["registry_owner"].clone(),
+    );
+    fixture.cleanup().await?;
+    Ok(owners)
+}
+
+#[tokio::test]
+async fn an_earlier_admitted_transfer_with_an_unmasked_word_reports_no_owner() -> Result<()> {
+    let (served, shadow) = earlier_transfer_wins(
+        "families_shadow_registry_earlier_unmasked",
+        json!({"owner_word_unmasked": true}),
+    )
+    .await?;
+    assert_eq!(served, Value::Null);
+    assert_eq!(shadow, Value::Null);
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_earlier_admitted_transfer_reports_its_registry_owner() -> Result<()> {
+    let (served, shadow) = earlier_transfer_wins(
+        "families_shadow_registry_earlier_registry_owner",
+        json!({"registry_owner": OTHER}),
+    )
+    .await?;
+    assert_eq!(served, json!(OTHER));
+    assert_eq!(shadow, json!(OTHER));
+    Ok(())
+}
+
 /// The shape the removed `registry_node_position_moved_by_later_write` cause covered, from the
 /// fixture corpus: a registry-only name whose node gets an AuthorityTransferred, then an
 /// AuthorityEpochChanged registry_only, then a SubregistryChanged of the parent that names the
