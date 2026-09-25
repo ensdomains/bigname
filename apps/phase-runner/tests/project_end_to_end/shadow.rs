@@ -69,9 +69,12 @@
 //!   SurfaceBound itself (name_authority/stage.rs:149-198). A field passes only when the
 //!   candidate has no opening SurfaceBound, its block has a NameWrapper SurfaceBound of the same
 //!   name and resource that recorded a lease, and the families loaded again with the candidate
-//!   given that event's wrapper metadata give exactly the served value. The seed corpus binds at
-//!   log 1 and wraps at log 5; whether a chain binding can carry another log than its
-//!   SurfaceBound is a step 2 question, reported rather than patched.
+//!   given that event's wrapper metadata give exactly the served value. Step 2's pairing is the
+//!   chain's shape: the adapter pushes a binding and its SurfaceBound from one raw log, and the
+//!   interpreter refuses a binding whose provenance lacks the indexes outside raw-block
+//!   derivation. What is wrong is the corpus seed (rebuild_performance/seed.sql binds at log 1
+//!   and wraps at log 5). The seed fix goes into step 2's branch; this cause and
+//!   `load_name_facts_replacing` go at the next merge of step 2.
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::Mutex,

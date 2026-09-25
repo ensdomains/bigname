@@ -1719,14 +1719,20 @@ tests and the phase runner's fixture-corpus run compare each value with what the
 production readers serve at the same publication, field by field. A differing
 field passes in two cases only. The first is a disclosed same-block ordering case:
 reading the same families with that block in the old generated-id order must give
-exactly the served value. The second is a named cause whose own check holds for
+exactly the served value. For a resource's permission rows and restriction block
+it passes only in one direction: today's order keeps the registration live, the
+served value is not empty, and the families read in that order give it. A served
+empty value against a family row is a mismatch. The second is a named cause whose own check holds for
 that field. A named cause is either a step 2 family gap, reported rather than
-patched, or a served-side bug. One step 2 gap is named today: step 2 pairs a
-binding with the SurfaceBound at the log its provenance records, so a wrapped
-binding whose NameWrapper SurfaceBound sits at another log keeps no wrapper
-metadata, and the families leave its lease's unnamed rows unstaged where today's
-stage names them. Its check reloads the families with that candidate given the
-block's SurfaceBound and must then give the served value. Another gap is not
+patched, or a served-side bug. One cause comes from the fixture corpus rather
+than the chain: step 2 pairs a binding with the SurfaceBound at the log its
+provenance records, as the adapter emits them from one log, but the corpus seed
+binds wrapped names at one log and wraps them at another. Those candidates keep no
+wrapper metadata, and the families leave their leases' unnamed rows unstaged
+where today's stage names them. Its check reloads the families with that
+candidate given the block's SurfaceBound and must then give the served value.
+The seed is fixed on step 2's branch, and the cause goes with the next merge of
+it. One step 2 gap is not
 excused and fails: the registry node keeps only its latest owner-setting event,
 so when a later transfer the name's admission leaves out, or a later
 SubregistryChanged, set it, the admitted owner is gone. A fixture pins that
