@@ -545,3 +545,138 @@ async fn families_from_another_content_hash_rebuild_after_a_skipped_rebuild() ->
     assert_eq!(fixture.snapshot().await?, incremental);
     fixture.cleanup().await
 }
+
+/// A resolver discovery edge that starts at `block`, a second work source for that block.
+async fn edge_starting_at(fixture: &Fixture, block: i64) -> Result<()> {
+    let origin: i64 = sqlx::query_scalar(
+        "INSERT INTO manifest_versions (manifest_version, namespace, source_family, chain_id,
+             deployment_label, rollout_status, normalizer_version, file_path, manifest_payload)
+         VALUES (1, 'ens', 'ens_v1_registry_l1', $1, 'fixture', 'active', 'fixture',
+                 'fixture/registry.yaml', '{\"contracts\": []}'::jsonb)
+         RETURNING manifest_id",
+    )
+    .bind(CHAIN)
+    .fetch_one(&fixture.pool)
+    .await?;
+    let (from, to) = (
+        "00000000-0000-0000-0000-00000000f001",
+        "00000000-0000-0000-0000-00000000f002",
+    );
+    for instance in [from, to] {
+        sqlx::query(
+            "INSERT INTO contract_instances (contract_instance_id, chain_id, contract_kind)
+             VALUES ($1::uuid, $2, 'contract')",
+        )
+        .bind(instance)
+        .bind(CHAIN)
+        .execute(&fixture.pool)
+        .await?;
+    }
+    sqlx::query(
+        "INSERT INTO contract_instance_addresses (contract_instance_id, chain_id, address)
+         VALUES ($1::uuid, $2, '0x00000000000000000000000000000000000000c7')",
+    )
+    .bind(to)
+    .bind(CHAIN)
+    .execute(&fixture.pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO discovery_edges (chain_id, edge_kind, from_contract_instance_id,
+             to_contract_instance_id, discovery_source, admission_basis, source_manifest_id,
+             active_from_block_number, active_from_block_hash, canonicality_state)
+         VALUES ($1, 'resolver', $2::uuid, $3::uuid, 'NewResolver', 'fixture', $4, $5, $6,
+                 'canonical')",
+    )
+    .bind(CHAIN)
+    .bind(from)
+    .bind(to)
+    .bind(origin)
+    .bind(block)
+    .bind(hash(block))
+    .execute(&fixture.pool)
+    .await?;
+    Ok(())
+}
+
+// A rebuild run reads one work block past its budget of three. With fewer work blocks than that
+// read it has the whole remainder and adds the target when no work falls on it; with more, it
+// applies its budget, reports it spent, and leaves the target to the next run. Every block carries
+// two events, and one case adds a discovery edge that starts on an event block: each block is
+// work once.
+#[tokio::test]
+async fn a_rebuild_run_reads_one_work_block_past_its_budget() -> Result<()> {
+    let small = FamilyOptions::new(CONTENT_HASH).with_max_blocks_per_run(3);
+    // (work blocks, a discovery edge starting at, per run: marker, blocks applied, budget spent)
+    type Run = (i64, u64, bool);
+    let cases: [(&[i64], Option<i64>, &[Run]); 7] = [
+        (&[5, 7], None, &[(12, 3, false)]),
+        (&[5, 7, 9], None, &[(9, 3, true), (12, 1, false)]),
+        (&[5, 7, 9, 11], None, &[(9, 3, true), (12, 2, false)]),
+        (&[5, 12], None, &[(12, 2, false)]),
+        (&[5, 7, 12], None, &[(12, 3, false)]),
+        (&[5, 7, 9, 12], None, &[(9, 3, true), (12, 1, false)]),
+        (&[5, 7, 9], Some(7), &[(9, 3, true), (12, 1, false)]),
+    ];
+    for (work, edge, runs) in cases {
+        let fixture = Fixture::new("families_repair_work_budget", 20).await?;
+        for &block in work {
+            seed(&fixture, block..=block).await?;
+        }
+        if let Some(block) = edge {
+            edge_starting_at(&fixture, block).await?;
+        }
+        let mut seen = Vec::new();
+        for run in 0..runs.len() {
+            let mode = if run == 0 {
+                FamilyMode::Rebuild
+            } else {
+                FamilyMode::Normal
+            };
+            let outcome = fixture.apply_with(12, mode, &small).await;
+            assert_eq!(outcome.skipped, None, "{work:?}");
+            seen.push((
+                fixture.marker().await?.0.unwrap_or(-1),
+                outcome.blocks,
+                outcome.budget_exhausted,
+            ));
+        }
+        assert_eq!(seen, runs, "work {work:?}, edge {edge:?}");
+        fixture.cleanup().await?;
+    }
+    Ok(())
+}
+
+// A refused undo journal (here a marker row that names itself) is not a reason to rebuild: the
+// run reports a skip and changes nothing, every later run does the same, and an operator rebuild
+// or a redo below the kept journal is the way out.
+#[tokio::test]
+async fn a_cyclic_undo_journal_skips_the_run_instead_of_rebuilding() -> Result<()> {
+    let fixture = Fixture::new("families_repair_cycle", 20).await?;
+    seed(&fixture, 11..=12).await?;
+    fixture.apply(12, FamilyMode::Normal).await;
+    let before = fixture.snapshot().await?;
+    sql(
+        &fixture,
+        &format!(
+            "UPDATE project_family_undo
+             SET before_image = before_image
+                 || jsonb_build_object('current_block_number', 12,
+                                       'current_block_hash', '{}')
+             WHERE family = 'marker' AND block_number = 12",
+            hash(12)
+        ),
+    )
+    .await?;
+    fixture.project_row(1, Some((11, 12, "operator"))).await?;
+    for _ in 0..2 {
+        let outcome = fixture
+            .apply(12, FamilyMode::Redo { from: 11, to: 12 })
+            .await;
+        let skipped = outcome.skipped.clone().unwrap_or_default();
+        assert!(skipped.contains("cycle"), "{skipped}");
+        assert!(!outcome.reset, "a refused journal does not rebuild");
+        assert_eq!(outcome.blocks + outcome.undone_blocks, 0);
+        assert_eq!(fixture.snapshot().await?, before, "nothing changed");
+    }
+    fixture.cleanup().await
+}

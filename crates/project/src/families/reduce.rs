@@ -150,3 +150,96 @@ pub(crate) fn namehash_of(logical_name_id: &str) -> Option<String> {
         .split_once(':')
         .map(|(_, namehash)| namehash.to_ascii_lowercase())
 }
+
+/// A JSON number whose value lies from 0 to `high`, as `jsonb_typeof(value) = 'number' AND
+/// (... ->> field)::numeric BETWEEN 0 AND high` reads it: the value decides, not its spelling, so
+/// `1.0`, `1.5` and `1000.0` count as the numbers they are (a jsonb literal `1e3` is already
+/// numeric 1000). Numbers arrive as serde numbers without arbitrary precision, an integer
+/// exactly and anything else as the nearest f64; a non-integral value within 2048 of 2^64 - 1
+/// is indistinguishable from 2^64 and reads as out of range.
+pub(crate) fn json_number_between(value: Option<&Value>, high: u64) -> Option<&serde_json::Number> {
+    let Some(Value::Number(number)) = value else {
+        return None;
+    };
+    let fits = if let Some(integer) = number.as_u64() {
+        integer <= high
+    } else if number.is_i64() {
+        false
+    } else {
+        #[allow(clippy::cast_precision_loss)]
+        let limit = high as f64;
+        number
+            .as_f64()
+            .is_some_and(|float| float >= 0.0 && float < limit)
+    };
+    fits.then_some(number)
+}
+
+/// A JSON value as `(... ->> field)::boolean` reads it: a JSON boolean as itself, a string or a
+/// number through PostgreSQL's boolean input, anything else (null included) as no boolean.
+pub(crate) fn json_boolean(value: &Value) -> Option<bool> {
+    match value {
+        Value::Bool(flag) => Some(*flag),
+        Value::String(text) => postgres_boolean(text),
+        Value::Number(number) => postgres_boolean(&number.to_string()),
+        _ => None,
+    }
+}
+
+/// PostgreSQL's boolean input: trimmed of ASCII space, tab, line feed, carriage return, vertical
+/// tab and form feed only (not Unicode whitespace), case-insensitive, `1` or `0`, or a unique
+/// prefix of `true`, `false`, `yes`, `no`, `on` or `off` (`o` alone is ambiguous).
+pub(crate) fn postgres_boolean(text: &str) -> Option<bool> {
+    let text = text
+        .trim_matches([' ', '\t', '\n', '\r', '\u{b}', '\u{c}'])
+        .to_ascii_lowercase();
+    if text.is_empty() {
+        return None;
+    }
+    match text.as_str() {
+        "1" => return Some(true),
+        "0" => return Some(false),
+        "o" => return None,
+        _ => {}
+    }
+    [
+        ("true", true),
+        ("false", false),
+        ("yes", true),
+        ("no", false),
+        ("on", true),
+        ("off", false),
+    ]
+    .into_iter()
+    .find_map(|(word, flag)| word.starts_with(&text).then_some(flag))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::postgres_boolean;
+
+    #[test]
+    fn a_boolean_reads_as_postgresql_reads_it() {
+        for (text, flag) in [
+            ("t", Some(true)),
+            ("TRUE", Some(true)),
+            (" y ", Some(true)),
+            ("on", Some(true)),
+            ("1", Some(true)),
+            ("f", Some(false)),
+            ("fals", Some(false)),
+            ("NO", Some(false)),
+            ("of", Some(false)),
+            ("0", Some(false)),
+            ("o", None),
+            ("", None),
+            ("2", None),
+            ("maybe", None),
+            ("truex", None),
+            ("\u{b}off\u{c}", Some(false)),
+            ("\u{a0}off\u{a0}", None),
+        ] {
+            assert_eq!(postgres_boolean(text), flag, "{text:?}");
+        }
+    }
+}

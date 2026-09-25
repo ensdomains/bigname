@@ -1652,7 +1652,13 @@ record-id records with resolver links, grants and account approvals, aliases,
 child edges, reverse tuples and claims, and the address associations. Each row
 belongs to one key and holds what the latest events of that key left, clears
 included: a zero pointer, record id `0`, a revoked grant or an inactive alias
-stays a row. A row goes only when nothing remains for its key.
+stays a row. A row goes only when nothing remains for its key. Each grant also
+carries `registration_position`, state new to the families rather than a copy of
+a served value: the position of the resource's latest `RegistrationGranted` or
+`RegistrationReserved` before the grant, earlier events of the grant's own block
+included, so the publishing steps can tell which registration of the resource a
+grant was written under. The served permissions read keeps no such value and
+masks by the resource's current registration.
 
 Registration and lease state also keeps every registration, renewal, release,
 reservation, expiry change and token transfer of a lease or ENSv2 triple as a
@@ -1666,9 +1672,11 @@ discovery edge, address or declaration of it, or the [active manifest
 set](glossary.md#active-manifest-set-family-block), with the
 manifests active at that block, the way the served resolver build does.
 
-These tables are shadows today. No served response reads them, and no served
-value depends on them. After each Project batch commits and its progress is
-recorded, the phase runner applies the families block by block, each block in
+These tables are shadows today. No production serving reader reads them, and
+no served value depends on them; only the family reducers, the step 3
+[shadow readers](glossary.md#shadow-read) in the test harnesses, and tests do.
+After each Project batch commits and its progress is recorded, the phase runner
+applies the families block by block, each block in
 a transaction of its own, from the [family marker](glossary.md#family-marker)
 (`project_family_marker`) up to the served marker. A batch's publication never
 waits for them, since it has committed before they run, but the next batch
@@ -1690,11 +1698,23 @@ run spends its budget, skips nothing and applies or undoes at least one block.
 A stop, a failed block or an Interpret revision change can still end it early.
 The served redo stays recorded, but the command exits non-zero with "family
 repair incomplete". The shortfall is recorded when the family run takes its
-pending work, before the run starts, and cleared only when a run ends on the
-served block, so a stop before the first family block also fails the command.
-The error names the served marker, and the family marker when a run ended with
-one; otherwise it says the family marker is unavailable. Rerunning the same
-redo repairs the families once the cause is gone. The run reads the Interpret and Project
+pending work, before the run starts, and cleared only by a returned outcome
+that is not a skip and stands on the served block, hash included. So a skip
+while the family marker already stands on the served block still fails the
+command. The error always names the served marker's block and hash, and
+reports the family marker in one of three ways:
+
+- a run that was abandoned before it returned (its future dropped by a stop)
+  reports the family marker as unavailable;
+- a run that returned reports the marker it observed;
+- a run that returned with no family marker at all reports "no block"; a
+  marker whose hash is off the readable lineage is still reported as its block
+  and hash.
+
+A stop leaves family completion unconfirmed rather than failed: the final
+family block can commit before the stop drops the run, and the command still
+exits non-zero. Rerunning the same redo repairs the families once the cause is
+gone. The run reads the Interpret and Project
 rows of `chain_phase_state` within 2 seconds or is skipped for that batch.
 `--project-families false` (or `BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES=false`)
 turns the loop off.
@@ -1732,10 +1752,17 @@ A Project redo undoes the families from their journal down to the block before
 the redo range and replays them to the served marker. A marker left on a block
 that is no longer readable is undone the same way. A redo below the kept
 journal, a redo attempt the families never saw, or a served rebuild clears the
-families and rebuilds them from the blocks that carry events or start or stop
-a resolver activation. So do families whose marker records a content hash
+families and rebuilds them from the blocks that carry events or surface
+bindings or start or stop a resolver activation, so a rebuild visits every
+block the normal path writes a binding candidate in. So do families whose marker records a content hash
 other than the running binary's, which covers a served rebuild whose family run
-was skipped. The repair record describes the latest of these: its
+was skipped. An undo journal the families refuse, such as one whose prior
+markers form a cycle, does not trigger a rebuild: every run that needs it
+stops with a data-integrity skip, logs a warning and counts on
+`phase_runner_project_family_skips_total`, changing nothing, until an operator
+runs a rebuild or a redo below the kept journal. That is deliberate: a
+malformed journal is a defect to look at, not state to rebuild over silently.
+The repair record describes the latest of these: its
 attempt, reason, trusted base, replay target, state (`undoing`, `replaying`,
 `rebuilding` or `complete`) and, once done, the marker, generation and input
 content hash it completed with. Each transition commits with the work it
@@ -1748,7 +1775,9 @@ statistics of the family tables after 1, 2, 4, 8, ... blocks rebuilt since its
 reset, counted across runs from the generation the reset recorded.
 
 The families differ from the served build in these known places, which the
-steps that read them must key on. Each is also stated on its table or column:
+steps that read them must key on. Each is also stated on its table or column,
+and each label names a family as the [owned key family](glossary.md#owned-key-family)
+entry maps them to tables and reducers:
 
 - F1: an `AuthorityEpochChanged` `registry_only` at an earlier block than a
   binding does not mark the binding registry-only; the served handoff takes an
@@ -1786,7 +1815,7 @@ steps that read them must key on. Each is also stated on its table or column:
   keeps every EVM-shaped addr value past a version change, under the
   `logical_name_id` it was written under, because a later link can keep such a
   value served. The reader owns the version and link boundary (the table
-  comment, set by migration `20260926101200`).
+  comment, set by schema-migration `20260926101200`).
 - The undo journal is not pruned while the chain has no finalized or safe
   head.
 

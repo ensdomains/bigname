@@ -457,3 +457,58 @@ async fn a_reverse_change_leaves_its_before_tuple_as_it_was() -> Result<()> {
     fixture.assert_rebuild_equal(11).await?;
     fixture.cleanup().await
 }
+
+// A binding opened in the block starts at the block time plus its log's microseconds, and the
+// one it replaces closes the same way. The served builders read the bindings open at the end
+// of the block (name_authority/build.sql:4-12, block_timestamp + 1 second, active_from before
+// it and active_to at or after it), so a named AuthorityTransferred in that block reaches the
+// new binding's resource, not the closed one's.
+#[tokio::test]
+async fn a_named_observation_reaches_a_binding_opened_in_its_own_block() -> Result<()> {
+    let fixture = Fixture::new("families_fidelity_same_block_binding", 20).await?;
+    let (first, second) = (uuid(1), uuid(2));
+    fixture
+        .binding(&uuid(101), &name(1), &first, "ens_v1", 10, 1, Some(12))
+        .await?;
+    fixture
+        .binding(&uuid(102), &name(1), &second, "ens_v1", 12, 2, None)
+        .await?;
+    // Block 12 is at 1800000144; the first binding closes at log 1, the second opens at log 2.
+    // Moved one at a time: the bindings of one name and arm may not overlap.
+    for (id, column, micros) in [(102, "active_from", 2), (101, "active_to", 1)] {
+        sqlx::query(&format!(
+            "UPDATE bigname_phase.surface_bindings
+             SET {column} = to_timestamp(1800000144) + make_interval(secs => $2 / 1e6)
+             WHERE surface_binding_id = $1::uuid"
+        ))
+        .bind(uuid(id))
+        .bind(f64::from(micros))
+        .execute(&fixture.pool)
+        .await?;
+    }
+    fixture
+        .write(
+            12,
+            3,
+            "AuthorityTransferred",
+            "ens_v1_registry_l1",
+            Some(&name(1)),
+            Some(&first),
+            json!({"node": node(1), "owner": OWNER_A, "owner_getter": OWNER_A}),
+            REGISTRY,
+        )
+        .await?;
+    fixture.apply(12, FamilyMode::Normal).await;
+    let rows = fixture.rows("project_registry_binding_observation").await?;
+    let target = rows
+        .iter()
+        .find(|row| row["observation_identity"] == json!(name(1)))
+        .map(|row| columns(row, &["resource_id", "target_resource_id"]));
+    assert_eq!(
+        target,
+        Some(json!({"resource_id": first, "target_resource_id": second}))
+    );
+    fixture.assert_undo_restores(12).await?;
+    fixture.assert_rebuild_equal(12).await?;
+    fixture.cleanup().await
+}

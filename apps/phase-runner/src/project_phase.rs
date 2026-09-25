@@ -124,8 +124,8 @@ impl ProjectPhase {
     }
 
     /// Record a chain's families as short of `target` when a finishing run takes its pending work,
-    /// before the run is first polled, and clear the entry only once a run ends on the target, so
-    /// a run that is abandoned midway, or before it starts, stays reported.
+    /// before the run is first polled, and clear the entry only once a run that skipped nothing
+    /// ends on the target, so a run that is abandoned midway, or before it starts, stays reported.
     fn note_shortfall(
         &self,
         chain_id: &str,
@@ -147,7 +147,9 @@ impl ProjectPhase {
             );
             return;
         };
-        if outcome.lag_blocks() == 0 {
+        // A skip is a shortfall even at lag 0: a redo that ends on the served marker's own block
+        // and hash leaves a family marker already there looking current.
+        if outcome.skipped.is_none() && outcome.lag_blocks() == 0 {
             shortfalls.remove(chain_id);
             return;
         }
@@ -404,19 +406,27 @@ impl Phase for ProjectPhase {
                 // runner closes it when it records this batch. The read is bounded so it cannot
                 // hold up the progress write; a failed or late read skips this batch's families,
                 // is counted as a skip, and the next run sees the redo attempt it missed and
-                // rebuilds.
-                let token = match tokio::time::timeout(
-                    self.families.token_budget,
-                    bigname_project::families::input_token(&self.pool, &context.chain_id),
-                )
-                .await
-                {
-                    Ok(Ok(token)) => Ok(token),
-                    Ok(Err(error)) => Err(format!("the input token did not read: {error}")),
-                    Err(_) => Err(format!(
+                // rebuilds. A zero budget skips without starting the read, which a zero-length
+                // timer would otherwise race.
+                let late = || {
+                    format!(
                         "the input token did not read within {:?}",
                         self.families.token_budget
-                    )),
+                    )
+                };
+                let token = if self.families.token_budget.is_zero() {
+                    Err(late())
+                } else {
+                    match tokio::time::timeout(
+                        self.families.token_budget,
+                        bigname_project::families::input_token(&self.pool, &context.chain_id),
+                    )
+                    .await
+                    {
+                        Ok(Ok(token)) => Ok(token),
+                        Ok(Err(error)) => Err(format!("the input token did not read: {error}")),
+                        Err(_) => Err(late()),
+                    }
                 };
                 self.pending_families
                     .lock()

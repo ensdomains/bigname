@@ -239,3 +239,225 @@ async fn an_alias_without_an_active_flag_is_stored_active() -> Result<()> {
     }
     fixture.cleanup().await
 }
+
+// The served children build lower-cases a child edge's owner (children.rs, `lower(COALESCE(
+// owner_getter, owner))`), and the family columns are documented lower-cased, so a checksummed
+// payload is stored lower-cased.
+#[tokio::test]
+async fn a_child_edge_stores_its_owner_and_owner_getter_lower_cased() -> Result<()> {
+    let fixture = Fixture::new("families_child_edge_case", 20).await?;
+    fixture
+        .write(
+            10,
+            1,
+            "SubregistryChanged",
+            "ens_v1_registry_l1",
+            None,
+            None,
+            json!({"source_event": "NewOwner", "node": node(1), "child_node": node(9),
+                   "labelhash": node(99),
+                   "owner": "0x00000000000000000000000000000000000000Aa",
+                   "owner_getter": "0x00000000000000000000000000000000000000Bb"}),
+            REGISTRY,
+        )
+        .await?;
+    fixture.apply(10, FamilyMode::Normal).await;
+    let owners = || async {
+        let edges = fixture.rows("project_child_edge_candidate").await?;
+        anyhow::ensure!(edges.len() == 1, "one edge key: {edges:?}");
+        anyhow::Ok(columns(
+            &edges[0],
+            &["owner", "owner_getter", "block_number"],
+        ))
+    };
+    assert_eq!(
+        owners().await?,
+        json!({"owner": "0x00000000000000000000000000000000000000aa",
+               "owner_getter": "0x00000000000000000000000000000000000000bb",
+               "block_number": 10})
+    );
+    fixture.assert_undo_restores(10).await?;
+    // The same key again with other mixed-case owners: the update lands lower-cased, its undo
+    // restores block 10's row (checked inside assert_undo_restores), and the replay lower-cases
+    // again.
+    fixture
+        .write(
+            11,
+            1,
+            "SubregistryChanged",
+            "ens_v1_registry_l1",
+            None,
+            None,
+            json!({"source_event": "NewOwner", "node": node(1), "child_node": node(9),
+                   "labelhash": node(99),
+                   "owner": "0x00000000000000000000000000000000000000cC",
+                   "owner_getter": "0x00000000000000000000000000000000000000Dd"}),
+            REGISTRY,
+        )
+        .await?;
+    fixture.apply(11, FamilyMode::Normal).await;
+    let updated = json!({"owner": "0x00000000000000000000000000000000000000cc",
+                         "owner_getter": "0x00000000000000000000000000000000000000dd",
+                         "block_number": 11});
+    assert_eq!(owners().await?, updated);
+    fixture.assert_undo_restores(11).await?;
+    assert_eq!(owners().await?, updated, "the replay lower-cases again");
+    fixture.assert_rebuild_equal(11).await?;
+    fixture.cleanup().await
+}
+
+// Both alias readers take `(after_state ->> 'active')::boolean`, so every spelling PostgreSQL
+// reads as a boolean decides the flag: case-insensitive and trimmed, unique prefixes of true,
+// false, yes, no, on and off, and 1 or 0, as text or as a JSON number.
+#[tokio::test]
+async fn an_alias_active_flag_reads_as_postgresql_reads_a_boolean() -> Result<()> {
+    let fixture = Fixture::new("families_alias_boolean", 20).await?;
+    let spellings = [
+        (json!("off"), false),
+        (json!(" No "), false),
+        (json!("0"), false),
+        (json!(0), false),
+        (json!("fal"), false),
+        (json!("n"), false),
+        (json!("ON"), true),
+        (json!("1"), true),
+        (json!(1), true),
+        (json!("ye"), true),
+    ];
+    for (n, (active, _)) in (1..).zip(&spellings) {
+        fixture
+            .write(
+                10,
+                n,
+                "AliasChanged",
+                "ens_v2_resolver_l1",
+                Some(&name(u64::try_from(100 + n)?)),
+                None,
+                json!({"resolver": RESOLVER, "to_logical_name_id": name(2), "active": active}),
+                RESOLVER,
+            )
+            .await?;
+    }
+    fixture.apply(10, FamilyMode::Normal).await;
+    let rows = fixture.rows("project_name_alias").await?;
+    let mut stored: Vec<(String, Option<bool>)> = rows
+        .iter()
+        .map(|row| (row["logical_name_id"].to_string(), row["active"].as_bool()))
+        .collect();
+    stored.sort();
+    let mut expected: Vec<(String, Option<bool>)> = (1..)
+        .zip(&spellings)
+        .map(|(n, (_, flag))| (json!(name(100 + n)).to_string(), Some(*flag)))
+        .collect();
+    expected.sort();
+    assert_eq!(stored, expected);
+    fixture.cleanup().await
+}
+
+// A differential check against PostgreSQL itself: every value goes through the served readers'
+// cast, `COALESCE((after_state ->> 'active')::boolean, true)`, and through the family reducer.
+// Where the cast accepts the value, both alias tables hold its result; where it rejects it (the
+// served batch would fail), both hold the documented active fallback.
+#[tokio::test]
+async fn an_alias_active_flag_matches_the_served_boolean_cast() -> Result<()> {
+    let fixture = Fixture::new("families_alias_boolean_cast", 20).await?;
+    let mut values: Vec<Value> = [
+        "t",
+        "tr",
+        "tru",
+        "true",
+        "f",
+        "fa",
+        "fal",
+        "fals",
+        "false",
+        "y",
+        "ye",
+        "yes",
+        "n",
+        "no",
+        "on",
+        "of",
+        "off",
+        "1",
+        "0",
+        "TrUe",
+        "FALSE",
+        "Off",
+        "yEs",
+        "o",
+        "",
+        "   ",
+        "junk",
+        "truex",
+        "2",
+        "01",
+        "\u{a0}off\u{a0}",
+        "\u{2003}on",
+        "off\u{3000}",
+        "\u{85}no",
+    ]
+    .into_iter()
+    .map(|text| json!(text))
+    .collect();
+    for space in [' ', '\t', '\n', '\r', '\u{b}', '\u{c}'] {
+        values.push(json!(format!("{space}off{space}")));
+        values.push(json!(format!("{space}{space}yes")));
+    }
+    values.extend([
+        json!(true),
+        json!(false),
+        Value::Null,
+        json!(0),
+        json!(1),
+        json!(2),
+        json!(1.0),
+    ]);
+    let mut expected = Vec::new();
+    for (n, value) in (1..).zip(&values) {
+        let cast: std::result::Result<Option<bool>, sqlx::Error> = sqlx::query_scalar(
+            "SELECT COALESCE((jsonb_build_object('active', $1::jsonb) ->> 'active')::boolean, true)",
+        )
+        .bind(value)
+        .fetch_one(&fixture.pool)
+        .await;
+        let flag = match cast {
+            Ok(flag) => flag.expect("COALESCE is never null"),
+            Err(sqlx::Error::Database(error)) => {
+                assert_eq!(error.code().as_deref(), Some("22P02"), "{value:?}: {error}");
+                true
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let logical = name(u64::try_from(200 + n)?);
+        fixture
+            .write(
+                10,
+                n,
+                "AliasChanged",
+                "ens_v2_resolver_l1",
+                Some(&logical),
+                None,
+                json!({"resolver": RESOLVER, "to_logical_name_id": name(2), "active": value}),
+                RESOLVER,
+            )
+            .await?;
+        expected.push((value.clone(), logical, flag));
+    }
+    fixture.apply(10, FamilyMode::Normal).await;
+    for table in ["project_name_alias", "project_resolver_alias"] {
+        let rows = fixture.rows(table).await?;
+        assert_eq!(rows.len(), expected.len(), "{table}");
+        for (value, logical, flag) in &expected {
+            let row = rows
+                .iter()
+                .find(|row| {
+                    row["logical_name_id"] == json!(logical)
+                        || row["alias_identity"] == json!(logical)
+                })
+                .unwrap_or_else(|| panic!("{table}: no row for {value:?}"));
+            assert_eq!(row["active"], json!(flag), "{table}: {value:?}");
+        }
+    }
+    fixture.cleanup().await
+}

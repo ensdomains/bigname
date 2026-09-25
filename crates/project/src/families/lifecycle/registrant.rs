@@ -107,6 +107,25 @@ pub(super) async fn fold_registrants(
             })
             .filter_map(|row| Some((Position::of_row(row)?, reported_registrant(row)?)))
             .max_by(|left, right| left.0.cmp(&right.0));
+        // The name's latest retained registrar transfer. One the adapter emitted unnamed reached
+        // no fold row on arrival (addresses.rs keys the fold by the event's own name), so a row
+        // named since is folded here: it becomes the token holder when it is later than the one
+        // the fold holds.
+        let transfer = current
+            .values()
+            .filter(|row| {
+                row.get("decoded_logical_name_id").and_then(Value::as_str) == Some(name.as_str())
+                    && row.get("event_kind").and_then(Value::as_str)
+                        == Some("TokenControlTransferred")
+            })
+            .filter_map(|row| {
+                let recipient = row
+                    .get("to_address")
+                    .and_then(Value::as_str)
+                    .map(str::to_ascii_lowercase);
+                Some((Position::of_row(row)?, recipient))
+            })
+            .max_by(|left, right| left.0.cmp(&right.0));
         let key = key_of(fold, [chain.clone(), json!(name)]);
         let existing = rows.get(fold, &key).cloned();
         let Some((position, registrant)) = latest else {
@@ -136,6 +155,24 @@ pub(super) async fn fold_registrants(
         });
         set(&mut row, "registrant", registrant);
         set(&mut row, "registrant_position", position.to_json());
+        if let Some((transfer_position, recipient)) = transfer {
+            let held = row
+                .get("token_holder_position")
+                .and_then(Value::as_object)
+                .and_then(Position::of_row);
+            if held.is_none_or(|held| transfer_position > held) {
+                set(
+                    &mut row,
+                    "token_holder",
+                    recipient.map_or(Value::Null, Value::String),
+                );
+                set(
+                    &mut row,
+                    "token_holder_position",
+                    transfer_position.to_json(),
+                );
+            }
+        }
         rows.put(fold, row).map_err(in_family(fold.name))?;
     }
     Ok(())
