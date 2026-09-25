@@ -982,6 +982,7 @@ async fn resolver_links_summary_follows_latest_link_per_node() -> Result<()> {
 #[tokio::test]
 async fn resolver_links_summary_follows_a_retracted_link_through_redo() -> Result<()> {
     const OTHER: &str = "0x5555555555555555555555555555555555555555";
+
     let (db, pool) = database("record_id_link_retraction").await?;
     seed(&pool).await?;
     event(

@@ -209,6 +209,113 @@ async fn project_write_then_pointer_change(
     Ok((write, attributed))
 }
 
+// Today pairs a coin-60 value only with a sibling its current pointer attributes to the
+// resource. Here the `AddrChanged` half is written at the resolver the name selects then
+// (RESOLVER_A), one log after an `AddressChanged` at the resolver it switches to in the same
+// transaction (RESOLVER_B). The sibling is attributed only through the pointer history, so neither
+// today nor the family pairs it, and the harness must not expect a pair.
+#[tokio::test]
+async fn a_sibling_attributed_only_through_history_is_not_a_pair() -> Result<()> {
+    let (database, pool) = database("history_sibling").await?;
+    let blocks = [block(1000), block(1001)];
+    seed(&pool, &blocks).await?;
+    let logical_name_id = format!("{NAMESPACE}:{NODE}");
+    let registry = json!({"emitting_address": "0x0000000000000000000000000000000000000660"});
+    insert_event(
+        &pool,
+        "pointer-a",
+        Some(&logical_name_id),
+        Some(RESOURCE),
+        "ResolverChanged",
+        "ens_v1_registry_l1",
+        &blocks[0],
+        0,
+        json!({"node": NODE, "resolver": RESOLVER_A}),
+        registry.clone(),
+    )
+    .await?;
+    let address = |resolver: &str, source: &str, value: &str| {
+        json!({"source_event": source, "resolver": resolver, "node": NODE,
+               "record_key": "addr:60", "record_family": "addr", "selector_key": "60",
+               "coin_type": "60", "value": value})
+    };
+    for (identity, log, resolver, source, value) in [
+        (
+            "value-b",
+            0,
+            RESOLVER_B,
+            "AddressChanged",
+            "0x00000000000000000000000000000000000000c1",
+        ),
+        (
+            "sibling-a",
+            1,
+            RESOLVER_A,
+            "AddrChanged",
+            "0x00000000000000000000000000000000000000c2",
+        ),
+    ] {
+        insert_event(
+            &pool,
+            identity,
+            None,
+            None,
+            "RecordChanged",
+            "ens_v1_resolver_l1",
+            &blocks[1],
+            log,
+            address(resolver, source, value),
+            json!({"emitting_address": resolver}),
+        )
+        .await?;
+    }
+    insert_event(
+        &pool,
+        "pointer-b",
+        Some(&logical_name_id),
+        Some(RESOURCE),
+        "ResolverChanged",
+        "ens_v1_registry_l1",
+        &blocks[1],
+        2,
+        json!({"node": NODE, "resolver": RESOLVER_B}),
+        registry,
+    )
+    .await?;
+    // Both halves in one transaction.
+    sqlx::query(
+        "UPDATE normalized_events SET transaction_hash = $1
+         WHERE event_identity IN ('value-b:1001', 'sibling-a:1001', 'pointer-b:1001')",
+    )
+    .bind(format!("0x{:064x}", 1001 * 100))
+    .execute(&pool)
+    .await?;
+    run(&pool, &blocks[1], None, RunMode::Normal).await?;
+    let (provenance, sibling): (Value, i64) = sqlx::query_as(
+        "SELECT row.provenance, event.normalized_event_id
+         FROM record_inventory_current row, normalized_events event
+         WHERE row.resource_id = $1::uuid AND event.event_identity = 'sibling-a:1001'",
+    )
+    .bind(RESOURCE)
+    .fetch_one(&pool)
+    .await?;
+    let listed = |field: &str| {
+        provenance[field]
+            .as_array()
+            .is_some_and(|ids| ids.contains(&json!(sibling)))
+    };
+    assert!(listed("attributed_event_ids"), "{provenance}");
+    assert!(!listed("record_event_ids"), "{provenance}");
+    assert!(
+        provenance["record_event_ids"]
+            .as_array()
+            .is_some_and(|ids| !ids.is_empty()),
+        "the value is served: {provenance}"
+    );
+    database.cleanup().await?;
+    Ok(())
+}
+
 async fn run(
     pool: &PgPool,
     target: &Block,

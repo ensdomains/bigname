@@ -373,9 +373,10 @@ async fn all_family_pages(
     }
 }
 
-/// The value events of today's row that are the `AddressChanged` half of a coin-60 pair: an
-/// `AddressChanged` `addr:60` write with an `AddrChanged` `addr:60` write attributed to the same
-/// resource one log later in the same transaction, the order one ENSv1 `setAddr` emits them in.
+/// The coin-60 pairs today's row serves, from normalized events alone: an `AddressChanged`
+/// `addr:60` value event of the row with an `AddrChanged` `addr:60` write that the resource's
+/// current pointer attributes to it, one log later in the same transaction, the order one ENSv1
+/// `setAddr` emits them in.
 /// (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L59-L62 @ ens_v1@91c966f)
 async fn expected_pairs(
     pool: &PgPool,
@@ -388,13 +389,17 @@ async fn expected_pairs(
             .map(|ids| ids.iter().filter_map(Value::as_i64).collect())
             .unwrap_or_default()
     };
-    let (values, attributed) = (ids("record_event_ids"), ids("attributed_event_ids"));
+    let values = ids("record_event_ids");
     if values.is_empty() {
         return Ok(Vec::new());
     }
-    // As today's `coin60_siblings`: the sibling is attributed to the same resource and sits one
-    // log later in the same transaction, compared null-safely. A node-keyed sibling is attributed
-    // when today's row lists it; a named one when it shares the value's name and resolver.
+    // As today's `coin60_siblings` over its current `attributed_events`: the value is a served
+    // event of the row, so it is attributed through the resource's current pointer; the sibling
+    // is attributed through the same arm when it shares the value's effective resolver, source
+    // family, namespace and manifest and the arm's key (the logical name for a named write, the
+    // node for a node-keyed one, the record id for a record-id one). The history attribution
+    // today's provenance also lists is not current and pairs nothing. The value side keeps the
+    // builder's requirements: an `addr` record of selector 60 with a log position.
     let rows = sqlx::query(
         "SELECT value.normalized_event_id AS value_id, value.block_number AS value_block,
                 value.transaction_index AS value_transaction, value.log_index AS value_log,
@@ -411,24 +416,33 @@ async fn expected_pairs(
           AND sibling.event_kind = 'RecordChanged'
           AND sibling.after_state ->> 'source_event' = 'AddrChanged'
           AND sibling.after_state ->> 'record_key' = 'addr:60'
-          AND (
-              sibling.normalized_event_id = ANY($2::bigint[])
-              OR (
-                  sibling.logical_name_id = value.logical_name_id
-                  AND lower(COALESCE(NULLIF(sibling.after_state ->> 'resolver', ''),
-                                     NULLIF(sibling.raw_fact_ref ->> 'emitting_address', '')))
-                    = lower(COALESCE(NULLIF(value.after_state ->> 'resolver', ''),
-                                     NULLIF(value.raw_fact_ref ->> 'emitting_address', '')))
-              )
-          )
+          AND sibling.source_family = value.source_family
+          AND sibling.namespace = value.namespace
+          AND sibling.source_manifest_id IS NOT DISTINCT FROM value.source_manifest_id
+          AND lower(COALESCE(NULLIF(sibling.after_state ->> 'resolver', ''),
+                             NULLIF(sibling.raw_fact_ref ->> 'emitting_address', '')))
+            = lower(COALESCE(NULLIF(value.after_state ->> 'resolver', ''),
+                             NULLIF(value.raw_fact_ref ->> 'emitting_address', '')))
+          AND CASE
+              WHEN value.logical_name_id IS NOT NULL
+                  THEN sibling.logical_name_id = value.logical_name_id
+              WHEN value.after_state ->> 'resolver_record_id' IS NOT NULL
+                  THEN sibling.logical_name_id IS NULL
+                   AND sibling.after_state ->> 'resolver_record_id'
+                     = value.after_state ->> 'resolver_record_id'
+              ELSE sibling.logical_name_id IS NULL
+               AND lower(sibling.after_state ->> 'node') = lower(value.after_state ->> 'node')
+          END
          WHERE value.normalized_event_id = ANY($1::bigint[])
            AND value.event_kind = 'RecordChanged'
            AND value.after_state ->> 'source_event' = 'AddressChanged'
            AND value.after_state ->> 'record_key' = 'addr:60'
+           AND value.after_state ->> 'record_family' = 'addr'
+           AND value.after_state ->> 'selector_key' = '60'
+           AND value.log_index IS NOT NULL
          ORDER BY value.normalized_event_id, sibling.normalized_event_id",
     )
     .bind(&values)
-    .bind(&attributed)
     .fetch_all(pool)
     .await
     .context("failed to find the coin-60 pairs today's row serves")?;
