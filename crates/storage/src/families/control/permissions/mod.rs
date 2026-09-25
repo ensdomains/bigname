@@ -169,14 +169,17 @@ pub async fn load_shadow_permissions_in(
     })
     .collect();
 
+    // Grouped once, so each resource reads only its own rows.
+    let mut by_resource: BTreeMap<String, Vec<GrantRow>> = BTreeMap::new();
+    for grant in grants {
+        by_resource
+            .entry(grant.resource_id.clone())
+            .or_default()
+            .push(grant);
+    }
     let served = |resource: &str| -> Vec<ServedGrant> {
-        let own: Vec<GrantRow> = grants
-            .iter()
-            .filter(|grant| grant.resource_id == resource)
-            .cloned()
-            .collect();
         masked_grants(
-            &own,
+            by_resource.get(resource).map_or(&[][..], Vec::as_slice),
             wrappers.get(resource),
             key_states.get(resource),
             clock.timestamp_seconds,
