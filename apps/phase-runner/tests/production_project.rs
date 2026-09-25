@@ -24788,26 +24788,23 @@ async fn served_authority(pool: &PgPool, logical_name_id: &str) -> Result<Served
     .await?)
 }
 
-// A released ENSv2 registration reserved again hands the name to its live ENSv1 lease (product
-// ruling of 2026-09-25: only a reservation defers to ENSv1). `unregister` of an owned token bumps
-// its token version, so the later `LabelReserved` carries a versioned token id and Interpret
-// writes the reservation with the name but without a resource. Selection must see it by name.
-// Raw logs run through Interpret; no normalized row is written by hand.
-// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L196-L207 @ ens_v2@a971bd64)
-// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L649-L651 @ ens_v2@a971bd64)
-#[tokio::test]
-async fn a_reservation_after_a_v2_release_hands_the_name_to_its_live_v1_lease_while_it_lasts()
--> Result<()> {
-    let scratch = ScratchDatabase::create("project_v2_release_then_reservation").await?;
-    let chain = CHAIN;
-    let logical_name_id = seed_dual_open_cross_arm_fixture(scratch.pool(), chain, 4).await?;
+/// Blocks 5 and 6 of the release-then-reserve sequence through Interpret and Project: beside a
+/// live ENSv1 lease the ENSv2 registration is unregistered in block 5 (a released ENSv2 tombstone),
+/// and the label is reserved again in block 6 with `reservation_expiry`, which hands the name to
+/// the ENSv1 lease on incremental and full runs. Returns the name and the released ENSv2 resource.
+async fn release_then_reserve(
+    pool: &PgPool,
+    chain: &str,
+    reservation_expiry: u64,
+) -> Result<(String, Uuid)> {
+    let logical_name_id = seed_dual_open_cross_arm_fixture(pool, chain, 4).await?;
     let unregistered = LabelUnregistered {
         tokenId: alice_v2_token(0),
         sender: SENDER.parse()?,
     }
     .encode_log_data();
     insert_raw_event_at(
-        scratch.pool(),
+        pool,
         chain,
         5,
         1,
@@ -24817,7 +24814,7 @@ async fn a_reservation_after_a_v2_release_hands_the_name_to_its_live_v1_lease_wh
         unregistered.data.as_ref(),
     )
     .await?;
-    InterpretEngine::new(scratch.pool().clone())
+    InterpretEngine::new(pool.clone())
         .run_batch(InterpretRequest {
             chain_id: chain.into(),
             from_block: 0,
@@ -24833,12 +24830,12 @@ async fn a_reservation_after_a_v2_release_hands_the_name_to_its_live_v1_lease_wh
     )
     .bind(chain)
     .bind(&logical_name_id)
-    .fetch_one(scratch.pool())
+    .fetch_one(pool)
     .await?;
-    run_project(scratch.pool(), chain, None, RunMode::Normal, 0, 5).await?;
+    run_project(pool, chain, None, RunMode::Normal, 0, 5).await?;
     // Released: the name stays with ENSv2 as a tombstone beside the live ENSv1 lease.
     assert_eq!(
-        served_authority(scratch.pool(), &logical_name_id).await?,
+        served_authority(pool, &logical_name_id).await?,
         (
             Some("ens_v2".into()),
             Some("unregistered".into()),
@@ -24847,17 +24844,17 @@ async fn a_reservation_after_a_v2_release_hands_the_name_to_its_live_v1_lease_wh
         )
     );
 
-    insert_lineage_block(scratch.pool(), chain, 6).await?;
+    insert_lineage_block(pool, chain, 6).await?;
     let reserved = LabelReserved {
         tokenId: alice_v2_token(1),
         labelHash: keccak256(b"alice"),
         label: "alice".into(),
-        expiry: 4_000_000_000,
+        expiry: reservation_expiry,
         sender: SENDER.parse()?,
     }
     .encode_log_data();
     insert_raw_event_at(
-        scratch.pool(),
+        pool,
         chain,
         6,
         1,
@@ -24867,7 +24864,7 @@ async fn a_reservation_after_a_v2_release_hands_the_name_to_its_live_v1_lease_wh
         reserved.data.as_ref(),
     )
     .await?;
-    InterpretEngine::new(scratch.pool().clone())
+    InterpretEngine::new(pool.clone())
         .run_batch(InterpretRequest {
             chain_id: chain.into(),
             from_block: 6,
@@ -24888,7 +24885,7 @@ async fn a_reservation_after_a_v2_release_hands_the_name_to_its_live_v1_lease_wh
     )
     .bind(chain)
     .bind(&logical_name_id)
-    .fetch_all(scratch.pool())
+    .fetch_all(pool)
     .await?;
     assert_eq!(
         reservation.len(),
@@ -24906,7 +24903,7 @@ async fn a_reservation_after_a_v2_release_hands_the_name_to_its_live_v1_lease_wh
     )
     .bind(chain)
     .bind(&logical_name_id)
-    .fetch_one(scratch.pool())
+    .fetch_one(pool)
     .await?;
     assert_eq!(open_v2, 0);
     let v1_resource: Uuid = sqlx::query_scalar(
@@ -24916,11 +24913,11 @@ async fn a_reservation_after_a_v2_release_hands_the_name_to_its_live_v1_lease_wh
     )
     .bind(chain)
     .bind(&logical_name_id)
-    .fetch_one(scratch.pool())
+    .fetch_one(pool)
     .await?;
 
     run_project(
-        scratch.pool(),
+        pool,
         chain,
         Some(Marker {
             number: 5,
@@ -24931,8 +24928,8 @@ async fn a_reservation_after_a_v2_release_hands_the_name_to_its_live_v1_lease_wh
         6,
     )
     .await?;
-    normalize_projection_clocks(scratch.pool()).await?;
-    let incremental = served_authority(scratch.pool(), &logical_name_id).await?;
+    normalize_projection_clocks(pool).await?;
+    let incremental = served_authority(pool, &logical_name_id).await?;
     assert_eq!(
         incremental,
         (
@@ -24947,18 +24944,83 @@ async fn a_reservation_after_a_v2_release_hands_the_name_to_its_live_v1_lease_wh
         "SELECT to_jsonb(current) FROM name_current current WHERE logical_name_id = $1",
     )
     .bind(&logical_name_id)
-    .fetch_one(scratch.pool())
+    .fetch_one(pool)
     .await?;
-    run_project(scratch.pool(), chain, None, RunMode::Normal, 0, 6).await?;
-    normalize_projection_clocks(scratch.pool()).await?;
+    run_project(pool, chain, None, RunMode::Normal, 0, 6).await?;
+    normalize_projection_clocks(pool).await?;
     let fresh_row: Value = sqlx::query_scalar(
         "SELECT to_jsonb(current) FROM name_current current WHERE logical_name_id = $1",
     )
     .bind(&logical_name_id)
-    .fetch_one(scratch.pool())
+    .fetch_one(pool)
     .await?;
     assert_eq!(incremental_row, fresh_row);
+    Ok((logical_name_id, v2_resource))
+}
 
+/// Projects block 7, where the reservation from `release_then_reserve` ended, and checks that the
+/// released ENSv2 tombstone returns and that the incremental and full runs agree.
+async fn assert_tombstone_returns_at_block_7(
+    pool: &PgPool,
+    chain: &str,
+    logical_name_id: &str,
+    v2_resource: Uuid,
+) -> Result<()> {
+    run_project(
+        pool,
+        chain,
+        Some(Marker {
+            number: 6,
+            hash: block_hash(chain, 6),
+        }),
+        RunMode::Normal,
+        7,
+        7,
+    )
+    .await?;
+    normalize_projection_clocks(pool).await?;
+    assert_eq!(
+        served_authority(pool, logical_name_id).await?,
+        (
+            Some("ens_v2".into()),
+            Some("unregistered".into()),
+            Some(v2_resource),
+            Some("released".into()),
+        ),
+        "the released ENSv2 tombstone returns once the reservation ends"
+    );
+    let ended_incremental: Value = sqlx::query_scalar(
+        "SELECT to_jsonb(current) FROM name_current current WHERE logical_name_id = $1",
+    )
+    .bind(logical_name_id)
+    .fetch_one(pool)
+    .await?;
+    run_project(pool, chain, None, RunMode::Normal, 0, 7).await?;
+    normalize_projection_clocks(pool).await?;
+    let ended_fresh: Value = sqlx::query_scalar(
+        "SELECT to_jsonb(current) FROM name_current current WHERE logical_name_id = $1",
+    )
+    .bind(logical_name_id)
+    .fetch_one(pool)
+    .await?;
+    assert_eq!(ended_incremental, ended_fresh);
+    Ok(())
+}
+
+// A released ENSv2 registration reserved again hands the name to its live ENSv1 lease (product
+// ruling of 2026-09-25: only a reservation defers to ENSv1). `unregister` of an owned token bumps
+// its token version, so the later `LabelReserved` carries a versioned token id and Interpret
+// writes the reservation with the name but without a resource. Selection must see it by name.
+// Raw logs run through Interpret; no normalized row is written by hand.
+// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L196-L207 @ ens_v2@a971bd64)
+// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L649-L651 @ ens_v2@a971bd64)
+#[tokio::test]
+async fn a_reservation_after_a_v2_release_hands_the_name_to_its_live_v1_lease_while_it_lasts()
+-> Result<()> {
+    let scratch = ScratchDatabase::create("project_v2_release_then_reservation").await?;
+    let chain = CHAIN;
+    let (logical_name_id, v2_resource) =
+        release_then_reserve(scratch.pool(), chain, 4_000_000_000).await?;
     // The hand-back lasts only while the reservation is live. `unregister` of the reserved entry
     // sets its expiry to now, the registry then answers a zero resolver for the label, and a
     // WrapperRegistry never falls back to ENSv1 once the expiry is nonzero. Interpret writes the
@@ -25009,44 +25071,54 @@ async fn a_reservation_after_a_v2_release_hands_the_name_to_its_live_v1_lease_wh
         vec![None],
         "the reservation's end is written for the name without a resource"
     );
-    run_project(
-        scratch.pool(),
-        chain,
-        Some(Marker {
-            number: 6,
-            hash: block_hash(chain, 6),
-        }),
-        RunMode::Normal,
-        7,
-        7,
+    assert_tombstone_returns_at_block_7(scratch.pool(), chain, &logical_name_id, v2_resource)
+        .await?;
+    scratch.cleanup().await
+}
+
+// The same hand-back ended by the reservation lapsing instead of `unregister`. The reservation in
+// block 6 expires at block 7's timestamp, so the entry is available from block 7 on and the
+// registry answers a zero resolver for it. Block 7 has no logs: Interpret retires the reservation
+// at the block boundary and writes its end with the name, no resource and no transaction or log
+// index, and the released ENSv2 tombstone returns.
+// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L255-L258 @ ens_v2@a971bd64)
+// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L628-L630 @ ens_v2@a971bd64)
+#[tokio::test]
+async fn a_lapsed_reservation_after_a_v2_release_gives_the_name_back_to_its_v2_tombstone()
+-> Result<()> {
+    let scratch = ScratchDatabase::create("project_v2_release_then_lapsed_reservation").await?;
+    let chain = CHAIN;
+    // `insert_lineage_block` stamps block n at n seconds, so block 7 reaches this expiry.
+    let (logical_name_id, v2_resource) = release_then_reserve(scratch.pool(), chain, 7).await?;
+    insert_lineage_block(scratch.pool(), chain, 7).await?;
+    InterpretEngine::new(scratch.pool().clone())
+        .run_batch(InterpretRequest {
+            chain_id: chain.into(),
+            from_block: 7,
+            to_block: 7,
+            resume_current: Some(InterpretMarker {
+                number: 6,
+                hash: block_hash(chain, 6),
+            }),
+            mode: InterpretRunMode::Normal,
+        })
+        .await?;
+    let lapse: Vec<(Option<Uuid>, Option<i64>, Option<i64>)> = sqlx::query_as(
+        "SELECT resource_id, transaction_index, log_index FROM normalized_events
+         WHERE chain_id = $1 AND logical_name_id = $2 AND event_kind = 'RegistrationReleased'
+           AND block_number = 7",
     )
+    .bind(chain)
+    .bind(&logical_name_id)
+    .fetch_all(scratch.pool())
     .await?;
-    normalize_projection_clocks(scratch.pool()).await?;
     assert_eq!(
-        served_authority(scratch.pool(), &logical_name_id).await?,
-        (
-            Some("ens_v2".into()),
-            Some("unregistered".into()),
-            Some(v2_resource),
-            Some("released".into()),
-        ),
-        "the released ENSv2 tombstone returns once the reservation ends"
+        lapse,
+        vec![(None, None, None)],
+        "the lapse is written for the name at the block boundary without a resource"
     );
-    let ended_incremental: Value = sqlx::query_scalar(
-        "SELECT to_jsonb(current) FROM name_current current WHERE logical_name_id = $1",
-    )
-    .bind(&logical_name_id)
-    .fetch_one(scratch.pool())
-    .await?;
-    run_project(scratch.pool(), chain, None, RunMode::Normal, 0, 7).await?;
-    normalize_projection_clocks(scratch.pool()).await?;
-    let ended_fresh: Value = sqlx::query_scalar(
-        "SELECT to_jsonb(current) FROM name_current current WHERE logical_name_id = $1",
-    )
-    .bind(&logical_name_id)
-    .fetch_one(scratch.pool())
-    .await?;
-    assert_eq!(ended_incremental, ended_fresh);
+    assert_tombstone_returns_at_block_7(scratch.pool(), chain, &logical_name_id, v2_resource)
+        .await?;
     scratch.cleanup().await
 }
 
