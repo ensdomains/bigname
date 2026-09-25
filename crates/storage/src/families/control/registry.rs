@@ -33,7 +33,6 @@ pub struct RegistryNode {
     pub registry_owner: Option<String>,
     pub owner_word_unmasked: Option<bool>,
     pub owner_getter: Option<String>,
-    pub owner_getter_reason: Option<String>,
     pub has_old_record: bool,
     pub first_current_record_block: Option<i64>,
     /// Every owner-setting registry event of the node (`project_registry_owner_event`), in the
@@ -117,7 +116,6 @@ impl RegistryNode {
             registry_owner: lower(row, "registry_owner"),
             owner_word_unmasked: flag(row, "owner_word_unmasked"),
             owner_getter: lower(row, "owner_getter"),
-            owner_getter_reason: text(row, "owner_getter_reason"),
             has_old_record: flag(row, "has_old_record").unwrap_or(false),
             first_current_record_block: row
                 .get("first_current_record_block")
@@ -150,7 +148,11 @@ pub fn registry_generation(
 /// Whether the ownerless-registry profile applies (name_authority/build.sql:852-856): the
 /// node's latest AuthorityTransferred reports the zero address as its owner getter
 /// (stage.rs:201-266 reads AuthorityTransferred only), no binding is selected and the arm is not
-/// ENSv2.
+/// ENSv2. Today's stage keys the transfers by name: the event's name, else the latest named
+/// event of its resource and family, else the active surface of its node. The families key them
+/// by node, which is the name's namehash, so they differ only for an unnamed transfer whose
+/// resource another name's events carry, or whose node has no active surface: the shadow counts
+/// it and today's stage does not, and the comparison fails rather than passing silently.
 pub fn ownerless_registry(
     node: Option<&RegistryNode>,
     selected_binding: Option<&str>,
