@@ -1735,8 +1735,17 @@ fn assert_v2_exercised_expansions_non_empty(route: &V2ConformanceRoute, payload:
             assert_permission_additive_vocabulary(payload).expect("role-summary additive vocabulary");
         }
         V2SuccessFixture::Resolver => {
-            for key in ["nodes", "aliases", "roles", "events"] {
-                assert_non_empty_json(&payload["data"][key], route.label, &format!("$.data.{key}"));
+            assert_non_empty_json(
+                &payload["data"]["bound_names"]["data"],
+                route.label,
+                "$.data.bound_names.data",
+            );
+            for key in ["counts", "nodes", "aliases", "links", "roles", "events"] {
+                assert!(
+                    payload["data"].get(key).is_none(),
+                    "{} $.data.{key} must be absent from the resolver overview",
+                    route.label
+                );
             }
         }
         V2SuccessFixture::DiagnosticsRecords => {
