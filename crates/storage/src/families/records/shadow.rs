@@ -378,8 +378,9 @@ async fn all_family_pages(
 }
 
 /// The value events of today's row that are the `AddressChanged` half of a coin-60 pair: an
-/// `AddressChanged` `addr:60` write with an `AddrChanged` `addr:60` write of the same node and
-/// resolver one log later in the same transaction.
+/// `AddressChanged` `addr:60` write with an `AddrChanged` `addr:60` write attributed to the same
+/// resource one log later in the same transaction, the order one ENSv1 `setAddr` emits them in.
+/// (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L59-L62 @ ens_v1@91c966f)
 async fn expected_pairs(
     pool: &PgPool,
     today: Option<&RecordInventoryCurrentRow>,

@@ -8,7 +8,9 @@
 //! write per record key across the union. No boundary and a link boundary admit every write; only
 //! an ordinary `RecordVersionChanged` cuts off the writes before it. When the latest eligible write
 //! of a key is the `AddrChanged` half of a coin-60 pair whose `AddressChanged` half is eligible too,
-//! the served value, event and position are the `AddressChanged` half's.
+//! the served value, event and position are the `AddressChanged` half's. An ENSv1 `setAddr` for
+//! coin 60 emits `AddressChanged` and then `AddrChanged` in one call, which makes the pair.
+//! (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L59-L62 @ ens_v1@91c966f)
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::Result;
@@ -37,9 +39,10 @@ pub enum FamilyAttribution {
 }
 
 /// A coin-60 pair a row serves: the `AddressChanged` half is the value event, the `AddrChanged`
-/// half one log later its compatibility sibling. The row's provenance lists only the value event,
-/// as today's does; the sibling is carried here for the design's provenance, which names both
-/// (step 7).
+/// half one log later its compatibility sibling, emitted in that order by one `setAddr`
+/// (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L59-L62 @ ens_v1@91c966f).
+/// The row's provenance lists only the value event, as today's does; the sibling is carried here
+/// for the design's provenance, which names both (step 7).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CompatibilityPair {
     pub record_key: String,

@@ -486,7 +486,9 @@ async fn zero_address_projection_converges_across_replay_modes() -> Result<()> {
 // log n and the `AddrChanged` half at log n + 1 of one transaction serve the `AddressChanged`
 // payload at its own position, each half is tested against a version boundary at its own
 // position, and a later write wins. The halves carry different values here so the served half is
-// visible. Each run also compares the family reads with today's reads.
+// visible. Each run also compares the family reads with today's reads. An ENSv1 `setAddr` for
+// coin 60 emits `AddressChanged` and then `AddrChanged`, so the halves sit at adjacent logs.
+// (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L59-L62 @ ens_v1@91c966f)
 /// The status and value a case serves for `addr:60`; `None` when it serves no record.
 type Served = (IndexedRecordStatus, Option<&'static str>);
 
