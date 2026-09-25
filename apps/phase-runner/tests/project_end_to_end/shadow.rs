@@ -311,7 +311,8 @@ pub struct Publication {
 
 impl Publication {
     /// The readable block at `number`, for a caller that holds no hash (the fixtures, which
-    /// publish one block at a time).
+    /// publish one block at a time). Only the Project fixture tests call it.
+    #[allow(dead_code)]
     pub async fn readable(pool: &PgPool, chain: &str, number: i64) -> Result<Self> {
         let hash: String = sqlx::query_scalar(
             "SELECT block_hash FROM chain_lineage
@@ -360,13 +361,15 @@ async fn fence(pool: &PgPool, chain: &str, publication: &Publication) -> Result<
     Ok(())
 }
 
-/// Compare at the readable block of `target`.
+/// Compare at the readable block of `target`. Only the Project fixture tests call it.
+#[allow(dead_code)]
 pub async fn compare(pool: &PgPool, chain: &str, target: i64) -> Result<Report> {
     let publication = Publication::readable(pool, chain, target).await?;
     compare_with(pool, chain, &publication, Options::default()).await
 }
 
-/// `compare` with the names read `chunk` at a time.
+/// `compare` with the names read `chunk` at a time. Only the Project fixture tests call it.
+#[allow(dead_code)]
 pub async fn compare_in_chunks(
     pool: &PgPool,
     chain: &str,
