@@ -122,8 +122,9 @@ impl ProjectWriteGauges {
             )?,
             family_lag: registry.int_gauge_vec(
                 "phase_runner_project_family_lag_blocks",
-                "Served Project marker minus the owned key family marker after the newest family \
-                 loop; 0 when the families are current.",
+                "Blocks between the owned key family marker and the served Project marker after the \
+                 newest family loop; 0 only when the family marker is the served block. A marker \
+                 off the served branch counts from below the branch point, at least 1.",
                 &["chain"],
             )?,
             family_skips: registry.int_counter_vec(

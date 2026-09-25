@@ -35,6 +35,11 @@ pub struct FamilySettings {
     /// How long the input token read before a batch's progress may take; past it the families
     /// skip that batch and the skip is counted.
     pub token_budget: Duration,
+    /// Whether a family run that spends its block budget is followed at once by another until
+    /// the families reach the served marker. The one-shot `redo` command sets it, since no later
+    /// batch follows it; the supervised run leaves it off so a long rebuild never holds up the
+    /// next served batch.
+    pub finish_each_batch: bool,
 }
 
 impl Default for FamilySettings {
@@ -43,6 +48,7 @@ impl Default for FamilySettings {
             enabled: true,
             max_blocks_per_run: bigname_project::families::MAX_BLOCKS_PER_RUN,
             token_budget: Duration::from_secs(2),
+            finish_each_batch: false,
         }
     }
 }
@@ -113,6 +119,12 @@ impl ProjectPhase {
         }
     }
 
+    fn report_families(&self, chain_id: &str, outcome: &bigname_project::families::FamilyOutcome) {
+        if let Some(feed) = &self.metrics_feed {
+            feed.project_families(chain_id, outcome);
+        }
+    }
+
     async fn redo_target(&self, chain_id: &str) -> RunnerResult<BlockMarker> {
         let position: Option<(Option<i64>, Option<String>)> = sqlx::query_as(
             "SELECT current_block_number, current_block_hash
@@ -171,19 +183,38 @@ impl Phase for ProjectPhase {
             };
             let options = FamilyOptions::new(bigname_content_hash::INTERPRETER_CONTENT_HASH)
                 .with_max_blocks_per_run(self.families.max_blocks_per_run);
-            let outcome = match token {
-                Ok(token) => {
-                    bigname_project::families::apply(
-                        &self.pool, &chain_id, &target, mode, &token, &options,
-                    )
-                    .await
-                }
+            let token = match token {
+                Ok(token) => token,
                 Err(reason) => {
-                    bigname_project::families::skipped(&self.pool, &chain_id, &target, reason).await
+                    let outcome =
+                        bigname_project::families::skipped(&self.pool, &chain_id, &target, reason)
+                            .await;
+                    self.report_families(&chain_id, &outcome);
+                    return;
                 }
             };
-            if let Some(feed) = &self.metrics_feed {
-                feed.project_families(&chain_id, &outcome);
+            let mut outcome = bigname_project::families::apply(
+                &self.pool, &chain_id, &target, mode, &token, &options,
+            )
+            .await;
+            self.report_families(&chain_id, &outcome);
+            // A later run continues a rebuild or repair in normal mode: the redo's own mode
+            // would start it again.
+            while self.families.finish_each_batch
+                && outcome.budget_exhausted
+                && outcome.skipped.is_none()
+                && outcome.blocks + outcome.undone_blocks > 0
+            {
+                outcome = bigname_project::families::apply(
+                    &self.pool,
+                    &chain_id,
+                    &target,
+                    FamilyMode::Normal,
+                    &token,
+                    &options,
+                )
+                .await;
+                self.report_families(&chain_id, &outcome);
             }
         })
     }

@@ -200,6 +200,37 @@ fn redo_cli_carries_progress_metrics_configuration() {
 }
 
 #[test]
+fn redo_finishes_each_family_run_the_supervised_run_does_not() {
+    let command = Cli::try_parse_from([
+        "phase-runner",
+        "redo",
+        "--database-url",
+        "postgres://phase-runner.invalid/fresh",
+        "--all-chains",
+        "--phase",
+        "recompute-flags",
+        "--from-block",
+        "1",
+        "--to-block",
+        "30",
+        "--project-families-max-blocks",
+        "10",
+    ])
+    .expect("redo family options must parse")
+    .resolve()
+    .expect("redo family options must resolve");
+    let ResolvedCommand::Redo {
+        project_families, ..
+    } = command
+    else {
+        panic!("expected redo command");
+    };
+    assert_eq!(project_families.max_blocks_per_run, 10);
+    assert!(project_families.finish_each_batch);
+    assert!(!crate::project_phase::FamilySettings::default().finish_each_batch);
+}
+
+#[test]
 fn redo_default_metrics_listener_ignores_an_occupied_supervisor_address() {
     const CHILD: &str = "BIGNAME_TEST_REDO_METRICS_CHILD";
     let redo = || {

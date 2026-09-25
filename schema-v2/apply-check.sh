@@ -648,7 +648,12 @@ for migration_file in \
     "$ROOT/migrations/20260926100800_project_families_fidelity.sql" \
     "$ROOT/migrations/20260926100900_project_families_activation_indexes.sql" \
     "$ROOT/migrations/20260926101000_project_families_rebuild_reset_sequence.sql" \
-    "$ROOT/migrations/20260926101100_project_families_disclosures.sql"
+    "$ROOT/migrations/20260926101100_project_families_disclosures.sql" \
+    "$ROOT/migrations/20260926101200_project_families_node_index_name.sql" \
+    "$ROOT/migrations/20260926101300_project_families_wrapper_lifecycle.sql" \
+    "$ROOT/migrations/20260926101400_project_families_binding_pairing.sql" \
+    "$ROOT/migrations/20260926101500_project_families_pointer_expiry_clear.sql" \
+    "$ROOT/migrations/20260926101600_project_families_registry_owner_event.sql"
 do
     emit_phase_migration "$migration_file" empty-schema | run_psql
 done
@@ -927,7 +932,17 @@ for migration_file in \
     "$ROOT/migrations/20260926101000_project_families_rebuild_reset_sequence.sql" \
     "$ROOT/migrations/20260926101000_project_families_rebuild_reset_sequence.sql" \
     "$ROOT/migrations/20260926101100_project_families_disclosures.sql" \
-    "$ROOT/migrations/20260926101100_project_families_disclosures.sql"
+    "$ROOT/migrations/20260926101100_project_families_disclosures.sql" \
+    "$ROOT/migrations/20260926101200_project_families_node_index_name.sql" \
+    "$ROOT/migrations/20260926101200_project_families_node_index_name.sql" \
+    "$ROOT/migrations/20260926101300_project_families_wrapper_lifecycle.sql" \
+    "$ROOT/migrations/20260926101300_project_families_wrapper_lifecycle.sql" \
+    "$ROOT/migrations/20260926101400_project_families_binding_pairing.sql" \
+    "$ROOT/migrations/20260926101400_project_families_binding_pairing.sql" \
+    "$ROOT/migrations/20260926101500_project_families_pointer_expiry_clear.sql" \
+    "$ROOT/migrations/20260926101500_project_families_pointer_expiry_clear.sql" \
+    "$ROOT/migrations/20260926101600_project_families_registry_owner_event.sql" \
+    "$ROOT/migrations/20260926101600_project_families_registry_owner_event.sql"
 do
     emit_phase_migration "$migration_file" baseline-first | run_psql
 done
@@ -4166,6 +4181,7 @@ BEGIN
             ('project_child_registration_state'),
             ('project_wrapper_state'),
             ('project_registry_node_state'),
+            ('project_registry_owner_event'),
             ('project_registry_binding_observation'),
             ('project_resolver_classification'),
             ('project_registry_pointer'),
@@ -4269,6 +4285,7 @@ BEGIN
             ('project_child_registration_state'),
             ('project_wrapper_state'),
             ('project_registry_node_state'),
+            ('project_registry_owner_event'),
             ('project_registry_binding_observation'),
             ('project_resolver_classification'),
             ('project_registry_pointer'),

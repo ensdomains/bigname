@@ -6,9 +6,12 @@
 mod support;
 
 use anyhow::Result;
-use bigname_project::{BatchRequest, Engine, RunMode, families::FamilyMode};
+use bigname_project::{
+    BatchRequest, Engine, Marker, RunMode,
+    families::{self, FamilyMode},
+};
 use serde_json::json;
-use support::{CHAIN, Event, Fixture, hash};
+use support::{CHAIN, Event, Fixture, hash, marker};
 
 async fn bootstrapped(prefix: &str) -> Result<Fixture> {
     let fixture = Fixture::new(prefix, 20).await?;
@@ -207,5 +210,45 @@ async fn each_block_records_the_input_token_it_read_and_waits_out_an_interpret_r
     .fetch_one(&fixture.pool)
     .await?;
     assert_eq!(token, (Some(false), Some(0), Some(String::new())));
+    fixture.cleanup().await
+}
+
+#[tokio::test]
+async fn the_lag_counts_a_marker_off_the_served_branch_or_above_the_target() -> Result<()> {
+    let fixture = bootstrapped("families_loop_lag_branch").await?;
+    fixture.apply(14, FamilyMode::Normal).await;
+
+    // The served target drops below the family marker; the families hold two blocks too many.
+    let lowered = families::skipped(&fixture.pool, CHAIN, &marker(12), "test".into()).await;
+    assert_eq!(lowered.lag_blocks(), 2);
+
+    // Block 14 is replaced by 14' at the same height and the loop is skipped: every family row is
+    // still for the orphaned 14, one block past the branch point.
+    sqlx::query(
+        "UPDATE chain_lineage SET canonicality_state = 'orphaned'
+         WHERE chain_id = $1 AND block_number = 14",
+    )
+    .bind(CHAIN)
+    .execute(&fixture.pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO chain_lineage (chain_id, block_hash, parent_hash, block_number,
+             block_timestamp, canonicality_state)
+         VALUES ($1, '0xreplacement14', $2, 14, to_timestamp(1800000168), 'canonical')",
+    )
+    .bind(CHAIN)
+    .bind(hash(13))
+    .execute(&fixture.pool)
+    .await?;
+    let replacement = Marker {
+        number: 14,
+        hash: "0xreplacement14".to_owned(),
+    };
+    let forked = families::skipped(&fixture.pool, CHAIN, &replacement, "test".into()).await;
+    assert_eq!(
+        forked.marker.as_ref().map(|marker| marker.hash.clone()),
+        Some(hash(14))
+    );
+    assert_eq!(forked.lag_blocks(), 1);
     fixture.cleanup().await
 }

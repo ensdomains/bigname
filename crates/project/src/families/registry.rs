@@ -2,8 +2,9 @@
 //! registry reported with its zero-owner getter facts, whether the 2017 registry ever recorded
 //! the node and the first block of a current-registry record (name_authority/build.sql,
 //! `registry_records`); the owner group carries the position and resource of the event that set
-//! it. Each observation identity (the name, else the resource) keeps its latest registry-binding
-//! observation with the resource it reaches (permission_resources.rs).
+//! it. Every owner-setting event of a node is also kept by position, since the group keeps only
+//! the latest. Each observation identity (the name, else the resource) keeps its latest
+//! registry-binding observation with the resource it reaches (permission_resources.rs).
 use std::collections::BTreeMap;
 
 use serde_json::{Value, json};
@@ -63,7 +64,13 @@ async fn registry_nodes(
         .map(|(event, node)| key_of(table, [chain.clone(), json!(event.namespace), json!(node)]))
         .collect();
     load_rows(transaction, rows, table, keys).await?;
+    let history = relevant
+        .iter()
+        .map(|(event, node)| owner_event_key(&chain, event, node))
+        .collect();
+    load_rows(transaction, rows, &tables::REGISTRY_OWNER_EVENT, history).await?;
     for (event, node) in relevant {
+        owner_event(rows, &chain, event, &node)?;
         let mut row = current(
             rows,
             table,
@@ -132,6 +139,60 @@ async fn registry_nodes(
         put(rows, table, row, event)?;
     }
     Ok(())
+}
+
+fn owner_event_key(chain: &Value, event: &BlockEvent, node: &str) -> super::store::Row {
+    key_of(
+        &tables::REGISTRY_OWNER_EVENT,
+        [
+            chain.clone(),
+            json!(event.namespace),
+            json!(node),
+            json!(event.position.event_identity),
+        ],
+    )
+}
+
+/// One owner-setting registry event of a node, kept by position with the name, resource and
+/// authority kind it carried; the node row keeps only the latest owner group.
+fn owner_event(rows: &mut RowSet, chain: &Value, event: &BlockEvent, node: &str) -> Result<()> {
+    let table = &tables::REGISTRY_OWNER_EVENT;
+    let mut row = current(rows, table, &owner_event_key(chain, event, node));
+    let after = &event.after;
+    set(
+        &mut row,
+        "transaction_hash",
+        text_or_null(event.transaction_hash.clone()),
+    );
+    set(
+        &mut row,
+        "logical_name_id",
+        text_or_null(event.logical_name_id.clone()),
+    );
+    set(
+        &mut row,
+        "resource_id",
+        text_or_null(event.resource_id.clone()),
+    );
+    set(&mut row, "event_kind", event.event_kind.clone());
+    set(&mut row, "source_family", event.source_family.clone());
+    set(
+        &mut row,
+        "authority_kind",
+        text_or_null(raw_text(after, "authority_kind")),
+    );
+    set(&mut row, "owner", text_or_null(raw_lower(after, "owner")));
+    set(
+        &mut row,
+        "owner_getter",
+        text_or_null(raw_lower(after, "owner_getter")),
+    );
+    set(
+        &mut row,
+        "owner_getter_reason",
+        text_or_null(raw_text(after, "owner_getter_reason")),
+    );
+    put(rows, table, row, event)
 }
 
 /// A registry-binding observation the resource summary reads (permission_resources.rs:10-60):

@@ -576,6 +576,7 @@ fn family_loops_set_their_own_time_and_lag_and_count_skips() -> Result<()> {
         bigname_project::families::FamilyOutcome {
             target: Some(marker(14)),
             marker: Some(marker(current)),
+            marker_readable: true,
             elapsed_ms,
             skipped: skipped.map(str::to_owned),
             duplicate_anomalies: u64::from(skipped.is_none()),
