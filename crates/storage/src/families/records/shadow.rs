@@ -401,6 +401,12 @@ async fn expected_pairs(
     // node for a node-keyed one, the record id for a record-id one). The history attribution
     // today's provenance also lists is not current and pairs nothing. The value side keeps the
     // builder's requirements: an `addr` record of selector 60 with a log position.
+    //
+    // This is deliberately stricter than `coin60_siblings`, which pairs through any current
+    // attribution arm: a named value with a node-keyed sibling, or halves of different source
+    // families, namespaces or manifests, pair today and not here. Every such divergence makes the
+    // oracle expect fewer pairs than today, never more, so it can only show as an extra family
+    // pair; a pair the family drops that the oracle expects is still caught.
     let rows = sqlx::query(
         "SELECT value.normalized_event_id AS value_id, value.block_number AS value_block,
                 value.transaction_index AS value_transaction, value.log_index AS value_log,
