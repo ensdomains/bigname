@@ -297,8 +297,10 @@ async fn children_before(chain: &Chain) -> Result<(String, String)> {
     Ok((first, surfaced))
 }
 
-/// A registry Transfer of the surfaced child to the zero address. The event carries `node` and
-/// no logical name, the shape the adapter writes when it has not linked the node's authority.
+/// An AuthorityTransferred derived from a registry Transfer (`source_event` Transfer) of the
+/// surfaced child to the zero address. It carries `node` and no logical name, as the adapter
+/// writes it when neither the node's linked authority nor its registry read anchor recorded the
+/// surface as known.
 async fn children_after(chain: &Chain) -> Result<()> {
     chain
         .event(

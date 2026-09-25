@@ -201,10 +201,12 @@ async fn seed_direct_scope(
     }
 
     // A changed registry edge rebuilds the child's edge; the parent node is an ancestor whose
-    // evidence stages without restaging its other children. A registry Transfer names the
-    // transferred node itself in `node`, so that node's own edge is rebuilt too: the adapter
-    // attaches a logical name only once it has linked the node's authority, and the child row
-    // follows the latest registry owner of the node's active surface.
+    // evidence stages without restaging its other children. An AuthorityTransferred derived from
+    // a registry Transfer (`source_event = 'Transfer'`) names the transferred node in `node`, and
+    // that node's own edge is rebuilt too. The adapter attributes the event to a logical name
+    // through the linked authority or, for a zero owner, the node's registry read anchor, so it
+    // can arrive without one while the node has an active surface; the child row follows that
+    // surface's latest registry owner. The before-state `node` is a conservative extra candidate.
     for (table, columns, events) in [
         (
             "project_scope_children",
