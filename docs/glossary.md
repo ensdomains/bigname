@@ -2148,7 +2148,11 @@ it is live: when it is unregistered or lapses, the label is available again and
 the tombstone returns. The reservation counts by name: after `unregister` bumps
 the token version, the reservation carries a versioned token id and no
 resource, so it is not a fact of the released resource, and Interpret writes its
-end as a named release without a resource. A path-expiry release that Interpret
+end as a named release without a resource. A version-zero reservation, such as
+one in a replacement registry, carries its own resource, and its end carries the
+same resource. Either end returns the tombstone. A reservation whose expiry is
+already at or before its own block's time is never live and does not defer. A
+path-expiry release that Interpret
 writes on the resource without a name, because the token had already lost its
 name, still counts as that registration's release. Its current registration
 lifecycle is unregistered and its selected arm is `ens_v2`, bound to the
