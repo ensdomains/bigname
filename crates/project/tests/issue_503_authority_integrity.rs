@@ -535,6 +535,133 @@ async fn expected_delta_v2_release_after_an_ended_v1_lease_is_a_v2_tombstone() -
     Ok(())
 }
 
+const EARLIER_HASH: &str = "0x0000000000000000000000000000000000000000000000000000000000000502";
+
+/// Adds block 9 to the lineage, before the target block 10.
+async fn earlier_block(pool: &PgPool) -> Result<()> {
+    sqlx::query("INSERT INTO chain_lineage (chain_id, block_hash, block_number, block_timestamp, canonicality_state) VALUES ($1, $2, 9, '2026-08-25T00:00:00Z', 'canonical')")
+        .bind(CHAIN).bind(EARLIER_HASH).execute(pool).await?;
+    Ok(())
+}
+
+/// Adds a resource and an `arm` binding at block 9 that closed before the target block.
+async fn closed_binding_at_block_9(
+    pool: &PgPool,
+    logical: &str,
+    index: u16,
+    arm: &str,
+) -> Result<(String, String)> {
+    let resource = uuid(15, index);
+    let binding = uuid(16, index);
+    sqlx::query("INSERT INTO resources (resource_id, chain_id, block_hash, block_number, canonicality_state) VALUES ($1::uuid, $2, $3, 9, 'canonical')")
+        .bind(&resource).bind(CHAIN).bind(EARLIER_HASH).execute(pool).await?;
+    sqlx::query("INSERT INTO surface_bindings (surface_binding_id, logical_name_id, resource_id, binding_kind, authority_arm, active_from, active_to, chain_id, block_hash, block_number, provenance, canonicality_state) VALUES ($1::uuid, $2, $3::uuid, 'declared_registry_path', $4, '2026-08-25T00:00:00Z', '2026-08-25T12:00:00Z', $5, $6, 9, '{\"transaction_index\":0,\"log_index\":0}', 'canonical')")
+        .bind(&binding).bind(logical).bind(&resource).bind(arm).bind(CHAIN).bind(EARLIER_HASH).execute(pool).await?;
+    Ok((resource, binding))
+}
+
+// Equal-position tie (TYR-36 step 6, Pro review question 1). An ENSv1 lease and an ENSv2
+// registration were both granted in block 9. In block 10 the ENSv1 lease lapses and the ENSv2
+// registration is released, and Interpret writes both releases at the block boundary with no
+// transaction or log index, so they share the position (10, NULL, NULL). Nothing is open on
+// either arm. The ENSv1 release is a holding-changing fact, unlike the expiry maintenance in
+// `expected_delta_equal_position_v1_expiry_residue_keeps_the_v2_tombstone` (phase-runner
+// production_project), which does not take part.
+// Rule: an ENSv2 release leaves the released ENSv2 tombstone only when it is strictly later than
+// the latest ENSv1 lease or registry ownership fact, so the tie goes to ENSv1, which serves its
+// released lease as the released ENSv1 tombstone.
+#[tokio::test]
+async fn an_equal_position_v1_lease_release_ties_to_v1_against_a_v2_release() -> Result<()> {
+    let (db, pool) = database("tie_v1_release_v2_release").await?;
+    earlier_block(&pool).await?;
+    let logical = surface(&pool, 76, "tie-release.eth", &[]).await?;
+    let (v1_resource, v1_binding) =
+        closed_binding_at_block_9(&pool, &logical, 76, "ens_v1").await?;
+    let (v2_resource, _) = closed_binding_at_block_9(&pool, &logical, 77, "ens_v2").await?;
+    for (identity, resource, family, kind, log, after) in [
+        (
+            "tie-v1-grant",
+            &v1_resource,
+            "ens_v1_registrar_l1",
+            "RegistrationGranted",
+            1,
+            json!({"status":"registered","registrant":"0x0000000000000000000000000000000000000001"}),
+        ),
+        (
+            "tie-v2-grant",
+            &v2_resource,
+            "ens_v2_registry_l1",
+            "RegistrationGranted",
+            2,
+            json!({"status":"registered","registrant":"0x0000000000000000000000000000000000000002"}),
+        ),
+    ] {
+        event(
+            &pool,
+            identity,
+            &logical,
+            Some(resource),
+            Event {
+                family,
+                kind,
+                log,
+                after,
+            },
+        )
+        .await?;
+    }
+    sqlx::query("UPDATE normalized_events SET block_number = 9, block_hash = $1 WHERE event_identity IN ('tie-v1-grant', 'tie-v2-grant')")
+        .bind(EARLIER_HASH).execute(&pool).await?;
+    for (identity, resource, family) in [
+        ("tie-v2-release", &v2_resource, "ens_v2_registry_l1"),
+        ("tie-v1-release", &v1_resource, "ens_v1_registrar_l1"),
+    ] {
+        event(
+            &pool,
+            identity,
+            &logical,
+            Some(resource),
+            Event {
+                family,
+                kind: "RegistrationReleased",
+                log: 0,
+                after: json!({"status":"released"}),
+            },
+        )
+        .await?;
+    }
+    sqlx::query("UPDATE normalized_events SET transaction_hash = NULL, transaction_index = NULL, log_index = NULL WHERE event_identity IN ('tie-v2-release', 'tie-v1-release')")
+        .execute(&pool).await?;
+    run(&pool).await?;
+    assert_eq!(
+        authority(&pool, &logical).await?,
+        (Some("ens_v1".into()), None, None, None)
+    );
+    assert_eq!(
+        lifecycle_state(&pool, &logical).await?.as_deref(),
+        Some("unregistered")
+    );
+    let (resource, binding, status): (Option<String>, Option<String>, Option<String>) =
+        sqlx::query_as(
+            "SELECT resource_id::text, surface_binding_id::text,
+                    declared_summary #>> '{registration,status}'
+             FROM name_current WHERE logical_name_id = $1",
+        )
+        .bind(&logical)
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(
+        (resource.as_deref(), binding.as_deref(), status.as_deref()),
+        (
+            Some(v1_resource.as_str()),
+            Some(v1_binding.as_str()),
+            Some("released")
+        )
+    );
+    db.cleanup().await?;
+    Ok(())
+}
+
 // Expected delta (TYR-36 step 6). An ENSv2 registration was released, and an ENSv1 lease granted
 // after the release is live now.
 // Before: the release qualified as an ENSv2 release tombstone because no ENSv1 fact preceded it,
