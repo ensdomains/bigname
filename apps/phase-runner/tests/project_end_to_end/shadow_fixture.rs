@@ -226,14 +226,33 @@ impl Fixture {
     /// SourceManifestUpdated event, as the rebuild-performance seed declares its resolvers. The
     /// resolver builder then serves a `resolver_current` row for each address.
     pub async fn declare_resolvers(&self, source_family: &str, addresses: &[&str]) -> Result<()> {
-        let contracts: Vec<Value> = addresses
+        let contracts: Vec<(&str, &str)> = addresses
             .iter()
-            .map(|address| {
-                json!({"role": "resolver", "address": address, "proxy_kind": "none",
+            .map(|address| (*address, "resolver"))
+            .collect();
+        self.declare_contracts(source_family, &contracts, None)
+            .await
+    }
+
+    /// An active manifest declaring `(address, role)` contracts of `source_family`, with the ENSv1
+    /// registry a mirror resolver reads when `mirrored_registry` is given.
+    pub async fn declare_contracts(
+        &self,
+        source_family: &str,
+        contracts: &[(&str, &str)],
+        mirrored_registry: Option<&str>,
+    ) -> Result<()> {
+        let contracts: Vec<Value> = contracts
+            .iter()
+            .map(|(address, role)| {
+                json!({"role": role, "address": address, "proxy_kind": "none",
                        "start_block": 0})
             })
             .collect();
-        let payload = json!({"deployment_epoch": "fixture", "contracts": contracts});
+        let mut payload = json!({"deployment_epoch": "fixture", "contracts": contracts});
+        if let Some(registry) = mirrored_registry {
+            payload["correlation_addresses"] = json!({"ens_v1_registry": registry});
+        }
         sqlx::query(
             "WITH manifest AS (
                  INSERT INTO manifest_versions (manifest_version, namespace, source_family,
@@ -245,7 +264,8 @@ impl Fixture {
              INSERT INTO normalized_events (event_identity, namespace, event_kind, source_family,
                  manifest_version, source_manifest_id, chain_id, derivation_kind,
                  canonicality_state, after_state)
-             SELECT 'fixture:manifest:' || $2, 'ens', 'SourceManifestUpdated', $2, 1, manifest_id,
+             SELECT 'fixture:manifest:' || manifest_id, 'ens', 'SourceManifestUpdated', $2, 1,
+                    manifest_id,
                     $1, 'manifest_sync', 'canonical'::canonicality_state,
                     jsonb_build_object('rollout_status', 'active', 'normalizer_version', 'fixture',
                         'manifest_payload', manifest_payload)

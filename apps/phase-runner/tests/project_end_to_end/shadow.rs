@@ -75,10 +75,14 @@ pub struct Report {
     pub aliases: usize,
     pub links: usize,
     pub roles: usize,
-    /// Served resolvers the shadow classified from the declaration manifest because F3 is
-    /// unfilled, and the subset whose served mirror that fallback does not reproduce.
+    /// Served resolvers the shadow classified from the declaration manifest because
+    /// `project_resolver_classification` has no row for them, and the subset whose served mirror
+    /// that fallback does not reproduce. The fallback is a partial comparison: the mirror only.
     pub f3_unfilled: usize,
     pub f3_unfilled_mirror_differs: usize,
+    /// Per resolver address, where its shadow classification came from: `family` (the
+    /// classification row, compared in full), `declaration` (the partial fallback) or `none`.
+    pub classification_sources: BTreeMap<String, &'static str>,
     pub mismatches: Vec<Mismatch>,
     /// Shadow time per reader: total microseconds and keys read.
     pub timings: BTreeMap<&'static str, (u128, usize)>,
@@ -400,6 +404,7 @@ async fn resolvers(
 ) -> Result<()> {
     let addresses: Vec<String> = sqlx::query_scalar(
         "SELECT lower(resolver_address) FROM resolver_current WHERE chain_id = $1
+         UNION SELECT resolver_address FROM project_resolver_classification WHERE chain_id = $1
          UNION SELECT resolver_address FROM project_resolver_alias WHERE chain_id = $1
          UNION SELECT resolver_address FROM project_resolver_link WHERE chain_id = $1
          UNION SELECT resolver_address FROM project_resource_pointer
@@ -423,6 +428,20 @@ async fn resolvers(
     Ok(())
 }
 
+/// A served JSON value as the classification row's text column holds it.
+fn as_text(value: Option<&Value>) -> Option<String> {
+    match value? {
+        Value::Null => None,
+        Value::String(text) => Some(text.clone()),
+        other => Some(other.to_string()),
+    }
+}
+
+/// The overview's classification against the shadow's. A `project_resolver_classification` row
+/// is compared in full with the served row: the classification object, support status and
+/// unsupported reason, the declaring manifest and its event, the admission namespace and the
+/// summary version. The declaration fallback is a partial comparison of the mirror only, because
+/// a declaration carries none of the rest.
 async fn classification(
     pool: &PgPool,
     chain: &str,
@@ -433,11 +452,16 @@ async fn classification(
     let started = Instant::now();
     let shadow = family::load_resolver_shadow(pool, chain, address).await?;
     report.time("resolver", started);
+    let source = match shadow.as_ref().map(|shadow| shadow.source) {
+        Some(ClassificationSource::Family) => "family",
+        Some(ClassificationSource::DeclarationManifest) => "declaration",
+        None => "none",
+    };
+    report
+        .classification_sources
+        .insert(address.to_owned(), source);
     let Some(served) = served else {
-        if shadow
-            .as_ref()
-            .is_some_and(|shadow| shadow.source == ClassificationSource::Family)
-        {
+        if source == "family" {
             report.mismatch(
                 format!("resolver {address}"),
                 "a classification row with no served row".to_owned(),
@@ -450,36 +474,57 @@ async fn classification(
         .pointer("/classification/mirror/mirrored_registry_address")
         .and_then(Value::as_str)
         .map(str::to_ascii_lowercase);
-    let support = served
-        .coverage
-        .get("status")
-        .and_then(Value::as_str)
-        .map(|status| {
-            if status == "projected" {
-                "supported"
-            } else {
-                "unsupported"
-            }
-        });
     match shadow {
         Some(shadow) if shadow.source == ClassificationSource::Family => {
-            if shadow.mirrored_registry_address() != served_mirror
-                || shadow.support_status.as_deref() != support
-            {
+            let support = served
+                .coverage
+                .get("status")
+                .and_then(Value::as_str)
+                .map(|status| {
+                    if status == "projected" {
+                        "supported"
+                    } else {
+                        "unsupported"
+                    }
+                });
+            let served_fields = (
+                served
+                    .declared_summary
+                    .get("classification")
+                    .cloned()
+                    .unwrap_or(Value::Null),
+                support.map(str::to_owned),
+                as_text(served.coverage.get("unsupported_reason")),
+                served.provenance.get("manifest_id").and_then(Value::as_i64),
+                served
+                    .provenance
+                    .get("manifest_event_id")
+                    .and_then(Value::as_i64),
+                as_text(served.provenance.get("classification_admission_namespace")),
+                as_text(served.declared_summary.get("summary_version")),
+            );
+            let family_fields = (
+                shadow.classification.clone(),
+                shadow.support_status.clone(),
+                shadow.unsupported_reason.clone(),
+                shadow.manifest_id,
+                shadow.manifest_event_id,
+                shadow.admission_namespace.clone(),
+                shadow.summary_version.clone(),
+            );
+            if served_fields != family_fields {
                 report.mismatch(
                     format!("resolver {address}"),
-                    format!(
-                        "served mirror {served_mirror:?} support {support:?}, \
-                         classification row {shadow:?}"
-                    ),
+                    format!("served {served_fields:?}, classification row {family_fields:?}"),
                 );
             }
         }
         fallback => {
-            // project_resolver_classification is not filled yet, so the shadow classifies from
-            // the declaration manifest. A declaration carries no support status, so support is
-            // not compared on this path until the table is filled; the mirror is, and every
-            // caller asserts `f3_unfilled_mirror_differs == 0`.
+            // A partial comparison: project_resolver_classification has no row, so the shadow
+            // classifies from the declaration manifest, which carries no support status,
+            // unsupported reason or admission, and whose role and source family are not the
+            // builder's selection. Only the mirror is compared; every caller asserts
+            // `f3_unfilled_mirror_differs == 0`.
             report.f3_unfilled += 1;
             let mirror = fallback.and_then(|shadow| shadow.mirrored_registry_address());
             if mirror != served_mirror {

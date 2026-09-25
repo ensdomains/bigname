@@ -22,8 +22,10 @@ pub enum ClassificationSource {
     /// The `project_resolver_classification` row.
     Family,
     /// That table is not filled yet: the latest active declaration manifest that names the address
-    /// as a contract, read the way the resolver builder reads `manifest_payload.contracts`.
-    /// Declaration precedence, discovery admission and upgrade evidence are not reproduced.
+    /// as a contract. This is a partial stand-in, not the resolver builder's classification: it
+    /// gives the source family, role and mirror only, and does not reproduce declaration
+    /// precedence, discovery admission, start blocks, upgrade implementations, proxy kinds or
+    /// support status.
     DeclarationManifest,
 }
 
@@ -37,7 +39,9 @@ pub struct FamilyResolverClassification {
     pub support_status: Option<String>,
     pub unsupported_reason: Option<String>,
     pub manifest_id: Option<i64>,
+    pub manifest_event_id: Option<i64>,
     pub admission_namespace: Option<String>,
+    pub summary_version: Option<String>,
 }
 
 impl FamilyResolverClassification {
@@ -64,11 +68,13 @@ pub async fn load_resolver_shadow(
         String,
         Option<String>,
         Option<i64>,
+        Option<i64>,
+        Option<String>,
         Option<String>,
     );
     let row: Option<FamilyRow> = sqlx::query_as(
         "SELECT classification, support_status, unsupported_reason, manifest_id,
-                admission_namespace
+                manifest_event_id, admission_namespace, summary_version
          FROM bigname_phase.project_resolver_classification
          WHERE chain_id = $1 AND resolver_address = $2",
     )
@@ -77,7 +83,15 @@ pub async fn load_resolver_shadow(
     .fetch_optional(pool)
     .await
     .with_context(|| format!("failed to load the classification row of {chain_id}:{address}"))?;
-    if let Some((classification, support_status, unsupported_reason, manifest_id, namespace)) = row
+    if let Some((
+        classification,
+        support_status,
+        unsupported_reason,
+        manifest_id,
+        manifest_event_id,
+        namespace,
+        summary_version,
+    )) = row
     {
         return Ok(Some(FamilyResolverClassification {
             source: ClassificationSource::Family,
@@ -87,7 +101,9 @@ pub async fn load_resolver_shadow(
             support_status: Some(support_status),
             unsupported_reason,
             manifest_id,
+            manifest_event_id,
             admission_namespace: namespace,
+            summary_version,
         }));
     }
     let position = json_position(
@@ -132,7 +148,9 @@ pub async fn load_resolver_shadow(
             support_status: None,
             unsupported_reason: None,
             manifest_id,
+            manifest_event_id: None,
             admission_namespace: Some(namespace),
+            summary_version: None,
         },
     ))
 }
