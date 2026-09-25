@@ -76,7 +76,7 @@ impl OwnerEvent {
 
 impl RegistryNode {
     /// The node's latest AuthorityTransferred in the canonical order, the event the served
-    /// ownerless profile reads (name_authority/stage.rs:201-266).
+    /// ownerless-registry profile reads (name_authority/stage.rs:201-266).
     pub fn latest_transfer(&self) -> Option<&OwnerEvent> {
         self.owner_events
             .iter()
