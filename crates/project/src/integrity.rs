@@ -233,7 +233,7 @@ async fn assert_exact_name_authority(
 }
 
 /// Fail the generation when a parent-child pair still states both an ENSv1 and an ENSv2 relation
-/// after the ENSv2 authority epoch of a child with an activated ENSv1->ENSv2 migration began.
+/// after the activated ENSv1->ENSv2 migration of a child selected under ENSv2.
 ///
 /// Raw coexistence is not the anomaly: a migrated or positively registered ENSv2
 /// child normally keeps its ENSv1 relation as residue, because neither migration
@@ -245,13 +245,15 @@ async fn assert_exact_name_authority(
 /// (upstream: .refs/ens_v2/contracts/src/migration/LockedWrapperReceiver.sol:L180 @ ens_v2@a971bd64),
 /// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1029 @ ens_v1@91c966f).
 /// What cannot be reconciled is an ENSv1
-/// relation asserted *after* that authority epoch started — the selection would
+/// relation asserted *after* the migration — the selection would
 /// silently drop it, and dropping a live contradiction is what this refuses.
 ///
 /// A released ENSv2 child is deliberately outside that: release publishes no ENSv2 relation, so
 /// a later ENSv1 relation has no ENSv2 relation left to contradict. The check covers only a
 /// child whose selected arm is ENSv2 and whose history records an activated ENSv1->ENSv2
-/// migration; that child's epoch starts at its own ENSv2 binding, not at the migration.
+/// migration. The cutoff is that migration's own `MigrationApplied` position, the one this
+/// invariant has always used. The published authority epoch start is the child's ENSv2 binding,
+/// which can sit later in the same transaction, so the check does not read it.
 async fn assert_child_authority(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
@@ -272,6 +274,8 @@ async fn assert_child_authority(
                    proof.block_hash AS proof_block_hash,
                    proof.canonicality_state AS proof_canonicality_state,
                    target_lineage.canonicality_state AS target_canonicality_state,
+                   COALESCE(proof.transaction_index, -1) AS proof_transaction_index,
+                   COALESCE(proof.log_index, -1) AS proof_log_index,
                    COALESCE(
                        (authority.authority_epoch_start_position ->> 'block_number')::bigint, -1
                    ) AS epoch_block_number,
@@ -316,21 +320,15 @@ async fn assert_child_authority(
               -- The activated migration boundary the child's history records.
               AND authority.authority_proof_kind = 'migration_authority_transition'
               AND authority.authority_proof_event_identity IS NOT NULL
+              -- The cutoff is the migration event's position, not the published epoch start.
               AND (
                   predecessor.block_number,
                   COALESCE(predecessor.evidence_transaction_index, -1),
                   COALESCE(predecessor.evidence_log_index, -1)
               ) > (
-                  COALESCE(
-                      (authority.authority_epoch_start_position ->> 'block_number')::bigint, -1
-                  ),
-                  COALESCE(
-                      (authority.authority_epoch_start_position ->> 'transaction_index')::bigint,
-                      -1
-                  ),
-                  COALESCE(
-                      (authority.authority_epoch_start_position ->> 'log_index')::bigint, -1
-                  )
+                  proof.block_number,
+                  COALESCE(proof.transaction_index, -1),
+                  COALESCE(proof.log_index, -1)
               )
         )
         SELECT parent_logical_name_id,
@@ -338,7 +336,10 @@ async fn assert_child_authority(
                -- Every input is stable across a replay. `normalized_event_id` is a generated
                -- identity that a redo's delete-and-reinsert changes, so the fingerprint and the
                -- durable evidence are keyed on `event_identity` instead; the same semantic
-               -- conflict after a replay must dedup against the row already written.
+               -- conflict after a replay must dedup against the row already written. The position
+               -- after the proof block is the cutoff, which is what earlier generations recorded
+               -- as the epoch start, so a conflict found before and after the epoch moved to the
+               -- binding keeps one fingerprint.
                encode(
                    sha256(
                        convert_to(
@@ -346,8 +347,8 @@ async fn assert_child_authority(
                                '|', parent_logical_name_id, child_logical_name_id,
                                authority_proof_kind, authority_proof_event_identity,
                                proof_block_number::text, proof_block_hash,
-                               epoch_block_number::text, epoch_transaction_index::text,
-                               epoch_log_index::text,
+                               proof_block_number::text, proof_transaction_index::text,
+                               proof_log_index::text,
                                predecessor_event_identity, predecessor_block_number::text,
                                predecessor_transaction_index::text,
                                predecessor_log_index::text,
@@ -375,6 +376,11 @@ async fn assert_child_authority(
                        'block_number', epoch_block_number,
                        'transaction_index', epoch_transaction_index,
                        'log_index', epoch_log_index
+                   ),
+                   'integrity_cutoff_position', jsonb_build_object(
+                       'block_number', proof_block_number,
+                       'transaction_index', proof_transaction_index,
+                       'log_index', proof_log_index
                    ),
                    'predecessor', jsonb_build_object(
                        'authority_arm', 'ens_v1',

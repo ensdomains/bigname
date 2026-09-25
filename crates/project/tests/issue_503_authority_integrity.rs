@@ -1851,3 +1851,6 @@ async fn token_owner_selection_preserves_authority_and_lifecycle_boundaries() ->
 
 #[path = "issue_503/migration_profile.rs"]
 mod migration_profile;
+
+#[path = "issue_503/child_cutoff.rs"]
+mod child_cutoff;

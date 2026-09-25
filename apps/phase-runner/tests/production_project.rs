@@ -24528,6 +24528,240 @@ async fn seed_raw_reservation_release_then_registration_before_v1(
     Ok(format!("ens:{:#x}", raw_namehash(&[b"ordinary"])))
 }
 
+const RESERVATION_RESOLVER: &str = "0x00000000000000000000000000000000000000e1";
+const REPLACEMENT_RESOLVER: &str = "0x00000000000000000000000000000000000000e2";
+
+/// A root-registry label reserved with `RESERVATION_RESOLVER` in block 1, then registered over the
+/// reservation in block 2 with `replacement` as its resolver. Upstream `_register` overwrites the
+/// stored resolver whatever the replacement is, but emits `ResolverUpdated` only for a nonzero one.
+/// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L461-L463 @ ens_v2@a971bd64)
+/// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L475-L477 @ ens_v2@a971bd64)
+async fn seed_raw_reservation_then_registration(
+    pool: &PgPool,
+    chain: &str,
+    replacement: Option<&str>,
+) -> Result<String> {
+    seed_lineage(pool, chain, 2).await?;
+    insert_declared_source_manifest_events(
+        pool,
+        "ens",
+        chain,
+        "ens_v2_root_l1",
+        "root_registry",
+        V2_REGISTRY,
+        &[
+            (
+                "LabelReserved",
+                "event LabelReserved(uint256 indexed tokenId, bytes32 indexed labelHash, string label, uint64 expiry, address indexed sender)",
+                &["root_registry"],
+                &["RegistrationReserved"],
+            ),
+            (
+                "LabelRegistered",
+                "event LabelRegistered(uint256 indexed tokenId, bytes32 indexed labelHash, string label, address owner, uint64 expiry, address indexed sender)",
+                &["root_registry"],
+                &["RegistrationGranted"],
+            ),
+            (
+                "TokenResource",
+                "event TokenResource(uint256 indexed tokenId, uint256 indexed resource)",
+                &["root_registry"],
+                &["TokenResourceLinked"],
+            ),
+            (
+                "ResolverUpdated",
+                "event ResolverUpdated(uint256 indexed tokenId, address indexed resolver, address indexed sender)",
+                &["root_registry"],
+                &["ResolverChanged"],
+            ),
+        ],
+    )
+    .await?;
+    let registry_manifest: i64 = sqlx::query_scalar(
+        "SELECT manifest_id FROM manifest_versions
+         WHERE chain_id = $1 AND source_family = 'ens_v2_root_l1'",
+    )
+    .bind(chain)
+    .fetch_one(pool)
+    .await?;
+    let resolver_rule = json!({
+        "edge_kind": "resolver",
+        "from_role": "root_registry",
+        "admission": "reachable_from_root"
+    });
+    sqlx::query(
+        "UPDATE manifest_versions
+         SET manifest_payload = jsonb_set(
+             manifest_payload, '{discovery_rules}', jsonb_build_array($2::jsonb)
+         )
+         WHERE manifest_id = $1",
+    )
+    .bind(registry_manifest)
+    .bind(&resolver_rule)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO manifest_discovery_rules (
+             manifest_id, edge_kind, from_role, admission, rule_payload
+         ) VALUES ($1, 'resolver', 'root_registry', 'reachable_from_root', $2)",
+    )
+    .bind(registry_manifest)
+    .bind(resolver_rule)
+    .execute(pool)
+    .await?;
+    let label = "reserved";
+    let mut token_bytes = *keccak256(label.as_bytes());
+    token_bytes[28..].copy_from_slice(&0_u32.to_be_bytes());
+    let token_id = U256::from_be_bytes(token_bytes);
+    let label_hash = keccak256(label.as_bytes());
+    let mut logs = vec![
+        (
+            1,
+            1,
+            LabelReserved {
+                tokenId: token_id,
+                labelHash: label_hash,
+                label: label.into(),
+                expiry: 4_000_000_000,
+                sender: SENDER.parse()?,
+            }
+            .encode_log_data(),
+        ),
+        (
+            1,
+            2,
+            ResolverUpdated {
+                tokenId: token_id,
+                resolver: RESERVATION_RESOLVER.parse()?,
+                sender: SENDER.parse()?,
+            }
+            .encode_log_data(),
+        ),
+        (
+            2,
+            1,
+            LabelRegistered {
+                tokenId: token_id,
+                labelHash: label_hash,
+                label: label.into(),
+                owner: OWNER.parse()?,
+                expiry: 4_000_000_000,
+                sender: SENDER.parse()?,
+            }
+            .encode_log_data(),
+        ),
+        (
+            2,
+            2,
+            TokenResource {
+                tokenId: token_id,
+                resource: token_id,
+            }
+            .encode_log_data(),
+        ),
+    ];
+    if let Some(resolver) = replacement {
+        logs.push((
+            2,
+            3,
+            ResolverUpdated {
+                tokenId: token_id,
+                resolver: resolver.parse()?,
+                sender: SENDER.parse()?,
+            }
+            .encode_log_data(),
+        ));
+    }
+    for (block, log, data) in logs {
+        insert_raw_event_at(
+            pool,
+            chain,
+            block,
+            1,
+            log,
+            V2_REGISTRY,
+            data.topics(),
+            data.data.as_ref(),
+        )
+        .await?;
+    }
+    Ok(format!("ens:{:#x}", raw_namehash(&[label.as_bytes()])))
+}
+
+// Reservation to registration through Interpret (Pro review of PR 953, question 4). The registration
+// replaces the reservation's resolver whether or not it emits `ResolverUpdated`, so Interpret must
+// write the replacement itself when it is zero. The normalized rows are checked before Project runs,
+// and the served resolver after.
+#[tokio::test]
+async fn reservation_to_registration_replaces_the_resolver_with_zero_and_nonzero() -> Result<()> {
+    for replacement in [None, Some(REPLACEMENT_RESOLVER)] {
+        let scratch = ScratchDatabase::create("project_reservation_registration_resolver").await?;
+        let chain = "ethereum-sepolia";
+        let logical_name_id =
+            seed_raw_reservation_then_registration(scratch.pool(), chain, replacement).await?;
+        InterpretEngine::new(scratch.pool().clone())
+            .run_batch(InterpretRequest {
+                chain_id: chain.into(),
+                from_block: 0,
+                to_block: 2,
+                resume_current: None,
+                mode: InterpretRunMode::Normal,
+            })
+            .await?;
+        let registration_resource: Uuid = sqlx::query_scalar(
+            "SELECT resource_id FROM surface_bindings
+             WHERE chain_id = $1 AND logical_name_id = $2 AND authority_arm = 'ens_v2'
+               AND active_to IS NULL",
+        )
+        .bind(chain)
+        .bind(&logical_name_id)
+        .fetch_one(scratch.pool())
+        .await?;
+        let latest_resolver: (i64, Option<String>) = sqlx::query_as(
+            "SELECT block_number, lower(after_state ->> 'resolver')
+             FROM normalized_events
+             WHERE chain_id = $1 AND logical_name_id = $2 AND event_kind = 'ResolverChanged'
+             ORDER BY block_number DESC, transaction_index DESC NULLS FIRST,
+                      log_index DESC NULLS FIRST, normalized_event_id DESC
+             LIMIT 1",
+        )
+        .bind(chain)
+        .bind(&logical_name_id)
+        .fetch_one(scratch.pool())
+        .await?;
+        // A zero replacement is the null resolver boundary Interpret writes itself.
+        assert_eq!(
+            latest_resolver,
+            (2, replacement.map(str::to_owned)),
+            "the registration block's resolver replaces the reservation's ({replacement:?})"
+        );
+
+        run_project(scratch.pool(), chain, None, RunMode::Normal, 0, 2).await?;
+        let served: (Option<String>, Option<String>, Option<Uuid>, Option<String>) =
+            sqlx::query_as(
+                "SELECT provenance #>> '{authority_selection,authority_arm}',
+                        provenance #>> '{authority_selection,lifecycle_state}',
+                        resource_id, lower(declared_summary #>> '{resolver,address}')
+                 FROM name_current WHERE logical_name_id = $1",
+            )
+            .bind(&logical_name_id)
+            .fetch_one(scratch.pool())
+            .await?;
+        assert_eq!(
+            served,
+            (
+                Some("ens_v2".into()),
+                Some("registered".into()),
+                Some(registration_resource),
+                replacement.map(str::to_owned),
+            ),
+            "the reservation's resolver is not served after registration ({replacement:?})"
+        );
+        scratch.cleanup().await?;
+    }
+    Ok(())
+}
+
 async fn assert_reservation_selects_v1(
     pool: &PgPool,
     chain: &str,
