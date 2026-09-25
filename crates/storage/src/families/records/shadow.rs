@@ -186,6 +186,11 @@ async fn inventory(pool: &PgPool, chain_id: &str, report: &mut ShadowReport) -> 
     Ok(())
 }
 
+/// The ENSIP-19 default coin type (`0x80000000`).
+const DEFAULT_COIN_TYPE: &str = "2147483648";
+/// Coins the default answers that the comparison adds: ETH, and Base (`0x80000000 | 8453`).
+const FALLBACK_COIN_TYPES: [&str; 2] = ["60", "2147492101"];
+
 async fn addresses(
     pool: &PgPool,
     chain_id: &str,
@@ -217,6 +222,19 @@ async fn addresses(
     .fetch_all(pool)
     .await
     .context("failed to list the addresses to compare")?;
+    // A default-address row answers every eligible EVM coin, which no stored row names, so for
+    // each address with one the comparison adds coin 60 and Base's coin to exercise the fallback.
+    let mut keys: BTreeSet<(String, String)> = keys.into_iter().collect();
+    let defaults: Vec<String> = keys
+        .iter()
+        .filter(|(_, coin_type)| coin_type == DEFAULT_COIN_TYPE)
+        .map(|(address, _)| address.clone())
+        .collect();
+    for address in defaults {
+        for coin_type in FALLBACK_COIN_TYPES {
+            keys.insert((address.clone(), coin_type.to_owned()));
+        }
+    }
     for (address, coin_type) in keys {
         let (today, today_pages) = all_today_pages(pool, &address, &coin_type, page_size).await?;
         let (family, family_pages, misses) =

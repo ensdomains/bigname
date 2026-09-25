@@ -1545,6 +1545,20 @@ async fn official_sepolia_direct_resolver_projects_ensip19_default_for_missing_e
     // the comparison expects nothing.
     let expected = Expectations::none();
     run_expecting(&pool, target, None, RunMode::Normal, &expected).await?;
+    // The only stored coin is the default one, so the comparison adds coin 60 and one other EVM
+    // coin for the address: each answers through the default, and both readers list the name.
+    let report = bigname_storage::families::records::compare_family_reads(
+        &pool,
+        CHAIN,
+        Some((target, hash(target))),
+        1,
+    )
+    .await?;
+    assert_eq!(
+        (report.address_pages, report.address_entries),
+        (3, 3),
+        "{report:#?}"
+    );
     // A direct node-keyed declaration has no link state, so the section is unsupported
     // by kind rather than reported empty.
     assert_eq!(
