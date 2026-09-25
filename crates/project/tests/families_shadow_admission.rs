@@ -304,29 +304,29 @@ fn failed_fields(report: &shadow_support::compare::Report) -> Vec<String> {
 /// `c` (Carol) and today's order `a` (Alice): both registrants are same-block deltas. Name 2 is a
 /// bystander placed by `second`.
 async fn staged_transfer_race(fixture: &Fixture) -> Result<(String, String)> {
-    staged_race(fixture, Second::OtherLease).await
+    staged_race(fixture, Second::Apart).await
 }
 
 /// Where the race puts name 2.
 enum Second {
     /// Bound directly to its own lease M (`uuid(3)`), which no staging pass of L reads.
-    OtherLease,
+    Apart,
     /// Bound directly to lease L too, at its own node, so pass one of L reads its candidate
     /// and passes it over.
-    OnLease,
+    Beside,
     /// Bound to NameWrapper resource W (`uuid(2)`), whose SurfaceBound recorded L at node 1
     /// (the shape of `a_direct_binding_of_one_name_wins_over_another_names_wrapper`), so pass
     /// two of L would match it; pass one matches name 1 first.
-    WrapperOnLease,
+    Wrapped,
 }
 
 /// The race with name 2 placed by `second`. Returns L and name 2's resource.
 async fn staged_race(fixture: &Fixture, second: Second) -> Result<(String, String)> {
     let lease = uuid(1);
     let placed = match second {
-        Second::OtherLease => Some(uuid(3)),
-        Second::OnLease => Some(lease.clone()),
-        Second::WrapperOnLease => None,
+        Second::Apart => Some(uuid(3)),
+        Second::Beside => Some(lease.clone()),
+        Second::Wrapped => None,
     };
     let mut bound = vec![(uuid(100), name(1), lease.clone(), 0)];
     bound.extend(
@@ -493,7 +493,7 @@ async fn a_wrong_candidate_of_another_name_on_the_lease_stays_a_mismatch() -> Re
 #[tokio::test]
 async fn another_names_binding_on_the_lease_outside_the_chunk_is_checked() -> Result<()> {
     let fixture = Fixture::new("families_shadow_admission_foreign_binding", 20).await?;
-    staged_race(&fixture, Second::OnLease).await?;
+    staged_race(&fixture, Second::Beside).await?;
     let report = publish_and_compare(&fixture, 12).await?;
     assert_counts(&report, &[], &RACE_DELTA);
     assert_eq!(
@@ -550,7 +550,7 @@ async fn another_names_binding_on_the_lease_outside_the_chunk_is_checked() -> Re
 async fn another_names_wrapper_candidate_on_the_lease_goes_through_the_staging_check() -> Result<()>
 {
     let fixture = Fixture::new("families_shadow_admission_foreign_wrapper", 20).await?;
-    staged_race(&fixture, Second::WrapperOnLease).await?;
+    staged_race(&fixture, Second::Wrapped).await?;
     let report = publish_and_compare(&fixture, 12).await?;
     assert_counts(&report, &[], &RACE_DELTA);
     assert_eq!(
