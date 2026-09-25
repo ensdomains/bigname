@@ -36,10 +36,6 @@ fn address(n: u64) -> String {
     format!("0x{n:040x}")
 }
 
-fn uuid(n: u64) -> String {
-    format!("00000000-0000-0000-0000-{n:012x}")
-}
-
 /// A scratch chain with canonical blocks `0..=blocks` and Ingest and Interpret complete, whose
 /// Project publications run as the runner runs them.
 struct Chain {
@@ -126,58 +122,6 @@ impl Chain {
         .await
         .with_context(|| format!("surface {raw_name}"))?;
         Ok(logical)
-    }
-
-    /// A surface binding of a new resource to the name, with the SurfaceBound event the
-    /// interpreter writes beside it.
-    async fn binding(
-        &self,
-        binding_id: &str,
-        logical: &str,
-        resource_id: &str,
-        binding_kind: &str,
-        block: i64,
-    ) -> Result<()> {
-        sqlx::query(
-            "INSERT INTO resources (resource_id, chain_id, block_hash, block_number,
-                 canonicality_state)
-             VALUES ($1::uuid, $2, $3, $4, 'canonical') ON CONFLICT DO NOTHING",
-        )
-        .bind(resource_id)
-        .bind(CHAIN)
-        .bind(hash(block))
-        .bind(block)
-        .execute(self.pool())
-        .await?;
-        sqlx::query(
-            "INSERT INTO surface_bindings (surface_binding_id, logical_name_id, resource_id,
-                 binding_kind, authority_arm, active_from, chain_id, block_hash, block_number,
-                 provenance, canonicality_state)
-             VALUES ($1::uuid, $2, $3::uuid, $4, 'ens_v2', to_timestamp($5::bigint + $8), $6,
-                 $7, $8, '{\"transaction_index\":0,\"log_index\":0}', 'canonical')",
-        )
-        .bind(binding_id)
-        .bind(logical)
-        .bind(resource_id)
-        .bind(binding_kind)
-        .bind(EPOCH)
-        .bind(CHAIN)
-        .bind(hash(block))
-        .bind(block)
-        .execute(self.pool())
-        .await
-        .with_context(|| format!("binding {binding_id}"))?;
-        self.event(
-            &format!("bound-{binding_id}"),
-            Some(logical),
-            Some(resource_id),
-            "ens_v2_registry_l1",
-            "SurfaceBound",
-            block,
-            json!({"binding_kind": binding_kind}),
-            &address(0xe0),
-        )
-        .await
     }
 
     /// A proof-checked, normalized label.
@@ -300,16 +244,6 @@ impl Chain {
         .await?)
     }
 
-    async fn topology(&self, logical: &str) -> Result<Option<Value>> {
-        Ok(sqlx::query_scalar(
-            "SELECT declared_summary -> 'topology' FROM name_current WHERE logical_name_id = $1",
-        )
-        .bind(logical)
-        .fetch_optional(self.pool())
-        .await?
-        .flatten())
-    }
-
     async fn cleanup(self) -> Result<()> {
         self.scratch.cleanup().await
     }
@@ -405,126 +339,6 @@ async fn zero_transfer_of_a_surfaced_child_matches_a_rebuild() -> Result<()> {
     ensure!(
         served == expected,
         "incremental children differ from the rebuild:\nincremental {served:#?}\nrebuild {expected:#?}"
-    );
-    incremental.cleanup().await?;
-    rebuilt.cleanup().await
-}
-
-/// `wild.eth`, bound through the registry, points at a resolver at block 2 and bumps its record
-/// version at block 3; `sub.wild.eth` is reached only as its wildcard descendant.
-async fn wildcard_before(chain: &Chain, resolver: &str) -> Result<(String, String)> {
-    let ancestor = chain
-        .surface(&word(0x1004), "wild.eth", &[word(0x2004), word(ETH)], 1)
-        .await?;
-    let ancestor_resource = uuid(0xa004);
-    chain
-        .binding(
-            &uuid(0xb004),
-            &ancestor,
-            &ancestor_resource,
-            "declared_registry_path",
-            1,
-        )
-        .await?;
-    let wildcard = chain
-        .surface(
-            &word(0x1005),
-            "sub.wild.eth",
-            &[word(0x2005), word(0x2004), word(ETH)],
-            1,
-        )
-        .await?;
-    chain
-        .binding(
-            &uuid(0xb005),
-            &wildcard,
-            &uuid(0xa005),
-            "observed_wildcard_path",
-            1,
-        )
-        .await?;
-    chain
-        .event(
-            "wild-point",
-            Some(&ancestor),
-            Some(&ancestor_resource),
-            "ens_v2_registry_l1",
-            "ResolverChanged",
-            2,
-            json!({"resolver": resolver}),
-            &address(0xe3),
-        )
-        .await?;
-    chain
-        .event(
-            "wild-version",
-            Some(&ancestor),
-            Some(&ancestor_resource),
-            "ens_v2_resolver_l1",
-            "RecordVersionChanged",
-            3,
-            json!({"resolver": resolver, "node": word(0x1004), "version": 1}),
-            resolver,
-        )
-        .await?;
-    Ok((ancestor, wildcard))
-}
-
-/// The ancestor's pointer is cleared at block 7; nothing names the wildcard descendant.
-async fn wildcard_after(chain: &Chain, ancestor: &str) -> Result<()> {
-    chain
-        .event(
-            "wild-zero",
-            Some(ancestor),
-            Some(&uuid(0xa004)),
-            "ens_v2_registry_l1",
-            "ResolverChanged",
-            7,
-            json!({"resolver": ZERO_ADDRESS}),
-            &address(0xe3),
-        )
-        .await
-}
-
-const BOUNDARY_BLOCK: &str =
-    "/version_boundaries/topology_version_boundary/chain_position/block_number";
-
-// A wildcard name's version boundary follows its ancestor's later zero pointer in the
-// incremental batch as it does in a rebuild, and keeps the ancestor's last non-zero resolver.
-#[tokio::test]
-async fn wildcard_boundary_follows_an_ancestor_pointer_change_like_a_rebuild() -> Result<()> {
-    let resolver = address(0xc3);
-    let mut incremental = Chain::new("scope_wildcard_incremental", 12).await?;
-    let mut rebuilt = Chain::new("scope_wildcard_rebuild", 12).await?;
-    let (ancestor, wildcard) = wildcard_before(&incremental, &resolver).await?;
-    wildcard_before(&rebuilt, &resolver).await?;
-    incremental.publish(4).await?;
-    let before = incremental
-        .topology(&wildcard)
-        .await?
-        .context("the wildcard name has no topology at block 4")?;
-    ensure!(
-        before.pointer(BOUNDARY_BLOCK) == Some(&json!(3)),
-        "{before}"
-    );
-
-    wildcard_after(&incremental, &ancestor).await?;
-    wildcard_after(&rebuilt, &ancestor).await?;
-    incremental.publish(8).await?;
-    rebuilt.publish(8).await?;
-    let expected = rebuilt
-        .topology(&wildcard)
-        .await?
-        .context("the rebuild serves no wildcard topology")?;
-    ensure!(
-        expected.pointer(BOUNDARY_BLOCK) == Some(&json!(7))
-            && expected.pointer("/resolver_path/0/address") == Some(&json!(resolver)),
-        "{expected}"
-    );
-    let served = incremental.topology(&wildcard).await?;
-    ensure!(
-        served.as_ref() == Some(&expected),
-        "incremental wildcard topology differs from the rebuild:\nincremental {served:#?}\nrebuild {expected:#}"
     );
     incremental.cleanup().await?;
     rebuilt.cleanup().await

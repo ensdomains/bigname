@@ -432,62 +432,6 @@ async fn include_alias_and_wildcard_scope(
                    WHERE chain_id = $1 AND block_hash = $3 AND block_number = $2
                )
            )
-         UNION
-         -- A scoped ancestor's wildcard descendants: the wildcard topology reads the ancestor's
-         -- pointer by raw-name suffix, which the registry-edge topology walk never follows.
-         SELECT descendant.logical_name_id
-         FROM name_surfaces scoped
-         JOIN project_scope_names scope
-           ON scope.logical_name_id = scoped.logical_name_id
-         JOIN chain_lineage scoped_lineage
-           ON scoped_lineage.chain_id = scoped.chain_id
-          AND scoped_lineage.block_hash = scoped.block_hash
-          AND scoped_lineage.block_number = scoped.block_number
-         CROSS JOIN LATERAL (
-             SELECT candidate.*
-             FROM name_surfaces candidate
-             -- The containment matches name_surfaces_project_label_hashes_idx without the top
-             -- label (unless it is the only one), whose entry lists nearly every name; the
-             -- raw-name suffix decides the match, as in the wildcard topology builder.
-             WHERE candidate.namespace = scoped.namespace
-               AND candidate.chain_id = scoped.chain_id
-               AND label_hashes(candidate.raw_labels) @> label_hashes(
-                   scoped.raw_labels[1:greatest(cardinality(scoped.raw_labels) - 1, 1)]
-               )
-               AND candidate.raw_name LIKE '%.' || scoped.raw_name
-             OFFSET 0
-         ) descendant
-         JOIN chain_lineage descendant_lineage
-           ON descendant_lineage.chain_id = descendant.chain_id
-          AND descendant_lineage.block_hash = descendant.block_hash
-          AND descendant_lineage.block_number = descendant.block_number
-         JOIN surface_bindings binding
-           ON binding.logical_name_id = descendant.logical_name_id
-          AND binding.binding_kind = 'observed_wildcard_path'
-         JOIN chain_lineage binding_lineage
-           ON binding_lineage.chain_id = binding.chain_id
-          AND binding_lineage.block_hash = binding.block_hash
-          AND binding_lineage.block_number = binding.block_number
-         WHERE scoped.chain_id = $1
-           AND scoped.raw_name <> ''
-           AND cardinality(scoped.raw_labels) > 0
-           AND binding.block_number <= $2
-           AND scoped.canonicality_state IN ('canonical', 'safe', 'finalized')
-           AND scoped_lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
-           AND descendant.canonicality_state IN ('canonical', 'safe', 'finalized')
-           AND descendant_lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
-           AND binding.canonicality_state IN ('canonical', 'safe', 'finalized')
-           AND binding_lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
-           AND binding.active_from < (
-               SELECT block_timestamp + interval '1 second' FROM chain_lineage
-               WHERE chain_id = $1 AND block_hash = $3 AND block_number = $2
-           )
-           AND (
-               binding.active_to IS NULL OR binding.active_to >= (
-                   SELECT block_timestamp + interval '1 second' FROM chain_lineage
-                   WHERE chain_id = $1 AND block_hash = $3 AND block_number = $2
-               )
-           )
          ON CONFLICT DO NOTHING",
     )
     .bind(chain_id)
