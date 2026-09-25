@@ -5,10 +5,10 @@ use crate::{ProjectError, Result};
 
 pub(crate) async fn create(tx: &mut Transaction<'_, Postgres>) -> Result<()> {
     for sql in [
-        "CREATE TEMP TABLE IF NOT EXISTS project_mirror_evidence_names(logical_name_id text PRIMARY KEY) ON COMMIT DROP",
-        "CREATE TEMP TABLE IF NOT EXISTS project_mirror_evidence_nodes(namespace text, namehash text, PRIMARY KEY(namespace,namehash)) ON COMMIT DROP",
-        "CREATE TEMP TABLE IF NOT EXISTS project_mirror_evidence_events(normalized_event_id bigint PRIMARY KEY) ON COMMIT DROP",
-        "CREATE TEMP TABLE IF NOT EXISTS project_mirror_evidence_resolvers(resolver_address text PRIMARY KEY) ON COMMIT DROP",
+        "/* project:stage.mirror_evidence.create.create_mirror_evidence_names */ CREATE TEMP TABLE IF NOT EXISTS project_mirror_evidence_names(logical_name_id text PRIMARY KEY) ON COMMIT DROP",
+        "/* project:stage.mirror_evidence.create.create_mirror_evidence_nodes */ CREATE TEMP TABLE IF NOT EXISTS project_mirror_evidence_nodes(namespace text, namehash text, PRIMARY KEY(namespace,namehash)) ON COMMIT DROP",
+        "/* project:stage.mirror_evidence.create.create_mirror_evidence_events */ CREATE TEMP TABLE IF NOT EXISTS project_mirror_evidence_events(normalized_event_id bigint PRIMARY KEY) ON COMMIT DROP",
+        "/* project:stage.mirror_evidence.create.create_mirror_evidence_resolvers */ CREATE TEMP TABLE IF NOT EXISTS project_mirror_evidence_resolvers(resolver_address text PRIMARY KEY) ON COMMIT DROP",
     ] {
         sqlx::query(sql)
             .execute(&mut **tx)
@@ -22,7 +22,7 @@ pub(crate) async fn create(tx: &mut Transaction<'_, Postgres>) -> Result<()> {
 /// nodes. The node is the name the event addresses, read in the adapters' shared order
 /// (`V1_EVENT_NODE_FIELDS` in `crates/adapters/src/schema_v2/seam.rs`), which
 /// `normalized_events_project_v1_pointer_addressed_node_idx` keys.
-pub(crate) const EVIDENCE_EVENTS_SQL: &str = "INSERT INTO project_mirror_evidence_events
+pub(crate) const EVIDENCE_EVENTS_SQL: &str = "/* project:stage.mirror_evidence.evidence_events_sql */ INSERT INTO project_mirror_evidence_events
          SELECT event.normalized_event_id
          FROM project_mirror_evidence_nodes node
          JOIN normalized_events event
@@ -45,7 +45,7 @@ pub(crate) async fn resolve_inputs(
     chain_id: &str,
     target_block: i64,
 ) -> Result<bool> {
-    sqlx::query("ANALYZE project_mirror_evidence_nodes")
+    sqlx::query("/* project:stage.mirror_evidence.resolve_inputs.analyze_mirror_evidence_nodes */ ANALYZE project_mirror_evidence_nodes")
         .execute(&mut **tx)
         .await
         .map_err(|e| ProjectError::database("failed to analyze mirror input nodes", e))?;
@@ -53,7 +53,7 @@ pub(crate) async fn resolve_inputs(
     // The shared event stage applies its serving eligibility filter again.
     for sql in [
         EVIDENCE_EVENTS_SQL,
-        "INSERT INTO project_mirror_evidence_resolvers
+        "/* project:stage.mirror_evidence.resolve_inputs.insert_mirror_evidence_resolvers */ INSERT INTO project_mirror_evidence_resolvers
          SELECT DISTINCT lower(candidate.address)
          FROM project_mirror_evidence_events evidence
          JOIN normalized_events event USING(normalized_event_id)
@@ -75,7 +75,7 @@ pub(crate) async fn resolve_inputs(
     }
     // These keys must bypass passthrough and invalidate direct as well as mirrored users.
     let inserted = sqlx::query(
-        "WITH invalid AS MATERIALIZED (
+        "/* project:stage.mirror_evidence.resolve_inputs.insert_scope_resolver_dependents */ WITH invalid AS MATERIALIZED (
          SELECT evidence.resolver_address FROM project_mirror_evidence_resolvers evidence
          WHERE NOT EXISTS (
              SELECT 1 FROM resolver_current current
@@ -112,7 +112,7 @@ pub(crate) async fn invalidate_resolver_dependents(
         return Ok(());
     }
     sqlx::query(
-        "WITH affected AS MATERIALIZED (
+        "/* project:stage.mirror_evidence.invalidate_resolver_dependents */ WITH affected AS MATERIALIZED (
              SELECT inventory.resource_id, inventory.provenance ->> 'logical_name_id' AS logical_name_id
              FROM project_scope_resolver_dependents changed
              JOIN record_inventory_current inventory
@@ -139,7 +139,7 @@ pub(crate) async fn classifications(
     // Only these documented classification fields may cross from an unaffected row.
     // Retained target metadata and record values are not inputs to a rebuilt mirror.
     sqlx::query(
-        "CREATE TEMP TABLE project_mirror_resolver_classifications ON COMMIT DROP AS
+        "/* project:stage.mirror_evidence.classifications */ CREATE TEMP TABLE project_mirror_resolver_classifications ON COMMIT DROP AS
          SELECT chain_id, resolver_address,
                 jsonb_build_object('classification', declared_summary -> 'classification') AS declared_summary,
                 support_status, unsupported_reason, manifest_version,

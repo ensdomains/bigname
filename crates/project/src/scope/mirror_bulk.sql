@@ -1,3 +1,4 @@
+/* project:scope.mirror_bulk.insert_mirror_frontier_resources */
 -- The work tables are created once per publication in mirror.sql and truncated after
 -- each pass (mirror_batch_finish.sql), so the relation locks a publication holds stay
 -- constant however many closure passes it runs.
@@ -8,7 +9,9 @@ WITH added AS (
 )
 INSERT INTO project_mirror_frontier_resources
 SELECT * FROM added;
+/* project:scope.mirror_bulk.analyze_mirror_frontier_resources */
 ANALYZE project_mirror_frontier_resources;
+/* project:scope.mirror_bulk.insert_mirror_frontier_names */
 WITH added AS (
     INSERT INTO project_mirror_seen_names SELECT scope.logical_name_id FROM project_scope_names scope
     WHERE NOT EXISTS (SELECT 1 FROM project_mirror_seen_names seen WHERE seen.logical_name_id = scope.logical_name_id)
@@ -16,11 +19,15 @@ WITH added AS (
 )
 INSERT INTO project_mirror_frontier_names
 SELECT * FROM added;
+/* project:scope.mirror_bulk.analyze_mirror_frontier_names */
 ANALYZE project_mirror_frontier_names;
+/* project:scope.mirror_bulk.insert_mirror_frontier_changed */
 WITH changed AS (DELETE FROM project_mirror_changed_nodes RETURNING *)
 INSERT INTO project_mirror_frontier_changed
 SELECT * FROM changed;
+/* project:scope.mirror_bulk.analyze_mirror_frontier_changed */
 ANALYZE project_mirror_frontier_changed;
+/* project:scope.mirror_bulk.insert_mirror_resource_nodes */
 INSERT INTO project_mirror_resource_nodes
     SELECT DISTINCT event.namespace, lower(COALESCE(event.after_state ->> 'child_node', event.after_state ->> 'namehash', event.after_state ->> 'node')) AS namehash
     FROM project_mirror_frontier_resources scope JOIN LATERAL (
@@ -37,7 +44,9 @@ INSERT INTO project_mirror_resource_nodes
       AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
       AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
     UNION SELECT namespace, namehash FROM project_mirror_frontier_changed;
+/* project:scope.mirror_bulk.analyze_mirror_resource_nodes */
 ANALYZE project_mirror_resource_nodes;
+/* project:scope.mirror_bulk.insert_mirror_seeds */
 WITH candidates AS (    SELECT surface.namespace, surface.raw_labels
     FROM project_mirror_frontier_names scope JOIN name_surfaces surface USING(logical_name_id)
     JOIN chain_lineage lineage USING(chain_id, block_number, block_hash)
@@ -80,7 +89,9 @@ WITH candidates AS (    SELECT surface.namespace, surface.raw_labels
 )
 INSERT INTO project_mirror_seeds
 SELECT * FROM added;
+/* project:scope.mirror_bulk.analyze_mirror_seeds */
 ANALYZE project_mirror_seeds;
+/* project:scope.mirror_bulk.insert_mirror_queried_names */
 INSERT INTO project_mirror_queried_names
     SELECT DISTINCT surface.logical_name_id
     FROM project_mirror_seeds seed JOIN LATERAL (
@@ -96,7 +107,9 @@ INSERT INTO project_mirror_queried_names
     ) surface ON TRUE
     WHERE surface.chain_id = $1 AND surface.block_number <= $2
       AND surface.canonicality_state IN ('canonical', 'safe', 'finalized');
+/* project:scope.mirror_bulk.analyze_mirror_queried_names */
 ANALYZE project_mirror_queried_names;
+/* project:scope.mirror_bulk.insert_mirror_pointer_candidates */
 INSERT INTO project_mirror_pointer_candidates
 SELECT DISTINCT event.resource_id, event.logical_name_id
 FROM project_mirror_frontier_resources scope JOIN LATERAL (
@@ -131,14 +144,18 @@ FROM project_mirror_queried_names scope JOIN LATERAL (
       AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
       AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized') OFFSET 0
 ) event ON TRUE;
+/* project:scope.mirror_bulk.analyze_mirror_pointer_candidates */
 ANALYZE project_mirror_pointer_candidates;
+/* project:scope.mirror_bulk.insert_mirror_new_pointers */
 WITH added AS (
     INSERT INTO project_mirror_seen_pointers SELECT resource_id, logical_name_id FROM project_mirror_pointer_candidates
     ON CONFLICT DO NOTHING RETURNING resource_id, logical_name_id
 )
 INSERT INTO project_mirror_new_pointers
 SELECT * FROM added;
+/* project:scope.mirror_bulk.analyze_mirror_new_pointers */
 ANALYZE project_mirror_new_pointers;
+/* project:scope.mirror_bulk.insert_mirror_walks */
 INSERT INTO project_mirror_walks
     SELECT DISTINCT mirror.resource_id AS mirror_resource_id, surface.namespace,
            surface.raw_labels[position:cardinality(surface.raw_labels)] AS suffix
@@ -148,10 +165,14 @@ INSERT INTO project_mirror_walks
     WHERE surface.chain_id = $1 AND surface.block_number <= $2
       AND surface.canonicality_state IN ('canonical', 'safe', 'finalized')
       AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized');
+/* project:scope.mirror_bulk.analyze_mirror_walks */
 ANALYZE project_mirror_walks;
+/* project:scope.mirror_bulk.insert_mirror_suffixes */
 INSERT INTO project_mirror_suffixes
 SELECT DISTINCT namespace, suffix FROM project_mirror_walks;
+/* project:scope.mirror_bulk.analyze_mirror_suffixes */
 ANALYZE project_mirror_suffixes;
+/* project:scope.mirror_bulk.insert_mirror_surfaces */
 INSERT INTO project_mirror_surfaces
     SELECT DISTINCT walk.suffix, surface.logical_name_id, surface.namespace,
            lower(surface.namehash) AS namehash
@@ -168,18 +189,24 @@ INSERT INTO project_mirror_surfaces
     WHERE surface.chain_id = $1 AND surface.block_number <= $2
       AND surface.canonicality_state IN ('canonical', 'safe', 'finalized')
       AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized');
+/* project:scope.mirror_bulk.analyze_mirror_surfaces */
 ANALYZE project_mirror_surfaces;
+/* project:scope.mirror_bulk.insert_mirror_consulted */
 INSERT INTO project_mirror_consulted
 SELECT DISTINCT walk.mirror_resource_id, surface.logical_name_id, surface.namespace, surface.namehash
 FROM project_mirror_walks walk JOIN project_mirror_surfaces surface USING(namespace, suffix);
+/* project:scope.mirror_bulk.analyze_mirror_consulted */
 ANALYZE project_mirror_consulted;
+/* project:scope.mirror_bulk.insert_mirror_wanted */
 WITH added AS (
     INSERT INTO project_mirror_seen_nodes SELECT DISTINCT namespace, namehash FROM project_mirror_consulted
     ON CONFLICT DO NOTHING RETURNING namespace, namehash
 )
 INSERT INTO project_mirror_wanted
 SELECT * FROM added;
+/* project:scope.mirror_bulk.analyze_mirror_wanted */
 ANALYZE project_mirror_wanted;
+/* project:scope.mirror_bulk.insert_mirror_cached_nodes */
 INSERT INTO project_mirror_cached_nodes
     SELECT DISTINCT event.namespace, lower(COALESCE(event.after_state ->> 'child_node', event.after_state ->> 'namehash', event.after_state ->> 'node')) AS namehash, event.resource_id
     FROM project_mirror_wanted JOIN LATERAL (
@@ -202,10 +229,13 @@ INSERT INTO project_mirror_cached_nodes
       AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
       AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
 ON CONFLICT DO NOTHING;
+/* project:scope.mirror_bulk.analyze_mirror_cached_nodes */
 ANALYZE project_mirror_cached_nodes;
+/* project:scope.mirror_bulk.insert_mirror_links */
 -- Keep mirror-to-node links separate from node-to-history resources. Joining both
 -- axes here would materialize millions of redundant mirror/resource combinations.
 INSERT INTO project_mirror_links
 SELECT mirror_resource_id, logical_name_id, namespace, namehash
 FROM project_mirror_consulted ON CONFLICT DO NOTHING;
+/* project:scope.mirror_bulk.analyze_mirror_links */
 ANALYZE project_mirror_links;

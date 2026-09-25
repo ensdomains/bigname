@@ -97,7 +97,8 @@ pub(in crate::engine) async fn capture(
     )
     .await?;
     reject_unsupported(&mut branch, request, target).await?;
-    let scope = Scopes::capture(&mut branch).await?;
+    let window = (request.affected_from_block, request.affected_to_block);
+    let scope = Scopes::capture(&mut branch, window).await?;
     branch.rollback().await?;
     ensure!(
         !enabled(tx).await?,

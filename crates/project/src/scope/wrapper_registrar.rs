@@ -67,7 +67,7 @@ pub(super) async fn include_registrars_for_scoped_wrappers(
 
 // The lease is looked up through the `resources` primary key: the recorded text is cast to a
 // uuid, not every resource id to text.
-const REGISTRARS_FOR_SCOPED_WRAPPERS: &str = "WITH scoped_wrappers AS (
+const REGISTRARS_FOR_SCOPED_WRAPPERS: &str = "/* project:scope.wrapper_registrar */ WITH scoped_wrappers AS (
              SELECT wrapper.normalized_event_id
              FROM project_scope_resources scope
              JOIN LATERAL (

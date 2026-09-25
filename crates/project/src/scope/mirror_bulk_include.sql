@@ -1,3 +1,4 @@
+/* project:scope.mirror_bulk_include */
 WITH full_links AS MATERIALIZED (
  SELECT link.* FROM project_mirror_frontier_resources scope JOIN project_mirror_links link
    ON link.mirror_resource_id = scope.resource_id

@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc, time::Instant};
 
 use sqlx::PgPool;
 
@@ -34,6 +34,50 @@ pub struct BatchOutcome {
     pub target: Marker,
     pub complete: bool,
     pub estimated_write_bytes: u64,
+    pub write_summary: WriteSummary,
+}
+
+/// What one batch read and wrote, counted inside its transaction. Keys are table and stage names.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct WriteSummary {
+    /// Blocks in the affected range.
+    pub blocks: u64,
+    /// Events in the affected range that changed the scope; zero for a full rebuild, which
+    /// derives the whole chain without one.
+    pub changed_events: u64,
+    /// Events staged for the builders: the history the rebuilt keys read.
+    pub staged_events: u64,
+    /// Keys in each scope when publication starts, by scope (`names` for `project_scope_names`).
+    pub scope_keys: BTreeMap<&'static str, u64>,
+    /// Rows each served table lost when publication cleared the scope.
+    pub deleted: BTreeMap<&'static str, u64>,
+    /// Rows each served table received; for child registrations, rows inserted or updated.
+    pub inserted: BTreeMap<&'static str, u64>,
+    /// Elapsed milliseconds of each derivation stage.
+    pub stage_elapsed_ms: BTreeMap<&'static str, u64>,
+}
+
+/// The scopes publication replaces, each named by its table without the `project_scope_` prefix.
+const SCOPES: [&str; 6] = [
+    "names",
+    "children",
+    "resources",
+    "account_permissions",
+    "resolvers",
+    "primary",
+];
+
+impl WriteSummary {
+    pub fn inserted_rows(&self) -> u64 {
+        self.inserted.values().copied().fold(0, u64::saturating_add)
+    }
+
+    fn finish_stage(&mut self, stage: &'static str, started: &mut Instant) {
+        let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        tracing::debug!(stage, elapsed_ms, "Project stage completed");
+        self.stage_elapsed_ms.insert(stage, elapsed_ms);
+        *started = Instant::now();
+    }
 }
 
 pub struct Engine {
@@ -62,12 +106,12 @@ impl Engine {
         let mut transaction = self.pool.begin().await.map_err(|error| {
             ProjectError::database("failed to begin project transaction", error)
         })?;
-        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
-            .execute(&mut *transaction)
-            .await
-            .map_err(|error| {
-                ProjectError::database("failed to configure project snapshot", error)
-            })?;
+        sqlx::query(
+            "/* project:engine.isolation */ SET TRANSACTION ISOLATION LEVEL REPEATABLE READ",
+        )
+        .execute(&mut *transaction)
+        .await
+        .map_err(|error| ProjectError::database("failed to configure project snapshot", error))?;
         revalidate_target(&mut transaction, &request.chain_id, &target).await?;
 
         let long_run = request.mode == RunMode::Redo || request.resume_current.is_none();
@@ -75,17 +119,31 @@ impl Engine {
             self.step_observer.as_deref().filter(|_| long_run),
             &request.chain_id,
         );
-        let row_count = derive(&mut transaction, &request, &target, &steps).await?;
+        let write_summary = derive(&mut transaction, &request, &target, &steps).await?;
         steps.enter("commit");
         transaction.commit().await.map_err(|error| {
             ProjectError::database("failed to commit atomic project publication", error)
         })?;
+        tracing::info!(
+            target: "bigname_project::batch",
+            chain_id = request.chain_id,
+            target_block = target.number,
+            blocks = write_summary.blocks,
+            changed_events = write_summary.changed_events,
+            staged_events = write_summary.staged_events,
+            scope_keys = ?write_summary.scope_keys,
+            deleted = ?write_summary.deleted,
+            inserted = ?write_summary.inserted,
+            stage_elapsed_ms = ?write_summary.stage_elapsed_ms,
+            "Project batch committed"
+        );
 
         Ok(BatchOutcome {
             current: target.clone(),
             target,
             complete: true,
-            estimated_write_bytes: row_count.saturating_mul(1_024),
+            estimated_write_bytes: write_summary.inserted_rows().saturating_mul(1_024),
+            write_summary,
         })
     }
 }
@@ -95,17 +153,17 @@ async fn derive(
     request: &BatchRequest,
     target: &Marker,
     steps: &Steps<'_>,
-) -> Result<u64> {
-    let mut stage_start = std::time::Instant::now();
+) -> Result<WriteSummary> {
+    let mut summary = WriteSummary {
+        blocks: u64::try_from(request.affected_to_block - request.affected_from_block + 1)
+            .unwrap_or(0),
+        ..WriteSummary::default()
+    };
+    let mut stage_start = Instant::now();
     let full_rebuild = matches!(request.mode, RunMode::Normal) && request.resume_current.is_none();
     steps.enter("prepare");
     stage::prepare(transaction, &request.chain_id, target).await?;
-    tracing::debug!(
-        stage = "prepare",
-        elapsed_ms = stage_start.elapsed().as_millis() as u64,
-        "Project stage completed"
-    );
-    stage_start = std::time::Instant::now();
+    summary.finish_stage("prepare", &mut stage_start);
     steps.enter("scope");
     scope::initialize(
         transaction,
@@ -120,51 +178,64 @@ async fn derive(
         },
     )
     .await?;
-    tracing::debug!(
-        stage = "scope",
-        elapsed_ms = stage_start.elapsed().as_millis() as u64,
-        "Project stage completed"
-    );
-    stage_start = std::time::Instant::now();
+    summary.finish_stage("scope", &mut stage_start);
     steps.enter("inputs");
     stage::inputs(transaction, &request.chain_id, target, full_rebuild).await?;
-    tracing::debug!(
-        stage = "inputs",
-        elapsed_ms = stage_start.elapsed().as_millis() as u64,
-        "Project stage completed"
-    );
-    stage_start = std::time::Instant::now();
+    summary.finish_stage("inputs", &mut stage_start);
     builders::build_all(transaction, &request.chain_id, target, full_rebuild, steps).await?;
-    tracing::debug!(
-        stage = "builders",
-        elapsed_ms = stage_start.elapsed().as_millis() as u64,
-        "Project stage completed"
-    );
-    stage_start = std::time::Instant::now();
+    summary.finish_stage("builders", &mut stage_start);
     steps.enter("integrity");
     integrity::assert_publishable(transaction, &request.chain_id, target).await?;
-    tracing::debug!(
-        stage = "integrity",
-        elapsed_ms = stage_start.elapsed().as_millis() as u64,
-        "Project stage completed"
-    );
-    stage_start = std::time::Instant::now();
+    summary.finish_stage("integrity", &mut stage_start);
     steps.enter("publish");
-    let row_count = publish::swap(transaction, &request.chain_id, full_rebuild).await?
-        + builders::child_registrations::publish(
-            transaction,
-            &request.chain_id,
-            full_rebuild,
-            request.affected_from_block,
-            request.affected_to_block,
-        )
-        .await?;
-    tracing::debug!(
-        stage = "publish",
-        elapsed_ms = stage_start.elapsed().as_millis() as u64,
-        "Project stage completed"
-    );
-    Ok(row_count)
+    // Counting the scope belongs to `publish`, so the six stage durations add up to the whole
+    // derivation.
+    count_inputs(transaction, full_rebuild, &mut summary).await?;
+    publish::swap(transaction, &request.chain_id, full_rebuild, &mut summary).await?;
+    builders::child_registrations::publish(
+        transaction,
+        &request.chain_id,
+        full_rebuild,
+        request.affected_from_block,
+        request.affected_to_block,
+        &mut summary,
+    )
+    .await?;
+    summary.finish_stage("publish", &mut stage_start);
+    Ok(summary)
+}
+
+/// Staged events and scope keys, read in one statement before publication. A full rebuild
+/// stages no changed events.
+async fn count_inputs(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    full_rebuild: bool,
+    summary: &mut WriteSummary,
+) -> Result<()> {
+    let changed = if full_rebuild {
+        "0::bigint"
+    } else {
+        "(SELECT count(*) FROM project_changed_events)"
+    };
+    let counts: Vec<i64> = sqlx::query_scalar(&format!(
+        "/* project:engine.count_inputs */ SELECT unnest(ARRAY[{changed}, \
+         (SELECT count(*) FROM project_events), {}])",
+        SCOPES
+            .map(|scope| format!("(SELECT count(*) FROM project_scope_{scope})"))
+            .join(", ")
+    ))
+    .fetch_all(&mut **transaction)
+    .await
+    .map_err(|error| ProjectError::database("failed to count project batch inputs", error))?;
+    let mut counts = counts
+        .into_iter()
+        .map(|count| u64::try_from(count).unwrap_or(0));
+    summary.changed_events = counts.next().unwrap_or(0);
+    summary.staged_events = counts.next().unwrap_or(0);
+    for (scope, count) in SCOPES.into_iter().zip(counts) {
+        summary.scope_keys.insert(scope, count);
+    }
+    Ok(())
 }
 
 fn validate_request(request: &BatchRequest) -> Result<()> {
@@ -188,7 +259,7 @@ fn validate_request(request: &BatchRequest) -> Result<()> {
 
 async fn load_marker(pool: &PgPool, chain_id: &str, number: i64) -> Result<Marker> {
     let rows: Vec<String> = sqlx::query_scalar(
-        "SELECT block_hash FROM chain_lineage
+        "/* project:engine.load_marker */ SELECT block_hash FROM chain_lineage
          WHERE chain_id = $1 AND block_number = $2
            AND canonicality_state IN ('canonical', 'safe', 'finalized')",
     )
@@ -237,7 +308,7 @@ async fn revalidate_target(
     target: &Marker,
 ) -> Result<()> {
     let live: Option<String> = sqlx::query_scalar(
-        "SELECT block_hash FROM chain_lineage
+        "/* project:engine.revalidate_target */ SELECT block_hash FROM chain_lineage
          WHERE chain_id = $1 AND block_number = $2 AND block_hash = $3
            AND canonicality_state IN ('canonical', 'safe', 'finalized')
          FOR SHARE",

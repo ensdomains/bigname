@@ -9,7 +9,7 @@ pub(super) async fn seed_resolvers(
     to_block: i64,
 ) -> Result<()> {
     sqlx::query(
-        r#"
+        r#"/* project:scope.retracted.resolvers.seed_resolvers.insert_scope_resolvers_from_resolver_current */
         WITH citations AS (
             SELECT row.resolver_address, citation.event_id
             FROM resolver_current row
@@ -46,7 +46,7 @@ pub(super) async fn seed_resolvers(
     .map_err(|error| ProjectError::database("failed to retain retracted resolver scope", error))?;
 
     sqlx::query(
-        r#"
+        r#"/* project:scope.retracted.resolvers.seed_resolvers.insert_scope_retracted_resolver_evidence */
         WITH old_candidates AS (
             SELECT evidence.event_identity,
                    lower(candidate.resolver_address) AS resolver_address,
@@ -131,7 +131,7 @@ pub(super) async fn seed_resolvers(
         )
     })?;
     sqlx::query(
-        "INSERT INTO project_scope_resolvers
+        "/* project:scope.retracted.resolvers.seed_resolvers.insert_scope_resolvers_from_scope_retracted_resolver_evidence */ INSERT INTO project_scope_resolvers
          SELECT DISTINCT resolver_address
          FROM project_scope_retracted_resolver_evidence
          ON CONFLICT DO NOTHING",
@@ -142,7 +142,7 @@ pub(super) async fn seed_resolvers(
         ProjectError::database("failed to rebuild resolvers with retracted evidence", error)
     })?;
     sqlx::query(
-        r#"
+        r#"/* project:scope.retracted.resolvers.seed_resolvers.insert_scope_resources */
         INSERT INTO project_scope_resources
         SELECT DISTINCT evidence.resource_id
         FROM project_redo_resolver_evidence evidence
@@ -196,7 +196,7 @@ pub(super) async fn seed_relinked_resolvers(
     // a record-ID resolver emits its own Linked logs.
     // (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L363-L367 @ ens_v2@a971bd64)
     let statement = format!(
-        r#"
+        r#"/* project:scope.retracted.resolvers.seed_relinked_resolvers */
         WITH latest AS (
             SELECT DISTINCT ON (lower(event.raw_fact_ref ->> 'emitting_address'),
                                 lower(event.after_state ->> 'node'))

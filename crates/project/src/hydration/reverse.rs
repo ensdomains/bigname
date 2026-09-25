@@ -128,7 +128,7 @@ impl Candidates {
         } else {
             Some(
                 sqlx::query_scalar::<_, i64>(
-                    "SELECT nextval('reverse_hydration_attempt_ordinal_seq')",
+                    "/* project:hydration.reverse.publish */ SELECT nextval('reverse_hydration_attempt_ordinal_seq')",
                 )
                 .fetch_one(&mut **transaction)
                 .await
@@ -182,7 +182,7 @@ async fn load_active_candidates(pool: &PgPool, head: &Marker) -> Result<Vec<Reve
         Value,
     );
     let rows = sqlx::query_as::<_, Row>(
-        r#"
+        r#"/* project:hydration.reverse.load_active_candidates */
         WITH eligible AS (
             SELECT current.*,
                    lower(current.claim_provenance ->> 'reverse_node') AS reverse_node,
@@ -304,7 +304,7 @@ async fn load_hydrated_candidates(
         Value,
     );
     let rows = sqlx::query_as::<_, Row>(
-        r#"
+        r#"/* project:hydration.reverse.load_hydrated_candidates */
         WITH stale AS (
             SELECT current.*,
                    COALESCE(current.claim_provenance ->> 'target_block_number' = $3::text
@@ -439,7 +439,7 @@ async fn update_primary(
         .expect("hydration provenance is an object")
         .insert("baseline".to_owned(), baseline_json(&candidate.baseline));
     let result = sqlx::query(
-        "UPDATE primary_names_current
+        "/* project:hydration.reverse.update_primary */ UPDATE primary_names_current
          SET claim_status = $4, raw_claim_name = $5,
              claim_name_is_normalized = $6, unsupported_reason = NULL,
              claim_provenance = (claim_provenance - $7) || jsonb_build_object($7, $8),
@@ -476,7 +476,7 @@ async fn restore_primary_baseline(
     let attempted_block_hash = attempt.map(|(head, _)| &head.hash);
     let attempt_ordinal = attempt.map(|(_, ordinal)| ordinal);
     let result = sqlx::query(
-        "UPDATE primary_names_current
+        "/* project:hydration.reverse.restore_primary_baseline */ UPDATE primary_names_current
          SET claim_status = $4, raw_claim_name = $5,
              claim_name_is_normalized = $6, unsupported_reason = $7,
              claim_provenance = claim_provenance - $8,

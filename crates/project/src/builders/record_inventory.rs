@@ -23,7 +23,7 @@ pub(super) async fn build(
     Ok(())
 }
 
-pub(in crate::builders) const BUILD_RECORD_INVENTORY: &str = r#"
+pub(in crate::builders) const BUILD_RECORD_INVENTORY: &str = r#"/* project:builders.record_inventory */
         WITH pointers AS (
             -- Mirror-pointer resources are re-pointed at the ENSv1 resolver the mirror would call
             -- for the queried node (record_inventory/mirror.rs); same column order.

@@ -29,7 +29,7 @@ pub(crate) async fn prepare(
 ) -> Result<()> {
     for table in PROJECTION_TABLES {
         let statement = format!(
-            "CREATE TEMP TABLE project_stage_{table}
+            "/* project:stage.prepare.{table} */ CREATE TEMP TABLE project_stage_{table}
              (LIKE {table} INCLUDING DEFAULTS) ON COMMIT DROP"
         );
         sqlx::query(&statement)
@@ -55,7 +55,7 @@ pub(crate) async fn inputs(
     linked_records::include(transaction, chain_id, target.number, full_rebuild).await?;
     // Collect statistics after all history is staged so builders can plan joins
     // against the actual event mix, including linked resolver records.
-    sqlx::query("ANALYZE project_events")
+    sqlx::query("/* project:stage.inputs.analyze_events */ ANALYZE project_events")
         .execute(&mut **transaction)
         .await
         .map_err(|error| ProjectError::database("failed to analyze staged events", error))?;
@@ -69,7 +69,7 @@ async fn create_manifests(
     target_block: i64,
 ) -> Result<()> {
     sqlx::query(
-        "CREATE TEMP TABLE project_manifests ON COMMIT DROP AS
+        "/* project:stage.create_manifests */ CREATE TEMP TABLE project_manifests ON COMMIT DROP AS
          WITH latest AS (
              SELECT DISTINCT ON (event.source_manifest_id)
                     event.source_manifest_id AS manifest_id,
@@ -125,7 +125,7 @@ async fn create_declared_resolver_addresses(
     target_block: i64,
 ) -> Result<()> {
     sqlx::query(
-        "CREATE TEMP TABLE project_declared_resolver_addresses ON COMMIT DROP AS
+        "/* project:stage.create_declared_resolver_addresses.create_declared_resolver_addresses */ CREATE TEMP TABLE project_declared_resolver_addresses ON COMMIT DROP AS
          SELECT manifest.namespace,
                 manifest.source_family,
                 lower(declaration ->> 'address') AS resolver_address,
@@ -169,7 +169,7 @@ async fn create_declared_resolver_addresses(
         ProjectError::database("failed to stage declared resolver addresses", error)
     })?;
     sqlx::query(
-        "CREATE INDEX ON project_declared_resolver_addresses (
+        "/* project:stage.create_declared_resolver_addresses.index_declared_resolver_addresses_namespace */ CREATE INDEX ON project_declared_resolver_addresses (
              namespace, resolver_address, manifest_id
          )",
     )
@@ -214,7 +214,7 @@ async fn create_identity_views(
          ) scope USING (logical_name_id)"
     };
     let surface_statement = format!(
-        "CREATE TEMP TABLE project_surfaces ON COMMIT DROP AS
+        "/* project:stage.create_identity_views.create_surfaces */ CREATE TEMP TABLE project_surfaces ON COMMIT DROP AS
          SELECT surface.*
          FROM name_surfaces surface
          {surface_scope_join}
@@ -240,7 +240,7 @@ async fn create_identity_views(
         "JOIN project_scope_resources scope USING (resource_id)"
     };
     let resource_statement = format!(
-        "CREATE TEMP TABLE project_resources ON COMMIT DROP AS
+        "/* project:stage.create_identity_views.create_resources */ CREATE TEMP TABLE project_resources ON COMMIT DROP AS
          SELECT resource.*
          FROM resources resource
          {resource_scope_join}
@@ -261,7 +261,7 @@ async fn create_identity_views(
         .map_err(|error| ProjectError::database("failed to stage resource identities", error))?;
 
     sqlx::query(
-        "CREATE TEMP TABLE project_binding_candidates ON COMMIT DROP AS
+        "/* project:stage.create_identity_views.create_binding_candidates */ CREATE TEMP TABLE project_binding_candidates ON COMMIT DROP AS
          SELECT binding.*
          FROM surface_bindings binding
          JOIN project_surfaces surface
@@ -300,12 +300,12 @@ async fn create_identity_views(
     // The builders look these tables up once per name or per resource, so each gets its key and
     // statistics. Temporary tables are never analyzed automatically.
     for statement in [
-        "ALTER TABLE project_surfaces ADD PRIMARY KEY (logical_name_id)",
-        "ALTER TABLE project_resources ADD PRIMARY KEY (resource_id)",
-        "CREATE INDEX ON project_binding_candidates (logical_name_id, authority_arm, block_number)",
-        "ANALYZE project_surfaces",
-        "ANALYZE project_resources",
-        "ANALYZE project_binding_candidates",
+        "/* project:stage.create_identity_views.key_surfaces */ ALTER TABLE project_surfaces ADD PRIMARY KEY (logical_name_id)",
+        "/* project:stage.create_identity_views.key_resources */ ALTER TABLE project_resources ADD PRIMARY KEY (resource_id)",
+        "/* project:stage.create_identity_views.index_binding_candidates_logical_name_id */ CREATE INDEX ON project_binding_candidates (logical_name_id, authority_arm, block_number)",
+        "/* project:stage.create_identity_views.analyze_surfaces */ ANALYZE project_surfaces",
+        "/* project:stage.create_identity_views.analyze_resources */ ANALYZE project_resources",
+        "/* project:stage.create_identity_views.analyze_binding_candidates */ ANALYZE project_binding_candidates",
     ] {
         sqlx::query(statement)
             .execute(&mut **transaction)

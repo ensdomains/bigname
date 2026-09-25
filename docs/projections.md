@@ -23,6 +23,14 @@ allowing a winning fork to retract losing-fork output. It stages the affected
 scope in connection-local tables and publishes the related projection rows and
 phase state transactionally.
 
+Every statement a batch sends starts with a [statement
+identifier](glossary.md#statement-identifier), and every batch returns a
+[write summary](glossary.md#write-summary) of the keys it scoped and the rows
+it deleted and inserted per served table. Neither changes what is published:
+the identifier is a comment, and the counts are read from the temporary scope
+tables and from the row counts PostgreSQL returns for each publication
+statement.
+
 Normal incremental Project work starts from events and identity rows in the
 `(previous, target]` block window. Name- or resource-local events initially
 select only that name or resource. `RecordChanged`, `RecordVersionChanged`,

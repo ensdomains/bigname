@@ -110,6 +110,7 @@ async fn main() -> Result<()> {
                     )),
                     Arc::new(
                         ProjectPhase::with_hydration(database.pool().clone(), hydration_rpc_urls)
+                            .with_metrics_feed(metrics_feed.clone())
                             .with_step_observer(Arc::new(metrics_feed.clone())),
                     ),
                     Arc::new(VerifyPhase::new(verification_database)),
@@ -219,6 +220,7 @@ async fn main() -> Result<()> {
                 ));
                 let project = Arc::new(
                     ProjectPhase::with_hydration(database.pool().clone(), hydration_rpc_urls)
+                        .with_metrics_feed(metrics_feed.clone())
                         .with_step_observer(Arc::new(metrics_feed.clone())),
                 );
                 let phases = if phase.requires_verify() {

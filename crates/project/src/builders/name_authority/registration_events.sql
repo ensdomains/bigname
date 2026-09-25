@@ -1,3 +1,4 @@
+/* project:builders.name_authority.registration_events */
 -- The rows that can name a registrant. A later wrap moves the registrar token into the
 -- NameWrapper; that custody transfer names the NameWrapper contract, not a registrant, so it is
 -- left out. The NameWrapped owner and later wrapper transfers are served as they occur on chain.

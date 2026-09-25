@@ -1,3 +1,4 @@
+/* project:builders.resolver.build */
 
         WITH {discovery},
         resolver_event_candidates AS (

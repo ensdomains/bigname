@@ -70,7 +70,7 @@ pub(crate) async fn initialize(
         resolver::include_resource_pointers(transaction, chain_id, target.number).await?;
         // Redo expands every retained or changed resolver key; live-follow uses the split below.
         sqlx::query(
-            "INSERT INTO project_scope_resolver_dependents
+            "/* project:scope.initialize */ INSERT INTO project_scope_resolver_dependents
              SELECT resolver_address FROM project_scope_resolvers
              ON CONFLICT DO NOTHING",
         )
@@ -104,27 +104,27 @@ pub(crate) async fn initialize(
 
 async fn create_scope_tables(transaction: &mut Transaction<'_, Postgres>) -> Result<()> {
     for statement in [
-        "CREATE TEMP TABLE project_binding_frontier_names (logical_name_id text PRIMARY KEY) ON COMMIT DROP",
-        "CREATE TEMP TABLE project_binding_frontier_resources (resource_id uuid PRIMARY KEY) ON COMMIT DROP",
-        "CREATE TEMP TABLE project_binding_seen_names (operator text, logical_name_id text, PRIMARY KEY(operator, logical_name_id)) ON COMMIT DROP",
-        "CREATE TEMP TABLE project_binding_seen_resources (operator text, resource_id uuid, PRIMARY KEY(operator, resource_id)) ON COMMIT DROP",
-        "CREATE TEMP TABLE project_scope_names (logical_name_id text PRIMARY KEY) ON COMMIT DROP",
-        "CREATE TEMP TABLE project_scope_expiry_names (logical_name_id text PRIMARY KEY) ON COMMIT DROP",
-        "CREATE TEMP TABLE project_scope_children (logical_name_id text PRIMARY KEY) ON COMMIT DROP",
+        "/* project:scope.create_scope_tables.create_binding_frontier_names */ CREATE TEMP TABLE project_binding_frontier_names (logical_name_id text PRIMARY KEY) ON COMMIT DROP",
+        "/* project:scope.create_scope_tables.create_binding_frontier_resources */ CREATE TEMP TABLE project_binding_frontier_resources (resource_id uuid PRIMARY KEY) ON COMMIT DROP",
+        "/* project:scope.create_scope_tables.create_binding_seen_names */ CREATE TEMP TABLE project_binding_seen_names (operator text, logical_name_id text, PRIMARY KEY(operator, logical_name_id)) ON COMMIT DROP",
+        "/* project:scope.create_scope_tables.create_binding_seen_resources */ CREATE TEMP TABLE project_binding_seen_resources (operator text, resource_id uuid, PRIMARY KEY(operator, resource_id)) ON COMMIT DROP",
+        "/* project:scope.create_scope_tables.create_scope_names */ CREATE TEMP TABLE project_scope_names (logical_name_id text PRIMARY KEY) ON COMMIT DROP",
+        "/* project:scope.create_scope_tables.create_scope_expiry_names */ CREATE TEMP TABLE project_scope_expiry_names (logical_name_id text PRIMARY KEY) ON COMMIT DROP",
+        "/* project:scope.create_scope_tables.create_scope_children */ CREATE TEMP TABLE project_scope_children (logical_name_id text PRIMARY KEY) ON COMMIT DROP",
         // Ancestors reached only through a changed child's edge: their own events and surfaces
         // stage as parent evidence, but their child families are not rebuilt.
-        "CREATE TEMP TABLE project_scope_ancestors (logical_name_id text PRIMARY KEY) ON COMMIT DROP",
-        "CREATE TEMP TABLE project_scope_resources (resource_id uuid PRIMARY KEY) ON COMMIT DROP",
-        "CREATE TEMP TABLE project_scope_account_permissions (chain_id text, authority_kind text, authority_contract text, owner text, subject text, relation_kind text, PRIMARY KEY (chain_id, authority_kind, authority_contract, owner, subject, relation_kind)) ON COMMIT DROP",
-        "CREATE TEMP TABLE project_scope_permission_effect_resources (resource_id uuid PRIMARY KEY) ON COMMIT DROP",
-        "CREATE TEMP TABLE project_scope_resolvers (resolver_address text PRIMARY KEY) ON COMMIT DROP",
-        "CREATE TEMP TABLE project_scope_resolver_permission_history (resolver_address text PRIMARY KEY) ON COMMIT DROP",
-        "CREATE TEMP TABLE project_scope_resolver_candidate_resources (resource_id uuid PRIMARY KEY) ON COMMIT DROP",
-        "CREATE TEMP TABLE project_scope_resolver_candidate_events (normalized_event_id bigint PRIMARY KEY, resource_id uuid) ON COMMIT DROP",
-        "CREATE TEMP TABLE project_scope_retracted_resolver_evidence (resolver_address text, source_family text, event_kind text, PRIMARY KEY (resolver_address, source_family, event_kind)) ON COMMIT DROP",
-        "CREATE TEMP TABLE project_scope_resolver_dependents (resolver_address text PRIMARY KEY) ON COMMIT DROP",
-        "CREATE TEMP TABLE project_scope_resolver_passthrough (resolver_address text PRIMARY KEY) ON COMMIT DROP",
-        "CREATE TEMP TABLE project_scope_primary (address text, coin_type text, namespace text, PRIMARY KEY (address, coin_type, namespace)) ON COMMIT DROP",
+        "/* project:scope.create_scope_tables.create_scope_ancestors */ CREATE TEMP TABLE project_scope_ancestors (logical_name_id text PRIMARY KEY) ON COMMIT DROP",
+        "/* project:scope.create_scope_tables.create_scope_resources */ CREATE TEMP TABLE project_scope_resources (resource_id uuid PRIMARY KEY) ON COMMIT DROP",
+        "/* project:scope.create_scope_tables.create_scope_account_permissions */ CREATE TEMP TABLE project_scope_account_permissions (chain_id text, authority_kind text, authority_contract text, owner text, subject text, relation_kind text, PRIMARY KEY (chain_id, authority_kind, authority_contract, owner, subject, relation_kind)) ON COMMIT DROP",
+        "/* project:scope.create_scope_tables.create_scope_permission_effect_resources */ CREATE TEMP TABLE project_scope_permission_effect_resources (resource_id uuid PRIMARY KEY) ON COMMIT DROP",
+        "/* project:scope.create_scope_tables.create_scope_resolvers */ CREATE TEMP TABLE project_scope_resolvers (resolver_address text PRIMARY KEY) ON COMMIT DROP",
+        "/* project:scope.create_scope_tables.create_scope_resolver_permission_history */ CREATE TEMP TABLE project_scope_resolver_permission_history (resolver_address text PRIMARY KEY) ON COMMIT DROP",
+        "/* project:scope.create_scope_tables.create_scope_resolver_candidate_resources */ CREATE TEMP TABLE project_scope_resolver_candidate_resources (resource_id uuid PRIMARY KEY) ON COMMIT DROP",
+        "/* project:scope.create_scope_tables.create_scope_resolver_candidate_events */ CREATE TEMP TABLE project_scope_resolver_candidate_events (normalized_event_id bigint PRIMARY KEY, resource_id uuid) ON COMMIT DROP",
+        "/* project:scope.create_scope_tables.create_scope_retracted_resolver_evidence */ CREATE TEMP TABLE project_scope_retracted_resolver_evidence (resolver_address text, source_family text, event_kind text, PRIMARY KEY (resolver_address, source_family, event_kind)) ON COMMIT DROP",
+        "/* project:scope.create_scope_tables.create_scope_resolver_dependents */ CREATE TEMP TABLE project_scope_resolver_dependents (resolver_address text PRIMARY KEY) ON COMMIT DROP",
+        "/* project:scope.create_scope_tables.create_scope_resolver_passthrough */ CREATE TEMP TABLE project_scope_resolver_passthrough (resolver_address text PRIMARY KEY) ON COMMIT DROP",
+        "/* project:scope.create_scope_tables.create_scope_primary */ CREATE TEMP TABLE project_scope_primary (address text, coin_type text, namespace text, PRIMARY KEY (address, coin_type, namespace)) ON COMMIT DROP",
     ] {
         sqlx::query(statement)
             .execute(&mut **transaction)
@@ -141,7 +141,7 @@ async fn stage_changed_events(
     to_block: i64,
 ) -> Result<()> {
     sqlx::query(
-        "CREATE TEMP TABLE project_changed_events ON COMMIT DROP AS
+        "/* project:scope.stage_changed_events */ CREATE TEMP TABLE project_changed_events ON COMMIT DROP AS
          SELECT event.*
          FROM normalized_events event
          JOIN chain_lineage lineage
@@ -170,7 +170,7 @@ async fn seed_direct_scope(
     to_block: i64,
 ) -> Result<()> {
     sqlx::query(
-        "INSERT INTO project_scope_names
+        "/* project:scope.seed_direct_scope.insert_scope_names_from_changed_events */ INSERT INTO project_scope_names
          SELECT logical_name_id FROM project_changed_events
          WHERE logical_name_id IS NOT NULL
          ON CONFLICT DO NOTHING",
@@ -180,11 +180,11 @@ async fn seed_direct_scope(
     .map_err(|error| ProjectError::database("failed to derive direct name scope", error))?;
 
     for statement in [
-        "INSERT INTO project_scope_names
+        "/* project:scope.seed_direct_scope.insert_scope_names_from_name_surfaces */ INSERT INTO project_scope_names
          SELECT logical_name_id FROM name_surfaces
          WHERE chain_id = $1 AND block_number BETWEEN $2 AND $3
          ON CONFLICT DO NOTHING",
-        "INSERT INTO project_scope_names
+        "/* project:scope.seed_direct_scope.insert_scope_names_from_surface_bindings */ INSERT INTO project_scope_names
          SELECT logical_name_id FROM surface_bindings
          WHERE chain_id = $1 AND block_number BETWEEN $2 AND $3
          ON CONFLICT DO NOTHING",
@@ -226,7 +226,7 @@ async fn seed_direct_scope(
         ),
     ] {
         let statement = format!(
-            "INSERT INTO {table}
+            "/* project:scope.seed_direct_scope.insert_{table} */ INSERT INTO {table}
              SELECT event.namespace || ':' || lower(candidate.node)
              FROM project_changed_events event
              CROSS JOIN LATERAL (
@@ -259,7 +259,7 @@ async fn seed_direct_scope(
     }
 
     sqlx::query(
-        "INSERT INTO project_scope_resources
+        "/* project:scope.seed_direct_scope.insert_scope_resources_from_changed_events */ INSERT INTO project_scope_resources
          SELECT resource_id FROM project_changed_events
          WHERE resource_id IS NOT NULL
          ON CONFLICT DO NOTHING",
@@ -269,7 +269,7 @@ async fn seed_direct_scope(
     .map_err(|error| ProjectError::database("failed to derive direct resource scope", error))?;
 
     sqlx::query(
-        "INSERT INTO project_scope_account_permissions
+        "/* project:scope.seed_direct_scope.insert_scope_account_permissions */ INSERT INTO project_scope_account_permissions
          SELECT chain_id,
                 after_state #>> '{scope,authority_kind}',
                 lower(after_state #>> '{scope,authority_contract}'),
@@ -285,7 +285,7 @@ async fn seed_direct_scope(
     .map_err(|error| ProjectError::database("failed to derive account permission scope", error))?;
 
     sqlx::query(
-        "INSERT INTO project_scope_permission_effect_resources
+        "/* project:scope.seed_direct_scope.insert_scope_permission_effect_resources */ INSERT INTO project_scope_permission_effect_resources
          SELECT resource_id FROM project_changed_events
          WHERE resource_id IS NOT NULL
            AND event_kind IN (
@@ -300,11 +300,11 @@ async fn seed_direct_scope(
     })?;
 
     for statement in [
-        "INSERT INTO project_scope_resources
+        "/* project:scope.seed_direct_scope.insert_scope_resources_from_resources */ INSERT INTO project_scope_resources
          SELECT resource_id FROM resources
          WHERE chain_id = $1 AND block_number BETWEEN $2 AND $3
          ON CONFLICT DO NOTHING",
-        "INSERT INTO project_scope_resources
+        "/* project:scope.seed_direct_scope.insert_scope_resources_from_surface_bindings */ INSERT INTO project_scope_resources
          SELECT resource_id FROM surface_bindings
          WHERE chain_id = $1 AND block_number BETWEEN $2 AND $3
          ON CONFLICT DO NOTHING",
@@ -321,7 +321,7 @@ async fn seed_direct_scope(
     }
 
     let direct_resolver_scope = format!(
-        "INSERT INTO project_scope_resolvers
+        "/* project:scope.seed_direct_scope.insert_scope_resolvers */ INSERT INTO project_scope_resolvers
          SELECT lower(address)
          FROM (
              SELECT after_state ->> 'resolver' AS address FROM project_changed_events
@@ -383,7 +383,7 @@ async fn include_alias_and_wildcard_scope(
     target: &Marker,
 ) -> Result<()> {
     sqlx::query(
-        "INSERT INTO project_scope_names
+        "/* project:scope.include_alias_and_wildcard_scope */ INSERT INTO project_scope_names
          SELECT event.after_state ->> 'to_logical_name_id'
          FROM project_changed_events event
          JOIN project_scope_names scope USING (logical_name_id)

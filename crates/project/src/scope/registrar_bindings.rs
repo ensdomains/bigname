@@ -33,7 +33,7 @@ pub(super) async fn include_unnamed_lease_resources_for_scoped_names(
     target_block: i64,
 ) -> Result<()> {
     let statement = format!(
-        "INSERT INTO project_scope_resources
+        "/* project:scope.registrar_bindings */ INSERT INTO project_scope_resources
          SELECT DISTINCT binding.resource_id
          FROM project_scope_names scope
          JOIN surface_bindings binding USING (logical_name_id)

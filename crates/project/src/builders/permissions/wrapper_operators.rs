@@ -17,7 +17,7 @@ pub(super) async fn build(
     full_rebuild: bool,
 ) -> Result<()> {
     sqlx::query(
-        r#"
+        r#"/* project:builders.permissions.wrapper_operators.create_wrapper_operator_rows */
         CREATE TEMP TABLE project_wrapper_operator_rows ON COMMIT DROP AS
         WITH account_state AS (
             SELECT staged.authority_contract, staged.owner, staged.subject, staged.approved,
@@ -95,7 +95,7 @@ pub(super) async fn build(
 
     // An operator who is also the token delegate keeps the operator set, which is a superset.
     sqlx::query(
-        r#"
+        r#"/* project:builders.permissions.wrapper_operators.update_stage_permissions_current */
         UPDATE project_stage_permissions_current existing
         SET effective_powers = operator.effective_powers,
             grant_source = operator.grant_source,
@@ -114,7 +114,7 @@ pub(super) async fn build(
     .map_err(|error| ProjectError::database("failed to merge wrapper operator rows", error))?;
 
     sqlx::query(
-        r#"
+        r#"/* project:builders.permissions.wrapper_operators.insert_stage_permissions_current */
         INSERT INTO project_stage_permissions_current (
             resource_id, subject, scope, scope_kind, scope_detail,
             effective_powers, grant_source, revocation_source,

@@ -1,3 +1,4 @@
+/* project:builders.name_authority.authority_events */
 -- Events that belong to each name's selected authority. The join is a plain equality on the
 -- name: `.eth` BaseRegistrar lifecycle rows written before the label was known are given their
 -- name while staging (`bind_resource_events`), so this statement never has to search the rows

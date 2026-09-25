@@ -13,8 +13,10 @@ use tokio_util::sync::CancellationToken;
 use crate::progress_monitor::RunnerPhaseProgress;
 
 mod project_steps;
+mod project_writes;
 mod served_lag;
-use project_steps::{ProjectStepFeed, ProjectStepGauges};
+use project_steps::{ProjectStepGauges, project_step_loop};
+use project_writes::ProjectWriteGauges;
 pub use served_lag::RunnerMetricsFeed;
 use served_lag::ServedLagGauges;
 
@@ -86,6 +88,7 @@ struct PipelineMetrics {
     batches_since_cursor_advance: IntGaugeVec,
     cursor_stall_age_seconds: IntGaugeVec,
     served_lag: ServedLagGauges,
+    project_writes: ProjectWriteGauges,
     project_steps: ProjectStepGauges,
     refresh_success: IntGauge,
     last_refresh_timestamp_seconds: IntGauge,
@@ -222,6 +225,7 @@ impl PipelineMetrics {
             &["chain", "phase", "mode"],
         )?;
         let served_lag = ServedLagGauges::new(&registry)?;
+        let project_writes = ProjectWriteGauges::new(&registry)?;
         let project_steps = ProjectStepGauges::new(&registry)?;
         let refresh_success = registry.int_gauge(
             "phase_runner_metrics_refresh_success",
@@ -249,6 +253,7 @@ impl PipelineMetrics {
             batches_since_cursor_advance,
             cursor_stall_age_seconds,
             served_lag,
+            project_writes,
             project_steps,
             refresh_success,
             last_refresh_timestamp_seconds,
@@ -468,21 +473,6 @@ pub async fn start(
     Ok(local_addr)
 }
 
-/// Applies Project step changes on their own, so a step change or the final idle
-/// never waits behind a pending served-lag database refresh.
-async fn project_step_loop(
-    gauges: ProjectStepGauges,
-    steps: ProjectStepFeed,
-    cancellation: CancellationToken,
-) {
-    loop {
-        tokio::select! {
-            () = cancellation.cancelled() => return,
-            () = steps.changed() => gauges.apply(&steps.snapshot()),
-        }
-    }
-}
-
 async fn refresh_loop(
     metrics: PipelineMetrics,
     pool: PgPool,
@@ -500,6 +490,7 @@ async fn refresh_loop(
             _ = ticks.tick() => metrics.refresh(&pool).await,
             () = feed.committed() => metrics.refresh_after_commit(&pool).await,
         };
+        metrics.project_writes.apply(feed.take_project_writes());
         if let Err(error) = result {
             tracing::error!(error = %format!("{error:#}"), "phase metrics refresh failed");
         }
