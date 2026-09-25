@@ -1663,7 +1663,10 @@ Interpret row's content hash and redo attempt, the [family input
 revision](glossary.md#family-input-revision), and stops the run, counted as a
 skip, when that revision differs from the one the run applies under or
 Interpret is in redo; the next run adopts the new revision or waits. The block
-records that revision and the whole input token on the marker. It writes the
+records that revision and the whole input token on the marker. The run reads
+the chain's manifest updates once, before its first block; each block takes its
+active manifest set from that read and records the set's key, so an update
+written during a run applies from the next run. The block writes the
 before-image of every row it changes and the prior marker to the [family undo
 journal](glossary.md#family-undo-journal) (`project_family_undo`) and advances
 the marker. A block's events are taken once per `event_identity`, which
@@ -1684,7 +1687,9 @@ the redo range and replays them to the served marker. A marker left on a block
 that is no longer readable is undone the same way. A redo below the kept
 journal, a redo attempt the families never saw, or a served rebuild clears the
 families and rebuilds them from the blocks that carry events or start or stop
-a resolver activation. The repair record describes the latest of these: its
+a resolver activation. So do families whose marker records a content hash
+other than the running binary's, which covers a served rebuild whose family run
+was skipped. The repair record describes the latest of these: its
 attempt, reason, trusted base, replay target, state (`undoing`, `replaying`,
 `rebuilding` or `complete`) and, once done, the marker, generation and input
 content hash it completed with. Each transition commits with the work it
@@ -1693,7 +1698,8 @@ move to replaying, and the final replayed or rebuilt block with the
 completion. A run that stops between blocks is resumed by the next. A redo
 retried after it completed is recognised only while the marker, its
 generation and the content hash still match. A rebuild refreshes the planner
-statistics of the family tables as they grow.
+statistics of the family tables after 1, 2, 4, 8, ... blocks rebuilt since its
+reset, counted across runs from the generation the reset recorded.
 
 Tests compare every family table and the marker, less its generation, as
 ordered JSON text before a block and after its undo, and compare the
