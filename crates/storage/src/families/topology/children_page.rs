@@ -1,9 +1,10 @@
 //! The subnames page over the family child relation, with today's page semantics
-//! (children/page.rs): the optional prefix, the expiry fence with its null treatment, the name and
+//! (crates/storage/src/children/page.rs): the optional prefix, the expiry fence with its null treatment, the name and
 //! timestamp sorts, and the keyset cursor. The total is an exact count over the same filtered
-//! relation, taken in the same statement as the page (design section 2.2); there is no maintained
-//! child count. The expiry fence reads the block clock of the family marker unless the caller
-//! fixes `evaluated_at`, never the database's transaction time.
+//! relation, taken in the same statement as the page; there is no maintained child count,
+//! because eligibility depends on the parent's current state. The expiry fence reads the family
+//! marker's block timestamp unless the caller fixes `evaluated_at`, never the database's
+//! transaction time.
 use anyhow::{Context, Result, bail};
 use sqlx::{PgPool, Postgres, QueryBuilder, Row, postgres::PgRow, types::time::OffsetDateTime};
 
@@ -19,7 +20,7 @@ use super::children::{CHILD_DISPLAY_NAME, CHILD_SURFACE_FILTER, push_selected};
 
 /// One served child, the wire fields of the subnames route (docs/api-v1-routes.md, subnames).
 /// The per-row provenance, chain positions and target blocks `children_current` stamps are not
-/// family facts (design section 2, read model) and are not reproduced.
+/// family facts and are not reproduced.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FamilyChildRow {
     pub parent_logical_name_id: String,
@@ -267,7 +268,8 @@ fn push_order(
     });
 }
 
-/// Rows without a timestamp sort last ascending and first descending, as children/page.rs does.
+/// Rows without a timestamp sort last ascending and first descending, as
+/// crates/storage/src/children/page.rs does.
 fn null_rank_expr(order: ChildrenCurrentOrder, prefix: &str) -> String {
     match order {
         ChildrenCurrentOrder::Asc => {

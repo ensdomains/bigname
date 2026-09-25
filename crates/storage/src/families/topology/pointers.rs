@@ -1,6 +1,7 @@
-//! Minimal F5 and F7 pointer reads with the names and signatures the step 4 brief gives
-//! (sections 2.4 and 2.7). Step 4 builds the full readers in parallel; the reviewer keeps one copy
-//! of each at merge and this file then goes.
+//! Minimal reads of the resource resolver pointer (`project_resource_pointer`) and the resolver
+//! links (`project_resolver_link`). The full pointer and record readers are being written in
+//! parallel under the same names and signatures; when both land, one copy of each is kept and
+//! this file goes.
 use anyhow::{Context, Result};
 use serde_json::Value;
 use sqlx::PgPool;
@@ -9,9 +10,10 @@ use uuid::Uuid;
 const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
 const ROOT_NODE: &str = "0x0000000000000000000000000000000000000000000000000000000000000000";
 
-/// F5's current-pointer group after the zero rejection: the resource's latest named
-/// ResolverChanged, clears included, and nothing when that latest pointer is null or zero
-/// (name_topology.rs, the alias resolver lateral; linked_records.rs, the pointer drop).
+/// The resource's current pointer after the zero rejection: its latest named ResolverChanged,
+/// clears included, and nothing when that latest pointer is null or zero
+/// (crates/project/src/builders/name_topology.rs, the alias resolver lateral;
+/// crates/project/src/builders/linked_records.rs, the pointer drop).
 #[derive(Clone, Debug, PartialEq)]
 pub struct FamilyAliasSourcePointer {
     pub chain_id: String,
@@ -63,7 +65,7 @@ pub async fn load_family_alias_source_pointer(
     ))
 }
 
-/// F5's historical non-zero pointer and its version boundary, the wildcard source.
+/// The resource's latest non-zero pointer and its version boundary, the wildcard source.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FamilyWildcardSource {
     /// The latest pointer whose resolver is not the zero address; null when that pointer named
@@ -113,7 +115,8 @@ pub async fn load_family_wildcard_source(
     ))
 }
 
-/// One F7 link row: the latest `Linked` for a node at a resolver, record id `0` a clear.
+/// One `project_resolver_link` row: the latest `Linked` for a node at a resolver, record id `0`
+/// a clear.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FamilyLink {
     pub node: String,
@@ -127,7 +130,7 @@ pub struct FamilyLink {
 }
 
 /// The exact-then-default link selection for one name at a record-ID resolver
-/// (linked_records.rs, `project_selected_records`).
+/// (crates/project/src/builders/linked_records.rs, `project_selected_records`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct LinkSelection {
     /// The link at the name's own node, a clear included.

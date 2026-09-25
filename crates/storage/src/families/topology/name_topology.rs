@@ -1,8 +1,10 @@
-//! The alias and wildcard arms of a name's `declared_summary.topology`, read from F10 and F5
-//! (name_topology.rs `project_alias_topology` and `project_wildcard_topology`). The direct,
-//! ownerless and Basenames transport arms are steps 3 and 4.
+//! The alias and wildcard arms of a name's `declared_summary.topology`, read from the aliases
+//! (`project_name_alias`) and the resource resolver pointers (`project_resource_pointer`), as
+//! crates/project/src/builders/name_topology.rs builds them in `project_alias_topology` and
+//! `project_wildcard_topology`. The direct, ownerless and Basenames transport arms are not read
+//! here.
 //!
-//! The alias arm joins the name's current F5 pointer (latest, then reject zero), never the
+//! The alias arm joins the name's current pointer (latest, then reject zero), never the
 //! historical non-zero pointer, so a pointer clear with no alias event leaves no alias topology
 //! and exposes no older pointer. The wildcard arm takes the longest ancestor by suffix with a
 //! binding, its historical non-zero pointer and its independent version boundary.

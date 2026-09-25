@@ -1,6 +1,7 @@
-//! The resolver overview's shadow reads: the F3 classification row (the overview is
-//! `resolver_current` minus its sampled sections, design F3) and `bound_names` over the F5
-//! resolver index joined to name eligibility.
+//! The resolver overview's shadow reads: the classification row
+//! (`project_resolver_classification`, which holds what the overview serves from
+//! `resolver_current` without the sampled sections) and `bound_names` over the resolver index of
+//! `project_resource_pointer` joined to name eligibility.
 use std::collections::BTreeMap;
 
 use anyhow::{Context, Result, bail};
@@ -18,9 +19,9 @@ use super::shims::json_position;
 /// Where a shadow classification came from.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ClassificationSource {
-    /// The F3 row.
+    /// The `project_resolver_classification` row.
     Family,
-    /// Step 2 leaves F3 unfilled: the latest active declaration manifest that names the address
+    /// That table is not filled yet: the latest active declaration manifest that names the address
     /// as a contract, read the way the resolver builder reads `manifest_payload.contracts`.
     /// Declaration precedence, discovery admission and upgrade evidence are not reproduced.
     DeclarationManifest,
@@ -50,7 +51,8 @@ impl FamilyResolverClassification {
     }
 }
 
-/// The overview's classification: the F3 row, else the declaration manifest.
+/// The overview's classification: the `project_resolver_classification` row, else the
+/// declaration manifest.
 pub async fn load_resolver_shadow(
     pool: &PgPool,
     chain_id: &str,
@@ -74,7 +76,7 @@ pub async fn load_resolver_shadow(
     .bind(&address)
     .fetch_optional(pool)
     .await
-    .with_context(|| format!("failed to load the F3 row of {chain_id}:{address}"))?;
+    .with_context(|| format!("failed to load the classification row of {chain_id}:{address}"))?;
     if let Some((classification, support_status, unsupported_reason, manifest_id, namespace)) = row
     {
         return Ok(Some(FamilyResolverClassification {
@@ -135,10 +137,11 @@ pub async fn load_resolver_shadow(
     ))
 }
 
-/// The names bound to a resolver: resources whose current F5 pointer names it, through
-/// `project_resource_pointer_resolver_idx`, joined to name eligibility. Until steps 3 and 4 give
-/// the eligibility and serving reads, eligibility is `name_current`'s predicate block of
-/// `load_phase_resolver_bound_name_rows`; only the resolver match moves to F5. A name's pointer is
+/// The names bound to a resolver: resources whose current pointer names it, through
+/// `project_resource_pointer_resolver_idx`, joined to name eligibility. Until name eligibility
+/// and the serving selection are read from the family tables, eligibility is `name_current`'s
+/// predicate block of `load_phase_resolver_bound_name_rows`; only the resolver match moves to
+/// `project_resource_pointer`. A name's pointer is
 /// its latest across the resources it named, so a name that moved its pointer to another resource
 /// is listed under its current resolver only. Same keyset and order as the served reader.
 pub async fn load_bound_names_shadow(

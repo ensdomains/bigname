@@ -1,9 +1,12 @@
-//! The declared direct children of one parent, read from the child edge families: F11 edge
-//! candidates and the parent subregistry, F2a per-registry child rows, F2c zero owners, F2b child
-//! fuses and F1 migration state, with the identity tables and label preimages. It reproduces the
-//! relation children.rs builds into `children_current` (candidates, then the arm selection of
-//! `publish`) and the read filter of children/page.rs, evaluated at read against the family
-//! marker's block: no stored eligibility, no maintained count.
+//! The declared direct children of one parent, read from the family tables: the edge candidates
+//! (`project_child_edge_candidate`) and parent subregistry (`project_parent_subregistry`), the
+//! per-registry child registrations (`project_child_registration_state`), registry owners
+//! (`project_registry_node_state`), child wrapper fuses (`project_wrapper_state`) and the parent's
+//! migration state (`project_name_state`), with the identity tables and label preimages. It
+//! reproduces the relation crates/project/src/builders/children.rs builds into
+//! `children_current` (its candidates, then the arm selection of `publish`) and the read filter
+//! of crates/storage/src/children/page.rs, evaluated at read against the family marker's block:
+//! no stored eligibility and no maintained count.
 use sqlx::{Postgres, QueryBuilder};
 
 use super::shims::{
@@ -54,7 +57,7 @@ pub(super) fn push_selected<'a>(
     builder.push(format!(
         "
         ), clock AS (
-            -- The block clock: the family marker of the parent's chain (D6), never NOW().
+            -- The clock: the family marker's block of the parent's chain, never NOW().
             SELECT marker.chain_id, marker.current_block_number AS block_number,
                    marker.block_timestamp,
                    extract(epoch FROM marker.block_timestamp) AS epoch_seconds
@@ -66,8 +69,9 @@ pub(super) fn push_selected<'a>(
             FROM parent_surface surface CROSS JOIN clock
             WHERE surface.visibility_state = 'active' AND {parent_readable}
         ), parent_migration AS (
-            -- Today's ENSv1 gate (children.rs:329-344). Step 6 removes invented authority gates
-            -- and changes this block and the builder together.
+            -- Today's ENSv1 migration gate (crates/project/src/builders/children.rs, the
+            -- migration path test in `v1_rows`). Removing that gate from the builder must
+            -- remove this block in the same change.
             SELECT state.migration_path, registry.registry_contract_instance_id::text
                        AS migration_registry_contract_instance_id
             FROM parent CROSS JOIN clock
@@ -134,8 +138,10 @@ pub(super) fn push_selected<'a>(
             JOIN bigname_phase.project_child_edge_candidate edge
               ON edge.chain_id = parent.chain_id AND edge.namespace = parent.namespace
              AND edge.parent_node = parent.node
-            -- F2c keeps the latest owner; only a zero current owner overrides the edge (D9).
-            -- Today's override is keyed by logical name (name_authority/stage.rs:207-241), so a
+            -- project_registry_node_state keeps the latest owner; only a zero current owner
+            -- overrides the edge's owner, as project_latest_registry_owner keeps zero owners only.
+            -- Today's override is keyed by logical name
+            -- (crates/project/src/builders/name_authority/stage.rs:207-241), so a
             -- Transfer of a node with no name surface never reaches the child row: the override
             -- applies only when the child has a surface.
             LEFT JOIN bigname_phase.project_registry_node_state ownership
@@ -275,7 +281,8 @@ fn label_decoded_name(under_root: &str) -> String {
 }
 
 /// The served child name: decoded, else the escaped raw bytes, else the labelhash placeholder
-/// under the parent's spelling (children/reads.rs, `CHILD_DISPLAY_NAME_EXPR`).
+/// under the parent's spelling (crates/storage/src/children/reads.rs,
+/// `CHILD_DISPLAY_NAME_EXPR`).
 pub(super) const CHILD_DISPLAY_NAME: &str = "COALESCE(
     selected.decoded_name,
     encode(selected.raw_name, 'escape'),
@@ -283,7 +290,7 @@ pub(super) const CHILD_DISPLAY_NAME: &str = "COALESCE(
 )";
 
 /// The page read filter on the child surface: a child with no surface passes, a surfaced child
-/// must be readable (children.rs `DEFAULT_CHILDREN_CURRENT_READ_FILTER`).
+/// must be readable (crates/storage/src/children.rs, `DEFAULT_CHILDREN_CURRENT_READ_FILTER`).
 pub(super) const CHILD_SURFACE_FILTER: &str = "
     AND (child_surface.logical_name_id IS NULL
          OR (child_surface.canonicality_state::text IN ('canonical', 'safe', 'finalized')

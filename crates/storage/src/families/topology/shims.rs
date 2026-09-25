@@ -1,15 +1,20 @@
-//! The reads step 5 borrows from steps 3 and 4 before they land, one small function each, so the
-//! reader that replaces a shim replaces exactly one function. Every shim names its interim source.
+//! Reads these readers need that are not yet computed from the family tables, one small
+//! function each, so the family read that replaces one replaces exactly one function. Every
+//! function names the interim source it reads today.
 //!
 //! - [`selected_binding`]: the name's selected binding. Interim: `name_current.surface_binding_id`
-//!   joined to its F1 candidate row; step 3 computes the F1 selection at read.
+//!   joined to its `project_binding_candidate` row, until the selection among a name's binding
+//!   candidates is computed at read.
 //! - [`selected_authority_arm`]: the child's selected authority arm. Interim:
-//!   `name_current.provenance.authority_selection.authority_arm`; step 3 computes it from F1.
+//!   `name_current.provenance.authority_selection.authority_arm`, until it is computed from the
+//!   binding candidates.
 //! - [`serving_row_exists`]: whether the child has a serving row. Interim:
-//!   `name_current.provenance.read_reachability.serving_resource_id`; steps 3 and 4 compute the
-//!   serving selection over F5, F2a, F2c and F1.
-//! - [`effective_child_fuses`]: the child's wrapper fuses masked at the block clock, the mask of
-//!   children.rs `effective_wrapper_state` over F2b; step 3 owns the wrapper masks.
+//!   `name_current.provenance.read_reachability.serving_resource_id`, until the serving
+//!   selection is computed from the resource pointers, registrations, registry owners and
+//!   binding candidates.
+//! - [`effective_child_fuses`]: the child's wrapper fuses masked at the family marker's block
+//!   time over `project_wrapper_state`, the mask `effective_wrapper_state` applies in
+//!   crates/project/src/builders/children.rs, until a shared wrapper mask read exists.
 use anyhow::{Context, Result};
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -34,7 +39,7 @@ pub(super) fn json_position(expression: &str) -> String {
     )
 }
 
-/// A name's selected binding: its F1 candidate row.
+/// A name's selected binding: its `project_binding_candidate` row.
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct SelectedBinding {
     pub(super) chain_id: String,
@@ -43,7 +48,7 @@ pub(super) struct SelectedBinding {
     pub(super) block_number: i64,
 }
 
-/// Interim: the binding `name_current` selected, read from its F1 candidate row.
+/// Interim: the binding `name_current` selected, read from its `project_binding_candidate` row.
 pub(super) async fn selected_binding(
     pool: &PgPool,
     logical_name_id: &str,
@@ -79,8 +84,9 @@ pub(super) fn selected_authority_arm(child: &str) -> String {
     )
 }
 
-/// Interim: whether the child named by `child` has a serving row (children.rs, the
-/// `project_name_serving` eligibility of an ownerless child).
+/// Interim: whether the child named by `child` has a serving row
+/// (crates/project/src/builders/children.rs, the `project_name_serving` eligibility of an
+/// ownerless child).
 pub(super) fn serving_row_exists(child: &str) -> String {
     format!(
         "EXISTS (SELECT 1 FROM bigname_phase.name_current serving_nc
@@ -93,7 +99,8 @@ pub(super) fn serving_row_exists(child: &str) -> String {
 /// The child's effective NameWrapper fuses at the block clock `epoch` (seconds): the wrapper
 /// row whose latest PermissionScopeChanged is the name's latest, its fuses when the wrapper state
 /// is known and its expiry is not behind the clock, else 0; null when the name has no wrapper
-/// row. The 32-bit fuse bound and the expiry mask are children.rs's.
+/// row. The 32-bit fuse bound and the expiry mask are those of
+/// crates/project/src/builders/children.rs.
 pub(super) fn effective_child_fuses(chain: &str, child: &str, epoch: &str) -> String {
     let position = json_position("wrapper.wrapper_state_position");
     format!(

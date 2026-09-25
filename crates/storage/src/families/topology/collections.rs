@@ -1,8 +1,10 @@
-//! The resolver `/aliases`, `/links` and `/roles` collections over F10, F7 and F8. Each page is
+//! The resolver `/aliases`, `/links` and `/roles` collections over the aliases
+//! (`project_resolver_alias`, and the alias-path bindings through `project_resource_pointer`),
+//! the resolver links (`project_resolver_link`) and the grants (`project_grant`). Each page is
 //! keyed `(key1, key2)` as the served collections are, and its total is an exact count over the
-//! same relation in the same statement (collections/reads.rs). The readers take a keyset
-//! position and nothing else: no publication token, generation or height (D10); they read the
-//! families at the publication the family marker names.
+//! same relation in the same statement (apps/api/src/v2/resolvers/collections/reads.rs). The
+//! readers take a keyset position and nothing else, no publication token, generation or height;
+//! they read the families at the block the family marker names.
 use anyhow::{Context, Result};
 use serde_json::Value;
 use sqlx::{PgPool, Row};
@@ -16,8 +18,8 @@ pub struct FamilyCollectionPage {
     pub total_count: u64,
 }
 
-/// `/aliases`: the binding arm (names whose selected alias-path binding's current F5 pointer is
-/// this resolver) then the event arm (F10 per-resolver rows that are active).
+/// `/aliases`: the binding arm (names whose selected alias-path binding's current resource
+/// pointer is this resolver) then the event arm (active `project_resolver_alias` rows).
 pub async fn load_resolver_aliases_shadow(
     pool: &PgPool,
     chain_id: &str,
@@ -127,10 +129,10 @@ pub async fn load_resolver_links_shadow(
     .await
 }
 
-/// `/roles`: resolver-scoped F8 grants whose effective powers are non-empty. Step 3 applies the
-/// wrapper, grace and expiry-retirement masks at read; until then the powers are the stored,
+/// `/roles`: resolver-scoped `project_grant` rows whose effective powers are non-empty. The
+/// wrapper, grace and expiry-retirement masks are not applied yet, so the powers are the stored,
 /// unmasked ones, which resolver-scoped ENSv2 grants carry unmasked today. `event_ids` holds the
-/// grant's last event only: the per-key evidence arrays are dropped from the row (design F8).
+/// grant's last event only, because the family row keeps no evidence arrays.
 pub async fn load_resolver_roles_shadow(
     pool: &PgPool,
     chain_id: &str,
