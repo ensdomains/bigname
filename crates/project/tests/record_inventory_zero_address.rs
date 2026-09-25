@@ -523,6 +523,8 @@ async fn coin60_pairs_serve_the_address_changed_half_at_its_own_position() -> Re
             1,
         ),
     ];
+    // The cases with a pair run both mutations below; count them so neither can skip silently.
+    let mut mutated = 0;
     for (id, expected, pairs) in expectations {
         let fixture = case(id)?;
         let (database, pool) = database(&format!("{id}_pair")).await?;
@@ -575,6 +577,20 @@ async fn coin60_pairs_serve_the_address_changed_half_at_its_own_position() -> Re
         // Mutation: a wrong sibling event and both positions moved one log on, adjacency kept,
         // must each be named against the pairs the harness accepted.
         if pairs > 0 {
+            mutated += 1;
+            // A duplicated pair is its own difference.
+            let mut doubled = family.clone();
+            doubled
+                .compatibility_pairs
+                .extend(family.compatibility_pairs.clone());
+            let differences = check_compatibility_pairs(&doubled, &family.compatibility_pairs);
+            assert!(
+                differences.iter().any(|d| {
+                    d.field == "compatibility_pairs.duplicates"
+                        && d.family == Some(json!(["addr:60"]))
+                }),
+                "{id}: {differences:#?}"
+            );
             let mut moved = family.clone();
             for pair in &mut moved.compatibility_pairs {
                 pair.sibling_event_id = pair.sibling_event_id.map(|id| id + 1000);
@@ -621,9 +637,12 @@ async fn coin60_pairs_serve_the_address_changed_half_at_its_own_position() -> Re
                 fields.contains(&"compatibility_pairs[addr:60]"),
                 "{id}: {report:#?}"
             );
+            mutated += 1;
         }
         database.cleanup().await?;
     }
+    // Three cases serve a pair, and each ran both mutations.
+    assert_eq!(mutated, 6);
     Ok(())
 }
 
