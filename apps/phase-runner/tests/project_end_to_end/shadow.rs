@@ -89,6 +89,11 @@ pub struct Report {
     /// that fallback does not reproduce. The fallback is a partial comparison: the mirror only.
     pub f3_unfilled: usize,
     pub f3_unfilled_mirror_differs: usize,
+    /// Classification rows with no served row whose unsupported reason is
+    /// `resolver_manifest_not_active`: step 2's declared F3 approximation keeps these rows for
+    /// undeclared resolvers the served build never writes. Counted, not failed; an extra row with
+    /// any other reason is a mismatch.
+    pub f3_extra_not_active: BTreeSet<String>,
     /// Per resolver address, where its shadow classification came from: `family` (the
     /// classification row, compared in full), `declaration` (the partial fallback) or `none`.
     pub classification_sources: BTreeMap<String, &'static str>,
@@ -121,7 +126,8 @@ impl Report {
         format!(
             "SEPOLIA_END_TO_END_SHADOW target={} parents={} child_rows={} child_pages={} \
              topology_names={} resolvers={} bound_names={} aliases={} links={} roles={} \
-             f3_unfilled={} f3_unfilled_mirror_differs={} mismatches={} {timings}",
+             f3_unfilled={} f3_unfilled_mirror_differs={} f3_extra_not_active={} mismatches={} \
+             {timings}",
             self.target,
             self.parents,
             self.child_rows,
@@ -134,6 +140,7 @@ impl Report {
             self.roles,
             self.f3_unfilled,
             self.f3_unfilled_mirror_differs,
+            self.f3_extra_not_active.len(),
             self.mismatches.len(),
         )
     }
@@ -462,7 +469,10 @@ fn as_text(value: Option<&Value>) -> Option<String> {
 /// is compared in full with the served row: the classification object, support status and
 /// unsupported reason, the declaring manifest and its event, the admission namespace and the
 /// summary version. The declaration fallback is a partial comparison of the mirror only, because
-/// a declaration carries none of the rest.
+/// a declaration carries none of the rest. Step 2 declares two approximations in F3: extra
+/// `resolver_manifest_not_active` rows for resolvers with no served row, counted by address in
+/// `f3_extra_not_active`, and a pointer-family priority taken from the F4/F5 pointer rows, which
+/// would show as a classification mismatch and has not in the fixtures or the corpus.
 async fn classification(
     pool: &PgPool,
     chain: &str,
@@ -482,7 +492,12 @@ async fn classification(
         .classification_sources
         .insert(address.to_owned(), source);
     let Some(served) = served else {
-        if source == "family" {
+        let not_active = shadow.as_ref().is_some_and(|shadow| {
+            shadow.unsupported_reason.as_deref() == Some("resolver_manifest_not_active")
+        });
+        if source == "family" && not_active {
+            report.f3_extra_not_active.insert(address.to_owned());
+        } else if source == "family" {
             report.mismatch(
                 format!("resolver {address}"),
                 "a classification row with no served row".to_owned(),

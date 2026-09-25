@@ -14,7 +14,7 @@ mod support;
 use anyhow::{Result, ensure};
 use bigname_storage::families::topology::load_name_topology_shadow;
 use serde_json::{Value, json};
-use shadow_fixture::{Fixture, ZERO_ADDRESS, address, unexpected, uuid, word};
+use shadow_fixture::{Fixture, ZERO_ADDRESS, address, extra_not_active, unexpected, uuid, word};
 
 const REGISTRY: &str = "ens_v2_registry_l1";
 const RESOLVER: &str = "ens_v2_resolver_l1";
@@ -181,6 +181,9 @@ async fn alias_and_wildcard_topology_match_the_served_names() -> Result<()> {
     let report = fixture.compare(1).await?;
     unexpected(&report, &[])?;
     ensure!(report.topology_names >= 3, "{}", report.line());
+    // The resolvers are undeclared: F3 keeps a resolver_manifest_not_active row for each one a
+    // name points at, which the served build does not write (step 2's declared approximation).
+    extra_not_active(&report, &[&first_resolver, &wildcard_resolver])?;
     for logical in [&followed.logical, &cleared.logical, &wildcard.logical] {
         ensure!(
             served_topology(&fixture, logical).await?.is_some()
@@ -346,6 +349,13 @@ async fn wildcard_path_keeps_the_served_resolver_spelling_across_ancestors() -> 
     fixture.publish(4).await?;
     let report = fixture.compare(1).await?;
     unexpected(&report, &[])?;
+    extra_not_active(
+        &report,
+        &[
+            &inner_resolver.to_ascii_lowercase(),
+            &outer_resolver.to_ascii_lowercase(),
+        ],
+    )?;
     for (name, source, resolver) in [
         (&through_inner, &inner, inner_resolver),
         (&through_outer, &wild, outer_resolver),

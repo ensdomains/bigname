@@ -503,3 +503,20 @@ pub fn unexpected(report: &shadow::Report, expected: &[String]) -> Result<()> {
     );
     Ok(())
 }
+
+/// The resolvers whose classification row has no served row and reads
+/// `resolver_manifest_not_active`, step 2's declared F3 approximation, are exactly `expected`.
+pub fn extra_not_active(report: &shadow::Report, expected: &[&str]) -> Result<()> {
+    let seen: Vec<&str> = report
+        .f3_extra_not_active
+        .iter()
+        .map(String::as_str)
+        .collect();
+    let mut expected = expected.to_vec();
+    expected.sort_unstable();
+    ensure!(
+        seen == expected,
+        "extra resolver_manifest_not_active rows {seen:?}, expected {expected:?}"
+    );
+    Ok(())
+}

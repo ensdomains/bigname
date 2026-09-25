@@ -21,8 +21,9 @@ use super::shims::json_position;
 pub enum ClassificationSource {
     /// The `project_resolver_classification` row.
     Family,
-    /// That table is not filled yet: the latest active declaration manifest that names the address
-    /// as a contract. This is a partial stand-in, not the resolver builder's classification: it
+    /// No row for the address (step 2 fills the table block by block, so this covers a resolver
+    /// the families have not classified yet): the latest active declaration manifest that names
+    /// the address as a contract. This is a partial stand-in, not the resolver builder's classification: it
     /// gives the source family, role and mirror only, and does not reproduce declaration
     /// precedence, discovery admission, start blocks, upgrade implementations, proxy kinds or
     /// support status.

@@ -16,7 +16,9 @@ use bigname_storage::families::topology::{
     FamilyCollectionPage, load_resolver_links_shadow, load_resolver_shadow,
 };
 use serde_json::{Value, json};
-use shadow_fixture::{CHAIN, Fixture, ZERO_ADDRESS, ZERO_NODE, address, unexpected, uuid, word};
+use shadow_fixture::{
+    CHAIN, Fixture, ZERO_ADDRESS, ZERO_NODE, address, extra_not_active, unexpected, uuid, word,
+};
 use sqlx::PgPool;
 
 const REGISTRY: &str = "ens_v2_registry_l1";
@@ -335,25 +337,22 @@ async fn resolver_collections_and_bound_names_match_the_served_readers() -> Resu
         "{}",
         report.line()
     );
-    // project_resolver_classification is not filled yet, so each declared resolver is classified
-    // from its declaration, a partial comparison of the mirror only. A classification row for
-    // either one turns this red; the row is then compared in full and this assertion changes.
+    // Step 2 fills project_resolver_classification block by block, so each declared resolver is
+    // read from its classification row and compared in full, not from the declaration fallback.
     let sources: Vec<(&str, &str)> = report
         .classification_sources
         .iter()
         .map(|(address, source)| (address.as_str(), *source))
         .collect();
     ensure!(
-        sources
-            == [
-                (first.as_str(), "declaration"),
-                (second.as_str(), "declaration")
-            ],
+        sources == [(first.as_str(), "family"), (second.as_str(), "family")],
         "{sources:?}"
     );
 
     // Block 6: the second name moves to the second resolver, the fourth clears its pointer, and a
-    // stranger emits a Linked naming the first resolver, which today's reader ignores.
+    // stranger emits a Linked naming the first resolver. Today's reader reads only the
+    // resolver's own logs, and step 2's F7 reducer now takes a Linked only from the resolver it
+    // names, so both keep the first resolver's own record 5 at the first name's node.
     point(&fixture, "two-second", &two, &second, 6).await?;
     point(&fixture, "four-zero", &four, ZERO_ADDRESS, 6).await?;
     link(
@@ -368,26 +367,15 @@ async fn resolver_collections_and_bound_names_match_the_served_readers() -> Resu
     .await?;
     fixture.publish(7).await?;
     let report = fixture.compare(1).await?;
-    // Expected difference: project_resolver_link keeps the latest ResolverRecordLinked per
-    // (resolver, node) from
-    // any emitter (crates/project/src/families/records.rs:167-175, :302-322), while today's
-    // /links reads only the resolver's own logs
-    // (apps/api/src/v2/resolvers/collections/links.sql:14-17). The stranger's link replaces
-    // record 5 at the first resolver in the family and not in the served reader.
-    // The difference is exactly that row, pinned in full: the served collection keeps the first
-    // resolver's own link of record 5 at the first name's node, the shadow serves the stranger's
-    // record 13 there, each row whole with its ordering keys, and every other row and the total
-    // agree.
-    let pin = LinkPin {
+    unexpected(&report, &[])?;
+    let own = LinkRow {
         resolver: &first,
         node: &one.node,
         name: &one.logical,
-        served: ("link-one", "5"),
-        shadow: ("link-stranger", "13"),
+        event: ("link-one", "5"),
     };
-    pin.check(fixture.pool()).await?;
-    // A second difference on the exempted row still fails: a changed position of the family's
-    // link leaves the known difference in place but breaks the pin.
+    own.check(fixture.pool()).await?;
+    // The check sees a change to that row: a moved family link fails it and the comparison.
     sqlx::query(
         "UPDATE project_resolver_link SET log_index = log_index + 50
          WHERE chain_id = $1 AND resolver_address = $2 AND node = $3",
@@ -398,19 +386,21 @@ async fn resolver_collections_and_bound_names_match_the_served_readers() -> Resu
     .execute(fixture.pool())
     .await?;
     ensure!(
-        pin.check(fixture.pool()).await.is_err(),
-        "a changed link position passed the pin"
+        own.check(fixture.pool()).await.is_err(),
+        "a changed link position passed the check"
     );
     unexpected(&fixture.compare(1).await?, &[format!("links of {first}")])?;
-    unexpected(&report, &[format!("links of {first}")])?;
     ensure!(report.bound_names == 4, "{}", report.line());
     fixture.cleanup().await
 }
 
-// The classification comparison: a declared ENSv1 mirror resolver's fallback serves the same
-// non-null mirror as the overview; a classification row copied from the served row compares
-// equal in full; changing any one of its fields, or adding a row for a resolver with no served
-// row, is a mismatch on that resolver's key.
+// The classification comparison. Step 2 fills project_resolver_classification block by block,
+// so both declared resolvers are read from their rows and compared in full. With the plain
+// resolver's row removed the reader falls back to the declaration, a partial comparison of the
+// mirror only; a rebuild of the families writes the row back and the full comparison returns.
+// Changing any one field of a row, or adding a row with no served row, is a mismatch on that
+// resolver's key, except a `resolver_manifest_not_active` row, step 2's declared approximation,
+// which is counted by address.
 #[tokio::test]
 async fn classification_rows_are_compared_in_full() -> Result<()> {
     let mut fixture = Fixture::new("families_shadow_classification", 12).await?;
@@ -418,6 +408,7 @@ async fn classification_rows_are_compared_in_full() -> Result<()> {
     let mirror = address(0xd3);
     let registry = address(0xd4);
     let orphan = address(0xd5);
+    let inactive = address(0xd6);
     fixture
         .declare_contracts(
             RESOLVER,
@@ -430,43 +421,60 @@ async fn classification_rows_are_compared_in_full() -> Result<()> {
     point(&fixture, "one-plain", &one, &plain, 2).await?;
     point(&fixture, "two-mirror", &two, &mirror, 2).await?;
     fixture.publish(4).await?;
+    let sources = |report: &shadow::Report| {
+        (
+            report.classification_sources.get(&plain).copied(),
+            report.classification_sources.get(&mirror).copied(),
+        )
+    };
     let report = fixture.compare(1).await?;
     unexpected(&report, &[])?;
+    extra_not_active(&report, &[])?;
     ensure!(
-        report.classification_sources.get(&plain) == Some(&"declaration")
-            && report.classification_sources.get(&mirror) == Some(&"declaration"),
+        sources(&report) == (Some("family"), Some("family")) && report.f3_unfilled == 0,
         "{:?}",
         report.classification_sources
     );
-    let fallback = load_resolver_shadow(fixture.pool(), CHAIN, &mirror)
+    let row = load_resolver_shadow(fixture.pool(), CHAIN, &mirror)
         .await?
-        .context("the mirror resolver is declared")?;
+        .context("the mirror resolver is classified")?;
     ensure!(
-        fallback.mirrored_registry_address() == Some(registry.clone()),
-        "{fallback:?}"
+        row.mirrored_registry_address() == Some(registry.clone()),
+        "{row:?}"
     );
 
-    // Seed the classification row from the served row: equal in full.
+    // The switch: without its row the plain resolver falls back to the declaration, compared
+    // for the mirror only; a rebuild writes the row back.
     sqlx::query(
-        "INSERT INTO project_resolver_classification (chain_id, resolver_address, block_number,
-             event_identity, classification, support_status, unsupported_reason, manifest_id,
-             manifest_event_id, admission_namespace, summary_version)
-         SELECT chain_id, lower(resolver_address), 1, 'fixture:classification',
-                declared_summary -> 'classification', support_status, unsupported_reason,
-                (provenance ->> 'manifest_id')::bigint,
-                (provenance ->> 'manifest_event_id')::bigint,
-                provenance ->> 'classification_admission_namespace',
-                declared_summary ->> 'summary_version'
-         FROM resolver_current WHERE chain_id = $1 AND lower(resolver_address) = $2",
+        "CREATE TABLE fixture_classification AS SELECT * FROM project_resolver_classification
+         WHERE chain_id = $1 AND resolver_address = $2",
     )
     .bind(CHAIN)
     .bind(&plain)
     .execute(fixture.pool())
     .await?;
+    let restore = "DELETE FROM project_resolver_classification
+                   WHERE chain_id = $1 AND resolver_address = $2";
+    sqlx::query(restore)
+        .bind(CHAIN)
+        .bind(&plain)
+        .execute(fixture.pool())
+        .await?;
     let report = fixture.compare(1).await?;
     unexpected(&report, &[])?;
     ensure!(
-        report.classification_sources.get(&plain) == Some(&"family"),
+        sources(&report) == (Some("declaration"), Some("family"))
+            && report.f3_unfilled == 1
+            && report.f3_unfilled_mirror_differs == 0,
+        "{}: {:?}",
+        report.line(),
+        report.classification_sources
+    );
+    fixture.rebuild().await?;
+    let report = fixture.compare(1).await?;
+    unexpected(&report, &[])?;
+    ensure!(
+        sources(&report) == (Some("family"), Some("family")),
         "{:?}",
         report.classification_sources
     );
@@ -482,16 +490,14 @@ async fn classification_rows_are_compared_in_full() -> Result<()> {
         "admission_namespace = 'basenames'",
         "summary_version = 'fixture'",
     ] {
-        let mut transaction = fixture.pool().begin().await?;
         sqlx::query(&format!(
             "UPDATE project_resolver_classification SET {change}
              WHERE chain_id = $1 AND resolver_address = $2"
         ))
         .bind(CHAIN)
         .bind(&plain)
-        .execute(&mut *transaction)
+        .execute(fixture.pool())
         .await?;
-        transaction.commit().await?;
         let report = fixture.compare(1).await?;
         let keys: Vec<&str> = report
             .mismatches
@@ -502,59 +508,52 @@ async fn classification_rows_are_compared_in_full() -> Result<()> {
             keys == [format!("resolver {plain}").as_str()],
             "{change}: {keys:?}"
         );
+        sqlx::query(restore)
+            .bind(CHAIN)
+            .bind(&plain)
+            .execute(fixture.pool())
+            .await?;
         sqlx::query(
-            "DELETE FROM project_resolver_classification
-             WHERE chain_id = $1 AND resolver_address = $2",
+            "INSERT INTO project_resolver_classification SELECT * FROM fixture_classification",
         )
-        .bind(CHAIN)
-        .bind(&plain)
-        .execute(fixture.pool())
-        .await?;
-        sqlx::query(
-            "INSERT INTO project_resolver_classification (chain_id, resolver_address,
-                 block_number, event_identity, classification, support_status,
-                 unsupported_reason, manifest_id, manifest_event_id, admission_namespace,
-                 summary_version)
-             SELECT chain_id, lower(resolver_address), 1, 'fixture:classification',
-                    declared_summary -> 'classification', support_status, unsupported_reason,
-                    (provenance ->> 'manifest_id')::bigint,
-                    (provenance ->> 'manifest_event_id')::bigint,
-                    provenance ->> 'classification_admission_namespace',
-                    declared_summary ->> 'summary_version'
-             FROM resolver_current WHERE chain_id = $1 AND lower(resolver_address) = $2",
-        )
-        .bind(CHAIN)
-        .bind(&plain)
         .execute(fixture.pool())
         .await?;
     }
+    unexpected(&fixture.compare(1).await?, &[])?;
 
-    // A classification row for a resolver with no served row is examined and fails.
-    sqlx::query(
-        "INSERT INTO project_resolver_classification (chain_id, resolver_address, block_number,
-             event_identity, support_status)
-         VALUES ($1, $2, 1, 'fixture:orphan', 'supported')",
-    )
-    .bind(CHAIN)
-    .bind(&orphan)
-    .execute(fixture.pool())
-    .await?;
+    // A row with no served row: counted when it reads resolver_manifest_not_active, a mismatch
+    // otherwise.
+    for (resolver, reason) in [
+        (&inactive, Some("resolver_manifest_not_active")),
+        (&orphan, None),
+    ] {
+        sqlx::query(
+            "INSERT INTO project_resolver_classification (chain_id, resolver_address,
+                 block_number, event_identity, support_status, unsupported_reason)
+             VALUES ($1, $2, 1, 'fixture:extra', 'unsupported', $3)",
+        )
+        .bind(CHAIN)
+        .bind(resolver)
+        .bind(reason)
+        .execute(fixture.pool())
+        .await?;
+    }
     let report = fixture.compare(1).await?;
     unexpected(&report, &[format!("resolver {orphan}")])?;
+    extra_not_active(&report, &[&inactive])?;
     fixture.cleanup().await
 }
 
-/// The `/links` difference at one node: the served collection serves the link event `served`
-/// and the shadow the link event `shadow`, each as `(event identity, record id)`.
-struct LinkPin<'a> {
+/// The `/links` row at one node, which both readers must serve exactly: the row the link event
+/// `event`, as `(event identity, record id)`, makes.
+struct LinkRow<'a> {
     resolver: &'a str,
     node: &'a str,
     name: &'a str,
-    served: (&'a str, &'a str),
-    shadow: (&'a str, &'a str),
+    event: (&'a str, &'a str),
 }
 
-impl LinkPin<'_> {
+impl LinkRow<'_> {
     /// The whole collection row a link event makes at this node: its ordering keys and its item,
     /// built from the interpreted event itself.
     async fn row(
@@ -610,16 +609,15 @@ impl LinkPin<'_> {
                 .cloned()
                 .collect()
         };
-        let expected_served = self.row(pool, self.served.0, self.served.1).await?;
-        let expected_shadow = self.row(pool, self.shadow.0, self.shadow.1).await?;
+        let expected = self.row(pool, self.event.0, self.event.1).await?;
         ensure!(
-            at_node(&served) == [expected_served.clone()],
-            "served {:?}, expected {expected_served:?}",
+            at_node(&served) == [expected.clone()],
+            "served {:?}, expected {expected:?}",
             at_node(&served)
         );
         ensure!(
-            at_node(&shadowed) == [expected_shadow.clone()],
-            "shadow {:?}, expected {expected_shadow:?}",
+            at_node(&shadowed) == [expected.clone()],
+            "shadow {:?}, expected {expected:?}",
             at_node(&shadowed)
         );
         ensure!(
