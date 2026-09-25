@@ -810,7 +810,10 @@ async fn a_wrapped_v1_tombstone_with_v2_history_reads_unregistered() -> Result<(
         .await?;
     }
     // A later reservation of the ENSv2 label keeps this ENSv2 release from standing as a
-    // tombstone: the reservation is the registration's latest lifecycle fact and defers to ENSv1.
+    // tombstone: the reservation is the name's latest ENSv2 lifecycle fact and defers to ENSv1.
+    // It has Interpret's shape: `unregister` bumped the token version, so the reservation names
+    // the label but carries no resource.
+    // (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L201-L205 @ ens_v2@a971bd64)
     let v2_resource = closed_v2_binding_at(&pool, &logical, 73, 7, 0).await?;
     for (log, kind, after) in [
         (
@@ -821,11 +824,12 @@ async fn a_wrapped_v1_tombstone_with_v2_history_reads_unregistered() -> Result<(
         (8, "RegistrationReleased", json!({"status":"unregistered"})),
         (9, "RegistrationReserved", json!({"status":"reserved"})),
     ] {
+        let resource = (kind != "RegistrationReserved").then_some(v2_resource.as_str());
         event(
             &pool,
             &format!("wrapped-tombstone-v2-{kind}"),
             &logical,
-            Some(&v2_resource),
+            resource,
             Event {
                 family: "ens_v2_registry_l1",
                 kind,

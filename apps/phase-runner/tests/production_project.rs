@@ -24766,6 +24766,200 @@ async fn reservation_to_registration_replaces_the_resolver_with_zero_and_nonzero
     Ok(())
 }
 
+/// The `alice` ENSv2 token id at `version`: the label hash with the version in its low 32 bits.
+/// (upstream: .refs/ens_v2/contracts/src/utils/LibLabel.sol:L15-L17 @ ens_v2@a971bd64)
+fn alice_v2_token(version: u32) -> U256 {
+    let mut token_bytes = *keccak256(b"alice");
+    token_bytes[28..].copy_from_slice(&version.to_be_bytes());
+    U256::from_be_bytes(token_bytes)
+}
+
+type ServedAuthority = (Option<String>, Option<String>, Option<Uuid>, Option<String>);
+
+async fn served_authority(pool: &PgPool, logical_name_id: &str) -> Result<ServedAuthority> {
+    Ok(sqlx::query_as(
+        "SELECT provenance #>> '{authority_selection,authority_arm}',
+                provenance #>> '{authority_selection,lifecycle_state}',
+                resource_id, declared_summary #>> '{registration,status}'
+         FROM name_current WHERE logical_name_id = $1",
+    )
+    .bind(logical_name_id)
+    .fetch_one(pool)
+    .await?)
+}
+
+// A released ENSv2 registration reserved again hands the name to its live ENSv1 lease (product
+// ruling of 2026-09-25: only a reservation defers to ENSv1). `unregister` of an owned token bumps
+// its token version, so the later `LabelReserved` carries a versioned token id and Interpret
+// writes the reservation with the name but without a resource. Selection must see it by name.
+// Raw logs run through Interpret; no normalized row is written by hand.
+// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L196-L207 @ ens_v2@a971bd64)
+// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L649-L651 @ ens_v2@a971bd64)
+#[tokio::test]
+async fn a_reservation_after_a_v2_release_hands_the_name_to_its_live_v1_lease() -> Result<()> {
+    let scratch = ScratchDatabase::create("project_v2_release_then_reservation").await?;
+    let chain = CHAIN;
+    let logical_name_id = seed_dual_open_cross_arm_fixture(scratch.pool(), chain, 4).await?;
+    let unregistered = LabelUnregistered {
+        tokenId: alice_v2_token(0),
+        sender: SENDER.parse()?,
+    }
+    .encode_log_data();
+    insert_raw_event_at(
+        scratch.pool(),
+        chain,
+        5,
+        1,
+        1,
+        V2_REGISTRY,
+        unregistered.topics(),
+        unregistered.data.as_ref(),
+    )
+    .await?;
+    InterpretEngine::new(scratch.pool().clone())
+        .run_batch(InterpretRequest {
+            chain_id: chain.into(),
+            from_block: 0,
+            to_block: 5,
+            resume_current: None,
+            mode: InterpretRunMode::Normal,
+        })
+        .await?;
+    let v2_resource: Uuid = sqlx::query_scalar(
+        "SELECT resource_id FROM surface_bindings
+         WHERE chain_id = $1 AND logical_name_id = $2 AND authority_arm = 'ens_v2'
+           AND active_to IS NOT NULL",
+    )
+    .bind(chain)
+    .bind(&logical_name_id)
+    .fetch_one(scratch.pool())
+    .await?;
+    run_project(scratch.pool(), chain, None, RunMode::Normal, 0, 5).await?;
+    // Released: the name stays with ENSv2 as a tombstone beside the live ENSv1 lease.
+    assert_eq!(
+        served_authority(scratch.pool(), &logical_name_id).await?,
+        (
+            Some("ens_v2".into()),
+            Some("unregistered".into()),
+            Some(v2_resource),
+            Some("released".into()),
+        )
+    );
+
+    insert_lineage_block(scratch.pool(), chain, 6).await?;
+    let reserved = LabelReserved {
+        tokenId: alice_v2_token(1),
+        labelHash: keccak256(b"alice"),
+        label: "alice".into(),
+        expiry: 4_000_000_000,
+        sender: SENDER.parse()?,
+    }
+    .encode_log_data();
+    insert_raw_event_at(
+        scratch.pool(),
+        chain,
+        6,
+        1,
+        1,
+        V2_REGISTRY,
+        reserved.topics(),
+        reserved.data.as_ref(),
+    )
+    .await?;
+    InterpretEngine::new(scratch.pool().clone())
+        .run_batch(InterpretRequest {
+            chain_id: chain.into(),
+            from_block: 6,
+            to_block: 6,
+            resume_current: Some(InterpretMarker {
+                number: 5,
+                hash: block_hash(chain, 5),
+            }),
+            mode: InterpretRunMode::Normal,
+        })
+        .await?;
+    // Interpret's shape: the reservation names the label but carries no resource, and opens no
+    // ENSv2 binding.
+    let reservation: Vec<(Option<Uuid>, Value)> = sqlx::query_as(
+        "SELECT resource_id, after_state FROM normalized_events
+         WHERE chain_id = $1 AND logical_name_id = $2 AND event_kind = 'RegistrationReserved'
+           AND block_number = 6",
+    )
+    .bind(chain)
+    .bind(&logical_name_id)
+    .fetch_all(scratch.pool())
+    .await?;
+    assert_eq!(
+        reservation.len(),
+        1,
+        "the reservation is written for the name"
+    );
+    assert_eq!(
+        reservation[0].0, None,
+        "a versioned reservation has no resource"
+    );
+    let open_v2: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM surface_bindings
+         WHERE chain_id = $1 AND logical_name_id = $2 AND authority_arm = 'ens_v2'
+           AND active_to IS NULL",
+    )
+    .bind(chain)
+    .bind(&logical_name_id)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(open_v2, 0);
+    let v1_resource: Uuid = sqlx::query_scalar(
+        "SELECT resource_id FROM surface_bindings
+         WHERE chain_id = $1 AND logical_name_id = $2 AND authority_arm = 'ens_v1'
+           AND active_to IS NULL",
+    )
+    .bind(chain)
+    .bind(&logical_name_id)
+    .fetch_one(scratch.pool())
+    .await?;
+
+    run_project(
+        scratch.pool(),
+        chain,
+        Some(Marker {
+            number: 5,
+            hash: block_hash(chain, 5),
+        }),
+        RunMode::Normal,
+        6,
+        6,
+    )
+    .await?;
+    normalize_projection_clocks(scratch.pool()).await?;
+    let incremental = served_authority(scratch.pool(), &logical_name_id).await?;
+    assert_eq!(
+        incremental,
+        (
+            Some("ens_v1".into()),
+            Some("registered".into()),
+            Some(v1_resource),
+            Some("active".into()),
+        ),
+        "the later reservation defers to the live ENSv1 lease"
+    );
+    let incremental_row: Value = sqlx::query_scalar(
+        "SELECT to_jsonb(current) FROM name_current current WHERE logical_name_id = $1",
+    )
+    .bind(&logical_name_id)
+    .fetch_one(scratch.pool())
+    .await?;
+    run_project(scratch.pool(), chain, None, RunMode::Normal, 0, 6).await?;
+    normalize_projection_clocks(scratch.pool()).await?;
+    let fresh_row: Value = sqlx::query_scalar(
+        "SELECT to_jsonb(current) FROM name_current current WHERE logical_name_id = $1",
+    )
+    .bind(&logical_name_id)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(incremental_row, fresh_row);
+    scratch.cleanup().await
+}
+
 async fn assert_reservation_selects_v1(
     pool: &PgPool,
     chain: &str,
@@ -24884,6 +25078,18 @@ async fn seed_dual_open_cross_arm_fixture(
                 "event TokenResource(uint256 indexed tokenId, uint256 indexed resource)",
                 &["registry"],
                 &["TokenResourceLinked"],
+            ),
+            (
+                "LabelUnregistered",
+                "event LabelUnregistered(uint256 indexed tokenId, address indexed sender)",
+                &["registry"],
+                &["RegistrationReleased"],
+            ),
+            (
+                "LabelReserved",
+                "event LabelReserved(uint256 indexed tokenId, bytes32 indexed labelHash, string label, uint64 expiry, address indexed sender)",
+                &["registry"],
+                &["RegistrationReserved"],
             ),
         ],
     )

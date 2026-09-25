@@ -60,31 +60,56 @@
             -- registration the name was last bound to. `unregister` burns the token and sets its
             -- expiry to now, so a released ENSv2 registration reports as expired and available.
             -- (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L195-L207 @ ens_v2@a971bd64)
-            SELECT DISTINCT ON (event.logical_name_id)
-                   event.logical_name_id, event.resource_id, event.event_kind,
-                   event.block_number, event.transaction_index, event.log_index
-            FROM project_events event
-            JOIN latest_v2_binding binding
-              ON binding.logical_name_id = event.logical_name_id
-             AND binding.resource_id = event.resource_id
-            WHERE event.source_family IN (
-                  'ens_v2_root_l1', 'ens_v2_registry_l1',
-                  'ens_v2_registrar_l1'
-              )
-              AND event.event_kind IN (
-                  'RegistrationGranted', 'RegistrationRenewed',
-                  'RegistrationReleased', 'RegistrationReserved'
-              )
-            ORDER BY event.logical_name_id, event.block_number DESC,
-                     event.transaction_index DESC, event.log_index DESC,
-                     event.normalized_event_id DESC
+            SELECT DISTINCT ON (fact.logical_name_id)
+                   fact.logical_name_id, fact.resource_id, fact.event_kind,
+                   fact.block_number, fact.transaction_index, fact.log_index
+            FROM (
+                SELECT binding.logical_name_id, event.resource_id, event.event_kind,
+                       event.block_number, event.transaction_index, event.log_index,
+                       event.normalized_event_id
+                FROM project_events event
+                JOIN latest_v2_binding binding
+                  ON binding.logical_name_id = event.logical_name_id
+                 AND binding.resource_id = event.resource_id
+                WHERE event.source_family IN (
+                      'ens_v2_root_l1', 'ens_v2_registry_l1',
+                      'ens_v2_registrar_l1'
+                  )
+                  AND event.event_kind IN (
+                      'RegistrationGranted', 'RegistrationRenewed',
+                      'RegistrationReleased', 'RegistrationReserved'
+                  )
+                UNION ALL
+                -- A reservation of the name counts whatever its resource. `unregister` of an
+                -- owned token bumps its token version, so a later `LabelReserved` carries a
+                -- versioned token id, and Interpret writes that reservation with the name but
+                -- without the released registration's resource, or any resource.
+                -- (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L201-L205 @ ens_v2@a971bd64)
+                -- (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L649-L651 @ ens_v2@a971bd64)
+                -- (upstream: .refs/ens_v2/contracts/src/utils/LibLabel.sol:L15-L17 @ ens_v2@a971bd64)
+                SELECT event.logical_name_id, event.resource_id, event.event_kind,
+                       event.block_number, event.transaction_index, event.log_index,
+                       event.normalized_event_id
+                FROM project_events event
+                JOIN latest_v2_binding binding
+                  ON binding.logical_name_id = event.logical_name_id
+                WHERE event.source_family IN (
+                      'ens_v2_root_l1', 'ens_v2_registry_l1',
+                      'ens_v2_registrar_l1'
+                  )
+                  AND event.event_kind = 'RegistrationReserved'
+                  AND event.resource_id IS DISTINCT FROM binding.resource_id
+            ) fact
+            ORDER BY fact.logical_name_id, fact.block_number DESC,
+                     fact.transaction_index DESC, fact.log_index DESC,
+                     fact.normalized_event_id DESC
         ), released_v2_authority AS (
             -- A released ENSv2 registration stays with ENSv2 whatever ENSv1 holds (product ruling
             -- of 2026-09-25): when the latest lifecycle fact of the registration the name was last
             -- bound to is its release, by `unregister` or by lapsing at expiry, and no ENSv2
             -- binding is open, the name is the released tombstone even beside a live ENSv1
-            -- lease. A later reservation of the label is a later lifecycle fact and defers to
-            -- ENSv1. The contracts never route a registered label back to ENSv1: `unregister`
+            -- lease. A later reservation of the name, with or without a resource, is a later
+            -- lifecycle fact and defers to ENSv1. The contracts never route a registered label back to ENSv1: `unregister`
             -- writes the release time as the expiry, the registry returns no resolver for an
             -- expired entry, and a WrapperRegistry stops answering with ENSV1Resolver for a label
             -- whose stored expiry is nonzero.

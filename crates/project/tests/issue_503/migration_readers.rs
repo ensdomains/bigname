@@ -120,14 +120,16 @@ async fn migration_readers_follow_the_selected_arm_after_a_v2_release() -> Resul
     let (db, pool) = database("migration_readers_release").await?;
     // Retained: the release is the latest lifecycle fact and ENSv2 stays selected.
     let (retained, _) = released_migrated_name(&pool, 81, "retained.eth").await?;
-    // Re-reserved: a later reservation of the ENSv2 label defers to the live ENSv1 lease.
-    let (reserved, reserved_v2) = released_migrated_name(&pool, 82, "rereserved.eth").await?;
+    // Re-reserved: a later reservation of the ENSv2 label defers to the live ENSv1 lease. As
+    // Interpret writes it after an `unregister`, the reservation names the label but carries no
+    // resource, since the token version was bumped.
+    let (reserved, _) = released_migrated_name(&pool, 82, "rereserved.eth").await?;
     live_v1_lease(&pool, &reserved, 82, 1).await?;
     event(
         &pool,
         "readers-82-reservation",
         &reserved,
-        Some(&reserved_v2),
+        None,
         Event {
             family: "ens_v2_registry_l1",
             kind: "RegistrationReserved",
