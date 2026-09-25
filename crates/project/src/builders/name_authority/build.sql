@@ -128,20 +128,46 @@
                           AND event.resource_id IS NULL)
                       -- A version-zero reservation carries its own resource, and so does its
                       -- release when it is unregistered or lapses. That release ends the
-                      -- reservation of this name like a resource-less one.
+                      -- reservation of this name like a resource-less one, but only when the
+                      -- reservation it ends is the name's current one: the latest earlier fact
+                      -- among the name's reservations, on any resource, and the registrations on
+                      -- the release's resource must be a reservation on that resource. A
+                      -- registration of the reserved label keeps the resource, since the registry
+                      -- bumps the token version only when it replaces an owner, so its later
+                      -- release ends a registration, not a reservation; and a release does not
+                      -- end a later reservation of the name on another resource. A release at the
+                      -- block boundary has no transaction or log index and is compared as the end
+                      -- of its block here, so it still ends a reservation written in its own block
+                      -- that was already expired.
+                      -- (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L435-L471 @ ens_v2@a971bd64)
                       OR (event.event_kind = 'RegistrationReleased'
                           AND event.resource_id IS DISTINCT FROM binding.resource_id
-                          AND EXISTS (
-                              SELECT 1
-                              FROM project_events reservation
-                              WHERE reservation.logical_name_id = event.logical_name_id
-                                AND reservation.resource_id = event.resource_id
-                                AND reservation.event_kind = 'RegistrationReserved'
-                                AND reservation.source_family IN (
+                          AND (
+                              SELECT witness.event_kind = 'RegistrationReserved'
+                                     AND witness.resource_id = event.resource_id
+                              FROM project_events witness
+                              WHERE witness.source_family IN (
                                     'ens_v2_root_l1', 'ens_v2_registry_l1',
                                     'ens_v2_registrar_l1'
                                 )
-                          ))
+                                AND (
+                                    (witness.event_kind = 'RegistrationReserved'
+                                     AND witness.logical_name_id = event.logical_name_id)
+                                    OR (witness.event_kind = 'RegistrationGranted'
+                                        AND witness.resource_id = event.resource_id)
+                                )
+                                AND (witness.block_number,
+                                     COALESCE(witness.transaction_index, -1),
+                                     COALESCE(witness.log_index, -1))
+                                    < (event.block_number,
+                                       COALESCE(event.transaction_index, 9223372036854775807),
+                                       COALESCE(event.log_index, 9223372036854775807))
+                              ORDER BY witness.block_number DESC,
+                                       COALESCE(witness.transaction_index, -1) DESC,
+                                       COALESCE(witness.log_index, -1) DESC,
+                                       witness.normalized_event_id DESC
+                              LIMIT 1
+                          ) IS TRUE)
                   )
             ) fact
             -- A reservation whose own expiry is already at or before its block's timestamp is
