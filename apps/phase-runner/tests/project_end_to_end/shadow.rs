@@ -1363,13 +1363,15 @@ fn log_facts_in(
         .map(|event| lifecycle_from_log(event, log.get(&event.position.event_identity)?))
         .collect::<Option<Vec<_>>>()?;
     let mut out = facts.clone();
-    out.snapshot_timestamps = events
-        .iter()
-        .filter_map(|event| {
-            let seconds = event.original_registered_at?;
-            Some((seconds, snapshots.get(&seconds)?.clone()))
-        })
-        .collect();
+    out.snapshot_timestamps = std::sync::Arc::new(
+        events
+            .iter()
+            .filter_map(|event| {
+                let seconds = event.original_registered_at?;
+                Some((seconds, snapshots.get(&seconds)?.clone()))
+            })
+            .collect(),
+    );
     out.events = events;
     Some(out)
 }

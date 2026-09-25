@@ -20,7 +20,7 @@ mod select;
 mod served;
 pub mod view;
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, sync::Arc};
 
 use serde_json::{Map, Value};
 
@@ -140,12 +140,13 @@ pub struct NameFacts {
     pub triples: Vec<TripleFacts>,
     pub events: Vec<LifecycleEvent>,
     pub wrappers: BTreeMap<String, WrapperRow>,
-    /// `resources.provenance ->> 'authority_kind'` of the resources the read touches.
-    pub resource_authority_kinds: BTreeMap<String, String>,
+    /// `resources.provenance ->> 'authority_kind'` of the resources the read touches. This and
+    /// the two timestamp maps are loaded once per batch and shared by every name of it.
+    pub resource_authority_kinds: Arc<BTreeMap<String, String>>,
     /// `to_jsonb(block_timestamp)` per canonical block.
-    pub block_timestamps: BTreeMap<i64, Value>,
+    pub block_timestamps: Arc<BTreeMap<i64, Value>>,
     /// `to_jsonb(to_timestamp(seconds))` per registrar snapshot registration time.
-    pub snapshot_timestamps: BTreeMap<i64, Value>,
+    pub snapshot_timestamps: Arc<BTreeMap<i64, Value>>,
     /// F1 `project_name_state.authority_start_positions`: the latest AuthorityEpochChanged per
     /// arm.
     pub authority_starts: Value,

@@ -1,7 +1,10 @@
 //! The loaders: one statement per family table for a batch of names, reading family tables and
 //! identity rows only (no normalized_events, no project_events; design:597). Every statement
 //! carries a `storage:families.control.lifecycle.*` prefix for the slow log.
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 use anyhow::{Context, Result};
 use serde_json::Value;
@@ -230,46 +233,52 @@ pub async fn load_name_facts(
     .fetch_all(pool)
     .await
     .context("failed to load resource authority kinds")?;
-    let authority_kinds: BTreeMap<String, String> = authority_kinds
-        .into_iter()
-        .filter_map(|(resource, kind)| Some((resource, kind?)))
-        .collect();
+    let authority_kinds: Arc<BTreeMap<String, String>> = Arc::new(
+        authority_kinds
+            .into_iter()
+            .filter_map(|(resource, kind)| Some((resource, kind?)))
+            .collect(),
+    );
     let blocks: Vec<i64> = events
         .iter()
         .map(|event| event.position.block_number)
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
-    let block_timestamps: BTreeMap<i64, Value> = sqlx::query_as::<_, (i64, Value)>(
-        "/* storage:families.control.lifecycle.block_timestamps */
+    let block_timestamps: Arc<BTreeMap<i64, Value>> = Arc::new(
+        sqlx::query_as::<_, (i64, Value)>(
+            "/* storage:families.control.lifecycle.block_timestamps */
          SELECT lineage.block_number, to_jsonb(lineage.block_timestamp)
          FROM bigname_phase.chain_lineage lineage
          WHERE lineage.chain_id = $1 AND lineage.block_number = ANY($2)
            AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')",
-    )
-    .bind(chain_id)
-    .bind(&blocks)
-    .fetch_all(pool)
-    .await
-    .context("failed to load block timestamps")?
-    .into_iter()
-    .collect();
+        )
+        .bind(chain_id)
+        .bind(&blocks)
+        .fetch_all(pool)
+        .await
+        .context("failed to load block timestamps")?
+        .into_iter()
+        .collect(),
+    );
     let snapshots: Vec<i64> = events
         .iter()
         .filter_map(|event| event.original_registered_at)
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
-    let snapshot_timestamps: BTreeMap<i64, Value> = sqlx::query_as::<_, (i64, Value)>(
-        "/* storage:families.control.lifecycle.snapshot_timestamps */
+    let snapshot_timestamps: Arc<BTreeMap<i64, Value>> = Arc::new(
+        sqlx::query_as::<_, (i64, Value)>(
+            "/* storage:families.control.lifecycle.snapshot_timestamps */
          SELECT seconds, to_jsonb(to_timestamp(seconds)) FROM unnest($1::bigint[]) seconds",
-    )
-    .bind(&snapshots)
-    .fetch_all(pool)
-    .await
-    .context("failed to convert registration times")?
-    .into_iter()
-    .collect();
+        )
+        .bind(&snapshots)
+        .fetch_all(pool)
+        .await
+        .context("failed to convert registration times")?
+        .into_iter()
+        .collect(),
+    );
     let starts: BTreeMap<String, Value> = sqlx::query_as::<_, (String, Value)>(
         "/* storage:families.control.lifecycle.authority_starts */
          SELECT state.logical_name_id, state.authority_start_positions
@@ -368,9 +377,9 @@ pub async fn load_name_facts(
                 .filter(|(resource, _)| own_resources.contains(*resource))
                 .map(|(resource, row)| (resource.clone(), row.clone()))
                 .collect(),
-            resource_authority_kinds: authority_kinds.clone(),
-            block_timestamps: block_timestamps.clone(),
-            snapshot_timestamps: snapshot_timestamps.clone(),
+            resource_authority_kinds: Arc::clone(&authority_kinds),
+            block_timestamps: Arc::clone(&block_timestamps),
+            snapshot_timestamps: Arc::clone(&snapshot_timestamps),
             authority_starts: starts.get(name).cloned().unwrap_or(Value::Null),
             registry_node: nodes
                 .get(&(
