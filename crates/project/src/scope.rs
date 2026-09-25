@@ -205,21 +205,22 @@ async fn seed_direct_scope(
     // transferred node itself in `node`, so that node's own edge is rebuilt too: the adapter
     // attaches a logical name only once it has linked the node's authority, and the child row
     // follows the latest registry owner of the node's active surface.
-    for (table, columns, event_kinds) in [
+    for (table, columns, events) in [
         (
             "project_scope_children",
             "(event.after_state ->> 'child_node'), (event.before_state ->> 'child_node')",
-            "'SubregistryChanged', 'AuthorityTransferred'",
+            "event.event_kind IN ('SubregistryChanged', 'AuthorityTransferred')",
         ),
         (
             "project_scope_ancestors",
             "(event.after_state ->> 'node'), (event.before_state ->> 'node')",
-            "'SubregistryChanged', 'AuthorityTransferred'",
+            "event.event_kind IN ('SubregistryChanged', 'AuthorityTransferred')",
         ),
         (
             "project_scope_children",
             "(event.after_state ->> 'node'), (event.before_state ->> 'node')",
-            "'AuthorityTransferred'",
+            "event.event_kind = 'AuthorityTransferred'
+               AND event.after_state ->> 'source_event' = 'Transfer'",
         ),
     ] {
         let statement = format!(
@@ -229,7 +230,7 @@ async fn seed_direct_scope(
              CROSS JOIN LATERAL (
                  VALUES {columns}
              ) candidate(node)
-             WHERE event.event_kind IN ({event_kinds})
+             WHERE {events}
                AND event.source_family IN (
                    'ens_v1_registry_l1', 'basenames_base_registry'
                )
