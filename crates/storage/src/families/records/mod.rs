@@ -17,6 +17,7 @@ mod facts;
 mod inventory;
 mod links;
 mod mirror;
+mod pair_oracle;
 mod payload;
 mod pointer;
 mod resolves_to;

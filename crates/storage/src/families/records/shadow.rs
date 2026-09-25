@@ -9,20 +9,20 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result, ensure};
 use serde_json::Value;
-use sqlx::{PgPool, Row};
+use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::{
-    CompatibilityPair, Difference, FamilyAttribution, FamilyPosition, check_compatibility_pairs,
-    compare_address_results, compare_primary_name, compare_record_inventory,
-    load_family_address_records, load_family_record_inventory_detail, load_family_reverse_claim,
-    page_family_address_records,
+    Difference, FamilyAttribution, check_compatibility_pairs, compare_address_results,
+    compare_primary_name, compare_record_inventory, load_family_address_records,
+    load_family_record_inventory_detail, load_family_reverse_claim, page_family_address_records,
+    pair_oracle,
 };
 use crate::{
     AddressNamesCurrentDedupe, AddressNamesCurrentOrder, AddressNamesCurrentSort,
-    AddressNamesCurrentSortedCursor, AddressRecordCurrentEntry, RecordInventoryCurrentRow,
-    load_address_records_current_page, load_bounded_record_attribution,
-    load_primary_name_current_snapshot, load_record_inventory_current,
+    AddressNamesCurrentSortedCursor, AddressRecordCurrentEntry, load_address_records_current_page,
+    load_bounded_record_attribution, load_primary_name_current_snapshot,
+    load_record_inventory_current,
 };
 
 /// What one shadow comparison saw. `differences` holds every key whose family read differs from
@@ -176,7 +176,9 @@ async fn inventory(pool: &PgPool, chain_id: &str, report: &mut ShadowReport) -> 
             compare_record_inventory(today.as_ref(), family.as_ref().map(|family| &family.row));
         if let Some(family) = &family {
             report.compatibility_pairs += family.compatibility_pairs.len();
-            let expected = expected_pairs(pool, today.as_ref()).await?;
+            let served = report.served_marker.as_ref().map(|(block, _)| *block);
+            let expected =
+                pair_oracle::expected_pairs(pool, chain_id, served, today.as_ref()).await?;
             differences.extend(check_compatibility_pairs(family, &expected));
         }
         if !differences.is_empty() {
@@ -372,106 +374,6 @@ async fn all_family_pages(
             None => return Ok((entries, pages, misses)),
         }
     }
-}
-
-/// The coin-60 pairs today's row serves, from normalized events alone: an `AddressChanged`
-/// `addr:60` value event of the row with an `AddrChanged` `addr:60` write that the resource's
-/// current pointer attributes to it, one log later in the same transaction, the order one ENSv1
-/// `setAddr` emits them in.
-/// (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L59-L62 @ ens_v1@91c966f)
-async fn expected_pairs(
-    pool: &PgPool,
-    today: Option<&RecordInventoryCurrentRow>,
-) -> Result<Vec<CompatibilityPair>> {
-    let ids = |field: &str| -> Vec<i64> {
-        today
-            .and_then(|row| row.provenance.get(field))
-            .and_then(Value::as_array)
-            .map(|ids| ids.iter().filter_map(Value::as_i64).collect())
-            .unwrap_or_default()
-    };
-    let values = ids("record_event_ids");
-    if values.is_empty() {
-        return Ok(Vec::new());
-    }
-    // As today's `coin60_siblings` over its current `attributed_events`: the value is a served
-    // event of the row, so it is attributed through the resource's current pointer; the sibling
-    // is attributed through the same arm when it shares the value's effective resolver, source
-    // family, namespace and manifest and the arm's key (the logical name for a named write, the
-    // node for a node-keyed one, the record id for a record-id one). The history attribution
-    // today's provenance also lists is not current and pairs nothing. The value side keeps the
-    // builder's requirements: an `addr` record of selector 60 with a log position.
-    //
-    // This is deliberately stricter than `coin60_siblings`, which pairs through any current
-    // attribution arm: a named value with a node-keyed sibling, or halves of different source
-    // families, namespaces or manifests, pair today and not here. Every such divergence makes the
-    // oracle expect fewer pairs than today, never more, so it can only show as an extra family
-    // pair; a pair the family drops that the oracle expects is still caught.
-    let rows = sqlx::query(
-        "SELECT value.normalized_event_id AS value_id, value.block_number AS value_block,
-                value.transaction_index AS value_transaction, value.log_index AS value_log,
-                value.event_identity AS value_identity,
-                sibling.normalized_event_id AS sibling_id, sibling.block_number AS sibling_block,
-                sibling.transaction_index AS sibling_transaction,
-                sibling.log_index AS sibling_log, sibling.event_identity AS sibling_identity
-         FROM bigname_phase.normalized_events value
-         JOIN bigname_phase.normalized_events sibling
-           ON sibling.chain_id = value.chain_id AND sibling.block_hash = value.block_hash
-          AND sibling.transaction_hash IS NOT DISTINCT FROM value.transaction_hash
-          AND sibling.transaction_index IS NOT DISTINCT FROM value.transaction_index
-          AND sibling.log_index = value.log_index + 1
-          AND sibling.event_kind = 'RecordChanged'
-          AND sibling.after_state ->> 'source_event' = 'AddrChanged'
-          AND sibling.after_state ->> 'record_key' = 'addr:60'
-          AND sibling.source_family = value.source_family
-          AND sibling.namespace = value.namespace
-          AND sibling.source_manifest_id IS NOT DISTINCT FROM value.source_manifest_id
-          AND lower(COALESCE(NULLIF(sibling.after_state ->> 'resolver', ''),
-                             NULLIF(sibling.raw_fact_ref ->> 'emitting_address', '')))
-            = lower(COALESCE(NULLIF(value.after_state ->> 'resolver', ''),
-                             NULLIF(value.raw_fact_ref ->> 'emitting_address', '')))
-          AND CASE
-              WHEN value.logical_name_id IS NOT NULL
-                  THEN sibling.logical_name_id = value.logical_name_id
-              WHEN value.after_state ->> 'resolver_record_id' IS NOT NULL
-                  THEN sibling.logical_name_id IS NULL
-                   AND sibling.after_state ->> 'resolver_record_id'
-                     = value.after_state ->> 'resolver_record_id'
-              ELSE sibling.logical_name_id IS NULL
-               AND lower(sibling.after_state ->> 'node') = lower(value.after_state ->> 'node')
-          END
-         WHERE value.normalized_event_id = ANY($1::bigint[])
-           AND value.event_kind = 'RecordChanged'
-           AND value.after_state ->> 'source_event' = 'AddressChanged'
-           AND value.after_state ->> 'record_key' = 'addr:60'
-           AND value.after_state ->> 'record_family' = 'addr'
-           AND value.after_state ->> 'selector_key' = '60'
-           AND value.log_index IS NOT NULL
-         ORDER BY value.normalized_event_id, sibling.normalized_event_id",
-    )
-    .bind(&values)
-    .fetch_all(pool)
-    .await
-    .context("failed to find the coin-60 pairs today's row serves")?;
-    rows.iter()
-        .map(|row| {
-            let position = |prefix: &str| -> Result<FamilyPosition> {
-                Ok(FamilyPosition {
-                    block_number: row.try_get(format!("{prefix}_block").as_str())?,
-                    transaction_index: row.try_get(format!("{prefix}_transaction").as_str())?,
-                    log_index: row.try_get(format!("{prefix}_log").as_str())?,
-                    event_identity: row.try_get(format!("{prefix}_identity").as_str())?,
-                })
-            };
-            Ok(CompatibilityPair {
-                record_key: "addr:60".to_owned(),
-                value_event_id: Some(row.try_get("value_id")?),
-                value_position: position("value")?,
-                sibling_event_id: Some(row.try_get("sibling_id")?),
-                sibling_position: position("sibling")?,
-            })
-        })
-        .collect()
 }
 
 async fn primary(pool: &PgPool, chain_id: &str, report: &mut ShadowReport) -> Result<()> {

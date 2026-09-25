@@ -646,6 +646,172 @@ async fn coin60_pairs_serve_the_address_changed_half_at_its_own_position() -> Re
     Ok(())
 }
 
+/// Today pairs through any current attribution arm, never checking that the halves share a
+/// manifest: a native value and a native sibling written under different manifests pair.
+#[tokio::test]
+async fn a_pair_across_manifests_is_served_as_today() -> Result<()> {
+    let fixture = case("ens_v1_pair_after_boundary")?;
+    let (database, pool) = database("pair_across_manifests").await?;
+    seed(&pool, fixture).await?;
+    let other: i64 = sqlx::query_scalar(
+        "INSERT INTO manifest_versions (manifest_version,namespace,source_family,chain_id,deployment_label,rollout_status,normalizer_version,file_path,manifest_payload)
+         SELECT 2,namespace,source_family,chain_id,'fixture-other','deprecated',normalizer_version,file_path || '.other',manifest_payload
+         FROM manifest_versions ORDER BY manifest_id LIMIT 1 RETURNING manifest_id",
+    )
+    .fetch_one(&pool)
+    .await?;
+    let moved = sqlx::query(
+        "UPDATE normalized_events SET source_manifest_id = $1, manifest_version = 2
+         WHERE after_state ->> 'source_event' = 'AddrChanged'",
+    )
+    .bind(other)
+    .execute(&pool)
+    .await?;
+    assert_eq!(moved.rows_affected(), 1);
+    run_window_expecting(
+        &pool,
+        11,
+        0,
+        11,
+        None,
+        RunMode::Normal,
+        &Expectations::none(),
+    )
+    .await?;
+    let family = load_family_record_inventory_detail(
+        &pool,
+        fixture.chain,
+        RESOURCE.parse()?,
+        FamilyAttribution::Given(Default::default()),
+    )
+    .await?
+    .context("no family row")?;
+    assert_eq!(family.compatibility_pairs.len(), 1);
+    database.cleanup().await
+}
+
+/// A named `AddressChanged` value and a node-keyed `AddrChanged` sibling are attributed through
+/// different arms (named and native). Today's pair join is per resource, not per arm, so they
+/// pair and today serves the `AddressChanged` value. Step 2's family pairs only within one arm,
+/// so it serves the later `AddrChanged` value instead; the harness expects today's pair and
+/// names that difference.
+#[tokio::test]
+async fn a_pair_across_attribution_arms_is_expected_as_today_serves_it() -> Result<()> {
+    let fixture = case("ens_v1_pair_after_boundary")?;
+    let (database, pool) = database("pair_across_arms").await?;
+    seed(&pool, fixture).await?;
+    let named = sqlx::query(
+        "UPDATE normalized_events value SET logical_name_id = pointer.logical_name_id
+         FROM normalized_events pointer
+         WHERE pointer.event_kind = 'ResolverChanged'
+           AND value.after_state ->> 'source_event' = 'AddressChanged'",
+    )
+    .execute(&pool)
+    .await?;
+    assert_eq!(named.rows_affected(), 1);
+    let ids: Vec<(i64, String)> = sqlx::query_as(
+        "SELECT normalized_event_id, after_state ->> 'source_event' FROM normalized_events
+         WHERE after_state ->> 'source_event' IN ('AddressChanged', 'AddrChanged')
+         ORDER BY log_index",
+    )
+    .fetch_all(&pool)
+    .await?;
+    let (value, sibling) = (ids[0].0, ids[1].0);
+    assert_eq!(
+        (ids[0].1.as_str(), ids[1].1.as_str()),
+        ("AddressChanged", "AddrChanged")
+    );
+    let logical_name_id = format!("ens:{NODE}");
+    let position = |id: &str, log: i64| {
+        json!({
+            "block_number": 11, "transaction_index": 0, "log_index": log,
+            "event_identity": format!("{}:{id}:11:{log}", fixture.id),
+        })
+    };
+    let pair = json!({
+        "record_key": "addr:60",
+        "value_event_id": value, "value_position": position("record-1", 3),
+        "sibling_event_id": sibling, "sibling_position": position("record-2", 4),
+    });
+    let entry = |address: &str, event: i64| {
+        json!({
+            "address": address, "binding_kind": "DeclaredRegistryPath",
+            "canonical_display_name": format!("{}.fixture", fixture.id),
+            "canonicality_summary": {"state": "canonical_lineage"},
+            "chain_positions": {"block_hash": block_hash(11), "block_number": 11},
+            "coin_type": "60",
+            "coverage": {"exhaustiveness": "not_asserted", "status": "projected"},
+            "logical_name_id": logical_name_id, "namehash": NODE, "namespace": "ens",
+            "normalized_name": format!("{}.fixture", fixture.id),
+            "provenance": {
+                "chain_id": fixture.chain,
+                "coverage": {"exhaustiveness": "not_asserted", "status": "projected"},
+                "logical_name_id": logical_name_id, "normalized_event_id": event,
+                "record_version_boundary_key": format!(
+                    "70:{logical_name_id};36:{RESOURCE};1:3;20:RecordVersionChanged;16:{};2:11;66:{};25:2027-01-15T08:00:11+00:00;",
+                    fixture.chain,
+                    block_hash(11)
+                ),
+                "resolver_address": RESOLVER,
+            },
+            "record_key": "addr:60", "record_resource_id": RESOURCE, "resource_id": RESOURCE,
+            "surface_binding_id": BINDING,
+        })
+    };
+    let entry_key = format!("entries[{logical_name_id}|{RESOURCE}|{BINDING}]");
+    let difference = |key: String, fields: Vec<(String, Option<Value>, Option<Value>)>| {
+        family_shadow::ExpectedDifference {
+            target: 11,
+            key,
+            fields,
+            times: 1,
+        }
+    };
+    let comparison = Expectations {
+        differences: vec![
+            difference(
+                format!("record_inventory {RESOURCE}"),
+                vec![
+                    (
+                        "entries[addr:60].value".into(),
+                        Some(json!(NONZERO20)),
+                        Some(json!(LATER20)),
+                    ),
+                    (
+                        "last_change.normalized_event_id".into(),
+                        Some(json!(value)),
+                        Some(json!(sibling)),
+                    ),
+                    (
+                        "provenance.record_event_ids".into(),
+                        Some(json!([value])),
+                        Some(json!([sibling])),
+                    ),
+                    ("compatibility_pairs[addr:60]".into(), Some(pair), None),
+                ],
+            ),
+            difference(
+                format!("resolves_to {NONZERO20} coin 60"),
+                vec![
+                    ("entries.count".into(), Some(json!(1)), Some(json!(0))),
+                    (entry_key.clone(), Some(entry(NONZERO20, value)), None),
+                ],
+            ),
+            difference(
+                format!("resolves_to {LATER20} coin 60"),
+                vec![
+                    ("entries.count".into(), Some(json!(0)), Some(json!(1))),
+                    (entry_key, None, Some(entry(LATER20, sibling))),
+                ],
+            ),
+        ],
+        ..Expectations::default()
+    };
+    run_window_expecting(&pool, 11, 0, 11, None, RunMode::Normal, &comparison).await?;
+    comparison.finish()?;
+    database.cleanup().await
+}
+
 async fn assert_terminal(fixture: &Case) -> Result<()> {
     let row = project_case_at(fixture, 13, Execution::FromZero).await?;
     assert_entry_and_answer(

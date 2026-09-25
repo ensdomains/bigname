@@ -859,6 +859,210 @@ async fn a_raw_bytes_pair_address_behind_a_lifted_version_is_found_inversely() -
     Ok(())
 }
 
+/// Today's linked arm admits a record-id write only with `storage_model = resolver_record_id` and
+/// the resolver named in its payload (`linked_records.rs`, `project_linked_record_events`). A
+/// linked `AddressChanged` value pairs with a linked `AddrChanged` one log later; the same record
+/// id's `AddrChanged` without the storage model is attributed to nothing, so it pairs nothing.
+///
+/// Step 2's family pairs node-keyed writes only, so for the linked pair it serves the later
+/// `AddrChanged` value where today serves the `AddressChanged` one; the harness names that
+/// difference. The pinned record-id resolver emits only `AddressUpdated` for an address write
+/// (`.refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L174` @ ens_v2@a971bd64), so no
+/// such pair comes from that source.
+#[tokio::test]
+async fn a_record_id_pair_needs_the_sibling_admitted_by_the_linked_arm() -> Result<()> {
+    let (db, pool) = database("record_id_pair_admission").await?;
+    seed(&pool).await?;
+    for n in 19..=20 {
+        sqlx::query("INSERT INTO chain_lineage (chain_id,block_hash,block_number,block_timestamp,canonicality_state) VALUES ($1,$2,$3,to_timestamp($3::double precision),'canonical')").bind(CHAIN).bind(hash(n)).bind(n).execute(&pool).await?;
+    }
+    let address = |source: &str, value: &str, linked: bool| {
+        let mut after = json!({"source_event":source,"resolver":RESOLVER,"resolver_record_id":"2","record_key":"addr:60","record_family":"addr","selector_key":"60","coin_type":"60","value_retained":true,"value":value});
+        if linked {
+            after["storage_model"] = json!("resolver_record_id");
+        }
+        after
+    };
+    let pairs = |pool: PgPool| async move {
+        let family = bigname_storage::families::records::load_family_record_inventory_detail(
+            &pool,
+            CHAIN,
+            resource(2).parse()?,
+            bigname_storage::families::records::FamilyAttribution::Given(Default::default()),
+        )
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("no family row"))?;
+        let served: Value = sqlx::query_scalar(
+            "SELECT entry -> 'value' FROM record_inventory_current,
+                    jsonb_array_elements(entries) entry
+             WHERE resource_id = $1::uuid AND entry ->> 'record_key' = 'addr:60'",
+        )
+        .bind(resource(2))
+        .fetch_one(&pool)
+        .await?;
+        anyhow::Ok((family.compatibility_pairs.len(), served))
+    };
+    let (value_a, sibling_a) = (INVERSE_A, "0x6666666666666666666666666666666666666666");
+    event(
+        &pool,
+        "linked-value",
+        19,
+        0,
+        "RecordChanged",
+        None,
+        address("AddressChanged", value_a, true),
+    )
+    .await?;
+    event(
+        &pool,
+        "linked-sibling",
+        19,
+        1,
+        "RecordChanged",
+        None,
+        address("AddrChanged", sibling_a, true),
+    )
+    .await?;
+    let id = |identity: &'static str| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT normalized_event_id FROM normalized_events WHERE event_identity = $1",
+            )
+            .bind(identity)
+            .fetch_one(&pool)
+            .await
+        }
+    };
+    let (value, sibling) = (id("linked-value").await?, id("linked-sibling").await?);
+    let position = |identity: &str, log: i64| {
+        json!({"block_number": 19, "transaction_index": 0, "log_index": log,
+               "event_identity": identity})
+    };
+    let mut linked_pair = Expectations {
+        differences: vec![ExpectedDifference {
+            target: 19,
+            key: format!("record_inventory {}", resource(2)),
+            fields: vec![
+                (
+                    "entries[addr:60].value".into(),
+                    Some(json!(value_a)),
+                    Some(json!(sibling_a)),
+                ),
+                (
+                    "provenance.record_event_ids".into(),
+                    Some(json!([
+                        id("empty-text").await?,
+                        id("empty-contenthash").await?,
+                        value,
+                        id("link-b-two").await?
+                    ])),
+                    Some(json!([
+                        id("empty-text").await?,
+                        id("empty-contenthash").await?,
+                        sibling,
+                        id("link-b-two").await?
+                    ])),
+                ),
+                (
+                    "compatibility_pairs[addr:60]".into(),
+                    Some(json!({
+                        "record_key": "addr:60",
+                        "value_event_id": value, "value_position": position("linked-value", 0),
+                        "sibling_event_id": sibling,
+                        "sibling_position": position("linked-sibling", 1),
+                    })),
+                    None,
+                ),
+            ],
+            times: 1,
+        }],
+        ..Expectations::default()
+    };
+    let link = id("link-b-two").await?;
+    let logical_name_id = format!("ens:{}", node(2));
+    let coverage = json!({"exhaustiveness": "not_asserted", "status": "projected"});
+    let entry = |address: &str, event: i64| {
+        json!({
+            "address": address, "binding_kind": "DeclaredRegistryPath",
+            "canonical_display_name": "record2.eth",
+            "canonicality_summary": {"state": "canonical_lineage"},
+            "chain_positions": {"block_hash": hash(19), "block_number": 19},
+            "coin_type": "60", "coverage": coverage,
+            "logical_name_id": logical_name_id, "namehash": node(2), "namespace": "ens",
+            "normalized_name": "record2.eth",
+            "provenance": {
+                "chain_id": CHAIN, "coverage": coverage, "logical_name_id": logical_name_id,
+                "normalized_event_id": event,
+                "record_version_boundary_key": format!(
+                    "70:{logical_name_id};36:{};{}:{link};20:ResolverRecordLinked;16:{CHAIN};2:14;66:{};25:1970-01-01T00:00:14+00:00;",
+                    resource(2),
+                    link.to_string().len(),
+                    hash(14)
+                ),
+                "resolver_address": RESOLVER,
+            },
+            "record_key": "addr:60", "record_resource_id": resource(2),
+            "resource_id": resource(2), "surface_binding_id": resource(102),
+        })
+    };
+    let entry_key = format!(
+        "entries[{logical_name_id}|{}|{}]",
+        resource(2),
+        resource(102)
+    );
+    for (address, today, family) in [
+        (value_a, Some(entry(value_a, sibling)), None),
+        (sibling_a, None, Some(entry(sibling_a, sibling))),
+    ] {
+        let count = |side: &Option<Value>| json!(usize::from(side.is_some()));
+        linked_pair.differences.push(ExpectedDifference {
+            target: 19,
+            key: format!("resolves_to {address} coin 60"),
+            fields: vec![
+                (
+                    "entries.count".into(),
+                    Some(count(&today)),
+                    Some(count(&family)),
+                ),
+                (entry_key.clone(), today, family),
+            ],
+            times: 1,
+        });
+    }
+    run_expecting(&pool, 19, None, RunMode::Normal, &linked_pair).await?;
+    linked_pair.finish()?;
+    assert_eq!(pairs(pool.clone()).await?, (0, json!(value_a)));
+    let (value_b, sibling_b) = (
+        "0x7777777777777777777777777777777777777777",
+        "0x8888888888888888888888888888888888888888",
+    );
+    event(
+        &pool,
+        "unlinked-value",
+        20,
+        0,
+        "RecordChanged",
+        None,
+        address("AddressChanged", value_b, true),
+    )
+    .await?;
+    event(
+        &pool,
+        "unlinked-sibling",
+        20,
+        1,
+        "RecordChanged",
+        None,
+        address("AddrChanged", sibling_b, false),
+    )
+    .await?;
+    run(&pool, 20, Some(19), RunMode::Normal).await?;
+    assert_eq!(pairs(pool.clone()).await?, (0, json!(value_b)));
+    db.cleanup().await?;
+    Ok(())
+}
+
 // A normalized record whose `value` is an explicit JSON null, as
 // crates/project/testdata/sql/stage/linked_records_fixture.sql sets up, is a success to today's
 // builder (`after_state ? 'value'`). The family row keeps that status though its value column
