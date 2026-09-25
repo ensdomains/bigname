@@ -1616,14 +1616,19 @@ pub fn control_positions(facts: &NameFacts) -> Vec<Position> {
 /// set family intake reads (crates/project/src/families/input.rs:175-195, :309-319). `event` is
 /// the normalized_events alias. Every log read an excuse rests on takes this predicate.
 fn published(target: &str) -> String {
+    published_as("event", target)
+}
+
+/// `published` for the normalized_events alias `event`.
+fn published_as(event: &str, target: &str) -> String {
     format!(
-        "event.block_number <= {target}
-         AND event.consumer_visibility = 'activated'
-         AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
+        "{event}.block_number <= {target}
+         AND {event}.consumer_visibility = 'activated'
+         AND {event}.canonicality_state IN ('canonical', 'safe', 'finalized')
          AND EXISTS (SELECT 1 FROM chain_lineage lineage
-                     WHERE lineage.chain_id = event.chain_id
-                       AND lineage.block_number = event.block_number
-                       AND lineage.block_hash = event.block_hash
+                     WHERE lineage.chain_id = {event}.chain_id
+                       AND lineage.block_number = {event}.block_number
+                       AND lineage.block_hash = {event}.block_hash
                        AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized'))"
     )
 }
@@ -1886,15 +1891,13 @@ pub fn one_report_per_target(reports: &[Counted], targets: &[i64]) -> Result<()>
     Ok(())
 }
 
-/// The fixture corpus's counted fields, asserted exactly against counts read from its event log
-/// at each target without the family readers (crates/project/tests/rebuild_performance/seed.sql):
-/// - an ENSv2 name whose interpreter path-expiry release (the `expired` rows, no name, the token
-///   resource) is not followed on that resource by a grant, reservation or named release is served
-///   active today and released by the families: eight fields each, and the two control-owner
-///   fields again for those whose token was transferred before the target.
-///
-/// No same-block delta may pass on the corpus.
-pub async fn assert_fixture_corpus_counts(pool: &PgPool, targets: &[i64]) -> Result<()> {
+/// The fixture corpus's counted fields, asserted exactly against `corpus_expectation` at each
+/// target. No same-block delta may pass on the corpus.
+pub async fn assert_fixture_corpus_counts(
+    pool: &PgPool,
+    chain: &str,
+    targets: &[i64],
+) -> Result<()> {
     let reports = take_reports();
     one_report_per_target(&reports, targets)?;
     for (target, delta, known) in reports {
@@ -1902,60 +1905,83 @@ pub async fn assert_fixture_corpus_counts(pool: &PgPool, targets: &[i64]) -> Res
             delta.is_empty(),
             "target {target}: same-block deltas {delta:?}"
         );
-        let expired: Vec<(String, bool)> = sqlx::query_as(
-            "SELECT name.logical_name_id, EXISTS (
-                        SELECT 1 FROM normalized_events transfer
-                        WHERE transfer.resource_id = release.resource_id
-                          AND transfer.logical_name_id = name.logical_name_id
-                          AND transfer.event_kind = 'TokenControlTransferred'
-                          AND transfer.block_number <= $1)
-             FROM name_current name
-             JOIN normalized_events release ON release.resource_id = name.resource_id
-             WHERE release.logical_name_id IS NULL
-               AND release.event_kind = 'RegistrationReleased'
-               AND release.after_state ->> 'source_event' = 'RegistryPathExpired'
-               AND release.block_number <= $1
-               AND NOT EXISTS (
-                   SELECT 1 FROM normalized_events later
-                   WHERE later.resource_id = release.resource_id
-                     AND later.block_number > release.block_number
-                     AND later.block_number <= $1
-                     AND (later.event_kind IN ('RegistrationGranted', 'RegistrationReserved')
-                          OR (later.event_kind = 'RegistrationReleased'
-                              AND later.logical_name_id IS NOT NULL)))",
-        )
-        .bind(target)
-        .fetch_all(pool)
-        .await?;
-        let cause = "served_membership_skips_unnamed_path_expiry";
-        let transferred = expired
-            .iter()
-            .filter(|(_, transferred)| *transferred)
-            .count();
-        let mut expected: BTreeMap<String, usize> = BTreeMap::new();
-        for field in [
-            "registration/status",
-            "registration/latest_event_kind",
-            "registration/authority_kind",
-            "registration/registrant",
-            "registration/released_at",
-            "control/status",
-            "control/expiry",
-            "control/registrant",
-        ] {
-            if !expired.is_empty() {
-                expected.insert(format!("{cause}:{field}"), expired.len());
-            }
-        }
-        for field in ["control/latest_event_kind", "control/registry_owner"] {
-            if transferred > 0 {
-                expected.insert(format!("{cause}:{field}"), transferred);
-            }
-        }
+        let expected = corpus_expectation(pool, chain, target).await?;
         anyhow::ensure!(
             known == expected,
             "target {target}: counted {known:?}, the event log gives {expected:?}"
         );
     }
     Ok(())
+}
+
+/// The corpus's named-cause counts at `target`, read from its publication-visible event log
+/// (`published`, every event reference) without the family readers (crates/project/tests/rebuild_performance/seed.sql): an ENSv2 name whose
+/// interpreter path-expiry release (the `expired` rows, no name, the token resource) is not
+/// followed on that resource by a grant, reservation or named release is served active today
+/// and released by the families: eight fields each, and the two control-owner fields again for
+/// those whose token was transferred before the target.
+pub async fn corpus_expectation(
+    pool: &PgPool,
+    chain: &str,
+    target: i64,
+) -> Result<BTreeMap<String, usize>> {
+    let sql = format!(
+        "SELECT name.logical_name_id, EXISTS (
+                    SELECT 1 FROM normalized_events transfer
+                    WHERE transfer.chain_id = $2
+                      AND transfer.resource_id = release.resource_id
+                      AND transfer.logical_name_id = name.logical_name_id
+                      AND transfer.event_kind = 'TokenControlTransferred'
+                      AND {transfer})
+         FROM name_current name
+         JOIN normalized_events release ON release.resource_id = name.resource_id
+         WHERE release.chain_id = $2
+           AND release.logical_name_id IS NULL
+           AND release.event_kind = 'RegistrationReleased'
+           AND release.after_state ->> 'source_event' = 'RegistryPathExpired'
+           AND {release}
+           AND NOT EXISTS (
+               SELECT 1 FROM normalized_events later
+               WHERE later.chain_id = $2
+                 AND later.resource_id = release.resource_id
+                 AND later.block_number > release.block_number
+                 AND {later}
+                 AND (later.event_kind IN ('RegistrationGranted', 'RegistrationReserved')
+                      OR (later.event_kind = 'RegistrationReleased'
+                          AND later.logical_name_id IS NOT NULL)))",
+        transfer = published_as("transfer", "$1"),
+        release = published_as("release", "$1"),
+        later = published_as("later", "$1"),
+    );
+    let expired: Vec<(String, bool)> = sqlx::query_as(&sql)
+        .bind(target)
+        .bind(chain)
+        .fetch_all(pool)
+        .await?;
+    let cause = "served_membership_skips_unnamed_path_expiry";
+    let transferred = expired
+        .iter()
+        .filter(|(_, transferred)| *transferred)
+        .count();
+    let mut expected: BTreeMap<String, usize> = BTreeMap::new();
+    for field in [
+        "registration/status",
+        "registration/latest_event_kind",
+        "registration/authority_kind",
+        "registration/registrant",
+        "registration/released_at",
+        "control/status",
+        "control/expiry",
+        "control/registrant",
+    ] {
+        if !expired.is_empty() {
+            expected.insert(format!("{cause}:{field}"), expired.len());
+        }
+    }
+    for field in ["control/latest_event_kind", "control/registry_owner"] {
+        if transferred > 0 {
+            expected.insert(format!("{cause}:{field}"), transferred);
+        }
+    }
+    Ok(expected)
 }

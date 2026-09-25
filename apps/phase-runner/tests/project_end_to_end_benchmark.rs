@@ -175,7 +175,7 @@ async fn fixture_corpus_publishes_hydrates_reads_and_matches_a_rebuild() -> Resu
     shadow::take_reports();
     let compared = run(pool, previous, &targets, Some(FIXTURE_CHILDREN_PAGE)).await?;
     ensure!(compared.len() == targets.len(), "every target is compared");
-    shadow::assert_fixture_corpus_counts(pool, &targets).await?;
+    shadow::assert_fixture_corpus_counts(pool, CHAIN, &targets).await?;
     for compared in &compared {
         // The harness cannot tell whether a dropped key was in the batch's full scope (see
         // `endpoint::Outcome::dropped`), so the fixture must produce none.

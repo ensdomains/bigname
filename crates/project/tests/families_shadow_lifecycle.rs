@@ -1515,3 +1515,92 @@ async fn an_unnamed_release_expiry_is_checked_against_the_log() -> Result<()> {
     );
     fixture.cleanup().await
 }
+
+/// Codex thread PRRT_kwDOSJpxAs6l8A2X: the corpus expectation reads the same publication-visible
+/// events as the comparison. An unnamed path-expiry release counts its name on eight fields; the
+/// release made a candidate, or moved to an orphaned hash of its block, counts nothing, and a
+/// later grant that is a candidate does not stop it counting.
+#[tokio::test]
+async fn the_corpus_expectation_reads_the_published_log_only() -> Result<()> {
+    use shadow_support::compare::corpus_expectation;
+    const ORPHAN: &str = "0x00000000000000000000000000000000000000000000000000000000000dead0";
+    for case in [
+        "visible",
+        "unactivated",
+        "wrong lineage",
+        "candidate later grant",
+    ] {
+        let fixture = Fixture::new("families_shadow_corpus_expectation", 20).await?;
+        let k1 = uuid(1);
+        v2_binding(&fixture, &k1).await?;
+        v2(
+            &fixture,
+            10,
+            "RegistrationGranted",
+            Some(&k1),
+            json!({"status": "registered", "registrant": ALICE, "expiry": 1_800_000_100u64}),
+        )
+        .await?;
+        unnamed_path_expiry(&fixture, "path-expiry", 14, &k1, 1_800_000_150).await?;
+        shadow_support::publish(&fixture, 16).await?;
+        match case {
+            "unactivated" => {
+                sqlx::query(
+                    "UPDATE normalized_events SET consumer_visibility = 'candidate',
+                         migration_correlation_ids = ARRAY['fixture']
+                     WHERE event_identity = 'path-expiry'",
+                )
+                .execute(&fixture.pool)
+                .await?;
+            }
+            "wrong lineage" => {
+                sqlx::query(
+                    "INSERT INTO chain_lineage (chain_id, block_hash, parent_hash, block_number,
+                         block_timestamp, canonicality_state)
+                     VALUES ($1, $2, $3, 14, to_timestamp(1800000168), 'orphaned')",
+                )
+                .bind(CHAIN)
+                .bind(ORPHAN)
+                .bind(support::hash(13))
+                .execute(&fixture.pool)
+                .await?;
+                sqlx::query(
+                    "UPDATE normalized_events SET block_hash = $1
+                     WHERE event_identity = 'path-expiry'",
+                )
+                .bind(ORPHAN)
+                .execute(&fixture.pool)
+                .await?;
+            }
+            "candidate later grant" => {
+                let id = v2(
+                    &fixture,
+                    15,
+                    "RegistrationGranted",
+                    Some(&k1),
+                    json!({"status": "registered", "registrant": ALICE}),
+                )
+                .await?;
+                sqlx::query(
+                    "UPDATE normalized_events SET consumer_visibility = 'candidate',
+                         migration_correlation_ids = ARRAY['fixture']
+                     WHERE normalized_event_id = $1",
+                )
+                .bind(id)
+                .execute(&fixture.pool)
+                .await?;
+            }
+            _ => {}
+        }
+        let expected = corpus_expectation(&fixture.pool, CHAIN, 16).await?;
+        let counted = !matches!(case, "unactivated" | "wrong lineage");
+        assert_eq!(
+            expected.len(),
+            if counted { 8 } else { 0 },
+            "{case}: {expected:?}"
+        );
+        assert!(expected.values().all(|count| *count == 1), "{case}");
+        fixture.cleanup().await?;
+    }
+    Ok(())
+}
