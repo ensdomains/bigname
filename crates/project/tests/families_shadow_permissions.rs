@@ -85,7 +85,7 @@ async fn a_delegate_who_is_also_an_operator_keeps_the_operator_set() -> Result<(
     .await?;
     approval(&fixture, 12, 2, HOLDER, DELEGATE, true).await?;
     let report = publish_and_compare(&fixture, TARGET).await?;
-    assert_eq!(report.mismatched, 0, "{:?}", report.lines);
+    shadow_support::assert_counts(&report, &[], &[]);
     assert_eq!(report.accounts, 2);
     // The delegate's token approval and the holder's approval of it collide on one subject: the
     // operator set is served and the narrower delegate row is not.
@@ -135,7 +135,7 @@ async fn a_holder_transfer_moves_the_operator_rows_to_the_new_owner() -> Result<
     )
     .await?;
     let report = publish_and_compare(&fixture, TARGET).await?;
-    assert_eq!(report.mismatched, 0, "{:?}", report.lines);
+    shadow_support::assert_counts(&report, &[], &[]);
     // The old holder's operator falls away with the token and the new holder's arrives.
     assert_eq!(
         rows(&fixture, &resource).await?,
@@ -149,7 +149,7 @@ async fn an_expired_emancipated_wrapper_drops_its_holder_row() -> Result<()> {
     let fixture = Fixture::new("families_shadow_permissions_expired", 20).await?;
     let resource = wrapped(&fixture, PARENT_CANNOT_CONTROL, timestamp(TARGET) - 1).await?;
     let report = publish_and_compare(&fixture, TARGET).await?;
-    assert_eq!(report.mismatched, 0, "{:?}", report.lines);
+    shadow_support::assert_counts(&report, &[], &[]);
     assert_eq!(rows(&fixture, &resource).await?, vec![]);
     fixture.cleanup().await
 }
@@ -203,7 +203,7 @@ async fn a_registry_operator_reaches_the_lease_its_owner_holds() -> Result<()> {
         )
         .await?;
     let report = publish_and_compare(&fixture, TARGET).await?;
-    assert_eq!(report.mismatched, 0, "{:?}", report.lines);
+    shadow_support::assert_counts(&report, &[], &[]);
     assert_eq!(report.accounts, 1);
     let operators: Vec<String> = bigname_storage::load_effective_permissions_by_resource_ids(
         &fixture.pool,

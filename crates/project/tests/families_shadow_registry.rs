@@ -108,7 +108,7 @@ async fn a_surface_binding_serves_its_registry_owner() -> Result<()> {
     let lease = uuid(1);
     bound(&fixture, &lease).await?;
     let report = publish_and_compare(&fixture, 12).await?;
-    assert_eq!(report.mismatched, 0);
+    shadow_support::assert_counts(&report, &[], &[]);
     assert_eq!(
         summary(&fixture, &lease).await?,
         Some(
@@ -137,7 +137,7 @@ async fn a_surface_unbinding_clears_the_registry_owner_with_its_event() -> Resul
         )
         .await?;
     let report = publish_and_compare(&fixture, 16).await?;
-    assert_eq!(report.mismatched, 0);
+    shadow_support::assert_counts(&report, &[], &[]);
     let unbound: i64 = sqlx::query_scalar(
         "SELECT normalized_event_id FROM normalized_events WHERE event_identity = $1",
     )
@@ -166,7 +166,7 @@ async fn the_old_registry_then_the_current_one_move_the_generation() -> Result<(
             transferred(&fixture, 13, OWNER, "registry").await?;
         }
         let report = publish_and_compare(&fixture, 16).await?;
-        assert_eq!(report.mismatched, 0, "{:?}", report.lines);
+        shadow_support::assert_counts(&report, &[], &[]);
         let selection = selection(&fixture).await?;
         if current {
             assert_eq!(selection["registry_generation"], json!("current"));
@@ -186,7 +186,7 @@ async fn a_zero_registry_owner_keeps_its_getter_facts() -> Result<()> {
     bound(&fixture, &uuid(1)).await?;
     transferred(&fixture, 11, ZERO, "registry").await?;
     let report = publish_and_compare(&fixture, 16).await?;
-    assert_eq!(report.mismatched, 0, "{:?}", report.lines);
+    shadow_support::assert_counts(&report, &[], &[]);
     let selection = selection(&fixture).await?;
     assert_eq!(selection["registry_generation"], json!("current"));
     assert_eq!(selection["registry_handoff_block_number"], json!(11));

@@ -10,8 +10,9 @@ mod shadow_support;
 mod support;
 
 use anyhow::Result;
+use bigname_storage::families::control::lifecycle::ShadowName;
 use serde_json::{Value, json};
-use shadow_support::{Served, publish_and_compare};
+use shadow_support::{Served, assert_counts, publish_and_compare};
 use support::{Event, Fixture, uuid};
 
 const REGISTRY: &str = "0x00000000000000000000000000000000000000e5";
@@ -58,6 +59,36 @@ async fn v2(
 fn path_expiry(expiry: i64) -> Value {
     json!({"source_event": "RegistryPathExpired", "derived_from": "interpreter_state",
            "terminal_reason": "registry_name_binding_expired", "expiry": expiry})
+}
+
+/// The interpreter's path-expiry release of `resource` in the shape the adapter emits it: the
+/// resource and no name, with no transaction or log (a block-boundary event), and the path-expiry
+/// facts (crates/adapters/src/schema_v2/protocol/v2_registry/expiry.rs:57-64).
+async fn unnamed_path_expiry(
+    fixture: &Fixture,
+    identity: &str,
+    block: i64,
+    resource: &str,
+    expiry: i64,
+) -> Result<()> {
+    let mut after = path_expiry(expiry);
+    after["registry_contract_instance_id"] = json!("R");
+    after["token_id"] = json!("7");
+    fixture
+        .event(
+            Event::new(identity, block, 0, "RegistrationReleased", V2_REGISTRY)
+                .resource(resource)
+                .after(after)
+                .raw(json!({"emitting_address": REGISTRY}))
+                .synthesised(),
+        )
+        .await?;
+    Ok(())
+}
+
+/// The name's selected event, status and expiry as the shadow reads them.
+async fn shadow_reads(fixture: &Fixture, target: i64) -> Result<(Served, ShadowName)> {
+    shadow_support::name(fixture, target, &name(1)).await
 }
 
 /// The registration and control fields of name 1, served and shadow, asserted equal.
@@ -128,7 +159,8 @@ async fn a_grant_serves_its_registrant_and_expiry() -> Result<()> {
     )
     .await?;
     let report = publish_and_compare(&fixture, 12).await?;
-    assert_eq!((report.names, report.mismatched), (1, 0));
+    assert_eq!(report.names, 1);
+    shadow_support::assert_counts(&report, &[], &[]);
     assert_eq!(report.equal, report.names + report.resources);
     let (served, _) = assert_name_equal(&fixture, 12).await?;
     assert_eq!(
@@ -161,7 +193,7 @@ async fn grant_then_expiry_change_serves_the_expiry_change() -> Result<()> {
     )
     .await?;
     let report = publish_and_compare(&fixture, 14).await?;
-    assert_eq!(report.mismatched, 0);
+    shadow_support::assert_counts(&report, &[], &[]);
     let (served, _) = assert_name_equal(&fixture, 14).await?;
     assert_eq!(
         served.registration("latest_event_kind"),
@@ -172,8 +204,13 @@ async fn grant_then_expiry_change_serves_the_expiry_change() -> Result<()> {
     fixture.cleanup().await
 }
 
+/// G, P, X: a grant, the interpreter's unnamed path-expiry release on the same resource, then an
+/// expiry change. The key's candidate is the path release, so the families serve the name
+/// released with the lapsed expiry the later change set; today's name-scoped membership never
+/// sees the release and serves the grant as active. Every differing field is the disclosed
+/// served-side difference, counted exactly.
 #[tokio::test]
-async fn grant_path_expiry_then_expiry_change_keeps_the_path_release() -> Result<()> {
+async fn grant_path_expiry_then_expiry_change_serves_the_path_release() -> Result<()> {
     let fixture = Fixture::new("families_shadow_path_expiry", 20).await?;
     let k1 = uuid(1);
     v2_binding(&fixture, &k1).await?;
@@ -185,14 +222,7 @@ async fn grant_path_expiry_then_expiry_change_keeps_the_path_release() -> Result
         json!({"status": "registered", "registrant": ALICE, "expiry": 1_800_000_100u64}),
     )
     .await?;
-    v2(
-        &fixture,
-        12,
-        "RegistrationReleased",
-        None,
-        path_expiry(1_800_000_100),
-    )
-    .await?;
+    unnamed_path_expiry(&fixture, "path-expiry", 12, &k1, 1_800_000_100).await?;
     v2(
         &fixture,
         14,
@@ -202,16 +232,33 @@ async fn grant_path_expiry_then_expiry_change_keeps_the_path_release() -> Result
     )
     .await?;
     let report = publish_and_compare(&fixture, 16).await?;
-    assert_eq!(report.mismatched, 0);
-    let (served, trace) = assert_name_equal(&fixture, 16).await?;
-    // The path release stays the key's candidate; the later expiry change is the latest kind
-    // and gives the expiry, and nothing retires the name.
-    assert_eq!(trace["key_candidates"][0]["kind"], json!("PathExpiry"));
+    let cause = "served_membership_skips_unnamed_path_expiry";
+    assert_counts(
+        &report,
+        &[
+            (&format!("{cause}:registration/status"), 1),
+            (&format!("{cause}:registration/authority_kind"), 1),
+            (&format!("{cause}:registration/registrant"), 1),
+            (&format!("{cause}:control/status"), 1),
+            (&format!("{cause}:control/expiry"), 1),
+            (&format!("{cause}:control/registrant"), 1),
+        ],
+        &[],
+    );
+    assert_eq!(report.served_side_bug_names, vec![name(1)]);
+    let (served, shadow) = shadow_reads(&fixture, 16).await?;
     assert_eq!(
-        served.registration("latest_event_kind"),
+        shadow.trace["key_candidates"][0]["kind"],
+        json!("PathExpiry")
+    );
+    assert_eq!(shadow.trace["selected_event"], json!("path-expiry"));
+    assert_eq!(shadow.registration["status"], json!("released"));
+    assert_eq!(shadow.registration["expiry"], json!(1_800_000_200u64));
+    assert_eq!(
+        shadow.registration["latest_event_kind"],
         json!("ExpiryChanged")
     );
-    assert_eq!(served.registration("expiry"), json!(1_800_000_200u64));
+    assert_eq!(shadow.control["status"], json!("unregistered"));
     assert_eq!(served.registration("status"), json!("active"));
     fixture.cleanup().await
 }
@@ -238,7 +285,7 @@ async fn grant_then_reservation_serves_reserved_with_the_grant_time() -> Result<
     )
     .await?;
     let report = publish_and_compare(&fixture, 14).await?;
-    assert_eq!(report.mismatched, 0);
+    shadow_support::assert_counts(&report, &[], &[]);
     let (served, _) = assert_name_equal(&fixture, 14).await?;
     assert_eq!(served.registration("status"), json!("reserved"));
     assert_eq!(
@@ -270,7 +317,7 @@ async fn reservation_then_expiry_change_keeps_the_reservation_kind() -> Result<(
     )
     .await?;
     let report = publish_and_compare(&fixture, 14).await?;
-    assert_eq!(report.mismatched, 0);
+    shadow_support::assert_counts(&report, &[], &[]);
     let (served, _) = assert_name_equal(&fixture, 14).await?;
     assert_eq!(
         served.registration("latest_event_kind"),
@@ -309,7 +356,7 @@ async fn a_null_resource_release_joins_the_associated_key_and_the_other_grant_wi
     )
     .await?;
     let report = publish_and_compare(&fixture, 16).await?;
-    assert_eq!(report.mismatched, 0);
+    shadow_support::assert_counts(&report, &[], &[]);
     let (served, trace) = assert_name_equal(&fixture, 16).await?;
     // The release follows the association to K2 and makes K2's candidate explicit; K1's active
     // grant wins the cross-key preference, served with the identity mismatch: no registrant or
@@ -329,11 +376,12 @@ async fn a_null_resource_release_joins_the_associated_key_and_the_other_grant_wi
     fixture.cleanup().await
 }
 
-/// Two grants of one triple in one transaction, inserted so the generated ids run against the
-/// log order: the families take the later log (D12), and a production difference, if any, is
-/// counted as the disclosed same-block delta rather than a mismatch.
+/// Two grants of one triple on two resources in one transaction, inserted so the generated ids
+/// run against the log order. With no null-resource event to follow the association, each key
+/// keeps its own active candidate and the binding's key is preferred in either order, so the
+/// families and today's read agree and nothing is excused.
 #[tokio::test]
-async fn two_grants_in_one_transaction_take_the_later_log() -> Result<()> {
+async fn two_grants_on_two_keys_in_one_transaction_serve_the_binding_key() -> Result<()> {
     let fixture = Fixture::new("families_shadow_d12", 20).await?;
     let (k1, k2) = (uuid(1), uuid(2));
     v2_binding(&fixture, &k2).await?;
@@ -356,19 +404,16 @@ async fn two_grants_in_one_transaction_take_the_later_log() -> Result<()> {
             .await?;
     }
     let report = publish_and_compare(&fixture, 12).await?;
-    assert_eq!(report.mismatched, 0);
     let (served, shadow) = shadow_support::name(&fixture, 12, &name(1)).await?;
     assert_eq!(
         shadow.registration["registrant"],
         json!(BOB),
         "the D12 answer"
     );
-    if served.registration("registrant") != json!(BOB) {
-        assert_eq!(
-            report.expected_delta, 1,
-            "the production difference is disclosed"
-        );
-    }
+    // The grants sit on different keys, so each key keeps its own candidate and the binding's
+    // key wins in both orders: no difference, and none may be excused.
+    assert_eq!(served.registration("registrant"), json!(BOB));
+    assert_counts(&report, &[], &[]);
     fixture.cleanup().await
 }
 
@@ -410,7 +455,6 @@ async fn synthesised_events_in_one_block_take_the_identity_order() -> Result<()>
             .await?;
     }
     let report = publish_and_compare(&fixture, 12).await?;
-    assert_eq!(report.mismatched, 0);
     let (served, shadow) = shadow_support::name(&fixture, 12, &name(1)).await?;
     assert_eq!(
         shadow.registration["latest_event_kind"],
@@ -423,6 +467,15 @@ async fn synthesised_events_in_one_block_take_the_identity_order() -> Result<()>
         "the production answer differs"
     );
     assert_eq!(report.expected_delta, 1, "and the difference is disclosed");
+    assert_counts(
+        &report,
+        &[],
+        &[
+            ("d12_same_block_order:registration/latest_event_kind", 1),
+            ("d12_same_block_order:registration/expiry", 1),
+            ("d12_same_block_order:control/expiry", 1),
+        ],
+    );
     fixture.cleanup().await
 }
 
@@ -493,7 +546,7 @@ async fn an_ensv1_lease_serves_its_transfer_and_renewal() -> Result<()> {
     )
     .await?;
     let report = publish_and_compare(&fixture, 16).await?;
-    assert_eq!(report.mismatched, 0);
+    shadow_support::assert_counts(&report, &[], &[]);
     let (served, _) = assert_name_equal(&fixture, 16).await?;
     assert_eq!(served.registration("registrant"), json!(BOB));
     assert_eq!(served.registration("expiry"), json!(2_100_000_000u64));
@@ -528,7 +581,7 @@ async fn an_ensv1_release_names_its_before_state_registrant() -> Result<()> {
         )
         .await?;
     let report = publish_and_compare(&fixture, 16).await?;
-    assert_eq!(report.mismatched, 0);
+    shadow_support::assert_counts(&report, &[], &[]);
     let (served, _) = assert_name_equal(&fixture, 16).await?;
     assert_eq!(
         served.registration("latest_event_kind"),
@@ -560,12 +613,13 @@ async fn a_grant_without_authority_kind_is_the_known_default_discrepancy() -> Re
         )
         .await?;
     let report = publish_and_compare(&fixture, 12).await?;
-    assert_eq!(report.mismatched, 0);
-    assert_eq!(
-        report
-            .known_discrepancy
-            .get("authority_kind_defaulted_to_registrar"),
-        Some(&1)
+    assert_counts(
+        &report,
+        &[(
+            "authority_kind_defaulted_to_registrar:registration/authority_kind",
+            1,
+        )],
+        &[],
     );
     let (served, shadow) = shadow_support::name(&fixture, 12, &name(1)).await?;
     assert_eq!(served.registration("authority_kind"), Value::Null);
@@ -573,13 +627,14 @@ async fn a_grant_without_authority_kind_is_the_known_default_discrepancy() -> Re
     fixture.cleanup().await
 }
 
-/// History A: grant, path expiry, explicit release. The path release lies between the grant and
-/// the explicit release, so the explicit release has no witness and the path release is the
-/// key's candidate. The interpreter's path release carries no resource, so the released-for-
-/// another-resource exclusion (build.sql:339-343) drops it against the bound resource and the
-/// name serves the binding as active, in both reads.
+/// History A: grant, the interpreter's unnamed path-expiry release, explicit release, all on one
+/// resource. The path release lies between the grant and the explicit release, so the explicit
+/// release has no witness and the path release is the key's candidate: the families serve P
+/// with the lapsed expiry kept. Today's name-scoped membership sees G and E only, so E is
+/// witnessed and served, and an explicit ENSv2 release clears the expiry. The expiry is the one
+/// field that differs, the disclosed served-side difference.
 #[tokio::test]
-async fn history_a_grant_path_expiry_explicit_release_picks_the_path_release() -> Result<()> {
+async fn history_a_grant_path_expiry_explicit_release_serves_the_path_release() -> Result<()> {
     let fixture = Fixture::new("families_shadow_history_a", 20).await?;
     let k1 = uuid(1);
     v2_binding(&fixture, &k1).await?;
@@ -591,14 +646,7 @@ async fn history_a_grant_path_expiry_explicit_release_picks_the_path_release() -
         json!({"status": "registered", "registrant": ALICE, "expiry": 1_800_000_100u64}),
     )
     .await?;
-    v2(
-        &fixture,
-        12,
-        "RegistrationReleased",
-        None,
-        path_expiry(1_800_000_100),
-    )
-    .await?;
+    unnamed_path_expiry(&fixture, "path-expiry", 12, &k1, 1_800_000_100).await?;
     v2(
         &fixture,
         14,
@@ -608,11 +656,25 @@ async fn history_a_grant_path_expiry_explicit_release_picks_the_path_release() -
     )
     .await?;
     let report = publish_and_compare(&fixture, 16).await?;
-    assert_eq!(report.mismatched, 0, "{:?}", report.lines);
-    let (served, trace) = assert_name_equal(&fixture, 16).await?;
-    assert_eq!(trace["key_candidates"][0]["kind"], json!("PathExpiry"));
-    assert_eq!(trace["selected_event"], Value::Null);
-    assert_eq!(served.registration("status"), json!("active"));
+    assert_counts(
+        &report,
+        &[(
+            "served_membership_skips_unnamed_path_expiry:registration/expiry",
+            1,
+        )],
+        &[],
+    );
+    assert_eq!(report.served_side_bug_names, vec![name(1)]);
+    let (served, shadow) = shadow_reads(&fixture, 16).await?;
+    assert_eq!(
+        shadow.trace["key_candidates"][0]["kind"],
+        json!("PathExpiry")
+    );
+    assert_eq!(shadow.trace["selected_event"], json!("path-expiry"));
+    assert_eq!(shadow.registration["status"], json!("released"));
+    assert_eq!(shadow.registration["expiry"], json!(1_800_000_100u64));
+    assert_eq!(served.registration("status"), json!("released"));
+    assert_eq!(served.registration("expiry"), Value::Null);
     fixture.cleanup().await
 }
 
@@ -640,7 +702,7 @@ async fn history_b_grant_explicit_release_serves_the_release_without_expiry() ->
     )
     .await?;
     let report = publish_and_compare(&fixture, 16).await?;
-    assert_eq!(report.mismatched, 0, "{:?}", report.lines);
+    shadow_support::assert_counts(&report, &[], &[]);
     let (served, trace) = assert_name_equal(&fixture, 16).await?;
     assert_eq!(trace["key_candidates"][0]["kind"], json!("Explicit"));
     assert_eq!(served.registration("status"), json!("released"));
@@ -649,9 +711,11 @@ async fn history_b_grant_explicit_release_serves_the_release_without_expiry() ->
     fixture.cleanup().await
 }
 
-/// P, V, W: a path expiry, a renewal that revives from it, then an ordinary renewal. Renewals
-/// are not registration candidates, so the path release stays the candidate, and the latest of
-/// the five kinds is the renewal.
+/// P, V, W: the interpreter's unnamed path expiry, a renewal that revives from it, then an
+/// ordinary renewal. Renewals are not registration candidates, so the path release stays the
+/// key's candidate and the latest of the five kinds is the renewal; the revival keeps the
+/// resource from retirement (design:63). Today's membership never sees the release and serves
+/// the grant, the disclosed served-side difference.
 #[tokio::test]
 async fn a_revival_then_an_ordinary_renewal_keep_the_path_release_as_candidate() -> Result<()> {
     let fixture = Fixture::new("families_shadow_revival", 22).await?;
@@ -665,14 +729,7 @@ async fn a_revival_then_an_ordinary_renewal_keep_the_path_release_as_candidate()
         json!({"status": "registered", "registrant": ALICE, "expiry": 1_800_000_100u64}),
     )
     .await?;
-    v2(
-        &fixture,
-        12,
-        "RegistrationReleased",
-        None,
-        path_expiry(1_800_000_100),
-    )
-    .await?;
+    unnamed_path_expiry(&fixture, "path-expiry", 12, &k1, 1_800_000_100).await?;
     v2(
         &fixture,
         14,
@@ -690,9 +747,29 @@ async fn a_revival_then_an_ordinary_renewal_keep_the_path_release_as_candidate()
     )
     .await?;
     let report = publish_and_compare(&fixture, 18).await?;
-    assert_eq!(report.mismatched, 0, "{:?}", report.lines);
-    let (served, trace) = assert_name_equal(&fixture, 18).await?;
-    assert_eq!(trace["key_candidates"][0]["kind"], json!("PathExpiry"));
+    let cause = "served_membership_skips_unnamed_path_expiry";
+    assert_counts(
+        &report,
+        &[
+            (&format!("{cause}:registration/status"), 1),
+            (&format!("{cause}:registration/authority_kind"), 1),
+            (&format!("{cause}:registration/registrant"), 1),
+            (&format!("{cause}:control/status"), 1),
+            (&format!("{cause}:control/expiry"), 1),
+            (&format!("{cause}:control/registrant"), 1),
+        ],
+        &[],
+    );
+    assert_eq!(report.served_side_bug_names, vec![name(1)]);
+    let (served, shadow) = shadow_reads(&fixture, 18).await?;
+    assert_eq!(
+        shadow.trace["key_candidates"][0]["kind"],
+        json!("PathExpiry")
+    );
+    assert_eq!(
+        shadow.registration["latest_event_kind"],
+        json!("RegistrationRenewed")
+    );
     assert_eq!(
         served.registration("latest_event_kind"),
         json!("RegistrationRenewed")
@@ -731,7 +808,7 @@ async fn a_renewal_serves_its_expiry_only_when_it_is_a_number() -> Result<()> {
         )
         .await?;
         let report = publish_and_compare(&fixture, 14).await?;
-        assert_eq!(report.mismatched, 0, "{:?}", report.lines);
+        shadow_support::assert_counts(&report, &[], &[]);
         let (served, _) = assert_name_equal(&fixture, 14).await?;
         let expected = if numeric {
             2_100_000_000u64
@@ -764,16 +841,18 @@ async fn a_grant_authority_key_is_the_known_unretained_key() -> Result<()> {
     )
     .await?;
     let report = publish_and_compare(&fixture, 12).await?;
-    assert_eq!(report.mismatched, 0, "{:?}", report.lines);
     let (served, shadow) = shadow_support::name(&fixture, 12, &name(1)).await?;
     assert_eq!(served.registration("authority_key"), json!("registrar:k1"));
-    if shadow.registration["authority_key"].is_null() {
-        assert_eq!(
-            report.known_discrepancy.get("authority_key_not_retained"),
-            Some(&1)
+    if shadow.trace["authority_key_stored"] == json!(false) {
+        assert_eq!(shadow.registration["authority_key"], Value::Null);
+        assert_counts(
+            &report,
+            &[("authority_key_not_stored:registration/authority_key", 1)],
+            &[],
         );
     } else {
         assert_eq!(shadow.registration["authority_key"], json!("registrar:k1"));
+        assert_counts(&report, &[], &[]);
     }
     fixture.cleanup().await
 }
@@ -818,7 +897,6 @@ async fn the_association_follows_the_later_position_not_the_generated_id() -> Re
     )
     .await?;
     let report = publish_and_compare(&fixture, 16).await?;
-    assert_eq!(report.mismatched, 0, "{:?}", report.lines);
     let (served, shadow) = shadow_support::name(&fixture, 16, &name(1)).await?;
     assert_eq!(
         shadow.registration["registrant"],
@@ -831,16 +909,29 @@ async fn the_association_follows_the_later_position_not_the_generated_id() -> Re
         "the production answer differs"
     );
     assert_eq!(report.expected_delta, 1, "and the difference is disclosed");
+    assert_counts(
+        &report,
+        &[],
+        &[
+            ("d12_same_block_order:registration/registrant", 1),
+            ("d12_same_block_order:registration/registered_at", 1),
+            ("d12_same_block_order:registration/authority_kind", 1),
+            ("d12_same_block_order:control/registrant", 1),
+            ("d12_same_block_order:control/expiry", 1),
+        ],
+    );
     fixture.cleanup().await
 }
 
-/// Finding, kept visible: the interpreter's path-expiry release names its resource and no name
-/// (crates/adapters/src/schema_v2/protocol/v2_registry/expiry.rs:58-59). The F2a key state of the
-/// resource counts it (crates/project/src/families/lifecycle.rs:71-76), today's name-scoped
-/// membership does not (build.sql:322, :366-367), so the five-kind latest differs. The comparison
-/// counts it under its name, not as a mismatch, until the design rules on it.
+/// Ruling R1: the interpreter's path-expiry release names its resource and no name
+/// (crates/adapters/src/schema_v2/protocol/v2_registry/expiry.rs:58-59). The F2a key state of
+/// the resource counts it (design:40, decoder rule 1), and the chain has expired the
+/// registration (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L36 @
+/// ens_v2@a971bd64), so the families serve the release: released, latest kind
+/// RegistrationReleased, control unregistered. Today's name-scoped membership (build.sql:322,
+/// :366-367) serves the renewal as active, the served-side difference disclosed for cutover.
 #[tokio::test]
-async fn an_unnamed_path_expiry_on_the_resource_is_the_known_membership_finding() -> Result<()> {
+async fn an_unnamed_path_expiry_on_the_resource_serves_the_release() -> Result<()> {
     let fixture = Fixture::new("families_shadow_unnamed_path_expiry", 20).await?;
     let k1 = uuid(1);
     v2_binding(&fixture, &k1).await?;
@@ -860,34 +951,34 @@ async fn an_unnamed_path_expiry_on_the_resource_is_the_known_membership_finding(
         json!({"expiry": 1_800_000_150u64}),
     )
     .await?;
-    let mut after = path_expiry(1_800_000_150);
-    after["registry_contract_instance_id"] = json!("R");
-    after["token_id"] = json!("7");
-    fixture
-        .event(
-            Event::new("path-expiry", 14, 0, "RegistrationReleased", V2_REGISTRY)
-                .resource(&k1)
-                .after(after)
-                .raw(json!({"emitting_address": REGISTRY}))
-                .synthesised(),
-        )
-        .await?;
+    unnamed_path_expiry(&fixture, "path-expiry", 14, &k1, 1_800_000_150).await?;
     let report = publish_and_compare(&fixture, 16).await?;
-    assert_eq!(report.mismatched, 0, "{:?}", report.lines);
-    let (served, shadow) = shadow_support::name(&fixture, 16, &name(1)).await?;
-    assert_eq!(
-        served.registration("latest_event_kind"),
-        json!("RegistrationRenewed")
+    let cause = "served_membership_skips_unnamed_path_expiry";
+    assert_counts(
+        &report,
+        &[
+            (&format!("{cause}:registration/status"), 1),
+            (&format!("{cause}:registration/latest_event_kind"), 1),
+            (&format!("{cause}:registration/authority_kind"), 1),
+            (&format!("{cause}:registration/registrant"), 1),
+            (&format!("{cause}:control/status"), 1),
+            (&format!("{cause}:control/expiry"), 1),
+            (&format!("{cause}:control/registrant"), 1),
+        ],
+        &[],
     );
+    assert_eq!(report.served_side_bug_names, vec![name(1)]);
+    let (served, shadow) = shadow_reads(&fixture, 16).await?;
+    assert_eq!(shadow.registration["status"], json!("released"));
     assert_eq!(
         shadow.registration["latest_event_kind"],
         json!("RegistrationReleased")
     );
+    assert_eq!(shadow.control["status"], json!("unregistered"));
+    assert_eq!(served.registration("status"), json!("active"));
     assert_eq!(
-        report
-            .known_discrepancy
-            .get("unnamed_resource_event_in_key_state"),
-        Some(&1)
+        served.registration("latest_event_kind"),
+        json!("RegistrationRenewed")
     );
     fixture.cleanup().await
 }

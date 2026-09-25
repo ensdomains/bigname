@@ -46,11 +46,7 @@ async fn boundary(fuses: i64, offset: i64) -> Result<Option<Value>> {
     .await?;
     let resource = wrapped(&fixture, fuses, timestamp(TARGET) + offset).await?;
     let report = publish_and_compare(&fixture, TARGET).await?;
-    assert_eq!(
-        report.mismatched, 0,
-        "fuses {fuses} offset {offset}: {:?}",
-        report.lines
-    );
+    shadow_support::assert_counts(&report, &[], &[]);
     assert!(report.names == 1 && report.resources >= 1, "{report:?}");
     let served = restrictions(&fixture, &resource).await?;
     fixture.cleanup().await?;

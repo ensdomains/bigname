@@ -108,3 +108,27 @@ pub async fn name(
         shadow,
     ))
 }
+
+/// Assert the report's counted fields exactly: named causes and same-block deltas, each as
+/// `case:field` with its count, and no mismatch.
+pub fn assert_counts(report: &compare::Report, known: &[(&str, usize)], delta: &[(&str, usize)]) {
+    let expect = |pairs: &[(&str, usize)]| -> std::collections::BTreeMap<String, usize> {
+        pairs
+            .iter()
+            .map(|(field, count)| ((*field).to_owned(), *count))
+            .collect()
+    };
+    assert_eq!(report.mismatched, 0, "{:#?}", report.lines);
+    assert_eq!(
+        report.known_discrepancy,
+        expect(known),
+        "{:#?}",
+        report.lines
+    );
+    assert_eq!(
+        report.expected_delta_fields,
+        expect(delta),
+        "{:#?}",
+        report.lines
+    );
+}

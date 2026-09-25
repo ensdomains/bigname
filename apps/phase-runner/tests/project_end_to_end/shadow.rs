@@ -5,50 +5,65 @@
 //! reader adds, and every account approval, and each is compared with what the production
 //! readers serve from today's tables at the same publication.
 //!
-//! A difference passes only as a disclosed D12 same-block delta (design section 7 item 5; the
-//! brief's section 4.3): the keyed events include two lifecycle events in one block whose
-//! generated-id order disagrees with the canonical order, or a synthesised event beside another
-//! event of its block. A difference that comes from a named step 2 discrepancy (section
-//! "Known discrepancies" below) is counted and printed as `known_discrepancy` with its name, so
-//! the finding stays visible without failing the run. Anything else is a mismatch.
+//! Every differing field of every item is decided on its own, at this publication, and passes
+//! only when a named cause is shown to produce it; anything else is a mismatch and fails the run.
+//! Each passing field is printed with its served and shadow values and counted by
+//! `case:field`, and the tests assert those counts exactly.
 //!
-//! Known discrepancies, each a place where the step 2 families and today's builders disagree on
-//! what a value is read from, reported rather than patched (step 3 changes no reducer):
-//! - `unnamed_resource_event_in_key_state`: the F2a key state of a resource counts every
-//!   lifecycle event whose resource is that resource, named or not (crates/project/src/families/
-//!   lifecycle.rs:71-76), as the design's key-state relation says, while today's ENSv2 membership
-//!   reads only the events emitted with the name (build.sql:322, :366-367). The interpreter's
-//!   RegistryPathExpired release carries its resource and no name
-//!   (crates/adapters/src/schema_v2/protocol/v2_registry/expiry.rs:58-59), so the families put it
-//!   in the name's candidate and five-kind latest and today's read never does. The design does not
-//!   rule on a resource-bearing unnamed event, so this is reported as a design question, not
-//!   patched. On the fixture corpus it shows as `registration/latest_event_kind` served
-//!   RegistrationRenewed, shadow RegistrationReleased.
-//! - `registry_owner_without_its_position`: the ENSv1 control block's registry owner and latest
-//!   kind are the latest admitted AuthorityTransferred, AuthorityEpochChanged or transfer
-//!   (build.sql:649-694). F2c sets the owner only on AuthorityTransferred
-//!   (crates/project/src/families/registry.rs:69-94) but stamps the node row with the position of
-//!   every event that writes it, SubregistryChanged included (:120), and keeps neither the
-//!   AuthorityTransferred's own position nor its resource, so the shadow can neither order it
-//!   against an AuthorityEpochChanged nor admit it. On the fixture corpus a registry-only name's
-//!   AuthorityTransferred (log 9) and AuthorityEpochChanged (log 11) are followed in the same
-//!   block by a SubregistryChanged of the same node (log 12): served `control/latest_event_kind`
-//!   AuthorityEpochChanged, shadow AuthorityTransferred. For an ENSv1 name a difference in these
-//!   two fields is reported under this name.
-//! - `authority_kind_defaulted_to_registrar`: the retained lifecycle row stores
-//!   `authority_kind` with a `registrar` default when the event's after-state has none
-//!   (crates/project/src/families/lifecycle.rs:317-322), while the served registration block
-//!   reads the raw after-state and serves null (build.sql:30 from :394 and :425). The shadow
-//!   cannot tell the two apart, so a served null against a shadow `registrar` is this finding.
-//! - `authority_key_not_retained`: the registration's `authority_key` is the winning grant's,
+//! - `d12_same_block_order` (brief section 4.3, counted as `expected_delta`): the item's retained
+//!   lifecycle events hold a block whose canonical order disagrees with the generated-id order,
+//!   and reading the same families again with that block put in generated-id order (the
+//!   association winner of an affected triple moved with it, `v2_lifecycle_events.sql:19`)
+//!   gives exactly the served value for the field. For a resource's permission rows the check is
+//!   the path-expiry drop rule of permissions.rs:111-133, :391-398 read in both orders.
+//!
+//! Named causes, each a place where the families and today's builders disagree, reported
+//! rather than patched (step 3 changes no reducer and no served table):
+//! - `served_membership_skips_unnamed_path_expiry`: the interpreter's RegistryPathExpired
+//!   release names its resource and no name (crates/adapters/src/schema_v2/protocol/v2_registry/
+//!   expiry.rs:58-59). The F2a key state is keyed by the resource and counts it (design:40,
+//!   decoder rule 1; crates/project/src/families/lifecycle.rs:71-76), and the chain treats the
+//!   registration as over: a name is available once its expiry has passed, the registry reports
+//!   no owner and no resolver for it, and unregistering sets the expiry to the current time
+//!   (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L36 @ ens_v2@a971bd64)
+//!   (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L206 @ ens_v2@a971bd64)
+//!   (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L255-L258 @ ens_v2@a971bd64)
+//!   (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L313-L316 @ ens_v2@a971bd64)
+//!   (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L627-L630 @ ens_v2@a971bd64).
+//!   Tate's ruling: an expired or released ENSv2 registration stays ENSv2 and is served
+//!   unregistered, and never falls back to an ENSv1 lease (only a RESERVED entry defers to
+//!   ENSv1). So the reader selects the release, serves it released and closes the control
+//!   block. Today's name-scoped membership (build.sql:322, :366-367) never sees the release and
+//!   serves the registration active: a served-side bug, recorded here with its names and count
+//!   on the `SEPOLIA_END_TO_END_SHADOW_SERVED_SIDE_BUG` line, not a rule the reader copies.
+//!   Served code is not changed in this branch. A field passes only when the shadow
+//!   selected that unnamed release and the field holds what the ENSv2 path-release presentation
+//!   gives (build.sql:88-95, :101-103): status released, latest kind RegistrationReleased,
+//!   the release's released_at, the lapsed expiry, no registrant or authority, control
+//!   unregistered with nothing else.
+//! - `registry_node_position_moved_by_later_write`: F2c sets the node's owner only on
+//!   AuthorityTransferred (crates/project/src/families/registry.rs:69-94) but stamps the row with
+//!   the position of every event that writes it, SubregistryChanged included (:120). A control
+//!   `latest_event_kind` or `registry_owner` field passes only when the node row's position is
+//!   not the node's latest AuthorityTransferred and reading the name again with that
+//!   AuthorityTransferred's position gives exactly the served value.
+//! - `authority_kind_defaulted_to_registrar`: the retained lifecycle row stores `authority_kind`
+//!   with a `registrar` default when the event's after-state has none
+//!   (crates/project/src/families/lifecycle.rs:317-322), while the served block serves null
+//!   (build.sql:30 from :394). `registration/authority_kind` passes only when served is null,
+//!   the shadow is `registrar`, and the winning event's after-state has no authority kind.
+//! - `authority_key_not_stored`: the registration's `authority_key` is the winning grant's,
 //!   AuthorityEpochChanged's or registry-only SurfaceBound's after-state key (build.sql:31,
-//!   :393-420). Step 2 keeps none of them: the retained row has no `authority_key` column
-//!   (crates/project/src/families/lifecycle.rs:306-380), the key state's `last_grant` omits it
-//!   (:432-437), and `authority_start_positions` keeps only the kind and resource
-//!   (crates/project/src/families/identity.rs:92-95). The reader reads each of those places, so
-//!   the finding closes by itself once step 2 stores the key, and until then a served key
-//!   against a shadow null, with the trace saying the key was not seen, is this finding.
-use std::collections::{BTreeMap, BTreeSet};
+//!   :393-420). Step 2 at b218b2fc has no place for it: no `authority_key` column on the retained
+//!   row (crates/project/src/families/lifecycle.rs:306-380), no member in `last_grant`
+//!   (:432-437) or in `authority_start_positions` (crates/project/src/families/identity.rs:92-95),
+//!   no column on the binding candidate. `registration/authority_key` passes only when the trace
+//!   says the winning event's place does not exist and the shadow is null; once step 2 adds the
+//!   place, a difference fails even when the stored value is null.
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Mutex,
+};
 
 use anyhow::{Context, Result};
 use bigname_storage::{
@@ -56,17 +71,19 @@ use bigname_storage::{
     families::control::{
         compare::{Difference, differences, field, same},
         lifecycle::{
-            AuthoritySelection, CONTROL_FIELDS, Clock, NameInput, REGISTRATION_FIELDS,
-            load_shadow_names,
+            AuthoritySelection, CONTROL_FIELDS, Clock, NameFacts, NameInput, REGISTRATION_FIELDS,
+            ShadowName, evaluate, load_name_facts, load_shadow_names,
         },
         permissions::{
             ResourceInput, effective_operator_rows, grant_json, load_shadow_approvals,
             load_shadow_permissions,
         },
+        position::Position,
         registry::{
             NameAttribution, load_observations, load_registry_nodes, ownerless_registry,
             registry_bindings, registry_generation,
         },
+        rows::{LifecycleEvent, Mark, Maxima},
     },
     load_effective_permissions_by_resource_ids, load_name_current_by_logical_name_ids,
 };
@@ -75,8 +92,23 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 const NAME_CHUNK: usize = 500;
-/// Mismatch lines printed per run; the counters count all of them.
-const PRINTED: usize = 40;
+/// Difference lines printed per comparison; the counters count all of them.
+const PRINTED: usize = 400;
+
+/// The counted fields of every printed report in this process, by target, for the tests that
+/// assert them exactly.
+static REPORTS: Mutex<Vec<Counted>> = Mutex::new(Vec::new());
+
+/// One printed report's target, same-block delta fields and named-cause fields.
+pub type Counted = (i64, BTreeMap<String, usize>, BTreeMap<String, usize>);
+
+/// The counted fields of the reports printed so far, emptying the list.
+pub fn take_reports() -> Vec<Counted> {
+    REPORTS
+        .lock()
+        .map(|mut reports| std::mem::take(&mut *reports))
+        .unwrap_or_default()
+}
 
 /// What one comparison saw.
 #[derive(Debug, Default)]
@@ -85,54 +117,54 @@ pub struct Report {
     pub resources: usize,
     pub accounts: usize,
     pub equal: usize,
+    /// Items whose every difference is a same-block ordering delta or a named cause, with at
+    /// least one same-block delta.
     pub expected_delta: usize,
-    pub known_discrepancy: BTreeMap<&'static str, usize>,
+    /// Same-block delta fields, by `d12_same_block_order:field`.
+    pub expected_delta_fields: BTreeMap<String, usize>,
+    /// Named-cause fields, by `case:field`.
+    pub known_discrepancy: BTreeMap<String, usize>,
     pub mismatched: usize,
+    /// Names the families serve released after the interpreter's path expiry and today's reader
+    /// serves active: the served-side bug of `served_membership_skips_unnamed_path_expiry`.
+    pub served_side_bug_names: Vec<String>,
     pub lines: Vec<String>,
 }
 
-/// Why an item's differences pass, if they do.
-#[derive(Clone, Copy)]
-enum Excuse {
+/// Why one differing field passes, if it does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Excuse {
     None,
     SameBlockOrder,
     Known(&'static str),
 }
 
 impl Report {
-    /// Count one compared item. `excuse` decides, per differing field, whether it passes.
-    fn item(&mut self, key: &str, diffs: Vec<Difference>, excuse: impl Fn(&Difference) -> Excuse) {
+    /// Count one compared item from its differing fields, each with the cause shown for it.
+    fn item(&mut self, key: &str, diffs: Vec<(Difference, Excuse)>) {
         if diffs.is_empty() {
             self.equal += 1;
             return;
         }
-        let excused: Vec<(Difference, Excuse)> = diffs
-            .into_iter()
-            .map(|diff| {
-                let why = excuse(&diff);
-                (diff, why)
-            })
-            .collect();
-        if excused.iter().any(|(_, why)| matches!(why, Excuse::None)) {
+        if diffs.iter().any(|(_, why)| *why == Excuse::None) {
             self.mismatched += 1;
-        } else if excused
-            .iter()
-            .any(|(_, why)| matches!(why, Excuse::SameBlockOrder))
-        {
+        } else if diffs.iter().any(|(_, why)| *why == Excuse::SameBlockOrder) {
             self.expected_delta += 1;
-        } else {
-            for (_, why) in &excused {
-                if let Excuse::Known(name) = why {
-                    *self.known_discrepancy.entry(name).or_default() += 1;
-                }
-            }
         }
-        for (diff, why) in excused {
+        for (diff, why) in diffs {
             let (kind, case) = match why {
-                Excuse::SameBlockOrder => ("EXPECTED_DELTA", "same_block_order"),
+                Excuse::SameBlockOrder => ("EXPECTED_DELTA", "d12_same_block_order"),
                 Excuse::Known(name) => ("KNOWN_DISCREPANCY", name),
                 Excuse::None => ("MISMATCH", "none"),
             };
+            let counted = format!("{case}:{}", diff.field);
+            match why {
+                Excuse::SameBlockOrder => {
+                    *self.expected_delta_fields.entry(counted).or_default() += 1;
+                }
+                Excuse::Known(_) => *self.known_discrepancy.entry(counted).or_default() += 1,
+                Excuse::None => {}
+            }
             if self.lines.len() < PRINTED {
                 self.lines.push(format!(
                     "SEPOLIA_END_TO_END_SHADOW_{kind} case={case} key={key} field={} served={} \
@@ -147,7 +179,13 @@ impl Report {
         for line in &self.lines {
             eprintln!("{line}");
         }
-        let list = |counts: &BTreeMap<&'static str, usize>| {
+        eprintln!(
+            "SEPOLIA_END_TO_END_SHADOW_SERVED_SIDE_BUG case=served_membership_skips_unnamed_path_expiry \
+             target={target} count={} names={}",
+            self.served_side_bug_names.len(),
+            self.served_side_bug_names.join(",")
+        );
+        let list = |counts: &BTreeMap<String, usize>| {
             counts
                 .iter()
                 .map(|(reason, count)| format!("{reason}:{count}"))
@@ -156,29 +194,26 @@ impl Report {
         };
         eprintln!(
             "SEPOLIA_END_TO_END_SHADOW target={target} names={} resources={} accounts={} \
-             equal={} expected_delta={} mismatched={} known_discrepancy={}",
+             equal={} expected_delta={} mismatched={} expected_delta_fields={} \
+             known_discrepancy={}",
             self.names,
             self.resources,
             self.accounts,
             self.equal,
             self.expected_delta,
             self.mismatched,
+            list(&self.expected_delta_fields),
             list(&self.known_discrepancy)
         );
+        if let Ok(mut reports) = REPORTS.lock() {
+            reports.push((
+                target,
+                self.expected_delta_fields.clone(),
+                self.known_discrepancy.clone(),
+            ));
+        }
     }
 }
-
-/// One retained lifecycle event's key, names, resource, position, identity and generated id.
-type RetainedPosition = (
-    String,
-    Option<String>,
-    Option<String>,
-    i64,
-    Option<i64>,
-    Option<i64>,
-    String,
-    Option<i64>,
-);
 
 /// One served resource summary: resource, authority kind, root, restrictions, registry owner and
 /// contract, binding provenance, chain positions and clear event id.
@@ -193,57 +228,6 @@ type SummaryRow = (
     Option<Value>,
     Option<Value>,
 );
-
-/// Keys whose retained lifecycle events hold a same-block pair the D12 order and the generated-id
-/// order disagree on, or a synthesised event beside another event of its block: names (decoded
-/// or original) and resources.
-async fn same_block_keys(pool: &PgPool, chain: &str) -> Result<BTreeSet<String>> {
-    let rows: Vec<RetainedPosition> = sqlx::query_as(
-        "SELECT state_key, COALESCE(original_logical_name_id, decoded_logical_name_id),
-                    resource_id::text, block_number, transaction_index, log_index,
-                    event_identity, normalized_event_id
-             FROM project_lifecycle_event WHERE chain_id = $1",
-    )
-    .bind(chain)
-    .fetch_all(pool)
-    .await?;
-    // Two groupings: events of one key in one block (a key's own candidate, brief 4.3 items 1, 2
-    // and 4), and events of one name in one block, which also catches two grants on different
-    // resources racing for a triple's association (item 3).
-    let mut groups: BTreeMap<(String, i64), Vec<_>> = BTreeMap::new();
-    for row in &rows {
-        groups
-            .entry((format!("key:{}", row.0), row.3))
-            .or_default()
-            .push(row);
-        if let Some(name) = &row.1 {
-            groups
-                .entry((format!("name:{name}"), row.3))
-                .or_default()
-                .push(row);
-        }
-    }
-    let mut keys = BTreeSet::new();
-    for events in groups.values().filter(|events| events.len() > 1) {
-        let synthesised = events.iter().any(|event| event.4.is_none());
-        let mut by_position = events.clone();
-        by_position
-            .sort_by(|left, right| (left.4, left.5, &left.6).cmp(&(right.4, right.5, &right.6)));
-        let mut by_id = events.clone();
-        by_id.sort_by_key(|event| event.7);
-        let disagree = by_position
-            .iter()
-            .zip(&by_id)
-            .any(|(left, right)| left.6 != right.6);
-        if synthesised || disagree {
-            for event in events {
-                keys.extend(event.1.clone());
-                keys.extend(event.2.clone());
-            }
-        }
-    }
-    Ok(keys)
-}
 
 pub async fn compare(pool: &PgPool, chain: &str, target: i64) -> Result<Report> {
     let mut report = Report::default();
@@ -261,7 +245,6 @@ pub async fn compare(pool: &PgPool, chain: &str, target: i64) -> Result<Report> 
         block_number: target,
         timestamp_seconds: timestamp,
     };
-    let ambiguous = same_block_keys(pool, chain).await?;
 
     // Names: registration and control, registry generation and the ownerless profile.
     let keys: Vec<String> =
@@ -362,36 +345,18 @@ pub async fn compare(pool: &PgPool, chain: &str, target: i64) -> Result<Report> 
                     Value::Object(shadow.trace.clone())
                 ));
             }
-            let same_block = ambiguous.contains(&input.logical_name_id);
-            let foreign = shadow.trace.contains_key("foreign_members");
-            let v1 = !input.selection.is_v2();
-            let key_unseen = shadow.trace.get("authority_key_retained") == Some(&json!(false));
-            report.item(&input.logical_name_id, diffs, |diff| {
-                if same_block {
-                    Excuse::SameBlockOrder
-                } else if diff.field == "registration/authority_key"
-                    && key_unseen
-                    && diff.shadow.is_null()
-                {
-                    Excuse::Known("authority_key_not_retained")
-                } else if diff.field == "registration/authority_kind"
-                    && diff.served.is_null()
-                    && diff.shadow == json!("registrar")
-                {
-                    Excuse::Known("authority_kind_defaulted_to_registrar")
-                } else if foreign {
-                    Excuse::Known("unnamed_resource_event_in_key_state")
-                } else if v1
-                    && matches!(
-                        diff.field.as_str(),
-                        "control/latest_event_kind" | "control/registry_owner"
-                    )
-                {
-                    Excuse::Known("registry_owner_without_its_position")
-                } else {
-                    Excuse::None
-                }
-            });
+            let excuses = name_excuses(pool, chain, &clock, input, shadow, &diffs).await?;
+            if excuses.contains(&Excuse::Known(
+                "served_membership_skips_unnamed_path_expiry",
+            )) {
+                report
+                    .served_side_bug_names
+                    .push(input.logical_name_id.clone());
+            }
+            report.item(
+                &input.logical_name_id,
+                diffs.into_iter().zip(excuses).collect(),
+            );
             report.names += 1;
         }
     }
@@ -536,14 +501,8 @@ pub async fn compare(pool: &PgPool, chain: &str, target: i64) -> Result<Report> 
                 });
             }
         }
-        let same_block = ambiguous.contains(resource);
-        report.item(resource, diffs, |_| {
-            if same_block {
-                Excuse::SameBlockOrder
-            } else {
-                Excuse::None
-            }
-        });
+        let excuses = resource_excuses(pool, chain, resource, &diffs).await?;
+        report.item(resource, diffs.into_iter().zip(excuses).collect());
         report.resources += 1;
     }
 
@@ -608,7 +567,10 @@ pub async fn compare(pool: &PgPool, chain: &str, target: i64) -> Result<Report> 
                 shadow: right,
             }]
         };
-        report.item(&account, diffs, |_| Excuse::None);
+        report.item(
+            &account,
+            diffs.into_iter().map(|diff| (diff, Excuse::None)).collect(),
+        );
         report.accounts += 1;
     }
     Ok(report)
@@ -618,4 +580,535 @@ fn row_namespace(name: &str) -> String {
     name.split_once(':')
         .map_or("ens", |(namespace, _)| namespace)
         .to_owned()
+}
+
+/// The value of a `registration/...` or `control/...` field of a shadow read.
+fn shadow_field(shadow: &ShadowName, path: &str) -> Value {
+    let Some((block, rest)) = path.split_once('/') else {
+        return Value::Null;
+    };
+    let block = match block {
+        "registration" => &shadow.registration,
+        "control" => &shadow.control,
+        _ => return Value::Null,
+    };
+    field(&Value::Object(block.clone()), rest).clone()
+}
+
+/// Whether the shadow value of `diff` is what the ENSv2 path-release presentation gives, for a
+/// name whose selected registration is the interpreter's unnamed path-expiry release
+/// (build.sql:88-95, :101-103).
+fn serves_the_unnamed_release(trace: &serde_json::Map<String, Value>, diff: &Difference) -> bool {
+    if trace.get("selected_unnamed_path_expiry") != Some(&json!(true)) {
+        return false;
+    }
+    let traced = |name: &str| trace.get(name).cloned().unwrap_or(Value::Null);
+    let shadow = &diff.shadow;
+    match diff.field.as_str() {
+        "registration/status" => shadow == &json!("released"),
+        "registration/latest_event_kind" => shadow == &json!("RegistrationReleased"),
+        "registration/released_at" => same(shadow, &traced("selected_released_at")),
+        "registration/expiry" => {
+            let candidate = traced("expiry_candidate");
+            let lapsed = if candidate.is_null() {
+                traced("selected_expiry")
+            } else {
+                candidate
+            };
+            !shadow.is_null() && same(shadow, &lapsed)
+        }
+        "registration/authority_kind"
+        | "registration/authority_key"
+        | "registration/registrant"
+        | "control/expiry"
+        | "control/registrant"
+        | "control/registry_owner"
+        | "control/latest_event_kind"
+        | "control/unsupported_reason" => shadow.is_null(),
+        "control/status" => shadow == &json!("unregistered"),
+        _ => false,
+    }
+}
+
+/// The cause shown for each differing field of one name, in `diffs` order.
+async fn name_excuses(
+    pool: &PgPool,
+    chain: &str,
+    clock: &Clock,
+    input: &NameInput,
+    shadow: &ShadowName,
+    diffs: &[Difference],
+) -> Result<Vec<Excuse>> {
+    let trace = &shadow.trace;
+    let mut out = Vec::with_capacity(diffs.len());
+    for diff in diffs {
+        let excuse = if serves_the_unnamed_release(trace, diff) {
+            Excuse::Known("served_membership_skips_unnamed_path_expiry")
+        } else if diff.field == "registration/authority_key"
+            && trace.get("authority_key_stored") == Some(&json!(false))
+            && diff.shadow.is_null()
+        {
+            Excuse::Known("authority_key_not_stored")
+        } else if diff.field == "registration/authority_kind"
+            && diff.served.is_null()
+            && diff.shadow == json!("registrar")
+            && winner_has_no_authority_kind(pool, trace).await?
+        {
+            Excuse::Known("authority_kind_defaulted_to_registrar")
+        } else {
+            Excuse::None
+        };
+        out.push(excuse);
+    }
+    if out.iter().all(|excuse| *excuse != Excuse::None) {
+        return Ok(out);
+    }
+    let Some(facts) = load_name_facts(pool, chain, std::slice::from_ref(input))
+        .await?
+        .pop()
+    else {
+        return Ok(out);
+    };
+
+    // The registry node row's position, when a later write moved it off the AuthorityTransferred.
+    let owner_fields = ["control/latest_event_kind", "control/registry_owner"];
+    let open = |out: &[Excuse], index: usize| out[index] == Excuse::None;
+    if !input.selection.is_v2()
+        && diffs
+            .iter()
+            .enumerate()
+            .any(|(index, diff)| open(&out, index) && owner_fields.contains(&diff.field.as_str()))
+        && let Some(node) = &facts.registry_node
+        && let Some(transferred) =
+            latest_authority_transferred(pool, chain, &node.namespace, &node.node, clock).await?
+        && node.position.as_ref() != Some(&transferred)
+    {
+        let mut moved = facts.clone();
+        if let Some(node) = moved.registry_node.as_mut() {
+            node.position = Some(transferred);
+        }
+        let counterfactual = evaluate(&moved, clock);
+        for (index, diff) in diffs.iter().enumerate() {
+            if open(&out, index)
+                && owner_fields.contains(&diff.field.as_str())
+                && same(&shadow_field(&counterfactual, &diff.field), &diff.served)
+            {
+                out[index] = Excuse::Known("registry_node_position_moved_by_later_write");
+            }
+        }
+    }
+
+    // The same families read with each disagreeing block in generated-id order.
+    if out.contains(&Excuse::None) {
+        let identities: Vec<String> = facts
+            .events
+            .iter()
+            .map(|event| event.position.event_identity.clone())
+            .collect();
+        let ids = generated_ids(pool, chain, &identities).await?;
+        if let Some(legacy) = legacy_facts(&facts, &ids) {
+            let counterfactual = evaluate(&legacy, clock);
+            for (index, diff) in diffs.iter().enumerate() {
+                if open(&out, index)
+                    && same(&shadow_field(&counterfactual, &diff.field), &diff.served)
+                {
+                    out[index] = Excuse::SameBlockOrder;
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Whether the event the authority context selected carries no authority kind in its
+/// after-state, read from the event log.
+async fn winner_has_no_authority_kind(
+    pool: &PgPool,
+    trace: &serde_json::Map<String, Value>,
+) -> Result<bool> {
+    let Some(identity) = trace.get("authority_context_event").and_then(Value::as_str) else {
+        return Ok(false);
+    };
+    let kind: Option<Option<String>> = sqlx::query_scalar(
+        "SELECT NULLIF(after_state ->> 'authority_kind', '') FROM normalized_events
+         WHERE event_identity = $1",
+    )
+    .bind(identity)
+    .fetch_optional(pool)
+    .await?;
+    Ok(matches!(kind, Some(None)))
+}
+
+/// The canonical position of the latest AuthorityTransferred of a registry node at the clock's
+/// block, from the event log, in the canonical order.
+async fn latest_authority_transferred(
+    pool: &PgPool,
+    chain: &str,
+    namespace: &str,
+    node: &str,
+    clock: &Clock,
+) -> Result<Option<Position>> {
+    let row: Option<(i64, Option<i64>, Option<i64>, String)> = sqlx::query_as(
+        "SELECT block_number, transaction_index, log_index, event_identity
+         FROM normalized_events
+         WHERE chain_id = $1 AND namespace = $2 AND block_number <= $4
+           AND event_kind = 'AuthorityTransferred'
+           AND source_family IN ('ens_v1_registry_l1', 'basenames_base_registry')
+           AND canonicality_state IN ('canonical', 'safe', 'finalized')
+           AND lower(COALESCE(NULLIF(after_state ->> 'child_node', ''),
+                              after_state ->> 'node')) = $3
+         ORDER BY block_number DESC, transaction_index DESC NULLS LAST,
+                  log_index DESC NULLS LAST, convert_to(event_identity, 'UTF8') DESC
+         LIMIT 1",
+    )
+    .bind(chain)
+    .bind(namespace)
+    .bind(node)
+    .bind(clock.block_number)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(
+        |(block_number, transaction_index, log_index, event_identity)| Position {
+            block_number,
+            transaction_index,
+            log_index,
+            event_identity,
+        },
+    ))
+}
+
+/// The generated ids of events, by identity.
+async fn generated_ids(
+    pool: &PgPool,
+    chain: &str,
+    identities: &[String],
+) -> Result<BTreeMap<String, i64>> {
+    Ok(sqlx::query_as::<_, (String, i64)>(
+        "SELECT event_identity, normalized_event_id FROM normalized_events
+         WHERE chain_id = $1 AND event_identity = ANY($2)",
+    )
+    .bind(chain)
+    .bind(identities)
+    .fetch_all(pool)
+    .await?
+    .into_iter()
+    .collect())
+}
+
+/// The name's facts with every block whose canonical order disagrees with the generated-id order
+/// put in generated-id order: the old two-part order of build.sql:322-335,
+/// v2_lifecycle_events.sql:19 and expiry_retirement.rs, which D12 replaced. The maxima are read
+/// again from the retained events in that order, and a triple's association winner that sat in
+/// such a block moves to the latest resource-bearing grant or reservation of the name in that
+/// block. None when no block changes or an event has no generated id.
+fn legacy_facts(facts: &NameFacts, ids: &BTreeMap<String, i64>) -> Option<NameFacts> {
+    let mut blocks: BTreeMap<i64, BTreeMap<String, &LifecycleEvent>> = BTreeMap::new();
+    for event in &facts.events {
+        blocks
+            .entry(event.position.block_number)
+            .or_default()
+            .insert(event.position.event_identity.clone(), event);
+    }
+    let mut moved: BTreeMap<String, Position> = BTreeMap::new();
+    for (block, events) in &blocks {
+        if events.len() < 2 {
+            continue;
+        }
+        let mut canonical: Vec<&LifecycleEvent> = events.values().copied().collect();
+        canonical.sort_by(|left, right| left.position.cmp(&right.position));
+        let mut legacy = canonical.clone();
+        for event in &legacy {
+            ids.get(&event.position.event_identity)?;
+        }
+        legacy.sort_by_key(|event| ids[&event.position.event_identity]);
+        if canonical
+            .iter()
+            .zip(&legacy)
+            .all(|(left, right)| left.position.event_identity == right.position.event_identity)
+        {
+            continue;
+        }
+        for (rank, event) in legacy.iter().enumerate() {
+            moved.insert(
+                event.position.event_identity.clone(),
+                Position {
+                    block_number: *block,
+                    transaction_index: Some(0),
+                    log_index: Some(rank as i64),
+                    event_identity: event.position.event_identity.clone(),
+                },
+            );
+        }
+    }
+    if moved.is_empty() {
+        return None;
+    }
+    let mut out = facts.clone();
+    for event in &mut out.events {
+        if let Some(position) = moved.get(&event.position.event_identity) {
+            event.position = position.clone();
+        }
+    }
+    let keys: Vec<String> = out.key_states.keys().cloned().collect();
+    for key in keys {
+        let maxima = maxima_of(&out.events, "resource", &key);
+        out.key_states.insert(key, maxima);
+    }
+    let events = out.events.clone();
+    for triple in &mut out.triples {
+        triple.maxima = maxima_of(&events, "triple", &triple.state_key());
+        let Some(winner) = triple.target_position.clone() else {
+            continue;
+        };
+        if !moved.contains_key(&winner.event_identity) {
+            continue;
+        }
+        let rival = events
+            .iter()
+            .filter(|event| {
+                event.state_kind == "resource"
+                    && event.is_v2_family()
+                    && event.resource_id.is_some()
+                    && event.original_logical_name_id.as_deref() == Some(triple.key[0].as_str())
+                    && matches!(
+                        event.event_kind.as_str(),
+                        "RegistrationGranted" | "RegistrationReserved"
+                    )
+                    && event.position.block_number == winner.block_number
+            })
+            .max_by(|left, right| left.position.cmp(&right.position));
+        if let Some(rival) = rival {
+            triple.target = rival.resource_id.clone();
+            triple.target_position = Some(rival.position.clone());
+        }
+    }
+    Some(out)
+}
+
+/// The membership maxima of one lifecycle key read from its retained events in their current
+/// positions, the fold of step 2's reducer (crates/project/src/families/lifecycle.rs:388-497).
+fn maxima_of(events: &[LifecycleEvent], state_kind: &str, state_key: &str) -> Maxima {
+    let mut own: Vec<&LifecycleEvent> = events
+        .iter()
+        .filter(|event| event.state_kind == state_kind && event.state_key == state_key)
+        .collect();
+    own.sort_by(|left, right| left.position.cmp(&right.position));
+    let mark = |event: &LifecycleEvent| {
+        Some(Mark {
+            position: event.position.clone(),
+            detail: json!({"kind": event.event_kind}),
+        })
+    };
+    let mut maxima = Maxima::default();
+    for event in own {
+        match event.event_kind.as_str() {
+            "RegistrationGranted" => {
+                maxima.last_grant = mark(event);
+                maxima.last_active = mark(event);
+            }
+            "RegistrationReserved" => {
+                maxima.last_reservation = mark(event);
+                maxima.last_active = mark(event);
+            }
+            "RegistrationReleased" => {
+                maxima.last_release_any = mark(event);
+                if event.is_path_expiry() {
+                    maxima.last_path_expiry = mark(event);
+                } else {
+                    maxima.last_explicit_release = mark(event);
+                }
+            }
+            "RegistrationRenewed" => {
+                if state_kind == "resource"
+                    && event.revived_from_expiry == Some(true)
+                    && maxima.last_path_expiry.is_some()
+                {
+                    maxima.last_revival = mark(event);
+                }
+                maxima.last_renewal = mark(event);
+            }
+            "ExpiryChanged" => maxima.last_expiry_changed = mark(event),
+            _ => {}
+        }
+    }
+    maxima
+}
+
+/// The cause shown for each differing field of one resource, in `diffs` order: only the
+/// permissions builder's path-expiry drop (permissions.rs:111-133, :391-398), where the old
+/// (block, generated id) order and the canonical order disagree on whether the latest ENSv2
+/// registration event of the resource is its path-expiry release, and the served rows follow
+/// the old answer.
+async fn resource_excuses(
+    pool: &PgPool,
+    chain: &str,
+    resource: &str,
+    diffs: &[Difference],
+) -> Result<Vec<Excuse>> {
+    let mut out = vec![Excuse::None; diffs.len()];
+    if !diffs.iter().any(|diff| {
+        matches!(
+            diff.field.as_str(),
+            "permissions_current" | "resource_restrictions"
+        )
+    }) {
+        return Ok(out);
+    }
+    let rows: Vec<Value> = sqlx::query_scalar(
+        "SELECT to_jsonb(event) FROM project_lifecycle_event event
+         WHERE event.chain_id = $1 AND event.state_kind = 'resource' AND event.state_key = $2",
+    )
+    .bind(chain)
+    .bind(resource)
+    .fetch_all(pool)
+    .await?;
+    let events: Vec<LifecycleEvent> = rows.iter().filter_map(LifecycleEvent::from_row).collect();
+    let identities: Vec<String> = events
+        .iter()
+        .map(|event| event.position.event_identity.clone())
+        .collect();
+    let ids = generated_ids(pool, chain, &identities).await?;
+    if !events
+        .iter()
+        .all(|event| ids.contains_key(&event.position.event_identity))
+    {
+        return Ok(out);
+    }
+    let canonical = lapsed_in(&events, |event| event.position.clone());
+    let legacy = lapsed_in(&events, |event| {
+        (
+            event.position.block_number,
+            ids[&event.position.event_identity],
+        )
+    });
+    if canonical == legacy {
+        return Ok(out);
+    }
+    for (index, diff) in diffs.iter().enumerate() {
+        let served_empty =
+            diff.served.is_null() || diff.served.as_array().is_some_and(|rows| rows.is_empty());
+        if matches!(
+            diff.field.as_str(),
+            "permissions_current" | "resource_restrictions"
+        ) && served_empty == legacy
+        {
+            out[index] = Excuse::SameBlockOrder;
+        }
+    }
+    Ok(out)
+}
+
+/// Whether a resource's latest ENSv2 registration event, under `order`, is a path-expiry
+/// release that no later grant, reservation or revival restores.
+fn lapsed_in<K: Ord>(events: &[LifecycleEvent], order: impl Fn(&LifecycleEvent) -> K) -> bool {
+    let mut own: Vec<&LifecycleEvent> = events.iter().collect();
+    own.sort_by_key(|event| order(event));
+    let mut lapsed = false;
+    for event in own {
+        match event.event_kind.as_str() {
+            "RegistrationReleased" if event.is_path_expiry() => lapsed = true,
+            "RegistrationGranted" | "RegistrationReserved" => lapsed = false,
+            "RegistrationRenewed" if event.revived_from_expiry == Some(true) => lapsed = false,
+            _ => {}
+        }
+    }
+    lapsed
+}
+
+/// The fixture corpus's counted fields, asserted exactly against counts read from its event log
+/// at each target without the family readers (crates/project/tests/rebuild_performance/seed.sql):
+/// - an ENSv2 name whose interpreter path-expiry release (the `expired` rows, no name, the token
+///   resource) is not followed on that resource by a grant, reservation or named release is served
+///   active today and released by the families: eight fields each, and the two control-owner
+///   fields again for those whose token was transferred before the target;
+/// - a registry-only name whose node has an AuthorityEpochChanged and a later fixture
+///   SubregistryChanged moves its F2c node row off the AuthorityTransferred: one field each.
+///
+/// No same-block delta may pass on the corpus.
+pub async fn assert_fixture_corpus_counts(pool: &PgPool) -> Result<()> {
+    let reports = take_reports();
+    anyhow::ensure!(!reports.is_empty(), "no shadow comparison ran");
+    for (target, delta, known) in reports {
+        anyhow::ensure!(
+            delta.is_empty(),
+            "target {target}: same-block deltas {delta:?}"
+        );
+        let expired: Vec<(String, bool)> = sqlx::query_as(
+            "SELECT name.logical_name_id, EXISTS (
+                        SELECT 1 FROM normalized_events transfer
+                        WHERE transfer.resource_id = release.resource_id
+                          AND transfer.logical_name_id = name.logical_name_id
+                          AND transfer.event_kind = 'TokenControlTransferred'
+                          AND transfer.block_number <= $1)
+             FROM name_current name
+             JOIN normalized_events release ON release.resource_id = name.resource_id
+             WHERE release.logical_name_id IS NULL
+               AND release.event_kind = 'RegistrationReleased'
+               AND release.after_state ->> 'source_event' = 'RegistryPathExpired'
+               AND release.block_number <= $1
+               AND NOT EXISTS (
+                   SELECT 1 FROM normalized_events later
+                   WHERE later.resource_id = release.resource_id
+                     AND later.block_number > release.block_number
+                     AND later.block_number <= $1
+                     AND (later.event_kind IN ('RegistrationGranted', 'RegistrationReserved')
+                          OR (later.event_kind = 'RegistrationReleased'
+                              AND later.logical_name_id IS NOT NULL)))",
+        )
+        .bind(target)
+        .fetch_all(pool)
+        .await?;
+        let moved: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM name_current name
+             WHERE EXISTS (
+                     SELECT 1 FROM normalized_events epoch
+                     WHERE epoch.logical_name_id = name.logical_name_id
+                       AND epoch.event_kind = 'AuthorityEpochChanged'
+                       AND epoch.block_number <= $1)
+               AND EXISTS (
+                     SELECT 1 FROM normalized_events later
+                     WHERE later.event_identity LIKE 'fixture:subname:%'
+                       AND later.after_state ->> 'child_node' = name.namehash
+                       AND later.block_number <= $1)",
+        )
+        .bind(target)
+        .fetch_one(pool)
+        .await?;
+        let cause = "served_membership_skips_unnamed_path_expiry";
+        let transferred = expired
+            .iter()
+            .filter(|(_, transferred)| *transferred)
+            .count();
+        let mut expected: BTreeMap<String, usize> = BTreeMap::new();
+        for field in [
+            "registration/status",
+            "registration/latest_event_kind",
+            "registration/authority_kind",
+            "registration/registrant",
+            "registration/released_at",
+            "control/status",
+            "control/expiry",
+            "control/registrant",
+        ] {
+            if !expired.is_empty() {
+                expected.insert(format!("{cause}:{field}"), expired.len());
+            }
+        }
+        for field in ["control/latest_event_kind", "control/registry_owner"] {
+            if transferred > 0 {
+                expected.insert(format!("{cause}:{field}"), transferred);
+            }
+        }
+        if moved > 0 {
+            expected.insert(
+                "registry_node_position_moved_by_later_write:control/latest_event_kind".into(),
+                usize::try_from(moved)?,
+            );
+        }
+        anyhow::ensure!(
+            known == expected,
+            "target {target}: counted {known:?}, the event log gives {expected:?}"
+        );
+    }
+    Ok(())
 }
