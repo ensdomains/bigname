@@ -151,7 +151,9 @@ impl LinkSelection {
 }
 
 /// Two probes of `project_resolver_link`: the name's node, then the empty-name node when the
-/// exact link is absent or a clear. `None` when neither exists.
+/// exact link is absent or a clear. Only rows of the record-ID storage model are links of a
+/// record-ID resolver, as the collection reader and today's link staging require; a row of
+/// another model or of none is neither a link nor a clear. `None` when neither probe finds one.
 pub async fn load_family_link_selection(
     pool: &PgPool,
     chain_id: &str,
@@ -194,7 +196,8 @@ async fn load_link(
         "SELECT node, record_id, storage_model, block_number, transaction_index, log_index,
                 event_identity, normalized_event_id
          FROM bigname_phase.project_resolver_link
-         WHERE chain_id = $1 AND resolver_address = $2 AND node = $3",
+         WHERE chain_id = $1 AND resolver_address = $2 AND node = $3
+           AND storage_model = 'resolver_record_id'",
     )
     .bind(chain_id)
     .bind(resolver_address)
