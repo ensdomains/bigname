@@ -82,10 +82,18 @@ impl Run<'_> {
         if blocks.last() != Some(&self.target.number) {
             blocks.push(self.target.number);
         }
+        let mut visited: u64 = 0;
         for number in blocks {
             if !self.budget.take(outcome) {
                 return Ok(());
             }
+            // A rebuild grows the families from empty faster than autovacuum samples them, and
+            // plans made on empty-table statistics scan whole families per key. Refresh the
+            // statistics after 1, 2, 4, 8, ... rebuilt blocks.
+            if visited > 0 && visited.is_power_of_two() {
+                analyze(self.pool, self.chain_id).await;
+            }
+            visited += 1;
             let completes = number == self.target.number;
             let plan = block::Plan {
                 predecessor: family.current.as_ref(),
@@ -251,4 +259,30 @@ pub(super) enum Transition {
     LowerTarget(i64),
     Reopen(i64),
     Complete,
+}
+
+/// Refresh the planner statistics of every family table. A failure only costs plan quality, so
+/// it is logged and the rebuild continues.
+async fn analyze(pool: &sqlx::PgPool, chain_id: &str) {
+    for table in tables::JOURNALLED
+        .iter()
+        .map(|table| table.name)
+        .chain(tables::DERIVED)
+        .chain(["project_family_undo"])
+    {
+        if let Err(error) = sqlx::query(&format!(
+            "/* project:families.rebuild.analyze */ ANALYZE {table}"
+        ))
+        .execute(pool)
+        .await
+        {
+            tracing::warn!(
+                target: "bigname_project::families",
+                chain_id,
+                table,
+                %error,
+                "could not refresh the statistics of a family table during a rebuild"
+            );
+        }
+    }
 }
