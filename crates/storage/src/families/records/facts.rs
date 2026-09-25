@@ -118,24 +118,27 @@ pub(crate) fn chain_position(
 /// `resolver_current` and the manifest events the way today's builders read it. No writer fills
 /// F3 yet, so today every read takes the second path.
 #[derive(Clone, Debug, Default)]
-pub(crate) struct ResolverClassification {
-    pub(crate) classification: Value,
-    pub(crate) support_status: Option<String>,
-    pub(crate) unsupported_reason: Option<String>,
-    pub(crate) manifest_id: Option<i64>,
-    pub(crate) declaration_namespace: Option<String>,
+pub struct ResolverClassification {
+    pub classification: Value,
+    pub support_status: Option<String>,
+    pub unsupported_reason: Option<String>,
+    pub manifest_id: Option<i64>,
+    pub declaration_namespace: Option<String>,
 }
 
 impl ResolverClassification {
-    pub(crate) fn field(&self, field: &str) -> Option<&str> {
+    /// A text field of the classification object.
+    pub fn field(&self, field: &str) -> Option<&str> {
         self.classification.get(field).and_then(Value::as_str)
     }
 
-    pub(crate) fn supported(&self) -> bool {
+    /// Whether the resolver is supported.
+    pub fn supported(&self) -> bool {
         self.support_status.as_deref() == Some("supported")
     }
 
-    pub(crate) fn has_read_feature(&self, feature: &str) -> bool {
+    /// Whether the classification lists `feature` among its read features.
+    pub fn has_read_feature(&self, feature: &str) -> bool {
         self.classification
             .get("read_features")
             .and_then(Value::as_array)
@@ -143,12 +146,12 @@ impl ResolverClassification {
     }
 
     /// Whether the declaration manifest is admitted in `namespace`.
-    pub(crate) fn declared_in(&self, namespace: &str) -> bool {
+    pub fn declared_in(&self, namespace: &str) -> bool {
         self.declaration_namespace.as_deref() == Some(namespace)
     }
 }
 
-pub(crate) async fn load_classification(
+pub async fn load_classification(
     pool: &PgPool,
     chain_id: &str,
     resolver_address: &str,

@@ -32,6 +32,10 @@ pub use compare::{
     Difference, check_compatibility_pairs, compare_address_records, compare_primary_name,
     compare_record_inventory,
 };
+pub use facts::{
+    ResolverClassification as FamilyResolverClassification,
+    load_classification as load_family_resolver_classification,
+};
 pub use inventory::{
     CompatibilityPair, FamilyAttribution, FamilyRecordInventory, load_family_record_inventory,
     load_family_record_inventory_detail,
