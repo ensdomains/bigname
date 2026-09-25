@@ -20,13 +20,13 @@
 //!   events, F1's epoch starts and the binding candidates' SurfaceBounds ordered by their
 //!   generated ids too, and the association winner of
 //!   an affected triple moved only to a grant of the same name, registry and token
-//!   (`v2_lifecycle_events.sql:10-23`), gives exactly the served value for the field. A
-//!   `control/*` field is read from the name's retained lifecycle events rebuilt from the
-//!   publication-visible log, not from the family rows: that read in the canonical order must
-//!   give the shadow value and in today's order the served one. It also needs every owner
-//!   event, epoch start (its kind, name and arm) and binding candidate's SurfaceBound (its kind,
-//!   name, resource, authority kind and key, state-derived flag and owner) the families hold for
-//!   the name to equal its rebuild from that log. For a
+//!   (`v2_lifecycle_events.sql:10-23`), gives exactly the served value for the field. Those
+//!   reads take the name's retained lifecycle events rebuilt from the publication-visible log,
+//!   not the family rows, and the same rebuild read in the canonical order must give the
+//!   shadow value; every named cause below needs that too. A `control/*` field also needs
+//!   every owner event, epoch start (its kind, name and arm) and binding candidate's
+//!   SurfaceBound (its kind, name, resource, authority kind and key, state-derived flag and
+//!   owner) the families hold for the name to equal its rebuild from that log. For a
 //!   resource's permission rows, admin powers and restriction block, the path-expiry drop rule of
 //!   permissions.rs:111-133, :391-398 must keep the registration live in today's order and
 //!   lapse it in the canonical order, the served value must not be empty, and the whole read in
@@ -814,7 +814,17 @@ async fn without_unnamed_release(
     Ok(membership)
 }
 
-/// The cause shown for each differing field of one name, in `diffs` order.
+/// Whether `read` computes `value` for `field`.
+fn gives(read: Option<&ShadowName>, field: &str, value: &Value) -> bool {
+    read.and_then(|read| shadow_field(read, field))
+        .is_some_and(|computed| same(&computed, value))
+}
+
+/// The cause shown for each differing field of one name, in `diffs` order. Every cause rests
+/// on the name's retained lifecycle events rebuilt from the publication-visible log, not on the
+/// family rows: read in the canonical order (through the refolding path, so the stored key
+/// states and triple summaries are not read either) they must give the field's shadow value,
+/// so a wrong fact on a family row fails the fields it decides and no other.
 async fn name_excuses(
     pool: &PgPool,
     chain: &str,
@@ -823,113 +833,100 @@ async fn name_excuses(
     shadow: &ShadowName,
     diffs: &[Difference],
 ) -> Result<Vec<Excuse>> {
+    let mut out = vec![Excuse::None; diffs.len()];
     if diffs.is_empty() {
-        return Ok(Vec::new());
+        return Ok(out);
     }
     let Some(facts) = load_name_facts(pool, chain, std::slice::from_ref(input))
         .await?
         .pop()
     else {
-        return Ok(vec![Excuse::None; diffs.len()]);
+        return Ok(out);
     };
+    let Some(from_log) = log_facts(pool, chain, clock.block_number, &facts).await? else {
+        return Ok(out);
+    };
+    let canonical = evaluate(&in_canonical_ranks(&from_log), clock);
+    let log_gives_shadow: Vec<bool> = diffs
+        .iter()
+        .map(|diff| gives(Some(&canonical), &diff.field, &diff.shadow))
+        .collect();
     // The unnamed-release cause passes a field only when today's name-scoped membership gives
-    // the served value: the families read in today's order without the unnamed path-expiry
-    // release (build.sql:322, :366-367 build membership by name).
+    // the served value: the events rebuilt from the log, read in today's order without the
+    // unnamed path-expiry release (build.sql:322, :366-367 build membership by name).
     let unnamed: Vec<bool> = diffs
         .iter()
         .map(|diff| serves_the_unnamed_release(shadow, diff))
         .collect();
     let without_release = if unnamed.contains(&true) {
         Some(evaluate(
-            &without_unnamed_release(pool, chain, clock.block_number, &facts).await?,
+            &without_unnamed_release(pool, chain, clock.block_number, &from_log).await?,
             clock,
         ))
     } else {
         None
     };
-    let mut out = Vec::with_capacity(diffs.len());
     for (index, diff) in diffs.iter().enumerate() {
-        let membership_gives_served = without_release
-            .as_ref()
-            .and_then(|membership| shadow_field(membership, &diff.field))
-            .is_some_and(|value| same(&value, &diff.served));
-        let excuse = if unnamed[index] && membership_gives_served {
+        if !log_gives_shadow[index] {
+            continue;
+        }
+        out[index] = if unnamed[index] && gives(without_release.as_ref(), &diff.field, &diff.served)
+        {
             Excuse::Known("served_membership_skips_unnamed_path_expiry")
         } else if serves_the_raw_arm_release(input, shadow, diff) {
             Excuse::Known("served_release_presentation_reads_the_raw_arm")
         } else {
             Excuse::None
         };
-        out.push(excuse);
     }
-    if out.iter().all(|excuse| *excuse != Excuse::None) {
+    if !out
+        .iter()
+        .zip(&log_gives_shadow)
+        .any(|(excuse, holds)| *excuse == Excuse::None && *holds)
+    {
         return Ok(out);
     }
 
-    let open = |out: &[Excuse], index: usize| out[index] == Excuse::None;
-    // The same families read in today's generated-id order at the selectors that use it.
-    if out.contains(&Excuse::None) {
-        let identities: Vec<String> = facts
-            .events
-            .iter()
-            .map(|event| event.position.event_identity.clone())
-            .chain(
-                control_positions(&facts)
-                    .into_iter()
-                    .map(|position| position.event_identity),
-            )
-            .collect();
-        let ids = generated_ids(pool, chain, clock.block_number, &identities).await?;
-        let keys = association_keys(pool, chain, clock.block_number, &identities).await?;
-        // The name's retained lifecycle events rebuilt from the publication-visible log, read
-        // in the canonical order through the refolding path and in today's order. A control
-        // field passes only when the first gives the shadow value and the second the served
-        // one, so a wrong fact on a canonically selected event (its unmasked-word flag, its
-        // recipient) fails even when today's order selects another event.
-        let from_log = log_facts(pool, chain, clock.block_number, &facts).await?;
-        let canonical_log = from_log
-            .as_ref()
-            .map(|facts| evaluate(&in_canonical_ranks(facts), clock));
-        let legacy_log = from_log
-            .as_ref()
-            .and_then(|facts| legacy_facts(facts, &ids, &keys))
-            .map(|legacy| evaluate(&legacy, clock));
-        let legacy = legacy_facts(&facts, &ids, &keys).map(|legacy| evaluate(&legacy, clock));
-        let gives = |read: &Option<ShadowName>, field: &str, value: &Value| {
-            read.as_ref()
-                .and_then(|read| shadow_field(read, field))
-                .is_some_and(|computed| same(&computed, value))
-        };
-        let mut control_holds = None;
-        for (index, diff) in diffs.iter().enumerate() {
-            // Only the fields the counterfactual computes: an authority-selection field has no
-            // today's-order value here and stays open.
-            if !open(&out, index) {
-                continue;
-            }
-            let control = diff.field.starts_with("control/");
-            let passes = if control {
-                gives(&canonical_log, &diff.field, &diff.shadow)
-                    && gives(&legacy_log, &diff.field, &diff.served)
-            } else {
-                gives(&legacy, &diff.field, &diff.served)
-            };
-            if !passes {
-                continue;
-            }
-            // A control field also needs the families' other control facts to be what the event
-            // log gives.
-            if control {
-                if control_holds.is_none() {
-                    control_holds =
-                        Some(control_facts_hold(pool, chain, clock.block_number, &facts).await?);
-                }
-                if control_holds != Some(true) {
-                    continue;
-                }
-            }
-            out[index] = Excuse::SameBlockOrder;
+    // The same events read in today's generated-id order at the selectors that use it: a field
+    // passes as a same-block delta only when that read gives the served value.
+    let identities: Vec<String> = from_log
+        .events
+        .iter()
+        .map(|event| event.position.event_identity.clone())
+        .chain(
+            control_positions(&from_log)
+                .into_iter()
+                .map(|position| position.event_identity),
+        )
+        .collect();
+    let ids = generated_ids(pool, chain, clock.block_number, &identities).await?;
+    let keys = association_keys(pool, chain, clock.block_number, &identities).await?;
+    let Some(legacy) = legacy_facts(&from_log, &ids, &keys) else {
+        return Ok(out);
+    };
+    let today = evaluate(&legacy, clock);
+    let mut control_holds = None;
+    for (index, diff) in diffs.iter().enumerate() {
+        // Only the fields both reads compute: an authority-selection field has no today's-order
+        // value here and stays open.
+        if out[index] != Excuse::None
+            || !log_gives_shadow[index]
+            || !gives(Some(&today), &diff.field, &diff.served)
+        {
+            continue;
         }
+        // A control field also needs the families' other control facts to be what the event
+        // log gives.
+        if diff.field.starts_with("control/") {
+            if control_holds.is_none() {
+                control_holds =
+                    Some(control_facts_hold(pool, chain, clock.block_number, &facts).await?);
+            }
+            if control_holds != Some(true) {
+                continue;
+            }
+        }
+        out[index] = Excuse::SameBlockOrder;
     }
     Ok(out)
 }

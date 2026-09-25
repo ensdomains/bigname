@@ -476,6 +476,42 @@ async fn synthesised_events_in_one_block_take_the_identity_order() -> Result<()>
             ("d12_same_block_order:control/expiry", 1),
         ],
     );
+    // Pro Q3 on a5f61182: a wrong expiry on the canonically selected grant, the log and the
+    // served rows unchanged, makes the families' expiry wrong while today's order still selects
+    // a-expiry, which carries the served one. Both expiry fields must stay mismatches, because
+    // the canonical read of the events rebuilt from the log gives 2,000,000,000; the latest
+    // kind, which the grant's expiry does not decide, keeps its same-block delta.
+    sqlx::query(
+        "UPDATE bigname_phase.project_lifecycle_event
+         SET expiry = '2200000000'::jsonb, expiry_seconds = 2200000000
+         WHERE event_identity = 'b-grant'",
+    )
+    .execute(&fixture.pool)
+    .await?;
+    let mutated = shadow_support::compare::compare(&fixture.pool, CHAIN, 12).await?;
+    assert_eq!(
+        failed_fields(&mutated),
+        ["control/expiry", "registration/expiry"],
+        "a wrong canonical expiry must not pass: {:#?}",
+        mutated.lines
+    );
+    assert_eq!(
+        mutated.expected_delta_fields,
+        [(
+            "d12_same_block_order:registration/latest_event_kind".to_owned(),
+            1
+        )]
+        .into(),
+        "{:#?}",
+        mutated.lines
+    );
+    sqlx::query(
+        "UPDATE bigname_phase.project_lifecycle_event
+         SET expiry = '2000000000'::jsonb, expiry_seconds = 2000000000
+         WHERE event_identity = 'b-grant'",
+    )
+    .execute(&fixture.pool)
+    .await?;
     // Codex thread PRRT_kwDOSJpxAs6l7vYS: an event the family still holds whose log row is no
     // longer canonical has no readable generated id, so the block's today's order is unknown
     // and the differences stay mismatches rather than same-block deltas.
@@ -1409,5 +1445,62 @@ async fn a_wrong_fact_on_the_canonically_selected_transfer_stays_a_mismatch() ->
         assert_eq!(restored.expected_delta_fields, delta, "{case}");
         assert_eq!(restored.mismatched, 0, "{case}");
     }
+    fixture.cleanup().await
+}
+
+/// Pro Q3 on a5f61182: a grant with no numeric expiry, then the interpreter's unnamed
+/// path-expiry release of its resource. With no admitted numeric expiry on the key the reader
+/// serves the release's own expiry (served.rs:173-183, :244-268), and today's name-scoped
+/// membership serves the grant with none: a field of the named cause. A wrong expiry on the
+/// family's release row moves both the shadow value and the reader's trace, and removing the
+/// release for the served-side read removes it too, so the cause must check the release against
+/// the log: the canonical read of the events rebuilt from it gives 1,800,000,150, and the field
+/// stays a mismatch.
+#[tokio::test]
+async fn an_unnamed_release_expiry_is_checked_against_the_log() -> Result<()> {
+    let fixture = Fixture::new("families_shadow_unnamed_release_expiry", 20).await?;
+    let k1 = uuid(1);
+    v2_binding(&fixture, &k1).await?;
+    v2(
+        &fixture,
+        10,
+        "RegistrationGranted",
+        Some(&k1),
+        json!({"status": "registered", "registrant": ALICE}),
+    )
+    .await?;
+    unnamed_path_expiry(&fixture, "path-expiry", 14, &k1, 1_800_000_150).await?;
+    let report = publish_and_compare(&fixture, 16).await?;
+    let (served, shadow) = shadow_reads(&fixture, 16).await?;
+    assert_eq!(served.registration("expiry"), Value::Null);
+    assert_eq!(shadow.registration["expiry"], json!(1_800_000_150u64));
+    let cause = "served_membership_skips_unnamed_path_expiry:registration/expiry";
+    assert_eq!(report.mismatched, 0, "{:#?}", report.lines);
+    assert_eq!(
+        report.known_discrepancy.get(cause),
+        Some(&1),
+        "{:#?}",
+        report.lines
+    );
+    sqlx::query(
+        "UPDATE bigname_phase.project_lifecycle_event
+         SET expiry = '1800000999'::jsonb, expiry_seconds = 1800000999
+         WHERE event_identity = 'path-expiry'",
+    )
+    .execute(&fixture.pool)
+    .await?;
+    let (_, shadow) = shadow_reads(&fixture, 16).await?;
+    assert_eq!(shadow.registration["expiry"], json!(1_800_000_999u64));
+    let mutated = shadow_support::compare::compare(&fixture.pool, CHAIN, 16).await?;
+    assert!(
+        !mutated.known_discrepancy.contains_key(cause),
+        "a wrong release expiry must not pass: {:#?}",
+        mutated.lines
+    );
+    assert!(
+        failed_fields(&mutated).contains(&"registration/expiry".to_owned()),
+        "{:#?}",
+        mutated.lines
+    );
     fixture.cleanup().await
 }
