@@ -49,13 +49,12 @@ fn lifecycle(event: &BlockEvent) -> Option<(&'static str, bool)> {
                 .pointer("/grant_source/relation_kind")
                 .or_else(|| event.after.pointer("/revocation_source/relation_kind"))
                 .and_then(Value::as_str);
-            (resource_scope && relation == Some("holder")).then(|| {
-                if powers.is_empty() {
-                    ("holder_revoke", true)
-                } else {
-                    ("holder_grant", false)
-                }
-            })
+            let lifecycle = if powers.is_empty() {
+                ("holder_revoke", true)
+            } else {
+                ("holder_grant", false)
+            };
+            (resource_scope && relation == Some("holder")).then_some(lifecycle)
         }
         _ => None,
     }
