@@ -1,5 +1,15 @@
 # Storage
 
+The schema this document describes is frozen for the [V1
+milestone](glossary.md#v1-milestone) by
+[ADR 0008](adrs/0008-v1-schema-freeze.md), which names the frozen artifact, the
+conformance test that makes the freeze observable, and every authorized
+carve-out. The frozen artifact is the `schema-v2/baseline/` tree plus the
+schema-migration head
+`migrations/20260925120000_normalized_events_resolver_history_idx.sql`; a
+carve-out that lands as a schema-migration advances this head here and in the
+ADR in the same change.
+
 PostgreSQL is the durable indexing and serving store. Current runtime objects
 live in `bigname_phase`; the append-only SQLx history in `migrations/` records
 the retired `public` schema, its schema-qualified deletion, and reviewed

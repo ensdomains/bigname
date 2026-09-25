@@ -799,6 +799,51 @@ schema-migration's `IF NOT EXISTS` build is a no-op when the index already
 exists, and it ends with the same check.
 
 The release containing
+`20260925120000_normalized_events_resolver_history_idx.sql` carries the two
+partial `normalized_events` indexes the resolver-anchored event feed
+(`GET /v1/events?resolver=`) uses and retires the two `permission_*`
+resolver-history indexes that nothing reads; #415 added all four to the
+baseline without a schema-migration, so a namespace that took slice 1 in
+place lacks them all, and a namespace replaced from the baseline between
+2026-08-14 and this release has all four. The baseline in this release
+carries only the two kept pointer indexes, so a namespace initialized or
+replaced from this release onward already has the end state and needs
+nothing here. On an initialized production namespace, run
+[`ops/resolver-history-indexes/install.sql`](../../ops/resolver-history-indexes/install.sql)
+in step 3 as [its runbook](../../ops/resolver-history-indexes/README.md)
+describes. `install.sql` is the reviewed source of those statements: the
+index block later in this runbook repeats the two kept builds, and the two
+drops have no copy there, because `install.sql` drops a retired name only
+when it holds the index #415 built and refuses a table, an index on another
+table, or an index with another definition under that name, which a bare
+`DROP INDEX` would remove. `schema-v2/apply-check.sh` proves it builds and
+drops what the fresh baseline and the schema-migration build and drop, and
+proves each refusal. Both kept predicates name `consumer_visibility`, so
+`install.sql` refuses a namespace that has not taken
+`20260811120000_ens_v2_migration_slice_1.sql`, naming that prerequisite;
+apply the schema-migrations through slice 1 first, as step 3 describes. The
+builds and drops are concurrent and permit writes, so they can finish while
+the existing runner is still processing, before the stop/start window opens;
+step 3 then only runs `install.sql` again as the check, which is a no-op with
+a receipt on a namespace that already has the two kept indexes and neither
+retired one. `install.sql` is its own readiness check and never drops or
+rebuilds a kept index; recover an interrupted build as its runbook describes.
+Keep the `install.sql` output with its start and end times in the release
+record. Both kept indexes key on a `lower(...)` expression, so after the
+builds run `ANALYZE bigname_phase.normalized_events`, as for the lookahead
+indexes: without statistics the planner may keep scanning the chain's
+`ResolverChanged` history instead of taking the `BitmapOr` over the pair.
+Then apply the schema-migrations in step 4. Like the other index
+schema-migrations, this one builds each kept index that is still missing
+itself, as an ordinary `CREATE INDEX` that blocks writes to
+`normalized_events` for the build, and it also drops each retired index that
+still exists under the table's exclusive lock, so on a populated namespace step 3 must come first; where a
+kept name is already taken it applies the same check, so `sqlx migrate run`
+stops without recording it if that name is invalid, not ready, on another
+table, not an index, or has another definition, and it refuses a retired name
+the same way.
+
+The release containing
 `20260904120000_project_redo_child_registration_history.sql` adds the bounded
 Interpret-to-Project handoff for child and registry identifiers from deleted
 ENSv1→ENSv2 [migration-registry](../glossary.md#migration-registry-wrapperregistry)
@@ -1007,6 +1052,27 @@ SELECT EXISTS (
 ) AS discovery_edges_reopen_index_ready;
 ```
 
+Every statement in the block below, and every `ops/*/install.sql`, is written
+against the schema as the schema-migrations older than its release left it.
+Four of the predicates below (`normalized_events_ens_v1_record_node_resolver_idx`,
+`normalized_events_basenames_record_node_resolver_idx`, and the two
+`normalized_events_pointer_*_resolver_history_idx` builds, which
+`ops/resolver-history-indexes/install.sql` also carries) name
+`consumer_visibility`, which `20260811120000_ens_v2_migration_slice_1.sql`
+adds to `normalized_events`; on a namespace that has not taken slice 1 the
+statement fails with a missing-column error, and that installer refuses
+before building, naming the prerequisite. So step 3 assumes every
+schema-migration older than the release's own is applied. When
+`sqlx migrate info` shows pending versions from more than one release with a
+step-3 entry, take the releases in order rather than prebuilding everything
+first: apply the pending schema-migrations older than the next release's
+step-3 statements with `sqlx migrate run --target-version <version>` (the
+version just before that release's index schema-migration), run that
+release's step 3, and continue to the next; the final `sqlx migrate run` in
+step 4 then applies the rest. A prebuild skipped this way leaves the
+schema-migration's `IF NOT EXISTS` build to perform the first build against
+the populated table, which the paragraphs above forbid.
+
 Apply the following index statements one at a time with the writer role. Do not
 wrap them in a transaction: PostgreSQL requires each `CREATE INDEX CONCURRENTLY`
 to run as a top-level statement. The `normalized_events` builds are expected to
@@ -1047,24 +1113,6 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_pointer_before_resolve
     WHERE event_kind = 'ResolverChanged'
       AND consumer_visibility = 'activated'
       AND canonicality_state IN ('canonical', 'safe', 'finalized');
-CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_permission_after_resolver_history_idx
-    ON bigname_phase.normalized_events
-       (chain_id, lower(after_state #>> '{scope,resolver_address}'),
-        block_number, block_hash) INCLUDE (resource_id)
-    WHERE event_kind = 'PermissionChanged'
-      AND consumer_visibility = 'activated'
-      AND canonicality_state IN ('canonical', 'safe', 'finalized')
-      AND after_state #>> '{scope,kind}' = 'resolver'
-      AND resource_id IS NOT NULL;
-CREATE INDEX CONCURRENTLY IF NOT EXISTS normalized_events_permission_before_resolver_history_idx
-    ON bigname_phase.normalized_events
-       (chain_id, lower(before_state #>> '{scope,resolver_address}'),
-        block_number, block_hash) INCLUDE (resource_id)
-    WHERE event_kind = 'PermissionChanged'
-      AND consumer_visibility = 'activated'
-      AND canonicality_state IN ('canonical', 'safe', 'finalized')
-      AND before_state #>> '{scope,kind}' = 'resolver'
-      AND resource_id IS NOT NULL;
 DROP INDEX CONCURRENTLY IF EXISTS bigname_phase.normalized_events_subregistry_registration_history_idx;
 CREATE INDEX CONCURRENTLY normalized_events_subregistry_registration_history_idx
     ON bigname_phase.normalized_events
@@ -1233,7 +1281,20 @@ indexes are additive; rollback may leave them in place.
    to exit zero, and after step 9 run `validate.sql` and
    `ops/project-progressive/validate-after-switch.sql` and require both to exit
    zero;
-   otherwise skip this step;
+   for the release containing
+   `20260925120000_normalized_events_resolver_history_idx.sql`, run
+   `ops/resolver-history-indexes/install.sql` as described above, require
+   it to exit zero, then run `ANALYZE bigname_phase.normalized_events`; it
+   refuses a namespace that has not taken
+   `20260811120000_ens_v2_migration_slice_1.sql`, so on one that is behind by
+   more than one release apply the releases in order as described above the
+   index block;
+   otherwise skip this step. Every `normalized_events` index this step builds
+   except `normalized_events_chain_block_number_idx` and
+   `normalized_events_chain_block_number_desc_idx` keys on an expression, and an expression index has no statistics until the
+   table is analyzed, so end the step with `ANALYZE bigname_phase.normalized_events`
+   whenever it built one, or confirm autovacuum has analyzed the table since
+   the build;
    For the release containing
    `20260814130000_surface_binding_authority_arm.sql`, a populated phase schema
    cannot take the required `NOT NULL` column without the forbidden historical

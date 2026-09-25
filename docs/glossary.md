@@ -1906,8 +1906,9 @@ deterministic baseline, not an input to deterministic replay.
 The closed set of Project-owned maintenance fields is `last_recomputed_at` on
 every projection
 table except `primary_names_current`; `inserted_at` on `name_current`,
-`children_current`, `permissions_current`, `record_inventory_current`,
-`resolver_current`, `address_names_current`, and `address_records_current`; and
+`children_current`, `permissions_current`, `account_permission_state_current`,
+`record_inventory_current`, `resolver_current`, `address_names_current`,
+`address_records_current`, and `child_registration_events`; and
 `reverse_hydration_attempted_block_number`,
 `reverse_hydration_attempted_block_hash`, and
 `reverse_hydration_attempt_ordinal` on `primary_names_current`. The Project
@@ -2372,6 +2373,17 @@ resolver
 (upstream: .refs/ens_v1/contracts/universalResolver/AbstractUniversalResolver.sol:L63-L88 @ ens_v1@91c966f).
 This path does not turn the ancestor into the name's declared exact resolver
 and has no live/indexed comparison.
+
+## V1 milestone
+
+bigname's first stable read release, "V1" — not ENSv1, and not the
+prospective V2 specification — together with the work that proves it replaces
+the retained legacy read surface: the parity coverage
+[`consumer-capabilities.md`](consumer-capabilities.md) requires, regression
+tests over the served routes, and monitoring. [ADR
+0008](adrs/0008-v1-schema-freeze.md) freezes the schema for the milestone's
+duration; it ends when those gates pass and the release is signed off, which
+is recorded by amending that ADR's status line.
 
 ## Verified lookup
 
