@@ -2052,7 +2052,7 @@ COMMENT ON COLUMN project_resource_pointer.event_identity IS
 COMMENT ON COLUMN project_resource_pointer.normalized_event_id IS
     'This value names the event that last wrote the row in normalized_events as attribution only; it never takes part in ordering.';
 COMMENT ON COLUMN project_resource_pointer.resolver_address IS
-    'This value is the lower-cased resolver of the latest ResolverChanged on the resource, named or not, clears included.';
+    'This value is the lower-cased resolver of the latest ResolverChanged on the resource, named or not, clears included. At an ENSv2 root-registry TLD expiry the interpreter emits the resolver clear with no logical name (adapters schema_v2/protocol/v2_registry/expiry.rs); this row keeps that clear, where the served pointer read takes named ResolverChanged only (builders/linked_records.rs, project_record_pointer_latest) and never sees it, so the served inventory keeps a row the name no longer reaches. The chain agrees with this row: getResolver returns the zero address once the token has expired.';
 COMMENT ON COLUMN project_resource_pointer.pointer_position IS
     'This value is that ResolverChanged''s position.';
 COMMENT ON COLUMN project_resource_pointer.namespace IS

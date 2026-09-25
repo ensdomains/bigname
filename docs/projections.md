@@ -1731,6 +1731,11 @@ steps that read them must key on. Each is also stated on its table or column:
 - F4 keeps the ENSv1 registry, registrar and wrapper families only, so a
   `ResolverChanged` of another family with no resource (a Basenames reverse
   node, for instance) lands in no family table.
+- F5 keeps the unnamed resolver clear the interpreter emits at an ENSv2
+  root-registry TLD expiry. The served pointer read takes named
+  `ResolverChanged` only, never sees that clear, and keeps an inventory row the
+  name no longer reaches; the chain agrees with F5 (`getResolver` returns the
+  zero address once the token has expired).
 - F7 keeps a `ResolverRecordLinked` whose payload has no resolver; the served
   link reader requires the payload resolver equal to the emitter.
 - The undo journal is not pruned while the chain has no finalized or safe
