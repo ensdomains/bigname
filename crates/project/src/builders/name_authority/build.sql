@@ -69,8 +69,19 @@
                        event.normalized_event_id
                 FROM project_events event
                 JOIN latest_v2_binding binding
-                  ON binding.logical_name_id = event.logical_name_id
-                 AND binding.resource_id = event.resource_id
+                  ON binding.resource_id = event.resource_id
+                 AND (
+                      binding.logical_name_id = event.logical_name_id
+                      -- When Interpret retires a token that has no name any more, it writes the
+                      -- path-expiry release on the token's resource without a name. It is still
+                      -- the release of the registration the name was last bound to. Only the
+                      -- release is taken this way: a nameless renewal of a token cut from its
+                      -- path does not give the name back.
+                      OR (
+                          event.logical_name_id IS NULL
+                          AND event.event_kind = 'RegistrationReleased'
+                      )
+                 )
                 WHERE event.source_family IN (
                       'ens_v2_root_l1', 'ens_v2_registry_l1',
                       'ens_v2_registrar_l1'
@@ -100,8 +111,11 @@
                   AND event.event_kind = 'RegistrationReserved'
                   AND event.resource_id IS DISTINCT FROM binding.resource_id
             ) fact
+            -- A block-boundary fact has no transaction or log index and sorts first in its
+            -- block, as in every other position comparison here.
             ORDER BY fact.logical_name_id, fact.block_number DESC,
-                     fact.transaction_index DESC, fact.log_index DESC,
+                     COALESCE(fact.transaction_index, -1) DESC,
+                     COALESCE(fact.log_index, -1) DESC,
                      fact.normalized_event_id DESC
         ), released_v2_authority AS (
             -- A released ENSv2 registration stays with ENSv2 whatever ENSv1 holds (product ruling
@@ -425,6 +439,9 @@
                selected.proof_kind AS authority_proof_kind, selected.proof_event_id AS authority_proof_event_id,
                selected.proof_event_identity AS authority_proof_event_identity, selected.transition_id AS authority_transition_id,
                CASE
+                   -- A released ENSv2 tombstone was selected because its release is the latest
+                   -- fact of its registration, which may be a release written without a name.
+                   WHEN selected.released_v2_resource_id IS NOT NULL THEN 'unregistered'
                    WHEN lifecycle.event_kind = 'RegistrationReleased' THEN 'unregistered'
                    WHEN lifecycle.event_kind = 'RegistrationReserved' THEN 'reserved'
                    WHEN lifecycle.event_kind IN ('RegistrationGranted', 'RegistrationRenewed')

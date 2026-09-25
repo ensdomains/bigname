@@ -5204,6 +5204,205 @@ async fn ens_v2_resource_identity_and_terminal_binding_round_trip() -> Result<()
     scratch.cleanup().await
 }
 
+// A registered child whose path is cut before its own expiry: when the parent's subregistry is
+// cleared, Interpret releases the child by name and closes its ENSv2 binding; when the child's own
+// expiry passes, the token has no name any more, so Interpret writes a second, block-boundary
+// release with the resource and no name. Project keeps the name as a released ENSv2 tombstone on
+// that resource (product ruling of 2026-09-25: an expired ENSv2 registration stays with ENSv2).
+// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L255-L258 @ ens_v2@a971bd64)
+#[tokio::test]
+async fn a_detached_child_expiry_is_released_without_a_name_and_stays_a_v2_tombstone() -> Result<()>
+{
+    let scratch = ScratchDatabase::create("production_interpret_detached_child_expiry").await?;
+    let chain = "interpret-detached-child-expiry";
+    seed_v2_lifecycle_fixture(scratch.pool(), chain).await?;
+    let child = ANNOUNCED_REGISTRY;
+    sqlx::query(
+        "WITH root AS (
+             SELECT manifest.manifest_id, declaration.contract_instance_id
+             FROM manifest_versions manifest JOIN manifest_contract_instances declaration USING (manifest_id, chain_id)
+             WHERE manifest.chain_id = $1 AND declaration.role = 'registry'
+         ), instance AS (
+             INSERT INTO contract_instances VALUES ($2, $1, 'contract', '{}'::jsonb, now()) RETURNING contract_instance_id
+         ), address AS (
+             INSERT INTO contract_instance_addresses (contract_instance_id, chain_id, address, active_from_block_number, source_manifest_id, provenance)
+             SELECT instance.contract_instance_id, $1, $3, 0, root.manifest_id, '{}'::jsonb FROM root, instance
+         ), edge AS (
+             INSERT INTO discovery_edges (chain_id, edge_kind, from_contract_instance_id, to_contract_instance_id, discovery_source, admission_basis, source_manifest_id, active_from_block_number, active_from_block_hash, canonicality_state, provenance)
+             SELECT $1, 'registry_announcement', root.contract_instance_id, instance.contract_instance_id, 'RegistryCreated', 'reachable_from_root', root.manifest_id, 0, $4, 'canonical', '{\"observation_key\":\"fixture-child\"}'::jsonb FROM root, instance
+         )
+         INSERT INTO manifest_discovery_rules (manifest_id, edge_kind, from_role, admission) SELECT manifest_id, 'subregistry', 'registry', 'linked_subregistry_event' FROM root",
+    )
+    .bind(chain)
+    .bind(Uuid::new_v4())
+    .bind(child)
+    .bind(block_hash(chain, 0))
+    .execute(scratch.pool())
+    .await?;
+    // The parent stays registered well past the fixture; only the child expires, at block 2.
+    let parent = v2_registry_events::LabelRegistered {
+        tokenId: versioned_token("alice", 1),
+        labelHash: keccak256(b"alice"),
+        label: "alice".to_owned(),
+        owner: "0x0000000000000000000000000000000000000061".parse()?,
+        expiry: 4_000_000_000,
+        sender: SENDER.parse()?,
+    }
+    .encode_log_data();
+    sqlx::query(
+        "UPDATE raw_logs SET data = $2 WHERE chain_id = $1 AND block_number = 1 AND log_index = 0",
+    )
+    .bind(chain)
+    .bind(parent.data.to_vec())
+    .execute(scratch.pool())
+    .await?;
+    sqlx::query("DELETE FROM raw_logs WHERE chain_id = $1 AND block_number = 2")
+        .bind(chain)
+        .execute(scratch.pool())
+        .await?;
+    let topology = [
+        (
+            child,
+            v2_registry_events::LabelRegistered {
+                tokenId: versioned_token("leaf", 1),
+                labelHash: keccak256(b"leaf"),
+                label: "leaf".into(),
+                owner: "0x0000000000000000000000000000000000000061".parse()?,
+                expiry: 2,
+                sender: SENDER.parse()?,
+            }
+            .encode_log_data(),
+        ),
+        (
+            child,
+            v2_registry_events::TokenResource {
+                tokenId: versioned_token("leaf", 1),
+                resource: U256::from(6001),
+            }
+            .encode_log_data(),
+        ),
+        (
+            CONTRACT,
+            v2_registry_events::SubregistryUpdated {
+                tokenId: versioned_token("alice", 1),
+                subregistry: child.parse()?,
+                sender: SENDER.parse()?,
+            }
+            .encode_log_data(),
+        ),
+        (
+            child,
+            v2_registry_events::ParentUpdated {
+                parent: CONTRACT.parse()?,
+                label: "alice".into(),
+                sender: SENDER.parse()?,
+            }
+            .encode_log_data(),
+        ),
+        // The parent's subregistry is cleared, which cuts the child's path.
+        (
+            CONTRACT,
+            v2_registry_events::SubregistryUpdated {
+                tokenId: versioned_token("alice", 1),
+                subregistry: Address::ZERO,
+                sender: SENDER.parse()?,
+            }
+            .encode_log_data(),
+        ),
+    ];
+    for (offset, (emitter, event)) in topology.into_iter().enumerate() {
+        insert_log_at(
+            scratch.pool(),
+            chain,
+            1,
+            &format!("{chain}-transaction-1"),
+            i64::try_from(offset)? + 4,
+            emitter,
+            event.topics(),
+            event.data.as_ref(),
+        )
+        .await?;
+    }
+    run_engine(scratch.pool(), chain, 1, 2, InterpretRunMode::Normal).await?;
+
+    // Interpret's shape before Project: a named release where the path was cut, which closes the
+    // binding, and a nameless block-boundary release at the child's own expiry.
+    type Release = (
+        Option<String>,
+        Uuid,
+        i64,
+        Option<i64>,
+        Option<i64>,
+        Option<String>,
+    );
+    let releases: Vec<Release> = sqlx::query_as(
+        "SELECT logical_name_id, resource_id, block_number, transaction_index, log_index,
+                after_state ->> 'source_event'
+         FROM normalized_events
+         WHERE chain_id = $1 AND event_kind = 'RegistrationReleased'
+           AND resource_id IN (
+               SELECT resource_id FROM normalized_events
+               WHERE chain_id = $1 AND logical_name_id IS NULL
+                 AND event_kind = 'RegistrationReleased'
+                 AND after_state ->> 'source_event' = 'RegistryPathExpired'
+           )
+         ORDER BY block_number, logical_name_id NULLS LAST",
+    )
+    .bind(chain)
+    .fetch_all(scratch.pool())
+    .await?;
+    assert_eq!(releases.len(), 2, "{releases:?}");
+    let leaf = releases[0]
+        .0
+        .clone()
+        .expect("the path cut releases the child by name");
+    let resource = releases[0].1;
+    assert_eq!(releases[0].2, 1);
+    assert_eq!(
+        (
+            releases[1].0.as_deref(),
+            releases[1].1,
+            releases[1].2,
+            releases[1].3,
+            releases[1].4,
+            releases[1].5.as_deref(),
+        ),
+        (None, resource, 2, None, None, Some("RegistryPathExpired")),
+        "the child's own expiry is released on its resource without a name"
+    );
+    let open: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM surface_bindings
+         WHERE chain_id = $1 AND logical_name_id = $2 AND authority_arm = 'ens_v2'
+           AND active_to IS NULL",
+    )
+    .bind(chain)
+    .bind(&leaf)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(open, 0);
+
+    run_project(scratch.pool(), chain, 2, 0, 2).await?;
+    let served: (Option<String>, Option<String>, Option<Uuid>, Option<String>) = sqlx::query_as(
+        "SELECT provenance #>> '{authority_selection,authority_arm}',
+                provenance #>> '{authority_selection,lifecycle_state}',
+                resource_id, declared_summary #>> '{registration,status}'
+         FROM name_current WHERE logical_name_id = $1",
+    )
+    .bind(&leaf)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        served,
+        (
+            Some("ens_v2".into()),
+            Some("unregistered".into()),
+            Some(resource),
+            Some("released".into()),
+        )
+    );
+    scratch.cleanup().await
+}
+
 #[tokio::test]
 async fn quiet_v2_expiry_reorg_matches_full_redo_on_the_winning_fork() -> Result<()> {
     let scratch = ScratchDatabase::create("production_interpret_v2_expiry_reorg").await?;

@@ -2145,7 +2145,9 @@ reservation of the label, which defers to ENSv1 like any
 [premigration reservation](#premigration-reservation), or a new ENSv2
 registration changes the name's arm. The reservation counts by name: after
 `unregister` bumps the token version, the reservation carries a versioned token
-id and no resource, so it is not a fact of the released resource. Its current registration lifecycle is
+id and no resource, so it is not a fact of the released resource. A path-expiry
+release that Interpret writes on the resource without a name, because the token
+had already lost its name, still counts as that registration's release. Its current registration lifecycle is
 unregistered and its selected arm is `ens_v2`, bound to the released resource.
 This follows the ENSv2 contracts, which never route a label that has been
 registered back to ENSv1: `unregister` burns the token and writes the release
