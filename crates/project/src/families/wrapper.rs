@@ -44,6 +44,13 @@ fn lifecycle(event: &BlockEvent) -> Option<(&'static str, bool)> {
                 .after
                 .get("effective_powers")
                 .and_then(Value::as_array)?;
+            // The served CTE reads COALESCE(grant_source ->> relation_kind, revocation_source
+            // ->> relation_kind), which also falls through a JSON-null relation_kind. The adapter
+            // never writes one: every wrapper PermissionChanged comes from v1_wrapper_states
+            // (adapters schema_v2/protocol/permissions.rs:196-236, called from
+            // protocol/v1/wrapper/permissions.rs:103), whose source always carries relation_kind
+            // as a string (:205) and whose after-state sets exactly one of grant_source and
+            // revocation_source, the other being JSON null (:229, :234).
             let relation = event
                 .after
                 .pointer("/grant_source/relation_kind")
