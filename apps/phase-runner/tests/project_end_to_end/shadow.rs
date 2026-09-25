@@ -1342,6 +1342,21 @@ pub async fn resource_excuses(
     Ok(out)
 }
 
+/// Exactly one printed report for each expected target, and none for any other target.
+pub fn one_report_per_target(reports: &[Counted], targets: &[i64]) -> Result<()> {
+    let mut expected = targets.to_vec();
+    expected.sort_unstable();
+    let distinct = expected.windows(2).all(|pair| pair[0] != pair[1]);
+    anyhow::ensure!(distinct, "the expected targets repeat: {expected:?}");
+    let mut seen: Vec<i64> = reports.iter().map(|report| report.0).collect();
+    seen.sort_unstable();
+    anyhow::ensure!(
+        seen == expected,
+        "shadow reports for targets {seen:?}, expected one each for {expected:?}"
+    );
+    Ok(())
+}
+
 /// The fixture corpus's counted fields, asserted exactly against counts read from its event log
 /// at each target without the family readers (crates/project/tests/rebuild_performance/seed.sql):
 /// - an ENSv2 name whose interpreter path-expiry release (the `expired` rows, no name, the token
@@ -1350,9 +1365,9 @@ pub async fn resource_excuses(
 ///   fields again for those whose token was transferred before the target.
 ///
 /// No same-block delta may pass on the corpus.
-pub async fn assert_fixture_corpus_counts(pool: &PgPool) -> Result<()> {
+pub async fn assert_fixture_corpus_counts(pool: &PgPool, targets: &[i64]) -> Result<()> {
     let reports = take_reports();
-    anyhow::ensure!(!reports.is_empty(), "no shadow comparison ran");
+    one_report_per_target(&reports, targets)?;
     for (target, delta, known) in reports {
         anyhow::ensure!(
             delta.is_empty(),

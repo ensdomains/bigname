@@ -498,7 +498,7 @@ async fn a_new_owner_subregistry_and_transfer_at_one_log_is_a_same_block_delta()
         .await?;
         let mutated = shadow_support::compare::compare(&fixture.pool, CHAIN, 12).await?;
         assert!(
-            mutated.expected_delta_fields.is_empty(),
+            mutated.expected_delta_fields.is_empty() && mutated.known_discrepancy.is_empty(),
             "{case} must not pass as a same-block delta: {:#?}",
             mutated.lines
         );

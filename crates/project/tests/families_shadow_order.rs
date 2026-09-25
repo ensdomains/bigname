@@ -314,6 +314,14 @@ async fn a_same_block_release_after_a_grant_passes_only_from_the_families_read()
             "{case} must fail: {:#?}",
             mutated.lines
         );
+        assert_eq!(
+            mutated.known_discrepancy,
+            RELEASED_NAME
+                .iter()
+                .map(|(field, count)| ((*field).to_owned(), *count))
+                .collect(),
+            "{case}: the released name's named causes stand whole"
+        );
         let failed: Vec<&str> = mutated
             .lines
             .iter()
@@ -498,7 +506,9 @@ async fn the_order_counterfactual_keeps_the_admission_of_a_reordered_block() -> 
     .await?;
     let mutated = shadow_support::compare::compare(&fixture.pool, CHAIN, 16).await?;
     assert!(
-        mutated.expected_delta_fields.is_empty() && mutated.mismatched == 1,
+        mutated.expected_delta_fields.is_empty()
+            && mutated.known_discrepancy.is_empty()
+            && mutated.mismatched == 1,
         "a wrong handoff block must fail: {:#?}",
         mutated.lines
     );
@@ -559,7 +569,8 @@ async fn an_unrelated_triple_in_the_block_is_not_an_association_rival() -> Resul
             json!({"expiry": 2_100_000_000u64}),
         ))
         .await?;
-    publish_and_compare(&fixture, 16).await?;
+    let report = publish_and_compare(&fixture, 16).await?;
+    assert_counts(&report, &[], &[]);
     let (facts, legacy) = facts_and_legacy(&fixture).await?;
     let target = |facts: &NameFacts| {
         facts

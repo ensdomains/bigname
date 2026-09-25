@@ -175,7 +175,7 @@ async fn fixture_corpus_publishes_hydrates_reads_and_matches_a_rebuild() -> Resu
     shadow::take_reports();
     let compared = run(pool, previous, &targets, Some(FIXTURE_CHILDREN_PAGE)).await?;
     ensure!(compared.len() == targets.len(), "every target is compared");
-    shadow::assert_fixture_corpus_counts(pool).await?;
+    shadow::assert_fixture_corpus_counts(pool, &targets).await?;
     for compared in &compared {
         // The harness cannot tell whether a dropped key was in the batch's full scope (see
         // `endpoint::Outcome::dropped`), so the fixture must produce none.
@@ -198,6 +198,45 @@ async fn fixture_corpus_publishes_hydrates_reads_and_matches_a_rebuild() -> Resu
         );
     }
     scratch.cleanup().await
+}
+
+/// The corpus count check takes exactly one shadow report per target: a duplicate, a missing
+/// or an unexpected target fails it.
+#[test]
+fn the_corpus_counts_take_one_report_per_target() {
+    let report =
+        |target: i64| -> shadow::Counted { (target, Default::default(), Default::default()) };
+    assert!(shadow::one_report_per_target(&[report(35), report(40)], &[35, 40]).is_ok());
+    assert!(shadow::one_report_per_target(&[report(40), report(35)], &[35, 40]).is_ok());
+    for (case, reports, targets) in [
+        (
+            "duplicate",
+            vec![report(35), report(35), report(40)],
+            vec![35, 40],
+        ),
+        (
+            "duplicate standing in for a missing one",
+            vec![report(35), report(35)],
+            vec![35, 40],
+        ),
+        ("missing", vec![report(35)], vec![35, 40]),
+        (
+            "unexpected",
+            vec![report(35), report(40), report(41)],
+            vec![35, 40],
+        ),
+        ("none", vec![], vec![35, 40]),
+        (
+            "repeated expectation",
+            vec![report(35), report(35)],
+            vec![35, 35],
+        ),
+    ] {
+        assert!(
+            shadow::one_report_per_target(&reports, &targets).is_err(),
+            "{case} must fail"
+        );
+    }
 }
 
 fn parse_targets(value: &str) -> Result<Vec<i64>> {

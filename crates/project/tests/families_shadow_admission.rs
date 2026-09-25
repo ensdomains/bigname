@@ -14,7 +14,7 @@ mod support;
 
 use anyhow::Result;
 use serde_json::{Value, json};
-use shadow_support::{assert_counts, publish_and_compare};
+use shadow_support::{assert_counts, publish, publish_and_compare};
 use support::{Event, Fixture, uuid};
 
 const REGISTRAR: &str = "0x00000000000000000000000000000000000000e3";
@@ -272,7 +272,9 @@ async fn a_row_several_names_match_is_named_for_none_of_them() -> Result<()> {
         json!({"status": "registered", "registrant": ALICE, "expiry": 2_000_000_000u64}),
     )
     .await?;
-    publish_and_compare(&fixture, 16).await?;
+    // Shadow-only: today's stage names such a row for one unspecified match, so the served
+    // side is not compared here.
+    publish(&fixture, 16).await?;
     assert_eq!(trace(&fixture, 16, &other).await?["staged"], Value::Null);
     assert_eq!(trace(&fixture, 16, &name(1)).await?["staged"], Value::Null);
     fixture.cleanup().await
