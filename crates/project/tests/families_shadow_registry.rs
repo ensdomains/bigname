@@ -1944,3 +1944,123 @@ async fn a_wrong_candidate_authority_key_stays_a_registration_mismatch() -> Resu
     );
     fixture.cleanup().await
 }
+
+/// Pro Q2 on 6c8bdf8b: the excuses read the canonical order through `in_canonical_ranks`, which
+/// gives every retained event and control position its canonical rank as a generated id. That
+/// read must equal the canonical read itself. Here a registry-only SurfaceBound and the lease's
+/// grant share one block, transaction and log (a lifecycle event and a control fact at one
+/// position), a registry transfer of the node sits at another log of the block, and a
+/// synthesised renewal and release carry no transaction or log. The two reads agree on every
+/// registration and control field, with the events in either order.
+#[tokio::test]
+async fn canonical_ranks_read_exactly_as_the_canonical_order() -> Result<()> {
+    use bigname_storage::families::control::lifecycle::{Clock, evaluate};
+    use shadow_support::compare::{control_positions, in_canonical_ranks};
+    let fixture = Fixture::new("families_shadow_registry_canonical_ranks", 20).await?;
+    let node_resource = uuid(3);
+    fixture
+        .binding(&uuid(100), &name(1), &node_resource, "ens_v1", 10, 9, None)
+        .await?;
+    fixture
+        .write(
+            10,
+            9,
+            "SurfaceBound",
+            "registry_only_binding",
+            Some(&name(1)),
+            Some(&node_resource),
+            json!({"authority_kind": "registry_only", "state_derived": true,
+                   "authority_key": "K-bound", "registry_contract": REGISTRY, "owner": OTHER}),
+            REGISTRY,
+        )
+        .await?;
+    fixture
+        .write(
+            10,
+            9,
+            "RegistrationGranted",
+            V1_REGISTRAR,
+            Some(&name(1)),
+            Some(&node_resource),
+            json!({"authority_kind": "registrar", "authority_key": "K-grant",
+                   "status": "registered", "registrant": OWNER, "expiry": 2_000_000_000u64}),
+            REGISTRAR,
+        )
+        .await?;
+    fixture
+        .write(
+            11,
+            4,
+            "AuthorityTransferred",
+            V1_REGISTRY,
+            Some(&name(1)),
+            Some(&node_resource),
+            json!({"node": node(1), "owner": THIRD, "owner_getter": THIRD,
+                   "emitter_role": "registry"}),
+            REGISTRY,
+        )
+        .await?;
+    for (identity, kind, after) in [
+        (
+            "synthesised-renewal",
+            "RegistrationRenewed",
+            json!({"authority_kind": "registrar", "expiry": 2_100_000_000u64}),
+        ),
+        (
+            "synthesised-release",
+            "RegistrationReleased",
+            json!({"authority_kind": "registrar", "status": "released"}),
+        ),
+    ] {
+        fixture
+            .event(
+                Event::new(identity, 11, 0, kind, V1_REGISTRAR)
+                    .name(&name(1))
+                    .resource(&node_resource)
+                    .after(after)
+                    .raw(json!({"emitting_address": REGISTRAR}))
+                    .synthesised(),
+            )
+            .await?;
+    }
+    shadow_support::publish(&fixture, 12).await?;
+    let facts = name_facts(&fixture).await?;
+    let lifecycle: Vec<_> = facts.events.iter().map(|event| &event.position).collect();
+    let control = control_positions(&facts);
+    assert!(
+        lifecycle
+            .iter()
+            .any(|position| position.transaction_index.is_none()),
+        "a synthesised event: {lifecycle:?}"
+    );
+    assert!(
+        lifecycle.iter().any(|event| control.iter().any(|fact| {
+            (fact.block_number, fact.transaction_index, fact.log_index)
+                == (event.block_number, event.transaction_index, event.log_index)
+        })),
+        "a shared position: {lifecycle:?} {control:?}"
+    );
+    let clock = Clock {
+        block_number: 12,
+        timestamp_seconds: 1_800_000_144,
+    };
+    let canonical = evaluate(&facts, &clock);
+    for (block, field) in [
+        (&canonical.registration, "latest_event_kind"),
+        (&canonical.registration, "authority_key"),
+        (&canonical.control, "registry_owner"),
+    ] {
+        assert!(
+            block.get(field).is_some_and(|value| !value.is_null()),
+            "{field}: {canonical:?}"
+        );
+    }
+    let mut reversed = facts.clone();
+    reversed.events.reverse();
+    for facts in [&facts, &reversed] {
+        let ranked = evaluate(&in_canonical_ranks(facts), &clock);
+        assert_eq!(ranked.registration, canonical.registration);
+        assert_eq!(ranked.control, canonical.control);
+    }
+    fixture.cleanup().await
+}
