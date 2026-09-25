@@ -86,6 +86,8 @@ pub(crate) struct Record {
     pub(crate) completed_sequence: Option<i64>,
     pub(crate) completed_marker: Option<Marker>,
     pub(crate) completed_input_hash: Option<String>,
+    /// The marker generation the rebuild's reset wrote; rebuilt blocks advance it one each.
+    pub(crate) reset_sequence: Option<i64>,
 }
 
 impl Record {
@@ -128,6 +130,7 @@ struct RecordRow {
     completed_marker_number: Option<i64>,
     completed_marker_hash: Option<String>,
     completed_input_hash: Option<String>,
+    reset_sequence: Option<i64>,
 }
 
 impl From<RecordRow> for Record {
@@ -160,6 +163,7 @@ impl From<RecordRow> for Record {
             completed_sequence: row.completed_sequence,
             completed_marker: marker(row.completed_marker_number, row.completed_marker_hash),
             completed_input_hash: row.completed_input_hash,
+            reset_sequence: row.reset_sequence,
         }
     }
 }
@@ -167,7 +171,8 @@ impl From<RecordRow> for Record {
 const RECORD_COLUMNS: &str = "attempt, reason, trusted_base_number, trusted_base_hash,
         replay_target_number, replay_target_hash, state, prefix_interpret_input_content_hash,
         prefix_interpret_redo_attempt, prefix_recorded, invalidation_from, pending_undo_target,
-        completed_sequence, completed_marker_number, completed_marker_hash, completed_input_hash";
+        completed_sequence, completed_marker_number, completed_marker_hash, completed_input_hash,
+        reset_sequence";
 
 pub(crate) async fn read(pool: &sqlx::PgPool, chain_id: &str) -> Result<Option<Record>> {
     let row: Option<RecordRow> = sqlx::query_as(&format!(
@@ -276,7 +281,7 @@ pub(crate) async fn begin_undo(
              prefix_recorded = false, invalidation_from = NULL,
              pending_undo_target = EXCLUDED.pending_undo_target, completed_sequence = NULL,
              completed_marker_number = NULL, completed_marker_hash = NULL,
-             completed_input_hash = NULL, updated_at = now()",
+             completed_input_hash = NULL, reset_sequence = NULL, updated_at = now()",
     )
     .bind(chain_id)
     .bind(repair.attempt)
@@ -379,13 +384,14 @@ pub(crate) async fn begin_rebuild(
     reason: Reason,
     target: &Marker,
     revision: &Revision,
+    reset_sequence: i64,
 ) -> Result<()> {
     sqlx::query(
         "/* project:families.repair.begin_rebuild */ INSERT INTO project_repair_record (
              chain_id, attempt, reason, replay_target_number, replay_target_hash, state,
              prefix_interpret_input_content_hash, prefix_interpret_redo_attempt,
-             prefix_recorded, updated_at
-         ) VALUES ($1, $2, $3, $4, $5, 'rebuilding', $6, $7, true, now())
+             prefix_recorded, reset_sequence, updated_at
+         ) VALUES ($1, $2, $3, $4, $5, 'rebuilding', $6, $7, true, $8, now())
          ON CONFLICT (chain_id) DO UPDATE SET
              attempt = EXCLUDED.attempt, reason = EXCLUDED.reason, trusted_base_number = NULL,
              trusted_base_hash = NULL, replay_target_number = EXCLUDED.replay_target_number,
@@ -394,7 +400,8 @@ pub(crate) async fn begin_rebuild(
              prefix_interpret_redo_attempt = EXCLUDED.prefix_interpret_redo_attempt,
              prefix_recorded = true, invalidation_from = NULL, pending_undo_target = NULL,
              completed_sequence = NULL, completed_marker_number = NULL,
-             completed_marker_hash = NULL, completed_input_hash = NULL, updated_at = now()",
+             completed_marker_hash = NULL, completed_input_hash = NULL,
+             reset_sequence = EXCLUDED.reset_sequence, updated_at = now()",
     )
     .bind(chain_id)
     .bind(attempt)
@@ -403,6 +410,7 @@ pub(crate) async fn begin_rebuild(
     .bind(&target.hash)
     .bind(revision.0.as_deref())
     .bind(revision.1)
+    .bind(reset_sequence)
     .execute(&mut **transaction)
     .await
     .map_err(|error| ProjectError::database("failed to begin the rebuild record", error))?;

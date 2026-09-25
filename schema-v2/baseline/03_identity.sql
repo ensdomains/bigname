@@ -76,10 +76,10 @@ CREATE INDEX IF NOT EXISTS contract_instance_addresses_instance_idx
     );
 
 -- The owned key family loop reads the addresses that start or stop at each block.
-CREATE INDEX IF NOT EXISTS contract_instance_addresses_from_block_idx
+CREATE INDEX IF NOT EXISTS project_families_contract_instance_addresses_from_block_idx
     ON contract_instance_addresses (chain_id, active_from_block_number);
 
-CREATE INDEX IF NOT EXISTS contract_instance_addresses_to_block_idx
+CREATE INDEX IF NOT EXISTS project_families_contract_instance_addresses_to_block_idx
     ON contract_instance_addresses (chain_id, active_to_block_number)
     WHERE active_to_block_number IS NOT NULL;
 
@@ -156,11 +156,11 @@ CREATE INDEX IF NOT EXISTS discovery_edges_active_to_idx
     WHERE deactivated_at IS NULL;
 
 -- The owned key family loop reads the resolver edges that start or stop at each block.
-CREATE INDEX IF NOT EXISTS discovery_edges_resolver_from_block_idx
+CREATE INDEX IF NOT EXISTS project_families_discovery_edges_resolver_from_block_idx
     ON discovery_edges (chain_id, active_from_block_number)
     WHERE edge_kind = 'resolver';
 
-CREATE INDEX IF NOT EXISTS discovery_edges_resolver_to_block_idx
+CREATE INDEX IF NOT EXISTS project_families_discovery_edges_resolver_to_block_idx
     ON discovery_edges (chain_id, active_to_block_number)
     WHERE edge_kind = 'resolver' AND active_to_block_number IS NOT NULL;
 

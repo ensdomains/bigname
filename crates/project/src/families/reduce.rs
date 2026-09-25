@@ -6,6 +6,7 @@
 use serde_json::{Map, Value, json};
 use sqlx::{Postgres, Transaction};
 
+use super::manifests::ActiveSet;
 use super::{
     input::{BlockEvent, BlockHeader},
     keys::{BlockKeys, Key, Space},
@@ -18,10 +19,10 @@ pub(crate) struct Context<'a> {
     pub(crate) chain_id: &'a str,
     pub(crate) block: &'a BlockHeader,
     pub(crate) keys: &'a BlockKeys,
-    /// The admission epoch the block read inside its transaction.
-    pub(crate) epoch: &'a str,
-    /// Whether it differs from the one the previous block recorded.
-    pub(crate) epoch_changed: bool,
+    /// The active manifest set at the block, from the run's read of the manifest updates.
+    pub(crate) manifests: &'a ActiveSet,
+    /// Whether its key differs from the one the previous block recorded.
+    pub(crate) manifests_changed: bool,
 }
 
 /// Name the family in a reducer error, so a skipped block says which family failed.

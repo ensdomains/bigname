@@ -17,6 +17,7 @@ mod identity;
 mod input;
 mod keys;
 mod lifecycle;
+mod manifests;
 mod marker;
 mod permissions;
 mod records;
@@ -192,6 +193,8 @@ pub struct FamilyOutcome {
     pub revision_adopted: bool,
     /// Deliveries of one event identity that disagreed with the kept one and were dropped.
     pub duplicate_anomalies: u64,
+    /// Times a rebuild refreshed the planner statistics of the family tables.
+    pub statistics_refreshes: u64,
     /// Elapsed milliseconds of the whole run.
     pub elapsed_ms: u64,
 }

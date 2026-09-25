@@ -39,6 +39,9 @@ bigname is a versioned indexing and read API for ENS, ENSv2, and Basenames. The 
   The snapshot is not a work queue: `chain_phase_state` remains the sole
   work/redo authority.
   Adapters provide interpretation behavior and do not write projection rows.
+  A phase that reads Interpret's tables may add read-only indexes on them
+  through its own migration, changing no row, when it lists each index with
+  the statement it serves under [table ownership](docs/storage.md#table-ownership).
 - API code reads phase projections, normalized events, and request-scoped lookup
   output only, except explicit audit endpoints and the schema-v2 lookup engine's
   guarded [resolution divergence
