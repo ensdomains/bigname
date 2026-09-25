@@ -566,7 +566,8 @@ async fn coin60_pairs_serve_the_address_changed_half_at_its_own_position() -> Re
         }
         // Step 2 finding: the inverse address index reads the `AddrChanged` half's own value,
         // so when the halves carry different addresses the served `AddressChanged` address has
-        // no index row and the family page of names resolving to it is empty.
+        // no index row. The family read finds it from the retained pair value; the diagnostic
+        // names exactly that entry.
         let report = compare_family_reads(
             &pool,
             fixture.chain,
@@ -578,9 +579,16 @@ async fn coin60_pairs_serve_the_address_changed_half_at_its_own_position() -> Re
             id,
             "ens_v1_pair_after_boundary" | "ens_v1_older_write_then_boundary_then_pair"
         );
+        assert!(report.differences.is_empty(), "{id}: {report:#?}");
+        let expected_misses: Vec<String> = if halves_differ {
+            vec![format!(
+                "resolves_to {NONZERO20} coin 60 resource {RESOURCE} addr:60"
+            )]
+        } else {
+            Vec::new()
+        };
         assert_eq!(
-            report.address_index_findings.len(),
-            usize::from(halves_differ),
+            report.address_index_misses, expected_misses,
             "{id}: {report:#?}"
         );
         database.cleanup().await?;
@@ -1079,12 +1087,7 @@ async fn run_window(
         })
         .await?;
     bounded_attribution::assert_bounded_record_attribution_matches_inventory(pool).await?;
-    // Only the pair cases whose halves carry different addresses may miss the address index,
-    // for the served `AddressChanged` address; the pair case counts them exactly.
-    family_shadow::assert_family_reads_match_with_gaps(pool, &outcome.current, |key| {
-        key == format!("resolves_to {NONZERO20} coin 60")
-    })
-    .await?;
+    family_shadow::assert_family_reads_match(pool, &outcome.current).await?;
     assert!(outcome.complete);
     assert_eq!(outcome.current, outcome.target);
     assert_eq!(outcome.target.number, target_block);

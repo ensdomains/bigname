@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 use super::{
     Difference, FamilyAttribution, check_compatibility_pairs, compare_address_records,
-    compare_primary_name, compare_record_inventory, load_family_address_records_page,
+    compare_primary_name, compare_record_inventory, load_family_address_records_page_detail,
     load_family_record_inventory_detail, load_family_reverse_claim,
 };
 use crate::{
@@ -35,12 +35,11 @@ pub struct ShadowReport {
     pub primary_tuples: usize,
     pub differences: Vec<(String, Vec<Difference>)>,
     pub node_claim_findings: Vec<(String, Vec<Difference>)>,
-    /// Address pages the inverse address index cannot answer because the index derives an
-    /// address from a value row's own `value` only, while the served value comes from elsewhere:
-    /// `address_bytes_hex` for a write without a `value` (the ENSv2 `AddressChanged` shape), or
-    /// the `AddressChanged` half (`sibling_value`) of a coin-60 pair whose halves carry different
-    /// addresses. Kept apart as known step 2 gaps.
-    pub address_index_findings: Vec<(String, Vec<Difference>)>,
+    /// Diagnostic, not an exclusion: every family entry of a name resolving to an address that
+    /// the derived address index alone would not have found, as `resolves_to <address> coin
+    /// <coin> resource <id> <record key>`. The family read finds these from the retained values;
+    /// each names a step 2 index gap, and a test that expects none can require the list empty.
+    pub address_index_misses: Vec<String>,
 }
 
 impl ShadowReport {
@@ -190,7 +189,7 @@ async fn addresses(
                 page_size,
             )
             .await?;
-            let family = load_family_address_records_page(
+            let family = load_family_address_records_page_detail(
                 pool,
                 &address,
                 &coin_type,
@@ -204,6 +203,14 @@ async fn addresses(
                 page_size,
             )
             .await?;
+            report
+                .address_index_misses
+                .extend(family.index_misses.iter().map(|(resource, record_key)| {
+                    format!(
+                        "resolves_to {address} coin {coin_type} resource {resource} {record_key}"
+                    )
+                }));
+            let family = family.page;
             report.address_pages += 1;
             report.address_entries += today.entries.len();
             let mut differences = compare_address_records(&today.entries, &family.entries);
@@ -215,15 +222,7 @@ async fn addresses(
                 });
             }
             let done = today.next_cursor.is_none() || !differences.is_empty();
-            if !differences.is_empty()
-                && family.entries.len() < today.entries.len()
-                && index_misses_served_address(pool, chain_id, &address).await?
-            {
-                report.address_index_findings.push((
-                    format!("resolves_to {address} coin {coin_type}"),
-                    differences,
-                ));
-            } else if !differences.is_empty() {
+            if !differences.is_empty() {
                 report.differences.push((
                     format!(
                         "resolves_to {address} coin {coin_type} page {}",
@@ -277,35 +276,4 @@ async fn primary(pool: &PgPool, chain_id: &str, report: &mut ShadowReport) -> Re
         }
     }
     Ok(())
-}
-
-/// Whether a family value row serves `address` from a column the derived index does not read:
-/// `address_bytes_hex` of a write without a `value`, or the `AddressChanged` half of a coin-60
-/// pair (`sibling_value`) whose `AddrChanged` half holds another address.
-async fn index_misses_served_address(pool: &PgPool, chain_id: &str, address: &str) -> Result<bool> {
-    Ok(sqlx::query_scalar(
-        "SELECT EXISTS (
-             SELECT 1 FROM bigname_phase.project_node_record_value
-             WHERE chain_id = $1 AND value IS NULL AND lower(address_bytes_hex) = $2
-               AND record_family = 'addr' AND status = 'success'
-             UNION ALL
-             SELECT 1 FROM bigname_phase.project_record_id_value
-             WHERE chain_id = $1 AND value IS NULL AND lower(address_bytes_hex) = $2
-               AND record_family = 'addr' AND status = 'success'
-             UNION ALL
-             SELECT 1 FROM bigname_phase.project_node_record_value
-             WHERE chain_id = $1 AND record_family = 'addr' AND sibling_value IS NOT NULL
-               AND lower(CASE WHEN jsonb_typeof(sibling_value) = 'string'
-                              THEN sibling_value #>> '{}'
-                              ELSE COALESCE(sibling_value ->> 'value', sibling_value ->> 'bytes')
-                         END) = $2
-               AND lower(CASE WHEN jsonb_typeof(value) = 'string' THEN value #>> '{}'
-                              ELSE COALESCE(value ->> 'value', value ->> 'bytes')
-                         END) IS DISTINCT FROM $2
-         )",
-    )
-    .bind(chain_id)
-    .bind(address)
-    .fetch_one(pool)
-    .await?)
 }

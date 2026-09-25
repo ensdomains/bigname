@@ -11,6 +11,7 @@
 //! missing positions first), so a same-position tie can resolve differently from today's readers,
 //! which break it by the generated event id.
 mod assemble;
+mod candidates;
 mod compare;
 mod facts;
 mod inventory;
@@ -40,7 +41,10 @@ pub use links::{
     load_family_alias_source_pointer, load_family_link_selection, load_family_wildcard_source,
 };
 pub use pointer::{FamilyResourcePointer, load_family_resource_pointer};
-pub use resolves_to::load_family_address_records_page;
+pub use resolves_to::{
+    FamilyAddressRecordsPage, load_family_address_records_page,
+    load_family_address_records_page_detail,
+};
 pub use reverse::{FamilyReverseClaim, load_family_reverse_claim};
 pub use shadow::{ShadowReport, compare_family_reads};
 

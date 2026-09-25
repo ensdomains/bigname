@@ -71,7 +71,7 @@ pub async fn compare_family_reads_with(
     eprintln!(
         "FAMILY_SHADOW target={} inventory_rows={} compatibility_pairs={} address_pages={} \
          address_entries={} primary_tuples={} differences={} node_claim_findings={} \
-         address_index_findings={}",
+         address_index_misses={}",
         target.number,
         report.inventory_rows,
         report.compatibility_pairs,
@@ -80,7 +80,7 @@ pub async fn compare_family_reads_with(
         report.primary_tuples,
         report.differences.len(),
         report.node_claim_findings.len(),
-        report.address_index_findings.len()
+        report.address_index_misses.len()
     );
     let unexpected: Vec<_> = report
         .differences
@@ -95,7 +95,6 @@ pub async fn compare_family_reads_with(
     let unexpected_gaps: Vec<_> = report
         .node_claim_findings
         .iter()
-        .chain(&report.address_index_findings)
         .filter(|(key, _)| !gap(key))
         .collect();
     ensure!(

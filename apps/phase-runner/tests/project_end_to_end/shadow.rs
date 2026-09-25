@@ -37,7 +37,7 @@ pub async fn compare(
     eprintln!(
         "SEPOLIA_END_TO_END_SHADOW target={} stage={stage} current={} inventory_rows={} \
          compatibility_pairs={} address_pages={} address_entries={} primary_tuples={} \
-         differences={} node_claim_findings={} address_index_findings={} elapsed_ms={}",
+         differences={} node_claim_findings={} address_index_misses={} elapsed_ms={}",
         target.number,
         report.current(),
         report.inventory_rows,
@@ -47,7 +47,7 @@ pub async fn compare(
         report.primary_tuples,
         report.differences.len(),
         report.node_claim_findings.len(),
-        report.address_index_findings.len(),
+        report.address_index_misses.len(),
         started.elapsed().as_millis()
     );
     for (key, differences) in report.differences.iter().take(5) {

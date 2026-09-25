@@ -1,14 +1,14 @@
-//! Names that resolve to an address, read over the inverse address index (F14) instead of
+//! Names that resolve to an address, read over the families instead of
 //! `address_records_current` (address_records.rs and storage address_names/resolves_to.rs).
 //!
-//! The index rows name the (resolver, node) and (resolver, record id) keys whose current `addr`
-//! value is the address. The derived index applies only its partition's version cutoff, so the
-//! read goes on from each key to the resources that serve records through it (F5 pointers at that
-//! resolver and node, pointers at a mirror resolver for that node, pointers at a resolver whose
-//! link selects that record id), assembles each resource's family record inventory to apply the
-//! arms, the combined boundary, the link selection and the mirror substitution, keeps the entries
-//! that still resolve to the address, and joins today's `name_current` for name eligibility (the
-//! family read model for it is step 3). Exact entries shadow the ENSIP-19 default address as the
+//! The candidates are the inverse address index (F14) rows and every retained address value that
+//! names the address (`candidates.rs`), a superset of the (resolver, node) and (resolver, record
+//! id) keys that can serve it. The read goes on from each key to the resources that serve records
+//! through it (F5 pointers at that resolver and node, pointers at a mirror resolver for that node,
+//! pointers at a resolver whose link selects that record id), assembles each resource's family
+//! record inventory to apply the arms, the combined boundary, the link selection and the mirror
+//! substitution, keeps the entries that still resolve to the address, and joins today's
+//! `name_current` for name eligibility (the family read model for it is step 3). Exact entries shadow the ENSIP-19 default address as the
 //! forward read does. The page is a keyset over the result order with no publication binding.
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -19,6 +19,7 @@ use sqlx::{PgPool, Postgres, QueryBuilder, Row, types::time::OffsetDateTime};
 use uuid::Uuid;
 
 use super::{
+    candidates::candidate_resources,
     inventory::{FamilyAttribution, FamilyRecordInventory, load_family_record_inventory_detail},
     payload::strip_nulls,
 };
@@ -43,54 +44,6 @@ fn may_fall_back(coin_type: &str) -> bool {
     coin_type
         .parse::<u64>()
         .is_ok_and(ensip19_default_fallback_target)
-}
-
-/// The resources whose records the index rows of `address` may answer for.
-async fn candidate_resources(
-    pool: &PgPool,
-    address: &str,
-    coin_types: &[String],
-) -> Result<BTreeSet<(String, Uuid)>> {
-    let rows = sqlx::query(
-        "WITH keys AS (
-             SELECT chain_id, resolver_address, node, NULL::text AS record_id
-             FROM bigname_phase.project_address_record_node_index
-             WHERE address = $1 AND coin_type = ANY($2::text[])
-             UNION
-             SELECT chain_id, resolver_address, NULL, record_id
-             FROM bigname_phase.project_address_record_id_index
-             WHERE address = $1 AND coin_type = ANY($2::text[])
-         ),
-         mirrors AS (
-             SELECT chain_id, resolver_address FROM bigname_phase.resolver_current
-             WHERE declared_summary #>> '{classification,role}' = 'ensv1_mirror_resolver'
-             UNION
-             SELECT chain_id, resolver_address
-             FROM bigname_phase.project_resolver_classification
-             WHERE classification ->> 'role' = 'ensv1_mirror_resolver'
-         )
-         SELECT DISTINCT pointer.chain_id, pointer.resource_id
-         FROM keys
-         JOIN bigname_phase.project_resource_pointer pointer
-           ON pointer.chain_id = keys.chain_id
-          AND (
-              (keys.node IS NOT NULL AND pointer.namehash = keys.node
-               AND (pointer.resolver_address = keys.resolver_address
-                    OR pointer.resolver_address IN (
-                        SELECT mirror.resolver_address FROM mirrors mirror
-                        WHERE mirror.chain_id = keys.chain_id)))
-              OR (keys.record_id IS NOT NULL
-                  AND pointer.resolver_address = keys.resolver_address)
-          )",
-    )
-    .bind(address)
-    .bind(coin_types)
-    .fetch_all(pool)
-    .await
-    .with_context(|| format!("failed to read the family address index of {address}"))?;
-    rows.into_iter()
-        .map(|row| Ok((row.try_get("chain_id")?, row.try_get("resource_id")?)))
-        .collect()
 }
 
 /// An `addr` entry's coin type and address, when it answers with an EVM address.
@@ -204,6 +157,15 @@ fn record_rows(chain_id: &str, inventory: &FamilyRecordInventory, address: &str)
     rows
 }
 
+/// A family page of names resolving to an address, with the entries the derived address index
+/// alone would not have found: each is (record resource, record key) of an entry whose resource
+/// the index did not reach through that record key's coin type.
+#[derive(Clone, Debug)]
+pub struct FamilyAddressRecordsPage {
+    pub page: AddressRecordsCurrentPage,
+    pub index_misses: Vec<(Uuid, String)>,
+}
+
 /// Load a page of names whose `addr:<coin_type>` record resolves to `address`, over the families.
 /// The arguments are those of `load_address_records_current_page`; this shadow reader supports the
 /// name sort without an authority filter, which is what the harness compares.
@@ -221,6 +183,29 @@ pub async fn load_family_address_records_page(
     cursor: Option<&AddressNamesCurrentSortedCursor>,
     page_size: u64,
 ) -> Result<AddressRecordsCurrentPage> {
+    Ok(load_family_address_records_page_detail(
+        pool, address, coin_type, namespaces, dedupe_by, q, authority, sort, order, cursor,
+        page_size,
+    )
+    .await?
+    .page)
+}
+
+/// [`load_family_address_records_page`] with the entries only the retained values found.
+#[allow(clippy::too_many_arguments)]
+pub async fn load_family_address_records_page_detail(
+    pool: &PgPool,
+    address: &str,
+    coin_type: &str,
+    namespaces: Option<&[String]>,
+    dedupe_by: AddressNamesCurrentDedupe,
+    q: Option<&str>,
+    authority: Option<&str>,
+    sort: AddressNamesCurrentSort,
+    order: AddressNamesCurrentOrder,
+    cursor: Option<&AddressNamesCurrentSortedCursor>,
+    page_size: u64,
+) -> Result<FamilyAddressRecordsPage> {
     if sort != AddressNamesCurrentSort::Name || authority.is_some() {
         bail!("the family address reader supports the name sort without an authority filter");
     }
@@ -229,12 +214,14 @@ pub async fn load_family_address_records_page(
     if may_fall_back(coin_type) {
         coin_types.push(ENSIP19_DEFAULT_ADDRESS_RECORD_KEY["addr:".len()..].to_owned());
     }
+    let candidates = candidate_resources(pool, &address, &coin_types).await?;
     let mut records = Vec::new();
-    let mut seen = BTreeMap::new();
-    for (chain_id, resource_id) in candidate_resources(pool, &address, &coin_types).await? {
-        if seen.insert(resource_id, ()).is_some() {
+    let mut indexed = BTreeMap::new();
+    for ((chain_id, resource_id), candidate) in candidates {
+        if indexed.contains_key(&resource_id) {
             continue;
         }
+        indexed.insert(resource_id, candidate.indexed_coin_types);
         let Some(inventory) = load_family_record_inventory_detail(
             pool,
             &chain_id,
@@ -247,10 +234,22 @@ pub async fn load_family_address_records_page(
         };
         records.extend(record_rows(&chain_id, &inventory, &address));
     }
-    page(
+    let page = page(
         pool, &address, coin_type, &records, namespaces, dedupe_by, q, order, cursor, page_size,
     )
-    .await
+    .await?;
+    let index_misses = page
+        .entries
+        .iter()
+        .filter(|entry| {
+            let coin = entry.record_key.trim_start_matches("addr:");
+            indexed
+                .get(&entry.record_resource_id)
+                .is_none_or(|coins: &BTreeSet<String>| !coins.contains(coin))
+        })
+        .map(|entry| (entry.record_resource_id, entry.record_key.clone()))
+        .collect();
+    Ok(FamilyAddressRecordsPage { page, index_misses })
 }
 
 #[allow(clippy::too_many_arguments)]

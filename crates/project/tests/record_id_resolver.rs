@@ -295,6 +295,112 @@ async fn link_and_version_boundaries_read_the_same_through_the_families() -> Res
     Ok(())
 }
 
+// Names resolving to an address are found from every retained address value, not only the
+// derived address index, which drops a value positioned at or before its partition's version
+// change. A link that outranks that version keeps the value served (value at 19, version at 20,
+// link at 21 to a record with no address), and a value sharing the version's block, transaction
+// and log position but later by event identity is served too; both names must be listed. Every
+// run compares the family reads with today's reads, pages included.
+#[tokio::test]
+async fn inverse_address_reads_find_values_the_address_index_drops() -> Result<()> {
+    let (db, pool) = database("record_id_inverse_address").await?;
+    seed(&pool).await?;
+    for n in 19..=22 {
+        sqlx::query("INSERT INTO chain_lineage (chain_id,block_hash,block_number,block_timestamp,canonicality_state) VALUES ($1,$2,$3,to_timestamp($3::double precision),'canonical')").bind(CHAIN).bind(hash(n)).bind(n).execute(&pool).await?;
+    }
+    let address = |n: i64, value: &str| json!({"source_event":"AddressChanged","node":node(n),"resolver":RESOLVER,"record_key":"addr:60","record_family":"addr","selector_key":"60","coin_type":"60","value":value});
+    let version = |n: i64| json!({"source_event":"VersionChanged","node":node(n),"resolver":RESOLVER,"record_version":"1"});
+    event(
+        &pool,
+        "address-one",
+        19,
+        0,
+        "RecordChanged",
+        Some(1),
+        address(1, INVERSE_A),
+    )
+    .await?;
+    event(
+        &pool,
+        "version-one",
+        20,
+        0,
+        "RecordVersionChanged",
+        Some(1),
+        version(1),
+    )
+    .await?;
+    link(&pool, "link-a-three", 21, 0, Some(1), 3).await?;
+    // Inserted in identity order, so today's generated ids agree with the canonical order.
+    event(
+        &pool,
+        "tie-a-version",
+        22,
+        0,
+        "RecordVersionChanged",
+        Some(2),
+        version(2),
+    )
+    .await?;
+    event(
+        &pool,
+        "tie-b-value",
+        22,
+        1,
+        "RecordChanged",
+        Some(2),
+        address(2, INVERSE_B),
+    )
+    .await?;
+    sqlx::query("UPDATE normalized_events SET transaction_hash = NULL, transaction_index = NULL, log_index = NULL WHERE event_identity IN ('tie-a-version', 'tie-b-value')").execute(&pool).await?;
+    run(&pool, 22, None, RunMode::Normal).await?;
+    // The step 2 index drops both values; the family read finds them from the retained values.
+    let report = family_shadow::assert_family_reads_match(
+        &pool,
+        &Marker {
+            number: 22,
+            hash: hash(22),
+        },
+    )
+    .await?;
+    assert_eq!(
+        report.address_index_misses,
+        [
+            format!(
+                "resolves_to {INVERSE_A} coin 60 resource {} addr:60",
+                resource(1)
+            ),
+            format!(
+                "resolves_to {INVERSE_B} coin 60 resource {} addr:60",
+                resource(2)
+            ),
+        ],
+        "{report:#?}"
+    );
+    for (id, value) in [(1, INVERSE_A), (2, INVERSE_B)] {
+        let row = inventory(&pool, id).await?;
+        let served = row["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["record_key"] == "addr:60")
+            .map(|entry| entry["value"].clone());
+        assert_eq!(served, Some(json!(value)), "resource{id}: {row}");
+        let listed: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM address_records_current WHERE address = $1 AND coin_type = '60'",
+        )
+        .bind(value)
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(listed, 1, "today lists resource{id} for {value}");
+    }
+    db.cleanup().await?;
+    Ok(())
+}
+
+const INVERSE_A: &str = "0x5555555555555555555555555555555555555555";
+const INVERSE_B: &str = "0x6666666666666666666666666666666666666666";
+
 // ABI content types come from the writes the selected record holds, so a write made before a
 // name links to the record counts, and a name without an exact link reads the default record.
 #[tokio::test]
@@ -804,11 +910,7 @@ async fn run(pool: &PgPool, target: i64, previous: Option<i64>, mode: RunMode) -
         })
         .await?;
     bounded_attribution::assert_bounded_record_attribution_matches_inventory(pool).await?;
-    // Only the address-bytes-only write of the ENSIP-19 case may miss the address index.
-    family_shadow::assert_family_reads_match_with_gaps(pool, &outcome.current, |key| {
-        key.starts_with(&format!("resolves_to {ADDRESS_BYTES_ONLY} coin "))
-    })
-    .await?;
+    family_shadow::assert_family_reads_match(pool, &outcome.current).await?;
     Ok(())
 }
 
@@ -1121,18 +1223,25 @@ async fn official_sepolia_direct_resolver_projects_ensip19_default_for_missing_e
     run(&pool, target, None, RunMode::Normal).await?;
     // Step 2 finding, kept visible: the inverse address index derives an address from a value
     // row's `value` only (crates/project/src/families/derived.rs:162 and :197), so this
-    // `AddressChanged`, which carries only `address_bytes_hex`, has no index row and the family
-    // page of names resolving to the address misses the name today's page serves.
-    let report = family_shadow::assert_family_reads_match_with_gaps(
+    // `AddressChanged`, which carries only `address_bytes_hex`, has no index row. The family read
+    // finds the name from the retained value and serves the same page; the diagnostic names the
+    // one entry the index alone would miss.
+    let report = family_shadow::assert_family_reads_match(
         &pool,
         &Marker {
             number: target,
             hash: hash(target),
         },
-        |key| key.starts_with(&format!("resolves_to {ADDRESS_BYTES_ONLY} coin ")),
     )
     .await?;
-    assert_eq!(report.address_index_findings.len(), 1, "{report:#?}");
+    assert_eq!(
+        report.address_index_misses,
+        [format!(
+            "resolves_to {ADDRESS_BYTES_ONLY} coin 2147483648 resource {} addr:2147483648",
+            resource(1)
+        )],
+        "{report:#?}"
+    );
     // A direct node-keyed declaration has no link state, so the section is unsupported
     // by kind rather than reported empty.
     assert_eq!(
