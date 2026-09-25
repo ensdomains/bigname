@@ -3168,8 +3168,8 @@ For a registrar lease first identified by a later readable observation, registra
   publication change during a continuation returns `409 stale` and requires
   restarting without a cursor; a request without a cursor whose publication
   changes during the read returns `409 stale` too and can simply be retried.
-- Planned cursor change, taking effect with the per-block publication and
-  not before: these cursors and the overview's `bound_names` cursor will carry
+- Planned cursor change, taking effect with the
+  [per-block publication](glossary.md#per-block-publication) and not before: these cursors and the overview's `bound_names` cursor will carry
   continuation identity only (route, filters, ordering, and keyset position)
   and no publication, snapshot, or generation. A page turn that crosses a
   publication will continue from the last row against the rows current then,

@@ -2446,8 +2446,16 @@ per-key current state Project keeps for one kind of fact, such as a name's
 binding candidates, a resource's resolver pointer or a resolver's records at a
 node. A block writes only the keys its own events name, and each row holds
 what the latest events of its key left, clears included. The families are
-unread shadows until the per-block publication reads them
-([projections](projections.md#owned-key-families)).
+unread shadows until the [per-block publication](#per-block-publication)
+reads them ([projections](projections.md#owned-key-families)).
+
+## Per-block publication
+
+the planned way Project will serve its current-state reads: straight from the
+[owned key families](#owned-key-family), published block by block, in place of
+the batch builders and the tables they fill. It is not built yet. Until it
+ships the families are unread, and a doc that describes a change taking effect
+with the per-block publication describes planned behaviour.
 
 ## Family undo record
 
