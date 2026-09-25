@@ -111,7 +111,7 @@ async fn main() -> Result<()> {
                     )),
                     Arc::new(
                         ProjectPhase::with_hydration(database.pool().clone(), hydration_rpc_urls)
-                            .with_families(project_families)
+                            .with_family_settings(project_families)
                             .with_metrics_feed(metrics_feed.clone())
                             .with_step_observer(Arc::new(metrics_feed.clone())),
                     ),
@@ -223,7 +223,7 @@ async fn main() -> Result<()> {
                 ));
                 let project = Arc::new(
                     ProjectPhase::with_hydration(database.pool().clone(), hydration_rpc_urls)
-                        .with_families(project_families)
+                        .with_family_settings(project_families)
                         .with_metrics_feed(metrics_feed.clone())
                         .with_step_observer(Arc::new(metrics_feed.clone())),
                 );

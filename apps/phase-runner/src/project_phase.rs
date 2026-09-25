@@ -1,6 +1,7 @@
 use std::{
     collections::BTreeMap,
     sync::{Arc, Mutex},
+    time::Duration,
 };
 
 use bigname_project::{
@@ -19,14 +20,39 @@ use crate::{
     },
 };
 
-type PendingFamilies = (Marker, FamilyMode, InputToken);
+/// The served marker and mode of a committed batch, with the input token read before its
+/// progress was recorded or the reason that read failed.
+type PendingFamilies = (Marker, FamilyMode, Result<InputToken, String>);
+
+/// How the owned key families follow the served batches.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FamilySettings {
+    /// Whether each committed batch is followed by the families.
+    pub enabled: bool,
+    /// The most family blocks one runner cycle applies or undoes; a rebuild or a long catch-up
+    /// continues on later cycles.
+    pub max_blocks_per_run: u64,
+    /// How long the input token read before a batch's progress may take; past it the families
+    /// skip that batch and the skip is counted.
+    pub token_budget: Duration,
+}
+
+impl Default for FamilySettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_blocks_per_run: bigname_project::families::MAX_BLOCKS_PER_RUN,
+            token_budget: Duration::from_secs(2),
+        }
+    }
+}
 
 pub struct ProjectPhase {
     pool: PgPool,
     engine: Engine,
     hydrator: Option<bigname_project::Hydrator>,
     metrics_feed: Option<RunnerMetricsFeed>,
-    families: bool,
+    families: FamilySettings,
     /// The served marker, mode and input token of each chain's last committed batch, which the
     /// owned key families follow once the runner has recorded the batch's progress.
     pending_families: Arc<Mutex<BTreeMap<String, PendingFamilies>>>,
@@ -39,7 +65,7 @@ impl ProjectPhase {
             pool,
             hydrator: None,
             metrics_feed: None,
-            families: true,
+            families: FamilySettings::default(),
             pending_families: Arc::default(),
         }
     }
@@ -50,14 +76,20 @@ impl ProjectPhase {
             hydrator: Some(bigname_project::Hydrator::new(pool.clone(), rpc_urls)),
             pool,
             metrics_feed: None,
-            families: true,
+            families: FamilySettings::default(),
             pending_families: Arc::default(),
         }
     }
 
     /// Whether each committed batch is followed by the owned key families; on unless turned off.
     pub fn with_families(mut self, enabled: bool) -> Self {
-        self.families = enabled;
+        self.families.enabled = enabled;
+        self
+    }
+
+    /// How the owned key families follow the served batches.
+    pub fn with_family_settings(mut self, settings: FamilySettings) -> Self {
+        self.families = settings;
         self
     }
 
@@ -131,11 +163,20 @@ impl Phase for ProjectPhase {
             let Some((target, mode, token)) = pending else {
                 return;
             };
-            let options = FamilyOptions::new(bigname_content_hash::INTERPRETER_CONTENT_HASH);
-            let outcome = bigname_project::families::apply(
-                &self.pool, &chain_id, &target, mode, &token, &options,
-            )
-            .await;
+            let options = FamilyOptions::new(bigname_content_hash::INTERPRETER_CONTENT_HASH)
+                .with_max_blocks_per_run(self.families.max_blocks_per_run);
+            let outcome = match token {
+                Ok(token) => {
+                    bigname_project::families::apply(
+                        &self.pool, &chain_id, &target, mode, &token, &options,
+                    )
+                    .await
+                }
+                Err(reason) => {
+                    bigname_project::families::skipped(&self.pool, &chain_id, &target, reason)
+                        .await
+                }
+            };
             if let Some(feed) = &self.metrics_feed {
                 feed.project_families(&chain_id, &outcome);
             }
@@ -229,7 +270,7 @@ impl Phase for ProjectPhase {
             if let Some(feed) = &self.metrics_feed {
                 feed.project_batch(&context.chain_id, &outcome.write_summary);
             }
-            if self.families {
+            if self.families.enabled {
                 let mode = match context.mode {
                     RunMode::Normal if context.resume.current.is_none() => FamilyMode::Rebuild,
                     RunMode::Normal => FamilyMode::Normal,
@@ -239,24 +280,30 @@ impl Phase for ProjectPhase {
                     },
                 };
                 // Read now, while a finished redo's session is still open on the Project row: the
-                // runner closes it when it records this batch. A failed read skips this batch's
-                // families; the next run sees the redo attempt it missed and rebuilds.
-                match bigname_project::families::input_token(&self.pool, &context.chain_id).await {
-                    Ok(token) => {
-                        self.pending_families
-                            .lock()
-                            .unwrap_or_else(|poisoned| poisoned.into_inner())
-                            .insert(
-                                context.chain_id.clone(),
-                                (outcome.current.clone(), mode, token),
-                            );
-                    }
-                    Err(error) => tracing::warn!(
-                        chain_id = %context.chain_id,
-                        %error,
-                        "Project families skipped this batch: the input token did not read"
-                    ),
-                }
+                // runner closes it when it records this batch. The read is bounded so it cannot
+                // hold up the progress write; a failed or late read skips this batch's families,
+                // is counted as a skip, and the next run sees the redo attempt it missed and
+                // rebuilds.
+                let token = match tokio::time::timeout(
+                    self.families.token_budget,
+                    bigname_project::families::input_token(&self.pool, &context.chain_id),
+                )
+                .await
+                {
+                    Ok(Ok(token)) => Ok(token),
+                    Ok(Err(error)) => Err(format!("the input token did not read: {error}")),
+                    Err(_) => Err(format!(
+                        "the input token did not read within {:?}",
+                        self.families.token_budget
+                    )),
+                };
+                self.pending_families
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .insert(
+                        context.chain_id.clone(),
+                        (outcome.current.clone(), mode, token),
+                    );
             }
             if let Some(hydrator) = &self.hydrator {
                 hydrator

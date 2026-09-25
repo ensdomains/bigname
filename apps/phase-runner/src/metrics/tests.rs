@@ -578,6 +578,7 @@ fn family_loops_set_their_own_time_and_lag_and_count_skips() -> Result<()> {
             marker: Some(marker(current)),
             elapsed_ms,
             skipped: skipped.map(str::to_owned),
+            duplicate_anomalies: u64::from(skipped.is_none()),
             ..Default::default()
         }
     };
@@ -594,6 +595,7 @@ fn family_loops_set_their_own_time_and_lag_and_count_skips() -> Result<()> {
         "phase_runner_project_families_seconds{chain=\"ethereum-sepolia\"} 0.25\n",
         "phase_runner_project_family_lag_blocks{chain=\"ethereum-sepolia\"} 0\n",
         "phase_runner_project_family_skips_total{chain=\"ethereum-sepolia\"} 1\n",
+        "phase_runner_project_family_duplicate_anomalies_total{chain=\"ethereum-sepolia\"} 1\n",
     ] {
         assert!(scrape.contains(line), "missing {line}");
     }
