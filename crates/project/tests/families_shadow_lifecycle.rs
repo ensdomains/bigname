@@ -12,7 +12,7 @@ mod support;
 use anyhow::Result;
 use bigname_storage::families::control::lifecycle::ShadowName;
 use serde_json::{Value, json};
-use shadow_support::{Served, assert_counts, publish_and_compare};
+use shadow_support::{Served, assert_counts, publish, publish_and_compare};
 use support::{CHAIN, Event, Fixture, uuid};
 
 const REGISTRY: &str = "0x00000000000000000000000000000000000000e5";
@@ -1917,5 +1917,299 @@ async fn a_wrong_decoded_name_changes_nothing_the_comparison_reads() -> Result<(
     assert_eq!(mutated.lines, report.lines);
     assert_eq!(mutated.expected_delta_fields, report.expected_delta_fields);
     assert_eq!(mutated.mismatched, report.mismatched);
+    fixture.cleanup().await
+}
+
+/// Name `n` bound under arm ens_v1 to `lease` at block 9 (its SurfaceBound at log `n`), then two
+/// registrar snapshot grants of it at block 10, transaction 0, log `n`: `b{n}` written first
+/// with registration time `b_time` and `a{n}` second with `a_time`, so a has the higher
+/// generated id. The canonical order takes b (its identity sorts last) and today's order takes
+/// a, so the registration time is a same-block delta.
+async fn snapshot_grants(
+    fixture: &Fixture,
+    n: u64,
+    lease: &str,
+    a_time: i64,
+    b_time: i64,
+) -> Result<()> {
+    let logical = name(n);
+    fixture
+        .binding(
+            &uuid(100 + n as u32),
+            &logical,
+            lease,
+            "ens_v1",
+            9,
+            n as i64,
+            None,
+        )
+        .await?;
+    let bound = format!("bound{n}");
+    fixture
+        .event(
+            Event::new(&bound, 9, n as i64, "SurfaceBound", V1_REGISTRAR)
+                .name(&logical)
+                .resource(lease)
+                .after(json!({"authority_kind": "registrar", "state_derived": false}))
+                .raw(json!({"emitting_address": REGISTRAR})),
+        )
+        .await?;
+    for (identity, time) in [(format!("b{n}"), b_time), (format!("a{n}"), a_time)] {
+        fixture
+            .event(
+                Event::new(&identity, 10, n as i64, "RegistrationGranted", V1_REGISTRAR)
+                    .name(&logical)
+                    .resource(lease)
+                    .after(
+                        json!({"authority_kind": "registrar", "status": "registered",
+                                  "registrant": ALICE, "expiry": 2_000_000_000u64,
+                                  "state_derived": true, "surface_materialization": true,
+                                  "registrar_surface_snapshot": true,
+                                  "original_registered_at": time}),
+                    )
+                    .raw(json!({"emitting_address": REGISTRAR})),
+            )
+            .await?;
+    }
+    Ok(())
+}
+
+/// The `registration/registered_at` lines of `name` in a report.
+fn registered_at_lines(report: &shadow_support::compare::Report, name: &str) -> Vec<String> {
+    report
+        .lines
+        .iter()
+        .filter(|line| {
+            line.contains(&format!("key={name} "))
+                && line.contains("field=registration/registered_at ")
+        })
+        .cloned()
+        .collect()
+}
+
+/// Pro Q7 on 6c8bdf8b: the snapshot registration time renders through a seconds-to-timestamp
+/// map the loader builds from the family rows of the whole chunk. Names 1 and 2 each hold the
+/// two-grant shape. With name 1's family time for b cleared, its shadow gives null; a canonical
+/// rebuild restores b's logged time V but looked V up in that map, which held V only when name 2
+/// shared the chunk. So name 1 passed as a same-block delta in a chunk of its own and failed
+/// beside name 2. The conversions now come from the rebuilt events themselves: name 1's
+/// registration time is a mismatch in chunks of one and of five hundred, and every result is
+/// the same in both.
+#[tokio::test]
+async fn a_snapshot_time_is_rebuilt_from_the_log_in_any_chunk() -> Result<()> {
+    const U: i64 = 1_700_000_000;
+    const V: i64 = 1_700_000_500;
+    let fixture = Fixture::new("families_shadow_snapshot_time", 20).await?;
+    snapshot_grants(&fixture, 1, &uuid(1), U, V).await?;
+    snapshot_grants(&fixture, 2, &uuid(2), U, V).await?;
+    let report = publish_and_compare(&fixture, 12).await?;
+    assert_counts(
+        &report,
+        &[],
+        &[("d12_same_block_order:registration/registered_at", 2)],
+    );
+    sqlx::query(
+        "UPDATE bigname_phase.project_lifecycle_event SET original_registered_at = NULL
+         WHERE event_identity = 'b1'",
+    )
+    .execute(&fixture.pool)
+    .await?;
+    let (_, shadow) = shadow_support::name(&fixture, 12, &name(1)).await?;
+    assert_eq!(shadow.registration["registered_at"], Value::Null);
+    let apart = shadow_support::compare::compare_in_chunks(&fixture.pool, CHAIN, 12, 1).await?;
+    assert!(
+        registered_at_lines(&apart, &name(1))
+            .iter()
+            .all(|line| line.starts_with("SEPOLIA_END_TO_END_SHADOW_MISMATCH")),
+        "alone: a cleared snapshot time must not pass: {:#?}",
+        apart.lines
+    );
+    let together =
+        shadow_support::compare::compare_in_chunks(&fixture.pool, CHAIN, 12, 500).await?;
+    assert_eq!(together, apart, "the chunk decides a result");
+    assert_eq!(
+        together.expected_delta_fields,
+        [(
+            "d12_same_block_order:registration/registered_at".to_owned(),
+            1
+        )]
+        .into(),
+        "{:#?}",
+        together.lines
+    );
+    assert_eq!(together.mismatched, 1, "{:#?}", together.lines);
+    fixture.cleanup().await
+}
+
+/// Name `n` bound under arm ens_v2 to `resource` at block 9 (log `n`), granted at block 10 and
+/// then given three transfers at block 11, all at log `n`: `c{n}`, `b{n}` and `a{n}` to Carol,
+/// Bob and Alice in that write order, so the canonical order takes c and today's takes a.
+async fn transfers_of(fixture: &Fixture, n: u64, resource: &str) -> Result<()> {
+    const CAROL: &str = "0x00000000000000000000000000000000000000cc";
+    let logical = name(n);
+    let log = n as i64;
+    fixture
+        .binding(
+            &uuid(100 + n as u32),
+            &logical,
+            resource,
+            "ens_v2",
+            9,
+            log,
+            None,
+        )
+        .await?;
+    let v2_after = |after: Value| {
+        let mut after = after;
+        after["registry_contract_instance_id"] = json!("R");
+        after["token_id"] = json!(n.to_string());
+        after["authority_kind"] = json!("registrar");
+        after
+    };
+    let (bound, grant) = (format!("bound{n}"), format!("grant{n}"));
+    fixture
+        .event(
+            Event::new(&bound, 9, log, "SurfaceBound", V2_REGISTRY)
+                .name(&logical)
+                .resource(resource)
+                .after(json!({"authority_kind": "registrar", "state_derived": false}))
+                .raw(json!({"emitting_address": REGISTRY})),
+        )
+        .await?;
+    fixture
+        .event(
+            Event::new(&grant, 10, log, "RegistrationGranted", V2_REGISTRY)
+                .name(&logical)
+                .resource(resource)
+                .after(v2_after(
+                    json!({"status": "registered", "registrant": ALICE,
+                                       "expiry": 2_000_000_000u64}),
+                ))
+                .raw(json!({"emitting_address": REGISTRY})),
+        )
+        .await?;
+    for (identity, to) in [
+        (format!("c{n}"), CAROL),
+        (format!("b{n}"), BOB),
+        (format!("a{n}"), ALICE),
+    ] {
+        fixture
+            .event(
+                Event::new(&identity, 11, log, "TokenControlTransferred", V2_REGISTRY)
+                    .name(&logical)
+                    .resource(resource)
+                    .after(v2_after(json!({"from": ALICE, "to": to})))
+                    .raw(json!({"emitting_address": REGISTRY})),
+            )
+            .await?;
+    }
+    Ok(())
+}
+
+/// Pro Q7 on 6c8bdf8b: the excuse pass loads its inputs once per chunk, so every name's result
+/// must not depend on which names share its chunk. Names 1 and 2 share one resource, names 3
+/// and 4 are ENSv1 children of one parent node, and name 5's family rows are deleted after the
+/// publication, so it differs with no facts; the whole report is the same in chunks of one, two
+/// and five hundred.
+#[tokio::test]
+async fn every_name_gets_the_same_result_in_any_chunk() -> Result<()> {
+    let fixture = Fixture::new("families_shadow_chunk_equivalence", 20).await?;
+    let (shared, own) = (uuid(1), uuid(5));
+    transfers_of(&fixture, 1, &shared).await?;
+    transfers_of(&fixture, 2, &shared).await?;
+    for n in [3u64, 4] {
+        let lease = uuid(n as u32);
+        fixture
+            .binding(
+                &uuid(100 + n as u32),
+                &name(n),
+                &lease,
+                "ens_v1",
+                9,
+                n as i64,
+                None,
+            )
+            .await?;
+        let bound = format!("bound{n}");
+        fixture
+            .event(
+                Event::new(&bound, 9, n as i64, "SurfaceBound", V1_REGISTRAR)
+                    .name(&name(n))
+                    .resource(&lease)
+                    .after(json!({"authority_kind": "registrar", "state_derived": false}))
+                    .raw(json!({"emitting_address": REGISTRAR})),
+            )
+            .await?;
+        let owner = format!("owner{n}");
+        fixture
+            .event(
+                Event::new(
+                    &owner,
+                    10,
+                    n as i64,
+                    "SubregistryChanged",
+                    "ens_v1_registry_l1",
+                )
+                .name(&name(n))
+                .after(json!({"source_event": "NewOwner", "node": node(50),
+                                  "child_node": node(n), "owner": ALICE,
+                                  "emitter_role": "registry"}))
+                .raw(json!({"emitting_address": REGISTRY})),
+            )
+            .await?;
+        let grant = format!("grant{n}");
+        fixture
+            .event(
+                Event::new(
+                    &grant,
+                    10,
+                    10 + n as i64,
+                    "RegistrationGranted",
+                    V1_REGISTRAR,
+                )
+                .name(&name(n))
+                .resource(&lease)
+                .after(
+                    json!({"authority_kind": "registrar", "status": "registered",
+                                  "registrant": ALICE, "expiry": 2_000_000_000u64}),
+                )
+                .raw(json!({"emitting_address": REGISTRAR})),
+            )
+            .await?;
+    }
+    transfers_of(&fixture, 5, &own).await?;
+    publish(&fixture, 12).await?;
+    for table in [
+        "project_lifecycle_event",
+        "project_binding_candidate",
+        "project_lifecycle_key_state",
+        "project_lifecycle_triple_summary",
+        "project_lifecycle_association",
+    ] {
+        let column = if table == "project_lifecycle_event" {
+            "original_logical_name_id"
+        } else {
+            "logical_name_id"
+        };
+        sqlx::query(&format!(
+            "DELETE FROM bigname_phase.{table} WHERE {column} = $1"
+        ))
+        .bind(name(5))
+        .execute(&fixture.pool)
+        .await?;
+    }
+    let reports = [
+        shadow_support::compare::compare_in_chunks(&fixture.pool, CHAIN, 12, 1).await?,
+        shadow_support::compare::compare_in_chunks(&fixture.pool, CHAIN, 12, 2).await?,
+        shadow_support::compare::compare_in_chunks(&fixture.pool, CHAIN, 12, 500).await?,
+    ];
+    assert_eq!(reports[0].names, 5);
+    assert!(
+        reports[0].expected_delta > 0 && reports[0].mismatched > 0,
+        "{:#?}",
+        reports[0].lines
+    );
+    assert_eq!(reports[0], reports[1]);
+    assert_eq!(reports[0], reports[2]);
     fixture.cleanup().await
 }

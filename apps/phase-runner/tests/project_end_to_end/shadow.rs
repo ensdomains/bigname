@@ -149,7 +149,7 @@ pub fn take_reports() -> Vec<Counted> {
 }
 
 /// What one comparison saw.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, PartialEq)]
 pub struct Report {
     pub names: usize,
     pub resources: usize,
@@ -268,6 +268,17 @@ type SummaryRow = (
 );
 
 pub async fn compare(pool: &PgPool, chain: &str, target: i64) -> Result<Report> {
+    compare_in_chunks(pool, chain, target, NAME_CHUNK).await
+}
+
+/// `compare` with the names read `chunk` at a time. Every name's result must not depend on
+/// which other names share its chunk; the fixtures compare chunkings to check that.
+pub async fn compare_in_chunks(
+    pool: &PgPool,
+    chain: &str,
+    target: i64,
+    chunk: usize,
+) -> Result<Report> {
     let mut report = Report::default();
     let timestamp: i64 = sqlx::query_scalar(
         "SELECT extract(epoch FROM block_timestamp)::bigint FROM chain_lineage
@@ -290,8 +301,8 @@ pub async fn compare(pool: &PgPool, chain: &str, target: i64) -> Result<Report> 
             .fetch_all(pool)
             .await?;
     let mut attributions = BTreeMap::new();
-    for chunk in keys.chunks(NAME_CHUNK) {
-        let rows = load_name_current_by_logical_name_ids(pool, chunk).await?;
+    for names in keys.chunks(chunk) {
+        let rows = load_name_current_by_logical_name_ids(pool, names).await?;
         let inputs: Vec<NameInput> = rows
             .values()
             .map(|row| NameInput {
@@ -871,7 +882,7 @@ fn name_excuses(
     if retention::name_differs(facts, &prefetched.retention).is_some() {
         return out;
     }
-    let Some(from_log) = log_facts_in(facts, &prefetched.log) else {
+    let Some(from_log) = log_facts_in(facts, &prefetched.log, &prefetched.snapshots) else {
         return out;
     };
     let canonical = evaluate(&in_canonical_ranks(&from_log), clock);
@@ -1146,8 +1157,7 @@ fn lifecycle_from_log(event: &LifecycleEvent, log: &LogEvent) -> Option<Lifecycl
         state_derived: raw_flag(after, "state_derived"),
         surface_materialization: raw_flag(after, "surface_materialization"),
         registrar_surface_snapshot: raw_flag(after, "registrar_surface_snapshot"),
-        original_registered_at: raw_text(after, "original_registered_at")
-            .and_then(|value| value.parse().ok()),
+        original_registered_at: logged_registration_time(log),
         owner_getter: raw_lower(after, "owner_getter"),
         owner_word_unmasked: raw_flag(after, "owner_word_unmasked"),
         registry_owner: raw_lower(after, "registry_owner"),
@@ -1174,16 +1184,36 @@ async fn events_from_log(
 }
 
 /// The name's facts with every retained lifecycle event rebuilt from its publication-visible
-/// log row in `log`; None when one is not there.
-fn log_facts_in(facts: &NameFacts, log: &BTreeMap<String, LogEvent>) -> Option<NameFacts> {
+/// log row in `log`; None when one is not there. The snapshot registration times render
+/// through `snapshots`, the conversions of the logged times, keeping exactly the rebuilt
+/// events' own: the loader's map holds the family times of every name in its batch, so a
+/// rebuilt time could otherwise render or not by which names share the chunk.
+fn log_facts_in(
+    facts: &NameFacts,
+    log: &BTreeMap<String, LogEvent>,
+    snapshots: &BTreeMap<i64, Value>,
+) -> Option<NameFacts> {
     let events = facts
         .events
         .iter()
         .map(|event| lifecycle_from_log(event, log.get(&event.position.event_identity)?))
         .collect::<Option<Vec<_>>>()?;
     let mut out = facts.clone();
+    out.snapshot_timestamps = events
+        .iter()
+        .filter_map(|event| {
+            let seconds = event.original_registered_at?;
+            Some((seconds, snapshots.get(&seconds)?.clone()))
+        })
+        .collect();
     out.events = events;
     Some(out)
+}
+
+/// The registration time of a retained event's log row as step 2 stores it
+/// (`lifecycle_from_log`).
+fn logged_registration_time(event: &LogEvent) -> Option<i64> {
+    raw_text(&event.after, "original_registered_at").and_then(|value| value.parse().ok())
 }
 
 /// What the name excuses read, loaded once for a chunk of differing names: their facts, and the
@@ -1196,6 +1226,9 @@ pub struct ExcuseInputs {
     pub keys: BTreeMap<String, (String, String)>,
     /// What the log gives the names under step 2's retention rules.
     pub retention: retention::RetentionLog,
+    /// `to_jsonb(to_timestamp(seconds))` of every registration time in `log`, as the loader
+    /// converts the family's (load.rs:255-270).
+    pub snapshots: BTreeMap<i64, Value>,
 }
 
 impl ExcuseInputs {
@@ -1237,12 +1270,27 @@ impl ExcuseInputs {
             .collect();
         let keys = association_keys(pool, chain, target, &identities).await?;
         let retention = retention::RetentionLog::load(pool, chain, target, &facts).await?;
+        let seconds: Vec<i64> = log
+            .values()
+            .filter_map(logged_registration_time)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let snapshots = sqlx::query_as::<_, (i64, Value)>(
+            "SELECT seconds, to_jsonb(to_timestamp(seconds)) FROM unnest($1::bigint[]) seconds",
+        )
+        .bind(&seconds)
+        .fetch_all(pool)
+        .await?
+        .into_iter()
+        .collect();
         Ok(Self {
             facts,
             log,
             ids,
             keys,
             retention,
+            snapshots,
         })
     }
 }
