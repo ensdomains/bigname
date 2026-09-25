@@ -16,7 +16,7 @@ use crate::families::control::{rows::WrapperRow, wrapper::restrictions};
 /// role that authorizes token transfers.
 /// (upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L409-L425 @ ens_v2@a971bd64)
 /// (upstream: .refs/ens_v2/contracts/src/access-control/EnhancedAccessControl.sol:L452-L455 @ ens_v2@a971bd64)
-/// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L545-L572 @ ens_v2@a971bd64)
+/// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L545-L573 @ ens_v2@a971bd64)
 /// (upstream: .refs/ens_v2/contracts/src/registry/libraries/RegistryRolesLib.sol:L23-L45 @ ens_v2@a971bd64)
 const ROLES: [(&str, &str); 5] = [
     ("unregister", "admin_unregister"),

@@ -1281,9 +1281,12 @@ fn expiry_seconds(after: &Value) -> Option<i64> {
 }
 
 /// A retained lifecycle event rebuilt from its log row as step 2 writes it
-/// (crates/project/src/families/lifecycle.rs:318-389, `retained_columns`), keeping only the
+/// (crates/project/src/families/lifecycle.rs:318-399, `retained_columns`), keeping only the
 /// family's key and decoded name, which the log does not carry. None when the log row is not at
-/// the event's position.
+/// the event's position. Exactly three fields are copied from the family row: `state_kind` and
+/// `state_key`, which the retention check's placement checks compare against the key step 2
+/// derives from the log row, and `decoded_logical_name_id`, which no read uses. Every other
+/// field comes from the log, so comparing a family row with its rebuild whole is exact.
 fn lifecycle_from_log(event: &LifecycleEvent, log: &LogEvent) -> Option<LifecycleEvent> {
     if log.position != event.position {
         return None;
@@ -1384,8 +1387,9 @@ fn logged_registration_time(event: &LogEvent) -> Option<i64> {
 
 /// What the name excuses read, loaded once for a chunk of differing names: their facts, and the
 /// publication-visible log rows, generated ids and association keys of every lifecycle and
-/// control event those facts name. A chunk with no differing names, or no events, reads
-/// nothing.
+/// control event those facts name. A chunk with no differing names reads nothing; one whose
+/// names have no events skips the log, association-key and time reads, but still runs the
+/// retention check's four queries.
 #[derive(Default)]
 pub struct ExcuseInputs {
     pub facts: BTreeMap<String, NameFacts>,

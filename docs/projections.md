@@ -1838,8 +1838,11 @@ rebuilt events with that block in the old generated-id order must give exactly
 the served value. For a resource's permission rows, admin powers and restriction
 block it passes only in one direction: the resource's rebuilt events keep the
 registration live in today's order and lapse it canonically, the served value is
-not empty, and the families read in today's order give it. A served empty value
-against a family row is a mismatch. A live registration's restriction block
+not empty, and the families read in today's order give it. That read also
+folds the registry root's admin powers in today's order, so when the resource
+has a root, the root's retained events must match the log too; if they do not,
+every differing field of the resource is refused, its permission rows included.
+A served empty value against a family row is a mismatch. A live registration's restriction block
 reads its registry root's admin powers, so it also passes when only the root's
 lapse differs between the orders, the whole block read in today's order equals
 the served one and the canonical read the shadow one. The canonical side is the

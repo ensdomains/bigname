@@ -1031,3 +1031,180 @@ async fn a_root_reversal_moves_the_child_restrictions_as_a_same_block_delta() ->
     }
     fixture.cleanup().await
 }
+
+/// Scoped pass on 4f480c6c, note 2: the one-direction permission excuse reads the root's admin
+/// powers in today's order too, so it also needs the root's retained events to match the log.
+/// The child is granted at 10 and, at block 14, released by an unnamed path expiry (log 2)
+/// written before a new grant (log 1): today's order keeps it live, the canonical order lapses
+/// it, and its permission rows pass as a same-block delta. With the root's grant row dropped
+/// from the families, the root's retained events no longer match the log, and the child's
+/// permission rows stay a mismatch: the refusal is in the safe direction.
+#[tokio::test]
+async fn a_root_retention_gap_refuses_the_child_permission_excuse() -> Result<()> {
+    let fixture = Fixture::new("families_shadow_permissions_root_gap", 20).await?;
+    let (child, root, n1) = (uuid(1), uuid(50), name(1));
+    for (resource, upstream) in [(&child, CHILD_WORD), (&root, ZERO_WORD)] {
+        fixture.resource(resource).await?;
+        sqlx::query("UPDATE resources SET provenance = $2 WHERE resource_id = $1::uuid")
+            .bind(resource)
+            .bind(json!({"adapter": "ens_v2_permissions", "chain_id": CHAIN,
+                         "source_family": "ens_v2_registry_l1", "registry_address": V2_REGISTRY,
+                         "registry_contract_instance_id": V2_INSTANCE,
+                         "upstream_resource": upstream}))
+            .execute(&fixture.pool)
+            .await?;
+    }
+    fixture
+        .binding(&uuid(100), &name(1), &child, "ens_v2", 9, 0, None)
+        .await?;
+    fixture
+        .write(
+            9,
+            1,
+            "SurfaceBound",
+            "ens_v2_registry_l1",
+            Some(&name(1)),
+            Some(&child),
+            json!({"authority_kind": "ens_v2_registry", "state_derived": false}),
+            V2_REGISTRY,
+        )
+        .await?;
+    let grant_after = |token: &str| {
+        json!({"authority_kind": "ens_v2_registry", "registry_contract_instance_id": V2_INSTANCE,
+               "token_id": token, "status": "registered", "registrant": HOLDER,
+               "expiry": 2_000_000_000u64, "state_derived": false})
+    };
+    let child_grant = |identity: &'static str, block: i64| {
+        support::Event::new(
+            identity,
+            block,
+            1,
+            "RegistrationGranted",
+            "ens_v2_registry_l1",
+        )
+        .name(&n1)
+        .resource(&child)
+        .after(grant_after("5001"))
+        .raw(json!({"emitting_address": V2_REGISTRY}))
+    };
+    fixture.event(child_grant("child-grant-10", 10)).await?;
+    role(
+        &fixture,
+        false,
+        10,
+        &child,
+        HOLDER,
+        &["unregister", "set_resolver"],
+    )
+    .await?;
+    fixture
+        .event(
+            support::Event::new(
+                "root-grant-10",
+                10,
+                2,
+                "RegistrationGranted",
+                "ens_v2_registry_l1",
+            )
+            .resource(&root)
+            .after(grant_after("9001"))
+            .raw(json!({"emitting_address": V2_REGISTRY})),
+        )
+        .await?;
+    role(&fixture, true, 11, &root, ROOT_ADMIN, &["admin_renew"]).await?;
+    fixture
+        .event(
+            support::Event::new(
+                "child-path-expiry",
+                14,
+                2,
+                "RegistrationReleased",
+                "ens_v2_registry_l1",
+            )
+            .resource(&child)
+            .after(json!({"source_event": "RegistryPathExpired",
+                              "derived_from": "interpreter_state",
+                              "terminal_reason": "registry_name_binding_expired",
+                              "expiry": 1_800_000_100u64,
+                              "registry_contract_instance_id": V2_INSTANCE,
+                              "token_id": "5001"}))
+            .raw(json!({"emitting_address": V2_REGISTRY})),
+        )
+        .await?;
+    fixture.event(child_grant("child-grant-14", 14)).await?;
+    let child_rows = |report: &shadow_support::compare::Report, kind: &str| {
+        report.lines.iter().any(|line| {
+            line.starts_with(kind)
+                && line.contains(&format!("key={child} "))
+                && line.contains("field=permissions_current")
+        })
+    };
+    let report = publish_and_compare(&fixture, 16).await?;
+    // Name 1 reads the unnamed release as served-side bug 1 on seven fields.
+    let known: Vec<(String, usize)> = [
+        "control/expiry",
+        "control/registrant",
+        "control/status",
+        "registration/authority_kind",
+        "registration/latest_event_kind",
+        "registration/registrant",
+        "registration/status",
+    ]
+    .iter()
+    .map(|field| {
+        (
+            format!("served_membership_skips_unnamed_path_expiry:{field}"),
+            1,
+        )
+    })
+    .collect();
+    let known_pairs: Vec<(&str, usize)> = known
+        .iter()
+        .map(|(field, count)| (field.as_str(), *count))
+        .collect();
+    shadow_support::assert_counts(
+        &report,
+        &known_pairs,
+        &[
+            ("d12_same_block_order:permissions_current", 1),
+            ("d12_same_block_order:resource_restrictions", 1),
+        ],
+    );
+    sqlx::query(
+        "DELETE FROM bigname_phase.project_lifecycle_event WHERE event_identity = 'root-grant-10'",
+    )
+    .execute(&fixture.pool)
+    .await?;
+    let mutated = shadow_support::compare::compare(&fixture.pool, CHAIN, 16).await?;
+    assert!(
+        child_rows(&mutated, "SEPOLIA_END_TO_END_SHADOW_MISMATCH"),
+        "a root retention gap must leave the child's permission rows a mismatch: {:#?}",
+        mutated.lines
+    );
+    // Every differing field of the child is refused, the restriction block included.
+    assert!(
+        mutated.expected_delta_fields.is_empty(),
+        "{:#?}",
+        mutated.lines
+    );
+    assert_eq!(
+        mutated.known_discrepancy,
+        known.into_iter().collect(),
+        "{:#?}",
+        mutated.lines
+    );
+    let mut failed: Vec<&str> = mutated
+        .lines
+        .iter()
+        .filter(|line| line.starts_with("SEPOLIA_END_TO_END_SHADOW_MISMATCH"))
+        .filter_map(|line| line.split(" field=").nth(1)?.split(' ').next())
+        .collect();
+    failed.sort();
+    assert_eq!(
+        failed,
+        ["permissions_current", "resource_restrictions"],
+        "{:#?}",
+        mutated.lines
+    );
+    fixture.cleanup().await
+}
