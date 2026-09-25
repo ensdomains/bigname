@@ -863,3 +863,99 @@ async fn a_permission_row_the_serving_reader_includes_is_compared() -> Result<()
     assert_eq!(failed, vec!["permissions_current"], "{:#?}", included.lines);
     fixture.cleanup().await
 }
+
+/// Codex thread PRRT_kwDOSJpxAs6l9h_i: a comparison is for one chain. A second chain's served
+/// name, resource summary and permission row, readable on that chain's own lineage, are what
+/// the serving readers expose for that chain (their read filters scope each row by its
+/// provenance chain), so they must not be compared against this chain's families: the report
+/// stays exactly the baseline.
+#[tokio::test]
+async fn another_chain_served_rows_are_not_compared() -> Result<()> {
+    const OTHER: &str = "other-chain";
+    let fixture = Fixture::new("families_shadow_order_other_chain", 20).await?;
+    let (k1, n1) = (uuid(1), name(1));
+    v2_binding(&fixture, &k1).await?;
+    fixture
+        .event(grant("grant-10", 10, &n1, &k1, ALICE))
+        .await?;
+    fixture
+        .event(registry_grant("permission-11", 11, &k1, BOB))
+        .await?;
+    let baseline = publish_and_compare(&fixture, 16).await?;
+    assert_counts(&baseline, &[], &[]);
+    // The other chain's lineage carries the same hashes, so its rows are readable there.
+    sqlx::query(
+        "INSERT INTO chain_lineage (chain_id, block_hash, parent_hash, block_number,
+             block_timestamp, canonicality_state)
+         SELECT $2, block_hash, parent_hash, block_number, block_timestamp, canonicality_state
+         FROM chain_lineage WHERE chain_id = $1",
+    )
+    .bind(CHAIN)
+    .bind(OTHER)
+    .execute(&fixture.pool)
+    .await?;
+    let (other_name, other_resource) = (name(7), uuid(7));
+    fixture
+        .binding(
+            &uuid(107),
+            &other_name,
+            &other_resource,
+            "ens_v2",
+            9,
+            7,
+            None,
+        )
+        .await?;
+    let chain = json!({"chain_id": OTHER});
+    sqlx::query(
+        "INSERT INTO name_current
+         SELECT (jsonb_populate_record(NULL::name_current,
+                    to_jsonb(row) || jsonb_build_object('logical_name_id', $1::text,
+                        'namehash', split_part($1::text, ':', 2),
+                        'surface_binding_id', $4::text, 'resource_id', $5::text,
+                        'provenance', row.provenance || $2::jsonb))).*
+         FROM name_current row WHERE row.logical_name_id = $3",
+    )
+    .bind(&other_name)
+    .bind(&chain)
+    .bind(&n1)
+    .bind(uuid(107))
+    .bind(&other_resource)
+    .execute(&fixture.pool)
+    .await?;
+    for table in [
+        "permissions_current_resource_summary",
+        "permissions_current",
+    ] {
+        sqlx::query(&format!(
+            "INSERT INTO {table}
+             SELECT (jsonb_populate_record(NULL::{table},
+                        to_jsonb(row) || jsonb_build_object('resource_id', $1::text,
+                            'provenance', row.provenance || $2::jsonb))).*
+             FROM {table} row WHERE row.resource_id = $3::uuid"
+        ))
+        .bind(&other_resource)
+        .bind(&chain)
+        .bind(&k1)
+        .execute(&fixture.pool)
+        .await?;
+    }
+    let served = bigname_storage::load_name_current_by_logical_name_ids(
+        &fixture.pool,
+        &[other_name.clone()],
+    )
+    .await?;
+    assert!(
+        served.contains_key(&other_name),
+        "the other chain serves its name"
+    );
+    let report = shadow_support::compare::compare(&fixture.pool, CHAIN, 16).await?;
+    assert_counts(&report, &[], &[]);
+    assert_eq!(
+        (report.names, report.resources, report.equal),
+        (baseline.names, baseline.resources, baseline.equal),
+        "{:#?}",
+        report.lines
+    );
+    fixture.cleanup().await
+}

@@ -133,6 +133,12 @@ use uuid::Uuid;
 pub mod retention;
 
 const NAME_CHUNK: usize = 500;
+/// The served names of one chain: a name_current row belongs to the chain its provenance
+/// names, the chain its read filter checks its publication lineage on (name_current.rs
+/// `DEFAULT_NAME_CURRENT_READ_FILTER`). The resource summaries and permission rows are scoped
+/// by their provenance chain the same way (canonicality.rs).
+const NAMES_OF_CHAIN: &str =
+    "SELECT logical_name_id FROM name_current WHERE provenance ->> 'chain_id' = $1 ORDER BY 1";
 /// Difference lines printed per comparison; the counters count all of them.
 const PRINTED: usize = 400;
 
@@ -425,10 +431,10 @@ async fn compare_fenced(
     };
 
     // Names: registration and control, registry generation and the ownerless profile.
-    let keys: Vec<String> =
-        sqlx::query_scalar("SELECT logical_name_id FROM name_current ORDER BY 1")
-            .fetch_all(pool)
-            .await?;
+    let keys: Vec<String> = sqlx::query_scalar(NAMES_OF_CHAIN)
+        .bind(chain)
+        .fetch_all(pool)
+        .await?;
     let mut attributions = BTreeMap::new();
     for names in keys.chunks(options.chunk) {
         let rows = load_name_current_by_logical_name_ids(pool, names).await?;
@@ -564,8 +570,10 @@ async fn compare_fenced(
                 summary.registry_binding_provenance, summary.registry_binding_chain_positions,
                 summary.provenance -> 'registry_binding_clear_event_id'
          FROM permissions_current_resource_summary summary
-         WHERE {CURRENT_PERMISSION_SUMMARY_READ_FILTER} ORDER BY 1"
+         WHERE summary.provenance ->> 'chain_id' = $1
+           AND {CURRENT_PERMISSION_SUMMARY_READ_FILTER} ORDER BY 1"
     ))
+    .bind(chain)
     .fetch_all(pool)
     .await?;
     let mut resource_ids: BTreeSet<String> = summaries.iter().map(|row| row.0.clone()).collect();
@@ -577,9 +585,11 @@ async fn compare_fenced(
                     'grant_source', pc.grant_source, 'revocation_source', pc.revocation_source,
                     'inheritance_path', pc.inheritance_path,
                     'transfer_behavior', pc.transfer_behavior)
-         FROM permissions_current pc WHERE TRUE {DEFAULT_PERMISSIONS_CURRENT_READ_FILTER}
+         FROM permissions_current pc
+         WHERE pc.provenance ->> 'chain_id' = $1 {DEFAULT_PERMISSIONS_CURRENT_READ_FILTER}
          ORDER BY pc.resource_id, pc.subject, pc.scope"
     ))
+    .bind(chain)
     .fetch_all(pool)
     .await?;
     let mut grants_by_resource: BTreeMap<String, Vec<Value>> = BTreeMap::new();
@@ -651,11 +661,12 @@ async fn compare_fenced(
         r"SELECT pc.resource_id::text, array_agg(DISTINCT power.value ORDER BY power.value)
          FROM permissions_current pc
          CROSS JOIN LATERAL jsonb_array_elements_text(pc.effective_powers) power
-         WHERE pc.scope_kind IN ('registry', 'root')
+         WHERE pc.provenance ->> 'chain_id' = $1 AND pc.scope_kind IN ('registry', 'root')
            AND (power.value LIKE 'admin\_%' OR power.value = 'can_transfer_admin')
            {DEFAULT_PERMISSIONS_CURRENT_READ_FILTER}
          GROUP BY 1"
     ))
+    .bind(chain)
     .fetch_all(pool)
     .await?
     .into_iter()
@@ -2247,10 +2258,10 @@ pub async fn corpus_expectation(
     chain: &str,
     target: i64,
 ) -> Result<BTreeMap<String, usize>> {
-    let keys: Vec<String> =
-        sqlx::query_scalar("SELECT logical_name_id FROM name_current ORDER BY 1")
-            .fetch_all(pool)
-            .await?;
+    let keys: Vec<String> = sqlx::query_scalar(NAMES_OF_CHAIN)
+        .bind(chain)
+        .fetch_all(pool)
+        .await?;
     let (mut names, mut resources): (Vec<String>, Vec<String>) = (Vec::new(), Vec::new());
     for chunk in keys.chunks(NAME_CHUNK) {
         for row in load_name_current_by_logical_name_ids(pool, chunk)
