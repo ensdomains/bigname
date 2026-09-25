@@ -310,28 +310,29 @@
         LEFT JOIN LATERAL (
             SELECT event.event_kind, event.after_state, event.resource_id, event.lifecycle_key
             FROM (SELECT DISTINCT ON (event.lifecycle_key) event.* FROM project_v2_lifecycle_events event
-            WHERE event.logical_name_id = surface.logical_name_id AND (
+            WHERE event.logical_name_id = surface.logical_name_id AND NOT event.expired_when_written AND (
                   event.event_kind IN ('RegistrationGranted', 'RegistrationReserved') OR
                   (event.event_kind = 'RegistrationReleased' AND ((event.after_state ->> 'source_event' = 'RegistryPathExpired' AND event.after_state ->> 'derived_from' = 'interpreter_state' AND event.after_state ->> 'terminal_reason' = 'registry_name_binding_expired')
                         OR EXISTS (SELECT 1 FROM project_v2_lifecycle_events active WHERE active.logical_name_id = event.logical_name_id AND active.lifecycle_key = event.lifecycle_key
-                            AND active.event_kind IN ('RegistrationGranted', 'RegistrationReserved') AND ROW(COALESCE(active.block_number, -1), active.normalized_event_id) < ROW(COALESCE(event.block_number, -1), event.normalized_event_id)
+                            AND active.event_kind IN ('RegistrationGranted', 'RegistrationReserved') AND NOT active.expired_when_written AND ROW(COALESCE(active.block_number, -1), COALESCE(active.transaction_index, -1), COALESCE(active.log_index, -1), active.normalized_event_id) < ROW(COALESCE(event.block_number, -1), COALESCE(event.transaction_index, -1), COALESCE(event.log_index, -1), event.normalized_event_id)
                             AND NOT EXISTS (SELECT 1 FROM project_v2_lifecycle_events expiry WHERE expiry.logical_name_id = event.logical_name_id AND expiry.lifecycle_key = event.lifecycle_key
-                                AND expiry.event_kind = 'RegistrationReleased' AND expiry.after_state ->> 'source_event' = 'RegistryPathExpired' AND expiry.after_state ->> 'derived_from' = 'interpreter_state' AND expiry.after_state ->> 'terminal_reason' = 'registry_name_binding_expired' AND ROW(COALESCE(expiry.block_number, -1), expiry.normalized_event_id) BETWEEN ROW(COALESCE(active.block_number, -1), active.normalized_event_id) AND ROW(COALESCE(event.block_number, -1), event.normalized_event_id)
+                                AND expiry.event_kind = 'RegistrationReleased' AND expiry.after_state ->> 'source_event' = 'RegistryPathExpired' AND expiry.after_state ->> 'derived_from' = 'interpreter_state' AND expiry.after_state ->> 'terminal_reason' = 'registry_name_binding_expired' AND ROW(COALESCE(expiry.block_number, -1), COALESCE(expiry.transaction_index, -1), COALESCE(expiry.log_index, -1), expiry.normalized_event_id) BETWEEN ROW(COALESCE(active.block_number, -1), COALESCE(active.transaction_index, -1), COALESCE(active.log_index, -1), active.normalized_event_id) AND ROW(COALESCE(event.block_number, -1), COALESCE(event.transaction_index, -1), COALESCE(event.log_index, -1), event.normalized_event_id)
                             )))
               ))
-              AND NOT EXISTS (SELECT 1 FROM project_v2_lifecycle_events later WHERE later.logical_name_id = event.logical_name_id AND later.lifecycle_key = event.lifecycle_key
+              AND NOT EXISTS (SELECT 1 FROM project_v2_lifecycle_events later WHERE later.logical_name_id = event.logical_name_id AND later.lifecycle_key = event.lifecycle_key AND NOT later.expired_when_written
                     AND ((event.event_kind = 'RegistrationReleased' AND later.event_kind IN ('RegistrationGranted', 'RegistrationReserved')) OR (event.event_kind <> 'RegistrationReleased' AND later.event_kind = 'RegistrationReleased'))
-                    AND ROW(COALESCE(later.block_number, -1), later.normalized_event_id) > ROW(COALESCE(event.block_number, -1), event.normalized_event_id)
+                    AND ROW(COALESCE(later.block_number, -1), COALESCE(later.transaction_index, -1), COALESCE(later.log_index, -1), later.normalized_event_id) > ROW(COALESCE(event.block_number, -1), COALESCE(event.transaction_index, -1), COALESCE(event.log_index, -1), event.normalized_event_id)
               )
-            -- Inside one block the latest row of a key is the one with the highest
-            -- normalized_event_id, not the latest transaction or log position. Block-boundary
-            -- rows (no transaction or log index) at one position tie the same way in authority
-            -- selection; this is the shape the two_boundary_releases test pins.
-            ORDER BY event.lifecycle_key, event.block_number DESC NULLS LAST, event.normalized_event_id DESC) event
+            -- Positions compare as authority selection compares them: block, transaction, log, then
+            -- event id, with a block-boundary row (no transaction or log index) first in its block.
+            -- A reservation already expired when written takes no part, as there.
+            ORDER BY event.lifecycle_key, event.block_number DESC NULLS LAST, COALESCE(event.transaction_index, -1) DESC,
+                     COALESCE(event.log_index, -1) DESC, event.normalized_event_id DESC) event
             ORDER BY (binding.resource_id IS NOT NULL AND event.lifecycle_key IS NOT DISTINCT FROM binding.resource_id::text AND event.event_kind <> 'RegistrationReleased') DESC,
                      (event.event_kind = 'RegistrationReleased'),
                      (binding.resource_id IS NOT NULL AND event.lifecycle_key IS NOT DISTINCT FROM binding.resource_id::text) DESC,
-                     event.block_number DESC NULLS LAST, event.normalized_event_id DESC
+                     event.block_number DESC NULLS LAST, COALESCE(event.transaction_index, -1) DESC,
+                     COALESCE(event.log_index, -1) DESC, event.normalized_event_id DESC
             LIMIT 1
         ) registration_current ON TRUE
         -- One selection, not two (product ruling of 2026-09-26): when authority selection chose a
@@ -370,6 +371,7 @@
         LEFT JOIN LATERAL (
             SELECT event.event_kind FROM project_v2_lifecycle_events event
             WHERE selected_registration.is_v2_lifecycle AND event.logical_name_id = surface.logical_name_id
+              AND NOT event.expired_when_written
               AND event.lifecycle_key IS NOT DISTINCT FROM COALESCE(selected_registration.lifecycle_key, row_identity.event_resource_id::text)
               AND event.event_kind IN ('RegistrationGranted', 'RegistrationRenewed', 'RegistrationReleased', 'RegistrationReserved', 'ExpiryChanged')
             ORDER BY event.block_number DESC NULLS LAST, event.transaction_index DESC NULLS LAST,

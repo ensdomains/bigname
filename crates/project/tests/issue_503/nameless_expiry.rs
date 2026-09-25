@@ -305,3 +305,219 @@ async fn two_boundary_releases_of_one_registration_give_the_same_tombstone_eithe
     }
     Ok(())
 }
+
+async fn project_at(
+    pool: &PgPool,
+    target: i64,
+    previous: Option<bigname_project::Marker>,
+) -> Result<bigname_project::Marker> {
+    Ok(Engine::new(pool.clone())
+        .run_batch(BatchRequest {
+            chain_id: CHAIN.into(),
+            target_block: target,
+            affected_from_block: previous.as_ref().map_or(9, |marker| marker.number + 1),
+            affected_to_block: target,
+            resume_current: previous,
+            mode: RunMode::Normal,
+        })
+        .await?
+        .current)
+}
+
+/// Seeds the same rows twice and projects them once as batches at blocks 9 and 10 and once as
+/// one batch at block 10. Both must serve the same fields, which are returned.
+async fn served_both_ways<F, Fut>(prefix: &str, seed: F) -> Result<Value>
+where
+    F: Fn(PgPool) -> Fut,
+    Fut: std::future::Future<Output = Result<String>>,
+{
+    let (stepped_db, stepped) = database(&format!("{prefix}_stepped")).await?;
+    let logical = seed(stepped.clone()).await?;
+    let at_9 = project_at(&stepped, 9, None).await?;
+    project_at(&stepped, 10, Some(at_9)).await?;
+    let stepped_served = served(&stepped, &logical).await?;
+    stepped_db.cleanup().await?;
+    let (one_db, one) = database(&format!("{prefix}_one")).await?;
+    let logical = seed(one.clone()).await?;
+    project_at(&one, 10, None).await?;
+    assert_eq!(
+        served(&one, &logical).await?,
+        stepped_served,
+        "{prefix}: one batch and batches at blocks 9 and 10 serve the same fields"
+    );
+    one_db.cleanup().await?;
+    Ok(stepped_served)
+}
+
+/// A release at the start of block 10, with no transaction or log index, on `resource`, by
+/// `logical` or without a name, with Interpret's path-expiry markers.
+async fn boundary_release(
+    pool: &PgPool,
+    identity: &str,
+    logical: Option<&str>,
+    resource: &str,
+    extra: Value,
+) -> Result<()> {
+    let mut after = json!({"source_event":"RegistryPathExpired","derived_from":"interpreter_state","terminal_reason":"registry_name_binding_expired","status":"released"});
+    if let (Some(after), Some(extra)) = (after.as_object_mut(), extra.as_object()) {
+        after.extend(extra.clone());
+    }
+    sqlx::query("INSERT INTO normalized_events (event_identity, namespace, logical_name_id, resource_id, event_kind, source_family, manifest_version, chain_id, block_number, block_hash, transaction_hash, transaction_index, log_index, derivation_kind, canonicality_state, after_state) VALUES ($1, 'ens', $2, $3::uuid, 'RegistrationReleased', 'ens_v2_registry_l1', 1, $4, 10, $5, NULL, NULL, NULL, 'ens_v2_registry_resource_surface', 'canonical', $6)")
+        .bind(identity).bind(logical).bind(resource).bind(CHAIN).bind(HASH).bind(after)
+        .execute(pool).await?;
+    Ok(())
+}
+
+// A block-boundary release and an indexed regrant on the same resource later in the same block
+// (Pro review of b83f829c, question 2). The rows are hand-built: the regrant keeps the released
+// registration's resource and opens a binding on it at (10, 0, 1). Authority selection orders by
+// block, transaction, log and event id with the boundary release first in its block, so the
+// regrant is the later fact and the name is registered. The registration section must agree
+// whichever row has the higher event id; before, its fold ordered by block and event id only and
+// served the release when it was written second. The case runs with the release named, as
+// Interpret writes it for a named entry, and without a name, and with each row written first.
+#[tokio::test]
+async fn an_indexed_regrant_after_a_boundary_release_in_the_same_block_is_the_later_fact()
+-> Result<()> {
+    for named in [true, false] {
+        for release_first in [true, false] {
+            let seed = |pool: PgPool| async move {
+                earlier_block(&pool).await?;
+                let logical = surface(&pool, 123, "boundary-regrant.eth", &[]).await?;
+                let (resource, _) =
+                    closed_binding_at_block_9(&pool, &logical, 123, "ens_v2").await?;
+                event(
+                    &pool,
+                    "boundary-regrant-grant",
+                    &logical,
+                    Some(&resource),
+                    Event {
+                        family: "ens_v2_registry_l1",
+                        kind: "RegistrationGranted",
+                        log: 2,
+                        after: json!({"status":"registered","registrant":"0x0000000000000000000000000000000000000002"}),
+                    },
+                )
+                .await?;
+                sqlx::query("UPDATE normalized_events SET block_number = 9, block_hash = $1 WHERE event_identity = 'boundary-regrant-grant'")
+                    .bind(EARLIER_HASH).execute(&pool).await?;
+                sqlx::query("INSERT INTO surface_bindings (surface_binding_id, logical_name_id, resource_id, binding_kind, authority_arm, active_from, chain_id, block_hash, block_number, provenance, canonicality_state) VALUES ($1::uuid, $2, $3::uuid, 'declared_registry_path', 'ens_v2', '2026-08-26T00:00:00Z', $4, $5, 10, '{\"transaction_index\":0,\"log_index\":1}', 'canonical')")
+                    .bind(uuid(17, 123)).bind(&logical).bind(&resource).bind(CHAIN).bind(HASH)
+                    .execute(&pool).await?;
+                let release = |pool: PgPool, logical: String, resource: String| async move {
+                    boundary_release(
+                        &pool,
+                        "boundary-regrant-release",
+                        named.then_some(logical.as_str()),
+                        &resource,
+                        json!({}),
+                    )
+                    .await
+                };
+                if release_first {
+                    release(pool.clone(), logical.clone(), resource.clone()).await?;
+                }
+                event(
+                    &pool,
+                    "boundary-regrant-regrant",
+                    &logical,
+                    Some(&resource),
+                    Event {
+                        family: "ens_v2_registry_l1",
+                        kind: "RegistrationGranted",
+                        log: 1,
+                        after: json!({"status":"registered","registrant":"0x0000000000000000000000000000000000000003"}),
+                    },
+                )
+                .await?;
+                if !release_first {
+                    release(pool.clone(), logical.clone(), resource.clone()).await?;
+                }
+                Ok(logical)
+            };
+            let served =
+                served_both_ways(&format!("boundary_regrant_{named}_{release_first}"), seed)
+                    .await?;
+            assert_eq!(
+                (
+                    served["resource_id"].as_str(),
+                    served["surface_binding_id"].as_str(),
+                    served["registration"]["status"].as_str(),
+                    served["registration"]["latest_event_kind"].as_str(),
+                    served["control"]["status"].as_str(),
+                ),
+                (
+                    Some(uuid(15, 123).as_str()),
+                    Some(uuid(17, 123).as_str()),
+                    Some("active"),
+                    Some("RegistrationGranted"),
+                    Some("registered"),
+                ),
+                "named release: {named}, release written first: {release_first}: {served}"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Block 10's timestamp in seconds: `database` writes it as 2026-08-26T00:00:00Z.
+const BLOCK_10_TIME: i64 = 1_787_702_400;
+
+// A version-zero reservation already expired when written and its release at the start of the
+// same block, for a name with no ENSv2 binding and nothing on ENSv1 (Pro review of b83f829c,
+// question 2). The rows are Interpret's shape for a named entry. The reservation is never live, so
+// the registration section's fold leaves it out, as authority selection does, and serves the
+// release whichever row has the higher event id. Without that, ordering by position would make the
+// indexed reservation the later fact.
+#[tokio::test]
+async fn a_reservation_expired_when_written_does_not_outrank_its_boundary_release() -> Result<()> {
+    for reservation_first in [true, false] {
+        let seed = |pool: PgPool| async move {
+            earlier_block(&pool).await?;
+            let logical = surface(&pool, 124, "expired-fold.eth", &[]).await?;
+            let resource = uuid(21, 124);
+            sqlx::query("INSERT INTO resources (resource_id, chain_id, block_hash, block_number, canonicality_state) VALUES ($1::uuid, $2, $3, 10, 'canonical')")
+                .bind(&resource).bind(CHAIN).bind(HASH).execute(&pool).await?;
+            let reserve = |pool: PgPool, logical: String, resource: String| async move {
+                event(
+                    &pool,
+                    "expired-fold-reserve",
+                    &logical,
+                    Some(&resource),
+                    Event {
+                        family: "ens_v2_registry_l1",
+                        kind: "RegistrationReserved",
+                        log: 1,
+                        after: json!({"source_event":"LabelReserved","expiry":BLOCK_10_TIME,"status":"reserved","reservation_resource":true}),
+                    },
+                )
+                .await
+            };
+            if reservation_first {
+                reserve(pool.clone(), logical.clone(), resource.clone()).await?;
+            }
+            boundary_release(
+                &pool,
+                "expired-fold-release",
+                Some(&logical),
+                &resource,
+                json!({"expiry":BLOCK_10_TIME,"released_at":BLOCK_10_TIME}),
+            )
+            .await?;
+            if !reservation_first {
+                reserve(pool.clone(), logical.clone(), resource.clone()).await?;
+            }
+            Ok(logical)
+        };
+        let served = served_both_ways(&format!("expired_fold_{reservation_first}"), seed).await?;
+        assert_eq!(
+            (
+                served["registration"]["status"].as_str(),
+                served["registration"]["latest_event_kind"].as_str(),
+            ),
+            (Some("released"), Some("RegistrationReleased")),
+            "reservation written first: {reservation_first}: {served}"
+        );
+    }
+    Ok(())
+}
