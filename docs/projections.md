@@ -1670,7 +1670,11 @@ The first readers of these tables live in the storage crate
 name's registration and control blocks from the lease, wrapper, registry and
 identity families, and a resource's permission rows, restriction block,
 registry binding and registry-operator rows from the grant, approval, wrapper
-and registry families, all at the publication's block clock. The Project fixture
+and registry families, all at the publication's block clock. Every selection of
+a latest event takes it in the canonical order (D12: block, transaction, log,
+then event identity). Binding candidates are not events: two at the same block,
+transaction and log still break the tie by binding id, as the served stage does,
+and a fixture pins that. The Project fixture
 tests and the phase runner's fixture-corpus run compare each value with what the
 production readers serve at the same publication, field by field. A differing
 field passes in two cases only. The first is a disclosed same-block ordering case:

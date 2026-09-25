@@ -271,7 +271,10 @@ impl BindingCandidate {
     }
 
     /// The order stage.rs compares candidates in: block, transaction and log with a missing one
-    /// read as -1, then the binding id.
+    /// read as -1, then the binding id. This is not the D12 event order: two candidates at the
+    /// same place break the tie by binding id, not by their SurfaceBound identities, as the
+    /// served stage does (fixture in admission.rs). The D12 claim covers event-derived latest
+    /// selections only.
     pub fn order(&self) -> (i64, i64, i64, &str) {
         (
             self.block_number,

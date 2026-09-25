@@ -386,3 +386,78 @@ pub(crate) fn custody_passes(
         || distinct(transaction_hash, wrapper.transaction_hash.as_deref())
         || distinct(to_address, wrapper.emitting_address.as_deref())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn candidate(id: &str, resource: &str, block: i64, identity: &str) -> BindingCandidate {
+        BindingCandidate {
+            surface_binding_id: id.into(),
+            logical_name_id: "ens:0x01".into(),
+            authority_arm: "ens_v1".into(),
+            resource_id: resource.into(),
+            canonicality_state: None,
+            surface_namehash: None,
+            block_number: block,
+            transaction_index: Some(0),
+            log_index: Some(1),
+            state_derived: None,
+            authority_kind: None,
+            authority_key: None,
+            authority_key_stored: false,
+            registry_only: false,
+            predecessor_resource_id: None,
+            predecessor_position: None,
+            lease_resource_id: None,
+            wrapped_registrar_resource_id: None,
+            node: None,
+            transaction_hash: None,
+            emitting_address: None,
+            surface_bound_position: Some(Position {
+                block_number: block,
+                transaction_index: Some(0),
+                log_index: Some(1),
+                event_identity: identity.into(),
+            }),
+        }
+    }
+
+    /// Item 5 of the TYR-36 step 3 review (Q8): two ENSv1 bindings of one name at the same block,
+    /// transaction and log, whose binding ids sort opposite to their SurfaceBound identities.
+    /// The binding order mirrors stage.rs and ends with the binding id, so the predecessor is
+    /// the binding with the larger id, not the one whose event is later in the canonical order.
+    /// The D12 claim covers event-derived latest selections only; this binding-id tie-break is
+    /// pinned as it is today.
+    #[test]
+    fn equal_position_bindings_break_the_tie_by_binding_id_not_event_identity() {
+        let by_id = candidate("binding-b", "lease-1", 10, "event-a");
+        let by_identity = candidate("binding-a", "lease-2", 10, "event-b");
+        assert!(
+            by_identity.surface_bound_position > by_id.surface_bound_position,
+            "event-b is the later event in the canonical order"
+        );
+        let selected = candidate("binding-z", "lease-3", 12, "event-z");
+        let candidates = [by_id.clone(), by_identity, selected.clone()];
+        let selection = AuthoritySelection {
+            authority_arm: Some("ens_v1".into()),
+            surface_binding_id: Some("binding-z".into()),
+            resource_id: Some("lease-3".into()),
+            ..AuthoritySelection::default()
+        };
+        let authority = Authority {
+            name: "ens:0x01",
+            selection: &selection,
+            candidates: &candidates,
+            binding: Some(&selected),
+            wrapper_modifier: false,
+            events: &[],
+        };
+        assert_eq!(
+            authority
+                .predecessor()
+                .map(|predecessor| predecessor.surface_binding_id.as_str()),
+            Some("binding-b")
+        );
+    }
+}
