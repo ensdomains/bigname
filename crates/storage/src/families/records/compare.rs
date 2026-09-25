@@ -364,7 +364,9 @@ pub fn compare_address_records(
     today: &[AddressRecordCurrentEntry],
     family: &[AddressRecordCurrentEntry],
 ) -> Vec<Difference> {
-    // A repeated key is compared as its own occurrence (`key#2` and on), never overwritten.
+    // A repeated key is compared as its own occurrence (`key#2` and on), never overwritten: the
+    // occurrence's position among the entries with that key is its identity, so two such entries
+    // in swapped order show as a difference on each occurrence rather than as an order change.
     let sequence = |entries: &[AddressRecordCurrentEntry]| {
         let mut map = Map::new();
         let mut order = Vec::new();
@@ -532,6 +534,40 @@ mod tests {
                 today: Some(json!("2")),
                 family: Some(json!("3")),
             }]
+        );
+    }
+
+    #[test]
+    fn a_repeated_address_key_differing_only_first_is_reported() {
+        let key = format!("a|{}|-", uuid::Uuid::nil());
+        let differences = compare_address_records(
+            &[address("a", "1"), address("a", "2")],
+            &[address("a", "3"), address("a", "2")],
+        );
+        assert_eq!(
+            differences,
+            [Difference {
+                field: format!("entries[{key}].provenance.value"),
+                today: Some(json!("1")),
+                family: Some(json!("3")),
+            }]
+        );
+    }
+
+    #[test]
+    fn swapped_repeated_address_keys_differ_per_occurrence() {
+        let key = format!("a|{}|-", uuid::Uuid::nil());
+        let differences = compare_address_records(
+            &[address("a", "1"), address("a", "2")],
+            &[address("a", "2"), address("a", "1")],
+        );
+        let fields: Vec<String> = differences.into_iter().map(|d| d.field).collect();
+        assert_eq!(
+            fields,
+            [
+                format!("entries[{key}].provenance.value"),
+                format!("entries[{key}#2].provenance.value"),
+            ]
         );
     }
 
