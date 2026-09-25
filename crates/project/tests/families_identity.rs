@@ -658,3 +658,209 @@ async fn an_epoch_after_the_successor_grant_takes_that_grant_as_the_lease() -> R
     fixture.assert_rebuild_equal(13).await?;
     fixture.cleanup().await
 }
+
+/// Opens an ens_v1 binding of name 1 on `resource` at `block`, log 1, with its SurfaceBound:
+/// a registrar one for a lease, a registry one otherwise.
+async fn bound(
+    fixture: &Fixture,
+    id: u32,
+    resource: &str,
+    block: i64,
+    closed_at: Option<i64>,
+) -> Result<()> {
+    fixture
+        .binding(&uuid(id), &name(1), resource, "ens_v1", block, 1, closed_at)
+        .await?;
+    let (family, kind, emitter) = if resource == uuid(2) {
+        ("ens_v1_registry_l1", "registry_only", REGISTRY)
+    } else {
+        ("ens_v1_registrar_l1", "registrar", REGISTRAR)
+    };
+    fixture
+        .write(
+            block,
+            1,
+            "SurfaceBound",
+            family,
+            Some(&name(1)),
+            Some(resource),
+            json!({"authority_kind": kind}),
+            emitter,
+        )
+        .await?;
+    Ok(())
+}
+
+/// Writes a name-1 registrar event of `kind` on `resource` with the name's namehash.
+async fn registrar_event(
+    fixture: &Fixture,
+    block: i64,
+    log: i64,
+    kind: &str,
+    resource: &str,
+    extra: Value,
+) -> Result<()> {
+    let mut after = json!({"namehash": node(1), "registrant": OWNER});
+    if let (Value::Object(after), Value::Object(extra)) = (&mut after, extra) {
+        after.extend(extra);
+    }
+    fixture
+        .write(
+            block,
+            log,
+            kind,
+            "ens_v1_registrar_l1",
+            Some(&name(1)),
+            Some(resource),
+            after,
+            REGISTRAR,
+        )
+        .await?;
+    Ok(())
+}
+
+async fn registry_only_epoch(
+    fixture: &Fixture,
+    block: i64,
+    log: i64,
+    registry: &str,
+) -> Result<()> {
+    fixture
+        .write(
+            block,
+            log,
+            "AuthorityEpochChanged",
+            "ens_v1_registry_l1",
+            Some(&name(1)),
+            Some(registry),
+            json!({"authority_kind": "registry_only"}),
+            REGISTRY,
+        )
+        .await?;
+    Ok(())
+}
+
+/// The registry-only candidates' predecessor and lease, in binding order.
+async fn handoffs(fixture: &Fixture) -> Result<Vec<Value>> {
+    let mut rows: Vec<Value> = fixture
+        .rows("project_binding_candidate")
+        .await?
+        .into_iter()
+        .filter(|row| row["registry_only"] == json!(true))
+        .collect();
+    rows.sort_by_key(|row| row["block_number"].as_i64().unwrap_or_default());
+    Ok(rows
+        .iter()
+        .map(|row| {
+            json!({
+                "predecessor": row["predecessor_resource_id"],
+                "lease": row["lease_resource_id"],
+                "lease_at": [row["lease_position"]["block_number"],
+                             row["lease_position"]["log_index"]],
+            })
+        })
+        .collect())
+}
+
+// A grant in the epoch's own block, before the epoch's log, is the lease: the served handoff
+// reads the epoch at any position (stage.rs:128-135), and the lifecycle family runs after
+// identity, so the grant meets the candidate already registry-only.
+#[tokio::test]
+async fn a_grant_in_the_epochs_own_block_becomes_the_lease() -> Result<()> {
+    let fixture = Fixture::new("families_identity_epoch_block_grant", 20).await?;
+    let (lease, registry, successor) = (uuid(1), uuid(2), uuid(3));
+    bound(&fixture, 101, &lease, 10, Some(11)).await?;
+    bound(&fixture, 102, &registry, 11, None).await?;
+    registrar_event(&fixture, 12, 1, "RegistrationReleased", &lease, json!({})).await?;
+    registrar_event(
+        &fixture,
+        13,
+        1,
+        "RegistrationGranted",
+        &successor,
+        json!({}),
+    )
+    .await?;
+    registry_only_epoch(&fixture, 13, 2, &registry).await?;
+    fixture.apply(13, FamilyMode::Normal).await;
+    assert_eq!(
+        handoffs(&fixture).await?,
+        vec![json!({"predecessor": lease, "lease": successor, "lease_at": [13, 1]})]
+    );
+    fixture.assert_undo_restores(13).await?;
+    fixture.assert_rebuild_equal(13).await?;
+    fixture.cleanup().await
+}
+
+// The replay applies the served grant filter: a grant of another authority kind is not the
+// lease (stage.rs:93-94), so the earlier registrar grant stays it.
+#[tokio::test]
+async fn the_grant_replay_skips_a_grant_of_another_authority_kind() -> Result<()> {
+    let fixture = Fixture::new("families_identity_replay_kind", 20).await?;
+    let (lease, registry, successor, other) = (uuid(1), uuid(2), uuid(3), uuid(4));
+    bound(&fixture, 101, &lease, 10, Some(11)).await?;
+    bound(&fixture, 102, &registry, 11, None).await?;
+    registrar_event(&fixture, 12, 1, "RegistrationReleased", &lease, json!({})).await?;
+    registrar_event(
+        &fixture,
+        12,
+        2,
+        "RegistrationGranted",
+        &successor,
+        json!({}),
+    )
+    .await?;
+    registrar_event(
+        &fixture,
+        12,
+        3,
+        "RegistrationGranted",
+        &other,
+        json!({"authority_kind": "wrapper"}),
+    )
+    .await?;
+    registry_only_epoch(&fixture, 13, 1, &registry).await?;
+    fixture.apply(13, FamilyMode::Normal).await;
+    assert_eq!(
+        handoffs(&fixture).await?,
+        vec![json!({"predecessor": lease, "lease": successor, "lease_at": [12, 2]})]
+    );
+    fixture.assert_undo_restores(13).await?;
+    fixture.assert_rebuild_equal(13).await?;
+    fixture.cleanup().await
+}
+
+// One epoch converts two earlier bindings of the same registry resource. Each takes its own
+// predecessor and its own lease: the first a grant after its predecessor's release, the second,
+// whose predecessor was never released, the predecessor.
+#[tokio::test]
+async fn one_epoch_converting_two_candidates_gives_each_its_own_lease() -> Result<()> {
+    let fixture = Fixture::new("families_identity_two_conversions", 20).await?;
+    let (lease, registry, successor, second_lease) = (uuid(1), uuid(2), uuid(3), uuid(4));
+    bound(&fixture, 101, &lease, 10, Some(11)).await?;
+    bound(&fixture, 102, &registry, 11, Some(14)).await?;
+    registrar_event(&fixture, 12, 1, "RegistrationReleased", &lease, json!({})).await?;
+    registrar_event(
+        &fixture,
+        12,
+        2,
+        "RegistrationGranted",
+        &successor,
+        json!({}),
+    )
+    .await?;
+    bound(&fixture, 103, &second_lease, 14, Some(15)).await?;
+    bound(&fixture, 104, &registry, 15, None).await?;
+    registry_only_epoch(&fixture, 16, 1, &registry).await?;
+    fixture.apply(16, FamilyMode::Normal).await;
+    assert_eq!(
+        handoffs(&fixture).await?,
+        vec![
+            json!({"predecessor": lease, "lease": successor, "lease_at": [12, 2]}),
+            json!({"predecessor": second_lease, "lease": second_lease, "lease_at": [14, 1]}),
+        ]
+    );
+    fixture.assert_undo_restores(16).await?;
+    fixture.assert_rebuild_equal(16).await?;
+    fixture.cleanup().await
+}
