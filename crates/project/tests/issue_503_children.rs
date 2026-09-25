@@ -941,3 +941,97 @@ async fn released_wrapper_registry_child_with_an_open_v1_binding_publishes_no_re
     );
     Ok(())
 }
+
+/// The hash-only locked child with its parent's migration registry created at block 11, and
+/// optionally the child's ENSv2 grant in that registry at block 12, which hides the ENSv1 child.
+/// With `pointer_block` 10 the parent's subregistry pointer to that registry is written a block
+/// before the registry's creation association.
+async fn seed_late_migration_registry(
+    pool: &PgPool,
+    association: bool,
+    history: bool,
+    pointer_block: i64,
+) -> Result<()> {
+    seed_identity(pool, &["ens_v1"]).await?;
+    sqlx::query("UPDATE name_surfaces SET visibility_state = 'shadow', deactivation_reason = 'hash-only replay fixture', deactivated_at = now() WHERE logical_name_id = $1").bind(CHILD).execute(pool).await?;
+    seed_v1_relation(pool, OWNER, 10).await?;
+    seed_wrapper(pool, 65_536, 2_000_000_000).await?;
+    seed_parent_migration_registry(pool, 11).await?;
+    sqlx::query("UPDATE normalized_events SET block_number = $1, block_hash = $2 WHERE event_identity = 'v2-parent-registry'")
+        .bind(pointer_block).bind(hash(pointer_block)).execute(pool).await?;
+    if !association {
+        sqlx::query("DELETE FROM migration_discovery_associations WHERE block_number = 11")
+            .execute(pool)
+            .await?;
+    }
+    seed_migration(pool, "locked_wrapped", 10, "parent-migration").await?;
+    if history {
+        event(pool, &format!("history-{REGISTRY}"), CHILD, None, "ens_v2_registry_l1", "RegistrationGranted", 12, 6,
+            json!({"registry_contract_instance_id":REGISTRY,"status":"registered","registrant":OWNER})).await?;
+    }
+    Ok(())
+}
+
+/// An Interpret redo of block 11 that no longer writes the parent migration registry's creation
+/// association: Project redoes block 11 only, and its publication must match a fresh rebuild
+/// without the association. Returns whether the child was visible before the redo and after it.
+async fn association_retraction_converges(
+    prefix: &str,
+    history: bool,
+    pointer_block: i64,
+) -> Result<(bool, bool)> {
+    let (_redo_db, redo) = database(&format!("{prefix}_redo")).await?;
+    seed_late_migration_registry(&redo, true, history, pointer_block).await?;
+    run(&redo, 12, None, RunMode::Normal).await?;
+    let before = visible(&redo).await?;
+    sqlx::query("DELETE FROM migration_discovery_associations WHERE block_number = 11")
+        .execute(&redo)
+        .await?;
+    Engine::new(redo.clone())
+        .run_batch(BatchRequest {
+            chain_id: CHAIN.into(),
+            target_block: 12,
+            affected_from_block: 11,
+            affected_to_block: 11,
+            resume_current: Some(Marker {
+                number: 12,
+                hash: hash(12),
+            }),
+            mode: RunMode::Redo,
+        })
+        .await?;
+    let (_fresh_db, fresh) = database(&format!("{prefix}_fresh")).await?;
+    seed_late_migration_registry(&fresh, false, history, pointer_block).await?;
+    run(&fresh, 12, None, RunMode::Normal).await?;
+    assert_eq!(rows(&redo).await?, rows(&fresh).await?, "{prefix}");
+    Ok((before, visible(&redo).await?))
+}
+
+// Review thread on scope.rs (TYR-36 step 6). A parent's migration registry creation association
+// becomes unreadable through an Interpret redo while the child's ENSv2 grant in that registry
+// stays outside the redo range. Without a readable association the locked parent publishes no
+// ENSv1 child, so the grant decides nothing either way and the child stays hidden.
+#[tokio::test]
+async fn a_retracted_migration_registry_association_with_child_history_converges_on_redo()
+-> Result<()> {
+    let seen = association_retraction_converges("issue503_assoc_retract_history", true, 11).await?;
+    assert_eq!(seen, (false, false));
+    Ok(())
+}
+
+// The same retraction with no child history: the association made the ENSv1 child visible, and
+// its retraction hides it. The redo must drop the published relation, with the parent's
+// subregistry pointer inside the redo range and outside it.
+#[tokio::test]
+async fn a_retracted_migration_registry_association_hides_the_child_on_redo() -> Result<()> {
+    for pointer_block in [11, 10] {
+        let seen = association_retraction_converges(
+            &format!("issue503_assoc_retract_{pointer_block}"),
+            false,
+            pointer_block,
+        )
+        .await?;
+        assert_eq!(seen, (true, false), "pointer at block {pointer_block}");
+    }
+    Ok(())
+}

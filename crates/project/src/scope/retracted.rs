@@ -4,7 +4,7 @@ use crate::{ProjectError, Result, scope::Window};
 
 mod handoffs;
 mod resolvers;
-use handoffs::seed_child_registration_history;
+use handoffs::{seed_child_registration_history, seed_retracted_migration_registry_associations};
 use resolvers::{seed_relinked_resolvers, seed_resolvers};
 
 /// Retain keys whose cited events Interpret deleted during redo so Project can retract losing-fork output.
@@ -25,6 +25,7 @@ pub(super) async fn seed(
     seed_children(transaction, chain_id).await?;
     seed_child_registration_history(transaction, chain_id, window.from_block, window.to_block)
         .await?;
+    seed_retracted_migration_registry_associations(transaction, chain_id).await?;
     seed_resources(transaction, chain_id, window.from_block, window.to_block).await?;
     handoffs::seed_wrapper_effect_resources(transaction, chain_id).await?;
     seed_account_permissions(transaction, chain_id).await?;
