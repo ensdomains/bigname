@@ -13,7 +13,8 @@ mod support;
 
 use anyhow::{Context, Result, ensure};
 use bigname_storage::families::topology::{
-    FamilyCollectionPage, load_resolver_links_shadow, load_resolver_shadow,
+    FamilyCollectionPage, load_family_link_selection, load_resolver_links_shadow,
+    load_resolver_shadow,
 };
 use serde_json::{Value, json};
 use shadow_fixture::{
@@ -133,6 +134,31 @@ async fn link(
     emitter: &str,
     block: i64,
 ) -> Result<()> {
+    link_of_model(
+        fixture,
+        identity,
+        resolver,
+        node,
+        record_id,
+        "resolver_record_id",
+        emitter,
+        block,
+    )
+    .await
+}
+
+/// A `ResolverRecordLinked` of the given storage model.
+#[allow(clippy::too_many_arguments)]
+async fn link_of_model(
+    fixture: &Fixture,
+    identity: &str,
+    resolver: &str,
+    node: &str,
+    record_id: &str,
+    storage_model: &str,
+    emitter: &str,
+    block: i64,
+) -> Result<()> {
     fixture
         .event(
             identity,
@@ -142,7 +168,7 @@ async fn link(
             "ResolverRecordLinked",
             block,
             json!({"resolver": resolver, "node": node, "resolver_record_id": record_id,
-                   "storage_model": "resolver_record_id"}),
+                   "storage_model": storage_model}),
             emitter,
         )
         .await?;
@@ -542,6 +568,129 @@ async fn classification_rows_are_compared_in_full() -> Result<()> {
     unexpected(&report, &[format!("resolver {orphan}")])?;
     extra_not_active(&report, &[&inactive])?;
     fixture.cleanup().await
+}
+
+// A record-ID link followed, at the same resolver and node, by a link of another storage model.
+// Today's `/links` keeps only record-ID links, so it still serves record 5 there. The F7 reducer
+// keeps one row per resolver and node whatever the model (crates/project/src/families/records.rs,
+// `link`), so the later link replaces it; the shadow reader, which also keeps only record-ID
+// rows, then serves no link at that node, and the name's link selection falls back to the
+// default record. Expected difference until step 2 keys the row by model or keeps the latest
+// record-ID link.
+#[tokio::test]
+async fn a_link_of_another_storage_model_hides_the_record_id_link() -> Result<()> {
+    let mut fixture = Fixture::new("families_shadow_link_model", 12).await?;
+    let first = address(0xd1);
+    fixture.declare_resolvers(RESOLVER, &[&first]).await?;
+    let one = name(&fixture, 1, "one", "declared_registry_path").await?;
+    let two = name(&fixture, 2, "two", "declared_registry_path").await?;
+    point(&fixture, "one-first", &one, &first, 2).await?;
+    point(&fixture, "two-first", &two, &first, 2).await?;
+    link(&fixture, "link-one", &first, &one.node, "5", &first, 2).await?;
+    link(&fixture, "link-two", &first, &two.node, "6", &first, 2).await?;
+    link(&fixture, "link-default", &first, ZERO_NODE, "7", &first, 2).await?;
+    fixture.publish(4).await?;
+    unexpected(&fixture.compare(1).await?, &[])?;
+
+    link_of_model(
+        &fixture,
+        "link-one-other-model",
+        &first,
+        &one.node,
+        "9",
+        "resolver_node",
+        &first,
+        5,
+    )
+    .await?;
+    fixture.publish(6).await?;
+    let report = fixture.compare(1).await?;
+    let hidden = HiddenLink {
+        resolver: &first,
+        node: &one.node,
+        name: &one.logical,
+        served: ("link-one", "5"),
+    };
+    hidden.check(fixture.pool()).await?;
+    let selection = load_family_link_selection(fixture.pool(), CHAIN, &first, &one.node)
+        .await?
+        .context("the default link remains")?;
+    ensure!(
+        selection.exact.is_none()
+            && selection.selected().map(|link| link.record_id.as_str()) == Some("7"),
+        "{selection:?}"
+    );
+    // The check sees a change: with the family row turned back into a record-ID link, the
+    // shadow serves the other model's record 9 at that node and the check fails.
+    let set_model = "UPDATE project_resolver_link SET storage_model = $4
+                     WHERE chain_id = $1 AND resolver_address = $2 AND node = $3";
+    sqlx::query(set_model)
+        .bind(CHAIN)
+        .bind(&first)
+        .bind(&one.node)
+        .bind("resolver_record_id")
+        .execute(fixture.pool())
+        .await?;
+    ensure!(
+        hidden.check(fixture.pool()).await.is_err(),
+        "a record-ID family row passed the check"
+    );
+    sqlx::query(set_model)
+        .bind(CHAIN)
+        .bind(&first)
+        .bind(&one.node)
+        .bind("resolver_node")
+        .execute(fixture.pool())
+        .await?;
+    unexpected(&report, &[format!("links of {first}")])?;
+    fixture.cleanup().await
+}
+
+/// A `/links` row today's reader serves and the shadow does not: at `node` the served collection
+/// serves exactly the row the link event `served` makes, the shadow serves nothing, every other
+/// row agrees and the served total is one higher.
+struct HiddenLink<'a> {
+    resolver: &'a str,
+    node: &'a str,
+    name: &'a str,
+    served: (&'a str, &'a str),
+}
+
+impl HiddenLink<'_> {
+    async fn check(&self, pool: &PgPool) -> Result<()> {
+        let (height, _) = shadow::publication(pool, CHAIN).await?;
+        let served =
+            shadow::served_collection(pool, CHAIN, self.resolver, "links", height, None, 1_000)
+                .await?;
+        let shadowed =
+            load_resolver_links_shadow(pool, CHAIN, self.resolver, "ens", None, 1_000).await?;
+        let expected = LinkRow {
+            resolver: self.resolver,
+            node: self.node,
+            name: self.name,
+            event: self.served,
+        }
+        .row(pool, self.served.0, self.served.1)
+        .await?;
+        let split = |page: &FamilyCollectionPage| -> (Vec<_>, Vec<_>) {
+            page.rows
+                .iter()
+                .cloned()
+                .partition(|(_, node, _)| node == self.node)
+        };
+        let (served_at, served_rest) = split(&served);
+        let (shadow_at, shadow_rest) = split(&shadowed);
+        ensure!(
+            served_at == [expected.clone()],
+            "served {served_at:?}, expected {expected:?}"
+        );
+        ensure!(shadow_at.is_empty(), "shadow {shadow_at:?}");
+        ensure!(
+            served_rest == shadow_rest && served.total_count == shadowed.total_count + 1,
+            "served {served:?}, shadow {shadowed:?}"
+        );
+        Ok(())
+    }
 }
 
 /// The `/links` row at one node, which both readers must serve exactly: the row the link event
