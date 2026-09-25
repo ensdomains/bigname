@@ -2166,7 +2166,9 @@ writes on the resource without a name, because the token had already lost its
 name, still counts as that registration's release. Its current registration
 lifecycle is unregistered and its selected arm is `ens_v2`, bound to the
 released resource. The name's registration section reads the same
-release and serves it as released (ruling of 2026-09-26).
+release and serves it as released (product ruling of 2026-09-26). When a named
+path-cut release comes before it, the served release, `released_at` and
+`expiry` come from this later release.
 This follows the ENSv2 contracts, which never route a label that has been
 registered back to ENSv1: `unregister` burns the token and writes the release
 time as the entry's expiry, which nothing sets back to zero
