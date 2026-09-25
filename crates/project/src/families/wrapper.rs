@@ -25,6 +25,17 @@ fn modifier(event: &BlockEvent) -> bool {
 /// (resource_summary.rs, `wrapper_lifecycles`): the NameWrapped mint, the NameUnwrapped epoch
 /// close, or a holder grant or revoke of the resource. Returns its source and whether it leaves
 /// the resource unwrapped.
+///
+/// The pinned NameWrapper emits NameWrapped only from `_wrap`, right after minting the node's
+/// token, and NameUnwrapped on two burns: `_unwrap` burns the token and hands the registry node
+/// to the owner, and a mint over a still-held token first burns it and emits NameUnwrapped to
+/// the zero address, so a re-wrap closes the old epoch before the new NameWrapped
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L878-L903 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1022-L1031 @ ens_v1@91c966f).
+/// The un-admitted `upgrade` path burns the token without NameUnwrapped; like every burn it
+/// revokes the holder, and that holder revoke, not an epoch close, leaves the resource unwrapped
+/// here, as in the served ranking
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L483-L509 @ ens_v1@91c966f).
 fn lifecycle(event: &BlockEvent) -> Option<(&'static str, bool)> {
     if event.source_family != "ens_v1_wrapper_l1" {
         return None;
