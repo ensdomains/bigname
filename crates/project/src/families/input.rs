@@ -296,13 +296,15 @@ impl BlockEvent {
 /// is; classification.rs, `activated`). The declaration start blocks come from the manifest
 /// history the run captured (`manifests::History::declaration_starts`), the one population
 /// classifies under, not from a read of their own. A rebuild visits only these: any other block
-/// owns no family fact.
+/// owns no family fact. At most `limit` blocks are returned, the lowest first, so a run reads the
+/// next chunk of its budget rather than every remaining block.
 pub(crate) async fn work_blocks(
     pool: &sqlx::PgPool,
     chain_id: &str,
     from: i64,
     to: i64,
     manifests: &super::manifests::History,
+    limit: i64,
 ) -> Result<Vec<i64>> {
     sqlx::query_scalar(
         "/* project:families.input.work_blocks */
@@ -344,12 +346,14 @@ pub(crate) async fn work_blocks(
              SELECT 1 FROM chain_lineage lineage
              WHERE lineage.chain_id = $1 AND lineage.block_number = work.block_number
                AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized'))
-         ORDER BY 1",
+         ORDER BY 1
+         LIMIT $5",
     )
     .bind(chain_id)
     .bind(to)
     .bind(from)
     .bind(manifests.declaration_starts(from, to))
+    .bind(limit)
     .fetch_all(pool)
     .await
     .map_err(|error| ProjectError::database("failed to list family work blocks", error))

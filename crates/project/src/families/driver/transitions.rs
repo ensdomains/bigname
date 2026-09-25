@@ -94,15 +94,20 @@ impl Run<'_> {
         // lands meanwhile cannot give classification a start block the work list omitted.
         let manifests =
             manifests::History::read(self.pool, self.chain_id, self.target.number).await?;
+        // One block past the budget, so a run whose work does not fit still finds its budget
+        // spent; the target is added only when the whole remainder was read.
+        let limit = i64::try_from(self.budget.left.saturating_add(1)).unwrap_or(i64::MAX);
         let mut blocks = input::work_blocks(
             self.pool,
             self.chain_id,
             from,
             self.target.number,
             &manifests,
+            limit,
         )
         .await?;
-        if blocks.last() != Some(&self.target.number) {
+        let whole = i64::try_from(blocks.len()).unwrap_or(i64::MAX) < limit;
+        if whole && blocks.last() != Some(&self.target.number) {
             blocks.push(self.target.number);
         }
         for number in blocks {
