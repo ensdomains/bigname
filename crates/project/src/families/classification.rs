@@ -20,7 +20,7 @@
 //! manifest of its family, which the served build leaves out, keeps a row marked unsupported with
 //! `resolver_manifest_not_active`. The row's position is the latest event that named the
 //! resolver, or `activation:<block>` for an activation; an epoch change reclassifies without
-//! moving it, and `admission_epoch` records the epoch the classification was made under.
+//! moving it, and `admission_manifests` records the epoch the classification was made under.
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{Map, Value, json};
@@ -231,7 +231,7 @@ pub(super) async fn apply(
         for (column, value) in result {
             set(&mut row, column, value.clone());
         }
-        set(&mut row, "admission_epoch", context.epoch);
+        set(&mut row, "admission_manifests", context.epoch);
         set(&mut row, "summary_version", SUMMARY_VERSION.to_string());
         if let Some(event) = last_event.get(&address) {
             event.write_position(&mut row);

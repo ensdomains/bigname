@@ -102,7 +102,7 @@ pub(crate) async fn apply(
         block: &opened.block,
         keys: &keys,
         epoch: &opened.epoch,
-        epoch_changed: opened.prior.admission_epoch.as_deref() != Some(opened.epoch.as_str()),
+        epoch_changed: opened.prior.admission_manifests.as_deref() != Some(opened.epoch.as_str()),
     };
     reduce::apply(&mut opened.transaction, &context, &events, &mut rows).await?;
     let (next, mut stats) = publish(opened, chain_id, &rows, plan, options).await?;
@@ -187,7 +187,7 @@ pub(crate) async fn open(
             )?;
         }
     }
-    let epoch = input::admission_epoch(&mut transaction, chain_id, number).await?;
+    let epoch = input::admission_manifests(&mut transaction, chain_id, number).await?;
     Ok(Opened {
         transaction,
         prior,
@@ -228,7 +228,7 @@ pub(crate) async fn publish(
         timestamp_seconds: Some(block.timestamp_seconds),
         input_content_hash: Some(options.input_content_hash.clone()),
         token: RecordedToken::of(&token),
-        admission_epoch: Some(epoch),
+        admission_manifests: Some(epoch),
         bootstrap: plan.bootstrap,
     };
     marker::advance(&mut transaction, chain_id, &next).await?;

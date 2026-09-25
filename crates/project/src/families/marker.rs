@@ -53,7 +53,7 @@ pub(crate) struct FamilyMarker {
     pub(crate) timestamp_seconds: Option<i64>,
     pub(crate) input_content_hash: Option<String>,
     pub(crate) token: RecordedToken,
-    pub(crate) admission_epoch: Option<String>,
+    pub(crate) admission_manifests: Option<String>,
     /// Whether a rebuild is still populating the families.
     pub(crate) bootstrap: bool,
 }
@@ -74,7 +74,7 @@ impl FamilyMarker {
             "project_redo_mode": token.project_redo_mode,
             "project_redo_from": token.project_redo_from,
             "project_redo_to": token.project_redo_to,
-            "admission_epoch": self.admission_epoch,
+            "admission_manifests": self.admission_manifests,
             "bootstrap": self.bootstrap,
         })
     }
@@ -101,7 +101,7 @@ impl FamilyMarker {
                 project_redo_from: int("project_redo_from"),
                 project_redo_to: int("project_redo_to"),
             },
-            admission_epoch: text(image, "admission_epoch"),
+            admission_manifests: text(image, "admission_manifests"),
             bootstrap: image
                 .get("bootstrap")
                 .and_then(Value::as_bool)
@@ -128,7 +128,7 @@ struct MarkerRow {
     project_redo_mode: Option<String>,
     project_redo_from: Option<i64>,
     project_redo_to: Option<i64>,
-    admission_epoch: Option<String>,
+    admission_manifests: Option<String>,
     state: String,
 }
 
@@ -151,7 +151,7 @@ impl From<MarkerRow> for FamilyMarker {
                 project_redo_from: row.project_redo_from,
                 project_redo_to: row.project_redo_to,
             },
-            admission_epoch: row.admission_epoch,
+            admission_manifests: row.admission_manifests,
             bootstrap: row.state == "bootstrap_pending",
         }
     }
@@ -161,7 +161,7 @@ const MARKER_COLUMNS: &str = "current_block_number, current_block_hash,
         extract(epoch FROM block_timestamp)::bigint AS timestamp_seconds, input_content_hash,
         sequence, interpret_input_content_hash, interpret_redo_attempt,
         interpret_redo_in_progress, project_redo_attempt, project_redo_mode, project_redo_from,
-        project_redo_to, admission_epoch, state";
+        project_redo_to, admission_manifests, state";
 
 /// Read the chain's marker without locking it.
 pub(crate) async fn read(pool: &sqlx::PgPool, chain_id: &str) -> Result<FamilyMarker> {
@@ -256,7 +256,7 @@ pub(crate) async fn advance(
              interpret_input_content_hash = $7, interpret_redo_attempt = $8,
              interpret_redo_in_progress = $9, project_redo_attempt = $10,
              project_redo_mode = $11, project_redo_from = $12, project_redo_to = $13,
-             admission_epoch = $14,
+             admission_manifests = $14,
              state = CASE WHEN $15 THEN 'bootstrap_pending' ELSE 'live' END
          WHERE chain_id = $1",
     )
@@ -273,7 +273,7 @@ pub(crate) async fn advance(
     .bind(token.project_redo_mode.as_deref())
     .bind(token.project_redo_from)
     .bind(token.project_redo_to)
-    .bind(next.admission_epoch.as_deref())
+    .bind(next.admission_manifests.as_deref())
     .bind(next.bootstrap)
     .execute(&mut **transaction)
     .await

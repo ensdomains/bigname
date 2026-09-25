@@ -1118,7 +1118,7 @@ CREATE TABLE IF NOT EXISTS project_family_marker (
     project_redo_mode text,
     project_redo_from bigint,
     project_redo_to bigint,
-    admission_epoch text,
+    admission_manifests text,
     PRIMARY KEY (chain_id),
     CHECK ((current_block_number IS NULL) = (current_block_hash IS NULL)),
     CHECK (state IN ('live', 'bootstrap_pending')),
@@ -1154,7 +1154,7 @@ COMMENT ON COLUMN project_family_marker.project_redo_from IS
     'This value is the Project row''s redo_from_block_number the last block read.';
 COMMENT ON COLUMN project_family_marker.project_redo_to IS
     'This value is the Project row''s redo_to_block_number the last block read.';
-COMMENT ON COLUMN project_family_marker.admission_epoch IS
+COMMENT ON COLUMN project_family_marker.admission_manifests IS
     'This value names the latest SourceManifestUpdated event of every manifest the chain reads, as the last block saw it; a block that sees another epoch classifies every stored resolver again.';
 
 CREATE TABLE IF NOT EXISTS project_family_undo (
@@ -1914,7 +1914,7 @@ CREATE TABLE IF NOT EXISTS project_resolver_classification (
     observed_families jsonb NOT NULL DEFAULT '{}'::jsonb,
     pointer_families jsonb NOT NULL DEFAULT '{}'::jsonb,
     upgrades jsonb NOT NULL DEFAULT '{}'::jsonb,
-    admission_epoch text,
+    admission_manifests text,
     PRIMARY KEY (chain_id, resolver_address),
     CHECK ((transaction_index IS NULL) = (log_index IS NULL)),
     CHECK (support_status IN ('supported', 'unsupported'))
@@ -1955,8 +1955,8 @@ COMMENT ON COLUMN project_resolver_classification.pointer_families IS
     'This value maps each resolver family to the number of F4 and F5 pointer rows pointing at the resolver now, standing for the priority 2 name pointers.';
 COMMENT ON COLUMN project_resolver_classification.upgrades IS
     'This value maps each family to the latest Upgraded of the proxy: its position, implementation and normalized event id.';
-COMMENT ON COLUMN project_resolver_classification.admission_epoch IS
-    'This value is the admission epoch the classification was made under (project_family_marker.admission_epoch).';
+COMMENT ON COLUMN project_resolver_classification.admission_manifests IS
+    'This value is the admission epoch the classification was made under (project_family_marker.admission_manifests).';
 
 CREATE TABLE IF NOT EXISTS project_registry_pointer (
     chain_id text NOT NULL,

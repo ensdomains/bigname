@@ -19,7 +19,7 @@ ALTER TABLE bigname_phase.project_family_marker
     ADD COLUMN IF NOT EXISTS project_redo_mode text,
     ADD COLUMN IF NOT EXISTS project_redo_from bigint,
     ADD COLUMN IF NOT EXISTS project_redo_to bigint,
-    ADD COLUMN IF NOT EXISTS admission_epoch text
+    ADD COLUMN IF NOT EXISTS admission_manifests text
 $ddl$;
 EXECUTE $ddl$
 COMMENT ON COLUMN bigname_phase.project_family_marker.interpret_input_content_hash IS
@@ -50,7 +50,7 @@ COMMENT ON COLUMN bigname_phase.project_family_marker.project_redo_to IS
     'This value is the Project row''s redo_to_block_number the last block read.'
 $ddl$;
 EXECUTE $ddl$
-COMMENT ON COLUMN bigname_phase.project_family_marker.admission_epoch IS
+COMMENT ON COLUMN bigname_phase.project_family_marker.admission_manifests IS
     'This value names the latest SourceManifestUpdated event of every manifest the chain reads, as the last block saw it; a block that sees another epoch classifies every stored resolver again.'
 $ddl$;
 EXECUTE $ddl$

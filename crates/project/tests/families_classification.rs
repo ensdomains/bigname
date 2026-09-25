@@ -214,7 +214,7 @@ async fn a_manifest_update_reclassifies_every_resolver_in_place() -> Result<()> 
         json!("resolver_not_declared")
     );
     let before =
-        fixture.rows("project_resolver_classification").await?[0]["admission_epoch"].clone();
+        fixture.rows("project_resolver_classification").await?[0]["admission_manifests"].clone();
     manifest(
         &fixture,
         Some(id),
@@ -235,7 +235,7 @@ async fn a_manifest_update_reclassifies_every_resolver_in_place() -> Result<()> 
                "event_identity": "ResolverChanged:10:1"}),
         "reclassified under the new epoch, still at the event that named it"
     );
-    assert_ne!(rows[0]["admission_epoch"], before);
+    assert_ne!(rows[0]["admission_manifests"], before);
     fixture.assert_undo_restores(12).await?;
     fixture.assert_rebuild_equal(12).await?;
     fixture.cleanup().await

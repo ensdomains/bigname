@@ -475,13 +475,13 @@ pub(crate) async fn token_in(
 /// the updates at or below block `number` (or with no block) on the readable lineage, as that
 /// statement filters them. A change means the resolver classifications were made under another
 /// declaration epoch.
-pub(crate) async fn admission_epoch(
+pub(crate) async fn admission_manifests(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
     number: i64,
 ) -> Result<String> {
     sqlx::query_scalar(
-        "/* project:families.input.admission_epoch */ SELECT COALESCE(string_agg(
+        "/* project:families.input.admission_manifests */ SELECT COALESCE(string_agg(
                 latest.manifest_id::text || ':' || latest.manifest_event_id::text, ','
                 ORDER BY latest.manifest_id), '')
          FROM (

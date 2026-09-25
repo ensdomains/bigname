@@ -200,7 +200,7 @@ async fn each_block_records_the_input_token_it_read_and_waits_out_an_interpret_r
         (Some("interpret-hash-b".to_owned()), Some(4))
     );
     let token: (Option<bool>, Option<i64>, Option<String>) = sqlx::query_as(
-        "SELECT interpret_redo_in_progress, project_redo_attempt, admission_epoch
+        "SELECT interpret_redo_in_progress, project_redo_attempt, admission_manifests
          FROM project_family_marker WHERE chain_id = $1",
     )
     .bind(CHAIN)

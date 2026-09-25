@@ -197,7 +197,7 @@ ALTER TABLE bigname_phase.project_resolver_classification
     ADD COLUMN IF NOT EXISTS observed_families jsonb NOT NULL DEFAULT '{}'::jsonb,
     ADD COLUMN IF NOT EXISTS pointer_families jsonb NOT NULL DEFAULT '{}'::jsonb,
     ADD COLUMN IF NOT EXISTS upgrades jsonb NOT NULL DEFAULT '{}'::jsonb,
-    ADD COLUMN IF NOT EXISTS admission_epoch text
+    ADD COLUMN IF NOT EXISTS admission_manifests text
 $ddl$;
 EXECUTE $ddl$
 COMMENT ON TABLE bigname_phase.project_resolver_classification IS
@@ -216,8 +216,8 @@ COMMENT ON COLUMN bigname_phase.project_resolver_classification.upgrades IS
     'This value maps each family to the latest Upgraded of the proxy: its position, implementation and normalized event id.'
 $ddl$;
 EXECUTE $ddl$
-COMMENT ON COLUMN bigname_phase.project_resolver_classification.admission_epoch IS
-    'This value is the admission epoch the classification was made under (project_family_marker.admission_epoch).'
+COMMENT ON COLUMN bigname_phase.project_resolver_classification.admission_manifests IS
+    'This value is the admission epoch the classification was made under (project_family_marker.admission_manifests).'
 $ddl$;
 EXECUTE $ddl$
 COMMENT ON COLUMN bigname_phase.project_resolver_classification.block_number IS
