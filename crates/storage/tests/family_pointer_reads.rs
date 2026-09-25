@@ -1,8 +1,9 @@
 //! The pointer reads of the family shadow readers, over tables installed by their own
 //! migrations:
-//! - `load_family_link_selection`: only links of the record-ID storage model count; the link at
-//!   the name's own node wins unless it is absent or a clear (record id `0`); then the link at the
-//!   empty-name node, the resolver's default record, serves, unless it is a clear too.
+//! - `load_family_link_selection`: the latest link per (resolver, node) of any storage model is
+//!   read, and only a record-ID one can serve; the link at the name's own node wins unless it is
+//!   absent, a clear (record id `0`) or of another model; then the link at the empty-name node,
+//!   the resolver's default record, serves, under the same rule.
 //! - `load_family_alias_source_pointer`: the resource's current pointer, rejected when null, zero
 //!   or empty, never an older pointer.
 //! - `load_family_wildcard_source`: the latest non-zero pointer, which a null or empty resolver
@@ -151,19 +152,52 @@ async fn exact_link_then_default_with_record_zero_as_a_clear() -> Result<()> {
     .await
 }
 
-// A link row of another storage model, or of none, is not a link of a record-ID resolver: it is
-// neither selected nor a clear, at the name's node or at the default node.
+// The newest link per (resolver, node) wins whatever its storage model (Tate, 2026-09-26; the
+// F7 design, "latest link per (resolver, node)"). A latest link of another model, or of none, is
+// read and reported, and it is no record-ID link: it serves no record, it hides any older
+// record-ID link at that node, and at the name's node it lets the default serve.
 #[tokio::test]
-async fn links_of_another_or_no_storage_model_are_not_selected() -> Result<()> {
+async fn a_latest_link_of_another_or_no_storage_model_is_no_record_id_link() -> Result<()> {
     with_database("family_link_models", |pool| async move {
+        let model = |link: Option<&bigname_storage::families::topology::FamilyLink>| {
+            link.map(|link| (link.record_id.clone(), link.storage_model.clone()))
+        };
         link_of_model(&pool, NAME, "5", 2, Some("node")).await?;
         link_of_model(&pool, DEFAULT_NODE, "7", 2, None).await?;
-        assert_eq!(selection(&pool, NAME).await?, None);
-        // A record-ID default still serves a name whose own row is of another model.
+        let neither = selection(&pool, NAME).await?;
+        assert_eq!(served(&neither), None);
+        assert_eq!(
+            neither
+                .as_ref()
+                .map(|s| (model(s.exact.as_ref()), model(s.default.as_ref()))),
+            Some((
+                Some(("5".to_owned(), Some("node".to_owned()))),
+                Some(("7".to_owned(), None))
+            ))
+        );
+        // A newer record-ID default replaces the null-model one and serves the name, whose own
+        // latest link is still of another model.
         link(&pool, DEFAULT_NODE, "8", 3).await?;
         let fallback = selection(&pool, NAME).await?;
         assert_eq!(served(&fallback), Some("8"));
-        assert!(fallback.as_ref().is_some_and(|s| s.exact.is_none()));
+        assert_eq!(
+            fallback.as_ref().and_then(|s| model(s.exact.as_ref())),
+            Some(("5".to_owned(), Some("node".to_owned())))
+        );
+        // A record-ID link at the name serves until a newer link of another model replaces it;
+        // the older record-ID link is not served again, the default is.
+        link(&pool, NAME, "6", 4).await?;
+        assert_eq!(served(&selection(&pool, NAME).await?), Some("6"));
+        link_of_model(&pool, NAME, "9", 5, Some("node")).await?;
+        let replaced = selection(&pool, NAME).await?;
+        assert_eq!(served(&replaced), Some("8"));
+        assert_eq!(
+            replaced.as_ref().and_then(|s| model(s.exact.as_ref())),
+            Some(("9".to_owned(), Some("node".to_owned())))
+        );
+        // A newer default of another model leaves nothing to serve.
+        link_of_model(&pool, DEFAULT_NODE, "8", 6, None).await?;
+        assert_eq!(served(&selection(&pool, NAME).await?), None);
         Ok(())
     })
     .await

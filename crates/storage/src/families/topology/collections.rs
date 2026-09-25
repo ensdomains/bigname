@@ -64,8 +64,11 @@ pub async fn load_resolver_aliases_shadow(
     page(pool, &items, chain_id, resolver_address, None, after, limit).await
 }
 
-/// `/links`: the latest link per node at this resolver with a non-zero record, names attached
-/// from the readable surfaces in `namespace` at the family marker's block.
+/// `/links`: the latest link per node at this resolver, of any storage model, when it is a
+/// record-ID link with a non-zero record, names attached from the readable surfaces in
+/// `namespace` at the family marker's block. The newest link per (resolver, node) wins whatever
+/// its model (Tate, 2026-09-26), so a later link of another model hides an older record-ID link
+/// at that node, which today's `/links` still serves.
 pub async fn load_resolver_links_shadow(
     pool: &PgPool,
     chain_id: &str,

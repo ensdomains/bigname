@@ -678,12 +678,13 @@ async fn roles_leave_out_a_grant_whose_resource_is_not_readable() -> Result<()> 
 }
 
 // A record-ID link followed, at the same resolver and node, by a link of another storage model.
-// Today's `/links` keeps only record-ID links, so it still serves record 5 there. The F7 reducer
-// keeps one row per resolver and node whatever the model (crates/project/src/families/records.rs,
-// `link`), so the later link replaces it; the shadow reader, which also keeps only record-ID
-// rows, then serves no link at that node, and the name's link selection falls back to the
-// default record. Expected difference until step 2 keys the row by model or keeps the latest
-// record-ID link.
+// Today's `/links` keeps only record-ID links, so it still serves record 5 there. The newest link
+// per (resolver, node) wins whatever its storage model (Tate, 2026-09-26; the F7 design, "latest
+// link per (resolver, node)"), and the F7 reducer keeps that one row
+// (crates/project/src/families/records.rs, `link`). The later link is no record-ID link, so the
+// shadow serves no link at that node, and the name's link selection reads that link and falls
+// back to the default record, never to record 5. Expected difference by that ruling, until the
+// served read switches to these readers.
 #[tokio::test]
 async fn a_link_of_another_storage_model_hides_the_record_id_link() -> Result<()> {
     let mut fixture = Fixture::new("families_shadow_link_model", 12).await?;
@@ -723,7 +724,11 @@ async fn a_link_of_another_storage_model_hides_the_record_id_link() -> Result<()
         .await?
         .context("the default link remains")?;
     ensure!(
-        selection.exact.is_none()
+        selection
+            .exact
+            .as_ref()
+            .is_some_and(|link| link.record_id == "9"
+                && link.storage_model.as_deref() == Some("resolver_node"))
             && selection.selected().map(|link| link.record_id.as_str()) == Some("7"),
         "{selection:?}"
     );

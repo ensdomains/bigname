@@ -120,8 +120,8 @@ pub async fn load_family_wildcard_source(
     ))
 }
 
-/// One `project_resolver_link` row: the latest `Linked` for a node at a resolver, record id `0`
-/// a clear.
+/// One `project_resolver_link` row: the latest `Linked` for a node at a resolver, of any storage
+/// model, record id `0` a clear.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FamilyLink {
     pub node: String,
@@ -134,31 +134,42 @@ pub struct FamilyLink {
     pub normalized_event_id: Option<i64>,
 }
 
+impl FamilyLink {
+    /// Whether this link serves a record: a record-ID link that is not a clear. A latest link of
+    /// another storage model, or of none, is no record-ID link (Tate, 2026-09-26).
+    pub fn serves(&self) -> bool {
+        self.storage_model.as_deref() == Some("resolver_record_id") && self.record_id != "0"
+    }
+}
+
 /// The exact-then-default link selection for one name at a record-ID resolver
 /// (crates/project/src/builders/linked_records.rs, `project_selected_records`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct LinkSelection {
-    /// The link at the name's own node, a clear included.
+    /// The latest link at the name's own node, a clear or another model's link included.
     pub exact: Option<FamilyLink>,
-    /// The link at the empty-name node, read only when the exact link is absent or a clear.
+    /// The latest link at the empty-name node, read only when the exact link serves no record.
     pub default: Option<FamilyLink>,
 }
 
 impl LinkSelection {
-    /// The link whose record serves the name: the exact link unless it is absent or a clear,
-    /// else the default link unless it is a clear.
+    /// The link whose record serves the name: the exact link when it serves, else the default
+    /// link when it serves.
     pub fn selected(&self) -> Option<&FamilyLink> {
         self.exact
             .as_ref()
-            .filter(|link| link.record_id != "0")
-            .or_else(|| self.default.as_ref().filter(|link| link.record_id != "0"))
+            .filter(|link| link.serves())
+            .or_else(|| self.default.as_ref().filter(|link| link.serves()))
     }
 }
 
 /// Two probes of `project_resolver_link`: the name's node, then the empty-name node when the
-/// exact link is absent or a clear. Only rows of the record-ID storage model are links of a
-/// record-ID resolver, as the collection reader and today's link staging require; a row of
-/// another model or of none is neither a link nor a clear. `None` when neither probe finds one.
+/// exact link serves no record. The newest link per (resolver, node) wins whatever its storage
+/// model (Tate, 2026-09-26; the F7 design, "latest link per (resolver, node)"), so each probe
+/// reads the one row the F7 reducer keeps there. A latest link of another model, or of none, is
+/// no record-ID link: it serves nothing and no older record-ID link at that node serves in its
+/// place. Today's link staging keeps only record-ID links, so the served read can still serve
+/// such an older link. `None` when neither probe finds a row.
 pub async fn load_family_link_selection(
     pool: &PgPool,
     chain_id: &str,
@@ -173,7 +184,7 @@ pub async fn load_family_link_selection(
         &namehash.to_ascii_lowercase(),
     )
     .await?;
-    let default = if exact.as_ref().is_some_and(|link| link.record_id != "0") {
+    let default = if exact.as_ref().is_some_and(FamilyLink::serves) {
         None
     } else {
         load_link(pool, chain_id, &resolver_address, ROOT_NODE).await?
@@ -201,8 +212,7 @@ async fn load_link(
         "SELECT node, record_id, storage_model, block_number, transaction_index, log_index,
                 event_identity, normalized_event_id
          FROM bigname_phase.project_resolver_link
-         WHERE chain_id = $1 AND resolver_address = $2 AND node = $3
-           AND storage_model = 'resolver_record_id'",
+         WHERE chain_id = $1 AND resolver_address = $2 AND node = $3",
     )
     .bind(chain_id)
     .bind(resolver_address)
