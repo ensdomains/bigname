@@ -356,7 +356,6 @@ mod tests {
             registry_generation(Some(&node), Some("ens_v1")),
             (Some("old"), None)
         );
-        node.namespace = "ens".into();
         node.first_current_record_block = Some(12);
         assert_eq!(
             registry_generation(Some(&node), Some("ens_v1")),
