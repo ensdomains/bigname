@@ -1773,7 +1773,9 @@ statistics of the family tables after 1, 2, 4, 8, ... blocks rebuilt since its
 reset, counted across runs from the generation the reset recorded.
 
 The families differ from the served build in these known places, which the
-steps that read them must key on. Each is also stated on its table or column:
+steps that read them must key on. Each is also stated on its table or column,
+and each label names a family as the [owned key family](glossary.md#owned-key-family)
+entry maps them to tables and reducers:
 
 - F1: an `AuthorityEpochChanged` `registry_only` at an earlier block than a
   binding does not mark the binding registry-only; the served handoff takes an

@@ -2449,6 +2449,29 @@ what the latest events of its key left, clears included. The families are
 unread shadows until the per-block publication reads them
 ([projections](projections.md#owned-key-families)).
 
+The families carry labels F1 to F14, used in the difference lists, the table
+comments and the reducers' module headers. Each label names these tables and
+the reducer under `crates/project/src/families/` that writes them:
+
+| Label | Tables | Reducer |
+| --- | --- | --- |
+| F1, name identity | `project_name_state`, `project_binding_candidate` | `identity.rs` |
+| F2a, registration and lease state | `project_lifecycle_key_state`, `project_lifecycle_triple_summary`, `project_lifecycle_association`, `project_lifecycle_event`, `project_child_registration_state` | `lifecycle.rs` |
+| F2b, wrapper state | `project_wrapper_state` | `wrapper.rs` |
+| F2c, registry ownership | `project_registry_node_state`, `project_registry_owner_event`, `project_registry_binding_observation` | `registry.rs` |
+| F3, resolver classification | `project_resolver_classification` | `classification.rs` |
+| F4, registry-node resolver pointer | `project_registry_pointer` | `resolver.rs` |
+| F5, resource resolver pointer | `project_resource_pointer` | `resolver.rs` |
+| F6, node records | `project_node_record_partition`, `project_node_record_value` | `records.rs` |
+| F7, record-id records and resolver links | `project_record_id_value`, `project_resolver_link` | `records.rs` |
+| F8, grants | `project_grant`, `project_resource_admin_aggregate` | `permissions.rs` |
+| F9, account approvals | `project_account_approval` | `permissions.rs` |
+| F10, aliases | `project_name_alias`, `project_resolver_alias` | `topology.rs` |
+| F11, child edges | `project_child_edge_candidate`, `project_parent_subregistry` | `topology.rs` |
+| F12, reverse tuples and claims | `project_reverse_tuple`, `project_reverse_node_claim`, `project_claim_normalization` | `reverse.rs` |
+| F13, address-to-name association | `project_address_name_fold`, `project_address_controller_candidate`, `project_address_name_index` | `addresses.rs`, with the index derived in `derived.rs` |
+| F14, address-to-record association | `project_address_record_node_index`, `project_address_record_id_index` | `derived.rs` |
+
 ## Family marker
 
 `project_family_marker`: the block and hash a chain's [owned key
