@@ -2,7 +2,7 @@
 //! event identity compared as a byte string. An event with no transaction or log position (a
 //! block-boundary event the interpreter synthesises) sorts before every transaction of its
 //! block. Generated normalized event ids never take part.
-use std::cmp::Ordering;
+use std::{cmp::Ordering, collections::BTreeMap};
 
 use serde_json::Value;
 
@@ -70,6 +70,56 @@ impl Position {
     }
 }
 
+/// The order a read takes its "latest" in. The readers read in the canonical order. The
+/// shadow harness reads the same facts again in the orders today's builders use, which break a
+/// tie inside a block by the generated normalized event id, to show that a same-block difference
+/// is only an ordering difference (brief section 4.3). The positions themselves never change,
+/// so the admission's three-part bounds read the same in every order.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum EventOrder {
+    #[default]
+    Canonical,
+    /// The generated normalized event id of each event identity.
+    Generated(BTreeMap<String, i64>),
+}
+
+impl EventOrder {
+    fn generated(&self, position: &Position) -> Option<i64> {
+        match self {
+            Self::Canonical => None,
+            Self::Generated(ids) => ids.get(&position.event_identity).copied(),
+        }
+    }
+
+    /// The order ENSv2 membership reads in. Today's builders take block, then generated id,
+    /// with no transaction or log (build.sql:322-340, permissions.rs:111-133,
+    /// v2_lifecycle_events.sql:19); an event without a generated id falls back to the
+    /// canonical order.
+    pub fn membership(&self, left: &Position, right: &Position) -> Ordering {
+        match (self.generated(left), self.generated(right)) {
+            (Some(left_id), Some(right_id)) => left
+                .block_number
+                .cmp(&right.block_number)
+                .then(left_id.cmp(&right_id)),
+            _ => left.cmp(right),
+        }
+    }
+
+    /// The order the summary laterals read in. Today's builders take block, transaction and
+    /// log, a missing one first, then the generated id (build.sql:307-308, :388-390).
+    pub fn lateral(&self, left: &Position, right: &Position) -> Ordering {
+        match (self.generated(left), self.generated(right)) {
+            (Some(left_id), Some(right_id)) => left
+                .block_number
+                .cmp(&right.block_number)
+                .then(left.transaction_index.cmp(&right.transaction_index))
+                .then(left.log_index.cmp(&right.log_index))
+                .then(left_id.cmp(&right_id)),
+            _ => left.cmp(right),
+        }
+    }
+}
+
 /// A three-part bound from a JSON object with `block_number`, `transaction_index` and
 /// `log_index`, missing parts read as -1.
 pub fn bound_of(value: &Value) -> Option<(i64, i64, i64)> {
@@ -118,6 +168,26 @@ mod tests {
                 < at(5, None, "x:RegistrationReleased:expiry:r:1:9")
         );
         assert!(at(5, None, "x:RegistrationReleased:a") < at(5, None, "x:ResolverChanged:a"));
+    }
+
+    #[test]
+    fn the_generated_orders_keep_positions_and_break_ties_by_id() {
+        let grant = at(5, Some((0, 3)), "grant");
+        let release = at(5, None, "release");
+        let ids = EventOrder::Generated(
+            [("grant".to_owned(), 1), ("release".to_owned(), 2)]
+                .into_iter()
+                .collect(),
+        );
+        // Membership ignores transaction and log; the laterals keep them.
+        assert_eq!(ids.membership(&grant, &release), Ordering::Less);
+        assert_eq!(ids.lateral(&grant, &release), Ordering::Greater);
+        assert_eq!(
+            EventOrder::Canonical.membership(&grant, &release),
+            Ordering::Greater
+        );
+        let unknown = at(5, None, "unknown");
+        assert_eq!(ids.membership(&grant, &unknown), grant.cmp(&unknown));
     }
 
     #[test]

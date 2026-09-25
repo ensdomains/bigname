@@ -8,17 +8,22 @@
 //! release, never another name's; when the key holds another name's events the read folds the
 //! key's retained events without them instead of using the stored maxima.
 use super::{NameFacts, view};
-use crate::families::control::rows::{LifecycleEvent, Mark, Maxima};
+use crate::families::control::{
+    position::EventOrder,
+    rows::{LifecycleEvent, Mark, Maxima},
+};
 
-/// The membership maxima of one lifecycle key folded from retained events in their positions,
-/// the fold of step 2's reducer (crates/project/src/families/lifecycle.rs:388-497).
-/// `last_revival` is kept for a resource key only.
+/// The membership maxima of one lifecycle key folded from retained events in `order`'s
+/// membership order, the fold of step 2's reducer (crates/project/src/families/lifecycle.rs
+/// :388-497). Every mark keeps its event's own position. `last_revival` is kept for a resource
+/// key only.
 pub fn maxima_of<'a>(
     events: impl IntoIterator<Item = &'a LifecycleEvent>,
     resource: bool,
+    order: &EventOrder,
 ) -> Maxima {
     let mut own: Vec<&LifecycleEvent> = events.into_iter().collect();
-    own.sort_by(|left, right| left.position.cmp(&right.position));
+    own.sort_by(|left, right| order.membership(&left.position, &right.position));
     let mark = |event: &LifecycleEvent| {
         Some(Mark {
             position: event.position.clone(),
@@ -92,6 +97,7 @@ pub(super) fn merged_for(facts: &NameFacts, key: &str, name: &str) -> view::Merg
                         && !foreign_named(event, key, name)
                 }),
                 true,
+                &EventOrder::Canonical,
             );
             return view::merged_view(Some(&own), associated);
         }

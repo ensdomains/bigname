@@ -14,8 +14,10 @@
 //!   lifecycle events hold a block whose canonical order disagrees with the generated-id order,
 //!   and reading the same families again with that block put in generated-id order (the
 //!   association winner of an affected triple moved with it, `v2_lifecycle_events.sql:19`)
-//!   gives exactly the served value for the field. For a resource's permission rows the check is
-//!   the path-expiry drop rule of permissions.rs:111-133, :391-398 read in both orders.
+//!   gives exactly the served value for the field. For a resource's permission rows and
+//!   restriction block the path-expiry drop rule of permissions.rs:111-133, :391-398 must answer
+//!   differently in the two orders, the whole read in today's order must equal the served value
+//!   and the whole canonical read the shadow value.
 //!
 //! Named causes, each a place where the families and today's builders disagree, reported
 //! rather than patched (step 3 changes no reducer and no served table):
@@ -75,15 +77,16 @@ use bigname_storage::{
     EffectivePermissionScope,
     families::control::{
         compare::{Difference, differences, field, same},
+        lifecycle::view::registration_lapsed,
         lifecycle::{
             AuthoritySelection, CONTROL_FIELDS, Clock, NameFacts, NameInput, REGISTRATION_FIELDS,
             ShadowName, evaluate, load_name_facts, load_shadow_names, membership::maxima_of,
         },
         permissions::{
-            ResourceInput, effective_operator_rows, grant_json, load_shadow_approvals,
-            load_shadow_permissions,
+            ResourceInput, ShadowPermissions, effective_operator_rows, grant_json,
+            load_shadow_approvals, load_shadow_permissions, load_shadow_permissions_in,
         },
-        position::Position,
+        position::{EventOrder, Position},
         registry::{
             NameAttribution, load_observations, load_registry_nodes, ownerless_registry,
             registry_bindings, registry_generation,
@@ -409,6 +412,10 @@ pub async fn compare(pool: &PgPool, chain: &str, target: i64) -> Result<Report> 
         })
         .collect();
     let shadows = load_shadow_permissions(pool, chain, &clock, &inputs).await?;
+    let inputs_by_resource: BTreeMap<&str, &ResourceInput> = inputs
+        .iter()
+        .map(|input| (input.resource_id.as_str(), input))
+        .collect();
     let observations = load_observations(pool, chain).await?;
     let bindings = registry_bindings(&observations, &attributions);
     let approvals = load_shadow_approvals(pool, chain).await?;
@@ -508,7 +515,14 @@ pub async fn compare(pool: &PgPool, chain: &str, target: i64) -> Result<Report> 
                 });
             }
         }
-        let excuses = resource_excuses(pool, chain, resource, &diffs).await?;
+        let excuses = resource_excuses(
+            pool,
+            chain,
+            &clock,
+            inputs_by_resource[resource.as_str()],
+            &diffs,
+        )
+        .await?;
         report.item(resource, diffs.into_iter().zip(excuses).collect());
         report.resources += 1;
     }
@@ -881,6 +895,7 @@ fn legacy_facts(facts: &NameFacts, ids: &BTreeMap<String, i64>) -> Option<NameFa
                 .iter()
                 .filter(|event| event.state_kind == "resource" && event.state_key == key),
             true,
+            &EventOrder::Canonical,
         );
         out.key_states.insert(key, maxima);
     }
@@ -892,6 +907,7 @@ fn legacy_facts(facts: &NameFacts, ids: &BTreeMap<String, i64>) -> Option<NameFa
                 .iter()
                 .filter(|event| event.state_kind == "triple" && event.state_key == state_key),
             false,
+            &EventOrder::Canonical,
         );
         let Some(winner) = triple.target_position.clone() else {
             continue;
@@ -921,15 +937,19 @@ fn legacy_facts(facts: &NameFacts, ids: &BTreeMap<String, i64>) -> Option<NameFa
     Some(out)
 }
 
-/// The cause shown for each differing field of one resource, in `diffs` order: only the
-/// permissions builder's path-expiry drop (permissions.rs:111-133, :391-398), where the old
-/// (block, generated id) order and the canonical order disagree on whether the latest ENSv2
-/// registration event of the resource is its path-expiry release, and the served rows follow
-/// the old answer.
-async fn resource_excuses(
+/// The cause shown for each differing field of one resource, in `diffs` order. The permissions
+/// builder's path-expiry drop (permissions.rs:111-133, :391-398) takes the resource's latest
+/// ENSv2 registration event in today's (block, generated id) order. A `permissions_current` or
+/// `resource_restrictions` field passes as a same-block delta only when the drop rule answers
+/// differently in that order and in the canonical order, the whole permission read of the
+/// resource taken again in today's order equals the served value, and the whole read in the
+/// canonical order equals the shadow value. Both values are compared whole, so a wrong subject,
+/// power, collision row or restriction fails.
+pub async fn resource_excuses(
     pool: &PgPool,
     chain: &str,
-    resource: &str,
+    clock: &Clock,
+    input: &ResourceInput,
     diffs: &[Difference],
 ) -> Result<Vec<Excuse>> {
     let mut out = vec![Excuse::None; diffs.len()];
@@ -946,7 +966,7 @@ async fn resource_excuses(
          WHERE event.chain_id = $1 AND event.state_kind = 'resource' AND event.state_key = $2",
     )
     .bind(chain)
-    .bind(resource)
+    .bind(&input.resource_id)
     .fetch_all(pool)
     .await?;
     let events: Vec<LifecycleEvent> = rows.iter().filter_map(LifecycleEvent::from_row).collect();
@@ -961,45 +981,37 @@ async fn resource_excuses(
     {
         return Ok(out);
     }
-    let canonical = lapsed_in(&events, |event| event.position.clone());
-    let legacy = lapsed_in(&events, |event| {
-        (
-            event.position.block_number,
-            ids[&event.position.event_identity],
-        )
-    });
-    if canonical == legacy {
+    let today = EventOrder::Generated(ids);
+    let lapsed = |order: &EventOrder| registration_lapsed(&maxima_of(&events, true, order), order);
+    if lapsed(&today) == lapsed(&EventOrder::Canonical) {
         return Ok(out);
     }
+    let read = |order: EventOrder| async move {
+        load_shadow_permissions_in(pool, chain, clock, std::slice::from_ref(input), &order)
+            .await
+            .map(|mut reads| reads.remove(&input.resource_id).unwrap_or_default())
+    };
+    let legacy = read(today).await?;
+    let canonical = read(EventOrder::Canonical).await?;
+    let value = |read: &ShadowPermissions, field: &str| match field {
+        "permissions_current" => Some(Value::Array(read.grants.iter().map(grant_json).collect())),
+        "resource_restrictions" => Some(read.restrictions.clone().unwrap_or(Value::Null)),
+        _ => None,
+    };
     for (index, diff) in diffs.iter().enumerate() {
-        let served_empty =
-            diff.served.is_null() || diff.served.as_array().is_some_and(|rows| rows.is_empty());
-        if matches!(
-            diff.field.as_str(),
-            "permissions_current" | "resource_restrictions"
-        ) && served_empty == legacy
+        let (Some(legacy), Some(canonical)) =
+            (value(&legacy, &diff.field), value(&canonical, &diff.field))
+        else {
+            continue;
+        };
+        if same(&legacy, &diff.served)
+            && same(&canonical, &diff.shadow)
+            && !same(&legacy, &canonical)
         {
             out[index] = Excuse::SameBlockOrder;
         }
     }
     Ok(out)
-}
-
-/// Whether a resource's latest ENSv2 registration event, under `order`, is a path-expiry
-/// release that no later grant, reservation or revival restores.
-fn lapsed_in<K: Ord>(events: &[LifecycleEvent], order: impl Fn(&LifecycleEvent) -> K) -> bool {
-    let mut own: Vec<&LifecycleEvent> = events.iter().collect();
-    own.sort_by_key(|event| order(event));
-    let mut lapsed = false;
-    for event in own {
-        match event.event_kind.as_str() {
-            "RegistrationReleased" if event.is_path_expiry() => lapsed = true,
-            "RegistrationGranted" | "RegistrationReserved" => lapsed = false,
-            "RegistrationRenewed" if event.revived_from_expiry == Some(true) => lapsed = false,
-            _ => {}
-        }
-    }
-    lapsed
 }
 
 /// The fixture corpus's counted fields, asserted exactly against counts read from its event log

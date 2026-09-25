@@ -17,7 +17,8 @@ pub use grants::{
 pub use summary::{admin_powers, locked_roles, resource_restrictions, wrapper_unwrapped};
 
 use super::{
-    lifecycle::Clock,
+    lifecycle::{Clock, membership::maxima_of, view::registration_lapsed},
+    position::EventOrder,
     registry::RegistryBinding,
     rows::{LifecycleEvent, Maxima, flag, lower, text},
     wrapper::load_wrapper_rows,
@@ -65,6 +66,19 @@ pub async fn load_shadow_permissions(
     clock: &Clock,
     resources: &[ResourceInput],
 ) -> Result<BTreeMap<String, ShadowPermissions>> {
+    load_shadow_permissions_in(pool, chain_id, clock, resources, &EventOrder::Canonical).await
+}
+
+/// The permission shadow read in `order`. In the canonical order the path-expiry drop reads the
+/// stored F2a key states; in any other order it reads each key state folded again from the
+/// resource's retained events in that order (the harness's same-block counterfactual).
+pub async fn load_shadow_permissions_in(
+    pool: &PgPool,
+    chain_id: &str,
+    clock: &Clock,
+    resources: &[ResourceInput],
+    order: &EventOrder,
+) -> Result<BTreeMap<String, ShadowPermissions>> {
     let mut ids: BTreeSet<String> = resources
         .iter()
         .map(|input| input.resource_id.clone())
@@ -111,6 +125,11 @@ pub async fn load_shadow_permissions(
     .iter()
     .filter_map(|row| Some((text(row, "resource_id")?, Maxima::from_row(row))))
     .collect();
+    let key_states = if *order == EventOrder::Canonical {
+        key_states
+    } else {
+        refolded(pool, chain_id, &ids, order).await?
+    };
     let mints: Vec<LifecycleEvent> = rows_for(
         pool,
         "/* storage:families.control.permissions.wrapper_mints */ SELECT to_jsonb(event)
@@ -175,6 +194,7 @@ pub async fn load_shadow_permissions(
             wrappers.get(resource),
             key_states.get(resource),
             clock.timestamp_seconds,
+            order,
         )
     };
     let admins = |resource: &str| -> Vec<String> {
@@ -182,7 +202,7 @@ pub async fn load_shadow_permissions(
         // serves none (resource_summary.rs:272-297 reads the staged permission rows).
         if key_states
             .get(resource)
-            .is_some_and(crate::families::control::lifecycle::view::registration_lapsed)
+            .is_some_and(|state| registration_lapsed(state, order))
         {
             return Vec::new();
         }
@@ -221,6 +241,35 @@ pub async fn load_shadow_permissions(
         );
     }
     Ok(out)
+}
+
+/// The key states of `resources` folded from their retained events in `order`.
+async fn refolded(
+    pool: &PgPool,
+    chain_id: &str,
+    resources: &[String],
+    order: &EventOrder,
+) -> Result<BTreeMap<String, Maxima>> {
+    let events: Vec<LifecycleEvent> = rows_for(
+        pool,
+        "/* storage:families.control.permissions.key_events */ SELECT to_jsonb(event)
+         FROM bigname_phase.project_lifecycle_event event
+         WHERE event.chain_id = $1 AND event.state_kind = 'resource' AND event.state_key = ANY($2)",
+        chain_id,
+        resources,
+    )
+    .await?
+    .iter()
+    .filter_map(LifecycleEvent::from_row)
+    .collect();
+    Ok(resources
+        .iter()
+        .filter(|resource| events.iter().any(|event| &event.state_key == *resource))
+        .map(|resource| {
+            let own = events.iter().filter(|event| &event.state_key == resource);
+            (resource.clone(), maxima_of(own, true, order))
+        })
+        .collect())
 }
 
 /// One served account approval (`account_permission_state_current`), in the columns the

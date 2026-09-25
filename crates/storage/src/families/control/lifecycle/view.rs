@@ -4,7 +4,7 @@
 //! candidate of a key and the retirement of a resource are computed from positions alone, so a
 //! reassociation changes them without any write to the events it moves.
 use crate::families::control::{
-    position::Position,
+    position::{EventOrder, Position},
     rows::{Mark, Maxima},
 };
 
@@ -161,15 +161,16 @@ pub fn retirement(key_state: &Maxima) -> Option<Position> {
 
 /// The permissions builder's drop rule (permissions.rs:111-133, :391-398) read from the key
 /// state: a resource whose latest ENSv2 registration event (grant, reservation, qualifying
-/// revival or path-expiry release) is a path-expiry release serves no grants.
-pub fn registration_lapsed(key_state: &Maxima) -> bool {
+/// revival or path-expiry release) is a path-expiry release serves no grants. `order` is the
+/// membership order the key state was folded in.
+pub fn registration_lapsed(key_state: &Maxima, order: &EventOrder) -> bool {
     let Some(path) = &key_state.last_path_expiry else {
         return false;
     };
     ![&key_state.last_active, &key_state.last_revival]
         .into_iter()
         .flatten()
-        .any(|mark| mark.position > path.position)
+        .any(|mark| order.membership(&mark.position, &path.position).is_gt())
 }
 
 #[cfg(test)]
@@ -226,14 +227,14 @@ mod tests {
             ..Maxima::default()
         };
         assert_eq!(retirement(&revived), None);
-        assert!(!registration_lapsed(&revived));
+        assert!(!registration_lapsed(&revived, &EventOrder::Canonical));
         let renewed = Maxima {
             last_path_expiry: mark(10, None),
             last_renewal: mark(30, None),
             ..Maxima::default()
         };
         assert_eq!(retirement(&renewed).map(|at| at.block_number), Some(10));
-        assert!(registration_lapsed(&renewed));
+        assert!(registration_lapsed(&renewed, &EventOrder::Canonical));
     }
 
     #[test]

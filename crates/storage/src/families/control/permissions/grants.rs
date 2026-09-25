@@ -6,7 +6,7 @@ use serde_json::{Map, Value, json};
 
 use crate::families::control::{
     lifecycle::view::registration_lapsed,
-    position::Position,
+    position::{EventOrder, Position},
     rows::{Maxima, WrapperRow, json as column, text},
     wrapper::effective_wrapper,
 };
@@ -101,14 +101,16 @@ pub fn masked_powers(powers: &Value, wrapper: Option<&WrapperRow>, clock_seconds
     Value::Array(kept)
 }
 
-/// The served rows of one resource's grants, before the operator fan-out.
+/// The served rows of one resource's grants, before the operator fan-out. `key_state` is the
+/// resource's F2a key state folded in `order`.
 pub fn masked_grants(
     grants: &[GrantRow],
     wrapper: Option<&WrapperRow>,
     key_state: Option<&Maxima>,
     clock_seconds: i64,
+    order: &EventOrder,
 ) -> Vec<ServedGrant> {
-    if key_state.is_some_and(registration_lapsed) {
+    if key_state.is_some_and(|state| registration_lapsed(state, order)) {
         return Vec::new();
     }
     grants
