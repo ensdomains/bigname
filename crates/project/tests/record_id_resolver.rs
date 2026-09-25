@@ -534,20 +534,18 @@ async fn inverse_address_reads_find_values_the_address_index_drops() -> Result<(
     )
     .await?;
     sqlx::query("UPDATE normalized_events SET transaction_hash = NULL, transaction_index = NULL, log_index = NULL WHERE event_identity IN ('tie-a-version', 'tie-b-value')").execute(&pool).await?;
-    // The step 2 index drops both values; the family read finds them from the retained values,
-    // and the diagnostic names each entry the index alone would miss.
+    // Step 2 indexes the value that ties with the version by event identity (resource 2). It
+    // still drops resource 1's value, positioned before its partition's version change, although
+    // the later link is the served boundary and admits it: the family read finds it from the
+    // retained value, and the diagnostic names that one entry.
     let expected = Expectations {
-        index_misses: [1, 2]
-            .map(|id| {
-                (
-                    22,
-                    format!(
-                        "resolves_to {INVERSE_A} coin 60 resource {} addr:60",
-                        resource(id)
-                    ),
-                )
-            })
-            .to_vec(),
+        index_misses: vec![(
+            22,
+            format!(
+                "resolves_to {INVERSE_A} coin 60 resource {} addr:60",
+                resource(1)
+            ),
+        )],
         ..Expectations::none()
     };
     run_expecting(&pool, 22, None, RunMode::Normal, &expected).await?;
@@ -1173,7 +1171,7 @@ async fn run_expecting(
     Ok(())
 }
 
-/// The address the ENSIP-19 case writes as `address_bytes_hex` only (a step 2 index gap).
+/// The address the ENSIP-19 case writes as `address_bytes_hex` only.
 const ADDRESS_BYTES_ONLY: &str = "0x3333333333333333333333333333333333333333";
 async fn inventory(pool: &PgPool, id: i64) -> Result<Value> {
     Ok(sqlx::query_scalar("SELECT jsonb_build_object('entries',entries,'last_change',last_change,'boundary',record_version_boundary,'provenance',provenance,'support',support_status) FROM record_inventory_current WHERE resource_id=$1::uuid")
@@ -1479,21 +1477,9 @@ async fn official_sepolia_direct_resolver_projects_ensip19_default_for_missing_e
         }),
     )
     .await?;
-    // Step 2 finding, kept visible: the inverse address index derives an address from a value
-    // row's `value` only (crates/project/src/families/derived.rs:162 and :197), so this
-    // `AddressChanged`, which carries only `address_bytes_hex`, has no index row. The family read
-    // finds the name from the retained value and serves the same page; the diagnostic names the
-    // one entry the index alone would miss.
-    let expected = Expectations {
-        index_misses: vec![(
-            target,
-            format!(
-                "resolves_to {ADDRESS_BYTES_ONLY} coin 2147483648 resource {} addr:2147483648",
-                resource(1)
-            ),
-        )],
-        ..Expectations::none()
-    };
+    // Step 2 indexes the address this `AddressChanged` carries only as `address_bytes_hex`, so
+    // the comparison expects nothing.
+    let expected = Expectations::none();
     run_expecting(&pool, target, None, RunMode::Normal, &expected).await?;
     // A direct node-keyed declaration has no link state, so the section is unsupported
     // by kind rather than reported empty.

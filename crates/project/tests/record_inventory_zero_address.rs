@@ -524,25 +524,9 @@ async fn coin60_pairs_serve_the_address_changed_half_at_its_own_position() -> Re
         let fixture = case(id)?;
         let (database, pool) = database(&format!("{id}_pair")).await?;
         seed(&pool, fixture).await?;
-        // Step 2 finding: the inverse address index reads the `AddrChanged` half's own value, so
-        // when the halves carry different addresses the served `AddressChanged` address has no
-        // index row. The family read finds it from the retained pair value; the diagnostic names
-        // exactly that entry.
-        let halves_differ = matches!(
-            id,
-            "ens_v1_pair_after_boundary" | "ens_v1_older_write_then_boundary_then_pair"
-        );
-        let comparison = Expectations {
-            index_misses: if halves_differ {
-                vec![(
-                    11,
-                    format!("resolves_to {NONZERO20} coin 60 resource {RESOURCE} addr:60"),
-                )]
-            } else {
-                Vec::new()
-            },
-            ..Expectations::none()
-        };
+        // Step 2 indexes the served half of a pair, so the index finds the `AddressChanged`
+        // address even when the halves differ, and the comparison expects nothing.
+        let comparison = Expectations::none();
         let outcome =
             run_window_expecting(&pool, 11, 0, 11, None, RunMode::Normal, &comparison).await?;
         let row: Value = sqlx::query_scalar(

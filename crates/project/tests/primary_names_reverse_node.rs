@@ -33,7 +33,7 @@ async fn reverse_node_claims_follow_resolver_storage_in_full_incremental_and_red
         Some(("success", Some("owner.eth"))),
         Some(("success", Some("owner.eth"))),
     ];
-    let shadow = lost_node_claims();
+    let shadow = claims_at_other_resolver();
     for (index, expected) in expected.into_iter().enumerate() {
         let block = index as i64 + 1;
         run(
@@ -353,50 +353,13 @@ async fn run(
     Ok(())
 }
 
-/// Step 2 finding: the node claim family keeps one row per node, so while the node points at
-/// OTHER (block 4) or its latest name record was written at OTHER (block 11), the older record at
-/// the current resolver that today's reader serves is not in the families. Each block runs three
-/// times (incremental, redo and full), so each difference shows three times.
-fn lost_node_claims() -> Expectations {
-    let key = format!("primary_name {ADDRESS} ens 60");
+/// Step 2 keeps one node claim row per node and resolver, so the record at the current resolver
+/// that today serves is in the families at blocks 4 and 11 and no difference is expected. At
+/// block 5 the node's only claim is at OTHER, and today serves no claim either, so the diagnostic
+/// shows with no difference.
+fn claims_at_other_resolver() -> Expectations {
     Expectations {
-        differences: vec![
-            // Today serves the name record written at OTHER (event 2), the node's resolver then.
-            ExpectedDifference {
-                target: 4,
-                key: key.clone(),
-                fields: vec![
-                    ("claim_name_is_normalized".into(), json!(true), json!(false)),
-                    (
-                        "claim_provenance.claim_event_id".into(),
-                        json!(2),
-                        json!(ABSENT),
-                    ),
-                    ("claim_status".into(), json!("success"), json!("not_found")),
-                    ("raw_claim_name".into(), json!("other.eth"), Value::Null),
-                ],
-                times: 3,
-            },
-            // Today serves the name record written at the current resolver (event 15).
-            ExpectedDifference {
-                target: 11,
-                key: key.clone(),
-                fields: vec![
-                    ("claim_name_is_normalized".into(), json!(true), json!(false)),
-                    (
-                        "claim_provenance.claim_event_id".into(),
-                        json!(15),
-                        json!(ABSENT),
-                    ),
-                    ("claim_status".into(), json!("success"), json!("not_found")),
-                    ("raw_claim_name".into(), json!("owner.eth"), Value::Null),
-                ],
-                times: 3,
-            },
-        ],
-        // At block 5 the node's only claim is at OTHER too, and today serves no claim either,
-        // so the diagnostic shows with no difference.
-        node_claims_at_other_resolver: [4, 5, 11].map(|block| (block, key.clone())).to_vec(),
+        node_claims_at_other_resolver: vec![(5, format!("primary_name {ADDRESS} ens 60"))],
         ..Expectations::none()
     }
 }
