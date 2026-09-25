@@ -10,7 +10,9 @@
 //! A comparison is for one publication, a height and its block's hash (`Publication`). Before
 //! its first read and after its last it checks that the block is readable and that the
 //! families' marker and Project's published position both stand on it, outside a redo, and it
-//! refuses to report otherwise (`fence`).
+//! refuses to report otherwise (`fence`). That validates the endpoints only: the reads between
+//! them are separate pool reads, not one snapshot, so the harness is meant for a quiescent
+//! target, such as the disposable copy.
 //!
 //! Every differing field of every item is decided on its own, at this publication, and passes
 //! only when a named cause is shown to produce it; anything else is a mismatch and fails the run.
@@ -344,7 +346,11 @@ impl Publication {
 /// and the Project phase's published position must both stand on it, and Project must not be
 /// in a redo. The comparison reads the served tables, the families and the log separately, so
 /// it checks this before its first read and after its last and refuses to report if either
-/// fails: nothing it read can then belong to another publication at the same height.
+/// fails. That validates the endpoints only. The reads between them are separate pool reads,
+/// not one snapshot, so a change from the publication to another and back between the two
+/// checks (a reorg or redo at the same height that returns) is not seen, and the reads could mix
+/// the two. The harness is meant for a quiescent target, such as the disposable copy; whether to
+/// run it in one repeatable-read transaction is open.
 async fn fence(pool: &PgPool, chain: &str, publication: &Publication) -> Result<()> {
     let (readable, families, served): (bool, bool, bool) = sqlx::query_as(
         "SELECT EXISTS (SELECT 1 FROM chain_lineage

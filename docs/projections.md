@@ -1849,7 +1849,10 @@ canonical, at the canonical lineage's hash for their height and at or below the
 target, the set family intake reads. A comparison is for one publication, a
 height and its block's hash: before its first read and after its last, the block
 must be readable and the families and the served publication must both stand on
-it, or it reports nothing. Before any difference of a name or resource can pass,
+it, or it reports nothing. That validates the endpoints only: the reads between
+them are separate reads, not one snapshot, so a change to another publication
+and back between the two checks is not seen. The harness is meant for a quiescent
+target, such as a disposable copy. Before any difference of a name or resource can pass,
 the families must hold exactly the retained facts the log gives it under step
 2's retention rules, in both directions: the binding candidates with their
 handoffs, the epoch starts, triples, key states and retained lifecycle events,
