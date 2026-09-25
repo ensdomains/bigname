@@ -570,6 +570,41 @@ async fn classification_rows_are_compared_in_full() -> Result<()> {
     fixture.cleanup().await
 }
 
+// A grant whose resource stops being readable leaves `/roles`: today's statement applies the
+// permissions read filter, whose resource and lineage predicates drop it, and the shadow must too.
+#[tokio::test]
+async fn roles_leave_out_a_grant_whose_resource_is_not_readable() -> Result<()> {
+    let mut fixture = Fixture::new("families_shadow_roles_readable", 12).await?;
+    let first = address(0xd1);
+    fixture.declare_resolvers(RESOLVER, &[&first]).await?;
+    for (identity, subject, resource) in [("grant-a", 0xee1, 1), ("grant-b", 0xee2, 2)] {
+        grant(
+            &fixture,
+            identity,
+            &first,
+            &address(subject),
+            resource,
+            json!(["set_text"]),
+            2,
+        )
+        .await?;
+    }
+    fixture.publish(4).await?;
+    let report = fixture.compare(1).await?;
+    unexpected(&report, &[])?;
+    ensure!(report.roles == 2, "{}", report.line());
+    sqlx::query(
+        "UPDATE resources SET canonicality_state = 'orphaned' WHERE resource_id = $1::uuid",
+    )
+    .bind(uuid(0xd000 + 2))
+    .execute(fixture.pool())
+    .await?;
+    let report = fixture.compare(1).await?;
+    unexpected(&report, &[])?;
+    ensure!(report.roles == 1, "{}", report.line());
+    fixture.cleanup().await
+}
+
 // A record-ID link followed, at the same resolver and node, by a link of another storage model.
 // Today's `/links` keeps only record-ID links, so it still serves record 5 there. The F7 reducer
 // keeps one row per resolver and node whatever the model (crates/project/src/families/records.rs,
