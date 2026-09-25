@@ -394,6 +394,57 @@ async fn an_unwrap_that_revokes_no_holder_grant_clears_the_restrictions() -> Res
     fixture.cleanup().await
 }
 
+/// Scoped review of ea047c04, Q5: the wrapper is unwrapped at 12 with no holder revocation, then
+/// wrapped again on the same resource at 13 (a NameWrapped mint). The newest lifecycle event is
+/// the mint, so both today's reader (resource_summary.rs:172-197) and the families'
+/// `lifecycle_unwrapped` serve the restriction block again.
+#[tokio::test]
+async fn an_unwrap_then_a_rewrap_brings_the_restrictions_back() -> Result<()> {
+    let fixture = Fixture::new("families_shadow_permissions_rewrap", 20).await?;
+    let fuses = PARENT_CANNOT_CONTROL;
+    let expiry = timestamp(TARGET) + 1_000_000;
+    let resource = wrapped(&fixture, fuses, expiry).await?;
+    wrapper_event(
+        &fixture,
+        12,
+        1,
+        "AuthorityEpochChanged",
+        &resource,
+        json!({}),
+        json!({"source_event": "NameUnwrapped", "node": node(1), "authority_kind": "wrapper"}),
+    )
+    .await?;
+    wrapper_event(
+        &fixture,
+        13,
+        1,
+        "TokenControlTransferred",
+        &resource,
+        json!({"from": null}),
+        json!({"source_event": "NameWrapped", "node": node(1), "owner": HOLDER, "to": HOLDER,
+               "fuses": fuses, "authority_kind": "wrapper"}),
+    )
+    .await?;
+    let report = publish_and_compare(&fixture, TARGET).await?;
+    shadow_support::assert_counts(&report, &[], &[]);
+    let served: Option<Value> = sqlx::query_scalar(
+        "SELECT resource_restrictions FROM permissions_current_resource_summary
+         WHERE resource_id = $1::uuid",
+    )
+    .bind(&resource)
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(
+        served,
+        Some(
+            json!({"kind": "ens_v1_wrapper", "wrapper_state": "emancipated",
+                    "fuses": fuses, "expiry_seconds": expiry})
+        ),
+        "the rewrap serves the block again"
+    );
+    fixture.cleanup().await
+}
+
 const V2_INSTANCE: &str = "00000000-0000-0000-0000-000000000021";
 const V2_REGISTRY: &str = "0x00000000000000000000000000000000000021aa";
 const ZERO_WORD: &str = "0x0000000000000000000000000000000000000000000000000000000000000000";
