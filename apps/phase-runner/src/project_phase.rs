@@ -99,6 +99,12 @@ impl ProjectPhase {
         self
     }
 
+    /// Reports committed batches and the steps of full-rebuild and redo runs to one feed.
+    pub fn with_metrics(self, feed: RunnerMetricsFeed) -> Self {
+        self.with_metrics_feed(feed.clone())
+            .with_step_observer(Arc::new(feed))
+    }
+
     /// Reports the steps of full-rebuild and redo runs, which are one long transaction.
     pub fn with_step_observer(self, observer: Arc<dyn bigname_project::StepObserver>) -> Self {
         Self {
@@ -173,8 +179,7 @@ impl Phase for ProjectPhase {
                     .await
                 }
                 Err(reason) => {
-                    bigname_project::families::skipped(&self.pool, &chain_id, &target, reason)
-                        .await
+                    bigname_project::families::skipped(&self.pool, &chain_id, &target, reason).await
                 }
             };
             if let Some(feed) = &self.metrics_feed {
