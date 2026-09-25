@@ -111,9 +111,52 @@ async fn a_late_input_token_skips_the_families_and_the_next_batch_catches_up() -
     scratch.cleanup().await
 }
 
+// A one-shot redo whose family rebuild needs more blocks than one run's budget: nothing calls the
+// family loop after the command returns, so the command finishes the rebuild before it does.
+#[tokio::test]
+async fn a_one_shot_redo_finishes_a_family_rebuild_longer_than_one_budget() -> Result<()> {
+    let scratch = ready_through("families_runner_budget", 30).await?;
+    // One event per block, so the rebuild has thirty blocks of work.
+    sqlx::query(
+        "INSERT INTO normalized_events (event_identity, namespace, event_kind, source_family,
+             manifest_version, chain_id, block_number, block_hash, derivation_kind,
+             canonicality_state, after_state)
+         SELECT 'budget:' || block, 'ens', 'PreimageObserved', 'budget_probe', 1, $1, block,
+                $1 || '-block-' || block, 'ens_v2_registry_resource_surface', 'canonical', '{}'
+         FROM generate_series(1, 30) block",
+    )
+    .bind(CHAIN)
+    .execute(scratch.pool())
+    .await?;
+    redo_project_through(
+        &scratch,
+        FamilySettings {
+            max_blocks_per_run: 10,
+            finish_each_batch: true,
+            ..FamilySettings::default()
+        },
+        30,
+    )
+    .await?;
+    assert_eq!(
+        project_state(&scratch).await?,
+        ("completed".into(), Some(30), false)
+    );
+    assert_eq!(
+        marker(&scratch).await?,
+        Some(30),
+        "the family rebuild finished before the command returned"
+    );
+    scratch.cleanup().await
+}
+
 async fn ready(prefix: &str) -> Result<ScratchDatabase> {
+    ready_through(prefix, 3).await
+}
+
+async fn ready_through(prefix: &str, head: i64) -> Result<ScratchDatabase> {
     let scratch = ScratchDatabase::create(prefix).await?;
-    seed_lineage(scratch.pool(), CHAIN, 3).await?;
+    seed_lineage(scratch.pool(), CHAIN, head).await?;
     sqlx::query("UPDATE chain_lineage SET canonicality_state = 'canonical' WHERE chain_id = $1")
         .bind(CHAIN)
         .execute(scratch.pool())
@@ -121,7 +164,7 @@ async fn ready(prefix: &str) -> Result<ScratchDatabase> {
     PhaseStore::new(scratch.pool().clone())
         .initialize_chain(CHAIN)
         .await?;
-    seed_completed_extent(scratch.pool(), 3).await?;
+    seed_completed_extent(scratch.pool(), head).await?;
     Ok(scratch)
 }
 
@@ -130,6 +173,14 @@ async fn redo_project(scratch: &ScratchDatabase) -> Result<()> {
 }
 
 async fn redo_project_with(scratch: &ScratchDatabase, families: FamilySettings) -> Result<()> {
+    redo_project_through(scratch, families, 3).await
+}
+
+async fn redo_project_through(
+    scratch: &ScratchDatabase,
+    families: FamilySettings,
+    head: i64,
+) -> Result<()> {
     PhaseRunner::new(
         scratch.runner(),
         PhaseSet::with_ingest_interpret_and_project(
@@ -148,7 +199,7 @@ async fn redo_project_with(scratch: &ScratchDatabase, families: FamilySettings) 
     .redo(
         &chain_config()?,
         RedoPhase::Phase(PhaseName::Project),
-        BlockRange::new(0, 3)?,
+        BlockRange::new(0, head)?,
         CancellationToken::new(),
     )
     .await?;
