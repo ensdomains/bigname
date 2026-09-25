@@ -314,6 +314,18 @@ async fn a_same_block_release_after_a_grant_passes_only_from_the_families_read()
             "{case} must fail: {:#?}",
             mutated.lines
         );
+        let failed: Vec<&str> = mutated
+            .lines
+            .iter()
+            .filter(|line| line.starts_with("SEPOLIA_END_TO_END_SHADOW_MISMATCH"))
+            .filter_map(|line| line.split(" field=").nth(1)?.split(' ').next())
+            .collect();
+        assert_eq!(
+            failed,
+            vec!["permissions_current"],
+            "{case}: {:#?}",
+            mutated.lines
+        );
         // Put the families back for the next mutation.
         sqlx::query(
             "UPDATE bigname_phase.project_grant
