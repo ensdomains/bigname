@@ -509,8 +509,8 @@ async fn a_link_and_version_at_one_position_follow_event_identity() -> Result<()
 }
 
 // Names resolving to an address are found from every retained address value, not only the
-// derived address index, which drops a value positioned at or before its partition's version
-// change. A link that outranks that version keeps the value served (value at 19, version at 20,
+// derived address index, which used to drop a value positioned at or before its partition's
+// version change. A link that outranks that version keeps the value served (value at 19, version at 20,
 // link at 21 to a record with no address), and a value sharing the version's block, transaction
 // and log position but later by event identity is served too; both names must be listed. Every
 // run compares the family reads with today's reads, pages included.
@@ -566,20 +566,10 @@ async fn inverse_address_reads_find_values_the_address_index_drops() -> Result<(
     )
     .await?;
     sqlx::query("UPDATE normalized_events SET transaction_hash = NULL, transaction_index = NULL, log_index = NULL WHERE event_identity IN ('tie-a-version', 'tie-b-value')").execute(&pool).await?;
-    // Step 2 indexes the value that ties with the version by event identity (resource 2). It
-    // still drops resource 1's value, positioned before its partition's version change, although
-    // the later link is the served boundary and admits it: the family read finds it from the
-    // retained value, and the diagnostic names that one entry.
-    let expected = Expectations {
-        index_misses: vec![(
-            22,
-            format!(
-                "resolves_to {INVERSE_A} coin 60 resource {} addr:60",
-                resource(1)
-            ),
-        )],
-        ..Expectations::none()
-    };
+    // Step 2 now indexes both: the value that ties with the version by event identity
+    // (resource 2) and resource 1's value before its partition's version change, which the later
+    // link keeps served. So the index misses nothing here.
+    let expected = Expectations::none();
     run_expecting(&pool, 22, None, RunMode::Normal, &expected).await?;
     for id in [1, 2] {
         let value = INVERSE_A;
@@ -632,6 +622,31 @@ async fn inverse_address_reads_find_values_the_address_index_drops() -> Result<(
         )],
         "{report:#?}"
     );
+    // With the index rows removed, the family read finds both names from the retained values.
+    sqlx::query("DELETE FROM project_address_record_node_index")
+        .execute(&pool)
+        .await?;
+    let page = bigname_storage::families::records::load_family_address_records_page(
+        &pool,
+        INVERSE_A,
+        "60",
+        None,
+        bigname_storage::AddressNamesCurrentDedupe::Surface,
+        None,
+        None,
+        bigname_storage::AddressNamesCurrentSort::Name,
+        bigname_storage::AddressNamesCurrentOrder::Asc,
+        None,
+        10,
+    )
+    .await?;
+    let mut resources: Vec<_> = page
+        .entries
+        .iter()
+        .map(|entry| entry.record_resource_id.to_string())
+        .collect();
+    resources.sort();
+    assert_eq!(resources, [resource(1), resource(2)]);
     db.cleanup().await?;
     Ok(())
 }
@@ -683,9 +698,10 @@ const RAW_PAIR_MIXED: &str = "0x77777777777777777777777777777777777777Ab";
 
 // A coin-60 pair whose `AddressChanged` half carries its address only as raw bytes (and a
 // different `AddrChanged` value), before a version reset that a later link lifts: the forward read
-// serves the raw-bytes address, which the family keeps only as the pair's
+// serves the raw-bytes address, which the value row keeps only as the pair's
 // `sibling_address_bytes_hex`. Both inverse readers must list the name for it, from mixed-case
-// input too, and the index alone misses it.
+// input too. Step 2 now indexes values past a version change, so the index finds it; with the
+// index rows removed, the family read must still find it from the retained values alone.
 #[tokio::test]
 async fn a_raw_bytes_pair_address_behind_a_lifted_version_is_found_inversely() -> Result<()> {
     let (db, pool) = database("record_id_raw_pair").await?;
@@ -725,18 +741,18 @@ async fn a_raw_bytes_pair_address_behind_a_lifted_version_is_found_inversely() -
     .await?;
     link(&pool, "raw-pair-link", 21, 0, Some(1), 3).await?;
     let lower = RAW_PAIR_MIXED.to_ascii_lowercase();
-    let expected = Expectations {
-        index_misses: vec![(
-            21,
-            format!(
-                "resolves_to {lower} coin 60 resource {} addr:60",
-                resource(1)
-            ),
-        )],
-        ..Expectations::none()
-    };
-    run_expecting(&pool, 21, None, RunMode::Normal, &expected).await?;
-    for address in [lower.as_str(), RAW_PAIR_MIXED] {
+    run(&pool, 21, None, RunMode::Normal).await?;
+    for (address, without_index) in [
+        (lower.as_str(), false),
+        (RAW_PAIR_MIXED, false),
+        (lower.as_str(), true),
+        (RAW_PAIR_MIXED, true),
+    ] {
+        if without_index {
+            sqlx::query("DELETE FROM project_address_record_node_index")
+                .execute(&pool)
+                .await?;
+        }
         let page = bigname_storage::families::records::load_family_address_records_page(
             &pool,
             address,
@@ -756,7 +772,11 @@ async fn a_raw_bytes_pair_address_behind_a_lifted_version_is_found_inversely() -
             .iter()
             .map(|entry| entry.record_resource_id.to_string())
             .collect();
-        assert_eq!(resources, [resource(1)], "{address}");
+        assert_eq!(
+            resources,
+            [resource(1)],
+            "{address} without index {without_index}"
+        );
     }
     let listed: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM address_records_current
