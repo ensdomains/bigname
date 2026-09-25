@@ -1695,10 +1695,19 @@ async fn project_expecting(
 /// an expired entry's resolver reads as zero.
 /// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L255-L258 @ ens_v2@a971bd64)
 /// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L628-L630 @ ens_v2@a971bd64)
-/// Today's record pointer read requires a named event (builders/linked_records.rs:97-99), so it
-/// keeps the token's record_inventory_current row, which no name route reaches (its name row has
-/// no resource or serving resource). That row is a served-side leftover the per-block publication
-/// step replaces. `counts` are `(target, times)`.
+/// Product ruling (Tate, 2026-09-26): an unnamed resolver-pointer clear written with a
+/// root-registry expiry withdraws the TLD token's records. The family value stands and there is
+/// no named-only exception. Today's record pointer read requires a named event
+/// (builders/linked_records.rs:97-99), so it keeps the token's record_inventory_current row, which
+/// no name route reaches (its name row has no resource or serving resource). The expected
+/// difference is that row: today `true`, family `false`, at each listed target.
+/// The pinned deployment registers every TLD, public suffix and the reverse mirror at MAX_EXPIRY,
+/// so on real chain data this expiry never happens and the difference is fixture-only.
+/// (upstream: .refs/ens_v2/contracts/script/deploy-constants.ts:L1 @ ens_v2@a971bd64)
+/// (upstream: .refs/ens_v2/contracts/deploy/01_ETHRegistry.ts:L46 @ ens_v2@a971bd64)
+/// (upstream: .refs/ens_v2/contracts/deploy/01_ReverseMirror.ts:L32 @ ens_v2@a971bd64)
+/// (upstream: .refs/ens_v2/contracts/script/publicSuffixes.ts:L101 @ ens_v2@a971bd64)
+/// `counts` are `(target, times)`.
 fn unnamed_clear_withdraws(counts: &[(i64, usize)]) -> Expectations {
     Expectations {
         differences: counts
