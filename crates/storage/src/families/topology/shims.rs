@@ -20,12 +20,17 @@
 //!   `normalized_events`, because `project_registry_node_state` keys a Transfer by the node it
 //!   carries and cannot attribute it through its name or resource.
 //!
-//! One interim read lives outside this file: the subnames page (`children_page.rs`) takes a
-//! child's registration and expiry times, and the released status its expiry fence checks, from
-//! the served `name_current.declared_summary` through `push_registered_at_timestamp_expr` and
-//! `push_expires_at_timestamp_expr`, the same expressions today's page uses. The timestamp sorts
-//! and the fence therefore compare one served column on both sides; step 7 must replace that
-//! read with one over the lifecycle families.
+//! Two interim reads live outside this file:
+//!
+//! - `load_bound_names_shadow` (`resolver.rs`) takes a name's selected resource from
+//!   `name_current.resource_id`, else its serving resource, to pick the one pointer that counts,
+//!   until the selection is computed from the binding candidates.
+//! - The subnames page (`children_page.rs`) takes a child's registration and expiry times, and
+//!   the released status its expiry fence checks, from the served `name_current.declared_summary`
+//!   through `push_registered_at_timestamp_expr` and `push_expires_at_timestamp_expr`, the same
+//!   expressions today's page uses. The timestamp sorts and the fence therefore compare one
+//!   served column on both sides; step 7 must replace that read with one over the lifecycle
+//!   families.
 use anyhow::{Context, Result};
 use sqlx::PgPool;
 use uuid::Uuid;

@@ -14,8 +14,6 @@ use crate::{
     name_current::{DEFAULT_NAME_CURRENT_LINEAGE_JOINS, DEFAULT_NAME_CURRENT_READ_FILTER},
 };
 
-use super::shims::json_position;
-
 /// Where a shadow classification came from.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ClassificationSource {
@@ -177,9 +175,10 @@ pub async fn load_resolver_shadow(
 /// `project_resource_pointer_resolver_idx`, joined to name eligibility. Until name eligibility
 /// and the serving selection are read from the family tables, eligibility is `name_current`'s
 /// predicate block of `load_phase_resolver_bound_name_rows`; only the resolver match moves to
-/// `project_resource_pointer`. A name's pointer is
-/// its latest across the resources it named, so a name that moved its pointer to another resource
-/// is listed under its current resolver only. Same keyset and order as the served reader.
+/// `project_resource_pointer`. A name's pointer is the one on its selected resource
+/// (interim: `name_current.resource_id`, else its serving resource), as today's name row takes its
+/// resolver from the selected authority's events; a pointer on another resource of the name does
+/// not move it. Same keyset and order as the served reader.
 pub async fn load_bound_names_shadow(
     pool: &PgPool,
     chain_id: &str,
@@ -198,22 +197,20 @@ pub async fn load_bound_names_shadow(
             _ => bail!("bound-name shadow cursor must use name ordering"),
         })
         .transpose()?;
-    let later = json_position("later.pointer_position");
-    let current = json_position("pointer.pointer_position");
     let query = format!(
         r#"
         WITH pointed AS (
+            -- Only the pointer of the name's selected resource counts, as today's name row takes
+            -- its resolver from the selected authority's events. Interim: the selected resource is
+            -- `name_current.resource_id`, else its serving resource, until the selection is
+            -- computed from the binding candidates.
             SELECT DISTINCT pointer.namespace || ':' || pointer.namehash AS logical_name_id
             FROM bigname_phase.project_resource_pointer pointer
+            JOIN bigname_phase.name_current selected
+              ON selected.logical_name_id = pointer.namespace || ':' || pointer.namehash
+             AND pointer.resource_id = COALESCE(selected.resource_id, selected.serving_resource_id)
             WHERE pointer.chain_id = $1 AND pointer.resolver_address = lower($2)
               AND pointer.namehash IS NOT NULL
-              AND NOT EXISTS (
-                  SELECT 1 FROM bigname_phase.project_resource_pointer later
-                  WHERE later.chain_id = pointer.chain_id AND later.namespace = pointer.namespace
-                    AND later.namehash = pointer.namehash
-                    AND later.resource_id <> pointer.resource_id
-                    AND later.pointer_position IS NOT NULL
-                    AND {later} > {current})
         )
         SELECT nc.logical_name_id
         FROM pointed
