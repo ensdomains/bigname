@@ -192,7 +192,11 @@ async fn family_block_timings() -> Result<()> {
          mismatched_candidates={mismatched} candidates={candidates} wrapper_leases={leases}"
     );
     ensure!(
-        bindings > 0 && without_bound == 0 && mismatched == 0 && candidates == bindings,
+        bindings > 0,
+        "FAMILY_BENCHMARK_BASE {base} is below the first seed binding, so no binding is checked"
+    );
+    ensure!(
+        without_bound == 0 && mismatched == 0 && candidates == bindings,
         "seed bindings do not pair with their SurfaceBound"
     );
     // The plans cover the follow, the undo and the replay; the rebuild ran without them.
