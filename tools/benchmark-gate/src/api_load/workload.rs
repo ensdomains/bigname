@@ -20,13 +20,12 @@ pub(super) struct RequestSpec {
     pub(super) required_permission_audit_evidence: bool,
 }
 
-const RESOLVER_INCLUDE_VARIANTS: [Option<&str>; 5] = [
-    None,
-    Some("nodes"),
-    Some("aliases"),
-    Some("roles"),
-    Some("events"),
-];
+// The resolver overview takes no `include`: it serves the mirror declaration and `bound_names`
+// only, and a request that sends `include` is `400 invalid_input`. Its variants are the
+// `bound_names` page sizes: the server default, one row (so a continuation exists to seed) and
+// the documented 200-row maximum. The former sections are the `/aliases`, `/links` and `/roles`
+// collections and `/v1/events?resolver=`, which this workload does not request yet.
+const RESOLVER_PAGE_SIZE_VARIANTS: [Option<&str>; 3] = [None, Some("1"), Some("200")];
 
 pub(super) fn request_variants(
     base: &Url,
@@ -52,16 +51,11 @@ pub(super) fn request_variants(
                 !corpus.resolvers.is_empty(),
                 "resolver endpoint has no real resolver corpus"
             );
-            for (index, target) in corpus.resolvers.iter().enumerate() {
-                for (variant, include) in RESOLVER_INCLUDE_VARIANTS.into_iter().enumerate() {
-                    let request_index = index * RESOLVER_INCLUDE_VARIANTS.len() + variant;
+            for target in &corpus.resolvers {
+                for page_size in RESOLVER_PAGE_SIZE_VARIANTS {
                     let mut query = Vec::new();
-                    if let Some(include) = include {
-                        query.push(("include", include));
-                        query.push((
-                            "page_size",
-                            defaults::parameterized_page_size(request_index),
-                        ));
+                    if let Some(page_size) = page_size {
+                        query.push(("page_size", page_size));
                     }
                     requests.push(get(
                         base,

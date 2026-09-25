@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use anyhow::{Result, ensure};
 use reqwest::Url;
 
-use super::{RESOLVER_INCLUDE_VARIANTS, RequestSpec, get, numeric_chain_id, request_variants};
+use super::{RESOLVER_PAGE_SIZE_VARIANTS, RequestSpec, get, numeric_chain_id, request_variants};
 use crate::api_load::{ResolverManifestCoverage, corpus::Corpus};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -48,19 +48,19 @@ fn record_resolver_request_construction(
             ],
             &[],
         )?;
-        for expected_include in RESOLVER_INCLUDE_VARIANTS {
+        for expected_page_size in RESOLVER_PAGE_SIZE_VARIANTS {
             ensure!(
                 requests.iter().any(|request| {
                     request.url.path() == expected.url.path()
                         && request
                             .url
                             .query_pairs()
-                            .find(|(key, _)| key == "include")
+                            .find(|(key, _)| key == "page_size")
                             .map(|(_, value)| value.into_owned())
                             .as_deref()
-                            == expected_include
+                            == expected_page_size
                 }),
-                "resolver request construction omitted include={expected_include:?} for manifest address {} on chain {:?} in family {:?}",
+                "resolver request construction omitted page_size={expected_page_size:?} for manifest address {} on chain {:?} in family {:?}",
                 target.resolver_address,
                 target.chain_id,
                 target.source_family
@@ -74,11 +74,11 @@ fn record_resolver_request_construction(
         requests.len()
             == targets
                 .len()
-                .saturating_mul(RESOLVER_INCLUDE_VARIANTS.len()),
-        "resolver request construction built {} variants for {} manifest addresses and {} include shapes",
+                .saturating_mul(RESOLVER_PAGE_SIZE_VARIANTS.len()),
+        "resolver request construction built {} variants for {} manifest addresses and {} page sizes",
         requests.len(),
         targets.len(),
-        RESOLVER_INCLUDE_VARIANTS.len()
+        RESOLVER_PAGE_SIZE_VARIANTS.len()
     );
     for count in coverage {
         let actual = constructed
@@ -151,7 +151,7 @@ mod tests {
 
         assert_eq!(
             requests.len(),
-            corpus.resolvers.len() * RESOLVER_INCLUDE_VARIANTS.len()
+            corpus.resolvers.len() * RESOLVER_PAGE_SIZE_VARIANTS.len()
         );
         // The overview no longer accepts `include`; a request that sends it is `400
         // invalid_input`, so the gate must not build one.
