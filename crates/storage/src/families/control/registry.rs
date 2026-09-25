@@ -1,6 +1,6 @@
 //! F2c, registry ownership: the registry generation of an ENSv1 name (the pull request 947
 //! fold, name_authority/build.sql:754-791 and :815-819), the zero-owner facts the ownerless
-//! registry profile reads (name_authority/stage.rs:202-261), and the per-resource registry
+//! registry profile reads (name_authority/stage.rs:201-268), and the per-resource registry
 //! binding the permission summary serves (permission_resources.rs:10-79).
 use std::collections::BTreeMap;
 
@@ -77,7 +77,7 @@ impl OwnerEvent {
 
 impl RegistryNode {
     /// The node's latest AuthorityTransferred in the canonical order, the event the served
-    /// ownerless-registry profile reads (name_authority/stage.rs:201-266).
+    /// ownerless-registry profile reads (name_authority/stage.rs:201-268).
     pub fn latest_transfer(&self) -> Option<&OwnerEvent> {
         self.owner_events
             .iter()
@@ -120,7 +120,7 @@ pub fn registry_generation(
 
 /// Whether the ownerless-registry profile applies (name_authority/build.sql:852-856): the
 /// node's latest AuthorityTransferred reports the zero address as its owner getter
-/// (stage.rs:201-266 reads AuthorityTransferred only), no binding is selected and the arm is not
+/// (stage.rs:201-268 reads AuthorityTransferred only), no binding is selected and the arm is not
 /// ENSv2. Today's stage keys the transfers by name: the event's name, else the latest named
 /// event of its resource and family, else the active surface of its node. The families key them
 /// by node, which is the name's namehash, so they differ only for an unnamed transfer whose
