@@ -67,6 +67,14 @@ impl ProjectPhase {
         self
     }
 
+    /// Reports the steps of full-rebuild and redo runs, which are one long transaction.
+    pub fn with_step_observer(self, observer: Arc<dyn bigname_project::StepObserver>) -> Self {
+        Self {
+            engine: self.engine.with_step_observer(observer),
+            ..self
+        }
+    }
+
     async fn redo_target(&self, chain_id: &str) -> RunnerResult<BlockMarker> {
         let position: Option<(Option<i64>, Option<String>)> = sqlx::query_as(
             "SELECT current_block_number, current_block_hash

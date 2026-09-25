@@ -1,8 +1,10 @@
-use std::{collections::BTreeMap, time::Instant};
+use std::{collections::BTreeMap, sync::Arc, time::Instant};
 
 use sqlx::PgPool;
 
-use crate::{ProjectError, Result, builders, integrity, publish, scope, stage};
+use crate::{
+    ProjectError, Result, StepObserver, builders, integrity, publish, scope, stage, steps::Steps,
+};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Marker {
@@ -80,11 +82,20 @@ impl WriteSummary {
 
 pub struct Engine {
     pool: PgPool,
+    step_observer: Option<Arc<dyn StepObserver>>,
 }
 
 impl Engine {
     pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            step_observer: None,
+        }
+    }
+
+    pub fn with_step_observer(mut self, observer: Arc<dyn StepObserver>) -> Self {
+        self.step_observer = Some(observer);
+        self
     }
 
     pub async fn run_batch(&self, request: BatchRequest) -> Result<BatchOutcome> {
@@ -103,7 +114,13 @@ impl Engine {
         .map_err(|error| ProjectError::database("failed to configure project snapshot", error))?;
         revalidate_target(&mut transaction, &request.chain_id, &target).await?;
 
-        let write_summary = derive(&mut transaction, &request, &target).await?;
+        let long_run = request.mode == RunMode::Redo || request.resume_current.is_none();
+        let steps = Steps::new(
+            self.step_observer.as_deref().filter(|_| long_run),
+            &request.chain_id,
+        );
+        let write_summary = derive(&mut transaction, &request, &target, &steps).await?;
+        steps.enter("commit");
         transaction.commit().await.map_err(|error| {
             ProjectError::database("failed to commit atomic project publication", error)
         })?;
@@ -135,6 +152,7 @@ async fn derive(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     request: &BatchRequest,
     target: &Marker,
+    steps: &Steps<'_>,
 ) -> Result<WriteSummary> {
     let mut summary = WriteSummary {
         blocks: u64::try_from(request.affected_to_block - request.affected_from_block + 1)
@@ -143,8 +161,10 @@ async fn derive(
     };
     let mut stage_start = Instant::now();
     let full_rebuild = matches!(request.mode, RunMode::Normal) && request.resume_current.is_none();
+    steps.enter("prepare");
     stage::prepare(transaction, &request.chain_id, target).await?;
     summary.finish_stage("prepare", &mut stage_start);
+    steps.enter("scope");
     scope::initialize(
         transaction,
         &request.chain_id,
@@ -159,12 +179,15 @@ async fn derive(
     )
     .await?;
     summary.finish_stage("scope", &mut stage_start);
+    steps.enter("inputs");
     stage::inputs(transaction, &request.chain_id, target, full_rebuild).await?;
     summary.finish_stage("inputs", &mut stage_start);
-    builders::build_all(transaction, &request.chain_id, target, full_rebuild).await?;
+    builders::build_all(transaction, &request.chain_id, target, full_rebuild, steps).await?;
     summary.finish_stage("builders", &mut stage_start);
+    steps.enter("integrity");
     integrity::assert_publishable(transaction, &request.chain_id, target).await?;
     summary.finish_stage("integrity", &mut stage_start);
+    steps.enter("publish");
     // Counting the scope belongs to `publish`, so the six stage durations add up to the whole
     // derivation.
     count_inputs(transaction, full_rebuild, &mut summary).await?;
