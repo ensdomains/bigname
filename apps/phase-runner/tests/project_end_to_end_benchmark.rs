@@ -25,6 +25,8 @@
 //! rebuilt state.
 #[path = "project_end_to_end/endpoint.rs"]
 mod endpoint;
+#[path = "project_end_to_end/shadow.rs"]
+mod shadow;
 #[allow(dead_code)]
 mod support;
 
@@ -397,6 +399,15 @@ async fn run(
             family_marker == Some(number),
             "the owned key families stopped at {family_marker:?}, not at target {number}"
         );
+        if compare.is_some() {
+            // The family readers beside the served readers at the same publication.
+            let report = shadow::compare(pool, CHAIN, number).await?;
+            report.print(number);
+            ensure!(
+                report.mismatched == 0,
+                "the family readers differ from the served values at {number}"
+            );
+        }
         ensure!(
             publication(pool).await? == (Some(number), Some(target.hash.clone()), false),
             "the progress marker is not at target {number}"
