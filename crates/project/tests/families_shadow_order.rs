@@ -162,15 +162,27 @@ async fn excuse(
     Ok(resource_excuses(&fixture.pool, CHAIN, &clock, input, &diffs).await?[0])
 }
 
-/// Item 1 of the TYR-36 step 3 review (Q7): a grant and the interpreter's unnamed path-expiry
-/// release of one resource in one block, the grant written first. D12 puts the release, which
-/// has no transaction or log, before the grant, so the registration is live and the resource
-/// serves its permission row; today's (block, generated id) order puts the release last, so the
-/// drop rule (permissions.rs:111-133, :391-398) serves nothing. The difference passes as a
-/// same-block delta only because the whole permission read in today's order is the served empty
-/// set and the whole canonical read is the shadow row; any other shadow or served value fails.
+/// The registry-scoped row BOB holds on `resource` as the summary serves it.
+fn bob_row(resource: &str) -> Value {
+    json!({
+        "resource_id": resource, "subject": BOB, "scope": "registry",
+        "scope_kind": "registry",
+        "scope_detail": {"kind": "registry", "chain_id": CHAIN, "registry_address": REGISTRY},
+        "effective_powers": ["set_resolver", "set_subregistry"],
+        "grant_source": {"kind": "raw_log", "source_event": "EACRolesChanged"},
+        "revocation_source": null, "inheritance_path": [], "transfer_behavior": {},
+    })
+}
+
+/// Items 1 and F1 of the TYR-36 step 3 reviews (Q7): a grant and the interpreter's unnamed
+/// path-expiry release of one resource in one block, the grant written first. D12 puts the
+/// release, which has no transaction or log, before the grant, so the registration is live and
+/// the shadow serves the permission row; today's (block, generated id) order puts the release
+/// last, so the drop rule (permissions.rs:111-133, :391-398) serves nothing. The families read
+/// in today's order are empty too, so matching them would only show that the served value is
+/// empty: the harness leaves this direction a mismatch, whatever the shadow row holds.
 #[tokio::test]
-async fn a_same_block_path_expiry_before_a_grant_passes_only_with_both_values() -> Result<()> {
+async fn a_same_block_path_expiry_today_serves_as_empty_is_a_mismatch() -> Result<()> {
     let fixture = Fixture::new("families_shadow_order_permissions", 20).await?;
     let (k1, n1) = (uuid(1), name(1));
     v2_binding(&fixture, &k1).await?;
@@ -187,60 +199,137 @@ async fn a_same_block_path_expiry_before_a_grant_passes_only_with_both_values() 
         .event(unnamed_path_expiry("path-expiry-14", 14, &k1))
         .await?;
     let report = publish_and_compare(&fixture, 16).await?;
-    assert_counts(
-        &report,
-        &[],
-        &[("d12_same_block_order:permissions_current", 1)],
+    assert!(report.known_discrepancy.is_empty(), "{:#?}", report.lines);
+    assert!(
+        report.expected_delta_fields.is_empty(),
+        "{:#?}",
+        report.lines
     );
+    assert_eq!(report.mismatched, 1, "{:#?}", report.lines);
     assert_eq!(served_rows(&fixture, &k1).await?, Vec::<Value>::new());
+    let input = resource_input(&fixture, &k1).await?;
+    assert_eq!(
+        excuse(
+            &fixture,
+            16,
+            &input,
+            "permissions_current",
+            json!([]),
+            json!([bob_row(&k1)])
+        )
+        .await?,
+        Excuse::None,
+    );
+    fixture.cleanup().await
+}
+
+/// The name side of the passing fixture: the families select the unnamed path-expiry release,
+/// which today's name-scoped membership never sees (the served-side bug the harness names).
+const RELEASED_NAME: [(&str, usize); 7] = [
+    (
+        "served_membership_skips_unnamed_path_expiry:control/expiry",
+        1,
+    ),
+    (
+        "served_membership_skips_unnamed_path_expiry:control/registrant",
+        1,
+    ),
+    (
+        "served_membership_skips_unnamed_path_expiry:control/status",
+        1,
+    ),
+    (
+        "served_membership_skips_unnamed_path_expiry:registration/authority_kind",
+        1,
+    ),
+    (
+        "served_membership_skips_unnamed_path_expiry:registration/latest_event_kind",
+        1,
+    ),
+    (
+        "served_membership_skips_unnamed_path_expiry:registration/registrant",
+        1,
+    ),
+    (
+        "served_membership_skips_unnamed_path_expiry:registration/status",
+        1,
+    ),
+];
+const DELTA: [(&str, usize); 1] = [("d12_same_block_order:permissions_current", 1)];
+
+/// Item F1 of the TYR-36 step 3 review (Q7), the direction that passes. The unnamed path-expiry
+/// release of the resource is written first at transaction 0 log 2 and a grant second at log 1
+/// of the same block. D12 puts the grant first and the release last, so the registration lapses
+/// and the shadow serves no row; today's order puts the grant last, so the registration is live
+/// and the summary serves BOB's row. The difference passes as a same-block delta because the
+/// families read again in today's order give exactly that row. Each mutation writes a wrong
+/// value into the families themselves and runs the whole comparison again: the read in today's
+/// order then differs from the served row and the field fails.
+#[tokio::test]
+async fn a_same_block_release_after_a_grant_passes_only_from_the_families_read() -> Result<()> {
+    let fixture = Fixture::new("families_shadow_order_permissions_live", 20).await?;
+    let (k1, n1) = (uuid(1), name(1));
+    v2_binding(&fixture, &k1).await?;
+    fixture
+        .event(grant("grant-10", 10, &n1, &k1, ALICE))
+        .await?;
+    fixture
+        .event(registry_grant("permission-11", 11, &k1, BOB))
+        .await?;
+    fixture
+        .event(unnamed_path_expiry("path-expiry-14", 14, &k1).at(0, 2))
+        .await?;
+    fixture
+        .event(grant("grant-14", 14, &n1, &k1, ALICE))
+        .await?;
+    let report = publish_and_compare(&fixture, 16).await?;
+    assert_counts(&report, &RELEASED_NAME, &DELTA);
+    let served = served_rows(&fixture, &k1).await?;
+    assert_eq!(
+        served,
+        vec![json!({"subject": BOB, "effective_powers": ["set_resolver", "set_subregistry"]})]
+    );
+
+    for (case, update) in [
+        (
+            "wrong subject",
+            "UPDATE bigname_phase.project_grant SET subject = $2
+             WHERE resource_id = $1::uuid AND subject = $3",
+        ),
+        (
+            "wrong powers",
+            "UPDATE bigname_phase.project_grant SET effective_powers = '[\"set_resolver\"]'
+             WHERE resource_id = $1::uuid AND subject = $3 AND $2 <> ''",
+        ),
+    ] {
+        sqlx::query(update)
+            .bind(&k1)
+            .bind(ALICE)
+            .bind(BOB)
+            .execute(&fixture.pool)
+            .await?;
+        let mutated = shadow_support::compare::compare(&fixture.pool, CHAIN, 16).await?;
+        assert!(
+            mutated.expected_delta_fields.is_empty() && mutated.mismatched == 1,
+            "{case} must fail: {:#?}",
+            mutated.lines
+        );
+        // Put the families back for the next mutation.
+        sqlx::query(
+            "UPDATE bigname_phase.project_grant
+             SET subject = $2, effective_powers = '[\"set_resolver\", \"set_subregistry\"]'
+             WHERE resource_id = $1::uuid AND subject IN ($2, $3) AND scope = 'registry'",
+        )
+        .bind(&k1)
+        .bind(BOB)
+        .bind(ALICE)
+        .execute(&fixture.pool)
+        .await?;
+        let restored = shadow_support::compare::compare(&fixture.pool, CHAIN, 16).await?;
+        assert_counts(&restored, &RELEASED_NAME, &DELTA);
+    }
 
     let input = resource_input(&fixture, &k1).await?;
-    let row = json!({
-        "resource_id": k1, "subject": BOB, "scope": "registry",
-        "scope_kind": "registry",
-        "scope_detail": {"kind": "registry", "chain_id": CHAIN, "registry_address": REGISTRY},
-        "effective_powers": ["set_resolver", "set_subregistry"],
-        "grant_source": {"kind": "raw_log", "source_event": "EACRolesChanged"},
-        "revocation_source": null, "inheritance_path": [], "transfer_behavior": {},
-    });
-    let passes = |served: Value, shadow: Value| {
-        let (fixture, input) = (&fixture, &input);
-        async move { excuse(fixture, 16, input, "permissions_current", served, shadow).await }
-    };
-    assert_eq!(
-        passes(json!([]), json!([row.clone()])).await?,
-        Excuse::SameBlockOrder,
-        "the served empty set and the canonical row"
-    );
-    let mut wrong_powers = row.clone();
-    wrong_powers["effective_powers"] = json!(["set_resolver"]);
-    let mut wrong_subject = row.clone();
-    wrong_subject["subject"] = json!(ALICE);
-    let mut collision = row.clone();
-    collision["grant_source"] = json!({"kind": "raw_log", "relation_kind": "operator"});
-    collision["transfer_behavior"] =
-        json!({"mode": "owner_scoped", "on_holder_change": "ceases_to_apply"});
-    for (case, served, shadow) in [
-        ("wrong powers", json!([]), json!([wrong_powers])),
-        ("wrong subject", json!([]), json!([wrong_subject])),
-        (
-            "collision output",
-            json!([]),
-            json!([row.clone(), collision]),
-        ),
-        (
-            "served not empty",
-            json!([row.clone()]),
-            json!([row.clone()]),
-        ),
-        ("empty shadow", json!([]), json!([])),
-    ] {
-        assert_eq!(
-            passes(served, shadow).await?,
-            Excuse::None,
-            "{case} must fail"
-        );
-    }
     let restriction = json!({"kind": "ens_v2_registry", "locked_roles": ["unregister"]});
     assert_eq!(
         excuse(
@@ -248,12 +337,12 @@ async fn a_same_block_path_expiry_before_a_grant_passes_only_with_both_values() 
             16,
             &input,
             "resource_restrictions",
-            Value::Null,
-            restriction
+            restriction,
+            Value::Null
         )
         .await?,
         Excuse::None,
-        "a wrong restriction must fail"
+        "a restriction the families do not give must fail"
     );
     fixture.cleanup().await
 }

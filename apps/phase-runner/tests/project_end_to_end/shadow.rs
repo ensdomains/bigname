@@ -18,10 +18,11 @@
 //!   use it (ENSv2 membership by block and id, the laterals by block, transaction, log and id),
 //!   every position kept so the authority admission is unchanged, and the association winner of
 //!   an affected triple moved only to a grant of the same name, registry and token
-//!   (`v2_lifecycle_events.sql:10-23`), gives exactly the served value for the field. For a resource's permission rows and
-//!   restriction block the path-expiry drop rule of permissions.rs:111-133, :391-398 must answer
-//!   differently in the two orders, the whole read in today's order must equal the served value
-//!   and the whole canonical read the shadow value.
+//!   (`v2_lifecycle_events.sql:10-23`), gives exactly the served value for the field. For a
+//!   resource's permission rows and restriction block, the path-expiry drop rule of
+//!   permissions.rs:111-133, :391-398 must keep the registration live in today's order and
+//!   lapse it in the canonical order, the served value must not be empty, and the whole read in
+//!   today's order must equal it. A served empty value against a canonical row is a mismatch.
 //!
 //! Named causes, each a place where the families and today's builders disagree, reported
 //! rather than patched (step 3 changes no reducer and no served table):
@@ -1001,11 +1002,14 @@ pub fn legacy_facts(
 /// The cause shown for each differing field of one resource, in `diffs` order. The permissions
 /// builder's path-expiry drop (permissions.rs:111-133, :391-398) takes the resource's latest
 /// ENSv2 registration event in today's (block, generated id) order. A `permissions_current` or
-/// `resource_restrictions` field passes as a same-block delta only when the drop rule answers
-/// differently in that order and in the canonical order, the whole permission read of the
-/// resource taken again in today's order equals the served value, and the whole read in the
-/// canonical order equals the shadow value. Both values are compared whole, so a wrong subject,
-/// power, collision row or restriction fails.
+/// `resource_restrictions` field passes as a same-block delta only in one direction: today's
+/// order keeps the registration live while the canonical order lapses it, the served value is
+/// not empty, and the whole permission read of the resource taken again from the families in
+/// today's order equals it. That read is compared whole, so a wrong subject, power, collision
+/// row or restriction in the families fails. The shadow value is the canonical read itself, so
+/// comparing it with the canonical read checks nothing and is not counted as evidence. The other
+/// direction, today's order lapsing the registration, is left a mismatch: the read in that order
+/// is empty, so matching it would only show that the served value is empty.
 pub async fn resource_excuses(
     pool: &PgPool,
     chain: &str,
@@ -1044,7 +1048,7 @@ pub async fn resource_excuses(
     }
     let today = EventOrder::Generated(ids);
     let lapsed = |order: &EventOrder| registration_lapsed(&maxima_of(&events, true, order), order);
-    if lapsed(&today) == lapsed(&EventOrder::Canonical) {
+    if lapsed(&today) || !lapsed(&EventOrder::Canonical) {
         return Ok(out);
     }
     let read = |order: EventOrder| async move {
@@ -1065,10 +1069,12 @@ pub async fn resource_excuses(
         else {
             continue;
         };
-        if same(&legacy, &diff.served)
-            && same(&canonical, &diff.shadow)
-            && !same(&legacy, &canonical)
-        {
+        let served_empty = match &diff.served {
+            Value::Null => true,
+            Value::Array(rows) => rows.is_empty(),
+            _ => false,
+        };
+        if !served_empty && same(&legacy, &diff.served) && !same(&legacy, &canonical) {
             out[index] = Excuse::SameBlockOrder;
         }
     }
