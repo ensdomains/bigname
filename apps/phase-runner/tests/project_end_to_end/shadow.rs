@@ -1249,13 +1249,20 @@ fn epoch_arm(source_family: &str) -> &'static str {
 /// family's arm (identity.rs:88-101); a candidate's SurfaceBound must be of the candidate's
 /// name and resource with its authority kind, key, state-derived flag and owner
 /// (identity.rs:135-152, :380-400).
+/// Only the Project fixture tests call it; the comparison uses `control_fact_checks_in`.
+#[allow(dead_code)]
 pub async fn control_facts_hold(
     pool: &PgPool,
     chain: &str,
     target: i64,
     facts: &NameFacts,
 ) -> Result<bool> {
-    let checks = control_fact_checks(pool, chain, target, facts).await?;
+    let identities: Vec<String> = control_positions(facts)
+        .into_iter()
+        .map(|position| position.event_identity)
+        .collect();
+    let log = published_log(pool, chain, target, &identities).await?;
+    let checks = control_fact_checks_in(facts, &log);
     Ok(checks.owners && checks.identity)
 }
 
@@ -1268,21 +1275,7 @@ pub struct ControlFactChecks {
     pub identity: bool,
 }
 
-pub async fn control_fact_checks(
-    pool: &PgPool,
-    chain: &str,
-    target: i64,
-    facts: &NameFacts,
-) -> Result<ControlFactChecks> {
-    let identities: Vec<String> = control_positions(facts)
-        .into_iter()
-        .map(|position| position.event_identity)
-        .collect();
-    let log = published_log(pool, chain, target, &identities).await?;
-    Ok(control_fact_checks_in(facts, &log))
-}
-
-/// `control_fact_checks` against publication-visible log rows already loaded.
+/// The checks of `control_facts_hold` against publication-visible log rows already loaded.
 fn control_fact_checks_in(
     facts: &NameFacts,
     log: &BTreeMap<String, LogEvent>,
