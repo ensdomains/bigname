@@ -13,7 +13,10 @@ use super::reduce::in_family;
 use super::{
     input::BlockEvent,
     keys,
-    reduce::{Context, current, key_of, load_rows, put, raw_lower, raw_text, set, text_or_null},
+    reduce::{
+        Context, current, json_boolean, key_of, load_rows, put, raw_lower, raw_text, set,
+        text_or_null,
+    },
     store::RowSet,
     tables,
 };
@@ -147,8 +150,11 @@ pub(super) async fn apply(
     load_rows(transaction, rows, &tables::ACCOUNT_APPROVAL, approval_keys).await?;
     for (key, event) in approvals {
         let table = &tables::ACCOUNT_APPROVAL;
-        // An approval whose flag does not read as a boolean has nothing to store.
-        let Some(flag) = event.after.get("approved").and_then(approved) else {
+        // The flag as the served `(after_state ->> 'approved')::boolean` reads it. A flag that
+        // reads as no boolean (a spelling PostgreSQL rejects, or null) fails every served batch:
+        // the cast aborts it, or the NOT NULL column refuses the row. That input cannot coexist
+        // with a served batch, so the family keeps nothing for the event rather than guess.
+        let Some(flag) = event.after.get("approved").and_then(json_boolean) else {
             continue;
         };
         let mut row = current(
@@ -204,19 +210,6 @@ pub(super) async fn apply(
         put(rows, table, row, event)?;
     }
     Ok(())
-}
-
-/// `(... ->> 'approved')::boolean`.
-fn approved(value: &Value) -> Option<bool> {
-    match value {
-        Value::Bool(flag) => Some(*flag),
-        Value::String(text) => match text.trim().to_ascii_lowercase().as_str() {
-            "true" | "t" | "yes" | "on" | "1" => Some(true),
-            "false" | "f" | "no" | "off" | "0" => Some(false),
-            _ => None,
-        },
-        _ => None,
-    }
 }
 
 /// The approval key an AccountPermissionChanged the builder admits addresses.

@@ -11,7 +11,10 @@ use sqlx::{Postgres, Transaction};
 use super::{
     input::BlockEvent,
     keys,
-    reduce::{Context, current, key_of, load_rows, put, raw_lower, raw_text, set, text_or_null},
+    reduce::{
+        Context, current, json_boolean, key_of, load_rows, put, raw_lower, raw_text, set,
+        text_or_null,
+    },
     store::{Row, RowSet},
     tables,
 };
@@ -191,70 +194,12 @@ pub(super) async fn apply(
 /// PostgreSQL reads a boolean; a spelling it rejects fails the served batch, and is kept active
 /// here.
 fn active(event: &BlockEvent) -> Value {
-    Value::Bool(match field(event, "active") {
-        Value::Bool(flag) => flag,
-        Value::String(text) => postgres_boolean(&text).unwrap_or(true),
-        Value::Number(number) => postgres_boolean(&number.to_string()).unwrap_or(true),
-        _ => true,
-    })
-}
-
-/// PostgreSQL's boolean input: trimmed of ASCII space, tab, line feed, carriage return, vertical
-/// tab and form feed only (not Unicode whitespace), case-insensitive, `1` or `0`, or a unique
-/// prefix of `true`, `false`, `yes`, `no`, `on` or `off` (`o` alone is ambiguous).
-fn postgres_boolean(text: &str) -> Option<bool> {
-    let text = text
-        .trim_matches([' ', '\t', '\n', '\r', '\u{b}', '\u{c}'])
-        .to_ascii_lowercase();
-    if text.is_empty() {
-        return None;
-    }
-    match text.as_str() {
-        "1" => return Some(true),
-        "0" => return Some(false),
-        "o" => return None,
-        _ => {}
-    }
-    [
-        ("true", true),
-        ("false", false),
-        ("yes", true),
-        ("no", false),
-        ("on", true),
-        ("off", false),
-    ]
-    .into_iter()
-    .find_map(|(word, flag)| word.starts_with(&text).then_some(flag))
+    Value::Bool(json_boolean(&field(event, "active")).unwrap_or(true))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{edge_arm, postgres_boolean};
-
-    #[test]
-    fn a_boolean_reads_as_postgresql_reads_it() {
-        for (text, flag) in [
-            ("t", Some(true)),
-            ("TRUE", Some(true)),
-            (" y ", Some(true)),
-            ("on", Some(true)),
-            ("1", Some(true)),
-            ("f", Some(false)),
-            ("fals", Some(false)),
-            ("NO", Some(false)),
-            ("of", Some(false)),
-            ("0", Some(false)),
-            ("o", None),
-            ("", None),
-            ("2", None),
-            ("maybe", None),
-            ("truex", None),
-            ("\u{b}off\u{c}", Some(false)),
-            ("\u{a0}off\u{a0}", None),
-        ] {
-            assert_eq!(postgres_boolean(text), flag, "{text:?}");
-        }
-    }
+    use super::edge_arm;
 
     #[test]
     fn an_edge_carries_the_canonical_authority_arm_of_its_registry() {

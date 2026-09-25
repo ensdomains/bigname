@@ -259,3 +259,115 @@ async fn approvals_keep_an_explicit_false() -> Result<()> {
     fixture.assert_rebuild_equal(11).await?;
     fixture.cleanup().await
 }
+
+// A differential check against PostgreSQL itself for the approval flag: each value goes through
+// the served builder's `(after_state ->> 'approved')::boolean` and through the family reducer.
+// Where the cast gives a boolean, the family row carries it. Where the cast rejects the value, or
+// gives null (the served column is NOT NULL), the served batch fails; the family keeps no row
+// for that event.
+#[tokio::test]
+async fn an_approval_flag_matches_the_served_boolean_cast() -> Result<()> {
+    let fixture = Fixture::new("families_approval_cast", 20).await?;
+    let mut values: Vec<Value> = [
+        "t",
+        "tr",
+        "tru",
+        "true",
+        "f",
+        "fa",
+        "fal",
+        "fals",
+        "false",
+        "y",
+        "ye",
+        "yes",
+        "n",
+        "no",
+        "on",
+        "of",
+        "off",
+        "1",
+        "0",
+        "TrUe",
+        "FALSE",
+        "Off",
+        "yEs",
+        "o",
+        "",
+        "   ",
+        "junk",
+        "truex",
+        "2",
+        "01",
+        "\u{a0}off\u{a0}",
+        "\u{2003}on",
+        "off\u{3000}",
+        "\u{85}no",
+    ]
+    .into_iter()
+    .map(|text| json!(text))
+    .collect();
+    for space in [' ', '\t', '\n', '\r', '\u{b}', '\u{c}'] {
+        values.push(json!(format!("{space}off{space}")));
+        values.push(json!(format!("{space}{space}yes")));
+    }
+    values.extend([
+        json!(true),
+        json!(false),
+        Value::Null,
+        json!(0),
+        json!(1),
+        json!(2),
+        json!(1.0),
+    ]);
+    let mut expected = Vec::new();
+    for (n, value) in (1..).zip(&values) {
+        let cast: std::result::Result<Option<bool>, sqlx::Error> = sqlx::query_scalar(
+            "SELECT (jsonb_build_object('approved', $1::jsonb) ->> 'approved')::boolean",
+        )
+        .bind(value)
+        .fetch_one(&fixture.pool)
+        .await;
+        let flag = match cast {
+            Ok(flag) => flag,
+            Err(sqlx::Error::Database(error)) => {
+                assert_eq!(error.code().as_deref(), Some("22P02"), "{value:?}: {error}");
+                None
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let subject = format!("0x{:040x}", 0x100 + n);
+        fixture
+            .write(
+                10,
+                n,
+                "AccountPermissionChanged",
+                "ens_v1_registry_l1",
+                None,
+                None,
+                json!({"subject": subject, "relation_kind": "operator", "approved": value,
+                       "scope": {"kind": "account", "authority_kind": "registry",
+                                 "authority_contract": REGISTRY, "owner": ALICE},
+                       "effective_powers": [], "inheritance_path": [],
+                       "transfer_behavior": {"mode": "owner_scoped"}}),
+                REGISTRY,
+            )
+            .await?;
+        expected.push((value.clone(), subject, flag));
+    }
+    fixture.apply(10, FamilyMode::Normal).await;
+    let rows = fixture.rows("project_account_approval").await?;
+    let mismatches: Vec<String> = expected
+        .iter()
+        .filter_map(|(value, subject, flag)| {
+            let stored = rows
+                .iter()
+                .find(|row| row["subject"] == json!(subject))
+                .map(|row| row["approved"].clone());
+            let want = flag.map(|flag| json!(flag));
+            (stored != want).then(|| format!("{value:?}: family {stored:?}, served {want:?}"))
+        })
+        .collect();
+    assert!(mismatches.is_empty(), "{mismatches:#?}");
+    fixture.cleanup().await
+}
