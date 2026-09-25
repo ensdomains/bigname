@@ -674,7 +674,10 @@ const REGISTRY_A: &str = "0000000a-0000-0000-0000-00000000000a";
 const REGISTRY_B: &str = "0000000b-0000-0000-0000-00000000000b";
 const REGISTRY_C: &str = "0000000c-0000-0000-0000-00000000000c";
 const TOKEN_B1: &str = "0x00000000000000000000000000000000000000000000000000000000000000b1";
-const TOKEN_A0: &str = "0x00000000000000000000000000000000000000000000000000000000000000a0";
+/// A version-zero token: the low 32 bits hold the token version, and Interpret gives a
+/// reservation its own resource only at version zero.
+/// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L649-L651 @ ens_v2@a971bd64)
+const TOKEN_A0: &str = "0x000000000000000000000000000000000000000000000000000000a000000000";
 
 // (a) The resource-less reservation B1 in registry B, then a live reservation A0 with its own
 // resource in registry A after the parent points there, then B1 is unregistered. A0 is live, so
