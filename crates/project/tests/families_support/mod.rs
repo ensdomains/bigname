@@ -41,6 +41,7 @@ pub const FAMILY_TABLES: &[&str] = &[
     "project_child_registration_state",
     "project_wrapper_state",
     "project_registry_node_state",
+    "project_registry_owner_event",
     "project_registry_binding_observation",
     "project_resolver_classification",
     "project_registry_pointer",

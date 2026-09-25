@@ -1719,7 +1719,9 @@ steps that read them must key on. Each is also stated on its table or column:
   `surface_binding_id` alone.
 - F2c: `AuthorityTransferred` and `SubregistryChanged` both set the owner
   group, so a `SubregistryChanged` after a zero-getter transfer replaces the
-  owner and the served "ownerless" verdict cannot be recovered. An
+  owner and the served "ownerless" verdict cannot be recovered from the node
+  row; `project_registry_owner_event` keeps every owner-setting event of the
+  node by position, with its name, resource and authority kind, for it. An
   observation's `target_resource_id` is the name's ENSv1 or Basenames binding
   active at the block, not the served authority selection.
 - F3: the pointer-family priority is approximated from the F4 and F5 pointer

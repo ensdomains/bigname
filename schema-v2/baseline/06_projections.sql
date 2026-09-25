@@ -1844,11 +1844,69 @@ COMMENT ON COLUMN project_registry_node_state.has_old_record IS
 COMMENT ON COLUMN project_registry_node_state.first_current_record_block IS
     'This value is the first block with an emitter_role registry event for the node.';
 COMMENT ON COLUMN project_registry_node_state.owner_event_kind IS
-    'This value is the kind of the registry event that last set the owner group: AuthorityTransferred or SubregistryChanged, both of which report the owner (name_authority/stage.rs:200-261). Either overwrites the group, so a SubregistryChanged after an AuthorityTransferred whose getter was zero replaces the owner; the served ownerless verdict, which reads AuthorityTransferred only, cannot be recovered from this row.';
+    'This value is the kind of the registry event that last set the owner group: AuthorityTransferred or SubregistryChanged, both of which report the owner (name_authority/stage.rs:200-261). Either overwrites the group, so a SubregistryChanged after an AuthorityTransferred whose getter was zero replaces the owner; the served ownerless verdict, which reads AuthorityTransferred only, cannot be recovered from this row, and project_registry_owner_event keeps every owner-setting event for it.';
 COMMENT ON COLUMN project_registry_node_state.owner_position IS
     'This value is the position of that event, apart from the row''s last-write position.';
 COMMENT ON COLUMN project_registry_node_state.owner_resource_id IS
     'This value is that event''s resource.';
+
+CREATE TABLE IF NOT EXISTS project_registry_owner_event (
+    chain_id text NOT NULL,
+    namespace text NOT NULL,
+    node text NOT NULL,
+    block_number bigint NOT NULL,
+    transaction_index bigint,
+    log_index bigint,
+    event_identity text NOT NULL,
+    normalized_event_id bigint,
+    transaction_hash text,
+    logical_name_id text,
+    resource_id uuid,
+    event_kind text NOT NULL,
+    source_family text NOT NULL,
+    authority_kind text,
+    owner text,
+    owner_getter text,
+    owner_getter_reason text,
+    PRIMARY KEY (chain_id, namespace, node, event_identity),
+    CHECK ((transaction_index IS NULL) = (log_index IS NULL))
+);
+COMMENT ON TABLE project_registry_owner_event IS
+    'Project-owned owner-setting registry events of family F2c: every AuthorityTransferred and SubregistryChanged an ENSv1 or Basenames registry reported for a node, keyed by position, with the name, resource, authority kind and owner facts each carried. The node row keeps only the latest owner group, which a SubregistryChanged after a zero-getter transfer replaces; the served ownerless verdict and owner history are recovered from these rows. Unpruned; a row leaves only when undo removes its block. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
+COMMENT ON COLUMN project_registry_owner_event.chain_id IS
+    'This value is the chain.';
+COMMENT ON COLUMN project_registry_owner_event.namespace IS
+    'This value is the namespace.';
+COMMENT ON COLUMN project_registry_owner_event.node IS
+    'This value is the lower-cased node the event addresses: child_node, else node.';
+COMMENT ON COLUMN project_registry_owner_event.block_number IS
+    'This value is the event''s block number.';
+COMMENT ON COLUMN project_registry_owner_event.transaction_index IS
+    'This value is the event''s transaction index; null with log_index for a synthesised event, which sorts before every transaction of its block.';
+COMMENT ON COLUMN project_registry_owner_event.log_index IS
+    'This value is the event''s log index; null with transaction_index for a synthesised event.';
+COMMENT ON COLUMN project_registry_owner_event.event_identity IS
+    'This value is the event identity, the final tiebreak of the canonical event order, compared as bytes.';
+COMMENT ON COLUMN project_registry_owner_event.normalized_event_id IS
+    'This value names the event in normalized_events as attribution only; it never takes part in ordering.';
+COMMENT ON COLUMN project_registry_owner_event.transaction_hash IS
+    'This value is the event''s transaction hash, null for a synthesised event.';
+COMMENT ON COLUMN project_registry_owner_event.logical_name_id IS
+    'This value is the event''s name, null when it carried none.';
+COMMENT ON COLUMN project_registry_owner_event.resource_id IS
+    'This value is the event''s resource.';
+COMMENT ON COLUMN project_registry_owner_event.event_kind IS
+    'This value is AuthorityTransferred or SubregistryChanged.';
+COMMENT ON COLUMN project_registry_owner_event.source_family IS
+    'This value is the registry source family.';
+COMMENT ON COLUMN project_registry_owner_event.authority_kind IS
+    'This value is the after-state authority_kind of the event.';
+COMMENT ON COLUMN project_registry_owner_event.owner IS
+    'This value is the lower-cased owner the event reported.';
+COMMENT ON COLUMN project_registry_owner_event.owner_getter IS
+    'This value is the lower-cased owner_getter of the event.';
+COMMENT ON COLUMN project_registry_owner_event.owner_getter_reason IS
+    'This value is the owner_getter_reason of the event.';
 
 CREATE TABLE IF NOT EXISTS project_registry_binding_observation (
     chain_id text NOT NULL,
