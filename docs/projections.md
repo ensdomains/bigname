@@ -1636,7 +1636,8 @@ gives it. The address-to-name and address-to-record index rows are not kept
 state: after every block and every undo they are derived again for the keys the
 block touched. Resolver classification classifies a resolver at the block that
 changed its candidates, the pointers that name it, its proxy upgrades, a
-discovery edge, address or declaration of it, or the admission epoch, with the
+discovery edge, address or declaration of it, or the [active manifest
+set](glossary.md#active-manifest-set-family-block), with the
 manifests active at that block, the way the served resolver build does.
 
 These tables are shadows today. Nothing reads them, and no served value
@@ -1667,7 +1668,8 @@ before-image of every row it changes and the prior marker to the [family undo
 journal](glossary.md#family-undo-journal) (`project_family_undo`) and advances
 the marker. A block's events are taken once per `event_identity`, which
 `normalized_events` already keeps unique; two deliveries of one identity that
-disagree keep the first in the canonical order and count on
+disagree keep the first in the [canonical event
+order](glossary.md#canonical-event-order) and count on
 `phase_runner_project_family_duplicate_anomalies_total`. A failure stops the
 loop for that batch and leaves the served publication and its progress as they
 were; the next batch catches up from where the marker stands.

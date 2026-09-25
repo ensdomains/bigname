@@ -16,11 +16,12 @@
 //! block. A resolver is classified again when an event of the block names it, when a pointer row
 //! moves to or from it, when a resolver edge, its contract address or a manifest declaration of
 //! it starts or stops at the block, and, every stored resolver, when the block sees another
-//! admission epoch. A resolver with no candidate has no row. One with candidates but no active
+//! active manifest set. A resolver with no candidate has no row. One with candidates but no active
 //! manifest of its family, which the served build leaves out, keeps a row marked unsupported with
 //! `resolver_manifest_not_active`. The row's position is the latest event that named the
-//! resolver, or `activation:<block>` for an activation; an epoch change reclassifies without
-//! moving it, and `admission_manifests` records the epoch the classification was made under.
+//! resolver, or `activation:<block>` for an activation; a manifest set change reclassifies
+//! without moving it, and `admission_manifests` records the key of the set the classification
+//! was made under.
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{Map, Value, json};
