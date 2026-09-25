@@ -734,3 +734,53 @@ async fn a_registry_only_surface_bound_and_transfer_at_one_log_is_a_same_block_d
     );
     fixture.cleanup().await
 }
+
+/// Pro Q1 on ea047c04: F1 keeps one epoch start per arm, the latest, so an older admitted
+/// AuthorityEpochChanged behind a newer one of the same arm that the admission leaves out is
+/// not seen. Name 1's lease gets an epoch at 11 to THIRD; an epoch at 12 on another resource,
+/// which the admission leaves out (authority_events.sql admits a resource-bearing event only on
+/// the selected resource), replaces it in F1. The served control block reads the epoch at 11
+/// (owner THIRD, latest kind AuthorityEpochChanged); the families have no admitted epoch and
+/// serve null for both. This is a step 2 retention dependency, pinned as a mismatch with no
+/// excuse: closing it needs F1 to keep every epoch of an arm, not only the latest.
+#[tokio::test]
+async fn an_older_admitted_epoch_behind_an_excluded_one_is_a_retention_gap() -> Result<()> {
+    let fixture = Fixture::new("families_shadow_registry_older_epoch", 20).await?;
+    let lease = uuid(1);
+    bound(&fixture, &lease).await?;
+    for (block, resource, owner) in [(11, uuid(1), THIRD), (12, uuid(2), OTHER)] {
+        fixture
+            .write(
+                block,
+                1,
+                "AuthorityEpochChanged",
+                V1_REGISTRAR,
+                Some(&name(1)),
+                Some(&resource),
+                json!({"node": node(1), "authority_kind": "registrar", "owner": owner}),
+                REGISTRAR,
+            )
+            .await?;
+    }
+    let report = publish_and_compare(&fixture, 16).await?;
+    let (served, shadow) = shadow_support::name(&fixture, 16, &name(1)).await?;
+    assert_eq!(served.control("registry_owner"), json!(THIRD));
+    assert_eq!(
+        served.control("latest_event_kind"),
+        json!("AuthorityEpochChanged")
+    );
+    assert_eq!(shadow.control["registry_owner"], Value::Null);
+    assert_eq!(shadow.control["latest_event_kind"], Value::Null);
+    assert!(
+        report.expected_delta_fields.is_empty()
+            && report.known_discrepancy.is_empty()
+            && report.mismatched == 1,
+        "{:#?}",
+        report.lines
+    );
+    assert_eq!(
+        failed_fields(&report),
+        ["control/latest_event_kind", "control/registry_owner"]
+    );
+    fixture.cleanup().await
+}
