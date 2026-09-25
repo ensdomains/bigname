@@ -101,7 +101,9 @@ pub(crate) async fn successor_grant(
 /// grant retained before the epoch arrived can already be the lease; `successor_grant` skipped it
 /// then, the candidate not being registry-only yet. The grants from `from` on are replayed in
 /// canonical order, so the latest qualifying one is the lease. This block's own grants reach
-/// `successor_grant` when the lifecycle family runs after identity.
+/// `successor_grant` when the lifecycle family runs after identity. Every retained row with an
+/// original name carries it as its decoded name too (`decode::Candidates::decode` returns the
+/// original first), so the decoded name alone finds them.
 pub(super) async fn retained_grants(
     transaction: &mut Transaction<'_, Postgres>,
     context: &Context<'_>,
@@ -114,7 +116,7 @@ pub(super) async fn retained_grants(
          FROM project_lifecycle_event retained
          WHERE retained.chain_id = $1 AND retained.source_family = 'ens_v1_registrar_l1'
            AND retained.event_kind = 'RegistrationGranted'
-           AND (retained.original_logical_name_id = $2 OR retained.decoded_logical_name_id = $2)
+           AND retained.decoded_logical_name_id = $2
            AND retained.block_number >= $3",
     )
     .bind(context.chain_id)
