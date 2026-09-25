@@ -9,6 +9,7 @@
 // that are unused until then.
 mod addresses;
 mod block;
+mod classification;
 mod decode;
 mod derived;
 mod driver;
@@ -105,8 +106,13 @@ pub async fn undo_to(pool: &PgPool, chain_id: &str, number: i64) -> crate::Resul
         .as_ref()
         .is_some_and(|marker| marker.number > base.number)
     {
-        match undo::undo_block(pool, chain_id, &family, token.project_redo_attempt_generation)
-            .await?
+        match undo::undo_block(
+            pool,
+            chain_id,
+            &family,
+            token.project_redo_attempt_generation,
+        )
+        .await?
         {
             Some(restored) => {
                 family = restored;
@@ -227,8 +233,16 @@ pub async fn apply(
         target: Some(target.clone()),
         ..FamilyOutcome::default()
     };
-    if let Err(error) =
-        driver::run(pool, chain_id, target, &mode, session, options, &mut outcome).await
+    if let Err(error) = driver::run(
+        pool,
+        chain_id,
+        target,
+        &mode,
+        session,
+        options,
+        &mut outcome,
+    )
+    .await
     {
         tracing::warn!(
             target: "bigname_project::families",
@@ -270,7 +284,12 @@ pub async fn apply(
 
 /// The outcome of a run that could not start, for example because the input token did not read
 /// in time: the families stay where they stand and the skip is reported like any other.
-pub async fn skipped(pool: &PgPool, chain_id: &str, target: &Marker, reason: String) -> FamilyOutcome {
+pub async fn skipped(
+    pool: &PgPool,
+    chain_id: &str,
+    target: &Marker,
+    reason: String,
+) -> FamilyOutcome {
     tracing::warn!(
         target: "bigname_project::families",
         chain_id,

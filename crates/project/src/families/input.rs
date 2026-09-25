@@ -249,18 +249,20 @@ pub(crate) fn order(events: &mut Vec<BlockEvent>) -> u64 {
     events.sort_by_cached_key(|event| (event.position.clone(), event.payload_text()));
     let mut anomalies = 0;
     let mut kept = std::collections::HashMap::<String, String>::new();
-    events.retain(|event| match kept.entry(event.position.event_identity.clone()) {
-        std::collections::hash_map::Entry::Occupied(first) => {
-            if *first.get() != event.fingerprint() {
-                anomalies += 1;
+    events.retain(
+        |event| match kept.entry(event.position.event_identity.clone()) {
+            std::collections::hash_map::Entry::Occupied(first) => {
+                if *first.get() != event.fingerprint() {
+                    anomalies += 1;
+                }
+                false
             }
-            false
-        }
-        std::collections::hash_map::Entry::Vacant(slot) => {
-            slot.insert(event.fingerprint());
-            true
-        }
-    });
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                slot.insert(event.fingerprint());
+                true
+            }
+        },
+    );
     anomalies
 }
 
@@ -288,33 +290,65 @@ impl BlockEvent {
     }
 }
 
-/// Blocks in `from..=to` that carry family work, ascending: an activated canonical event. A
-/// rebuild visits only these: a block with no event owns no family fact.
+/// Blocks in `from..=to` that carry family work, ascending: an activated canonical event, or a
+/// resolver activation the F3 classification is pinned to (a resolver edge or its target's
+/// contract address that starts or stops there, or an active manifest declaration whose start
+/// block it is; classification.rs, `activated`). A rebuild visits only these: any other block
+/// owns no family fact.
 pub(crate) async fn work_blocks(
     pool: &sqlx::PgPool,
     chain_id: &str,
     from: i64,
     to: i64,
 ) -> Result<Vec<i64>> {
-    sqlx::query_scalar(
-        "/* project:families.input.work_blocks */ SELECT DISTINCT event.block_number
-         FROM normalized_events event
-         JOIN chain_lineage lineage
-           ON lineage.chain_id = event.chain_id
-          AND lineage.block_number = event.block_number
-          AND lineage.block_hash = event.block_hash
-         WHERE event.chain_id = $1 AND event.block_number BETWEEN $2 AND $3
-           AND event.consumer_visibility = 'activated'
-           AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
-           AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+    sqlx::query_scalar(&format!(
+        "/* project:families.input.work_blocks */ WITH {manifests}
+         SELECT block_number FROM (
+             SELECT event.block_number
+             FROM normalized_events event
+             JOIN chain_lineage lineage
+               ON lineage.chain_id = event.chain_id
+              AND lineage.block_number = event.block_number
+              AND lineage.block_hash = event.block_hash
+             WHERE event.chain_id = $1 AND event.block_number BETWEEN $3 AND $2
+               AND event.consumer_visibility = 'activated'
+               AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
+               AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+             UNION
+             SELECT boundary.block_number
+             FROM discovery_edges edge
+             CROSS JOIN LATERAL (VALUES (edge.active_from_block_number),
+                                        (edge.active_to_block_number)) boundary (block_number)
+             WHERE edge.chain_id = $1 AND edge.edge_kind = 'resolver'
+               AND boundary.block_number BETWEEN $3 AND $2
+             UNION
+             SELECT boundary.block_number
+             FROM discovery_edges edge
+             JOIN contract_instance_addresses address
+               ON address.contract_instance_id = edge.to_contract_instance_id
+              AND address.chain_id = edge.chain_id
+             CROSS JOIN LATERAL (VALUES (address.active_from_block_number),
+                                        (address.active_to_block_number))
+                 boundary (block_number)
+             WHERE edge.chain_id = $1 AND edge.edge_kind = 'resolver'
+               AND boundary.block_number BETWEEN $3 AND $2
+             UNION
+             SELECT (declaration ->> 'start_block')::bigint
+             FROM manifests manifest
+             CROSS JOIN LATERAL jsonb_array_elements(COALESCE(
+                 manifest.manifest_payload -> 'contracts', '[]'::jsonb)) declaration
+             WHERE declaration ->> 'start_block' ~ '^[0-9]+$'
+               AND (declaration ->> 'start_block')::bigint BETWEEN $3 AND $2
+         ) work
          ORDER BY 1",
-    )
+        manifests = super::classification::MANIFESTS,
+    ))
     .bind(chain_id)
-    .bind(from)
     .bind(to)
+    .bind(from)
     .fetch_all(pool)
     .await
-    .map_err(|error| ProjectError::database("failed to list family event blocks", error))
+    .map_err(|error| ProjectError::database("failed to list family work blocks", error))
 }
 
 /// The readable hash of a block, `None` when no readable row exists at that height.
@@ -380,7 +414,8 @@ type TokenRow = (
     Option<String>,
 );
 
-const TOKEN_SQL: &str = "/* project:families.input.input_token */ SELECT interpret.input_content_hash,
+const TOKEN_SQL: &str =
+    "/* project:families.input.input_token */ SELECT interpret.input_content_hash,
         interpret.redo_attempt_generation, interpret.redo_in_progress,
         project.redo_attempt_generation, project.redo_mode,
         project.redo_from_block_number, project.redo_to_block_number, project.last_error
@@ -430,11 +465,14 @@ pub(crate) async fn token_in(
 
 /// The admission epoch: which SourceManifestUpdated event is the latest of every manifest the
 /// chain reads, as one text. Manifest sync writes these events without a chain position, so the
-/// latest per manifest is the latest written, the order stage.rs `create_manifests` uses. A
-/// change means the resolver classifications were made under another declaration epoch.
+/// latest per manifest is the latest written, the order stage.rs `create_manifests` uses, among
+/// the updates at or below block `number` (or with no block) on the readable lineage, as that
+/// statement filters them. A change means the resolver classifications were made under another
+/// declaration epoch.
 pub(crate) async fn admission_epoch(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
+    number: i64,
 ) -> Result<String> {
     sqlx::query_scalar(
         "/* project:families.input.admission_epoch */ SELECT COALESCE(string_agg(
@@ -445,6 +483,9 @@ pub(crate) async fn admission_epoch(
                     event.source_manifest_id AS manifest_id,
                     event.normalized_event_id AS manifest_event_id
              FROM normalized_events event
+             LEFT JOIN chain_lineage lineage
+               ON lineage.chain_id = event.chain_id AND lineage.block_hash = event.block_hash
+              AND lineage.block_number = event.block_number
              WHERE (event.chain_id = $1
                     OR ($1 = 'base-mainnet' AND event.namespace = 'basenames'
                         AND event.source_family = 'basenames_execution'
@@ -452,10 +493,14 @@ pub(crate) async fn admission_epoch(
                AND event.event_kind = 'SourceManifestUpdated'
                AND event.source_manifest_id IS NOT NULL
                AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
+               AND (event.block_hash IS NULL
+                    OR lineage.canonicality_state IN ('canonical', 'safe', 'finalized'))
+               AND (event.block_number IS NULL OR event.block_number <= $2)
              ORDER BY event.source_manifest_id, event.normalized_event_id DESC
          ) latest",
     )
     .bind(chain_id)
+    .bind(number)
     .fetch_one(&mut **transaction)
     .await
     .map_err(|error| ProjectError::database("failed to read the admission epoch", error))

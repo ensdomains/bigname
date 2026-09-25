@@ -47,6 +47,7 @@ pub(crate) async fn apply(
     super::registry::apply(transaction, context, events, rows).await?;
     super::resolver::registry_pointers(transaction, context, events, rows).await?;
     super::resolver::resource_pointers(transaction, context, events, rows).await?;
+    super::classification::apply(transaction, context, events, rows).await?;
     super::records::apply(transaction, context, events, rows).await?;
     super::wrapper::apply(transaction, context, events, rows).await?;
     super::permissions::apply(transaction, context, events, rows).await?;

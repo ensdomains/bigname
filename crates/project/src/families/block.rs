@@ -187,7 +187,7 @@ pub(crate) async fn open(
             )?;
         }
     }
-    let epoch = input::admission_epoch(&mut transaction, chain_id).await?;
+    let epoch = input::admission_epoch(&mut transaction, chain_id, number).await?;
     Ok(Opened {
         transaction,
         prior,
@@ -382,7 +382,11 @@ async fn retention_floor(
     .min())
 }
 
-async fn prune(transaction: &mut Transaction<'_, Postgres>, chain_id: &str, floor: i64) -> Result<()> {
+async fn prune(
+    transaction: &mut Transaction<'_, Postgres>,
+    chain_id: &str,
+    floor: i64,
+) -> Result<()> {
     sqlx::query(
         "/* project:families.block.prune */ DELETE FROM project_family_undo
          WHERE chain_id = $1 AND block_number < $2",
