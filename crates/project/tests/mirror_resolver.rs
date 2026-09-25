@@ -11,6 +11,7 @@ mod family_shadow;
 use anyhow::{Context, Result};
 use bigname_project::{BatchOutcome, BatchRequest, Engine, Marker, RunMode};
 use bigname_test_support::{TestDatabase, TestDatabaseConfig};
+use family_shadow::{Expectations, ExpectedDifference};
 use serde_json::{Value, json};
 use sqlx::{PgPool, raw_sql};
 
@@ -772,7 +773,14 @@ async fn root_registry_tld_without_a_registration_serves_its_pointer() -> Result
         .single_label()
         .unbound()
         .with_v2_lifecycle(lifecycle);
-        let (database, pool) = project(&fixture, fixture.target(), Execution::FromZero).await?;
+        let expected = if lifecycle == V2Lifecycle::Expired {
+            unnamed_clear_withdraws(&[(fixture.target(), 1)])
+        } else {
+            Expectations::none()
+        };
+        let (database, pool) =
+            project_expecting(&fixture, fixture.target(), Execution::FromZero, &expected).await?;
+        expected.finish()?;
         if let Some(name) = name_current(&pool, &logical_name_id).await? {
             assert_eq!(name["serving_resource_id"], Value::Null, "{id}: {name}");
             assert_eq!(
@@ -798,19 +806,48 @@ async fn released_direct_tld_pointer_stays_withdrawn_after_a_name_only_update() 
     fixture.v2_payload = Some(json!({"deployment_epoch": "fixture", "contracts": []}));
 
     for incremental in [false, true] {
+        let target = fixture.target();
+        let expected = if incremental {
+            unnamed_clear_withdraws(
+                &(fixture.base + 2..target)
+                    .map(|block| (block, 1))
+                    .chain([(target, 2)])
+                    .collect::<Vec<_>>(),
+            )
+        } else {
+            unnamed_clear_withdraws(&[(target, 2)])
+        };
         let (database, pool) = database(&format!("direct_tld_rescope_{incremental}")).await?;
         seed(&pool, &fixture).await?;
         sqlx::query("UPDATE normalized_events SET block_number = $1, block_hash = $2 WHERE event_kind = 'PreimageObserved'")
             .bind(fixture.target()).bind(block_hash(fixture.target())).execute(&pool).await?;
         if incremental {
-            run(&pool, fixture.base, 0, fixture.base, None, RunMode::Normal).await?;
+            run_expecting(
+                &pool,
+                fixture.base,
+                0,
+                fixture.base,
+                None,
+                RunMode::Normal,
+                &expected,
+            )
+            .await?;
             let live = name_current(&pool, &logical_name_id)
                 .await?
                 .context("live TLD")?;
             assert_eq!(live["serving_resource_id"], V2_RESOURCE, "{live}");
             assert_eq!(live["declared_summary"]["resolver"]["address"], V1_RESOLVER);
             for block in fixture.base + 1..=fixture.target() {
-                run(&pool, block, block, block, Some(block - 1), RunMode::Normal).await?;
+                run_expecting(
+                    &pool,
+                    block,
+                    block,
+                    block,
+                    Some(block - 1),
+                    RunMode::Normal,
+                    &expected,
+                )
+                .await?;
                 if block >= fixture.base + 2 {
                     let name = name_current(&pool, &logical_name_id)
                         .await?
@@ -828,13 +865,14 @@ async fn released_direct_tld_pointer_stays_withdrawn_after_a_name_only_update() 
                 }
             }
         } else {
-            run(
+            run_expecting(
                 &pool,
                 fixture.target(),
                 0,
                 fixture.target(),
                 None,
                 RunMode::Normal,
+                &expected,
             )
             .await?;
             let name = name_current(&pool, &logical_name_id)
@@ -847,15 +885,17 @@ async fn released_direct_tld_pointer_stays_withdrawn_after_a_name_only_update() 
                 "{name}"
             );
         }
-        run(
+        run_expecting(
             &pool,
             fixture.target(),
             fixture.target(),
             fixture.target(),
             Some(fixture.target()),
             RunMode::Redo,
+            &expected,
         )
         .await?;
+        expected.finish()?;
         let name = name_current(&pool, &logical_name_id)
             .await?
             .context("redo TLD")?;
@@ -1337,55 +1377,104 @@ async fn project(
     target: i64,
     execution: Execution,
 ) -> Result<(TestDatabase, PgPool)> {
+    project_expecting(fixture, target, execution, &Expectations::none()).await
+}
+
+/// [`project`] whose family comparisons expect `expected`.
+async fn project_expecting(
+    fixture: &Fixture,
+    target: i64,
+    execution: Execution,
+    expected: &Expectations,
+) -> Result<(TestDatabase, PgPool)> {
     let (database, pool) = database(&format!("{}_{execution:?}", fixture.id)).await?;
     seed(&pool, fixture).await?;
     let base = fixture.base;
     match execution {
         Execution::FromZero => {
-            run(&pool, target, 0, target, None, RunMode::Normal).await?;
+            run_expecting(&pool, target, 0, target, None, RunMode::Normal, expected).await?;
         }
         Execution::PerBlock => {
-            run(&pool, base, 0, base, None, RunMode::Normal).await?;
+            run_expecting(&pool, base, 0, base, None, RunMode::Normal, expected).await?;
             for block in base + 1..=target {
-                run(&pool, block, block, block, Some(block - 1), RunMode::Normal).await?;
+                run_expecting(
+                    &pool,
+                    block,
+                    block,
+                    block,
+                    Some(block - 1),
+                    RunMode::Normal,
+                    expected,
+                )
+                .await?;
             }
         }
         Execution::TwoByTwo => {
-            run(&pool, base + 1, 0, base + 1, None, RunMode::Normal).await?;
-            run(
+            run_expecting(
+                &pool,
+                base + 1,
+                0,
+                base + 1,
+                None,
+                RunMode::Normal,
+                expected,
+            )
+            .await?;
+            run_expecting(
                 &pool,
                 target,
                 base + 2,
                 target,
                 Some(base + 1),
                 RunMode::Normal,
+                expected,
             )
             .await?;
         }
         Execution::Idempotent => {
-            run(&pool, target - 1, 0, target - 1, None, RunMode::Normal).await?;
-            run(
+            run_expecting(
                 &pool,
-                target,
-                target,
-                target,
-                Some(target - 1),
+                target - 1,
+                0,
+                target - 1,
+                None,
                 RunMode::Normal,
+                expected,
             )
             .await?;
-            run(
+            run_expecting(
                 &pool,
                 target,
                 target,
                 target,
                 Some(target - 1),
                 RunMode::Normal,
+                expected,
+            )
+            .await?;
+            run_expecting(
+                &pool,
+                target,
+                target,
+                target,
+                Some(target - 1),
+                RunMode::Normal,
+                expected,
             )
             .await?;
         }
         Execution::RedoLastBlock => {
-            run(&pool, target, 0, target, None, RunMode::Normal).await?;
-            run(&pool, target, target, target, Some(target), RunMode::Redo).await?;
+            run_expecting(&pool, target, 0, target, None, RunMode::Normal, expected).await?;
+            run_expecting(
+                &pool,
+                target,
+                target,
+                target,
+                Some(target),
+                RunMode::Redo,
+                expected,
+            )
+            .await?;
         }
     }
     let raw_count: i64 = sqlx::query_scalar("SELECT count(*) FROM raw_logs")
@@ -1395,6 +1484,26 @@ async fn project(
     Ok((database, pool))
 }
 
+/// Step 2 keeps in F5 the unnamed pointer clear the interpreter derives beside a root-registry
+/// expiry, so the family read withdraws the TLD token's records at the clear. Today's record
+/// pointers read only named pointer events and keep serving the token through its earlier named
+/// pointer: a semantic difference between F5 and today's serving pointer, not a reader bug.
+/// `counts` are `(target, times)`.
+fn unnamed_clear_withdraws(counts: &[(i64, usize)]) -> Expectations {
+    Expectations {
+        differences: counts
+            .iter()
+            .map(|&(target, times)| ExpectedDifference {
+                target,
+                key: format!("record_inventory {V2_RESOURCE}"),
+                fields: vec![("row".into(), json!(true), json!(false))],
+                times,
+            })
+            .collect(),
+        ..Expectations::none()
+    }
+}
+
 async fn run(
     pool: &PgPool,
     target_block: i64,
@@ -1402,6 +1511,28 @@ async fn run(
     affected_to_block: i64,
     resume_current: Option<i64>,
     mode: RunMode,
+) -> Result<BatchOutcome> {
+    run_expecting(
+        pool,
+        target_block,
+        affected_from_block,
+        affected_to_block,
+        resume_current,
+        mode,
+        &Expectations::none(),
+    )
+    .await
+}
+
+/// [`run`] whose family comparison expects `expected`.
+async fn run_expecting(
+    pool: &PgPool,
+    target_block: i64,
+    affected_from_block: i64,
+    affected_to_block: i64,
+    resume_current: Option<i64>,
+    mode: RunMode,
+    expected: &Expectations,
 ) -> Result<BatchOutcome> {
     let outcome = Engine::new(pool.clone())
         .run_batch(BatchRequest {
@@ -1419,7 +1550,7 @@ async fn run(
     assert!(outcome.complete);
     assert_eq!(outcome.target.number, target_block);
     bounded_attribution::assert_bounded_record_attribution_matches_inventory(pool).await?;
-    family_shadow::assert_family_reads_match(pool, &outcome.current).await?;
+    family_shadow::compare_family_reads_at(pool, &outcome.current, expected).await?;
     Ok(outcome)
 }
 
