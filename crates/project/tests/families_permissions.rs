@@ -371,3 +371,112 @@ async fn an_approval_flag_matches_the_served_boolean_cast() -> Result<()> {
     assert!(mismatches.is_empty(), "{mismatches:#?}");
     fixture.cleanup().await
 }
+
+// The wrapper expiry and fuses are read the way the served builders read them: the expiry as a
+// numeric value from 0 to 2^64 - 1, whatever its spelling (address_names.rs `wrapper_expiries`,
+// children.rs `latest_wrapper_expiries`), and the fuses as a numeric value from 0 to 2^63 - 1
+// cast to bigint (permissions.rs `modifiers`), a cast that rejects a non-integral spelling and
+// so fails the served batch; the family keeps no fuses for such a value.
+#[tokio::test]
+async fn wrapper_numbers_match_the_served_numeric_reads() -> Result<()> {
+    let fixture = Fixture::new("families_wrapper_numbers", 20).await?;
+    let values = [
+        json!(0),
+        json!(1),
+        json!(1.0),
+        json!(1.5),
+        json!(1e3),
+        json!(-1),
+        json!(-0.0),
+        json!(-0.5),
+        json!(2000),
+        json!(4_294_967_295u64),
+        json!(9_223_372_036_854_775_807i64),
+        json!(9_223_372_036_854_775_808u64),
+        json!(18_446_744_073_709_551_615u64),
+        json!(1.8e19),
+        json!(1e20),
+        json!("5"),
+        json!(true),
+        Value::Null,
+    ];
+    let mut expected = Vec::new();
+    for (n, value) in (1..).zip(&values) {
+        let expiry: Option<Value> = sqlx::query_scalar(
+            "SELECT to_jsonb(CASE
+                 WHEN jsonb_typeof(after_state -> 'expiry') = 'number'
+                  AND (after_state ->> 'expiry')::numeric >= 0
+                  AND (after_state ->> 'expiry')::numeric <= 18446744073709551615
+                     THEN (after_state ->> 'expiry')::numeric END)
+             FROM (SELECT jsonb_build_object('expiry', $1::jsonb) AS after_state) event",
+        )
+        .bind(value)
+        .fetch_one(&fixture.pool)
+        .await?;
+        let fuses: std::result::Result<Option<Value>, sqlx::Error> = sqlx::query_scalar(
+            "SELECT to_jsonb(CASE
+                 WHEN jsonb_typeof(after_state -> 'fuses') = 'number'
+                  AND (after_state ->> 'fuses')::numeric >= 0
+                  AND (after_state ->> 'fuses')::numeric <= 9223372036854775807
+                     THEN (after_state ->> 'fuses')::bigint END)
+             FROM (SELECT jsonb_build_object('fuses', $1::jsonb) AS after_state) event",
+        )
+        .bind(value)
+        .fetch_one(&fixture.pool)
+        .await;
+        let expiry = expiry.unwrap_or(Value::Null);
+        let fuses = match fuses {
+            Ok(fuses) => fuses.unwrap_or(Value::Null),
+            Err(sqlx::Error::Database(error)) => {
+                assert_eq!(error.code().as_deref(), Some("22P02"), "{value:?}: {error}");
+                Value::Null
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let resource = uuid(100 + n);
+        fixture
+            .write(
+                10,
+                2 * i64::from(n),
+                "PermissionScopeChanged",
+                "ens_v1_wrapper_l1",
+                None,
+                Some(&resource),
+                json!({"fuses": value, "wrapper_state": "wrapped"}),
+                WRAPPER,
+            )
+            .await?;
+        fixture
+            .write(
+                10,
+                2 * i64::from(n) + 1,
+                "ExpiryChanged",
+                "ens_v1_wrapper_l1",
+                None,
+                Some(&resource),
+                json!({"expiry": value, "source_event": "ExpiryExtended"}),
+                WRAPPER,
+            )
+            .await?;
+        expected.push((resource, value.clone(), fuses, expiry));
+    }
+    fixture.apply(10, FamilyMode::Normal).await;
+    let rows = fixture.rows("project_wrapper_state").await?;
+    let mut mismatches = Vec::new();
+    for (resource, value, fuses, expiry) in expected {
+        let row = rows
+            .iter()
+            .find(|row| row["resource_id"] == json!(resource))
+            .expect("each resource has a wrapper row");
+        let got = (row["fuses"].clone(), row["expiry_seconds"].clone());
+        if got != (fuses.clone(), expiry.clone()) {
+            mismatches.push(format!(
+                "{value}: family {got:?}, served ({fuses}, {expiry})"
+            ));
+        }
+    }
+    assert!(mismatches.is_empty(), "{mismatches:#?}");
+    fixture.assert_undo_restores(10).await?;
+    fixture.assert_rebuild_equal(10).await?;
+    fixture.cleanup().await
+}

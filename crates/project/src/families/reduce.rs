@@ -151,6 +151,29 @@ pub(crate) fn namehash_of(logical_name_id: &str) -> Option<String> {
         .map(|(_, namehash)| namehash.to_ascii_lowercase())
 }
 
+/// A JSON number whose value lies from 0 to `high`, as `jsonb_typeof(value) = 'number' AND
+/// (... ->> field)::numeric BETWEEN 0 AND high` reads it: the value decides, not its spelling, so
+/// `1.0`, `1.5` and `1e3` count as the numbers they are. Numbers arrive as serde numbers without
+/// arbitrary precision, an integer exactly and anything else as the nearest f64; a non-integral
+/// value within 2048 of 2^64 - 1 is indistinguishable from 2^64 and reads as out of range.
+pub(crate) fn json_number_between(value: Option<&Value>, high: u64) -> Option<&serde_json::Number> {
+    let Some(Value::Number(number)) = value else {
+        return None;
+    };
+    let fits = if let Some(integer) = number.as_u64() {
+        integer <= high
+    } else if number.is_i64() {
+        false
+    } else {
+        #[allow(clippy::cast_precision_loss)]
+        let limit = high as f64;
+        number
+            .as_f64()
+            .is_some_and(|float| float >= 0.0 && float < limit)
+    };
+    fits.then_some(number)
+}
+
 /// A JSON value as `(... ->> field)::boolean` reads it: a JSON boolean as itself, a string or a
 /// number through PostgreSQL's boolean input, anything else (null included) as no boolean.
 pub(crate) fn json_boolean(value: &Value) -> Option<bool> {

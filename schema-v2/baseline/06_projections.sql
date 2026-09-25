@@ -1765,11 +1765,11 @@ COMMENT ON COLUMN project_wrapper_state.normalized_event_id IS
 COMMENT ON COLUMN project_wrapper_state.wrapper_state IS
     'This value is wrapped, emancipated or locked from the latest PermissionScopeChanged; null for any other value.';
 COMMENT ON COLUMN project_wrapper_state.fuses IS
-    'This value is that event''s fuses when a JSON number from 0 to 4294967295.';
+    'This value is the fuses of the latest PermissionScopeChanged when a JSON number whose value is an integer from 0 to 9223372036854775807, the range the served modifiers read before casting to bigint (builders/permissions.rs modifiers, address_names.rs scope_modifiers); null otherwise. A non-integral spelling such as 1.0 fails that served cast and the Project batch, so it never reaches a served row.';
 COMMENT ON COLUMN project_wrapper_state.wrapper_state_position IS
     'This value is that PermissionScopeChanged''s position.';
 COMMENT ON COLUMN project_wrapper_state.expiry_seconds IS
-    'This value is the latest wrapper expiry: a JSON number from 0 to 18446744073709551615.';
+    'This value is the latest wrapper expiry when a JSON number whose value is from 0 to 18446744073709551615, compared by value as the served numeric read does (address_names.rs wrapper_expiries, children.rs latest_wrapper_expiries), so 1.0 and 1.5 count as those numbers; null otherwise.';
 COMMENT ON COLUMN project_wrapper_state.expiry_position IS
     'This value is that ExpiryChanged''s position.';
 COMMENT ON COLUMN project_wrapper_state.owner_word_unmasked IS

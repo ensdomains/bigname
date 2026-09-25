@@ -1,10 +1,11 @@
 -- Existing schema-v2 databases gain the owned key family comments (TYR-36
 -- step 2) that cite the adapter lines behind the binding pairing and the
 -- pinned registry lines behind the F5 TLD-expiry clear, in place of the plain
--- statements migrations 101400 and 101500 wrote. Comments only; no column,
--- index or row changes. An empty schema-migration database has no phase
--- baseline yet, so this migration is a no-op there and phase-runner
--- init-schema installs the same comments.
+-- statements migrations 101400 and 101500 wrote, and state the numeric ranges
+-- the F2b wrapper fuses and expiry keep, in place of the 100100 statements.
+-- Comments only; no column, index or row changes. An empty schema-migration
+-- database has no phase baseline yet, so this migration is a no-op there and
+-- phase-runner init-schema installs the same comments.
 DO $migration$
 BEGIN
 IF to_regclass('bigname_phase.name_current') IS NULL THEN
@@ -18,6 +19,14 @@ $ddl$;
 EXECUTE $ddl$
 COMMENT ON COLUMN bigname_phase.project_resource_pointer.resolver_address IS
     'This value is the lower-cased resolver of the latest ResolverChanged on the resource, named or not, clears included. At an ENSv2 root-registry TLD expiry the interpreter emits the resolver clear with no logical name (adapters schema_v2/protocol/v2_registry/expiry.rs); this row keeps that clear, where the served pointer read takes named ResolverChanged only (builders/linked_records.rs, project_record_pointer_latest) and never sees it, so the served inventory keeps a row the name no longer reaches. The pinned registry returns the zero address from getResolver once the token has expired (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L255-L258, L628-L630 @ ens_v2@a971bd64), which this row matches.'
+$ddl$;
+EXECUTE $ddl$
+COMMENT ON COLUMN bigname_phase.project_wrapper_state.fuses IS
+    'This value is the fuses of the latest PermissionScopeChanged when a JSON number whose value is an integer from 0 to 9223372036854775807, the range the served modifiers read before casting to bigint (builders/permissions.rs modifiers, address_names.rs scope_modifiers); null otherwise. A non-integral spelling such as 1.0 fails that served cast and the Project batch, so it never reaches a served row.'
+$ddl$;
+EXECUTE $ddl$
+COMMENT ON COLUMN bigname_phase.project_wrapper_state.expiry_seconds IS
+    'This value is the latest wrapper expiry when a JSON number whose value is from 0 to 18446744073709551615, compared by value as the served numeric read does (address_names.rs wrapper_expiries, children.rs latest_wrapper_expiries), so 1.0 and 1.5 count as those numbers; null otherwise.'
 $ddl$;
 END
 $migration$;
