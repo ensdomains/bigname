@@ -570,6 +570,43 @@ async fn classification_rows_are_compared_in_full() -> Result<()> {
     fixture.cleanup().await
 }
 
+// The declaration fallback reads a manifest's latest update before asking whether it is active,
+// as today's manifest staging does (crates/project/src/stage.rs, `create_manifests`): a manifest
+// whose newest update retires it declares nothing, even though an older update was active.
+#[tokio::test]
+async fn the_declaration_fallback_ignores_a_retired_manifest() -> Result<()> {
+    let mut fixture = Fixture::new("families_shadow_retired_manifest", 12).await?;
+    let retired = address(0xd7);
+    fixture.declare_resolvers(RESOLVER, &[&retired]).await?;
+    fixture.publish(2).await?;
+    sqlx::query(
+        "INSERT INTO normalized_events (event_identity, namespace, event_kind, source_family,
+             manifest_version, source_manifest_id, chain_id, derivation_kind,
+             canonicality_state, after_state)
+         SELECT 'fixture:manifest-retired:' || manifest_id, 'ens', 'SourceManifestUpdated',
+                source_family, 1, manifest_id, chain_id, 'manifest_sync',
+                'canonical'::canonicality_state,
+                jsonb_build_object('rollout_status', 'deprecated', 'normalizer_version',
+                    'fixture', 'manifest_payload', manifest_payload)
+         FROM manifest_versions WHERE chain_id = $1 AND source_family = $2",
+    )
+    .bind(CHAIN)
+    .bind(RESOLVER)
+    .execute(fixture.pool())
+    .await?;
+    sqlx::query(
+        "DELETE FROM project_resolver_classification
+         WHERE chain_id = $1 AND resolver_address = $2",
+    )
+    .bind(CHAIN)
+    .bind(&retired)
+    .execute(fixture.pool())
+    .await?;
+    let fallback = load_resolver_shadow(fixture.pool(), CHAIN, &retired).await?;
+    ensure!(fallback.is_none(), "{fallback:?}");
+    fixture.cleanup().await
+}
+
 // A grant whose resource stops being readable leaves `/roles`: today's statement applies the
 // permissions read filter, whose resource and lineage predicates drop it, and the shadow must too.
 #[tokio::test]
