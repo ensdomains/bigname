@@ -5443,13 +5443,12 @@ const SERVED_FIELDS: &str = "SELECT jsonb_build_object(
         'resolver', declared_summary -> 'resolver')
     FROM name_current WHERE logical_name_id = $1";
 
-/// Projects `chain` as resumed batches at `targets` and returns the fields `name` serves.
-async fn served_after_resumed_batches(
+/// Projects `chain` as resumed batches at `targets` and returns the last Project marker.
+async fn project_resumed_batches(
     pool: &PgPool,
     chain: &str,
     targets: &[i64],
-    name: &str,
-) -> Result<Value> {
+) -> Result<bigname_project::Marker> {
     let engine = ProjectEngine::new(pool.clone());
     let mut previous: Option<bigname_project::Marker> = None;
     for &target in targets {
@@ -5466,6 +5465,17 @@ async fn served_after_resumed_batches(
         assert!(outcome.complete);
         previous = Some(outcome.current);
     }
+    previous.context("no target")
+}
+
+/// Projects `chain` as resumed batches at `targets` and returns the fields `name` serves.
+async fn served_after_resumed_batches(
+    pool: &PgPool,
+    chain: &str,
+    targets: &[i64],
+    name: &str,
+) -> Result<Value> {
+    project_resumed_batches(pool, chain, targets).await?;
     Ok(sqlx::query_scalar(SERVED_FIELDS)
         .bind(name)
         .fetch_one(pool)
@@ -5874,6 +5884,172 @@ async fn a_detached_renewal_gives_the_released_tombstone_its_lapsed_expiry() -> 
         "{served}"
     );
     Ok(())
+}
+
+// A reorg that retracts the detached child's lapse (adversarial review of 56825409, F1). The child
+// is registered with expiry 3 and its path is cut in block 1, so Interpret releases it by name
+// there and writes its lapse at block 3 on its resource without a name. Project follows to block 3
+// and serves that lapse. A reorg then replaces blocks 2 and 3 with a fork where the child registry
+// renews the detached token to 100 in block 2, so nothing lapses at block 3. Interpret's redo
+// deletes the lapse and keeps its resource for Project. The Project redo brings the name back in
+// through its closed ENSv2 binding on that resource and serves what a full rebuild serves: the
+// release by name at the path cut, not the retracted lapse's 3 and 3.
+// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L255-L258 @ ens_v2@a971bd64)
+#[tokio::test]
+async fn a_reorg_that_retracts_a_detached_lapse_rebuilds_the_name() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_interpret_detached_lapse_reorg").await?;
+    let chain = "interpret-detached-lapse-reorg";
+    let pool = scratch.pool();
+    detached_child_fixture(pool, chain, 3, None, 3).await?;
+    let (leaf, resource): (String, Uuid) = sqlx::query_as(
+        "SELECT logical_name_id, resource_id FROM normalized_events
+         WHERE chain_id = $1 AND event_kind = 'RegistrationReleased'
+           AND logical_name_id IS NOT NULL",
+    )
+    .bind(chain)
+    .fetch_one(pool)
+    .await?;
+    project_resumed_batches(pool, chain, &[1, 2, 3]).await?;
+    let lapsed: Value = sqlx::query_scalar(SERVED_FIELDS)
+        .bind(&leaf)
+        .fetch_one(pool)
+        .await?;
+    assert_eq!(
+        (
+            lapsed["registration"]["released_at"].as_i64(),
+            lapsed["registration"]["expiry"].as_i64(),
+        ),
+        (Some(3), Some(3)),
+        "{lapsed}"
+    );
+
+    let mut reorg = pool.begin().await?;
+    sqlx::query(
+        "UPDATE chain_lineage SET canonicality_state = 'orphaned'
+         WHERE chain_id = $1 AND block_number IN (2, 3)",
+    )
+    .bind(chain)
+    .execute(&mut *reorg)
+    .await?;
+    sqlx::query(
+        "WITH fork(block_hash, parent_hash, block_number) AS (
+             VALUES ($2, $3, 2), ($4, $2, 3)
+         ) INSERT INTO chain_lineage (chain_id, block_hash, parent_hash, block_number,
+             block_timestamp, canonicality_state)
+         SELECT $1, block_hash, parent_hash, block_number, to_timestamp(block_number),
+                'canonical'
+         FROM fork",
+    )
+    .bind(chain)
+    .bind(format!("{chain}-fork-2"))
+    .bind(block_hash(chain, 1))
+    .bind(format!("{chain}-fork-3"))
+    .execute(&mut *reorg)
+    .await?;
+    let renewed = v2_registry_events::ExpiryUpdated {
+        tokenId: versioned_token("leaf", 1),
+        newExpiry: 100,
+        sender: SENDER.parse()?,
+    }
+    .encode_log_data();
+    sqlx::query(
+        "INSERT INTO raw_transactions (
+             chain_id, block_hash, block_number, transaction_hash,
+             transaction_index, from_address, to_address
+         ) VALUES ($1, $2, 2, $3, 0, $4, $5)",
+    )
+    .bind(chain)
+    .bind(format!("{chain}-fork-2"))
+    .bind(format!("{chain}-fork-transaction-2"))
+    .bind(SENDER)
+    .bind(ANNOUNCED_REGISTRY)
+    .execute(&mut *reorg)
+    .await?;
+    sqlx::query(
+        "INSERT INTO raw_logs (
+             chain_id, block_hash, block_number, transaction_hash, transaction_index,
+             log_index, emitting_address, topics, data
+         )
+         VALUES ($1, $2, 2, $3, 0, 0, $4, $5, $6)",
+    )
+    .bind(chain)
+    .bind(format!("{chain}-fork-2"))
+    .bind(format!("{chain}-fork-transaction-2"))
+    .bind(ANNOUNCED_REGISTRY)
+    .bind(
+        renewed
+            .topics()
+            .iter()
+            .map(|topic| format!("{topic:#x}"))
+            .collect::<Vec<_>>(),
+    )
+    .bind(renewed.data.to_vec())
+    .execute(&mut *reorg)
+    .await?;
+    reorg.commit().await?;
+    run_engine(pool, chain, 2, 3, InterpretRunMode::Redo).await?;
+    let kept: Vec<(Option<String>, Option<Uuid>)> = sqlx::query_as(
+        "SELECT logical_name_id, resource_id FROM project_redo_expiry_roots WHERE chain_id = $1",
+    )
+    .bind(chain)
+    .fetch_all(pool)
+    .await?;
+    assert_eq!(
+        kept,
+        [(None, Some(resource))],
+        "Interpret keeps only the retracted lapse's resource for Project"
+    );
+
+    let redone = ProjectEngine::new(pool.clone())
+        .run_batch(ProjectBatchRequest {
+            chain_id: chain.to_owned(),
+            target_block: 3,
+            affected_from_block: 2,
+            affected_to_block: 3,
+            // A reorg rewinds every phase to the common ancestor, block 1.
+            resume_current: Some(bigname_project::Marker {
+                number: 1,
+                hash: block_hash(chain, 1),
+            }),
+            mode: ProjectRunMode::Redo,
+        })
+        .await?;
+    assert!(redone.complete);
+    let redone: Value = sqlx::query_scalar(SERVED_FIELDS)
+        .bind(&leaf)
+        .fetch_one(pool)
+        .await?;
+    let rebuilt = served_after_one_batch(pool, chain, 3, &leaf).await?;
+    assert_eq!(
+        rebuilt, redone,
+        "the Project redo and a full rebuild serve the same fields"
+    );
+    let binding: Uuid = sqlx::query_scalar(
+        "SELECT surface_binding_id FROM surface_bindings
+         WHERE chain_id = $1 AND logical_name_id = $2 AND authority_arm = 'ens_v2'",
+    )
+    .bind(chain)
+    .bind(&leaf)
+    .fetch_one(pool)
+    .await?;
+    let (resource, binding) = (resource.to_string(), binding.to_string());
+    // The name is back to the release by name at the path cut in block 1, which carries neither a
+    // release time nor an expiry.
+    assert_eq!(
+        detached_child_served(&redone),
+        (
+            Some("ens_v2"),
+            Some("unregistered"),
+            Some(resource.as_str()),
+            Some(binding.as_str()),
+            Some("released"),
+            Some("unregistered"),
+            None,
+            None,
+        ),
+        "{redone}"
+    );
+    scratch.cleanup().await
 }
 
 #[tokio::test]

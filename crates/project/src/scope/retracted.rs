@@ -22,6 +22,14 @@ pub(super) async fn seed(
         target_block,
     )
     .await?;
+    super::v2_release_names::include_names_bound_to_retracted_releases(
+        transaction,
+        chain_id,
+        window.from_block,
+        window.to_block,
+        target_block,
+    )
+    .await?;
     seed_children(transaction, chain_id).await?;
     seed_child_registration_history(transaction, chain_id, window.from_block, window.to_block)
         .await?;
