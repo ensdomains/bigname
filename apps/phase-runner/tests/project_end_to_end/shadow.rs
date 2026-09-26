@@ -305,7 +305,10 @@ async fn children(
     report: &mut Report,
 ) -> Result<()> {
     let parents: Vec<String> = sqlx::query_scalar(
-        "SELECT parent_logical_name_id FROM children_current
+        "SELECT current.parent_logical_name_id FROM children_current current
+         JOIN name_surfaces parent_surface
+           ON parent_surface.logical_name_id = current.parent_logical_name_id
+         WHERE parent_surface.chain_id = $1
          UNION
          SELECT surface.logical_name_id FROM project_child_edge_candidate edge
          JOIN name_surfaces surface
@@ -385,8 +388,10 @@ const TOPOLOGY_KINDS: [&str; 2] = ["resolver_alias_path", "observed_wildcard_pat
 async fn topology(pool: &PgPool, chain: &str, report: &mut Report) -> Result<()> {
     let names: Vec<(String, Option<Value>, bool)> = sqlx::query_as(
         "SELECT nc.logical_name_id, nc.declared_summary -> 'topology',
-                nc.binding_kind = ANY($2)
+                COALESCE(nc.binding_kind = ANY($2), false)
          FROM name_current nc
+         JOIN name_surfaces surface
+           ON surface.logical_name_id = nc.logical_name_id AND surface.chain_id = $1
          WHERE nc.binding_kind = ANY($2)
             OR nc.logical_name_id IN (
                 SELECT logical_name_id FROM project_name_alias WHERE chain_id = $1
