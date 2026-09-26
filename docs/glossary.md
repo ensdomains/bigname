@@ -2548,10 +2548,12 @@ batch it is the adapter's write order. Between batches at one log it is not,
 and that order is a disclosed precondition: no two batches of one source are
 known to write one family key, and where batches of two sources write one key
 from one log, the fact with the higher ordinal (then the higher identity
-bytes) wins, not the one inserted last. Its one known instance is the
+bytes) wins, not the one inserted last. Its one confirmed instance is the
 NameWrapped registry-node pointer, where the resolver value agrees with the
-served read and only the resource, source family and event attribution differ
-([projections](projections.md#owned-key-families)); that bound is not a
+served read and only the resource, source family and event attribution differ;
+a registrar `NameRegistered` that promotes a pre-surface registry authority
+and moves the authority is an unconfirmed second shape
+([projections](projections.md#owned-key-families)). That bound is not a
 general exemption for cross-source value differences. A
 served reader ported to the canonical event order (step 7) must parse the
 ordinal the same way. Only when both indexes are present, match

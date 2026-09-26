@@ -1756,22 +1756,45 @@ write order; a source can carry several batches at one log, none of which is
 known to write one family key twice. Between batches the comparator's order
 is a disclosed precondition, not the adapter's write order: where batches of
 two sources write one key from one log, the fact with the higher ordinal
-(then the higher identity bytes) wins, not the one inserted last. The one known instance is a
-NameWrapped log, which writes the registry-node pointer from the wrapper
-(ordinal 4 or 5, depending on whether a SurfaceBound was emitted) and from the
-registry-read surface materialization (ordinal 0) with the same resolver: the
-families keep the wrapper row, the name's authority after NameWrapped, while
-the served read's generated-id tie-break keeps the registry row, so the
-resolver value agrees while the resource, source family and event attribution
-differ (`families_ordering.rs`, `name_wrapped_pointer_keeps_the_wrapper_row`,
-and `mirror_resolver/name_wrapped_sources.rs`, which drives the real adapter and
-the served mirror selector). The exemption is bounded to that value-equal pair; it is not
-a general exemption for cross-source value differences. A registrar log's registry-read
-materialization never meets a registrar `ResolverChanged` at the same log,
-because it arises only when the registrar event leaves the name's authority
-where it was. The served builders break the same ties by generated id today;
-the step that ports a served reader to the families (step 7) must use this
-rule with the SQL parse the glossary gives, which checks the digits before it casts.
+(then the higher identity bytes) wins, not the one inserted last. One
+instance is confirmed: a NameWrapped log writes the registry-node pointer from
+the wrapper (ordinal 4 or 5, depending on whether a SurfaceBound was emitted)
+and from the registry-read surface materialization (ordinal 0) with the same
+resolver. The families keep the wrapper row, the name's authority after
+NameWrapped, while the served read's generated-id tie-break keeps the registry
+row, so the resolver value agrees while the resource, source family and event
+attribution differ (`families_ordering.rs`,
+`name_wrapped_pointer_keeps_the_wrapper_row`, and
+`mirror_resolver/name_wrapped_sources.rs`, which drives the real adapter and
+the served mirror selector). One shape is unconfirmed: a registrar
+`NameRegistered` that promotes a pre-surface registry authority (the
+registry-authority surface materialization) and also moves the name's
+authority to the registrar would write the pointer from the registrar
+(`ResolverChanged:authority`) and from the sourced materialization at ordinal
+1 (`crates/adapters/src/schema_v2/protocol/v1/registrar.rs:452-460`,
+`:543-566`; `authority_transition.rs:215-285`); no adapter run has produced it
+yet. The exemption is bounded to value-equal pairs of this kind; it is not a
+general exemption for cross-source value differences. A registrar log's
+registry-read materialization never meets a registrar `ResolverChanged` at the
+same log, because it arises only when the registrar event leaves the name's
+authority where it was.
+
+The served builders do not share one tie-break at a log. Most selectors break
+it by `normalized_event_id DESC`, the insertion order, which agrees with the
+ordinal inside one batch and favours a sourced batch across batches. The
+children builder (`crates/project/src/builders/children.rs:41, 72, 160, 182,
+217, 356, 507`), the name-authority stage
+(`crates/project/src/builders/name_authority/stage.rs:231, 259, 323, 382`)
+and the name topology builder (`name_topology.rs:541, 578`) break it by
+`event_identity`, the old byte rule. The served binding choice
+(`name_authority/build.sql:53-60, 558-561, 745-752`; `stage.rs:78-81`) takes
+`surface_binding_id DESC` and ignores event order. Insertion order equals
+emission order only because Interpret writes a batch in list order
+(`crates/interpret/src/write/normalized.rs:43`), and a replayed identity keeps
+its old id, so a generated-id tie-break is not stable across replay; the
+families' rule does not use generated ids. The step that ports a served reader
+to the families (step 7) must use this rule with the SQL parse the glossary
+gives, which checks the digits before it casts.
 
 Undo rows are kept back to the lowest of: 256 blocks below the family marker,
 the chain's finalized block, its safe block, and the block an active repair
