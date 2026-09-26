@@ -817,11 +817,23 @@
                        'manifest_version', event.manifest_version
                    ) ORDER BY event.normalized_event_id) AS manifest_versions,
                    max(event.manifest_version) AS manifest_version
-            FROM project_events event
-            -- The release that decided a released ENSv2 tombstone can carry no name; it is cited
-            -- too, so a redo that retracts it rebuilds the name.
-            WHERE event.logical_name_id = surface.logical_name_id
-               OR event.normalized_event_id = selected_authority.released_v2_event_id
+            FROM (
+                SELECT named.normalized_event_id, named.raw_fact_ref, named.source_manifest_id,
+                       named.source_family, named.manifest_version
+                FROM project_events named
+                WHERE named.logical_name_id = surface.logical_name_id
+                UNION ALL
+                -- The release that decided a released ENSv2 tombstone can carry no name, on the
+                -- tombstone's resource. It is cited too, so a redo that retracts it rebuilds the
+                -- name. It is read by resource and event id, which the staged events index.
+                SELECT deciding.normalized_event_id, deciding.raw_fact_ref,
+                       deciding.source_manifest_id, deciding.source_family,
+                       deciding.manifest_version
+                FROM project_events deciding
+                WHERE deciding.resource_id = selected_authority.released_v2_resource_id
+                  AND deciding.normalized_event_id = selected_authority.released_v2_event_id
+                  AND deciding.logical_name_id IS NULL
+            ) event
         ) evidence ON TRUE
         LEFT JOIN LATERAL (
             SELECT COALESCE(bool_or(
