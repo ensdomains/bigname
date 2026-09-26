@@ -7,9 +7,10 @@
 //! rows instead of the served tables, so the harness can compare the two field by field. Every
 //! production response is still served from today's tables; nothing outside the harness calls
 //! these readers. Events are ordered in the canonical event order of the families (block number,
-//! transaction index, log index, then the event identity as bytes, with a synthesised event's
-//! missing positions first), so a same-position tie can resolve differently from today's readers,
-//! which break it by the generated event id.
+//! transaction index, log index, then the emission ordinal when both indexes are present, then
+//! the event identity as bytes, with a synthesised event's missing positions first; see
+//! `FamilyPosition`), so a same-position tie can resolve differently from today's readers, which
+//! break it by the generated event id.
 mod assemble;
 mod candidates;
 mod compare;
@@ -25,6 +26,8 @@ mod reverse;
 mod rows;
 mod serving;
 mod shadow;
+
+use std::cmp::Ordering;
 
 use serde_json::Value;
 use sqlx::{Row, postgres::PgRow};
@@ -62,10 +65,13 @@ pub(crate) fn is_cleared(address: Option<&str>) -> bool {
     address.is_none_or(|address| address.is_empty() || address == ZERO_ADDRESS)
 }
 
-/// A position in the canonical event order. The derived ordering compares block number,
-/// transaction index and log index with a missing index first, then the event identity by its
-/// bytes.
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+/// A position in the canonical event order (D12 as amended on 2026-09-26; the project crate's
+/// families/position.rs): block number, transaction index, log index, then, when the event has
+/// both a transaction and a log index, the emission ordinal its identity ends with, then the
+/// event identity by its bytes. `None` sorts first at each step. Equality is field equality;
+/// the order ends with the full identity, so two positions compare equal exactly when they are
+/// equal.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FamilyPosition {
     pub block_number: i64,
     pub transaction_index: Option<i64>,
@@ -93,4 +99,43 @@ impl FamilyPosition {
             event_identity: row.try_get("event_identity")?,
         })
     }
+
+    /// The emission ordinal, as the project crate's `families::emission_ordinal` reads it
+    /// (docs/glossary.md, "Emission ordinal"): the identity's final `:`-separated segment when
+    /// the event has a transaction and a log index and that segment is a nonempty run of ASCII
+    /// digits no greater than `u32::MAX` (leading zeros allowed). Boundary facts and
+    /// family-internal identities have none. A copy, since storage does not depend on project.
+    pub fn emission_ordinal(&self) -> Option<u32> {
+        self.transaction_index?;
+        self.log_index?;
+        let (_, tail) = self.event_identity.rsplit_once(':')?;
+        if tail.is_empty() || !tail.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        tail.parse().ok()
+    }
 }
+
+impl Ord for FamilyPosition {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.block_number
+            .cmp(&other.block_number)
+            .then_with(|| self.transaction_index.cmp(&other.transaction_index))
+            .then_with(|| self.log_index.cmp(&other.log_index))
+            .then_with(|| self.emission_ordinal().cmp(&other.emission_ordinal()))
+            .then_with(|| {
+                self.event_identity
+                    .as_bytes()
+                    .cmp(other.event_identity.as_bytes())
+            })
+    }
+}
+
+impl PartialOrd for FamilyPosition {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+#[cfg(test)]
+mod position_tests;

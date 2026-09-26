@@ -205,7 +205,7 @@ async fn nearest(
         ));
         labels.push(Value::from(raw_labels[depth..].to_vec()));
     }
-    let rows = sqlx::query(
+    let walk = format!(
         "SELECT walk.ancestor_depth, registry.node, surface.raw_name, registry.resource_id::text
                     AS resource_id,
                 registry.resolver_address, registry.normalized_event_id, registry.source_family,
@@ -218,18 +218,18 @@ async fn nearest(
          JOIN bigname_phase.project_registry_pointer registry
            ON registry.chain_id = $1 AND registry.namespace = surface.namespace
           AND registry.node = walk.node
-         ORDER BY walk.ancestor_depth ASC, registry.block_number DESC,
-                  registry.transaction_index DESC NULLS LAST, registry.log_index DESC NULLS LAST,
-                  registry.event_identity COLLATE \"C\" DESC",
-    )
-    .bind(chain_id)
-    .bind(&namespace)
-    .bind(&depths)
-    .bind(&nodes)
-    .bind(&labels)
-    .fetch_all(pool)
-    .await
-    .context("failed to walk the ENSv1 registry pointers of a mirror pointer")?;
+         ORDER BY walk.ancestor_depth ASC, {}",
+        latest_registry_first("registry")
+    );
+    let rows = sqlx::query(&walk)
+        .bind(chain_id)
+        .bind(&namespace)
+        .bind(&depths)
+        .bind(&nodes)
+        .bind(&labels)
+        .fetch_all(pool)
+        .await
+        .context("failed to walk the ENSv1 registry pointers of a mirror pointer")?;
     for row in rows {
         let resolver: String = row.try_get("resolver_address")?;
         if is_cleared(Some(&resolver)) {
@@ -250,6 +250,43 @@ async fn nearest(
         }));
     }
     Ok(None)
+}
+
+/// The canonical event order, latest first, over the position columns of `alias`, a
+/// `project_registry_pointer` row: block, transaction and log (absent last), the emission ordinal
+/// (absent last), then identity bytes, as `FamilyPosition` orders. Today it cannot decide a walk:
+/// the table's key is (chain_id, namespace, node), so every row at one depth is the same pointer
+/// row. It is kept so the walk states the same order as every other family comparison.
+fn latest_registry_first(alias: &str) -> String {
+    format!(
+        "{alias}.block_number DESC, {alias}.transaction_index DESC NULLS LAST,
+         {alias}.log_index DESC NULLS LAST, {} DESC, {alias}.event_identity COLLATE \"C\" DESC",
+        emission_ordinal(
+            &format!("{alias}.event_identity"),
+            &format!("{alias}.transaction_index"),
+            &format!("{alias}.log_index"),
+        )
+    )
+}
+
+/// The emission ordinal of the identity expression `identity` (docs/glossary.md, "Emission
+/// ordinal"), in the checked SQL form step 2 gives it (crates/project/tests/families_ordinal_sql.rs,
+/// checked there against the Rust parse; copied from PR 954's families/topology/shims.rs): strip
+/// leading zeros, check the significant length against the ten-digit bound, and only then cast,
+/// so no suffix errors where the Rust parse yields none. Absent is -1 rather than null so the row
+/// value stays decisive; every valid ordinal is at least 0, so -1 sorts last under `DESC`.
+fn emission_ordinal(identity: &str, transaction: &str, log: &str) -> String {
+    format!(
+        "COALESCE(CASE WHEN {transaction} IS NOT NULL AND {log} IS NOT NULL THEN (
+            SELECT CASE WHEN digits.d = '' THEN 0::bigint
+                        WHEN length(digits.d) < 10
+                          OR (length(digits.d) = 10
+                              AND digits.d COLLATE \"C\" <= '4294967295' COLLATE \"C\")
+                            THEN digits.d::bigint END
+            FROM (SELECT ltrim(m[1], '0') AS d
+                  FROM regexp_match(({identity}) COLLATE \"C\", ':([0-9]+)$') m) digits
+        ) END, -1::bigint)"
+    )
 }
 
 /// The forwarding mode and the stopping rules of the mirror selection.
@@ -314,3 +351,7 @@ fn suffix_namehash(raw_labels: &[String], labelhashes: &[String]) -> String {
         });
     format!("{node:#x}")
 }
+
+#[cfg(test)]
+#[path = "mirror_tests.rs"]
+mod tests;
