@@ -2,7 +2,9 @@
 //! transaction index, log index, the emission ordinal when both indexes are present, then the
 //! identity bytes (docs/glossary.md, "Canonical event order"). Each case is a pair of events at
 //! one position, earlier then later, checked with the composite greater-than both ways and with
-//! a descending selection, over the row columns and over the same position stored as JSON.
+//! a descending selection, over the row columns and over the same position stored as JSON. One
+//! more label holds three events at one position, ordinals 2 and 10 and none, checked in full
+//! ascending order and by a descending selection.
 use anyhow::{Result, ensure};
 use bigname_test_support::{TestDatabase, TestDatabaseConfig};
 use sqlx::PgPool;
@@ -71,6 +73,18 @@ async fn install(pool: &PgPool) -> Result<()> {
     )
     .execute(pool)
     .await?;
+    // Three events at one log: bytes would order them e:10, e:2, zzz; the ordinal orders them
+    // zzz (none), e:2, e:10.
+    sqlx::raw_sql(
+        "CREATE TABLE event_triple AS
+         SELECT 'triple'::text AS label, 1::bigint AS block_number,
+                0::bigint AS transaction_index, 5::bigint AS log_index, identity AS event_identity,
+                jsonb_build_object('block_number', 1, 'transaction_index', 0, 'log_index', 5,
+                                   'event_identity', identity) AS position
+         FROM unnest(ARRAY['e:10', 'e:2', 'zzz']) identity",
+    )
+    .execute(pool)
+    .await?;
     for (label, earlier, later, transaction, log) in cases() {
         for (is_later, identity) in [(false, earlier), (true, later)] {
             sqlx::query(
@@ -95,7 +109,7 @@ async fn install(pool: &PgPool) -> Result<()> {
 async fn check(pool: &PgPool, a: &str, b: &str, e: &str) -> Result<()> {
     let wrong: Vec<String> = sqlx::query_scalar(&format!(
         "SELECT a.label FROM event_position a JOIN event_position b ON b.label = a.label
-         WHERE a.later AND NOT b.later AND NOT ({a} > {b} AND NOT {b} > {a})
+         WHERE a.later AND NOT b.later AND ({a} > {b} AND NOT {b} > {a}) IS NOT TRUE
          ORDER BY a.label"
     ))
     .fetch_all(pool)
@@ -113,6 +127,22 @@ async fn check(pool: &PgPool, a: &str, b: &str, e: &str) -> Result<()> {
         wrong.is_empty() && descending.is_empty(),
         "greater-than failed for {wrong:?}; descending selection failed for {descending:?}"
     );
+    let ascending: Option<String> = sqlx::query_scalar(&format!(
+        "SELECT string_agg(e.event_identity, ',' ORDER BY {e}) FROM event_triple e"
+    ))
+    .fetch_one(pool)
+    .await?;
+    ensure!(
+        ascending.as_deref() == Some("zzz,e:2,e:10"),
+        "ascending triple {ascending:?}"
+    );
+    let latest: Vec<String> = sqlx::query_scalar(&format!(
+        "SELECT DISTINCT ON (e.label) e.event_identity FROM event_triple e
+         ORDER BY e.label, {e} DESC"
+    ))
+    .fetch_all(pool)
+    .await?;
+    ensure!(latest == ["e:10"], "descending triple {latest:?}");
     Ok(())
 }
 
