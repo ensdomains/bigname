@@ -2038,22 +2038,44 @@ field and the checks above see it, the field stays a mismatch and fails the run
 until the owning reducer is fixed.
 
 Under Tate's ruling an expired or released ENSv2 registration stays ENSv2 and
-is served unregistered. Three served-side bugs break that rule today, and the
-harness can see the first two:
+is served unregistered. Before step 6 (`main` at `de24ff32`) three served-side
+bugs broke that rule. Step 6 fixed the third and narrowed the first; the second
+remains. The harness reports what remains under two named causes:
 
-- When the interpreter's path-expiry release names only the token resource, the
-  current reader never sees it and serves the registration as active. The
-  families serve it as released. The run prints the names it finds in this shape.
-- When a name has no selected authority arm, the selection reads the missing
-  arm as ENSv2 and can select an ENSv2 release, but the presentation compares
-  the raw arm with ENSv2 and serves that release as live. The families decide
-  both with one resolved arm and serve it released.
-- When the interpreter knows the name, it also closes the ENSv2 binding at expiry.
-  If the name has an open ENSv1 lease, the served name authority then selects arm
-  ens_v1 and serves that lease. The shadow reads take the authority selection from
-  the served row as input, because the selection belongs to plan step 6. They
-  follow it and agree, so nothing is counted. A fixture pins the served arm, and
-  step 6 has to fix it.
+- Narrowed by step 6. When the interpreter's path-expiry release names only the
+  token resource, today's registration fold reads the name's own lifecycle rows
+  (name_current/build.sql:322, :383-389) and never sees it. Once the name's
+  ENSv2 binding is closed, the release can be the deciding fact of a released
+  tombstone (name_authority/build.sql:246-271), and `name_current` serves that
+  fact on the tombstone's resource (name_current/build.sql:349-364); both sides
+  then serve it released and the fields are equal. With the binding still open,
+  the fold serves the registration as active and the families serve it as
+  released. The harness counts that under
+  `served_membership_skips_unnamed_path_expiry`, which now covers only an open
+  binding. It includes `registration/expiry`: the families present the
+  release's own expiry (name_current/build.sql:45-49) where today's fold serves
+  the name's expiry rows, and the field is counted only where the two differ.
+  The run prints the names it finds in this shape.
+- Not fixed by step 6. The selection leaves a name with no authority arm when
+  no rule of name_authority/build.sql:440-450 applies, as for a name with ENSv2
+  and Basenames history, nothing open and no released ENSv2 tombstone. The
+  registration selection reads the missing arm as ENSv2
+  (name_current/build.sql:362) and can select an ENSv2 release, but the
+  presentation compares the raw arm with ENSv2 (name_current/build.sql:99,
+  :104, :113), so it keeps the release's expiry and does not close the control
+  block. The families decide both with one resolved arm and serve it released.
+  The harness counts this under `served_release_presentation_reads_the_raw_arm`,
+  and the fixture
+  `a_release_with_no_selected_arm_is_presented_as_an_ensv2_release` pins it.
+- Fixed by step 6. When the interpreter knows the name, it also closes the
+  ENSv2 binding at expiry. If the name had an open ENSv1 lease, the served name
+  authority used to select arm ens_v1 and serve that lease, and the shadow
+  reads, which take the authority selection from the served row as input,
+  agreed. Step 6 selects ENSv2 for a released tombstone before any ENSv1
+  binding is considered (name_authority/build.sql:443, :246-271). The fixture
+  `a_real_path_expiry_with_an_ensv1_lease_stays_released_under_ensv2` now pins
+  both sides at arm ens_v2, registration released and control unregistered,
+  and nothing is counted.
 
 The comparison covers the fields the readers list. It leaves out `created_at`,
 the lapsed registration's authority, the child rows and the whole-history

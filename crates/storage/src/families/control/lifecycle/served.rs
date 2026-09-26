@@ -27,7 +27,7 @@ pub(super) struct Tagged<'a> {
     pub(super) event: &'a LifecycleEvent,
     pub(super) staged: StagedName,
     pub(super) admitted: bool,
-    /// The ENSv2 lifecycle key (v2_lifecycle_events.sql:10-23), for an ENSv2-family event.
+    /// The ENSv2 lifecycle key (v2_lifecycle_events.sql:13-27), for an ENSv2-family event.
     pub(super) key: Option<String>,
 }
 
@@ -237,7 +237,7 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> ShadowName {
     );
 
     // The summary laterals' input: the name's admitted events, restricted to the selected
-    // lifecycle key for an ENSv2 selection (build.sql:386, :397, :448, :507, :642, :666).
+    // lifecycle key for an ENSv2 selection (build.sql:404, :415, :466, :525, :660, :684).
     let in_scope: Vec<&Tagged<'_>> = tagged
         .iter()
         .filter(|tagged| {
@@ -360,8 +360,8 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> ShadowName {
         opt_text(latest_event_kind.as_deref()),
     );
     // One resolved arm decides both the selection and its presentation: a missing arm reads as
-    // ENSv2 (build.sql:347), so a release it selects is presented as an ENSv2 release. Today's
-    // presentation compares the raw arm with 'ens_v2' (build.sql:89, :94, :103), which a missing
+    // ENSv2 (build.sql:362), so a release it selects is presented as an ENSv2 release. Today's
+    // presentation compares the raw arm with 'ens_v2' (build.sql:99, :104, :113), which a missing
     // arm fails; the harness reports that difference under its own cause.
     let v2_release = selected_kind == Some("RegistrationReleased") && is_v2;
     let mut unreleased = None;
@@ -392,8 +392,9 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> ShadowName {
 
     // A wrapper grant's control is built like any other grant's: TYR-36 step 6 (de24ff32,
     // "serve the control owner of a wrapper grant") removed the served "ENSv1 wrapper effective
-    // control is not yet projected" section from name_current/build.sql (control CASE, :107-115)
-    // and from the API's declared control section (declared_state.rs:91-100).
+    // control is not yet projected" section from name_current/build.sql (the control CASE,
+    // :105-108 before that commit) and from the API's declared control section
+    // (declared_state.rs:91-100 before it).
     let live_control = || {
         let mut control = Map::new();
         let status = if selected_kind == Some("RegistrationReserved") {
@@ -436,8 +437,8 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> ShadowName {
     } else {
         live_control()
     };
-    // With no selected arm, today's presentation does not clear the release (build.sql:89, :94,
-    // :103 compare the raw arm): the harness reads what it serves instead from here.
+    // With no selected arm, today's presentation does not clear the release (build.sql:99, :104,
+    // :113 compare the raw arm): the harness reads what it serves instead from here.
     if let Some(unreleased) = unreleased.filter(|_| selection.authority_arm.is_none()) {
         trace.insert(
             "raw_arm_presentation".into(),

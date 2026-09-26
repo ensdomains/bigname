@@ -1,4 +1,4 @@
-//! The control block's registry owner and latest kind (build.sql:649-694), restated over the
+//! The control block's registry owner and latest kind (build.sql:667-712), restated over the
 //! name's admitted retained events and the F2c registry node.
 use super::{
     NameFacts,
@@ -8,7 +8,7 @@ use super::{
 };
 use crate::families::control::position::Position;
 
-/// The control block's registry owner and latest kind (build.sql:649-694), from what the
+/// The control block's registry owner and latest kind (build.sql:667-712), from what the
 /// families keep: the latest admitted ENSv2 transfer or registrar snapshot grant, F1's latest
 /// admitted AuthorityEpochChanged with the owner it reports, an admitted registry-only
 /// SurfaceBound with its bound owner, and, for an ENSv1 or Basenames name, each of the name's
@@ -50,7 +50,7 @@ pub(super) fn control_owner(
             owners.push((event.position.clone(), owner));
         }
     }
-    // The name's own registry transfers the admission holds (build.sql:666 reads the name's
+    // The name's own registry transfers the admission holds (build.sql:684 reads the name's
     // admitted AuthorityTransferred rows), from every owner-setting event F2c keeps.
     if !is_v2 && let Some(node) = &facts.registry_node {
         let name = facts.input.logical_name_id.as_str();

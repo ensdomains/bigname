@@ -1,8 +1,8 @@
 //! F2a with the F1 facts it reads: the shadow of `name_current.declared_summary.registration`
-//! and `.control` (name_current/build.sql:16-133).
+//! and `.control` (name_current/build.sql:16-140).
 //!
 //! The F1 selection is an input, not a recomputation: the reader takes the authority selection
-//! the served row carries in `provenance.authority_selection` (build.sql:234-252), plus the
+//! the served row carries in `provenance.authority_selection` (build.sql:235-252), plus the
 //! selected binding's registry-only handoff facts from `project_binding_candidate`. The name
 //! authority selection is plan step 6's contract, so taking it as input keeps the lifecycle proof
 //! apart from the selection proof. The one selection output the row does not carry, the fact
@@ -38,7 +38,7 @@ use super::{
 
 pub use load::{load_name_facts, load_shadow_names, namespace_of};
 
-/// The F1 selection outputs the admission reads (name_authority/build.sql:793-850), as the
+/// The F1 selection outputs the admission reads (name_authority/build.sql:561-603), as the
 /// served row's `provenance.authority_selection` carries them.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AuthoritySelection {
@@ -87,7 +87,7 @@ impl AuthoritySelection {
         }
     }
 
-    /// `COALESCE(selected_authority_arm, 'ens_v2') = 'ens_v2'` (build.sql:347).
+    /// `COALESCE(selected_authority_arm, 'ens_v2') = 'ens_v2'` (build.sql:362).
     pub fn is_v2(&self) -> bool {
         self.authority_arm.as_deref().unwrap_or("ens_v2") == "ens_v2"
     }
@@ -128,7 +128,7 @@ impl TripleFacts {
     }
 
     /// The lifecycle key today's decoder gives an unassociated triple, `registry:token`, null
-    /// when both are empty (v2_lifecycle_events.sql:21-23).
+    /// when both are empty (v2_lifecycle_events.sql:25-27).
     pub fn unassociated_key(&self) -> Option<String> {
         let key = format!("{}:{}", self.key[1], self.key[2]);
         (key != ":").then_some(key)

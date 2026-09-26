@@ -14,7 +14,7 @@ use crate::families::control::{
     rows::{BindingCandidate, LifecycleEvent, Mark},
 };
 
-/// The five kinds `latest_event_kind` reads (build.sql:58-63).
+/// The five kinds `latest_event_kind` reads (build.sql:67-73).
 const FIVE_KINDS: [&str; 5] = [
     "RegistrationGranted",
     "RegistrationRenewed",
@@ -24,7 +24,7 @@ const FIVE_KINDS: [&str; 5] = [
 ];
 
 /// The registration time of the latest admitted grant: its block's timestamp, or a registrar
-/// snapshot's own registration time (build.sql:374-380).
+/// snapshot's own registration time (build.sql:392-398).
 pub(super) fn registered_at(facts: &NameFacts, grant: &LifecycleEvent) -> Value {
     let snapshot = grant.source_family == REGISTRAR
         && grant.state_derived == Some(true)
@@ -43,7 +43,7 @@ pub(super) fn registered_at(facts: &NameFacts, grant: &LifecycleEvent) -> Value 
         .unwrap_or(Value::Null)
 }
 
-/// The expiry lateral (build.sql:496-533): the latest admitted grant, or renewal, release or
+/// The expiry lateral (build.sql:514-551): the latest admitted grant, or renewal, release or
 /// ExpiryChanged with a JSON-number expiry, leaving out the wrapper's ExpiryChanged; its
 /// converted seconds, null for a grant without a numeric expiry.
 pub(super) fn expiry_candidate(order: &EventOrder, in_scope: &[&Tagged<'_>]) -> Option<i64> {
@@ -70,7 +70,7 @@ pub(super) fn expiry_candidate(order: &EventOrder, in_scope: &[&Tagged<'_>]) -> 
     .and_then(|tagged| tagged.event.expiry_seconds)
 }
 
-/// The registrant (build.sql:440-495 over registration_events.sql): the latest admitted grant,
+/// The registrant (build.sql:458-513 over registration_events.sql): the latest admitted grant,
 /// release or transfer, plus the registry-only lease's transfers after the handoff, without the
 /// custody transfer into the wrapper and without a registrar release of a lease a wrapper of the
 /// name stands for; a release names its before-state registrant.
@@ -169,7 +169,7 @@ pub(super) fn registrant(
         .and_then(|tagged| value(tagged.event))
 }
 
-/// The authority kind and key the registration serves (build.sql:393-420).
+/// The authority kind and key the registration serves (build.sql:411-438).
 pub(super) struct AuthorityContext {
     pub(super) kind: Value,
     pub(super) key: Value,
@@ -178,7 +178,7 @@ pub(super) struct AuthorityContext {
 }
 
 /// The name's state-derived registry-only SurfaceBounds the admission holds, as their binding
-/// candidates (the SurfaceBound arm of build.sql:396-399 and :664-665).
+/// candidates (the SurfaceBound arm of build.sql:418-419 and :688-689).
 pub(super) fn admitted_registry_only<'a>(
     facts: &'a NameFacts,
     authority: &Authority<'_>,
@@ -212,10 +212,10 @@ pub(super) fn admitted_registry_only<'a>(
 }
 
 /// The latest admitted grant, AuthorityEpochChanged or state-derived registry-only SurfaceBound
-/// (build.sql:393-420), with the authority kind and key its after-state carries: the retained
+/// (build.sql:411-438), with the authority kind and key its after-state carries: the retained
 /// grant's columns, F1's latest AuthorityEpochChanged per arm, the binding candidate's
 /// SurfaceBound. A successor lease granted under a registry-only binding's handoff names the
-/// registration, not the authority, and is left out (build.sql:405-416); step 2 folds the
+/// registration, not the authority, and is left out (build.sql:421-433); step 2 folds the
 /// successor as the handoff's lease (`lease_resource_id`, name_authority/stage.rs:60, :81-119).
 pub(super) fn authority_context(
     facts: &NameFacts,
@@ -346,7 +346,7 @@ pub(super) fn latest_event_kind(
             let name = &facts.input.logical_name_id;
             if facts.order != EventOrder::Canonical {
                 // The counterfactual reads the key's members themselves in today's lateral order
-                // (build.sql:366-371), not the maxima folded in its membership order.
+                // (build.sql:383-389), not the maxima folded in its membership order.
                 return latest(
                     &facts.order,
                     members(facts, key, name).into_iter().filter(|event| {
@@ -388,7 +388,7 @@ pub(super) fn latest_event_kind(
 }
 
 /// The registration's registrar lease: the lease the latest NameWrapper SurfaceBound on the
-/// selected event's resource recorded, else that resource (build.sql:348-360). Today's builder
+/// selected event's resource recorded, else that resource (build.sql:365-377). Today's builder
 /// takes that SurfaceBound by block and generated id, so the candidates compare by their
 /// SurfaceBound positions in the read's order: the canonical order in a read, block and
 /// generated id in the same-block counterfactual. A candidate without a SurfaceBound position
