@@ -1,8 +1,9 @@
 //! Same-log ties in the record inventory's boundary and winner selection. Synthetic: no adapter
 //! emits two record facts for one record key at one log (the coin-60 `AddrChanged` sibling is one
 //! log later, crates/project/src/families/records.rs:270-277), and no fixture carries a version
-//! change and a write at one log. The emission ordinal decides each tie here, with identity bytes
-//! ordering the other way, so a comparator that skips the ordinal fails every case.
+//! change and a write at one log. The emission ordinal (docs/glossary.md#emission-ordinal) decides
+//! each tie here, with identity bytes ordering the other way, so a comparator that skips the
+//! ordinal fails every case.
 use serde_json::Value;
 
 use super::{Boundary, FamilyPosition, RecordCandidate, combined_boundary, latest_eligible};

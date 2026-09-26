@@ -218,11 +218,13 @@ async fn an_unnamed_ens_v2_reverse_node_pointer_is_outside_the_pointer_families(
 
 // A reverse node's resolver pointers from F4 (an ENSv1 registry ResolverChanged, no resource) and
 // F5 (an ENSv2 registry ResolverChanged on a resource, addressing the node) at one log, decided by
-// the emission ordinal (docs/glossary.md#emission-ordinal). The identities end in ordinals 10 and
-// 2, whose byte order is the reverse of their ordinal order, and the ordinal-10 pointer is
-// inserted first, so today's generated ids pick the other pointer. At block 2 the F4 pointer has
-// ordinal 10 and names RESOLVER; at block 3 the F5 pointer has ordinal 10 and names OTHER. The
-// node has a name record at each resolver, so the selected resolver decides the claim.
+// the emission ordinal (docs/glossary.md#emission-ordinal). In each block the two identities end
+// in ordinals 10 and 2, and compared as bytes the ordinal-2 identity sorts last ("2:f4:10" before
+// "2:f5:2", "3:pointer:10" before "3:pointer:2"), so identity order alone picks the other
+// pointer. The ordinal-10 pointer is inserted first, so today's generated ids pick the other
+// pointer too. At block 2 the F4 pointer has ordinal 10 and names RESOLVER; at block 3 the F5
+// pointer has ordinal 10 and names OTHER. The node has a name record at each resolver, so the
+// selected resolver decides the claim.
 #[tokio::test]
 async fn f4_and_f5_pointers_at_one_log_follow_the_emission_ordinal() -> Result<()> {
     let (database, pool) = database("ordinal_pointers").await?;
@@ -259,14 +261,22 @@ async fn f4_and_f5_pointers_at_one_log_follow_the_emission_ordinal() -> Result<(
     // Block 3, log 5: F5 (ordinal 10, OTHER) first, then F4 (ordinal 2, RESOLVER).
     pointer_as(
         &pool,
-        "3:f5:10",
+        "3:pointer:10",
         "ens_v2_registry_l1",
         3,
         OTHER,
         Some(POINTER_RESOURCE),
     )
     .await?;
-    pointer_as(&pool, "3:f4:2", "ens_v1_registry_l1", 3, RESOLVER, None).await?;
+    pointer_as(
+        &pool,
+        "3:pointer:2",
+        "ens_v1_registry_l1",
+        3,
+        RESOLVER,
+        None,
+    )
+    .await?;
     let id = |identity: &'static str| {
         let pool = pool.clone();
         async move {
@@ -280,7 +290,7 @@ async fn f4_and_f5_pointers_at_one_log_follow_the_emission_ordinal() -> Result<(
     };
     let (at_resolver, at_other) = (id("1:1").await?, id("1:2").await?);
     let (f4_two, f5_two) = (id("2:f4:10").await?, id("2:f5:2").await?);
-    let (f5_three, f4_three) = (id("3:f5:10").await?, id("3:f4:2").await?);
+    let (f5_three, f4_three) = (id("3:pointer:10").await?, id("3:pointer:2").await?);
     assert!(f4_two < f5_two && f5_three < f4_three);
     // (block, today's pointer, the family's pointer): each a resolver, its pointer event, the
     // claim event and the claimed name.

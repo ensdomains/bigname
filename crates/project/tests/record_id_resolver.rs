@@ -686,6 +686,166 @@ async fn a_link_and_version_at_one_log_follow_the_emission_ordinal() -> Result<(
     Ok(())
 }
 
+// The inventory's last change at one log, decided by the emission ordinal
+// (docs/glossary.md#emission-ordinal): the latest of the selected record id's writes and links
+// (storage families/records/assemble.rs, `latest_link`). A write of record id 7 ("metadata:10")
+// and the link that selects it for name 3 ("metadata:2") share block 20, transaction 0 and log
+// 3. Compared as bytes "metadata:2" sorts last, and the write is inserted first, so identity order
+// and today's generated ids both pick the link; the ordinal picks the write. Entries and boundary
+// agree; only the last change differs.
+#[tokio::test]
+async fn the_last_change_of_a_linked_record_follows_the_emission_ordinal() -> Result<()> {
+    let (db, pool) = database("record_id_latest_link").await?;
+    seed(&pool).await?;
+    lineage(&pool, 19..=20).await?;
+    text(&pool, "metadata:10", 20, 3, 7, "seven").await?;
+    link(&pool, "metadata:2", 20, 3, Some(3), 7).await?;
+    let (write, link_id) = (
+        event_id(&pool, "metadata:10").await?,
+        event_id(&pool, "metadata:2").await?,
+    );
+    assert!(write < link_id);
+    let expected = last_change_differs(vec![
+        (
+            "last_change.event_kind".into(),
+            Some(json!("ResolverRecordLinked")),
+            Some(json!("RecordChanged")),
+        ),
+        (
+            "last_change.normalized_event_id".into(),
+            Some(json!(link_id)),
+            Some(json!(write)),
+        ),
+    ]);
+    run_expecting(&pool, 20, None, RunMode::Normal, &expected).await?;
+    expected.finish()?;
+    let (today, family) = both_rows(&pool, 3).await?;
+    assert_eq!(
+        today["entries"],
+        json!([{"record_family":"text","record_key":"text:url","selector_key":"url","status":"success","value":"seven"}])
+    );
+    assert_eq!(family.entries, today["entries"]);
+    assert_eq!(today["boundary"]["normalized_event_id"], link_id);
+    assert_eq!(family.record_version_boundary, today["boundary"]);
+    assert_eq!(today["last_change"]["normalized_event_id"], link_id);
+    let last_change = family.last_change.expect("a last change");
+    assert_eq!(last_change["event_kind"], "RecordChanged");
+    assert_eq!(last_change["normalized_event_id"], write);
+    db.cleanup().await?;
+    Ok(())
+}
+
+// The last change of an inventory with no link selection is its latest served record
+// (assemble.rs, `latest_record`). The resolver's link events are removed, so name 3 reads only its
+// named writes. Two writes of different record keys share block 20, transaction 0 and log 3:
+// "records:10" (text:url, inserted first) and "records:2" (text:email). Identity order and
+// today's generated ids pick the text:email write; the ordinal picks the text:url write. Both
+// entries are served on both sides; only the last change's event id differs.
+#[tokio::test]
+async fn the_last_change_of_unlinked_records_follows_the_emission_ordinal() -> Result<()> {
+    let (db, pool) = database("record_id_latest_record").await?;
+    seed(&pool).await?;
+    sqlx::query("DELETE FROM normalized_events WHERE event_kind = 'ResolverRecordLinked'")
+        .execute(&pool)
+        .await?;
+    lineage(&pool, 19..=20).await?;
+    let named = |key: &str, value: &str| json!({"source_event":"TextChanged","node":node(3),"resolver":RESOLVER,"record_key":format!("text:{key}"),"record_family":"text","selector_key":key,"value_retained":true,"value":value,"value_length":value.len()});
+    event(
+        &pool,
+        "records:10",
+        20,
+        3,
+        "RecordChanged",
+        Some(3),
+        named("url", "url"),
+    )
+    .await?;
+    event(
+        &pool,
+        "records:2",
+        20,
+        3,
+        "RecordChanged",
+        Some(3),
+        named("email", "email"),
+    )
+    .await?;
+    let (url, email) = (
+        event_id(&pool, "records:10").await?,
+        event_id(&pool, "records:2").await?,
+    );
+    assert!(url < email);
+    let expected = last_change_differs(vec![(
+        "last_change.normalized_event_id".into(),
+        Some(json!(email)),
+        Some(json!(url)),
+    )]);
+    run_expecting(&pool, 20, None, RunMode::Normal, &expected).await?;
+    expected.finish()?;
+    let (today, family) = both_rows(&pool, 3).await?;
+    let keys = |entries: &Value| -> Vec<String> {
+        entries
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| entry["record_key"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    assert_eq!(keys(&today["entries"]), ["text:email", "text:url"]);
+    assert_eq!(family.entries, today["entries"]);
+    assert_eq!(family.record_version_boundary, today["boundary"]);
+    assert_eq!(today["last_change"]["normalized_event_id"], email);
+    let last_change = family.last_change.expect("a last change");
+    assert_eq!(last_change["event_kind"], "RecordChanged");
+    assert_eq!(last_change["normalized_event_id"], url);
+    db.cleanup().await?;
+    Ok(())
+}
+
+async fn lineage(pool: &PgPool, blocks: std::ops::RangeInclusive<i64>) -> Result<()> {
+    for n in blocks {
+        sqlx::query("INSERT INTO chain_lineage (chain_id,block_hash,block_number,block_timestamp,canonicality_state) VALUES ($1,$2,$3,to_timestamp($3::double precision),'canonical')").bind(CHAIN).bind(hash(n)).bind(n).execute(pool).await?;
+    }
+    Ok(())
+}
+
+async fn event_id(pool: &PgPool, identity: &str) -> Result<i64> {
+    Ok(sqlx::query_scalar(
+        "SELECT normalized_event_id FROM normalized_events WHERE event_identity = $1",
+    )
+    .bind(identity)
+    .fetch_one(pool)
+    .await?)
+}
+
+/// Name 3's inventory differing only in `fields` at block 20, once.
+fn last_change_differs(fields: Vec<(String, Option<Value>, Option<Value>)>) -> Expectations {
+    Expectations {
+        differences: vec![ExpectedDifference {
+            target: 20,
+            key: format!("record_inventory {}", resource(3)),
+            fields,
+            times: 1,
+        }],
+        ..Expectations::none()
+    }
+}
+
+/// Today's inventory row of name `n` and the family reader's.
+async fn both_rows(
+    pool: &PgPool,
+    n: i64,
+) -> Result<(Value, bigname_storage::RecordInventoryCurrentRow)> {
+    let family = bigname_storage::families::records::load_family_record_inventory(
+        pool,
+        CHAIN,
+        resource(n).parse()?,
+    )
+    .await?
+    .expect("a family row");
+    Ok((inventory(pool, n).await?, family))
+}
+
 // Names resolving to an address are found from every retained address value, not only the
 // derived address index, which used to drop a value positioned at or before its partition's
 // version change. A link that outranks that version keeps the value served (value at 19, version at 20,
