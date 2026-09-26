@@ -99,7 +99,12 @@ fn value(payload: &Value) -> Value {
 }
 
 /// Whether a coin-60 write of the zero address answers as absent: a native ENSv1 or Basenames
-/// resolver write read through its own registry family.
+/// resolver write read through its own registry family. Both resolvers store `address(0)` as 20
+/// zero bytes, and their `addr(node)` getter returns the zero address for that and for an empty
+/// record alike, so the legacy read cannot tell the zero address from no address.
+/// (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L22-L23 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L36-L40 @ ens_v1@91c966f)
+/// (upstream: .refs/basenames/lib/ens-contracts/contracts/resolvers/profiles/AddrResolver.sol:L35-L43 @ basenames@1809bbc)
 pub(crate) fn coin60_zero_address_is_absent(
     payload: &Value,
     event_source_family: &str,

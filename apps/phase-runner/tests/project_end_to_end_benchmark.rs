@@ -195,6 +195,18 @@ async fn fixture_corpus_publishes_hydrates_reads_and_matches_a_rebuild() -> Resu
         "every target and every rebuild is shadow compared"
     );
     shadow::require_clean(&shadows)?;
+    // The fixture writes a coin-60 `AddressChanged` with its `AddrChanged` sibling for every
+    // ENSv1 name, so every comparison must have checked pairs; a disposable copy need not. Its
+    // address values are 16 bytes (`substr(md5(..), 1, 40)` in seed.sql), so no address key is
+    // listed and no address page is compared here.
+    for shadow in &shadows {
+        ensure!(
+            shadow.report.compatibility_pairs > 0,
+            "the {} shadow comparison at {} checked no compatibility pairs",
+            shadow.stage,
+            shadow.target
+        );
+    }
     for compared in &compared {
         // The harness cannot tell whether a dropped key was in the batch's full scope (see
         // `endpoint::Outcome::dropped`), so the fixture must produce none.

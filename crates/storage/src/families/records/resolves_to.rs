@@ -8,8 +8,12 @@
 //! pointers at a resolver whose link selects that record id), assembles each resource's family
 //! record inventory to apply the arms, the combined boundary, the link selection and the mirror
 //! substitution, keeps the entries that still resolve to the address, and joins today's
-//! `name_current` for name eligibility (the family read model for it is step 3). Exact entries shadow the ENSIP-19 default address as the
-//! forward read does. The page is a keyset over the result order with no publication binding.
+//! `name_current` for name eligibility (the family read model for it is step 3). Exact entries
+//! shadow the ENSIP-19 default address as the forward read does: the resolvers read the default
+//! only when the coin's own stored bytes are empty and the coin is an EVM coin.
+//! (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L80-L85 @ ens_v1@91c966f)
+//! (upstream: .refs/ens_v2/contracts/src/resolver/AbstractRecordResolver.sol:L172-L178 @ ens_v2@a971bd64)
+//! The page is a keyset over the result order with no publication binding.
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result, bail};
@@ -27,6 +31,7 @@ use crate::{
     AddressNamesCurrentDedupe, AddressNamesCurrentOrder, AddressNamesCurrentSort,
     AddressNamesCurrentSortedCursor, AddressNamesCurrentSortedCursorValue,
     AddressRecordCurrentEntry, AddressRecordsCurrentPage, ENSIP19_DEFAULT_ADDRESS_RECORD_KEY,
+    projection_helpers::{checked_page_limit_i64_from_usize, checked_page_size_usize},
 };
 
 const ZERO: &str = "0x0000000000000000000000000000000000000000";
@@ -301,7 +306,17 @@ async fn page(
     cursor: Option<&AddressNamesCurrentSortedCursor>,
     page_size: u64,
 ) -> Result<AddressRecordsCurrentPage> {
-    let limit = i64::try_from(page_size).context("page size too large")?;
+    // The page size checks of `load_address_records_current_page`, with its messages.
+    let page_size = checked_page_size_usize(
+        page_size,
+        "address_records_current page_size must be positive",
+        "address_records_current page_size does not fit in usize",
+    )?;
+    let page_limit = checked_page_limit_i64_from_usize(
+        page_size,
+        "address_records_current page_size is too large",
+        "address_records_current page_size exceeds SQL limit",
+    )?;
     let mut builder = QueryBuilder::<Postgres>::new(
         "WITH records AS (
              SELECT * FROM unnest(",
@@ -430,7 +445,7 @@ async fn page(
         " ORDER BY canonical_display_name {}, logical_name_id ASC, resource_id::TEXT ASC LIMIT ",
         direction.1
     ));
-    builder.push_bind(limit + 1);
+    builder.push_bind(page_limit);
     let rows = builder
         .build()
         .fetch_all(pool)
@@ -462,7 +477,6 @@ async fn page(
             })
         })
         .collect::<Result<Vec<_>>>()?;
-    let page_size = usize::try_from(page_size).unwrap_or(usize::MAX);
     let next_cursor = (entries.len() > page_size).then(|| {
         entries.truncate(page_size);
         entries.last().map(|entry| AddressNamesCurrentSortedCursor {

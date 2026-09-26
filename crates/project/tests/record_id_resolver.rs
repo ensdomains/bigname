@@ -930,6 +930,60 @@ async fn inverse_address_reads_find_values_the_address_index_drops() -> Result<(
         assert_eq!(listed, 1, "today lists resource{id} for {value}");
     }
 
+    // The family reader checks the page size as today's reader does: a page size of 0, or one
+    // whose sentinel row overflows the SQL limit, is the same error on both sides.
+    let served = |address: String, size: u64| {
+        let pool = pool.clone();
+        async move {
+            bigname_storage::load_address_records_current_page(
+                &pool,
+                &address,
+                "60",
+                None,
+                bigname_storage::AddressNamesCurrentDedupe::Surface,
+                None,
+                None,
+                bigname_storage::AddressNamesCurrentSort::Name,
+                bigname_storage::AddressNamesCurrentOrder::Asc,
+                None,
+                size,
+            )
+            .await
+        }
+    };
+    let family = |address: String, size: u64| {
+        let pool = pool.clone();
+        async move {
+            bigname_storage::families::records::load_family_address_records_page(
+                &pool,
+                &address,
+                "60",
+                None,
+                bigname_storage::AddressNamesCurrentDedupe::Surface,
+                None,
+                None,
+                bigname_storage::AddressNamesCurrentSort::Name,
+                bigname_storage::AddressNamesCurrentOrder::Asc,
+                None,
+                size,
+            )
+            .await
+        }
+    };
+    assert_eq!(served(INVERSE_A.to_owned(), 10).await?.entries.len(), 2);
+    assert_eq!(family(INVERSE_A.to_owned(), 10).await?.entries.len(), 2);
+    for size in [0, i64::MAX as u64] {
+        let today = served(INVERSE_A.to_owned(), size)
+            .await
+            .expect_err("today rejects the page size")
+            .to_string();
+        let error = family(INVERSE_A.to_owned(), size)
+            .await
+            .expect_err("the family rejects the page size")
+            .to_string();
+        assert_eq!(error, today, "page size {size}");
+    }
+
     // Mutation: a difference on the second of the address's two pages (page size one) must fail
     // the comparison, and be named on that entry.
     sqlx::query(
@@ -2460,7 +2514,12 @@ async fn database(name: &str) -> Result<(TestDatabase, PgPool)> {
     Ok((database, pool))
 }
 
-/// Optimism's coin (`0x80000000 | 10`), an ENSIP-19 fallback target the comparison does not add.
+/// Optimism's coin (`0x80000000 | 10`), an ENSIP-19 fallback target the comparison does not add:
+/// `chainFromCoinType` maps it to chain 10, so it is an EVM coin, and the resolvers read the
+/// default address for an EVM coin whose own stored bytes are empty.
+/// (upstream: .refs/ens_v1/contracts/utils/ENSIP19.sol:L26-L31 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L80-L85 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v2/contracts/src/resolver/AbstractRecordResolver.sol:L172-L178 @ ens_v2@a971bd64)
 const OPTIMISM_COIN: &str = "2147483658";
 /// An exact address for the fallback cases that differs from the default.
 const EXACT_OTHER: &str = "0x8888888888888888888888888888888888888888";
@@ -2621,7 +2680,14 @@ async fn exact_records_and_the_default_address_answer_alike_through_the_families
 
 /// A name pointing at the official Sepolia PublicResolverV2 with an ENSIP-19 default address
 /// (`ADDRESS_BYTES_ONLY`, as raw bytes) written at the target block; returns the database, the
-/// target block and the resolver address.
+/// target block and the resolver address. The resolver is the `public_resolver_v2` entry of the
+/// checked-in Sepolia manifest (manifests/sepolia/ethereum/ens/ens_v2_resolver_l1/v1.toml), whose
+/// address and default-address fallback come from the Sepolia deployment: PublicResolverV2
+/// composes the ENSv1 `AddrResolver` profile, which returns `addrs[COIN_TYPE_DEFAULT]` when the
+/// requested EVM coin type is empty.
+/// (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/PublicResolverV2.json:L2 @ ens_v2_sepolia_20260916@366de741)
+/// (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/resolver/PublicResolverV2.sol:L23-L35 @ ens_v2_sepolia_20260916@366de741)
+/// (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/build-info/solc-0_8_25-32c5cc51dc76e0217cc18fd81b550ff63339308e.json:L184 @ ens_v2_sepolia_20260916@366de741)
 async fn public_default(name: &str) -> Result<(TestDatabase, PgPool, i64, String)> {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
