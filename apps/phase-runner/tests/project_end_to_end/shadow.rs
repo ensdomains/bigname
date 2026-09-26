@@ -54,8 +54,8 @@
 //!   For the registry binding, the observations are rebuilt from the publication-visible event
 //!   log (activated, canonical, at the canonical lineage's hash, at or below the target: the set
 //!   family intake reads), independently of the families: for each observation identity (the name, else the
-//!   resource) its latest producer event canonically (block, transaction, log, event identity)
-//!   and in today's order (block, transaction, log, generated id), each derived as step 2
+//!   resource) its latest producer event canonically (block, transaction, log, the emission
+//!   ordinal when there is one, event identity) and in today's order (block, transaction, log, generated id), each derived as step 2
 //!   derives it, its target read from the name's current binding at the publication. A
 //!   `registry_binding/*` field passes only when every family observation reaching the resource
 //!   is exactly its identity's canonical rebuild (no identity on one side only), the canonical
@@ -1527,7 +1527,8 @@ impl ExcuseInputs {
 }
 
 /// The facts read in the canonical order through the refolding path: every event and control
-/// position ranked by (block, transaction, log, identity) and the rank given as its generated
+/// position ranked by (block, transaction, log, emission ordinal when there is one, identity),
+/// the `Position` order, and the rank given as its generated
 /// id, so membership and the laterals fold the retained events themselves in the canonical
 /// order rather than read the stored key states and triple summaries.
 pub fn in_canonical_ranks(facts: &NameFacts) -> NameFacts {
@@ -1840,7 +1841,8 @@ fn same_observation(family: &Observation, rebuilt: &Observation) -> bool {
 /// Every resource's registry binding rebuilt from the publication-visible event log
 /// (`published`), in both orders, independently of the family's choices. For each observation identity (the
 /// name, else the resource) the canonical rebuild takes its latest producer event in the
-/// canonical order (block, transaction, log, event identity), as F2c keeps it, and today's
+/// canonical order (block, transaction, log, emission ordinal when there is one, event
+/// identity), the `Position` order, as F2c keeps it, and today's
 /// rebuild the latest in (block, transaction, log, generated id), as the served summary does
 /// (permission_resources.rs:10-11); each is derived as step 2 derives it, with its target
 /// read from the name's current binding at the publication's served end-of-block cutoff, the

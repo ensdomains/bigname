@@ -1934,11 +1934,15 @@ row, which masks the powers when it has a modifier
 wrapper refusal; that side is the families read against themselves, the same
 disclosed class as the root rule. These checks run for
 the items that differ: a family value equal to the served one is not a
-difference. One ENSv1 NewOwner log yields a
-SubregistryChanged and an AuthorityTransferred at one position; the families keep
-the SubregistryChanged, whose identity sorts last, and today's builders the
-AuthorityTransferred, whose generated id is higher, as the registry-binding
-observation of the name. So the observations are rebuilt from the
+difference. Several producer events can share one position. One ENSv1 NewOwner
+log yields a SubregistryChanged and then an AuthorityTransferred; the adapter
+numbers them 0 and 1, so the families, by emission ordinal, and today's
+builders, by generated id, both keep the AuthorityTransferred as the
+registry-binding observation of the name, and a replay of a real NewOwner log
+reads equal. Producer events that tie on position and ordinal, as facts of
+different sources can, fall to identity bytes in the families and to generated
+id in today's builders, and the fixtures cover that tie with synthetic
+identities. So the observations are rebuilt from the
 publication-visible event log in both orders, each identity's latest event
 chosen from the log and not from the family row, and a binding field passes only
 when the family observations equal their canonical rebuild, the canonical
