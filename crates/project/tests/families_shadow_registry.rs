@@ -742,7 +742,8 @@ async fn a_textual_owner_unmask_flag_holds_in_the_control_guard() -> Result<()> 
                 REGISTRY,
             )
             .await?;
-        publish_and_compare(&fixture, 12).await?;
+        let report = publish_and_compare(&fixture, 12).await?;
+        shadow_support::assert_counts(&report, &[], &[]);
         let facts = name_facts(&fixture).await?;
         let flags: Vec<Option<bool>> = facts
             .registry_node
