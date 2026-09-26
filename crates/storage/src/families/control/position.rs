@@ -223,10 +223,11 @@ mod tests {
     }
 
     // The shared vectors. Their twin, the same three lists asserted against the project crate's
-    // comparator and reader (`Ord` and `of_row`), lands in step 2's
-    // crates/project/src/families/position_tests.rs (PR 952, commit 21b2aa68); keep the two copies
-    // identical, since a drift between the comparators moves the shadow read and the canonical
-    // excuse read together.
+    // comparator and reader (`Ord` and `of_row`), is in
+    // crates/project/src/families/position_tests.rs (step 2, PR 952). At step 2's bbb7d0ab the
+    // two copies' literal lists and their order and partial tests are identical; keep them so,
+    // since a drift between the comparators moves the shadow read and the canonical excuse read
+    // together.
     type Place = (i64, Option<i64>, Option<i64>, &'static str);
     /// A suffix of 131073 digits, one more than PostgreSQL's numeric type accepts before the
     /// decimal point, and far past `u32::MAX`: no ordinal.
