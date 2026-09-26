@@ -372,118 +372,169 @@ async fn an_approval_flag_matches_the_served_boolean_cast() -> Result<()> {
     fixture.cleanup().await
 }
 
-// The wrapper expiry and fuses are read the way the served builders read them: the expiry as a
-// numeric value from 0 to 2^64 - 1 (address_names.rs `wrapper_expiries`, children.rs
-// `latest_wrapper_expiries`), and the fuses as a numeric value from 0 to 2^63 - 1 cast to
-// bigint (permissions.rs `modifiers`), a cast that rejects a non-integral spelling and so fails
-// the served batch; the family keeps no fuses for such a value. One declared difference: the
-// family keeps no expiry for a decimal spelling, which may reach it rounded
-// (a_decimal_expiry_is_not_rounded); the adapter writes the expiry as a JSON integer.
+/// The served wrapper expiry: address_names.rs `wrapper_expiries` (:39-48), permissions.rs
+/// `wrapper_expiries` (:158-166) and children.rs `latest_wrapper_expiries` (:164-167) keep the
+/// numeric value from 0 to 2^64 - 1, and name_current/build.sql `expiry_seconds` (:557-563) is
+/// the same expression.
+const SERVED_WRAPPER_EXPIRY: &str = "CASE
+    WHEN jsonb_typeof(after_state -> 'expiry') = 'number'
+     AND (after_state ->> 'expiry')::numeric >= 0
+     AND (after_state ->> 'expiry')::numeric <= 18446744073709551615
+        THEN (after_state ->> 'expiry')::numeric END";
+/// The served scope fuses: permissions.rs `modifiers` (:138-141) and address_names.rs
+/// `scope_modifiers` (:70-77) cast a value from 0 to 2^63 - 1 to bigint, which fails with
+/// 22P02 on a decimal spelling.
+const SERVED_SCOPE_FUSES: &str = "CASE
+    WHEN jsonb_typeof(after_state -> 'fuses') = 'number'
+     AND (after_state ->> 'fuses')::numeric >= 0
+     AND (after_state ->> 'fuses')::numeric <= 9223372036854775807
+        THEN (after_state ->> 'fuses')::bigint END";
+/// The served servable expiry: name_current/build.sql `servable_expiry_seconds` (:568-574)
+/// casts an integral value from 1 to 253402300799 to bigint, which fails with 22P02 on an
+/// integral decimal spelling such as 1.0 or 1000.0.
+const SERVED_SERVABLE_EXPIRY: &str = "CASE
+    WHEN jsonb_typeof(after_state -> 'expiry') = 'number'
+     AND (after_state ->> 'expiry')::numeric = trunc((after_state ->> 'expiry')::numeric)
+     AND (after_state ->> 'expiry')::numeric BETWEEN 1 AND 253402300799
+        THEN (after_state ->> 'expiry')::bigint END";
+
+/// One served expression over `{field: literal}`: its value as JSON, or `None` when it fails
+/// with 22P02, the cast error that fails the served batch.
+async fn served(
+    fixture: &Fixture,
+    expression: &str,
+    field: &str,
+    literal: &str,
+) -> Result<Option<Value>> {
+    let result: std::result::Result<Option<Value>, sqlx::Error> = sqlx::query_scalar(&format!(
+        "SELECT to_jsonb({expression})
+         FROM (SELECT jsonb_build_object($1::text, $2::text::jsonb) AS after_state) event"
+    ))
+    .bind(field)
+    .bind(literal)
+    .fetch_one(&fixture.pool)
+    .await;
+    match result {
+        Ok(value) => Ok(Some(value.unwrap_or(Value::Null))),
+        Err(sqlx::Error::Database(error)) => {
+            assert_eq!(error.code().as_deref(), Some("22P02"), "{literal}: {error}");
+            Ok(None)
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+// The wrapper expiry and fuses against the served expressions above, each case a jsonb literal
+// written into the stored event as it is, so `1e3` is the jsonb numeric 1000 and not the Rust
+// f64 1000.0. The fuses match SERVED_SCOPE_FUSES; where that cast fails the served batch, the
+// family keeps no fuses. The expiry matches SERVED_WRAPPER_EXPIRY except for a decimal spelling,
+// which the family keeps as null because it may arrive rounded (a_decimal_expiry_is_not_rounded);
+// the adapter writes the expiry as a JSON integer. SERVED_SERVABLE_EXPIRY fails on exactly the
+// integral decimal spellings 1.0 and 1000.0, where the family expiry is null.
 #[tokio::test]
 async fn wrapper_numbers_match_the_served_numeric_reads() -> Result<()> {
     let fixture = Fixture::new("families_wrapper_numbers", 20).await?;
-    let values = [
-        json!(0),
-        json!(1),
-        json!(1.0),
-        json!(1.5),
-        // json!(1e3) is the f64 1000.0, which jsonb receives spelled 1000.0. A literal 1e3 in
-        // a jsonb payload becomes numeric 1000 and is kept on both sides as an integer.
-        json!(1000.0),
-        json!(-1),
-        json!(-0.0),
-        json!(-0.5),
-        json!(2000),
-        json!(4_294_967_295u64),
-        json!(9_223_372_036_854_775_807i64),
-        json!(9_223_372_036_854_775_808u64),
-        json!(18_446_744_073_709_551_615u64),
-        json!(1.8e19),
-        json!(1e20),
-        json!("5"),
-        json!(true),
-        Value::Null,
+    let literals = [
+        "0",
+        "1",
+        "1.0",
+        "1.5",
+        "1000.0",
+        "1e3",
+        "-1",
+        "-0.0",
+        "-0.5",
+        "2000",
+        "4294967295",
+        "9223372036854775807",
+        "9223372036854775808",
+        "18446744073709551615",
+        "1.8e19",
+        "1e20",
+        "\"5\"",
+        "true",
+        "null",
     ];
     let mut expected = Vec::new();
-    for (n, value) in (1..).zip(&values) {
-        let expiry: Option<Value> = sqlx::query_scalar(
-            "SELECT to_jsonb(CASE
-                 WHEN jsonb_typeof(after_state -> 'expiry') = 'number'
-                  AND (after_state ->> 'expiry')::numeric >= 0
-                  AND (after_state ->> 'expiry')::numeric <= 18446744073709551615
-                     THEN (after_state ->> 'expiry')::numeric END)
-             FROM (SELECT jsonb_build_object('expiry', $1::jsonb) AS after_state) event",
-        )
-        .bind(value)
-        .fetch_one(&fixture.pool)
-        .await?;
-        let fuses: std::result::Result<Option<Value>, sqlx::Error> = sqlx::query_scalar(
-            "SELECT to_jsonb(CASE
-                 WHEN jsonb_typeof(after_state -> 'fuses') = 'number'
-                  AND (after_state ->> 'fuses')::numeric >= 0
-                  AND (after_state ->> 'fuses')::numeric <= 9223372036854775807
-                     THEN (after_state ->> 'fuses')::bigint END)
-             FROM (SELECT jsonb_build_object('fuses', $1::jsonb) AS after_state) event",
-        )
-        .bind(value)
-        .fetch_one(&fixture.pool)
-        .await;
-        let spelled: String = sqlx::query_scalar("SELECT $1::jsonb::text")
-            .bind(value)
+    let mut servable_failures = Vec::new();
+    for (n, literal) in (1..).zip(literals) {
+        let spelled: String = sqlx::query_scalar("SELECT $1::text::jsonb::text")
+            .bind(literal)
             .fetch_one(&fixture.pool)
             .await?;
+        let expiry = served(&fixture, SERVED_WRAPPER_EXPIRY, "expiry", literal)
+            .await?
+            .expect("the served numeric expiry never fails");
         let expiry = if spelled.contains('.') {
             Value::Null
         } else {
-            expiry.unwrap_or(Value::Null)
+            expiry
         };
-        let fuses = match fuses {
-            Ok(fuses) => fuses.unwrap_or(Value::Null),
-            Err(sqlx::Error::Database(error)) => {
-                assert_eq!(error.code().as_deref(), Some("22P02"), "{value:?}: {error}");
-                Value::Null
-            }
-            Err(error) => return Err(error.into()),
-        };
+        let fuses = served(&fixture, SERVED_SCOPE_FUSES, "fuses", literal)
+            .await?
+            .unwrap_or(Value::Null);
+        if served(&fixture, SERVED_SERVABLE_EXPIRY, "expiry", literal)
+            .await?
+            .is_none()
+        {
+            servable_failures.push(literal);
+        }
         let resource = uuid(100 + n);
-        fixture
-            .write(
-                10,
+        for (log, kind, after, field) in [
+            (
                 2 * i64::from(n),
                 "PermissionScopeChanged",
-                "ens_v1_wrapper_l1",
-                None,
-                Some(&resource),
-                json!({"fuses": value, "wrapper_state": "wrapped"}),
-                WRAPPER,
-            )
-            .await?;
-        fixture
-            .write(
-                10,
+                json!({"fuses": 0, "wrapper_state": "wrapped"}),
+                "fuses",
+            ),
+            (
                 2 * i64::from(n) + 1,
                 "ExpiryChanged",
-                "ens_v1_wrapper_l1",
-                None,
-                Some(&resource),
-                json!({"expiry": value, "source_event": "ExpiryExtended"}),
-                WRAPPER,
+                json!({"expiry": 0, "source_event": "ExpiryExtended"}),
+                "expiry",
+            ),
+        ] {
+            let id = fixture
+                .write(
+                    10,
+                    log,
+                    kind,
+                    "ens_v1_wrapper_l1",
+                    None,
+                    Some(&resource),
+                    after,
+                    WRAPPER,
+                )
+                .await?;
+            sqlx::query(
+                "UPDATE normalized_events
+                 SET after_state = jsonb_set(after_state, ARRAY[$2::text], $3::text::jsonb)
+                 WHERE normalized_event_id = $1",
             )
+            .bind(id)
+            .bind(field)
+            .bind(literal)
+            .execute(&fixture.pool)
             .await?;
-        expected.push((resource, value.clone(), fuses, expiry));
+        }
+        expected.push((resource, literal, fuses, expiry));
     }
+    assert_eq!(servable_failures, ["1.0", "1000.0"]);
     fixture.apply(10, FamilyMode::Normal).await;
     let rows = fixture.rows("project_wrapper_state").await?;
     let mut mismatches = Vec::new();
-    for (resource, value, fuses, expiry) in expected {
+    for (resource, literal, fuses, expiry) in expected {
         let row = rows
             .iter()
             .find(|row| row["resource_id"] == json!(resource))
             .expect("each resource has a wrapper row");
         let got = (row["fuses"].clone(), row["expiry_seconds"].clone());
+        if servable_failures.contains(&literal) {
+            assert_eq!(got.1, Value::Null, "{literal}: the family keeps no expiry");
+        }
         if got != (fuses.clone(), expiry.clone()) {
             mismatches.push(format!(
-                "{value}: family {got:?}, served ({fuses}, {expiry})"
+                "{literal}: family {got:?}, expected ({fuses}, {expiry})"
             ));
         }
     }

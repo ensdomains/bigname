@@ -220,7 +220,29 @@ pub(crate) fn postgres_boolean(text: &str) -> Option<bool> {
 
 #[cfg(test)]
 mod tests {
-    use super::postgres_boolean;
+    use serde_json::{Value, json};
+
+    use super::{flag, postgres_boolean};
+
+    // `flag` is true exactly when the served `after_state ->> field = 'true'` holds; every
+    // other value that is not the string "false" or a JSON false reads as null.
+    #[test]
+    fn a_flag_is_true_exactly_when_the_served_text_is_true() {
+        for (after, expected) in [
+            (json!({"flag": true}), Value::Bool(true)),
+            (json!({"flag": false}), Value::Bool(false)),
+            (json!({"flag": "true"}), Value::Bool(true)),
+            (json!({"flag": "false"}), Value::Bool(false)),
+            (json!({"flag": "TRUE"}), Value::Null),
+            (json!({"flag": "t"}), Value::Null),
+            (json!({"flag": 1}), Value::Null),
+            (json!({"flag": null}), Value::Null),
+            (json!({}), Value::Null),
+            (json!({"flag": [true]}), Value::Null),
+        ] {
+            assert_eq!(flag(&after, "flag"), expected, "{after}");
+        }
+    }
 
     #[test]
     fn a_boolean_reads_as_postgresql_reads_it() {
