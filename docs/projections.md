@@ -1862,8 +1862,9 @@ name's registration and control blocks from the lease, wrapper, registry and
 identity families, and a resource's permission rows, restriction block,
 registry binding and registry-operator rows from the grant, approval, wrapper
 and registry families, all at the publication's block clock. Every selection of
-a latest event takes it in the canonical order (D12: block, transaction, log,
-then event identity). Binding candidates are not events: two at the same block,
+a latest event takes it in the canonical order (D12 as amended: block,
+transaction, log, then the emission ordinal of a raw log's fact, then event
+identity). Binding candidates are not events: two at the same block,
 transaction and log still break the tie by binding id, as the served stage does,
 and a fixture pins that. The Project fixture
 tests and the phase runner's fixture-corpus run compare each value with what the
@@ -1877,17 +1878,23 @@ must be readable and the families and the served publication must both stand on
 it, or it reports nothing. That validates the endpoints only: the reads between
 them are separate reads, not one snapshot, so a change to another publication
 and back between the two checks is not seen. The harness is meant for a quiescent
-target, such as a disposable copy. Before any difference of a name or resource can pass,
+target, such as a disposable copy. Before any difference of a name can pass,
 the families must hold exactly the retained facts the log gives it under step
 2's retention rules, in both directions: the binding candidates with their
 handoffs, the epoch starts, triples, key states and retained lifecycle events,
-each event under the key step 2 derives, and the node's owner-setting events. A
-name's checks then read its retained lifecycle events rebuilt from that log
-rather than the family rows, and those rebuilt events read in the canonical
-order must give the shadow value, so a missing, extra or misfiled retained
-event fails the fields it decides. Each family row must also equal its rebuild
-whole, so a wrong fact on a retained event leaves every differing field of the
-name, or of the resource it sits on, a mismatch. Each candidate's surface
+each event under the key step 2 derives, and the node's owner-setting events;
+otherwise the name gets no excuse. A name's checks then read its retained
+lifecycle events rebuilt from that log rather than the family rows, and those
+rebuilt events read in the canonical order must give the shadow value, so a
+missing, extra or misfiled retained event fails the fields it decides. Each
+family row must also equal its rebuild whole, so a wrong fact on a retained
+event leaves every differing field of the name a mismatch. A resource has its
+own guard for three fields only, its permission rows, admin powers and
+restriction block: their excuse needs the resource's retained events, and its
+root's, to match the log, and each row to equal its rebuild, so a wrong
+retained fact leaves those three a mismatch. Its registry binding and operator
+rows are checked separately, against observations rebuilt from the log (below).
+Each candidate's surface
 namehash must be the namehash part of its name, and the staging candidates of
 every unnamed registrar event of the name, whichever name they belong to, must
 be what the log gives. The wrapper rows are not rebuilt from the log, so a name
@@ -1916,6 +1923,10 @@ That holds because the root is compared itself: the compared resources are close
 over the roots their served summaries name, so a root with no served summary or
 permission row of its own is still compared, and a resource whose root is not
 in the compared set gets no permission-row, admin-power or restriction excuse.
+The effective-permission reader selects direct rows by resource id, so it can
+serve another chain's row on a compared resource; every such row is a mismatch
+(`other_chain_rows`). That check covers the compared resources, closed over
+their roots, and nothing else: a resource outside that set is not read.
 The resource-side excuse reads the wrapper rows too: the permission rows and
 restriction block it reads in both orders come through the resource's wrapper
 row, which masks the powers when it has a modifier

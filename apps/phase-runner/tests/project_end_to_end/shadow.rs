@@ -1434,7 +1434,12 @@ fn logged_registration_time(event: &LogEvent) -> Option<i64> {
 /// publication-visible log rows, generated ids and association keys of every lifecycle and
 /// control event those facts name. A chunk with no differing names reads nothing; one whose
 /// names have no events skips the log, association-key and time reads, but still runs the
-/// retention check's four queries.
+/// retention check's queries (`RetentionLog::load`): the names' bindings, their named events,
+/// the retained events of every resource they reach, their nodes' owner-setting events and,
+/// when they reach a resource, which of those resources carry a wrapper event; then, when an
+/// unnamed registrar event sits on a lease, the names bound on it and the NameWrapper
+/// SurfaceBounds that recorded it, and, when some of those names are not in the chunk, their
+/// bindings and opening events. That is four to nine queries per chunk.
 #[derive(Default)]
 pub struct ExcuseInputs {
     pub facts: BTreeMap<String, NameFacts>,
