@@ -26,14 +26,23 @@
 //!
 //! In the same mode, once the owned key families reach each target, the step 5 family readers
 //! (`bigname_storage::families::topology`) must serve what the served subname, topology, resolver
-//! and resolver collection readers serve at that publication (`project_end_to_end/shadow.rs`).
+//! and resolver collection readers serve at that publication
+//! (`project_end_to_end/topology_shadow.rs`).
+//!
+//! With `BIGNAME_END_TO_END_SHADOW=1` (always on the fixture) each target, and each rebuild when
+//! compared, also compares the owned key family readers with today's readers
+//! (`project_end_to_end/records_shadow.rs`). Production serves today's tables either way.
 #[path = "project_end_to_end/endpoint.rs"]
 mod endpoint;
-#[allow(dead_code)]
+#[path = "project_end_to_end/records_shadow.rs"]
+mod records_shadow;
 #[path = "project_end_to_end/shadow.rs"]
 mod shadow;
 #[allow(dead_code)]
 mod support;
+#[allow(dead_code)]
+#[path = "project_end_to_end/topology_shadow.rs"]
+mod topology_shadow;
 
 use std::{str::FromStr, time::Instant};
 
@@ -102,8 +111,13 @@ async fn disposable_copy_publishes_hydrates_and_reads_each_target() -> Result<()
     let targets = parse_targets(&std::env::var("BIGNAME_BENCHMARK_TARGETS")?)?;
     let compare = (std::env::var("BIGNAME_END_TO_END_COMPARE").as_deref() == Ok("1"))
         .then_some(COPY_CHILDREN_PAGE);
-    run(&pool, previous, &targets, compare).await?;
+    let shadow = (std::env::var("BIGNAME_END_TO_END_SHADOW").as_deref() == Ok("1"))
+        .then_some(COPY_CHILDREN_PAGE);
+    let (_, shadows) = run(&pool, previous, &targets, compare, false, shadow).await?;
     pool.close().await;
+    if shadow.is_some() {
+        records_shadow::require_clean(&shadows)?;
+    }
     Ok(())
 }
 
@@ -177,8 +191,35 @@ async fn fixture_corpus_publishes_hydrates_reads_and_matches_a_rebuild() -> Resu
     .execute(pool)
     .await?;
     require_disposable_copy(pool).await?;
-    let compared = run(pool, previous, &targets, Some(FIXTURE_CHILDREN_PAGE)).await?;
+    shadow::take_reports();
+    let (compared, shadows) = run(
+        pool,
+        previous,
+        &targets,
+        Some(FIXTURE_CHILDREN_PAGE),
+        true,
+        Some(FIXTURE_CHILDREN_PAGE),
+    )
+    .await?;
     ensure!(compared.len() == targets.len(), "every target is compared");
+    shadow::assert_fixture_corpus_counts(&targets)?;
+    ensure!(
+        shadows.len() == 2 * targets.len(),
+        "every target and every rebuild is shadow compared"
+    );
+    records_shadow::require_clean(&shadows)?;
+    // The fixture writes a coin-60 `AddressChanged` with its `AddrChanged` sibling for every
+    // ENSv1 name, so every comparison must have checked pairs; a disposable copy need not. Its
+    // address values are 16 bytes (`substr(md5(..), 1, 40)` in seed.sql), so no address key is
+    // listed and no address page is compared here.
+    for shadow in &shadows {
+        ensure!(
+            shadow.report.compatibility_pairs > 0,
+            "the {} shadow comparison at {} checked no compatibility pairs",
+            shadow.stage,
+            shadow.target
+        );
+    }
     for compared in &compared {
         // The harness cannot tell whether a dropped key was in the batch's full scope (see
         // `endpoint::Outcome::dropped`), so the fixture must produce none.
@@ -201,6 +242,45 @@ async fn fixture_corpus_publishes_hydrates_reads_and_matches_a_rebuild() -> Resu
         );
     }
     scratch.cleanup().await
+}
+
+/// The corpus count check takes exactly one shadow report per target: a duplicate, a missing
+/// or an unexpected target fails it.
+#[test]
+fn the_corpus_counts_take_one_report_per_target() {
+    let report =
+        |target: i64| -> shadow::Counted { (target, Default::default(), Default::default(), None) };
+    assert!(shadow::one_report_per_target(&[report(35), report(40)], &[35, 40]).is_ok());
+    assert!(shadow::one_report_per_target(&[report(40), report(35)], &[35, 40]).is_ok());
+    for (case, reports, targets) in [
+        (
+            "duplicate",
+            vec![report(35), report(35), report(40)],
+            vec![35, 40],
+        ),
+        (
+            "duplicate standing in for a missing one",
+            vec![report(35), report(35)],
+            vec![35, 40],
+        ),
+        ("missing", vec![report(35)], vec![35, 40]),
+        (
+            "unexpected",
+            vec![report(35), report(40), report(41)],
+            vec![35, 40],
+        ),
+        ("none", vec![], vec![35, 40]),
+        (
+            "repeated expectation",
+            vec![report(35), report(35)],
+            vec![35, 35],
+        ),
+    ] {
+        assert!(
+            shadow::one_report_per_target(&reports, &targets).is_err(),
+            "{case} must fail"
+        );
+    }
 }
 
 fn parse_targets(value: &str) -> Result<Vec<i64>> {
@@ -289,7 +369,9 @@ async fn run(
     previous: i64,
     targets: &[i64],
     compare: Option<u64>,
-) -> Result<Vec<Compared>> {
+    corpus: bool,
+    shadow: Option<u64>,
+) -> Result<(Vec<Compared>, Vec<records_shadow::Shadow>)> {
     let _ = tracing_subscriber::fmt()
         .with_env_filter("bigname_project::batch=info,bigname_project::families=info")
         .with_target(false)
@@ -317,6 +399,7 @@ async fn run(
     }
     let mut resume = load_marker(pool, previous).await?;
     let mut compared = Vec::new();
+    let mut shadows = Vec::new();
     ensure!(
         publication(pool).await? == (Some(previous), Some(resume.hash.clone()), false),
         "Project is not published at the requested previous marker"
@@ -404,6 +487,25 @@ async fn run(
             family_marker == Some(number),
             "the owned key families stopped at {family_marker:?}, not at target {number}"
         );
+        if compare.is_some() {
+            // The family readers beside the served readers at the same publication.
+            // With `corpus`, the comparison also reads the fixture corpus's expected counts at
+            // this publication, which the corpus test asserts after the run.
+            let options = shadow::Options {
+                corpus,
+                ..shadow::Options::default()
+            };
+            let publication = shadow::Publication {
+                number,
+                hash: target.hash.clone(),
+            };
+            let report = shadow::compare_with(pool, CHAIN, &publication, options).await?;
+            report.print(number);
+            ensure!(
+                report.mismatched == 0,
+                "the family readers differ from the served values at {number}"
+            );
+        }
         ensure!(
             publication(pool).await? == (Some(number), Some(target.hash.clone()), false),
             "the progress marker is not at target {number}"
@@ -419,11 +521,16 @@ async fn run(
             hash.as_deref() == Some(INTERPRETER_CONTENT_HASH),
             "the publication does not carry this binary's interpreter hash"
         );
+        if let Some(page_size) = shadow {
+            shadows.push(
+                records_shadow::compare(pool, CHAIN, &target, page_size, "incremental").await?,
+            );
+        }
         if let Some(children_page) = compare {
-            let report = shadow::compare(
+            let report = topology_shadow::compare(
                 pool,
                 CHAIN,
-                shadow::Settings {
+                topology_shadow::Settings {
                     children_page,
                     collection_page: children_page,
                     every_child_filter: children_page == FIXTURE_CHILDREN_PAGE,
@@ -435,7 +542,7 @@ async fn run(
             ensure!(
                 report.mismatches.is_empty(),
                 "the family readers differ from the served readers at {number}: {:#}",
-                shadow::describe(&report)
+                topology_shadow::describe(&report)
             );
             // Step 2 fills project_resolver_classification block by block and the comparison runs
             // once the families have caught up, so every resolver is read from its row and
@@ -470,10 +577,15 @@ async fn run(
             compared.push(
                 compare_with_rebuild(pool, &project, &target, children_page, &retention).await?,
             );
+            if let Some(page_size) = shadow {
+                shadows.push(
+                    records_shadow::compare(pool, CHAIN, &target, page_size, "rebuild").await?,
+                );
+            }
         }
         resume = target;
     }
-    Ok(compared)
+    Ok((compared, shadows))
 }
 
 /// Reads every name and subname the batch left, rebuilds the target from scratch and commits it,

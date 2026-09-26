@@ -1,0 +1,399 @@
+//! F8 and F9, raw permissions: the shadow of `permissions_current`, the restriction block and
+//! registry binding of `permissions_current_resource_summary`, `account_permission_state_current`
+//! and the registry-operator rows the effective-permission reader adds (permissions/effective.rs
+//! :63-72).
+mod grants;
+mod summary;
+
+use std::collections::{BTreeMap, BTreeSet};
+
+use anyhow::{Context, Result};
+use serde_json::{Value, json};
+use sqlx::PgPool;
+
+pub use grants::{
+    GrantRow, ServedGrant, WrapperApproval, masked_grants, masked_powers, with_operators,
+};
+pub use summary::{admin_powers, locked_roles, resource_restrictions, wrapper_unwrapped};
+
+use super::{
+    lifecycle::{Clock, membership::maxima_of, view::registration_lapsed},
+    position::EventOrder,
+    registry::RegistryBinding,
+    rows::{LifecycleEvent, Maxima, flag, lower, text},
+    wrapper::load_wrapper_rows,
+};
+
+/// One resource to read, with the summary facts the families do not hold: the authority kind
+/// today's summary derives from the resource's whole event history (resource_summary.rs:53-126,
+/// :218-237) and the registry root from the identity table.
+#[derive(Clone, Debug, Default)]
+pub struct ResourceInput {
+    pub resource_id: String,
+    pub authority_kind: Option<String>,
+    pub root_resource_id: Option<String>,
+}
+
+/// The shadow of one resource's permission rows and restriction block.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ShadowPermissions {
+    pub grants: Vec<ServedGrant>,
+    pub admin_powers: Vec<String>,
+    pub restrictions: Option<Value>,
+}
+
+async fn rows_for(
+    pool: &PgPool,
+    sql: &str,
+    chain_id: &str,
+    resources: &[String],
+) -> Result<Vec<Value>> {
+    if resources.is_empty() {
+        return Ok(Vec::new());
+    }
+    sqlx::query_scalar(sql)
+        .bind(chain_id)
+        .bind(resources)
+        .fetch_all(pool)
+        .await
+        .with_context(|| format!("failed to run {}", sql.lines().next().unwrap_or(sql)))
+}
+
+/// Load and evaluate the permission shadow of `resources` at `clock`.
+pub async fn load_shadow_permissions(
+    pool: &PgPool,
+    chain_id: &str,
+    clock: &Clock,
+    resources: &[ResourceInput],
+) -> Result<BTreeMap<String, ShadowPermissions>> {
+    load_shadow_permissions_in(pool, chain_id, clock, resources, &EventOrder::Canonical).await
+}
+
+/// The permission shadow read in `order`. In the canonical order the path-expiry drop reads the
+/// stored F2a key states; in any other order it reads each key state folded again from the
+/// resource's retained events in that order (the harness's same-block counterfactual).
+pub async fn load_shadow_permissions_in(
+    pool: &PgPool,
+    chain_id: &str,
+    clock: &Clock,
+    resources: &[ResourceInput],
+    order: &EventOrder,
+) -> Result<BTreeMap<String, ShadowPermissions>> {
+    let mut ids: BTreeSet<String> = resources
+        .iter()
+        .map(|input| input.resource_id.clone())
+        .collect();
+    ids.extend(
+        resources
+            .iter()
+            .filter_map(|input| input.root_resource_id.clone()),
+    );
+    let ids: Vec<String> = ids.into_iter().collect();
+    let grants: Vec<GrantRow> = rows_for(
+        pool,
+        "/* storage:families.control.permissions.grants */ SELECT to_jsonb(grant_row)
+         FROM bigname_phase.project_grant grant_row
+         WHERE grant_row.chain_id = $1 AND grant_row.resource_id = ANY($2::uuid[])",
+        chain_id,
+        &ids,
+    )
+    .await?
+    .iter()
+    .filter_map(GrantRow::from_row)
+    .collect();
+    let aggregates: BTreeMap<String, Value> = rows_for(
+        pool,
+        "/* storage:families.control.permissions.admin_aggregates */ SELECT to_jsonb(aggregate)
+         FROM bigname_phase.project_resource_admin_aggregate aggregate
+         WHERE aggregate.chain_id = $1 AND aggregate.resource_id = ANY($2::uuid[])",
+        chain_id,
+        &ids,
+    )
+    .await?
+    .iter()
+    .filter_map(|row| Some((text(row, "resource_id")?, row.get("admin_powers")?.clone())))
+    .collect();
+    let key_states: BTreeMap<String, Maxima> = rows_for(
+        pool,
+        "/* storage:families.control.permissions.key_states */ SELECT to_jsonb(state)
+         FROM bigname_phase.project_lifecycle_key_state state
+         WHERE state.chain_id = $1 AND state.resource_id = ANY($2::uuid[])",
+        chain_id,
+        &ids,
+    )
+    .await?
+    .iter()
+    .filter_map(|row| Some((text(row, "resource_id")?, Maxima::from_row(row))))
+    .collect();
+    let key_states = if *order == EventOrder::Canonical {
+        key_states
+    } else {
+        refolded(pool, chain_id, &ids, order).await?
+    };
+    let wrappers: BTreeMap<String, _> = load_wrapper_rows(pool, chain_id, &ids)
+        .await?
+        .into_iter()
+        .map(|row| (row.resource_id.clone(), row))
+        .collect();
+    let holders: Vec<String> = grants
+        .iter()
+        .filter(|grant| {
+            grant
+                .grant_source
+                .get("relation_kind")
+                .and_then(Value::as_str)
+                == Some("holder")
+        })
+        .map(|grant| grant.subject.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let approvals: Vec<WrapperApproval> = rows_for(
+        pool,
+        "/* storage:families.control.permissions.wrapper_approvals */ SELECT to_jsonb(approval)
+         FROM bigname_phase.project_account_approval approval
+         WHERE approval.chain_id = $1 AND approval.authority_kind = 'wrapper'
+           AND approval.owner = ANY($2)",
+        chain_id,
+        &holders,
+    )
+    .await?
+    .iter()
+    .filter_map(|row| {
+        Some(WrapperApproval {
+            authority_contract: lower(row, "authority_contract")?,
+            owner: lower(row, "owner")?,
+            subject: lower(row, "subject")?,
+            approved: flag(row, "approved")?,
+        })
+    })
+    .collect();
+
+    // Grouped once, so each resource reads only its own rows.
+    let mut by_resource: BTreeMap<String, Vec<GrantRow>> = BTreeMap::new();
+    for grant in grants {
+        by_resource
+            .entry(grant.resource_id.clone())
+            .or_default()
+            .push(grant);
+    }
+    let served = |resource: &str| -> Vec<ServedGrant> {
+        masked_grants(
+            by_resource.get(resource).map_or(&[][..], Vec::as_slice),
+            wrappers.get(resource),
+            key_states.get(resource),
+            clock.timestamp_seconds,
+            order,
+        )
+    };
+    let admins = |resource: &str| -> Vec<String> {
+        // The admin rows are served rows: a resource whose registration lapsed by path expiry
+        // serves none (resource_summary.rs:272-297 reads the staged permission rows).
+        if key_states
+            .get(resource)
+            .is_some_and(|state| registration_lapsed(state, order))
+        {
+            return Vec::new();
+        }
+        aggregates
+            .get(resource)
+            .map(admin_powers)
+            .unwrap_or_default()
+    };
+    let mut out = BTreeMap::new();
+    for input in resources {
+        let resource = input.resource_id.as_str();
+        let rows = with_operators(served(resource), &approvals);
+        let own_admins = admins(resource);
+        let root_admins = input
+            .root_resource_id
+            .as_deref()
+            .map(admins)
+            .unwrap_or_default();
+        let unwrapped = wrapper_unwrapped(wrappers.get(resource));
+        let restrictions = resource_restrictions(
+            input.authority_kind.as_deref(),
+            wrappers.get(resource),
+            unwrapped,
+            clock.timestamp_seconds,
+            !rows.is_empty(),
+            &own_admins,
+            &root_admins,
+        );
+        out.insert(
+            input.resource_id.clone(),
+            ShadowPermissions {
+                grants: rows,
+                admin_powers: own_admins,
+                restrictions,
+            },
+        );
+    }
+    Ok(out)
+}
+
+/// The key states of `resources` folded from their retained events in `order`.
+async fn refolded(
+    pool: &PgPool,
+    chain_id: &str,
+    resources: &[String],
+    order: &EventOrder,
+) -> Result<BTreeMap<String, Maxima>> {
+    let events: Vec<LifecycleEvent> = rows_for(
+        pool,
+        "/* storage:families.control.permissions.key_events */ SELECT to_jsonb(event)
+         FROM bigname_phase.project_lifecycle_event event
+         WHERE event.chain_id = $1 AND event.state_kind = 'resource' AND event.state_key = ANY($2)",
+        chain_id,
+        resources,
+    )
+    .await?
+    .iter()
+    .filter_map(LifecycleEvent::from_row)
+    .collect();
+    Ok(resources
+        .iter()
+        .filter(|resource| events.iter().any(|event| &event.state_key == *resource))
+        .map(|resource| {
+            let own = events.iter().filter(|event| &event.state_key == resource);
+            (resource.clone(), maxima_of(own, true, order))
+        })
+        .collect())
+}
+
+/// One served account approval (`account_permission_state_current`), in the columns the
+/// comparison reads; the whole-history evidence arrays are dropped (design F9 row).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ServedApproval {
+    pub authority_kind: String,
+    pub authority_contract: String,
+    pub authority_contract_instance_id: Option<String>,
+    pub owner: String,
+    pub subject: String,
+    pub relation_kind: String,
+    pub approved: bool,
+    pub effective_powers: Value,
+    pub grant_source: Value,
+    pub revocation_source: Value,
+    pub inheritance_path: Value,
+    pub transfer_behavior: Value,
+}
+
+impl ServedApproval {
+    fn from_row(row: &Value) -> Option<Self> {
+        let column = |field: &str| row.get(field).cloned().unwrap_or(Value::Null);
+        Some(Self {
+            authority_kind: text(row, "authority_kind")?,
+            authority_contract: lower(row, "authority_contract")?,
+            authority_contract_instance_id: text(row, "authority_contract_instance_id"),
+            owner: lower(row, "owner")?,
+            subject: lower(row, "subject")?,
+            relation_kind: text(row, "relation_kind")?,
+            approved: flag(row, "approved")?,
+            effective_powers: column("effective_powers"),
+            grant_source: column("grant_source"),
+            revocation_source: column("revocation_source"),
+            inheritance_path: column("inheritance_path"),
+            transfer_behavior: column("transfer_behavior"),
+        })
+    }
+
+    /// The key the served table uses.
+    pub fn key(&self) -> (String, String, String, String, String) {
+        (
+            self.authority_kind.clone(),
+            self.authority_contract.clone(),
+            self.owner.clone(),
+            self.subject.clone(),
+            self.relation_kind.clone(),
+        )
+    }
+}
+
+/// Every F9 approval of the chain.
+pub async fn load_shadow_approvals(pool: &PgPool, chain_id: &str) -> Result<Vec<ServedApproval>> {
+    let rows: Vec<Value> = sqlx::query_scalar(
+        "/* storage:families.control.permissions.approvals */ SELECT to_jsonb(approval)
+         FROM bigname_phase.project_account_approval approval
+         WHERE approval.chain_id = $1",
+    )
+    .bind(chain_id)
+    .fetch_all(pool)
+    .await
+    .context("failed to load account approvals")?;
+    Ok(rows.iter().filter_map(ServedApproval::from_row).collect())
+}
+
+/// One registry-operator row the effective-permission reader adds for a resource.
+#[derive(Clone, Debug, PartialEq)]
+pub struct OperatorRow {
+    pub resource_id: String,
+    pub subject: String,
+    pub scope: String,
+    /// The account scope's parts, as the served row's scope carries them.
+    pub scope_detail: Value,
+    pub effective_powers: Value,
+    pub grant_source: Value,
+    pub inheritance_path: Value,
+    pub transfer_behavior: Value,
+}
+
+/// The approved registry operators of a resource's registry binding (permissions/effective.rs
+/// :63-72): approvals of the binding's registry contract and owner, relation operator.
+pub fn effective_operator_rows(
+    chain_id: &str,
+    resource_id: &str,
+    binding: &RegistryBinding,
+    approvals: &[ServedApproval],
+) -> Vec<OperatorRow> {
+    let (Some(owner), Some(contract)) = (&binding.registry_owner, &binding.registry_contract)
+    else {
+        return Vec::new();
+    };
+    let mut rows: Vec<OperatorRow> = approvals
+        .iter()
+        .filter(|approval| {
+            approval.approved
+                && approval.authority_kind == "registry"
+                && approval.relation_kind == "operator"
+                && &approval.authority_contract == contract
+                && &approval.owner == owner
+        })
+        .map(|approval| OperatorRow {
+            resource_id: resource_id.to_owned(),
+            subject: approval.subject.clone(),
+            scope: format!(
+                "account:{chain_id}:{}:{}:{}",
+                approval.authority_kind, approval.authority_contract, approval.owner
+            ),
+            scope_detail: json!({
+                "chain_id": chain_id,
+                "authority_kind": approval.authority_kind,
+                "authority_contract": approval.authority_contract,
+                "owner": approval.owner,
+            }),
+            effective_powers: approval.effective_powers.clone(),
+            grant_source: approval.grant_source.clone(),
+            inheritance_path: approval.inheritance_path.clone(),
+            transfer_behavior: approval.transfer_behavior.clone(),
+        })
+        .collect();
+    rows.sort_by(|left, right| (&left.subject, &left.scope).cmp(&(&right.subject, &right.scope)));
+    rows
+}
+
+/// A served grant as the JSON the harness compares.
+pub fn grant_json(grant: &ServedGrant) -> Value {
+    json!({
+        "resource_id": grant.resource_id,
+        "subject": grant.subject,
+        "scope": grant.scope,
+        "scope_kind": grant.scope_kind,
+        "scope_detail": grant.scope_detail,
+        "effective_powers": grant.effective_powers,
+        "grant_source": grant.grant_source,
+        "revocation_source": grant.revocation_source,
+        "inheritance_path": grant.inheritance_path,
+        "transfer_behavior": grant.transfer_behavior,
+    })
+}

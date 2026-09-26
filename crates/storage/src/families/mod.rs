@@ -1,5 +1,6 @@
-//! Shadow readers over the Project owned key families (docs/projections.md, "Owned key
-//! families"). No served response reads them yet: the phase-runner harness runs them beside the
-//! served readers at one publication and asserts they agree, until the per-block publication
-//! switches the served reads over.
+//! Readers over the owned key families (docs/projections.md, "Owned key families"). They are
+//! shadow reads: nothing that serves a response calls them yet, and the harness compares what
+//! they return with what today's readers serve.
+pub mod control;
+pub mod records;
 pub mod topology;

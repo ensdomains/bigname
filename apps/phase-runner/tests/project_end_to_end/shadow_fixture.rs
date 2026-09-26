@@ -15,7 +15,7 @@ use phase_runner::{
 use serde_json::{Value, json};
 use sqlx::PgPool;
 
-use crate::{shadow, support::ScratchDatabase};
+use crate::{support::ScratchDatabase, topology_shadow};
 
 pub const CHAIN: &str = "ethereum-sepolia";
 /// Lineage timestamps start here, so expiry fences at the block clock are in the future of 2026.
@@ -441,7 +441,7 @@ impl Fixture {
     }
 
     /// The shadow comparison at the current publication, over small pages and every filter.
-    pub async fn compare(&self, page: u64) -> Result<shadow::Report> {
+    pub async fn compare(&self, page: u64) -> Result<topology_shadow::Report> {
         self.compare_with_prefixes(page, &[]).await
     }
 
@@ -450,11 +450,11 @@ impl Fixture {
         &self,
         page: u64,
         prefixes: &'static [&'static str],
-    ) -> Result<shadow::Report> {
-        let report = shadow::compare(
+    ) -> Result<topology_shadow::Report> {
+        let report = topology_shadow::compare(
             self.pool(),
             CHAIN,
-            shadow::Settings {
+            topology_shadow::Settings {
                 children_page: page,
                 collection_page: page,
                 every_child_filter: true,
@@ -479,11 +479,11 @@ impl Fixture {
 /// `DifferingLink` does for the one such difference (families_shadow_resolver.rs). The mutation
 /// checks that name a key only need it to show that the comparison notices a change.
 /// A declaration-manifest classification whose mirror disagrees with the served one always fails.
-pub fn unexpected(report: &shadow::Report, expected: &[String]) -> Result<()> {
+pub fn unexpected(report: &topology_shadow::Report, expected: &[String]) -> Result<()> {
     ensure!(
         report.f3_unfilled_mirror_differs == 0,
         "the declaration fallback serves a different mirror: {:#}",
-        shadow::describe(report)
+        topology_shadow::describe(report)
     );
     for key in expected {
         ensure!(
@@ -492,7 +492,7 @@ pub fn unexpected(report: &shadow::Report, expected: &[String]) -> Result<()> {
                 .iter()
                 .any(|mismatch| &mismatch.key == key),
             "expected difference {key:?} is gone: {:#}",
-            shadow::describe(report)
+            topology_shadow::describe(report)
         );
     }
     let unexpected: Vec<String> = report
@@ -510,7 +510,7 @@ pub fn unexpected(report: &shadow::Report, expected: &[String]) -> Result<()> {
 
 /// The resolvers whose classification row has no served row and reads
 /// `resolver_manifest_not_active`, step 2's declared F3 approximation, are exactly `expected`.
-pub fn extra_not_active(report: &shadow::Report, expected: &[&str]) -> Result<()> {
+pub fn extra_not_active(report: &topology_shadow::Report, expected: &[&str]) -> Result<()> {
     let seen: Vec<&str> = report
         .f3_extra_not_active
         .iter()

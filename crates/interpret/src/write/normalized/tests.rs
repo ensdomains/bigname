@@ -670,3 +670,46 @@ async fn record_id_resolver_events_persist_through_production_writer() -> TestRe
     database.cleanup().await?;
     Ok(())
 }
+
+// A rewrite that differs from the stored event only in `consumer_visibility` (Pro review of
+// 802e95a5, question 1). Both inputs carry the same valid correlation-id set, so visibility is the
+// only differing field. An identical retry is accepted; the visibility-only retry is refused and
+// leaves the stored id and visibility as they were. The writer regression checks refusal of a
+// visibility-only rewrite; it does not establish how activation is scheduled.
+#[tokio::test]
+async fn a_visibility_only_rewrite_is_refused_and_leaves_the_stored_row() -> TestResult {
+    let database = database("interpret_normalized_visibility_only").await?;
+    let mut candidate = event("visibility", json!({"value":1}));
+    candidate.migration_correlation_ids = vec!["correlation-1".to_owned()];
+    candidate.consumer_visibility = "candidate".to_owned();
+    let mut activated = candidate.clone();
+    activated.consumer_visibility = "activated".to_owned();
+
+    let mut seed = database.pool().begin().await?;
+    events(&mut seed, std::slice::from_ref(&candidate)).await?;
+    seed.commit().await?;
+    let stored: (i64, String) =
+        sqlx::query_as("SELECT normalized_event_id, consumer_visibility FROM normalized_events")
+            .fetch_one(database.pool())
+            .await?;
+    assert_eq!(stored.1, "candidate");
+
+    let mut retry = database.pool().begin().await?;
+    events(&mut retry, std::slice::from_ref(&candidate)).await?;
+    retry.commit().await?;
+
+    let mut rewrite = database.pool().begin().await?;
+    let error = events(&mut rewrite, std::slice::from_ref(&activated))
+        .await
+        .expect_err("a visibility-only rewrite must be refused");
+    assert_eq!(error.kind(), crate::ErrorKind::DataIntegrity);
+    assert!(error.to_string().contains("0=visibility"), "{error}");
+    rewrite.rollback().await?;
+    let persisted: Vec<(i64, String)> =
+        sqlx::query_as("SELECT normalized_event_id, consumer_visibility FROM normalized_events")
+            .fetch_all(database.pool())
+            .await?;
+    assert_eq!(persisted, [stored]);
+    database.cleanup().await?;
+    Ok(())
+}

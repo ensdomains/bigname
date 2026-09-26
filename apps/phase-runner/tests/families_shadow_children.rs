@@ -1,15 +1,15 @@
 //! TYR-36 step 5: the child-edge shadow reader (F11 with F2a, F2b and F2c) against
 //! `children_current` at one publication, over small pages and every sort and expiry filter.
 //! Each case seeds interpreted events, publishes through the runner's Project phase with the
-//! families on, and runs the shadow comparison of `project_end_to_end/shadow.rs`.
-#[allow(dead_code)]
-#[path = "project_end_to_end/shadow.rs"]
-mod shadow;
+//! families on, and runs the shadow comparison of `project_end_to_end/topology_shadow.rs`.
 #[allow(dead_code)]
 #[path = "project_end_to_end/shadow_fixture.rs"]
 mod shadow_fixture;
 #[allow(dead_code)]
 mod support;
+#[allow(dead_code)]
+#[path = "project_end_to_end/topology_shadow.rs"]
+mod topology_shadow;
 
 use anyhow::{Context, Result, ensure};
 use bigname_storage::{
@@ -206,9 +206,12 @@ async fn ens_v1_edges_match_the_served_children() -> Result<()> {
     let report = fixture.compare(2).await?;
     unexpected(&report, &[])?;
     ensure!(
-        shadow::shadow_children(fixture.pool(), &first).await?.len() == 8,
+        topology_shadow::shadow_children(fixture.pool(), &first)
+            .await?
+            .len()
+            == 8,
         "{:#}",
-        shadow::describe(&report)
+        topology_shadow::describe(&report)
     );
     let duplicate: Option<String> =
         sqlx::query_scalar("SELECT owner FROM children_current WHERE child_logical_name_id = $1")
@@ -244,10 +247,13 @@ async fn ens_v1_edges_match_the_served_children() -> Result<()> {
     let report = fixture.compare(2).await?;
     unexpected(&report, &[])?;
     let surfaced = format!("ens:{}", word(8));
-    let (_, clock) = shadow::publication(fixture.pool(), CHAIN).await?;
-    for (index, filter) in shadow::child_filters(clock, true, &[]).iter().enumerate() {
+    let (_, clock) = topology_shadow::publication(fixture.pool(), CHAIN).await?;
+    for (index, filter) in topology_shadow::child_filters(clock, true, &[])
+        .iter()
+        .enumerate()
+    {
         let (served_total, served, shadow_total, shadowed) =
-            shadow::walk_children(fixture.pool(), &first, filter, 2).await?;
+            topology_shadow::walk_children(fixture.pool(), &first, filter, 2).await?;
         ensure!(
             served == shadowed
                 && served_total == shadow_total
@@ -286,19 +292,19 @@ async fn ens_v1_edges_match_the_served_children() -> Result<()> {
     fixture.rebuild().await?;
     let report = fixture.compare(2).await?;
     unexpected(&report, &[])?;
-    let first_children = shadow::shadow_children(fixture.pool(), &first).await?;
+    let first_children = topology_shadow::shadow_children(fixture.pool(), &first).await?;
     ensure!(
         first_children.len() == 5
             && !first_children.contains(&format!("ens:{}", word(2)))
             && !first_children.contains(&format!("ens:{}", word(8)))
             && first_children.contains(&format!("ens:{}", word(4)))
-            && shadow::shadow_children(fixture.pool(), &second)
+            && topology_shadow::shadow_children(fixture.pool(), &second)
                 .await?
                 .contains(&format!("ens:{}", word(2))),
         "{first_children:?}"
     );
     ensure!(
-        shadow::shadow_children(fixture.pool(), &migrated)
+        topology_shadow::shadow_children(fixture.pool(), &migrated)
             .await?
             .is_empty()
     );
@@ -462,7 +468,7 @@ async fn ens_v2_subregistry_children_match_the_served_children() -> Result<()> {
     fixture.publish(4).await?;
     let report = fixture.compare(1).await?;
     unexpected(&report, &[])?;
-    let served_first = shadow::shadow_children(fixture.pool(), &parent_id).await?;
+    let served_first = topology_shadow::shadow_children(fixture.pool(), &parent_id).await?;
     ensure!(
         served_first.contains(&children[0]) && served_first.contains(&children[2]),
         "{served_first:?}"
@@ -484,7 +490,7 @@ async fn ens_v2_subregistry_children_match_the_served_children() -> Result<()> {
     fixture.publish(7).await?;
     let report = fixture.compare(1).await?;
     unexpected(&report, &[])?;
-    let served_second = shadow::shadow_children(fixture.pool(), &parent_id).await?;
+    let served_second = topology_shadow::shadow_children(fixture.pool(), &parent_id).await?;
     ensure!(
         served_second.contains(&children[2])
             && served_second.contains(&children[4])
@@ -509,7 +515,7 @@ async fn ens_v2_subregistry_children_match_the_served_children() -> Result<()> {
     let report = fixture.compare(1).await?;
     unexpected(&report, &[])?;
     ensure!(
-        shadow::shadow_children(fixture.pool(), &parent_id)
+        topology_shadow::shadow_children(fixture.pool(), &parent_id)
             .await?
             .is_empty()
     );
@@ -718,7 +724,7 @@ async fn a_locked_parent_keeps_its_migratable_children() -> Result<()> {
     fixture.publish(4).await?;
     let report = fixture.compare(1).await?;
     unexpected(&report, &[])?;
-    let visible = shadow::shadow_children(fixture.pool(), &parent_id).await?;
+    let visible = topology_shadow::shadow_children(fixture.pool(), &parent_id).await?;
     let expected: std::collections::BTreeSet<String> = [1, 3, 4]
         .iter()
         .map(|child| format!("ens:{}", word(*child)))
@@ -730,7 +736,7 @@ async fn a_locked_parent_keeps_its_migratable_children() -> Result<()> {
     let report = fixture.compare(1).await?;
     unexpected(&report, &[])?;
     ensure!(
-        !shadow::shadow_children(fixture.pool(), &parent_id)
+        !topology_shadow::shadow_children(fixture.pool(), &parent_id)
             .await?
             .contains(&format!("ens:{}", word(3)))
     );
@@ -841,7 +847,7 @@ async fn zero_owner_attribution_follows_the_served_precedence() -> Result<()> {
     fixture.publish(4).await?;
     let report = fixture.compare(2).await?;
     unexpected(&report, &[])?;
-    let visible = shadow::shadow_children(fixture.pool(), &parent_id).await?;
+    let visible = topology_shadow::shadow_children(fixture.pool(), &parent_id).await?;
     let expected: std::collections::BTreeSet<String> = [41, 45]
         .iter()
         .map(|child| format!("ens:{}", word(*child)))
@@ -902,7 +908,7 @@ async fn rejected_migration_evidence_hides_a_locked_parents_children() -> Result
         let report = fixture.compare(1).await?;
         unexpected(&report, &[])?;
         ensure!(
-            shadow::shadow_children(fixture.pool(), &parent_id)
+            topology_shadow::shadow_children(fixture.pool(), &parent_id)
                 .await?
                 .is_empty(),
             "{evidence:?}: {}",
@@ -1024,7 +1030,7 @@ async fn child_filters_sort_page_and_expire_at_the_block_clock() -> Result<()> {
     let report = fixture.compare_with_prefixes(1, PREFIXES).await?;
     unexpected(&report, &[])?;
     let pool = fixture.pool();
-    let (_, clock) = shadow::publication(pool, CHAIN).await?;
+    let (_, clock) = topology_shadow::publication(pool, CHAIN).await?;
     ensure!(clock.unix_timestamp() == epoch + 6, "{clock}");
     let registered: Vec<(String, bool)> = sqlx::query_as(
         "SELECT logical_name_id,
@@ -1055,7 +1061,7 @@ async fn child_filters_sort_page_and_expire_at_the_block_clock() -> Result<()> {
                 ..ChildrenCurrentPageFilter::default()
             };
             let (served_total, served, shadow_total, shadowed) =
-                shadow::walk_children(pool, &parent_id, &filter, 1).await?;
+                topology_shadow::walk_children(pool, &parent_id, &filter, 1).await?;
             ensure!(
                 served == shadowed && served_total == 6 && shadow_total == 6,
                 "{order:?} {include_expired}: served {served:?}, shadow {shadowed:?}"
@@ -1070,7 +1076,7 @@ async fn child_filters_sort_page_and_expire_at_the_block_clock() -> Result<()> {
         ..ChildrenCurrentPageFilter::default()
     };
     let (served_total, served, shadow_total, shadowed) =
-        shadow::walk_children(pool, &parent_id, &fenced, 10).await?;
+        topology_shadow::walk_children(pool, &parent_id, &fenced, 10).await?;
     ensure!(
         served == shadowed
             && served_total == 6
@@ -1088,7 +1094,7 @@ async fn child_filters_sort_page_and_expire_at_the_block_clock() -> Result<()> {
             ..fenced
         };
         let (served_total, served, shadow_total, shadowed) =
-            shadow::walk_children(pool, &parent_id, &filter, 1).await?;
+            topology_shadow::walk_children(pool, &parent_id, &filter, 1).await?;
         ensure!(
             display_names(&served) == expected
                 && served == shadowed
@@ -1108,7 +1114,7 @@ async fn child_filters_sort_page_and_expire_at_the_block_clock() -> Result<()> {
     let served =
         load_children_current_page_filtered(pool, &parent_id, &by_expiry(clock), None, 2).await?;
     let shadowed = load_children_shadow_page(pool, &parent_id, &by_expiry(clock), None, 2).await?;
-    let served_rows: Vec<FamilyChildRow> = served.rows.iter().map(shadow::wire).collect();
+    let served_rows: Vec<FamilyChildRow> = served.rows.iter().map(topology_shadow::wire).collect();
     ensure!(
         served_rows == shadowed.rows
             && served.total_count == shadowed.total_count
@@ -1122,7 +1128,7 @@ async fn child_filters_sort_page_and_expire_at_the_block_clock() -> Result<()> {
     let mut shadow_cursor = served_cursor.clone();
     fixture.publish(9).await?;
     let pool = fixture.pool();
-    let (_, later) = shadow::publication(pool, CHAIN).await?;
+    let (_, later) = topology_shadow::publication(pool, CHAIN).await?;
     ensure!(later.unix_timestamp() == epoch + 9, "{later}");
     let mut continued = Vec::new();
     loop {
@@ -1137,7 +1143,8 @@ async fn child_filters_sort_page_and_expire_at_the_block_clock() -> Result<()> {
         let shadowed =
             load_children_shadow_page(pool, &parent_id, &by_expiry(later), Some(&shadow_cursor), 2)
                 .await?;
-        let served_rows: Vec<FamilyChildRow> = served.rows.iter().map(shadow::wire).collect();
+        let served_rows: Vec<FamilyChildRow> =
+            served.rows.iter().map(topology_shadow::wire).collect();
         ensure!(
             served_rows == shadowed.rows
                 && served.total_count == shadowed.total_count
@@ -1240,7 +1247,7 @@ async fn child_prefixes_match_backslashes_literally() -> Result<()> {
             ..ChildrenCurrentPageFilter::default()
         };
         let (served_total, served, shadow_total, shadowed) =
-            shadow::walk_children(pool, &parent_id, &filter, 1).await?;
+            topology_shadow::walk_children(pool, &parent_id, &filter, 1).await?;
         let mut names = display_names(&served);
         names.sort_unstable();
         ensure!(

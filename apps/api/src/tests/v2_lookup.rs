@@ -126,7 +126,7 @@ async fn v2_lookup_name_only_refuses_while_interpret_redo_is_in_progress()
     seed_v2_lookup_base_head(&database).await?;
     for (chain, deployment) in [
         ("ethereum-mainnet", "ens_v1"),
-        ("ethereum-sepolia", "ens_v2_sepolia_post_audit"),
+        ("ethereum-sepolia", "ens_v2_sepolia_20260915"),
     ] {
         database
             .insert_manifest(
@@ -2680,7 +2680,7 @@ async fn v2_lookup_production_derivation_uses_the_sepolia_authority_chain() -> R
             "ens",
             "ens_v2_registry_l1",
             "ethereum-sepolia",
-            "ens_v2_sepolia_post_audit",
+            "ens_v2_sepolia_20260915",
             1,
             "active",
             "ensip15@ens-normalize-0.1.1",

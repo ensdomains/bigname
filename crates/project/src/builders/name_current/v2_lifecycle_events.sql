@@ -1,7 +1,10 @@
 /* project:builders.name_current.v2_lifecycle_events */
 -- Every ENSv2 registry, root-registry and registrar event with the key of the registration it
 -- belongs to: the token resource when the event names one, else the resource of the latest grant
--- or reservation of the same registry and token id, else the registry and token id themselves.
+-- or reservation of the same registry and token id, else the registry and token id themselves;
+-- and whether it is a reservation already expired when written: its expiry is at or before its
+-- own block's time, so it is never live, the rule authority selection applies
+-- (`name_authority/build.sql`).
 -- `name_current` reads these rows several times per name, so they are staged once, narrowed to
 -- the columns it reads, and indexed by name and by event.
 CREATE TEMP TABLE project_v2_lifecycle_events ON COMMIT DROP AS
@@ -17,9 +20,19 @@ SELECT event.normalized_event_id, event.logical_name_id, event.resource_id, even
                = COALESCE(event.after_state ->> 'registry_contract_instance_id',
                      event.raw_fact_ref ->> 'emitting_address', event.after_state ->> 'registry')
              AND linked.after_state ->> 'token_id' = event.after_state ->> 'token_id'
-           ORDER BY linked.block_number DESC NULLS LAST, linked.normalized_event_id DESC LIMIT 1
+           ORDER BY linked.block_number DESC NULLS LAST, COALESCE(linked.transaction_index, -1) DESC,
+                    COALESCE(linked.log_index, -1) DESC, linked.normalized_event_id DESC LIMIT 1
        ), NULLIF(CONCAT(COALESCE(event.after_state ->> 'registry_contract_instance_id',
                      event.raw_fact_ref ->> 'emitting_address', event.after_state ->> 'registry'),
-                 ':', event.after_state ->> 'token_id'), ':')) AS lifecycle_key
+                 ':', event.after_state ->> 'token_id'), ':')) AS lifecycle_key,
+       (event.event_kind = 'RegistrationReserved' AND EXISTS (
+           SELECT 1 FROM chain_lineage lineage
+           WHERE lineage.chain_id = event.chain_id AND lineage.block_hash = event.block_hash
+             AND lineage.block_number = event.block_number
+             AND CASE WHEN jsonb_typeof(event.after_state -> 'expiry') = 'number'
+                     THEN (event.after_state ->> 'expiry')::numeric <=
+                          extract(epoch FROM lineage.block_timestamp)
+                     ELSE FALSE END
+       )) AS expired_when_written
 FROM project_events event
 WHERE event.source_family IN ('ens_v2_root_l1', 'ens_v2_registry_l1', 'ens_v2_registrar_l1')

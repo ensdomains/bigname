@@ -3,13 +3,13 @@
 //! the alias-path binding arm over F5), `/links` (F7) and `/roles` (F8), each paged at size one
 //! so every page and its total are compared.
 #[allow(dead_code)]
-#[path = "project_end_to_end/shadow.rs"]
-mod shadow;
-#[allow(dead_code)]
 #[path = "project_end_to_end/shadow_fixture.rs"]
 mod shadow_fixture;
 #[allow(dead_code)]
 mod support;
+#[allow(dead_code)]
+#[path = "project_end_to_end/topology_shadow.rs"]
+mod topology_shadow;
 
 use anyhow::{Context, Result, ensure};
 use bigname_storage::families::topology::{
@@ -447,7 +447,7 @@ async fn classification_rows_are_compared_in_full() -> Result<()> {
     point(&fixture, "one-plain", &one, &plain, 2).await?;
     point(&fixture, "two-mirror", &two, &mirror, 2).await?;
     fixture.publish(4).await?;
-    let sources = |report: &shadow::Report| {
+    let sources = |report: &topology_shadow::Report| {
         (
             report.classification_sources.get(&plain).copied(),
             report.classification_sources.get(&mirror).copied(),
@@ -774,10 +774,17 @@ struct DifferingLink<'a> {
 
 impl DifferingLink<'_> {
     async fn check(&self, pool: &PgPool) -> Result<()> {
-        let (height, _) = shadow::publication(pool, CHAIN).await?;
-        let served =
-            shadow::served_collection(pool, CHAIN, self.resolver, "links", height, None, 1_000)
-                .await?;
+        let (height, _) = topology_shadow::publication(pool, CHAIN).await?;
+        let served = topology_shadow::served_collection(
+            pool,
+            CHAIN,
+            self.resolver,
+            "links",
+            height,
+            None,
+            1_000,
+        )
+        .await?;
         let shadowed =
             load_resolver_links_shadow(pool, CHAIN, self.resolver, "ens", None, 1_000).await?;
         let at = LinkRow {
@@ -857,10 +864,17 @@ impl LinkRow<'_> {
     }
 
     async fn check(&self, pool: &PgPool) -> Result<()> {
-        let (height, _) = shadow::publication(pool, CHAIN).await?;
-        let served =
-            shadow::served_collection(pool, CHAIN, self.resolver, "links", height, None, 1_000)
-                .await?;
+        let (height, _) = topology_shadow::publication(pool, CHAIN).await?;
+        let served = topology_shadow::served_collection(
+            pool,
+            CHAIN,
+            self.resolver,
+            "links",
+            height,
+            None,
+            1_000,
+        )
+        .await?;
         let shadowed =
             load_resolver_links_shadow(pool, CHAIN, self.resolver, "ens", None, 1_000).await?;
         let at_node = |page: &FamilyCollectionPage| -> Vec<(String, String, Value)> {

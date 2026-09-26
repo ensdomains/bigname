@@ -276,7 +276,6 @@ async fn name_wrapped_pointer_differs_from_the_served_mirror_in_attribution_only
     adapter_output::persist_output(&pool, &output).await?;
     point_ensv2_at_mirror(&pool, &fixture, &logical_name_id, &node_hex).await?;
     let target = fixture.target();
-    run(&pool, target, 0, target, None, RunMode::Normal).await?;
     let id_of = |identity: &str| {
         sqlx::query_scalar::<_, i64>(
             "SELECT normalized_event_id FROM normalized_events WHERE event_identity = $1",
@@ -290,6 +289,36 @@ async fn name_wrapped_pointer_differs_from_the_served_mirror_in_attribution_only
         registry_id > wrapper_id,
         "Interpret inserts the sourced batch last"
     );
+    // Step 2's disclosed attribution difference, as step 4's shadow harness reports it: the
+    // mirrored resolver agrees, and the family keeps the wrapper fact (the higher emission
+    // ordinal at one log, then identity bytes) where today keeps the registry fact.
+    let expected = Expectations {
+        differences: vec![ExpectedDifference {
+            target,
+            key: format!("record_inventory {WRAPPED_V2_RESOURCE}"),
+            fields: vec![
+                (
+                    "provenance.mirror.mirrored_pointer_event_id".into(),
+                    Some(json!(registry_id)),
+                    Some(json!(wrapper_id)),
+                ),
+                (
+                    "provenance.mirror.mirrored_pointer_source_family".into(),
+                    Some(json!("ens_v1_registry_l1")),
+                    Some(json!("ens_v1_wrapper_l1")),
+                ),
+                (
+                    "provenance.mirror.mirrored_resource_id".into(),
+                    Some(json!(registry.resource_id)),
+                    Some(json!(wrapper.resource_id)),
+                ),
+            ],
+            times: 1,
+        }],
+        ..Expectations::none()
+    };
+    run_expecting(&pool, target, 0, target, None, RunMode::Normal, &expected).await?;
+    expected.finish()?;
 
     let served = inventory(&pool, WRAPPED_V2_RESOURCE).await?;
     let mirror = &served["provenance"]["mirror"];

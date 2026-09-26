@@ -709,6 +709,173 @@ fn parent_controlled_clobber_is_not_a_migration_boundary() -> anyhow::Result<()>
     Ok(())
 }
 
+/// The open-ENSv1 WrapperRegistry case through Interpret (Pro review of PR 953, questions 5 and 8).
+/// `C-06`'s parent owner registers the child directly into the parent's WrapperRegistry; here the
+/// child is also wrapped in the ENSv1 NameWrapper with `PARENT_CANNOT_CONTROL` before that, and the
+/// WrapperRegistry later unregisters it. Interpret opens the child's ENSv2 binding at its
+/// TokenResource log, closes it at the unregister log with a release on the same resource, and
+/// leaves the ENSv1 wrapper binding open, since nothing on ENSv1 moved. Project's handling of this
+/// shape (name authority and the children omission) is asserted on normalized rows in
+/// `crates/project/tests/issue_503_children.rs`.
+/// (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L293-L307 @ ens_v2@a971bd64)
+/// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L195-L207 @ ens_v2@a971bd64)
+#[test]
+fn a_released_parent_owner_child_keeps_its_open_v1_wrapper_binding() -> anyhow::Result<()> {
+    let fixture = fixture()?;
+    let scenario = &fixture["scenarios"]["C-06"];
+    let addresses = &fixture["addresses"];
+    let child = &scenario["child"];
+    let child_logical = format!("ens:{}", child["namehash"].as_str().unwrap());
+    let registry = child["emitting_registry"].as_str().unwrap();
+    let owner: Address = child["registration_owner"].as_str().unwrap().parse()?;
+    let token = decimal_u256(&child["v2_token_id"])?;
+    let mut logs = scenario_logs(scenario, addresses, &["parent", "child"])?;
+    let mut encoded = Vec::new();
+    for label in ["sub", "c06", "eth"] {
+        encoded.push(u8::try_from(label.len())?);
+        encoded.extend_from_slice(label.as_bytes());
+    }
+    encoded.push(0);
+    // PARENT_CANNOT_CONTROL, the fuse the children projection's locked-parent reachability reads.
+    logs.push(raw_at_transaction(
+        super::super::NameWrapped {
+            node: child["namehash"].as_str().unwrap().parse()?,
+            name: encoded.into(),
+            owner,
+            fuses: 65_536,
+            expiry: 4_000_000_000,
+        }
+        .encode_log_data(),
+        230,
+        0,
+        0,
+        addresses["name_wrapper"].as_str().unwrap(),
+    ));
+    logs.push(raw_at_transaction(
+        super::super::v2_registry::LabelUnregistered {
+            tokenId: token,
+            sender: owner,
+        }
+        .encode_log_data(),
+        238,
+        0,
+        0,
+        registry,
+    ));
+    let mut input = batch(ordered(logs), &fixture, true);
+    let manifest = input
+        .manifests
+        .iter_mut()
+        .find(|manifest| manifest.manifest_id == REGISTRY_MANIFEST_ID)
+        .expect("registry manifest");
+    let mut payload: Value = serde_json::from_str(&manifest.payload_json)?;
+    payload["abi"]["events"]
+        .as_array_mut()
+        .expect("ABI events")
+        .push(json!({
+            "name": "LabelUnregistered",
+            "fragment": "event LabelUnregistered(uint256 indexed tokenId, address indexed sender)",
+            "emitter_roles": ["registry"],
+            "normalized_events": ["RegistrationReleased"],
+        }));
+    manifest.payload_json = serde_json::to_string(&payload)?;
+    let output = interpret_test_batch(input)?;
+    assert!(
+        child_boundaries(&output).is_empty(),
+        "a parent-owner registration is never a migration"
+    );
+    let registration = output
+        .normalized_events
+        .iter()
+        .find(|event| {
+            event.event_kind == "RegistrationGranted"
+                && event.logical_name_id.as_deref() == Some(child_logical.as_str())
+                && event.resource_id.is_some()
+        })
+        .expect("the child registration on its TokenResource resource");
+    assert_eq!(registration.consumer_visibility, "activated");
+    let resource = registration.resource_id.expect("the registration resource");
+    let v2_binding = output
+        .surface_bindings
+        .iter()
+        .find(|binding| {
+            binding.logical_name_id == child_logical && binding.authority_arm == "ens_v2"
+        })
+        .expect("the child's ENSv2 binding");
+    assert_eq!(v2_binding.resource_id, resource);
+    assert_eq!(
+        (
+            v2_binding.block_number,
+            v2_binding.provenance["log_index"].as_i64()
+        ),
+        (
+            237,
+            child["v2_registration_log_index"]
+                .as_i64()
+                .map(|log| log + 2)
+        ),
+        "the ENSv2 binding opens at the TokenResource log"
+    );
+    let release = output
+        .normalized_events
+        .iter()
+        .find(|event| {
+            event.event_kind == "RegistrationReleased"
+                && event.resource_id == Some(resource)
+                && event.after_state["source_event"] == "LabelUnregistered"
+        })
+        .expect("the release on the child resource");
+    assert_eq!(
+        (
+            release.block_number,
+            release.transaction_index,
+            release.log_index
+        ),
+        (Some(238), Some(0), Some(0))
+    );
+    let v1_binding = output
+        .surface_bindings
+        .iter()
+        .find(|binding| {
+            binding.logical_name_id == child_logical && binding.authority_arm == "ens_v1"
+        })
+        .expect("the wrap opened the child's ENSv1 binding");
+    let closures = output
+        .binding_closures
+        .iter()
+        .filter(|closure| closure.logical_name_id == child_logical)
+        .collect::<Vec<_>>();
+    assert!(
+        closures
+            .iter()
+            .filter(|closure| closure.authority_arm == "ens_v1")
+            .all(|closure| closure.except_surface_binding_id == Some(v1_binding.surface_binding_id)),
+        "no closure reaches the ENSv1 wrapper binding"
+    );
+    let last_v2 = closures
+        .iter()
+        .filter(|closure| closure.authority_arm == "ens_v2")
+        .max_by_key(|closure| {
+            (
+                closure.block_number,
+                closure.transaction_index,
+                closure.log_index,
+            )
+        })
+        .expect("an ENSv2 closure");
+    assert_eq!(
+        (
+            last_v2.block_number,
+            last_v2.transaction_index,
+            last_v2.log_index,
+            last_v2.except_surface_binding_id
+        ),
+        (238, 0, 0, None),
+        "the unregister closes the ENSv2 binding"
+    );
+    Ok(())
+}
+
 #[test]
 fn mixed_helper_batch_attributes_children_per_log() -> anyhow::Result<()> {
     let fixture = fixture()?;

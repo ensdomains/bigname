@@ -310,7 +310,7 @@ async fn v2_search_explicit_namespace_bypasses_broken_public_derivation() -> Res
     seed_v2_search_fixture(&database).await?;
     for (chain, deployment) in [
         ("ethereum-mainnet", "ens_v1"),
-        ("ethereum-sepolia", "ens_v2_sepolia_post_audit"),
+        ("ethereum-sepolia", "ens_v2_sepolia_20260915"),
     ] {
         database
             .insert_manifest(
@@ -459,7 +459,7 @@ async fn v2_search_manifest_change_that_breaks_derivation_returns_conflict() -> 
             "ens",
             "ens_v2_registry_l1",
             "ethereum-sepolia",
-            "ens_v2_sepolia_post_audit",
+            "ens_v2_sepolia_20260915",
             1,
             "active",
             "ensip15@ens-normalize-0.1.1",
@@ -545,7 +545,7 @@ async fn public_namespace_derivation_tracks_manifest_authority_and_ready_checkpo
             "ens",
             "ens_v2_registry_l1",
             "ethereum-sepolia",
-            "ens_v2_sepolia_post_audit",
+            "ens_v2_sepolia_20260915",
             1,
             "active",
             "ensip15@ens-normalize-0.1.1",
@@ -1735,8 +1735,8 @@ async fn v2_search_omits_every_unsupported_exact_name() -> Result<()> {
 // timestamp can hold. Such a supported name is still searchable; its expiry reads as unknown, as
 // does a negative one.
 // (upstream: .refs/ens_v2_sepolia_20260916/contracts/script/deploy-constants.ts:L1 @ ens_v2_sepolia_20260916@366de741)
-// (upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ETHRegistry.ts:L46 @ ens_v2_sepolia_20260916@366de741)
-// (upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ReverseMirror.ts:L35 @ ens_v2_sepolia_20260916@366de741)
+// (upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ETHRegistry.ts:L36-L48 @ ens_v2_sepolia_20260916@366de741)
+// (upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ReverseMirror.ts:L25-L37 @ ens_v2_sepolia_20260916@366de741)
 #[tokio::test]
 async fn v2_search_serves_a_name_whose_expiry_exceeds_the_timestamp_range() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;

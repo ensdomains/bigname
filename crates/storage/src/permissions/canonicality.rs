@@ -32,7 +32,7 @@ pub const DEFAULT_PERMISSIONS_CURRENT_READ_FILTER: &str = r#"
   )
 "#;
 
-pub(super) const CURRENT_PERMISSION_SUMMARY_READ_FILTER: &str = r#"
+pub const CURRENT_PERMISSION_SUMMARY_READ_FILTER: &str = r#"
   summary.canonicality_summary ->> 'state' = 'canonical_lineage'
   AND EXISTS (
       SELECT 1

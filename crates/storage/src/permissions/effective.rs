@@ -23,17 +23,30 @@ use crate::projection_helpers::{
     checked_page_limit_i64, checked_page_size_usize, split_keyset_page,
 };
 
-const ACCOUNT_READ_FILTER: &str = r#"
+macro_rules! account_approval_read_filter {
+    () => {
+        r#"
  AND aps.canonicality_summary->>'state' IN ('canonical','safe','finalized')
  AND (SELECT account_lineage.canonicality_state FROM bigname_phase.chain_lineage account_lineage
    WHERE account_lineage.chain_id=aps.chain_id
      AND account_lineage.block_hash=aps.chain_positions->>'target_block_hash')
    IN ('canonical','safe','finalized')
- AND (SELECT binding_lineage.canonicality_state FROM bigname_phase.chain_lineage binding_lineage
+"#
+    };
+}
+
+/// The account half of the registry-operator read's filter: an approval row (`aps`) whose
+/// canonicality summary and publication lineage are canonical.
+pub const ACCOUNT_APPROVAL_READ_FILTER: &str = account_approval_read_filter!();
+
+const ACCOUNT_READ_FILTER: &str = concat!(
+    account_approval_read_filter!(),
+    r#" AND (SELECT binding_lineage.canonicality_state FROM bigname_phase.chain_lineage binding_lineage
    WHERE binding_lineage.chain_id=summary.registry_binding_provenance->>'chain_id'
      AND binding_lineage.block_hash=summary.registry_binding_chain_positions->>'block_hash')
    IN ('canonical','safe','finalized')
-"#;
+"#
+);
 
 const DIRECT_COLUMNS: &str = r#"pc.resource_id,pc.subject,pc.scope AS scope_storage_key,
  pc.scope_kind,pc.scope_detail,NULL::text AS grant_relation,pc.effective_powers,

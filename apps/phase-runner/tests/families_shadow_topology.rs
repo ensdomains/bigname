@@ -5,13 +5,13 @@
 //! `observed_wildcard_path` binding (crates/project/src/scope.rs, the wildcard scope arm), so
 //! there is no operating path to test until one is wired.
 #[allow(dead_code)]
-#[path = "project_end_to_end/shadow.rs"]
-mod shadow;
-#[allow(dead_code)]
 #[path = "project_end_to_end/shadow_fixture.rs"]
 mod shadow_fixture;
 #[allow(dead_code)]
 mod support;
+#[allow(dead_code)]
+#[path = "project_end_to_end/topology_shadow.rs"]
+mod topology_shadow;
 
 use anyhow::{Result, ensure};
 use bigname_storage::families::topology::load_name_topology_shadow;

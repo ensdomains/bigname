@@ -4,8 +4,8 @@ use anyhow::{Context, Result};
 use serde_json::Value;
 use sqlx::{PgPool, Row, types::time::OffsetDateTime};
 
-/// `provenance.authority_selection.proof_kind` written by Project when the current ENSv2
-/// authority is proven by an activated `MigrationApplied` boundary.
+/// `provenance.authority_selection.proof_kind` written by Project when the name has an activated
+/// `MigrationApplied` boundary. It is migration history; it does not select authority.
 pub const MIGRATION_AUTHORITY_TRANSITION_PROOF_KIND: &str = "migration_authority_transition";
 
 /// The `authority_arm` Project selected for a `name_current` row (`ens_v1`, `ens_v2`, ...).
@@ -16,9 +16,9 @@ pub fn name_current_authority_arm(provenance: &Value) -> Option<&str> {
         .filter(|arm| !arm.trim().is_empty())
 }
 
-/// Block timestamps of the `MigrationApplied` proof event for every requested name whose current
-/// authority is the ENSv2 arm proven by an ENSv1→ENSv2 migration transition. Names selected by any
-/// other proof, or on the ENSv1 arm, are absent from the map.
+/// Block timestamps of the `MigrationApplied` event for every requested name whose current
+/// authority is the ENSv2 arm and that has an activated ENSv1→ENSv2 migration. Names without a
+/// migration, or on the ENSv1 arm, are absent from the map.
 pub async fn load_name_migration_transition_timestamps(
     pool: &PgPool,
     logical_name_ids: &[String],

@@ -420,8 +420,8 @@ fn push_json_timestamp(builder: &mut QueryBuilder<'_, Postgres>, path: &[&str]) 
     // unknown instead of failing the whole query. The range check reads the full value; a value
     // inside it keeps whole seconds, as Project's formatted `control.expiry` presents it.
     // (upstream: .refs/ens_v2_sepolia_20260916/contracts/script/deploy-constants.ts:L1 @ ens_v2_sepolia_20260916@366de741)
-    // (upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ETHRegistry.ts:L46 @ ens_v2_sepolia_20260916@366de741)
-    // (upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ReverseMirror.ts:L35 @ ens_v2_sepolia_20260916@366de741)
+    // (upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ETHRegistry.ts:L36-L48 @ ens_v2_sepolia_20260916@366de741)
+    // (upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ReverseMirror.ts:L25-L37 @ ens_v2_sepolia_20260916@366de741)
     builder.push(") = 'number' THEN CASE WHEN (nc.declared_summary #>> ");
     builder.push(path.as_str());
     builder.push(
