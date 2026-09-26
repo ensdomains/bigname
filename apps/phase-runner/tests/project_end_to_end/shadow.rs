@@ -149,6 +149,22 @@ impl Report {
 /// The served and family markers must name the same block: that block, and the family marker's
 /// block timestamp, which is the clock the time-dependent filters read.
 pub async fn publication(pool: &PgPool, chain: &str) -> Result<(i64, OffsetDateTime)> {
+    let marker = marker(pool, chain).await?;
+    Ok((marker.block_number, marker.clock))
+}
+
+/// The family marker a comparison reads at: its block number and hash, which must equal the
+/// served publication's, its sequence, which every family block and undo advances, and its block
+/// timestamp.
+#[derive(Clone, Debug)]
+struct Marker {
+    block_number: i64,
+    block_hash: String,
+    sequence: i64,
+    clock: OffsetDateTime,
+}
+
+async fn marker(pool: &PgPool, chain: &str) -> Result<Marker> {
     let served: (Option<i64>, Option<String>) = sqlx::query_as(
         "SELECT current_block_number, current_block_hash FROM chain_phase_state
          WHERE chain_id = $1 AND phase_name = 'project'",
@@ -156,8 +172,9 @@ pub async fn publication(pool: &PgPool, chain: &str) -> Result<(i64, OffsetDateT
     .bind(chain)
     .fetch_one(pool)
     .await?;
-    let family: Option<(Option<i64>, Option<String>, Option<OffsetDateTime>)> = sqlx::query_as(
-        "SELECT current_block_number, current_block_hash, block_timestamp
+    type FamilyRow = (Option<i64>, Option<String>, Option<OffsetDateTime>, i64);
+    let family: Option<FamilyRow> = sqlx::query_as(
+        "SELECT current_block_number, current_block_hash, block_timestamp, sequence
          FROM project_family_marker WHERE chain_id = $1",
     )
     .bind(chain)
@@ -171,27 +188,41 @@ pub async fn publication(pool: &PgPool, chain: &str) -> Result<(i64, OffsetDateT
         family.0,
         served.0
     );
-    Ok((
-        served.0.unwrap_or_default(),
-        family
+    Ok(Marker {
+        block_number: served.0.unwrap_or_default(),
+        block_hash: served.1.unwrap_or_default(),
+        sequence: family.3,
+        clock: family
             .2
             .context("the family marker has no block timestamp")?,
-    ))
+    })
 }
 
 pub async fn compare(pool: &PgPool, chain: &str, settings: Settings) -> Result<Report> {
-    let (target, clock) = publication(pool, chain).await?;
+    let start = marker(pool, chain).await?;
     let mut report = Report {
-        target,
+        target: start.block_number,
         ..Report::default()
     };
-    children(pool, chain, settings, clock, &mut report).await?;
+    children(pool, chain, settings, start.clock, &mut report).await?;
     topology(pool, chain, &mut report).await?;
-    resolvers(pool, chain, target, settings, &mut report).await?;
-    // The comparison read one publication throughout.
+    resolvers(pool, chain, start.block_number, settings, &mut report).await?;
+    // The comparison read one publication throughout: the same block, the same block hash, so a
+    // same-height reorg fails it, and the same marker sequence, so a family undo and reapply at
+    // the same block fails it too.
+    let end = marker(pool, chain).await?;
+    let moved: Vec<&str> = [
+        (start.block_number != end.block_number, "block number"),
+        (start.block_hash != end.block_hash, "block hash"),
+        (start.sequence != end.sequence, "marker sequence"),
+    ]
+    .into_iter()
+    .filter_map(|(moved, what)| moved.then_some(what))
+    .collect();
     ensure!(
-        publication(pool, chain).await?.0 == target,
-        "the publication moved during the shadow comparison"
+        moved.is_empty(),
+        "the publication moved during the shadow comparison: {} changed, from {start:?} to {end:?}",
+        moved.join(", ")
     );
     Ok(report)
 }

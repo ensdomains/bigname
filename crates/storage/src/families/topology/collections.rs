@@ -66,9 +66,13 @@ pub async fn load_resolver_aliases_shadow(
 
 /// `/links`: the latest link per node at this resolver with a non-zero record, names attached
 /// from the readable surfaces in `namespace` at the family marker's block. The newest link per
-/// (resolver, node) wins (Tate, 2026-09-26), as on chain; `storage_model` is an annotation and
-/// plays no part (see `load_family_link_selection`). Today's `/links` drops a link not annotated
-/// `resolver_record_id` and serves an older one; only a fixture writes such a link.
+/// (resolver, node) wins (Tate, 2026-09-26), as on chain, where the resolver keeps one record id
+/// per node (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L96-L97 @
+/// ens_v2@a971bd64) and each `Linked` overwrites it (upstream:
+/// .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L363-L367 @ ens_v2@a971bd64).
+/// `storage_model` is an annotation and plays no part (see `load_family_link_selection`). Today's
+/// `/links` drops a link not annotated `resolver_record_id` and serves an older one; only a
+/// fixture writes such a link.
 pub async fn load_resolver_links_shadow(
     pool: &PgPool,
     chain_id: &str,
