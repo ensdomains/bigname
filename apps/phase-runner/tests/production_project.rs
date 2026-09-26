@@ -17999,6 +17999,11 @@ async fn mixed_authority_expiry_serves_the_released_v2_summary_on_both_paths() -
 // none, on the tombstone's resource and binding. Before, the section ran its own choice and served
 // the earlier reservation as `reserved` with no resource, beside authority provenance that named
 // the tombstone's resource.
+// The rows are hand-built and one PermissionedRegistry cannot write them: registering over a
+// live owned entry reverts `LabelAlreadyRegistered`, so the live registration and the live
+// reservation of one label need two registry instances on chain. Authority selection's pick for
+// this shape predates the one-selection change; the section only follows it now.
+// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L440-L445 @ ens_v2@a971bd64)
 #[tokio::test]
 async fn an_earlier_reservation_elsewhere_gives_way_to_the_bound_registrations_expiry() -> Result<()>
 {
