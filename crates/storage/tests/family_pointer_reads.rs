@@ -6,8 +6,10 @@
 //!   unless it is a clear too.
 //! - `load_family_alias_source_pointer`: the resource's current pointer, rejected when null, zero
 //!   or empty, never an older pointer.
-//! - `load_family_wildcard_source`: the latest non-zero pointer, which a null or empty resolver
-//!   counts as, with the latest pointer or version event as its boundary.
+//! - `load_family_wildcard_source`: the latest non-zero pointer, with the latest pointer or
+//!   version event as its boundary. Its null and empty cases guard the reader against rows the F5
+//!   reducer does not produce, since it records a non-zero pointer only for a non-empty, non-zero
+//!   resolver.
 use anyhow::Result;
 use bigname_storage::families::topology::{
     LinkSelection, load_family_alias_source_pointer, load_family_link_selection,
@@ -264,8 +266,10 @@ async fn alias_pointer_rejects_null_zero_and_empty() -> Result<()> {
 }
 
 // The wildcard read keeps the latest non-zero pointer through a later zero clear, with the clear
-// as its boundary; a null or empty resolver counts as non-zero, as the served wildcard lateral
-// admits it.
+// as its boundary. The null and empty cases guard the reader against rows the F5 reducer does not
+// produce: it records a non-zero pointer only for a non-empty, non-zero resolver
+// (crates/project/src/families/resolver.rs). The served wildcard lateral does admit a null or
+// empty pointer; docs/projections.md lists that difference under F5.
 #[tokio::test]
 async fn wildcard_source_keeps_the_historical_pointer_through_a_clear() -> Result<()> {
     with_database("family_wildcard_source", |pool| async move {

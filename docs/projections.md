@@ -1835,6 +1835,12 @@ entry maps them to tables and reducers:
   `getResolver` once the token has expired, which F5 matches (upstream:
   .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L255-L258,
   L628-L630 @ ens_v2@a971bd64).
+- F5 records a wildcard source (`nonzero_resolver_address`) only for a pointer
+  whose resolver is neither empty nor the zero address. The served wildcard
+  lateral (`crates/project/src/builders/name_topology.rs`) takes the latest
+  `ResolverChanged` whose resolver is not the zero address, so it admits a null
+  or empty pointer as the wildcard source where F5 keeps the older one. No
+  producer writes wildcard bindings today, so no read reaches the difference.
 - F7 keeps a `ResolverRecordLinked` whose payload has no resolver; the served
   link reader requires the payload resolver equal to the emitter.
 - F14's node index (`project_address_record_node_index`) is a superset: it

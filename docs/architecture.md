@@ -151,7 +151,7 @@ an ENSv1 row while retaining or opening the concrete ENSv2 successor.
 For a manifest declaring the record-ID `PermissionedResolver` event generation,
 Interpret emits `ResolverRecordLinked` for `Linked` and `RecordChanged` for
 record updates. Both retain the emitting resolver instance and numeric
-`resolver_record_id`; record values have `storage_model: resolver_record_id`
+`resolver_record_id`; record values have [`storage_model`](glossary.md#storage-model) `resolver_record_id`
 and no interpretation-time name or registration resource. Record IDs are local
 to a resolver instance, distinct from bigname resource IDs. Project derives the
 current association with materialized names from canonical link history. A

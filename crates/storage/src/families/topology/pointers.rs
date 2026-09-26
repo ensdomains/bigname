@@ -73,8 +73,11 @@ pub async fn load_family_alias_source_pointer(
 /// The resource's latest non-zero pointer and its version boundary, the wildcard source.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FamilyWildcardSource {
-    /// The latest pointer whose resolver is not the zero address; null when that pointer named
-    /// no resolver, as the served wildcard lateral admits it.
+    /// The latest pointer whose resolver is neither empty nor the zero address. The F5 reducer
+    /// sets it only for such a resolver (crates/project/src/families/resolver.rs), so it is never
+    /// null or empty in a row the reducer writes; the reader passes either through unchanged, and
+    /// the tests' null and empty cases guard it against rows the reducer does not produce. The
+    /// served wildcard lateral does admit a null or empty pointer (docs/projections.md, F5).
     pub nonzero_resolver_address: Option<String>,
     pub nonzero_position: Value,
     /// The latest RecordVersionChanged or ResolverChanged on the resource, zero pointers included.
@@ -121,7 +124,8 @@ pub async fn load_family_wildcard_source(
 }
 
 /// One `project_resolver_link` row: the latest `Linked` for a node at a resolver, record id `0`
-/// a clear. `storage_model` is a bigname annotation, not chain state: the record-ID adapter
+/// a clear. `storage_model` is a bigname annotation (docs/glossary.md, "Storage model"), not
+/// chain state: the record-ID adapter
 /// stamps `resolver_record_id` on every `Linked`
 /// (crates/adapters/src/schema_v2/protocol/v2_record_resolver.rs, `metadata`), and no producer
 /// writes another value. The reads never consult it.
