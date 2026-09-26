@@ -2550,11 +2550,14 @@ known to write one family key, and where batches of two sources write one key
 from one log, the fact with the higher ordinal (then the higher identity
 bytes) wins, not the one inserted last. Its one confirmed instance is the
 NameWrapped registry-node pointer, where the resolver value agrees with the
-served read and only the resource, source family and event attribution differ;
-a registrar `NameRegistered` that promotes a pre-surface registry authority
-and moves the authority is an unconfirmed second shape
-([projections](projections.md#owned-key-families)). That bound is not a
-general exemption for cross-source value differences. A
+served read and only the resource, source family and event attribution differ.
+Four more shapes are read from the adapter code and pinned by tests but not
+yet produced by an adapter run: an F1 binding predecessor, an F4 registrar
+pointer, an F4 enrichment pointer against the registrar surface, and an F13
+controller. The F13 shape is a value difference: the families keep the
+registrant as controller where the served fold would keep the registry owner
+([projections](projections.md#owned-key-families) lists all four). No
+cross-source value difference is exempted. A
 served reader ported to the canonical event order (step 7) must parse the
 ordinal the same way. Only when both indexes are present, match
 `regexp_match(event_identity COLLATE "C", ':([0-9]+)$') m`, strip leading

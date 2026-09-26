@@ -653,8 +653,8 @@ async fn binding(
 // that run the materialization sourced no SurfaceBound. An adapter run of a registrar
 // NameRegistered after a registry owner and a resolver selection produced the primary batch
 // modelled here (ordinals 0 to 6) but no sourced materialization. So these cases pin the
-// families' result for shapes that are not yet demonstrated (docs/projections.md, "one
-// unconfirmed shape").
+// families' result for shapes that are not yet demonstrated (docs/projections.md lists the
+// four and states the F13 controller value difference).
 /// The registry-only surface materialization a readable trigger sources to the registry
 /// manifest (adapters protocol/v1/authority_transition.rs:233-284): SurfaceBound (0) and, with
 /// a resolver, ResolverChanged (1), both on the registry-only resource.

@@ -153,6 +153,10 @@ pub(super) async fn apply(
             );
             set(&mut row, "expiry_position", event.position.to_json());
         }
+        // This reads the flag with `as_bool`, while registry.rs and lifecycle.rs use
+        // `reduce::flag`, which also takes the string "true" or "false". Wrapper events never
+        // carry the key: the adapter's `mark_unmasked_word` runs only in the v1 registry decodes
+        // (adapters schema_v2/protocol/v1/registry.rs), so the two readers cannot disagree today.
         if let Some(unmasked) = event.after.get("owner_word_unmasked") {
             set(
                 &mut row,
