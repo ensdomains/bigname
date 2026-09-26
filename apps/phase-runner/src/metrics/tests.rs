@@ -559,3 +559,46 @@ fn project_batches_set_last_batch_gauges_and_add_up_written_rows() -> Result<()>
     }
     Ok(())
 }
+
+#[test]
+fn family_loops_set_their_own_time_and_lag_and_count_skips() -> Result<()> {
+    let metrics = PipelineMetrics::new(
+        900,
+        RunnerLoopHeartbeat::default(),
+        RunnerPhaseProgress::default(),
+    )?;
+    let feed = RunnerMetricsFeed::default();
+    let marker = |number: i64| bigname_project::Marker {
+        number,
+        hash: format!("0x{number:064x}"),
+    };
+    let outcome = |elapsed_ms: u64, current: i64, skipped: Option<&str>| {
+        bigname_project::families::FamilyOutcome {
+            target: Some(marker(14)),
+            marker: Some(marker(current)),
+            marker_readable: true,
+            elapsed_ms,
+            skipped: skipped.map(str::to_owned),
+            duplicate_anomalies: u64::from(skipped.is_none()),
+            ..Default::default()
+        }
+    };
+    feed.project_families(
+        "ethereum-sepolia",
+        &outcome(40, 12, Some("block 13: failed")),
+    );
+    feed.project_families("ethereum-sepolia", &outcome(250, 14, None));
+    metrics.project_writes.apply(feed.take_project_writes());
+
+    let scrape = metrics.registry.encode()?;
+    for line in [
+        "# TYPE phase_runner_project_family_skips_total counter",
+        "phase_runner_project_families_seconds{chain=\"ethereum-sepolia\"} 0.25\n",
+        "phase_runner_project_family_lag_blocks{chain=\"ethereum-sepolia\"} 0\n",
+        "phase_runner_project_family_skips_total{chain=\"ethereum-sepolia\"} 1\n",
+        "phase_runner_project_family_duplicate_anomalies_total{chain=\"ethereum-sepolia\"} 1\n",
+    ] {
+        assert!(scrape.contains(line), "missing {line}");
+    }
+    Ok(())
+}

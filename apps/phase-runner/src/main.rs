@@ -58,6 +58,7 @@ async fn main() -> Result<()> {
             manifests_root,
             mut runtime,
             hydration_rpc_urls,
+            project_families,
         } => {
             // Only the supervised run and an explicit redo poll the token; the
             // one-shot commands keep the default SIGTERM disposition.
@@ -110,8 +111,8 @@ async fn main() -> Result<()> {
                     )),
                     Arc::new(
                         ProjectPhase::with_hydration(database.pool().clone(), hydration_rpc_urls)
-                            .with_metrics_feed(metrics_feed.clone())
-                            .with_step_observer(Arc::new(metrics_feed.clone())),
+                            .with_family_settings(project_families)
+                            .with_metrics(metrics_feed.clone()),
                     ),
                     Arc::new(VerifyPhase::new(verification_database)),
                     Arc::new(LivePhase::with_engine(ingest_engine)),
@@ -152,6 +153,7 @@ async fn main() -> Result<()> {
             range,
             watch_set_coverage_attestations,
             hydration_rpc_urls,
+            project_families,
         } => {
             let cancellation = CancellationToken::new();
             phase_runner::shutdown::cancel_on_signal(&cancellation)
@@ -220,8 +222,8 @@ async fn main() -> Result<()> {
                 ));
                 let project = Arc::new(
                     ProjectPhase::with_hydration(database.pool().clone(), hydration_rpc_urls)
-                        .with_metrics_feed(metrics_feed.clone())
-                        .with_step_observer(Arc::new(metrics_feed.clone())),
+                        .with_family_settings(project_families)
+                        .with_metrics(metrics_feed.clone()),
                 );
                 let phases = if phase.requires_verify() {
                     let verification_database_url =

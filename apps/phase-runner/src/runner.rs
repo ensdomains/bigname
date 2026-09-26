@@ -559,6 +559,13 @@ impl PhaseRunner {
             .await?;
             self.record_loop_progress(&chain.chain_id);
             reserved_write_bytes = progress.estimated_write_bytes;
+            // Shadow work after the recorded progress. A stop abandons it; its own transactions
+            // roll back and the next batch catches up.
+            tokio::select! {
+                biased;
+                () = cancellation.cancelled() => {}
+                () = phase.after_progress_recorded(&chain.chain_id) => {}
+            }
 
             match outcome {
                 PhaseBatchOutcome::Complete(_) => {

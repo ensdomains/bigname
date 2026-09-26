@@ -40,6 +40,17 @@ impl RunnerMetricsFeed {
         self.project_writes.record(chain, summary);
     }
 
+    /// Records what the owned key family loop after a Project batch did, and wakes the metrics
+    /// task so the family gauges follow the loop rather than the next refresh tick.
+    pub fn project_families(
+        &self,
+        chain: &str,
+        outcome: &bigname_project::families::FamilyOutcome,
+    ) {
+        self.project_writes.record_families(chain, outcome);
+        self.committed.notify_one();
+    }
+
     pub(super) fn take_project_writes(&self) -> super::project_writes::Pending {
         self.project_writes.take()
     }

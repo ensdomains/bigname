@@ -209,9 +209,23 @@ mandatory full Interpret and Project redos.
 | `migration_event_associations`, `migration_discovery_associations`, `migration_candidate_identity_effects`, `migration_candidate_discovery_effects` | Interpret | Correlation-versioned diagnostic associations and effects that slice 1 must not use to alter independently admitted normalized events, identity rows, or [discovery edges](glossary.md#discovery-graph--discovery-edge). The ordinary `registry_announcement` indexability edge remains a watch-plan input. |
 | `*_current` projection families | Project | Current serving state, rebuildable from canonical interpreted input. |
 | `child_registration_events` | Project | Historical membership of each name's [direct child registration](glossary.md#direct-child-registration) events, rebuildable from canonical interpreted input; name history selects rows through it and reads the events themselves from `normalized_events`. |
+| `project_family_marker`, `project_family_undo`, `project_repair_record` and the owned key family tables (`project_name_state` through `project_address_record_id_index`) | Project, after each batch's progress is recorded | [Owned key families](projections.md#owned-key-families): per-key current state, its block marker, its undo journal (kept back to the lowest of 256 blocks, the finalized and safe blocks and an active repair's floor) and the record of the latest family repair or rebuild. Unread shadows, rebuildable from canonical interpreted input; never serving data until the per-block publication reads them. |
 | `chain_phase_state`, redo/invalidation state, `service_heartbeats` | phase runner; manifest synchronization may stamp or widen required Ingest redo work recorded by the [manifest-authority marker](glossary.md#manifest-authority-marker), and Interpret may stamp discovery-owned required Ingest work in the transaction that finalizes a completed pass | Phase progress, repair work, and runtime liveness. Both coordination writers use the shared required-Ingest installer under the existing synchronization and runner phase-exclusion rules. They preserve lifecycle backup fields, clear resumable evidence for genuinely new demand, and never execute the redo. The phase runner remains the sole executor and redo authority. |
 | `project_generation_failures` | phase runner after Project rollback | Append-only audit evidence for a [projection generation failure](glossary.md#projection-generation-failure); never a product projection. |
 | `resolution_divergences` | guarded lookup functions; Project publication may only clear outdated direct observations | Active live/indexed resolver disagreements and retained observations retired after the exact resolver becomes null; diagnostic only. |
+
+Interpret writes `discovery_edges` and `contract_instance_addresses`. A phase
+that reads them may add read-only indexes through its own schema-migration, never
+changing a row, when it records each index here with the statement it serves.
+The owned key families add five, named for their reader:
+
+| Index | Serves |
+| --- | --- |
+| `project_families_discovery_edges_resolver_from_block_idx` | `project:families.classification.activated`: resolver edges that start at the block |
+| `project_families_discovery_edges_resolver_to_block_idx` | `project:families.classification.activated`: resolver edges that stop at the block |
+| `project_families_contract_instance_addresses_from_block_idx` | `project:families.classification.activated`: contract addresses that start at the block |
+| `project_families_contract_instance_addresses_to_block_idx` | `project:families.classification.activated`: contract addresses that stop at the block |
+| `project_families_discovery_edges_resolver_destination_idx` | `project:families.classification.activated`: whether an address that starts or stops at the block is any resolver edge's destination, deactivated edges included |
 
 When an ENSv1 BaseRegistrar manifest admits ordinary numeric registration and renewal,
 Interpret retains the registrar resource, token lineage, owner and expiry independently of
