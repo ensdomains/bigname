@@ -53,7 +53,8 @@ fn assert_query_values(endpoint: &str, parameter: &str, expected: &[&str]) {
     assert_eq!(
         actual,
         expected.iter().map(|value| (*value).to_owned()).collect(),
-        "{endpoint} must rotate every documented {parameter} value"
+        "{endpoint} must send exactly these {parameter} values, none when the set is empty (the \
+         resolver overview takes no include)"
     );
 }
 
@@ -92,13 +93,12 @@ fn address_names_rotate_documented_expansion_values() {
     assert_query_values("address_names", "order", &["asc", "desc"]);
 }
 
+// The overview has no sections left to rotate; its `bound_names` page runs at one row and at the
+// documented maximum, beside the omitted default.
 #[test]
-fn resolvers_rotate_every_overview_section() {
-    assert_query_values(
-        "resolver",
-        "include",
-        &["nodes", "aliases", "roles", "events"],
-    );
+fn resolvers_page_bound_names_at_one_row_and_the_maximum() {
+    assert_query_values("resolver", "page_size", &["1", "200"]);
+    assert_query_values("resolver", "include", &[]);
 }
 
 #[test]

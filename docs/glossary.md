@@ -248,6 +248,27 @@ configured, and otherwise records provider trust without comparing intake with i
 only its block extent, trust level, and any fatal mismatch in phase state. It
 does not write coverage attestations or repair raw data.
 
+<a id="storage-model"></a>
+## Storage model (`storage_model`)
+
+a bigname annotation on record events (`RecordChanged`, `RecordVersionChanged`)
+and resolver links (`ResolverRecordLinked`) that names how the emitting
+resolver stores the record. It is not chain state: the only value written today
+is `resolver_record_id`, which the record-ID resolver adapter stamps on every
+event it emits
+(`crates/adapters/src/schema_v2/protocol/v2_record_resolver.rs`, `metadata`).
+Record events from other resolvers carry none and are keyed by node.
+The link reads over the [owned key families](#owned-key-family) do not consult
+it: the newest link per resolver and node wins, as on chain, where the resolver
+keeps one record id per node
+(upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L96-L97 @ ens_v2@a971bd64),
+each `Linked` overwrites it
+(upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L363-L367 @ ens_v2@a971bd64)
+and resolution serves that record, falling back to the default node only when
+it is 0
+(upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L380-L387 @ ens_v2@a971bd64).
+Today's served link staging keeps only links annotated `resolver_record_id`.
+
 ## Verification level
 
 the source-bounded trust label for a chain's stored
@@ -2446,8 +2467,16 @@ per-key current state Project keeps for one kind of fact, such as a name's
 binding candidates, a resource's resolver pointer or a resolver's records at a
 node. A block writes only the keys its own events name, and each row holds
 what the latest events of its key left, clears included. The families are
-unread shadows until the per-block publication reads them
-([projections](projections.md#owned-key-families)).
+unread shadows until the [per-block publication](#per-block-publication)
+reads them ([projections](projections.md#owned-key-families)).
+
+## Per-block publication
+
+the planned way Project will serve its current-state reads: straight from the
+[owned key families](#owned-key-family), published block by block, in place of
+the batch builders and the tables they fill. It is not built yet. Until it
+ships the families are unread, and a doc that describes a change taking effect
+with the per-block publication describes planned behaviour.
 
 The families carry labels F1 to F14, used in the difference lists, the table
 comments and the reducers' module headers. Each label names these tables and

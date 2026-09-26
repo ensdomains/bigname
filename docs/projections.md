@@ -40,8 +40,8 @@ row. `PermissionChanged` rebuilds every resolver identified by
 metadata is not resolver evidence; resolver-family adapters put the emitting
 resolver in that semantic scope.
 None of these events rebuilds other names that use the resolver. Record and
-record-version events do not contribute to the resolver overview's derived
-sections, so an existing resolver touched only by those kinds is republished at
+record-version events do not contribute to the stored `resolver_current`
+section summaries, so an existing resolver touched only by those kinds is republished at
 the new target without restaging unrelated resolver history. That republish
 path is existing-row only: a record or record-version observation without a
 linked name or resource does not create a resolver row.
@@ -1183,7 +1183,10 @@ resolver row whose version differs from the running code's (a row from before
 the field existed included), so a deploy that adds or reshapes a section
 reaches every resolver — a manifest-declared one with no events and an
 unchanged citation included — on the first run, without waiting for evidence
-that would otherwise rescope it.
+that would otherwise rescope it. The resolver overview route no longer serves
+these section summaries or their counts; they stay stored until the
+[per-block publication](glossary.md#per-block-publication) replaces them, and the route reads only the classification from
+this row.
 
 `resolver_current.unsupported_reason` for an ENSv2 resolver (and the
 `coverage.unsupported_reason` copied onto its record inventory) uses a closed
@@ -1904,6 +1907,12 @@ entry maps them to tables and reducers:
   `getResolver` once the token has expired, which F5 matches (upstream:
   .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L255-L258,
   L628-L630 @ ens_v2@a971bd64).
+- F5 records a wildcard source (`nonzero_resolver_address`) only for a pointer
+  whose resolver is neither empty nor the zero address. The served wildcard
+  lateral (`crates/project/src/builders/name_topology.rs`) takes the latest
+  `ResolverChanged` whose resolver is not the zero address, so it admits a null
+  or empty pointer as the wildcard source where F5 keeps the older one. No
+  producer writes wildcard bindings today, so no read reaches the difference.
 - F7 keeps a `ResolverRecordLinked` whose payload has no resolver; the served
   link reader requires the payload resolver equal to the emitter.
 - F14's node index (`project_address_record_node_index`) is a superset: it

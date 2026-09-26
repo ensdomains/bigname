@@ -2879,12 +2879,10 @@ For a registrar lease first identified by a later readable observation, registra
   previous pointer is that contract, so a resolver's timeline includes the
   names pointing at it. It composes with every other filter and with
   `include=data`, whose `contract_address` is the emitting contract. This
-  filter lives on `/v1/events` rather than as `include=events` on the resolver
-  overview because it is an unbounded, paginated, redo-guarded history read
-  with the shared `order`/`type`/timestamp vocabulary, whereas the overview's
-  `include=events` is a bounded `{count, by_type}` summary; nesting a second
-  paginated collection beside `bound_names` would give the overview two
-  independent cursors.
+  filter lives on `/v1/events` rather than on the resolver overview because it
+  is an unbounded, paginated, redo-guarded history read with the shared
+  `order`/`type`/timestamp vocabulary; nesting a second paginated collection
+  beside `bound_names` would give the overview two independent cursors.
   `contract_address` keeps only events whose source log was emitted by
   that contract (a registry, registrar, or resolver address, compared
   case-insensitively); it combines with every other filter (including
@@ -2987,17 +2985,17 @@ For a registrar lease first identified by a later readable observation, registra
 - Method/path: `GET /v1/resolvers/{chain_id}/{address}`
 - Tier: product read.
 - Purpose: resolver overview for numeric `chain_id` and resolver `address`.
-- Request parameters: path `chain_id`, `address`; query `include` for
-  route-documented sections, `at`, `finality`, `cursor`, `page_size`.
+- Request parameters: path `chain_id`, `address`; query `at`, `finality`,
+  `cursor`, `page_size`. Other query parameters, `include` among them, return
+  `400 invalid_input`.
 - Response shape: `data` is a resolver overview in product vocabulary. The
   route includes route-local `bound_names: {data, page}`, a nested collection
   of record-shaped name rows that replaces resolver-based name filtering.
   `data.mirror` is present only when the resolver is a declared
   [ENSv1 mirror resolver](glossary.md#ensv1-mirror-resolver-ensv1_mirror_resolver):
   `{kind: "ensv1_registry", registry: {chain_id, address}}` names the ENSv1
-  registry whose resolvers answer for the names bound to it; the overview's
-  own `counts` and sections still describe this resolver's bindings, not the
-  mirrored ENSv1 resolvers.
+  registry whose resolvers answer for the names bound to it; `bound_names`
+  still lists this resolver's own bindings, not the mirrored ENSv1 resolvers'.
   Those rows use the same optional, atomic `wrapper_state` and `wrapper_fuses`
   contract as exact-name detail; the fields are present only for a current
   ENSv1 NameWrapper registration at the served projection timestamp.
@@ -3030,109 +3028,16 @@ For a registrar lease first identified by a later readable observation, registra
   different: its event-derived resolver
   binding is eligible for `bound_names` only where that resolver family's
   existing binding-enumeration capability is supported.
-  `counts.nodes`, `counts.aliases`, `counts.links`, and `counts.role_holders`
-  are total counts, while the corresponding `include=nodes`, `include=aliases`,
-  `include=links`, and `include=roles` arrays are deterministic samples of at
-  most 100 items. A
-  count greater than the returned array length means that sample is truncated;
-  omitted binding rows remain available through paginated name-side routes,
-  and omitted permission rows remain available through permission routes.
-  Complete alias mappings, record links, and per-registration permission rows
-  are available through the `/aliases`, `/links`, and `/roles` collections
-  below. Binding samples sort by name
-  and stable identity, alias samples place current binding aliases before
-  current alias-event rows and preserve each group’s stable order, link
-  samples sort by numeric record ID and then namehash, and
-  role-holder samples sort by address.
-  `include=links` serves the record links of a resolver of the ENSv2
-  record-ID generation (a proxy whose admitted implementation's manifest
-  declares `Linked`; see [manifests](manifests.md#record-id-resolver-generation)).
-  Such a resolver stores values per numeric record and binds names to records
-  with `Linked(recordId, node, name)`; the latest link per node is current,
-  record ID `0` unlinks the node, and a record linked at the empty-name node
-  (`namehash("")`, all zeros) is the resolver's default record, which answers
-  every node without a link of its own.
-  (upstream: .refs/ens_v2/contracts/src/resolver/interfaces/IRecordResolver.sol:L32-L38 @ ens_v2@a971bd64)
-  (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L379-L386 @ ens_v2@a971bd64)
-  Each item is one node with a non-zero current record: `{record_id, namehash,
-  default, namespace?, name?, display_name?, link_event}`. `record_id` is the
-  decimal record ID as a string; `default` is `true` for the empty-name node;
-  `name` and `display_name` are present only when bigname knows a name surface
-  for that namehash — a resolver may link a node bigname has never observed as
-  a name, which is then served by `namehash` alone; `link_event` is
-  `{block_number, timestamp, transaction_hash, log_index}` of the current
-  `Linked` observation. Nodes sharing a `record_id` share one record's values,
-  so grouping items by `record_id` yields the names each record serves;
-  `counts.linked_records` is the number of distinct records with at least one
-  linked node. On a node-keyed resolver — a direct `public_resolver_v2` or
-  ENSv1-mirror declaration, or any ENSv1 or Basenames resolver — the section
-  is unsupported with reason `record_links_not_applicable` and contributes no
-  counts; on a resolver whose enumeration is unsupported it carries that
-  resolver's enumeration reason. Example item:
-
-  ```json
-  {
-    "record_id": "7",
-    "namehash": "0x5f9c…",
-    "default": false,
-    "namespace": "ens",
-    "name": "shared.eth",
-    "display_name": "shared.eth",
-    "link_event": {
-      "block_number": 11710004,
-      "timestamp": "2026-09-16T10:04:12Z",
-      "transaction_hash": "0xlink…",
-      "log_index": 1
-    }
-  }
-  ```
-  `include=roles` items are `{address, registration_count, permission_count,
-  powers, grant_event?}`. `registration_count` is the number of distinct registrations with
-  resolver-scoped permission rows for the role address. `permission_count` is
-  the number of those permission rows, not the number of powers expanded from
-  them; a row granting multiple powers counts once. The former embedded
-  `registration_ids` list is omitted because it was itself unbounded, and
-  permission rows remain queryable through `GET /v1/permissions` using the
-  returned addresses. `grant_event`, when present, is the provenance of the
-  event that granted the role: `{block_number, timestamp, transaction_hash,
-  log_index}` of the earliest canonical `permission`-type event, among the
-  events recorded as provenance on the holder's resolver-scoped permission
-  rows, whose subject is the holder (ties broken by `log_index`). It is read
-  from current permission rows and normalized events, not from the overview
-  summary, so it is omitted — never `null` — when the holder has no
-  resolver-scoped permission row, when the row's provenance names no
-  permission event for that subject, or when the granting event is no longer
-  canonical. Example item:
-
-  ```json
-  {
-    "address": "0x0000000000000000000000000000000000000abc",
-    "registration_count": 1,
-    "permission_count": 1,
-    "powers": ["set_records", "set_resolver"],
-    "grant_event": {
-      "block_number": 150,
-      "timestamp": "2023-11-14T22:15:50Z",
-      "transaction_hash": "0xgrant150tx",
-      "log_index": 3
-    }
-  }
-  ```
-
-  The resolver arrays are not independently pageable. This
-  bounded-sample contract is
-  the consumer-visible resolver-overview shape change delivered with
-  [issue #401](https://github.com/ensdomains/bigname/issues/401); clients must
-  not interpret an included array as exhaustive when its total count is
-  larger.
-  `include=aliases` exposes binding rows as `{namespace, name, display_name,
-  namehash}` and resolver alias rows as `{namespace, from_name, to_name,
-  from_display_name?, to_display_name?, state, resolver: {chain_id, address},
-  to_registration_id?}`. `to_name` is `null` when the latest alias state is
-  `removed` or `unknown`. `include=events` exposes `{count, by_type}` where
-  `by_type` aggregates raw resolver event kinds that map to the same friendly
-  `type` vocabulary as `GET /v1/events`; raw kinds without a product event type
-  remain included in `count` but are excluded from `by_type`.
+  The overview carries no section counts and no sampled sections. A
+  resolver's alias mappings, record links, and resolver-scoped permission rows
+  are the paginated `/aliases`, `/links`, and `/roles` collections below, each
+  with an exact `page.total_count`; its events are `GET /v1/events` with the
+  `resolver` filter. This is a consumer-visible shape change: the overview
+  formerly served `counts` (`nodes`, `aliases`, `links`, `linked_records`,
+  `role_holders`) and, through the `include` parameter, bounded samples
+  `nodes`, `aliases`, `links`, and `roles` and an `events` count object; those
+  fields and the parameter are removed, and a request that still sends
+  `include` is rejected rather than served without the sections.
 - Pagination behavior: standard collection pagination applies to the
   nested `bound_names.page` object. The top-level response has no `page`.
 - Snapshot behavior: the resolver overview and bound names read
@@ -3164,23 +3069,65 @@ For a registrar lease first identified by a later readable observation, registra
 
 ### `GET /v1/resolvers/{chain_id}/{address}/aliases`, `/links`, and `/roles`
 
-- Tier: product read. These collections make the supported resolver overview
-  tables fully pageable without enlarging its bounded previews.
+- Tier: product read. These collections page a resolver's alias mappings,
+  record links, and resolver-scoped permission rows.
 - Parameters: numeric `chain_id`, resolver `address`; `at`, `finality`, `cursor`,
   `page_size` (default 50, maximum 200). Other query parameters are rejected.
-- `/aliases` returns the same two row shapes as the overview aliases: current
-  alias bindings followed by current active alias-event mappings. The binding
+- `/aliases` returns current alias bindings followed by current active
+  alias-event mappings. A binding row is `{namespace, name, display_name,
+  namehash}`; an alias-event row is `{namespace, from_name, to_name,
+  from_display_name?, to_display_name?, state, resolver: {chain_id, address},
+  to_registration_id?}`, and its `to_name` is `null` when the latest alias
+  state is `removed` or `unknown`. The binding
   group sorts by stable name identity; the event group sorts by stable alias
   identity, so equal display names cannot skip or duplicate entries. Counts
   cover both groups. This is a complete enumeration of the supported indexed
   mappings, not a claim to discover arbitrary custom resolver behavior.
-- `/links` returns the overview's record-link rows — one per node whose
-  current link names a non-zero record, in numeric `record_id` then
-  `namehash` order, the default record's empty-name node included — read from
-  the latest activated canonical `Linked` observation per node at or below
-  the selected height, with names attached from the canonical name surfaces
-  at that height. `page.total_count` counts those rows. It is unsupported,
-  with the same reason as the overview section, on a node-keyed resolver.
+- `/links` serves the record links of a resolver of the ENSv2 record-ID
+  generation (a proxy whose admitted implementation's manifest declares
+  `Linked`; see [manifests](manifests.md#record-id-resolver-generation)).
+  Such a resolver stores values per numeric record and binds names to records
+  with `Linked(recordId, node, name)`; the latest link per node is current,
+  record ID `0` unlinks the node, and a record linked at the empty-name node
+  (`namehash("")`, all zeros) is the resolver's default record, which answers
+  every node without a link of its own.
+  (upstream: .refs/ens_v2/contracts/src/resolver/interfaces/IRecordResolver.sol:L32-L38 @ ens_v2@a971bd64)
+  (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L379-L386 @ ens_v2@a971bd64)
+  It returns one row per node whose current link names a non-zero record, in
+  numeric `record_id` then `namehash` order, the default record's empty-name
+  node included, read from the latest activated canonical `Linked`
+  observation per node at or below the selected height, with names attached
+  from the canonical name surfaces at that height. Each row is `{record_id,
+  namehash, default, namespace?, name?, display_name?, link_event}`.
+  `record_id` is the decimal record ID as a string; `default` is `true` for
+  the empty-name node; `name` and `display_name` are present only when bigname
+  knows a name surface for that namehash — a resolver may link a node bigname
+  has never observed as a name, which is then served by `namehash` alone;
+  `link_event` is `{block_number, timestamp, transaction_hash, log_index}` of
+  the current `Linked` observation. Nodes sharing a `record_id` share one
+  record's values, so grouping rows by `record_id` yields the names each
+  record serves. `page.total_count` counts those rows. On a node-keyed
+  resolver — a direct `public_resolver_v2` or ENSv1-mirror declaration, or any
+  ENSv1 or Basenames resolver — the collection is unsupported with reason
+  `record_links_not_applicable`; on a resolver whose enumeration is
+  unsupported it carries that resolver's enumeration reason. Example row:
+
+  ```json
+  {
+    "record_id": "7",
+    "namehash": "0x5f9c…",
+    "default": false,
+    "namespace": "ens",
+    "name": "shared.eth",
+    "display_name": "shared.eth",
+    "link_event": {
+      "block_number": 11710004,
+      "timestamp": "2026-09-16T10:04:12Z",
+      "transaction_hash": "0xlink…",
+      "log_index": 1
+    }
+  }
+  ```
 - `/roles` returns one `{address, registration_id, name?, powers, grant_event?,
   record_resource?}` row
   for each current resolver-scoped permission row with at least one power.
@@ -3197,11 +3144,15 @@ For a registrar lease first identified by a later readable observation, registra
   hold only `link` or `admin_set_*` powers, contributes no hash.
   Rows sort by address and registration ID; multiple registrations for one
   holder remain separate. `name` is present when the registration has a current
-  readable name. `grant_event` follows the overview provenance shape,
-  but is selected only from that individual registration's permission row.
+  readable name. `grant_event`, when present, is the provenance of the event
+  that granted the row: `{block_number, timestamp, transaction_hash,
+  log_index}` of the earliest canonical `permission`-type event, among the
+  events recorded as provenance on that registration's permission row, whose
+  subject is the holder (ties broken by `log_index`). It is omitted, never
+  `null`, when the row's provenance names no permission event for that
+  subject or the granting event is no longer canonical.
   Revoked/empty grants, unrelated resolver scopes, and noncanonical resources
-  are excluded. `page.total_count` counts these rows, whereas the overview's
-  `counts.role_holders` counts distinct addresses.
+  are excluded. `page.total_count` counts these rows.
 - Both routes use the normal `{data, page, meta}` envelope. Supported reads
   report an exact `page.total_count`, including zero, from the same database
   statement and predicates as the page. Unsupported enumeration returns an

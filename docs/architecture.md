@@ -151,7 +151,7 @@ an ENSv1 row while retaining or opening the concrete ENSv2 successor.
 For a manifest declaring the record-ID `PermissionedResolver` event generation,
 Interpret emits `ResolverRecordLinked` for `Linked` and `RecordChanged` for
 record updates. Both retain the emitting resolver instance and numeric
-`resolver_record_id`; record values have `storage_model: resolver_record_id`
+`resolver_record_id`; record values have [`storage_model`](glossary.md#storage-model) `resolver_record_id`
 and no interpretation-time name or registration resource. Record IDs are local
 to a resolver instance, distinct from bigname resource IDs. Project derives the
 current association with materialized names from canonical link history. A
@@ -1644,7 +1644,7 @@ Queryable by `scope=surface|resource|both`. History reads are canonical normaliz
 
 ### Resolver overview
 
-Resolvers are first-class read targets. Sections: bindings, alias mappings, record links (record-ID generation only: PermissionedResolver keeps node-to-record links and emits `Linked` (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L97-L100 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L363-L367 @ ens_v2@a971bd64), while the node-keyed PublicResolverV2 has no link state (upstream: .refs/ens_v2/contracts/src/resolver/PublicResolverV2.sol:L23-L59 @ ens_v2@a971bd64)), resolver-scoped permissions, role holders, events, counts. Each section is supported only when a projection owns the fan-in. Shared ENSv1 PublicResolver targets do not enumerate current-name fan-in for `bindings`, `aliases`, or event summaries — those return `UnsupportedSummary` with `resolver_binding_enumeration_not_projected`. Exact-name resolver state stays on exact-name routes.
+Resolvers are first-class read targets. The overview serves the resolver's mirror declaration and its bound names (`bound_names`), and takes no section expansions. The former overview sections are their own routes: the `/aliases`, `/links` and `/roles` collections, and `/v1/events` with the `resolver` filter. Record links cover the record-ID generation only: PermissionedResolver keeps node-to-record links and emits `Linked` (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L97-L100 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L363-L367 @ ens_v2@a971bd64), while the node-keyed PublicResolverV2 has no link state (upstream: .refs/ens_v2/contracts/src/resolver/PublicResolverV2.sol:L23-L59 @ ens_v2@a971bd64). Each collection is supported only when a projection owns the fan-in. Shared ENSv1 PublicResolver targets do not enumerate current-name fan-in: the stored binding summary carries `resolver_binding_enumeration_not_projected`, and a collection without projected fan-in returns an empty page with a null total and an unsupported reason, never a claim that the resolver has no rows. Exact-name resolver state stays on exact-name routes.
 
 ### Explain by exact name
 

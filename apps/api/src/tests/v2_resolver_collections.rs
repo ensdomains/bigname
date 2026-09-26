@@ -349,6 +349,40 @@ async fn v2_resolver_collection_unsupported_is_not_empty_supported() -> Result<(
     database.cleanup().await
 }
 
+// A pipeline reason on an unsupported section is not product vocabulary: the collection answers
+// 500 internal_error rather than leak it. This covered the overview's include sections before
+// they were removed; the mapping still serves the collections.
+#[tokio::test]
+async fn v2_resolver_collection_rejects_pipeline_unsupported_reason() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let mut resolver = unsupported_resolver_current_row("ethereum-mainnet", V2_RESOLVER_ADDRESS);
+    for section in ["aliases", "links", "role_holders"] {
+        resolver.declared_summary[section] = json!({
+            "status": "unsupported",
+            "unsupported_reason": "resolver_sidecar_missing"
+        });
+    }
+    database
+        .seed_snapshot_selector_chain_positions(&resolver.chain_positions)
+        .await?;
+    upsert_test_resolver_current_rows(&database, &[resolver]).await?;
+    for section in ["aliases", "links", "roles"] {
+        let response = v2_resolver_response_for_database(
+            &database,
+            &format!("/v1/resolvers/1/{V2_RESOLVER_ADDRESS}/{section}"),
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR, "{section}");
+        let payload: ErrorResponse = read_json(response).await?;
+        assert_eq!(payload.error.code, "internal_error", "{section}");
+        assert_eq!(
+            payload.error.message, "failed to map resolver reason vocabulary",
+            "{section}"
+        );
+    }
+    database.cleanup().await
+}
+
 #[tokio::test]
 async fn v2_resolver_collection_role_provenance_stays_registration_scoped() -> Result<()> {
     const HOLDER: &str = "0x0000000000000000000000000000000000000abc";

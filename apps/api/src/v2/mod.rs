@@ -107,7 +107,7 @@ pub(crate) use registries::{
 #[allow(unused_imports)]
 pub(crate) use resolvers::{
     BoundNames, BoundNamesCursorBinding, bound_names_cursor_payload, bound_names_storage_cursor,
-    build_resolver_overview, resolver_overview_include,
+    build_resolver_overview,
 };
 pub(crate) use resolvers::{
     get_resolver, get_resolver_aliases, get_resolver_links, get_resolver_roles,

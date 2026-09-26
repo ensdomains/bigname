@@ -25,67 +25,44 @@ pub(crate) use bound_names_cursor::{
     BoundNamesCursorBinding, bound_names_cursor_payload, bound_names_storage_cursor,
 };
 
-#[path = "resolvers/include.rs"]
-mod include;
-pub(crate) use include::{ResolverOverviewInclude, resolver_overview_include};
-
 #[path = "resolvers/link_items.rs"]
 mod link_items;
 
 #[path = "resolvers/overview_items.rs"]
 mod overview_items;
-use overview_items::{projected_section_items, summary_is_supported};
 
 #[path = "resolvers/role_grants.rs"]
 mod role_grants;
-use role_grants::{attach_role_grant_events, load_role_grant_events};
 
 #[path = "resolvers/snapshot_checks.rs"]
 mod snapshot_checks;
 use snapshot_checks::{require_phase_name_snapshot, require_phase_target_snapshot};
 
 use super::{
-    Envelope, Finality, Meta, NameRecord, PRODUCT_PIPELINE_TERMS, Page, QueryParamAllowlist,
+    Envelope, Finality, NameRecord, PRODUCT_PIPELINE_TERMS, Page, QueryParamAllowlist,
     SnapshotReadResource, StrictQueryParams, V2Error, V2Result, api_error_to_v2, build_name_record,
     contains_boundary_vocabulary, decode, encode, encode_at_token, name_record, numeric_to_slug,
     resolve_v2_snapshot_for, snapshot_meta, snapshot_slot_for_slug,
-    vocab::{Completeness, Resolver, Status},
+    vocab::{Resolver, Status},
 };
 
 const BOUND_NAMES_SORT_TOKEN: &str = "name_asc";
-const RESOLVER_SECTIONS: [(&str, &str, &str); 5] = [
-    ("nodes", "nodes", "bindings"),
-    ("aliases", "aliases", "aliases"),
-    ("links", "links", "links"),
-    ("roles", "role_holders", "role_holders"),
-    ("events", "events", "event_summary"),
-];
-/// `counts.linked_records`: distinct records with at least one linked node.
-const LINKED_RECORDS_COUNT_KEY: &str = "linked_records";
 
 pub(crate) struct ResolverQueryParams;
 
 impl QueryParamAllowlist for ResolverQueryParams {
-    const ALLOWED: &'static [&'static str] = &["include", "at", "finality", "cursor", "page_size"];
+    const ALLOWED: &'static [&'static str] = &["at", "finality", "cursor", "page_size"];
 }
 
 pub(crate) type ResolverQuery = StrictQueryParams<ResolverQueryParams>;
 
+/// The resolver overview: its identity, its mirror declaration and the names bound to it. It
+/// carries no section counts or samples; the `/aliases`, `/links` and `/roles` collections page
+/// those rows with exact totals (docs/api-v1-routes.md, the resolver overview).
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub(crate) struct ResolverOverview {
     pub(crate) chain_id: u64,
     pub(crate) address: String,
-    pub(crate) counts: BTreeMap<String, u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) nodes: Option<Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) aliases: Option<Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) links: Option<Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) roles: Option<Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) events: Option<Value>,
     /// Present only for a declared ENSv1 mirror resolver: the ENSv1 registry it reads.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) mirror: Option<ResolverMirror>,
@@ -112,7 +89,6 @@ pub(crate) async fn get_resolver(
     let params = params.into_inner();
     let (numeric_chain_id, chain_id_slug) = parse_numeric_chain_id(&chain_id)?;
     let normalized_address = parse_evm_address(&address, "address").map_err(api_error_to_v2)?;
-    let include = resolver_overview_include(&params.include)?;
     let publication = super::collection_snapshot::CollectionSnapshot::capture_for_namespace(
         &state,
         None,
@@ -213,11 +189,6 @@ pub(crate) async fn get_resolver(
     for bound_name_row in &bound_name_rows {
         require_phase_name_snapshot(bound_name_row, &selected_snapshot)?;
     }
-    let role_grant_events = if include.requests("roles") {
-        load_role_grant_events(&state.pool, &row, chain_id_slug, &normalized_address).await?
-    } else {
-        BTreeMap::new()
-    };
     let current =
         load_resolver_project_generations(&state.pool, &selected_snapshot, require_selected_head)
             .await?;
@@ -250,10 +221,8 @@ pub(crate) async fn get_resolver(
             has_more,
         },
     };
-    let mut meta = snapshot_meta(&selected_snapshot)?;
-    apply_resolver_support_meta(&mut meta, &row, include)?;
-    let mut data = build_resolver_overview(row, numeric_chain_id, include, bound_names)?;
-    attach_role_grant_events(data.roles.as_mut(), &role_grant_events);
+    let meta = snapshot_meta(&selected_snapshot)?;
+    let data = build_resolver_overview(row, numeric_chain_id, bound_names);
     publication.finish(&state).await?;
 
     Ok(Json(Envelope {
@@ -278,61 +247,15 @@ async fn load_resolver_project_generations(
 pub(crate) fn build_resolver_overview(
     row: ResolverCurrentRow,
     chain_id: u64,
-    include: ResolverOverviewInclude,
     bound_names: BoundNames,
-) -> V2Result<ResolverOverview> {
-    let mut counts = BTreeMap::new();
-    let mut nodes = None;
-    let mut aliases = None;
-    let mut links = None;
-    let mut roles = None;
-    let mut events = None;
-
-    for (field_key, count_key, summary_key) in RESOLVER_SECTIONS {
-        let section_summary = resolver_overview_summary(&row, summary_key);
-        if let Some(count) = section_summary.and_then(projected_section_count) {
-            counts.insert(count_key.to_owned(), count);
-            if field_key == "links" {
-                let records = section_summary
-                    .and_then(|summary| summary.get("record_count"))
-                    .and_then(Value::as_u64)
-                    .ok_or_else(|| {
-                        V2Error::internal_error("failed to map resolver link record count")
-                    })?;
-                counts.insert(LINKED_RECORDS_COUNT_KEY.to_owned(), records);
-            }
-        }
-
-        if include.requests(field_key) {
-            let items = section_summary
-                .map(|summary| projected_section_items(summary, field_key))
-                .transpose()?
-                .flatten()
-                .unwrap_or(Value::Null);
-            match field_key {
-                "nodes" => nodes = Some(items),
-                "aliases" => aliases = Some(items),
-                "links" => links = Some(items),
-                "roles" => roles = Some(items),
-                "events" => events = Some(items),
-                _ => {}
-            }
-        }
-    }
-
+) -> ResolverOverview {
     let mirror = resolver_mirror(&row.declared_summary, chain_id);
-    Ok(ResolverOverview {
+    ResolverOverview {
         chain_id,
         address: row.resolver_address,
-        counts,
-        nodes,
-        aliases,
-        links,
-        roles,
-        events,
         mirror,
         bound_names,
-    })
+    }
 }
 
 fn resolver_mirror(declared_summary: &Value, chain_id: u64) -> Option<ResolverMirror> {
@@ -401,52 +324,6 @@ async fn load_bound_name_rows(
     Ok((rows, next_cursor))
 }
 
-fn apply_resolver_support_meta(
-    meta: &mut Meta,
-    row: &ResolverCurrentRow,
-    include: ResolverOverviewInclude,
-) -> V2Result<()> {
-    let mut fields = Vec::new();
-    let mut reason = None;
-    let requested_count = RESOLVER_SECTIONS
-        .iter()
-        .filter(|(field_key, _, _)| include.requests(field_key))
-        .count();
-
-    for (field_key, _, summary_key) in RESOLVER_SECTIONS {
-        if !include.requests(field_key) {
-            continue;
-        }
-        let summary = resolver_overview_summary(row, summary_key);
-        if summary.is_none_or(|summary| !summary_is_supported(summary)) {
-            fields.push(field_key.to_owned());
-            if reason.is_none() {
-                reason = summary
-                    .and_then(|summary| summary.get("unsupported_reason"))
-                    .and_then(Value::as_str)
-                    .map(product_resolver_reason)
-                    .transpose()?;
-            }
-        }
-    }
-
-    if !fields.is_empty() {
-        let completeness = if fields.len() == requested_count {
-            Completeness::Unsupported
-        } else {
-            Completeness::Partial
-        };
-        if completeness == Completeness::Unsupported && reason.is_none() {
-            reason = Some("resolver_overview_not_supported".to_owned());
-        }
-        meta.completeness = Some(completeness);
-        meta.unsupported_fields = Some(fields);
-        meta.unsupported_reason = reason;
-    }
-
-    Ok(())
-}
-
 fn bound_name_cursor_from_row(row: &NameCurrentListRow) -> NameCurrentListCursor {
     NameCurrentListCursor {
         sort_value: NameCurrentListCursorValue::Name(row.row.canonical_display_name.clone()),
@@ -505,27 +382,6 @@ pub(crate) fn resolver_snapshot_scope(chain_id_slug: &str) -> V2Result<SnapshotS
             "failed to build resolver snapshot scope"
         );
         V2Error::internal_error("failed to build resolver snapshot scope")
-    })
-}
-
-fn resolver_overview_summary<'a>(
-    row: &'a ResolverCurrentRow,
-    summary_key: &str,
-) -> Option<&'a Value> {
-    row.declared_summary
-        .get(summary_key)
-        .filter(|value| value.is_object())
-}
-
-fn projected_section_count(summary: &Value) -> Option<u64> {
-    if !summary_is_supported(summary) {
-        return None;
-    }
-    summary.get("count").and_then(Value::as_u64).or_else(|| {
-        summary
-            .get("items")
-            .and_then(Value::as_array)
-            .map(|items| items.len() as u64)
     })
 }
 

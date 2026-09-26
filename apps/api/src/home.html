@@ -482,7 +482,7 @@ const GLYPHS = {
     ['L', 'v-mark-a', 'history', 'GET /v1/names/{name}/history', '/docs#history', 'Every event across all of a name\'s registrations, including released ones.'],
     ['J', 'v-sky', 'permissions', 'GET /v1/permissions', '/docs#permissions', 'Who can do what to a name or registration, or what an address can do.'],
     ['S', 'v-mark-a', 'lookup', 'POST /v1/lookup', '/docs#lookup', 'Up to 1000 names and addresses per call, in input order.'],
-    ['Z', 'v-pink', 'resolvers', 'GET /v1/resolvers/{chain_id}/{address}', '/docs#resolver', 'Nodes, aliases, record links, roles, and the names that use it.'],
+    ['Z', 'v-pink', 'resolvers', 'GET /v1/resolvers/{chain_id}/{address}', '/docs#resolver', 'The resolver and the names bound to it; its aliases, record links and roles are separate collections.'],
     ['O', 'ghost', 'everything else', 'GET /docs', '/docs', 'Search, subnames, events, registries, namespaces, status, diagnostics.'],
   ];
   // break a path only between segments, as the docs index does
