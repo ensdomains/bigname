@@ -221,8 +221,8 @@ mod tests {
     }
 
     // The shared vectors. Their twin, the same two lists asserted against the project crate's
-    // comparator and reader (`Ord` and `of_row`), belongs in
-    // crates/project/src/families/position_tests.rs, which is step 2's file; keep the two copies
+    // comparator and reader (`Ord` and `of_row`), lands in step 2's
+    // crates/project/src/families/position_tests.rs (PR 952, commit 21b2aa68); keep the two copies
     // identical, since a drift between the comparators moves the shadow read and the canonical
     // excuse read together.
     type Place = (i64, Option<i64>, Option<i64>, &'static str);

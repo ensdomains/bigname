@@ -1508,6 +1508,8 @@ async fn a_root_reached_only_through_a_child_is_audited() -> Result<()> {
     );
     let aggregate = format!(
         "INSERT INTO bigname_phase.project_resource_admin_aggregate
+             (chain_id, resource_id, block_number, transaction_index, log_index,
+              event_identity, normalized_event_id, admin_powers)
          SELECT chain_id, $1::uuid, block_number, transaction_index, log_index,
                 event_identity, normalized_event_id,
                 jsonb_build_object('{HOLDER}|registry', '[\"admin_renew\"]'::jsonb)

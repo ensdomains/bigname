@@ -1,9 +1,13 @@
-//! Raw ENSv1 logs replayed through the real schema v2 adapter onto the families_support fixture,
-//! persisted the way Interpret persists them (the shape of `handoff_scenario` in
-//! crates/project/tests/address_names_projection.rs), so a fixture reads exactly the normalized
-//! events, identities and emission ordinals the adapter writes. The checked-in Sepolia manifests
-//! (`manifests/sepolia`) are admitted at fixed fixture addresses; block hashes and times are the
-//! fixture lineage's.
+//! Raw ENSv1 logs replayed through the real schema v2 adapter onto the families_support fixture
+//! (the shape of `handoff_scenario` in crates/project/tests/address_names_projection.rs), so a
+//! fixture reads exactly the normalized events, identities and emission ordinals the adapter
+//! writes. `persist` writes the columns Interpret writes for normalized events and lineage;
+//! bindings are written for observe-only histories with no rebinding, without Interpret's
+//! `active_to`, conflict handling and closure ordering (crates/interpret/src/write/identity.rs
+//! :30-75, :257-300), and no manifest contract instance or preimage rows are written. A history
+//! that rebinds a name needs the Interpret write path, not this one. The checked-in Sepolia
+//! manifests (`manifests/sepolia`) are admitted at fixed fixture addresses; block hashes and
+//! times are the fixture lineage's.
 use alloy_primitives::{Address, B256, LogData, U256, keccak256};
 use alloy_sol_types::{SolEvent, sol};
 use anyhow::{Result, ensure};
@@ -36,6 +40,8 @@ sol! {
 pub const REGISTRY: &str = "0x0000000000000000000000000000000000000c01";
 pub const REGISTRAR: &str = "0x0000000000000000000000000000000000000c02";
 pub const WRAPPER: &str = "0x0000000000000000000000000000000000000c03";
+/// The wrapped-registrar controller that calls `registerAndWrapETH2LD`; it emits nothing here.
+pub const CONTROLLER: &str = "0x0000000000000000000000000000000000000c04";
 const MANIFESTS: [(i64, &str, &str); 3] = [
     (931, "ens_v1_registry_l1", "registry"),
     (932, "ens_v1_registrar_l1", "registrar"),
@@ -193,6 +199,9 @@ pub fn interpret(batches: Vec<BatchInput>) -> Result<Vec<BatchOutput>> {
 /// bindings with their closures, and normalized events with every column Interpret writes.
 pub async fn persist(pool: &PgPool, output: &BatchOutput) -> Result<()> {
     for manifest in manifests() {
+        // ON CONFLICT (manifest_id) arbitrates the primary key only; a second active version of
+        // one namespace, family and chain would still fail the partial unique index
+        // manifest_versions_one_active_idx (04_manifests.sql:42-44), so write one per family.
         sqlx::query(
             "INSERT INTO manifest_versions (
                  manifest_id, manifest_version, namespace, source_family, chain_id,
@@ -389,9 +398,11 @@ pub async fn replay(pool: &PgPool, batches: Vec<BatchInput>) -> Result<Vec<Batch
 /// mints the token to the wrapper, the registry names the wrapper owner of the node, the
 /// registrar emits its NameRegistered, then the wrapper mints its ERC-1155 token and emits
 /// NameWrapped (`registerAndWrapETH2LD` through `_wrapETH2LD`, which burns PARENT_CANNOT_CONTROL
-/// and IS_DOT_ETH)
+/// and IS_DOT_ETH, then `_wrap`: the mint, then NameWrapped). The mint's operator is the caller,
+/// the wrapped-registrar controller.
 /// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L130-L152 @ ens_v1@91c966f)
-/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1000-L1031 @ ens_v1@91c966f).
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L289-L305 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L894-L903 @ ens_v1@91c966f).
 pub fn wrapped_registration(label: &str, owner: &str, expires: u64, block: i64) -> BatchInput {
     let (label_hash, node) = (labelhash(label), namehash(&[label, "eth"]));
     let token = U256::from_be_bytes(label_hash.0);
@@ -438,7 +449,7 @@ pub fn wrapped_registration(label: &str, owner: &str, expires: u64, block: i64) 
             ),
             log(
                 TransferSingle {
-                    operator: wrapper,
+                    operator: address(CONTROLLER),
                     from: Address::ZERO,
                     to: address(owner),
                     id: U256::from_be_bytes(node.0),

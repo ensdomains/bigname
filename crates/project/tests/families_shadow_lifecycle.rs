@@ -417,14 +417,16 @@ async fn two_grants_on_two_keys_in_one_transaction_serve_the_binding_key() -> Re
     fixture.cleanup().await
 }
 
-/// Step 2's amended D12 (39990c38) in the shadow reader: a release and then a grant written
-/// from one log, identities ending with emission ordinals 0 and 1 in the adapter's order
-/// (adapters schema_v2/normalized.rs:118-131). The family keeps each kind's maximum in its
-/// own column, and the reader compares them across kinds. Compared as text, the grant
-/// (`RegistrationGranted`) sorts before the release (`RegistrationReleased`) and the reader would
-/// take the release as latest and serve the name released, which the harness would disclose as a
-/// same-block ordering delta; in emission order the grant is latest, as today's builder reads it
-/// (the grant is written second and has the higher generated id), and the name reads equal.
+/// Step 2's amended D12 (39990c38) in the shadow reader, a synthetic ordinal fixture: a release
+/// and then a grant written from one log with handwritten ENSv2 identities ending with emission
+/// ordinals 0 and 1, the numbering the adapter gives facts of one batch (adapters
+/// schema_v2/normalized.rs:118-131); the adapter is not shown to emit this pair. The family
+/// keeps each kind's maximum in its own column, and the reader compares them across kinds.
+/// Compared as text, the grant (`RegistrationGranted`) sorts before the release
+/// (`RegistrationReleased`) and the reader would take the release as latest and serve the name
+/// released, which the harness would disclose as a same-block ordering delta; in emission order
+/// the grant is latest, as today's builder reads it (the grant is written second and has the
+/// higher generated id), and the name reads equal.
 #[tokio::test]
 async fn a_release_then_a_grant_from_one_log_take_the_emission_order() -> Result<()> {
     let fixture = Fixture::new("families_shadow_d12_emission", 20).await?;

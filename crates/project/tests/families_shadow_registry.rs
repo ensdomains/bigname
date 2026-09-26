@@ -479,7 +479,7 @@ async fn a_replayed_new_owner_log_reads_equal() -> Result<()> {
 /// it numbers the two facts 0 and 1, so both sides take the AuthorityTransferred
 /// (`a_replayed_new_owner_log_reads_equal`). The case stays as the harness's proof for a genuine
 /// identity tie, which still arises between facts of different sources, whose ordinals
-/// interleave (docs/glossary.md, "Emission ordinal"). It passes as a same-block delta only
+/// interleave (docs/glossary.md, "Canonical event order"). It passes as a same-block delta only
 /// because the binding read again in today's order gives exactly the served binding. The
 /// control block reads the name's admitted AuthorityTransferred rows only, which F2c keeps apart
 /// from the SubregistryChanged, so both sides agree there.
