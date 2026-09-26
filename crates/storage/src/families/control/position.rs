@@ -56,17 +56,15 @@ impl Position {
     }
 
     /// A position stored as one JSON object: the family rows' secondary positions and the
-    /// `position` member of their jsonb maxima.
+    /// `position` member of their jsonb maxima. Like the project crate's `Position::of_row`, it
+    /// needs a numeric block and a string identity, and reads a missing or non-numeric
+    /// transaction or log index as none.
     pub fn from_json(value: &Value) -> Option<Self> {
         Some(Self {
             block_number: value.get("block_number")?.as_i64()?,
             transaction_index: value.get("transaction_index").and_then(Value::as_i64),
             log_index: value.get("log_index").and_then(Value::as_i64),
-            event_identity: value
-                .get("event_identity")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_owned(),
+            event_identity: value.get("event_identity")?.as_str()?.to_owned(),
         })
     }
 
@@ -220,6 +218,84 @@ mod tests {
         );
         let unknown = at(5, None, "unknown");
         assert_eq!(ids.membership(&grant, &unknown), grant.cmp(&unknown));
+    }
+
+    // The shared vectors. Their twin, the same two lists asserted against the project crate's
+    // comparator and reader (`Ord` and `of_row`), belongs in
+    // crates/project/src/families/position_tests.rs, which is step 2's file; keep the two copies
+    // identical, since a drift between the comparators moves the shadow read and the canonical
+    // excuse read together.
+    type Place = (i64, Option<i64>, Option<i64>, &'static str);
+    /// Positions in ascending canonical order: block, transaction, log (none first), the
+    /// emission ordinal when both indexes are present (none first), then identity bytes.
+    const SHARED_ORDER: [Place; 18] = [
+        (5, None, None, "a:10"),
+        (5, None, None, "a:9"),
+        (5, None, None, "b"),
+        (5, Some(0), None, "a:3"),
+        (5, Some(0), Some(0), "a:holder"),
+        (5, Some(0), Some(0), "q:-1"),
+        (5, Some(0), Some(0), "t:4294967296"),
+        (5, Some(0), Some(0), "z"),
+        (5, Some(0), Some(0), "z:0"),
+        (5, Some(0), Some(0), "y:1"),
+        (5, Some(0), Some(0), "x:2"),
+        (5, Some(0), Some(0), "r:7"),
+        (5, Some(0), Some(0), "s:007"),
+        (5, Some(0), Some(0), "w:9"),
+        (5, Some(0), Some(0), "v:10"),
+        (5, Some(0), Some(0), "u:4294967295"),
+        (5, Some(0), Some(1), "a:0"),
+        (6, None, None, "a"),
+    ];
+    /// Stored JSON positions and what each reads as.
+    const SHARED_JSON: [(&str, Option<Place>); 6] = [
+        (
+            r#"{"block_number": 7, "transaction_index": null, "log_index": null, "event_identity": "e"}"#,
+            Some((7, None, None, "e")),
+        ),
+        (
+            r#"{"block_number": 7, "log_index": 3, "event_identity": "e:1"}"#,
+            Some((7, None, Some(3), "e:1")),
+        ),
+        (
+            r#"{"block_number": 7, "transaction_index": "1", "log_index": 2, "event_identity": "e"}"#,
+            Some((7, None, Some(2), "e")),
+        ),
+        (r#"{"block_number": 7}"#, None),
+        (r#"{"block_number": 7, "event_identity": 5}"#, None),
+        (r#"{"block_number": "7", "event_identity": "e"}"#, None),
+    ];
+
+    fn place((block, transaction, log, identity): Place) -> Position {
+        Position {
+            block_number: block,
+            transaction_index: transaction,
+            log_index: log,
+            event_identity: identity.to_owned(),
+        }
+    }
+
+    #[test]
+    fn the_shared_order_vector_holds() {
+        let positions: Vec<Position> = SHARED_ORDER.into_iter().map(place).collect();
+        for (i, left) in positions.iter().enumerate() {
+            for (j, right) in positions.iter().enumerate() {
+                assert_eq!(left.cmp(right), i.cmp(&j), "{left:?} against {right:?}");
+            }
+        }
+        let mut shuffled = positions.clone();
+        shuffled.reverse();
+        shuffled.sort();
+        assert_eq!(shuffled, positions);
+    }
+
+    #[test]
+    fn the_shared_json_vector_holds() {
+        for (text, expected) in SHARED_JSON {
+            let value: Value = serde_json::from_str(text).expect("the vector is JSON");
+            assert_eq!(Position::from_json(&value), expected.map(place), "{text}");
+        }
     }
 
     #[test]
