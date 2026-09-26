@@ -205,7 +205,6 @@ pub(super) fn admitted_registry_only<'a>(
                     transaction_hash: None,
                     to_address: None,
                     namehash: None,
-                    wrapper_linked: false,
                 })
                 .then_some((position, candidate))
         })
@@ -311,7 +310,6 @@ pub(super) fn admitted_epochs(
             transaction_hash: None,
             to_address: None,
             namehash: None,
-            wrapper_linked: false,
         };
         if authority.admits(&probe) {
             let member = |name: &str| start.get(name).cloned().unwrap_or(Value::Null);

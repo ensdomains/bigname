@@ -103,7 +103,6 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> ShadowName {
         .events
         .iter()
         .map(|event| {
-            let linked = authority.wrapper_linked(event);
             let key = event
                 .is_v2_family()
                 .then(|| match event.state_kind.as_str() {
@@ -113,7 +112,7 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> ShadowName {
             Tagged {
                 event,
                 staged: authority.staged_name(event),
-                admitted: authority.admits(&Probe::of(event, linked)),
+                admitted: authority.admits(&Probe::of(event)),
                 key: key.flatten(),
             }
         })

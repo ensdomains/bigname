@@ -56,11 +56,10 @@ pub(crate) struct Probe<'a> {
     pub(crate) transaction_hash: Option<&'a str>,
     pub(crate) to_address: Option<&'a str>,
     pub(crate) namehash: Option<&'a str>,
-    pub(crate) wrapper_linked: bool,
 }
 
 impl<'a> Probe<'a> {
-    pub(crate) fn of(event: &'a LifecycleEvent, wrapper_linked: bool) -> Self {
+    pub(crate) fn of(event: &'a LifecycleEvent) -> Self {
         Self {
             event_kind: &event.event_kind,
             source_family: &event.source_family,
@@ -70,7 +69,6 @@ impl<'a> Probe<'a> {
             transaction_hash: event.transaction_hash.as_deref(),
             to_address: event.to_address.as_deref(),
             namehash: event.namehash.as_deref(),
-            wrapper_linked,
         }
     }
 }
@@ -180,14 +178,8 @@ impl<'a> Authority<'a> {
         }
     }
 
-    /// Membership in `project_wrapper_linked_events`: emitted unnamed and named for this name by
-    /// pass two (design:111).
-    pub(crate) fn wrapper_linked(&self, event: &LifecycleEvent) -> bool {
-        self.staged_by(event) == Some(Pass::Wrapper)
-    }
-
     /// The selected NameWrapper SurfaceBounds: wrapper candidates of the name at the selected
-    /// resource (authority_events.sql:119-125, :291-297).
+    /// resource (authority_events.sql:119-125).
     fn selected_wrappers(&self) -> impl Iterator<Item = &'a BindingCandidate> + '_ {
         let selected = self.selection.resource_id.as_deref();
         self.candidates.iter().filter(move |candidate| {
@@ -327,44 +319,14 @@ impl<'a> Authority<'a> {
         })
     }
 
-    /// The epoch bound and its wrapper-linked exception (authority_events.sql:262-311).
-    fn epoch(&self, probe: &Probe<'_>) -> bool {
-        if !self.selection.has_proof {
-            return true;
-        }
-        if self
-            .selection
-            .epoch_start
-            .is_some_and(|start| probe.position.bound() >= start)
-        {
-            return true;
-        }
-        probe.source_family == REGISTRAR
-            && matches!(
-                probe.event_kind,
-                "RegistrationGranted"
-                    | "RegistrationRenewed"
-                    | "ExpiryChanged"
-                    | "TokenControlTransferred"
-            )
-            && probe.wrapper_linked
-            && probe.resource_id.is_some()
-            && self.selected_wrappers().any(|wrapper| {
-                custody_passes(
-                    probe.event_kind,
-                    probe.transaction_hash,
-                    probe.to_address,
-                    wrapper,
-                ) && wrapper.wrapped_registrar_resource_id.as_deref() == probe.resource_id
-                    && wrapper.node.is_some()
-                    && wrapper.node.as_deref() == probe.namehash
-            })
-    }
-
     /// Whether `project_authority_events` holds the probe for this name (authority_events.sql
-    /// :12-312). The caller has already established that the probe carries the name.
+    /// :12-261). The caller has already established that the probe carries the name. No epoch
+    /// bound applies: TYR-36 step 6 (de24ff32) deleted the served cut of events before a proof's
+    /// authority epoch start, with its exception for leases the selected NameWrapper recorded
+    /// (authority_events.sql:262-311 before it), so a migration's proof id is history and admits
+    /// or refuses nothing.
     pub(crate) fn admits(&self, probe: &Probe<'_>) -> bool {
-        let arm_rules = match self.selection.unsupported_reason.as_deref() {
+        match self.selection.unsupported_reason.as_deref() {
             None => {
                 let selected = self.selection.resource_id.as_deref();
                 (probe.resource_id.is_some() && probe.resource_id == selected)
@@ -380,8 +342,7 @@ impl<'a> Authority<'a> {
                 probe.source_family == REGISTRAR && STAGED_KINDS.contains(&probe.event_kind)
             }
             Some(_) => false,
-        };
-        arm_rules && self.epoch(probe)
+        }
     }
 
     /// A NameWrapper SurfaceBound of the name as a member of the admitted set, for the custody
@@ -403,7 +364,6 @@ impl<'a> Authority<'a> {
             transaction_hash: wrapper.transaction_hash.as_deref(),
             to_address: None,
             namehash: None,
-            wrapper_linked: false,
         })
     }
 }

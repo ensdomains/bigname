@@ -73,7 +73,6 @@ pub(super) fn control_owner(
                 transaction_hash: event.transaction_hash.as_deref(),
                 to_address: None,
                 namehash: None,
-                wrapper_linked: false,
             });
             if admitted {
                 owners.push((event.position.clone(), event.reported_owner()));
