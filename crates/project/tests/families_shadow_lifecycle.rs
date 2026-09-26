@@ -2227,11 +2227,12 @@ async fn an_unnamed_release_expiry_is_checked_against_the_log() -> Result<()> {
 }
 
 /// Codex thread PRRT_kwDOSJpxAs6l8A2X: the corpus expectation reads the same publication-visible
-/// events as the comparison. An unnamed path-expiry release counts its name on eight fields; the
-/// release made a candidate, or moved to an orphaned hash of its block, counts nothing, and a
-/// later grant that is a candidate does not stop it counting. Pro Q9 on 6c8bdf8b: it also counts
-/// exactly the names the harness compares, so a name_current row the serving reader excludes
-/// counts nothing.
+/// events as the comparison. An unnamed path-expiry release counts its name on nine fields, the
+/// registration expiry among them because the release carries 1_800_000_150 and the grant
+/// 1_800_000_100 (build.sql:45-49); the release made a candidate, or moved to an orphaned hash of
+/// its block, counts nothing, and a later grant that is a candidate does not stop it counting.
+/// Pro Q9 on 6c8bdf8b: it also counts exactly the names the harness compares, so a name_current
+/// row the serving reader excludes counts nothing.
 #[tokio::test]
 async fn the_corpus_expectation_reads_the_published_log_only() -> Result<()> {
     use shadow_support::compare::corpus_expectation;
@@ -2317,7 +2318,7 @@ async fn the_corpus_expectation_reads_the_published_log_only() -> Result<()> {
         let counted = !matches!(case, "unactivated" | "wrong lineage" | "stale name");
         assert_eq!(
             expected.len(),
-            if counted { 8 } else { 0 },
+            if counted { 9 } else { 0 },
             "{case}: {expected:?}"
         );
         assert!(expected.values().all(|count| *count == 1), "{case}");
@@ -2976,7 +2977,7 @@ async fn the_corpus_expectation_is_read_at_the_report_publication() -> Result<()
     let publication = Publication::readable(&fixture.pool, CHAIN, 16).await?;
     let report = compare_with(&fixture.pool, CHAIN, &publication, options).await?;
     let recorded = report.corpus_expected.expect("read with the report");
-    assert_eq!(recorded.len(), 8, "{recorded:?}");
+    assert_eq!(recorded.len(), 9, "{recorded:?}");
     sqlx::query(
         "UPDATE chain_lineage SET canonicality_state = 'orphaned'
          WHERE chain_id = $1 AND block_number = 14",
