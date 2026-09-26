@@ -1878,8 +1878,10 @@ entry maps them to tables and reducers:
   (`address_names.rs` `wrapper_expiries`, `children.rs`
   `latest_wrapper_expiries`, `name_current/build.sql` `expiry_seconds`), while
   the served bigint casts fail on it and fail the batch: the scope fuses cast
-  on any decimal fuses, and `name_current`'s `servable_expiry_seconds` on an
-  integral decimal expiry from 1 to 253402300799. The adapter writes both
+  on decimal-spelled fuses whose numeric value is between 0 and
+  9223372036854775807, inclusive, and `name_current`'s
+  `servable_expiry_seconds` on an integral decimal expiry from 1 to
+  253402300799. The adapter writes both
   numbers as JSON integers.
 - F2c: `AuthorityTransferred` and `SubregistryChanged` both set the owner
   group, so a `SubregistryChanged` after a zero-getter transfer replaces the
