@@ -2492,3 +2492,98 @@ async fn another_chains_epoch_start_is_not_read() -> Result<()> {
     );
     fixture.cleanup().await
 }
+
+/// Pro r6 Q6 on ba2ffbd5, after step 2 keyed `project_name_state` by chain (28aa091b): two
+/// chains publish the same logical name, each with its own ENSv1 epoch start, and each keeps its
+/// own row; the lifecycle loader reads each chain's start for that chain. A later epoch on one
+/// chain moves that chain's row and start only. Today a logical name's surface belongs to one
+/// chain (normalized_events references name_surfaces by chain), so, as step 2's own chain-key
+/// test does, the fixture drops that reference to let a second chain carry the name.
+#[tokio::test]
+async fn two_chains_keep_their_own_epoch_start_for_one_name() -> Result<()> {
+    const OTHER: &str = "other-chain";
+    const V1_REGISTRY: &str = "ens_v1_registry_l1";
+    let fixture = Fixture::new("families_shadow_two_chain_starts", 20).await?;
+    fixture.lineage(OTHER, 20).await?;
+    sqlx::query(
+        "ALTER TABLE normalized_events
+             DROP CONSTRAINT normalized_events_chain_id_logical_name_id_fkey",
+    )
+    .execute(&fixture.pool)
+    .await?;
+    let named = name(1);
+    let epoch = |identity: &'static str, block: i64, chain: &'static str, family: &'static str| {
+        let kind = if family == V1_REGISTRAR {
+            "registrar"
+        } else {
+            "registry_only"
+        };
+        Event::new(identity, block, 1, "AuthorityEpochChanged", family)
+            .on(chain)
+            .name(&named)
+            .after(json!({"authority_kind": kind}))
+            .raw(json!({"emitting_address": REGISTRAR}))
+    };
+    fixture
+        .event(epoch("this:epoch:10", 10, CHAIN, V1_REGISTRAR))
+        .await?;
+    fixture
+        .event(epoch("other:epoch:11", 11, OTHER, V1_REGISTRY))
+        .await?;
+    let apply = |chain: &'static str, target: i64| {
+        let fixture = &fixture;
+        async move {
+            let outcome = fixture.apply_on(chain, target).await;
+            assert_eq!(outcome.skipped, None, "{chain} at {target}");
+        }
+    };
+    apply(CHAIN, 12).await;
+    apply(OTHER, 12).await;
+    // Each chain's row, and the start the loader reads for that chain.
+    let starts = || async {
+        let rows: Vec<(String, Value)> = sqlx::query_as(
+            "SELECT chain_id, authority_start_positions -> 'ens_v1'
+             FROM bigname_phase.project_name_state WHERE logical_name_id = $1 ORDER BY 1",
+        )
+        .bind(&named)
+        .fetch_all(&fixture.pool)
+        .await?;
+        let input = bigname_storage::families::control::lifecycle::NameInput {
+            logical_name_id: named.clone(),
+            namehash: node(1),
+            selection: Default::default(),
+        };
+        let mut out = Vec::new();
+        for (chain, stored) in rows {
+            let facts = bigname_storage::families::control::lifecycle::load_name_facts(
+                &fixture.pool,
+                &chain,
+                std::slice::from_ref(&input),
+            )
+            .await?;
+            let read = &facts[0].authority_starts["ens_v1"];
+            assert_eq!(read, &stored, "the loader reads {chain}'s own start");
+            out.push(
+                json!({"chain": chain, "block_number": stored["block_number"],
+                            "authority_kind": stored["authority_kind"]}),
+            );
+        }
+        Ok::<_, anyhow::Error>(out)
+    };
+    let (this, other) = (
+        json!({"chain": CHAIN, "block_number": 10, "authority_kind": "registrar"}),
+        json!({"chain": OTHER, "block_number": 11, "authority_kind": "registry_only"}),
+    );
+    let sorted = |mut rows: Vec<Value>| {
+        rows.sort_by_key(|row| row["chain"].as_str().map(str::to_owned));
+        rows
+    };
+    assert_eq!(starts().await?, sorted(vec![this.clone(), other]));
+    fixture
+        .event(epoch("other:epoch:13", 13, OTHER, V1_REGISTRY))
+        .await?;
+    apply(OTHER, 14).await;
+    let moved = json!({"chain": OTHER, "block_number": 13, "authority_kind": "registry_only"});
+    assert_eq!(starts().await?, sorted(vec![this, moved]));
+    fixture.cleanup().await
+}
