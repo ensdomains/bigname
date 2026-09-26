@@ -21,14 +21,14 @@ use bigname_storage::{
 };
 use serde_json::{Value, json};
 use shadow_support::{
-    publish, publish_and_compare,
+    publish, publish_and_compare, replay,
     wrapper::{
         CANNOT_UNWRAP, DELEGATE, GRACE_PERIOD, HOLDER, HOLDER_POWERS, IS_DOT_ETH, OPERATOR,
-        PARENT_CANNOT_CONTROL, V1_WRAPPER, WRAPPER, approval, name, node, permission,
-        permission_changed, timestamp, wrapped, wrapper_event,
+        PARENT_CANNOT_CONTROL, WRAPPER, approval, name, node, permission_changed, timestamp,
+        wrapped, wrapper_event,
     },
 };
-use support::{CHAIN, Event, Fixture, uuid};
+use support::{CHAIN, Fixture, uuid};
 use uuid::Uuid;
 
 const NEXT_HOLDER: &str = "0x00000000000000000000000000000000000000a2";
@@ -660,55 +660,39 @@ async fn a_lapsed_registration_drops_its_rows_and_the_root_keeps_its_admin() -> 
     fixture.cleanup().await
 }
 
-/// Pro Q5 on ea047c04, conflicting lifecycle events at one position. A NameWrapper
-/// TransferSingle emits the old holder's revoke and then the new holder's grant from one log
-/// (adapters schema_v2/protocol/v1/wrapper/transfer.rs:158-159), their identities ending with
-/// the facts' emission ordinals in the adapter's order (adapters schema_v2/normalized.rs:118-131):
-/// the log's TokenControlTransferred is fact 0, so here `holder:0:revoke:<old>:1` and
-/// `holder:0:grant:<new>:2`. Today's summary ranks wrapper lifecycle events by
-/// position and then generated id (resource_summary.rs:172-196), so the grant, pushed second, is
-/// the latest and the restriction block stays. Under step 2's amended D12 (39990c38) the family
-/// folds facts of one log by that emission ordinal, so it takes the grant too and serves the same
-/// block. Until 39990c38 the revoke's identity sorted after the grant's and this was pinned as a
-/// mismatch on `resource_restrictions`; it is now pinned equal.
+/// Pro Q5 on ea047c04 and Pro r7 Q5 on 0638b9ba, conflicting lifecycle events at one position,
+/// replayed through the real adapter. `probe`.eth is registered to the NameWrapper and wrapped
+/// for the holder at block 8 (PARENT_CANNOT_CONTROL and IS_DOT_ETH burnt), and at block 13 one
+/// ERC-1155 TransferSingle moves it to the next holder, with no resolver and no token approval.
+/// The adapter emits, from that one log, the TokenControlTransferred and then the old holder's
+/// revoke and the new holder's grant (adapters schema_v2/protocol/v1/wrapper/transfer.rs:118-159),
+/// numbered 0, 1 and 2 over the whole draft vector (adapters schema_v2/normalized.rs:35-42,
+/// :118-131); the fixture asserts those identity tails exactly. Today's summary ranks wrapper
+/// lifecycle events by position and then generated id (resource_summary.rs:172-196), so the
+/// grant, written last, keeps the restriction block. Under step 2's amended D12 (39990c38) the
+/// family folds the log's facts by that emission ordinal and takes the grant too. Before
+/// 39990c38 the revoke's identity sorted after the grant's and this was a pinned mismatch on
+/// `resource_restrictions`; it is now pinned equal.
 #[tokio::test]
 async fn a_holder_transfer_from_one_log_keeps_the_restrictions_in_emission_order() -> Result<()> {
     let fixture = Fixture::new("families_shadow_permissions_one_log_transfer", 20).await?;
-    let fuses = PARENT_CANNOT_CONTROL;
-    let expiry = timestamp(TARGET) + 1_000_000;
-    let resource = wrapped(&fixture, fuses, expiry).await?;
-    for (ordinal, (subject, action, grant)) in
-        [(HOLDER, "revoke", false), (NEXT_HOLDER, "grant", true)]
-            .into_iter()
-            .enumerate()
-    {
-        let identity = format!(
-            "0xtx13:1:PermissionChanged:holder:0:{action}:{subject}:{}",
-            ordinal + 1
-        );
-        fixture
-            .event(
-                Event::new(&identity, 13, 1, "PermissionChanged", V1_WRAPPER)
-                    .name(&name(1))
-                    .resource(&resource)
-                    .before(permission(
-                        subject,
-                        "holder",
-                        HOLDER_POWERS,
-                        "TransferSingle",
-                        !grant,
-                    ))
-                    .after(permission(
-                        subject,
-                        "holder",
-                        HOLDER_POWERS,
-                        "TransferSingle",
-                        grant,
-                    ))
-                    .raw(json!({"emitting_address": WRAPPER})),
-            )
-            .await?;
-    }
+    let expires = 1_900_000_000_u64;
+    let outputs = replay::replay(
+        &fixture.pool,
+        vec![
+            replay::wrapped_registration("probe", HOLDER, expires, 8),
+            replay::wrapper_transfer("probe", HOLDER, NEXT_HOLDER, 13),
+        ],
+    )
+    .await?;
+    let resource = transfer_facts(
+        &outputs[1],
+        &[
+            &format!("TransferSingle:{}:0", replay_node()),
+            &format!("PermissionChanged:TransferSingle:holder:0:revoke:{HOLDER}:1"),
+            &format!("PermissionChanged:TransferSingle:holder:0:grant:{NEXT_HOLDER}:2"),
+        ],
+    );
     let report = publish_and_compare(&fixture, TARGET).await?;
     let served: Option<Value> = sqlx::query_scalar(
         "SELECT resource_restrictions FROM permissions_current_resource_summary
@@ -720,15 +704,25 @@ async fn a_holder_transfer_from_one_log_keeps_the_restrictions_in_emission_order
     assert_eq!(
         served,
         Some(
-            json!({"kind": "ens_v1_wrapper", "wrapper_state": "emancipated", "fuses": fuses,
-                    "expiry_seconds": expiry})
+            json!({"kind": "ens_v1_wrapper", "wrapper_state": "emancipated",
+                    "fuses": PARENT_CANNOT_CONTROL | IS_DOT_ETH,
+                    "expiry_seconds": expires + 7_776_000})
         ),
         "today's summary keeps the block through the transfer"
     );
+    assert_eq!(
+        rows(&fixture, &resource).await?,
+        [(
+            NEXT_HOLDER.to_owned(),
+            "holder".to_owned(),
+            json!(masked_holder_powers())
+        )],
+        "the new holder's row only"
+    );
     shadow_support::assert_counts(&report, &[], &[]);
     assert_eq!(
-        (report.equal, report.mismatched),
-        (3, 0),
+        (report.names, report.equal, report.mismatched),
+        (1, report.names + report.resources, 0),
         "{:#?}",
         report.lines
     );
@@ -785,101 +779,100 @@ async fn an_unwrap_and_an_expiry_update_in_one_block_in_both_orders() -> Result<
     Ok(())
 }
 
-/// The second one-log transfer shape (Codex thread PRRT_kwDOSJpxAs6l4hOw): the recipient of a
-/// wrapped transfer is the token's approved delegate. `_beforeTransfer` clears the approval, so
-/// the adapter emits the delegate's token-approval revoke before the holder rows from the same
-/// log, and relies on the recipient's holder grant being the later row
-/// (adapters schema_v2/protocol/v1/wrapper/transfer.rs:141-146). Both rows fold to one family
-/// grant key, the resource, subject and resource scope. Today's builder keeps the grant, the
-/// higher generated id, and serves the recipient's holder row. Under step 2's amended D12
-/// (39990c38) the family folds the log's facts by their emission ordinals in the adapter's order
-/// (after the TokenControlTransferred at 0: 1 for the delegate's revoke, 3 for the grant), keeps the grant and serves the same rows and restriction block. Until
-/// 39990c38 the revoke's identity (`token_approval`) sorted after the grant's (`holder`) and this
-/// was pinned as a mismatch on `permissions_current` and `resource_restrictions`; it is now
-/// pinned equal.
+/// The second one-log transfer shape (Codex thread PRRT_kwDOSJpxAs6l4hOw, Pro r7 Q5 on
+/// 0638b9ba), replayed through the real adapter: the holder approves the next holder for the
+/// token at block 10, and the block 13 TransferSingle moves the name to that delegate.
+/// `_beforeTransfer` clears the approval, so after the TokenControlTransferred the adapter emits
+/// the delegate's token-approval revoke before the holder rows from the same log, and relies on
+/// the recipient's holder grant being the later row (adapters
+/// schema_v2/protocol/v1/wrapper/transfer.rs:141-159): ordinals 0 to 3, asserted exactly. The
+/// revoke and the grant fold to one family grant key, the resource, subject and resource scope.
+/// Today's builder keeps the grant, the higher generated id, and serves the recipient's holder
+/// row. Under step 2's amended D12 (39990c38) the family folds the log's facts by emission
+/// ordinal (1 for the revoke, 3 for the grant), keeps the grant and serves the same rows and
+/// restriction block. Before 39990c38 the revoke's identity (`token_approval`) sorted after the
+/// grant's (`holder`) and this was a pinned mismatch on `permissions_current` and
+/// `resource_restrictions`; it is now pinned equal.
 #[tokio::test]
 async fn a_transfer_to_the_delegate_from_one_log_keeps_the_recipients_holder_row() -> Result<()> {
     let fixture = Fixture::new("families_shadow_permissions_one_log_delegate", 20).await?;
-    let fuses = PARENT_CANNOT_CONTROL;
-    let resource = wrapped(&fixture, fuses, timestamp(TARGET) + 1_000_000).await?;
-    permission_changed(
-        &fixture,
-        12,
-        1,
-        &resource,
-        NEXT_HOLDER,
-        "token_approval",
-        &["extend_subname_expiry"],
-        "Approval",
-        true,
+    let expires = 1_900_000_000_u64;
+    let outputs = replay::replay(
+        &fixture.pool,
+        vec![
+            replay::wrapped_registration("probe", HOLDER, expires, 8),
+            replay::wrapper_approval("probe", HOLDER, NEXT_HOLDER, 10),
+            replay::wrapper_transfer("probe", HOLDER, NEXT_HOLDER, 13),
+        ],
     )
     .await?;
-    for (ordinal, (relation, powers, action, subject, grant)) in [
-        (
-            "token_approval",
-            &["extend_subname_expiry"][..],
-            "revoke",
-            NEXT_HOLDER,
-            false,
-        ),
-        ("holder", HOLDER_POWERS, "revoke", HOLDER, false),
-        ("holder", HOLDER_POWERS, "grant", NEXT_HOLDER, true),
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        let identity = format!(
-            "0xtx13:1:PermissionChanged:{relation}:0:{action}:{subject}:{}",
-            ordinal + 1
-        );
-        fixture
-            .event(
-                Event::new(&identity, 13, 1, "PermissionChanged", V1_WRAPPER)
-                    .name(&name(1))
-                    .resource(&resource)
-                    .before(permission(
-                        subject,
-                        relation,
-                        powers,
-                        "TransferSingle",
-                        !grant,
-                    ))
-                    .after(permission(
-                        subject,
-                        relation,
-                        powers,
-                        "TransferSingle",
-                        grant,
-                    ))
-                    .raw(json!({"emitting_address": WRAPPER})),
-            )
-            .await?;
-    }
+    let resource = transfer_facts(
+        &outputs[2],
+        &[
+            &format!("TransferSingle:{}:0", replay_node()),
+            &format!("PermissionChanged:TransferSingle:token_approval:0:revoke:{NEXT_HOLDER}:1"),
+            &format!("PermissionChanged:TransferSingle:holder:0:revoke:{HOLDER}:2"),
+            &format!("PermissionChanged:TransferSingle:holder:0:grant:{NEXT_HOLDER}:3"),
+        ],
+    );
     let report = publish_and_compare(&fixture, TARGET).await?;
-    let served = rows(&fixture, &resource).await?;
     assert_eq!(
-        served,
+        rows(&fixture, &resource).await?,
         [(
             NEXT_HOLDER.to_owned(),
             "holder".to_owned(),
-            // Every holder power but `extend_expiry`, which the served row derives away.
-            json!(
-                HOLDER_POWERS
-                    .iter()
-                    .filter(|power| **power != "extend_expiry")
-                    .collect::<Vec<_>>()
-            )
+            json!(masked_holder_powers())
         )],
         "today's builder serves the recipient's holder row only"
     );
     shadow_support::assert_counts(&report, &[], &[]);
     assert_eq!(
-        (report.equal, report.mismatched),
-        (3, 0),
+        (report.names, report.equal, report.mismatched),
+        (1, report.names + report.resources, 0),
         "{:#?}",
         report.lines
     );
     fixture.cleanup().await
+}
+
+/// Every holder power but `extend_expiry`, which the served row masks under these fuses: a .eth
+/// name carries PARENT_CANNOT_CONTROL, and `extend_expiry` needs CAN_EXTEND_EXPIRY (grants.rs
+/// `blocked`).
+fn masked_holder_powers() -> Vec<&'static str> {
+    HOLDER_POWERS
+        .iter()
+        .copied()
+        .filter(|power| *power != "extend_expiry")
+        .collect()
+}
+
+/// The namehash of the replayed `probe`.eth.
+fn replay_node() -> String {
+    format!("{:#x}", replay::namehash(&["probe", "eth"]))
+}
+
+/// The facts the adapter wrote for the one TransferSingle log of `output`, which must end with
+/// exactly `tails` in emission order; returns their resource.
+fn transfer_facts(output: &bigname_adapters::schema_v2::BatchOutput, tails: &[&str]) -> String {
+    let facts: Vec<&str> = output
+        .normalized_events
+        .iter()
+        .map(|event| event.event_identity.as_str())
+        .collect();
+    assert_eq!(facts.len(), tails.len(), "{facts:#?}");
+    for (identity, tail) in facts.iter().zip(tails) {
+        assert!(
+            identity.ends_with(&format!(":{tail}")),
+            "{identity} ends {tail}"
+        );
+    }
+    let resources: std::collections::BTreeSet<String> = output
+        .normalized_events
+        .iter()
+        .filter_map(|event| event.resource_id.map(|id| id.to_string()))
+        .collect();
+    assert_eq!(resources.len(), 1, "{resources:?}");
+    resources.into_iter().next().expect("one resource")
 }
 
 /// An ENSv2 registration's after-state for token `token`.

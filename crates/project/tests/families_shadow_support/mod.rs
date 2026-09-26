@@ -7,6 +7,7 @@
 
 #[path = "../../../../apps/phase-runner/tests/project_end_to_end/shadow.rs"]
 pub mod compare;
+pub mod replay;
 pub mod wrapper;
 
 use anyhow::{Result, ensure};
