@@ -1,6 +1,7 @@
-//! D12 as amended (Tate, 2026-09-26): several facts of one log fold in the order the adapter
-//! wrote them. Within one (block, transaction, log) the trailing emission ordinal of the event
-//! identity decides before the identity bytes. The wrapper transfer shapes are the adapter's
+//! D12 as amended (Tate, 2026-09-26): several facts of one adapter emission batch at one log
+//! fold in the order the adapter wrote them. Within one (block, transaction, log) the trailing
+//! emission ordinal (docs/glossary.md#emission-ordinal) of the event identity decides before the
+//! identity bytes. The wrapper transfer shapes are the adapter's
 //! own (adapters schema_v2/protocol/v1/wrapper/transfer.rs:141-169, permissions.rs:47-123):
 //! one TransferSingle writes the delegate approval clear, the old holder's revoke, the new
 //! holder's grant and, for a retained delegate that was the old holder, its re-grant, in that
@@ -25,10 +26,11 @@ fn name() -> String {
 }
 
 /// The adapter's raw-log identity: `{derivation}:{manifest}:{chain}:{block hash}:{tx hash}:
-/// {log}:{suffix}:{ordinal}` (adapters schema_v2/normalized.rs:118-131).
+/// {log}:{suffix}:{ordinal}` (adapters schema_v2/normalized.rs:118-131), with the derivation
+/// kind of a wrapper PermissionChanged (adapters schema_v2/common.rs:266-295).
 fn identity(manifest: i64, block: i64, log: i64, suffix: &str, ordinal: &str) -> String {
     format!(
-        "ens_v1_wrapper:{manifest}:{CHAIN}:{}:0xtx{block}_0:{log}:{suffix}:{ordinal}",
+        "ens_v1_unwrapped_authority:{manifest}:{CHAIN}:{}:0xtx{block}_0:{log}:{suffix}:{ordinal}",
         hash(block)
     )
 }
@@ -392,12 +394,15 @@ async fn boundary_facts_keep_identity_order() -> Result<()> {
 
 // The one known cross-source pair at one log, the disclosed precondition of the amendment: a
 // NameWrapped log writes the registry-node pointer twice with the same resolver. The wrapper's
-// own ResolverChanged carries ordinal 5 (adapters authority_transition.rs:489-497), and
-// the registry-read surface materialization, sourced to the registry manifest, carries ordinal 0
-// (authority_transition.rs:200-320). Ordinals restart per source (normalized.rs:118-131), so
-// the families keep the wrapper row, the name's authority after NameWrapped. The served read
-// breaks the tie by normalized_event_id DESC (builders/record_inventory/mirror.rs:105-109) and
-// keeps the registry row the adapter inserted last, so the two differ in provenance only.
+// own ResolverChanged carries ordinal 4 or 5, depending on whether a SurfaceBound was emitted
+// before it (adapters authority_transition.rs:489-497), and the registry-read surface
+// materialization, a batch of its own sourced to the registry manifest, carries ordinal 0
+// (authority_transition.rs:200-320). Ordinals count from 0 again per emission batch
+// (normalized.rs:118-131, sourced_events.rs:57-71), so the families keep the wrapper row, the
+// name's authority after NameWrapped. The registry row's manifest id is the higher one, so its
+// identity is byte-greater and only the ordinal picks the wrapper row. The served read breaks
+// the tie by normalized_event_id DESC (builders/record_inventory/mirror.rs:105-109) and keeps
+// the registry row the adapter inserted last, so the two differ in provenance only.
 #[tokio::test]
 async fn name_wrapped_pointer_keeps_the_wrapper_row() -> Result<()> {
     const RESOLVER: &str = "0x00000000000000000000000000000000000000d4";
@@ -415,11 +420,11 @@ async fn name_wrapped_pointer_keeps_the_wrapper_row() -> Result<()> {
     };
     let wrapper_identity = format!(
         "{}:ResolverChanged:authority:NameWrapped:{RESOLVER}:5",
-        prefix(6133)
+        prefix(6131)
     );
     let registry_identity = format!(
         "{}:ResolverChanged:surface-materialization:{NODE}:{anchor}:{RESOLVER}:0",
-        prefix(6131)
+        prefix(6133)
     );
     for (identity, family, resource) in [
         (&wrapper_identity, WRAPPER_FAMILY, &wrapper),
@@ -434,6 +439,10 @@ async fn name_wrapped_pointer_keeps_the_wrapper_row() -> Result<()> {
             )
             .await?;
     }
+    assert!(
+        registry_identity.as_bytes() > wrapper_identity.as_bytes(),
+        "identity bytes alone would pick the registry row"
+    );
     fixture.apply(12, FamilyMode::Normal).await;
     let pointers: Vec<(String, Option<String>, String, String)> = sqlx::query_as(
         "SELECT resolver_address, resource_id::text, source_family, event_identity
@@ -449,7 +458,7 @@ async fn name_wrapped_pointer_keeps_the_wrapper_row() -> Result<()> {
             WRAPPER_FAMILY.to_owned(),
             wrapper_identity.clone()
         )],
-        "ordinal 5 is the later fact of the log: the wrapper row wins"
+        "the wrapper's ordinal beats the registry batch's 0: the wrapper row wins"
     );
     let served: String = sqlx::query_scalar(
         "SELECT source_family FROM normalized_events
