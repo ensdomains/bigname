@@ -262,7 +262,9 @@ fn write(rows: &mut RowSet, chain: &Value, event: &BlockEvent) -> Result<()> {
     let key = key_of(table, base.into_iter().chain([json!(record_key)]));
     let previous = current(rows, table, &key);
     // The AddrChanged half of a coin-60 pair keeps the AddressChanged half written one log
-    // earlier in the same transaction.
+    // earlier in the same transaction: setAddr emits AddressChanged, then AddrChanged when the
+    // coin type is 60.
+    // (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L59-L62 @ ens_v1@91c966f)
     let sibling = (raw_text(after, "source_event").as_deref() == Some("AddrChanged")
         && record_key == "addr:60"
         && previous.get("source_event").and_then(Value::as_str) == Some("AddressChanged")
