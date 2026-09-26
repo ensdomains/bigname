@@ -306,7 +306,7 @@ outcomes, or durable traces.
 | `resolver_current` | chain and resolver address | resolver overview |
 | `record_inventory_current` | resource plus record boundary key | indexed record inventory and values |
 | `primary_names_current` | address, coin type, and namespace | declared primary-name claims |
-| `project_*` owned key families | per family, see [below](#owned-key-families) | none yet: unread shadows until the per-block publication reads them |
+| `project_*` owned key families | per family, see [below](#owned-key-families) | no served path yet: the step 3 [shadow readers](glossary.md#shadow-read) (`crates/storage/src/families/control`) read them in the test harnesses only, until the per-block publication reads them |
 
 `surface_bindings` remains identity history rather than a `_current`
 projection. Exact-name reads ordinarily first select the logical name's
@@ -1677,8 +1677,10 @@ set](glossary.md#active-manifest-set-family-block), with the
 manifests active at that block, the way the served resolver build does.
 
 These tables are shadows today. No production serving reader reads them, and
-no served value depends on them; only the family reducers and tests do. After
-each Project batch commits and its progress is recorded, the phase runner applies the families block by block, each block in
+no served value depends on them; only the family reducers, the step 3
+[shadow readers](glossary.md#shadow-read) in the test harnesses, and tests do.
+After each Project batch commits and its progress is recorded, the phase runner
+applies the families block by block, each block in
 a transaction of its own, from the [family marker](glossary.md#family-marker)
 (`project_family_marker`) up to the served marker. A batch's publication never
 waits for them, since it has committed before they run, but the next batch
@@ -1821,7 +1823,7 @@ children builder (`crates/project/src/builders/children.rs:41, 72, 160, 182,
 (`crates/project/src/builders/name_authority/stage.rs:231, 259, 323, 382`)
 and the name topology builder (`name_topology.rs:541, 578`) break it by
 `event_identity`, the old byte rule. The served binding choice
-(`name_authority/build.sql:53-60, 558-561, 745-752`; `stage.rs:78-81`) takes
+(`name_authority/build.sql:53-56, 391-394, 512-519`; `stage.rs:78-81`) takes
 `surface_binding_id DESC` and ignores event order. Insertion order equals
 emission order only because Interpret writes a batch in list order
 (`crates/interpret/src/write/normalized.rs:44`), and a replayed identity keeps
@@ -1938,6 +1940,157 @@ reported as `phase_runner_project_families_seconds`,
 `phase_runner_project_family_skips_total` and
 `phase_runner_project_family_duplicate_anomalies_total`.
 
+The first readers of these tables live in the storage crate
+(`bigname_storage::families::control`) and run only in tests. They rebuild a
+name's registration and control blocks from the lease, wrapper, registry and
+identity families, and a resource's permission rows, restriction block,
+registry binding and registry-operator rows from the grant, approval, wrapper
+and registry families, all at the publication's block clock. Every selection of
+a latest event takes it in the canonical order (D12 as amended: block,
+transaction, log, then the emission ordinal of a raw log's fact, then event
+identity). Binding candidates are not events: two at the same block,
+transaction and log still break the tie by binding id, as the served stage does,
+and a fixture pins that. The registration's wrapped registrar lease is an event
+selection, not a candidate one: it is the lease the latest NameWrapper
+SurfaceBound of the resource recorded, taken in the canonical order, where
+today's builder takes block and generated id. The Project fixture
+tests and the phase runner's fixture-corpus run compare each value with what the
+production readers serve at the same publication, field by field. Every log
+read these checks make takes only the
+[publication-visible events](glossary.md#publication-visible-event): activated,
+canonical, at the canonical lineage's hash for their height and at or below the
+target, the set family intake reads. A comparison is for one publication, a
+height and its block's hash: before its first read and after its last, the block
+must be readable and the families and the served publication must both stand on
+it, or it reports nothing. That validates the endpoints only: the reads between
+them are separate reads, not one snapshot, so a change to another publication
+and back between the two checks is not seen. The harness is meant for a quiescent
+target, such as a disposable copy. Before any difference of a name can pass,
+the families must hold exactly the retained facts the log gives it under step
+2's retention rules, in both directions: the binding candidates with their
+handoffs, the epoch starts, triples, key states and retained lifecycle events,
+each event under the key step 2 derives, and the node's owner-setting events;
+otherwise the name gets no excuse. A name's checks then read its retained
+lifecycle events rebuilt from that log rather than the family rows, and those
+rebuilt events read in the canonical order must give the shadow value, so a
+missing, extra or misfiled retained event fails the fields it decides. Each
+family row must also equal its rebuild whole, so a wrong fact on a retained
+event leaves every differing field of the name a mismatch. A resource has its
+own guard for three fields only, its permission rows, admin powers and
+restriction block: their excuse needs the resource's retained events, and its
+root's, to match the log, and each row to equal its rebuild, so a wrong
+retained fact leaves those three a mismatch. Its registry binding and operator
+rows are checked separately, against observations rebuilt from the log (below).
+Each candidate's surface
+namehash must be the namehash part of its name, and the staging candidates of
+every unnamed registrar event of the name, whichever name they belong to, must
+be what the log gives. The wrapper rows are not rebuilt from the log, so a name
+that reads one gets no excuse. A missing or rekeyed wrapper row reads as no
+modifier on every side, so a name also gets none when the log gives an event the
+wrapper family folds on a resource it reaches, whether or not a row is there. The retained decoded name is not read, so a wrong
+value there is not caught by these checks. A differing field passes in two cases only. The first is a disclosed same-block ordering case: reading the
+rebuilt events with that block in the old generated-id order must give exactly
+the served value. For a resource's permission rows, admin powers and restriction
+block it passes only in one direction: the resource's rebuilt events keep the
+registration live in today's order and lapse it canonically, the served value is
+not empty, and the families read in today's order give it. That read also
+folds the registry root's admin powers in today's order, so when the resource
+has a root, the root's retained events must match the log too; if they do not,
+the resource's permission-row, admin-power and restriction excuses are refused.
+Its registry-binding and operator-row checks are separate.
+A served empty value against a family row is a mismatch. A live registration's restriction block
+reads its registry root's admin powers, so it also passes when only the root's
+lapse differs between the orders, the whole block read in today's order equals
+the served one and the canonical read the shadow one. The canonical side is the
+families read against themselves, so the rule is sound for the report, not for
+the field: a wrong root value leaves the root's own admin powers a mismatch, and
+a wrong child admin power the live root also holds can let the child's block
+pass while the child's own admin powers stay a mismatch; either fails the run.
+That holds because the root is compared itself: the compared resources are closed
+over the roots their served summaries name, so a root with no served summary or
+permission row of its own is still compared, and a resource whose root is not
+in the compared set gets no permission-row, admin-power or restriction excuse.
+The effective-permission reader selects direct rows by resource id, so it can
+serve another chain's row on a compared resource; every such row is a mismatch
+(`other_chain_rows`). That check covers the compared resources, closed over
+their roots, and nothing else: a resource outside that set is not read.
+The resource-side excuse reads the wrapper rows too: the permission rows and
+restriction block it reads in both orders come through the resource's wrapper
+row, which masks the powers when it has a modifier
+(crates/storage/src/families/control/permissions/grants.rs:84). It has no
+wrapper refusal; that side is the families read against themselves, the same
+disclosed class as the root rule. These checks run for
+the items that differ: a family value equal to the served one is not a
+difference. Several producer events can share one position. One ENSv1 NewOwner
+log yields a SubregistryChanged and then an AuthorityTransferred; the adapter
+numbers them 0 and 1, so the families, by emission ordinal, and today's
+builders, by generated id, both keep the AuthorityTransferred as the
+registry-binding observation of the name, and a replay of a real NewOwner log
+reads equal. Producer events that tie on position and ordinal, as facts of
+different sources can, fall to identity bytes in the families and to generated
+id in today's builders, and the fixtures cover that tie with synthetic
+identities. So the observations are rebuilt from the
+publication-visible event log in both orders, each identity's latest event
+chosen from the log and not from the family row, and a binding field passes only
+when the family observations equal their canonical rebuild, the canonical
+binding equals the shadow one whole, today's binding equals the served one
+whole, and the two select different events. The control block's same-block read
+orders the node's owner-setting events, the epoch starts and the registry-only
+SurfaceBounds by generated id too. A name field passes only when the epoch
+starts and the SurfaceBounds, which the registration's authority kind and key
+read too, equal their rebuild from the event log, and a control field only when
+the owner-setting events do as well. The second is a named
+cause whose own check holds for that field. Both named causes are served-side
+bugs. A step 2 family gap is never a named cause: where it changes a compared
+field and the checks above see it, the field stays a mismatch and fails the run
+until the owning reducer is fixed.
+
+Under Tate's ruling an expired or released ENSv2 registration stays ENSv2 and
+is served unregistered. Before step 6 (`main` at `de24ff32`) three served-side
+bugs broke that rule. Step 6 fixed the third and narrowed the first; the second
+remains. The harness reports what remains under two named causes:
+
+- Narrowed by step 6. When the interpreter's path-expiry release names only the
+  token resource, today's registration fold reads the name's own lifecycle rows
+  (name_current/build.sql:322, :383-389) and never sees it. Once the name's
+  ENSv2 binding is closed, the release can be the deciding fact of a released
+  tombstone (name_authority/build.sql:246-271), and `name_current` serves that
+  fact on the tombstone's resource (name_current/build.sql:349-364); both sides
+  then serve it released and the fields are equal. With the binding still open,
+  the fold serves the registration as active and the families serve it as
+  released. The harness counts that under
+  `served_membership_skips_unnamed_path_expiry`, which now covers only an open
+  binding. It includes `registration/expiry`: the families present the
+  release's own expiry (name_current/build.sql:45-49) where today's fold serves
+  the name's expiry rows, and the field is counted only where the two differ.
+  The run prints the names it finds in this shape.
+- Not fixed by step 6. The selection leaves a name with no authority arm when
+  no rule of name_authority/build.sql:440-450 applies, as for a name with ENSv2
+  and Basenames history, nothing open and no released ENSv2 tombstone. The
+  registration selection reads the missing arm as ENSv2
+  (name_current/build.sql:362) and can select an ENSv2 release, but the
+  presentation compares the raw arm with ENSv2 (name_current/build.sql:99,
+  :104, :113), so it keeps the release's expiry and does not close the control
+  block. The families decide both with one resolved arm and serve it released.
+  The harness counts this under `served_release_presentation_reads_the_raw_arm`,
+  and the fixture
+  `a_release_with_no_selected_arm_is_presented_as_an_ensv2_release` pins it.
+- Fixed by step 6. When the interpreter knows the name, it also closes the
+  ENSv2 binding at expiry. If the name had an open ENSv1 lease, the served name
+  authority used to select arm ens_v1 and serve that lease, and the shadow
+  reads, which take the authority selection from the served row as input,
+  agreed. Step 6 selects ENSv2 for a released tombstone before any ENSv1
+  binding is considered (name_authority/build.sql:443, :246-271). The fixture
+  `a_real_path_expiry_with_an_ensv1_lease_stays_released_under_ensv2` now pins
+  both sides at arm ens_v2, registration released and control unregistered,
+  and nothing is counted.
+
+The comparison covers the fields the readers list. It leaves out `created_at`,
+the lapsed registration's authority, the child rows and the whole-history
+evidence columns. Every test asserts its counted fields exactly, and a differing
+listed field with no disclosed case or named cause fails the run. These are
+[shadow reads](glossary.md#shadow-read). No API route calls them.
+
 ## Index baseline
 
 Indexes follow measured serving queries. Baseline access paths cover exact-name
@@ -1957,7 +2110,8 @@ new truth family.
   replay coordination, not projection writes.
 - Project reads canonical interpreted input and owns every projection write.
   Project also owns the [owned key families](#owned-key-families), their
-  marker, undo journal and repair record; they are unread shadows.
+  marker, undo journal and repair record; no served path reads them. The
+  step 3 shadow readers read them in the test harnesses only.
 - The API reads projections and request-scoped lookup output.
 - Storage exposes typed reads and phase publication boundaries; it does not
   grant adapters or API handlers a projection write shortcut.
