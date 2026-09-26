@@ -50,6 +50,8 @@ decisions kept. Linear TYR-36 step 6.
   whose only release is that one reads as released, not as its old grant. When
   a named path-cut release comes before that expiry release, the served
   release, `released_at` and `expiry` come from the later expiry release.
+  When the deciding fact is the end of a later reservation, the tombstone's
+  `expiry` and `released_at` are that end's.
 - An activated ENSv1→ENSv2 migration and a positive ENSv2 child registration
   are no longer [authority proofs](../glossary.md#authority-proof). The
   migration is served history (`migrated_at`, `is_migrated`) and selects no

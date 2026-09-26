@@ -954,3 +954,80 @@ async fn a_tombstone_restored_by_a_resourceless_release_serves_that_release() ->
     db.cleanup().await?;
     Ok(())
 }
+
+/// Block 11's timestamp in seconds: `seed_sequence` writes it as 2026-08-26T00:00:12Z.
+const BLOCK_11_SECONDS: i64 = 1_787_702_412;
+
+// A lapsed reservation's end as the deciding fact (adversarial review of 503387dc, finding 1).
+// After B0's release, B/T is reserved at block 10 with no resource, expiring at block 11's time,
+// and Interpret writes its lapse at the start of block 11 by name, with no resource, and with the
+// reservation's expiry and the lapse time. That end restores the released ENSv2 tombstone on B0.
+// The registration section serves the fact that decided the tombstone, so its `expiry` and
+// `released_at` are the reservation end's, on B0's resource and binding.
+// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L628-L630 @ ens_v2@a971bd64)
+#[tokio::test]
+async fn a_lapsed_reservations_end_gives_the_tombstone_its_expiry_and_release_time() -> Result<()> {
+    let facts = [
+        (
+            "bt-reserve",
+            "RegistrationReserved",
+            None,
+            10,
+            1,
+            json!({"source_event":"LabelReserved","expiry":BLOCK_11_SECONDS,"status":"reserved","registry_contract_instance_id":REGISTRY_B,"token_id":TOKEN_B1}),
+        ),
+        (
+            "bt-lapse",
+            "RegistrationReleased",
+            None,
+            11,
+            -1,
+            json!({"source_event":"RegistryPathExpired","derived_from":"interpreter_state","terminal_reason":"registry_name_binding_expired","status":"released","expiry":BLOCK_11_SECONDS,"released_at":BLOCK_11_SECONDS,"registry_contract_instance_id":REGISTRY_B,"token_id":TOKEN_B1}),
+        ),
+    ];
+    let (_, block_10, block_11) = sequence_selections(
+        "lapsed_reservation_end",
+        125,
+        "lapsed-reservation.eth",
+        &facts,
+    )
+    .await?;
+    assert_eq!(
+        block_10.0.as_deref(),
+        Some("ens_v1"),
+        "B/T is live at block 10"
+    );
+    assert_eq!(
+        block_11,
+        (
+            Some("ens_v2".to_owned()),
+            Some("unregistered".to_owned()),
+            Some(uuid(15, 125))
+        )
+    );
+    let (db, pool) = database("lapsed_reservation_end_served").await?;
+    let (logical, _, _) = seed_sequence(&pool, 125, "lapsed-reservation.eth", &facts).await?;
+    project(&pool, 11, None).await?;
+    let served = served(&pool, &logical).await?;
+    assert_eq!(
+        (
+            served["resource_id"].as_str(),
+            served["surface_binding_id"].as_str(),
+            served["registration"]["status"].as_str(),
+            served["control"]["status"].as_str(),
+            served["registration"]["expiry"].as_i64(),
+            served["registration"]["released_at"].as_i64(),
+        ),
+        (
+            Some(uuid(15, 125).as_str()),
+            Some(uuid(16, 125).as_str()),
+            Some("released"),
+            Some("unregistered"),
+            Some(BLOCK_11_SECONDS),
+            Some(BLOCK_11_SECONDS),
+        ),
+        "{served}"
+    );
+    db.cleanup().await?;
+    Ok(())
+}
