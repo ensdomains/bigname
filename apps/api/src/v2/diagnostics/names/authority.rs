@@ -97,6 +97,23 @@ mod tests {
         );
     }
 
+    // A wrapped ENSv1 name has an owner, so a wrapper registration's control section is served
+    // like any other ENSv1 grant's instead of being marked unsupported.
+    #[test]
+    fn authority_builder_serves_the_control_of_a_wrapper_registration() {
+        let mut row = super::super::test_name_row();
+        row.declared_summary["registration"] = json!({"authority_kind": "wrapper"});
+
+        assert_eq!(
+            build_name_authority_control_explain_declared_state(&row)["control"],
+            json!({
+                "registrant": "0x00000000000000000000000000000000000000aa",
+                "registry_owner": "0x00000000000000000000000000000000000000bb",
+                "latest_event_kind": "NameTransferred"
+            })
+        );
+    }
+
     #[test]
     fn authority_builder_keeps_projected_authority_section() {
         let mut row = super::super::test_name_row();

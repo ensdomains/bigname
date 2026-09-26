@@ -2,14 +2,14 @@ use sqlx::{Postgres, Transaction};
 
 use crate::{ProjectError, Result};
 
-#[allow(clippy::too_many_arguments)]
-pub(super) async fn include_changed_child_proofs(
+/// Names registered in a migration registry whose creation association changed in the window.
+/// Children staging reads those associations, so their registrations rebuild with them.
+pub(super) async fn include_changed_migration_registry_members(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
     from_block: i64,
     to_block: i64,
     target_block: i64,
-    retain_retracted: bool,
 ) -> Result<()> {
     sqlx::query(
         "/* project:scope.authority.include_changed_child_proofs */ INSERT INTO project_scope_names
@@ -42,23 +42,17 @@ pub(super) async fn include_changed_child_proofs(
                'canonical', 'safe', 'finalized'
            )
            AND registration.logical_name_id IS NOT NULL
-         UNION
-         SELECT current.logical_name_id
-         FROM name_current current
-         WHERE $5
-           AND current.provenance #>> '{authority_selection,proof_kind}' =
-               'positive_v2_child_registration'
-           AND current.provenance ->> 'chain_id' = $1
          ON CONFLICT DO NOTHING",
     )
     .bind(chain_id)
     .bind(from_block)
     .bind(to_block)
     .bind(target_block)
-    .bind(retain_retracted)
     .execute(&mut **transaction)
     .await
-    .map_err(|error| ProjectError::database("failed to scope changed child proofs", error))?;
+    .map_err(|error| {
+        ProjectError::database("failed to scope changed migration registry members", error)
+    })?;
     Ok(())
 }
 
@@ -91,14 +85,6 @@ pub(super) async fn include_topology_dependents(
                AND registration.canonicality_state IN (
                    'canonical', 'safe', 'finalized'
                )
-         )
-         OR EXISTS (
-             SELECT 1
-             FROM name_current current
-             WHERE current.logical_name_id = child.logical_name_id
-               AND current.provenance ->> 'chain_id' = $1
-               AND current.provenance #>> '{authority_selection,proof_kind}' =
-                   'positive_v2_child_registration'
          )
          ), promoted_names AS (
              INSERT INTO project_scope_names

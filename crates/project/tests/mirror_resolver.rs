@@ -882,7 +882,7 @@ async fn root_registry_tld_without_a_registration_serves_its_pointer() -> Result
     // serving resource. A root registration (Sepolia's `eth` and `reverse`) serves its registrant,
     // keeps the uint64 expiry unformatted, and reads its records through the mirror, the same in
     // every execution.
-    // (upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ReverseMirror.ts:L35 @ ens_v2_sepolia_20260916@366de741)
+    // (upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ReverseMirror.ts:L25-L37 @ ens_v2_sepolia_20260916@366de741)
     for lifecycle in [V2Lifecycle::None, V2Lifecycle::Registered] {
         let fixture = Fixture::declared(
             "tld_root_bound",

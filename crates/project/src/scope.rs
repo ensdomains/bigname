@@ -19,6 +19,7 @@ mod resolver;
 mod resolver_dependents;
 mod retracted;
 mod topology;
+mod v2_release_names;
 mod wrapper;
 mod wrapper_registrar;
 
@@ -52,13 +53,12 @@ pub(crate) async fn initialize(
     labels::include_changed_children(transaction, chain_id).await?;
     inventory::include_changed_record_consumers(transaction, chain_id, target.number).await?;
     registry_resolver::include_parent_names(transaction, chain_id, target.number).await?;
-    authority::include_changed_child_proofs(
+    authority::include_changed_migration_registry_members(
         transaction,
         chain_id,
         window.from_block,
         window.to_block,
         target.number,
-        window.retain_retracted,
     )
     .await?;
     wrapper::include_time_boundaries(transaction, chain_id, window.previous, target).await?;
@@ -86,6 +86,7 @@ pub(crate) async fn initialize(
         crate::stage::mirror_evidence::invalidate_resolver_dependents(transaction, chain_id)
             .await?;
     }
+    v2_release_names::include_names_bound_to_released_resources(transaction, target.number).await?;
     close_binding_scope(transaction, chain_id, target).await?;
     include_alias_and_wildcard_scope(transaction, chain_id, target).await?;
     close_binding_scope(transaction, chain_id, target).await?;

@@ -25,6 +25,7 @@ pub(super) async fn seed_wrapper_effect_resources(
                AND lineage.block_hash = event.block_hash
                AND lineage.block_number = event.block_number
               WHERE event.normalized_event_id = citation.event_id::bigint
+                AND event.consumer_visibility = 'activated'
                 AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
                 AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
           )
@@ -61,6 +62,49 @@ pub(super) async fn seed_child_registration_history(
     .map_err(|error| {
         ProjectError::database(
             "failed to scope retracted child registration history",
+            error,
+        )
+    })?;
+    Ok(())
+}
+
+/// A published child of a locked parent cites the migration registry creation association that
+/// made it reachable, and that association is not a normalized event, so the citation check in
+/// `seed_children` cannot see it go. When a redo leaves the cited association unreadable, the
+/// parent and child rebuild; the parent's subregistry pointer may lie outside the redo range.
+pub(super) async fn seed_retracted_migration_registry_associations(
+    transaction: &mut Transaction<'_, Postgres>,
+    chain_id: &str,
+) -> Result<()> {
+    sqlx::query(
+        "/* project:scope.retracted.handoffs.seed_retracted_migration_registry_associations */ INSERT INTO project_scope_children
+         SELECT DISTINCT candidate.logical_name_id
+         FROM children_current row
+         CROSS JOIN LATERAL (
+             VALUES (row.parent_logical_name_id), (row.child_logical_name_id)
+         ) candidate(logical_name_id)
+         WHERE row.provenance ->> 'chain_id' = $1
+           AND row.provenance #>> '{parent_reachability,migration_registry_association,logical_edge_identity}' IS NOT NULL
+           AND NOT EXISTS (
+               SELECT 1 FROM migration_discovery_associations association
+               JOIN chain_lineage lineage
+                 ON lineage.chain_id = association.chain_id
+                AND lineage.block_hash = association.block_hash
+                AND lineage.block_number = association.block_number
+               WHERE association.chain_id = $1
+                 AND association.logical_edge_identity = row.provenance #>> '{parent_reachability,migration_registry_association,logical_edge_identity}'
+                 AND association.migration_correlation_id = row.provenance #>> '{parent_reachability,migration_registry_association,migration_correlation_id}'
+                 AND association.canonicality_state IN ('canonical', 'safe', 'finalized')
+                 AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+           )
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(chain_id)
+    .execute(&mut **transaction)
+    .await
+    .map_err(|error| {
+        ProjectError::database(
+            "failed to scope children of a retracted migration registry association",
             error,
         )
     })?;

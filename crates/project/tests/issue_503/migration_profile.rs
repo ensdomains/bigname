@@ -2,7 +2,7 @@ use super::*;
 
 const REGISTRY: &str = "0x0000000000000000000000000000000000000822";
 const OWNER: &str = "0x0000000000000000000000000000000000000823";
-const PROFILE: &str = "ens_v2_sepolia_post_audit";
+const PROFILE: &str = "ens_v2_sepolia_20260915";
 
 async fn manifest(pool: &PgPool, family: &str, profile: &str, contracts: Value) -> Result<i64> {
     let payload = json!({"deployment_epoch":profile,"contracts":contracts,
@@ -116,18 +116,19 @@ async fn selected_authority(
 }
 
 // Each mutation breaks one thing the old exact-name profile gate checked. Support now follows the
-// authority decision alone, so a mutation that leaves the selected ENSv2 registration without an
-// authority refusal serves it, and only a mutation that breaks authority selection stays refused.
+// authority decision alone, and none of these mutations changes that decision: the name's open
+// ENSv2 binding is selected with no authority refusal in every case, so each one is served.
 // Authority selection does not check the proof's manifest (`missing_manifest`, `inactive_manifest`,
 // `wrong_proof_family`, `wrong_namespace`, `unadmitted_latest_proof` keep their proof); Interpret
 // writes events only from active manifests, so these rows exist only in fixtures.
 // These cases pin that support follows the authority result; they do not show that a malformed
 // proof is rejected. Several keep a proof that should not establish a migration (`wrong_resource`
 // keeps one whose successor is another resource), and the registration is served because it is
-// independently current, not because the proof is sound. Checking proof association belongs to
-// authority selection, not to the support decision this suite covers.
+// independently current, not because the proof is sound. Neither authority selection nor the
+// support decision checks proof association any more: the migration is history, and selection
+// reads only the open ENSv2 binding.
 #[tokio::test]
-async fn migration_boundary_mutations_refuse_only_through_authority_selection() -> Result<()> {
+async fn migration_history_mutations_do_not_gate_current_v2_authority() -> Result<()> {
     for case in [
         "supported",
         "missing",
@@ -233,10 +234,14 @@ async fn migration_boundary_mutations_refuse_only_through_authority_selection() 
         }
         project(&pool, RunMode::Normal).await?;
         let normal = status(&pool, &f.logical).await?;
-        let authority_refusal = match case {
-            "wrong_binding" => Some("current_authority_not_projected"),
-            _ => None,
-        };
+        // Expected delta (TYR-36 step 6): `wrong_binding` names a successor binding that does not
+        // exist. Before, the migration proof forced ENSv2 onto that binding and the name was
+        // refused with `current_authority_not_projected`. After, the proof is history only and the
+        // name's open ENSv2 binding, a registration in the admitted registry, is served. Chain
+        // fact: the registry's own `LabelRegistered` holds the owner and expiry whatever a
+        // migration event names.
+        // (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/registry/interfaces/IRegistryEvents.sol:L18-L25 @ ens_v2_sepolia_20260916@366de741)
+        let authority_refusal: Option<&str> = None;
         let proof = match case {
             "missing" | "candidate" | "orphan" | "wrong_chain" => None,
             "unadmitted_latest_proof" => Some("unadmitted-later-boundary"),
@@ -259,10 +264,10 @@ async fn migration_boundary_mutations_refuse_only_through_authority_selection() 
             },
             "{case}: {normal:?}"
         );
-        // `stale` binds a resource with no registration events, and the later boundary in
-        // `unadmitted_latest_proof` starts the authority epoch after the grant, so these fixtures
-        // carry no current registration to compare; only their authority result is checked.
-        if authority_refusal.is_none() && !matches!(case, "stale" | "unadmitted_latest_proof") {
+        // `stale` binds a resource with no registration events, so it carries no current
+        // registration to compare; only its authority result is checked. A migration no longer
+        // moves the authority epoch, so `unadmitted_latest_proof` serves its registration too.
+        if authority_refusal.is_none() && case != "stale" {
             assert_eq!(normal.2, Some(uuid(1, 822)), "{case}");
             let registrant: Option<String> = sqlx::query_scalar("SELECT declared_summary #>> '{registration,registrant}' FROM name_current WHERE logical_name_id=$1")
                 .bind(&f.logical).fetch_one(&pool).await?;
