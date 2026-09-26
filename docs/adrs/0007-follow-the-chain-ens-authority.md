@@ -66,7 +66,9 @@ decisions kept. Linear TYR-36 step 6.
   is not cancelled by it. The registry keeps state per entry, and R1's lapse
   does not change R2's entry, which stays reserved on chain until it lapses or
   is unregistered. Only a new registration, or a reservation later than R1's
-  release, moves the name. The two-registry case is tested from contract logs
+  release, moves the name. The two-registry case is exercised by an
+  Interpret-to-Project integration test using hand-encoded contract-shaped logs
+  and seeded registry discovery; it is not captured contract execution
   (`a_replaced_registrys_lapse_presents_its_tombstone_over_a_live_reservation_elsewhere`).
   (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L196-L207 @ ens_v2@a971bd64)
   (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L425-L471 @ ens_v2@a971bd64)
