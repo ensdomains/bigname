@@ -1891,7 +1891,9 @@ name, or of the resource it sits on, a mismatch. Each candidate's surface
 namehash must be the namehash part of its name, and the staging candidates of
 every unnamed registrar event of the name, whichever name they belong to, must
 be what the log gives. The wrapper rows are not rebuilt from the log, so a name
-that reads one gets no excuse. The retained decoded name is not read, so a wrong
+that reads one gets no excuse. A missing or rekeyed wrapper row reads as no
+modifier on every side, so a name also gets none when the log gives an event the
+wrapper family folds on a resource it reaches, whether or not a row is there. The retained decoded name is not read, so a wrong
 value there is not caught by these checks. A differing field passes in two cases only. The first is a disclosed same-block ordering case: reading the
 rebuilt events with that block in the old generated-id order must give exactly
 the served value. For a resource's permission rows, admin powers and restriction

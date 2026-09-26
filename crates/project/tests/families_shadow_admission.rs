@@ -692,3 +692,167 @@ async fn a_name_that_reads_a_wrapper_row_gets_no_excuse() -> Result<()> {
     );
     fixture.cleanup().await
 }
+
+/// The wrapped three-transfer race (Pro r6 Q3 on ba2ffbd5). Name 1 was bound to lease L at 8
+/// (closed at 9) and is bound to NameWrapper resource W at 9, whose SurfaceBound recorded L at
+/// node 1; W carries a NameWrapped PermissionScopeChanged modifier at 10 and a named grant at
+/// 10. At block 11 three transfers share one block, transaction and log: `c`, unnamed on L at
+/// node 1, to Carol, then `b` and `a`, named on W, to Bob and Alice, written in that order so
+/// their generated ids run a > b > c. With the modifier, L is the selected binding's
+/// predecessor lease and `c` is admitted (admission.rs `wrapped_lease`): the canonical order
+/// takes `c` (Carol), today's `a` (Alice). Without it only `b` and `a` are admitted and the
+/// canonical order takes `b` (Bob).
+async fn wrapped_transfer_race(fixture: &Fixture) -> Result<(String, String)> {
+    let (lease, wrapper) = (uuid(1), uuid(2));
+    let first = name(1);
+    fixture
+        .binding(&uuid(99), &first, &lease, "ens_v1", 8, 0, Some(9))
+        .await?;
+    fixture
+        .write(
+            8,
+            0,
+            "SurfaceBound",
+            V1_REGISTRAR,
+            Some(&first),
+            Some(&lease),
+            json!({"authority_kind": "registrar", "state_derived": false}),
+            REGISTRAR,
+        )
+        .await?;
+    fixture
+        .binding(&uuid(100), &first, &wrapper, "ens_v1", 9, 2, None)
+        .await?;
+    fixture
+        .event(wrapper_bound("wrap-1", &first, &wrapper, &lease))
+        .await?;
+    fixture
+        .event(
+            Event::new("scope-10", 10, 3, "PermissionScopeChanged", V1_WRAPPER)
+                .name(&first)
+                .resource(&wrapper)
+                .after(
+                    json!({"source_event": "NameWrapped", "node": node(1), "fuses": 0,
+                              "wrapper_state": "wrapped"}),
+                )
+                .raw(json!({"emitting_address": WRAPPER})),
+        )
+        .await?;
+    fixture.resource(&lease).await?;
+    fixture
+        .event(
+            Event::new("grant-10", 10, 4, "RegistrationGranted", V1_WRAPPER)
+                .name(&first)
+                .resource(&wrapper)
+                .after(json!({"authority_kind": "wrapper", "status": "registered",
+                              "registrant": HOLDER, "expiry": 2_000_000_000u64}))
+                .raw(json!({"emitting_address": WRAPPER})),
+        )
+        .await?;
+    for (identity, to, named) in [("c", CAROL, false), ("b", BOB, true), ("a", ALICE, true)] {
+        let event = if named {
+            Event::new(identity, 11, 1, "TokenControlTransferred", V1_WRAPPER)
+                .name(&first)
+                .resource(&wrapper)
+                .after(json!({"authority_kind": "wrapper", "from": HOLDER, "to": to}))
+                .raw(json!({"emitting_address": WRAPPER}))
+        } else {
+            Event::new(identity, 11, 1, "TokenControlTransferred", V1_REGISTRAR)
+                .resource(&lease)
+                .after(
+                    json!({"authority_kind": "registrar", "from": HOLDER, "to": to,
+                              "namehash": node(1)}),
+                )
+                .raw(json!({"emitting_address": REGISTRAR}))
+        };
+        fixture.event(event).await?;
+    }
+    Ok((lease, wrapper))
+}
+
+/// Name 1's shadow registrant at block 12.
+async fn registrant(fixture: &Fixture) -> Result<Value> {
+    let (_, shadow) = shadow_support::name(fixture, 12, &name(1)).await?;
+    Ok(shadow.registration["registrant"].clone())
+}
+
+/// Pro r6 Q3 on ba2ffbd5, a missing or rekeyed wrapper row. The name reads W's wrapper row, so
+/// its registrant difference (Carol against Alice) gets no excuse. Deleting that row, or moving
+/// it to another resource, leaves the shadow read and both excuse reads without the modifier:
+/// the shadow and the canonical read give Bob and today's order Alice, which passed as a
+/// same-block delta while the refusal read only the rows present. The log still gives W's
+/// modifier, so the name is refused either way and the registrant stays a mismatch; the row
+/// restored, the baseline is back.
+#[tokio::test]
+async fn a_missing_or_rekeyed_wrapper_row_gets_no_excuse() -> Result<()> {
+    let fixture = Fixture::new("families_shadow_admission_wrapper_absent", 20).await?;
+    let (_, wrapper) = wrapped_transfer_race(&fixture).await?;
+    let elsewhere = uuid(9);
+    fixture.resource(&elsewhere).await?;
+    let refused = |report: &shadow_support::compare::Report| {
+        assert!(
+            report.known_discrepancy.is_empty() && report.expected_delta_fields.is_empty(),
+            "{:#?}",
+            report.lines
+        );
+        assert_eq!(
+            (report.mismatched, failed_fields(report)),
+            (1, vec!["registration/registrant".to_owned()]),
+            "{:#?}",
+            report.lines
+        );
+    };
+    let baseline = publish_and_compare(&fixture, 12).await?;
+    refused(&baseline);
+    assert_eq!(registrant(&fixture).await?, json!(CAROL));
+    let saved: Value = sqlx::query_scalar(
+        "SELECT to_jsonb(wrapper) FROM bigname_phase.project_wrapper_state wrapper
+         WHERE resource_id = $1::uuid",
+    )
+    .bind(&wrapper)
+    .fetch_one(&fixture.pool)
+    .await?;
+    for (case, mutation) in [
+        (
+            "deleted",
+            "DELETE FROM bigname_phase.project_wrapper_state WHERE resource_id = $1::uuid",
+        ),
+        (
+            "rekeyed",
+            "UPDATE bigname_phase.project_wrapper_state SET resource_id = $2::uuid
+             WHERE resource_id = $1::uuid",
+        ),
+    ] {
+        let changed = sqlx::query(mutation)
+            .bind(&wrapper)
+            .bind(&elsewhere)
+            .execute(&fixture.pool)
+            .await?
+            .rows_affected();
+        assert_eq!(changed, 1, "{case}");
+        assert_eq!(registrant(&fixture).await?, json!(BOB), "{case}");
+        refused(&shadow_support::compare::compare(&fixture.pool, CHAIN, 12).await?);
+        let removed = sqlx::query(
+            "DELETE FROM bigname_phase.project_wrapper_state
+             WHERE resource_id IN ($1::uuid, $2::uuid)",
+        )
+        .bind(&wrapper)
+        .bind(&elsewhere)
+        .execute(&fixture.pool)
+        .await?
+        .rows_affected();
+        assert_eq!(removed, u64::from(case == "rekeyed"), "{case}");
+        let restored = sqlx::query(
+            "INSERT INTO bigname_phase.project_wrapper_state
+             SELECT * FROM jsonb_populate_record(NULL::bigname_phase.project_wrapper_state, $1)",
+        )
+        .bind(&saved)
+        .execute(&fixture.pool)
+        .await?
+        .rows_affected();
+        assert_eq!(restored, 1, "{case}");
+        assert_eq!(registrant(&fixture).await?, json!(CAROL), "{case}");
+        refused(&shadow_support::compare::compare(&fixture.pool, CHAIN, 12).await?);
+    }
+    fixture.cleanup().await
+}

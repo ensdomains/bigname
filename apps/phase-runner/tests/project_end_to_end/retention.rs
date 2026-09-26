@@ -36,7 +36,9 @@
 //! The older admitted epochs the families do not keep (one start per arm) are not expected
 //! here, so a served value that needs one stays a mismatch. The wrapper rows (F2b) are not
 //! rebuilt: a name that reads one gets no excuse, since they decide the wrapped-lease admission
-//! and the wrapper presentation. The stored key-state and triple maxima are not read by the
+//! and the wrapper presentation. A missing or rekeyed row reads as no modifier on every side, so
+//! a name also gets none when the log gives a wrapper event on a resource it reaches, whether or
+//! not the families hold a row for it. The stored key-state and triple maxima are not read by the
 //! excuse reads, which fold the events themselves.
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -49,7 +51,9 @@ use bigname_storage::families::control::{
 use serde_json::{Value, json};
 use sqlx::PgPool;
 
-use super::{LogEvent, epoch_arm, published_where, raw_lower, raw_text, reported_control_owner};
+use super::{
+    LogEvent, epoch_arm, published, published_where, raw_lower, raw_text, reported_control_owner,
+};
 
 /// The kinds step 2 retains as lifecycle events (crates/project/src/families/lifecycle.rs:25-32).
 const RETAINED: [&str; 6] = [
@@ -104,6 +108,9 @@ pub struct RetentionLog {
     /// choose among (their bindings are in `bindings`), kept apart so the name's own checks
     /// read exactly what they read before.
     pub staging: BTreeMap<String, LogEvent>,
+    /// The reached resources with a publication-visible event the wrapper family folds
+    /// (`wrapper_resources`): the log's evidence that a wrapper row exists, present or not.
+    pub wrapper_resources: BTreeSet<String>,
 }
 
 /// The resources the families' facts of a name reach.
@@ -158,6 +165,7 @@ impl RetentionLog {
             resources.extend(raw_text(&event.after, "wrapped_registrar_resource_id"));
         }
         let resources: Vec<String> = resources.into_iter().collect();
+        let wrapper_resources = wrapper_resources(pool, chain, target, &resources).await?;
         events.extend(
             published_where(
                 pool,
@@ -264,8 +272,58 @@ impl RetentionLog {
             bindings,
             events,
             staging,
+            wrapper_resources,
         })
     }
+}
+
+/// The resources among `resources` with a publication-visible event step 2's wrapper family
+/// folds into an F2b row (crates/project/src/families/wrapper.rs:20-88): a NameWrapper
+/// PermissionScopeChanged (the modifier), a NameWrapper lifecycle event (the NameWrapped
+/// transfer, the NameUnwrapped epoch close or unbind, a resource-scoped holder grant or revoke),
+/// or a wrapper expiry (a NameWrapper ExpiryChanged, or the registrar's NameRenewed one for a
+/// wrapped name). One conservative difference: a holder row whose grant source carries a JSON
+/// null relation kind falls through to the revocation source here and not in the reducer, so the
+/// set can only be larger.
+async fn wrapper_resources(
+    pool: &PgPool,
+    chain: &str,
+    target: i64,
+    resources: &[String],
+) -> Result<BTreeSet<String>> {
+    if resources.is_empty() {
+        return Ok(BTreeSet::new());
+    }
+    let sql = format!(
+        "SELECT DISTINCT event.resource_id::text FROM normalized_events event
+         WHERE event.chain_id = $1 AND event.resource_id = ANY($2::uuid[])
+           AND ((event.source_family = '{WRAPPER}'
+                 AND (event.event_kind IN ('PermissionScopeChanged', 'ExpiryChanged')
+                      OR (event.event_kind = '{TRANSFER}'
+                          AND event.after_state ->> 'source_event' = 'NameWrapped')
+                      OR (event.event_kind IN ('AuthorityEpochChanged', 'SurfaceUnbound')
+                          AND event.after_state ->> 'source_event' = 'NameUnwrapped')
+                      OR (event.event_kind = 'PermissionChanged'
+                          AND event.after_state -> 'scope' ->> 'kind' = 'resource'
+                          AND jsonb_typeof(event.after_state -> 'effective_powers') = 'array'
+                          AND COALESCE(
+                                event.after_state -> 'grant_source' ->> 'relation_kind',
+                                event.after_state -> 'revocation_source' ->> 'relation_kind')
+                              = 'holder')))
+                OR (event.source_family = '{REGISTRAR}' AND event.event_kind = 'ExpiryChanged'
+                    AND event.after_state ->> 'source_event' = 'NameRenewed'
+                    AND event.after_state ->> 'authority_kind' = 'wrapper'))
+           AND {}",
+        published("$3")
+    );
+    Ok(sqlx::query_scalar(&sql)
+        .bind(chain)
+        .bind(resources)
+        .bind(target)
+        .fetch_all(pool)
+        .await?
+        .into_iter()
+        .collect())
 }
 
 /// The names with a publication-visible surface binding on one of `resources`.
@@ -675,9 +733,28 @@ pub fn name_differs(facts: &NameFacts, log: &RetentionLog) -> Option<String> {
     }
     // The wrapper rows (F2b) are not rebuilt from the log. They decide the wrapped-lease
     // admission (served.rs `authority_of`, admission.rs `wrapped_lease`) and the wrapper
-    // presentation, so a name that reads one gets no excuse.
+    // presentation, so a name that reads one gets no excuse. A missing row reads as no modifier
+    // in the shadow read and in both excuse reads alike, so the refusal also holds when the log
+    // gives a wrapper event on a resource the name reaches, whether or not a row is there.
     if !facts.wrappers.is_empty() {
         return Some("wrapper rows".into());
+    }
+    let mut reached = family_resources(facts);
+    reached.extend(
+        log.bindings
+            .iter()
+            .filter(|binding| binding.name == name)
+            .map(|binding| binding.resource.clone()),
+    );
+    for event in &named {
+        reached.extend(event.resource.clone());
+        reached.extend(raw_text(&event.after, "wrapped_registrar_resource_id"));
+    }
+    if reached
+        .iter()
+        .any(|resource| log.wrapper_resources.contains(resource))
+    {
+        return Some("wrapper events".into());
     }
 
     // Epoch starts: the latest AuthorityEpochChanged of the name per arm.
