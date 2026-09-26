@@ -504,3 +504,83 @@ async fn a_reservation_expired_when_written_does_not_outrank_its_boundary_releas
     }
     Ok(())
 }
+
+/// The nameless-release shape with `release` merged into the release's payload, the release
+/// written by the name when `named`, and a later `ExpiryChanged` to 40 by the name on the same
+/// resource in block 10.
+async fn seed_release_before_a_named_expiry_change(
+    pool: PgPool,
+    release: Value,
+    named: bool,
+) -> Result<String> {
+    let logical = seed_nameless_release(pool.clone()).await?;
+    sqlx::query(
+        "UPDATE normalized_events
+         SET after_state = after_state || $2, logical_name_id = CASE WHEN $3 THEN $1 END
+         WHERE event_identity = 'nameless-expiry-v2-release'",
+    )
+    .bind(&logical)
+    .bind(release)
+    .bind(named)
+    .execute(&pool)
+    .await?;
+    event(
+        &pool,
+        "nameless-expiry-v2-expiry-change",
+        &logical,
+        Some(&uuid(15, 97)),
+        Event {
+            family: "ens_v2_registry_l1",
+            kind: "ExpiryChanged",
+            log: 5,
+            after: json!({"expiry":40}),
+        },
+    )
+    .await?;
+    Ok(logical)
+}
+
+// Which expiry a released tombstone serves when a named expiry row follows its release (Pro review
+// of 56825409, question 4). A path-expiry release that carries its expiry serves it, 30, over the
+// later named `ExpiryChanged` to 40. When the release carries no expiry, or a JSON null, the
+// name's expiry rows decide, 40. An explicit release serves no expiry at all.
+#[tokio::test]
+async fn a_path_expiry_releases_own_expiry_precedes_a_later_named_expiry_change() -> Result<()> {
+    for (case, release, named, expiry) in [
+        ("release_expiry", json!({"expiry":30}), false, Some(30)),
+        ("release_without_expiry", json!({}), false, Some(40)),
+        (
+            "release_null_expiry",
+            json!({"expiry":null}),
+            false,
+            Some(40),
+        ),
+        (
+            "explicit_release",
+            json!({"source_event":"LabelUnregistered","released_at":1_787_702_400_i64}),
+            true,
+            None,
+        ),
+    ] {
+        let served = served_both_ways(&format!("expiry_precedence_{case}"), |pool| {
+            seed_release_before_a_named_expiry_change(pool, release.clone(), named)
+        })
+        .await?;
+        assert_eq!(
+            (
+                served["authority_arm"].as_str(),
+                served["resource_id"].as_str(),
+                served["registration"]["status"].as_str(),
+                served["registration"]["expiry"].as_i64(),
+            ),
+            (
+                Some("ens_v2"),
+                Some(uuid(15, 97).as_str()),
+                Some("released"),
+                expiry,
+            ),
+            "{case}: {served}"
+        );
+    }
+    Ok(())
+}
