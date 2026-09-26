@@ -25,6 +25,7 @@ pub(super) async fn seed_wrapper_effect_resources(
                AND lineage.block_hash = event.block_hash
                AND lineage.block_number = event.block_number
               WHERE event.normalized_event_id = citation.event_id::bigint
+                AND event.consumer_visibility = 'activated'
                 AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
                 AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
           )

@@ -4,10 +4,14 @@ use crate::{ProjectError, Result, scope::Window};
 
 mod handoffs;
 mod resolvers;
+#[cfg(test)]
+mod visibility_tests;
 use handoffs::{seed_child_registration_history, seed_retracted_migration_registry_associations};
 use resolvers::{seed_relinked_resolvers, seed_resolvers};
 
-/// Retain keys whose cited events Interpret deleted during redo so Project can retract losing-fork output.
+/// Retain keys whose cited events are no longer readable, so Project can retract losing-fork
+/// output: a cited event is unreadable when it was deleted, is no longer canonical, or is no longer
+/// activated.
 pub(super) async fn seed(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
