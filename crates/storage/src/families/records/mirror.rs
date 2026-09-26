@@ -253,10 +253,12 @@ async fn nearest(
 }
 
 /// The canonical event order, latest first, over the position columns of `alias`, a
-/// `project_registry_pointer` row: block, transaction and log (absent last), the emission ordinal
-/// (absent last), then identity bytes, as `FamilyPosition` orders. Today it cannot decide a walk:
-/// the table's key is (chain_id, namespace, node), so every row at one depth is the same pointer
-/// row. It is kept so the walk states the same order as every other family comparison.
+/// `project_registry_pointer` row: block, transaction and log (absent last), the emission
+/// ordinal (docs/glossary.md#emission-ordinal; absent last), then identity bytes, as
+/// `FamilyPosition` orders. Today it cannot decide a walk: the table's key is (chain_id,
+/// namespace, node) (schema-v2/baseline/06_projections.sql:2052), so every row at one depth is
+/// the same pointer row. It is kept so the walk states the same order as every other family
+/// comparison.
 fn latest_registry_first(alias: &str) -> String {
     format!(
         "{alias}.block_number DESC, {alias}.transaction_index DESC NULLS LAST,

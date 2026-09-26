@@ -1,3 +1,8 @@
+//! The mirror walk's order clause, `latest_registry_first`, run over an `unnest` relation of
+//! positions. This proves the generated `ORDER BY` clause, not the walk's join over
+//! `name_surfaces` and `project_registry_pointer`. In the walk the ordinal term is inert today:
+//! `project_registry_pointer` is keyed by (chain_id, namespace, node)
+//! (schema-v2/baseline/06_projections.sql:2052), so every row at one depth is the same pointer row.
 use anyhow::Result;
 use bigname_test_support::{TestDatabase, TestDatabaseConfig};
 
@@ -25,7 +30,7 @@ fn positions() -> Vec<FamilyPosition> {
     ]
 }
 
-/// The walk's order at one depth agrees with `FamilyPosition`'s: at one log, the higher emission
+/// The walk's order clause agrees with `FamilyPosition`'s: at one log, the higher emission
 /// ordinal is the later fact, so `e:10` wins over `e:2`, where identity bytes alone pick `e:2`.
 #[tokio::test]
 async fn the_walk_order_follows_the_emission_ordinal() -> Result<()> {

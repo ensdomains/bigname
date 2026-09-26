@@ -166,6 +166,46 @@ async fn unsupported_mirror(
     })
 }
 
+/// A version boundary candidate: its position, its event kind and, for a link, its event id.
+type Boundary = (FamilyPosition, &'static str, Option<i64>);
+
+/// The combined version boundary, the latest partition version event or selected link in the
+/// canonical event order, and the cutoff it sets: only an ordinary `RecordVersionChanged` cuts
+/// off the writes before it.
+fn combined_boundary(boundaries: Vec<Boundary>) -> (Option<Boundary>, Option<FamilyPosition>) {
+    let boundary = boundaries.into_iter().max_by(|a, b| a.0.cmp(&b.0));
+    let cutoff = boundary
+        .as_ref()
+        .filter(|(_, kind, _)| *kind == "RecordVersionChanged")
+        .map(|(position, _, _)| position.clone());
+    (boundary, cutoff)
+}
+
+/// Whether a write at `position` is after the cutoff, when there is one.
+fn eligible(cutoff: Option<&FamilyPosition>, position: &FamilyPosition) -> bool {
+    cutoff.is_none_or(|cut| position > cut)
+}
+
+/// The latest eligible write per record key across the union, in the canonical event order.
+fn latest_eligible(
+    candidates: Vec<RecordCandidate>,
+    cutoff: Option<&FamilyPosition>,
+) -> BTreeMap<String, RecordCandidate> {
+    let mut winners: BTreeMap<String, RecordCandidate> = BTreeMap::new();
+    for candidate in candidates
+        .into_iter()
+        .filter(|candidate| eligible(cutoff, &candidate.position))
+    {
+        match winners.get(&candidate.record_key) {
+            Some(current) if current.position >= candidate.position => {}
+            _ => {
+                winners.insert(candidate.record_key.clone(), candidate);
+            }
+        }
+    }
+    winners
+}
+
 /// Select the served records of `pointer` (the serving pointer after any mirror substitution);
 /// `link_pointer` is the pointer before substitution, whose resolver the link selection reads.
 async fn select(
@@ -196,8 +236,7 @@ async fn select(
     };
     candidates.extend(linked.iter().cloned());
 
-    // The combined version boundary: the latest partition version event or selected link.
-    let mut boundaries: Vec<(FamilyPosition, &'static str, Option<i64>)> = versions
+    let mut boundaries: Vec<Boundary> = versions
         .into_iter()
         .map(|position| (position, "RecordVersionChanged", None))
         .collect();
@@ -210,32 +249,14 @@ async fn select(
             ));
         }
     }
-    let boundary = boundaries.into_iter().max_by(|a, b| a.0.cmp(&b.0));
-    let cutoff = boundary
-        .as_ref()
-        .filter(|(_, kind, _)| *kind == "RecordVersionChanged")
-        .map(|(position, _, _)| position.clone());
-    let eligible = |position: &FamilyPosition| cutoff.as_ref().is_none_or(|cut| position > cut);
-
-    // The latest eligible write per record key across the union.
-    let mut winners: BTreeMap<String, RecordCandidate> = BTreeMap::new();
-    for candidate in candidates
-        .into_iter()
-        .filter(|candidate| eligible(&candidate.position))
-    {
-        match winners.get(&candidate.record_key) {
-            Some(current) if current.position >= candidate.position => {}
-            _ => {
-                winners.insert(candidate.record_key.clone(), candidate);
-            }
-        }
-    }
+    let (boundary, cutoff) = combined_boundary(boundaries);
+    let winners = latest_eligible(candidates, cutoff.as_ref());
 
     // Read back the events the family rows name only by position.
     let mut identities: Vec<String> = winners
         .values()
         .filter_map(|winner| winner.pair_sibling())
-        .filter(|sibling| eligible(sibling))
+        .filter(|sibling| eligible(cutoff.as_ref(), sibling))
         .map(|sibling| sibling.event_identity.clone())
         .collect();
     if let Some((position, "RecordVersionChanged", _)) = &boundary {
@@ -248,7 +269,7 @@ async fn select(
     for winner in winners.into_values() {
         let sibling = winner
             .pair_sibling()
-            .filter(|sibling| eligible(sibling))
+            .filter(|sibling| eligible(cutoff.as_ref(), sibling))
             .and_then(|sibling| {
                 probed
                     .get(&sibling.event_identity)
@@ -313,3 +334,7 @@ async fn select(
         mirrored: false,
     })
 }
+
+#[cfg(test)]
+#[path = "inventory_tests.rs"]
+mod tests;
