@@ -7668,96 +7668,163 @@ async fn project_redo_without_resume_revisits_wrapper_timestamp_boundaries() -> 
     scratch.cleanup().await
 }
 
+// A wrapper expiry boundary whose cited events a redo leaves unreadable: deleted, or kept with
+// their ids and canonical states but no longer activated (Pro review of 0e609402). Each case is
+// redone at block 3; right after the redo the permission summary cites no unreadable event and
+// equals a rebuild of the same database. The candidate rows share one valid correlation-id set.
 #[tokio::test]
 async fn project_redo_removes_a_retracted_wrapper_expiry_boundary() -> Result<()> {
-    let scratch = ScratchDatabase::create("production_project_wrapper_expiry_retraction").await?;
-    seed_project_fixture(scratch.pool()).await?;
-    insert_lineage_block(scratch.pool(), CHAIN, 4).await?;
-    insert_event(
-        scratch.pool(),
-        CHAIN,
-        3,
-        None,
-        Some(RESOURCE),
-        "ExpiryChanged",
-        "ens_v1_wrapper_l1",
-        json!({"expiry":7_776_003}),
-        json!({}),
-    )
-    .await?;
-    insert_event(
-        scratch.pool(),
-        CHAIN,
-        3,
-        None,
-        Some(RESOURCE),
-        "PermissionScopeChanged",
-        "ens_v1_wrapper_l1",
-        json!({"fuses":196_608,"wrapper_state":"emancipated"}),
-        json!({}),
-    )
-    .await?;
-    insert_event(
-        scratch.pool(),
-        CHAIN,
-        4,
-        None,
-        Some(RESOURCE),
-        "PermissionChanged",
-        "ens_v1_registrar_l1",
-        json!({
-            "subject":OWNER,
-            "scope":{"kind":"resource"},
-            "effective_powers":["resource_control"],
-            "grant_source":{"kind":"later_authority"},
-            "inheritance_path":[],
-            "transfer_behavior":"replace_on_authority_change"
-        }),
-        json!({}),
-    )
-    .await?;
-    run_project(scratch.pool(), CHAIN, None, RunMode::Normal, 0, 4).await?;
-    assert!(
-        sqlx::query_scalar::<_, bool>(
-            "SELECT provenance ? 'wrapper_expiry_boundary'
-             FROM permissions_current_resource_summary WHERE resource_id = $1",
+    for (case, retraction) in [
+        (
+            "deleted",
+            "DELETE FROM normalized_events WHERE chain_id = $1 AND block_number = 3 AND event_kind IN ('ExpiryChanged', 'PermissionScopeChanged')",
+        ),
+        (
+            "expiry_candidate",
+            "UPDATE normalized_events SET consumer_visibility = 'candidate', migration_correlation_ids = ARRAY['wrapper-group'] WHERE chain_id = $1 AND block_number = 3 AND event_kind = 'ExpiryChanged'",
+        ),
+        (
+            "fuses_candidate",
+            "UPDATE normalized_events SET consumer_visibility = 'candidate', migration_correlation_ids = ARRAY['wrapper-group'] WHERE chain_id = $1 AND block_number = 3 AND event_kind = 'PermissionScopeChanged'",
+        ),
+        (
+            "both_candidate",
+            "UPDATE normalized_events SET consumer_visibility = 'candidate', migration_correlation_ids = ARRAY['wrapper-group'] WHERE chain_id = $1 AND block_number = 3 AND event_kind IN ('ExpiryChanged', 'PermissionScopeChanged')",
+        ),
+    ] {
+        let scratch =
+            ScratchDatabase::create(&format!("production_project_wrapper_expiry_{case}")).await?;
+        seed_project_fixture(scratch.pool()).await?;
+        insert_lineage_block(scratch.pool(), CHAIN, 4).await?;
+        insert_event(
+            scratch.pool(),
+            CHAIN,
+            3,
+            None,
+            Some(RESOURCE),
+            "ExpiryChanged",
+            "ens_v1_wrapper_l1",
+            json!({"expiry":7_776_003}),
+            json!({}),
         )
-        .bind(Uuid::parse_str(RESOURCE)?)
-        .fetch_one(scratch.pool())
-        .await?
-    );
-
-    sqlx::query(
-        "DELETE FROM normalized_events
-         WHERE chain_id = $1 AND block_number = 3
-           AND event_kind IN ('ExpiryChanged', 'PermissionScopeChanged')",
-    )
-    .bind(CHAIN)
-    .execute(scratch.pool())
-    .await?;
-    run_project(
-        scratch.pool(),
-        CHAIN,
-        Some(Marker {
-            number: 4,
-            hash: block_hash(CHAIN, 4),
-        }),
-        RunMode::Redo,
-        3,
-        3,
-    )
-    .await?;
-
-    assert!(
-        !sqlx::query_scalar::<_, bool>(
-            "SELECT provenance ? 'wrapper_expiry_boundary'
-             FROM permissions_current_resource_summary WHERE resource_id = $1",
+        .await?;
+        insert_event(
+            scratch.pool(),
+            CHAIN,
+            3,
+            None,
+            Some(RESOURCE),
+            "PermissionScopeChanged",
+            "ens_v1_wrapper_l1",
+            json!({"fuses":196_608,"wrapper_state":"emancipated"}),
+            json!({}),
         )
-        .bind(Uuid::parse_str(RESOURCE)?)
-        .fetch_one(scratch.pool())
-        .await?
-    );
-    scratch.cleanup().await
+        .await?;
+        insert_event(
+            scratch.pool(),
+            CHAIN,
+            4,
+            None,
+            Some(RESOURCE),
+            "PermissionChanged",
+            "ens_v1_registrar_l1",
+            json!({
+                "subject":OWNER,
+                "scope":{"kind":"resource"},
+                "effective_powers":["resource_control"],
+                "grant_source":{"kind":"later_authority"},
+                "inheritance_path":[],
+                "transfer_behavior":"replace_on_authority_change"
+            }),
+            json!({}),
+        )
+        .await?;
+        run_project(scratch.pool(), CHAIN, None, RunMode::Normal, 0, 4).await?;
+        assert!(
+            sqlx::query_scalar::<_, bool>(
+                "SELECT provenance ? 'wrapper_expiry_boundary'
+                 FROM permissions_current_resource_summary WHERE resource_id = $1",
+            )
+            .bind(Uuid::parse_str(RESOURCE)?)
+            .fetch_one(scratch.pool())
+            .await?,
+            "{case}"
+        );
+        let unreadable: Vec<String> = sqlx::query_scalar(
+            "SELECT normalized_event_id::text FROM normalized_events
+             WHERE chain_id = $1 AND block_number = 3
+               AND event_kind IN ('ExpiryChanged', 'PermissionScopeChanged')",
+        )
+        .bind(CHAIN)
+        .fetch_all(scratch.pool())
+        .await?;
+        sqlx::query(retraction)
+            .bind(CHAIN)
+            .execute(scratch.pool())
+            .await?;
+        let unreadable: Vec<String> = match case {
+            "expiry_candidate" | "fuses_candidate" => {
+                let kind = if case == "expiry_candidate" {
+                    "ExpiryChanged"
+                } else {
+                    "PermissionScopeChanged"
+                };
+                sqlx::query_scalar(
+                    "SELECT normalized_event_id::text FROM normalized_events
+                     WHERE chain_id = $1 AND block_number = 3 AND event_kind = $2",
+                )
+                .bind(CHAIN)
+                .bind(kind)
+                .fetch_all(scratch.pool())
+                .await?
+            }
+            _ => unreadable,
+        };
+        run_project(
+            scratch.pool(),
+            CHAIN,
+            Some(Marker {
+                number: 4,
+                hash: block_hash(CHAIN, 4),
+            }),
+            RunMode::Redo,
+            3,
+            3,
+        )
+        .await?;
+        normalize_projection_clocks(scratch.pool()).await?;
+        let summary = |pool: PgPool| async move {
+            sqlx::query_scalar::<_, Value>(
+                "SELECT to_jsonb(row) - 'last_recomputed_at'
+                 FROM permissions_current_resource_summary row WHERE resource_id = $1",
+            )
+            .bind(Uuid::parse_str(RESOURCE)?)
+            .fetch_one(&pool)
+            .await
+            .map_err(anyhow::Error::from)
+        };
+        let redone = summary(scratch.pool().clone()).await?;
+        let boundary = &redone["provenance"]["wrapper_expiry_boundary"];
+        for id in &unreadable {
+            assert!(
+                boundary["fuses_event_id"].as_str() != Some(id.as_str())
+                    && boundary["expiry_event_id"].as_str() != Some(id.as_str()),
+                "{case}: the summary still cites unreadable event {id}: {redone}"
+            );
+        }
+        if case == "deleted" || case == "both_candidate" {
+            assert!(boundary.is_null(), "{case}: {redone}");
+        }
+        run_project(scratch.pool(), CHAIN, None, RunMode::Normal, 0, 4).await?;
+        normalize_projection_clocks(scratch.pool()).await?;
+        assert_eq!(
+            summary(scratch.pool().clone()).await?,
+            redone,
+            "{case}: the redo and a rebuild of the same database publish the same summary"
+        );
+        scratch.cleanup().await?;
+    }
+    Ok(())
 }
 
 #[tokio::test]
