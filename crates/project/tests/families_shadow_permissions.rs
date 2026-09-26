@@ -835,6 +835,22 @@ async fn a_transfer_to_the_delegate_from_one_log_keeps_the_recipients_holder_row
     fixture.cleanup().await
 }
 
+/// Every (key, field) the report fails, sorted.
+fn failed_pairs(report: &shadow_support::compare::Report) -> Vec<(String, String)> {
+    let mut failed: Vec<(String, String)> = report
+        .lines
+        .iter()
+        .filter(|line| line.starts_with("SEPOLIA_END_TO_END_SHADOW_MISMATCH"))
+        .filter_map(|line| {
+            let key = line.split(" key=").nth(1)?.split(' ').next()?;
+            let field = line.split(" field=").nth(1)?.split(' ').next()?;
+            Some((key.to_owned(), field.to_owned()))
+        })
+        .collect();
+    failed.sort();
+    failed
+}
+
 /// Every holder power but `extend_expiry`, which the served row masks under these fuses: a .eth
 /// name carries PARENT_CANNOT_CONTROL, and `extend_expiry` needs CAN_EXTEND_EXPIRY (grants.rs
 /// `blocked`).
@@ -1113,6 +1129,75 @@ async fn a_root_reversal_moves_the_child_restrictions_as_a_same_block_delta() ->
     fixture.cleanup().await
 }
 
+/// Pro r7 Q3 on 0638b9ba, the root reversal with the root's served summary deleted. The root
+/// keeps its served permission row (its admin role), so it is compared whether or not the set is
+/// closed over roots; what this pins is that the child's restriction block still passes as the
+/// root-reversal delta while the root's own audit runs. An extra admin power written into the root's aggregate
+/// (`admin_set_subregistry`, which the child's own admin power already unlocks, so the child's
+/// block read in today's order still equals the served one) leaves the child's block excused,
+/// and the root's own `admin_powers` is still the one mismatch: an excused child block cannot
+/// hide the root's audit. Restored, the baseline is back.
+#[tokio::test]
+async fn a_summary_less_root_keeps_its_admin_audit_under_a_reversal() -> Result<()> {
+    let fixture = Fixture::new("families_shadow_permissions_root_reversal_no_summary", 20).await?;
+    let (child, root) = root_reversal(
+        &fixture,
+        &["unregister", "set_resolver", "admin_set_subregistry"],
+    )
+    .await?;
+    publish(&fixture, 16).await?;
+    let deleted = sqlx::query(
+        "DELETE FROM permissions_current_resource_summary WHERE resource_id = $1::uuid",
+    )
+    .bind(&root)
+    .execute(&fixture.pool)
+    .await?
+    .rows_affected();
+    assert_eq!(deleted, 1);
+    // Without its summary the root has no restriction block to compare: its rows and admin
+    // powers are its own lapse delta, the child's block the reversal delta.
+    let deltas = [
+        ("d12_same_block_order:admin_powers", 1),
+        ("d12_same_block_order:permissions_current", 1),
+        ("d12_same_block_order:resource_restrictions", 1),
+    ];
+    let baseline = shadow_support::compare::compare(&fixture.pool, CHAIN, 16).await?;
+    shadow_support::assert_counts(&baseline, &[], &deltas);
+    assert_eq!(baseline.resources, 2, "{:#?}", baseline.lines);
+    let original = admin_aggregate(&fixture, &root).await?;
+    set_admin_aggregate(
+        &fixture,
+        &root,
+        &every_holder(&original, &["admin_renew", "admin_set_subregistry"]),
+    )
+    .await?;
+    let mutated = shadow_support::compare::compare(&fixture.pool, CHAIN, 16).await?;
+    assert_eq!(
+        failed_pairs(&mutated),
+        [(root.clone(), "admin_powers".to_owned())],
+        "{:#?}",
+        mutated.lines
+    );
+    assert!(
+        mutated.lines.iter().any(|line| {
+            line.starts_with("SEPOLIA_END_TO_END_SHADOW_EXPECTED_DELTA")
+                && line.contains(&format!("key={child} field=resource_restrictions "))
+        }),
+        "the child's block is still excused: {:#?}",
+        mutated.lines
+    );
+    set_admin_aggregate(&fixture, &root, &original).await?;
+    let restored = shadow_support::compare::compare(&fixture.pool, CHAIN, 16).await?;
+    shadow_support::assert_counts(&restored, &[], &deltas);
+    assert_eq!(
+        (restored.mismatched, restored.equal),
+        (baseline.mismatched, baseline.equal),
+        "{:#?}",
+        restored.lines
+    );
+    fixture.cleanup().await
+}
+
 /// Pro r5 Q6 on c23e3e5b, overlapping admin powers: the child's holder and the root's admin
 /// both hold `admin_renew`, so `renew` is unlocked on the child in both orders and nothing
 /// differs. With `admin_renew` removed only from the child's aggregate (its row deleted, as the
@@ -1368,8 +1453,10 @@ async fn a_root_retention_gap_refuses_the_child_permission_excuse() -> Result<()
 /// (here its summary row is deleted; the root has no permission row) was not compared, and
 /// another chain's direct row on it, which the effective-permission reader serves by resource
 /// id, went unchecked. The set is now closed over the summaries' roots: the root is compared
-/// and equals, a family grant copied onto it is exactly a `permissions_current` mismatch of the
-/// root, and the foreign row is an `other_chain_rows` mismatch with no excuse.
+/// and equals. A resource-scoped non-admin family grant on the root, then a holder-keyed admin
+/// aggregate on it, each written alone and removed again, is exactly the root's
+/// `permissions_current`, then the root's `admin_powers` with the child's restriction block that
+/// reads it, as mismatches with no excuse, and the baseline is back after each. The foreign row is an `other_chain_rows` mismatch with no excuse.
 #[tokio::test]
 async fn a_root_reached_only_through_a_child_is_audited() -> Result<()> {
     const OTHER: &str = "other-chain";
@@ -1407,47 +1494,86 @@ async fn a_root_reached_only_through_a_child_is_audited() -> Result<()> {
         "{:#?}",
         closed.lines
     );
-    // The root is audited on its own, not only reached: a family grant on it that the served
-    // tables lack (the child's holder grant copied onto the root) is its own mismatch.
-    let copied = sqlx::query(
+    // The root is audited on its own, not only reached. Each family row below is one the
+    // served tables lack, written on the summary-less root and removed before the next.
+    let grant = format!(
         "INSERT INTO bigname_phase.project_grant
          SELECT (jsonb_populate_record(NULL::bigname_phase.project_grant,
-                    to_jsonb(grant_row) || jsonb_build_object('resource_id', $1::text))).*
+                    to_jsonb(grant_row) || jsonb_build_object(
+                        'resource_id', $1::text, 'scope', 'resource', 'scope_kind', 'resource',
+                        'scope_detail', '{{\"kind\": \"resource\"}}'::jsonb,
+                        'effective_powers', '[\"set_resolver\"]'::jsonb))).*
          FROM bigname_phase.project_grant grant_row
-         WHERE grant_row.resource_id = $2::uuid AND grant_row.subject = $3",
-    )
-    .bind(&root)
-    .bind(&child)
-    .bind(HOLDER)
-    .execute(&fixture.pool)
-    .await?
-    .rows_affected();
-    assert_eq!(copied, 1);
-    let mutated = shadow_support::compare::compare(&fixture.pool, CHAIN, TARGET).await?;
-    assert!(
-        mutated.known_discrepancy.is_empty() && mutated.expected_delta_fields.is_empty(),
-        "{:#?}",
-        mutated.lines
+         WHERE grant_row.resource_id = $2::uuid AND grant_row.subject = '{HOLDER}'"
     );
-    let failed: Vec<&str> = mutated
-        .lines
-        .iter()
-        .filter(|line| line.starts_with("SEPOLIA_END_TO_END_SHADOW_MISMATCH"))
-        .filter_map(|line| {
-            line.contains(&format!("key={root} "))
-                .then(|| line.split(" field=").nth(1)?.split(' ').next())
-                .flatten()
-        })
-        .collect();
-    assert_eq!(failed, ["permissions_current"], "{:#?}", mutated.lines);
-    assert_eq!(mutated.mismatched, 1, "{:#?}", mutated.lines);
-    let removed =
-        sqlx::query("DELETE FROM bigname_phase.project_grant WHERE resource_id = $1::uuid")
+    let aggregate = format!(
+        "INSERT INTO bigname_phase.project_resource_admin_aggregate
+         SELECT chain_id, $1::uuid, block_number, transaction_index, log_index,
+                event_identity, normalized_event_id,
+                jsonb_build_object('{HOLDER}|registry', '[\"admin_renew\"]'::jsonb)
+         FROM bigname_phase.project_grant
+         WHERE resource_id = $2::uuid AND subject = '{HOLDER}'"
+    );
+    // The root's admin powers also feed the child's restriction block, so the aggregate fails
+    // the child's block too.
+    for (case, insert, table, failed) in [
+        (
+            "resource-scoped grant",
+            grant.as_str(),
+            "project_grant",
+            vec![(root.clone(), "permissions_current")],
+        ),
+        (
+            "admin aggregate",
+            aggregate.as_str(),
+            "project_resource_admin_aggregate",
+            vec![
+                (child.clone(), "resource_restrictions"),
+                (root.clone(), "admin_powers"),
+            ],
+        ),
+    ] {
+        let inserted = sqlx::query(insert)
             .bind(&root)
+            .bind(&child)
             .execute(&fixture.pool)
             .await?
             .rows_affected();
-    assert_eq!(removed, 1);
+        assert_eq!(inserted, 1, "{case}");
+        let mutated = shadow_support::compare::compare(&fixture.pool, CHAIN, TARGET).await?;
+        assert!(
+            mutated.known_discrepancy.is_empty() && mutated.expected_delta_fields.is_empty(),
+            "{case}: {:#?}",
+            mutated.lines
+        );
+        let mut failed: Vec<(String, String)> = failed
+            .into_iter()
+            .map(|(key, field)| (key, field.to_owned()))
+            .collect();
+        failed.sort();
+        assert_eq!(
+            failed_pairs(&mutated),
+            failed,
+            "{case}: {:#?}",
+            mutated.lines
+        );
+        let removed = sqlx::query(&format!(
+            "DELETE FROM bigname_phase.{table} WHERE resource_id = $1::uuid"
+        ))
+        .bind(&root)
+        .execute(&fixture.pool)
+        .await?
+        .rows_affected();
+        assert_eq!(removed, 1, "{case}");
+        let restored = shadow_support::compare::compare(&fixture.pool, CHAIN, TARGET).await?;
+        shadow_support::assert_counts(&restored, &[], &[]);
+        assert_eq!(
+            (restored.resources, restored.equal, restored.mismatched),
+            (closed.resources, closed.equal, 0),
+            "{case}: {:#?}",
+            restored.lines
+        );
+    }
     sqlx::query(
         "INSERT INTO chain_lineage (chain_id, block_hash, parent_hash, block_number,
              block_timestamp, canonicality_state)
