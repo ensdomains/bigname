@@ -1775,13 +1775,13 @@ COMMENT ON COLUMN project_wrapper_state.expiry_position IS
 COMMENT ON COLUMN project_wrapper_state.owner_word_unmasked IS
     'This value is the latest owner_word_unmasked flag the wrapper events carried.';
 COMMENT ON COLUMN project_wrapper_state.lifecycle_source IS
-    'This value is the source of the newest wrapper lifecycle event of the resource: NameWrapped, NameUnwrapped, holder_grant or holder_revoke (resource_summary.rs wrapper_lifecycles).';
+    'This value is the source of the newest wrapper lifecycle event of the resource: NameWrapped, NameUnwrapped, holder_grant or holder_revoke (resource_summary.rs wrapper_lifecycles). NameWrapped is the mint: the pinned NameWrapper emits it only from _wrap, right after minting the token of the node (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L878-L903 @ ens_v1@91c966f).';
 COMMENT ON COLUMN project_wrapper_state.lifecycle_unwrapped IS
-    'This value is true when the newest wrapper lifecycle event leaves the resource unwrapped: a NameUnwrapped or a holder revoke with no powers. The served wrapper restrictions are served only while it is false.';
+    'This value is true when the newest wrapper lifecycle event leaves the resource unwrapped: a NameUnwrapped or a holder revoke with no powers. The pinned NameWrapper emits NameUnwrapped when _unwrap burns the token (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1022-L1031 @ ens_v1@91c966f) and when a mint burns a still-held token first (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L878-L903 @ ens_v1@91c966f); its upgrade, which no manifest admits, burns without NameUnwrapped, so there only the holder revoke leaves the resource unwrapped (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L483-L509 @ ens_v1@91c966f). The served wrapper restrictions are served only while it is false.';
 COMMENT ON COLUMN project_wrapper_state.lifecycle_position IS
     'This value is the canonical position of the newest wrapper lifecycle event.';
 COMMENT ON COLUMN project_wrapper_state.unwrapped_position IS
-    'This value is the canonical position of the latest NameUnwrapped of the resource, kept when a later mint or holder grant becomes the newest lifecycle event.';
+    'This value is the canonical position of the latest NameUnwrapped of the resource, kept when a later mint or holder grant becomes the newest lifecycle event; a re-wrap over a still-held token emits NameUnwrapped to the zero address before its NameWrapped (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L878-L903 @ ens_v1@91c966f).';
 
 CREATE TABLE IF NOT EXISTS project_registry_node_state (
     chain_id text NOT NULL,
@@ -2693,7 +2693,7 @@ CREATE TABLE IF NOT EXISTS project_child_edge_candidate (
     CHECK ((transaction_index IS NULL) = (log_index IS NULL))
 );
 COMMENT ON TABLE project_child_edge_candidate IS
-    'Project-owned ENSv1 and Basenames child edge candidates of family F11: the latest SubregistryChanged per child and arm, kept while ineligible; a later edge for the child under another parent replaces it. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
+    'Project-owned ENSv1 and Basenames child edge candidates of family F11: the latest SubregistryChanged per parent, child and arm, kept while ineligible. Candidates are retained per parent: a later edge for the child under another parent adds a row and leaves the earlier parent''s row in place, so the reader selects the latest per child and arm. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
 COMMENT ON COLUMN project_child_edge_candidate.chain_id IS
     'This value is the chain.';
 COMMENT ON COLUMN project_child_edge_candidate.namespace IS

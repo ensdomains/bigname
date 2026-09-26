@@ -218,7 +218,7 @@ CREATE TABLE IF NOT EXISTS bigname_phase.project_child_edge_candidate (
 $ddl$;
 EXECUTE $ddl$
 COMMENT ON TABLE bigname_phase.project_child_edge_candidate IS
-    'Project-owned ENSv1 and Basenames child edge candidates of family F11: the latest SubregistryChanged per child and arm, kept while ineligible; a later edge for the child under another parent replaces it. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.'
+    'Project-owned ENSv1 and Basenames child edge candidates of family F11: the latest SubregistryChanged per parent, child and arm, kept while ineligible. Candidates are retained per parent: a later edge for the child under another parent adds a row and leaves the earlier parent''s row in place, so the reader selects the latest per child and arm. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.'
 $ddl$;
 EXECUTE $ddl$
 COMMENT ON COLUMN bigname_phase.project_child_edge_candidate.chain_id IS
