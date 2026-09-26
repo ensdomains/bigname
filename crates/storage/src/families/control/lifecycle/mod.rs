@@ -201,7 +201,8 @@ pub const CONTROL_FIELDS: [&str; 6] = [
     "latest_event_kind",
 ];
 
-/// Evaluate one name from its loaded facts.
-pub fn evaluate(facts: &NameFacts, clock: &Clock) -> ShadowName {
+/// Evaluate one name from its loaded facts. A fact the read cannot decide exactly, such as a
+/// reservation's fractional expiry (`membership::expired_when_written`), fails it.
+pub fn evaluate(facts: &NameFacts, clock: &Clock) -> anyhow::Result<ShadowName> {
     served::evaluate(facts, clock)
 }

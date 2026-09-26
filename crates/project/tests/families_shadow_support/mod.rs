@@ -91,6 +91,20 @@ impl Served {
     }
 }
 
+/// The production row of `logical_name_id` alone, for a case whose family read must fail.
+pub async fn served(fixture: &Fixture, logical_name_id: &str) -> Result<Served> {
+    let rows =
+        load_name_current_by_logical_name_ids(&fixture.pool, &[logical_name_id.to_owned()]).await?;
+    let row = rows
+        .get(logical_name_id)
+        .ok_or_else(|| anyhow::anyhow!("{logical_name_id} has no name_current row"))?;
+    Ok(Served {
+        summary: row.declared_summary.clone(),
+        provenance: row.provenance.clone(),
+        resource_id: row.resource_id.map(|id| id.to_string()),
+    })
+}
+
 /// The production row of `logical_name_id` and the family read of the same name at `target`.
 pub async fn name(
     fixture: &Fixture,

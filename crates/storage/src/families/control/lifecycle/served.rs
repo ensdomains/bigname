@@ -3,6 +3,7 @@
 //! the latest under the facts' order, the canonical order in every read.
 use std::collections::BTreeMap;
 
+use anyhow::Result;
 use serde_json::{Map, Value, json};
 
 use super::{
@@ -97,7 +98,7 @@ pub(super) fn authority_of(facts: &NameFacts) -> Authority<'_> {
     }
 }
 
-pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> ShadowName {
+pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> Result<ShadowName> {
     let input = &facts.input;
     let selection = &input.selection;
     let is_v2 = selection.is_v2();
@@ -136,7 +137,7 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> ShadowName {
     let mut trace = Map::new();
     // A released ENSv2 tombstone serves the fact that decided it, on the tombstone's resource;
     // every other ENSv2 name the registration fold (build.sql:349-364).
-    let tombstone = deciding_fact(facts, clock);
+    let tombstone = deciding_fact(facts, clock)?;
     trace.insert("released_v2".into(), json!(tombstone.is_some()));
     let selected = if let Some(tombstone) = tombstone {
         Selected {
@@ -146,7 +147,7 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> ShadowName {
             released: true,
         }
     } else if is_v2 {
-        select_v2(facts, &tagged, binding_resource, &mut trace)
+        select_v2(facts, &tagged, binding_resource, &mut trace)?
     } else {
         let event = latest(
             &facts.order,
@@ -318,7 +319,7 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> ShadowName {
     let context = authority_context(facts, &authority, &in_scope, is_v2, selected_key.as_deref());
     trace.insert("authority_context_event".into(), context.event.clone());
     let latest_event_kind =
-        latest_event_kind(facts, &selected, &in_scope, is_v2, selected_key.as_deref());
+        latest_event_kind(facts, &selected, &in_scope, is_v2, selected_key.as_deref())?;
 
     let released_at = selected
         .event
@@ -445,9 +446,9 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> ShadowName {
             json!({"registration": unreleased, "control": live_control()}),
         );
     }
-    ShadowName {
+    Ok(ShadowName {
         registration,
         control,
         trace,
-    }
+    })
 }

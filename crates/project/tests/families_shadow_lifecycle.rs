@@ -377,6 +377,131 @@ async fn a_reservation_expired_when_written_leaves_the_earlier_grant_selected() 
     fixture.cleanup().await
 }
 
+/// Name 1's grant on K1 at block 9 and a reservation at block 10, whose timestamp is
+/// 1_800_000_120, with the expiry `expiry` written into the stored event as JSONB text, so
+/// Postgres holds the value exactly and no Rust f64 rounds it on the way in. Returns the
+/// reservation's event id.
+async fn reservation_with_expiry(fixture: &Fixture, expiry: &str) -> Result<i64> {
+    let k1 = uuid(1);
+    v2_binding(fixture, &k1).await?;
+    v2(
+        fixture,
+        9,
+        "RegistrationGranted",
+        Some(&k1),
+        json!({"status": "registered", "registrant": ALICE, "expiry": 2_000_000_000u64}),
+    )
+    .await?;
+    let reservation = v2(
+        fixture,
+        10,
+        "RegistrationReserved",
+        Some(&k1),
+        json!({"status": "reserved"}),
+    )
+    .await?;
+    sqlx::query(
+        "UPDATE normalized_events SET after_state = jsonb_set(after_state, '{expiry}', $1::jsonb)
+         WHERE normalized_event_id = $2",
+    )
+    .bind(expiry)
+    .bind(reservation)
+    .execute(&fixture.pool)
+    .await?;
+    Ok(reservation)
+}
+
+/// Both sides agree on a reservation whose integer expiry is just before or just after its
+/// block's timestamp, and on one whose expiry is a numeric string (v2_lifecycle_events.sql:28-36
+/// reads only a JSON number): expired when written, the grant stays selected; otherwise the
+/// reservation is live and selected.
+async fn exact_expiry(prefix: &str, expiry: &str, expired: bool) -> Result<()> {
+    let fixture = Fixture::new(prefix, 20).await?;
+    reservation_with_expiry(&fixture, expiry).await?;
+    let report = publish_and_compare(&fixture, 14).await?;
+    assert_counts(&report, &[], &[]);
+    let (served, shadow) = shadow_reads(&fixture, 14).await?;
+    let (status, kind, selected) = if expired {
+        ("active", "RegistrationGranted", "RegistrationGranted:9:1")
+    } else {
+        (
+            "reserved",
+            "RegistrationReserved",
+            "RegistrationReserved:10:1",
+        )
+    };
+    assert_eq!(served.registration("status"), json!(status));
+    assert_eq!(served.registration("latest_event_kind"), json!(kind));
+    assert_eq!(shadow.registration["status"], json!(status));
+    assert_eq!(shadow.registration["latest_event_kind"], json!(kind));
+    assert_eq!(shadow.trace["selected_event"], json!(selected));
+    fixture.cleanup().await
+}
+
+#[tokio::test]
+async fn a_reservation_expiring_one_second_before_its_block_is_expired_on_both_sides() -> Result<()>
+{
+    exact_expiry("families_shadow_expiry_below", "1800000119", true).await
+}
+
+#[tokio::test]
+async fn a_reservation_expiring_one_second_after_its_block_stays_live_on_both_sides() -> Result<()>
+{
+    exact_expiry("families_shadow_expiry_above", "1800000121", false).await
+}
+
+#[tokio::test]
+async fn a_numeric_string_reservation_expiry_is_never_expired_on_either_side() -> Result<()> {
+    exact_expiry("families_shadow_expiry_string", "\"1800000120\"", false).await
+}
+
+/// A reservation whose expiry is a fractional JSON number just after its block's timestamp. The
+/// served read compares it as exact numeric (v2_lifecycle_events.sql:32-35), so the reservation
+/// is live and selected. The families parse the number as an f64, which rounds it to the block
+/// timestamp, so the shadow cannot decide the rule: it refuses the name with an error naming the
+/// event, never an approximate answer, and the comparison fails hard.
+async fn fractional_expiry(prefix: &str, expiry: &str) -> Result<()> {
+    let fixture = Fixture::new(prefix, 20).await?;
+    let reservation = reservation_with_expiry(&fixture, expiry).await?;
+    let exact: bool = sqlx::query_scalar(
+        "SELECT (after_state ->> 'expiry')::numeric > 1800000120
+         FROM normalized_events WHERE normalized_event_id = $1",
+    )
+    .bind(reservation)
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert!(exact, "Postgres holds {expiry} exactly, after the block");
+    let error = match publish_and_compare(&fixture, 14).await {
+        Ok(_) => panic!(
+            "the shadow compared a fractional expiry instead of refusing it (report printed above)"
+        ),
+        Err(error) => format!("{error:#}"),
+    };
+    eprintln!("refused: {error}");
+    assert!(
+        error.contains("fractional expiry cannot be compared exactly")
+            && error.contains("RegistrationReserved:10:1"),
+        "{error}"
+    );
+    let served = shadow_support::served(&fixture, &name(1)).await?;
+    assert_eq!(served.registration("status"), json!("reserved"));
+    assert_eq!(
+        served.registration("latest_event_kind"),
+        json!("RegistrationReserved")
+    );
+    fixture.cleanup().await
+}
+
+#[tokio::test]
+async fn a_fractional_reservation_expiry_is_refused_not_rounded() -> Result<()> {
+    fractional_expiry("families_shadow_expiry_fraction", "1800000120.00000001").await
+}
+
+#[tokio::test]
+async fn an_exponent_reservation_expiry_is_refused_not_rounded() -> Result<()> {
+    fractional_expiry("families_shadow_expiry_exponent", "1.80000012000000001e9").await
+}
+
 #[tokio::test]
 async fn a_null_resource_release_joins_the_associated_key_and_the_other_grant_wins() -> Result<()> {
     let fixture = Fixture::new("families_shadow_association", 20).await?;

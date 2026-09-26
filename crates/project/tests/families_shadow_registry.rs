@@ -2202,7 +2202,7 @@ async fn canonical_ranks_read_exactly_as_the_canonical_order() -> Result<()> {
         block_number: 12,
         timestamp_seconds: 1_800_000_144,
     };
-    let canonical = evaluate(&facts, &clock);
+    let canonical = evaluate(&facts, &clock)?;
     for (block, field) in [
         (&canonical.registration, "latest_event_kind"),
         (&canonical.registration, "authority_key"),
@@ -2216,7 +2216,7 @@ async fn canonical_ranks_read_exactly_as_the_canonical_order() -> Result<()> {
     let mut reversed = facts.clone();
     reversed.events.reverse();
     for facts in [&facts, &reversed] {
-        let ranked = evaluate(&in_canonical_ranks(facts), &clock);
+        let ranked = evaluate(&in_canonical_ranks(facts), &clock)?;
         assert_eq!(ranked.registration, canonical.registration);
         assert_eq!(ranked.control, canonical.control);
     }

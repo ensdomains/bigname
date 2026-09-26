@@ -1,12 +1,13 @@
 //! The summary laterals of name_current/build.sql, each restated over the admitted retained
 //! events of the name (or of the selected ENSv2 lifecycle key) and ordered by the facts'
 //! order, the canonical order in every read.
+use anyhow::Result;
 use serde_json::{Value, json};
 
 use super::{
     NameFacts,
     admission::{Authority, Probe, REGISTRAR, StagedName},
-    membership::{expired_when_written, members, merged_for},
+    membership::{members, merged_for, without_expired},
     served::{Selected, Tagged, latest},
 };
 use crate::families::control::{
@@ -330,34 +331,42 @@ pub(super) fn admitted_epochs(
 /// `latest_event_kind`, the CASE of build.sql:67-73 in order: a selected reservation serves its
 /// own kind; so does a released tombstone's deciding fact (`is_released_v2`); another ENSv2
 /// selection serves the latest of the five kinds in the selected key's membership, else its own
-/// kind; an ENSv1 one the latest admitted of the five kinds, else its own.
+/// kind; an ENSv1 one the latest admitted of the five kinds, else its own. A reservation whose
+/// expiry cannot be compared exactly fails the read (`membership::expired_when_written`).
 pub(super) fn latest_event_kind(
     facts: &NameFacts,
     selected: &Selected<'_>,
     in_scope: &[&Tagged<'_>],
     is_v2: bool,
     selected_key: Option<&str>,
-) -> Option<String> {
+) -> Result<Option<String>> {
     if selected.kind() == Some("RegistrationReserved") || selected.released {
-        return selected.kind().map(str::to_owned);
+        return Ok(selected.kind().map(str::to_owned));
     }
-    let found = if is_v2 {
-        selected_key.and_then(|key| {
-            let name = &facts.input.logical_name_id;
-            if facts.order != EventOrder::Canonical {
-                // The counterfactual reads the key's members themselves in today's lateral order
-                // (build.sql:383-389), not the maxima folded in its membership order.
-                return latest(
-                    &facts.order,
-                    members(facts, key, name).into_iter().filter(|event| {
-                        FIVE_KINDS.contains(&event.event_kind.as_str())
-                            && !expired_when_written(facts, event)
-                    }),
-                    |event| &event.position,
-                )
-                .map(|event| event.event_kind.clone());
-            }
-            let view = merged_for(facts, key, name);
+    let found = if !is_v2 {
+        latest(
+            &facts.order,
+            in_scope
+                .iter()
+                .filter(|tagged| FIVE_KINDS.contains(&tagged.event.event_kind.as_str())),
+            |tagged| &tagged.event.position,
+        )
+        .map(|tagged| tagged.event.event_kind.clone())
+    } else if let Some(key) = selected_key {
+        let name = &facts.input.logical_name_id;
+        if facts.order != EventOrder::Canonical {
+            // The counterfactual reads the key's members themselves in today's lateral order
+            // (build.sql:383-389), not the maxima folded in its membership order.
+            let live = without_expired(
+                facts,
+                members(facts, key, name)
+                    .into_iter()
+                    .filter(|event| FIVE_KINDS.contains(&event.event_kind.as_str())),
+            )?;
+            latest(&facts.order, live, |event| &event.position)
+                .map(|event| event.event_kind.clone())
+        } else {
+            let view = merged_for(facts, key, name)?;
             let marks: [(&Option<Mark>, &str); 5] = [
                 (&view.last_grant, "RegistrationGranted"),
                 (&view.last_renewal, "RegistrationRenewed"),
@@ -373,18 +382,11 @@ pub(super) fn latest_event_kind(
                 |(mark, _)| &mark.position,
             )
             .map(|(_, kind)| kind.to_owned())
-        })
+        }
     } else {
-        latest(
-            &facts.order,
-            in_scope
-                .iter()
-                .filter(|tagged| FIVE_KINDS.contains(&tagged.event.event_kind.as_str())),
-            |tagged| &tagged.event.position,
-        )
-        .map(|tagged| tagged.event.event_kind.clone())
+        None
     };
-    found.or_else(|| selected.kind().map(str::to_owned))
+    Ok(found.or_else(|| selected.kind().map(str::to_owned)))
 }
 
 /// The registration's registrar lease: the lease the latest NameWrapper SurfaceBound on the

@@ -572,7 +572,10 @@ fn admitted(facts: &NameFacts, target: i64) -> Value {
         block_number: target,
         timestamp_seconds: timestamp(target),
     };
-    evaluate(facts, &clock).trace["admitted"].clone()
+    evaluate(facts, &clock)
+        .expect("the fixture's facts are decidable")
+        .trace["admitted"]
+        .clone()
 }
 
 /// An ENSv2 event of name 1 on `resource` at `(transaction 0, log)`.
@@ -674,7 +677,7 @@ async fn a_same_block_release_before_a_grant_stays_live_in_todays_membership_ord
         block_number: 16,
         timestamp_seconds: timestamp(16),
     };
-    let (canonical, today) = (evaluate(&facts, &clock), evaluate(&legacy, &clock));
+    let (canonical, today) = (evaluate(&facts, &clock)?, evaluate(&legacy, &clock)?);
     for read in [&canonical, &today] {
         assert_eq!(read.trace["selected_event"], json!("grant-12"));
         assert_eq!(read.registration["status"], json!("active"));
@@ -761,12 +764,12 @@ async fn the_order_counterfactual_keeps_every_position_and_the_admission() -> Re
         timestamp_seconds: timestamp(16),
     };
     assert_eq!(
-        evaluate(&facts, &clock).registration["expiry"],
+        evaluate(&facts, &clock)?.registration["expiry"],
         json!(2_300_000_000u64),
         "the canonical order takes ordinal 1"
     );
     assert_eq!(
-        evaluate(&legacy, &clock).registration["expiry"],
+        evaluate(&legacy, &clock)?.registration["expiry"],
         json!(2_200_000_000u64),
         "today's order takes the higher generated id, ordinal 0"
     );

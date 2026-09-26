@@ -1101,7 +1101,12 @@ fn name_excuses(
     {
         return out;
     }
-    let canonical = evaluate(&in_canonical_ranks(&from_log), clock);
+    // The rebuilds hold the same reservations as the family rows the shadow read, so a fact that
+    // read could not decide failed the run before this point; a rebuild that fails anyway
+    // excuses nothing.
+    let Ok(canonical) = evaluate(&in_canonical_ranks(&from_log), clock) else {
+        return out;
+    };
     // Every excuse also needs the families' identity facts, the epoch starts and the binding
     // candidates' SurfaceBounds, to be what the log gives, since both blocks read them, and a
     // control field the node's owner-setting events too.
@@ -1121,9 +1126,13 @@ fn name_excuses(
         .iter()
         .map(|diff| serves_the_unnamed_release(shadow, diff))
         .collect();
-    let without_release = unnamed
+    let Ok(without_release) = unnamed
         .contains(&true)
-        .then(|| evaluate(&without_unnamed_release(&from_log, &prefetched.ids), clock));
+        .then(|| evaluate(&without_unnamed_release(&from_log, &prefetched.ids), clock))
+        .transpose()
+    else {
+        return out;
+    };
     for (index, diff) in diffs.iter().enumerate() {
         if !log_gives_shadow[index] {
             continue;
@@ -1150,7 +1159,9 @@ fn name_excuses(
     let Some(legacy) = legacy_facts(&from_log, &prefetched.ids, &prefetched.keys) else {
         return out;
     };
-    let today = evaluate(&legacy, clock);
+    let Ok(today) = evaluate(&legacy, clock) else {
+        return out;
+    };
     for (index, diff) in diffs.iter().enumerate() {
         // Only the fields both reads compute: an authority-selection field has no today's-order
         // value here and stays open.

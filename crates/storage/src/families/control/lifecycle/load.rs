@@ -50,13 +50,14 @@ pub async fn load_shadow_names(
     names: &[NameInput],
 ) -> Result<BTreeMap<String, ShadowName>> {
     let facts = load_name_facts(pool, chain_id, names).await?;
-    Ok(facts
+    facts
         .into_iter()
         .map(|facts| {
-            let shadow = evaluate(&facts, clock);
-            (facts.input.logical_name_id, shadow)
+            let shadow = evaluate(&facts, clock)
+                .with_context(|| format!("the shadow read of {}", facts.input.logical_name_id))?;
+            Ok((facts.input.logical_name_id, shadow))
         })
-        .collect())
+        .collect()
 }
 
 /// Load every fact the lifecycle read of `names` reads.

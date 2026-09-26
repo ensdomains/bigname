@@ -7,6 +7,7 @@
 //! membership is its own events and the unnamed ones, such as the interpreter's path-expiry
 //! release, never another name's; when the key holds another name's events the read folds the
 //! key's retained events without them instead of using the stored maxima.
+use anyhow::{Result, bail};
 use serde_json::Value;
 
 use super::{NameFacts, view};
@@ -19,23 +20,51 @@ use crate::families::control::{
 /// at or before its own block's timestamp, so it is never live (v2_lifecycle_events.sql:28-36,
 /// the rule name_authority/build.sql:212-239 applies). Since TYR-36 step 6 such a reservation
 /// takes no part in a name's registration fold or ENSv2 latest kind (name_current/build.sql
-/// :322, :326, :331, :385); it stays among the retained events and in every other fold. Block
-/// timestamps are whole seconds; an expiry with a fraction compares as a float.
-pub(super) fn expired_when_written(facts: &NameFacts, event: &LifecycleEvent) -> bool {
+/// :322, :326, :331, :385); it stays among the retained events and in every other fold.
+///
+/// The served rule compares the JSON number with the block's epoch as exact numeric
+/// (v2_lifecycle_events.sql:32-35). Block timestamps are whole seconds, so an integer expiry
+/// compares exactly here too; one past `i64` is never at or before a block. A JSON number that is
+/// not an integer (a fraction or an exponent literal) reached the families as an `f64`, which can
+/// round it onto the block's second, so the rule cannot be decided from it: the read is refused
+/// with an error naming the event and the value, never approximated. The adapter writes the
+/// chain's `uint64` expiry as a JSON integer, so no producer writes such a value today. A
+/// string, null or missing expiry is not a number, and the served rule does not filter it
+/// (`ELSE FALSE`).
+pub(super) fn expired_when_written(facts: &NameFacts, event: &LifecycleEvent) -> Result<bool> {
+    if event.event_kind != "RegistrationReserved" {
+        return Ok(false);
+    }
     let Value::Number(expiry) = &event.expiry else {
-        return false;
+        return Ok(false);
     };
     let Some(&block) = facts.block_seconds.get(&event.position.block_number) else {
-        return false;
+        return Ok(false);
     };
-    event.event_kind == "RegistrationReserved"
-        && match (expiry.as_i64(), expiry.as_u64()) {
-            (Some(seconds), _) => seconds <= block,
-            (None, Some(_)) => false,
-            (None, None) => expiry
-                .as_f64()
-                .is_some_and(|seconds| seconds <= block as f64),
+    if let Some(seconds) = expiry.as_i64() {
+        return Ok(seconds <= block);
+    }
+    if expiry.as_u64().is_some() {
+        return Ok(false);
+    }
+    bail!(
+        "{}: fractional expiry cannot be compared exactly: {expiry}",
+        event.position.event_identity
+    )
+}
+
+/// `events` without the reservations expired when written, in their order.
+pub(super) fn without_expired<'a>(
+    facts: &NameFacts,
+    events: impl IntoIterator<Item = &'a LifecycleEvent>,
+) -> Result<Vec<&'a LifecycleEvent>> {
+    let mut kept = Vec::new();
+    for event in events {
+        if !expired_when_written(facts, event)? {
+            kept.push(event);
         }
+    }
+    Ok(kept)
 }
 
 /// The membership maxima of one lifecycle key folded from retained events in `order`'s
@@ -145,21 +174,14 @@ pub(super) fn members<'a>(facts: &'a NameFacts, key: &str, name: &str) -> Vec<&'
 /// reservation expired when written, which the stored maxima count, the view is the members
 /// without it folded again. In the harness's same-block counterfactual the view is the members
 /// folded in today's name-membership order instead (block, transaction, log, generated id;
-/// build.sql:322-347), also without such a reservation.
-pub(super) fn merged_for(facts: &NameFacts, key: &str, name: &str) -> view::MergedView {
+/// build.sql:322-347), also without such a reservation. A reservation whose expiry cannot be
+/// compared exactly fails the read (`expired_when_written`).
+pub(super) fn merged_for(facts: &NameFacts, key: &str, name: &str) -> Result<view::MergedView> {
     let members = members(facts, key, name);
-    if facts.order != EventOrder::Canonical
-        || members
-            .iter()
-            .any(|event| expired_when_written(facts, event))
-    {
-        let folded = name_maxima_of(
-            members
-                .into_iter()
-                .filter(|event| !expired_when_written(facts, event)),
-            &facts.order,
-        );
-        return view::merged_view(Some(&folded), []);
+    let live = without_expired(facts, members.iter().copied())?;
+    if facts.order != EventOrder::Canonical || live.len() != members.len() {
+        let folded = name_maxima_of(live, &facts.order);
+        return Ok(view::merged_view(Some(&folded), []));
     }
     let associated = facts
         .triples
@@ -180,9 +202,9 @@ pub(super) fn merged_for(facts: &NameFacts, key: &str, name: &str) -> view::Merg
                 }),
                 &EventOrder::Canonical,
             );
-            return view::merged_view(Some(&own), associated);
+            return Ok(view::merged_view(Some(&own), associated));
         }
-        return view::merged_view(Some(state), associated);
+        return Ok(view::merged_view(Some(state), associated));
     }
     let unassociated = facts
         .triples
@@ -191,5 +213,5 @@ pub(super) fn merged_for(facts: &NameFacts, key: &str, name: &str) -> view::Merg
             triple.target.is_none() && triple.unassociated_key().as_deref() == Some(key)
         })
         .map(|triple| &triple.maxima);
-    view::merged_view(None, associated.chain(unassociated))
+    Ok(view::merged_view(None, associated.chain(unassociated)))
 }

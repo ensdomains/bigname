@@ -5,9 +5,10 @@
 //! serves that fact, its kind and payload, on the tombstone's resource, instead of the ordinary
 //! registration fold (build.sql:349-364). The fact can be a release written without a name, or
 //! the end of a later reservation of the name with no resource or another one.
+use anyhow::Result;
 use serde_json::Value;
 
-use super::{Clock, NameFacts, membership::expired_when_written};
+use super::{Clock, NameFacts, membership::without_expired};
 use crate::families::control::{
     position::Position,
     rows::{BindingCandidate, LifecycleEvent},
@@ -29,10 +30,15 @@ const LIFECYCLE: [&str; 4] = [
 
 /// The released tombstone's deciding fact, or none when the name is not one: the selected arm is
 /// not exactly ens_v2 (name_authority/build.sql:584-587), an ENSv2 binding of the name is open at
-/// the publication (:267-271), or the latest lifecycle fact is not a release (:266).
-pub(super) fn deciding_fact<'a>(facts: &'a NameFacts, clock: &Clock) -> Option<Tombstone<'a>> {
+/// the publication (:267-271), or the latest lifecycle fact is not a release (:266). A
+/// reservation whose expiry cannot be compared exactly fails the read
+/// (`membership::expired_when_written`).
+pub(super) fn deciding_fact<'a>(
+    facts: &'a NameFacts,
+    clock: &Clock,
+) -> Result<Option<Tombstone<'a>>> {
     if facts.input.selection.authority_arm.as_deref() != Some("ens_v2") {
-        return None;
+        return Ok(None);
     }
     let bindings: Vec<&BindingCandidate> = facts
         .candidates
@@ -43,7 +49,7 @@ pub(super) fn deciding_fact<'a>(facts: &'a NameFacts, clock: &Clock) -> Option<T
         .iter()
         .any(|binding| binding.open_at(clock.timestamp_seconds))
     {
-        return None;
+        return Ok(None);
     }
     // The binding the name was last bound to (:48-56).
     let bound = bindings.into_iter().max_by(|left, right| {
@@ -58,11 +64,14 @@ pub(super) fn deciding_fact<'a>(facts: &'a NameFacts, clock: &Clock) -> Option<T
                 right.log_index.unwrap_or(-1),
             ))
             .then_with(|| left.surface_binding_id.cmp(&right.surface_binding_id))
-    })?;
+    });
+    let Some(bound) = bound else {
+        return Ok(None);
+    };
     let resource = bound.resource_id.as_str();
     let name = facts.input.logical_name_id.as_str();
     let named = |event: &LifecycleEvent| event.original_logical_name_id.as_deref() == Some(name);
-    let latest = facts
+    let facts_of_the_name = facts
         .events
         .iter()
         .filter(|event| event.is_v2_family())
@@ -87,14 +96,17 @@ pub(super) fn deciding_fact<'a>(facts: &'a NameFacts, clock: &Clock) -> Option<T
                     _ => false,
                 };
             own || reservation
-        })
-        // A reservation expired when written is never live and takes no part (:212-239).
-        .filter(|event| !expired_when_written(facts, event))
-        .max_by(|left, right| facts.order.name_membership(&left.position, &right.position))?;
-    (latest.event_kind == "RegistrationReleased").then(|| Tombstone {
-        event: latest,
-        resource: resource.to_owned(),
-    })
+        });
+    // A reservation expired when written is never live and takes no part (:212-239).
+    let latest = without_expired(facts, facts_of_the_name)?
+        .into_iter()
+        .max_by(|left, right| facts.order.name_membership(&left.position, &right.position));
+    Ok(latest
+        .filter(|latest| latest.event_kind == "RegistrationReleased")
+        .map(|latest| Tombstone {
+            event: latest,
+            resource: resource.to_owned(),
+        }))
 }
 
 /// Whether `witness` is before `event` as the reservation-end rule compares them: its block,

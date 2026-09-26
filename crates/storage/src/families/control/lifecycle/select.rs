@@ -1,6 +1,7 @@
 //! The ENSv2 registration candidate of one name (build.sql:319-348): one candidate per lifecycle
 //! key from the name's membership of the key, then the cross-key preference, then the
 //! released-elsewhere exclusion.
+use anyhow::Result;
 use serde_json::{Map, Value, json};
 
 use super::{
@@ -18,7 +19,7 @@ pub(super) fn select_v2<'a>(
     tagged: &[Tagged<'a>],
     binding_resource: Option<&str>,
     trace: &mut Map<String, Value>,
-) -> Selected<'a> {
+) -> Result<Selected<'a>> {
     let name = facts.input.logical_name_id.as_str();
     let mut keys: Vec<String> = tagged
         .iter()
@@ -43,7 +44,7 @@ pub(super) fn select_v2<'a>(
     }
     let mut candidates: Vec<(String, Candidate, &'a LifecycleEvent)> = Vec::new();
     for key in keys {
-        let view = merged_for(facts, &key, name);
+        let view = merged_for(facts, &key, name)?;
         let Some(candidate) = view::candidate(&view, &facts.order) else {
             continue;
         };
@@ -114,18 +115,18 @@ pub(super) fn select_v2<'a>(
         &facts.order,
     );
     let Some((key, candidate, event)) = winner.map(|index| &candidates[index]) else {
-        return Selected::none();
+        return Ok(Selected::none());
     };
     let released_elsewhere = candidate.event_kind == "RegistrationReleased"
         && binding_resource.is_some()
         && event.resource_id.as_deref() != binding_resource;
     if released_elsewhere {
-        return Selected::none();
+        return Ok(Selected::none());
     }
-    Selected {
+    Ok(Selected {
         event: Some(event),
         lifecycle_key: Some(key.clone()),
         resource: event.resource_id.clone(),
         released: false,
-    }
+    })
 }
