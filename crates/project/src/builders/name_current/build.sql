@@ -332,9 +332,11 @@
                     AND ((event.event_kind = 'RegistrationReleased' AND later.event_kind IN ('RegistrationGranted', 'RegistrationReserved')) OR (event.event_kind <> 'RegistrationReleased' AND later.event_kind = 'RegistrationReleased'))
                     AND ROW(COALESCE(later.block_number, -1), COALESCE(later.transaction_index, -1), COALESCE(later.log_index, -1), later.normalized_event_id) > ROW(COALESCE(event.block_number, -1), COALESCE(event.transaction_index, -1), COALESCE(event.log_index, -1), event.normalized_event_id)
               )
-            -- Positions compare as authority selection compares them: block, transaction, log, then
-            -- event id, with a block-boundary row (no transaction or log index) first in its block.
-            -- A reservation already expired when written takes no part, as there.
+            -- For chain-positioned facts, positions compare as authority selection compares them:
+            -- block, transaction, log, then event id, with a block-boundary row (no transaction or
+            -- log index) first in its block. A row with no block at all sorts first there and last
+            -- here; no ENSv2 writer produces one. A reservation already expired when written takes
+            -- no part, as there.
             ORDER BY event.lifecycle_key, event.block_number DESC NULLS LAST, COALESCE(event.transaction_index, -1) DESC,
                      COALESCE(event.log_index, -1) DESC, event.normalized_event_id DESC) event
             ORDER BY (binding.resource_id IS NOT NULL AND event.lifecycle_key IS NOT DISTINCT FROM binding.resource_id::text AND event.event_kind <> 'RegistrationReleased') DESC,
