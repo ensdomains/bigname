@@ -22,3 +22,7 @@ pub(super) async fn include_names_bound_to_released_resources(
         })?;
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "v2_release_names_tests.rs"]
+mod tests;
