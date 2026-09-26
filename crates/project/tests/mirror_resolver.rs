@@ -2330,3 +2330,6 @@ mod pointer_identity;
 
 #[path = "mirror_resolver/classification_inputs.rs"]
 mod classification_inputs;
+
+#[path = "mirror_resolver/name_wrapped_sources.rs"]
+mod name_wrapped_sources;

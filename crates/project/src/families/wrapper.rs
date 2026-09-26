@@ -137,7 +137,6 @@ pub(super) async fn apply(
                 // `modifiers`, address_names.rs `scope_modifiers`), which rejects a non-integral
                 // spelling and fails the served batch, so only an integer reaches a served row.
                 json_number_between(event.after.get("fuses"), i64::MAX.unsigned_abs())
-                    .filter(|number| number.is_u64())
                     .map_or(Value::Null, |number| Value::Number(number.clone())),
             );
             set(&mut row, "wrapper_state_position", event.position.to_json());
@@ -146,12 +145,18 @@ pub(super) async fn apply(
                 &mut row,
                 "expiry_seconds",
                 // The served expiry is the numeric value (address_names.rs `wrapper_expiries`,
-                // children.rs `latest_wrapper_expiries`), fractional or not.
+                // children.rs `latest_wrapper_expiries`). The adapter writes it as a JSON integer
+                // (ens_v1_wrapper decodes of a u64); a decimal spelling keeps no expiry here
+                // because it may arrive rounded (`json_number_between`).
                 json_number_between(event.after.get("expiry"), u64::MAX)
                     .map_or(Value::Null, |number| Value::Number(number.clone())),
             );
             set(&mut row, "expiry_position", event.position.to_json());
         }
+        // This reads the flag with `as_bool`, while registry.rs and lifecycle.rs use
+        // `reduce::flag`, which also takes the string "true" or "false". Wrapper events never
+        // carry the key: the adapter's `mark_unmasked_word` runs only in the v1 registry decodes
+        // (adapters schema_v2/protocol/v1/registry.rs), so the two readers cannot disagree today.
         if let Some(unmasked) = event.after.get("owner_word_unmasked") {
             set(
                 &mut row,

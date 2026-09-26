@@ -1741,30 +1741,90 @@ order](glossary.md#canonical-event-order) and count on
 loop for that batch and leaves the served publication and its progress as they
 were; the next batch catches up from where the marker stands.
 
-Several facts of one log apply in the order the adapter wrote them: within one
-block, transaction and log the trailing emission ordinal of `event_identity`
-decides before the identity bytes (D12 as amended by Tate on 2026-09-26; the
-[canonical event order](glossary.md#canonical-event-order) states the parse).
+Facts within one emission batch apply in adapter write order: within one
+block, transaction and log the trailing
+[emission ordinal](glossary.md#emission-ordinal) of `event_identity` decides
+before the identity bytes (D12 as amended by Tate on 2026-09-26; the
+[canonical event order](glossary.md#canonical-event-order)).
 A NameWrapper transfer writes the delegate approval clear, the old holder's
 revoke, the new holder's grant and a retained delegate's re-grant at one log,
 so the name stays wrapped after a holder-to-holder transfer and a recipient
 that was the approved delegate keeps its holder powers. Facts with no
-transaction or log keep the identity byte order. Ordinals are per source:
-the ordinal restarts for each source of a log, so the comparator's order
-between two sources at one log is a disclosed precondition, not the adapter's
-write order. Cross-source facts of one log carry independent ordinals; where
-two sources write one key from one log, the fact with the higher ordinal (then
-the higher identity bytes) wins, not the one inserted last, and the served read
-may differ by provenance only. The one known instance is a
-NameWrapped log, which writes the registry-node pointer from the wrapper
-(ordinal 5) and from the registry-read surface materialization (ordinal 0)
-with the same resolver: the families keep the wrapper row, the name's
-authority after NameWrapped, while the served read's generated-id tie-break
-keeps the registry row, so only `resource_id` and `source_family` differ
-(`families_ordering.rs`, `name_wrapped_pointer_keeps_the_wrapper_row`). The served
-builders break the same ties by generated id today; the step that ports a
-served reader to the families (step 7) must use this rule with the SQL parse
-the glossary gives, not a bare bigint cast.
+transaction or log keep the identity byte order. The ordinal counts from 0
+again for every emission batch, and a source can carry several batches at one
+log. No two batches of the same source are known to write the same family key.
+Between batches the comparator's order is a disclosed precondition, not the
+adapter's write order: where batches of two sources write one key from one
+log, the fact with the higher ordinal (then the higher identity bytes) wins,
+not the one inserted last.
+
+One cross-batch instance is confirmed, and it differs from the served read in
+provenance only: a NameWrapped log writes the registry-node pointer from the
+wrapper (ordinal 4 or 5, depending on whether a SurfaceBound was emitted) and
+from the registry-read surface materialization (ordinal 0) with the same
+resolver. The families keep the wrapper row, the name's authority after
+NameWrapped, while the served read's generated-id tie-break keeps the registry
+row, so the resolver value agrees while the resource, source family and event
+attribution differ (`families_ordering.rs`,
+`name_wrapped_pointer_keeps_the_wrapper_row`, and
+`mirror_resolver/name_wrapped_sources.rs`, which drives the real adapter and
+the served mirror selector).
+
+Four more cross-batch shapes are read from the adapter code and pinned in
+`families_ordering_realistic_b.rs`; no adapter run has produced any of them
+yet:
+
+- F1 binding predecessor (`:701-716`): a NameWrapped over a registry-only
+  authority whose surface was unknown opens the wrapper binding (ordinal 3)
+  and a sourced registry-only binding (ordinal 0) at one log. When a later
+  log of the block makes the registry-only authority current again, its
+  binding hands off from the wrapper binding, and the sourced one has no
+  predecessor.
+- F4 registrar pointer (`:917-946`): a registrar `NameRegistered` that promotes
+  a pre-surface registry authority (the registry-authority surface
+  materialization) and also moves the name's authority to the registrar writes
+  the pointer from the registrar (`ResolverChanged:authority`, ordinal 6) and
+  from the sourced materialization (ordinal 1) with one resolver
+  (`crates/adapters/src/schema_v2/protocol/v1/registrar.rs:452-460`,
+  `:543-566`; `authority_transition.rs:215-285`). The families keep the
+  registrar row: a provenance difference.
+- F13 controller (`:947-975`): in the same `NameRegistered` log the sourced
+  registry-only SurfaceBound (ordinal 0) sets the controller to the registry
+  owner and the registrant's grant (ordinal 2) sets it to the registrant. The
+  families keep the registrant (ALICE in the fixture). The served controller
+  fold (`crates/project/src/builders/address_names.rs:228-237`) orders one log
+  by `normalized_event_id`, and Interpret inserts the sourced batch last, so
+  it would keep the registry owner. This is a value difference, not provenance
+  only.
+- F4 enrichment against the registrar surface (`:976-1046`): a controller
+  `NameRegistered` naming a surface the registry-only authority did not have,
+  with a proven registrar retained, writes the pointer from the enrichment's
+  resolver link replay (ordinal 0) and from the registrar surface snapshot
+  (ordinal 3). The families keep the snapshot's registrar row; the fixture
+  gives both one resolver.
+
+No exemption covers a cross-source value difference: a reader ported to the
+families must treat the F13 shape as a value change if an adapter run ever
+produces it. A registrar log's registry-read materialization never meets a
+registrar `ResolverChanged` at the same log, because it arises only when the
+registrar event leaves the name's authority where it was.
+
+The served builders do not share one tie-break at a log. Most selectors break
+it by `normalized_event_id DESC`, the insertion order, which agrees with the
+ordinal inside one batch and favours a sourced batch across batches. The
+children builder (`crates/project/src/builders/children.rs:41, 72, 160, 182,
+217, 355, 507`), the name-authority stage
+(`crates/project/src/builders/name_authority/stage.rs:231, 259, 323, 382`)
+and the name topology builder (`name_topology.rs:541, 578`) break it by
+`event_identity`, the old byte rule. The served binding choice
+(`name_authority/build.sql:53-60, 558-561, 745-752`; `stage.rs:78-81`) takes
+`surface_binding_id DESC` and ignores event order. Insertion order equals
+emission order only because Interpret writes a batch in list order
+(`crates/interpret/src/write/normalized.rs:44`), and a replayed identity keeps
+its old id, so a generated-id tie-break is not stable across replay; the
+families' rule does not use generated ids. The step that ports a served reader
+to the families (step 7) must use this rule with the SQL parse the glossary
+gives, which checks the digits before it casts.
 
 Undo rows are kept back to the lowest of: 256 blocks below the family marker,
 the chain's finalized block, its safe block, and the block an active repair
@@ -1808,6 +1868,16 @@ entry maps them to tables and reducers:
   one name at the same position order by `event_identity`, then
   `surface_binding_id`; the served selection orders them by
   `surface_binding_id` alone.
+- F2b: a decimal-spelled wrapper expiry (`1.0`, `1.5`, `1000.0`) is null in
+  `project_wrapper_state.expiry_seconds`, because the family reads payloads
+  without arbitrary precision and a decimal can arrive rounded. The served
+  wrapper expiry expression keeps it as the numeric value
+  (`address_names.rs` `wrapper_expiries`, `children.rs`
+  `latest_wrapper_expiries`, `name_current/build.sql` `expiry_seconds`), while
+  the served bigint casts fail on it and fail the batch: the scope fuses cast
+  on any decimal fuses, and `name_current`'s `servable_expiry_seconds` on an
+  integral decimal expiry from 1 to 253402300799. The adapter writes both
+  numbers as JSON integers.
 - F2c: `AuthorityTransferred` and `SubregistryChanged` both set the owner
   group, so a `SubregistryChanged` after a zero-getter transfer replaces the
   owner and the served "ownerless" verdict cannot be recovered from the node
