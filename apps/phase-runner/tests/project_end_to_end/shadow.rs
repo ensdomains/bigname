@@ -22,7 +22,8 @@
 //! - `d12_same_block_order` (brief section 4.3, counted as `expected_delta`): the item's retained
 //!   lifecycle events hold a block whose canonical order disagrees with the generated-id order,
 //!   and reading the same families again in today's generated-id order where today's builders
-//!   use it (ENSv2 membership by block and id, the laterals by block, transaction, log and id),
+//!   use it (ENSv2 name membership, the tombstone's deciding fact and the laterals by block,
+//!   transaction, log and id since TYR-36 step 6; the wrapped-lease selector by block and id),
 //!   every position kept so the authority admission is unchanged, the node's owner-setting
 //!   events, F1's epoch starts and the binding candidates' SurfaceBounds ordered by their
 //!   generated ids too, and the association winner of
@@ -83,10 +84,14 @@
 //!   Tate's ruling: an expired or released ENSv2 registration stays ENSv2 and is served
 //!   unregistered, and never falls back to an ENSv1 lease (only a RESERVED entry defers to
 //!   ENSv1). So the reader selects the release, serves it released and closes the control
-//!   block. Today's name-scoped membership (build.sql:322, :366-367) never sees the unnamed
-//!   release and serves the registration active: a served-side bug, recorded here with the
-//!   names and count this harness finds in that shape on the
-//!   `SEPOLIA_END_TO_END_SHADOW_SERVED_SIDE_BUG` line, not a rule the reader copies. The
+//!   block. Since TYR-36 step 6 today's builders serve such a release themselves when it decides
+//!   a released tombstone, which needs the name's ENSv2 binding closed (name_authority/build.sql
+//!   :246-271, name_current/build.sql:349-364); the reader follows that and the fields are
+//!   equal. The cause is what remains: with the binding still open, today's name-scoped fold
+//!   (build.sql:322, :383-389) never sees the unnamed release and serves the registration
+//!   active: a served-side bug, recorded here with the names and count this harness finds in
+//!   that shape on the `SEPOLIA_END_TO_END_SHADOW_SERVED_SIDE_BUG` line, not a rule the reader
+//!   copies. The
 //!   fallback half of the ruling was not observable here: when the interpreter knows the name it
 //!   also closes the ENSv2 binding, and before TYR-36 step 6 the served name authority then
 //!   selected an open ENSv1 lease, which the shadow took as input and agreed with. Step 6
@@ -96,11 +101,11 @@
 //!   field passes only when the shadow
 //!   selected that unnamed release and the field holds what the ENSv2 path-release presentation
 //!   gives (build.sql:88-95, :101-103): status released, latest kind RegistrationReleased,
-//!   the release's released_at, the expiry the reader's expiry rule gives (the name's latest
-//!   admitted numeric expiry on the key, else the release's own), no registrant or authority,
-//!   control unregistered with nothing else; and the served value must be what today's
-//!   name-scoped membership gives, the families read in today's order without the unnamed
-//!   release.
+//!   the release's released_at, the expiry the path-expiry rule gives (build.sql:45-49: the
+//!   release's own, else the name's latest admitted numeric expiry on the key), no registrant
+//!   or authority, control unregistered with nothing else; and the served value must be what
+//!   today's name-scoped membership gives, the families read in today's order without the
+//!   unnamed release.
 //! - `served_release_presentation_reads_the_raw_arm`: the selection reads a missing authority
 //!   arm as ENSv2 (build.sql:347), so a name with no selected arm can select an ENSv2 release,
 //!   but today's presentation compares the raw arm with 'ens_v2' (build.sql:89, :94, :103) and
@@ -983,10 +988,9 @@ fn release_presented(shadow: &ShadowName) -> bool {
 
 /// Whether the shadow value of `diff` is what the ENSv2 path-release presentation gives, for a
 /// name whose selected registration is the interpreter's unnamed path-expiry release. The whole
-/// presentation must hold, not only the differing field. The expiry is the reader's expiry
-/// rule: the expiry lateral's value (the latest admitted numeric expiry of the name on the
-/// selected key) when it has one, else the release's own expiry; a later ExpiryChanged or
-/// renewal of the name moves it past the release's own.
+/// presentation must hold, not only the differing field. The expiry is the path-expiry rule of
+/// build.sql:45-49: the release's own expiry, else the expiry lateral's value (the latest
+/// admitted numeric expiry of the name on the selected key).
 fn serves_the_unnamed_release(shadow: &ShadowName, diff: &Difference) -> bool {
     let trace = &shadow.trace;
     if trace.get("selected_unnamed_path_expiry") != Some(&json!(true)) || !release_presented(shadow)
@@ -994,9 +998,9 @@ fn serves_the_unnamed_release(shadow: &ShadowName, diff: &Difference) -> bool {
         return false;
     }
     let traced = |name: &str| trace.get(name).cloned().unwrap_or(Value::Null);
-    let expiry = match traced("expiry_candidate") {
-        Value::Null => traced("selected_expiry"),
-        lateral => lateral,
+    let expiry = match traced("selected_expiry") {
+        Value::Null => traced("expiry_candidate"),
+        own => own,
     };
     let value = &diff.shadow;
     match diff.field.as_str() {
@@ -1112,7 +1116,7 @@ fn name_excuses(
         .collect();
     // The unnamed-release cause passes a field only when today's name-scoped membership gives
     // the served value: the events rebuilt from the log, read in today's order without the
-    // unnamed path-expiry release (build.sql:322, :366-367 build membership by name).
+    // unnamed path-expiry release (build.sql:322, :383-389 build membership by name).
     let unnamed: Vec<bool> = diffs
         .iter()
         .map(|diff| serves_the_unnamed_release(shadow, diff))
@@ -2097,15 +2101,19 @@ pub async fn association_keys(
 }
 
 /// The name's facts read in today's generated-id order where today's builders use it
-/// (`EventOrder::Generated`: ENSv2 membership in block and generated id, build.sql:322-340; the
-/// laterals in block, transaction, log and generated id, build.sql:307-308), with every event
-/// kept at its own position, so the authority admission, whose bounds compare positions,
-/// admits exactly what the canonical read admits. A triple whose association winner sits in a
-/// block whose two orders disagree moves to the latest grant or reservation of that block with
-/// the same name, registry identifier and token id by transaction, log and generated id: today's
-/// association, which orders by position before the id since TYR-36 step 6 (de24ff32,
-/// v2_lifecycle_events.sql:10-24). None when no block of the name's events reads differently
-/// in the two orders or an event has no generated id.
+/// (`EventOrder::Generated`), with every event kept at its own position, so the authority
+/// admission, whose bounds compare positions, admits exactly what the canonical read admits.
+/// Since TYR-36 step 6 (de24ff32) the name's registration fold, the tombstone's deciding fact and
+/// the laterals take block, transaction, log (a missing one first) and then the generated id
+/// (build.sql:307-308, :322-347, :388-390; name_authority/build.sql:57-245); only the
+/// wrapped-lease selector still takes block and generated id alone, over the NameWrapper
+/// SurfaceBounds (build.sql:373-374). A block disagrees when one of those selectors orders its
+/// positions differently from the canonical order: a same-place tie the generated id breaks
+/// otherwise than the ordinal or identity, or for the lease selector any reversal. A triple
+/// whose association winner sits in a disagreeing block moves to the latest grant or
+/// reservation of that block with the same name, registry identifier and token id by
+/// transaction, log and generated id: today's association (v2_lifecycle_events.sql:10-24). None
+/// when no block of the name's facts reads differently or an event has no generated id.
 pub fn legacy_facts(
     facts: &NameFacts,
     ids: &BTreeMap<String, i64>,
@@ -2128,29 +2136,40 @@ pub fn legacy_facts(
             .or_default()
             .push(position);
     }
+    // The SurfaceBounds the wrapped-lease selector orders by block and generated id.
+    let leases: BTreeSet<&str> = facts
+        .candidates
+        .iter()
+        .filter(|candidate| {
+            candidate.is_wrapper() && candidate.wrapped_registrar_resource_id.is_some()
+        })
+        .filter_map(|candidate| candidate.surface_bound_position.as_ref())
+        .map(|position| position.event_identity.as_str())
+        .collect();
+    let differs = |canonical: &[&Position], today: &[&Position]| {
+        canonical
+            .iter()
+            .zip(today)
+            .any(|(left, right)| left.event_identity != right.event_identity)
+    };
     let disagreeing: BTreeSet<i64> = blocks
         .iter()
         .filter(|(_, positions)| {
             let mut canonical: Vec<&Position> = positions.iter().collect();
             canonical.sort();
             canonical.dedup_by(|left, right| left.event_identity == right.event_identity);
-            // Membership orders by generated id alone, the laterals by transaction, log and id.
-            let mut membership = canonical.clone();
-            membership.sort_by_key(|position| ids[&position.event_identity]);
-            let mut lateral = canonical.clone();
-            lateral.sort_by_key(|position| {
-                (
-                    position.transaction_index,
-                    position.log_index,
-                    ids[&position.event_identity],
-                )
-            });
-            [membership, lateral].iter().any(|today| {
-                canonical
-                    .iter()
-                    .zip(today)
-                    .any(|(left, right)| left.event_identity != right.event_identity)
-            })
+            // Name membership and the laterals: the place, then the generated id.
+            let mut placed = canonical.clone();
+            placed.sort_by_key(|position| (position.bound(), ids[&position.event_identity]));
+            // The wrapped-lease selector: the generated id alone, among the lease SurfaceBounds.
+            let canonical_leases: Vec<&Position> = canonical
+                .iter()
+                .copied()
+                .filter(|position| leases.contains(position.event_identity.as_str()))
+                .collect();
+            let mut by_id = canonical_leases.clone();
+            by_id.sort_by_key(|position| ids[&position.event_identity]);
+            differs(&canonical, &placed) || differs(&canonical_leases, &by_id)
         })
         .map(|(block, _)| *block)
         .collect();
@@ -2451,9 +2470,11 @@ pub fn assert_fixture_corpus_counts(targets: &[i64]) -> Result<()> {
 /// compares: those the serving loader returns, with the resource it serves. An ENSv2 name whose
 /// interpreter path-expiry release (the `expired` rows, no name, the token resource) is not
 /// followed on that resource by a grant, reservation or named release is served active today
-/// and released by the families: eight fields each, and the two control-owner fields again for
-/// those whose token was transferred before the target. The oracle is the seed's: other
-/// histories are not covered.
+/// and released by the families: eight fields each; the registration expiry for those whose
+/// release carries an expiry other than the name's latest numeric expiry on the resource, which
+/// today's expiry lateral serves while the families present the release's own
+/// (build.sql:45-49, :515-551); and the two control-owner fields again for those whose token was
+/// transferred before the target. The oracle is the seed's: other histories are not covered.
 pub async fn corpus_expectation(
     pool: &PgPool,
     chain: &str,
@@ -2482,7 +2503,20 @@ pub async fn corpus_expectation(
                       AND transfer.resource_id = release.resource_id
                       AND transfer.logical_name_id = name.logical_name_id
                       AND transfer.event_kind = 'TokenControlTransferred'
-                      AND {transfer})
+                      AND {transfer}),
+                (release.after_state -> 'expiry') IS DISTINCT FROM (
+                    SELECT fact.after_state -> 'expiry'
+                    FROM normalized_events fact
+                    WHERE fact.chain_id = $2
+                      AND fact.resource_id = release.resource_id
+                      AND fact.logical_name_id = name.logical_name_id
+                      AND fact.event_kind IN ('RegistrationGranted', 'RegistrationRenewed',
+                                              'RegistrationReleased', 'ExpiryChanged')
+                      AND jsonb_typeof(fact.after_state -> 'expiry') = 'number'
+                      AND {fact}
+                    ORDER BY fact.block_number DESC, fact.transaction_index DESC NULLS LAST,
+                             fact.log_index DESC NULLS LAST, fact.normalized_event_id DESC
+                    LIMIT 1)
          FROM unnest($3::text[], $4::uuid[]) name(logical_name_id, resource_id)
          JOIN normalized_events release ON release.resource_id = name.resource_id
          WHERE release.chain_id = $2
@@ -2502,8 +2536,9 @@ pub async fn corpus_expectation(
         transfer = published_as("transfer", "$1"),
         release = published_as("release", "$1"),
         later = published_as("later", "$1"),
+        fact = published_as("fact", "$1"),
     );
-    let expired: Vec<(String, bool)> = sqlx::query_as(&sql)
+    let expired: Vec<(String, bool, bool)> = sqlx::query_as(&sql)
         .bind(target)
         .bind(chain)
         .bind(&names)
@@ -2513,9 +2548,16 @@ pub async fn corpus_expectation(
     let cause = "served_membership_skips_unnamed_path_expiry";
     let transferred = expired
         .iter()
-        .filter(|(_, transferred)| *transferred)
+        .filter(|(_, transferred, _)| *transferred)
+        .count();
+    let own_expiry = expired
+        .iter()
+        .filter(|(_, _, own_expiry)| *own_expiry)
         .count();
     let mut expected: BTreeMap<String, usize> = BTreeMap::new();
+    if own_expiry > 0 {
+        expected.insert(format!("{cause}:registration/expiry"), own_expiry);
+    }
     for field in [
         "registration/status",
         "registration/latest_event_kind",

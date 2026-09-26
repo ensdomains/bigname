@@ -16,6 +16,7 @@ use bigname_storage::{
         compare::Difference,
         lifecycle::{AuthoritySelection, Clock, NameFacts, NameInput, evaluate, load_name_facts},
         permissions::ResourceInput,
+        position::EventOrder,
     },
     load_name_current_by_logical_name_ids,
 };
@@ -226,8 +227,9 @@ async fn a_same_block_path_expiry_today_serves_as_empty_is_a_mismatch() -> Resul
 }
 
 /// The name side of the passing fixture: the families select the unnamed path-expiry release,
-/// which today's name-scoped membership never sees (the served-side bug the harness names).
-const RELEASED_NAME: [(&str, usize); 7] = [
+/// which today's name-scoped membership never sees (the served-side bug the harness names), and
+/// present it with its own expiry (build.sql:45-49).
+const RELEASED_NAME: [(&str, usize); 8] = [
     (
         "served_membership_skips_unnamed_path_expiry:control/expiry",
         1,
@@ -242,6 +244,10 @@ const RELEASED_NAME: [(&str, usize); 7] = [
     ),
     (
         "served_membership_skips_unnamed_path_expiry:registration/authority_kind",
+        1,
+    ),
+    (
+        "served_membership_skips_unnamed_path_expiry:registration/expiry",
         1,
     ),
     (
@@ -525,9 +531,8 @@ async fn a_same_block_release_moves_the_admin_powers_with_the_rows() -> Result<(
     fixture.cleanup().await
 }
 
-/// Name 1's facts as the harness loads them, with the counterfactual that reads them in today's
-/// order.
-async fn facts_and_legacy(fixture: &Fixture) -> Result<(NameFacts, NameFacts)> {
+/// Name 1's facts as the harness loads them.
+async fn name_facts(fixture: &Fixture) -> Result<NameFacts> {
     let rows = load_name_current_by_logical_name_ids(&fixture.pool, &[name(1)]).await?;
     let row = &rows[&name(1)];
     let input = NameInput {
@@ -535,10 +540,16 @@ async fn facts_and_legacy(fixture: &Fixture) -> Result<(NameFacts, NameFacts)> {
         namehash: row.namehash.to_ascii_lowercase(),
         selection: AuthoritySelection::from_provenance(&row.provenance),
     };
-    let facts = load_name_facts(&fixture.pool, CHAIN, &[input])
+    Ok(load_name_facts(&fixture.pool, CHAIN, &[input])
         .await?
         .pop()
-        .expect("name 1 has facts");
+        .expect("name 1 has facts"))
+}
+
+/// Name 1's facts as the harness loads them, with the counterfactual that reads them in today's
+/// order.
+async fn facts_and_legacy(fixture: &Fixture) -> Result<(NameFacts, NameFacts)> {
+    let facts = name_facts(fixture).await?;
     let identities: Vec<String> = facts
         .events
         .iter()
@@ -591,15 +602,99 @@ fn v2_event<'a>(
     event
 }
 
+/// Since TYR-36 step 6 (de24ff32) today's ENSv2 name membership compares block, transaction and
+/// log before the generated id (name_current/build.sql:322-347), so a release and a grant of one
+/// block at distinct logs fold in log order in both orders. Block 12 holds a release at log 3,
+/// written second, and a grant at log 7, written first: both orders keep the grant after the
+/// release and serve the registration active. Block 14 holds two ExpiryChanged facts of one log,
+/// ordinal 1 written before ordinal 0: today's laterals take the higher generated id and the
+/// canonical order the higher ordinal, so the two expiry fields are a same-block delta. The
+/// counterfactual that shows it reads the name's membership in today's order too; read by block
+/// and generated id alone it would put the release last, present the name released and leave
+/// the delta unexplained.
+#[tokio::test]
+async fn a_same_block_release_before_a_grant_stays_live_in_todays_membership_order() -> Result<()> {
+    let fixture = Fixture::new("families_shadow_order_name_membership", 20).await?;
+    let (k1, n1) = (uuid(1), name(1));
+    v2_binding(&fixture, &k1).await?;
+    fixture
+        .event(grant("grant-10", 10, &n1, &k1, ALICE))
+        .await?;
+    for event in [
+        v2_event(
+            "grant-12",
+            12,
+            7,
+            "RegistrationGranted",
+            &n1,
+            Some(&k1),
+            json!({"status": "registered", "registrant": ALICE, "expiry": 2_000_000_000u64}),
+        ),
+        v2_event(
+            "release-12",
+            12,
+            3,
+            "RegistrationReleased",
+            &n1,
+            Some(&k1),
+            json!({"status": "released", "source_event": "LabelUnregistered"}),
+        ),
+        v2_event(
+            "expiry-14:1",
+            14,
+            5,
+            "ExpiryChanged",
+            &n1,
+            Some(&k1),
+            json!({"expiry": 2_300_000_000u64}),
+        ),
+        v2_event(
+            "expiry-14:0",
+            14,
+            5,
+            "ExpiryChanged",
+            &n1,
+            Some(&k1),
+            json!({"expiry": 2_200_000_000u64}),
+        ),
+    ] {
+        fixture.event(event).await?;
+    }
+    let report = publish_and_compare(&fixture, 16).await?;
+    assert_counts(
+        &report,
+        &[],
+        &[
+            ("d12_same_block_order:control/expiry", 1),
+            ("d12_same_block_order:registration/expiry", 1),
+        ],
+    );
+    let (facts, legacy) = facts_and_legacy(&fixture).await?;
+    let clock = Clock {
+        block_number: 16,
+        timestamp_seconds: timestamp(16),
+    };
+    let (canonical, today) = (evaluate(&facts, &clock), evaluate(&legacy, &clock));
+    for read in [&canonical, &today] {
+        assert_eq!(read.trace["selected_event"], json!("grant-12"));
+        assert_eq!(read.registration["status"], json!("active"));
+    }
+    assert_eq!(canonical.registration["expiry"], json!(2_300_000_000u64));
+    assert_eq!(today.registration["expiry"], json!(2_200_000_000u64));
+    fixture.cleanup().await
+}
+
 /// Item 4 of the TYR-36 step 3 review (Q7): the same-block counterfactual reads the name's
 /// facts in today's order at the selectors that use it and keeps every event at its own
 /// position, so the admission reads exactly what the canonical read admits. Name 1 has a grant at
-/// block 10 and, in block 12, an ExpiryChanged at log 7, written first, and a renewal at log 3:
-/// the generated ids and the canonical order disagree, so the counterfactual runs. It used to
-/// check this against an authority epoch bound that a migration proof opened inside the block;
-/// TYR-36 step 6 (de24ff32) deleted that bound from the served admission (authority_events.sql
-/// :262-311 before it) and the shadow admission follows, so what remains is that the reread
-/// moves no position and admits the same events.
+/// block 10 and, in block 12, two ExpiryChanged facts of one log (log 7), ordinal 1 written
+/// before ordinal 0, and a renewal at log 3, written last. The expiry pair is an ordering
+/// difference that remains in today's builders: their laterals take the higher generated id
+/// (ordinal 0) and the canonical order the higher ordinal (ordinal 1), so the counterfactual
+/// runs and the two expiry fields are a same-block delta. The renewal and the pair sit at
+/// distinct logs, which today's name membership and laterals compare before the id since
+/// TYR-36 step 6 (de24ff32, name_current/build.sql:322-347), so that reversal alone is no
+/// difference and runs no counterfactual.
 #[tokio::test]
 async fn the_order_counterfactual_keeps_every_position_and_the_admission() -> Result<()> {
     let fixture = Fixture::new("families_shadow_order_admission", 20).await?;
@@ -608,19 +703,26 @@ async fn the_order_counterfactual_keeps_every_position_and_the_admission() -> Re
     fixture
         .event(grant("grant-10", 10, &n1, &k1, ALICE))
         .await?;
-    fixture
-        .event(v2_event(
-            "expiry-12",
+    for event in [
+        v2_event(
+            "expiry-12:1",
+            12,
+            7,
+            "ExpiryChanged",
+            &n1,
+            Some(&k1),
+            json!({"expiry": 2_300_000_000u64}),
+        ),
+        v2_event(
+            "expiry-12:0",
             12,
             7,
             "ExpiryChanged",
             &n1,
             Some(&k1),
             json!({"expiry": 2_200_000_000u64}),
-        ))
-        .await?;
-    fixture
-        .event(v2_event(
+        ),
+        v2_event(
             "renewal-12",
             12,
             3,
@@ -628,10 +730,19 @@ async fn the_order_counterfactual_keeps_every_position_and_the_admission() -> Re
             &n1,
             Some(&k1),
             json!({"expiry": 2_100_000_000u64}),
-        ))
-        .await?;
+        ),
+    ] {
+        fixture.event(event).await?;
+    }
     let report = publish_and_compare(&fixture, 16).await?;
-    assert_counts(&report, &[], &[]);
+    assert_counts(
+        &report,
+        &[],
+        &[
+            ("d12_same_block_order:control/expiry", 1),
+            ("d12_same_block_order:registration/expiry", 1),
+        ],
+    );
     let (facts, legacy) = facts_and_legacy(&fixture).await?;
     let positions = |facts: &NameFacts| -> Vec<_> {
         facts
@@ -645,11 +756,63 @@ async fn the_order_counterfactual_keeps_every_position_and_the_admission() -> Re
         positions(&facts),
         "every position is kept"
     );
-    assert_ne!(legacy.order, facts.order, "the reread is in today's order");
+    let clock = Clock {
+        block_number: 16,
+        timestamp_seconds: timestamp(16),
+    };
+    assert_eq!(
+        evaluate(&facts, &clock).registration["expiry"],
+        json!(2_300_000_000u64),
+        "the canonical order takes ordinal 1"
+    );
+    assert_eq!(
+        evaluate(&legacy, &clock).registration["expiry"],
+        json!(2_200_000_000u64),
+        "today's order takes the higher generated id, ordinal 0"
+    );
     let mut held: Vec<String> = serde_json::from_value(admitted(&facts, 16))?;
     held.sort();
-    assert_eq!(held, ["expiry-12", "grant-10", "renewal-12"]);
+    assert_eq!(
+        held,
+        ["expiry-12:0", "expiry-12:1", "grant-10", "renewal-12"]
+    );
     assert_eq!(admitted(&legacy, 16), admitted(&facts, 16));
+
+    // Without the ordinal pair the renewal and the expiry at distinct logs, written in the
+    // reverse of their log order, read the same in both orders: no block disagrees, so there is
+    // no counterfactual.
+    let identities: Vec<String> = facts
+        .events
+        .iter()
+        .map(|event| event.position.event_identity.clone())
+        .chain(
+            control_positions(&facts)
+                .into_iter()
+                .map(|at| at.event_identity),
+        )
+        .collect();
+    let ids = generated_ids(&fixture.pool, CHAIN, 16, &identities).await?;
+    let keys = association_keys(&fixture.pool, CHAIN, 16, &identities).await?;
+    let mut distinct_logs = facts.clone();
+    distinct_logs
+        .events
+        .retain(|event| event.position.event_identity != "expiry-12:0");
+    let at = |identity: &str| {
+        facts
+            .events
+            .iter()
+            .find(|event| event.position.event_identity == identity)
+            .map(|event| event.position.clone())
+            .expect("the event is retained")
+    };
+    let (renewal, expiry) = (at("renewal-12"), at("expiry-12:1"));
+    assert!(ids[&renewal.event_identity] > ids[&expiry.event_identity]);
+    assert_eq!(
+        EventOrder::Generated(ids.clone()).name_membership(&renewal, &expiry),
+        renewal.cmp(&expiry),
+        "today's name membership orders the distinct logs as the canonical order does"
+    );
+    assert!(legacy_facts(&distinct_logs, &ids, &keys).is_none());
 
     // A control position the event log does not name leaves today's order unknown, so there is
     // no reread rather than a partly ordered one.
@@ -769,7 +932,7 @@ async fn a_migrated_name_admits_its_events_before_the_epoch_start() -> Result<()
         ))
         .await?;
     let report = publish_and_compare(&fixture, 16).await?;
-    let (facts, _) = facts_and_legacy(&fixture).await?;
+    let facts = name_facts(&fixture).await?;
     assert!(
         facts.input.selection.has_proof,
         "the migration is the proof"
@@ -779,15 +942,29 @@ async fn a_migrated_name_admits_its_events_before_the_epoch_start() -> Result<()
     held.sort();
     assert_eq!(held, ["expiry-12", "grant-10", "renewal-12"]);
     assert_counts(&report, &[], &[]);
+    // The served row reads the events before the start too: its registration time is grant-10's
+    // block and its expiry the ExpiryChanged after the start, over the renewal before it.
+    let (served, shadow) = shadow_support::name(&fixture, 16, &n1).await?;
+    assert_eq!(
+        served.registration("registered_at"),
+        json!("2027-01-15T08:02:00+00:00")
+    );
+    assert_eq!(served.registration("expiry"), json!(2_200_000_000u64));
+    assert_eq!(
+        shadow.registration["registered_at"],
+        served.registration("registered_at")
+    );
     fixture.cleanup().await
 }
 
 /// Item 4 of the TYR-36 step 3 review (Q7): today's association takes the latest linked grant
 /// of the same name, registry and token (v2_lifecycle_events.sql:10-23), so the counterfactual
 /// may move a triple's association only to a grant of that complete triple. Name 1 has a grant
-/// of triple (R, 7) on K1 at log 5 and, in the same block, a grant of the unrelated triple
-/// (R2, 9) on K2 at log 1 written after it, then a null-resource ExpiryChanged of (R, 7). The
-/// block's two orders disagree, but the unrelated grant is no rival: the triple stays on K1.
+/// of triple (R, 7) on K1 and, at the same transaction and log, a grant of the unrelated triple
+/// (R2, 9) on K2, emission ordinals 1 and 0, written in that order, then a null-resource
+/// ExpiryChanged of (R, 7). The generated ids and the ordinals order the block's two grants
+/// oppositely, which today's builders still decide by the id, so the block disagrees; but the
+/// unrelated grant is no rival: the triple stays on K1.
 #[tokio::test]
 async fn an_unrelated_triple_in_the_block_is_not_an_association_rival() -> Result<()> {
     let fixture = Fixture::new("families_shadow_order_unrelated_triple", 20).await?;
@@ -796,7 +973,7 @@ async fn an_unrelated_triple_in_the_block_is_not_an_association_rival() -> Resul
     fixture.resource(&k2).await?;
     fixture
         .event(v2_event(
-            "grant-r7",
+            "grants-12:1",
             12,
             5,
             "RegistrationGranted",
@@ -807,9 +984,9 @@ async fn an_unrelated_triple_in_the_block_is_not_an_association_rival() -> Resul
         .await?;
     fixture
         .event(v2_event(
-            "grant-r2-9",
+            "grants-12:0",
             12,
-            1,
+            5,
             "RegistrationGranted",
             &n1,
             Some(&k2),
@@ -846,7 +1023,7 @@ async fn an_unrelated_triple_in_the_block_is_not_an_association_rival() -> Resul
                 )
             })
     };
-    let expected = Some((Some(k1.clone()), Some("grant-r7".to_owned())));
+    let expected = Some((Some(k1.clone()), Some("grants-12:1".to_owned())));
     assert_eq!(target(&facts), expected);
     assert_eq!(target(&legacy), expected, "the unrelated grant is no rival");
     fixture.cleanup().await

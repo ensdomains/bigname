@@ -206,9 +206,10 @@ async fn grant_then_expiry_change_serves_the_expiry_change() -> Result<()> {
 
 /// G, P, X: a grant, the interpreter's unnamed path-expiry release on the same resource, then an
 /// expiry change. The key's candidate is the path release, so the families serve the name
-/// released with the lapsed expiry the later change set; today's name-scoped membership never
-/// sees the release and serves the grant as active. Every differing field is the disclosed
-/// served-side difference, counted exactly.
+/// released with the release's own expiry, before the later change's (build.sql:45-49); today's
+/// name-scoped membership never sees the release and serves the grant as active with the
+/// change's expiry. Every differing field is the disclosed served-side difference, counted
+/// exactly.
 #[tokio::test]
 async fn grant_path_expiry_then_expiry_change_serves_the_path_release() -> Result<()> {
     let fixture = Fixture::new("families_shadow_path_expiry", 20).await?;
@@ -239,6 +240,7 @@ async fn grant_path_expiry_then_expiry_change_serves_the_path_release() -> Resul
             (&format!("{cause}:registration/status"), 1),
             (&format!("{cause}:registration/authority_kind"), 1),
             (&format!("{cause}:registration/registrant"), 1),
+            (&format!("{cause}:registration/expiry"), 1),
             (&format!("{cause}:control/status"), 1),
             (&format!("{cause}:control/expiry"), 1),
             (&format!("{cause}:control/registrant"), 1),
@@ -252,8 +254,10 @@ async fn grant_path_expiry_then_expiry_change_serves_the_path_release() -> Resul
         json!("PathExpiry")
     );
     assert_eq!(shadow.trace["selected_event"], json!("path-expiry"));
+    assert_eq!(shadow.trace["expiry_candidate"], json!(1_800_000_200u64));
     assert_eq!(shadow.registration["status"], json!("released"));
-    assert_eq!(shadow.registration["expiry"], json!(1_800_000_200u64));
+    assert_eq!(shadow.registration["expiry"], json!(1_800_000_100u64));
+    assert_eq!(served.registration("expiry"), json!(1_800_000_200u64));
     assert_eq!(
         shadow.registration["latest_event_kind"],
         json!("ExpiryChanged")
@@ -322,6 +326,53 @@ async fn reservation_then_expiry_change_keeps_the_reservation_kind() -> Result<(
     assert_eq!(
         served.registration("latest_event_kind"),
         json!("RegistrationReserved")
+    );
+    fixture.cleanup().await
+}
+
+/// A reservation written with an expiry at or before its own block's timestamp is never live
+/// (v2_lifecycle_events.sql:28-36), and since TYR-36 step 6 it takes no part in the registration
+/// fold or the ENSv2 latest kind (name_current/build.sql:322, :326, :331, :385). Block 12's
+/// timestamp is 1_800_000_144, so the reservation at 12 with expiry 1_800_000_100 is expired
+/// when written, and the earlier grant stays the registration on both sides: active, latest kind
+/// RegistrationGranted.
+#[tokio::test]
+async fn a_reservation_expired_when_written_leaves_the_earlier_grant_selected() -> Result<()> {
+    let fixture = Fixture::new("families_shadow_expired_reservation", 20).await?;
+    let k1 = uuid(1);
+    v2_binding(&fixture, &k1).await?;
+    v2(
+        &fixture,
+        10,
+        "RegistrationGranted",
+        Some(&k1),
+        json!({"status": "registered", "registrant": ALICE, "expiry": 2_000_000_000u64}),
+    )
+    .await?;
+    v2(
+        &fixture,
+        12,
+        "RegistrationReserved",
+        Some(&k1),
+        json!({"status": "reserved", "expiry": 1_800_000_100u64}),
+    )
+    .await?;
+    let report = publish_and_compare(&fixture, 14).await?;
+    assert_counts(&report, &[], &[]);
+    let (served, shadow) = shadow_reads(&fixture, 14).await?;
+    assert_eq!(served.registration("status"), json!("active"));
+    assert_eq!(
+        served.registration("latest_event_kind"),
+        json!("RegistrationGranted")
+    );
+    assert_eq!(
+        shadow.trace["selected_event"],
+        json!("RegistrationGranted:10:1")
+    );
+    assert_eq!(shadow.registration["status"], json!("active"));
+    assert_eq!(
+        shadow.registration["latest_event_kind"],
+        json!("RegistrationGranted")
     );
     fixture.cleanup().await
 }
@@ -837,8 +888,9 @@ async fn history_b_grant_explicit_release_serves_the_release_without_expiry() ->
 /// P, V, W: the interpreter's unnamed path expiry, a renewal that revives from it, then an
 /// ordinary renewal. Renewals are not registration candidates, so the path release stays the
 /// key's candidate and the latest of the five kinds is the renewal; the revival keeps the
-/// resource from retirement (design:63). Today's membership never sees the release and serves
-/// the grant, the disclosed served-side difference.
+/// resource from retirement (design:63). The release serves its own expiry before the renewals'
+/// (build.sql:45-49). Today's membership never sees the release and serves the grant, the
+/// disclosed served-side difference.
 #[tokio::test]
 async fn a_revival_then_an_ordinary_renewal_keep_the_path_release_as_candidate() -> Result<()> {
     let fixture = Fixture::new("families_shadow_revival", 22).await?;
@@ -877,6 +929,7 @@ async fn a_revival_then_an_ordinary_renewal_keep_the_path_release_as_candidate()
             (&format!("{cause}:registration/status"), 1),
             (&format!("{cause}:registration/authority_kind"), 1),
             (&format!("{cause}:registration/registrant"), 1),
+            (&format!("{cause}:registration/expiry"), 1),
             (&format!("{cause}:control/status"), 1),
             (&format!("{cause}:control/expiry"), 1),
             (&format!("{cause}:control/registrant"), 1),
@@ -893,6 +946,7 @@ async fn a_revival_then_an_ordinary_renewal_keep_the_path_release_as_candidate()
         shadow.registration["latest_event_kind"],
         json!("RegistrationRenewed")
     );
+    assert_eq!(shadow.registration["expiry"], json!(1_800_000_100u64));
     assert_eq!(
         served.registration("latest_event_kind"),
         json!("RegistrationRenewed")
@@ -1163,7 +1217,8 @@ async fn an_unnamed_path_expiry_on_the_resource_serves_the_release() -> Result<(
     // Codex threads PRRT_kwDOSJpxAs6l43wy and PRRT_kwDOSJpxAs6l4hOz: the named cause passes a
     // field only when today's name-scoped membership, the families read without the unnamed
     // release, gives the served value. A served status the membership does not give, and a
-    // wrong expiry in the families that the shadow presents, each stay a mismatch.
+    // wrong expiry in the families that the shadow presents (the release's own, build.sql:45-49),
+    // each stay a mismatch.
     let snapshot: Value =
         sqlx::query_scalar("SELECT declared_summary FROM name_current WHERE logical_name_id = $1")
             .bind(name(1))
@@ -1192,7 +1247,7 @@ async fn an_unnamed_path_expiry_on_the_resource_serves_the_release() -> Result<(
     sqlx::query(
         "UPDATE bigname_phase.project_lifecycle_event
          SET expiry = '1800000999'::jsonb, expiry_seconds = 1800000999
-         WHERE event_kind = 'RegistrationRenewed'",
+         WHERE event_kind = 'RegistrationReleased'",
     )
     .execute(&fixture.pool)
     .await?;
@@ -1404,6 +1459,527 @@ async fn a_real_path_expiry_with_an_ensv1_lease_stays_released_under_ensv2() -> 
     assert_eq!(shadow.registration["registrant"], Value::Null);
     assert_eq!(served.control("status"), json!("unregistered"));
     assert_eq!(shadow.control["status"], json!("unregistered"));
+    fixture.cleanup().await
+}
+
+/// A released ENSv2 registration is served from the lifecycle fact that decided its tombstone
+/// (TYR-36 step 6, name_current/build.sql:349-364), and two rules read that selection. The
+/// expiry of a path-expiry release is the release's own before the name's expiry rows
+/// (build.sql:40-49), and the latest kind of a released selection is the selected fact's kind
+/// (build.sql:69), not the latest lifecycle kind on its key. Here the name's binding closes at
+/// the path cut, so authority selection chooses the released tombstone
+/// (name_authority/build.sql:246-271), and a named ExpiryChanged follows the cut: the expiry
+/// lateral reads its 1_800_000_300 and the ENSv2 latest kind reads ExpiryChanged, but both sides
+/// serve the release's own expiry and kind.
+#[tokio::test]
+async fn a_released_v2_path_expiry_keeps_its_own_expiry_and_kind() -> Result<()> {
+    let fixture = Fixture::new("families_shadow_released_v2_expiry", 20).await?;
+    let k1 = uuid(1);
+    fixture
+        .binding(&uuid(100), &name(1), &k1, "ens_v2", 9, 0, Some(14))
+        .await?;
+    fixture
+        .write(
+            9,
+            0,
+            "SurfaceBound",
+            V2_REGISTRY,
+            Some(&name(1)),
+            Some(&k1),
+            json!({"authority_kind": "registrar", "state_derived": false}),
+            REGISTRY,
+        )
+        .await?;
+    v2(
+        &fixture,
+        10,
+        "RegistrationGranted",
+        Some(&k1),
+        json!({"status": "registered", "registrant": ALICE, "expiry": 1_800_000_150u64}),
+    )
+    .await?;
+    let mut unbound = path_expiry(1_800_000_150);
+    unbound["registry_contract_instance_id"] = json!("R");
+    unbound["token_id"] = json!("7");
+    unbound["topology_rebind"] = json!(true);
+    let mut released = path_expiry(1_800_000_150);
+    released["registry_contract_instance_id"] = json!("R");
+    released["token_id"] = json!("7");
+    released["status"] = json!("released");
+    released["released_at"] = json!(1_800_000_168u64);
+    for (identity, kind, after) in [
+        ("x:SurfaceUnbound:expiry:R:7", "SurfaceUnbound", unbound),
+        (
+            "x:RegistrationReleased:expiry:R:7",
+            "RegistrationReleased",
+            released,
+        ),
+    ] {
+        fixture
+            .event(
+                Event::new(identity, 14, 0, kind, V2_REGISTRY)
+                    .name(&name(1))
+                    .resource(&k1)
+                    .before(json!({"status": "registered", "registrant": ALICE}))
+                    .after(after)
+                    .raw(json!({"emitting_address": REGISTRY}))
+                    .synthesised(),
+            )
+            .await?;
+    }
+    v2(
+        &fixture,
+        15,
+        "ExpiryChanged",
+        Some(&k1),
+        json!({"expiry": 1_800_000_300u64}),
+    )
+    .await?;
+    let report = publish_and_compare(&fixture, 16).await?;
+    assert_counts(&report, &[], &[]);
+    assert!(report.served_side_bug_names.is_empty());
+    let (served, shadow) = shadow_reads(&fixture, 16).await?;
+    assert_eq!(
+        served.provenance["authority_selection"]["authority_arm"],
+        json!("ens_v2")
+    );
+    assert_eq!(served.registration("status"), json!("released"));
+    assert_eq!(served.registration("expiry"), json!(1_800_000_150u64));
+    assert_eq!(
+        served.registration("latest_event_kind"),
+        json!("RegistrationReleased")
+    );
+    assert_eq!(
+        shadow.trace["selected_event"],
+        json!("x:RegistrationReleased:expiry:R:7")
+    );
+    assert_eq!(shadow.trace["expiry_candidate"], json!(1_800_000_300u64));
+    assert_eq!(shadow.registration["expiry"], json!(1_800_000_150u64));
+    assert_eq!(
+        shadow.registration["latest_event_kind"],
+        json!("RegistrationReleased")
+    );
+    fixture.cleanup().await
+}
+
+/// The block timestamp the fixture lineage gives `block`, in seconds.
+fn block_seconds(block: i64) -> i64 {
+    1_800_000_000 + block * 12
+}
+
+/// An ENSv2 registry event of registry `registry` and token `token` at `place` (transaction and
+/// log), or at the block boundary when `place` is None, named for name 1 when `named`.
+#[allow(clippy::too_many_arguments)]
+async fn v2_at(
+    fixture: &Fixture,
+    identity: &str,
+    block: i64,
+    place: Option<(i64, i64)>,
+    kind: &str,
+    named: bool,
+    resource: Option<&str>,
+    (registry, token): (&str, &str),
+    after: Value,
+) -> Result<()> {
+    let mut after = after;
+    after["registry_contract_instance_id"] = json!(registry);
+    after["token_id"] = json!(token);
+    after["authority_kind"] = json!("registrar");
+    if let Some(resource) = resource {
+        fixture.resource(resource).await?;
+    }
+    let logical = name(1);
+    let mut event = Event::new(identity, block, 0, kind, V2_REGISTRY)
+        .after(after)
+        .raw(json!({"emitting_address": REGISTRY}));
+    event = match place {
+        Some((transaction, log)) => event.at(transaction, log),
+        None => event.synthesised(),
+    };
+    if named {
+        event = event.name(&logical);
+    }
+    if let Some(resource) = resource {
+        event = event.resource(resource);
+    }
+    fixture.event(event).await?;
+    Ok(())
+}
+
+/// Name 1's ENSv2 registration of registry R token 7 on `resource`: its binding and SurfaceBound
+/// at block 6, a grant at (6, 0, 1) with `expiry`, and the binding closed at block 8, where
+/// `release` is written at (8, 0, 1) by name.
+async fn closed_v2_registration(
+    fixture: &Fixture,
+    resource: &str,
+    expiry: i64,
+    release: Value,
+) -> Result<()> {
+    fixture
+        .binding(&uuid(100), &name(1), resource, "ens_v2", 6, 0, Some(8))
+        .await?;
+    fixture
+        .write(
+            6,
+            0,
+            "SurfaceBound",
+            V2_REGISTRY,
+            Some(&name(1)),
+            Some(resource),
+            json!({"authority_kind": "registrar", "state_derived": false}),
+            REGISTRY,
+        )
+        .await?;
+    let registered = json!({"status": "registered", "registrant": ALICE, "expiry": expiry,
+                            "source_event": "LabelRegistered"});
+    v2_at(
+        fixture,
+        "v2-grant-6",
+        6,
+        Some((0, 1)),
+        "RegistrationGranted",
+        true,
+        Some(resource),
+        ("R", "7"),
+        registered,
+    )
+    .await?;
+    v2_at(
+        fixture,
+        "v2-release-8",
+        8,
+        Some((0, 1)),
+        "RegistrationReleased",
+        true,
+        Some(resource),
+        ("R", "7"),
+        release,
+    )
+    .await
+}
+
+/// The explicit release (`unregister`) of name 1's registration at block 8.
+fn unregistered_at_8() -> Value {
+    json!({"status": "released", "source_event": "LabelUnregistered",
+           "released_at": block_seconds(8), "expiry": block_seconds(8)})
+}
+
+/// Served and shadow equal and whole, no named cause and no delta: the name is the released
+/// ENSv2 tombstone, its registration the deciding fact's `released_at` and `expiry`.
+async fn assert_tombstone(
+    fixture: &Fixture,
+    target: i64,
+    deciding: &str,
+    released_at: Value,
+    expiry: Value,
+) -> Result<()> {
+    let report = publish_and_compare(fixture, target).await?;
+    assert_counts(&report, &[], &[]);
+    assert!(report.served_side_bug_names.is_empty());
+    let (served, shadow) = shadow_reads(fixture, target).await?;
+    assert_eq!(
+        served.provenance["authority_selection"]["authority_arm"],
+        json!("ens_v2")
+    );
+    assert_eq!(shadow.trace["selected_event"], json!(deciding));
+    assert_eq!(shadow.trace["released_v2"], json!(true));
+    for (field, value) in [
+        ("status", json!("released")),
+        ("latest_event_kind", json!("RegistrationReleased")),
+        ("released_at", released_at),
+        ("expiry", expiry),
+        ("registrant", Value::Null),
+    ] {
+        assert_eq!(served.registration(field), value, "served {field}");
+        assert_eq!(
+            shadow
+                .registration
+                .get(field)
+                .cloned()
+                .unwrap_or(Value::Null),
+            value,
+            "shadow {field}, trace {:?}",
+            shadow.trace
+        );
+    }
+    assert_eq!(served.control("status"), json!("unregistered"));
+    assert_eq!(shadow.control["status"], json!("unregistered"));
+    Ok(())
+}
+
+/// Step 6's detached-renewal shape (apps/phase-runner/tests/production_interpret.rs,
+/// `a_detached_renewal_gives_the_released_tombstone_its_lapsed_expiry`): the name's grant with
+/// expiry E1, a named release where its path was cut, which closes the binding, then a renewal
+/// of the detached token written without a name to E2, and its lapse, the interpreter's path
+/// release without a name carrying E2. Authority selection keeps the released tombstone
+/// (name_authority/build.sql:246-271) and the lapse is its deciding fact; the name's own expiry
+/// rows end at E1, but a path-expiry release serves its own expiry first (build.sql:45-49), E2.
+#[tokio::test]
+async fn a_detached_renewal_gives_the_tombstone_its_lapsed_expiry() -> Result<()> {
+    let fixture = Fixture::new("families_shadow_detached_renewal", 20).await?;
+    let k1 = uuid(1);
+    let cut = json!({"status": "released", "source_event": "SubregistryUpdated",
+                     "terminal_reason": "registry_name_binding_changed",
+                     "released_at": block_seconds(8)});
+    closed_v2_registration(&fixture, &k1, 1_800_000_200, cut).await?;
+    v2_at(
+        &fixture,
+        "detached-renewal-10",
+        10,
+        Some((0, 1)),
+        "RegistrationRenewed",
+        false,
+        Some(&k1),
+        ("R", "7"),
+        json!({"expiry": 1_800_000_300u64}),
+    )
+    .await?;
+    let mut lapse = path_expiry(1_800_000_300);
+    lapse["status"] = json!("released");
+    lapse["released_at"] = json!(block_seconds(12));
+    v2_at(
+        &fixture,
+        "detached-lapse-12",
+        12,
+        None,
+        "RegistrationReleased",
+        false,
+        Some(&k1),
+        ("R", "7"),
+        lapse,
+    )
+    .await?;
+    assert_tombstone(
+        &fixture,
+        14,
+        "detached-lapse-12",
+        json!(block_seconds(12)),
+        json!(1_800_000_300u64),
+    )
+    .await?;
+    fixture.cleanup().await
+}
+
+/// Step 6's reservation expired when written (crates/project/tests/issue_503/
+/// expired_reservation.rs): the name's ENSv2 registration is unregistered at block 8; at block 10
+/// a reservation of the name at (10, 1, 1) carries an expiry at or before block 10's timestamp,
+/// and Interpret writes its release at the block boundary. The reservation is never live
+/// (v2_lifecycle_events.sql:28-36, name_authority/build.sql:212-239), so the boundary release is
+/// the tombstone's deciding fact and serves its own expiry. `own_resource` gives the reservation
+/// and its release the reservation's own resource, as a version-zero token has; otherwise
+/// neither has one.
+async fn expired_when_written(prefix: &str, expiry: i64, own_resource: bool) -> Result<()> {
+    let fixture = Fixture::new(prefix, 20).await?;
+    let (k1, k2) = (uuid(1), uuid(2));
+    closed_v2_registration(&fixture, &k1, 1_800_000_050, unregistered_at_8()).await?;
+    let resource = own_resource.then_some(k2.as_str());
+    let token = if own_resource { "0x100" } else { "0x101" };
+    v2_at(
+        &fixture,
+        "reserve-10",
+        10,
+        Some((1, 1)),
+        "RegistrationReserved",
+        true,
+        resource,
+        ("E", token),
+        json!({"status": "reserved", "expiry": expiry,
+                               "source_event": "LabelReserved"}),
+    )
+    .await?;
+    let mut release = path_expiry(expiry);
+    release["status"] = json!("released");
+    release["released_at"] = json!(block_seconds(10));
+    v2_at(
+        &fixture,
+        "reserve-release-10",
+        10,
+        None,
+        "RegistrationReleased",
+        true,
+        resource,
+        ("E", token),
+        release,
+    )
+    .await?;
+    assert_tombstone(
+        &fixture,
+        12,
+        "reserve-release-10",
+        json!(block_seconds(10)),
+        json!(expiry),
+    )
+    .await?;
+    fixture.cleanup().await
+}
+
+#[tokio::test]
+async fn a_resourceless_reservation_expiring_at_its_block_leaves_the_tombstone() -> Result<()> {
+    expired_when_written("families_shadow_expired_at_block", block_seconds(10), false).await
+}
+
+#[tokio::test]
+async fn a_resourceless_reservation_expired_before_its_block_leaves_the_tombstone() -> Result<()> {
+    expired_when_written(
+        "families_shadow_expired_before_block",
+        block_seconds(10) - 1,
+        false,
+    )
+    .await
+}
+
+#[tokio::test]
+async fn a_resource_backed_reservation_expiring_at_its_block_leaves_the_tombstone() -> Result<()> {
+    expired_when_written(
+        "families_shadow_v0_expired_at_block",
+        block_seconds(10),
+        true,
+    )
+    .await
+}
+
+#[tokio::test]
+async fn a_resource_backed_reservation_expired_before_its_block_leaves_the_tombstone() -> Result<()>
+{
+    expired_when_written(
+        "families_shadow_v0_expired_before_block",
+        block_seconds(10) - 1,
+        true,
+    )
+    .await
+}
+
+/// A released ENSv2 registration, then a later reservation of the name and that reservation's
+/// end (name_authority/build.sql:95-210). Authority selection restores the tombstone of the
+/// registration the name was last bound to and keeps the end of the reservation as its deciding
+/// fact, which name_current serves (build.sql:349-364): its kind, `released_at` and expiry, on
+/// the tombstone's resource. `own_resource` gives the reservation and its end their own
+/// resource (version zero); otherwise neither has one and the end matches the reservation by
+/// registry instance and token id. `lapse` ends the reservation by path expiry, which keeps its
+/// own expiry; otherwise it is unregistered, which clears it.
+async fn reservation_end(prefix: &str, own_resource: bool, lapse: bool) -> Result<()> {
+    let fixture = Fixture::new(prefix, 20).await?;
+    let (k1, k2) = (uuid(1), uuid(2));
+    closed_v2_registration(&fixture, &k1, 1_800_000_050, unregistered_at_8()).await?;
+    let resource = own_resource.then_some(k2.as_str());
+    let token = if own_resource { "0x200" } else { "0x201" };
+    v2_at(
+        &fixture,
+        "reserve-10",
+        10,
+        Some((0, 1)),
+        "RegistrationReserved",
+        true,
+        resource,
+        ("E", token),
+        json!({"status": "reserved", "expiry": 1_800_000_190u64,
+                               "source_event": "LabelReserved"}),
+    )
+    .await?;
+    let (place, mut end) = if lapse {
+        (None, path_expiry(1_800_000_190))
+    } else {
+        (
+            Some((0, 1)),
+            json!({"source_event": "LabelUnregistered", "expiry": block_seconds(12)}),
+        )
+    };
+    end["status"] = json!("released");
+    end["released_at"] = json!(block_seconds(12));
+    v2_at(
+        &fixture,
+        "reserve-end-12",
+        12,
+        place,
+        "RegistrationReleased",
+        true,
+        resource,
+        ("E", token),
+        end,
+    )
+    .await?;
+    let expiry = if lapse {
+        json!(1_800_000_190u64)
+    } else {
+        Value::Null
+    };
+    assert_tombstone(
+        &fixture,
+        14,
+        "reserve-end-12",
+        json!(block_seconds(12)),
+        expiry,
+    )
+    .await?;
+    fixture.cleanup().await
+}
+
+#[tokio::test]
+async fn a_resourceless_reservations_lapse_is_the_tombstones_deciding_fact() -> Result<()> {
+    reservation_end("families_shadow_reservation_lapse", false, true).await
+}
+
+#[tokio::test]
+async fn a_resourceless_reservations_unregister_is_the_tombstones_deciding_fact() -> Result<()> {
+    reservation_end("families_shadow_reservation_unregister", false, false).await
+}
+
+#[tokio::test]
+async fn a_resource_backed_reservations_unregister_is_the_tombstones_deciding_fact() -> Result<()> {
+    reservation_end("families_shadow_v0_reservation_unregister", true, false).await
+}
+
+/// Step 6's replaced-registry lapse (apps/phase-runner/tests/production_interpret.rs,
+/// `a_replaced_registrys_lapse_presents_its_tombstone_over_a_live_reservation_elsewhere`): the
+/// name's registration is released by name where its path was cut, a live reservation of the name
+/// with its own resource follows, and then the old registration lapses without a name. The lapse
+/// is the latest fact of the registration the name was last bound to, so it decides the
+/// tombstone over the live reservation elsewhere.
+#[tokio::test]
+async fn a_lapse_without_a_name_decides_the_tombstone_over_a_live_reservation_elsewhere()
+-> Result<()> {
+    let fixture = Fixture::new("families_shadow_replaced_registry_lapse", 20).await?;
+    let (k1, k2) = (uuid(1), uuid(2));
+    let cut = json!({"status": "released", "source_event": "SubregistryUpdated",
+                     "terminal_reason": "registry_name_binding_changed",
+                     "released_at": block_seconds(8)});
+    closed_v2_registration(&fixture, &k1, 1_800_000_150, cut).await?;
+    v2_at(
+        &fixture,
+        "reserve-10",
+        10,
+        Some((0, 1)),
+        "RegistrationReserved",
+        true,
+        Some(&k2),
+        ("B", "0x300"),
+        json!({"status": "reserved", "expiry": 4_000_000_000u64,
+                                 "source_event": "LabelReserved"}),
+    )
+    .await?;
+    let mut lapse = path_expiry(1_800_000_150);
+    lapse["status"] = json!("released");
+    lapse["released_at"] = json!(block_seconds(12));
+    v2_at(
+        &fixture,
+        "lapse-12",
+        12,
+        None,
+        "RegistrationReleased",
+        false,
+        Some(&k1),
+        ("R", "7"),
+        lapse,
+    )
+    .await?;
+    assert_tombstone(
+        &fixture,
+        14,
+        "lapse-12",
+        json!(block_seconds(12)),
+        json!(1_800_000_150u64),
+    )
+    .await?;
     fixture.cleanup().await
 }
 
@@ -1809,6 +2385,7 @@ async fn a_wrong_epoch_start_under_an_unnamed_release_is_not_the_named_cause() -
         "control/registrant",
         "control/status",
         "registration/authority_kind",
+        "registration/expiry",
         "registration/latest_event_kind",
         "registration/registrant",
         "registration/status",
@@ -1842,7 +2419,7 @@ async fn a_wrong_epoch_start_under_an_unnamed_release_is_not_the_named_cause() -
         "a wrong epoch start must not pass as the named cause: {:#?}",
         mutated.lines
     );
-    assert_eq!(failed_fields(&mutated).len(), 7, "{:#?}", mutated.lines);
+    assert_eq!(failed_fields(&mutated).len(), 8, "{:#?}", mutated.lines);
     fixture.cleanup().await
 }
 

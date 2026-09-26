@@ -1376,12 +1376,13 @@ async fn a_root_retention_gap_refuses_the_child_permission_excuse() -> Result<()
         })
     };
     let report = publish_and_compare(&fixture, 16).await?;
-    // Name 1 reads the unnamed release as served-side bug 1 on seven fields.
+    // Name 1 reads the unnamed release as served-side bug 1 on eight fields.
     let known: Vec<(String, usize)> = [
         "control/expiry",
         "control/registrant",
         "control/status",
         "registration/authority_kind",
+        "registration/expiry",
         "registration/latest_event_kind",
         "registration/registrant",
         "registration/status",
