@@ -1823,7 +1823,7 @@ children builder (`crates/project/src/builders/children.rs:41, 72, 160, 182,
 (`crates/project/src/builders/name_authority/stage.rs:231, 259, 323, 382`)
 and the name topology builder (`name_topology.rs:541, 578`) break it by
 `event_identity`, the old byte rule. The served binding choice
-(`name_authority/build.sql:53-60, 558-561, 745-752`; `stage.rs:78-81`) takes
+(`name_authority/build.sql:53-56, 391-394, 512-519`; `stage.rs:78-81`) takes
 `surface_binding_id DESC` and ignores event order. Insertion order equals
 emission order only because Interpret writes a batch in list order
 (`crates/interpret/src/write/normalized.rs:44`), and a replayed identity keeps

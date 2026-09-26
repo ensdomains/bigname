@@ -958,7 +958,7 @@ async fn a_migrated_name_admits_its_events_before_the_epoch_start() -> Result<()
 }
 
 /// Item 4 of the TYR-36 step 3 review (Q7): today's association takes the latest linked grant
-/// of the same name, registry and token (v2_lifecycle_events.sql:10-23), so the counterfactual
+/// of the same name, registry and token (v2_lifecycle_events.sql:13-24), so the counterfactual
 /// may move a triple's association only to a grant of that complete triple. Name 1 has a grant
 /// of triple (R, 7) on K1 and, at the same transaction and log, a grant of the unrelated triple
 /// (R2, 9) on K2, emission ordinals 1 and 0, written in that order, then a null-resource

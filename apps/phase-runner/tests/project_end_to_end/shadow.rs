@@ -29,7 +29,7 @@
 //!   generated ids too, and the association winner of
 //!   an affected triple moved only to a grant of the same name, registry and token, the latest
 //!   by transaction, log and id as today's association takes it since TYR-36 step 6
-//!   (`v2_lifecycle_events.sql:10-24`), gives exactly the served value for the field. Those
+//!   (`v2_lifecycle_events.sql:13-24`), gives exactly the served value for the field. Those
 //!   reads take the name's retained lifecycle events rebuilt from the publication-visible log,
 //!   not the family rows, and the same rebuild read in the canonical order must give the
 //!   shadow value; every named cause below needs that too. Every name excuse, this one and
@@ -100,15 +100,15 @@
 //!   and shadow answer, released under ENSv2. Served code is not changed in this branch. A
 //!   field passes only when the shadow
 //!   selected that unnamed release and the field holds what the ENSv2 path-release presentation
-//!   gives (build.sql:88-95, :101-103): status released, latest kind RegistrationReleased,
+//!   gives (build.sql:98-106, :111-113): status released, latest kind RegistrationReleased,
 //!   the release's released_at, the expiry the path-expiry rule gives (build.sql:45-49: the
 //!   release's own, else the name's latest admitted numeric expiry on the key), no registrant
 //!   or authority, control unregistered with nothing else; and the served value must be what
 //!   today's name-scoped membership gives, the families read in today's order without the
 //!   unnamed release.
 //! - `served_release_presentation_reads_the_raw_arm`: the selection reads a missing authority
-//!   arm as ENSv2 (build.sql:347), so a name with no selected arm can select an ENSv2 release,
-//!   but today's presentation compares the raw arm with 'ens_v2' (build.sql:89, :94, :103) and
+//!   arm as ENSv2 (build.sql:362), so a name with no selected arm can select an ENSv2 release,
+//!   but today's presentation compares the raw arm with 'ens_v2' (build.sql:99, :104, :113) and
 //!   serves that release with its registrant, authority and expiry and a live control block.
 //!   The reader decides both with the one resolved arm and presents the release whole (ruling
 //!   R1). A field passes only when no arm is selected, the shadow presents the whole release,
@@ -966,7 +966,7 @@ fn shadow_field(shadow: &ShadowName, path: &str) -> Option<Value> {
 
 /// Whether the shadow presents its selected registration as an ENSv2 release, whole: status
 /// released, no registrant, authority kind or key, and a control block that is
-/// `{status: unregistered}` with nothing else (build.sql:88-95, :101-103).
+/// `{status: unregistered}` with nothing else (build.sql:98-106, :111-113).
 fn release_presented(shadow: &ShadowName) -> bool {
     let registration = |name: &str| {
         shadow
@@ -1023,7 +1023,7 @@ fn serves_the_unnamed_release(shadow: &ShadowName, diff: &Difference) -> bool {
 
 /// Whether `diff` is the difference between the whole ENSv2 release the shadow presents for a
 /// name with no selected arm and what today's presentation serves for it, which compares the raw
-/// arm with 'ens_v2' (build.sql:89, :94, :103) and so neither clears the release nor closes the
+/// arm with 'ens_v2' (build.sql:99, :104, :113) and so neither clears the release nor closes the
 /// control block. The served value must equal what the reader traced for that presentation.
 fn serves_the_raw_arm_release(input: &NameInput, shadow: &ShadowName, diff: &Difference) -> bool {
     if input.selection.authority_arm.is_some() || !release_presented(shadow) {
@@ -1167,7 +1167,7 @@ fn name_excuses(
 
 /// The owner an authority event reports to the served control block, as step 2 stores it for
 /// an epoch start and a binding candidate (crates/project/src/families/identity.rs
-/// `control_owner`, name_current/build.sql:650-663).
+/// `control_owner`, name_current/build.sql:668-681).
 fn reported_control_owner(after: &Value) -> Option<String> {
     let unmasked = match after.get("owner_word_unmasked") {
         Some(Value::Bool(flag)) => *flag,
@@ -1316,7 +1316,7 @@ fn raw_flag(value: &Value, field: &str) -> Option<bool> {
 }
 
 /// The expiry in seconds as step 2 converts it: an integral JSON number in range, else none
-/// (crates/project/src/families/lifecycle.rs:302-316, build.sql:493-501).
+/// (crates/project/src/families/lifecycle.rs:302-316, build.sql:515-523).
 fn expiry_seconds(after: &Value) -> Option<i64> {
     let Some(Value::Number(number)) = after.get("expiry") else {
         return None;
@@ -2070,7 +2070,7 @@ pub async fn generated_ids(
 }
 
 /// The registry identifier and token id of publication-visible events (`published`), by
-/// identity, as today's association keys them (v2_lifecycle_events.sql:14-19).
+/// identity, as today's association keys them (v2_lifecycle_events.sql:18-22).
 pub async fn association_keys(
     pool: &PgPool,
     chain: &str,
@@ -2112,7 +2112,7 @@ pub async fn association_keys(
 /// otherwise than the ordinal or identity, or for the lease selector any reversal. A triple
 /// whose association winner sits in a disagreeing block moves to the latest grant or
 /// reservation of that block with the same name, registry identifier and token id by
-/// transaction, log and generated id: today's association (v2_lifecycle_events.sql:10-24). None
+/// transaction, log and generated id: today's association (v2_lifecycle_events.sql:13-24). None
 /// when no block of the name's facts reads differently or an event has no generated id.
 pub fn legacy_facts(
     facts: &NameFacts,
@@ -2473,7 +2473,7 @@ pub fn assert_fixture_corpus_counts(targets: &[i64]) -> Result<()> {
 /// and released by the families: eight fields each; the registration expiry for those whose
 /// release carries an expiry other than the name's latest numeric expiry on the resource, which
 /// today's expiry lateral serves while the families present the release's own
-/// (build.sql:45-49, :515-551); and the two control-owner fields again for those whose token was
+/// (build.sql:45-49, :514-551); and the two control-owner fields again for those whose token was
 /// transferred before the target. The oracle is the seed's: other histories are not covered.
 pub async fn corpus_expectation(
     pool: &PgPool,

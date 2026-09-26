@@ -869,7 +869,7 @@ async fn a_missing_or_rekeyed_wrapper_row_gets_no_excuse() -> Result<()> {
 /// bound to NameWrapper resource W twice in block 9: at log 2 (closed at log 3) by a
 /// SurfaceBound that recorded lease L1, and at log 3 by one that recorded L2. The log 3 event
 /// is written first, so today's builder, which takes the latest SurfaceBound by block and
-/// generated id (build.sql:348-358), serves L1 as the registration's resource. The canonical
+/// generated id (build.sql:365-377), serves L1 as the registration's resource. The canonical
 /// order takes the SurfaceBound at log 3, L2, and the families read in today's order give L1
 /// again, so the difference is a same-block delta. W carries no wrapper modifier, so the name
 /// is not refused.

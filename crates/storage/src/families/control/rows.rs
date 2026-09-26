@@ -130,7 +130,7 @@ impl LifecycleEvent {
         )
     }
 
-    /// Whether `after_state -> 'expiry'` is a JSON number (build.sql:521-527).
+    /// Whether `after_state -> 'expiry'` is a JSON number (build.sql:543-546).
     pub fn numeric_expiry(&self) -> bool {
         self.expiry.is_number()
     }
@@ -221,7 +221,7 @@ pub struct BindingCandidate {
     pub authority_kind: Option<String>,
     /// The SurfaceBound's after-state authority key.
     pub authority_key: Option<String>,
-    /// The owner the SurfaceBound reports to the served control block (build.sql:650-671),
+    /// The owner the SurfaceBound reports to the served control block (build.sql:668-689),
     /// positioned at `surface_bound_position`.
     pub bound_owner: Option<String>,
     pub registry_only: bool,

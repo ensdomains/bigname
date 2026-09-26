@@ -207,7 +207,7 @@ async fn a_zero_registry_owner_keeps_its_getter_facts() -> Result<()> {
 /// holds, then one to OTHER at 12 carrying another resource, which the admission leaves out
 /// (authority_events.sql admits a resource-bearing event only on the selected resource), and the
 /// lease is transferred at 13. The served control block reads the latest admitted events
-/// (build.sql:649-694): owner OWNER, latest kind TokenControlTransferred. F2c keeps every
+/// (build.sql:667-712): owner OWNER, latest kind TokenControlTransferred. F2c keeps every
 /// owner-setting event of the node (`project_registry_owner_event`), so the reader holds the
 /// transfer at 11 under the admission, leaves the one at 12 out, and agrees on both fields.
 #[tokio::test]
@@ -256,7 +256,7 @@ async fn an_excluded_later_transfer_is_not_the_control_owner() -> Result<()> {
 /// Name 1's node gets an admitted AuthorityTransferred at 11 carrying `extra` in its payload,
 /// then one at 12 on another resource that the admission leaves out, so the node row's latest
 /// owner-setting event is the excluded one. The served control block reads the transfer at 11
-/// (build.sql:650-663): null under an unmasked owner word, else its registry_owner, else its
+/// (build.sql:668-681): null under an unmasked owner word, else its registry_owner, else its
 /// owner. Step 2 keeps both facts on every owner-event row, so the reader takes them from the
 /// transfer at 11 itself and agrees.
 async fn earlier_transfer_wins(label: &str, extra: Value) -> Result<(Value, Value)> {
@@ -319,7 +319,7 @@ async fn an_earlier_admitted_transfer_with_an_unmasked_word_reports_no_owner() -
 /// A synthetic shape: the interpreter never puts registry_owner on a registry
 /// AuthorityTransferred (it sets it on the registrar epoch observation only,
 /// crates/adapters/src/schema_v2/protocol/v1/registrar.rs). The fixture exercises the served
-/// COALESCE(registry_owner, owner) rule of build.sql:660-663, not a chain shape.
+/// COALESCE(registry_owner, owner) rule of build.sql:678-681, not a chain shape.
 #[tokio::test]
 async fn an_earlier_admitted_transfer_reports_its_registry_owner() -> Result<()> {
     let (served, shadow) = earlier_transfer_wins(
@@ -767,7 +767,7 @@ async fn a_textual_owner_unmask_flag_holds_in_the_control_guard() -> Result<()> 
 /// with handwritten identities (`<kind>:10:9`) that all carry the same synthetic ordinal 9, so
 /// the canonical order breaks the tie by identity bytes and takes the transfer last (`E` sorts
 /// before `T`); today's lateral takes the epoch change, whose generated id is higher
-/// (build.sql:689-693). Both report one owner, so only the latest kind differs, and it passes
+/// (build.sql:707-711). Both report one owner, so only the latest kind differs, and it passes
 /// as a same-block delta only because the families read again in today's order, the owner
 /// event and the epoch start included, give exactly the served kind. A real NewOwner log is
 /// numbered in push order (`a_replayed_new_owner_log_reads_equal` asserts SubregistryChanged
@@ -1002,7 +1002,7 @@ async fn one_log_bound(fixture: &Fixture, node_resource: &str) -> Result<()> {
 
 /// Item 4 of the ea047c04..2533ef55 review: a state-derived registry-only SurfaceBound and a
 /// registry AuthorityTransferred at one block, transaction and log, the SurfaceBound pushed
-/// first. Both feed the control owner (build.sql:664-667). The canonical order puts the
+/// first. Both feed the control owner (build.sql:684-692). The canonical order puts the
 /// SurfaceBound last (its identity sorts after the transfer's) and reports its bound owner;
 /// today's order puts the transfer last (higher id) and reports its owner. The same-block read
 /// orders the binding candidates' SurfaceBound positions by generated id too, so the owner is a
@@ -2552,8 +2552,8 @@ async fn a_binding_opened_in_the_transfer_block_is_the_rebuilt_target() -> Resul
     fixture
         .binding(&uuid(101), &name(1), &successor, "ens_v1", 11, 0, None)
         .await?;
-    // The interpreter's times carry the log's microseconds (build.sql:4-12): the new binding
-    // moves first, so the two never overlap.
+    // The interpreter's times carry the log's microseconds (name_authority/build.sql:4-12): the
+    // new binding moves first, so the two never overlap.
     for (column, binding) in [("active_from", uuid(101)), ("active_to", uuid(100))] {
         sqlx::query(&format!(
             "UPDATE surface_bindings SET {column} = {column} + interval '5 microseconds'

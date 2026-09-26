@@ -19,13 +19,13 @@ pub const GRACE_PERIOD_SECONDS: i128 = 7_776_000;
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct EffectiveWrapper {
     /// Null when the state, fuses or expiry is unknown, and for an emancipated or locked name
-    /// past its wrapper expiry (build.sql:600-608, permissions.rs:319-327).
+    /// past its wrapper expiry (build.sql:618-626, permissions.rs:319-327).
     pub wrapper_state: Option<String>,
     /// Zero past the wrapper expiry; null when the state, fuses or expiry is unknown
     /// (permissions.rs:311-318, resource_summary.rs:400-407).
     pub fuses: Option<i64>,
     /// Past its own expiry the NameWrapper reports no owner for an emancipated or locked name,
-    /// and zero fuses for any name (build.sql:616-623).
+    /// and zero fuses for any name (build.sql:627-641).
     /// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L843-L856 @ ens_v1@91c966f)
     pub owner_lapsed: bool,
     /// A `.eth` name (the effective fuses carry IS_DOT_ETH) whose clock is inside the last
@@ -86,7 +86,7 @@ pub fn effective_wrapper(row: &WrapperRow, clock_seconds: i64) -> EffectiveWrapp
 }
 
 /// The wrapper expiry a wrapped name with no registrar lease serves: an integral word between
-/// 1 and 253402300799 (build.sql:568-574).
+/// 1 and 253402300799 (build.sql:586-592).
 pub fn servable_expiry(row: &WrapperRow) -> Option<i64> {
     expiry(row)
         .filter(|expiry| (1..=253_402_300_799).contains(expiry))

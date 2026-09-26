@@ -773,7 +773,7 @@ async fn an_ensv1_release_names_its_before_state_registrant() -> Result<()> {
 
 /// A grant whose after-state has no `authority_kind`: step 2 retains the kind raw, null when
 /// absent (migration 20260926100800), and the served block reads the raw after-state and serves
-/// null (build.sql:30, :394). The families agree; the old `authority_kind_defaulted_to_registrar`
+/// null (build.sql:30, :412). The families agree; the old `authority_kind_defaulted_to_registrar`
 /// cause is gone, so a difference here fails.
 #[tokio::test]
 async fn a_grant_without_authority_kind_is_served_null_by_both() -> Result<()> {
@@ -999,7 +999,7 @@ async fn a_renewal_serves_its_expiry_only_when_it_is_a_number() -> Result<()> {
 }
 
 /// The served registration names the winning grant's `authority_key` (build.sql:31,
-/// :393-420); step 2 retains it on the lifecycle row (migration 20260926100800), so the families
+/// :411-438); step 2 retains it on the lifecycle row (migration 20260926100800), so the families
 /// serve the same key and a difference fails.
 #[tokio::test]
 async fn a_grant_authority_key_is_read_from_the_retained_row() -> Result<()> {
@@ -1162,7 +1162,7 @@ async fn the_counterfactual_associates_by_position_like_todays_decoder() -> Resu
 /// registration (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L36 @
 /// ens_v2@a971bd64), so the families serve the release: released, latest kind
 /// RegistrationReleased, control unregistered. Today's name-scoped membership (build.sql:322,
-/// :366-367) serves the renewal as active, the served-side difference disclosed for cutover.
+/// :383-389) serves the renewal as active, the served-side difference disclosed for cutover.
 #[tokio::test]
 async fn an_unnamed_path_expiry_on_the_resource_serves_the_release() -> Result<()> {
     let fixture = Fixture::new("families_shadow_unnamed_path_expiry", 20).await?;
@@ -1985,8 +1985,8 @@ async fn a_lapse_without_a_name_decides_the_tombstone_over_a_live_reservation_el
 
 /// Item 2 of the TYR-36 step 3 review (Q2): a name with ENSv2 lifecycle events and a Basenames
 /// event, and no open binding, has two event arms and no ENSv1 history, so no authority arm is
-/// selected (name_authority/build.sql:599-620). The selection reads a missing arm as ENSv2
-/// (`COALESCE(selected_authority_arm, 'ens_v2') = 'ens_v2'`, build.sql:347), so its explicit
+/// selected (name_authority/build.sql:432-451). The selection reads a missing arm as ENSv2
+/// (`COALESCE(selected_authority_arm, 'ens_v2') = 'ens_v2'`, build.sql:362), so its explicit
 /// release is the registration; the presentation reads the same resolved arm, so the release is
 /// served whole: released, no registrant, authority or expiry, control unregistered and nothing
 /// else (ruling R1: a released ENSv2 registration stays ENSv2 and is unregistered).

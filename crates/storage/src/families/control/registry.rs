@@ -1,5 +1,5 @@
 //! F2c, registry ownership: the registry generation of an ENSv1 name (the pull request 947
-//! fold, name_authority/build.sql:754-791 and :815-819), the zero-owner facts the ownerless
+//! fold, name_authority/build.sql:522-560 and :592-596), the zero-owner facts the ownerless
 //! registry profile reads (name_authority/stage.rs:201-268), and the per-resource registry
 //! binding the permission summary serves (permission_resources.rs:10-79).
 use std::collections::BTreeMap;
@@ -70,7 +70,7 @@ impl OwnerEvent {
         })
     }
 
-    /// The owner this event reports to the served control block (build.sql:650-663): null when
+    /// The owner this event reports to the served control block (build.sql:668-681): null when
     /// its owner word is unmasked, else its registry_owner, else its owner.
     pub fn reported_owner(&self) -> Option<String> {
         if self.owner_word_unmasked == Some(true) {
@@ -105,10 +105,10 @@ impl RegistryNode {
 }
 
 /// The registry generation and handoff block of an ENS name (name_authority/build.sql
-/// :815-819): `old` when the 2017 registry recorded the node and the current registry has not,
+/// :592-596): `old` when the 2017 registry recorded the node and the current registry has not,
 /// under arm ens_v1; the handoff block is the first current-registry record. The served fold
 /// reads ENS registry records only and leaves the all-zero root node out
-/// (name_authority/build.sql:775-791), so a node of another namespace, such as a Basenames node
+/// (name_authority/build.sql:542-558), so a node of another namespace, such as a Basenames node
 /// F2c also keeps, and the root node have no records and no handoff block.
 pub fn registry_generation(
     node: Option<&RegistryNode>,
@@ -125,7 +125,7 @@ pub fn registry_generation(
     )
 }
 
-/// Whether the ownerless-registry profile applies (name_authority/build.sql:852-856): the
+/// Whether the ownerless-registry profile applies (name_authority/build.sql:609-613): the
 /// node's latest AuthorityTransferred reports the zero address as its owner getter
 /// (stage.rs:201-268 reads AuthorityTransferred only), no binding is selected and the arm is not
 /// ENSv2. Today's stage keys the transfers by name: the event's name, else the latest named
@@ -476,7 +476,7 @@ mod tests {
         );
     }
 
-    /// The served records leave the all-zero root node out (name_authority/build.sql:790): an
+    /// The served records leave the all-zero root node out (name_authority/build.sql:558): an
     /// old-only or current-registry root record gives no records and no handoff block.
     #[test]
     fn the_root_node_has_no_registry_records() {
