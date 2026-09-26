@@ -109,15 +109,30 @@ impl EventOrder {
         }
     }
 
-    /// The order ENSv2 membership reads in. Today's builders take block, then generated id,
-    /// with no transaction or log (build.sql:322-340, permissions.rs:111-133,
-    /// v2_lifecycle_events.sql:19); an event without a generated id falls back to the
-    /// canonical order.
+    /// The order the resource-permission fold and the wrapped-lease selector read in: today's
+    /// builders take block, then generated id, with no transaction or log (permissions.rs:132,
+    /// name_current/build.sql:373-374); an event without a generated id falls back to the
+    /// canonical order. ENSv2 name membership reads `name_membership` instead.
     pub fn membership(&self, left: &Position, right: &Position) -> Ordering {
         match (self.generated(left), self.generated(right)) {
             (Some(left_id), Some(right_id)) => left
                 .block_number
                 .cmp(&right.block_number)
+                .then(left_id.cmp(&right_id)),
+            _ => left.cmp(right),
+        }
+    }
+
+    /// The order ENSv2 name membership reads in. Since TYR-36 step 6 (de24ff32) today's builders
+    /// compare block, then transaction and log with a missing one read as -1, then the generated
+    /// id, for every step of the name's registration fold (name_current/build.sql:319-347) and
+    /// for the deciding fact of a released tombstone (name_authority/build.sql:57-245); an event
+    /// without a generated id falls back to the canonical order.
+    pub fn name_membership(&self, left: &Position, right: &Position) -> Ordering {
+        match (self.generated(left), self.generated(right)) {
+            (Some(left_id), Some(right_id)) => left
+                .bound()
+                .cmp(&right.bound())
                 .then(left_id.cmp(&right_id)),
             _ => left.cmp(right),
         }
@@ -220,6 +235,36 @@ mod tests {
         );
         let unknown = at(5, None, "unknown");
         assert_eq!(ids.membership(&grant, &unknown), grant.cmp(&unknown));
+    }
+
+    #[test]
+    fn name_membership_compares_the_place_before_the_generated_id() {
+        let ids = EventOrder::Generated(BTreeMap::from([
+            ("release".to_owned(), 2),
+            ("grant".to_owned(), 1),
+            ("boundary".to_owned(), 3),
+            ("ordinal-1".to_owned(), 4),
+            ("ordinal-0".to_owned(), 5),
+        ]));
+        let (release, grant) = (
+            at(12, Some((0, 3)), "release"),
+            at(12, Some((0, 7)), "grant"),
+        );
+        assert_eq!(ids.membership(&grant, &release), Ordering::Less);
+        assert_eq!(ids.name_membership(&grant, &release), Ordering::Greater);
+        // A block-boundary fact reads as transaction and log -1, first in its block.
+        let boundary = at(12, None, "boundary");
+        assert_eq!(ids.name_membership(&boundary, &release), Ordering::Less);
+        // One place: the generated id decides, where the canonical order takes the ordinal.
+        let (one, zero) = (
+            at(14, Some((0, 5)), "ordinal-1"),
+            at(14, Some((0, 5)), "ordinal-0"),
+        );
+        assert_eq!(ids.name_membership(&one, &zero), Ordering::Less);
+        assert_eq!(
+            EventOrder::Canonical.name_membership(&one, &zero),
+            one.cmp(&zero)
+        );
     }
 
     // The shared vectors. Their twin, the same three lists asserted against the project crate's

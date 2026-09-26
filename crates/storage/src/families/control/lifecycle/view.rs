@@ -79,9 +79,10 @@ pub struct Candidate {
 }
 
 /// The candidate of one key: candidate_active, candidate_path and candidate_explicit with the
-/// witness rule, latest of the three (design:63, restating build.sql:322-334 under D12).
+/// witness rule, latest of the three (design:63, restating build.sql:322-341 under D12). Every
+/// comparison is the name-membership order (`EventOrder::name_membership`).
 pub fn candidate(view: &MergedView, order: &EventOrder) -> Option<Candidate> {
-    let after = |left: &Position, right: &Position| order.membership(left, right).is_gt();
+    let after = |left: &Position, right: &Position| order.name_membership(left, right).is_gt();
     let active = view.last_active.as_ref();
     let mut found: Vec<Candidate> = Vec::new();
     if let Some(active) = active {
@@ -122,12 +123,13 @@ pub fn candidate(view: &MergedView, order: &EventOrder) -> Option<Candidate> {
     }
     found
         .into_iter()
-        .max_by(|left, right| order.membership(&left.position, &right.position))
+        .max_by(|left, right| order.name_membership(&left.position, &right.position))
 }
 
-/// The cross-key preference of build.sql:336-340 over one candidate per key: the binding
+/// The cross-key preference of build.sql:342-346 over one candidate per key: the binding
 /// resource's non-released candidate, then any non-released one, then the binding key's, then
-/// the latest. `keys` pairs each key with its candidate; the result is the index of the winner.
+/// the latest in the name-membership order. `keys` pairs each key with its candidate; the result
+/// is the index of the winner.
 pub fn preferred<'a>(
     keys: impl IntoIterator<Item = (&'a str, &'a Candidate)>,
     binding_resource: Option<&str>,
@@ -143,7 +145,7 @@ pub fn preferred<'a>(
             };
             rank(left_key, left)
                 .cmp(&rank(right_key, right))
-                .then_with(|| order.membership(&left.position, &right.position))
+                .then_with(|| order.name_membership(&left.position, &right.position))
         })
         .map(|(index, _)| index)
 }
