@@ -53,6 +53,7 @@ async fn seed_account_permissions(
               SELECT 1 FROM normalized_events event
               LEFT JOIN chain_lineage lineage USING (chain_id, block_hash, block_number)
               WHERE event.normalized_event_id = citation.event_id::bigint
+                AND event.consumer_visibility = 'activated'
                 AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
                 AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
           )
@@ -187,6 +188,7 @@ async fn seed_children(transaction: &mut Transaction<'_, Postgres>, chain_id: &s
                    AND lineage.block_hash = event.block_hash
                    AND lineage.block_number = event.block_number
                   WHERE event.normalized_event_id = citation.event_id::bigint
+                    AND event.consumer_visibility = 'activated'
                     AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
                     AND (
                         (event.block_number IS NULL AND event.block_hash IS NULL)
@@ -308,6 +310,7 @@ async fn seed_resources(
                  AND lineage.block_hash = event.block_hash
                  AND lineage.block_number = event.block_number
                 WHERE event.normalized_event_id = citation.event_id::bigint
+                  AND event.consumer_visibility = 'activated'
                   AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
                   AND (
                       (event.block_number IS NULL AND event.block_hash IS NULL)
@@ -406,6 +409,7 @@ async fn seed_primary(transaction: &mut Transaction<'_, Postgres>, chain_id: &st
                AND lineage.block_hash = event.block_hash
                AND lineage.block_number = event.block_number
               WHERE event.normalized_event_id = citation.event_id::bigint
+                AND event.consumer_visibility = 'activated'
                 AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
                 AND (
                     (event.block_number IS NULL AND event.block_hash IS NULL)
