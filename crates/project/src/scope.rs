@@ -19,6 +19,7 @@ mod resolver;
 mod resolver_dependents;
 mod retracted;
 mod topology;
+mod v2_release_names;
 mod wrapper;
 mod wrapper_registrar;
 
@@ -85,6 +86,7 @@ pub(crate) async fn initialize(
         crate::stage::mirror_evidence::invalidate_resolver_dependents(transaction, chain_id)
             .await?;
     }
+    v2_release_names::include_names_bound_to_released_resources(transaction, target.number).await?;
     close_binding_scope(transaction, chain_id, target).await?;
     include_alias_and_wildcard_scope(transaction, chain_id, target).await?;
     close_binding_scope(transaction, chain_id, target).await?;

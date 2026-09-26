@@ -5512,36 +5512,119 @@ async fn a_detached_child_expiry_is_released_without_a_name_and_stays_a_v2_tombs
     Ok(())
 }
 
-// Resumed Project batches must serve what one batch serves for the detached child. They do not
-// yet: the batch at block 3 holds only the release written without a name, and incremental scope
-// does not bring in a name whose closed ENSv2 binding was on that release's resource, so the name
-// keeps the row the block-1 path cut gave it (no `released_at`, no expiry) until something else
-// touches it. One batch reads the later release. Authority selection's reading of the nameless
-// release has the same gap. Ignored until the scope rule lands.
-#[tokio::test]
-#[ignore = "incremental scope does not yet rescope a name for a later release without a name on its closed binding's resource"]
-async fn a_detached_child_expiry_serves_the_same_fields_resumed_and_in_one_batch() -> Result<()> {
-    let chain = "interpret-detached-child-resumed";
-    let resumed_db = ScratchDatabase::create("production_interpret_detached_child_resumed").await?;
-    detached_child_fixture(resumed_db.pool(), chain, 2, Some((1, 9, 3)), 3).await?;
-    let leaf: String = sqlx::query_scalar(
-        "SELECT logical_name_id FROM normalized_events
+/// The detached child's served fields after resumed Project batches at `targets`, the last of
+/// which holds no event at all, then after a full rebuild of the same interpreted database at
+/// that block. Both must be the same; the resumed fields are returned with the child's name, its
+/// ENSv2 resource and its binding.
+async fn detached_child_resumed_then_rebuilt(
+    pool: &PgPool,
+    chain: &str,
+    targets: &[i64],
+) -> Result<(Value, String, Uuid, Uuid)> {
+    let (leaf, resource): (String, Uuid) = sqlx::query_as(
+        "SELECT logical_name_id, resource_id FROM normalized_events
          WHERE chain_id = $1 AND event_kind = 'RegistrationReleased'
            AND logical_name_id IS NOT NULL",
     )
     .bind(chain)
-    .fetch_one(resumed_db.pool())
+    .fetch_one(pool)
     .await?;
-    let resumed = served_after_resumed_batches(resumed_db.pool(), chain, &[1, 2, 3], &leaf).await?;
-    resumed_db.cleanup().await?;
-    let one_db = ScratchDatabase::create("production_interpret_detached_child_one").await?;
-    detached_child_fixture(one_db.pool(), chain, 2, Some((1, 9, 3)), 3).await?;
+    let binding: Uuid = sqlx::query_scalar(
+        "SELECT surface_binding_id FROM surface_bindings
+         WHERE chain_id = $1 AND logical_name_id = $2 AND authority_arm = 'ens_v2'",
+    )
+    .bind(chain)
+    .bind(&leaf)
+    .fetch_one(pool)
+    .await?;
+    let resumed = served_after_resumed_batches(pool, chain, targets, &leaf).await?;
+    let last = *targets.last().context("no target")?;
+    let rebuilt = served_after_one_batch(pool, chain, last, &leaf).await?;
     assert_eq!(
-        served_after_one_batch(one_db.pool(), chain, 3, &leaf).await?,
-        resumed,
-        "resumed batches and one batch serve the same fields"
+        rebuilt, resumed,
+        "resumed batches and a full rebuild serve the same fields"
     );
-    one_db.cleanup().await
+    Ok((resumed, leaf, resource, binding))
+}
+
+fn detached_child_served(
+    served: &Value,
+) -> (
+    Option<&str>,
+    Option<&str>,
+    Option<&str>,
+    Option<&str>,
+    Option<&str>,
+    Option<&str>,
+    Option<i64>,
+    Option<i64>,
+) {
+    (
+        served["authority_arm"].as_str(),
+        served["lifecycle_state"].as_str(),
+        served["resource_id"].as_str(),
+        served["surface_binding_id"].as_str(),
+        served["registration"]["status"].as_str(),
+        served["control"]["status"].as_str(),
+        served["registration"]["released_at"].as_i64(),
+        served["registration"]["expiry"].as_i64(),
+    )
+}
+
+// Resumed Project batches serve what a full rebuild serves for the detached child (Pro review of
+// 503387dc, question 5). The batch at block 3 holds only the release written without a name; the
+// scope brings the child in through its closed ENSv2 binding on that resource, so the batch
+// serves the later release, 3 and 3. The batch at block 4 holds nothing and keeps it.
+#[tokio::test]
+async fn a_detached_child_expiry_serves_the_same_fields_resumed_and_in_one_batch() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_interpret_detached_child_resumed").await?;
+    let chain = "interpret-detached-child-resumed";
+    detached_child_fixture(scratch.pool(), chain, 2, Some((1, 9, 3)), 4).await?;
+    let (served, _, resource, binding) =
+        detached_child_resumed_then_rebuilt(scratch.pool(), chain, &[1, 2, 3, 4]).await?;
+    let (resource, binding) = (resource.to_string(), binding.to_string());
+    assert_eq!(
+        detached_child_served(&served),
+        (
+            Some("ens_v2"),
+            Some("unregistered"),
+            Some(resource.as_str()),
+            Some(binding.as_str()),
+            Some("released"),
+            Some("unregistered"),
+            Some(3),
+            Some(3),
+        ),
+        "{served}"
+    );
+    scratch.cleanup().await
+}
+
+// The same with the renewal from 20 to 30 at block 2: the batch at block 30 holds only the release
+// written without a name, and the batch at block 31 holds nothing.
+#[tokio::test]
+async fn a_detached_renewal_serves_the_same_fields_resumed_and_in_one_batch() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_interpret_detached_renewal_resumed").await?;
+    let chain = "interpret-detached-renewal-resumed";
+    detached_child_fixture(scratch.pool(), chain, 20, Some((2, 0, 30)), 31).await?;
+    let (served, _, resource, binding) =
+        detached_child_resumed_then_rebuilt(scratch.pool(), chain, &[1, 2, 29, 30, 31]).await?;
+    let (resource, binding) = (resource.to_string(), binding.to_string());
+    assert_eq!(
+        detached_child_served(&served),
+        (
+            Some("ens_v2"),
+            Some("unregistered"),
+            Some(resource.as_str()),
+            Some(binding.as_str()),
+            Some("released"),
+            Some("unregistered"),
+            Some(30),
+            Some(30),
+        ),
+        "{served}"
+    );
+    scratch.cleanup().await
 }
 
 // A detached renewal (Pro review of b83f829c, question 5): the child registered with expiry 20
