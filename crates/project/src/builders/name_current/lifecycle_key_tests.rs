@@ -20,6 +20,17 @@ const B: &str = "00000000-0000-0000-0000-00000000000b";
 const C: &str = "00000000-0000-0000-0000-00000000000c";
 const D: &str = "00000000-0000-0000-0000-00000000000d";
 
+/// Event id, token id, kind, resource, block, transaction index and log index.
+type Row = (
+    i64,
+    &'static str,
+    &'static str,
+    Option<&'static str>,
+    i64,
+    Option<i64>,
+    Option<i64>,
+);
+
 #[tokio::test]
 async fn a_resource_less_event_takes_the_latest_candidate_by_chain_position() -> Result<()> {
     let database = TestDatabase::create(TestDatabaseConfig::new("lifecycle_key")).await?;
@@ -34,8 +45,7 @@ async fn a_resource_less_event_takes_the_latest_candidate_by_chain_position() ->
     )
     .execute(&mut *tx)
     .await?;
-    // (id, token, kind, resource, block, transaction index, log index)
-    let rows: [(i64, &str, &str, Option<&str>, i64, Option<i64>, Option<i64>); 6] = [
+    let rows: [Row; 6] = [
         // Two grants in block 10: the later one by log index has the lower id.
         (
             1,
