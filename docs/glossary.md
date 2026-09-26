@@ -2548,11 +2548,18 @@ batch it is the adapter's write order. Between batches at one log it is not,
 and that order is a disclosed precondition: no two batches of one source are
 known to write one family key, and where batches of two sources write one key
 from one log, the fact with the higher ordinal (then the higher identity
-bytes) wins, not the one inserted last, and it may differ from the served
-read in provenance only. Its one known instance is the NameWrapped
-registry-node pointer ([projections](projections.md#owned-key-families)). A
+bytes) wins, not the one inserted last. Its one known instance is the
+NameWrapped registry-node pointer, where the resolver value agrees with the
+served read and only the resource, source family and event attribution differ
+([projections](projections.md#owned-key-families)); that bound is not a
+general exemption for cross-source value differences. A
 served reader ported to the canonical event order (step 7) must parse the
-ordinal the same way:
-`CASE WHEN m[1]::numeric <= 4294967295 THEN m[1]::bigint END` over
-`regexp_match(event_identity, ':([0-9]+)$') m`, only when both indexes are
-present, ordered `NULLS FIRST`; never a bare bigint cast.
+ordinal the same way. Only when both indexes are present, match
+`regexp_match(event_identity COLLATE "C", ':([0-9]+)$') m`, strip leading
+zeros with `d = ltrim(m[1], '0')`, then take
+`CASE WHEN d = '' THEN 0::bigint WHEN length(d) < 10 OR (length(d) = 10 AND d COLLATE "C" <= '4294967295' COLLATE "C") THEN d::bigint END`,
+ordered `NULLS FIRST`, with the full identity bytes last. It checks the
+significant length before it casts, so no suffix errors where the Rust parse
+yields none; a cast to numeric first fails on 131073 digits.
+`crates/project/tests/families_ordinal_sql.rs` checks this form against the
+Rust parse.

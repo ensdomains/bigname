@@ -1756,20 +1756,22 @@ write order; a source can carry several batches at one log, none of which is
 known to write one family key twice. Between batches the comparator's order
 is a disclosed precondition, not the adapter's write order: where batches of
 two sources write one key from one log, the fact with the higher ordinal
-(then the higher identity bytes) wins, not the one inserted last, and the
-served read may differ by provenance only. The one known instance is a
+(then the higher identity bytes) wins, not the one inserted last. The one known instance is a
 NameWrapped log, which writes the registry-node pointer from the wrapper
 (ordinal 4 or 5, depending on whether a SurfaceBound was emitted) and from the
 registry-read surface materialization (ordinal 0) with the same resolver: the
 families keep the wrapper row, the name's authority after NameWrapped, while
-the served read's generated-id tie-break keeps the registry row, so only
-`resource_id` and `source_family` differ (`families_ordering.rs`,
-`name_wrapped_pointer_keeps_the_wrapper_row`). A registrar log's registry-read
+the served read's generated-id tie-break keeps the registry row, so the
+resolver value agrees while the resource, source family and event attribution
+differ (`families_ordering.rs`, `name_wrapped_pointer_keeps_the_wrapper_row`,
+and `mirror_resolver/name_wrapped_sources.rs`, which drives the real adapter and
+the served mirror selector). The exemption is bounded to that value-equal pair; it is not
+a general exemption for cross-source value differences. A registrar log's registry-read
 materialization never meets a registrar `ResolverChanged` at the same log,
 because it arises only when the registrar event leaves the name's authority
 where it was. The served builders break the same ties by generated id today;
 the step that ports a served reader to the families (step 7) must use this
-rule with the SQL parse the glossary gives, not a bare bigint cast.
+rule with the SQL parse the glossary gives, which checks the digits before it casts.
 
 Undo rows are kept back to the lowest of: 256 blocks below the family marker,
 the chain's finalized block, its safe block, and the block an active repair
