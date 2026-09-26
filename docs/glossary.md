@@ -1929,6 +1929,17 @@ an orphaned block hash stays resolvable through lineage, which is how a stale
 row is told apart from a live one. Operator diagnostics read this table; product
 routes do not.
 
+<a id="publication-visible-event"></a>
+## Publication-visible event
+
+a normalized event a publication at a target block can read: activated
+(`consumer_visibility = 'activated'`), `canonical`, `safe` or `finalized`
+([canonicality](#canonicality)), at or below the target, and at the hash the
+canonical lineage holds for its height. It is the set the [owned key
+families](#owned-key-family)' intake reads (`crates/project/src/families/input.rs`),
+and every log read a [shadow read](#shadow-read)'s checks make takes only these
+events.
+
 <a id="raw-fact"></a>
 ## Raw facts
 
@@ -2308,6 +2319,16 @@ but general public reads are not enabled; (2) *shadow comparison*:
 running a new read surface in parallel with an existing one and diffing
 responses during a migration (the identity route's `profile=shadow`).
 
+## Shadow read
+
+a value computed from the [owned key families](#owned-key-family) by the
+readers in `bigname_storage::families::control`, compared with the value the
+production reader serves from today's tables at the same publication. Shadow
+reads run only in tests and the fixture-corpus harness. A differing field passes
+only as a disclosed same-block ordering case or under a named cause whose check
+holds for that field, and no API response uses a shadow read
+([projections](projections.md#owned-key-families)).
+
 ## Sidecar
 
 a retired legacy companion-table pattern that precomputed
@@ -2463,8 +2484,9 @@ runbook](runbooks/pipeline-monitoring.md#project-batch-writes)).
 per-key current state Project keeps for one kind of fact, such as a name's
 binding candidates, a resource's resolver pointer or a resolver's records at a
 node. A block writes only the keys its own events name, and each row holds
-what the latest events of its key left, clears included. The families are
-unread shadows until the per-block publication reads them
+what the latest events of its key left, clears included. No served path reads
+the families until the per-block publication does; the step 3
+[shadow readers](#shadow-read) read them in the test harnesses only
 ([projections](projections.md#owned-key-families)).
 
 The families carry labels F1 to F14, used in the difference lists, the table
