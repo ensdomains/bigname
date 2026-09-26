@@ -139,6 +139,18 @@ pub(crate) fn raw_text(value: &Value, field: &str) -> Option<String> {
     }
 }
 
+/// A boolean flag: a JSON boolean, or the string `"true"` or `"false"`, else null. It is true
+/// exactly when the served builders' `->> field = 'true'` holds.
+pub(crate) fn flag(value: &Value, field: &str) -> Value {
+    match value.get(field) {
+        Some(Value::Bool(flag)) => Value::Bool(*flag),
+        Some(Value::String(text)) if text == "true" || text == "false" => {
+            Value::Bool(text == "true")
+        }
+        _ => Value::Null,
+    }
+}
+
 /// `raw_text` lower-cased, as `lower(... ->> field)` reads an address.
 pub(crate) fn raw_lower(value: &Value, field: &str) -> Option<String> {
     raw_text(value, field).map(|text| text.to_ascii_lowercase())
