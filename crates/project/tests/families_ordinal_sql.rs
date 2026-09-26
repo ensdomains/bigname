@@ -22,13 +22,16 @@ SELECT CASE WHEN $2::bigint IS NOT NULL AND $3::bigint IS NOT NULL THEN (
           FROM regexp_match($1::text COLLATE "C", ':([0-9]+)$') m) digits
 ) END"#;
 
+/// A case's transaction and log index.
+type Indexes = (Option<i64>, Option<i64>);
+
 #[tokio::test]
 async fn the_sql_parse_matches_the_rust_parse() -> Result<()> {
     let fixture = Fixture::new("families_ordinal_sql", 1).await?;
     let nines = format!("p:{}", "9".repeat(131_073));
     let zero_prefixed = format!("p:{}7", "0".repeat(200_000));
     let both = (Some(0), Some(5));
-    let cases: Vec<(&str, (Option<i64>, Option<i64>), String)> = vec![
+    let cases: Vec<(&str, Indexes, String)> = vec![
         ("no transaction index", (None, Some(5)), "p:3".into()),
         ("no log index", (Some(0), None), "p:3".into()),
         ("no indexes", (None, None), "p:3".into()),
