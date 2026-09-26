@@ -5527,6 +5527,19 @@ async fn served_after_one_batch(
         .await?)
 }
 
+/// The events `name`'s row cites: its `selected_event_ids` and `raw_fact_refs`.
+async fn cited_events(pool: &PgPool, name: &str) -> Result<Value> {
+    Ok(sqlx::query_scalar(
+        "SELECT jsonb_build_object(
+             'selected_event_ids', provenance -> 'selected_event_ids',
+             'raw_fact_refs', provenance -> 'raw_fact_refs')
+         FROM name_current WHERE logical_name_id = $1",
+    )
+    .bind(name)
+    .fetch_one(pool)
+    .await?)
+}
+
 // A registered child whose path is cut before its own expiry: when the parent's subregistry is
 // cleared, Interpret releases the child by name and closes its ENSv2 binding. The child registry
 // then renews the detached token in the same block, from 2 to 3. When that expiry passes, the
@@ -5700,10 +5713,32 @@ async fn detached_child_resumed_then_rebuilt(
         );
     }
     let last = *targets.last().context("no target")?;
+    // The row cites the release without a name that decided it, and a rebuild cites the same.
+    let cited = cited_events(pool, &leaf).await?;
+    let release: i64 = sqlx::query_scalar(
+        "SELECT normalized_event_id FROM normalized_events
+         WHERE chain_id = $1 AND block_number = $2 AND logical_name_id IS NULL
+           AND event_kind = 'RegistrationReleased'",
+    )
+    .bind(chain)
+    .bind(lapse)
+    .fetch_one(pool)
+    .await?;
+    assert!(
+        cited["selected_event_ids"]
+            .as_array()
+            .is_some_and(|ids| ids.contains(&json!(release))),
+        "{cited}"
+    );
     assert_eq!(
         served_after_one_batch(pool, chain, last, &leaf).await?,
         served[served.len() - 1],
         "resumed batches and a full rebuild serve the same fields"
+    );
+    assert_eq!(
+        cited_events(pool, &leaf).await?,
+        cited,
+        "resumed batches and a full rebuild cite the same events"
     );
     Ok(())
 }
@@ -5878,10 +5913,16 @@ async fn a_replaced_registrys_lapse_presents_its_tombstone_over_a_live_reservati
             "right after the batch at {target}: {fields}"
         );
     }
+    let cited = cited_events(scratch.pool(), &leaf).await?;
     assert_eq!(
         served_after_one_batch(scratch.pool(), chain, 4, &leaf).await?,
         served[3],
         "resumed batches and a full rebuild serve the same fields"
+    );
+    assert_eq!(
+        cited_events(scratch.pool(), &leaf).await?,
+        cited,
+        "resumed batches and a full rebuild cite the same events"
     );
     scratch.cleanup().await
 }
@@ -6123,10 +6164,16 @@ async fn detached_lapse_retracted(chain: &str, retraction: LapseRetraction) -> R
         ),
         "right after the redo: {redone}"
     );
+    let cited = cited_events(pool, &leaf).await?;
     assert_eq!(
         served_after_one_batch(pool, chain, 3, &leaf).await?,
         redone,
         "the Project redo and a full rebuild serve the same fields"
+    );
+    assert_eq!(
+        cited_events(pool, &leaf).await?,
+        cited,
+        "the Project redo and a full rebuild cite the same events"
     );
     scratch.cleanup().await
 }
@@ -6210,7 +6257,9 @@ async fn a_redo_rebuilds_a_name_whose_deciding_release_is_no_longer_activated() 
         (Some("released"), None, None),
         "{redone}"
     );
+    let cited = cited_events(pool, &leaf).await?;
     assert_eq!(served_after_one_batch(pool, chain, 3, &leaf).await?, redone);
+    assert_eq!(cited_events(pool, &leaf).await?, cited);
     scratch.cleanup().await
 }
 
