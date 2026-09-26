@@ -1781,7 +1781,7 @@ COMMENT ON COLUMN project_wrapper_state.lifecycle_unwrapped IS
 COMMENT ON COLUMN project_wrapper_state.lifecycle_position IS
     'This value is the canonical position of the newest wrapper lifecycle event.';
 COMMENT ON COLUMN project_wrapper_state.unwrapped_position IS
-    'This value is the canonical position of the latest NameUnwrapped of the resource, kept when a later mint or holder grant becomes the newest lifecycle event; a re-wrap emits NameUnwrapped to the zero address before its NameWrapped (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L878-L903 @ ens_v1@91c966f).';
+    'This value is the canonical position of the latest NameUnwrapped of the resource, kept when a later mint or holder grant becomes the newest lifecycle event; a re-wrap over a still-held token emits NameUnwrapped to the zero address before its NameWrapped (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L878-L903 @ ens_v1@91c966f).';
 
 CREATE TABLE IF NOT EXISTS project_registry_node_state (
     chain_id text NOT NULL,
