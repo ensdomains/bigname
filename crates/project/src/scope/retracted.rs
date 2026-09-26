@@ -4,10 +4,14 @@ use crate::{ProjectError, Result, scope::Window};
 
 mod handoffs;
 mod resolvers;
-use handoffs::seed_child_registration_history;
+#[cfg(test)]
+mod visibility_tests;
+use handoffs::{seed_child_registration_history, seed_retracted_migration_registry_associations};
 use resolvers::{seed_relinked_resolvers, seed_resolvers};
 
-/// Retain keys whose cited events Interpret deleted during redo so Project can retract losing-fork output.
+/// Retain keys whose cited events are no longer readable, so Project can retract losing-fork
+/// output: a cited event is unreadable when it was deleted, is no longer canonical, or is no longer
+/// activated.
 pub(super) async fn seed(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
@@ -25,6 +29,7 @@ pub(super) async fn seed(
     seed_children(transaction, chain_id).await?;
     seed_child_registration_history(transaction, chain_id, window.from_block, window.to_block)
         .await?;
+    seed_retracted_migration_registry_associations(transaction, chain_id).await?;
     seed_resources(transaction, chain_id, window.from_block, window.to_block).await?;
     handoffs::seed_wrapper_effect_resources(transaction, chain_id).await?;
     seed_account_permissions(transaction, chain_id).await?;
@@ -52,6 +57,7 @@ async fn seed_account_permissions(
               SELECT 1 FROM normalized_events event
               LEFT JOIN chain_lineage lineage USING (chain_id, block_hash, block_number)
               WHERE event.normalized_event_id = citation.event_id::bigint
+                AND event.consumer_visibility = 'activated'
                 AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
                 AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
           )
@@ -98,6 +104,7 @@ async fn seed_names(
                AND lineage.block_hash = event.block_hash
                AND lineage.block_number = event.block_number
               WHERE event.normalized_event_id = citation.event_id::bigint
+                AND event.consumer_visibility = 'activated'
                 AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
                 AND (
                     (event.block_number IS NULL AND event.block_hash IS NULL)
@@ -185,6 +192,7 @@ async fn seed_children(transaction: &mut Transaction<'_, Postgres>, chain_id: &s
                    AND lineage.block_hash = event.block_hash
                    AND lineage.block_number = event.block_number
                   WHERE event.normalized_event_id = citation.event_id::bigint
+                    AND event.consumer_visibility = 'activated'
                     AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
                     AND (
                         (event.block_number IS NULL AND event.block_hash IS NULL)
@@ -306,6 +314,7 @@ async fn seed_resources(
                  AND lineage.block_hash = event.block_hash
                  AND lineage.block_number = event.block_number
                 WHERE event.normalized_event_id = citation.event_id::bigint
+                  AND event.consumer_visibility = 'activated'
                   AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
                   AND (
                       (event.block_number IS NULL AND event.block_hash IS NULL)
@@ -404,6 +413,7 @@ async fn seed_primary(transaction: &mut Transaction<'_, Postgres>, chain_id: &st
                AND lineage.block_hash = event.block_hash
                AND lineage.block_number = event.block_number
               WHERE event.normalized_event_id = citation.event_id::bigint
+                AND event.consumer_visibility = 'activated'
                 AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
                 AND (
                     (event.block_number IS NULL AND event.block_hash IS NULL)

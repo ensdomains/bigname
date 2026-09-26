@@ -141,8 +141,7 @@ const REGISTRY_ONLY_HANDOFFS: &str = "/* project:builders.name_authority.stage.r
 /// namehash: through a binding of that resource to the name, or through the registrar lease a
 /// `NameWrapped` row of the name recorded in `wrapped_registrar_resource_id`. The second way
 /// leaves out the registrar transfer that moves the token into the NameWrapper in the wrap's own
-/// transaction: it names the NameWrapper contract, not a holder. Rows named the second way are
-/// listed in `project_wrapper_linked_events`.
+/// transaction: it names the NameWrapper contract, not a holder.
 /// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L264-L265 @ ens_v1@91c966f)
 async fn bind_resource_events(transaction: &mut Transaction<'_, Postgres>) -> Result<()> {
     for statement in [
@@ -156,9 +155,6 @@ async fn bind_resource_events(transaction: &mut Transaction<'_, Postgres>) -> Re
                'ExpiryChanged', 'TokenControlTransferred'
            )
            AND lower(surface.namehash) = lower(event.after_state ->> 'namehash')",
-        "/* project:builders.name_authority.stage.bind_resource_events.create_wrapper_linked_events */ CREATE TEMP TABLE project_wrapper_linked_events (
-             normalized_event_id bigint PRIMARY KEY
-         ) ON COMMIT DROP",
         BIND_WRAPPER_LINKED_EVENTS,
     ] {
         sqlx::query(statement)
@@ -173,30 +169,25 @@ async fn bind_resource_events(transaction: &mut Transaction<'_, Postgres>) -> Re
 
 const BIND_WRAPPER_LINKED_EVENTS: &str =
     "/* project:builders.name_authority.stage.bind_wrapper_linked_events */
-    WITH named AS (
-        UPDATE project_events event SET logical_name_id = wrapper.logical_name_id
-        FROM project_events wrapper
-        WHERE event.logical_name_id IS NULL
-          AND event.source_family = 'ens_v1_registrar_l1'
-          AND event.event_kind IN (
-              'RegistrationGranted', 'RegistrationRenewed', 'RegistrationReleased',
-              'ExpiryChanged', 'TokenControlTransferred'
-          )
-          AND wrapper.source_family = 'ens_v1_wrapper_l1'
-          AND wrapper.event_kind = 'SurfaceBound'
-          AND wrapper.logical_name_id IS NOT NULL
-          AND wrapper.after_state ->> 'wrapped_registrar_resource_id' = event.resource_id::text
-          AND lower(wrapper.after_state ->> 'node') = lower(event.after_state ->> 'namehash')
-          AND (
-              event.event_kind <> 'TokenControlTransferred'
-              OR event.transaction_hash IS DISTINCT FROM wrapper.transaction_hash
-              OR lower(event.after_state ->> 'to') IS DISTINCT FROM
-                 lower(wrapper.raw_fact_ref ->> 'emitting_address')
-          )
-        RETURNING event.normalized_event_id
-    )
-    INSERT INTO project_wrapper_linked_events
-    SELECT DISTINCT normalized_event_id FROM named";
+    UPDATE project_events event SET logical_name_id = wrapper.logical_name_id
+    FROM project_events wrapper
+    WHERE event.logical_name_id IS NULL
+      AND event.source_family = 'ens_v1_registrar_l1'
+      AND event.event_kind IN (
+          'RegistrationGranted', 'RegistrationRenewed', 'RegistrationReleased',
+          'ExpiryChanged', 'TokenControlTransferred'
+      )
+      AND wrapper.source_family = 'ens_v1_wrapper_l1'
+      AND wrapper.event_kind = 'SurfaceBound'
+      AND wrapper.logical_name_id IS NOT NULL
+      AND wrapper.after_state ->> 'wrapped_registrar_resource_id' = event.resource_id::text
+      AND lower(wrapper.after_state ->> 'node') = lower(event.after_state ->> 'namehash')
+      AND (
+          event.event_kind <> 'TokenControlTransferred'
+          OR event.transaction_hash IS DISTINCT FROM wrapper.transaction_hash
+          OR lower(event.after_state ->> 'to') IS DISTINCT FROM
+             lower(wrapper.raw_fact_ref ->> 'emitting_address')
+      )";
 
 async fn ownerless_registry(transaction: &mut Transaction<'_, Postgres>) -> Result<()> {
     sqlx::query(

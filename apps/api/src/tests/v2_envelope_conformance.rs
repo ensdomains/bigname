@@ -1595,7 +1595,7 @@ async fn seed_v2_conformance_namespace_manifests(database: &TestDatabase) -> Res
             "ens",
             "ens_v2_registry_l1",
             "ethereum-sepolia",
-            "ens_v2_sepolia_post_audit",
+            "ens_v2_sepolia_20260915",
             1,
             "active",
             "ensip15@ens-normalize-0.1.1",

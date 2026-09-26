@@ -3,6 +3,93 @@
 Status: Accepted
 Date: 2026-09-24
 Amended: 2026-09-25 (support follows the authority decision without a registrar qualification)
+Amended: 2026-09-25 (the remaining ENSv2 authority exceptions are removed)
+Amended: 2026-09-25 (a released or expired ENSv2 registration stays with ENSv2, product ruling)
+Amended: 2026-09-26 (the registration section follows authority selection for a nameless path-expiry release, product ruling)
+Amended: 2026-09-26 (a lapsed last-bound registration is presented over a live reservation elsewhere, ruling applied by the reviewer)
+
+## 2026-09-25 Amendment: The Remaining ENSv2 Authority Exceptions Are Removed
+
+The rule in this ADR now applies without the exceptions that the earlier
+decisions kept. Linear TYR-36 step 6.
+
+- The root, `eth`, `reverse`, and `addr.reverse` are no longer
+  classified as shared ENS infrastructure. They follow the same rule as every
+  other name: a name among them with an open ENSv2 binding selects ENSv2 and
+  its authority epoch starts at that binding, like any other. The deployment
+  registers `eth` and `reverse` in the root registry; this does not make all
+  four names ordinary root-registry registrations.
+  (upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ETHRegistry.ts:L36-L48 @ ens_v2_sepolia_20260916@366de741)
+  (upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ReverseMirror.ts:L25-L37 @ ens_v2_sepolia_20260916@366de741)
+- The released ENSv2 regime, the rule that kept a released name under ENSv2
+  across its later facts so that a regrant continued the old ENSv2 authority,
+  is removed, and a simpler rule takes its place (product ruling of
+  2026-09-25): a released or expired ENSv2 registration stays with ENSv2. When
+  the latest lifecycle fact of the ENSv2 registration a name was last bound to
+  is its release, by `unregister` or by lapsing at expiry, and no ENSv2
+  registration is current, the name is served as the
+  [released v2 authority](../glossary.md#released-v2-authority) tombstone,
+  unregistered, whatever ENSv1 holds, a live ENSv1 lease included. Only a
+  new ENSv2 registration, or a later ENSv2 reservation that is still live,
+  changes that. The reservation defers to ENSv1 like any reservation, but only
+  while it is live: when it is unregistered or lapses, the released ENSv2
+  selection returns, and a reservation already expired when it is written
+  never defers. The ENSv2 contracts never route such a
+  label back to ENSv1: `unregister` writes the release time as the entry's
+  expiry, the registry returns no resolver for an expired entry, and a
+  `WrapperRegistry` stops answering with `ENSV1Resolver` for any label whose
+  stored expiry is nonzero.
+  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L196-L207 @ ens_v2@a971bd64)
+  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L255-L258 @ ens_v2@a971bd64)
+  (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L294-L297 @ ens_v2@a971bd64)
+- The name's registration section follows the same selection (product ruling
+  of 2026-09-26). It is one selection, not two: when authority selection
+  chooses a released ENSv2 tombstone, the registration section serves the
+  lifecycle fact that decided it, on the tombstone's resource and binding. A
+  path-expiry release that Interpret writes without a name, on the resource the
+  name was last bound to, is such a fact, so a name cut from its registry path
+  whose only release is that one reads as released, not as its old grant. When
+  a named path-cut release comes before that expiry release, the served
+  release, `released_at` and `expiry` come from the later expiry release.
+  When the deciding fact is the end of a later reservation, the tombstone's
+  `expiry` and `released_at` are that end's. A path-expiry end carries its
+  expiry. An end by `unregister` is an explicit release, and an explicit ENSv2
+  release serves no expiry, so that tombstone serves none: neither the
+  last-bound registration's expiry nor the reservation's.
+- Decision, a ruling applied by the reviewer on 2026-09-26 under Tate's
+  standing rule to follow the chain, Tate informed and not objecting: a name
+  whose last-bound ENSv2 registration R1 lapses or is released while a later
+  reservation of the name on another resource R2 is still live, for example in
+  the registry that replaced R1's on the parent's current path, is served as
+  R1's released tombstone. The registration section shows the lifecycle fact
+  of the registration the name was last bound to; a live reservation elsewhere
+  is not cancelled by it. The registry keeps state per entry, and R1's lapse
+  does not change R2's entry, which stays reserved on chain until it lapses or
+  is unregistered. Only a new registration, or a reservation later than R1's
+  release, moves the name. The two-registry case is exercised by an
+  Interpret-to-Project integration test using hand-encoded contract-shaped logs
+  and seeded registry discovery; it is not captured contract execution
+  (`a_replaced_registrys_lapse_presents_its_tombstone_over_a_live_reservation_elsewhere`).
+  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L196-L207 @ ens_v2@a971bd64)
+  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L425-L471 @ ens_v2@a971bd64)
+  (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L628-L660 @ ens_v2@a971bd64)
+- An activated ENSv1→ENSv2 migration and a positive ENSv2 child registration
+  are no longer [authority proofs](../glossary.md#authority-proof). The
+  migration is served history (`migrated_at`, `is_migrated`) and selects no
+  arm, binding or epoch start; the child registration proof is removed. The
+  ENSv2 registration a migration or a child registration makes is selected
+  like any other registration in an admitted registry.
+- The deployment-profile classifier (the `deployment_profile` value in
+  `authority_selection` provenance) and the two retired Sepolia deployment
+  labels `ens_v2_sepolia_post_audit` and `ens_v2_sepolia_hackathon` are removed
+  too. They were classification, not an authority rule: they chose which reason
+  string a refusal carried and never which arm held a name.
+- The wrapper-specific `unsupported` control branch in Project and the
+  wrapper-specific control refusal in the API are removed (ruling R2 of TYR-36).
+  A wrapped ENSv1 name's control section follows the ordinary control fold,
+  like any other ENSv1 name's. The control fields of a name wrapped after its
+  registration are not yet right, since `registry_owner` can hold the account
+  the wrapped token was minted to; that is tracked as TYR-49.
 
 ## 2026-09-25 Amendment: Support Follows The Authority Decision
 
@@ -16,8 +103,8 @@ migration successor proof or child registration proof is needed. The reason
 `ensv2_exact_name_profile_shadow` and its public name
 `exact_name_profile_not_supported` are no longer produced or mapped. On Sepolia
 the root-registry names `eth` and `reverse` become supported
-(upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ETHRegistry.ts:L46 @ ens_v2_sepolia_20260916@366de741)
-(upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ReverseMirror.ts:L35 @ ens_v2_sepolia_20260916@366de741). Admitting a
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ETHRegistry.ts:L36-L48 @ ens_v2_sepolia_20260916@366de741)
+(upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ReverseMirror.ts:L25-L37 @ ens_v2_sepolia_20260916@366de741). Admitting a
 chain's ENSv2 [source families](../glossary.md#source-family) is therefore the decision that exposes its names:
 the `exact_name_profile` flag stays a namespace summary for `/v1/namespaces` and
 no longer gates serving, so a future Mainnet ENSv2 admission serves each
@@ -39,8 +126,10 @@ arms was refused: its profile was served identity-only with the reason
 `independent_ens_deployments_overlap` on Sepolia or
 `conflicting_current_ens_authority` on Mainnet. The rule treated choosing an arm
 without a proof as inventing an authority boundary. Only the four exact
-[shared ENS infrastructure](../glossary.md#shared-ens-infrastructure) names were
-excepted.
+shared ENS infrastructure names (the root, `eth`, `reverse` and `addr.reverse`)
+were excepted; the
+[2026-09-25 amendment](#2026-09-25-amendment-the-remaining-ensv2-authority-exceptions-are-removed)
+removes that exception.
 
 On Sepolia that refused 652 names on 2026-09-23. None of them was live on both
 arms at once. In 649 of them one arm held only history: 466 names live on ENSv1
@@ -92,6 +181,15 @@ The proof the refusal waited for is therefore a product of the migration
 scripts, and the chain does not need it to decide who holds a name.
 
 ## Decision
+
+> **Superseded in part.** This section is the original 2026-09-24 decision,
+> kept as the record of what was decided then. The two 2026-09-25 amendments at
+> the top of this ADR supersede it where they differ: no authority proof,
+> released regime or shared-infrastructure classification remains, a
+> released or expired ENSv2 registration stays with ENSv2 except while a later
+> ENSv2 reservation of the label is live, an activated migration is served
+> history only, and support needs no further qualification. Read the
+> amendments for the current rule.
 
 bigname follows the chain. For an ordinary ENS name:
 
@@ -159,18 +257,27 @@ Resolver finds no resolver and the lookup fails.
 (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/universalResolver/AbstractNormalizedUniversalResolver.sol:L406-L408 @ ens_v2_sepolia_20260916@366de741)
 bigname instead lets ENSv1 decide such a name, which is what the ENSv1 registry
 itself records. The premigration reservation normally covers every live ENSv1
-name, so this case arises only for a live ENSv1 name whose reservation was
-used and released, or that was registered on ENSv1 after the premigration
-snapshot. The difference is listed in
+name, so this case arises only for a live ENSv1 name that never had an ENSv2
+registration: one registered on ENSv1 after the premigration snapshot, or whose
+reservation lapsed without being used. A name whose ENSv2 registration was
+released stays with ENSv2 under the 2026-09-25 amendment, as the Universal
+Resolver does. The difference is listed in
 [`upstream.md`](../upstream.md#ensv1-authority-without-an-ensv2-entry).
 
 ## Consequences
 
+- Under the 2026-09-25 amendment, a name live on ENSv1 whose ENSv2
+  registration was granted and released (466 of the Sepolia names counted on
+  2026-09-23 had that shape) reads as released under ENSv2, not as its ENSv1
+  lease.
 - Names that were identity-only with `independent_ens_deployments_overlap` or
   `conflicting_current_ens_authority` get a selected authority. A name with a
-  current ENSv2 registration selects ENSv2; any other such name selects ENSv1,
-  including as a released ENSv1 registration. On Sepolia this covers all 652
-  names refused on 2026-09-23. When this ADR was accepted, a name whose
+  current ENSv2 registration selects ENSv2. A name whose ENSv2 registration
+  was released or has expired selects ENSv2 as a released tombstone, except
+  while a later ENSv2 reservation of the label is live, when it selects its
+  live ENSv1 registration until the reservation ends. Any other such name
+  selects ENSv1, including as a released ENSv1 registration. On Sepolia this
+  covers all 652 names refused on 2026-09-23. When this ADR was accepted, a name whose
   selected arm is ENSv2 also needed a per-name exact-name profile
   qualification (an admitted `ETHRegistrar` event, a proven ENSv1→ENSv2
   migration successor, or a positive child registration proof) and otherwise stayed

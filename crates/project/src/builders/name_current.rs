@@ -3,6 +3,10 @@ use sqlx::{Postgres, Transaction};
 
 pub(in crate::builders) mod query;
 
+#[cfg(test)]
+#[path = "name_current/lifecycle_key_tests.rs"]
+mod lifecycle_key_tests;
+
 pub(super) async fn build(
     transaction: &mut Transaction<'_, Postgres>,
     chain_id: &str,
