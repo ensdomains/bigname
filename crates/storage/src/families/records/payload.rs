@@ -104,6 +104,10 @@ fn value(payload: &Value) -> Value {
 /// (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L22-L30 @ ens_v1@91c966f)
 /// (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L36-L40 @ ens_v1@91c966f)
 /// (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L80-L85 @ ens_v1@91c966f)
+/// The Basenames resolver stores and reads the same way: `setAddr(node, a)` writes the twenty
+/// address bytes under coin 60, and the coin read falls back to the default only for empty bytes.
+/// (upstream: .refs/basenames/src/L2/resolver/AddrResolver.sol:L48-L50 @ basenames@1809bbc)
+/// (upstream: .refs/basenames/src/L2/resolver/AddrResolver.sol:L93-L100 @ basenames@1809bbc)
 pub(crate) fn coin60_zero_address_is_absent(
     payload: &Value,
     event_source_family: &str,

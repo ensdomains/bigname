@@ -68,8 +68,10 @@ pub async fn load_family_reverse_claim(
     let claim_identity: Option<String> = if node_claimed {
         match (&reverse_node, &pointer) {
             (Some(node), Some((_, Some(resolver)))) => {
-                // The claim at the node's current resolver. While the family keeps one row per
-                // node, a row at another resolver means the claim today's reader serves is lost.
+                // The claim at the node's current resolver. The family keys claims by node and
+                // resolver, so a row at another resolver is not this node's claim; when only such
+                // a row exists, the claim today's reader serves is not in the family (reported as
+                // `node_claim_at_other_resolver`).
                 let claim = sqlx::query(
                     "SELECT event_identity
                      FROM bigname_phase.project_reverse_node_claim

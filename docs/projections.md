@@ -1901,6 +1901,14 @@ entry maps them to tables and reducers:
 - F4 keeps the ENSv1 registry, registrar and wrapper families only, so a
   `ResolverChanged` of another family with no resource (a Basenames reverse
   node, for instance) lands in no family table.
+- F4 keys a pointer to its child node first (`pointer_node` in
+  `crates/project/src/families/keys.rs`), while today's reverse claim matches a
+  pointer's `node` only. A state-derived ENSv1 `ResolverChanged` that carries
+  the parent in `node` and a reverse node in `child_node` (a reverse node
+  reclaimed with the same resolver after its reverse name was wrapped and
+  unwrapped) is that reverse node's pointer here and skipped there; the
+  resolver agrees and `claim_provenance.resolver_event_id` differs (pinned in
+  `crates/project/tests/primary_names_reverse_node/reclaim_after_unwrap.rs`).
 - F5 keeps the unnamed resolver clear the interpreter emits at an ENSv2
   root-registry TLD expiry. The served pointer read takes named
   `ResolverChanged` only, never sees that clear, and keeps an inventory row the

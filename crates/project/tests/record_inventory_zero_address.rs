@@ -152,7 +152,13 @@ async fn default_fallback_tracks_exact_replacement_and_version_reset() -> Result
 
 /// An exact coin-60 record cleared to empty bytes lets the ENSIP-19 default answer coin 60; one
 /// cleared to the zero address carries `exact_nonempty_not_found_record_keys` and keeps shadowing
-/// the default. Both readers list the default's address at coin 60 only in the first case.
+/// the default. Both readers list the default's address at coin 60 only in the first case. The
+/// resolvers read the default address only when the coin's own stored bytes are empty, and a
+/// zero-address write is stored as twenty nonempty bytes.
+/// (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L22-L30 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L80-L85 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v2/contracts/src/resolver/AbstractRecordResolver.sol:L172-L178 @ ens_v2@a971bd64)
+/// (upstream: .refs/basenames/src/L2/resolver/AddrResolver.sol:L93-L100 @ basenames@1809bbc)
 #[tokio::test]
 async fn the_nonempty_absence_marker_keeps_the_default_off_coin_60_in_both_readers() -> Result<()> {
     let mut empty = composed_fixture(true)?;
