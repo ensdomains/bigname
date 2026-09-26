@@ -2,7 +2,16 @@
 -- project_wrapper_state (TYR-36 step 2): the newest NameWrapped mint,
 -- NameUnwrapped or holder grant or revoke of a wrapper resource, whether it
 -- leaves the resource unwrapped, and the latest unwrap, which the served
--- permissions summary reads. Rows written before lack them, so a database
+-- permissions summary reads. The pinned NameWrapper emits NameWrapped only
+-- from _wrap, right after minting the node's token, and NameUnwrapped when
+-- _unwrap burns the token or when a mint over a still-held token burns it
+-- first, so a re-wrap closes the old epoch before the new NameWrapped
+-- (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L878-L903 @ ens_v1@91c966f)
+-- (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1022-L1031 @ ens_v1@91c966f).
+-- The upgrade path, which no manifest admits, burns the token without
+-- NameUnwrapped; its holder revoke leaves the resource unwrapped
+-- (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L483-L509 @ ens_v1@91c966f).
+-- Rows written before lack them, so a database
 -- with the older shape resets every owned key family and the next family run
 -- rebuilds them; the families are unread by every served path. An empty
 -- schema-migration database has no phase baseline yet, so this migration is a
@@ -68,11 +77,11 @@ COMMENT ON TABLE bigname_phase.project_wrapper_state IS
 $ddl$;
 EXECUTE $ddl$
 COMMENT ON COLUMN bigname_phase.project_wrapper_state.lifecycle_source IS
-    'This value is the source of the newest wrapper lifecycle event of the resource: NameWrapped, NameUnwrapped, holder_grant or holder_revoke (resource_summary.rs wrapper_lifecycles).'
+    'This value is the source of the newest wrapper lifecycle event of the resource: NameWrapped, NameUnwrapped, holder_grant or holder_revoke (resource_summary.rs wrapper_lifecycles). NameWrapped is the mint: the pinned NameWrapper emits it only from _wrap, right after minting the token of the node (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L878-L903 @ ens_v1@91c966f).'
 $ddl$;
 EXECUTE $ddl$
 COMMENT ON COLUMN bigname_phase.project_wrapper_state.lifecycle_unwrapped IS
-    'This value is true when the newest wrapper lifecycle event leaves the resource unwrapped: a NameUnwrapped or a holder revoke with no powers. The served wrapper restrictions are served only while it is false.'
+    'This value is true when the newest wrapper lifecycle event leaves the resource unwrapped: a NameUnwrapped or a holder revoke with no powers. The pinned NameWrapper emits NameUnwrapped when _unwrap burns the token (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1022-L1031 @ ens_v1@91c966f) and when a mint burns a still-held token first (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L878-L903 @ ens_v1@91c966f); its upgrade, which no manifest admits, burns without NameUnwrapped, so there only the holder revoke leaves the resource unwrapped (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L483-L509 @ ens_v1@91c966f). The served wrapper restrictions are served only while it is false.'
 $ddl$;
 EXECUTE $ddl$
 COMMENT ON COLUMN bigname_phase.project_wrapper_state.lifecycle_position IS
@@ -80,7 +89,7 @@ COMMENT ON COLUMN bigname_phase.project_wrapper_state.lifecycle_position IS
 $ddl$;
 EXECUTE $ddl$
 COMMENT ON COLUMN bigname_phase.project_wrapper_state.unwrapped_position IS
-    'This value is the canonical position of the latest NameUnwrapped of the resource, kept when a later mint or holder grant becomes the newest lifecycle event.'
+    'This value is the canonical position of the latest NameUnwrapped of the resource, kept when a later mint or holder grant becomes the newest lifecycle event; a re-wrap emits NameUnwrapped to the zero address before its NameWrapped (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L878-L903 @ ens_v1@91c966f).'
 $ddl$;
 END
 $migration$;
