@@ -17991,8 +17991,17 @@ async fn mixed_authority_expiry_serves_the_released_v2_summary_on_both_paths() -
     fresh.cleanup().await
 }
 
+// A registration on the bound resource, a reservation of the name on another resource at block 2,
+// then the registration's path-expiry release at block 3. The release is the later fact of the
+// registration the name was last bound to, so authority selection keeps the name as the released
+// ENSv2 tombstone on that resource. The registration section serves the same fact (product ruling
+// of 2026-09-26, one selection): released, with the grant's expiry since this release carries
+// none, on the tombstone's resource and binding. Before, the section ran its own choice and served
+// the earlier reservation as `reserved` with no resource, beside authority provenance that named
+// the tombstone's resource.
 #[tokio::test]
-async fn surviving_reservation_drives_summary_after_other_resource_expires() -> Result<()> {
+async fn an_earlier_reservation_elsewhere_gives_way_to_the_bound_registrations_expiry() -> Result<()>
+{
     const REGISTERED_RESOURCE: &str = "00000000-0000-0000-0000-0000000008a1";
     const RESERVED_RESOURCE: &str = "00000000-0000-0000-0000-0000000008a2";
     const RESERVED_LINEAGE: &str = "00000000-0000-0000-0000-0000000008a4";
@@ -18149,50 +18158,24 @@ async fn surviving_reservation_drives_summary_after_other_resource_expires() -> 
     .bind(logical_name_id)
     .fetch_one(scratch.pool())
     .await?;
+    let registration = &incremental["declared_summary"]["registration"];
+    assert_eq!(registration["status"], "released");
+    assert_eq!(registration["latest_event_kind"], "RegistrationReleased");
+    assert_eq!(registration["expiry"], 3);
+    assert_eq!(registration["registered_at"], "1970-01-01T00:00:01+00:00");
+    assert_eq!(registration["registrant"], Value::Null);
+    assert_eq!(registration["authority_kind"], Value::Null);
     assert_eq!(
-        incremental["declared_summary"]["registration"]["status"],
-        "reserved"
-    );
-    assert_eq!(
-        incremental["declared_summary"]["registration"]["latest_event_kind"],
-        "RegistrationReserved"
-    );
-    assert_eq!(
-        incremental["declared_summary"]["registration"]["expiry"],
-        100
-    );
-    assert_eq!(
-        incremental["declared_summary"]["control"]["status"],
-        "reserved"
-    );
-    assert_eq!(
-        incremental["declared_summary"]["registration"]["registrant"],
-        Value::Null
-    );
-    assert_eq!(
-        incremental["declared_summary"]["registration"]["registered_at"],
-        Value::Null
-    );
-    assert_eq!(
-        incremental["declared_summary"]["registration"]["authority_kind"],
-        Value::Null
-    );
-    assert_eq!(
-        incremental["declared_summary"]["control"]["registrant"],
-        Value::Null
+        incremental["declared_summary"]["control"],
+        json!({"status":"unregistered"})
     );
     assert_eq!(
         incremental["declared_summary"]["resolver"]["address"],
         Value::Null
     );
-    assert_eq!(
-        incremental["resource_id"],
-        Value::Null,
-        "the reservation-selected row exposed a registration resource",
-    );
-    assert_eq!(incremental["token_lineage_id"], Value::Null);
-    assert_eq!(incremental["surface_binding_id"], Value::Null);
-    assert_eq!(incremental["binding_kind"], Value::Null);
+    assert_eq!(incremental["resource_id"], REGISTERED_RESOURCE);
+    assert_eq!(incremental["surface_binding_id"], BINDING);
+    assert_eq!(incremental["binding_kind"], "declared_registry_path");
 
     run_project(scratch.pool(), chain, None, RunMode::Normal, 0, 3).await?;
     normalize_projection_clocks(scratch.pool()).await?;
