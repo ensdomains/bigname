@@ -57,9 +57,9 @@ fn cases() -> Vec<Case> {
         ),
         // One ordinal on both sides: the identity bytes decide.
         case("equal ordinals", "a:5", "b:5", both),
-        // Without a transaction or a log index there is no ordinal, so bytes decide.
-        case("no transaction index", "e:10", "e:2", (None, Some(5))),
-        case("no log index", "e:10", "e:2", (Some(0), None)),
+        // A synthesised event has neither index, so it has no ordinal and bytes decide. Every
+        // family table these helpers read requires both indexes or neither, and so does
+        // normalized_events, whose positions the JSON positions copy.
         case("synthesised", "activation:10", "activation:9", (None, None)),
     ]
 }

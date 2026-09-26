@@ -1,15 +1,12 @@
 //! The pointer reads of the family shadow readers, over tables installed by their own
 //! migrations:
-//! - `load_family_link_selection`: the latest link per (resolver, node), whatever its
-//!   storage-model annotation; the link at the name's own node wins unless it is absent or a clear
-//!   (record id `0`); then the link at the empty-name node, the resolver's default record, serves,
-//!   unless it is a clear too.
+//! - `load_family_link_selection`: the latest link per (resolver, node); the link at the name's
+//!   own node wins unless it is absent or a clear (record id `0`); then the link at the empty-name
+//!   node, the resolver's default record, serves, unless it is a clear too.
 //! - `load_family_alias_source_pointer`: the resource's current pointer, rejected when null, zero
 //!   or empty, never an older pointer.
 //! - `load_family_wildcard_source`: the latest non-zero pointer, with the latest pointer or
-//!   version event as its boundary. Its null and empty cases guard the reader against rows the F5
-//!   reducer does not produce, since it records a non-zero pointer only for a non-empty, non-zero
-//!   resolver.
+//!   version event as its boundary.
 use anyhow::Result;
 use bigname_storage::families::topology::{
     LinkSelection, load_family_alias_source_pointer, load_family_link_selection,
@@ -44,16 +41,6 @@ async fn install(pool: &PgPool) -> Result<()> {
 }
 
 async fn link(pool: &PgPool, node: &str, record_id: &str, block: i64) -> Result<()> {
-    link_of_model(pool, node, record_id, block, Some("resolver_record_id")).await
-}
-
-async fn link_of_model(
-    pool: &PgPool,
-    node: &str,
-    record_id: &str,
-    block: i64,
-    storage_model: Option<&str>,
-) -> Result<()> {
     sqlx::query(
         "INSERT INTO bigname_phase.project_resolver_link (chain_id, resolver_address, node,
              block_number, transaction_index, log_index, event_identity, record_id,
@@ -69,7 +56,7 @@ async fn link_of_model(
     .bind(block)
     .bind(format!("link:{node}:{block}"))
     .bind(record_id)
-    .bind(storage_model)
+    .bind("resolver_record_id")
     .execute(pool)
     .await?;
     Ok(())
@@ -150,33 +137,6 @@ where
 async fn exact_link_then_default_with_record_zero_as_a_clear() -> Result<()> {
     with_database("family_link_selection", |pool| async move {
         exercise(&pool).await
-    })
-    .await
-}
-
-// A link row with an unexpected storage-model annotation, or none, still serves its record like
-// any other link: the newest link per (resolver, node) wins (Tate, 2026-09-26), as on chain, and
-// the annotation plays no part. No producer writes such a row; the record-ID adapter stamps
-// `resolver_record_id` on every `Linked`.
-#[tokio::test]
-async fn a_link_with_an_unexpected_annotation_serves_like_any_other() -> Result<()> {
-    with_database("family_link_models", |pool| async move {
-        link_of_model(&pool, NAME, "5", 2, Some("node")).await?;
-        link_of_model(&pool, DEFAULT_NODE, "7", 2, None).await?;
-        // The exact link serves, so the default is not read; another node gets the default.
-        let exact = selection(&pool, NAME).await?;
-        assert_eq!(served(&exact), Some("5"));
-        assert!(exact.as_ref().is_some_and(|s| s.default.is_none()));
-        assert_eq!(served(&selection(&pool, OTHER).await?), Some("7"));
-        // A newer link replaces the older one whatever either annotation says.
-        link(&pool, NAME, "6", 3).await?;
-        assert_eq!(served(&selection(&pool, NAME).await?), Some("6"));
-        link_of_model(&pool, NAME, "9", 4, Some("node")).await?;
-        assert_eq!(served(&selection(&pool, NAME).await?), Some("9"));
-        // An annotated clear is still a clear and hands over to the default.
-        link_of_model(&pool, NAME, "0", 5, None).await?;
-        assert_eq!(served(&selection(&pool, NAME).await?), Some("7"));
-        Ok(())
     })
     .await
 }
@@ -266,20 +226,16 @@ async fn alias_pointer_rejects_null_zero_and_empty() -> Result<()> {
 }
 
 // The wildcard read keeps the latest non-zero pointer through a later zero clear, with the clear
-// as its boundary. The null and empty cases guard the reader against rows the F5 reducer does not
-// produce: it records a non-zero pointer only for a non-empty, non-zero resolver
-// (crates/project/src/families/resolver.rs). The served wildcard lateral does admit a null or
-// empty pointer; docs/projections.md lists that difference under F5.
+// as its boundary. The F5 reducer records a non-zero pointer only for a non-empty, non-zero
+// resolver (crates/project/src/families/resolver.rs), so no row it writes pairs a populated
+// position with a null or empty address; docs/projections.md lists the served wildcard lateral's
+// admission of those under F5.
 #[tokio::test]
 async fn wildcard_source_keeps_the_historical_pointer_through_a_clear() -> Result<()> {
     with_database("family_wildcard_source", |pool| async move {
         let cleared = Uuid::from_u128(1);
         pointer(&pool, cleared, Some(ZERO), Some(Some(OLDER))).await?;
-        let null_pointer = Uuid::from_u128(2);
-        pointer(&pool, null_pointer, None, Some(None)).await?;
-        let empty_pointer = Uuid::from_u128(3);
-        pointer(&pool, empty_pointer, Some(""), Some(Some(""))).await?;
-        let never = Uuid::from_u128(4);
+        let never = Uuid::from_u128(2);
         pointer(&pool, never, Some(ZERO), None).await?;
 
         let source = load_family_wildcard_source(&pool, CHAIN, cleared)
@@ -289,13 +245,6 @@ async fn wildcard_source_keeps_the_historical_pointer_through_a_clear() -> Resul
         assert_eq!(source.nonzero_position["block_number"], json!(3));
         assert_eq!(source.boundary_kind, "ResolverChanged");
         assert_eq!(source.boundary_position["block_number"], json!(5));
-        let null_source = load_family_wildcard_source(&pool, CHAIN, null_pointer).await?;
-        assert!(null_source.is_some_and(|source| source.nonzero_resolver_address.is_none()));
-        let empty_source = load_family_wildcard_source(&pool, CHAIN, empty_pointer).await?;
-        assert!(
-            empty_source
-                .is_some_and(|source| source.nonzero_resolver_address.as_deref() == Some(""))
-        );
         assert_eq!(
             load_family_wildcard_source(&pool, CHAIN, never).await?,
             None

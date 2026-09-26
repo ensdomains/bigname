@@ -259,8 +259,15 @@ event it emits
 (`crates/adapters/src/schema_v2/protocol/v2_record_resolver.rs`, `metadata`).
 Record events from other resolvers carry none and are keyed by node.
 The link reads over the [owned key families](#owned-key-family) do not consult
-it: the newest link per resolver and node wins, as on chain. Today's served link
-staging keeps only links annotated `resolver_record_id`.
+it: the newest link per resolver and node wins, as on chain, where the resolver
+keeps one record id per node
+(upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L96-L97 @ ens_v2@a971bd64),
+each `Linked` overwrites it
+(upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L363-L367 @ ens_v2@a971bd64)
+and resolution serves that record, falling back to the default node only when
+it is 0
+(upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L380-L387 @ ens_v2@a971bd64).
+Today's served link staging keeps only links annotated `resolver_record_id`.
 
 ## Verification level
 
