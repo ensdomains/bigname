@@ -75,8 +75,8 @@ impl Position {
 
     /// The three-part bound the authority admission compares against (authority_events.sql
     /// :200-217, :264-276): block, then transaction and log with a missing one read as -1. It
-    /// agrees with the canonical order except that it ignores the identity, which only matters
-    /// between two positions the bound treats as equal.
+    /// agrees with the canonical order except that it ignores both the emission ordinal and the
+    /// identity, which only matter between two positions the bound treats as equal.
     pub fn bound(&self) -> (i64, i64, i64) {
         (
             self.block_number,
@@ -227,16 +227,30 @@ mod tests {
     // excuse read together.
     type Place = (i64, Option<i64>, Option<i64>, &'static str);
     /// Positions in ascending canonical order: block, transaction, log (none first), the
-    /// emission ordinal when both indexes are present (none first), then identity bytes.
-    const SHARED_ORDER: [Place; 18] = [
+    /// emission ordinal when both indexes are present (none first), then identity bytes. It
+    /// covers synthesised facts, partially absent indexes, a missing or empty suffix, signed and
+    /// non-ASCII digits, overflow, `u32::MAX`, leading zeros, 9 against 10 and an equal-ordinal
+    /// identity tie.
+    const SHARED_ORDER: [Place; 26] = [
+        // Synthesised facts: no ordinal, identity bytes, so ":10" before ":9".
         (5, None, None, "a:10"),
         (5, None, None, "a:9"),
         (5, None, None, "b"),
+        // A log index without a transaction index, and the reverse: no ordinal.
+        (5, None, Some(0), "a:1"),
         (5, Some(0), None, "a:3"),
+        // Both indexes, no ordinal: empty, signed, non-ASCII, missing, negative, overflowing or
+        // non-numeric suffix; identity bytes.
+        (5, Some(0), Some(0), "a:"),
+        (5, Some(0), Some(0), "a:+1"),
         (5, Some(0), Some(0), "a:holder"),
+        (5, Some(0), Some(0), "a:\u{663}"),
+        (5, Some(0), Some(0), "a:\u{ff13}"),
+        (5, Some(0), Some(0), "abc"),
         (5, Some(0), Some(0), "q:-1"),
         (5, Some(0), Some(0), "t:4294967296"),
         (5, Some(0), Some(0), "z"),
+        // Ordinals, numerically, then identity bytes on a tie.
         (5, Some(0), Some(0), "z:0"),
         (5, Some(0), Some(0), "y:1"),
         (5, Some(0), Some(0), "x:2"),
@@ -245,11 +259,14 @@ mod tests {
         (5, Some(0), Some(0), "w:9"),
         (5, Some(0), Some(0), "v:10"),
         (5, Some(0), Some(0), "u:4294967295"),
+        // The log, then the transaction, then the block decide before any ordinal.
         (5, Some(0), Some(1), "a:0"),
+        (5, Some(1), Some(0), "a:0"),
         (6, None, None, "a"),
+        (6, Some(0), Some(0), "a:0"),
     ];
     /// Stored JSON positions and what each reads as.
-    const SHARED_JSON: [(&str, Option<Place>); 6] = [
+    const SHARED_JSON: [(&str, Option<Place>); 8] = [
         (
             r#"{"block_number": 7, "transaction_index": null, "log_index": null, "event_identity": "e"}"#,
             Some((7, None, None, "e")),
@@ -262,9 +279,14 @@ mod tests {
             r#"{"block_number": 7, "transaction_index": "1", "log_index": 2, "event_identity": "e"}"#,
             Some((7, None, Some(2), "e")),
         ),
+        (
+            r#"{"block_number": 7, "event_identity": ""}"#,
+            Some((7, None, None, "")),
+        ),
         (r#"{"block_number": 7}"#, None),
         (r#"{"block_number": 7, "event_identity": 5}"#, None),
         (r#"{"block_number": "7", "event_identity": "e"}"#, None),
+        (r#"{"block_number": 7.5, "event_identity": "e"}"#, None),
     ];
 
     fn place((block, transaction, log, identity): Place) -> Position {
