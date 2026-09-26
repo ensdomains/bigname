@@ -22,14 +22,6 @@ pub(super) async fn seed(
         target_block,
     )
     .await?;
-    super::v2_release_names::include_names_bound_to_retracted_releases(
-        transaction,
-        chain_id,
-        window.from_block,
-        window.to_block,
-        target_block,
-    )
-    .await?;
     seed_children(transaction, chain_id).await?;
     seed_child_registration_history(transaction, chain_id, window.from_block, window.to_block)
         .await?;
@@ -107,6 +99,7 @@ async fn seed_names(
                AND lineage.block_hash = event.block_hash
                AND lineage.block_number = event.block_number
               WHERE event.normalized_event_id = citation.event_id::bigint
+                AND event.consumer_visibility = 'activated'
                 AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
                 AND (
                     (event.block_number IS NULL AND event.block_hash IS NULL)

@@ -818,7 +818,10 @@
                    ) ORDER BY event.normalized_event_id) AS manifest_versions,
                    max(event.manifest_version) AS manifest_version
             FROM project_events event
+            -- The release that decided a released ENSv2 tombstone can carry no name; it is cited
+            -- too, so a redo that retracts it rebuilds the name.
             WHERE event.logical_name_id = surface.logical_name_id
+               OR event.normalized_event_id = selected_authority.released_v2_event_id
         ) evidence ON TRUE
         LEFT JOIN LATERAL (
             SELECT COALESCE(bool_or(
