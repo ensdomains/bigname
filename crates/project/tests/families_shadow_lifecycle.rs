@@ -417,10 +417,11 @@ async fn two_grants_on_two_keys_in_one_transaction_serve_the_binding_key() -> Re
     fixture.cleanup().await
 }
 
-/// Step 2's amended D12 (39990c38) in the shadow reader, a synthetic ordinal fixture: a release
-/// and then a grant written from one log with handwritten ENSv2 identities ending with emission
-/// ordinals 0 and 1, the numbering the adapter gives facts of one batch (adapters
-/// schema_v2/normalized.rs:118-131); the adapter is not shown to emit this pair. The family
+/// Step 2's amended D12 (39990c38) in the shadow reader, on constructed normalized facts with
+/// raw-log-shaped ordinal suffixes: the test writes a release and then a grant at one log with
+/// handwritten ENSv2 identities ending with ordinals 0 and 1, the shape the adapter gives the
+/// complete draft vector of one raw log (adapters schema_v2/normalized.rs:118-131). It does not
+/// show that the adapter emits this pair from one log. The family
 /// keeps each kind's maximum in its own column, and the reader compares them across kinds.
 /// Compared as text, the grant (`RegistrationGranted`) sorts before the release
 /// (`RegistrationReleased`) and the reader would take the release as latest and serve the name

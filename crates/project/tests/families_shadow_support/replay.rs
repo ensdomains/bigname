@@ -1,13 +1,13 @@
-//! Raw ENSv1 logs replayed through the real schema v2 adapter onto the families_support fixture
-//! (the shape of `handoff_scenario` in crates/project/tests/address_names_projection.rs), so a
-//! fixture reads exactly the normalized events, identities and emission ordinals the adapter
-//! writes. `persist` writes the columns Interpret writes for normalized events and lineage;
-//! bindings are written for observe-only histories with no rebinding, without Interpret's
-//! `active_to`, conflict handling and closure ordering (crates/interpret/src/write/identity.rs
-//! :30-75, :257-300), and no manifest contract instance or preimage rows are written. A history
-//! that rebinds a name needs the Interpret write path, not this one. The checked-in Sepolia
-//! manifests (`manifests/sepolia`) are admitted at fixed fixture addresses; block hashes and
-//! times are the fixture lineage's.
+//! Runs the schema-v2 adapter on constructed raw logs and inserts its Project-consumed outputs
+//! into a pre-seeded canonical fixture (families_support, in the shape of `handoff_scenario` in
+//! crates/project/tests/address_names_projection.rs); this does not exercise Interpret's
+//! production persistence path. A fixture reads the normalized events, identities and emission
+//! ordinals the adapter produced. The binding writes lack Interpret's `active_to`, conflict
+//! handling and closure ordering (crates/interpret/src/write/identity.rs:30-75, :257-300), and
+//! no manifest contract instance or preimage rows are written, so they fit observe-only
+//! histories with no rebinding; a history that rebinds a name needs the Interpret path. The
+//! checked-in Sepolia manifests (`manifests/sepolia`) are admitted at fixed fixture addresses;
+//! block hashes and times are the fixture lineage's.
 use alloy_primitives::{Address, B256, LogData, U256, keccak256};
 use alloy_sol_types::{SolEvent, sol};
 use anyhow::{Result, ensure};
@@ -194,9 +194,10 @@ pub fn interpret(batches: Vec<BatchInput>) -> Result<Vec<BatchOutput>> {
     Ok(out)
 }
 
-/// Persist adapter output the way Interpret does for the rows Project and the families read:
-/// the manifest versions the events cite, token lineages, resources, name surfaces, surface
-/// bindings with their closures, and normalized events with every column Interpret writes.
+/// Insert the adapter output's Project-consumed rows into the pre-seeded canonical fixture: the
+/// manifest versions the events cite, token lineages, resources, name surfaces, surface
+/// bindings with their closures, and normalized events. This does not exercise Interpret's
+/// production persistence path.
 pub async fn persist(pool: &PgPool, output: &BatchOutput) -> Result<()> {
     for manifest in manifests() {
         // ON CONFLICT (manifest_id) arbitrates the primary key only; a second active version of

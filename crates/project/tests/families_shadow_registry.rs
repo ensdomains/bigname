@@ -10,6 +10,7 @@ mod shadow_support;
 mod support;
 
 use anyhow::Result;
+use bigname_storage::families::control::position::Position;
 use serde_json::{Value, json};
 use shadow_support::publish_and_compare;
 use support::{CHAIN, Event, Fixture, uuid};
@@ -469,20 +470,20 @@ async fn a_replayed_new_owner_log_reads_equal() -> Result<()> {
     fixture.cleanup().await
 }
 
-/// Codex thread PRRT_kwDOSJpxAs6l3jx7, relabelled after Pro r7 Q9 on 0638b9ba: a synthetic
-/// identity tie at one shared position. A SubregistryChanged and an AuthorityTransferred of the
-/// child node sit at one block, transaction and log with handwritten identities that carry no
-/// emission ordinal (`SubregistryChanged:11:1`, `AuthorityTransferred:11:1`), so D12 falls
+/// Codex thread PRRT_kwDOSJpxAs6l3jx7, relabelled after Pro r7 Q9 on 0638b9ba: a synthetic identity
+/// tie at one shared position. A SubregistryChanged and an AuthorityTransferred of the child node
+/// sit at one block, transaction and log with handwritten identities that both carry the same
+/// synthetic ordinal 1 (`SubregistryChanged:11:1`, `AuthorityTransferred:11:1`), so D12 falls
 /// through to identity bytes and the families take the SubregistryChanged, while today's builder
 /// breaks the tie by generated id and takes the AuthorityTransferred (permission_resources.rs
-/// :41-57); the served event id differs. This is not what the adapter writes for a NewOwner log:
-/// it numbers the two facts 0 and 1, so both sides take the AuthorityTransferred
+/// :41-57); the served event id differs. This is not what the adapter writes for a NewOwner log: it
+/// numbers the two facts 0 and 1, so both sides take the AuthorityTransferred
 /// (`a_replayed_new_owner_log_reads_equal`). The case stays as the harness's proof for a genuine
-/// identity tie, which still arises between facts of different sources, whose ordinals
-/// interleave (docs/glossary.md, "Canonical event order"). It passes as a same-block delta only
-/// because the binding read again in today's order gives exactly the served binding. The
-/// control block reads the name's admitted AuthorityTransferred rows only, which F2c keeps apart
-/// from the SubregistryChanged, so both sides agree there.
+/// identity tie, which still arises between facts of different sources, whose ordinals interleave
+/// (docs/glossary.md, "Canonical event order"). It passes as a same-block delta only because the
+/// binding read again in today's order gives exactly the served binding. The control block reads
+/// the name's admitted AuthorityTransferred rows only, which F2c keeps apart from the
+/// SubregistryChanged, so both sides agree there.
 #[tokio::test]
 async fn a_new_owner_subregistry_and_transfer_at_one_log_is_a_same_block_delta() -> Result<()> {
     let fixture = Fixture::new("families_shadow_registry_new_owner", 20).await?;
@@ -625,10 +626,11 @@ fn failed_fields(report: &shadow_support::compare::Report) -> Vec<String> {
     fields
 }
 
-/// Three producer events of name 1 at one block, transaction and log, written in each of the
-/// six orders: a SubregistryChanged whose getter is THIRD and two AuthorityTransferred events
-/// whose getters are OWNER and OTHER. Like the NewOwner tie above, the identities are synthetic
-/// and carry no emission ordinal. The families keep the SubregistryChanged, the greatest
+/// Three synthetic producer events of name 1 at one block, transaction and log with equal
+/// emission ordinals, written in each of the six orders: a SubregistryChanged whose getter is
+/// THIRD and two AuthorityTransferred events whose getters are OWNER and OTHER. The handwritten
+/// identities all end with ordinal 1, as in the NewOwner tie above, so the ordinal step ties
+/// and D12 decides by identity bytes. The families keep the SubregistryChanged, the greatest
 /// identity, in every order; today's builder keeps the last one written, the highest generated
 /// id. When that is the SubregistryChanged nothing differs; otherwise the registry owner and
 /// event ids of the binding are same-block deltas, and the served owner is the getter of the
@@ -637,8 +639,16 @@ fn failed_fields(report: &shadow_support::compare::Report) -> Vec<String> {
 async fn three_producer_events_at_one_log_in_every_order() -> Result<()> {
     let events = [
         ("SubregistryChanged:11:1", "SubregistryChanged", THIRD),
-        ("AuthorityTransferred:11:1:a", "AuthorityTransferred", OWNER),
-        ("AuthorityTransferred:11:1:b", "AuthorityTransferred", OTHER),
+        (
+            "AuthorityTransferred:11:1:a:1",
+            "AuthorityTransferred",
+            OWNER,
+        ),
+        (
+            "AuthorityTransferred:11:1:b:1",
+            "AuthorityTransferred",
+            OTHER,
+        ),
     ];
     let orders = [
         [0, 1, 2],
@@ -666,6 +676,24 @@ async fn three_producer_events_at_one_log_in_every_order() -> Result<()> {
                 )
                 .await?;
         }
+        let stored: Vec<(i64, Option<i64>, Option<i64>, String)> = sqlx::query_as(
+            "SELECT block_number, transaction_index, log_index, event_identity
+             FROM normalized_events WHERE chain_id = $1 AND block_number = 11
+             ORDER BY event_identity",
+        )
+        .bind(CHAIN)
+        .fetch_all(&fixture.pool)
+        .await?;
+        assert_eq!(stored.len(), 3, "order {order:?}");
+        for (block_number, transaction_index, log_index, event_identity) in stored {
+            let position = Position {
+                block_number,
+                transaction_index,
+                log_index,
+                event_identity,
+            };
+            assert_eq!(position.emission_ordinal(), Some(1), "{position:?}");
+        }
         let report = publish_and_compare(&fixture, 12).await?;
         let last = events[order[2]];
         let served = summary(&fixture, &lease).await?.expect("summarised");
@@ -687,17 +715,20 @@ async fn three_producer_events_at_one_log_in_every_order() -> Result<()> {
     Ok(())
 }
 
-/// Scoped review of ea047c04, F1: a registry-only NewOwner yields a SubregistryChanged, an
-/// AuthorityTransferred and, when the authority resource changes, an AuthorityEpochChanged
-/// registry_only from one raw log, at one block, transaction and log, in that push order. The
-/// canonical order breaks the tie by identity and takes the transfer last (`E` sorts before
-/// `T`); today's lateral takes the epoch change, whose generated id is higher
+/// Scoped review of ea047c04, F1, relabelled after Pro r8 on 6e05205a: a synthetic
+/// equal-ordinal case, not the adapter's output. A SubregistryChanged, an AuthorityTransferred
+/// and a registry_only AuthorityEpochChanged of name 1 sit at one block, transaction and log
+/// with handwritten identities (`<kind>:10:9`) that all carry the same synthetic ordinal 9, so
+/// the canonical order breaks the tie by identity bytes and takes the transfer last (`E` sorts
+/// before `T`); today's lateral takes the epoch change, whose generated id is higher
 /// (build.sql:689-693). Both report one owner, so only the latest kind differs, and it passes
 /// as a same-block delta only because the families read again in today's order, the owner
-/// event and the epoch start included, give exactly the served kind.
+/// event and the epoch start included, give exactly the served kind. A real NewOwner log is
+/// numbered in push order (`a_replayed_new_owner_log_reads_equal` asserts SubregistryChanged
+/// 0, AuthorityTransferred 1 and AuthorityEpochChanged 2), so there the ordinal decides, not
+/// the identity; this case stays as the harness's proof for an identity tie at one log.
 #[tokio::test]
-async fn a_registry_only_new_owner_transfer_and_epoch_at_one_log_is_a_same_block_delta()
--> Result<()> {
+async fn a_synthetic_registry_only_epoch_identity_tie_is_a_same_block_delta() -> Result<()> {
     let fixture = Fixture::new("families_shadow_registry_one_log_epoch", 20).await?;
     let node_resource = uuid(3);
     fixture
@@ -743,11 +774,11 @@ async fn a_registry_only_new_owner_transfer_and_epoch_at_one_log_is_a_same_block
         json!("AuthorityTransferred")
     );
     assert_eq!(served.control("registry_owner"), json!(OWNER));
-    // The registry binding of the node is the NewOwner shape of
-    // `a_new_owner_subregistry_and_transfer_at_one_log_is_a_same_block_delta`: the families keep
-    // the SubregistryChanged, which carries no getter and so clears the binding, and today's
-    // builder keeps the transfer; each binding field passes only because the whole binding read
-    // in today's order equals the served one.
+    // The registry binding of the node is the synthetic tie of
+    // `a_new_owner_subregistry_and_transfer_at_one_log_is_a_same_block_delta`: with equal ordinals
+    // the families keep the SubregistryChanged by identity bytes, which carries no getter and so
+    // clears the binding, and today's builder keeps the transfer; each binding field passes only
+    // because the whole binding read in today's order equals the served one.
     let binding = [
         "block_number",
         "clear_event_id",
@@ -1470,7 +1501,7 @@ async fn two_same_payload_events_with_distinct_identities_differ_in_event_ids_on
 /// the selected-identity condition below.
 #[test]
 fn each_condition_of_the_binding_delta_rejects_on_its_own() {
-    use bigname_storage::families::control::{position::Position, registry::RegistryBinding};
+    use bigname_storage::families::control::registry::RegistryBinding;
     use shadow_support::compare::{BindingOrders, binding_json};
     use std::collections::{BTreeMap, BTreeSet};
 
