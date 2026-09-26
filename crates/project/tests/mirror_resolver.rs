@@ -5,10 +5,13 @@
 
 #[path = "support/bounded_attribution.rs"]
 mod bounded_attribution;
+#[path = "support/family_shadow.rs"]
+mod family_shadow;
 
 use anyhow::{Context, Result};
 use bigname_project::{BatchOutcome, BatchRequest, Engine, Marker, RunMode};
 use bigname_test_support::{TestDatabase, TestDatabaseConfig};
+use family_shadow::{Expectations, ExpectedDifference};
 use serde_json::{Value, json};
 use sqlx::{PgPool, raw_sql};
 
@@ -256,6 +259,212 @@ async fn mirrored_name_serves_the_ensv1_inventory_with_mirror_provenance() -> Re
         resolver["declared_summary"]["bindings"]["status"],
         "supported"
     );
+    database.cleanup().await?;
+    Ok(())
+}
+
+/// Today selects a mirrored resource's linked records against the mirror's own address (the
+/// resource's pointer before substitution) and attributes them by resource alone
+/// (`linked_records.rs`, `project_selected_records`; `record_inventory.rs`, the linked arm of
+/// `attributed_events`). A linked `AddressChanged` value and `AddrChanged` one log later at the
+/// mirror's address therefore pair for the mirrored resource, and the harness must expect that
+/// pair.
+#[tokio::test]
+async fn a_linked_pair_at_the_mirror_address_is_expected_for_the_mirrored_name() -> Result<()> {
+    let fixture = Fixture::declared("mirror_linked_pair", V1Side::Projected);
+    let (database, pool) = database(fixture.id).await?;
+    seed(&pool, &fixture).await?;
+    let node = bigname_lookup::ens_namehash_hex(NAME)?;
+    // After the seeded ENSv1 records, the latest at `base + 3`.
+    let block = fixture.base + 4;
+    extend_chain(&pool, block, block).await?;
+    let mut ids = Vec::new();
+    for (identity, log, kind, after) in [
+        (
+            "linked-link",
+            20,
+            "ResolverRecordLinked",
+            json!({"source_event":"Linked","storage_model":"resolver_record_id","resolver":MIRROR,"node":node,"resolver_record_id":"7","dns_encoded_name":"0x066d6972726f7207666978747572650000"}),
+        ),
+        (
+            "linked-value",
+            21,
+            "RecordChanged",
+            json!({"source_event":"AddressChanged","storage_model":"resolver_record_id","resolver":MIRROR,"resolver_record_id":"7","record_key":"addr:60","record_family":"addr","selector_key":"60","coin_type":"60","value_retained":true,"value":"0x6666666666666666666666666666666666666666"}),
+        ),
+        (
+            "linked-sibling",
+            22,
+            "RecordChanged",
+            json!({"source_event":"AddrChanged","storage_model":"resolver_record_id","resolver":MIRROR,"resolver_record_id":"7","record_key":"addr:60","record_family":"addr","selector_key":"60","coin_type":"60","value_retained":true,"value":ROOT_OWNER}),
+        ),
+    ] {
+        let id: i64 = sqlx::query_scalar("INSERT INTO normalized_events (event_identity,namespace,event_kind,source_family,manifest_version,chain_id,block_number,block_hash,transaction_hash,transaction_index,log_index,derivation_kind,canonicality_state,after_state,raw_fact_ref) VALUES ($1,'ens',$2,'ens_v2_resolver_l1',1,$3,$4,$5,$6,0,$7,'ens_v2_resolver','canonical',$8,$9) RETURNING normalized_event_id")
+            .bind(format!("{}:{identity}", fixture.id)).bind(kind).bind(CHAIN).bind(block)
+            .bind(block_hash(block)).bind(format!("0x{:064x}", block * 1000)).bind(log)
+            .bind(after).bind(json!({"emitting_address": MIRROR})).fetch_one(&pool).await?;
+        ids.push(id);
+    }
+    let target = block;
+    let outcome = Engine::new(pool.clone())
+        .run_batch(BatchRequest {
+            chain_id: CHAIN.to_owned(),
+            target_block: target,
+            affected_from_block: 0,
+            affected_to_block: target,
+            resume_current: None,
+            mode: RunMode::Normal,
+        })
+        .await?;
+    // Today serves the linked value through the mirror's own address.
+    let v2 = inventory(&pool, V2_RESOURCE).await?;
+    let served = v2["entries"]
+        .as_array()
+        .and_then(|entries| {
+            entries
+                .iter()
+                .find(|entry| entry["record_key"] == "addr:60")
+        })
+        .context("served addr:60")?;
+    assert_eq!(
+        served["value"], "0x6666666666666666666666666666666666666666",
+        "the AddressChanged half is served: {v2}"
+    );
+    assert_eq!(
+        v2["provenance"]["record_link_event_ids"],
+        json!([ids[0]]),
+        "{v2}"
+    );
+    assert!(
+        v2["provenance"]["record_event_ids"]
+            .as_array()
+            .is_some_and(|served| served.contains(&json!(ids[1]))),
+        "{v2}"
+    );
+    // The family serves no pair here; the harness must still expect today's.
+    let report = family_shadow::shadow_report_at(&pool, &outcome.current).await?;
+    let position = |identity: &str, log: i64| {
+        json!({"block_number": block, "transaction_index": 0, "log_index": log,
+               "event_identity": format!("{}:{identity}", fixture.id)})
+    };
+    let pair = json!({
+        "record_key": "addr:60",
+        "value_event_id": ids[1], "value_position": position("linked-value", 21),
+        "sibling_event_id": ids[2], "sibling_position": position("linked-sibling", 22),
+    });
+    let named = report
+        .differences
+        .iter()
+        .find(|(key, _)| *key == format!("record_inventory {V2_RESOURCE}"))
+        .map(|(_, differences)| differences.clone())
+        .unwrap_or_default();
+    assert!(
+        named.iter().any(|difference| {
+            difference.field == "compatibility_pairs[addr:60]"
+                && difference.today == Some(pair.clone())
+                && difference.family.is_none()
+        }),
+        "{report:#?}"
+    );
+    database.cleanup().await?;
+    Ok(())
+}
+
+/// The converse of the case above. The mirrored name's link selects record id 7 at the mirror's
+/// own address, so today's linked arm admits record id 7's writes at the mirror only. A native
+/// `AddressChanged` value at the substituted ENSv1 resolver and a record-id `AddrChanged` one log
+/// later at that same resolver, carrying record id 7, is not attributed through any arm, so it
+/// pairs nothing, and the harness must not expect a pair either.
+#[tokio::test]
+async fn a_record_id_sibling_at_the_substituted_resolver_does_not_pair() -> Result<()> {
+    let fixture = Fixture::declared("mirror_substituted_record_id", V1Side::Projected);
+    let (database, pool) = database(fixture.id).await?;
+    seed(&pool, &fixture).await?;
+    let node = bigname_lookup::ens_namehash_hex(NAME)?;
+    let block = fixture.base + 4;
+    extend_chain(&pool, block, block).await?;
+    let value = "0x6666666666666666666666666666666666666666";
+    let v1_manifest = manifest_id(&pool, "ens_v1_resolver_l1").await?;
+    let mut ids = Vec::new();
+    for (identity, log, family, manifest, emitter, after) in [
+        (
+            "mirror-link",
+            20,
+            "ens_v2_resolver_l1",
+            None,
+            MIRROR,
+            json!({"source_event":"Linked","storage_model":"resolver_record_id","resolver":MIRROR,"node":node,"resolver_record_id":"7","dns_encoded_name":"0x066d6972726f7207666978747572650000"}),
+        ),
+        (
+            "native-value",
+            21,
+            "ens_v1_resolver_l1",
+            Some(v1_manifest),
+            V1_RESOLVER,
+            json!({"source_event":"AddressChanged","node":node,"resolver":V1_RESOLVER,"record_key":"addr:60","record_family":"addr","selector_key":"60","value":value}),
+        ),
+        (
+            "record-id-sibling",
+            22,
+            "ens_v1_resolver_l1",
+            Some(v1_manifest),
+            V1_RESOLVER,
+            json!({"source_event":"AddrChanged","storage_model":"resolver_record_id","resolver":V1_RESOLVER,"resolver_record_id":"7","record_key":"addr:60","record_family":"addr","selector_key":"60","coin_type":"60","value_retained":true,"value":ROOT_OWNER}),
+        ),
+    ] {
+        let kind = if identity == "mirror-link" {
+            "ResolverRecordLinked"
+        } else {
+            "RecordChanged"
+        };
+        let id: i64 = sqlx::query_scalar("INSERT INTO normalized_events (event_identity,namespace,event_kind,source_family,manifest_version,source_manifest_id,chain_id,block_number,block_hash,transaction_hash,transaction_index,log_index,derivation_kind,canonicality_state,after_state,raw_fact_ref) VALUES ($1,'ens',$2,$3,1,$4,$5,$6,$7,$8,0,$9,'ens_v1_unwrapped_authority','canonical',$10,$11) RETURNING normalized_event_id")
+            .bind(format!("{}:{identity}", fixture.id)).bind(kind).bind(family).bind(manifest)
+            .bind(CHAIN).bind(block).bind(block_hash(block))
+            .bind(format!("0x{:064x}", block * 1000)).bind(log).bind(after)
+            .bind(json!({"emitting_address": emitter})).fetch_one(&pool).await?;
+        ids.push(id);
+    }
+    let outcome = Engine::new(pool.clone())
+        .run_batch(BatchRequest {
+            chain_id: CHAIN.to_owned(),
+            target_block: block,
+            affected_from_block: 0,
+            affected_to_block: block,
+            resume_current: None,
+            mode: RunMode::Normal,
+        })
+        .await?;
+    // Today serves the native value through the substituted resolver and selects record id 7 at
+    // the mirror.
+    let v2 = inventory(&pool, V2_RESOURCE).await?;
+    let served = v2["entries"]
+        .as_array()
+        .and_then(|entries| {
+            entries
+                .iter()
+                .find(|entry| entry["record_key"] == "addr:60")
+        })
+        .context("served addr:60")?;
+    assert_eq!(served["value"], value, "{v2}");
+    assert_eq!(
+        v2["provenance"]["record_link_event_ids"],
+        json!([ids[0]]),
+        "{v2}"
+    );
+    // Today does not attribute the record-id sibling at all: no arm admits it, so it is in
+    // neither the served events nor the attributed events, and cannot be a pair's sibling.
+    for field in ["record_event_ids", "attributed_event_ids"] {
+        assert!(
+            v2["provenance"][field]
+                .as_array()
+                .is_some_and(|listed| !listed.contains(&json!(ids[2]))),
+            "{field}: {v2}"
+        );
+    }
+    // Neither side pairs; require a current marker and no field differences.
+    let report = family_shadow::shadow_report_at(&pool, &outcome.current).await?;
+    assert!(report.current(), "{report:#?}");
+    assert!(report.differences.is_empty(), "{report:#?}");
     database.cleanup().await?;
     Ok(())
 }
@@ -770,7 +979,14 @@ async fn root_registry_tld_without_a_registration_serves_its_pointer() -> Result
         .single_label()
         .unbound()
         .with_v2_lifecycle(lifecycle);
-        let (database, pool) = project(&fixture, fixture.target(), Execution::FromZero).await?;
+        let expected = if lifecycle == V2Lifecycle::Expired {
+            unnamed_clear_withdraws(&[(fixture.target(), 1)])
+        } else {
+            Expectations::none()
+        };
+        let (database, pool) =
+            project_expecting(&fixture, fixture.target(), Execution::FromZero, &expected).await?;
+        expected.finish()?;
         if let Some(name) = name_current(&pool, &logical_name_id).await? {
             assert_eq!(name["serving_resource_id"], Value::Null, "{id}: {name}");
             assert_eq!(
@@ -796,19 +1012,48 @@ async fn released_direct_tld_pointer_stays_withdrawn_after_a_name_only_update() 
     fixture.v2_payload = Some(json!({"deployment_epoch": "fixture", "contracts": []}));
 
     for incremental in [false, true] {
+        let target = fixture.target();
+        let expected = if incremental {
+            unnamed_clear_withdraws(
+                &(fixture.base + 2..target)
+                    .map(|block| (block, 1))
+                    .chain([(target, 2)])
+                    .collect::<Vec<_>>(),
+            )
+        } else {
+            unnamed_clear_withdraws(&[(target, 2)])
+        };
         let (database, pool) = database(&format!("direct_tld_rescope_{incremental}")).await?;
         seed(&pool, &fixture).await?;
         sqlx::query("UPDATE normalized_events SET block_number = $1, block_hash = $2 WHERE event_kind = 'PreimageObserved'")
             .bind(fixture.target()).bind(block_hash(fixture.target())).execute(&pool).await?;
         if incremental {
-            run(&pool, fixture.base, 0, fixture.base, None, RunMode::Normal).await?;
+            run_expecting(
+                &pool,
+                fixture.base,
+                0,
+                fixture.base,
+                None,
+                RunMode::Normal,
+                &expected,
+            )
+            .await?;
             let live = name_current(&pool, &logical_name_id)
                 .await?
                 .context("live TLD")?;
             assert_eq!(live["serving_resource_id"], V2_RESOURCE, "{live}");
             assert_eq!(live["declared_summary"]["resolver"]["address"], V1_RESOLVER);
             for block in fixture.base + 1..=fixture.target() {
-                run(&pool, block, block, block, Some(block - 1), RunMode::Normal).await?;
+                run_expecting(
+                    &pool,
+                    block,
+                    block,
+                    block,
+                    Some(block - 1),
+                    RunMode::Normal,
+                    &expected,
+                )
+                .await?;
                 if block >= fixture.base + 2 {
                     let name = name_current(&pool, &logical_name_id)
                         .await?
@@ -826,13 +1071,14 @@ async fn released_direct_tld_pointer_stays_withdrawn_after_a_name_only_update() 
                 }
             }
         } else {
-            run(
+            run_expecting(
                 &pool,
                 fixture.target(),
                 0,
                 fixture.target(),
                 None,
                 RunMode::Normal,
+                &expected,
             )
             .await?;
             let name = name_current(&pool, &logical_name_id)
@@ -845,15 +1091,17 @@ async fn released_direct_tld_pointer_stays_withdrawn_after_a_name_only_update() 
                 "{name}"
             );
         }
-        run(
+        run_expecting(
             &pool,
             fixture.target(),
             fixture.target(),
             fixture.target(),
             Some(fixture.target()),
             RunMode::Redo,
+            &expected,
         )
         .await?;
+        expected.finish()?;
         let name = name_current(&pool, &logical_name_id)
             .await?
             .context("redo TLD")?;
@@ -1335,55 +1583,104 @@ async fn project(
     target: i64,
     execution: Execution,
 ) -> Result<(TestDatabase, PgPool)> {
+    project_expecting(fixture, target, execution, &Expectations::none()).await
+}
+
+/// [`project`] whose family comparisons expect `expected`.
+async fn project_expecting(
+    fixture: &Fixture,
+    target: i64,
+    execution: Execution,
+    expected: &Expectations,
+) -> Result<(TestDatabase, PgPool)> {
     let (database, pool) = database(&format!("{}_{execution:?}", fixture.id)).await?;
     seed(&pool, fixture).await?;
     let base = fixture.base;
     match execution {
         Execution::FromZero => {
-            run(&pool, target, 0, target, None, RunMode::Normal).await?;
+            run_expecting(&pool, target, 0, target, None, RunMode::Normal, expected).await?;
         }
         Execution::PerBlock => {
-            run(&pool, base, 0, base, None, RunMode::Normal).await?;
+            run_expecting(&pool, base, 0, base, None, RunMode::Normal, expected).await?;
             for block in base + 1..=target {
-                run(&pool, block, block, block, Some(block - 1), RunMode::Normal).await?;
+                run_expecting(
+                    &pool,
+                    block,
+                    block,
+                    block,
+                    Some(block - 1),
+                    RunMode::Normal,
+                    expected,
+                )
+                .await?;
             }
         }
         Execution::TwoByTwo => {
-            run(&pool, base + 1, 0, base + 1, None, RunMode::Normal).await?;
-            run(
+            run_expecting(
+                &pool,
+                base + 1,
+                0,
+                base + 1,
+                None,
+                RunMode::Normal,
+                expected,
+            )
+            .await?;
+            run_expecting(
                 &pool,
                 target,
                 base + 2,
                 target,
                 Some(base + 1),
                 RunMode::Normal,
+                expected,
             )
             .await?;
         }
         Execution::Idempotent => {
-            run(&pool, target - 1, 0, target - 1, None, RunMode::Normal).await?;
-            run(
+            run_expecting(
                 &pool,
-                target,
-                target,
-                target,
-                Some(target - 1),
+                target - 1,
+                0,
+                target - 1,
+                None,
                 RunMode::Normal,
+                expected,
             )
             .await?;
-            run(
+            run_expecting(
                 &pool,
                 target,
                 target,
                 target,
                 Some(target - 1),
                 RunMode::Normal,
+                expected,
+            )
+            .await?;
+            run_expecting(
+                &pool,
+                target,
+                target,
+                target,
+                Some(target - 1),
+                RunMode::Normal,
+                expected,
             )
             .await?;
         }
         Execution::RedoLastBlock => {
-            run(&pool, target, 0, target, None, RunMode::Normal).await?;
-            run(&pool, target, target, target, Some(target), RunMode::Redo).await?;
+            run_expecting(&pool, target, 0, target, None, RunMode::Normal, expected).await?;
+            run_expecting(
+                &pool,
+                target,
+                target,
+                target,
+                Some(target),
+                RunMode::Redo,
+                expected,
+            )
+            .await?;
         }
     }
     let raw_count: i64 = sqlx::query_scalar("SELECT count(*) FROM raw_logs")
@@ -1393,6 +1690,39 @@ async fn project(
     Ok((database, pool))
 }
 
+/// Step 2 keeps in F5 the unnamed pointer clear the interpreter derives beside a root-registry
+/// expiry, so the family read withdraws the TLD token's records at the clear. The chain agrees:
+/// an expired entry's resolver reads as zero.
+/// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L255-L258 @ ens_v2@a971bd64)
+/// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L628-L630 @ ens_v2@a971bd64)
+/// Product ruling (Tate, 2026-09-26): an unnamed resolver-pointer clear written with a
+/// root-registry expiry withdraws the TLD token's records. The family value stands and there is
+/// no named-only exception. Today's record pointer read requires a named event
+/// (builders/linked_records.rs:97-99), so it keeps the token's record_inventory_current row, which
+/// no name route reaches (its name row has no resource or serving resource). The expected
+/// difference is that row: today `true`, family `false`, at each listed target.
+/// The pinned deployment registers every TLD, public suffix and the reverse mirror at MAX_EXPIRY,
+/// so on real chain data this expiry never happens and the difference is fixture-only.
+/// (upstream: .refs/ens_v2/contracts/script/deploy-constants.ts:L1 @ ens_v2@a971bd64)
+/// (upstream: .refs/ens_v2/contracts/deploy/01_ETHRegistry.ts:L46 @ ens_v2@a971bd64)
+/// (upstream: .refs/ens_v2/contracts/deploy/01_ReverseMirror.ts:L32 @ ens_v2@a971bd64)
+/// (upstream: .refs/ens_v2/contracts/script/publicSuffixes.ts:L101 @ ens_v2@a971bd64)
+/// `counts` are `(target, times)`.
+fn unnamed_clear_withdraws(counts: &[(i64, usize)]) -> Expectations {
+    Expectations {
+        differences: counts
+            .iter()
+            .map(|&(target, times)| ExpectedDifference {
+                target,
+                key: format!("record_inventory {V2_RESOURCE}"),
+                fields: vec![("row".into(), Some(json!(true)), Some(json!(false)))],
+                times,
+            })
+            .collect(),
+        ..Expectations::none()
+    }
+}
+
 async fn run(
     pool: &PgPool,
     target_block: i64,
@@ -1400,6 +1730,28 @@ async fn run(
     affected_to_block: i64,
     resume_current: Option<i64>,
     mode: RunMode,
+) -> Result<BatchOutcome> {
+    run_expecting(
+        pool,
+        target_block,
+        affected_from_block,
+        affected_to_block,
+        resume_current,
+        mode,
+        &Expectations::none(),
+    )
+    .await
+}
+
+/// [`run`] whose family comparison expects `expected`.
+async fn run_expecting(
+    pool: &PgPool,
+    target_block: i64,
+    affected_from_block: i64,
+    affected_to_block: i64,
+    resume_current: Option<i64>,
+    mode: RunMode,
+    expected: &Expectations,
 ) -> Result<BatchOutcome> {
     let outcome = Engine::new(pool.clone())
         .run_batch(BatchRequest {
@@ -1417,6 +1769,7 @@ async fn run(
     assert!(outcome.complete);
     assert_eq!(outcome.target.number, target_block);
     bounded_attribution::assert_bounded_record_attribution_matches_inventory(pool).await?;
+    family_shadow::compare_family_reads_at(pool, &outcome.current, expected).await?;
     Ok(outcome)
 }
 
