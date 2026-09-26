@@ -329,6 +329,8 @@ type Fact = (
 /// Sentinel `released_at` values on hand-built releases, so a served release time names the row
 /// it came from.
 const B0_RELEASED_AT: i64 = 9_001;
+/// B0's grant expiry, a sentinel as well; `LabelRegistered` always carries one.
+const B0_EXPIRY: i64 = 9_002;
 const CT_RELEASED_AT: i64 = 11_001;
 const A0_RELEASED_AT: i64 = 11_002;
 
@@ -382,7 +384,7 @@ async fn seed_sequence(
             None,
             9,
             2,
-            json!({"source_event":"LabelRegistered","status":"registered","registrant":"0x0000000000000000000000000000000000000002"}),
+            json!({"source_event":"LabelRegistered","status":"registered","registrant":"0x0000000000000000000000000000000000000002","expiry":B0_EXPIRY}),
         ),
         (
             "b0-release",
@@ -654,7 +656,9 @@ async fn a_topology_reservation_is_ended_by_a_later_release_on_its_resource() ->
             ),
             "{case}: its release restores the tombstone on B0"
         );
-        // The tombstone serves the reservation's end, on B0's resource and binding.
+        // The tombstone serves the reservation's end, on B0's resource and binding. The end is an
+        // explicit release, which serves no expiry: not B0's grant expiry and not the
+        // reservation's far-future one.
         let served = served_at_11(case, index, name, &facts).await?;
         assert_eq!(
             (
@@ -663,6 +667,7 @@ async fn a_topology_reservation_is_ended_by_a_later_release_on_its_resource() ->
                 served["registration"]["status"].as_str(),
                 served["control"]["status"].as_str(),
                 served["registration"]["released_at"].as_i64(),
+                served["registration"]["expiry"].as_i64(),
             ),
             (
                 Some(uuid(15, index).as_str()),
@@ -670,6 +675,7 @@ async fn a_topology_reservation_is_ended_by_a_later_release_on_its_resource() ->
                 Some("released"),
                 Some("unregistered"),
                 Some(A0_RELEASED_AT),
+                None,
             ),
             "{case}: {served}"
         );
