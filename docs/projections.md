@@ -1149,6 +1149,8 @@ name and resource consumers of that resolver. Incremental staging includes the
 resolver's canonical link and record history through the target, including
 updates with null name/resource fields. Full rebuild and redo use the same
 selection rule; retracted events never remain as synthetic per-name facts.
+On redo, a published row that cites an event that was deleted, is no longer
+canonical, or is no longer activated is rescoped and rebuilt.
 
 `resolver_current` summarizes one resolver contract across readable bound names,
 aliases, record links, roles, record evidence, and normalized events. Embedded
