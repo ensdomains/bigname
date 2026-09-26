@@ -1,5 +1,7 @@
 #[path = "support/bounded_attribution.rs"]
 mod bounded_attribution;
+#[path = "support/family_shadow.rs"]
+mod family_shadow;
 
 use anyhow::{Context, Result};
 use bigname_domain::resolver_read::{IndexedRecordStatus, evaluate_indexed_record};
@@ -184,7 +186,7 @@ async fn run(
     predecessor: Option<&Block>,
     mode: RunMode,
 ) -> Result<()> {
-    Engine::new(pool.clone())
+    let outcome = Engine::new(pool.clone())
         .run_batch(BatchRequest {
             chain_id: chain(pool).await?,
             target_block: target.number,
@@ -198,6 +200,7 @@ async fn run(
         })
         .await?;
     bounded_attribution::assert_bounded_record_attribution_matches_inventory(pool).await?;
+    family_shadow::assert_family_reads_match(pool, &outcome.current).await?;
     Ok(())
 }
 

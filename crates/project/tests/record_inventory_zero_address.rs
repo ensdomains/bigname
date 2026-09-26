@@ -1,10 +1,17 @@
 #[path = "support/bounded_attribution.rs"]
 mod bounded_attribution;
+#[path = "support/family_shadow.rs"]
+mod family_shadow;
 
 use anyhow::{Context, Result};
 use bigname_domain::resolver_read::{IndexedRecordStatus, evaluate_indexed_record};
 use bigname_project::{BatchOutcome, BatchRequest, Engine, Marker, RunMode};
+use bigname_storage::families::records::{
+    FamilyAttribution, check_compatibility_pairs, compare_family_reads,
+    load_family_record_inventory_detail,
+};
 use bigname_test_support::{TestDatabase, TestDatabaseConfig};
+use family_shadow::Expectations;
 use serde_json::{Value, json};
 use sqlx::{PgPool, raw_sql};
 
@@ -139,6 +146,119 @@ async fn default_fallback_tracks_exact_replacement_and_version_reset() -> Result
             previous = Some(row);
             database.cleanup().await?;
         }
+    }
+    Ok(())
+}
+
+/// An exact coin-60 record cleared to empty bytes lets the ENSIP-19 default answer coin 60; one
+/// cleared to the zero address carries `exact_nonempty_not_found_record_keys` and keeps shadowing
+/// the default. Both readers list the default's address at coin 60 only in the first case. The
+/// resolvers read the default address only when the coin's own stored bytes are empty, and a
+/// zero-address write is stored as twenty nonempty bytes.
+/// (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L22-L30 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L80-L85 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v2/contracts/src/resolver/AbstractRecordResolver.sol:L172-L178 @ ens_v2@a971bd64)
+/// (upstream: .refs/basenames/src/L2/resolver/AddrResolver.sol:L93-L100 @ basenames@1809bbc)
+#[tokio::test]
+async fn the_nonempty_absence_marker_keeps_the_default_off_coin_60_in_both_readers() -> Result<()> {
+    let mut empty = composed_fixture(true)?;
+    empty.events = vec![
+        scalar(10, 1, 10, "AddressChanged", "2147483648", LATER20),
+        scalar(11, 1, 11, "AddressChanged", "60", ZERO20),
+        scalar(11, 2, 11, "AddrChanged", "60", ZERO20),
+        {
+            let mut clear = flat(12, "60", "0x");
+            clear.transaction = 12;
+            clear
+        },
+        scalar(12, 2, 12, "AddrChanged", "60", ZERO20),
+    ];
+    for (fixture, marked, at_60) in [(composed_fixture(true)?, true, 0), (empty, false, 1)] {
+        let (database, row) = project_case_with_database(&fixture, 13, Execution::FromZero).await?;
+        assert_marker(&row, marked);
+        let pool = database.pool().clone();
+        for (coin, listed) in [("60", at_60), ("2147483648", 1)] {
+            let arguments = (
+                bigname_storage::AddressNamesCurrentDedupe::Surface,
+                bigname_storage::AddressNamesCurrentSort::Name,
+                bigname_storage::AddressNamesCurrentOrder::Asc,
+            );
+            let today = bigname_storage::load_address_records_current_page(
+                &pool,
+                LATER20,
+                coin,
+                None,
+                arguments.0,
+                None,
+                None,
+                arguments.1,
+                arguments.2,
+                None,
+                50,
+            )
+            .await?;
+            let family = bigname_storage::families::records::load_family_address_records_page(
+                &pool,
+                LATER20,
+                coin,
+                None,
+                arguments.0,
+                None,
+                None,
+                arguments.1,
+                arguments.2,
+                None,
+                50,
+            )
+            .await?;
+            assert_eq!(
+                (today.entries.len(), family.entries.len()),
+                (listed, listed),
+                "marked {marked} coin {coin}"
+            );
+        }
+        // Mutation: today's served default row shadowing coin 60 is what the marker produces.
+        // Dropping coin 60 from it, as a reader ignoring the marker would, must be reported
+        // against the family read.
+        if marked {
+            let dropped = sqlx::query(
+                "UPDATE address_records_current
+                 SET provenance = jsonb_set(provenance, '{shadowed_coin_types}',
+                                            (provenance -> 'shadowed_coin_types') - '60')
+                 WHERE coin_type = '2147483648' AND provenance -> 'shadowed_coin_types' ? '60'",
+            )
+            .execute(&pool)
+            .await?;
+            assert_eq!(dropped.rows_affected(), 1);
+            let report =
+                compare_family_reads(&pool, fixture.chain, Some((13, block_hash(13))), 50).await?;
+            let key = format!("resolves_to {LATER20} coin 2147483648");
+            let fields: Vec<_> = report
+                .differences
+                .iter()
+                .filter(|(listed, _)| *listed == key)
+                .flat_map(|(_, differences)| differences.clone())
+                .collect();
+            assert!(
+                fields.iter().any(|difference| {
+                    difference
+                        .field
+                        .ends_with(".provenance.shadowed_coin_types")
+                        && difference
+                            .family
+                            .as_ref()
+                            .and_then(Value::as_array)
+                            .is_some_and(|coins| coins.contains(&json!("60")))
+                        && difference
+                            .today
+                            .as_ref()
+                            .and_then(Value::as_array)
+                            .is_some_and(|coins| !coins.contains(&json!("60")))
+                }),
+                "{report:#?}"
+            );
+        }
+        database.cleanup().await?;
     }
     Ok(())
 }
@@ -476,6 +596,335 @@ async fn zero_address_projection_converges_across_replay_modes() -> Result<()> {
     Ok(())
 }
 
+// The coin-60 pair rule in the canonical order (TYR-36 step 4): the `AddressChanged` half at
+// log n and the `AddrChanged` half at log n + 1 of one transaction serve the `AddressChanged`
+// payload at its own position, each half is tested against a version boundary at its own
+// position, and a later write wins. The halves carry different values here so the served half is
+// visible. Each run also compares the family reads with today's reads. An ENSv1 `setAddr` for
+// coin 60 emits `AddressChanged` and then `AddrChanged`, so the halves sit at adjacent logs.
+// (upstream: .refs/ens_v1/contracts/resolvers/profiles/AddrResolver.sol:L59-L62 @ ens_v1@91c966f)
+/// The status and value a case serves for `addr:60`; `None` when it serves no record.
+type Served = (IndexedRecordStatus, Option<&'static str>);
+
+#[tokio::test]
+async fn coin60_pairs_serve_the_address_changed_half_at_its_own_position() -> Result<()> {
+    let expectations: [(&str, Option<Served>, usize); 6] = [
+        (
+            "ens_v1_pair_after_boundary",
+            Some((IndexedRecordStatus::Success, Some(NONZERO20))),
+            1,
+        ),
+        ("ens_v1_pair_before_boundary", None, 0),
+        (
+            "ens_v1_pair_then_later_write",
+            Some((IndexedRecordStatus::Success, Some(LATER20))),
+            0,
+        ),
+        (
+            "ens_v1_pair_clear",
+            Some((IndexedRecordStatus::NotFound, None)),
+            1,
+        ),
+        (
+            "ens_v1_address_changed_alone",
+            Some((IndexedRecordStatus::Success, Some(NONZERO20))),
+            0,
+        ),
+        (
+            "ens_v1_older_write_then_boundary_then_pair",
+            Some((IndexedRecordStatus::Success, Some(NONZERO20))),
+            1,
+        ),
+    ];
+    // The cases with a pair run both mutations below; count them so neither can skip silently.
+    let mut mutated = 0;
+    for (id, expected, pairs) in expectations {
+        let fixture = case(id)?;
+        let (database, pool) = database(&format!("{id}_pair")).await?;
+        seed(&pool, fixture).await?;
+        // Step 2 indexes the served half of a pair, so the index finds the `AddressChanged`
+        // address even when the halves differ, and the comparison expects nothing.
+        let comparison = Expectations::none();
+        let outcome =
+            run_window_expecting(&pool, 11, 0, 11, None, RunMode::Normal, &comparison).await?;
+        let row: Value = sqlx::query_scalar(
+            "SELECT to_jsonb(row) FROM record_inventory_current row WHERE resource_id = $1::uuid",
+        )
+        .bind(RESOURCE)
+        .fetch_one(&pool)
+        .await?;
+        match expected {
+            Some((status, value)) => assert_entry_and_answer(&row, "addr:60", status, value),
+            None => assert!(
+                row["entries"]
+                    .as_array()
+                    .is_some_and(|entries| entries.iter().all(|e| e["record_key"] != "addr:60")),
+                "{id}: {row}"
+            ),
+        }
+        let family = load_family_record_inventory_detail(
+            &pool,
+            fixture.chain,
+            RESOURCE.parse()?,
+            FamilyAttribution::Given(Default::default()),
+        )
+        .await?
+        .with_context(|| format!("{id}: no family row"))?;
+        assert_eq!(family.compatibility_pairs.len(), pairs, "{id}");
+        for pair in &family.compatibility_pairs {
+            // The served position is the `AddressChanged` half's own, log 3 of transaction 1.
+            assert_eq!(pair.value_position.log_index, Some(3), "{id}");
+            assert_eq!(pair.sibling_position.log_index, Some(4), "{id}");
+            // The row reproduces today's provenance, which lists only the value event. The
+            // design's provenance names both events; the pair carries the sibling for step 7.
+            assert!(pair.sibling_event_id.is_some(), "{id}");
+            assert!(
+                family.row.provenance["record_event_ids"]
+                    .as_array()
+                    .is_some_and(|ids| ids.contains(&json!(pair.value_event_id))
+                        && !ids.contains(&json!(pair.sibling_event_id))),
+                "{id}: {}",
+                family.row.provenance
+            );
+        }
+        // Mutation: a wrong sibling event and both positions moved one log on, adjacency kept,
+        // must each be named against the pairs the harness accepted.
+        if pairs > 0 {
+            mutated += 1;
+            // A duplicated pair is its own difference.
+            let mut doubled = family.clone();
+            doubled
+                .compatibility_pairs
+                .extend(family.compatibility_pairs.clone());
+            let differences = check_compatibility_pairs(&doubled, &family.compatibility_pairs);
+            assert!(
+                differences.iter().any(|d| {
+                    d.field == "compatibility_pairs.duplicates"
+                        && d.family == Some(json!(["addr:60"]))
+                }),
+                "{id}: {differences:#?}"
+            );
+            let mut moved = family.clone();
+            for pair in &mut moved.compatibility_pairs {
+                pair.sibling_event_id = pair.sibling_event_id.map(|id| id + 1000);
+                for position in [&mut pair.value_position, &mut pair.sibling_position] {
+                    position.log_index = position.log_index.map(|log| log + 1);
+                }
+            }
+            let differences = check_compatibility_pairs(&moved, &family.compatibility_pairs);
+            let mut fields: Vec<&str> = differences.iter().map(|d| d.field.as_str()).collect();
+            fields.sort_unstable();
+            assert_eq!(
+                fields,
+                [
+                    "compatibility_pairs[addr:60].sibling_event_id",
+                    "compatibility_pairs[addr:60].sibling_position.log_index",
+                    "compatibility_pairs[addr:60].value_position.log_index",
+                ],
+                "{id}"
+            );
+        }
+        // Mutation: without the pair metadata the family read must fail the comparison, on the
+        // pairs today's row serves as well as on the served value's event.
+        if pairs > 0 {
+            sqlx::query(
+                "UPDATE project_node_record_value
+                 SET sibling_position = NULL, sibling_value = NULL",
+            )
+            .execute(&pool)
+            .await?;
+            let report = compare_family_reads(
+                &pool,
+                fixture.chain,
+                Some((outcome.current.number, outcome.current.hash.clone())),
+                1,
+            )
+            .await?;
+            assert!(comparison.check(11, &report).is_err(), "{id}: {report:#?}");
+            let fields: Vec<&str> = report
+                .differences
+                .iter()
+                .flat_map(|(_, differences)| differences.iter().map(|d| d.field.as_str()))
+                .collect();
+            assert!(
+                fields.contains(&"compatibility_pairs[addr:60]"),
+                "{id}: {report:#?}"
+            );
+            mutated += 1;
+        }
+        database.cleanup().await?;
+    }
+    // Three cases serve a pair, and each ran both mutations.
+    assert_eq!(mutated, 6);
+    Ok(())
+}
+
+/// Today pairs through any current attribution arm, never checking that the halves share a
+/// manifest: a native value and a native sibling written under different manifests pair.
+#[tokio::test]
+async fn a_pair_across_manifests_is_served_as_today() -> Result<()> {
+    let fixture = case("ens_v1_pair_after_boundary")?;
+    let (database, pool) = database("pair_across_manifests").await?;
+    seed(&pool, fixture).await?;
+    let other: i64 = sqlx::query_scalar(
+        "INSERT INTO manifest_versions (manifest_version,namespace,source_family,chain_id,deployment_label,rollout_status,normalizer_version,file_path,manifest_payload)
+         SELECT 2,namespace,source_family,chain_id,'fixture-other','deprecated',normalizer_version,file_path || '.other',manifest_payload
+         FROM manifest_versions ORDER BY manifest_id LIMIT 1 RETURNING manifest_id",
+    )
+    .fetch_one(&pool)
+    .await?;
+    let moved = sqlx::query(
+        "UPDATE normalized_events SET source_manifest_id = $1, manifest_version = 2
+         WHERE after_state ->> 'source_event' = 'AddrChanged'",
+    )
+    .bind(other)
+    .execute(&pool)
+    .await?;
+    assert_eq!(moved.rows_affected(), 1);
+    run_window_expecting(
+        &pool,
+        11,
+        0,
+        11,
+        None,
+        RunMode::Normal,
+        &Expectations::none(),
+    )
+    .await?;
+    let family = load_family_record_inventory_detail(
+        &pool,
+        fixture.chain,
+        RESOURCE.parse()?,
+        FamilyAttribution::Given(Default::default()),
+    )
+    .await?
+    .context("no family row")?;
+    assert_eq!(family.compatibility_pairs.len(), 1);
+    database.cleanup().await
+}
+
+/// A named `AddressChanged` value and a node-keyed `AddrChanged` sibling are attributed through
+/// different arms (named and native). Today's pair join is per resource, not per arm, so they
+/// pair and today serves the `AddressChanged` value. Step 2's family pairs only within one arm,
+/// so it serves the later `AddrChanged` value instead; the harness expects today's pair and
+/// names that difference.
+#[tokio::test]
+async fn a_pair_across_attribution_arms_is_expected_as_today_serves_it() -> Result<()> {
+    let fixture = case("ens_v1_pair_after_boundary")?;
+    let (database, pool) = database("pair_across_arms").await?;
+    seed(&pool, fixture).await?;
+    let named = sqlx::query(
+        "UPDATE normalized_events value SET logical_name_id = pointer.logical_name_id
+         FROM normalized_events pointer
+         WHERE pointer.event_kind = 'ResolverChanged'
+           AND value.after_state ->> 'source_event' = 'AddressChanged'",
+    )
+    .execute(&pool)
+    .await?;
+    assert_eq!(named.rows_affected(), 1);
+    let ids: Vec<(i64, String)> = sqlx::query_as(
+        "SELECT normalized_event_id, after_state ->> 'source_event' FROM normalized_events
+         WHERE after_state ->> 'source_event' IN ('AddressChanged', 'AddrChanged')
+         ORDER BY log_index",
+    )
+    .fetch_all(&pool)
+    .await?;
+    let (value, sibling) = (ids[0].0, ids[1].0);
+    assert_eq!(
+        (ids[0].1.as_str(), ids[1].1.as_str()),
+        ("AddressChanged", "AddrChanged")
+    );
+    let logical_name_id = format!("ens:{NODE}");
+    let position = |id: &str, log: i64| {
+        json!({
+            "block_number": 11, "transaction_index": 0, "log_index": log,
+            "event_identity": format!("{}:{id}:11:{log}", fixture.id),
+        })
+    };
+    let pair = json!({
+        "record_key": "addr:60",
+        "value_event_id": value, "value_position": position("record-1", 3),
+        "sibling_event_id": sibling, "sibling_position": position("record-2", 4),
+    });
+    let entry = |address: &str, event: i64| {
+        json!({
+            "address": address, "binding_kind": "DeclaredRegistryPath",
+            "canonical_display_name": format!("{}.fixture", fixture.id),
+            "canonicality_summary": {"state": "canonical_lineage"},
+            "chain_positions": {"block_hash": block_hash(11), "block_number": 11},
+            "coin_type": "60",
+            "coverage": {"exhaustiveness": "not_asserted", "status": "projected"},
+            "logical_name_id": logical_name_id, "namehash": NODE, "namespace": "ens",
+            "normalized_name": format!("{}.fixture", fixture.id),
+            "provenance": {
+                "chain_id": fixture.chain,
+                "coverage": {"exhaustiveness": "not_asserted", "status": "projected"},
+                "logical_name_id": logical_name_id, "normalized_event_id": event,
+                "record_version_boundary_key": format!(
+                    "70:{logical_name_id};36:{RESOURCE};1:3;20:RecordVersionChanged;16:{};2:11;66:{};25:2027-01-15T08:00:11+00:00;",
+                    fixture.chain,
+                    block_hash(11)
+                ),
+                "resolver_address": RESOLVER,
+            },
+            "record_key": "addr:60", "record_resource_id": RESOURCE, "resource_id": RESOURCE,
+            "surface_binding_id": BINDING,
+        })
+    };
+    let entry_key = format!("entries[{logical_name_id}|{RESOURCE}|{BINDING}]");
+    let difference = |key: String, fields: Vec<(String, Option<Value>, Option<Value>)>| {
+        family_shadow::ExpectedDifference {
+            target: 11,
+            key,
+            fields,
+            times: 1,
+        }
+    };
+    let comparison = Expectations {
+        differences: vec![
+            difference(
+                format!("record_inventory {RESOURCE}"),
+                vec![
+                    (
+                        "entries[addr:60].value".into(),
+                        Some(json!(NONZERO20)),
+                        Some(json!(LATER20)),
+                    ),
+                    (
+                        "last_change.normalized_event_id".into(),
+                        Some(json!(value)),
+                        Some(json!(sibling)),
+                    ),
+                    (
+                        "provenance.record_event_ids".into(),
+                        Some(json!([value])),
+                        Some(json!([sibling])),
+                    ),
+                    ("compatibility_pairs[addr:60]".into(), Some(pair), None),
+                ],
+            ),
+            difference(
+                format!("resolves_to {NONZERO20} coin 60"),
+                vec![
+                    ("entries.count".into(), Some(json!(1)), Some(json!(0))),
+                    (entry_key.clone(), Some(entry(NONZERO20, value)), None),
+                ],
+            ),
+            difference(
+                format!("resolves_to {LATER20} coin 60"),
+                vec![
+                    ("entries.count".into(), Some(json!(0)), Some(json!(1))),
+                    (entry_key, None, Some(entry(LATER20, sibling))),
+                ],
+            ),
+        ],
+        ..Expectations::default()
+    };
+    run_window_expecting(&pool, 11, 0, 11, None, RunMode::Normal, &comparison).await?;
+    comparison.finish()?;
+    database.cleanup().await
+}
+
 async fn assert_terminal(fixture: &Case) -> Result<()> {
     let row = project_case_at(fixture, 13, Execution::FromZero).await?;
     assert_entry_and_answer(
@@ -680,6 +1129,98 @@ fn cases() -> &'static [Case] {
                 IndexedRecordStatus::Success,
                 Some(ZERO20),
             ),
+            fixture(
+                "ens_v1_pair_after_boundary",
+                "ens",
+                "ethereum-mainnet",
+                "ens_v1_registry_l1",
+                "ens_v1_resolver_l1",
+                "ens_v1",
+                vec![
+                    version(11, 2, 1),
+                    scalar(11, 3, 1, "AddressChanged", "60", NONZERO20),
+                    scalar(11, 4, 1, "AddrChanged", "60", LATER20),
+                ],
+                "addr:60",
+                IndexedRecordStatus::Success,
+                Some(NONZERO20),
+            ),
+            fixture(
+                "ens_v1_pair_before_boundary",
+                "ens",
+                "ethereum-mainnet",
+                "ens_v1_registry_l1",
+                "ens_v1_resolver_l1",
+                "ens_v1",
+                vec![
+                    scalar(11, 3, 1, "AddressChanged", "60", NONZERO20),
+                    scalar(11, 4, 1, "AddrChanged", "60", LATER20),
+                    version(11, 5, 1),
+                ],
+                "addr:60",
+                IndexedRecordStatus::NotFound,
+                None,
+            ),
+            fixture(
+                "ens_v1_pair_then_later_write",
+                "ens",
+                "ethereum-mainnet",
+                "ens_v1_registry_l1",
+                "ens_v1_resolver_l1",
+                "ens_v1",
+                vec![
+                    scalar(11, 3, 1, "AddressChanged", "60", NONZERO20),
+                    scalar(11, 4, 1, "AddrChanged", "60", NONZERO20),
+                    scalar(11, 5, 1, "AddrChanged", "60", LATER20),
+                ],
+                "addr:60",
+                IndexedRecordStatus::Success,
+                Some(LATER20),
+            ),
+            fixture(
+                "ens_v1_pair_clear",
+                "ens",
+                "ethereum-mainnet",
+                "ens_v1_registry_l1",
+                "ens_v1_resolver_l1",
+                "ens_v1",
+                vec![
+                    scalar(11, 3, 1, "AddressChanged", "60", "0x"),
+                    scalar(11, 4, 1, "AddrChanged", "60", ZERO20),
+                ],
+                "addr:60",
+                IndexedRecordStatus::NotFound,
+                None,
+            ),
+            fixture(
+                "ens_v1_address_changed_alone",
+                "ens",
+                "ethereum-mainnet",
+                "ens_v1_registry_l1",
+                "ens_v1_resolver_l1",
+                "ens_v1",
+                vec![scalar(11, 3, 1, "AddressChanged", "60", NONZERO20)],
+                "addr:60",
+                IndexedRecordStatus::Success,
+                Some(NONZERO20),
+            ),
+            fixture(
+                "ens_v1_older_write_then_boundary_then_pair",
+                "ens",
+                "ethereum-mainnet",
+                "ens_v1_registry_l1",
+                "ens_v1_resolver_l1",
+                "ens_v1",
+                vec![
+                    scalar(11, 1, 1, "AddrChanged", "60", LATER20),
+                    version(11, 2, 1),
+                    scalar(11, 3, 1, "AddressChanged", "60", NONZERO20),
+                    scalar(11, 4, 1, "AddrChanged", "60", LATER20),
+                ],
+                "addr:60",
+                IndexedRecordStatus::Success,
+                Some(NONZERO20),
+            ),
         ]
     })
 }
@@ -761,6 +1302,16 @@ fn flat(block: i64, coin: &str, value: &str) -> FixtureEvent {
             "record_family": "addr", "selector_key": coin, "source_event": "AddressChanged",
             "coin_type": coin, "address_bytes_hex": value, "value_retained": false
         }),
+    )
+}
+
+fn version(block: i64, log_index: i64, transaction: i64) -> FixtureEvent {
+    event(
+        block,
+        log_index,
+        transaction,
+        json!({"node": NODE, "resolver": RESOLVER, "source_event": "VersionChanged",
+               "record_version": "1"}),
     )
 }
 
@@ -849,6 +1400,28 @@ async fn run_window(
     resume_current: Option<i64>,
     mode: RunMode,
 ) -> Result<BatchOutcome> {
+    run_window_expecting(
+        pool,
+        target_block,
+        affected_from_block,
+        affected_to_block,
+        resume_current,
+        mode,
+        &Expectations::none(),
+    )
+    .await
+}
+
+/// [`run_window`] whose family comparison expects `expected`.
+async fn run_window_expecting(
+    pool: &PgPool,
+    target_block: i64,
+    affected_from_block: i64,
+    affected_to_block: i64,
+    resume_current: Option<i64>,
+    mode: RunMode,
+    expected: &Expectations,
+) -> Result<BatchOutcome> {
     let outcome = Engine::new(pool.clone())
         .run_batch(BatchRequest {
             chain_id: sqlx::query_scalar("SELECT chain_id FROM chain_lineage LIMIT 1")
@@ -865,6 +1438,7 @@ async fn run_window(
         })
         .await?;
     bounded_attribution::assert_bounded_record_attribution_matches_inventory(pool).await?;
+    family_shadow::compare_family_reads_at(pool, &outcome.current, expected).await?;
     assert!(outcome.complete);
     assert_eq!(outcome.current, outcome.target);
     assert_eq!(outcome.target.number, target_block);
