@@ -662,9 +662,10 @@ async fn a_lapsed_registration_drops_its_rows_and_the_root_keeps_its_admin() -> 
 
 /// Pro Q5 on ea047c04, conflicting lifecycle events at one position. A NameWrapper
 /// TransferSingle emits the old holder's revoke and then the new holder's grant from one log
-/// (adapters schema_v2/protocol/v1/wrapper/transfer.rs:158-159), their identities ending
-/// `holder:0:revoke:<old>:0` and `holder:0:grant:<new>:1`, the fact's index in the log
-/// (adapters schema_v2/normalized.rs:118-131). Today's summary ranks wrapper lifecycle events by
+/// (adapters schema_v2/protocol/v1/wrapper/transfer.rs:158-159), their identities ending with
+/// the facts' emission ordinals in the adapter's order (adapters schema_v2/normalized.rs:118-131):
+/// the log's TokenControlTransferred is fact 0, so here `holder:0:revoke:<old>:1` and
+/// `holder:0:grant:<new>:2`. Today's summary ranks wrapper lifecycle events by
 /// position and then generated id (resource_summary.rs:172-196), so the grant, pushed second, is
 /// the latest and the restriction block stays. Under step 2's amended D12 (39990c38) the family
 /// folds facts of one log by that emission ordinal, so it takes the grant too and serves the same
@@ -681,7 +682,10 @@ async fn a_holder_transfer_from_one_log_keeps_the_restrictions_in_emission_order
             .into_iter()
             .enumerate()
     {
-        let identity = format!("0xtx13:1:PermissionChanged:holder:0:{action}:{subject}:{ordinal}");
+        let identity = format!(
+            "0xtx13:1:PermissionChanged:holder:0:{action}:{subject}:{}",
+            ordinal + 1
+        );
         fixture
             .event(
                 Event::new(&identity, 13, 1, "PermissionChanged", V1_WRAPPER)
@@ -788,8 +792,8 @@ async fn an_unwrap_and_an_expiry_update_in_one_block_in_both_orders() -> Result<
 /// (adapters schema_v2/protocol/v1/wrapper/transfer.rs:141-146). Both rows fold to one family
 /// grant key, the resource, subject and resource scope. Today's builder keeps the grant, the
 /// higher generated id, and serves the recipient's holder row. Under step 2's amended D12
-/// (39990c38) the family folds the log's facts by their emission ordinals (0 for the revoke, 2
-/// for the grant), keeps the grant and serves the same rows and restriction block. Until
+/// (39990c38) the family folds the log's facts by their emission ordinals in the adapter's order
+/// (after the TokenControlTransferred at 0: 1 for the delegate's revoke, 3 for the grant), keeps the grant and serves the same rows and restriction block. Until
 /// 39990c38 the revoke's identity (`token_approval`) sorted after the grant's (`holder`) and this
 /// was pinned as a mismatch on `permissions_current` and `resource_restrictions`; it is now
 /// pinned equal.
@@ -824,8 +828,10 @@ async fn a_transfer_to_the_delegate_from_one_log_keeps_the_recipients_holder_row
     .into_iter()
     .enumerate()
     {
-        let identity =
-            format!("0xtx13:1:PermissionChanged:{relation}:0:{action}:{subject}:{ordinal}");
+        let identity = format!(
+            "0xtx13:1:PermissionChanged:{relation}:0:{action}:{subject}:{}",
+            ordinal + 1
+        );
         fixture
             .event(
                 Event::new(&identity, 13, 1, "PermissionChanged", V1_WRAPPER)
@@ -1369,7 +1375,8 @@ async fn a_root_retention_gap_refuses_the_child_permission_excuse() -> Result<()
 /// (here its summary row is deleted; the root has no permission row) was not compared, and
 /// another chain's direct row on it, which the effective-permission reader serves by resource
 /// id, went unchecked. The set is now closed over the summaries' roots: the root is compared
-/// and equals, and the foreign row is an `other_chain_rows` mismatch with no excuse.
+/// and equals, a family grant copied onto it is exactly a `permissions_current` mismatch of the
+/// root, and the foreign row is an `other_chain_rows` mismatch with no excuse.
 #[tokio::test]
 async fn a_root_reached_only_through_a_child_is_audited() -> Result<()> {
     const OTHER: &str = "other-chain";
@@ -1407,6 +1414,47 @@ async fn a_root_reached_only_through_a_child_is_audited() -> Result<()> {
         "{:#?}",
         closed.lines
     );
+    // The root is audited on its own, not only reached: a family grant on it that the served
+    // tables lack (the child's holder grant copied onto the root) is its own mismatch.
+    let copied = sqlx::query(
+        "INSERT INTO bigname_phase.project_grant
+         SELECT (jsonb_populate_record(NULL::bigname_phase.project_grant,
+                    to_jsonb(grant_row) || jsonb_build_object('resource_id', $1::text))).*
+         FROM bigname_phase.project_grant grant_row
+         WHERE grant_row.resource_id = $2::uuid AND grant_row.subject = $3",
+    )
+    .bind(&root)
+    .bind(&child)
+    .bind(HOLDER)
+    .execute(&fixture.pool)
+    .await?
+    .rows_affected();
+    assert_eq!(copied, 1);
+    let mutated = shadow_support::compare::compare(&fixture.pool, CHAIN, TARGET).await?;
+    assert!(
+        mutated.known_discrepancy.is_empty() && mutated.expected_delta_fields.is_empty(),
+        "{:#?}",
+        mutated.lines
+    );
+    let failed: Vec<&str> = mutated
+        .lines
+        .iter()
+        .filter(|line| line.starts_with("SEPOLIA_END_TO_END_SHADOW_MISMATCH"))
+        .filter_map(|line| {
+            line.contains(&format!("key={root} "))
+                .then(|| line.split(" field=").nth(1)?.split(' ').next())
+                .flatten()
+        })
+        .collect();
+    assert_eq!(failed, ["permissions_current"], "{:#?}", mutated.lines);
+    assert_eq!(mutated.mismatched, 1, "{:#?}", mutated.lines);
+    let removed =
+        sqlx::query("DELETE FROM bigname_phase.project_grant WHERE resource_id = $1::uuid")
+            .bind(&root)
+            .execute(&fixture.pool)
+            .await?
+            .rows_affected();
+    assert_eq!(removed, 1);
     sqlx::query(
         "INSERT INTO chain_lineage (chain_id, block_hash, parent_hash, block_number,
              block_timestamp, canonicality_state)
