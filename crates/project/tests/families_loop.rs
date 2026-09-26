@@ -1,0 +1,288 @@
+//! The owned key family loop (docs/projections.md, "Owned key families"): one transaction per
+//! block after the served batch commits, a compare-and-swap on the shadow marker, a marker journal
+//! row on every block, catch-up from a lagging marker, and a failure that stops the loop without
+//! touching anything the served batch published.
+#[path = "families_support/mod.rs"]
+mod support;
+
+use anyhow::Result;
+use bigname_project::{
+    BatchRequest, Engine, Marker, RunMode,
+    families::{self, FamilyMode},
+};
+use serde_json::json;
+use support::{CHAIN, Event, Fixture, hash, marker};
+
+async fn bootstrapped(prefix: &str) -> Result<Fixture> {
+    let fixture = Fixture::new(prefix, 20).await?;
+    let outcome = fixture.apply(10, FamilyMode::Rebuild).await;
+    assert_eq!(outcome.skipped, None);
+    assert_eq!(fixture.marker().await?.0, Some(10));
+    Ok(fixture)
+}
+
+#[tokio::test]
+async fn catch_up_applies_and_journals_every_block_to_the_served_marker() -> Result<()> {
+    let fixture = bootstrapped("families_loop_catch_up").await?;
+    let (_, _, sequence) = fixture.marker().await?;
+    let outcome = fixture.apply(14, FamilyMode::Normal).await;
+    assert_eq!(outcome.skipped, None);
+    assert_eq!(outcome.blocks, 4);
+    assert_eq!(outcome.lag_blocks(), 0);
+    assert_eq!(
+        fixture.marker().await?,
+        (Some(14), Some(hash(14)), sequence + 4)
+    );
+    assert_eq!(fixture.journalled_blocks().await?, [10, 11, 12, 13, 14]);
+    fixture.cleanup().await
+}
+
+#[tokio::test]
+async fn a_second_run_at_the_same_head_changes_nothing() -> Result<()> {
+    let fixture = bootstrapped("families_loop_same_head").await?;
+    fixture.apply(14, FamilyMode::Normal).await;
+    let marker = fixture.marker().await?;
+    let snapshot = fixture.snapshot().await?;
+    let outcome = fixture.apply(14, FamilyMode::Normal).await;
+    assert_eq!((outcome.blocks, outcome.skipped), (0, None));
+    assert_eq!(fixture.marker().await?, marker);
+    assert_eq!(fixture.snapshot().await?, snapshot);
+    fixture.cleanup().await
+}
+
+#[tokio::test]
+async fn a_lagging_marker_catches_up_from_where_it_stands() -> Result<()> {
+    let fixture = bootstrapped("families_loop_lagging").await?;
+    fixture.apply(11, FamilyMode::Normal).await;
+    let outcome = fixture.apply(14, FamilyMode::Normal).await;
+    assert_eq!(outcome.blocks, 3, "blocks 12 to 14, from the family marker");
+    assert_eq!(fixture.marker().await?.0, Some(14));
+    fixture.cleanup().await
+}
+
+#[tokio::test]
+async fn a_failing_block_stops_the_loop_and_the_next_run_resumes_there() -> Result<()> {
+    let fixture = bootstrapped("families_loop_failure").await?;
+    // A failure inside block 13's transaction: its first journal write raises.
+    sqlx::raw_sql(
+        "CREATE FUNCTION fail_block_13() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN
+             IF NEW.block_number = 13 THEN RAISE EXCEPTION 'injected family failure'; END IF;
+             RETURN NEW;
+         END $$;
+         CREATE TRIGGER fail_block_13 BEFORE INSERT ON project_family_undo
+         FOR EACH ROW EXECUTE FUNCTION fail_block_13();",
+    )
+    .execute(&fixture.pool)
+    .await?;
+    let outcome = fixture.apply(14, FamilyMode::Normal).await;
+    let skipped = outcome
+        .skipped
+        .clone()
+        .expect("the failing block stops the loop");
+    assert!(skipped.contains("block 13"), "{skipped}");
+    assert!(skipped.contains("injected family failure"), "{skipped}");
+    assert_eq!(outcome.blocks, 2);
+    assert_eq!(outcome.lag_blocks(), 2);
+    assert_eq!(fixture.marker().await?.0, Some(12));
+    assert_eq!(fixture.journalled_blocks().await?, [10, 11, 12]);
+
+    sqlx::raw_sql("DROP TRIGGER fail_block_13 ON project_family_undo")
+        .execute(&fixture.pool)
+        .await?;
+    let outcome = fixture.apply(14, FamilyMode::Normal).await;
+    assert_eq!((outcome.blocks, outcome.skipped), (2, None));
+    assert_eq!(fixture.marker().await?.0, Some(14));
+    fixture.cleanup().await
+}
+
+#[tokio::test]
+async fn a_family_failure_leaves_the_served_publication_as_committed() -> Result<()> {
+    let fixture = Fixture::new("families_loop_served", 14).await?;
+    let name = "ens:0x01";
+    fixture.surface(name, "0x01").await?;
+    fixture
+        .event(
+            Event::new("fixture:grant", 12, 0, "RegistrationGranted", "ens_v2_registry_l1")
+                .name(name)
+                .after(json!({"status": "registered", "registrant": "0x00000000000000000000000000000000000000aa",
+                              "token_id": "1", "registry_contract_instance_id": "r"})),
+        )
+        .await?;
+    let served = Engine::new(fixture.pool.clone())
+        .run_batch(BatchRequest {
+            chain_id: CHAIN.to_owned(),
+            target_block: 14,
+            affected_from_block: 0,
+            affected_to_block: 14,
+            resume_current: None,
+            mode: RunMode::Normal,
+        })
+        .await?;
+    let published = served_digest(&fixture).await?;
+    sqlx::raw_sql(
+        "CREATE FUNCTION fail_families() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN RAISE EXCEPTION 'injected family failure'; END $$;
+         CREATE TRIGGER fail_families BEFORE INSERT ON project_family_undo
+         FOR EACH ROW EXECUTE FUNCTION fail_families();",
+    )
+    .execute(&fixture.pool)
+    .await?;
+    let outcome = fixture
+        .apply(served.current.number, FamilyMode::Rebuild)
+        .await;
+    assert!(outcome.skipped.is_some());
+    assert_eq!(
+        served_digest(&fixture).await?,
+        published,
+        "the served rows are what the batch committed"
+    );
+    assert_eq!(
+        fixture.marker().await?.0,
+        None,
+        "the families never applied a block"
+    );
+    fixture.cleanup().await
+}
+
+/// Every row of the served tables the batch wrote, as text.
+async fn served_digest(fixture: &Fixture) -> Result<Vec<String>> {
+    let mut digest = Vec::new();
+    for table in [
+        "name_current",
+        "children_current",
+        "permissions_current",
+        "record_inventory_current",
+        "resolver_current",
+        "address_names_current",
+        "primary_names_current",
+        "child_registration_events",
+    ] {
+        let rows: Vec<String> = sqlx::query_scalar(&format!(
+            "SELECT (to_jsonb(served) - 'inserted_at' - 'last_recomputed_at')::text
+             FROM {table} served ORDER BY 1"
+        ))
+        .fetch_all(&fixture.pool)
+        .await?;
+        digest.push(format!("{table}: {}", rows.join("\n")));
+    }
+    Ok(digest)
+}
+
+// Every block reads the input token inside its own transaction and records it on the marker. No
+// block applies while Interpret is in redo: the run stops as a skip and the next run resumes.
+#[tokio::test]
+async fn each_block_records_the_input_token_it_read_and_waits_out_an_interpret_redo() -> Result<()>
+{
+    let fixture = Fixture::new("families_loop_revision", 20).await?;
+    fixture.interpret_row("interpret-hash-a", 3, false).await?;
+    fixture.apply(10, FamilyMode::Normal).await;
+    assert_eq!(
+        fixture.marker_revision().await?,
+        (Some("interpret-hash-a".to_owned()), Some(3))
+    );
+
+    fixture.interpret_row("interpret-hash-b", 4, true).await?;
+    let waiting = fixture.apply(11, FamilyMode::Normal).await;
+    let skipped = waiting
+        .skipped
+        .expect("no block applies while Interpret is in redo");
+    assert!(skipped.contains("Interpret is in redo"), "{skipped}");
+    assert_eq!(fixture.marker().await?.0, Some(10));
+
+    fixture.interpret_row("interpret-hash-b", 4, false).await?;
+    let resumed = fixture.apply(12, FamilyMode::Normal).await;
+    assert_eq!(resumed.skipped, None);
+    assert!(
+        resumed.revision_adopted,
+        "no Project redo followed the rewrite"
+    );
+    assert_eq!(fixture.marker().await?.0, Some(12));
+    assert_eq!(
+        fixture.marker_revision().await?,
+        (Some("interpret-hash-b".to_owned()), Some(4))
+    );
+    let token: (Option<bool>, Option<i64>, Option<String>) = sqlx::query_as(
+        "SELECT interpret_redo_in_progress, project_redo_attempt, admission_manifests
+         FROM project_family_marker WHERE chain_id = $1",
+    )
+    .bind(CHAIN)
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(token, (Some(false), Some(0), Some(String::new())));
+    fixture.cleanup().await
+}
+
+#[tokio::test]
+async fn the_lag_counts_a_marker_off_the_served_branch_or_above_the_target() -> Result<()> {
+    let fixture = bootstrapped("families_loop_lag_branch").await?;
+    fixture.apply(14, FamilyMode::Normal).await;
+
+    // The served target drops below the family marker; the families hold two blocks too many.
+    let lowered = families::skipped(&fixture.pool, CHAIN, &marker(12), "test".into()).await;
+    assert_eq!(lowered.lag_blocks(), 2);
+
+    // Block 14 is replaced by 14' at the same height and the loop is skipped: every family row is
+    // still for the orphaned 14, one block past the branch point.
+    sqlx::query(
+        "UPDATE chain_lineage SET canonicality_state = 'orphaned'
+         WHERE chain_id = $1 AND block_number = 14",
+    )
+    .bind(CHAIN)
+    .execute(&fixture.pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO chain_lineage (chain_id, block_hash, parent_hash, block_number,
+             block_timestamp, canonicality_state)
+         VALUES ($1, '0xreplacement14', $2, 14, to_timestamp(1800000168), 'canonical')",
+    )
+    .bind(CHAIN)
+    .bind(hash(13))
+    .execute(&fixture.pool)
+    .await?;
+    let replacement = Marker {
+        number: 14,
+        hash: "0xreplacement14".to_owned(),
+    };
+    let forked = families::skipped(&fixture.pool, CHAIN, &replacement, "test".into()).await;
+    assert_eq!(
+        forked.marker.as_ref().map(|marker| marker.hash.clone()),
+        Some(hash(14))
+    );
+    assert_eq!(forked.lag_blocks(), 1);
+    fixture.cleanup().await
+}
+
+// A rebuild does not start while Interpret is in redo: the run reports the wait, resets nothing
+// and leaves no marker. The next run after the redo clears rebuilds to the served marker.
+#[tokio::test]
+async fn a_rebuild_waits_out_an_interpret_redo_and_the_next_run_completes_it() -> Result<()> {
+    let fixture = Fixture::new("families_loop_rebuild_wait", 20).await?;
+    fixture.interpret_row("interpret-hash-a", 3, true).await?;
+    let waiting = fixture.apply(10, FamilyMode::Rebuild).await;
+    let skipped = waiting
+        .skipped
+        .clone()
+        .expect("no rebuild starts while Interpret is in redo");
+    assert!(skipped.contains("Interpret is in redo"), "{skipped}");
+    assert_eq!((waiting.reset, waiting.blocks), (false, 0));
+    let applied: Option<i64> = sqlx::query_scalar(
+        "SELECT current_block_number FROM project_family_marker WHERE chain_id = $1",
+    )
+    .bind(CHAIN)
+    .fetch_optional(&fixture.pool)
+    .await?
+    .flatten();
+    assert_eq!(applied, None, "no family block applied");
+
+    fixture.interpret_row("interpret-hash-a", 3, false).await?;
+    let rebuilt = fixture.apply(10, FamilyMode::Normal).await;
+    assert_eq!(rebuilt.skipped, None);
+    assert!(
+        rebuilt.reset,
+        "the next run rebuilds the families it never started"
+    );
+    assert_eq!(fixture.marker().await?.0, Some(10));
+    assert_eq!(rebuilt.lag_blocks(), 0);
+    fixture.cleanup().await
+}

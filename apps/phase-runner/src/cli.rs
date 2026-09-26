@@ -16,8 +16,13 @@ use crate::{
     },
     error::{ErrorKind, RunnerError, RunnerResult},
     phase::{BlockRange, PhaseName},
+    project_phase::FamilySettings,
     runner::RedoPhase,
 };
+
+#[path = "cli_families.rs"]
+mod families;
+use families::ProjectFamiliesArgs;
 
 #[path = "cli_capacity.rs"]
 mod capacity;
@@ -170,6 +175,9 @@ struct RunArgs {
         help = "CHAIN=HTTP_URL used only for hash-pinned multicall hydration"
     )]
     hydration_rpc_urls: Vec<String>,
+
+    #[command(flatten)]
+    project_families: ProjectFamiliesArgs,
 }
 
 #[derive(Debug, Args)]
@@ -250,6 +258,9 @@ struct RedoArgs {
         help = "CHAIN=HTTP_URL used only for hash-pinned multicall hydration"
     )]
     hydration_rpc_urls: Vec<String>,
+
+    #[command(flatten)]
+    project_families: ProjectFamiliesArgs,
 }
 
 #[derive(Clone, Debug, Args)]
@@ -284,6 +295,7 @@ pub enum ResolvedCommand {
         manifests_root: PathBuf,
         runtime: RuntimeConfig,
         hydration_rpc_urls: bigname_lookup::ChainRpcUrls,
+        project_families: FamilySettings,
     },
     Redo {
         database_url: String,
@@ -299,6 +311,7 @@ pub enum ResolvedCommand {
         range: BlockRange,
         watch_set_coverage_attestations: BTreeMap<String, String>,
         hydration_rpc_urls: bigname_lookup::ChainRpcUrls,
+        project_families: FamilySettings,
     },
     Rewind {
         database_url: String,
@@ -377,6 +390,7 @@ fn resolve_run(args: RunArgs) -> RunnerResult<ResolvedCommand> {
         manifests_root: args.manifests.manifests_root,
         runtime,
         hydration_rpc_urls,
+        project_families: args.project_families.into(),
     })
 }
 
@@ -433,6 +447,11 @@ fn resolve_redo(args: RedoArgs) -> RunnerResult<ResolvedCommand> {
         range,
         watch_set_coverage_attestations,
         hydration_rpc_urls: resolve_hydration_rpc_urls(&args.hydration_rpc_urls)?,
+        // Nothing follows a one-shot redo, so its family runs finish before it returns.
+        project_families: FamilySettings {
+            finish_each_batch: true,
+            ..args.project_families.into()
+        },
     })
 }
 

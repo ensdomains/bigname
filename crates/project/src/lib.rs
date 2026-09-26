@@ -3,6 +3,7 @@
 mod builders;
 mod engine;
 mod error;
+pub mod families;
 mod hydration;
 mod integrity;
 #[cfg(test)]

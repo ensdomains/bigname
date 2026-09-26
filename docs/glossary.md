@@ -2457,3 +2457,132 @@ and the elapsed time of each derivation stage. The engine returns it with the
 batch outcome and logs it; the phase runner exports it as the
 `phase_runner_project_*` metrics ([pipeline monitoring
 runbook](runbooks/pipeline-monitoring.md#project-batch-writes)).
+
+## Owned key family
+
+per-key current state Project keeps for one kind of fact, such as a name's
+binding candidates, a resource's resolver pointer or a resolver's records at a
+node. A block writes only the keys its own events name, and each row holds
+what the latest events of its key left, clears included. The families are
+unread shadows until the per-block publication reads them
+([projections](projections.md#owned-key-families)).
+
+The families carry labels F1 to F14, used in the difference lists, the table
+comments and the reducers' module headers. Each label names these tables and
+the reducer under `crates/project/src/families/` that writes them:
+
+| Label | Tables | Reducer |
+| --- | --- | --- |
+| F1, name identity | `project_name_state`, `project_binding_candidate` | `identity.rs` |
+| F2a, registration and lease state | `project_lifecycle_key_state`, `project_lifecycle_triple_summary`, `project_lifecycle_association`, `project_lifecycle_event`, `project_child_registration_state` | `lifecycle.rs` |
+| F2b, wrapper state | `project_wrapper_state` | `wrapper.rs` |
+| F2c, registry ownership | `project_registry_node_state`, `project_registry_owner_event`, `project_registry_binding_observation` | `registry.rs` |
+| F3, resolver classification | `project_resolver_classification` | `classification.rs` |
+| F4, registry-node resolver pointer | `project_registry_pointer` | `resolver.rs` |
+| F5, resource resolver pointer | `project_resource_pointer` | `resolver.rs` |
+| F6, node records | `project_node_record_partition`, `project_node_record_value` | `records.rs` |
+| F7, record-id records and resolver links | `project_record_id_value`, `project_resolver_link` | `records.rs` |
+| F8, grants | `project_grant`, `project_resource_admin_aggregate` | `permissions.rs` |
+| F9, account approvals | `project_account_approval` | `permissions.rs` |
+| F10, aliases | `project_name_alias`, `project_resolver_alias` | `topology.rs` |
+| F11, child edges | `project_child_edge_candidate`, `project_parent_subregistry` | `topology.rs` |
+| F12, reverse tuples and claims | `project_reverse_tuple`, `project_reverse_node_claim`, `project_claim_normalization` | `reverse.rs` |
+| F13, address-to-name association | `project_address_name_fold`, `project_address_controller_candidate`, `project_address_name_index` | `addresses.rs`, with the index derived in `derived.rs` |
+| F14, address-to-record association | `project_address_record_node_index`, `project_address_record_id_index` | `derived.rs` |
+
+## Family marker
+
+`project_family_marker`: the block and hash a chain's [owned key
+families](#owned-key-family) stand at, the generation (`sequence`) every block
+and undo advances, and the input token, input revision and [active manifest
+set](#active-manifest-set-family-block) key the last block read. A block or undo applies only against the generation it
+planned from.
+
+## Family undo journal
+
+the rows of `project_family_undo`: for every owned key family row a block
+changed, the row as it was before the block (or nothing, when the block
+created it), plus the family marker before the block. Undoing the block puts
+those images back and returns the marker. Rows are kept back to the lowest of
+256 blocks below the marker, the finalized block, the safe block and an active
+repair's floor ([projections](projections.md#owned-key-families)).
+
+## Repair record
+
+`project_repair_record`: the latest undo-then-replay or rebuild of a chain's
+owned key families, with the Project redo attempt that caused it, its reason,
+the block it trusts, the block it replays to, its state (`undoing`,
+`replaying`, `rebuilding` or `complete`) and, when complete, the marker,
+generation and input content hash it finished with. Each state change commits
+in the same transaction as the reset, undo or block it describes.
+
+## Family input revision
+
+the Interpret row's `input_content_hash` and `redo_attempt_generation` a family
+block read inside its own transaction, recorded on the family marker; nothing
+while Interpret is in redo, and the block then waits. Distinct from the retired [raw-log input
+revision](#input-revision-raw-log-input-revision).
+
+## Active manifest set (family block)
+
+the manifests a family block classifies resolvers under: for every manifest
+the chain reads, its latest `SourceManifestUpdated` event at or below the block
+(or with no block) on the readable lineage, and those that are active with a
+payload. The block records the set's key, `manifest_id:event_id` per manifest,
+as `admission_manifests`; a different key reclassifies every stored resolver
+and every address an active resolver edge reaches, so an edge-only resolver
+whose origin manifest returns gets its row back. A
+family run reads the manifest updates once, before its first block. Distinct
+from the retired [admission epoch](#admission-epoch).
+
+## Canonical event order
+
+the one order Project applies a chain's events in (D12, amended by Tate on
+2026-09-26): block number, then transaction index, then log index, then, for an
+event with both a transaction and a log index, its
+[emission ordinal](#emission-ordinal), then `event_identity` compared as bytes
+(`COLLATE "C"` in SQL). Facts of one emission batch at one log therefore apply
+in the order the adapter wrote them: a NameWrapper transfer's resource-scoped
+facts (the delegate approval clear, the old holder's revoke, the new holder's
+grant, a retained delegate's re-grant) end on what the adapter wrote last. A
+synthesised event has no transaction or log position, sorts before every
+transaction of its block and keeps the identity byte order, since its trailing
+number is not an emission index. Owned key family reducers, the dedupe of
+repeated deliveries and every position comparison use it
+([projections](projections.md#owned-key-families)).
+
+## Emission ordinal
+
+the index of a fact within the adapter emission batch that wrote it, which the
+adapter appends as the final `:`-separated segment of a raw-log
+`event_identity` (`crates/adapters/src/schema_v2/normalized.rs:118-131`). It
+counts from 0 again for every batch: once for a log's primary events and once
+for each sourced batch (`sourced_events.rs:57-71`), and one source can carry
+several batches at one log. It is that segment when it is a nonempty run of
+ASCII digits no greater than 4294967295, leading zeros allowed, on an event
+with both a transaction and a log index; any other event has none, and none
+sorts first in the [canonical event order](#canonical-event-order). Within one
+batch it is the adapter's write order. Between batches at one log it is not,
+and that order is a disclosed precondition: no two batches of one source are
+known to write one family key, and where batches of two sources write one key
+from one log, the fact with the higher ordinal (then the higher identity
+bytes) wins, not the one inserted last. Its one confirmed instance is the
+NameWrapped registry-node pointer, where the resolver value agrees with the
+served read and only the resource, source family and event attribution differ.
+Four more shapes are read from the adapter code and pinned by tests but not
+yet produced by an adapter run: an F1 binding predecessor, an F4 registrar
+pointer, an F4 enrichment pointer against the registrar surface, and an F13
+controller. The F13 shape is a value difference: the families keep the
+registrant as controller where the served fold would keep the registry owner
+([projections](projections.md#owned-key-families) lists all four). No
+cross-source value difference is exempted. A
+served reader ported to the canonical event order (step 7) must parse the
+ordinal the same way. Only when both indexes are present, match
+`regexp_match(event_identity COLLATE "C", ':([0-9]+)$') m`, strip leading
+zeros with `d = ltrim(m[1], '0')`, then take
+`CASE WHEN d = '' THEN 0::bigint WHEN length(d) < 10 OR (length(d) = 10 AND d COLLATE "C" <= '4294967295' COLLATE "C") THEN d::bigint END`,
+ordered `NULLS FIRST`, with the full identity bytes last. It checks the
+significant length before it casts, so no suffix errors where the Rust parse
+yields none; a cast to numeric first fails on 131073 digits.
+`crates/project/tests/families_ordinal_sql.rs` checks this form against the
+Rust parse.

@@ -1,7 +1,12 @@
-use std::sync::Arc;
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use bigname_project::{
     BatchRequest, Engine, ErrorKind as ProjectErrorKind, Marker, RunMode as ProjectRunMode,
+    families::{FamilyMode, FamilyOptions, InputToken},
 };
 use sqlx::PgPool;
 
@@ -10,15 +15,55 @@ use crate::{
     heads::BlockMarker,
     metrics::RunnerMetricsFeed,
     phase::{
-        Phase, PhaseBatchOutcome, PhaseContext, PhaseFuture, PhaseName, PhaseProgress, RunMode,
+        AfterProgressFuture, Phase, PhaseBatchOutcome, PhaseContext, PhaseFuture, PhaseName,
+        PhaseProgress, RunMode,
     },
 };
+
+/// The served marker and mode of a committed batch, with the input token read before its
+/// progress was recorded or the reason that read failed.
+type PendingFamilies = (Marker, FamilyMode, Result<InputToken, String>);
+
+/// How the owned key families follow the served batches.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FamilySettings {
+    /// Whether each committed batch is followed by the families.
+    pub enabled: bool,
+    /// The most family blocks one runner cycle applies or undoes; a rebuild or a long catch-up
+    /// continues on later cycles.
+    pub max_blocks_per_run: u64,
+    /// How long the input token read before a batch's progress may take; past it the families
+    /// skip that batch and the skip is counted.
+    pub token_budget: Duration,
+    /// Whether a family run that spends its block budget is followed at once by another until
+    /// the families reach the served marker. The one-shot `redo` command sets it, since no later
+    /// batch follows it. The supervised run leaves it off: the batch's publication is already
+    /// committed, and the next batch waits for one budgeted family run rather than a series.
+    pub finish_each_batch: bool,
+}
+
+impl Default for FamilySettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_blocks_per_run: bigname_project::families::MAX_BLOCKS_PER_RUN,
+            token_budget: Duration::from_secs(2),
+            finish_each_batch: false,
+        }
+    }
+}
 
 pub struct ProjectPhase {
     pool: PgPool,
     engine: Engine,
     hydrator: Option<bigname_project::Hydrator>,
     metrics_feed: Option<RunnerMetricsFeed>,
+    families: FamilySettings,
+    /// The served marker, mode and input token of each chain's last committed batch, which the
+    /// owned key families follow once the runner has recorded the batch's progress.
+    pending_families: Arc<Mutex<BTreeMap<String, PendingFamilies>>>,
+    /// Chains whose finishing family run left the families short of the served marker.
+    family_shortfalls: Arc<Mutex<BTreeMap<String, String>>>,
 }
 
 impl ProjectPhase {
@@ -28,6 +73,9 @@ impl ProjectPhase {
             pool,
             hydrator: None,
             metrics_feed: None,
+            families: FamilySettings::default(),
+            pending_families: Arc::default(),
+            family_shortfalls: Arc::default(),
         }
     }
 
@@ -37,7 +85,22 @@ impl ProjectPhase {
             hydrator: Some(bigname_project::Hydrator::new(pool.clone(), rpc_urls)),
             pool,
             metrics_feed: None,
+            families: FamilySettings::default(),
+            pending_families: Arc::default(),
+            family_shortfalls: Arc::default(),
         }
+    }
+
+    /// Whether each committed batch is followed by the owned key families; on unless turned off.
+    pub fn with_families(mut self, enabled: bool) -> Self {
+        self.families.enabled = enabled;
+        self
+    }
+
+    /// How the owned key families follow the served batches.
+    pub fn with_family_settings(mut self, settings: FamilySettings) -> Self {
+        self.families = settings;
+        self
     }
 
     /// Reports what each committed batch wrote to the metrics task.
@@ -46,11 +109,76 @@ impl ProjectPhase {
         self
     }
 
+    /// Reports committed batches and the steps of full-rebuild and redo runs to one feed.
+    pub fn with_metrics(self, feed: RunnerMetricsFeed) -> Self {
+        self.with_metrics_feed(feed.clone())
+            .with_step_observer(Arc::new(feed))
+    }
+
     /// Reports the steps of full-rebuild and redo runs, which are one long transaction.
     pub fn with_step_observer(self, observer: Arc<dyn bigname_project::StepObserver>) -> Self {
         Self {
             engine: self.engine.with_step_observer(observer),
             ..self
+        }
+    }
+
+    /// Record a chain's families as short of `target` when a finishing run takes its pending work,
+    /// before the run is first polled, and clear the entry only once a run that skipped nothing
+    /// ends on the target, so a run that is abandoned midway, or before it starts, stays reported.
+    fn note_shortfall(
+        &self,
+        chain_id: &str,
+        target: &Marker,
+        outcome: Option<&bigname_project::families::FamilyOutcome>,
+    ) {
+        let mut shortfalls = self
+            .family_shortfalls
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(outcome) = outcome else {
+            shortfalls.insert(
+                chain_id.to_owned(),
+                format!(
+                    "chain {chain_id}: the family run toward served marker block {} ({}) did not \
+                     finish; the family marker is unavailable",
+                    target.number, target.hash
+                ),
+            );
+            return;
+        };
+        // A skip is a shortfall even at lag 0: a redo that ends on the served marker's own block
+        // and hash leaves a family marker already there looking current.
+        if outcome.skipped.is_none() && outcome.lag_blocks() == 0 {
+            shortfalls.remove(chain_id);
+            return;
+        }
+        let marker = outcome.marker.as_ref().map_or_else(
+            || "no block".to_owned(),
+            |marker| format!("block {} ({})", marker.number, marker.hash),
+        );
+        let reason = outcome.skipped.as_deref().unwrap_or("stopped");
+        tracing::error!(
+            chain_id,
+            family_block = outcome.marker.as_ref().map(|marker| marker.number),
+            target_block = target.number,
+            target_hash = target.hash,
+            reason,
+            "one-shot redo left the owned key families short of the served marker; rerun the \
+             same redo"
+        );
+        shortfalls.insert(
+            chain_id.to_owned(),
+            format!(
+                "chain {chain_id}: families at {marker}, served marker block {} ({}): {reason}",
+                target.number, target.hash
+            ),
+        );
+    }
+
+    fn report_families(&self, chain_id: &str, outcome: &bigname_project::families::FamilyOutcome) {
+        if let Some(feed) = &self.metrics_feed {
+            feed.project_families(chain_id, outcome);
         }
     }
 
@@ -97,6 +225,85 @@ impl ProjectPhase {
 impl Phase for ProjectPhase {
     fn name(&self) -> PhaseName {
         PhaseName::Project
+    }
+
+    fn after_progress_recorded(&self, chain_id: &str) -> AfterProgressFuture<'_> {
+        let pending = self
+            .pending_families
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(chain_id);
+        let finish = self.families.finish_each_batch;
+        // Recorded here, not in the future: a stop can drop the future before its first poll, and
+        // the one-shot redo must still see that its families did not reach the served marker.
+        if finish && let Some((target, _, _)) = &pending {
+            self.note_shortfall(chain_id, target, None);
+        }
+        let chain_id = chain_id.to_owned();
+        Box::pin(async move {
+            let Some((target, mode, token)) = pending else {
+                return;
+            };
+            let options = FamilyOptions::new(bigname_content_hash::INTERPRETER_CONTENT_HASH)
+                .with_max_blocks_per_run(self.families.max_blocks_per_run);
+            let token = match token {
+                Ok(token) => token,
+                Err(reason) => {
+                    let outcome =
+                        bigname_project::families::skipped(&self.pool, &chain_id, &target, reason)
+                            .await;
+                    self.report_families(&chain_id, &outcome);
+                    if finish {
+                        self.note_shortfall(&chain_id, &target, Some(&outcome));
+                    }
+                    return;
+                }
+            };
+            let mut outcome = bigname_project::families::apply(
+                &self.pool, &chain_id, &target, mode, &token, &options,
+            )
+            .await;
+            self.report_families(&chain_id, &outcome);
+            // Later runs continue in normal mode: in the redo's own mode an unfinished rebuild
+            // would start again.
+            while finish
+                && outcome.budget_exhausted
+                && outcome.skipped.is_none()
+                && outcome.blocks + outcome.undone_blocks > 0
+            {
+                outcome = bigname_project::families::apply(
+                    &self.pool,
+                    &chain_id,
+                    &target,
+                    FamilyMode::Normal,
+                    &token,
+                    &options,
+                )
+                .await;
+                self.report_families(&chain_id, &outcome);
+            }
+            if finish {
+                self.note_shortfall(&chain_id, &target, Some(&outcome));
+            }
+        })
+    }
+
+    fn after_redo(&self, chain_id: &str) -> RunnerResult<()> {
+        let shortfall = self
+            .family_shortfalls
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(chain_id)
+            .cloned();
+        shortfall.map_or(Ok(()), |shortfall| {
+            Err(RunnerError::new(
+                ErrorKind::Transient,
+                format!(
+                    "family repair incomplete; the redo is recorded, rerun the same redo to \
+                     finish the owned key families: {shortfall}"
+                ),
+            ))
+        })
     }
 
     fn run_batch(&self, context: PhaseContext) -> PhaseFuture<'_> {
@@ -185,6 +392,49 @@ impl Phase for ProjectPhase {
             };
             if let Some(feed) = &self.metrics_feed {
                 feed.project_batch(&context.chain_id, &outcome.write_summary);
+            }
+            if self.families.enabled {
+                let mode = match context.mode {
+                    RunMode::Normal if context.resume.current.is_none() => FamilyMode::Rebuild,
+                    RunMode::Normal => FamilyMode::Normal,
+                    RunMode::Redo(range) | RunMode::RecomputeFlags(range) => FamilyMode::Redo {
+                        from: range.from,
+                        to: range.to,
+                    },
+                };
+                // Read now, while a finished redo's session is still open on the Project row: the
+                // runner closes it when it records this batch. The read is bounded so it cannot
+                // hold up the progress write; a failed or late read skips this batch's families,
+                // is counted as a skip, and the next run sees the redo attempt it missed and
+                // rebuilds. A zero budget skips without starting the read, which a zero-length
+                // timer would otherwise race.
+                let late = || {
+                    format!(
+                        "the input token did not read within {:?}",
+                        self.families.token_budget
+                    )
+                };
+                let token = if self.families.token_budget.is_zero() {
+                    Err(late())
+                } else {
+                    match tokio::time::timeout(
+                        self.families.token_budget,
+                        bigname_project::families::input_token(&self.pool, &context.chain_id),
+                    )
+                    .await
+                    {
+                        Ok(Ok(token)) => Ok(token),
+                        Ok(Err(error)) => Err(format!("the input token did not read: {error}")),
+                        Err(_) => Err(late()),
+                    }
+                };
+                self.pending_families
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .insert(
+                        context.chain_id.clone(),
+                        (outcome.current.clone(), mode, token),
+                    );
             }
             if let Some(hydrator) = &self.hydrator {
                 hydrator
