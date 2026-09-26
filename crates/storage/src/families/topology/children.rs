@@ -211,7 +211,7 @@ pub(super) fn push_selected<'a>(
         ), selected AS (
             -- publish's arm rule: the child's selected arm, or the only arm when none is selected;
             -- the canonical event order picks within the arm: recency, the emission ordinal at
-            -- one log, then event identity.
+            -- one log (docs/glossary.md#emission-ordinal), then event identity.
             SELECT candidate.*,
                    row_number() OVER (
                        PARTITION BY candidate.child_logical_name_id

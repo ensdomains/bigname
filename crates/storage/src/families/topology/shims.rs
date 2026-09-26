@@ -87,13 +87,14 @@ use anyhow::{Context, Result};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-/// The canonical event order over a family row's own position columns (docs/glossary.md,
-/// "Canonical event order"; D12 as amended on 2026-09-26), as a row value that compares
-/// later-is-greater: block number, transaction index, log index, the emission ordinal, then the
-/// event identity as bytes. A synthesised event (no transaction or log index) sorts before every
-/// transaction of its block and has no ordinal, so it keeps the identity byte order. Every
-/// component is non-null, so a greater-than over two positions is always decisive and a
-/// descending order puts an event without an ordinal after one with an ordinal.
+/// The canonical event order over a family row's own position columns
+/// (docs/glossary.md#canonical-event-order; D12 as amended on 2026-09-26), as a row value that
+/// compares later-is-greater: block number, transaction index, log index, the emission ordinal
+/// (docs/glossary.md#emission-ordinal), then the event identity as bytes. A synthesised event
+/// (no transaction or log index) sorts before every transaction of its block and has no ordinal,
+/// so it keeps the identity byte order. Every component is non-null, so a greater-than over two
+/// positions is always decisive and a descending order puts an event without an ordinal after
+/// one with an ordinal.
 pub(super) fn row_position(alias: &str) -> String {
     let ordinal = emission_ordinal(
         &format!("{alias}.event_identity"),
@@ -106,14 +107,14 @@ pub(super) fn row_position(alias: &str) -> String {
     )
 }
 
-/// The emission ordinal of an event as a bigint, -1 when it has none: the identity's final
-/// `:`-separated segment when the event has both a transaction and a log index and that segment
-/// is a nonempty run of ASCII digits no greater than 4294967295, leading zeros allowed. This is
-/// step 2's checked SQL form (docs/glossary.md, "Canonical event order", as a769bcf3 on
-/// claude/tyr36-step2 gives it, and crates/project/tests/families_ordinal_sql.rs there, which
-/// checks it against the Rust parse in crates/project/src/families/position.rs): strip leading
-/// zeros, check the significant length against the ten-digit bound, and only then cast, so no
-/// suffix errors where the Rust parse yields none. Absent is -1 rather than null so the row value
+/// The emission ordinal (docs/glossary.md#emission-ordinal) of an event as a bigint, -1 when it
+/// has none: the identity's final `:`-separated segment when the event has both a transaction and
+/// a log index and that segment is a nonempty run of ASCII digits no greater than 4294967295,
+/// leading zeros allowed. This is the glossary's checked SQL form, which
+/// crates/project/tests/families_ordinal_sql.rs checks against the Rust parse in
+/// crates/project/src/families/position.rs: strip leading zeros, check the significant length
+/// against the ten-digit bound, and only then cast, so no suffix errors where the Rust parse
+/// yields none. Absent is -1 rather than null so the row value
 /// stays decisive; every valid ordinal is at least 0, so -1 sorts first as `NULLS FIRST` does.
 fn emission_ordinal(identity: &str, transaction: &str, log: &str) -> String {
     format!(

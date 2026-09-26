@@ -1,10 +1,10 @@
 //! The canonical event order of `row_position` and `json_position` in PostgreSQL: block,
-//! transaction index, log index, the emission ordinal when both indexes are present, then the
-//! identity bytes (docs/glossary.md, "Canonical event order"). Each case is a pair of events at
-//! one position, earlier then later, checked with the composite greater-than both ways and with
-//! a descending selection, over the row columns and over the same position stored as JSON. One
-//! more label holds three events at one position, ordinals 2 and 10 and none, checked in full
-//! ascending order and by a descending selection.
+//! transaction index, log index, the emission ordinal (docs/glossary.md#emission-ordinal) when
+//! both indexes are present, then the identity bytes (docs/glossary.md#canonical-event-order).
+//! Each case is a pair of events at one position, earlier then later, checked with the composite
+//! greater-than both ways and with a descending selection, over the row columns and over the same
+//! position stored as JSON. One more label holds three events at one position, ordinals 2 and
+//! 10 and none, checked in full ascending order and by a descending selection.
 use anyhow::{Result, ensure};
 use bigname_test_support::{TestDatabase, TestDatabaseConfig};
 use sqlx::PgPool;
