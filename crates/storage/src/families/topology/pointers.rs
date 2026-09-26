@@ -73,11 +73,13 @@ pub async fn load_family_alias_source_pointer(
 /// The resource's latest non-zero pointer and its version boundary, the wildcard source.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FamilyWildcardSource {
-    /// The latest pointer whose resolver is neither empty nor the zero address. The F5 reducer
-    /// sets it only for such a resolver (crates/project/src/families/resolver.rs), so it is never
-    /// null or empty in a row the reducer writes; the reader passes either through unchanged, and
-    /// the tests' null and empty cases guard it against rows the reducer does not produce. The
-    /// served wildcard lateral does admit a null or empty pointer (docs/projections.md, F5).
+    /// The latest pointer whose resolver is neither empty nor the zero address. When
+    /// `nonzero_position` is populated by the F5 reducer (crates/project/src/families/resolver.rs),
+    /// `nonzero_resolver_address` is non-null, nonempty and not the zero address. Both fields may
+    /// be null before any qualifying pointer. The reader defensively passes through manually
+    /// supplied null or empty addresses with a populated position, which the tests' null and empty
+    /// cases cover. The served wildcard lateral does admit a null or empty pointer
+    /// (docs/projections.md, F5).
     pub nonzero_resolver_address: Option<String>,
     pub nonzero_position: Value,
     /// The latest RecordVersionChanged or ResolverChanged on the resource, zero pointers included.
