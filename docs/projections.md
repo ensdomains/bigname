@@ -1912,6 +1912,10 @@ families read against themselves, so the rule is sound for the report, not for
 the field: a wrong root value leaves the root's own admin powers a mismatch, and
 a wrong child admin power the live root also holds can let the child's block
 pass while the child's own admin powers stay a mismatch; either fails the run.
+That holds because the root is compared itself: the compared resources are closed
+over the roots their served summaries name, so a root with no served summary or
+permission row of its own is still compared, and a resource whose root is not
+in the compared set gets no permission-row, admin-power or restriction excuse.
 The resource-side excuse reads the wrapper rows too: the permission rows and
 restriction block it reads in both orders come through the resource's wrapper
 row, which masks the powers when it has a modifier

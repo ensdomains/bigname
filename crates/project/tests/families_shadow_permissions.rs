@@ -876,12 +876,17 @@ async fn a_transfer_to_the_delegate_from_one_log_keeps_the_recipients_holder_row
     fixture.cleanup().await
 }
 
-/// The root-reversal shape: child registration `uuid(1)` bound to name 1 and granted at 10, its
-/// holder given `child_powers` on it; registry root `uuid(50)` granted at 10 with `admin_renew`
-/// at 11, and at block 14 the root's path-expiry release (log 2) written before a new grant of it
-/// (log 1). The canonical order takes the release last and lapses the root; today's order takes
-/// the grant (higher id) and keeps it live.
-async fn root_reversal(fixture: &Fixture, child_powers: &[&str]) -> Result<(String, String)> {
+/// An ENSv2 registration's after-state for token `token`.
+fn v2_grant_after(token: &str) -> Value {
+    json!({"authority_kind": "ens_v2_registry", "registry_contract_instance_id": V2_INSTANCE,
+           "token_id": token, "status": "registered", "registrant": HOLDER,
+           "expiry": 2_000_000_000u64, "state_derived": false})
+}
+
+/// Child registration `uuid(1)` of registry root `uuid(50)`, both resources of the ENSv2
+/// registry: the child bound to name 1 at 9, granted at 10 and its holder given `child_powers`
+/// on it. The root has no event.
+async fn child_of_root(fixture: &Fixture, child_powers: &[&str]) -> Result<(String, String)> {
     let (child, root) = (uuid(1), uuid(50));
     for (resource, upstream) in [(&child, CHILD_WORD), (&root, ZERO_WORD)] {
         fixture.resource(resource).await?;
@@ -909,11 +914,6 @@ async fn root_reversal(fixture: &Fixture, child_powers: &[&str]) -> Result<(Stri
             V2_REGISTRY,
         )
         .await?;
-    let grant_after = |token: &str| {
-        json!({"authority_kind": "ens_v2_registry", "registry_contract_instance_id": V2_INSTANCE,
-               "token_id": token, "status": "registered", "registrant": HOLDER,
-               "expiry": 2_000_000_000u64, "state_derived": false})
-    };
     fixture
         .write(
             10,
@@ -922,11 +922,21 @@ async fn root_reversal(fixture: &Fixture, child_powers: &[&str]) -> Result<(Stri
             "ens_v2_registry_l1",
             Some(&name(1)),
             Some(&child),
-            grant_after("5001"),
+            v2_grant_after("5001"),
             V2_REGISTRY,
         )
         .await?;
     role(fixture, false, 10, &child, HOLDER, child_powers).await?;
+    Ok((child, root))
+}
+
+/// The root-reversal shape: child registration `uuid(1)` bound to name 1 and granted at 10, its
+/// holder given `child_powers` on it; registry root `uuid(50)` granted at 10 with `admin_renew`
+/// at 11, and at block 14 the root's path-expiry release (log 2) written before a new grant of it
+/// (log 1). The canonical order takes the release last and lapses the root; today's order takes
+/// the grant (higher id) and keeps it live.
+async fn root_reversal(fixture: &Fixture, child_powers: &[&str]) -> Result<(String, String)> {
+    let (child, root) = child_of_root(fixture, child_powers).await?;
     let root_grant = |identity: &'static str, block: i64| {
         support::Event::new(
             identity,
@@ -936,7 +946,7 @@ async fn root_reversal(fixture: &Fixture, child_powers: &[&str]) -> Result<(Stri
             "ens_v2_registry_l1",
         )
         .resource(&root)
-        .after(grant_after("9001"))
+        .after(v2_grant_after("9001"))
         .raw(json!({"emitting_address": V2_REGISTRY}))
     };
     fixture.event(root_grant("root-grant-10", 10)).await?;
@@ -1249,7 +1259,7 @@ async fn a_root_retention_gap_refuses_the_child_permission_excuse() -> Result<()
                 "ens_v2_registry_l1",
             )
             .resource(&root)
-            .after(grant_after("9001"))
+            .after(v2_grant_after("9001"))
             .raw(json!({"emitting_address": V2_REGISTRY})),
         )
         .await?;
@@ -1348,6 +1358,114 @@ async fn a_root_retention_gap_refuses_the_child_permission_excuse() -> Result<()
         ["permissions_current", "resource_restrictions"],
         "{:#?}",
         mutated.lines
+    );
+    fixture.cleanup().await
+}
+
+/// Pro r6 Q4 and Q5 on ba2ffbd5, a root the comparison reaches only through a child. The child
+/// names registry root `uuid(50)` in its served summary, and the family reader loads the root
+/// for the child's restriction block whatever the served tables hold. The comparison set was
+/// built from this chain's served summaries and permission rows only, so a root with neither
+/// (here its summary row is deleted; the root has no permission row) was not compared, and
+/// another chain's direct row on it, which the effective-permission reader serves by resource
+/// id, went unchecked. The set is now closed over the summaries' roots: the root is compared
+/// and equals, and the foreign row is an `other_chain_rows` mismatch with no excuse.
+#[tokio::test]
+async fn a_root_reached_only_through_a_child_is_audited() -> Result<()> {
+    const OTHER: &str = "other-chain";
+    let fixture = Fixture::new("families_shadow_permissions_dependency_root", 20).await?;
+    let (child, root) = child_of_root(&fixture, &["unregister", "set_resolver"]).await?;
+    let baseline = publish_and_compare(&fixture, TARGET).await?;
+    shadow_support::assert_counts(&baseline, &[], &[]);
+    let deleted = sqlx::query(
+        "DELETE FROM permissions_current_resource_summary WHERE resource_id = $1::uuid",
+    )
+    .bind(&root)
+    .execute(&fixture.pool)
+    .await?
+    .rows_affected();
+    assert_eq!(deleted, 1);
+    let (named_root, root_rows): (Option<String>, i64) = sqlx::query_as(
+        "SELECT (SELECT root_resource_id::text FROM permissions_current_resource_summary
+                 WHERE resource_id = $1::uuid),
+                (SELECT count(*) FROM permissions_current WHERE resource_id = $2::uuid)",
+    )
+    .bind(&child)
+    .bind(&root)
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(
+        (named_root.as_deref(), root_rows),
+        (Some(root.as_str()), 0),
+        "the child names the root, which serves nothing here"
+    );
+    let closed = shadow_support::compare::compare(&fixture.pool, CHAIN, TARGET).await?;
+    shadow_support::assert_counts(&closed, &[], &[]);
+    assert_eq!(
+        (closed.resources, closed.equal, closed.mismatched),
+        (baseline.resources, baseline.equal, 0),
+        "{:#?}",
+        closed.lines
+    );
+    sqlx::query(
+        "INSERT INTO chain_lineage (chain_id, block_hash, parent_hash, block_number,
+             block_timestamp, canonicality_state)
+         SELECT $2, block_hash, parent_hash, block_number, block_timestamp, canonicality_state
+         FROM chain_lineage WHERE chain_id = $1",
+    )
+    .bind(CHAIN)
+    .bind(OTHER)
+    .execute(&fixture.pool)
+    .await?;
+    let inserted = sqlx::query(
+        "INSERT INTO permissions_current
+         SELECT (jsonb_populate_record(NULL::permissions_current,
+                    to_jsonb(row) || jsonb_build_object('resource_id', $1::text,
+                        'provenance', row.provenance || jsonb_build_object('chain_id', $2::text)))).*
+         FROM permissions_current row WHERE row.resource_id = $3::uuid AND row.subject = $4",
+    )
+    .bind(&root)
+    .bind(OTHER)
+    .bind(&child)
+    .bind(HOLDER)
+    .execute(&fixture.pool)
+    .await?
+    .rows_affected();
+    assert_eq!(inserted, 1);
+    let effective = bigname_storage::load_effective_permissions_by_resource_ids(
+        &fixture.pool,
+        &[root.parse()?],
+        None,
+    )
+    .await?;
+    assert!(
+        effective
+            .iter()
+            .any(|row| row.subject == HOLDER && row.provenance["chain_id"] == json!(OTHER)),
+        "the API serves the other chain's row on the root"
+    );
+    let report = shadow_support::compare::compare(&fixture.pool, CHAIN, TARGET).await?;
+    assert!(
+        report.known_discrepancy.is_empty() && report.expected_delta_fields.is_empty(),
+        "{:#?}",
+        report.lines
+    );
+    let failed: Vec<&str> = report
+        .lines
+        .iter()
+        .filter(|line| line.starts_with("SEPOLIA_END_TO_END_SHADOW_MISMATCH"))
+        .filter_map(|line| {
+            line.contains(&format!("key={root} "))
+                .then(|| line.split(" field=").nth(1)?.split(' ').next())
+                .flatten()
+        })
+        .collect();
+    assert_eq!(failed, ["other_chain_rows"], "{:#?}", report.lines);
+    assert_eq!(
+        (report.resources, report.mismatched),
+        (baseline.resources, 1),
+        "{:#?}",
+        report.lines
     );
     fixture.cleanup().await
 }

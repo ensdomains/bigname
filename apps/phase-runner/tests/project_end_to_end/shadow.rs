@@ -49,7 +49,8 @@
 //!   and the canonical read the shadow one; the canonical side is the families against
 //!   themselves, so the rule holds for the report, not the field: a wrong root value leaves
 //!   the root's own `admin_powers` a mismatch, and a wrong child admin power the root also
-//!   holds leaves the child's `admin_powers` one (`resource_excuses`).
+//!   holds leaves the child's `admin_powers` one (`resource_excuses`). The root is compared
+//!   itself because the compared resources are closed over the roots their summaries name.
 //!   For the registry binding, the observations are rebuilt from the publication-visible event
 //!   log (activated, canonical, at the canonical lineage's hash, at or below the target: the set
 //!   family intake reads), independently of the families: for each observation identity (the name, else the
@@ -609,6 +610,12 @@ async fn compare_fenced(
         resource_ids.insert(resource.clone());
         grants_by_resource.entry(resource).or_default().push(row);
     }
+    // Close the set over the roots the summaries name. The family reader loads a resource's
+    // registry root to read the root's admin powers for it, whatever the served tables hold,
+    // and the root-reversal excuse leans on the root's own comparison, so a root with no served
+    // summary or permission row of this chain is compared too: its permission rows, admin powers
+    // and the effective reader's rows on it, with no summary fields.
+    resource_ids.extend(summaries.iter().filter_map(|row| row.2.clone()));
     let summary_by_resource: BTreeMap<String, _> =
         summaries.iter().map(|row| (row.0.clone(), row)).collect();
     let inputs: Vec<ResourceInput> = resource_ids
@@ -792,14 +799,18 @@ async fn compare_fenced(
                 });
             }
         }
-        let mut excuses = resource_excuses(
-            pool,
-            chain,
-            &clock,
-            inputs_by_resource[resource.as_str()],
-            &diffs,
-        )
-        .await?;
+        let input = inputs_by_resource[resource.as_str()];
+        // The permission excuses read the root's admin powers, so they stand only on a root
+        // this comparison audits itself: in the set and in the effective reader's batch.
+        let root_audited = input
+            .root_resource_id
+            .as_deref()
+            .is_none_or(|root| resource_ids.contains(root) && root.parse::<Uuid>().is_ok());
+        let mut excuses = if root_audited {
+            resource_excuses(pool, chain, &clock, input, &diffs).await?
+        } else {
+            vec![Excuse::None; diffs.len()]
+        };
         // The registry binding rebuilt from the event log in both orders: the observations of
         // each identity tie-broken canonically and by generated id (permission_resources.rs
         // :41-57). Every `registry_binding/*` field passes as a same-block delta only when the
@@ -2253,7 +2264,9 @@ async fn lapse_evidence(
 /// admin power that the live root also holds is masked in today's read, so the child's block
 /// can pass, but the child's own `admin_powers` stays a mismatch
 /// (`a_child_admin_power_the_root_also_holds_still_fails_the_report`). Either fails the run.
-/// When the child's or the root's retained events do not match the log, this function refuses
+/// That needs the root compared on its own: the caller closes the compared resources over the
+/// summaries' roots and calls this only when the root is among them
+/// (`a_root_reached_only_through_a_child_is_audited`). When the child's or the root's retained events do not match the log, this function refuses
 /// the permission-row, admin-power and restriction excuses; the registry-binding and
 /// operator-row checks are separate.
 pub async fn resource_excuses(
