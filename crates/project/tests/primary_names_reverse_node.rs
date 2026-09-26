@@ -599,3 +599,6 @@ async fn database(name: &str) -> Result<(TestDatabase, PgPool)> {
     }
     Ok((database, pool))
 }
+
+#[path = "primary_names_reverse_node/reclaim_after_unwrap.rs"]
+mod reclaim_after_unwrap;
