@@ -6,7 +6,7 @@ Amended: 2026-09-25 (support follows the authority decision without a registrar 
 Amended: 2026-09-25 (the remaining ENSv2 authority exceptions are removed)
 Amended: 2026-09-25 (a released or expired ENSv2 registration stays with ENSv2, product ruling)
 Amended: 2026-09-26 (the registration section follows authority selection for a nameless path-expiry release, product ruling)
-Amended: 2026-09-26 (a lapsed last-bound registration is presented over a live reservation elsewhere, product ruling)
+Amended: 2026-09-26 (a lapsed last-bound registration is presented over a live reservation elsewhere, ruling applied by the reviewer)
 
 ## 2026-09-25 Amendment: The Remaining ENSv2 Authority Exceptions Are Removed
 
@@ -52,16 +52,20 @@ decisions kept. Linear TYR-36 step 6.
   a named path-cut release comes before that expiry release, the served
   release, `released_at` and `expiry` come from the later expiry release.
   When the deciding fact is the end of a later reservation, the tombstone's
-  `expiry` and `released_at` are that end's.
-- Decision, product ruling of 2026-09-26 (applied by the reviewer, with Tate
-  informed and not objecting): a name whose last-bound ENSv2 registration R1
-  lapses or is released while a later reservation of the name on another
-  resource R2 is still live, for example in the registry that replaced R1's
-  on the parent's current path, is served as R1's released tombstone. This is
-  a last-bound-registration presentation policy, not a claim that R2's
-  reservation ended: the registry keeps state per entry, and R1's lapse does
-  not change R2's entry, which stays reserved on chain until it lapses or is
-  unregistered. Only a new registration, or a reservation later than R1's
+  `expiry` and `released_at` are that end's. A path-expiry end carries its
+  expiry. An end by `unregister` is an explicit release, and an explicit ENSv2
+  release serves no expiry, so that tombstone serves none: neither the
+  last-bound registration's expiry nor the reservation's.
+- Decision, a ruling applied by the reviewer on 2026-09-26 under Tate's
+  standing rule to follow the chain, Tate informed and not objecting: a name
+  whose last-bound ENSv2 registration R1 lapses or is released while a later
+  reservation of the name on another resource R2 is still live, for example in
+  the registry that replaced R1's on the parent's current path, is served as
+  R1's released tombstone. The registration section shows the lifecycle fact
+  of the registration the name was last bound to; a live reservation elsewhere
+  is not cancelled by it. The registry keeps state per entry, and R1's lapse
+  does not change R2's entry, which stays reserved on chain until it lapses or
+  is unregistered. Only a new registration, or a reservation later than R1's
   release, moves the name. The two-registry case is tested from contract logs
   (`a_replaced_registrys_lapse_presents_its_tombstone_over_a_live_reservation_elsewhere`).
   (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L196-L207 @ ens_v2@a971bd64)

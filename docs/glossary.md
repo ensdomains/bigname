@@ -2173,7 +2173,8 @@ authority selection chose for a released tombstone, this release included, on
 the tombstone's resource and binding (product ruling of 2026-09-26). When a
 named path-cut release comes before it, the served release, `released_at` and
 `expiry` come from this later release. When the deciding fact is the end of a later
-reservation, the tombstone's `expiry` and `released_at` are that end's.
+reservation, the tombstone's `expiry` and `released_at` are that end's. An end by
+`unregister` is an explicit release, which serves no expiry.
 This follows the ENSv2 contracts, which never route a label that has been
 registered back to ENSv1: `unregister` burns the token and writes the release
 time as the entry's expiry, which nothing sets back to zero

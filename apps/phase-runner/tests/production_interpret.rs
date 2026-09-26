@@ -5724,9 +5724,10 @@ async fn a_detached_renewal_serves_the_same_fields_resumed_and_in_one_batch() ->
 // writes that release without a name.
 // At block 2 the reservation is the name's latest fact and the name reads as reserved. From block
 // 3 the name is served as the released tombstone of the registration it was last bound to, A's
-// `leaf`, with that lapse's time and expiry, though B's reservation is still live on chain. This is
-// the last-bound-registration presentation policy (ADR 0007, product ruling of 2026-09-26): the
-// registry state is per entry, and A's lapse does not end B's reservation.
+// `leaf`, with that lapse's time and expiry, though B's reservation is still live on chain (ADR
+// 0007, a ruling applied by the reviewer on 2026-09-26): the registration section shows the
+// lifecycle fact of the registration the name was last bound to, and the registry state is per
+// entry, so A's lapse does not end B's reservation.
 // (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L196-L207 @ ens_v2@a971bd64)
 // (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L425-L471 @ ens_v2@a971bd64)
 // (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L628-L660 @ ens_v2@a971bd64)
