@@ -505,23 +505,28 @@ async fn a_reservation_expired_when_written_does_not_outrank_its_boundary_releas
     Ok(())
 }
 
-/// The nameless-release shape with `release` merged into the release's payload, the release
-/// written by the name when `named`, and a later `ExpiryChanged` to 40 by the name on the same
-/// resource in block 10.
+/// The nameless-release shape with `release` merged into the release's payload, and a later
+/// `ExpiryChanged` to 40 by the name on the same resource in block 10. When `explicit`, the
+/// release is instead the one Interpret writes for `unregister`: by the name, at its log position
+/// before the expiry change, with `release` as its whole payload.
 async fn seed_release_before_a_named_expiry_change(
     pool: PgPool,
     release: Value,
-    named: bool,
+    explicit: bool,
 ) -> Result<String> {
     let logical = seed_nameless_release(pool.clone()).await?;
     sqlx::query(
         "UPDATE normalized_events
-         SET after_state = after_state || $2, logical_name_id = CASE WHEN $3 THEN $1 END
+         SET after_state = CASE WHEN $3 THEN $2 ELSE after_state || $2 END,
+             logical_name_id = CASE WHEN $3 THEN $1 END,
+             transaction_hash = CASE WHEN $3 THEN '0x503' END,
+             transaction_index = CASE WHEN $3 THEN 0 END,
+             log_index = CASE WHEN $3 THEN 4 END
          WHERE event_identity = 'nameless-expiry-v2-release'",
     )
     .bind(&logical)
     .bind(release)
-    .bind(named)
+    .bind(explicit)
     .execute(&pool)
     .await?;
     event(
@@ -546,7 +551,7 @@ async fn seed_release_before_a_named_expiry_change(
 // name's expiry rows decide, 40. An explicit release serves no expiry at all.
 #[tokio::test]
 async fn a_path_expiry_releases_own_expiry_precedes_a_later_named_expiry_change() -> Result<()> {
-    for (case, release, named, expiry) in [
+    for (case, release, explicit, expiry) in [
         ("release_expiry", json!({"expiry":30}), false, Some(30)),
         ("release_without_expiry", json!({}), false, Some(40)),
         (
@@ -555,15 +560,21 @@ async fn a_path_expiry_releases_own_expiry_precedes_a_later_named_expiry_change(
             false,
             Some(40),
         ),
+        // Interpret's `LabelUnregistered` release payload (`v2_registry/transfer.rs`).
         (
             "explicit_release",
-            json!({"source_event":"LabelUnregistered","released_at":1_787_702_400_i64}),
+            json!({
+                "source_event":"LabelUnregistered",
+                "sender":"0x0000000000000000000000000000000000000002",
+                "registry_contract_instance_id":"00000000-0000-0000-0000-000000000097",
+                "token_id":"0x0000000000000000000000000000000000000000000000000000000000000097"
+            }),
             true,
             None,
         ),
     ] {
         let served = served_both_ways(&format!("expiry_precedence_{case}"), |pool| {
-            seed_release_before_a_named_expiry_change(pool, release.clone(), named)
+            seed_release_before_a_named_expiry_change(pool, release.clone(), explicit)
         })
         .await?;
         assert_eq!(
@@ -581,6 +592,13 @@ async fn a_path_expiry_releases_own_expiry_precedes_a_later_named_expiry_change(
             ),
             "{case}: {served}"
         );
+        if explicit {
+            assert_eq!(
+                served["registration"].get("expiry"),
+                Some(&Value::Null),
+                "{case}: the expiry is served as JSON null: {served}"
+            );
+        }
     }
     Ok(())
 }
