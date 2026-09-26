@@ -4,7 +4,8 @@
                 WHERE linked.logical_name_id = event.logical_name_id AND linked.resource_id IS NOT NULL
                   AND linked.event_kind IN ('RegistrationGranted', 'RegistrationReserved') AND linked.source_family IN ('ens_v2_root_l1', 'ens_v2_registry_l1', 'ens_v2_registrar_l1')
                   AND COALESCE(linked.after_state ->> 'registry_contract_instance_id', linked.raw_fact_ref ->> 'emitting_address', linked.after_state ->> 'registry') = COALESCE(event.after_state ->> 'registry_contract_instance_id', event.raw_fact_ref ->> 'emitting_address', event.after_state ->> 'registry') AND linked.after_state ->> 'token_id' = event.after_state ->> 'token_id'
-                ORDER BY linked.block_number DESC NULLS LAST, linked.normalized_event_id DESC LIMIT 1
+                ORDER BY linked.block_number DESC NULLS LAST, COALESCE(linked.transaction_index, -1) DESC,
+                         COALESCE(linked.log_index, -1) DESC, linked.normalized_event_id DESC LIMIT 1
             ), NULLIF(CONCAT(COALESCE(event.after_state ->> 'registry_contract_instance_id', event.raw_fact_ref ->> 'emitting_address', event.after_state ->> 'registry'), ':', event.after_state ->> 'token_id'), ':')) AS lifecycle_key,
             (event.event_kind = 'RegistrationReserved' AND EXISTS (
                 SELECT 1 FROM chain_lineage lineage
