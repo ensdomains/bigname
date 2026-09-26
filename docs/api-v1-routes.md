@@ -375,22 +375,23 @@ collection route carry neither header.
   [`architecture.md`](architecture.md#ensv1ensv2-current-authority). A name
   with facts on both ENSv1 and ENSv2 follows the chain
   ([ADR 0007](adrs/0007-follow-the-chain-ens-authority.md)): a current ENSv2
-  registration is selected without a migration proof, and otherwise ENSv1
-  decides unless a qualifying ENSv2 release tombstone or regime
-  ([released ENSv2 authority](glossary.md#released-v2-authority)) applies, so
-  such a name is no longer refused. A selected ENSv2 registration with no
+  registration is selected without a migration proof, a released or expired
+  ENSv2 registration with no later ENSv2 reservation that is still live stays
+  with ENSv2 as a
+  [released ENSv2 authority](glossary.md#released-v2-authority) tombstone
+  whatever ENSv1 holds (ending that reservation restores the tombstone), a
+  live ENSv1 registration is selected otherwise, and a
+  name with no open binding follows its history, so such a name is no longer
+  refused. A selected ENSv2 registration with no
   authority refusal is served; it needs no `ETHRegistrar` event, ENSv1→ENSv2
   migration proof or child-registration proof. The earlier reasons
   `conflicting_current_ens_authority` (Mainnet) and
   `independent_ens_deployments_overlap` (Sepolia) are no longer produced. A
   `name_current` row derived with either reason by an earlier Project generation,
   before the required full-history Interpret redo and its stamped Project redo
-  complete, still returns the unsupported result below. The exact
-  [shared ENS infrastructure](glossary.md#shared-ens-infrastructure) names (root,
-  `eth`, `reverse`, and `addr.reverse`) select a current ENSv2 arm without an
-  authority epoch when ENSv1 evidence, current or historical, exists.
-  Historical ENSv2 evidence alone does not qualify, and `.reverse` descendants
-  do not inherit the exception. An address lookup
+  complete, still returns the unsupported result below. The root, `eth`,
+  `reverse`, and `addr.reverse` follow the same rule as every other name. An
+  address lookup
   returns `409 conflict` when the deployment has no ready public namespace.
   An unsupported name result retains `input`, `kind`, and a `record` containing
   only `name`, `display_name`, `namespace`, `namehash`, `status`, and
@@ -569,8 +570,8 @@ collection route carry neither header.
   The Sepolia root registry registers `eth` and `reverse` with the largest
   uint64 expiry
   (upstream: .refs/ens_v2_sepolia_20260916/contracts/script/deploy-constants.ts:L1 @ ens_v2_sepolia_20260916@366de741)
-  (upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ETHRegistry.ts:L46 @ ens_v2_sepolia_20260916@366de741)
-  (upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ReverseMirror.ts:L35 @ ens_v2_sepolia_20260916@366de741).
+  (upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ETHRegistry.ts:L36-L48 @ ens_v2_sepolia_20260916@366de741)
+  (upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ReverseMirror.ts:L25-L37 @ ens_v2_sepolia_20260916@366de741).
   Search and address collections treat such an expiry, or the same value as a
   quoted number, as unknown the same way: the row has no `expires_at` and
   address names with `sort=expires_at` place it with the other unknown expiries, last ascending
@@ -679,11 +680,13 @@ collection route carry neither header.
   registry-only name's `registration_id`. `authority` is omitted for Basenames
   names, on a supported, unregistered ownerless registry row, and on the
   `status=unsupported` identity-only object. A zero registry owner does not
-  remove `authority` supplied by a retained registrar binding. `migrated_at` is present only when `authority=ens_v2` was proven by
-  an activated `MigrationApplied` [migration
-  boundary](glossary.md#migration-boundary): it is the RFC 3339 block time of
-  that proof event, read through the event's block in the chain lineage. A name
-  first registered in ENSv2 has `authority=ens_v2` and no `migrated_at`. The
+  remove `authority` supplied by a retained registrar binding. `migrated_at` is present only when ENSv2 is the currently selected
+  `authority` and the name's history retains an activated `MigrationApplied`
+  [migration boundary](glossary.md#migration-boundary): it is the RFC 3339 block
+  time of that migration event, read through the event's block in the chain
+  lineage. The migration is history, not the reason for the selection; a
+  migrated name whose selection changes to ENSv1 omits it. A name first
+  registered in ENSv2 has `authority=ens_v2` and no `migrated_at`. The
   name-profile portion uses `name`, `display_name`, `namespace`, `namehash`, `resolver`,
   `subregistry`, `addresses`, `text_records`, `content_hash`,
   `primary_name`, `primary_address`, `chain_id`, `network`, `status`, and
@@ -1395,7 +1398,7 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   [authority arm](glossary.md#authority-epoch) still chooses between the remaining ENSv1 and ENSv2 candidates.
   An unknown activated migration-path value blocks the Project generation as a
   data-integrity failure instead of silently hiding relations. A child
-  without an authority proof publishes the relation of its selected arm
+  publishes the relation of its selected arm
   ([ADR 0007](adrs/0007-follow-the-chain-ens-authority.md)); only a child
   with no selected authority at all whose arms disagree is omitted entirely.
   On every ENS
@@ -2258,8 +2261,8 @@ introduces it rebuilds Project from full history before serving the option; see
   `is_migrated` concerns the ENSv1→ENSv2 migration only and is unrelated to
   `ens_v0`: an `ens_v0` name never satisfies `is_migrated=true`.
   `is_migrated=true|false` optionally selects whether the current name has the
-  same proven ENSv1→ENSv2 transition used by `migrated_at`: an ENSv2 authority
-  selected by a migration proof with a retained event and block timestamp.
+  same ENSv1→ENSv2 migration history used by `migrated_at`: a selected ENSv2
+  arm and a retained activated `MigrationApplied` with its block timestamp.
   Native ENSv2 registrations do not satisfy `is_migrated=true`. It combines
   with the other filters and is rejected with `relation=resolves_to`.
   The ownership collection always returns an exact `page.total_count` before

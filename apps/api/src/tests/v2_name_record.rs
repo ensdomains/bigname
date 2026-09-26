@@ -4324,7 +4324,7 @@ async fn v2_get_subnames_uses_current_sepolia_anchor_on_mixed_phase_heads() -> R
     child.canonicality_summary = json!({"state":"canonical_lineage"});
     upsert_phase_children_current_rows(&database.pool, &[child]).await?;
     database.insert_manifest("ens", "ens_v2_registry_l1", "ethereum-sepolia",
-        "ens_v2_sepolia_post_audit", 1, "active", "ensip15@ens-normalize-0.1.1").await?;
+        "ens_v2_sepolia_20260915", 1, "active", "ensip15@ens-normalize-0.1.1").await?;
     let state = AppState::new_with_rpc_urls(database.lookup_pool.clone(),
         bigname_lookup::ChainRpcUrls::default());
     let response = app_router(state).oneshot(Request::builder()
@@ -6114,7 +6114,7 @@ async fn seed_v2_alice_name_records_fixture_with_row(
 }
 
 // Sepolia's root registry registers `reverse` and points it at the ENSv1 mirror resolver
-// (upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ReverseMirror.ts:L35 @ ens_v2_sepolia_20260916@366de741).
+// (upstream: .refs/ens_v2_sepolia_20260916/contracts/deploy/01_ReverseMirror.ts:L25-L37 @ ens_v2_sepolia_20260916@366de741).
 // These rows follow what Project builds for a bound, registered root name read through a mirror
 // (crates/project/tests/mirror_resolver.rs, `tld_root_bound`): a supported ENSv2 row with its own
 // binding and resolver, no serving resource and no pointer reachability, and an inventory on the

@@ -284,9 +284,8 @@ outcomes, or durable traces.
 - The independently admitted `registry_announcement` edge for an ENSv1→ENSv2
   migration-created registry remains ordinary because it drives the watch plan,
   not a product projection. Project ignores every candidate downstream effect.
-  After an activated parent transition, authority selection may classify a positive
-  child-registration [authority proof](glossary.md#authority-proof), and child reachability may prove the current subregistry is its migration-created `WrapperRegistry`.
-  Both require the readable canonical association, active ordinary announcement, and matching topology; reachability additionally requires non-empty association evidence contained in the parent boundary. The association proves neither result by itself.
+  After an activated parent transition, child reachability may prove the current subregistry is its migration-created `WrapperRegistry`.
+  That requires the readable canonical association, active ordinary announcement, matching topology, and non-empty association evidence contained in the parent boundary. The association proves nothing by itself, and authority selection does not read it.
 - Coverage and support are explicit. They are never inferred from row presence
   or a historical ingest range.
 - Verified provider answers are request-scoped lookup output, not projection
@@ -312,24 +311,22 @@ outcomes, or durable traces.
 `surface_bindings` remains identity history rather than a `_current`
 projection. Exact-name reads ordinarily first select the logical name's
 [`authority epoch`](glossary.md#authority-epoch), then select fields only from
-that epoch's binding and resources at the requested position. An activated
-ENSv1→ENSv2 authority proof may select a closed ENSv2 binding after release;
-that [released v2 authority](glossary.md#released-v2-authority) does not fall
-back to an active retained ENSv1 binding. A released ENSv1 lease with no
+that epoch's binding and resources at the requested position. A released ENSv1 lease with no
 revived custody likewise selects its closed lease binding,
 or the closed NameWrapper binding that stands for a lease registered through
 the NameWrapper, or the open registry-only binding under which the lease lapsed
 after its token was transferred without `reclaim`,
-as a [released v1 authority](glossary.md#released-v1-authority) tombstone. The exact
-[shared ENS infrastructure](glossary.md#shared-ens-infrastructure) no-proof
-exception selects a current ENSv2 arm when ENSv1 evidence is current or
-historical, without establishing an authority epoch, so its epoch start and
-proof fields remain null. Historical ENSv2 evidence without a current ENSv2
-binding does not qualify. An ordinary name without a proof follows the chain
+as a [released v1 authority](glossary.md#released-v1-authority) tombstone. A
+name without a proof, the root, `eth`, `reverse`, and `addr.reverse` included,
+follows the chain
 ([ADR 0007](adrs/0007-follow-the-chain-ens-authority.md)): a current ENSv2
-binding selects ENSv2, with its epoch starting at that binding and null proof
-fields, and otherwise ENSv1 decides unless a qualifying ENSv2 release tombstone
-or regime applies.
+binding selects ENSv2, with its epoch starting at that binding and a migration
+recorded only as history; a released or expired ENSv2 registration with no
+later ENSv2 reservation that is still live stays with ENSv2 as a
+[released v2 authority](glossary.md#released-v2-authority) tombstone whatever
+ENSv1 holds, and ending that reservation restores the tombstone; a live ENSv1
+binding selects ENSv1 otherwise; and a name with no open binding follows its
+history.
 
 ## Exact-name projection
 
@@ -707,8 +704,13 @@ ENSv1→ENSv2 migration path: `unwrapped`, `unlocked_wrapped`, and
 `locked_child` parents retain only a [migratable child](glossary.md#migratable-child)
 through their [migration registry](glossary.md#migration-registry-wrapperregistry).
 An unknown activated path is a Project data-integrity failure. Child authority
-selection then chooses among the surviving arms; cross-era recency never chooses
-the arm. A surviving locked-path row cites the matched association's stable
+selection then keeps only the arm the child's own authority selects; cross-era
+recency never chooses the arm. A released ENSv2 child is a released v2
+authority tombstone and publishes no relation on either arm; a child publishes
+its ENSv1 relation only when its own selected arm is ENSv1 and the relation
+survived that filter. Any entry the child has had in the parent's migration
+registry, released or not, makes it non-migratable, so a released child of a
+locked parent publishes no relation while its ENSv1 wrapper binding is open. A surviving locked-path row cites the matched association's stable
 logical-edge and correlation identities plus its source manifest; its row-level
 manifest version therefore accounts for the association that authorized the
 migration registry. Its `normalized_event_ids`, `event_identities`,
@@ -1148,6 +1150,8 @@ name and resource consumers of that resolver. Incremental staging includes the
 resolver's canonical link and record history through the target, including
 updates with null name/resource fields. Full rebuild and redo use the same
 selection rule; retracted events never remain as synthetic per-name facts.
+On redo, a published row that cites an event that was deleted, is no longer
+canonical, or is no longer activated is rescoped and rebuilt.
 
 `resolver_current` summarizes one resolver contract across readable bound names,
 aliases, record links, roles, record evidence, and normalized events. Embedded

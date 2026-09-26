@@ -38,6 +38,15 @@
                        'registrant', CASE WHEN NOT effective_wrapper.owner_lapsed
                            THEN registrant.registrant END,
                        'expiry', CASE
+                           -- A lapsed ENSv2 registration's expiry is the one its path-expiry
+                           -- release carries, before the name's own expiry rows: a renewal after
+                           -- its path was cut is written without a name, so those rows can be
+                           -- older. An explicit release clears the expiry below.
+                           WHEN selected_registration.is_v2_lifecycle
+                            AND selected_registration.event_kind = 'RegistrationReleased'
+                            AND selected_registration.after_state ->> 'source_event' = 'RegistryPathExpired'
+                               THEN COALESCE(NULLIF(selected_registration.after_state -> 'expiry', 'null'::jsonb),
+                                             to_jsonb(expiry.expiry_seconds))
                            WHEN selected_registration.is_v2_lifecycle
                             AND selected_registration.event_kind IS NOT NULL
                             AND selected_registration.resource_id IS DISTINCT FROM binding.resource_id
@@ -57,6 +66,7 @@
                        'released_at', selected_registration.after_state -> 'released_at',
                        'latest_event_kind', CASE
                            WHEN selected_registration.event_kind = 'RegistrationReserved' THEN selected_registration.event_kind
+                           WHEN selected_registration.is_released_v2 THEN selected_registration.event_kind
                            WHEN selected_registration.is_v2_lifecycle THEN COALESCE(v2_registration_latest.event_kind, selected_registration.event_kind)
                            ELSE COALESCE(registration_latest.event_kind,
                                selected_registration.event_kind)
@@ -102,10 +112,6 @@
                        WHEN selected_registration.event_kind = 'RegistrationReleased'
                         AND selected_authority.selected_authority_arm = 'ens_v2'
                            THEN jsonb_build_object('status', 'unregistered')
-                       WHEN COALESCE(resource.provenance ->> 'authority_kind',
-                           registration_grant.after_state ->> 'authority_kind') IN ('wrapper', 'name_wrapper')
-                           THEN jsonb_build_object('status', 'unsupported', 'unsupported_reason',
-                               'ENSv1 wrapper effective control is not yet projected')
                        ELSE jsonb_build_object(
                            'status', CASE
                                WHEN selected_registration.event_kind = 'RegistrationReserved'
@@ -162,11 +168,6 @@
                            ELSE NULL
                        END,
                        'latest_event_kind', resolver.event_kind
-                   ),
-                   'record_inventory', jsonb_build_object(
-                       'status', 'unsupported',
-                       'unsupported_reason',
-                           'record_inventory remains unsupported in the ENSv1 name_current rebuild'
                    ),
                    'history', jsonb_build_object(
                        'surface_head', surface_history.pointer,
@@ -241,7 +242,6 @@
                        'proof_event_identity', selected_authority.authority_proof_event_identity,
                        'transition_id', selected_authority.authority_transition_id,
                        'lifecycle_state', selected_authority.lifecycle_state,
-                       'deployment_profile', selected_authority.deployment_profile,
                        'resource_authority_context', selected_authority.resource_authority_context,
                        'unsupported_reason', selected_authority.unsupported_reason,
                        'registry_generation', selected_authority.registry_generation,
@@ -319,32 +319,49 @@
         LEFT JOIN LATERAL (
             SELECT event.event_kind, event.after_state, event.resource_id, event.lifecycle_key
             FROM (SELECT DISTINCT ON (event.lifecycle_key) event.* FROM project_v2_lifecycle_events event
-            WHERE event.logical_name_id = surface.logical_name_id AND (
+            WHERE event.logical_name_id = surface.logical_name_id AND NOT event.expired_when_written AND (
                   event.event_kind IN ('RegistrationGranted', 'RegistrationReserved') OR
                   (event.event_kind = 'RegistrationReleased' AND ((event.after_state ->> 'source_event' = 'RegistryPathExpired' AND event.after_state ->> 'derived_from' = 'interpreter_state' AND event.after_state ->> 'terminal_reason' = 'registry_name_binding_expired')
                         OR EXISTS (SELECT 1 FROM project_v2_lifecycle_events active WHERE active.logical_name_id = event.logical_name_id AND active.lifecycle_key = event.lifecycle_key
-                            AND active.event_kind IN ('RegistrationGranted', 'RegistrationReserved') AND ROW(COALESCE(active.block_number, -1), active.normalized_event_id) < ROW(COALESCE(event.block_number, -1), event.normalized_event_id)
+                            AND active.event_kind IN ('RegistrationGranted', 'RegistrationReserved') AND NOT active.expired_when_written AND ROW(COALESCE(active.block_number, -1), COALESCE(active.transaction_index, -1), COALESCE(active.log_index, -1), active.normalized_event_id) < ROW(COALESCE(event.block_number, -1), COALESCE(event.transaction_index, -1), COALESCE(event.log_index, -1), event.normalized_event_id)
                             AND NOT EXISTS (SELECT 1 FROM project_v2_lifecycle_events expiry WHERE expiry.logical_name_id = event.logical_name_id AND expiry.lifecycle_key = event.lifecycle_key
-                                AND expiry.event_kind = 'RegistrationReleased' AND expiry.after_state ->> 'source_event' = 'RegistryPathExpired' AND expiry.after_state ->> 'derived_from' = 'interpreter_state' AND expiry.after_state ->> 'terminal_reason' = 'registry_name_binding_expired' AND ROW(COALESCE(expiry.block_number, -1), expiry.normalized_event_id) BETWEEN ROW(COALESCE(active.block_number, -1), active.normalized_event_id) AND ROW(COALESCE(event.block_number, -1), event.normalized_event_id)
+                                AND expiry.event_kind = 'RegistrationReleased' AND expiry.after_state ->> 'source_event' = 'RegistryPathExpired' AND expiry.after_state ->> 'derived_from' = 'interpreter_state' AND expiry.after_state ->> 'terminal_reason' = 'registry_name_binding_expired' AND ROW(COALESCE(expiry.block_number, -1), COALESCE(expiry.transaction_index, -1), COALESCE(expiry.log_index, -1), expiry.normalized_event_id) BETWEEN ROW(COALESCE(active.block_number, -1), COALESCE(active.transaction_index, -1), COALESCE(active.log_index, -1), active.normalized_event_id) AND ROW(COALESCE(event.block_number, -1), COALESCE(event.transaction_index, -1), COALESCE(event.log_index, -1), event.normalized_event_id)
                             )))
               ))
-              AND NOT EXISTS (SELECT 1 FROM project_v2_lifecycle_events later WHERE later.logical_name_id = event.logical_name_id AND later.lifecycle_key = event.lifecycle_key
+              AND NOT EXISTS (SELECT 1 FROM project_v2_lifecycle_events later WHERE later.logical_name_id = event.logical_name_id AND later.lifecycle_key = event.lifecycle_key AND NOT later.expired_when_written
                     AND ((event.event_kind = 'RegistrationReleased' AND later.event_kind IN ('RegistrationGranted', 'RegistrationReserved')) OR (event.event_kind <> 'RegistrationReleased' AND later.event_kind = 'RegistrationReleased'))
-                    AND ROW(COALESCE(later.block_number, -1), later.normalized_event_id) > ROW(COALESCE(event.block_number, -1), event.normalized_event_id)
+                    AND ROW(COALESCE(later.block_number, -1), COALESCE(later.transaction_index, -1), COALESCE(later.log_index, -1), later.normalized_event_id) > ROW(COALESCE(event.block_number, -1), COALESCE(event.transaction_index, -1), COALESCE(event.log_index, -1), event.normalized_event_id)
               )
-            ORDER BY event.lifecycle_key, event.block_number DESC NULLS LAST, event.normalized_event_id DESC) event
+            -- For chain-positioned facts, positions compare as authority selection compares them:
+            -- block, transaction, log, then event id, with a block-boundary row (no transaction or
+            -- log index) first in its block. A row with no block at all sorts first there and last
+            -- here; no ENSv2 writer produces one. A reservation already expired when written takes
+            -- no part, as there.
+            ORDER BY event.lifecycle_key, event.block_number DESC NULLS LAST, COALESCE(event.transaction_index, -1) DESC,
+                     COALESCE(event.log_index, -1) DESC, event.normalized_event_id DESC) event
             ORDER BY (binding.resource_id IS NOT NULL AND event.lifecycle_key IS NOT DISTINCT FROM binding.resource_id::text AND event.event_kind <> 'RegistrationReleased') DESC,
                      (event.event_kind = 'RegistrationReleased'),
                      (binding.resource_id IS NOT NULL AND event.lifecycle_key IS NOT DISTINCT FROM binding.resource_id::text) DESC,
-                     event.block_number DESC NULLS LAST, event.normalized_event_id DESC
+                     event.block_number DESC NULLS LAST, COALESCE(event.transaction_index, -1) DESC,
+                     COALESCE(event.log_index, -1) DESC, event.normalized_event_id DESC
             LIMIT 1
         ) registration_current ON TRUE
+        -- One selection, not two (product ruling of 2026-09-26): when authority selection chose a
+        -- released ENSv2 tombstone, the section serves the lifecycle fact that decided it, which
+        -- may be a release written without a name or the end of a reservation with no resource
+        -- or another one, on the tombstone's resource and binding. The fold above serves every
+        -- other ENSv2 name.
+        LEFT JOIN project_v2_lifecycle_events released_fact
+          ON released_fact.normalized_event_id = selected_authority.released_v2_event_id
         CROSS JOIN LATERAL (
-            SELECT CASE WHEN arm.is_v2 THEN CASE WHEN arm.use_event THEN registration_current.event_kind END ELSE registration.event_kind END AS event_kind,
-                   CASE WHEN arm.is_v2 THEN CASE WHEN arm.use_event THEN registration_current.after_state END ELSE registration.after_state END AS after_state,
-                   CASE WHEN arm.is_v2 THEN CASE WHEN arm.use_event THEN registration_current.resource_id END ELSE registration.resource_id END AS resource_id,
-                   CASE WHEN arm.is_v2 THEN CASE WHEN arm.use_event THEN registration_current.lifecycle_key END END AS lifecycle_key, arm.is_v2 AS is_v2_lifecycle
-            FROM (SELECT COALESCE(selected_authority.selected_authority_arm, 'ens_v2') = 'ens_v2' AS is_v2, NOT (registration_current.event_kind = 'RegistrationReleased' AND binding.resource_id IS NOT NULL AND registration_current.resource_id IS DISTINCT FROM binding.resource_id) AS use_event) arm
+            SELECT CASE WHEN arm.released THEN released_fact.event_kind WHEN arm.is_v2 THEN CASE WHEN arm.use_event THEN registration_current.event_kind END ELSE registration.event_kind END AS event_kind,
+                   CASE WHEN arm.released THEN released_fact.after_state WHEN arm.is_v2 THEN CASE WHEN arm.use_event THEN registration_current.after_state END ELSE registration.after_state END AS after_state,
+                   CASE WHEN arm.released THEN selected_authority.released_v2_resource_id WHEN arm.is_v2 THEN CASE WHEN arm.use_event THEN registration_current.resource_id END ELSE registration.resource_id END AS resource_id,
+                   CASE WHEN arm.released THEN selected_authority.released_v2_resource_id::text WHEN arm.is_v2 THEN CASE WHEN arm.use_event THEN registration_current.lifecycle_key END END AS lifecycle_key,
+                   arm.is_v2 AS is_v2_lifecycle, arm.released AS is_released_v2
+            FROM (SELECT COALESCE(selected_authority.selected_authority_arm, 'ens_v2') = 'ens_v2' AS is_v2,
+                         released_fact.normalized_event_id IS NOT NULL AS released,
+                         NOT (registration_current.event_kind = 'RegistrationReleased' AND binding.resource_id IS NOT NULL AND registration_current.resource_id IS DISTINCT FROM binding.resource_id) AS use_event) arm
         ) selected_registration CROSS JOIN LATERAL (
             SELECT COALESCE((
                 SELECT (current_wrapper.after_state ->> 'wrapped_registrar_resource_id')::uuid
@@ -365,6 +382,7 @@
         LEFT JOIN LATERAL (
             SELECT event.event_kind FROM project_v2_lifecycle_events event
             WHERE selected_registration.is_v2_lifecycle AND event.logical_name_id = surface.logical_name_id
+              AND NOT event.expired_when_written
               AND event.lifecycle_key IS NOT DISTINCT FROM COALESCE(selected_registration.lifecycle_key, row_identity.event_resource_id::text)
               AND event.event_kind IN ('RegistrationGranted', 'RegistrationRenewed', 'RegistrationReleased', 'RegistrationReserved', 'ExpiryChanged')
             ORDER BY event.block_number DESC NULLS LAST, event.transaction_index DESC NULLS LAST,
@@ -799,8 +817,23 @@
                        'manifest_version', event.manifest_version
                    ) ORDER BY event.normalized_event_id) AS manifest_versions,
                    max(event.manifest_version) AS manifest_version
-            FROM project_events event
-            WHERE event.logical_name_id = surface.logical_name_id
+            FROM (
+                SELECT named.normalized_event_id, named.raw_fact_ref, named.source_manifest_id,
+                       named.source_family, named.manifest_version
+                FROM project_events named
+                WHERE named.logical_name_id = surface.logical_name_id
+                UNION ALL
+                -- The release that decided a released ENSv2 tombstone can carry no name, on the
+                -- tombstone's resource. It is cited too, so a redo that retracts it rebuilds the
+                -- name. It is read by resource and event id, which the staged events index.
+                SELECT deciding.normalized_event_id, deciding.raw_fact_ref,
+                       deciding.source_manifest_id, deciding.source_family,
+                       deciding.manifest_version
+                FROM project_events deciding
+                WHERE deciding.resource_id = selected_authority.released_v2_resource_id
+                  AND deciding.normalized_event_id = selected_authority.released_v2_event_id
+                  AND deciding.logical_name_id IS NULL
+            ) event
         ) evidence ON TRUE
         LEFT JOIN LATERAL (
             SELECT COALESCE(bool_or(
