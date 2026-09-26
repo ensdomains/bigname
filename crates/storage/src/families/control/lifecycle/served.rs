@@ -351,21 +351,12 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> ShadowName {
         }
     }
 
-    let control_unsupported = event_resource
-        .and_then(|resource| facts.resource_authority_kinds.get(resource))
-        .map(String::as_str)
-        .or_else(|| grant.and_then(|grant| grant.authority_kind_raw.as_deref()))
-        .is_some_and(|kind| matches!(kind, "wrapper" | "name_wrapper"));
+    // A wrapper grant's control is built like any other grant's: TYR-36 step 6 (de24ff32,
+    // "serve the control owner of a wrapper grant") removed the served "ENSv1 wrapper effective
+    // control is not yet projected" section from name_current/build.sql (control CASE, :107-115)
+    // and from the API's declared control section (declared_state.rs:91-100).
     let live_control = || {
         let mut control = Map::new();
-        if control_unsupported {
-            control.insert("status".into(), json!("unsupported"));
-            control.insert(
-                "unsupported_reason".into(),
-                json!("ENSv1 wrapper effective control is not yet projected"),
-            );
-            return control;
-        }
         let status = if selected_kind == Some("RegistrationReserved") {
             selected.event.and_then(|event| event.status.clone())
         } else {

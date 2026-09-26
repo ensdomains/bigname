@@ -140,10 +140,8 @@ pub struct NameFacts {
     pub triples: Vec<TripleFacts>,
     pub events: Vec<LifecycleEvent>,
     pub wrappers: BTreeMap<String, WrapperRow>,
-    /// `resources.provenance ->> 'authority_kind'` of the resources the read touches. This and
-    /// the two timestamp maps are loaded once per batch and shared by every name of it.
-    pub resource_authority_kinds: Arc<BTreeMap<String, String>>,
-    /// `to_jsonb(block_timestamp)` per canonical block.
+    /// `to_jsonb(block_timestamp)` per canonical block. This and the snapshot timestamps are
+    /// loaded once per batch and shared by every name of it.
     pub block_timestamps: Arc<BTreeMap<i64, Value>>,
     /// `to_jsonb(to_timestamp(seconds))` per registrar snapshot registration time.
     pub snapshot_timestamps: Arc<BTreeMap<i64, Value>>,

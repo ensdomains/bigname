@@ -222,23 +222,6 @@ pub async fn load_name_facts(
     .collect();
 
     let wrappers = load_wrapper_rows(pool, chain_id, &resource_list).await?;
-    let authority_kinds: Vec<(String, Option<String>)> = sqlx::query_as(
-        "/* storage:families.control.lifecycle.resource_authority */
-         SELECT resource.resource_id::text, resource.provenance ->> 'authority_kind'
-         FROM bigname_phase.resources resource
-         WHERE resource.resource_id = ANY($1::uuid[])
-           AND resource.canonicality_state IN ('canonical', 'safe', 'finalized')",
-    )
-    .bind(&resource_list)
-    .fetch_all(pool)
-    .await
-    .context("failed to load resource authority kinds")?;
-    let authority_kinds: Arc<BTreeMap<String, String>> = Arc::new(
-        authority_kinds
-            .into_iter()
-            .filter_map(|(resource, kind)| Some((resource, kind?)))
-            .collect(),
-    );
     let blocks: Vec<i64> = events
         .iter()
         .map(|event| event.position.block_number)
@@ -378,7 +361,6 @@ pub async fn load_name_facts(
                 .filter(|(resource, _)| own_resources.contains(*resource))
                 .map(|(resource, row)| (resource.clone(), row.clone()))
                 .collect(),
-            resource_authority_kinds: Arc::clone(&authority_kinds),
             block_timestamps: Arc::clone(&block_timestamps),
             snapshot_timestamps: Arc::clone(&snapshot_timestamps),
             authority_starts: starts.get(name).cloned().unwrap_or(Value::Null),
