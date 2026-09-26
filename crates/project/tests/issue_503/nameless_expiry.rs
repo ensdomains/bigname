@@ -584,3 +584,126 @@ async fn a_path_expiry_releases_own_expiry_precedes_a_later_named_expiry_change(
     }
     Ok(())
 }
+
+const BLOCK_11: &str = "0x0000000000000000000000000000000000000000000000000000000000000b11";
+
+/// The nameless-release shape with the release carrying its expiry, 30, and its time, then a
+/// resolver change on the name's live ENSv1 lease at block 11: an event by the name that touches
+/// nothing on the released ENSv2 resource.
+async fn seed_release_then_a_named_event(pool: PgPool) -> Result<String> {
+    let logical = seed_nameless_release(pool.clone()).await?;
+    sqlx::query(
+        "UPDATE normalized_events SET after_state = after_state || $1
+         WHERE event_identity = 'nameless-expiry-v2-release'",
+    )
+    .bind(json!({"expiry":30,"released_at":BLOCK_10_TIME}))
+    .execute(&pool)
+    .await?;
+    sqlx::query("INSERT INTO chain_lineage (chain_id, block_hash, block_number, block_timestamp, canonicality_state) VALUES ($1, $2, 11, '2026-08-26T00:00:12Z', 'canonical')")
+        .bind(CHAIN).bind(BLOCK_11).execute(&pool).await?;
+    let v1_resource: String = sqlx::query_scalar(
+        "SELECT resource_id::text FROM surface_bindings
+         WHERE logical_name_id = $1 AND authority_arm = 'ens_v1'",
+    )
+    .bind(&logical)
+    .fetch_one(&pool)
+    .await?;
+    event(
+        &pool,
+        "nameless-expiry-v1-resolver-11",
+        &logical,
+        Some(&v1_resource),
+        Event {
+            family: "ens_v1_registry_l1",
+            kind: "ResolverChanged",
+            log: 1,
+            after: json!({"resolver":"0x0000000000000000000000000000000000000b11"}),
+        },
+    )
+    .await?;
+    sqlx::query(
+        "UPDATE normalized_events SET block_number = 11, block_hash = $1
+         WHERE event_identity = 'nameless-expiry-v1-resolver-11'",
+    )
+    .bind(BLOCK_11)
+    .execute(&pool)
+    .await?;
+    Ok(logical)
+}
+
+// A later batch that holds only a named event on a tombstoned name (adversarial review of
+// 802e95a5, item 4). The name's ENSv2 binding is closed, so the batch reaches the name by name
+// only. It must still read the release without a name that decided the tombstone: right after the
+// batch at block 11 the name serves the same tombstone, with the release's expiry and time, and a
+// rebuild of the same database agrees.
+#[tokio::test]
+async fn a_named_event_after_a_nameless_release_keeps_its_tombstone() -> Result<()> {
+    let (db, pool) = database("nameless_release_named_event").await?;
+    let logical = seed_release_then_a_named_event(pool.clone()).await?;
+    let at_9 = project_at(&pool, 9, None).await?;
+    let at_10 = project_at(&pool, 10, Some(at_9)).await?;
+    let after_10 = served(&pool, &logical).await?;
+    project_at(&pool, 11, Some(at_10)).await?;
+    let after_11 = served(&pool, &logical).await?;
+    // The batch at 11 rebuilt the name: its evidence cites the block-11 event, and still the
+    // release without a name.
+    let cited = |pool: PgPool, logical: String| async move {
+        sqlx::query_scalar::<_, Value>(
+            "SELECT jsonb_build_object(
+                 'selected_event_ids', provenance -> 'selected_event_ids',
+                 'raw_fact_refs', provenance -> 'raw_fact_refs')
+             FROM name_current WHERE logical_name_id = $1",
+        )
+        .bind(logical)
+        .fetch_one(&pool)
+        .await
+    };
+    let (release, named): (i64, i64) = sqlx::query_as(
+        "SELECT
+             (SELECT normalized_event_id FROM normalized_events
+              WHERE event_identity = 'nameless-expiry-v2-release'),
+             (SELECT normalized_event_id FROM normalized_events
+              WHERE event_identity = 'nameless-expiry-v1-resolver-11')",
+    )
+    .fetch_one(&pool)
+    .await?;
+    let incremental = cited(pool.clone(), logical.clone()).await?;
+    let ids = incremental["selected_event_ids"]
+        .as_array()
+        .context("no citations")?;
+    assert!(
+        ids.contains(&json!(release)) && ids.contains(&json!(named)),
+        "{incremental}"
+    );
+    project_at(&pool, 11, None).await?;
+    let rebuilt = served(&pool, &logical).await?;
+    assert_eq!(
+        cited(pool.clone(), logical.clone()).await?,
+        incremental,
+        "a rebuild cites the same events"
+    );
+    db.cleanup().await?;
+    for (label, served) in [("after 10", &after_10), ("after 11", &after_11)] {
+        assert_eq!(
+            (
+                served["authority_arm"].as_str(),
+                served["lifecycle_state"].as_str(),
+                served["resource_id"].as_str(),
+                served["registration"]["status"].as_str(),
+                served["registration"]["released_at"].as_i64(),
+                served["registration"]["expiry"].as_i64(),
+            ),
+            (
+                Some("ens_v2"),
+                Some("unregistered"),
+                Some(uuid(15, 97).as_str()),
+                Some("released"),
+                Some(BLOCK_10_TIME),
+                Some(30),
+            ),
+            "{label}: {served}"
+        );
+    }
+    assert_eq!(after_11, rebuilt, "a rebuild of the same database agrees");
+    Ok(())
+}
