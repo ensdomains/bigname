@@ -1,10 +1,12 @@
 //! The canonical event order (D12 as amended by Tate on 2026-09-26; docs/projections.md, "Owned
 //! key families"): block number, transaction index, log index, then, when the event has both a
-//! transaction and a log index, the emission ordinal its identity ends with, then the event
-//! identity compared as bytes. `None` sorts first at each step. Several facts of one log fold in
-//! the order the adapter wrote them, since its raw-log identities end with the fact's index in
-//! that log (adapters schema_v2/normalized.rs:118-131). Every family comparison of positions,
-//! stored or read, goes through this one comparator.
+//! transaction and a log index, the emission ordinal its identity ends with
+//! (docs/glossary.md#emission-ordinal), then the event identity compared as bytes. `None` sorts
+//! first at each step. The ordinal is the fact's index in the adapter emission batch that wrote
+//! it and counts from 0 again for every batch (adapters schema_v2/normalized.rs:118-131,
+//! sourced_events.rs:57-71), so facts of one batch fold in the order the adapter wrote them;
+//! between batches at one log the order is a disclosed precondition. Every family comparison of
+//! positions, stored or read, goes through this one comparator.
 use std::cmp::Ordering;
 
 use serde_json::{Map, Value, json};

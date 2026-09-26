@@ -2521,27 +2521,38 @@ from the retired [admission epoch](#admission-epoch).
 
 the one order Project applies a chain's events in (D12, amended by Tate on
 2026-09-26): block number, then transaction index, then log index, then, for an
-event with both a transaction and a log index, the emission ordinal its
-`event_identity` ends with, then `event_identity` compared as bytes
-(`COLLATE "C"` in SQL). The emission ordinal is the identity's final
-`:`-separated segment when that is a nonempty run of ASCII digits no greater
-than 4294967295, leading zeros allowed; any other suffix has none, and none
-sorts first. Several facts of one log therefore apply in the order the adapter
-wrote them: a NameWrapper transfer's resource-scoped facts (the delegate
-approval clear, the old holder's revoke, the new holder's grant, a retained
-delegate's re-grant) end on what the adapter wrote last. A synthesised event
-has no transaction or log position, sorts before every transaction of its
-block and keeps the identity byte order, since its trailing number is not an
-emission index. Ordinals are per source, so facts of two sources at one log
-interleave by ordinal, and that cross-source order is a disclosed
-precondition: where two sources write one key from one log, the fact with the
-higher ordinal (then the higher identity bytes) wins, and it may differ from
-the served read in provenance only. Its one
-known instance is the NameWrapped registry-node pointer
-([projections](projections.md#owned-key-families)). Owned key family reducers, the
-dedupe of repeated deliveries and every position comparison use it
-([projections](projections.md#owned-key-families)). A served reader ported to
-it (step 7) must parse the ordinal the same way:
+event with both a transaction and a log index, its
+[emission ordinal](#emission-ordinal), then `event_identity` compared as bytes
+(`COLLATE "C"` in SQL). Facts of one emission batch at one log therefore apply
+in the order the adapter wrote them: a NameWrapper transfer's resource-scoped
+facts (the delegate approval clear, the old holder's revoke, the new holder's
+grant, a retained delegate's re-grant) end on what the adapter wrote last. A
+synthesised event has no transaction or log position, sorts before every
+transaction of its block and keeps the identity byte order, since its trailing
+number is not an emission index. Owned key family reducers, the dedupe of
+repeated deliveries and every position comparison use it
+([projections](projections.md#owned-key-families)).
+
+## Emission ordinal
+
+the index of a fact within the adapter emission batch that wrote it, which the
+adapter appends as the final `:`-separated segment of a raw-log
+`event_identity` (`crates/adapters/src/schema_v2/normalized.rs:118-131`). It
+counts from 0 again for every batch: once for a log's primary events and once
+for each sourced batch (`sourced_events.rs:57-71`), and one source can carry
+several batches at one log. It is that segment when it is a nonempty run of
+ASCII digits no greater than 4294967295, leading zeros allowed, on an event
+with both a transaction and a log index; any other event has none, and none
+sorts first in the [canonical event order](#canonical-event-order). Within one
+batch it is the adapter's write order. Between batches at one log it is not,
+and that order is a disclosed precondition: no two batches of one source are
+known to write one family key, and where batches of two sources write one key
+from one log, the fact with the higher ordinal (then the higher identity
+bytes) wins, not the one inserted last, and it may differ from the served
+read in provenance only. Its one known instance is the NameWrapped
+registry-node pointer ([projections](projections.md#owned-key-families)). A
+served reader ported to the canonical event order (step 7) must parse the
+ordinal the same way:
 `CASE WHEN m[1]::numeric <= 4294967295 THEN m[1]::bigint END` over
 `regexp_match(event_identity, ':([0-9]+)$') m`, only when both indexes are
 present, ordered `NULLS FIRST`; never a bare bigint cast.
