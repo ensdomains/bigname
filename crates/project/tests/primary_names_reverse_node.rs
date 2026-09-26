@@ -216,6 +216,174 @@ async fn an_unnamed_ens_v2_reverse_node_pointer_is_outside_the_pointer_families(
     Ok(())
 }
 
+// A reverse node's resolver pointers from F4 (an ENSv1 registry ResolverChanged, no resource) and
+// F5 (an ENSv2 registry ResolverChanged on a resource, addressing the node) at one log, decided by
+// the emission ordinal (docs/glossary.md#emission-ordinal). The identities end in ordinals 10 and
+// 2, whose byte order is the reverse of their ordinal order, and the ordinal-10 pointer is
+// inserted first, so today's generated ids pick the other pointer. At block 2 the F4 pointer has
+// ordinal 10 and names RESOLVER; at block 3 the F5 pointer has ordinal 10 and names OTHER. The
+// node has a name record at each resolver, so the selected resolver decides the claim.
+#[tokio::test]
+async fn f4_and_f5_pointers_at_one_log_follow_the_emission_ordinal() -> Result<()> {
+    let (database, pool) = database("ordinal_pointers").await?;
+    for block in 1..=3 {
+        sqlx::query("INSERT INTO chain_lineage (chain_id,block_hash,block_number,block_timestamp,canonicality_state) VALUES ($1,$2,$3,to_timestamp($3::double precision),'canonical')")
+            .bind(CHAIN).bind(hash(block)).bind(block).execute(&pool).await?;
+    }
+    sqlx::query("INSERT INTO resources (resource_id,chain_id,block_hash,block_number,canonicality_state) VALUES ($1::uuid,$2,$3,1,'canonical')")
+        .bind(POINTER_RESOURCE).bind(CHAIN).bind(hash(1)).execute(&pool).await?;
+    event(
+        &pool,
+        1,
+        0,
+        "ReverseChanged",
+        json!({
+            "source_event":"ReverseClaimed", "address":ADDRESS,
+            "coin_type":"60", "namespace":"ens", "reverse_node":NODE
+        }),
+    )
+    .await?;
+    name(&pool, 1, 1, RESOLVER, json!("resolver.eth")).await?;
+    name(&pool, 1, 2, OTHER, json!("other.eth")).await?;
+    // Block 2, log 5: F4 (ordinal 10, RESOLVER) first, then F5 (ordinal 2, OTHER).
+    pointer_as(&pool, "2:f4:10", "ens_v1_registry_l1", 2, RESOLVER, None).await?;
+    pointer_as(
+        &pool,
+        "2:f5:2",
+        "ens_v2_registry_l1",
+        2,
+        OTHER,
+        Some(POINTER_RESOURCE),
+    )
+    .await?;
+    // Block 3, log 5: F5 (ordinal 10, OTHER) first, then F4 (ordinal 2, RESOLVER).
+    pointer_as(
+        &pool,
+        "3:f5:10",
+        "ens_v2_registry_l1",
+        3,
+        OTHER,
+        Some(POINTER_RESOURCE),
+    )
+    .await?;
+    pointer_as(&pool, "3:f4:2", "ens_v1_registry_l1", 3, RESOLVER, None).await?;
+    let id = |identity: &'static str| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT normalized_event_id FROM normalized_events WHERE event_identity = $1",
+            )
+            .bind(identity)
+            .fetch_one(&pool)
+            .await
+        }
+    };
+    let (at_resolver, at_other) = (id("1:1").await?, id("1:2").await?);
+    let (f4_two, f5_two) = (id("2:f4:10").await?, id("2:f5:2").await?);
+    let (f5_three, f4_three) = (id("3:f5:10").await?, id("3:f4:2").await?);
+    assert!(f4_two < f5_two && f5_three < f4_three);
+    // (block, today's pointer, the family's pointer): each a resolver, its pointer event, the
+    // claim event and the claimed name.
+    let at = |resolver: &str, pointer: i64| {
+        if resolver == RESOLVER {
+            (RESOLVER, pointer, at_resolver, "resolver.eth")
+        } else {
+            (OTHER, pointer, at_other, "other.eth")
+        }
+    };
+    let cases = [
+        (2, at(OTHER, f5_two), at(RESOLVER, f4_two)),
+        (3, at(RESOLVER, f4_three), at(OTHER, f5_three)),
+    ];
+    let key = format!("primary_name {ADDRESS} ens 60");
+    let shadow = Expectations {
+        differences: cases
+            .iter()
+            .map(|(block, today, family)| ExpectedDifference {
+                target: *block,
+                key: key.clone(),
+                fields: vec![
+                    (
+                        "claim_provenance.claim_event_id".into(),
+                        Some(json!(today.2)),
+                        Some(json!(family.2)),
+                    ),
+                    (
+                        "claim_provenance.resolver_address".into(),
+                        Some(json!(today.0)),
+                        Some(json!(family.0)),
+                    ),
+                    (
+                        "claim_provenance.resolver_event_id".into(),
+                        Some(json!(today.1)),
+                        Some(json!(family.1)),
+                    ),
+                    (
+                        "raw_claim_name".into(),
+                        Some(json!(today.3)),
+                        Some(json!(family.3)),
+                    ),
+                ],
+                times: 1,
+            })
+            .collect(),
+        ..Expectations::none()
+    };
+    for (block, today, family) in cases {
+        run(
+            &pool,
+            block,
+            (block > 2).then_some(block - 1),
+            RunMode::Normal,
+            &shadow,
+        )
+        .await?;
+        let served = snapshot(&pool).await?.expect("today's claim");
+        assert_eq!(served["raw_claim_name"], today.3, "block {block}");
+        assert_eq!(
+            served["claim_provenance"]["resolver_event_id"], today.1,
+            "block {block}"
+        );
+        let claim = bigname_storage::families::records::load_family_reverse_claim(
+            &pool, CHAIN, ADDRESS, "ens", "60",
+        )
+        .await?
+        .expect("a family claim");
+        assert!(!claim.node_claim_at_other_resolver, "block {block}");
+        let row = claim.snapshot.row;
+        assert_eq!(
+            row.raw_claim_name.as_deref(),
+            Some(family.3),
+            "block {block}"
+        );
+        let provenance = &row.claim_provenance;
+        assert_eq!(provenance["resolver_address"], family.0, "block {block}");
+        assert_eq!(provenance["resolver_event_id"], family.1, "block {block}");
+        assert_eq!(provenance["claim_event_id"], family.2, "block {block}");
+    }
+    shadow.finish()?;
+    database.cleanup().await?;
+    Ok(())
+}
+
+/// The resource the F5 pointers of the ordinal case are written on.
+const POINTER_RESOURCE: &str = "77000000-0000-0000-0000-000000000001";
+
+/// A ResolverChanged at the reverse node, log 5 of `block`, with its own identity and resource.
+async fn pointer_as(
+    pool: &PgPool,
+    identity: &str,
+    family: &str,
+    block: i64,
+    resolver: &str,
+    resource: Option<&str>,
+) -> Result<()> {
+    sqlx::query("INSERT INTO normalized_events (event_identity,namespace,resource_id,event_kind,source_family,manifest_version,chain_id,block_number,block_hash,transaction_hash,transaction_index,log_index,derivation_kind,canonicality_state,after_state) VALUES ($1,'ens',$2::uuid,'ResolverChanged',$3,1,$4,$5,$6,$6,0,5,'ens_v1_unwrapped_authority','canonical',$7)")
+        .bind(identity).bind(resource).bind(family).bind(CHAIN).bind(block).bind(hash(block))
+        .bind(json!({"node":NODE,"resolver":resolver})).execute(pool).await?;
+    Ok(())
+}
+
 async fn seed(pool: &PgPool) -> Result<()> {
     for block in 1..=11 {
         sqlx::query("INSERT INTO chain_lineage (chain_id,block_hash,block_number,block_timestamp,canonicality_state) VALUES ($1,$2,$3,to_timestamp($3::double precision),'canonical')")

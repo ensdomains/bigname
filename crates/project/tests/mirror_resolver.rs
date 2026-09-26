@@ -461,7 +461,7 @@ async fn a_record_id_sibling_at_the_substituted_resolver_does_not_pair() -> Resu
             "{field}: {v2}"
         );
     }
-    // Neither side pairs, so the comparison is clean.
+    // Neither side pairs; require a current marker and no field differences.
     let report = family_shadow::shadow_report_at(&pool, &outcome.current).await?;
     assert!(report.current(), "{report:#?}");
     assert!(report.differences.is_empty(), "{report:#?}");

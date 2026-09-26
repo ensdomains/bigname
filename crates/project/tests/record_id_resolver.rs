@@ -508,6 +508,184 @@ async fn a_link_and_version_at_one_position_follow_event_identity() -> Result<()
     Ok(())
 }
 
+// The same link-and-version ties at one log with both indexes present, decided by the emission
+// ordinal (docs/glossary.md#emission-ordinal). Each pair shares block 20, transaction 0 and one
+// log; the identities end in ordinals 10 and 2, whose byte order is the reverse of their ordinal
+// order, and the ordinal-10 event is inserted first, so today's generated ids pick the other
+// event. For resource 1 the link has ordinal 10: the families make it the boundary and serve the
+// value written before both, where today makes the version the boundary and cuts that value off.
+// For resource 3 the version has ordinal 10: the families cut the value off, where today makes
+// the link the boundary and serves it. The index-less test above keeps the identity fallback.
+#[tokio::test]
+async fn a_link_and_version_at_one_log_follow_the_emission_ordinal() -> Result<()> {
+    let (db, pool) = database("record_id_ordinal_tie").await?;
+    seed(&pool).await?;
+    for n in 19..=20 {
+        sqlx::query("INSERT INTO chain_lineage (chain_id,block_hash,block_number,block_timestamp,canonicality_state) VALUES ($1,$2,$3,to_timestamp($3::double precision),'canonical')").bind(CHAIN).bind(hash(n)).bind(n).execute(&pool).await?;
+    }
+    let version = |n: i64| json!({"source_event":"VersionChanged","node":node(n),"resolver":RESOLVER,"record_version":"1"});
+    text(&pool, "record-four", 19, 0, 4, "four").await?;
+    text(&pool, "record-five", 19, 1, 5, "five").await?;
+    // Resource 1, log 0: the link (ordinal 10) first, then the version (ordinal 2).
+    link(&pool, "one:10", 20, 0, Some(1), 4).await?;
+    event(
+        &pool,
+        "one:2",
+        20,
+        0,
+        "RecordVersionChanged",
+        Some(1),
+        version(1),
+    )
+    .await?;
+    // Resource 3, log 1: the version (ordinal 10) first, then the link (ordinal 2).
+    event(
+        &pool,
+        "three:10",
+        20,
+        1,
+        "RecordVersionChanged",
+        Some(3),
+        version(3),
+    )
+    .await?;
+    link(&pool, "three:2", 20, 1, Some(3), 5).await?;
+    let id = |identity: &'static str| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT normalized_event_id FROM normalized_events WHERE event_identity = $1",
+            )
+            .bind(identity)
+            .fetch_one(&pool)
+            .await
+        }
+    };
+    let (four, five) = (id("record-four").await?, id("record-five").await?);
+    let (link_one, version_one) = (id("one:10").await?, id("one:2").await?);
+    let (version_three, link_three) = (id("three:10").await?, id("three:2").await?);
+    assert!(link_one < version_one && version_three < link_three);
+    let text_url = json!({"record_family":"text","record_key":"text:url","selector_key":"url","status":"success"});
+    let entry = |value: &str| {
+        let mut entry = text_url.clone();
+        entry["value"] = json!(value);
+        entry
+    };
+    let selector = json!({"cacheable":true,"record_family":"text","record_key":"text:url","selector_key":"url"});
+    let boundary = |today: (&str, i64), family: (&str, i64)| {
+        [
+            (
+                "record_version_boundary.event_kind".to_owned(),
+                Some(json!(today.0)),
+                Some(json!(family.0)),
+            ),
+            (
+                "record_version_boundary.normalized_event_id".to_owned(),
+                Some(json!(today.1)),
+                Some(json!(family.1)),
+            ),
+        ]
+    };
+    let mut linked_later = vec![
+        ("entries[text:url]".to_owned(), None, Some(entry("four"))),
+        (
+            "provenance.record_event_ids".to_owned(),
+            Some(json!([link_one])),
+            Some(json!([four, link_one])),
+        ),
+        (
+            "selectors[text:url]".to_owned(),
+            None,
+            Some(selector.clone()),
+        ),
+    ];
+    linked_later.extend(boundary(
+        ("RecordVersionChanged", version_one),
+        ("ResolverRecordLinked", link_one),
+    ));
+    let mut version_later = vec![
+        ("entries[text:url]".to_owned(), Some(entry("five")), None),
+        (
+            "provenance.record_event_ids".to_owned(),
+            Some(json!([five, link_three])),
+            Some(json!([link_three])),
+        ),
+        ("selectors[text:url]".to_owned(), Some(selector), None),
+    ];
+    version_later.extend(boundary(
+        ("ResolverRecordLinked", link_three),
+        ("RecordVersionChanged", version_three),
+    ));
+    let expected = Expectations {
+        differences: vec![
+            ExpectedDifference {
+                target: 20,
+                key: format!("record_inventory {}", resource(1)),
+                fields: linked_later,
+                times: 1,
+            },
+            ExpectedDifference {
+                target: 20,
+                key: format!("record_inventory {}", resource(3)),
+                fields: version_later,
+                times: 1,
+            },
+        ],
+        ..Expectations::none()
+    };
+    run_expecting(&pool, 20, None, RunMode::Normal, &expected).await?;
+    expected.finish()?;
+
+    // Today's rows, decided by the generated ids.
+    let today_one = inventory(&pool, 1).await?;
+    assert_eq!(
+        today_one["boundary"]["normalized_event_id"], version_one,
+        "{today_one}"
+    );
+    assert_eq!(today_one["entries"], json!([]), "{today_one}");
+    let today_three = inventory(&pool, 3).await?;
+    assert_eq!(
+        today_three["boundary"]["normalized_event_id"], link_three,
+        "{today_three}"
+    );
+    assert_text(&pool, 3, "five").await?;
+    // The family rows, decided by the ordinal: entries, boundary and last change.
+    for (n, boundary_kind, boundary_id, entries) in [
+        (1, "ResolverRecordLinked", link_one, json!([entry("four")])),
+        (3, "RecordVersionChanged", version_three, json!([])),
+    ] {
+        let family = bigname_storage::families::records::load_family_record_inventory(
+            &pool,
+            CHAIN,
+            resource(n).parse()?,
+        )
+        .await?
+        .expect("a family row");
+        let today = inventory(&pool, n).await?;
+        assert_eq!(family.entries, entries, "resource{n}");
+        assert_eq!(
+            family.record_version_boundary["event_kind"], boundary_kind,
+            "resource{n}"
+        );
+        assert_eq!(
+            family.record_version_boundary["normalized_event_id"], boundary_id,
+            "resource{n}"
+        );
+        // The latest contributing write or link is the selected link on both sides; a version
+        // change is never the last change.
+        let link = if n == 1 { link_one } else { link_three };
+        let last_change = family.last_change.expect("a last change");
+        assert_eq!(
+            last_change["event_kind"], "ResolverRecordLinked",
+            "resource{n}"
+        );
+        assert_eq!(last_change["normalized_event_id"], link, "resource{n}");
+        assert_eq!(last_change, today["last_change"], "resource{n}");
+    }
+    db.cleanup().await?;
+    Ok(())
+}
+
 // Names resolving to an address are found from every retained address value, not only the
 // derived address index, which used to drop a value positioned at or before its partition's
 // version change. A link that outranks that version keeps the value served (value at 19, version at 20,
