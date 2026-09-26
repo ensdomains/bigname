@@ -13,7 +13,8 @@ use sqlx::{Postgres, Transaction};
 use super::{
     input::BlockEvent,
     reduce::{
-        Context, current, in_family, key_of, load_rows, put, raw_lower, raw_text, set, text_or_null,
+        Context, current, flag, in_family, key_of, load_rows, put, raw_lower, raw_text, set,
+        text_or_null,
     },
     store::RowSet,
     tables,
@@ -94,10 +95,7 @@ async fn registry_nodes(
         set(
             &mut row,
             "owner_word_unmasked",
-            after
-                .get("owner_word_unmasked")
-                .and_then(Value::as_bool)
-                .map_or(Value::Null, Value::Bool),
+            flag(after, "owner_word_unmasked"),
         );
         set(
             &mut row,
@@ -202,10 +200,7 @@ fn owner_event(rows: &mut RowSet, chain: &Value, event: &BlockEvent, node: &str)
     set(
         &mut row,
         "owner_word_unmasked",
-        after
-            .get("owner_word_unmasked")
-            .and_then(Value::as_bool)
-            .map_or(Value::Null, Value::Bool),
+        flag(after, "owner_word_unmasked"),
     );
     put(rows, table, row, event)
 }

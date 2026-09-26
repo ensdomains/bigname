@@ -1,10 +1,12 @@
 //! The canonical event order (D12 as amended by Tate on 2026-09-26; docs/projections.md, "Owned
 //! key families"): block number, transaction index, log index, then, when the event has both a
-//! transaction and a log index, the emission ordinal its identity ends with, then the event
-//! identity compared as bytes. `None` sorts first at each step. Several facts of one log fold in
-//! the order the adapter wrote them, since its raw-log identities end with the fact's index in
-//! that log (adapters schema_v2/normalized.rs:118-131). Every family comparison of positions,
-//! stored or read, goes through this one comparator.
+//! transaction and a log index, the emission ordinal its identity ends with
+//! (docs/glossary.md#emission-ordinal), then the event identity compared as bytes. `None` sorts
+//! first at each step. The ordinal is the fact's index in the adapter emission batch that wrote
+//! it and counts from 0 again for every batch (adapters schema_v2/normalized.rs:118-131,
+//! sourced_events.rs:57-71), so facts of one batch fold in the order the adapter wrote them;
+//! between batches at one log the order is a disclosed precondition. Every family comparison of
+//! positions, stored or read, goes through this one comparator.
 use std::cmp::Ordering;
 
 use serde_json::{Map, Value, json};
@@ -19,6 +21,23 @@ pub(crate) struct Position {
     pub(crate) event_identity: String,
 }
 
+/// The emission ordinal of an event with these position fields, as [`Position`] orders by it
+/// (docs/glossary.md, "Emission ordinal"). Public so a served reader's SQL parse can be checked
+/// against it.
+pub fn emission_ordinal(
+    transaction_index: Option<i64>,
+    log_index: Option<i64>,
+    event_identity: &str,
+) -> Option<u32> {
+    transaction_index?;
+    log_index?;
+    let (_, tail) = event_identity.rsplit_once(':')?;
+    if tail.is_empty() || !tail.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    tail.parse().ok()
+}
+
 impl Position {
     /// The emission ordinal: the identity's final `:`-separated segment when the event has a
     /// transaction and a log index and that segment is a nonempty run of ASCII digits no greater
@@ -27,13 +46,7 @@ impl Position {
     /// (adapters normalized.rs:141-144) and is not an emission index. Family-internal identities
     /// (`binding:<uuid>`, `activation:<block>`) have none either.
     pub(crate) fn emission_ordinal(&self) -> Option<u32> {
-        self.transaction_index?;
-        self.log_index?;
-        let (_, tail) = self.event_identity.rsplit_once(':')?;
-        if tail.is_empty() || !tail.bytes().all(|byte| byte.is_ascii_digit()) {
-            return None;
-        }
-        tail.parse().ok()
+        emission_ordinal(self.transaction_index, self.log_index, &self.event_identity)
     }
 
     /// The four position columns every family row carries for its last owning event.

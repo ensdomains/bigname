@@ -139,6 +139,18 @@ pub(crate) fn raw_text(value: &Value, field: &str) -> Option<String> {
     }
 }
 
+/// A boolean flag: a JSON boolean, or the string `"true"` or `"false"`, else null. It is true
+/// exactly when the served builders' `->> field = 'true'` holds.
+pub(crate) fn flag(value: &Value, field: &str) -> Value {
+    match value.get(field) {
+        Some(Value::Bool(flag)) => Value::Bool(*flag),
+        Some(Value::String(text)) if text == "true" || text == "false" => {
+            Value::Bool(text == "true")
+        }
+        _ => Value::Null,
+    }
+}
+
 /// `raw_text` lower-cased, as `lower(... ->> field)` reads an address.
 pub(crate) fn raw_lower(value: &Value, field: &str) -> Option<String> {
     raw_text(value, field).map(|text| text.to_ascii_lowercase())
@@ -151,28 +163,20 @@ pub(crate) fn namehash_of(logical_name_id: &str) -> Option<String> {
         .map(|(_, namehash)| namehash.to_ascii_lowercase())
 }
 
-/// A JSON number whose value lies from 0 to `high`, as `jsonb_typeof(value) = 'number' AND
-/// (... ->> field)::numeric BETWEEN 0 AND high` reads it: the value decides, not its spelling, so
-/// `1.0`, `1.5` and `1000.0` count as the numbers they are (a jsonb literal `1e3` is already
-/// numeric 1000). Numbers arrive as serde numbers without arbitrary precision, an integer
-/// exactly and anything else as the nearest f64; a non-integral value within 2048 of 2^64 - 1
-/// is indistinguishable from 2^64 and reads as out of range.
+/// A JSON integer from 0 to `high`, as `jsonb_typeof(value) = 'number' AND (... ->> field)::numeric
+/// BETWEEN 0 AND high` reads it for an integral spelling (a jsonb literal `1e3` is already
+/// numeric 1000). A decimal spelling such as `1.0` or `1.5` reads as no number: numbers arrive
+/// as serde numbers without arbitrary precision, a decimal parsed best-effort into an f64, so it
+/// can arrive already changed (`9007199254740991.0` arrives as 9007199254740990). The served
+/// numeric read keeps a decimal; the family keeps no value there rather than a different one.
 pub(crate) fn json_number_between(value: Option<&Value>, high: u64) -> Option<&serde_json::Number> {
     let Some(Value::Number(number)) = value else {
         return None;
     };
-    let fits = if let Some(integer) = number.as_u64() {
-        integer <= high
-    } else if number.is_i64() {
-        false
-    } else {
-        #[allow(clippy::cast_precision_loss)]
-        let limit = high as f64;
-        number
-            .as_f64()
-            .is_some_and(|float| float >= 0.0 && float < limit)
-    };
-    fits.then_some(number)
+    number
+        .as_u64()
+        .is_some_and(|integer| integer <= high)
+        .then_some(number)
 }
 
 /// A JSON value as `(... ->> field)::boolean` reads it: a JSON boolean as itself, a string or a
@@ -216,7 +220,29 @@ pub(crate) fn postgres_boolean(text: &str) -> Option<bool> {
 
 #[cfg(test)]
 mod tests {
-    use super::postgres_boolean;
+    use serde_json::{Value, json};
+
+    use super::{flag, postgres_boolean};
+
+    // `flag` is true exactly when the served `after_state ->> field = 'true'` holds; every
+    // other value that is not the string "false" or a JSON false reads as null.
+    #[test]
+    fn a_flag_is_true_exactly_when_the_served_text_is_true() {
+        for (after, expected) in [
+            (json!({"flag": true}), Value::Bool(true)),
+            (json!({"flag": false}), Value::Bool(false)),
+            (json!({"flag": "true"}), Value::Bool(true)),
+            (json!({"flag": "false"}), Value::Bool(false)),
+            (json!({"flag": "TRUE"}), Value::Null),
+            (json!({"flag": "t"}), Value::Null),
+            (json!({"flag": 1}), Value::Null),
+            (json!({"flag": null}), Value::Null),
+            (json!({}), Value::Null),
+            (json!({"flag": [true]}), Value::Null),
+        ] {
+            assert_eq!(flag(&after, "flag"), expected, "{after}");
+        }
+    }
 
     #[test]
     fn a_boolean_reads_as_postgresql_reads_it() {
