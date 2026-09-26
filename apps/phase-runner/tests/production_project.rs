@@ -8,7 +8,7 @@ use std::{
 
 use alloy_primitives::{Address, B256, U256, keccak256};
 use alloy_sol_types::{SolEvent, sol};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use bigname_adapters::schema_v2::{
     AddressAdmissionInput, BatchInput as AdapterBatchInput, DiscoveryRuleInput, ManifestInput,
     RawBlockInput as AdapterRawBlockInput, RawLogInput as AdapterRawLogInput,
@@ -7668,6 +7668,54 @@ async fn project_redo_without_resume_revisits_wrapper_timestamp_boundaries() -> 
     scratch.cleanup().await
 }
 
+/// Fails when a published wrapper expiry boundary cites any event in `unreadable`. An absent
+/// boundary or an absent or null citation field cites nothing; any other value must be a numeric
+/// event id, as the builder publishes it.
+fn boundary_cites_none_of(boundary: &Value, unreadable: &[i64]) -> Result<()> {
+    for field in ["fuses_event_id", "expiry_event_id"] {
+        let cited = &boundary[field];
+        if cited.is_null() {
+            continue;
+        }
+        let id = cited
+            .as_i64()
+            .with_context(|| format!("{field} is not a numeric event id: {boundary}"))?;
+        anyhow::ensure!(
+            !unreadable.contains(&id),
+            "{field} still cites unreadable event {id}: {boundary}"
+        );
+    }
+    Ok(())
+}
+
+// The checker above against a boundary that cites fuses event 14 and expiry event 13, as the
+// builder publishes them (Pro review of a8675fec): it rejects either id when unreadable, and
+// accepts an unrelated unreadable id and an absent boundary.
+#[test]
+fn the_wrapper_boundary_checker_rejects_a_cited_unreadable_id() {
+    let summary = json!({"provenance":{"wrapper_expiry_boundary":{
+        "fuses_event_id":14,"expiry_event_id":13
+    }}});
+    let boundary = &summary["provenance"]["wrapper_expiry_boundary"];
+    assert!(
+        boundary_cites_none_of(boundary, &[14]).is_err(),
+        "fuses 14 unreadable"
+    );
+    assert!(
+        boundary_cites_none_of(boundary, &[13]).is_err(),
+        "expiry 13 unreadable"
+    );
+    assert!(
+        boundary_cites_none_of(boundary, &[99]).is_ok(),
+        "unrelated unreadable id"
+    );
+    let absent = json!({"provenance":{}});
+    assert!(
+        boundary_cites_none_of(&absent["provenance"]["wrapper_expiry_boundary"], &[13, 14]).is_ok(),
+        "absent boundary"
+    );
+}
+
 // A wrapper expiry boundary whose cited events a redo leaves unreadable: deleted, or kept with
 // their ids and canonical states but no longer activated (Pro review of 0e609402). Each case is
 // redone at block 3; right after the redo the permission summary cites no unreadable event and
@@ -7750,8 +7798,8 @@ async fn project_redo_removes_a_retracted_wrapper_expiry_boundary() -> Result<()
             .await?,
             "{case}"
         );
-        let unreadable: Vec<String> = sqlx::query_scalar(
-            "SELECT normalized_event_id::text FROM normalized_events
+        let unreadable: Vec<i64> = sqlx::query_scalar(
+            "SELECT normalized_event_id FROM normalized_events
              WHERE chain_id = $1 AND block_number = 3
                AND event_kind IN ('ExpiryChanged', 'PermissionScopeChanged')",
         )
@@ -7762,7 +7810,7 @@ async fn project_redo_removes_a_retracted_wrapper_expiry_boundary() -> Result<()
             .bind(CHAIN)
             .execute(scratch.pool())
             .await?;
-        let unreadable: Vec<String> = match case {
+        let unreadable: Vec<i64> = match case {
             "expiry_candidate" | "fuses_candidate" => {
                 let kind = if case == "expiry_candidate" {
                     "ExpiryChanged"
@@ -7770,7 +7818,7 @@ async fn project_redo_removes_a_retracted_wrapper_expiry_boundary() -> Result<()
                     "PermissionScopeChanged"
                 };
                 sqlx::query_scalar(
-                    "SELECT normalized_event_id::text FROM normalized_events
+                    "SELECT normalized_event_id FROM normalized_events
                      WHERE chain_id = $1 AND block_number = 3 AND event_kind = $2",
                 )
                 .bind(CHAIN)
@@ -7805,13 +7853,8 @@ async fn project_redo_removes_a_retracted_wrapper_expiry_boundary() -> Result<()
         };
         let redone = summary(scratch.pool().clone()).await?;
         let boundary = &redone["provenance"]["wrapper_expiry_boundary"];
-        for id in &unreadable {
-            assert!(
-                boundary["fuses_event_id"].as_str() != Some(id.as_str())
-                    && boundary["expiry_event_id"].as_str() != Some(id.as_str()),
-                "{case}: the summary still cites unreadable event {id}: {redone}"
-            );
-        }
+        boundary_cites_none_of(boundary, &unreadable)
+            .with_context(|| format!("{case}: {redone}"))?;
         if case == "deleted" || case == "both_candidate" {
             assert!(boundary.is_null(), "{case}: {redone}");
         }
