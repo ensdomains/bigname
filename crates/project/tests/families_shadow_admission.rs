@@ -782,7 +782,9 @@ async fn registrant(fixture: &Fixture) -> Result<Value> {
 /// the shadow and the canonical read give Bob and today's order Alice, which passed as a
 /// same-block delta while the refusal read only the rows present. The log still gives W's
 /// modifier, so the name is refused either way and the registrant stays a mismatch; the row
-/// restored, the baseline is back.
+/// restored, the baseline is back. Since TYR-36 step 6 (de24ff32) serves a wrapper grant's
+/// control owner, the refused registrant shows in the control block too; before it both sides
+/// served that control as unsupported and only `registration/registrant` differed.
 #[tokio::test]
 async fn a_missing_or_rekeyed_wrapper_row_gets_no_excuse() -> Result<()> {
     let fixture = Fixture::new("families_shadow_admission_wrapper_absent", 20).await?;
@@ -797,7 +799,13 @@ async fn a_missing_or_rekeyed_wrapper_row_gets_no_excuse() -> Result<()> {
         );
         assert_eq!(
             (report.mismatched, failed_fields(report)),
-            (1, vec!["registration/registrant".to_owned()]),
+            (
+                1,
+                vec![
+                    "control/registrant".to_owned(),
+                    "registration/registrant".to_owned(),
+                ]
+            ),
             "{:#?}",
             report.lines
         );

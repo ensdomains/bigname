@@ -592,35 +592,21 @@ fn v2_event<'a>(
 }
 
 /// Item 4 of the TYR-36 step 3 review (Q7): the same-block counterfactual reads the name's
-/// facts in today's order at the selectors that use it and keeps every position, so the
-/// authority admission, whose epoch bound compares three-part positions (authority_events.sql
-/// :262-311), admits exactly what it admits in the canonical read. Name 1 has a migration proof
-/// at block 12, log 5, and in that block an ExpiryChanged at log 7, written first, and a renewal
-/// at log 3: the generated ids and the canonical order disagree, and the ExpiryChanged is
-/// admitted after the epoch start in both reads. Rewriting positions would have moved it before
-/// the bound and changed what the laterals read, an admission change no same-block excuse may
-/// rest on.
+/// facts in today's order at the selectors that use it and keeps every event at its own
+/// position, so the admission reads exactly what the canonical read admits. Name 1 has a grant at
+/// block 10 and, in block 12, an ExpiryChanged at log 7, written first, and a renewal at log 3:
+/// the generated ids and the canonical order disagree, so the counterfactual runs. It used to
+/// check this against an authority epoch bound that a migration proof opened inside the block;
+/// TYR-36 step 6 (de24ff32) deleted that bound from the served admission (authority_events.sql
+/// :262-311 before it) and the shadow admission follows, so what remains is that the reread
+/// moves no position and admits the same events.
 #[tokio::test]
-async fn the_order_counterfactual_keeps_the_admission_of_a_reordered_block() -> Result<()> {
+async fn the_order_counterfactual_keeps_every_position_and_the_admission() -> Result<()> {
     let fixture = Fixture::new("families_shadow_order_admission", 20).await?;
     let (k1, n1) = (uuid(1), name(1));
     v2_binding(&fixture, &k1).await?;
     fixture
         .event(grant("grant-10", 10, &n1, &k1, ALICE))
-        .await?;
-    fixture
-        .event(
-            Event::new(
-                "migration-12",
-                12,
-                5,
-                "MigrationApplied",
-                "ens_v2_migration_l1",
-            )
-            .name(&n1)
-            .after(json!({"migration_path": "unlocked_wrapped",
-                              "successor_binding": {"binding_id": uuid(100), "resource_id": k1}})),
-        )
         .await?;
     fixture
         .event(v2_event(
@@ -647,12 +633,22 @@ async fn the_order_counterfactual_keeps_the_admission_of_a_reordered_block() -> 
     let report = publish_and_compare(&fixture, 16).await?;
     assert_counts(&report, &[], &[]);
     let (facts, legacy) = facts_and_legacy(&fixture).await?;
+    let positions = |facts: &NameFacts| -> Vec<_> {
+        facts
+            .events
+            .iter()
+            .map(|event| event.position.clone())
+            .collect()
+    };
     assert_eq!(
-        facts.input.selection.epoch_start,
-        Some((12, 0, 5)),
-        "the proof opens the epoch mid-block"
+        positions(&legacy),
+        positions(&facts),
+        "every position is kept"
     );
-    assert_eq!(admitted(&facts, 16), json!(["expiry-12"]));
+    assert_ne!(legacy.order, facts.order, "the reread is in today's order");
+    let mut held: Vec<String> = serde_json::from_value(admitted(&facts, 16))?;
+    held.sort();
+    assert_eq!(held, ["expiry-12", "grant-10", "renewal-12"]);
     assert_eq!(admitted(&legacy, 16), admitted(&facts, 16));
 
     // A control position the event log does not name leaves today's order unknown, so there is
@@ -702,6 +698,87 @@ async fn the_order_counterfactual_keeps_the_admission_of_a_reordered_block() -> 
         "{:#?}",
         mutated.lines
     );
+    fixture.cleanup().await
+}
+
+/// A migrated name's events before its authority epoch start are admitted, as production admits
+/// them since TYR-36 step 6 (de24ff32) deleted the epoch cut of
+/// name_authority/authority_events.sql (:262-311 before it). Name 1 has a grant at block 10;
+/// at block 12 its ENSv2 binding opens and a MigrationApplied sits at log 5, so the selection
+/// carries the migration as its proof and starts the epoch at (12, 0, 5); in that block a
+/// renewal at log 3 precedes the start and an ExpiryChanged at log 7 follows it. The served row
+/// and the families read all three.
+#[tokio::test]
+async fn a_migrated_name_admits_its_events_before_the_epoch_start() -> Result<()> {
+    let fixture = Fixture::new("families_shadow_order_migrated_admission", 20).await?;
+    let (k1, n1) = (uuid(1), name(1));
+    fixture.surface(&n1, &node(1)).await?;
+    fixture.resource(&k1).await?;
+    fixture
+        .event(grant("grant-10", 10, &n1, &k1, ALICE))
+        .await?;
+    fixture
+        .binding(&uuid(100), &n1, &k1, "ens_v2", 12, 5, None)
+        .await?;
+    fixture
+        .write(
+            12,
+            5,
+            "SurfaceBound",
+            V2_REGISTRY,
+            Some(&n1),
+            Some(&k1),
+            json!({"authority_kind": "registrar", "state_derived": false}),
+            REGISTRY,
+        )
+        .await?;
+    fixture
+        .event(
+            Event::new(
+                "migration-12",
+                12,
+                5,
+                "MigrationApplied",
+                "ens_v2_migration_l1",
+            )
+            .name(&n1)
+            .after(json!({"migration_path": "unlocked_wrapped",
+                              "successor_binding": {"binding_id": uuid(100), "resource_id": k1}})),
+        )
+        .await?;
+    fixture
+        .event(v2_event(
+            "renewal-12",
+            12,
+            3,
+            "RegistrationRenewed",
+            &n1,
+            Some(&k1),
+            json!({"expiry": 2_100_000_000u64}),
+        ))
+        .await?;
+    fixture
+        .event(v2_event(
+            "expiry-12",
+            12,
+            7,
+            "ExpiryChanged",
+            &n1,
+            Some(&k1),
+            json!({"expiry": 2_200_000_000u64}),
+        ))
+        .await?;
+    let report = publish_and_compare(&fixture, 16).await?;
+    let (facts, _) = facts_and_legacy(&fixture).await?;
+    assert!(
+        facts.input.selection.has_proof,
+        "the migration is the proof"
+    );
+    assert_eq!(facts.input.selection.epoch_start, Some((12, 0, 5)));
+    let mut held: Vec<String> = serde_json::from_value(admitted(&facts, 16))?;
+    held.sort();
+    assert_eq!(held, ["expiry-12", "grant-10", "renewal-12"]);
+    assert_counts(&report, &[], &[]);
     fixture.cleanup().await
 }
 

@@ -26,8 +26,9 @@
 //!   every position kept so the authority admission is unchanged, the node's owner-setting
 //!   events, F1's epoch starts and the binding candidates' SurfaceBounds ordered by their
 //!   generated ids too, and the association winner of
-//!   an affected triple moved only to a grant of the same name, registry and token
-//!   (`v2_lifecycle_events.sql:10-23`), gives exactly the served value for the field. Those
+//!   an affected triple moved only to a grant of the same name, registry and token, the latest
+//!   by transaction, log and id as today's association takes it since TYR-36 step 6
+//!   (`v2_lifecycle_events.sql:10-24`), gives exactly the served value for the field. Those
 //!   reads take the name's retained lifecycle events rebuilt from the publication-visible log,
 //!   not the family rows, and the same rebuild read in the canonical order must give the
 //!   shadow value; every named cause below needs that too. Every name excuse, this one and
@@ -86,11 +87,13 @@
 //!   release and serves the registration active: a served-side bug, recorded here with the
 //!   names and count this harness finds in that shape on the
 //!   `SEPOLIA_END_TO_END_SHADOW_SERVED_SIDE_BUG` line, not a rule the reader copies. The
-//!   fallback half of the ruling is not observable here: when the interpreter knows the name it
-//!   also closes the ENSv2 binding, the served name authority then selects an open ENSv1 lease
-//!   (name_authority/build.sql:611-618), and the shadow takes that selection as input and
-//!   agrees; the lifecycle fixture `a_real_path_expiry_with_an_ensv1_lease_is_served_from_the_lease`
-//!   pins it for step 6. Served code is not changed in this branch. A field passes only when the shadow
+//!   fallback half of the ruling was not observable here: when the interpreter knows the name it
+//!   also closes the ENSv2 binding, and before TYR-36 step 6 the served name authority then
+//!   selected an open ENSv1 lease, which the shadow took as input and agreed with. Step 6
+//!   (de24ff32) keeps a released or expired ENSv2 registration with ENSv2, and the lifecycle
+//!   fixture `a_real_path_expiry_with_an_ensv1_lease_stays_released_under_ensv2` pins the served
+//!   and shadow answer, released under ENSv2. Served code is not changed in this branch. A
+//!   field passes only when the shadow
 //!   selected that unnamed release and the field holds what the ENSv2 path-release presentation
 //!   gives (build.sql:88-95, :101-103): status released, latest kind RegistrationReleased,
 //!   the release's released_at, the expiry the reader's expiry rule gives (the name's latest
@@ -2098,9 +2101,10 @@ pub async fn association_keys(
 /// laterals in block, transaction, log and generated id, build.sql:307-308), with every event
 /// kept at its own position, so the authority admission, whose bounds compare positions,
 /// admits exactly what the canonical read admits. A triple whose association winner sits in a
-/// block whose two orders disagree moves to the latest grant or reservation, in today's order,
-/// of that block with the same name, registry identifier and token id: today's association
-/// (v2_lifecycle_events.sql:10-23). None when no block of the name's events reads differently
+/// block whose two orders disagree moves to the latest grant or reservation of that block with
+/// the same name, registry identifier and token id by transaction, log and generated id: today's
+/// association, which orders by position before the id since TYR-36 step 6 (de24ff32,
+/// v2_lifecycle_events.sql:10-24). None when no block of the name's events reads differently
 /// in the two orders or an event has no generated id.
 pub fn legacy_facts(
     facts: &NameFacts,
@@ -2178,7 +2182,13 @@ pub fn legacy_facts(
                     && event.position.block_number == winner.block_number
                     && triple_keys.get(&event.position.event_identity) == Some(&key)
             })
-            .max_by_key(|event| ids[&event.position.event_identity]);
+            .max_by_key(|event| {
+                (
+                    event.position.transaction_index,
+                    event.position.log_index,
+                    ids[&event.position.event_identity],
+                )
+            });
         if let Some(rival) = rival {
             triple.target = rival.resource_id.clone();
             triple.target_position = Some(rival.position.clone());

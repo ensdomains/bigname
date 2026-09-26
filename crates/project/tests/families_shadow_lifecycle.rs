@@ -973,9 +973,11 @@ async fn a_grant_authority_key_is_read_from_the_retained_row() -> Result<()> {
 /// generated id, G_b on K2 at transaction 3 log 1 the lower one, then a release with no
 /// resource. The families associate the triple with the later position, K2, so the release
 /// makes K2's candidate explicit and the bound K1 keeps its live grant: Alice is served. Today's
-/// decoder associates by generated id (v2_lifecycle_events.sql:19), so the release lands on K1,
-/// K2's live grant wins the preference with the identity mismatch, and no registrant is served.
-/// The difference is counted as the disclosed same-block delta, not as a mismatch.
+/// decoder now associates by position too: since TYR-36 step 6 (de24ff32) its lifecycle-key
+/// lateral takes block, transaction and log before the generated id
+/// (v2_lifecycle_events.sql:23-24), so it serves Alice as well and the comparison is equal.
+/// Before step 6 it associated by generated id, served no registrant, and this pinned the
+/// difference as a disclosed same-block delta.
 #[tokio::test]
 async fn the_association_follows_the_later_position_not_the_generated_id() -> Result<()> {
     let fixture = Fixture::new("families_shadow_d12_association", 20).await?;
@@ -1017,18 +1019,83 @@ async fn the_association_follows_the_later_position_not_the_generated_id() -> Re
     );
     assert_eq!(
         served.registration("registrant"),
-        Value::Null,
-        "the production answer differs"
+        json!(ALICE),
+        "the production answer agrees"
     );
-    assert_eq!(report.expected_delta, 1, "and the difference is disclosed");
+    assert_counts(&report, &[], &[]);
+    fixture.cleanup().await
+}
+
+/// The counterfactual's association model since TYR-36 step 6 (de24ff32): today's decoder takes
+/// the linked grant by block, transaction, log and generated id (v2_lifecycle_events.sql:23-24),
+/// so the reread moves a triple's association to the grant of that order, not to the highest id
+/// of the block. Block 10 is the association case above (K2's grant later by position, K1's by
+/// id); both sides associate the release with K2 and serve Alice. Block 12 adds two
+/// ExpiryChanged of K1 at one transaction and log, identities ending with ordinals 1 and 0
+/// written in that order: the canonical order takes ordinal 1 (2,300,000,000), today's the higher
+/// id (2,200,000,000), so the expiry differs and the reread must give the served name. It does
+/// only when its association follows the position too; by id it would move the release to K1
+/// and serve no registrant.
+#[tokio::test]
+async fn the_counterfactual_associates_by_position_like_todays_decoder() -> Result<()> {
+    let fixture = Fixture::new("families_shadow_d12_association_counterfactual", 20).await?;
+    let (k1, k2) = (uuid(1), uuid(2));
+    v2_binding(&fixture, &k1).await?;
+    fixture.resource(&k2).await?;
+    for (resource, transaction, log, identity, registrant) in
+        [(&k2, 3, 1, "grant-b", BOB), (&k1, 2, 5, "grant-a", ALICE)]
+    {
+        fixture
+            .event(
+                Event::new(identity, 10, log, "RegistrationGranted", V2_REGISTRY)
+                    .at(transaction, log)
+                    .name(&name(1))
+                    .resource(resource)
+                    .after(
+                        json!({"registry_contract_instance_id": "R", "token_id": "7",
+                               "authority_kind": "registrar", "status": "registered",
+                               "registrant": registrant, "expiry": 2_000_000_000u64}),
+                    )
+                    .raw(json!({"emitting_address": REGISTRY})),
+            )
+            .await?;
+    }
+    for (identity, expiry) in [
+        ("x:ExpiryChanged:12:0:1:1", 2_300_000_000u64),
+        ("x:ExpiryChanged:12:0:1:0", 2_200_000_000u64),
+    ] {
+        fixture
+            .event(
+                Event::new(identity, 12, 1, "ExpiryChanged", V2_REGISTRY)
+                    .name(&name(1))
+                    .resource(&k1)
+                    .after(
+                        json!({"registry_contract_instance_id": "R", "token_id": "7",
+                                  "authority_kind": "registrar", "expiry": expiry}),
+                    )
+                    .raw(json!({"emitting_address": REGISTRY})),
+            )
+            .await?;
+    }
+    v2(
+        &fixture,
+        14,
+        "RegistrationReleased",
+        None,
+        json!({"status": "released"}),
+    )
+    .await?;
+    let report = publish_and_compare(&fixture, 16).await?;
+    let (served, shadow) = shadow_support::name(&fixture, 16, &name(1)).await?;
+    assert_eq!(served.registration("registrant"), json!(ALICE));
+    assert_eq!(shadow.registration["registrant"], json!(ALICE));
+    assert_eq!(served.registration("expiry"), json!(2_200_000_000u64));
+    assert_eq!(shadow.registration["expiry"], json!(2_300_000_000u64));
     assert_counts(
         &report,
         &[],
         &[
-            ("d12_same_block_order:registration/registrant", 1),
-            ("d12_same_block_order:registration/registered_at", 1),
-            ("d12_same_block_order:registration/authority_kind", 1),
-            ("d12_same_block_order:control/registrant", 1),
+            ("d12_same_block_order:registration/expiry", 1),
             ("d12_same_block_order:control/expiry", 1),
         ],
     );
@@ -1236,15 +1303,16 @@ async fn a_topology_rebind_keeps_each_name_to_its_own_events_on_the_shared_key()
 /// closes the name's ENSv2 binding and emits a named SurfaceUnbound and a named path-expiry
 /// release on the token resource (crates/adapters/src/schema_v2/protocol/v2_registry/
 /// topology.rs:251-296). Here the name also has an open ENSv1 lease from before its ENSv2
-/// registration. The served name authority then selects arm ens_v1, because nothing is open on
-/// ENSv2 and an ENSv1 binding is (name_authority/build.sql:611-618), so today's row serves the
-/// live ENSv1 lease. Under Tate's ruling an expired ENSv2 registration stays ENSv2 and is served
-/// unregistered, so that is a second served-side bug. Step 3 cannot see it: the shadow takes the
-/// authority selection from the served row as input (selection is step 6's work), follows it to
-/// the ENSv1 lease and agrees with the served row. This test pins the served arm so the bug stays
-/// visible until step 6 changes the selection.
+/// registration. Before TYR-36 step 6 the served name authority selected arm ens_v1, because
+/// nothing was open on ENSv2 and an ENSv1 binding was, and served the live ENSv1 lease (active,
+/// Bob): a served-side bug under Tate's ruling that an expired ENSv2 registration stays ENSv2
+/// and is served unregistered. The shadow takes the authority selection from the served row, so
+/// it agreed, and this test pinned the served ens_v1 arm until step 6 fixed the selection.
+/// Step 6 (de24ff32, "keep a released or expired ENSv2 registration with ENSv2") keeps the name
+/// with ENSv2, so the served row and the shadow now both serve the path-expiry release as
+/// released, and the comparison is equal.
 #[tokio::test]
-async fn a_real_path_expiry_with_an_ensv1_lease_is_served_from_the_lease() -> Result<()> {
+async fn a_real_path_expiry_with_an_ensv1_lease_stays_released_under_ensv2() -> Result<()> {
     let fixture = Fixture::new("families_shadow_real_path_expiry", 20).await?;
     let (lease, k1) = (uuid(2), uuid(1));
     fixture
@@ -1323,21 +1391,19 @@ async fn a_real_path_expiry_with_an_ensv1_lease_is_served_from_the_lease() -> Re
             .await?;
     }
     let report = publish_and_compare(&fixture, 16).await?;
+    assert_counts(&report, &[], &[]);
+    assert!(report.served_side_bug_names.is_empty());
     let (served, shadow) = shadow_support::name(&fixture, 16, &name(1)).await?;
-    // Pinned today: the served row routes the expired ENSv2 name back to the ENSv1 lease, and
-    // the shadow, taking that selection as input, agrees. Nothing is counted, so the harness
-    // cannot see this flavour of the bug.
     assert_eq!(
         served.provenance["authority_selection"]["authority_arm"],
-        json!("ens_v1")
+        json!("ens_v2")
     );
-    assert_eq!(served.registration("status"), json!("active"));
-    assert_eq!(served.registration("registrant"), json!(BOB));
-    assert_eq!(served.registration("resource_id"), json!(lease));
-    assert_eq!(shadow.registration["status"], json!("active"));
-    assert_eq!(shadow.registration["registrant"], json!(BOB));
-    assert!(report.served_side_bug_names.is_empty());
-    assert_counts(&report, &[], &[]);
+    assert_eq!(served.registration("status"), json!("released"));
+    assert_eq!(shadow.registration["status"], json!("released"));
+    assert_eq!(served.registration("registrant"), Value::Null);
+    assert_eq!(shadow.registration["registrant"], Value::Null);
+    assert_eq!(served.control("status"), json!("unregistered"));
+    assert_eq!(shadow.control["status"], json!("unregistered"));
     fixture.cleanup().await
 }
 
