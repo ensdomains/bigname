@@ -680,3 +680,179 @@ async fn a_cyclic_undo_journal_skips_the_run_instead_of_rebuilding() -> Result<(
     }
     fixture.cleanup().await
 }
+
+// Families written under an older content hash can hold a maximum the old comparator picked
+// (identity bytes straight after the log index), where the canonical event order now decides by
+// the emission ordinal first (docs/glossary.md#emission-ordinal). The state is seeded as the old
+// comparator would have left it: a resource pointer set and cleared at one log, whose row and
+// whose block-13 undo before-image hold the byte-greater fact (ordinal 1 of manifest 9) instead
+// of the higher-ordinal one (ordinal 2 of manifest 7). A run under the new content hash replaces
+// both: the row holds the ordinal winner with its nested positions, no journal row keeps the
+// seeded image, undoing block 13 restores the ordinal winner, and the result equals a rebuild.
+#[tokio::test]
+async fn a_new_content_hash_replaces_state_the_old_order_wrote() -> Result<()> {
+    let fixture = Fixture::new("families_repair_old_order", 20).await?;
+    let (old_hash, new_hash) = (
+        FamilyOptions::new("old-order-content-hash"),
+        FamilyOptions::new("ordinal-order-content-hash"),
+    );
+    let resource = families_support::uuid(1);
+    let node = format!("0x{:064x}", 7);
+    let name = format!("ens:{node}");
+    fixture.resource(&resource).await?;
+    fixture.surface(&name, &node).await?;
+    let identity = |manifest: i64, ordinal: u32| {
+        format!(
+            "ens_v2_registry_resource_surface:{manifest}:{CHAIN}:{}:0xtx12_0:5:\
+             ResolverChanged:{ordinal}",
+            hash(12)
+        )
+    };
+    let (later, earlier) = (identity(7, 2), identity(9, 1));
+    assert!(later.as_bytes() < earlier.as_bytes(), "the orders disagree");
+    let position = |identity: &str| {
+        json!({"block_number": 12, "transaction_index": 0, "log_index": 5,
+               "event_identity": identity})
+    };
+    let mut ids = Vec::new();
+    for (identity, resolver) in [(&later, RESOLVER_B), (&earlier, RESOLVER_A)] {
+        ids.push(
+            fixture
+                .event(
+                    families_support::Event::new(
+                        identity,
+                        12,
+                        5,
+                        "ResolverChanged",
+                        "ens_v2_registry_l1",
+                    )
+                    .name(&name)
+                    .resource(&resource)
+                    .after(json!({"resolver": resolver})),
+                )
+                .await?,
+        );
+    }
+    fixture
+        .event(
+            families_support::Event::new(
+                "version-13",
+                13,
+                1,
+                "RecordVersionChanged",
+                "ens_v2_registry_l1",
+            )
+            .name(&name)
+            .resource(&resource)
+            .after(json!({"version": 2})),
+        )
+        .await?;
+    let pointer = |fixture: &Fixture| {
+        let pool = fixture.pool.clone();
+        async move {
+            sqlx::query_scalar::<_, Value>(
+                "SELECT jsonb_build_object('resolver', resolver_address,
+                     'pointer', pointer_position, 'nonzero', nonzero_resolver_address,
+                     'nonzero_position', nonzero_position)
+                 FROM project_resource_pointer",
+            )
+            .fetch_one(&pool)
+            .await
+        }
+    };
+    let ordinal_winner = json!({"resolver": RESOLVER_B, "pointer": position(&later),
+                                "nonzero": RESOLVER_B, "nonzero_position": position(&later)});
+    let applied = fixture.apply_with(13, FamilyMode::Normal, &old_hash).await;
+    assert_eq!(applied.skipped, None);
+    assert_eq!(pointer(&fixture).await?, ordinal_winner);
+
+    // The old comparator's state: the byte-greater set wins the pointer, in the row and in the
+    // image block 13 journalled of the row after block 12.
+    let old = json!({"resolver_address": RESOLVER_A, "pointer_position": position(&earlier),
+                     "nonzero_resolver_address": RESOLVER_A,
+                     "nonzero_position": position(&earlier)});
+    let row = sqlx::query(
+        "UPDATE project_resource_pointer
+         SET resolver_address = $1, pointer_position = $2, nonzero_resolver_address = $1,
+             nonzero_position = $2",
+    )
+    .bind(RESOLVER_A)
+    .bind(position(&earlier))
+    .execute(&fixture.pool)
+    .await?;
+    let mut image = old.clone();
+    image["event_identity"] = json!(earlier);
+    image["normalized_event_id"] = json!(ids[1]);
+    image["boundary_position"] = position(&earlier);
+    let journal = sqlx::query(
+        "UPDATE project_family_undo SET before_image = before_image || $1
+         WHERE chain_id = $2 AND block_number = 13 AND family = 'project_resource_pointer'
+           AND before_image IS NOT NULL",
+    )
+    .bind(&image)
+    .bind(CHAIN)
+    .execute(&fixture.pool)
+    .await?;
+    assert_eq!((row.rows_affected(), journal.rows_affected()), (1, 1));
+    let seeded = |fixture: &Fixture| {
+        let pool = fixture.pool.clone();
+        let earlier = earlier.clone();
+        async move {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM project_family_undo
+                 WHERE chain_id = $1 AND strpos(before_image::text, $2) > 0",
+            )
+            .bind(CHAIN)
+            .bind(earlier)
+            .fetch_one(&pool)
+            .await
+        }
+    };
+    assert_eq!(seeded(&fixture).await?, 1, "the seeded image is journalled");
+
+    let moved = fixture.apply_with(13, FamilyMode::Normal, &new_hash).await;
+    assert_eq!(moved.skipped, None);
+    assert!(
+        moved.reset,
+        "the families were written under another content hash"
+    );
+    let marker_hash: Option<String> = sqlx::query_scalar(
+        "SELECT input_content_hash FROM project_family_marker WHERE chain_id = $1",
+    )
+    .bind(CHAIN)
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(marker_hash.as_deref(), Some("ordinal-order-content-hash"));
+    assert_eq!(
+        pointer(&fixture).await?,
+        ordinal_winner,
+        "the row is replaced"
+    );
+    assert_eq!(seeded(&fixture).await?, 0, "the journal is replaced");
+
+    // Undoing block 13 restores the row after block 12 as the ordinal order writes it.
+    let incremental = fixture.exact().await?;
+    assert_eq!(families::undo_to(&fixture.pool, CHAIN, 12).await?, 1);
+    let undone = sqlx::query_scalar::<_, Value>(
+        "SELECT jsonb_build_object('resolver', resolver_address, 'pointer', pointer_position,
+             'boundary', boundary_position, 'event_identity', event_identity)
+         FROM project_resource_pointer",
+    )
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(
+        undone,
+        json!({"resolver": RESOLVER_B, "pointer": position(&later),
+               "boundary": position(&later), "event_identity": later})
+    );
+    fixture.apply_with(13, FamilyMode::Normal, &new_hash).await;
+    assert_eq!(fixture.exact().await?, incremental);
+    let rebuilt = fixture.apply_with(13, FamilyMode::Rebuild, &new_hash).await;
+    assert_eq!(rebuilt.skipped, None);
+    assert_eq!(
+        fixture.exact().await?,
+        incremental,
+        "equal to a fresh rebuild"
+    );
+    fixture.cleanup().await
+}

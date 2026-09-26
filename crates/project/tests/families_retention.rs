@@ -578,3 +578,59 @@ async fn an_earlier_transfer_keeps_its_registry_owner_and_unmasked_flag() -> Res
     fixture.assert_rebuild_equal(12).await?;
     fixture.cleanup().await
 }
+
+// The served owner and controller builders test `after_state ->> 'owner_word_unmasked' =
+// 'true'`, which a JSON string "true" also meets. The adapter writes a JSON boolean
+// (adapters protocol/v1/unmasked_word.rs:66-71), but a retained body with the string form must
+// keep the flag in the node row and the owner-event row as the served predicate reads it; a value
+// that is neither form is not a flag.
+#[tokio::test]
+async fn a_textual_unmasked_flag_is_kept_as_the_served_predicate_reads_it() -> Result<()> {
+    const REGISTRY: &str = "0x00000000000000000000000000000000000000a3";
+    const OWNER: &str = "0x00000000000000000000000000000000000000c1";
+    let fixture = Fixture::new("families_retention_owner_word_text", 20).await?;
+    let registry = "ens_v1_registry_l1";
+    for (n, flag) in [
+        (5u64, json!("true")),
+        (6, json!("false")),
+        (7, json!("yes")),
+    ] {
+        fixture
+            .write(
+                10,
+                i64::try_from(n)?,
+                "AuthorityTransferred",
+                registry,
+                Some(&name(n)),
+                Some(&uuid(u32::try_from(n)?)),
+                json!({"node": node(n), "owner": OWNER, "owner_getter": OWNER,
+                       "owner_word_unmasked": flag}),
+                REGISTRY,
+            )
+            .await?;
+    }
+    fixture.apply(10, FamilyMode::Normal).await;
+    for table in [
+        "project_registry_node_state",
+        "project_registry_owner_event",
+    ] {
+        let flags: Vec<(String, Value)> = sqlx::query_as(&format!(
+            "SELECT node, COALESCE(to_jsonb(owner_word_unmasked), 'null'::jsonb)
+             FROM {table} ORDER BY node"
+        ))
+        .fetch_all(&fixture.pool)
+        .await?;
+        assert_eq!(
+            flags,
+            vec![
+                (node(5), json!(true)),
+                (node(6), json!(false)),
+                (node(7), Value::Null)
+            ],
+            "{table}"
+        );
+    }
+    fixture.assert_undo_restores(10).await?;
+    fixture.assert_rebuild_equal(10).await?;
+    fixture.cleanup().await
+}

@@ -15,7 +15,8 @@ use super::{
     decode,
     input::BlockEvent,
     reduce::{
-        Context, current, in_family, key_of, load_rows, put, raw_lower, raw_text, set, text_or_null,
+        Context, current, flag, in_family, key_of, load_rows, put, raw_lower, raw_text, set,
+        text_or_null,
     },
     store::{Row, RowSet},
     tables,
@@ -287,16 +288,6 @@ fn child_row(rows: &mut RowSet, key: Row, event: &BlockEvent) -> Result<()> {
         .flatten();
     set(&mut row, "registrant", text_or_null(registrant));
     put(rows, table, row, event)
-}
-
-fn flag(value: &Value, field: &str) -> Value {
-    match value.get(field) {
-        Some(Value::Bool(flag)) => Value::Bool(*flag),
-        Some(Value::String(text)) if text == "true" || text == "false" => {
-            Value::Bool(text == "true")
-        }
-        _ => Value::Null,
-    }
 }
 
 /// The expiry as build.sql:493-501 converts it: an integral JSON number in range, else null.

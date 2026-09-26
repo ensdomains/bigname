@@ -1769,7 +1769,7 @@ COMMENT ON COLUMN project_wrapper_state.fuses IS
 COMMENT ON COLUMN project_wrapper_state.wrapper_state_position IS
     'This value is that PermissionScopeChanged''s position.';
 COMMENT ON COLUMN project_wrapper_state.expiry_seconds IS
-    'This value is the latest wrapper expiry when a JSON number whose value is from 0 to 18446744073709551615, compared by value as the served numeric read does (address_names.rs wrapper_expiries, children.rs latest_wrapper_expiries), so 1.0 and 1.5 count as those numbers; null otherwise.';
+    'This value is the latest wrapper expiry when a JSON integer from 0 to 18446744073709551615, the range the served numeric read keeps (address_names.rs wrapper_expiries, children.rs latest_wrapper_expiries); null otherwise. A decimal spelling such as 1.0 or 1.5, which the served read keeps as that numeric, is null here: the Project reads event payloads without arbitrary precision, so a decimal can arrive rounded (9007199254740991.0 as 9007199254740990). The adapter writes the expiry as a JSON integer (adapters schema_v2/protocol/v1/wrapper.rs decodes a uint64), so only a hand-written payload reaches the difference.';
 COMMENT ON COLUMN project_wrapper_state.expiry_position IS
     'This value is that ExpiryChanged''s position.';
 COMMENT ON COLUMN project_wrapper_state.owner_word_unmasked IS
