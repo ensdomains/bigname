@@ -1938,7 +1938,10 @@ a latest event takes it in the canonical order (D12 as amended: block,
 transaction, log, then the emission ordinal of a raw log's fact, then event
 identity). Binding candidates are not events: two at the same block,
 transaction and log still break the tie by binding id, as the served stage does,
-and a fixture pins that. The Project fixture
+and a fixture pins that. The registration's wrapped registrar lease is an event
+selection, not a candidate one: it is the lease the latest NameWrapper
+SurfaceBound of the resource recorded, taken in the canonical order, where
+today's builder takes block and generated id. The Project fixture
 tests and the phase runner's fixture-corpus run compare each value with what the
 production readers serve at the same publication, field by field. Every log
 read these checks make takes only the

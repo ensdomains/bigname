@@ -1620,8 +1620,7 @@ fn control_fact_checks_in(
                     && raw_text(after, "authority_kind") == event.authority_kind
                     && lower(after, "owner") == event.owner
                     && lower(after, "registry_owner") == event.registry_owner
-                    && after.get("owner_word_unmasked").and_then(Value::as_bool)
-                        == event.owner_word_unmasked
+                    && raw_flag(after, "owner_word_unmasked") == event.owner_word_unmasked
                     && lower(after, "owner_getter") == event.owner_getter
             })
         });

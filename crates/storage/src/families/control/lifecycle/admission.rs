@@ -409,7 +409,14 @@ impl<'a> Authority<'a> {
 }
 
 /// The custody exclusion of stage.rs:189-194 and authority_events.sql:104-111: the transfer
-/// that moves the registrar token into the NameWrapper in the wrap's own transaction.
+/// that moves the registrar token into the NameWrapper in the wrap's own transaction. The
+/// pinned NameWrapper takes custody inside each `.eth` wrap: `wrapETH2LD` transfers the token
+/// from the registrant to itself and then wraps, `registerAndWrapETH2LD` registers the token to
+/// itself and then wraps, and `onERC721Received` wraps from the callback the registrar makes
+/// while transferring the token to it.
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L246-L279 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L289-L305 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L778-L811 @ ens_v1@91c966f)
 pub(crate) fn custody_passes(
     event_kind: &str,
     transaction_hash: Option<&str>,

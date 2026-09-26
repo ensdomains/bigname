@@ -856,3 +856,82 @@ async fn a_missing_or_rekeyed_wrapper_row_gets_no_excuse() -> Result<()> {
     }
     fixture.cleanup().await
 }
+
+/// Codex thread PRRT_kwDOSJpxAs6mMMhv, the wrapped registrar lease in one block. Name 1 is
+/// bound to NameWrapper resource W twice in block 9: at log 2 (closed at log 3) by a
+/// SurfaceBound that recorded lease L1, and at log 3 by one that recorded L2. The log 3 event
+/// is written first, so today's builder, which takes the latest SurfaceBound by block and
+/// generated id (build.sql:348-358), serves L1 as the registration's resource. The canonical
+/// order takes the SurfaceBound at log 3, L2, and the families read in today's order give L1
+/// again, so the difference is a same-block delta. W carries no wrapper modifier, so the name
+/// is not refused.
+#[tokio::test]
+async fn a_wrapped_lease_chosen_in_one_block_takes_the_event_order() -> Result<()> {
+    let fixture = Fixture::new("families_shadow_admission_wrapped_lease_order", 20).await?;
+    let (first_lease, second_lease, wrapper) = (uuid(1), uuid(3), uuid(2));
+    let first = name(1);
+    fixture.resource(&first_lease).await?;
+    fixture.resource(&second_lease).await?;
+    fixture.surface(&first, &node(1)).await?;
+    fixture.resource(&wrapper).await?;
+    // In-block bindings take log-microsecond times: the log 2 binding closes as the log 3 one
+    // opens.
+    for (binding, log, from, to) in [(uuid(100), 2, 2, Some(3)), (uuid(101), 3, 3, None::<i64>)] {
+        sqlx::query(
+            "INSERT INTO surface_bindings (surface_binding_id, logical_name_id, resource_id,
+                 binding_kind, authority_arm, active_from, active_to, chain_id, block_hash,
+                 block_number, provenance, canonicality_state)
+             VALUES ($1::uuid, $2, $3::uuid, 'declared_registry_path', 'ens_v1',
+                     to_timestamp(1800000000 + 9 * 12) + $4 * interval '1 microsecond',
+                     to_timestamp(1800000000 + 9 * 12) + $5 * interval '1 microsecond',
+                     $6, $7, 9, jsonb_build_object('transaction_index', 0, 'log_index', $8),
+                     'canonical')",
+        )
+        .bind(&binding)
+        .bind(&first)
+        .bind(&wrapper)
+        .bind(from)
+        .bind(to)
+        .bind(CHAIN)
+        .bind(support::hash(9))
+        .bind(log)
+        .execute(&fixture.pool)
+        .await?;
+    }
+    for (identity, log, lease, binding) in [
+        ("wrap-b", 3, &second_lease, uuid(101)),
+        ("wrap-a", 2, &first_lease, uuid(100)),
+    ] {
+        fixture
+            .event(
+                Event::new(identity, 9, log, "SurfaceBound", V1_WRAPPER)
+                    .name(&first)
+                    .resource(&wrapper)
+                    .after(json!({"authority_kind": "wrapper", "node": node(1),
+                                  "wrapped_registrar_resource_id": lease,
+                                  "surface_binding_id": binding, "state_derived": false}))
+                    .raw(json!({"emitting_address": WRAPPER})),
+            )
+            .await?;
+    }
+    fixture
+        .event(
+            Event::new("grant-10", 10, 4, "RegistrationGranted", V1_WRAPPER)
+                .name(&first)
+                .resource(&wrapper)
+                .after(json!({"authority_kind": "wrapper", "status": "registered",
+                              "registrant": HOLDER, "expiry": 2_000_000_000u64}))
+                .raw(json!({"emitting_address": WRAPPER})),
+        )
+        .await?;
+    let report = publish_and_compare(&fixture, 12).await?;
+    let (served, shadow) = shadow_support::name(&fixture, 12, &first).await?;
+    assert_eq!(served.registration("resource_id"), json!(first_lease));
+    assert_eq!(shadow.registration["resource_id"], json!(second_lease));
+    assert_counts(
+        &report,
+        &[],
+        &[("d12_same_block_order:registration/resource_id", 1)],
+    );
+    fixture.cleanup().await
+}

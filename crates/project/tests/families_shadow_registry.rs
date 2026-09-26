@@ -715,6 +715,51 @@ async fn three_producer_events_at_one_log_in_every_order() -> Result<()> {
     Ok(())
 }
 
+/// Codex thread PRRT_kwDOSJpxAs6mOMqQ: an owner-setting event whose `owner_word_unmasked` is
+/// the text `"true"` or `"false"`. Step 2's F2c reducer stores it as the boolean
+/// (crates/project/src/families/registry.rs:97-98, :202-203, `reduce::flag`), so the control
+/// guard must read the log value the same way, or it refuses every control excuse that reads
+/// the event.
+#[tokio::test]
+async fn a_textual_owner_unmask_flag_holds_in_the_control_guard() -> Result<()> {
+    for (index, (text, flag)) in [("false", false), ("true", true)].into_iter().enumerate() {
+        let fixture =
+            Fixture::new(&format!("families_shadow_registry_text_flag_{index}"), 20).await?;
+        let node_resource = uuid(3);
+        fixture
+            .binding(&uuid(100), &name(1), &node_resource, "ens_v1", 10, 1, None)
+            .await?;
+        fixture
+            .write(
+                10,
+                9,
+                "AuthorityTransferred",
+                V1_REGISTRY,
+                Some(&name(1)),
+                Some(&node_resource),
+                json!({"source_event": "NewOwner", "node": node(2), "child_node": node(1),
+                       "owner": OWNER, "owner_getter": OWNER, "owner_word_unmasked": text}),
+                REGISTRY,
+            )
+            .await?;
+        publish_and_compare(&fixture, 12).await?;
+        let facts = name_facts(&fixture).await?;
+        let flags: Vec<Option<bool>> = facts
+            .registry_node
+            .iter()
+            .flat_map(|node| &node.owner_events)
+            .map(|event| event.owner_word_unmasked)
+            .collect();
+        assert_eq!(flags, [Some(flag)], "{text}");
+        assert!(
+            shadow_support::compare::control_facts_hold(&fixture.pool, CHAIN, 12, &facts).await?,
+            "{text}"
+        );
+        fixture.cleanup().await?;
+    }
+    Ok(())
+}
+
 /// Scoped review of ea047c04, F1, relabelled after Pro r8 on 6e05205a: a synthetic
 /// equal-ordinal case, not the adapter's output. A SubregistryChanged, an AuthorityTransferred
 /// and a registry_only AuthorityEpochChanged of name 1 sit at one block, transaction and log

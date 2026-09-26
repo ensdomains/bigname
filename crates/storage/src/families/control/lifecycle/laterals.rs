@@ -387,8 +387,13 @@ pub(super) fn latest_event_kind(
     found.or_else(|| selected.kind().map(str::to_owned))
 }
 
-/// The registration's registrar lease: the lease a NameWrapper SurfaceBound on the selected
-/// event's resource recorded, else that resource (build.sql:348-360).
+/// The registration's registrar lease: the lease the latest NameWrapper SurfaceBound on the
+/// selected event's resource recorded, else that resource (build.sql:348-360). Today's builder
+/// takes that SurfaceBound by block and generated id, so the candidates compare by their
+/// SurfaceBound positions in the read's order: the canonical order in a read, block and
+/// generated id in the same-block counterfactual. A candidate without a SurfaceBound position
+/// stands at its own place with the identity `binding:<id>`, as step 2 places it
+/// (families/identity.rs `binding_position`).
 pub(super) fn registrar_resource<'a>(
     facts: &'a NameFacts,
     resource: Option<&'a str>,
@@ -402,8 +407,20 @@ pub(super) fn registrar_resource<'a>(
                 && candidate.resource_id == resource
                 && candidate.wrapped_registrar_resource_id.is_some()
         })
-        .max_by(|left, right| left.order().cmp(&right.order()))
-        .and_then(|candidate| candidate.wrapped_registrar_resource_id.as_deref());
+        .map(|candidate| {
+            let position = candidate
+                .surface_bound_position
+                .clone()
+                .unwrap_or_else(|| Position {
+                    block_number: candidate.block_number,
+                    transaction_index: candidate.transaction_index,
+                    log_index: candidate.log_index,
+                    event_identity: format!("binding:{}", candidate.surface_binding_id),
+                });
+            (position, candidate)
+        })
+        .max_by(|(left, _), (right, _)| facts.order.membership(left, right))
+        .and_then(|(_, candidate)| candidate.wrapped_registrar_resource_id.as_deref());
     Some(wrapped.unwrap_or(resource))
 }
 
