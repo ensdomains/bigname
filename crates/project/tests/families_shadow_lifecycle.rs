@@ -417,14 +417,9 @@ async fn two_grants_on_two_keys_in_one_transaction_serve_the_binding_key() -> Re
     fixture.cleanup().await
 }
 
-/// A synthesised grant and a synthesised expiry change of one key in one block, with no
-/// transaction or log: D12 orders them by identity bytes, so the grant `b-grant` is the later
-/// one, while today's order takes the higher generated id, the expiry change `a-expiry`. The
-/// families serve the D12 answer, the production answer differs, and the difference is counted as
-/// the disclosed same-block delta (brief section 4.3).
 /// Step 2's amended D12 (39990c38) in the shadow reader: a release and then a grant written
-/// from one log, identities ending with their emission ordinals 0 and 1 as the adapter writes
-/// them (adapters schema_v2/normalized.rs:118-131). The family keeps each kind's maximum in its
+/// from one log, identities ending with emission ordinals 0 and 1 in the adapter's order
+/// (adapters schema_v2/normalized.rs:118-131). The family keeps each kind's maximum in its
 /// own column, and the reader compares them across kinds. Compared as text, the grant
 /// (`RegistrationGranted`) sorts before the release (`RegistrationReleased`) and the reader would
 /// take the release as latest and serve the name released, which the harness would disclose as a
@@ -489,6 +484,11 @@ async fn a_release_then_a_grant_from_one_log_take_the_emission_order() -> Result
     fixture.cleanup().await
 }
 
+/// A synthesised grant and a synthesised expiry change of one key in one block, with no
+/// transaction or log: D12 orders them by identity bytes, so the grant `b-grant` is the later
+/// one, while today's order takes the higher generated id, the expiry change `a-expiry`. The
+/// families serve the D12 answer, the production answer differs, and the difference is counted as
+/// the disclosed same-block delta (brief section 4.3).
 #[tokio::test]
 async fn synthesised_events_in_one_block_take_the_identity_order() -> Result<()> {
     let fixture = Fixture::new("families_shadow_d12_synthesised", 20).await?;
