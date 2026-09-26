@@ -326,6 +326,23 @@ type Fact = (
     Value,
 );
 
+/// Sentinel `released_at` values on hand-built releases, so a served release time names the row
+/// it came from.
+const B0_RELEASED_AT: i64 = 9_001;
+const CT_RELEASED_AT: i64 = 11_001;
+const A0_RELEASED_AT: i64 = 11_002;
+
+/// Seeds the sequence once more, projects it in one batch to block 11, and returns what the name
+/// serves.
+async fn served_at_11(prefix: &str, index: u16, name: &str, facts: &[Fact]) -> Result<Value> {
+    let (db, pool) = database(&format!("{prefix}_served")).await?;
+    let (logical, _, _) = seed_sequence(&pool, index, name, facts).await?;
+    project(&pool, 11, None).await?;
+    let served = served(&pool, &logical).await?;
+    db.cleanup().await?;
+    Ok(served)
+}
+
 /// The resource of registry A's version-zero token.
 const A0: &str = "00000016-0000-0000-0000-000000000001";
 
@@ -373,7 +390,8 @@ async fn seed_sequence(
             None,
             9,
             3,
-            json!({"source_event":"LabelUnregistered","status":"released"}),
+            // A sentinel release time, so a served one cannot be taken for B0's by mistake.
+            json!({"source_event":"LabelUnregistered","status":"released","released_at":B0_RELEASED_AT}),
         ),
     ];
     for (position, (identity, kind, resource, block, log, after)) in
@@ -607,7 +625,14 @@ async fn a_topology_reservation_is_ended_by_a_later_release_on_its_resource() ->
                 log,
                 json!({"source_event":"ExpiryUpdated","status":"reserved","expiry":4_000_000_000_i64,"reservation_resource":true}),
             ),
-            release("a0-release", Some(A0), 11, 1),
+            (
+                "a0-release",
+                "RegistrationReleased",
+                Some(A0),
+                11,
+                1,
+                json!({"source_event":"LabelUnregistered","status":"released","released_at":A0_RELEASED_AT}),
+            ),
         ];
         let (v1_resource, block_10, block_11) =
             sequence_selections(case, index, name, &facts).await?;
@@ -628,6 +653,25 @@ async fn a_topology_reservation_is_ended_by_a_later_release_on_its_resource() ->
                 Some(uuid(15, index))
             ),
             "{case}: its release restores the tombstone on B0"
+        );
+        // The tombstone serves the reservation's end, on B0's resource and binding.
+        let served = served_at_11(case, index, name, &facts).await?;
+        assert_eq!(
+            (
+                served["resource_id"].as_str(),
+                served["surface_binding_id"].as_str(),
+                served["registration"]["status"].as_str(),
+                served["control"]["status"].as_str(),
+                served["registration"]["released_at"].as_i64(),
+            ),
+            (
+                Some(uuid(15, index).as_str()),
+                Some(uuid(16, index).as_str()),
+                Some("released"),
+                Some("unregistered"),
+                Some(A0_RELEASED_AT),
+            ),
+            "{case}: {served}"
         );
     }
     Ok(())
@@ -913,7 +957,14 @@ async fn a_tombstone_restored_by_a_resourceless_release_serves_that_release() ->
     let facts = [
         versioned_reservation("bt-reserve", REGISTRY_B, TOKEN_B1, 10, 1),
         versioned_reservation("ct-reserve", REGISTRY_C, TOKEN_B1, 10, 2),
-        versioned_release("ct-release", REGISTRY_C, TOKEN_B1, 11, 1),
+        (
+            "ct-release",
+            "RegistrationReleased",
+            None,
+            11,
+            1,
+            json!({"source_event":"LabelUnregistered","status":"released","released_at":CT_RELEASED_AT,"registry_contract_instance_id":REGISTRY_C,"token_id":TOKEN_B1}),
+        ),
     ];
     let (_, _, block_11) = sequence_selections(
         "tombstone_after_ct_release",
@@ -930,10 +981,13 @@ async fn a_tombstone_restored_by_a_resourceless_release_serves_that_release() ->
             Some(uuid(15, 122))
         )
     );
-    let (db, pool) = database("tombstone_after_ct_release_served").await?;
-    let (logical, _, _) = seed_sequence(&pool, 122, "tombstone-ct.eth", &facts).await?;
-    project(&pool, 11, None).await?;
-    let served = served(&pool, &logical).await?;
+    let served = served_at_11(
+        "tombstone_after_ct_release",
+        122,
+        "tombstone-ct.eth",
+        &facts,
+    )
+    .await?;
     assert_eq!(
         (
             served["resource_id"].as_str(),
@@ -941,6 +995,7 @@ async fn a_tombstone_restored_by_a_resourceless_release_serves_that_release() ->
             served["registration"]["status"].as_str(),
             served["registration"]["latest_event_kind"].as_str(),
             served["control"]["status"].as_str(),
+            served["registration"]["released_at"].as_i64(),
         ),
         (
             Some(uuid(15, 122).as_str()),
@@ -948,10 +1003,10 @@ async fn a_tombstone_restored_by_a_resourceless_release_serves_that_release() ->
             Some("released"),
             Some("RegistrationReleased"),
             Some("unregistered"),
+            Some(CT_RELEASED_AT),
         ),
-        "{served}"
+        "the tombstone serves C/T's end, not B0's release: {served}"
     );
-    db.cleanup().await?;
     Ok(())
 }
 
