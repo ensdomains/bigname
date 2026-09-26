@@ -74,9 +74,11 @@ impl Position {
     }
 
     /// The three-part bound the authority admission compares against (authority_events.sql
-    /// :200-217, :264-276): block, then transaction and log with a missing one read as -1. It
-    /// agrees with the canonical order except that it ignores both the emission ordinal and the
-    /// identity, which only matter between two positions the bound treats as equal.
+    /// :200-217, :264-276): block, then transaction and log with a missing one read as -1. For
+    /// nonnegative transaction and log indexes, it agrees with the canonical order except that it
+    /// ignores both the emission ordinal and the identity, which only matter between two
+    /// positions the bound treats as equal; a negative index would sort after a missing one in
+    /// the canonical order but not in the bound.
     pub fn bound(&self) -> (i64, i64, i64) {
         (
             self.block_number,
@@ -220,18 +222,30 @@ mod tests {
         assert_eq!(ids.membership(&grant, &unknown), grant.cmp(&unknown));
     }
 
-    // The shared vectors. Their twin, the same two lists asserted against the project crate's
+    // The shared vectors. Their twin, the same three lists asserted against the project crate's
     // comparator and reader (`Ord` and `of_row`), lands in step 2's
     // crates/project/src/families/position_tests.rs (PR 952, commit 21b2aa68); keep the two copies
     // identical, since a drift between the comparators moves the shadow read and the canonical
     // excuse read together.
     type Place = (i64, Option<i64>, Option<i64>, &'static str);
+    /// A suffix of 131073 digits, one more than PostgreSQL's numeric type accepts before the
+    /// decimal point, and far past `u32::MAX`: no ordinal.
+    const LONG_SUFFIX: &str = match core::str::from_utf8(&LONG_SUFFIX_BYTES) {
+        Ok(text) => text,
+        Err(_) => panic!("ASCII"),
+    };
+    static LONG_SUFFIX_BYTES: [u8; 131075] = {
+        let mut bytes = [b'1'; 131075];
+        bytes[0] = b't';
+        bytes[1] = b':';
+        bytes
+    };
     /// Positions in ascending canonical order: block, transaction, log (none first), the
     /// emission ordinal when both indexes are present (none first), then identity bytes. It
     /// covers synthesised facts, partially absent indexes, a missing or empty suffix, signed and
-    /// non-ASCII digits, overflow, `u32::MAX`, leading zeros, 9 against 10 and an equal-ordinal
-    /// identity tie.
-    const SHARED_ORDER: [Place; 26] = [
+    /// non-ASCII digits, a trailing newline, overflow (at `u32::MAX + 1` and at 131073 digits),
+    /// `u32::MAX`, leading zeros, 9 against 10 and an equal-ordinal identity tie.
+    const SHARED_ORDER: [Place; 28] = [
         // Synthesised facts: no ordinal, identity bytes, so ":10" before ":9".
         (5, None, None, "a:10"),
         (5, None, None, "a:9"),
@@ -239,15 +253,17 @@ mod tests {
         // A log index without a transaction index, and the reverse: no ordinal.
         (5, None, Some(0), "a:1"),
         (5, Some(0), None, "a:3"),
-        // Both indexes, no ordinal: empty, signed, non-ASCII, missing, negative, overflowing or
-        // non-numeric suffix; identity bytes.
+        // Both indexes, no ordinal: empty, signed, newline-terminated, non-ASCII, missing,
+        // negative, overflowing or non-numeric suffix; identity bytes.
         (5, Some(0), Some(0), "a:"),
         (5, Some(0), Some(0), "a:+1"),
+        (5, Some(0), Some(0), "a:7\n"),
         (5, Some(0), Some(0), "a:holder"),
         (5, Some(0), Some(0), "a:\u{663}"),
         (5, Some(0), Some(0), "a:\u{ff13}"),
         (5, Some(0), Some(0), "abc"),
         (5, Some(0), Some(0), "q:-1"),
+        (5, Some(0), Some(0), LONG_SUFFIX),
         (5, Some(0), Some(0), "t:4294967296"),
         (5, Some(0), Some(0), "z"),
         // Ordinals, numerically, then identity bytes on a tie.
@@ -264,6 +280,13 @@ mod tests {
         (5, Some(1), Some(0), "a:0"),
         (6, None, None, "a"),
         (6, Some(0), Some(0), "a:0"),
+    ];
+    /// The partial positions: a log index without a transaction index, and the reverse. Each class
+    /// holds two identities, so the vector fails if either guard is dropped: neither reads an
+    /// ordinal, and identity bytes put ":10" before ":9".
+    const SHARED_PARTIAL: [(Place, Place); 2] = [
+        ((5, None, Some(0), "a:10"), (5, None, Some(0), "a:9")),
+        ((5, Some(0), None, "a:10"), (5, Some(0), None, "a:9")),
     ];
     /// Stored JSON positions and what each reads as.
     const SHARED_JSON: [(&str, Option<Place>); 8] = [
@@ -310,6 +333,16 @@ mod tests {
         shuffled.reverse();
         shuffled.sort();
         assert_eq!(shuffled, positions);
+    }
+
+    #[test]
+    fn the_shared_partial_vector_holds() {
+        for (lower, higher) in SHARED_PARTIAL {
+            let (lower, higher) = (place(lower), place(higher));
+            assert_eq!(lower.emission_ordinal(), None, "{lower:?}");
+            assert_eq!(higher.emission_ordinal(), None, "{higher:?}");
+            assert!(lower < higher, "{lower:?} against {higher:?}");
+        }
     }
 
     #[test]
