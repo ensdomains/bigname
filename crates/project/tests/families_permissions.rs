@@ -373,10 +373,12 @@ async fn an_approval_flag_matches_the_served_boolean_cast() -> Result<()> {
 }
 
 // The wrapper expiry and fuses are read the way the served builders read them: the expiry as a
-// numeric value from 0 to 2^64 - 1, whatever its spelling (address_names.rs `wrapper_expiries`,
-// children.rs `latest_wrapper_expiries`), and the fuses as a numeric value from 0 to 2^63 - 1
-// cast to bigint (permissions.rs `modifiers`), a cast that rejects a non-integral spelling and
-// so fails the served batch; the family keeps no fuses for such a value.
+// numeric value from 0 to 2^64 - 1 (address_names.rs `wrapper_expiries`, children.rs
+// `latest_wrapper_expiries`), and the fuses as a numeric value from 0 to 2^63 - 1 cast to
+// bigint (permissions.rs `modifiers`), a cast that rejects a non-integral spelling and so fails
+// the served batch; the family keeps no fuses for such a value. One declared difference: the
+// family keeps no expiry for a decimal spelling, which may reach it rounded
+// (a_decimal_expiry_is_not_rounded); the adapter writes the expiry as a JSON integer.
 #[tokio::test]
 async fn wrapper_numbers_match_the_served_numeric_reads() -> Result<()> {
     let fixture = Fixture::new("families_wrapper_numbers", 20).await?;
@@ -426,7 +428,15 @@ async fn wrapper_numbers_match_the_served_numeric_reads() -> Result<()> {
         .bind(value)
         .fetch_one(&fixture.pool)
         .await;
-        let expiry = expiry.unwrap_or(Value::Null);
+        let spelled: String = sqlx::query_scalar("SELECT $1::jsonb::text")
+            .bind(value)
+            .fetch_one(&fixture.pool)
+            .await?;
+        let expiry = if spelled.contains('.') {
+            Value::Null
+        } else {
+            expiry.unwrap_or(Value::Null)
+        };
         let fuses = match fuses {
             Ok(fuses) => fuses.unwrap_or(Value::Null),
             Err(sqlx::Error::Database(error)) => {
@@ -480,6 +490,59 @@ async fn wrapper_numbers_match_the_served_numeric_reads() -> Result<()> {
     assert!(mismatches.is_empty(), "{mismatches:#?}");
     fixture.assert_undo_restores(10).await?;
     fixture.assert_rebuild_equal(10).await?;
+    fixture.cleanup().await
+}
+
+// A decimal expiry reaches the family as a best-effort f64, so its value may already have
+// moved (9007199254740993.0 arrives as 9007199254740994, and 9007199254740991.0, below 2^53,
+// as 9007199254740990). The family keeps no expiry for a decimal spelling rather than a
+// different one; an integer, 2^53 + 1 included, is kept exactly.
+#[tokio::test]
+async fn a_decimal_expiry_is_not_rounded() -> Result<()> {
+    let fixture = Fixture::new("families_wrapper_decimal_expiry", 20).await?;
+    let cases = [
+        ("9007199254740991.0", None),
+        ("9007199254740992.0", None),
+        ("9007199254740993.0", None),
+        ("9007199254740993", Some("9007199254740993")),
+    ];
+    for (n, (spelling, _)) in (1..).zip(&cases) {
+        let id = fixture
+            .write(
+                10,
+                i64::from(n),
+                "ExpiryChanged",
+                "ens_v1_wrapper_l1",
+                None,
+                Some(&uuid(200 + n)),
+                json!({"expiry": 0, "source_event": "ExpiryExtended"}),
+                WRAPPER,
+            )
+            .await?;
+        sqlx::query(
+            "UPDATE normalized_events
+             SET after_state = jsonb_set(after_state, '{expiry}', $2::text::jsonb)
+             WHERE normalized_event_id = $1",
+        )
+        .bind(id)
+        .bind(spelling)
+        .execute(&fixture.pool)
+        .await?;
+    }
+    fixture.apply(10, FamilyMode::Normal).await;
+    let mut mismatches = Vec::new();
+    for (n, (spelling, expected)) in (1..).zip(&cases) {
+        let got: Option<String> = sqlx::query_scalar(
+            "SELECT expiry_seconds::text FROM project_wrapper_state WHERE resource_id = $1::uuid",
+        )
+        .bind(uuid(200 + n))
+        .fetch_one(&fixture.pool)
+        .await?;
+        if got.as_deref() != *expected {
+            mismatches.push(format!("{spelling}: family {got:?}, expected {expected:?}"));
+        }
+    }
+    assert!(mismatches.is_empty(), "{mismatches:#?}");
     fixture.cleanup().await
 }
 
