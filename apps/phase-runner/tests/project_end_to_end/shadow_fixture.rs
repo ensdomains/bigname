@@ -473,8 +473,11 @@ impl Fixture {
 
 /// Mismatches other than the named expected differences. Each name is an exact mismatch key, and
 /// every named key must still differ, so a fixed reducer or reader turns the test red until the
-/// name is removed. A key only says which read differs: the caller asserts that the whole read
-/// differs in exactly the expected rows, so a second regression on the same key is not hidden.
+/// name is removed. A key only says which read differs, and the comparison stops at a key's first
+/// mismatch, so this check alone does not see a second regression on the same key. A fixture that
+/// names an expected product difference must also check the whole read itself, as
+/// `DifferingLink` does for the one such difference (families_shadow_resolver.rs). The mutation
+/// checks that name a key only need it to show that the comparison notices a change.
 /// A declaration-manifest classification whose mirror disagrees with the served one always fails.
 pub fn unexpected(report: &shadow::Report, expected: &[String]) -> Result<()> {
     ensure!(
