@@ -233,9 +233,24 @@ pub struct BindingCandidate {
     pub transaction_hash: Option<String>,
     pub emitting_address: Option<String>,
     pub surface_bound_position: Option<Position>,
+    /// The surface binding's `active_from` and `active_to` in seconds, read from the identity
+    /// row as the served name authority reads them (name_authority/build.sql:7-12); the lifecycle
+    /// loader alone reads them, so they are none elsewhere.
+    pub active_from_seconds: Option<f64>,
+    pub active_to_seconds: Option<f64>,
 }
 
 impl BindingCandidate {
+    /// Whether the binding is open at a publication whose block has timestamp `seconds`:
+    /// `active_from < cutoff AND (active_to IS NULL OR active_to >= cutoff)` with the cutoff one
+    /// second after the block (name_authority/build.sql:3-12). A binding with no start is not
+    /// open, as the comparison with NULL is not true there.
+    pub fn open_at(&self, seconds: i64) -> bool {
+        let cutoff = seconds as f64 + 1.0;
+        self.active_from_seconds.is_some_and(|from| from < cutoff)
+            && self.active_to_seconds.is_none_or(|to| to >= cutoff)
+    }
+
     pub(crate) fn from_row(row: &Value) -> Option<Self> {
         Some(Self {
             surface_binding_id: text(row, "surface_binding_id")?,
@@ -265,6 +280,8 @@ impl BindingCandidate {
             surface_bound_position: row
                 .get("surface_bound_position")
                 .and_then(Position::from_json),
+            active_from_seconds: row.get("binding_active_from").and_then(Value::as_f64),
+            active_to_seconds: row.get("binding_active_to").and_then(Value::as_f64),
         })
     }
 

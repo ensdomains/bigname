@@ -58,9 +58,11 @@ pub(super) fn select_v2<'a>(
         // (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L206 @ ens_v2@a971bd64)
         // (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L255-L258 @ ens_v2@a971bd64)
         // (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L313-L316 @ ens_v2@a971bd64)
-        // Today's name-scoped membership (build.sql:322) never sees the unnamed release, a
-        // served-side bug the harness records. Another name's event is never the candidate: the
-        // membership leaves it out, and one found here is traced and the key skipped.
+        // Today's name-scoped fold (build.sql:322) never sees the unnamed release; it is served
+        // only as a released tombstone's deciding fact (build.sql:349-364, `tombstone.rs`), and
+        // otherwise the harness records the served-side bug. Another name's event is never the
+        // candidate: the membership leaves it out, and one found here is traced and the key
+        // skipped.
         let event = tagged.iter().find(|tagged| {
             tagged.event.position.event_identity == candidate.position.event_identity
                 && tagged.key.as_deref() == Some(key.as_str())
@@ -112,22 +114,18 @@ pub(super) fn select_v2<'a>(
         &facts.order,
     );
     let Some((key, candidate, event)) = winner.map(|index| &candidates[index]) else {
-        return Selected {
-            event: None,
-            lifecycle_key: None,
-        };
+        return Selected::none();
     };
     let released_elsewhere = candidate.event_kind == "RegistrationReleased"
         && binding_resource.is_some()
         && event.resource_id.as_deref() != binding_resource;
     if released_elsewhere {
-        return Selected {
-            event: None,
-            lifecycle_key: None,
-        };
+        return Selected::none();
     }
     Selected {
         event: Some(event),
         lifecycle_key: Some(key.clone()),
+        resource: event.resource_id.clone(),
+        released: false,
     }
 }

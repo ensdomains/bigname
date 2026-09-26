@@ -7,16 +7,41 @@
 //! membership is its own events and the unnamed ones, such as the interpreter's path-expiry
 //! release, never another name's; when the key holds another name's events the read folds the
 //! key's retained events without them instead of using the stored maxima.
+use serde_json::Value;
+
 use super::{NameFacts, view};
 use crate::families::control::{
     position::EventOrder,
     rows::{LifecycleEvent, Mark, Maxima},
 };
 
+/// Whether `event` is a reservation already expired when written: its expiry is a JSON number
+/// at or before its own block's timestamp, so it is never live (v2_lifecycle_events.sql:28-36,
+/// the rule name_authority/build.sql:212-239 applies). Since TYR-36 step 6 such a reservation
+/// takes no part in a name's registration fold or ENSv2 latest kind (name_current/build.sql
+/// :322, :326, :331, :385); it stays among the retained events and in every other fold. Block
+/// timestamps are whole seconds; an expiry with a fraction compares as a float.
+pub(super) fn expired_when_written(facts: &NameFacts, event: &LifecycleEvent) -> bool {
+    let Value::Number(expiry) = &event.expiry else {
+        return false;
+    };
+    let Some(&block) = facts.block_seconds.get(&event.position.block_number) else {
+        return false;
+    };
+    event.event_kind == "RegistrationReserved"
+        && match (expiry.as_i64(), expiry.as_u64()) {
+            (Some(seconds), _) => seconds <= block,
+            (None, Some(_)) => false,
+            (None, None) => expiry
+                .as_f64()
+                .is_some_and(|seconds| seconds <= block as f64),
+        }
+}
+
 /// The membership maxima of one lifecycle key folded from retained events in `order`'s
-/// membership order, the fold of step 2's reducer (crates/project/src/families/lifecycle.rs
-/// :388-497). Every mark keeps its event's own position. `last_revival` is kept for a resource
-/// key only.
+/// membership order (block and generated id, the resource-permission fold's), the fold of step
+/// 2's reducer (crates/project/src/families/lifecycle.rs:388-497). Every mark keeps its event's
+/// own position. `last_revival` is kept for a resource key only.
 pub fn maxima_of<'a>(
     events: impl IntoIterator<Item = &'a LifecycleEvent>,
     resource: bool,
@@ -24,6 +49,21 @@ pub fn maxima_of<'a>(
 ) -> Maxima {
     let mut own: Vec<&LifecycleEvent> = events.into_iter().collect();
     own.sort_by(|left, right| order.membership(&left.position, &right.position));
+    fold(own, resource)
+}
+
+/// `maxima_of` in the name-membership order (`EventOrder::name_membership`), the order a name's
+/// registration fold reads in since TYR-36 step 6 (build.sql:322-347).
+pub fn name_maxima_of<'a>(
+    events: impl IntoIterator<Item = &'a LifecycleEvent>,
+    order: &EventOrder,
+) -> Maxima {
+    let mut own: Vec<&LifecycleEvent> = events.into_iter().collect();
+    own.sort_by(|left, right| order.name_membership(&left.position, &right.position));
+    fold(own, true)
+}
+
+fn fold(own: Vec<&LifecycleEvent>, resource: bool) -> Maxima {
     let mark = |event: &LifecycleEvent| {
         Some(Mark {
             position: event.position.clone(),
@@ -101,11 +141,24 @@ pub(super) fn members<'a>(facts: &'a NameFacts, key: &str, name: &str) -> Vec<&'
 
 /// The merged view of one ENSv2 lifecycle key for `name`: the resource's key state, or its
 /// retained events without another name's when it holds any, merged with the summaries of the
-/// triples associated with it; or an unassociated triple's summary alone. In the harness's
-/// same-block counterfactual the view is the members folded in that order instead.
+/// triples associated with it; or an unassociated triple's summary alone. When a member is a
+/// reservation expired when written, which the stored maxima count, the view is the members
+/// without it folded again. In the harness's same-block counterfactual the view is the members
+/// folded in today's name-membership order instead (block, transaction, log, generated id;
+/// build.sql:322-347), also without such a reservation.
 pub(super) fn merged_for(facts: &NameFacts, key: &str, name: &str) -> view::MergedView {
-    if facts.order != EventOrder::Canonical {
-        let folded = maxima_of(members(facts, key, name), true, &facts.order);
+    let members = members(facts, key, name);
+    if facts.order != EventOrder::Canonical
+        || members
+            .iter()
+            .any(|event| expired_when_written(facts, event))
+    {
+        let folded = name_maxima_of(
+            members
+                .into_iter()
+                .filter(|event| !expired_when_written(facts, event)),
+            &facts.order,
+        );
         return view::merged_view(Some(&folded), []);
     }
     let associated = facts
@@ -119,13 +172,12 @@ pub(super) fn merged_for(facts: &NameFacts, key: &str, name: &str) -> view::Merg
             .iter()
             .any(|event| foreign_named(event, key, name))
         {
-            let own = maxima_of(
+            let own = name_maxima_of(
                 facts.events.iter().filter(|event| {
                     event.state_kind == "resource"
                         && event.state_key == key
                         && !foreign_named(event, key, name)
                 }),
-                true,
                 &EventOrder::Canonical,
             );
             return view::merged_view(Some(&own), associated);

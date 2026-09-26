@@ -14,6 +14,7 @@ use super::{
         registrant, registrar_resource,
     },
     select::select_v2,
+    tombstone::deciding_fact,
 };
 use crate::families::control::{
     position::{EventOrder, Position},
@@ -30,13 +31,27 @@ pub(super) struct Tagged<'a> {
     pub(super) key: Option<String>,
 }
 
-/// The registration the name serves (build.sql:319-348).
+/// The registration the name serves (build.sql:319-364): the event whose kind and payload it
+/// serves, its lifecycle key, the resource it serves the registration on, which for a released
+/// tombstone is the tombstone's and not the deciding event's own, and whether it is a released
+/// tombstone's deciding fact (`is_released_v2`).
 pub(super) struct Selected<'a> {
     pub(super) event: Option<&'a LifecycleEvent>,
     pub(super) lifecycle_key: Option<String>,
+    pub(super) resource: Option<String>,
+    pub(super) released: bool,
 }
 
 impl Selected<'_> {
+    pub(super) fn none() -> Self {
+        Self {
+            event: None,
+            lifecycle_key: None,
+            resource: None,
+            released: false,
+        }
+    }
+
     pub(super) fn kind(&self) -> Option<&str> {
         self.event.map(|event| event.event_kind.as_str())
     }
@@ -119,33 +134,45 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> ShadowName {
         .collect();
 
     let mut trace = Map::new();
-    let selected = if is_v2 {
+    // A released ENSv2 tombstone serves the fact that decided it, on the tombstone's resource;
+    // every other ENSv2 name the registration fold (build.sql:349-364).
+    let tombstone = deciding_fact(facts, clock);
+    trace.insert("released_v2".into(), json!(tombstone.is_some()));
+    let selected = if let Some(tombstone) = tombstone {
+        Selected {
+            event: Some(tombstone.event),
+            lifecycle_key: Some(tombstone.resource.clone()),
+            resource: Some(tombstone.resource),
+            released: true,
+        }
+    } else if is_v2 {
         select_v2(facts, &tagged, binding_resource, &mut trace)
     } else {
+        let event = latest(
+            &facts.order,
+            tagged.iter().filter(|tagged| {
+                tagged.staged == StagedName::Ours
+                    && tagged.admitted
+                    && matches!(
+                        tagged.event.event_kind.as_str(),
+                        "RegistrationGranted"
+                            | "RegistrationRenewed"
+                            | "RegistrationReleased"
+                            | "RegistrationReserved"
+                    )
+            }),
+            |tagged| &tagged.event.position,
+        )
+        .map(|tagged| tagged.event);
         Selected {
-            event: latest(
-                &facts.order,
-                tagged.iter().filter(|tagged| {
-                    tagged.staged == StagedName::Ours
-                        && tagged.admitted
-                        && matches!(
-                            tagged.event.event_kind.as_str(),
-                            "RegistrationGranted"
-                                | "RegistrationRenewed"
-                                | "RegistrationReleased"
-                                | "RegistrationReserved"
-                        )
-                }),
-                |tagged| &tagged.event.position,
-            )
-            .map(|tagged| tagged.event),
+            event,
             lifecycle_key: None,
+            resource: event.and_then(|event| event.resource_id.clone()),
+            released: false,
         }
     };
     let has_lifecycle = is_v2 && selected.event.is_some();
-    let selected_resource = selected
-        .event
-        .and_then(|event| event.resource_id.as_deref());
+    let selected_resource = selected.resource.as_deref();
     let mismatch = has_lifecycle && selected_resource != binding_resource;
     let event_resource = if has_lifecycle {
         selected_resource
@@ -167,10 +194,14 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> ShadowName {
     );
     trace.insert("selected_key".into(), opt_text(selected_key.as_deref()));
     trace.insert("identity_mismatch".into(), json!(mismatch));
-    // A selected release emitted without a name: the path-expiry release the interpreter
-    // synthesises. The harness reads these to check that the shadow serves the release.
+    // A release emitted without a name that the registration fold selected: the path-expiry
+    // release the interpreter synthesises, which today's name-scoped fold never sees. The harness
+    // reads these to check that the shadow serves the release. A released tombstone's deciding
+    // fact is served by both sides (build.sql:349-364), so it is not one.
     let unnamed_release = selected.event.filter(|event| {
-        event.original_logical_name_id.is_none() && event.event_kind == "RegistrationReleased"
+        !selected.released
+            && event.original_logical_name_id.is_none()
+            && event.event_kind == "RegistrationReleased"
     });
     trace.insert(
         "selected_unnamed_path_expiry".into(),
@@ -235,11 +266,12 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> ShadowName {
         .as_ref()
         .is_some_and(|wrapper| wrapper.owner_lapsed);
     // A wrapped ENSv1 name with no registrar lease expires with its NameWrapper entry
-    // (build.sql:47-53, :120-123).
+    // (build.sql:57-62, :126-129).
     let wrapper_fallback = wrapper_row
         .filter(|row| row.wrapper_state.is_some() && !is_v2)
         .and_then(servable_expiry);
 
+    let selected_kind = selected.kind();
     let expiry_seconds = expiry_candidate(&facts.order, &in_scope);
     trace.insert("expiry_candidate".into(), json!(expiry_seconds));
     let selected_expiry = || {
@@ -247,16 +279,25 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> ShadowName {
             .event
             .map_or(Value::Null, |event| event.expiry.clone())
     };
-    // The registration expiry (build.sql:39-53): with an identity mismatch, the selected event's
-    // own expiry; otherwise the expiry lateral, which is the latest admitted grant of the name on
-    // the selected key or its latest admitted renewal, release or ExpiryChanged with a numeric
-    // expiry (`expiry_candidate`); only when that finds nothing, the selected ENSv2 event's own
-    // expiry. The interpreter's unnamed path-expiry release is not admitted for the name (it
-    // carries no name, so staging leaves it Unnamed), so a name serving it takes the lateral's
-    // value when one exists. That value can differ from the release's own expiry: an
-    // ExpiryChanged or renewal of the name after the release moves it (fixture
-    // `grant_path_expiry_then_expiry_change_serves_the_path_release`).
-    let registration_expiry = if mismatch {
+    // The registration expiry, the CASE of build.sql:40-63 branch by branch. First, an ENSv2
+    // path-expiry release serves its own expiry, and the expiry lateral only when the release
+    // carries none (build.sql:45-49): a renewal after the path was cut is written without a
+    // name, so the name's expiry rows can be older than the release. Then, with an identity
+    // mismatch, the selected event's own expiry (build.sql:50-53). Otherwise the expiry lateral
+    // (`expiry_candidate`: the latest admitted grant of the name on the selected key, or its
+    // latest admitted renewal, release or ExpiryChanged with a numeric expiry), else the selected
+    // ENSv2 event's own expiry, else for ENSv1 the NameWrapper expiry (build.sql:54-62).
+    let path_release = is_v2
+        && selected_kind == Some("RegistrationReleased")
+        && selected
+            .event
+            .is_some_and(|event| event.source_event.as_deref() == Some("RegistryPathExpired"));
+    let registration_expiry = if path_release {
+        match selected_expiry() {
+            Value::Null => expiry_seconds.map_or(Value::Null, |seconds| json!(seconds)),
+            own => own,
+        }
+    } else if mismatch {
         selected_expiry()
     } else if let Some(seconds) = expiry_seconds {
         json!(seconds)
@@ -279,7 +320,6 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> ShadowName {
     let latest_event_kind =
         latest_event_kind(facts, &selected, &in_scope, is_v2, selected_key.as_deref());
 
-    let selected_kind = selected.kind();
     let released_at = selected
         .event
         .map_or(Value::Null, |event| event.released_at.clone());

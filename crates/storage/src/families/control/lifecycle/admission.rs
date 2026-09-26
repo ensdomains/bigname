@@ -421,6 +421,8 @@ mod tests {
                 log_index: Some(1),
                 event_identity: identity.into(),
             }),
+            active_from_seconds: None,
+            active_to_seconds: None,
         }
     }
 

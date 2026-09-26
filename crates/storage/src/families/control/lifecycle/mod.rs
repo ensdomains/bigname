@@ -5,12 +5,17 @@
 //! the served row carries in `provenance.authority_selection` (build.sql:234-252), plus the
 //! selected binding's registry-only handoff facts from `project_binding_candidate`. The name
 //! authority selection is plan step 6's contract, so taking it as input keeps the lifecycle proof
-//! apart from the selection proof.
+//! apart from the selection proof. The one selection output the row does not carry, the fact
+//! that decided a released ENSv2 tombstone, is found again from the retained events and the
+//! binding candidates with their identity rows' open windows, by the rules that chose it
+//! (`tombstone.rs`, name_authority/build.sql:48-271).
 //!
 //! Membership (the registration candidate and the ENSv2 latest kind) reads the F2a maxima merged
-//! across the key and the triples associated with it. Every other value reads the retained
-//! events of the name through the authority admission, as the laterals of build.sql read
-//! `project_authority_events`, ordered by the canonical order instead of the code's orderings.
+//! across the key and the triples associated with it, or the key's retained events folded again
+//! when they hold another name's event or a reservation expired when written. Every other value
+//! reads the retained events of the name through the authority admission, as the laterals of
+//! build.sql read `project_authority_events`, ordered by the canonical order instead of the
+//! code's orderings.
 mod admission;
 mod control;
 mod laterals;
@@ -18,6 +23,7 @@ mod load;
 pub mod membership;
 mod select;
 mod served;
+mod tombstone;
 pub mod view;
 
 use std::{collections::BTreeMap, sync::Arc};
@@ -41,7 +47,9 @@ pub struct AuthoritySelection {
     pub resource_id: Option<String>,
     /// `authority_epoch_start_position` as a three-part bound.
     pub epoch_start: Option<(i64, i64, i64)>,
-    /// Whether an authority proof event exists, which switches the epoch bound on.
+    /// Whether an authority proof event exists. Selection history only: since TYR-36 step 6
+    /// (de24ff32) no admission rule reads it, and only the migrated-name fixture
+    /// (crates/project/tests/families_shadow_order.rs) checks it.
     pub has_proof: bool,
     pub unsupported_reason: Option<String>,
     pub ownerless_registry: bool,
@@ -143,6 +151,9 @@ pub struct NameFacts {
     /// `to_jsonb(block_timestamp)` per canonical block. This and the snapshot timestamps are
     /// loaded once per batch and shared by every name of it.
     pub block_timestamps: Arc<BTreeMap<i64, Value>>,
+    /// Each canonical block's timestamp in whole seconds, which a reservation's expiry is
+    /// compared with (v2_lifecycle_events.sql:28-36).
+    pub block_seconds: Arc<BTreeMap<i64, i64>>,
     /// `to_jsonb(to_timestamp(seconds))` per registrar snapshot registration time.
     pub snapshot_timestamps: Arc<BTreeMap<i64, Value>>,
     /// F1 `project_name_state.authority_start_positions`: the latest AuthorityEpochChanged per

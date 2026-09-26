@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 use super::{
     NameFacts,
     admission::{Authority, Probe, REGISTRAR, StagedName},
-    membership::{members, merged_for},
+    membership::{expired_when_written, members, merged_for},
     served::{Selected, Tagged, latest},
 };
 use crate::families::control::{
@@ -327,9 +327,10 @@ pub(super) fn admitted_epochs(
     found
 }
 
-/// `latest_event_kind` (build.sql:58-63): a selected reservation serves its own kind; an ENSv2
-/// selection serves the latest of the five kinds in the selected key's membership; an ENSv1 one
-/// the latest admitted of the five kinds.
+/// `latest_event_kind`, the CASE of build.sql:67-73 in order: a selected reservation serves its
+/// own kind; so does a released tombstone's deciding fact (`is_released_v2`); another ENSv2
+/// selection serves the latest of the five kinds in the selected key's membership, else its own
+/// kind; an ENSv1 one the latest admitted of the five kinds, else its own.
 pub(super) fn latest_event_kind(
     facts: &NameFacts,
     selected: &Selected<'_>,
@@ -337,7 +338,7 @@ pub(super) fn latest_event_kind(
     is_v2: bool,
     selected_key: Option<&str>,
 ) -> Option<String> {
-    if selected.kind() == Some("RegistrationReserved") {
+    if selected.kind() == Some("RegistrationReserved") || selected.released {
         return selected.kind().map(str::to_owned);
     }
     let found = if is_v2 {
@@ -348,9 +349,10 @@ pub(super) fn latest_event_kind(
                 // (build.sql:366-371), not the maxima folded in its membership order.
                 return latest(
                     &facts.order,
-                    members(facts, key, name)
-                        .into_iter()
-                        .filter(|event| FIVE_KINDS.contains(&event.event_kind.as_str())),
+                    members(facts, key, name).into_iter().filter(|event| {
+                        FIVE_KINDS.contains(&event.event_kind.as_str())
+                            && !expired_when_written(facts, event)
+                    }),
                     |event| &event.position,
                 )
                 .map(|event| event.event_kind.clone());

@@ -72,7 +72,12 @@ pub async fn load_name_facts(
     let candidates: Vec<BindingCandidate> = json_rows(
         pool,
         "/* storage:families.control.lifecycle.candidates */ SELECT to_jsonb(candidate)
+             || jsonb_build_object(
+                 'binding_active_from', extract(epoch FROM binding.active_from)::float8,
+                 'binding_active_to', extract(epoch FROM binding.active_to)::float8)
          FROM bigname_phase.project_binding_candidate candidate
+         LEFT JOIN bigname_phase.surface_bindings binding
+           ON binding.surface_binding_id = candidate.surface_binding_id
          WHERE candidate.chain_id = $1 AND candidate.logical_name_id = ANY($2)",
         chain_id,
         &ids,
@@ -228,21 +233,33 @@ pub async fn load_name_facts(
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
-    let block_timestamps: Arc<BTreeMap<i64, Value>> = Arc::new(
-        sqlx::query_as::<_, (i64, Value)>(
-            "/* storage:families.control.lifecycle.block_timestamps */
-         SELECT lineage.block_number, to_jsonb(lineage.block_timestamp)
+    // Each retained event's block is on the canonical lineage, so its canonical row at that
+    // height is the row the served reads join by hash (build.sql:399-403,
+    // v2_lifecycle_events.sql:28-31).
+    let block_rows = sqlx::query_as::<_, (i64, Value, i64)>(
+        "/* storage:families.control.lifecycle.block_timestamps */
+         SELECT lineage.block_number, to_jsonb(lineage.block_timestamp),
+                floor(extract(epoch FROM lineage.block_timestamp))::bigint
          FROM bigname_phase.chain_lineage lineage
          WHERE lineage.chain_id = $1 AND lineage.block_number = ANY($2)
            AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')",
-        )
-        .bind(chain_id)
-        .bind(&blocks)
-        .fetch_all(pool)
-        .await
-        .context("failed to load block timestamps")?
-        .into_iter()
-        .collect(),
+    )
+    .bind(chain_id)
+    .bind(&blocks)
+    .fetch_all(pool)
+    .await
+    .context("failed to load block timestamps")?;
+    let block_seconds: Arc<BTreeMap<i64, i64>> = Arc::new(
+        block_rows
+            .iter()
+            .map(|(block, _, seconds)| (*block, *seconds))
+            .collect(),
+    );
+    let block_timestamps: Arc<BTreeMap<i64, Value>> = Arc::new(
+        block_rows
+            .into_iter()
+            .map(|(block, timestamp, _)| (block, timestamp))
+            .collect(),
     );
     let snapshots: Vec<i64> = events
         .iter()
@@ -362,6 +379,7 @@ pub async fn load_name_facts(
                 .map(|(resource, row)| (resource.clone(), row.clone()))
                 .collect(),
             block_timestamps: Arc::clone(&block_timestamps),
+            block_seconds: Arc::clone(&block_seconds),
             snapshot_timestamps: Arc::clone(&snapshot_timestamps),
             authority_starts: starts.get(name).cloned().unwrap_or(Value::Null),
             registry_node: nodes
