@@ -394,15 +394,95 @@ async fn a_later_subregistry_write_to_the_node_leaves_the_epoch_owner_equal() ->
     fixture.cleanup().await
 }
 
-/// Codex thread PRRT_kwDOSJpxAs6l3jx7, the ENSv1 NewOwner shape: one registry log yields a
-/// SubregistryChanged and then an AuthorityTransferred of the child node, at one block,
-/// transaction and log. The registry-binding observation keeps one of them per name: the
-/// families break the tie by event identity and take the SubregistryChanged, today's builder
-/// breaks it by generated id and takes the AuthorityTransferred (permission_resources.rs:41-57),
-/// so the served event id differs. It passes as a same-block delta only because the binding
-/// read again in today's order gives exactly the served binding. The control block reads the
-/// name's admitted AuthorityTransferred rows only, which F2c keeps apart from the
-/// SubregistryChanged, so both sides agree there.
+/// Pro r7 Q9 on 0638b9ba, the real NewOwner shape replayed through the adapter: `probe`.eth is
+/// registered to OWNER at block 8, and at block 11 the registry's NewOwner alone (the
+/// registrar's `reclaim`) names OTHER. The adapter writes, from that one log, a
+/// SubregistryChanged and then an AuthorityTransferred with emission ordinals 0 and 1, then the
+/// epoch change and the old and new owners' permission rows at 2 to 4, all asserted exactly. Under step 2's amended D12 the families take the AuthorityTransferred, the later
+/// ordinal, as today's builder does by generated id, so the registry binding reads equal with no
+/// delta. With the ordinal step removed from both comparators, both resources' binding event
+/// ids differ (the SubregistryChanged against the served AuthorityTransferred) and pass only as
+/// same-block deltas.
+#[tokio::test]
+async fn a_replayed_new_owner_log_reads_equal() -> Result<()> {
+    let fixture = Fixture::new("families_shadow_registry_new_owner_replay", 20).await?;
+    let outputs = shadow_support::replay::replay(
+        &fixture.pool,
+        vec![
+            shadow_support::replay::registration("probe", OWNER, 1_900_000_000, 8),
+            shadow_support::replay::new_owner("probe", OTHER, 11),
+        ],
+    )
+    .await?;
+    let facts: Vec<(&str, &str)> = outputs[1]
+        .normalized_events
+        .iter()
+        .map(|event| (event.event_kind.as_str(), event.event_identity.as_str()))
+        .collect();
+    assert_eq!(
+        facts
+            .iter()
+            .map(|(kind, identity)| {
+                let tail = identity.rsplit_once(':').map(|(_, tail)| tail);
+                (*kind, tail)
+            })
+            .collect::<Vec<_>>(),
+        [
+            ("SubregistryChanged", Some("0")),
+            ("AuthorityTransferred", Some("1")),
+            ("AuthorityEpochChanged", Some("2")),
+            ("PermissionChanged", Some("3")),
+            ("PermissionChanged", Some("4"))
+        ],
+        "{facts:#?}"
+    );
+    let report = publish_and_compare(&fixture, 12).await?;
+    shadow_support::assert_counts(&report, &[], &[]);
+    // The registrar's numeric NameRegistered carries no label preimage, so no name surface is
+    // written and only the resources are compared, the registry binding among them.
+    assert_eq!(
+        (
+            report.names,
+            report.resources,
+            report.equal,
+            report.mismatched
+        ),
+        (0, 2, 2, 0),
+        "{:#?}",
+        report.lines
+    );
+    let (served_ids, transfer_id): (Value, i64) = sqlx::query_as(
+        "SELECT summary.registry_binding_provenance -> 'normalized_event_ids',
+                transfer.normalized_event_id
+         FROM normalized_events transfer
+         JOIN permissions_current_resource_summary summary
+           ON summary.resource_id = transfer.resource_id
+         WHERE transfer.block_number = 11 AND transfer.event_kind = 'AuthorityTransferred'",
+    )
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(
+        served_ids,
+        json!([transfer_id]),
+        "the served binding is the AuthorityTransferred"
+    );
+    fixture.cleanup().await
+}
+
+/// Codex thread PRRT_kwDOSJpxAs6l3jx7, relabelled after Pro r7 Q9 on 0638b9ba: a synthetic
+/// identity tie at one shared position. A SubregistryChanged and an AuthorityTransferred of the
+/// child node sit at one block, transaction and log with handwritten identities that carry no
+/// emission ordinal (`SubregistryChanged:11:1`, `AuthorityTransferred:11:1`), so D12 falls
+/// through to identity bytes and the families take the SubregistryChanged, while today's builder
+/// breaks the tie by generated id and takes the AuthorityTransferred (permission_resources.rs
+/// :41-57); the served event id differs. This is not what the adapter writes for a NewOwner log:
+/// it numbers the two facts 0 and 1, so both sides take the AuthorityTransferred
+/// (`a_replayed_new_owner_log_reads_equal`). The case stays as the harness's proof for a genuine
+/// identity tie, which still arises between facts of different sources, whose ordinals
+/// interleave (docs/glossary.md, "Emission ordinal"). It passes as a same-block delta only
+/// because the binding read again in today's order gives exactly the served binding. The
+/// control block reads the name's admitted AuthorityTransferred rows only, which F2c keeps apart
+/// from the SubregistryChanged, so both sides agree there.
 #[tokio::test]
 async fn a_new_owner_subregistry_and_transfer_at_one_log_is_a_same_block_delta() -> Result<()> {
     let fixture = Fixture::new("families_shadow_registry_new_owner", 20).await?;
@@ -547,7 +627,8 @@ fn failed_fields(report: &shadow_support::compare::Report) -> Vec<String> {
 
 /// Three producer events of name 1 at one block, transaction and log, written in each of the
 /// six orders: a SubregistryChanged whose getter is THIRD and two AuthorityTransferred events
-/// whose getters are OWNER and OTHER. The families keep the SubregistryChanged, the greatest
+/// whose getters are OWNER and OTHER. Like the NewOwner tie above, the identities are synthetic
+/// and carry no emission ordinal. The families keep the SubregistryChanged, the greatest
 /// identity, in every order; today's builder keeps the last one written, the highest generated
 /// id. When that is the SubregistryChanged nothing differs; otherwise the registry owner and
 /// event ids of the binding are same-block deltas, and the served owner is the getter of the

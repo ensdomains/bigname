@@ -507,3 +507,64 @@ pub fn wrapper_transfer(label: &str, from: &str, to: &str, block: i64) -> BatchI
         )],
     )
 }
+
+/// An unwrapped .eth second-level name `label` registered to `owner` in one transaction of
+/// `block`, in the order the registrar's `_register` emits it: the ERC-721 mint, the registry's
+/// NewOwner for the node, then the registrar's NameRegistered
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L130-L152 @ ens_v1@91c966f).
+pub fn registration(label: &str, owner: &str, expires: u64, block: i64) -> BatchInput {
+    let label_hash = labelhash(label);
+    let token = U256::from_be_bytes(label_hash.0);
+    batch(
+        block,
+        vec![
+            log(
+                Transfer {
+                    from: Address::ZERO,
+                    to: address(owner),
+                    tokenId: token,
+                }
+                .encode_log_data(),
+                block,
+                0,
+                0,
+                REGISTRAR,
+            ),
+            new_owner_log(label, owner, block, 1),
+            log(
+                NameRegistered {
+                    id: token,
+                    owner: address(owner),
+                    expires: U256::from(expires),
+                }
+                .encode_log_data(),
+                block,
+                0,
+                2,
+                REGISTRAR,
+            ),
+        ],
+    )
+}
+
+fn new_owner_log(label: &str, owner: &str, block: i64, log_index: i64) -> RawLogInput {
+    log(
+        NewOwner {
+            node: namehash(&["eth"]),
+            label: labelhash(label),
+            owner: address(owner),
+        }
+        .encode_log_data(),
+        block,
+        0,
+        log_index,
+        REGISTRY,
+    )
+}
+
+/// The registry's NewOwner of `label`.eth to `owner` alone in `block`, as the registrar's
+/// `reclaim` writes it
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L175 @ ens_v1@91c966f).
+pub fn new_owner(label: &str, owner: &str, block: i64) -> BatchInput {
+    batch(block, vec![new_owner_log(label, owner, block, 0)])
+}
