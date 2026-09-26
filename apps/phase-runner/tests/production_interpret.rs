@@ -5623,18 +5623,20 @@ async fn detached_child_resumed_then_rebuilt(
     Ok((resumed, leaf, resource, binding))
 }
 
-fn detached_child_served(
-    served: &Value,
-) -> (
-    Option<&str>,
-    Option<&str>,
-    Option<&str>,
-    Option<&str>,
-    Option<&str>,
-    Option<&str>,
+/// Authority arm, lifecycle, resource, binding, registration status, control status, and the
+/// registration's `released_at` and expiry.
+type DetachedChildServed<'a> = (
+    Option<&'a str>,
+    Option<&'a str>,
+    Option<&'a str>,
+    Option<&'a str>,
+    Option<&'a str>,
+    Option<&'a str>,
     Option<i64>,
     Option<i64>,
-) {
+);
+
+fn detached_child_served(served: &Value) -> DetachedChildServed<'_> {
     (
         served["authority_arm"].as_str(),
         served["lifecycle_state"].as_str(),
