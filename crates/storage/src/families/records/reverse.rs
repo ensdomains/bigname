@@ -15,9 +15,9 @@ use crate::{PrimaryNameClaimStatus, PrimaryNameCurrentRow, PrimaryNameCurrentSna
 #[derive(Clone, Debug)]
 pub struct FamilyReverseClaim {
     pub snapshot: PrimaryNameCurrentSnapshot,
-    /// The node's latest name record or version change was written at another resolver than the
-    /// node's current one. Today's reader then takes the latest record at the current resolver,
-    /// which the node claim family, one row per node, does not keep.
+    /// For a `ReverseClaimed` tuple, no family claim row matches the selected resolver, but a
+    /// row exists for the same namespace, reverse node and chain at another resolver. This
+    /// diagnostic alone does not establish that today serves a claim missing from the family.
     pub node_claim_at_other_resolver: bool,
 }
 
@@ -68,10 +68,9 @@ pub async fn load_family_reverse_claim(
     let claim_identity: Option<String> = if node_claimed {
         match (&reverse_node, &pointer) {
             (Some(node), Some((_, Some(resolver)))) => {
-                // The claim at the node's current resolver. The family keys claims by node and
-                // resolver, so a row at another resolver is not this node's claim; when only such
-                // a row exists, the claim today's reader serves is not in the family (reported as
-                // `node_claim_at_other_resolver`).
+                // Select this node's claim at its current resolver. Claims are keyed by namespace,
+                // reverse node and resolver. If no matching row exists but a row at another
+                // resolver does, set `node_claim_at_other_resolver`.
                 let claim = sqlx::query(
                     "SELECT event_identity
                      FROM bigname_phase.project_reverse_node_claim
