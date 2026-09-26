@@ -34,6 +34,7 @@ mod undo;
 mod wrapper;
 
 pub use input::{InputToken, Revision, input_token};
+pub use position::emission_ordinal;
 
 use std::{collections::BTreeMap, time::Instant};
 
