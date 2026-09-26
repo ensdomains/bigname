@@ -677,14 +677,16 @@ async fn roles_leave_out_a_grant_whose_resource_is_not_readable() -> Result<()> 
     fixture.cleanup().await
 }
 
-// A record-ID link followed, at the same resolver and node, by a link of another storage model.
-// Today's `/links` keeps only record-ID links, so it still serves record 5 there. The newest link
-// per (resolver, node) wins whatever its storage model (Tate, 2026-09-26; the F7 design, "latest
-// link per (resolver, node)"), and the F7 reducer keeps that one row
-// (crates/project/src/families/records.rs, `link`). The later link is no record-ID link, so the
-// shadow serves no link at that node, and the name's link selection reads that link and falls
-// back to the default record, never to record 5. Expected difference by that ruling, until the
-// served read switches to these readers.
+// A record-ID link followed, at the same resolver and node, by a link annotated with another
+// storage model; no producer writes that annotation, the record-ID adapter stamps
+// `resolver_record_id` on every `Linked`. The newest link per (resolver, node) wins (Tate,
+// 2026-09-26), as on chain, where the resolver keeps one record id per node and each `Linked`
+// overwrites it (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L363-L367
+// @ ens_v2@a971bd64). The F7 reducer keeps that one row (crates/project/src/families/records.rs,
+// `link`), so the shadow serves record 9 at that node and the name's link selection serves it too.
+// Today's `/links` drops a link not annotated `resolver_record_id` before selection
+// (crates/project/src/builders/resolver/link_summary.rs:32-41), so it still serves record 5.
+// Expected difference by that ruling, until the served read switches to these readers.
 #[tokio::test]
 async fn a_link_of_another_storage_model_hides_the_record_id_link() -> Result<()> {
     let mut fixture = Fixture::new("families_shadow_link_model", 12).await?;
@@ -713,62 +715,64 @@ async fn a_link_of_another_storage_model_hides_the_record_id_link() -> Result<()
     .await?;
     fixture.publish(6).await?;
     let report = fixture.compare(1).await?;
-    let hidden = HiddenLink {
+    let differing = DifferingLink {
         resolver: &first,
         node: &one.node,
         name: &one.logical,
         served: ("link-one", "5"),
+        shadow: ("link-one-other-model", "9"),
     };
-    hidden.check(fixture.pool()).await?;
+    differing.check(fixture.pool()).await?;
     let selection = load_family_link_selection(fixture.pool(), CHAIN, &first, &one.node)
         .await?
-        .context("the default link remains")?;
+        .context("the newer link remains")?;
     ensure!(
-        selection
-            .exact
-            .as_ref()
-            .is_some_and(|link| link.record_id == "9"
-                && link.storage_model.as_deref() == Some("resolver_node"))
-            && selection.selected().map(|link| link.record_id.as_str()) == Some("7"),
+        selection.default.is_none()
+            && selection
+                .selected()
+                .is_some_and(|link| link.record_id == "9"
+                    && link.storage_model.as_deref() == Some("resolver_node")),
         "{selection:?}"
     );
-    // The check sees a change: with the family row turned back into a record-ID link, the
-    // shadow serves the other model's record 9 at that node and the check fails.
-    let set_model = "UPDATE project_resolver_link SET storage_model = $4
-                     WHERE chain_id = $1 AND resolver_address = $2 AND node = $3";
-    sqlx::query(set_model)
+    // The check sees a change: with the family row's record changed, the shadow row at that
+    // node no longer equals the one the newer link event makes, and the check fails.
+    let set_record = "UPDATE project_resolver_link SET record_id = $4
+                      WHERE chain_id = $1 AND resolver_address = $2 AND node = $3";
+    sqlx::query(set_record)
         .bind(CHAIN)
         .bind(&first)
         .bind(&one.node)
-        .bind("resolver_record_id")
+        .bind("10")
         .execute(fixture.pool())
         .await?;
     ensure!(
-        hidden.check(fixture.pool()).await.is_err(),
-        "a record-ID family row passed the check"
+        differing.check(fixture.pool()).await.is_err(),
+        "a changed family row passed the check"
     );
-    sqlx::query(set_model)
+    sqlx::query(set_record)
         .bind(CHAIN)
         .bind(&first)
         .bind(&one.node)
-        .bind("resolver_node")
+        .bind("9")
         .execute(fixture.pool())
         .await?;
+    differing.check(fixture.pool()).await?;
     unexpected(&report, &[format!("links of {first}")])?;
     fixture.cleanup().await
 }
 
-/// A `/links` row today's reader serves and the shadow does not: at `node` the served collection
-/// serves exactly the row the link event `served` makes, the shadow serves nothing, every other
-/// row agrees and the served total is one higher.
-struct HiddenLink<'a> {
+/// A `/links` node where the readers serve different rows: at `node` the served collection
+/// serves exactly the row the link event `served` makes and the shadow exactly the row the link
+/// event `shadow` makes, every other row agrees and the totals are equal.
+struct DifferingLink<'a> {
     resolver: &'a str,
     node: &'a str,
     name: &'a str,
     served: (&'a str, &'a str),
+    shadow: (&'a str, &'a str),
 }
 
-impl HiddenLink<'_> {
+impl DifferingLink<'_> {
     async fn check(&self, pool: &PgPool) -> Result<()> {
         let (height, _) = shadow::publication(pool, CHAIN).await?;
         let served =
@@ -776,14 +780,14 @@ impl HiddenLink<'_> {
                 .await?;
         let shadowed =
             load_resolver_links_shadow(pool, CHAIN, self.resolver, "ens", None, 1_000).await?;
-        let expected = LinkRow {
+        let at = LinkRow {
             resolver: self.resolver,
             node: self.node,
             name: self.name,
             event: self.served,
-        }
-        .row(pool, self.served.0, self.served.1)
-        .await?;
+        };
+        let served_row = at.row(pool, self.served.0, self.served.1).await?;
+        let shadow_row = at.row(pool, self.shadow.0, self.shadow.1).await?;
         let split = |page: &FamilyCollectionPage| -> (Vec<_>, Vec<_>) {
             page.rows
                 .iter()
@@ -793,12 +797,15 @@ impl HiddenLink<'_> {
         let (served_at, served_rest) = split(&served);
         let (shadow_at, shadow_rest) = split(&shadowed);
         ensure!(
-            served_at == [expected.clone()],
-            "served {served_at:?}, expected {expected:?}"
+            served_at == [served_row.clone()],
+            "served {served_at:?}, expected {served_row:?}"
         );
-        ensure!(shadow_at.is_empty(), "shadow {shadow_at:?}");
         ensure!(
-            served_rest == shadow_rest && served.total_count == shadowed.total_count + 1,
+            shadow_at == [shadow_row.clone()],
+            "shadow {shadow_at:?}, expected {shadow_row:?}"
+        );
+        ensure!(
+            served_rest == shadow_rest && served.total_count == shadowed.total_count,
             "served {served:?}, shadow {shadowed:?}"
         );
         Ok(())

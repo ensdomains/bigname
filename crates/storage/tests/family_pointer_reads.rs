@@ -1,9 +1,9 @@
 //! The pointer reads of the family shadow readers, over tables installed by their own
 //! migrations:
-//! - `load_family_link_selection`: the latest link per (resolver, node) of any storage model is
-//!   read, and only a record-ID one can serve; the link at the name's own node wins unless it is
-//!   absent, a clear (record id `0`) or of another model; then the link at the empty-name node,
-//!   the resolver's default record, serves, under the same rule.
+//! - `load_family_link_selection`: the latest link per (resolver, node), whatever its
+//!   storage-model annotation; the link at the name's own node wins unless it is absent or a clear
+//!   (record id `0`); then the link at the empty-name node, the resolver's default record, serves,
+//!   unless it is a clear too.
 //! - `load_family_alias_source_pointer`: the resource's current pointer, rejected when null, zero
 //!   or empty, never an older pointer.
 //! - `load_family_wildcard_source`: the latest non-zero pointer, which a null or empty resolver
@@ -152,52 +152,28 @@ async fn exact_link_then_default_with_record_zero_as_a_clear() -> Result<()> {
     .await
 }
 
-// The newest link per (resolver, node) wins whatever its storage model (Tate, 2026-09-26; the
-// F7 design, "latest link per (resolver, node)"). A latest link of another model, or of none, is
-// read and reported, and it is no record-ID link: it serves no record, it hides any older
-// record-ID link at that node, and at the name's node it lets the default serve.
+// A link row with an unexpected storage-model annotation, or none, still serves its record like
+// any other link: the newest link per (resolver, node) wins (Tate, 2026-09-26), as on chain, and
+// the annotation plays no part. No producer writes such a row; the record-ID adapter stamps
+// `resolver_record_id` on every `Linked`.
 #[tokio::test]
-async fn a_latest_link_of_another_or_no_storage_model_is_no_record_id_link() -> Result<()> {
+async fn a_link_with_an_unexpected_annotation_serves_like_any_other() -> Result<()> {
     with_database("family_link_models", |pool| async move {
-        let model = |link: Option<&bigname_storage::families::topology::FamilyLink>| {
-            link.map(|link| (link.record_id.clone(), link.storage_model.clone()))
-        };
         link_of_model(&pool, NAME, "5", 2, Some("node")).await?;
         link_of_model(&pool, DEFAULT_NODE, "7", 2, None).await?;
-        let neither = selection(&pool, NAME).await?;
-        assert_eq!(served(&neither), None);
-        assert_eq!(
-            neither
-                .as_ref()
-                .map(|s| (model(s.exact.as_ref()), model(s.default.as_ref()))),
-            Some((
-                Some(("5".to_owned(), Some("node".to_owned()))),
-                Some(("7".to_owned(), None))
-            ))
-        );
-        // A newer record-ID default replaces the null-model one and serves the name, whose own
-        // latest link is still of another model.
-        link(&pool, DEFAULT_NODE, "8", 3).await?;
-        let fallback = selection(&pool, NAME).await?;
-        assert_eq!(served(&fallback), Some("8"));
-        assert_eq!(
-            fallback.as_ref().and_then(|s| model(s.exact.as_ref())),
-            Some(("5".to_owned(), Some("node".to_owned())))
-        );
-        // A record-ID link at the name serves until a newer link of another model replaces it;
-        // the older record-ID link is not served again, the default is.
-        link(&pool, NAME, "6", 4).await?;
+        // The exact link serves, so the default is not read; another node gets the default.
+        let exact = selection(&pool, NAME).await?;
+        assert_eq!(served(&exact), Some("5"));
+        assert!(exact.as_ref().is_some_and(|s| s.default.is_none()));
+        assert_eq!(served(&selection(&pool, OTHER).await?), Some("7"));
+        // A newer link replaces the older one whatever either annotation says.
+        link(&pool, NAME, "6", 3).await?;
         assert_eq!(served(&selection(&pool, NAME).await?), Some("6"));
-        link_of_model(&pool, NAME, "9", 5, Some("node")).await?;
-        let replaced = selection(&pool, NAME).await?;
-        assert_eq!(served(&replaced), Some("8"));
-        assert_eq!(
-            replaced.as_ref().and_then(|s| model(s.exact.as_ref())),
-            Some(("9".to_owned(), Some("node".to_owned())))
-        );
-        // A newer default of another model leaves nothing to serve.
-        link_of_model(&pool, DEFAULT_NODE, "8", 6, None).await?;
-        assert_eq!(served(&selection(&pool, NAME).await?), None);
+        link_of_model(&pool, NAME, "9", 4, Some("node")).await?;
+        assert_eq!(served(&selection(&pool, NAME).await?), Some("9"));
+        // An annotated clear is still a clear and hands over to the default.
+        link_of_model(&pool, NAME, "0", 5, None).await?;
+        assert_eq!(served(&selection(&pool, NAME).await?), Some("7"));
         Ok(())
     })
     .await

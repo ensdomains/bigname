@@ -120,8 +120,11 @@ pub async fn load_family_wildcard_source(
     ))
 }
 
-/// One `project_resolver_link` row: the latest `Linked` for a node at a resolver, of any storage
-/// model, record id `0` a clear.
+/// One `project_resolver_link` row: the latest `Linked` for a node at a resolver, record id `0`
+/// a clear. `storage_model` is a bigname annotation, not chain state: the record-ID adapter
+/// stamps `resolver_record_id` on every `Linked`
+/// (crates/adapters/src/schema_v2/protocol/v2_record_resolver.rs, `metadata`), and no producer
+/// writes another value. The reads never consult it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FamilyLink {
     pub node: String,
@@ -135,10 +138,10 @@ pub struct FamilyLink {
 }
 
 impl FamilyLink {
-    /// Whether this link serves a record: a record-ID link that is not a clear. A latest link of
-    /// another storage model, or of none, is no record-ID link (Tate, 2026-09-26).
+    /// Whether this link serves its record: any link but a clear (record id `0`), as the chain
+    /// serves it.
     pub fn serves(&self) -> bool {
-        self.storage_model.as_deref() == Some("resolver_record_id") && self.record_id != "0"
+        self.record_id != "0"
     }
 }
 
@@ -146,7 +149,7 @@ impl FamilyLink {
 /// (crates/project/src/builders/linked_records.rs, `project_selected_records`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct LinkSelection {
-    /// The latest link at the name's own node, a clear or another model's link included.
+    /// The latest link at the name's own node, a clear included.
     pub exact: Option<FamilyLink>,
     /// The latest link at the empty-name node, read only when the exact link serves no record.
     pub default: Option<FamilyLink>,
@@ -164,12 +167,18 @@ impl LinkSelection {
 }
 
 /// Two probes of `project_resolver_link`: the name's node, then the empty-name node when the
-/// exact link serves no record. The newest link per (resolver, node) wins whatever its storage
-/// model (Tate, 2026-09-26; the F7 design, "latest link per (resolver, node)"), so each probe
-/// reads the one row the F7 reducer keeps there. A latest link of another model, or of none, is
-/// no record-ID link: it serves nothing and no older record-ID link at that node serves in its
-/// place. Today's link staging keeps only record-ID links, so the served read can still serve
-/// such an older link. `None` when neither probe finds a row.
+/// exact link is absent or a clear. This is the chain's rule: the resolver keeps one record id
+/// per node (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L96-L97 @
+/// ens_v2@a971bd64), each `Linked` overwrites it (upstream:
+/// .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L363-L367 @ ens_v2@a971bd64), and
+/// resolution serves that record, consulting the default node only when it is 0 (upstream:
+/// .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L380-L387 @ ens_v2@a971bd64). So
+/// the newest link per (resolver, node) wins (Tate, 2026-09-26), and each probe reads the one row
+/// the F7 reducer keeps there (crates/project/src/families/records.rs, `link`; the F7 row in
+/// docs/glossary.md). `storage_model` is an annotation and plays no part. Today's link staging
+/// drops links not annotated `resolver_record_id`
+/// (crates/project/src/builders/resolver/link_summary.rs), so for such a row, which only a fixture
+/// writes, the served read serves an older link instead. `None` when neither probe finds a row.
 pub async fn load_family_link_selection(
     pool: &PgPool,
     chain_id: &str,
