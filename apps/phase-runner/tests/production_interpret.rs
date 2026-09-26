@@ -139,6 +139,7 @@ mod v2_registry_events {
         event EACRolesChanged(uint256 indexed resource, address indexed account, uint256 oldRoleBitmap, uint256 newRoleBitmap);
         event TransferSingle(address indexed operator, address indexed from, address indexed to, uint256 id, uint256 value);
         event ExpiryUpdated(uint256 indexed tokenId, uint64 indexed newExpiry, address indexed sender);
+        event LabelReserved(uint256 indexed tokenId, bytes32 indexed labelHash, string label, uint64 expiry, address indexed sender);
     }
 }
 
@@ -5216,6 +5217,20 @@ async fn detached_child_fixture(
     renewal: Option<(i64, i64, u64)>,
     through: i64,
 ) -> Result<()> {
+    child_registry_fixture(pool, chain, expiry, renewal, None, through).await
+}
+
+/// The detached child, with the parent in block 1 pointing `alice` at `replacement` instead of
+/// clearing it when one is given. The replacement registry takes `alice` as its parent and
+/// reserves `leaf` in block 2 at token version zero, expiring long after the fixture.
+async fn child_registry_fixture(
+    pool: &PgPool,
+    chain: &str,
+    expiry: u64,
+    renewal: Option<(i64, i64, u64)>,
+    replacement: Option<&str>,
+    through: i64,
+) -> Result<()> {
     seed_v2_lifecycle_fixture(pool, chain).await?;
     let child = ANNOUNCED_REGISTRY;
     sqlx::query(
@@ -5300,12 +5315,15 @@ async fn detached_child_fixture(
             }
             .encode_log_data(),
         ),
-        // The parent's subregistry is cleared, which cuts the child's path.
+        // The parent's subregistry is cleared or replaced, which cuts the child's path.
         (
             CONTRACT,
             v2_registry_events::SubregistryUpdated {
                 tokenId: versioned_token("alice", 1),
-                subregistry: Address::ZERO,
+                subregistry: match replacement {
+                    Some(registry) => registry.parse()?,
+                    None => Address::ZERO,
+                },
                 sender: SENDER.parse()?,
             }
             .encode_log_data(),
@@ -5321,6 +5339,64 @@ async fn detached_child_fixture(
             emitter,
             event.topics(),
             event.data.as_ref(),
+        )
+        .await?;
+    }
+    if let Some(registry) = replacement {
+        sqlx::query(
+            "WITH root AS (
+                 SELECT manifest.manifest_id, declaration.contract_instance_id
+                 FROM manifest_versions manifest JOIN manifest_contract_instances declaration USING (manifest_id, chain_id)
+                 WHERE manifest.chain_id = $1 AND declaration.role = 'registry'
+             ), instance AS (
+                 INSERT INTO contract_instances VALUES ($2, $1, 'contract', '{}'::jsonb, now()) RETURNING contract_instance_id
+             ), address AS (
+                 INSERT INTO contract_instance_addresses (contract_instance_id, chain_id, address, active_from_block_number, source_manifest_id, provenance)
+                 SELECT instance.contract_instance_id, $1, $3, 0, root.manifest_id, '{}'::jsonb FROM root, instance
+             )
+             INSERT INTO discovery_edges (chain_id, edge_kind, from_contract_instance_id, to_contract_instance_id, discovery_source, admission_basis, source_manifest_id, active_from_block_number, active_from_block_hash, canonicality_state, provenance)
+             SELECT $1, 'registry_announcement', root.contract_instance_id, instance.contract_instance_id, 'RegistryCreated', 'reachable_from_root', root.manifest_id, 0, $4, 'canonical', '{\"observation_key\":\"fixture-replacement\"}'::jsonb FROM root, instance",
+        )
+        .bind(chain)
+        .bind(Uuid::new_v4())
+        .bind(registry)
+        .bind(block_hash(chain, 0))
+        .execute(pool)
+        .await?;
+        let parent = v2_registry_events::ParentUpdated {
+            parent: CONTRACT.parse()?,
+            label: "alice".into(),
+            sender: SENDER.parse()?,
+        }
+        .encode_log_data();
+        insert_log_at(
+            pool,
+            chain,
+            1,
+            &format!("{chain}-transaction-1"),
+            9,
+            registry,
+            parent.topics(),
+            parent.data.as_ref(),
+        )
+        .await?;
+        let reserved = v2_registry_events::LabelReserved {
+            tokenId: versioned_token("leaf", 0),
+            labelHash: keccak256(b"leaf"),
+            label: "leaf".into(),
+            expiry: 4_000_000_000,
+            sender: SENDER.parse()?,
+        }
+        .encode_log_data();
+        insert_log_at(
+            pool,
+            chain,
+            2,
+            &format!("{chain}-transaction-2"),
+            0,
+            registry,
+            reserved.topics(),
+            reserved.data.as_ref(),
         )
         .await?;
     }
@@ -5623,6 +5699,125 @@ async fn a_detached_renewal_serves_the_same_fields_resumed_and_in_one_batch() ->
             Some(30),
         ),
         "{served}"
+    );
+    scratch.cleanup().await
+}
+
+// A registration on one registry, a live reservation of the name on its replacement, and the old
+// registration's expiry while the reservation stays live (Pro review of 503387dc, question 4). The
+// parent points `alice` at registry A, where `leaf` is registered with expiry 3, and in block 1
+// replaces A with registry B, which takes `alice` as its parent. Interpret releases A's `leaf` by
+// name at the swap. In block 2 B reserves `leaf` at token version zero, live long after the
+// fixture, on the parent's current path. In block 3 A's detached `leaf` lapses and Interpret
+// writes that release without a name.
+// At block 2 the reservation is the name's latest fact and the name reads as reserved. From block
+// 3 the name is served as the released tombstone of the registration it was last bound to, A's
+// `leaf`, with that lapse's time and expiry, though B's reservation is still live on chain. This is
+// the last-bound-registration presentation policy (ADR 0007, product ruling of 2026-09-26): the
+// registry state is per entry, and A's lapse does not end B's reservation.
+// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L196-L207 @ ens_v2@a971bd64)
+// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L425-L471 @ ens_v2@a971bd64)
+// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L628-L660 @ ens_v2@a971bd64)
+#[tokio::test]
+async fn a_replaced_registrys_lapse_presents_its_tombstone_over_a_live_reservation_elsewhere()
+-> Result<()> {
+    const REPLACEMENT: &str = "0x000000000000000000000000000000000000004f";
+    let scratch = ScratchDatabase::create("production_interpret_replaced_registry_lapse").await?;
+    let chain = "interpret-replaced-registry-lapse";
+    child_registry_fixture(scratch.pool(), chain, 3, None, Some(REPLACEMENT), 4).await?;
+    let (leaf, resource): (String, Uuid) = sqlx::query_as(
+        "SELECT logical_name_id, resource_id FROM normalized_events
+         WHERE chain_id = $1 AND event_kind = 'RegistrationReleased'
+           AND logical_name_id IS NOT NULL AND resource_id IS NOT NULL",
+    )
+    .bind(chain)
+    .fetch_one(scratch.pool())
+    .await?;
+    let reservation: (i64, Option<Uuid>) = sqlx::query_as(
+        "SELECT block_number, resource_id FROM normalized_events
+         WHERE chain_id = $1 AND logical_name_id = $2 AND event_kind = 'RegistrationReserved'",
+    )
+    .bind(chain)
+    .bind(&leaf)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(
+        reservation.0, 2,
+        "B reserves the name on its path in block 2"
+    );
+    assert!(
+        reservation.1.is_some_and(|reserved| reserved != resource),
+        "the reservation has its own resource: {reservation:?}"
+    );
+    let lapse: i64 = sqlx::query_scalar(
+        "SELECT block_number FROM normalized_events
+         WHERE chain_id = $1 AND logical_name_id IS NULL AND resource_id = $2
+           AND event_kind = 'RegistrationReleased'",
+    )
+    .bind(chain)
+    .bind(resource)
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(lapse, 3, "A's detached registration lapses in block 3");
+    let binding: Uuid = sqlx::query_scalar(
+        "SELECT surface_binding_id FROM surface_bindings
+         WHERE chain_id = $1 AND logical_name_id = $2 AND authority_arm = 'ens_v2'",
+    )
+    .bind(chain)
+    .bind(&leaf)
+    .fetch_one(scratch.pool())
+    .await?;
+    let at_2 = served_after_resumed_batches(scratch.pool(), chain, &[1, 2], &leaf).await?;
+    assert_eq!(
+        (
+            at_2["lifecycle_state"].as_str(),
+            at_2["registration"]["status"].as_str(),
+        ),
+        (Some("reserved"), Some("reserved")),
+        "{at_2}"
+    );
+    let engine = ProjectEngine::new(scratch.pool().clone());
+    let mut previous = bigname_project::Marker {
+        number: 2,
+        hash: block_hash(chain, 2),
+    };
+    for target in [3, 4] {
+        let outcome = engine
+            .run_batch(ProjectBatchRequest {
+                chain_id: chain.to_owned(),
+                target_block: target,
+                affected_from_block: target,
+                affected_to_block: target,
+                resume_current: Some(previous.clone()),
+                mode: ProjectRunMode::Normal,
+            })
+            .await?;
+        assert!(outcome.complete);
+        previous = outcome.current;
+    }
+    let resumed: Value = sqlx::query_scalar(SERVED_FIELDS)
+        .bind(&leaf)
+        .fetch_one(scratch.pool())
+        .await?;
+    let (resource, binding) = (resource.to_string(), binding.to_string());
+    assert_eq!(
+        detached_child_served(&resumed),
+        (
+            Some("ens_v2"),
+            Some("unregistered"),
+            Some(resource.as_str()),
+            Some(binding.as_str()),
+            Some("released"),
+            Some("unregistered"),
+            Some(3),
+            Some(3),
+        ),
+        "{resumed}"
+    );
+    assert_eq!(
+        served_after_one_batch(scratch.pool(), chain, 4, &leaf).await?,
+        resumed,
+        "resumed batches and a full rebuild serve the same fields"
     );
     scratch.cleanup().await
 }
@@ -8597,6 +8792,12 @@ async fn seed_v2_lifecycle_fixture(pool: &PgPool, chain_id: &str) -> Result<()> 
                 "fragment": "event ExpiryUpdated(uint256 indexed tokenId, uint64 indexed newExpiry, address indexed sender)",
                 "emitter_roles": ["registry"],
                 "normalized_events": ["SurfaceUnbound", "RegistrationReleased", "ExpiryChanged", "RegistrationRenewed", "PreimageObserved", "SurfaceBound", "RegistrationGranted", "AuthorityTransferred", "ResolverChanged", "SubregistryChanged"]
+            },
+            {
+                "name": "LabelReserved",
+                "fragment": "event LabelReserved(uint256 indexed tokenId, bytes32 indexed labelHash, string label, uint64 expiry, address indexed sender)",
+                "emitter_roles": ["registry"],
+                "normalized_events": ["SurfaceUnbound", "RegistrationReleased", "RegistrationReserved", "PreimageObserved", "ResolverChanged", "SubregistryChanged"]
             }
         ], "calls": [] }
     });
