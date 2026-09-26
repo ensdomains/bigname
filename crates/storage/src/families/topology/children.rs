@@ -210,7 +210,8 @@ pub(super) fn push_selected<'a>(
             WHERE parent.raw_name <> ''
         ), selected AS (
             -- publish's arm rule: the child's selected arm, or the only arm when none is selected;
-            -- recency then event identity picks within the arm.
+            -- the canonical event order picks within the arm: recency, the emission ordinal at
+            -- one log, then event identity.
             SELECT candidate.*,
                    row_number() OVER (
                        PARTITION BY candidate.child_logical_name_id

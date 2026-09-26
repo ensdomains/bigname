@@ -13,9 +13,11 @@
 //!
 //! Every reader takes a storage keyset position and nothing else: no publication token,
 //! generation or request time. Time-dependent filters read the block timestamp of the family
-//! marker (`project_family_marker`). Where a reader picks the latest of several events it orders
-//! them by block number, transaction index, log index, then event identity, not by the generated
-//! normalized event id. The one exception is the declaration fallback, which takes each
+//! marker (`project_family_marker`). Where a reader compares family positions it uses the
+//! canonical event order (docs/glossary.md): block number, transaction index, log index, the
+//! emission ordinal, then event identity, never the generated normalized event id. The interim
+//! zero-owner attribution over `normalized_events` keeps today's served order (block,
+//! transaction index, log index, event identity), and the declaration fallback takes each
 //! manifest's latest update by normalized event id as today's manifest staging does.
 mod children;
 mod children_page;
