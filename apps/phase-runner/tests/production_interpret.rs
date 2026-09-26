@@ -6263,13 +6263,15 @@ async fn a_redo_rebuilds_a_name_whose_deciding_release_is_no_longer_activated() 
     scratch.cleanup().await
 }
 
-// Interpret never promotes a written event to activated in place (Pro review of 56825409,
-// question 1). A normalized event's identity is bound to its data, visibility included, so
-// writing the same release again with another visibility is refused, not merged. An event becomes
-// activated only when a batch or redo writes it, and that write's block is in the range Project
-// is then scheduled over.
+// Interpret rewriting a stored release whose visibility and correlation ids were changed (Pro
+// review of 56825409, question 1): the rewrite is refused, not merged, and the stored row keeps
+// its id and visibility. The writer regression in `crates/interpret/src/write/normalized/tests.rs`
+// checks refusal of a visibility-only rewrite. Activation scheduling is outside this PR and is not
+// established by this test. Project requires activation or replacement writes to be included in
+// its supplied rebuild range; an in-place promotion below a normal incremental window would not be
+// discovered by the forward scope operator.
 #[tokio::test]
-async fn interpret_refuses_to_change_a_written_releases_visibility_in_place() -> Result<()> {
+async fn interpret_refuses_a_rewrite_with_changed_visibility_and_correlation_ids() -> Result<()> {
     let scratch = ScratchDatabase::create("production_interpret_visibility_in_place").await?;
     let chain = "interpret-visibility-in-place";
     let pool = scratch.pool();

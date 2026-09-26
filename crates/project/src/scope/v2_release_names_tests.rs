@@ -115,6 +115,7 @@ async fn release_names_read_bindings_by_resource_in_a_one_block_batch() -> Resul
         let names: i64 = sqlx::query_scalar("SELECT count(*) FROM project_scope_names")
             .fetch_one(&mut *tx)
             .await?;
+        eprintln!("V2_RELEASE_NAMES_PLAN_JSON {label} {plan}");
         let (mut bindings, mut lineage) = (Vec::new(), Vec::new());
         scans(&plan[0]["Plan"], "surface_bindings", &mut bindings);
         scans(&plan[0]["Plan"], "chain_lineage", &mut lineage);

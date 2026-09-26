@@ -725,3 +725,113 @@ async fn a_named_event_after_a_nameless_release_keeps_its_tombstone() -> Result<
     assert_eq!(after_11, rebuilt, "a rebuild of the same database agrees");
     Ok(())
 }
+
+/// What `logical`'s row cites: its selected event ids, raw fact refs and manifest objects, and
+/// the row's manifest version.
+async fn evidence(pool: &PgPool, logical: &str) -> Result<(Vec<i64>, Vec<Value>, Vec<Value>, i64)> {
+    let (ids, refs, manifests, version): (Value, Value, Value, i64) = sqlx::query_as(
+        "SELECT provenance -> 'selected_event_ids', provenance -> 'raw_fact_refs',
+                provenance -> 'manifest_versions', manifest_version
+         FROM name_current WHERE logical_name_id = $1",
+    )
+    .bind(logical)
+    .fetch_one(pool)
+    .await?;
+    let ids = serde_json::from_value::<Vec<i64>>(ids)?;
+    let refs = serde_json::from_value::<Vec<Value>>(refs)?;
+    let manifests = serde_json::from_value::<Vec<Value>>(manifests)?;
+    Ok((ids, refs, manifests, version))
+}
+
+/// The nameless-release shape where the deciding release carries raw fact ref `deciding` and
+/// manifest version 7, with a losing release without a name on the same resource earlier, at
+/// block 9 log 4 after the grant. When `named`, the deciding release is written by the name.
+async fn seed_evidence(pool: PgPool, named: bool) -> Result<String> {
+    let logical = seed_nameless_release(pool.clone()).await?;
+    sqlx::query(
+        "UPDATE normalized_events
+         SET raw_fact_ref = '{\"kind\":\"deciding\"}', manifest_version = 7,
+             logical_name_id = CASE WHEN $2 THEN $1 END
+         WHERE event_identity = 'nameless-expiry-v2-release'",
+    )
+    .bind(&logical)
+    .bind(named)
+    .execute(&pool)
+    .await?;
+    sqlx::query("INSERT INTO normalized_events (event_identity, namespace, logical_name_id, resource_id, event_kind, source_family, manifest_version, chain_id, block_number, block_hash, transaction_hash, transaction_index, log_index, raw_fact_ref, derivation_kind, canonicality_state, after_state) VALUES ('nameless-expiry-v2-losing-release', 'ens', NULL, $1::uuid, 'RegistrationReleased', 'ens_v2_registry_l1', 1, $2, 9, $3, '0x502', 0, 4, '{\"kind\":\"losing\"}', 'ens_v2_registry_resource_surface', 'canonical', $4)")
+        .bind(uuid(15, 97)).bind(CHAIN).bind(EARLIER_HASH)
+        .bind(json!({"source_event":"RegistryPathExpired","derived_from":"interpreter_state","terminal_reason":"registry_name_binding_expired","status":"released"}))
+        .execute(&pool).await?;
+    Ok(logical)
+}
+
+// The evidence of a tombstone decided by a release (Pro review of 802e95a5, question 3). The
+// deciding release is cited exactly once, with its raw fact ref and manifest object at the same
+// place in their arrays, whether it has no name or is the name's own; a losing release without a
+// name on the same resource is not cited; and the deciding release's manifest version, 7, above
+// the named evidence's 1, raises the row's manifest version to 7. Each runs as batches at blocks 9
+// and 10 and as one batch, which cite the same.
+#[tokio::test]
+async fn a_tombstones_evidence_cites_its_deciding_release_once() -> Result<()> {
+    for named in [false, true] {
+        let mut cited = Vec::new();
+        for stepped in [true, false] {
+            let (db, pool) = database(&format!("tombstone_evidence_{named}_{stepped}")).await?;
+            let logical = seed_evidence(pool.clone(), named).await?;
+            if stepped {
+                let at_9 = project_at(&pool, 9, None).await?;
+                project_at(&pool, 10, Some(at_9)).await?;
+            } else {
+                project_at(&pool, 10, None).await?;
+            }
+            let (deciding, losing): (i64, i64) = sqlx::query_as(
+                "SELECT
+                     (SELECT normalized_event_id FROM normalized_events
+                      WHERE event_identity = 'nameless-expiry-v2-release'),
+                     (SELECT normalized_event_id FROM normalized_events
+                      WHERE event_identity = 'nameless-expiry-v2-losing-release')",
+            )
+            .fetch_one(&pool)
+            .await?;
+            let (ids, refs, manifests, version) = evidence(&pool, &logical).await?;
+            let served = served(&pool, &logical).await?;
+            db.cleanup().await?;
+            let case = format!("named {named}, stepped {stepped}");
+            assert_eq!(
+                (
+                    served["authority_arm"].as_str(),
+                    served["registration"]["status"].as_str()
+                ),
+                (Some("ens_v2"), Some("released")),
+                "{case}: {served}"
+            );
+            assert_eq!(
+                ids.iter().filter(|id| **id == deciding).count(),
+                1,
+                "{case}: {ids:?}"
+            );
+            assert!(!ids.contains(&losing), "{case}: {ids:?}");
+            assert_eq!(
+                (ids.len(), refs.len(), manifests.len()),
+                (ids.len(), ids.len(), ids.len())
+            );
+            let at = ids
+                .iter()
+                .position(|id| *id == deciding)
+                .context("not cited")?;
+            assert_eq!(refs[at], json!({"kind":"deciding"}), "{case}: {refs:?}");
+            assert_eq!(
+                manifests[at],
+                json!({"source_manifest_id":null,"source_family":"ens_v2_registry_l1","manifest_version":7}),
+                "{case}: {manifests:?}"
+            );
+            assert_eq!(version, 7, "{case}");
+            cited.push((ids.len(), refs, manifests, version));
+        }
+        assert_eq!(
+            cited[0], cited[1],
+            "named {named}: batches and one batch cite the same"
+        );
+    }
+    Ok(())
+}
