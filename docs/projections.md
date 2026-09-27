@@ -1759,31 +1759,34 @@ ranges](glossary.md#rebuild-range). The switch point is the chain's safe block
 minus 5, read from `chain_heads` once per run, or 256 blocks below the target
 when no safe block is published. Work blocks above it, and the target, which
 completes the rebuild, go one to a transaction as above, so a reorg near the
-head still undoes single blocks. The first range after the rebuild's reset
-holds one work block, and each range committed doubles the next; a later run
-that resumes the rebuild starts with a range of up to its whole remaining
-budget. Each block counts against the run's budget, and a range never holds
-more blocks than the budget has left. A range's own cap, 1,024 work blocks,
-binds only when a run's budget is larger; under the default budget of 256
-blocks a run, the budget is the cap. A range also ends at 4,096 events: a range
-whose next block would pass the event cap ends before it, and a first block
-over the cap is a range of its own. A range passes the fences above once, for
-its first block, and reads the lineage rows, events, surface bindings and
-resolver activations of all its blocks in one statement each, grouped back by
-block: events are ordered and taken once per `event_identity` within their own
-block, and each block takes its own active manifest set. It folds the blocks
-one at a time through the same reducers, each block seeing the families as the
-blocks before it left them, including the rows a reducer reads from a family
-table mid-fold, which the range has not written yet; a block classifies
-resolvers and reads a name's current binding at its own height. The range then
-journals, for every row it changed, the row as it was before the range and the
-prior marker, under its last block, writes once, advances the marker to its
-last block still in `bootstrap_pending`, prunes and commits: one generation. An
-undo takes the whole range back at once, so undo to a block inside a range
-stops on the range's predecessor. The result equals applying the same blocks
-one by one (`crates/project/tests/families_range.rs`, and every test's rebuild
-comparison, which rebuilds both ways). Redo replay and live follow stay one
-block to a transaction.
+head still undoes single blocks. The switch follows the safe block, not the
+finalized one, by the product owner's ruling; a safe block is not final, and a
+reorg whose fork point lies inside a range undoes that whole range and replays
+from its predecessor. The first range after the rebuild's reset holds one work
+block, and each range committed doubles the next; a later run that resumes the
+rebuild starts with a range of up to its whole remaining budget. Each block
+counts against the run's budget, and a range never holds more blocks than the
+budget has left. A range's own cap, 1,024 work blocks, binds only when a run's
+budget is larger; under the default budget of 256 blocks a run, the budget is
+the cap. A range also ends at 4,096 events: a range whose next block would pass
+the event cap ends before it, and a first block over the cap is a range of its
+own. A range passes the fences above once, for its first block, and reads the
+lineage rows, events, surface bindings and resolver activations of all its
+blocks in one statement each, grouped back by block: events are ordered and
+taken once per `event_identity` within their own block, and each block takes
+its own active manifest set. It folds the blocks one at a time through the same
+reducers, each block seeing the families as the blocks before it left them,
+including the rows a reducer reads from a family table mid-fold, which the
+range has not written yet; a block classifies resolvers and reads a name's
+current binding at its own height. The range then journals, for every row it
+changed, the row as it was before the range and the prior marker, under its
+last block, writes once, advances the marker to its last block still in
+`bootstrap_pending`, prunes and commits: one generation. An undo takes the
+whole range back at once, so undo to a block inside a range stops on the
+range's predecessor. The result equals applying the same blocks one by one
+(`crates/project/tests/families_range.rs`, and every test's rebuild comparison,
+which rebuilds both ways). Redo replay and live follow stay one block to a
+transaction.
 
 Facts within one emission batch apply in adapter write order: within one
 block, transaction and log the trailing

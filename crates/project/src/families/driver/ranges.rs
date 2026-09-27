@@ -19,8 +19,9 @@ impl Budget {
 impl Run<'_> {
     /// The highest work block this run's rebuild applies in a range, read once per run; `None`
     /// when ranges are off. By default it is the chain's safe block minus `RANGE_SAFE_MARGIN`, so
-    /// the blocks a reorg can still replace stay one to a transaction, or with no safe block the
-    /// target minus `RANGE_TARGET_MARGIN`.
+    /// the blocks nearest the head stay one to a transaction, or with no safe block the target
+    /// minus `RANGE_TARGET_MARGIN`. The safe block is not final; a reorg whose fork point lies
+    /// inside a range undoes the whole range.
     pub(super) async fn switch_point(&self) -> Result<Option<i64>> {
         match self.options.rebuild_ranges {
             RebuildRanges::Off => Ok(None),

@@ -54,7 +54,9 @@ pub const MAX_BLOCKS_PER_RUN: u64 = 256;
 
 /// A rebuild applies the work blocks at or below this many blocks under the chain's safe block
 /// in [ranges](RebuildRanges); the blocks above it and the target go one to a transaction, so a
-/// reorg near the head undoes single blocks.
+/// reorg near the head undoes single blocks. The switch follows the safe block, not the
+/// finalized one, by the product owner's ruling: a safe block is not final, and a reorg whose
+/// fork point lies inside a range undoes that whole range and replays from its predecessor.
 pub const RANGE_SAFE_MARGIN: i64 = 5;
 
 /// With no safe block published, a rebuild applies the work blocks at or below this many blocks
