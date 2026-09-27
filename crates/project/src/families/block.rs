@@ -278,7 +278,7 @@ async fn write(
     block: &input::BlockHeader,
     rows: &store::RowSet,
 ) -> Result<BlockStats> {
-    let changes = rows.changes();
+    let changes = rows.written();
     let mut stats = BlockStats::default();
     if changes.is_empty() {
         return Ok(stats);

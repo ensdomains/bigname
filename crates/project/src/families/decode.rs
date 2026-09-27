@@ -20,7 +20,7 @@ use sqlx::{Postgres, Transaction};
 use super::{
     input::BlockEvent,
     reduce::{Context, in_family, key_of, load_rows},
-    store::{Row, RowSet},
+    store::{self, Row, RowSet},
     tables,
 };
 use crate::{ProjectError, Result};
@@ -104,13 +104,17 @@ impl Candidates {
             ProjectError::database("failed to read the leases' binding candidates", error)
         })
         .map_err(in_family(tables::LIFECYCLE_EVENT.name))?;
+        // The uuid columns compare as uuids; every lease here is a hyphenated uuid.
+        let lowered: BTreeSet<String> = leases.iter().map(|lease| lease.to_lowercase()).collect();
+        let named = |row: &Row, column: &str| {
+            text(row, column).is_some_and(|value| lowered.contains(&value.to_lowercase()))
+        };
+        let stored = rows.overlay(table, store::objects(stored), |row| {
+            named(row, "resource_id") || named(row, "wrapped_registrar_resource_id")
+        });
         let mut by_key: BTreeMap<String, Row> = stored
             .into_iter()
-            .filter_map(|value| match value {
-                Value::Object(row) => Some(row),
-                _ => None,
-            })
-            .map(|row| (super::store::key_text(table, &row), row))
+            .map(|row| (store::key_text(table, &row), row))
             .collect();
         for (key, after) in changed {
             match after {
@@ -205,6 +209,19 @@ pub(crate) async fn redecode(
             )
         })
         .collect();
+    // Rows an earlier block of a rebuild range retained or named are not in the table yet.
+    let unnamed = |row: &Row, column: &str| row.get(column).is_none_or(Value::is_null);
+    let keys: Vec<Row> = rows
+        .overlay(table, keys, |row| {
+            text(row, "state_kind").as_deref() == Some("resource")
+                && text(row, "state_key").is_some_and(|key| candidates.arrived.contains(&key))
+                && text(row, "source_family").as_deref() == Some(REGISTRAR)
+                && unnamed(row, "original_logical_name_id")
+                && unnamed(row, "decoded_logical_name_id")
+        })
+        .iter()
+        .map(|row| store::key_object(table, &store::key_text(table, row)))
+        .collect::<Result<_>>()?;
     load_rows(transaction, rows, table, keys.clone()).await?;
     for key in keys {
         let Some(mut row) = rows.get(table, &key).cloned() else {

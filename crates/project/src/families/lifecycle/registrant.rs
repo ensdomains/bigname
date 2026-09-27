@@ -7,7 +7,7 @@ use crate::{
     families::{
         input::Position,
         reduce::{Context, in_family, key_of, load_rows, set},
-        store::{Row, RowSet},
+        store::{self, Row, RowSet},
         tables,
     },
 };
@@ -78,13 +78,20 @@ pub(super) async fn fold_registrants(
     .await
     .map_err(|error| ProjectError::database("failed to read names' retained rows", error))
     .map_err(in_family(tables::ADDRESS_NAME_FOLD.name))?;
+    // Rows an earlier block of a rebuild range retained or named are not in the table yet.
+    let stored = rows.overlay(table, store::objects(stored), |row| {
+        store::column(row, "decoded_logical_name_id").is_some_and(|name| {
+            names
+                .binary_search_by(|known| known.as_str().cmp(name))
+                .is_ok()
+        }) && matches!(
+            store::column(row, "event_kind"),
+            Some("RegistrationGranted" | "RegistrationReleased" | "TokenControlTransferred")
+        )
+    });
     let mut current: std::collections::BTreeMap<String, Row> = stored
         .into_iter()
-        .filter_map(|value| match value {
-            Value::Object(row) => Some(row),
-            _ => None,
-        })
-        .map(|row| (crate::families::store::key_text(table, &row), row))
+        .map(|row| (store::key_text(table, &row), row))
         .collect();
     for (key, _, after) in changed {
         match after {

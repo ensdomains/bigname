@@ -10,7 +10,7 @@ use crate::{
     families::{
         input::Position,
         reduce::{Context, in_family, key_of, load_rows, namehash_of, set},
-        store::{Row, RowSet},
+        store::{self, Row, RowSet},
         tables,
     },
 };
@@ -52,6 +52,11 @@ pub(crate) async fn successor_grant(
     .await
     .map_err(|error| ProjectError::database("failed to read registry-only candidates", error))
     .map_err(in_family(table.name))?;
+    let stored = rows.overlay(table, store::objects(stored), |row| {
+        store::column(row, "logical_name_id") == Some(name)
+            && row.get("registry_only").and_then(Value::as_bool) == Some(true)
+            && store::column(row, "authority_arm") == Some("ens_v1")
+    });
     let mut keys: Vec<Row> = stored
         .iter()
         .map(|row| key_of(table, [row["surface_binding_id"].clone()]))
@@ -126,12 +131,19 @@ pub(super) async fn retained_grants(
     .await
     .map_err(|error| ProjectError::database("failed to read the name's retained grants", error))
     .map_err(in_family(tables::BINDING_CANDIDATE.name))?;
+    // Grants an earlier block of a rebuild range retained are not in the table yet.
+    let stored = rows.overlay(&tables::LIFECYCLE_EVENT, store::objects(stored), |row| {
+        store::column(row, "source_family") == Some("ens_v1_registrar_l1")
+            && store::column(row, "event_kind") == Some("RegistrationGranted")
+            && store::column(row, "decoded_logical_name_id") == Some(name)
+            && row
+                .get("block_number")
+                .and_then(Value::as_i64)
+                .is_some_and(|block| block >= from)
+    });
     let mut grants: Vec<(Position, Row)> = stored
         .into_iter()
-        .filter_map(|value| match value {
-            Value::Object(row) => Some((Position::of_row(&row)?, row)),
-            _ => None,
-        })
+        .filter_map(|row| Some((Position::of_row(&row)?, row)))
         .collect();
     grants.sort_by(|left, right| left.0.cmp(&right.0));
     for (_, grant) in grants {
@@ -180,8 +192,15 @@ async fn released_before(
     .await
     .map_err(|error| ProjectError::database("failed to read predecessor releases", error))
     .map_err(in_family(tables::BINDING_CANDIDATE.name))?;
-    Ok(stored.iter().any(|value| match value {
-        Value::Object(row) => is_release(row),
-        _ => false,
-    }))
+    let stored = rows.overlay(&tables::LIFECYCLE_EVENT, store::objects(stored), |row| {
+        store::column(row, "state_kind") == Some("resource")
+            && store::column(row, "state_key") == Some(resource)
+            && store::column(row, "event_kind") == Some("RegistrationReleased")
+            && store::column(row, "source_family") == Some("ens_v1_registrar_l1")
+            && row
+                .get("block_number")
+                .and_then(Value::as_i64)
+                .is_some_and(|block| block <= position.block_number)
+    });
+    Ok(stored.iter().any(is_release))
 }
