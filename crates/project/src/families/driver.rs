@@ -3,6 +3,7 @@
 //! per transaction, stopping when the run's block budget is spent. The repair record says which
 //! of these is under way, so a run that stops between two blocks is resumed by the next; every
 //! transaction fences on the marker generation and on the repair record it planned from.
+mod ranges;
 mod transitions;
 
 use sqlx::PgPool;

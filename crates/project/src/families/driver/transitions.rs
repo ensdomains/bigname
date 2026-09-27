@@ -110,13 +110,22 @@ impl Run<'_> {
         if whole && blocks.last() != Some(&self.target.number) {
             blocks.push(self.target.number);
         }
-        for number in blocks {
+        // Work blocks at or below the switch point go in ranges that start at one block and
+        // double with every range committed, up to the cap; the rest and the target one by one.
+        let switch = self.switch_point().await?;
+        let ranged = |number: &i64| {
+            *number != self.target.number && switch.is_some_and(|switch| *number <= switch)
+        };
+        let cap = usize::try_from(self.options.max_range_blocks).unwrap_or(usize::MAX);
+        let (mut index, mut size) = (0, 1);
+        while let Some(&number) = blocks.get(index) {
             if !self.budget.take(outcome) {
                 return Ok(());
             }
             // A rebuild grows the families from empty faster than autovacuum samples them, and
             // plans made on empty-table statistics scan whole families per key. Refresh the
-            // statistics after 1, 2, 4, 8, ... blocks rebuilt since the reset, across runs.
+            // statistics after 1, 2, 4, 8, ... generations (single blocks or ranges) rebuilt
+            // since the reset, across runs.
             let rebuilt = u64::try_from(family.sequence - reset_sequence).unwrap_or(0);
             if rebuilt > 0 && rebuilt.is_power_of_two() {
                 analyze(self.pool, self.chain_id).await;
@@ -132,11 +141,22 @@ impl Run<'_> {
                 role: block::Role::Rebuild { attempt, completes },
                 manifests: &manifests,
             };
+            let eligible = blocks[index..].iter().take_while(|n| ranged(n)).count();
+            if eligible > 0 {
+                let (next, applied) = self
+                    .range(&blocks[index..index + eligible], size, &plan, outcome)
+                    .await?;
+                family = next;
+                index += applied;
+                size = applied.saturating_mul(2).min(cap);
+                continue;
+            }
             let (next, stats) = block::apply(self.pool, self.chain_id, number, &plan, self.options)
                 .await
                 .map_err(|error| at_block(number, error))?;
             outcome.record(stats);
             family = next;
+            index += 1;
         }
         Ok(())
     }

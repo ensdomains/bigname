@@ -21,6 +21,7 @@ mod manifests;
 mod marker;
 mod permissions;
 mod position;
+mod range;
 mod records;
 mod reduce;
 mod registry;
@@ -248,7 +249,8 @@ pub struct FamilyOutcome {
     pub rows: BTreeMap<&'static str, u64>,
     /// Undo rows written, marker rows included.
     pub undo_rows: u64,
-    /// Elapsed milliseconds of each applied block.
+    /// Elapsed milliseconds of each block applied in a transaction of its own; a rebuild range
+    /// adds none.
     pub block_ms: Vec<u64>,
     /// Why the loop stopped early; the families then lag and the next run catches up.
     pub skipped: Option<String>,
@@ -287,9 +289,20 @@ impl FamilyOutcome {
 
     fn record(&mut self, stats: block::BlockStats) {
         self.blocks += 1;
+        self.block_ms.push(stats.elapsed_ms);
+        self.add(stats);
+    }
+
+    /// A committed rebuild range of `blocks` blocks; its time is not a block's.
+    fn record_range(&mut self, stats: block::BlockStats, blocks: u64) {
+        self.blocks += blocks;
+        self.ranges += 1;
+        self.add(stats);
+    }
+
+    fn add(&mut self, stats: block::BlockStats) {
         self.undo_rows += stats.undo_rows;
         self.duplicate_anomalies += stats.duplicate_anomalies;
-        self.block_ms.push(stats.elapsed_ms);
         for (table, rows) in stats.rows {
             *self.rows.entry(table).or_default() += rows;
         }
@@ -344,6 +357,7 @@ pub async fn apply(
         target_block = target.number,
         marker_block = outcome.marker.as_ref().map(|marker| marker.number),
         blocks = outcome.blocks,
+        ranges = outcome.ranges,
         undone_blocks = outcome.undone_blocks,
         reset = outcome.reset,
         rows = ?outcome.rows,
