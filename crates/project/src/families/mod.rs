@@ -51,6 +51,44 @@ pub const RETAINED_UNDO_DEPTH: i64 = 256;
 /// run. Live follow applies a block or two per run; a rebuild or a long catch-up spans many runs.
 pub const MAX_BLOCKS_PER_RUN: u64 = 256;
 
+/// A rebuild applies the work blocks at or below this many blocks under the chain's safe block
+/// in [ranges](RebuildRanges); the blocks above it and the target go one to a transaction, so a
+/// reorg near the head undoes single blocks.
+pub const RANGE_SAFE_MARGIN: i64 = 5;
+
+/// With no safe block published, a rebuild applies the work blocks at or below this many blocks
+/// under its target in ranges.
+pub const RANGE_TARGET_MARGIN: i64 = RETAINED_UNDO_DEPTH;
+
+/// The most work blocks one rebuild range applies. A range saves the fixed statements of every
+/// block after its first (the fences, the marker journal and advance, the retention read and
+/// prune, the commit), about fifteen round trips, so past a few hundred blocks the saving no
+/// longer shows beside the blocks' own reads; 1,024 keeps a sparse stretch to one transaction a
+/// run while bounding how much one failure has to redo.
+pub const MAX_RANGE_BLOCKS: u64 = 1024;
+
+/// The most events one rebuild range applies, unless its first block alone holds more. The
+/// range's working set keeps every row it loaded, with its pre-range and pre-block images, until
+/// it commits, and a resource-bearing event loads at least its resource pointer row. 4,096 is
+/// about twice Sepolia's densest block (2,147 events), which keeps the working set to tens of
+/// megabytes while leaving dense stretches a few blocks per range.
+pub const MAX_RANGE_EVENTS: u64 = 4096;
+
+/// Which work blocks a rebuild applies several to a transaction. A range folds its blocks one
+/// by one exactly as single blocks would, then journals, writes and advances the marker once, to
+/// its last block; undo takes the whole range back in one step.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RebuildRanges {
+    /// Every block in a transaction of its own.
+    Off,
+    /// The work blocks at or below the chain's safe block minus [`RANGE_SAFE_MARGIN`], read once
+    /// per run, or with no safe block the target minus [`RANGE_TARGET_MARGIN`].
+    BelowSafe,
+    /// The work blocks at or below this block, whatever the chain's heads; for tests and
+    /// benchmarks.
+    Through(i64),
+}
+
 /// Every owned key family table, journalled and derived, for tests that compare the families
 /// of two runs.
 pub fn family_tables() -> impl Iterator<Item = &'static str> {
@@ -146,6 +184,12 @@ pub struct FamilyOptions {
     pub retained_undo_depth: i64,
     /// Blocks one run applies or undoes at most.
     pub max_blocks_per_run: u64,
+    /// Which work blocks a rebuild applies in ranges.
+    pub rebuild_ranges: RebuildRanges,
+    /// Work blocks one rebuild range applies at most.
+    pub max_range_blocks: u64,
+    /// Events one rebuild range applies at most, unless its first block alone holds more.
+    pub max_range_events: u64,
 }
 
 impl FamilyOptions {
@@ -154,7 +198,22 @@ impl FamilyOptions {
             input_content_hash: input_content_hash.into(),
             retained_undo_depth: RETAINED_UNDO_DEPTH,
             max_blocks_per_run: MAX_BLOCKS_PER_RUN,
+            rebuild_ranges: RebuildRanges::BelowSafe,
+            max_range_blocks: MAX_RANGE_BLOCKS,
+            max_range_events: MAX_RANGE_EVENTS,
         }
+    }
+
+    pub fn with_rebuild_ranges(mut self, ranges: RebuildRanges) -> Self {
+        self.rebuild_ranges = ranges;
+        self
+    }
+
+    /// Cap a rebuild range at `blocks` work blocks and `events` events, each at least one.
+    pub fn with_range_caps(mut self, blocks: u64, events: u64) -> Self {
+        self.max_range_blocks = blocks.max(1);
+        self.max_range_events = events.max(1);
+        self
     }
 
     pub fn with_max_blocks_per_run(mut self, blocks: u64) -> Self {
@@ -177,8 +236,10 @@ pub struct FamilyOutcome {
     pub marker: Option<Marker>,
     /// Whether the family marker's hash is readable on the lineage at its height.
     pub marker_readable: bool,
-    /// Blocks applied.
+    /// Blocks applied, a range's blocks included.
     pub blocks: u64,
+    /// Rebuild ranges committed; their blocks count in `blocks`.
+    pub ranges: u64,
     /// Blocks undone.
     pub undone_blocks: u64,
     /// Whether the families were cleared and rebuilt.
