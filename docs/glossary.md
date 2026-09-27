@@ -2544,9 +2544,10 @@ the reducer under `crates/project/src/families/` that writes them:
 ## Family marker
 
 `project_family_marker`: the block and hash a chain's [owned key
-families](#owned-key-family) stand at, the generation (`sequence`) every block
-and undo advances, and the input token, input revision and [active manifest
-set](#active-manifest-set-family-block) key the last block read. A block or undo applies only against the generation it
+families](#owned-key-family) stand at, the generation (`sequence`) every block,
+[rebuild range](#rebuild-range) and undo advances, and the input token, input
+revision and [active manifest set](#active-manifest-set-family-block) key the
+last block read. A block, range or undo applies only against the generation it
 planned from.
 
 ## Family undo journal
@@ -2554,9 +2555,20 @@ planned from.
 the rows of `project_family_undo`: for every owned key family row a block
 changed, the row as it was before the block (or nothing, when the block
 created it), plus the family marker before the block. Undoing the block puts
-those images back and returns the marker. Rows are kept back to the lowest of
+those images back and returns the marker. A [rebuild range](#rebuild-range)
+journals the same way under its last block, with the images from before the
+range, so it is undone as one step. Rows are kept back to the lowest of
 256 blocks below the marker, the finalized block, the safe block and an active
 repair's floor ([projections](projections.md#owned-key-families)).
+
+## Rebuild range
+
+several work blocks of an owned key family rebuild applied in one transaction:
+the blocks at or below the chain's safe block minus 5 (or 256 blocks below the
+target with no safe block). The range folds its blocks one by one exactly as
+single blocks would, then journals, writes and advances the [family
+marker](#family-marker) once, to its last block, as one generation
+([projections](projections.md#owned-key-families)).
 
 ## Repair record
 
