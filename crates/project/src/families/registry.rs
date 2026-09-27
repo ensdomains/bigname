@@ -13,10 +13,10 @@ use sqlx::{Postgres, Transaction};
 use super::{
     input::BlockEvent,
     reduce::{
-        Context, current, flag, in_family, key_of, load_rows, put, raw_lower, raw_text, set,
-        text_or_null,
+        Context, Preload, current, flag, in_family, key_of, load_rows, put, raw_lower, raw_text,
+        set, text_or_null,
     },
-    store::RowSet,
+    store::{self, Row, RowSet},
     tables,
 };
 use crate::{ProjectError, Result};
@@ -33,6 +33,47 @@ pub(super) async fn apply(
 ) -> Result<()> {
     registry_nodes(transaction, context, events, rows).await?;
     observations(transaction, context, events, rows).await
+}
+
+/// The node, owner-event and observation keys one block's events and bindings name.
+pub(super) fn preload(chain: &Value, events: &[BlockEvent], bindings: &[Row], into: &mut Preload) {
+    let nodes = node_events(events);
+    into.add(
+        &tables::REGISTRY_NODE_STATE,
+        nodes
+            .iter()
+            .map(|(event, node)| node_key(chain, event, node)),
+    );
+    into.add(
+        &tables::REGISTRY_OWNER_EVENT,
+        nodes
+            .iter()
+            .map(|(event, node)| owner_event_key(chain, event, node)),
+    );
+    let table = &tables::REGISTRY_BINDING_OBSERVATION;
+    into.add(
+        table,
+        events
+            .iter()
+            .filter_map(observation)
+            .map(|observation| observation.identity)
+            .chain(rebound(bound_names(bindings), events))
+            .map(|identity| key_of(table, [chain.clone(), json!(identity)])),
+    );
+}
+
+fn node_events(events: &[BlockEvent]) -> Vec<(&BlockEvent, String)> {
+    events
+        .iter()
+        .filter_map(|event| Some((event, registry_node(event)?)))
+        .collect()
+}
+
+fn node_key(chain: &Value, event: &BlockEvent, node: &str) -> Row {
+    key_of(
+        &tables::REGISTRY_NODE_STATE,
+        [chain.clone(), json!(event.namespace), json!(node)],
+    )
 }
 
 /// The node an ENSv1 registry event describes: the child for NewOwner, else its own node.
@@ -56,13 +97,10 @@ async fn registry_nodes(
 ) -> Result<()> {
     let table = &tables::REGISTRY_NODE_STATE;
     let chain = json!(context.chain_id);
-    let relevant: Vec<(&BlockEvent, String)> = events
-        .iter()
-        .filter_map(|event| Some((event, registry_node(event)?)))
-        .collect();
+    let relevant = node_events(events);
     let keys = relevant
         .iter()
-        .map(|(event, node)| key_of(table, [chain.clone(), json!(event.namespace), json!(node)]))
+        .map(|(event, node)| node_key(&chain, event, node))
         .collect();
     load_rows(transaction, rows, table, keys).await?;
     let history = relevant
@@ -139,7 +177,7 @@ async fn registry_nodes(
     Ok(())
 }
 
-fn owner_event_key(chain: &Value, event: &BlockEvent, node: &str) -> super::store::Row {
+fn owner_event_key(chain: &Value, event: &BlockEvent, node: &str) -> Row {
     key_of(
         &tables::REGISTRY_OWNER_EVENT,
         [
@@ -302,7 +340,10 @@ async fn rebound_names(
     context: &Context<'_>,
     events: &[BlockEvent],
 ) -> Result<Vec<String>> {
-    let mut names: Vec<String> = sqlx::query_scalar(
+    if let Some(prefetched) = context.prefetched {
+        return Ok(rebound(bound_names(&prefetched.bindings), events));
+    }
+    let names: Vec<String> = sqlx::query_scalar(
         "/* project:families.registry.rebound_names */ SELECT DISTINCT binding.logical_name_id
          FROM surface_bindings binding
          WHERE binding.chain_id = $1 AND binding.block_number = $2 AND binding.block_hash = $3
@@ -315,6 +356,21 @@ async fn rebound_names(
     .await
     .map_err(|error| ProjectError::database("failed to read the block's bound names", error))
     .map_err(in_family(tables::REGISTRY_BINDING_OBSERVATION.name))?;
+    Ok(rebound(names, events))
+}
+
+/// The names of the block's binding rows, as `rebound_names` reads them.
+fn bound_names(bindings: &[Row]) -> Vec<String> {
+    bindings
+        .iter()
+        .filter_map(|binding| store::column(binding, "logical_name_id"))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// The bound names with every name a SurfaceBound or SurfaceUnbound of the block names, sorted
+/// and each once.
+fn rebound(mut names: Vec<String>, events: &[BlockEvent]) -> Vec<String> {
     names.extend(
         events
             .iter()
@@ -323,7 +379,7 @@ async fn rebound_names(
     );
     names.sort();
     names.dedup();
-    Ok(names)
+    names
 }
 
 /// Each observation identity keeps its latest observation (DISTINCT ON the identity,

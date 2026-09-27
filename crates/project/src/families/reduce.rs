@@ -3,6 +3,8 @@
 //! key's current row and writes the row the event leaves. Clears stay rows; a row goes only when
 //! its reducer has no remaining fact. A reducer that needs another family's row reads that
 //! family's row for one of the block's own keys, never history.
+use std::collections::{BTreeMap, BTreeSet};
+
 use serde_json::{Map, Value, json};
 use sqlx::{Postgres, Transaction};
 
@@ -23,6 +25,72 @@ pub(crate) struct Context<'a> {
     pub(crate) manifests: &'a ActiveSet,
     /// Whether its key differs from the one the previous block recorded.
     pub(crate) manifests_changed: bool,
+    /// The block's inputs a rebuild range read for all its blocks at once; a single block reads
+    /// them itself.
+    pub(crate) prefetched: Option<&'a Prefetched>,
+}
+
+/// One block's inputs a rebuild range reads for all its blocks in one statement each.
+#[derive(Debug, Default)]
+pub(crate) struct Prefetched {
+    /// The block's readable surface bindings, as `to_jsonb` rows (identity.rs `block_bindings`).
+    pub(crate) bindings: Vec<Row>,
+    /// The resolvers whose discovered candidates can change at the block (classification.rs
+    /// `activated`).
+    pub(crate) activated: BTreeSet<String>,
+}
+
+/// The keys a rebuild range loads before it folds, per table, so each table is read once for
+/// the whole range rather than once per block. Loading a key early changes nothing: until the
+/// range writes, the table holds the key's pre-range row either way.
+#[derive(Default)]
+pub(crate) struct Preload {
+    tables: BTreeMap<&'static str, (&'static TableSpec, Vec<Row>)>,
+}
+
+impl Preload {
+    pub(crate) fn add(&mut self, table: &'static TableSpec, keys: impl IntoIterator<Item = Row>) {
+        self.tables
+            .entry(table.name)
+            .or_insert_with(|| (table, Vec::new()))
+            .1
+            .extend(keys);
+    }
+
+    /// Load every collected key, one statement per table.
+    pub(crate) async fn load(
+        self,
+        transaction: &mut Transaction<'_, Postgres>,
+        rows: &mut RowSet,
+    ) -> Result<()> {
+        for (table, keys) in self.tables.into_values() {
+            load_rows(transaction, rows, table, keys).await?;
+        }
+        Ok(())
+    }
+}
+
+/// Collect the keys every reducer loads from the events and prefetched inputs of one block,
+/// without the keys a reducer finds only by reading a family table mid-fold.
+pub(crate) fn preload(
+    chain_id: &str,
+    events: &[BlockEvent],
+    keys: &BlockKeys,
+    prefetched: &Prefetched,
+    into: &mut Preload,
+) {
+    let chain = json!(chain_id);
+    super::identity::preload(&chain, events, &prefetched.bindings, into);
+    super::registry::preload(&chain, events, &prefetched.bindings, into);
+    super::resolver::preload(chain_id, keys, into);
+    super::classification::preload(&chain, events, &prefetched.activated, into);
+    super::records::preload(&chain, events, into);
+    super::wrapper::preload(&chain, events, into);
+    super::permissions::preload(&chain, events, into);
+    super::topology::preload(&chain, events, into);
+    super::reverse::preload(&chain, events, keys, into);
+    super::addresses::preload(&chain, events, into);
+    super::lifecycle::preload(&chain, events, into);
 }
 
 /// Name the family in a reducer error, so a skipped block says which family failed.

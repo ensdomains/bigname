@@ -12,8 +12,10 @@ use sqlx::{Postgres, Transaction};
 
 use super::{
     input::BlockEvent,
-    keys::{self, Space, ZERO_ADDRESS},
-    reduce::{self, Context, chain_key, current, key_of, load, put, raw_lower, set, text_or_null},
+    keys::{self, BlockKeys, Space, ZERO_ADDRESS},
+    reduce::{
+        self, Context, Preload, chain_key, current, key_of, load, put, raw_lower, set, text_or_null,
+    },
     store::RowSet,
     tables,
 };
@@ -24,6 +26,19 @@ const V1_POINTER_FAMILIES: [&str; 3] = [
     "ens_v1_registrar_l1",
     "ens_v1_wrapper_l1",
 ];
+
+/// The registry-node and resource pointer keys one block's events name.
+pub(super) fn preload(chain_id: &str, keys: &BlockKeys, into: &mut Preload) {
+    for (table, space) in [
+        (&tables::REGISTRY_POINTER, Space::RegistryPointer),
+        (&tables::RESOURCE_POINTER, Space::Resource),
+    ] {
+        into.add(
+            table,
+            keys.of(space).map(|key| chain_key(table, chain_id, key)),
+        );
+    }
+}
 
 pub(super) async fn registry_pointers(
     transaction: &mut Transaction<'_, Postgres>,

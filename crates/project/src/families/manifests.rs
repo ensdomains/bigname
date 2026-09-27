@@ -166,16 +166,25 @@ impl History {
     }
 }
 
-/// The `manifests` CTE over the active set bound as parameter `$param`, with the columns the
-/// served `create_manifests` gives.
+/// The record an active set's rows read as, with the columns the served `create_manifests`
+/// gives.
+const RECORD: &str = "manifest(
+        manifest_id bigint, namespace text, source_family text, rollout_status text,
+        manifest_payload jsonb, manifest_event_id bigint)";
+
+/// The `manifests` CTE over the active set bound as parameter `$param`.
 pub(crate) fn input(param: usize) -> String {
     format!(
         "manifests AS (
-    SELECT * FROM jsonb_to_recordset(${param}::jsonb) AS manifest(
-        manifest_id bigint, namespace text, source_family text, rollout_status text,
-        manifest_payload jsonb, manifest_event_id bigint)
+    SELECT * FROM jsonb_to_recordset(${param}::jsonb) AS {RECORD}
 )"
     )
+}
+
+/// The rows of the active set `expression` evaluates to, as the record `manifest`, for a
+/// statement that reads several sets.
+pub(crate) fn recordset(expression: &str) -> String {
+    format!("jsonb_to_recordset({expression}) AS {RECORD}")
 }
 
 #[cfg(test)]

@@ -14,9 +14,10 @@ use sqlx::{Postgres, Transaction};
 
 use super::{
     input::BlockEvent,
-    keys::Space,
+    keys::{BlockKeys, Space},
     reduce::{
-        Context, current, key_of, load, load_rows, put, raw_lower, raw_text, set, text_or_null,
+        Context, Preload, current, key_of, load, load_rows, put, raw_lower, raw_text, set,
+        text_or_null,
     },
     store::{Row, RowSet},
     tables,
@@ -77,6 +78,33 @@ fn claim(chain: &Value, event: &BlockEvent) -> Option<Row> {
     ))
 }
 
+/// The reverse tuple, node claim and claim keys one block's events name.
+pub(super) fn preload(chain: &Value, events: &[BlockEvent], keys: &BlockKeys, into: &mut Preload) {
+    let table = &tables::REVERSE_TUPLE;
+    into.add(
+        table,
+        keys.of(Space::ReverseTuple).map(|key| tuple_key_of(key)),
+    );
+    into.add(
+        table,
+        events
+            .iter()
+            .filter_map(|event| reverse_tuple(event).or_else(|| claim_tuple(event))),
+    );
+    into.add(
+        &tables::REVERSE_NODE_CLAIM,
+        events.iter().filter_map(node_claim),
+    );
+    into.add(
+        &tables::CLAIM_NORMALIZATION,
+        events.iter().filter_map(|event| claim(chain, event)),
+    );
+}
+
+fn tuple_key_of(key: &[String]) -> Row {
+    key_of(&tables::REVERSE_TUPLE, key.iter().map(|part| json!(part)))
+}
+
 pub(super) async fn apply(
     transaction: &mut Transaction<'_, Postgres>,
     context: &Context<'_>,
@@ -94,7 +122,7 @@ pub(super) async fn apply(
         &tables::REVERSE_TUPLE,
         context.keys,
         Space::ReverseTuple,
-        |key| key_of(&tables::REVERSE_TUPLE, key.iter().map(|part| json!(part))),
+        |key| tuple_key_of(key),
     )
     .await?;
     let tuples = events

@@ -10,9 +10,10 @@ use sqlx::{Postgres, Transaction};
 use super::{
     input::BlockEvent,
     reduce::{
-        Context, current, json_number_between, key_of, load_rows, put, raw_text, set, text_or_null,
+        Context, Preload, current, json_number_between, key_of, load_rows, put, raw_text, set,
+        text_or_null,
     },
-    store::RowSet,
+    store::{Row, RowSet},
     tables,
 };
 use crate::Result;
@@ -88,6 +89,28 @@ fn wrapper_expiry(event: &BlockEvent) -> bool {
                 && raw_text(&event.after, "authority_kind").as_deref() == Some("wrapper")))
 }
 
+/// The wrapper keys one block's wrapper events name.
+pub(super) fn preload(chain: &Value, events: &[BlockEvent], into: &mut Preload) {
+    into.add(
+        &tables::WRAPPER_STATE,
+        wrapper_events(events)
+            .iter()
+            .map(|(_, resource)| wrapper_key(chain, resource)),
+    );
+}
+
+fn wrapper_events(events: &[BlockEvent]) -> Vec<(&BlockEvent, &str)> {
+    events
+        .iter()
+        .filter(|event| modifier(event) || wrapper_expiry(event) || lifecycle(event).is_some())
+        .filter_map(|event| Some((event, event.resource_id.as_deref()?)))
+        .collect()
+}
+
+fn wrapper_key(chain: &Value, resource: &str) -> Row {
+    key_of(&tables::WRAPPER_STATE, [chain.clone(), json!(resource)])
+}
+
 pub(super) async fn apply(
     transaction: &mut Transaction<'_, Postgres>,
     context: &Context<'_>,
@@ -96,14 +119,10 @@ pub(super) async fn apply(
 ) -> Result<()> {
     let chain = json!(context.chain_id);
     let table = &tables::WRAPPER_STATE;
-    let relevant: Vec<(&BlockEvent, &str)> = events
-        .iter()
-        .filter(|event| modifier(event) || wrapper_expiry(event) || lifecycle(event).is_some())
-        .filter_map(|event| Some((event, event.resource_id.as_deref()?)))
-        .collect();
+    let relevant = wrapper_events(events);
     let keys = relevant
         .iter()
-        .map(|(_, resource)| key_of(table, [chain.clone(), json!(resource)]))
+        .map(|(_, resource)| wrapper_key(&chain, resource))
         .collect();
     load_rows(transaction, rows, table, keys).await?;
     for (event, resource) in relevant {

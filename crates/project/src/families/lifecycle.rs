@@ -15,11 +15,11 @@ use super::{
     decode,
     input::BlockEvent,
     reduce::{
-        Context, current, flag, in_family, key_of, load_rows, put, raw_lower, raw_text, set,
-        text_or_null,
+        Context, Preload, current, flag, in_family, key_of, load_rows, put, raw_lower, raw_text,
+        set, text_or_null,
     },
     store::{Row, RowSet},
-    tables,
+    tables::{self, TableSpec},
 };
 use crate::Result;
 
@@ -150,52 +150,10 @@ pub(super) async fn apply(
     rows: &mut RowSet,
 ) -> Result<()> {
     let chain = json!(context.chain_id);
-    let keyed: Vec<(&BlockEvent, StateKey)> = events
-        .iter()
-        .filter_map(|event| state_key(event).map(|key| (event, key)))
-        .collect();
-    let (mut resources, mut triples) = (Vec::new(), Vec::new());
-    for (_, key) in &keyed {
-        match key {
-            StateKey::Resource(_) => resources.push(state_row_key(&chain, key)),
-            StateKey::Triple(_) => triples.push(state_row_key(&chain, key)),
-        }
+    let keyed = keyed(events);
+    for (table, keys) in lifecycle_keys(&chain, events, &keyed) {
+        load_rows(transaction, rows, table, keys).await?;
     }
-    load_rows(transaction, rows, &tables::LIFECYCLE_KEY_STATE, resources).await?;
-    load_rows(
-        transaction,
-        rows,
-        &tables::LIFECYCLE_TRIPLE_SUMMARY,
-        triples,
-    )
-    .await?;
-    let retained = keyed
-        .iter()
-        .map(|(event, key)| event_row_key(&chain, key, event))
-        .collect();
-    load_rows(transaction, rows, &tables::LIFECYCLE_EVENT, retained).await?;
-    let associations = events
-        .iter()
-        .filter_map(|event| association(&chain, event))
-        .collect();
-    load_rows(
-        transaction,
-        rows,
-        &tables::LIFECYCLE_ASSOCIATION,
-        associations,
-    )
-    .await?;
-    let children = events
-        .iter()
-        .filter_map(|event| child(&chain, event))
-        .collect();
-    load_rows(
-        transaction,
-        rows,
-        &tables::CHILD_REGISTRATION_STATE,
-        children,
-    )
-    .await?;
     let candidates = decode::Candidates::load(transaction, context, events, rows).await?;
 
     for (event, key) in &keyed {
@@ -255,6 +213,55 @@ pub(super) async fn apply(
     }
     decode::redecode(transaction, context, &candidates, rows).await?;
     registrant::fold_registrants(transaction, context, rows).await
+}
+
+/// The key-state, triple, retained event, association and child keys one block's events name;
+/// the names a candidate decodes are found while folding.
+pub(super) fn preload(chain: &Value, events: &[BlockEvent], into: &mut Preload) {
+    for (table, keys) in lifecycle_keys(chain, events, &keyed(events)) {
+        into.add(table, keys);
+    }
+}
+
+/// The block's retained events with the key each is kept under.
+fn keyed(events: &[BlockEvent]) -> Vec<(&BlockEvent, StateKey)> {
+    events
+        .iter()
+        .filter_map(|event| state_key(event).map(|key| (event, key)))
+        .collect()
+}
+
+fn lifecycle_keys(
+    chain: &Value,
+    events: &[BlockEvent],
+    keyed: &[(&BlockEvent, StateKey)],
+) -> [(&'static TableSpec, Vec<Row>); 5] {
+    let (mut resources, mut triples) = (Vec::new(), Vec::new());
+    for (_, key) in keyed {
+        match key {
+            StateKey::Resource(_) => resources.push(state_row_key(chain, key)),
+            StateKey::Triple(_) => triples.push(state_row_key(chain, key)),
+        }
+    }
+    let retained = keyed
+        .iter()
+        .map(|(event, key)| event_row_key(chain, key, event))
+        .collect();
+    let associations = events
+        .iter()
+        .filter_map(|event| association(chain, event))
+        .collect();
+    let children = events
+        .iter()
+        .filter_map(|event| child(chain, event))
+        .collect();
+    [
+        (&tables::LIFECYCLE_KEY_STATE, resources),
+        (&tables::LIFECYCLE_TRIPLE_SUMMARY, triples),
+        (&tables::LIFECYCLE_EVENT, retained),
+        (&tables::LIFECYCLE_ASSOCIATION, associations),
+        (&tables::CHILD_REGISTRATION_STATE, children),
+    ]
 }
 
 fn child_row(rows: &mut RowSet, key: Row, event: &BlockEvent) -> Result<()> {

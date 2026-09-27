@@ -17,10 +17,10 @@ pub(super) use self::lease::successor_grant;
 use super::{
     input::{BlockEvent, Position},
     reduce::{
-        Context, current, in_family, key_of, load_rows, namehash_of, put, raw_lower, raw_text, set,
-        text_or_null,
+        Context, Preload, current, in_family, key_of, load_rows, namehash_of, put, raw_lower,
+        raw_text, set, text_or_null,
     },
-    store::{Row, RowSet},
+    store::{self, Row, RowSet},
     tables,
 };
 use crate::{ProjectError, Result};
@@ -46,6 +46,46 @@ pub(super) async fn apply(
     candidates(transaction, context, events, rows).await
 }
 
+/// The name-state and binding-candidate keys one block's events and bindings name.
+pub(super) fn preload(chain: &Value, events: &[BlockEvent], bindings: &[Row], into: &mut Preload) {
+    into.add(
+        &tables::NAME_STATE,
+        name_events(events)
+            .into_iter()
+            .map(|(event, name)| name_key(chain, event, name)),
+    );
+    into.add(&tables::BINDING_CANDIDATE, bindings.iter().map(binding_key));
+}
+
+/// The migrations and epochs of the block, with the name each names.
+fn name_events(events: &[BlockEvent]) -> Vec<(&BlockEvent, &str)> {
+    events
+        .iter()
+        .filter(|event| {
+            (event.event_kind == "MigrationApplied" && event.source_family == "ens_v2_migration_l1")
+                || event.event_kind == "AuthorityEpochChanged"
+        })
+        .filter_map(|event| Some((event, event.logical_name_id.as_deref()?)))
+        .collect()
+}
+
+fn name_key(chain: &Value, event: &BlockEvent, name: &str) -> Row {
+    key_of(
+        &tables::NAME_STATE,
+        [chain.clone(), json!(event.namespace), json!(name)],
+    )
+}
+
+fn binding_key(binding: &Row) -> Row {
+    key_of(
+        &tables::BINDING_CANDIDATE,
+        [binding
+            .get("surface_binding_id")
+            .cloned()
+            .unwrap_or(Value::Null)],
+    )
+}
+
 async fn names(
     transaction: &mut Transaction<'_, Postgres>,
     context: &Context<'_>,
@@ -53,20 +93,9 @@ async fn names(
     rows: &mut RowSet,
 ) -> Result<()> {
     let table = &tables::NAME_STATE;
-    let relevant: Vec<(&BlockEvent, &str)> = events
-        .iter()
-        .filter(|event| {
-            (event.event_kind == "MigrationApplied" && event.source_family == "ens_v2_migration_l1")
-                || event.event_kind == "AuthorityEpochChanged"
-        })
-        .filter_map(|event| Some((event, event.logical_name_id.as_deref()?)))
-        .collect();
-    let key = |event: &BlockEvent, name: &str| {
-        key_of(
-            table,
-            [json!(context.chain_id), json!(event.namespace), json!(name)],
-        )
-    };
+    let chain = json!(context.chain_id);
+    let relevant = name_events(events);
+    let key = |event: &BlockEvent, name: &str| name_key(&chain, event, name);
     let keys = relevant
         .iter()
         .map(|(event, name)| key(event, name))
@@ -197,26 +226,10 @@ async fn candidates(
     rows: &mut RowSet,
 ) -> Result<()> {
     let table = &tables::BINDING_CANDIDATE;
-    let bindings: Vec<Value> = sqlx::query_scalar(
-        "/* project:families.identity.block_bindings */ SELECT to_jsonb(binding)
-         FROM surface_bindings binding
-         WHERE binding.chain_id = $1 AND binding.block_number = $2 AND binding.block_hash = $3
-           AND binding.canonicality_state IN ('canonical', 'safe', 'finalized')",
-    )
-    .bind(context.chain_id)
-    .bind(context.block.number)
-    .bind(&context.block.hash)
-    .fetch_all(&mut **transaction)
-    .await
-    .map_err(|error| ProjectError::database("failed to read the block's surface bindings", error))
-    .map_err(in_family(table.name))?;
-    let bindings: Vec<Row> = bindings
-        .into_iter()
-        .filter_map(|value| match value {
-            Value::Object(row) => Some(row),
-            _ => None,
-        })
-        .collect();
+    let bindings = match context.prefetched {
+        Some(prefetched) => prefetched.bindings.clone(),
+        None => block_bindings(transaction, context).await?,
+    };
     // An epoch that turns an earlier binding registry-only arrives in a later block than the
     // binding: the name's earlier candidates of that resource become registry-only then.
     let epochs: Vec<&BlockEvent> = events
@@ -254,11 +267,16 @@ async fn candidates(
     .await
     .map_err(|error| ProjectError::database("failed to read the names' binding candidates", error))
     .map_err(in_family(table.name))?;
+    // Candidates an earlier block of a rebuild range wrote are not in the table yet.
+    let earlier = rows.overlay(table, store::objects(earlier), |candidate| {
+        store::column(candidate, "logical_name_id").is_some_and(|name| {
+            names
+                .binary_search_by(|known| known.as_str().cmp(name))
+                .is_ok()
+        })
+    });
     let mut by_name: BTreeMap<String, Vec<Row>> = BTreeMap::new();
-    for candidate in earlier.into_iter().filter_map(|value| match value {
-        Value::Object(row) => Some(row),
-        _ => None,
-    }) {
+    for candidate in earlier {
         let name = candidate
             .get("logical_name_id")
             .and_then(Value::as_str)
@@ -268,15 +286,7 @@ async fn candidates(
     }
     let keys = bindings
         .iter()
-        .map(|binding| {
-            key_of(
-                table,
-                [binding
-                    .get("surface_binding_id")
-                    .cloned()
-                    .unwrap_or(Value::Null)],
-            )
-        })
+        .map(binding_key)
         .chain(
             by_name
                 .values()
@@ -341,6 +351,27 @@ async fn candidates(
         lease::retained_grants(transaction, context, rows, &name, from).await?;
     }
     Ok(())
+}
+
+/// The block's readable surface bindings, as `to_jsonb` rows.
+async fn block_bindings(
+    transaction: &mut Transaction<'_, Postgres>,
+    context: &Context<'_>,
+) -> Result<Vec<Row>> {
+    let bindings: Vec<Value> = sqlx::query_scalar(
+        "/* project:families.identity.block_bindings */ SELECT to_jsonb(binding)
+         FROM surface_bindings binding
+         WHERE binding.chain_id = $1 AND binding.block_number = $2 AND binding.block_hash = $3
+           AND binding.canonicality_state IN ('canonical', 'safe', 'finalized')",
+    )
+    .bind(context.chain_id)
+    .bind(context.block.number)
+    .bind(&context.block.hash)
+    .fetch_all(&mut **transaction)
+    .await
+    .map_err(|error| ProjectError::database("failed to read the block's surface bindings", error))
+    .map_err(in_family(tables::BINDING_CANDIDATE.name))?;
+    Ok(store::objects(bindings))
 }
 
 fn text_of(row: &Row, column: &str) -> String {

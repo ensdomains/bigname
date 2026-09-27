@@ -111,7 +111,8 @@ pub(crate) async fn read_block(
     ))
 }
 
-type EventRow = (
+/// The columns of one event as `block_events` selects them.
+pub(crate) type EventRow = (
     i64,
     String,
     String,
@@ -154,45 +155,49 @@ pub(crate) async fn block_events(
     .map_err(|error| ProjectError::database("failed to read family block events", error))?;
     let mut events = rows
         .into_iter()
-        .map(
-            |(
-                normalized_event_id,
-                event_identity,
-                namespace,
-                logical_name_id,
-                resource_id,
-                event_kind,
-                source_family,
-                source_manifest_id,
-                transaction_hash,
-                transaction_index,
-                log_index,
-                before,
-                after,
-                raw_fact_ref,
-            )| BlockEvent {
-                normalized_event_id,
-                position: Position {
-                    block_number: block.number,
-                    transaction_index,
-                    log_index,
-                    event_identity,
-                },
-                namespace,
-                logical_name_id,
-                resource_id,
-                event_kind,
-                source_family,
-                source_manifest_id,
-                transaction_hash,
-                before,
-                after,
-                raw_fact_ref,
-            },
-        )
+        .map(|row| event(block.number, row))
         .collect::<Vec<_>>();
     let anomalies = order(&mut events);
     Ok((events, anomalies))
+}
+
+/// One event of block `block_number` from its selected columns.
+pub(crate) fn event(block_number: i64, row: EventRow) -> BlockEvent {
+    let (
+        normalized_event_id,
+        event_identity,
+        namespace,
+        logical_name_id,
+        resource_id,
+        event_kind,
+        source_family,
+        source_manifest_id,
+        transaction_hash,
+        transaction_index,
+        log_index,
+        before,
+        after,
+        raw_fact_ref,
+    ) = row;
+    BlockEvent {
+        normalized_event_id,
+        position: Position {
+            block_number,
+            transaction_index,
+            log_index,
+            event_identity,
+        },
+        namespace,
+        logical_name_id,
+        resource_id,
+        event_kind,
+        source_family,
+        source_manifest_id,
+        transaction_hash,
+        before,
+        after,
+        raw_fact_ref,
+    }
 }
 
 /// Sort into the canonical order and keep each event once by its event identity. Generated

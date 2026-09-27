@@ -13,7 +13,9 @@ use sqlx::{Postgres, Transaction};
 use super::{
     input::BlockEvent,
     keys,
-    reduce::{Context, current, key_of, load_rows, put, raw_lower, raw_text, set, text_or_null},
+    reduce::{
+        Context, Preload, current, key_of, load_rows, put, raw_lower, raw_text, set, text_or_null,
+    },
     store::{Row, RowSet},
     tables,
 };
@@ -109,6 +111,15 @@ fn write_value(row: &mut Row, event: &BlockEvent) {
     }
 }
 
+/// The partition, value, record-id and link keys one block's writes and links address.
+pub(super) fn preload(chain: &Value, events: &[BlockEvent], into: &mut Preload) {
+    let [partitions, values, ids, links] = record_keys(chain, events);
+    into.add(&tables::NODE_RECORD_PARTITION, partitions);
+    into.add(&tables::NODE_RECORD_VALUE, values);
+    into.add(&tables::RECORD_ID_VALUE, ids);
+    into.add(&tables::RESOLVER_LINK, links);
+}
+
 pub(super) async fn apply(
     transaction: &mut Transaction<'_, Postgres>,
     context: &Context<'_>,
@@ -116,6 +127,31 @@ pub(super) async fn apply(
     rows: &mut RowSet,
 ) -> Result<()> {
     let chain = json!(context.chain_id);
+    // Load every row the block's writes and links address.
+    let [partitions, values, ids, links] = record_keys(&chain, events);
+    load_rows(
+        transaction,
+        rows,
+        &tables::NODE_RECORD_PARTITION,
+        partitions,
+    )
+    .await?;
+    load_rows(transaction, rows, &tables::NODE_RECORD_VALUE, values).await?;
+    load_rows(transaction, rows, &tables::RECORD_ID_VALUE, ids).await?;
+    load_rows(transaction, rows, &tables::RESOLVER_LINK, links).await?;
+
+    for event in events {
+        match event.event_kind.as_str() {
+            "RecordChanged" | "RecordVersionChanged" => write(rows, &chain, event)?,
+            "ResolverRecordLinked" => link(rows, &chain, event)?,
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// The partition, value, record-id and link keys of the block's writes and links.
+fn record_keys(chain: &Value, events: &[BlockEvent]) -> [Vec<Row>; 4] {
     let writes: Vec<&BlockEvent> = events
         .iter()
         .filter(|event| {
@@ -125,7 +161,6 @@ pub(super) async fn apply(
             )
         })
         .collect();
-    // Load every row the block's writes and links address.
     let (mut partitions, mut values, mut ids, mut links) = (vec![], vec![], vec![], vec![]);
     for event in &writes {
         let Some(resolver) = keys::record_resolver(event) else {
@@ -179,25 +214,7 @@ pub(super) async fn apply(
             ));
         }
     }
-    load_rows(
-        transaction,
-        rows,
-        &tables::NODE_RECORD_PARTITION,
-        partitions,
-    )
-    .await?;
-    load_rows(transaction, rows, &tables::NODE_RECORD_VALUE, values).await?;
-    load_rows(transaction, rows, &tables::RECORD_ID_VALUE, ids).await?;
-    load_rows(transaction, rows, &tables::RESOLVER_LINK, links).await?;
-
-    for event in events {
-        match event.event_kind.as_str() {
-            "RecordChanged" | "RecordVersionChanged" => write(rows, &chain, event)?,
-            "ResolverRecordLinked" => link(rows, &chain, event)?,
-            _ => {}
-        }
-    }
-    Ok(())
+    [partitions, values, ids, links]
 }
 
 fn write(rows: &mut RowSet, chain: &Value, event: &BlockEvent) -> Result<()> {

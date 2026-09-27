@@ -12,7 +12,7 @@ use super::{
     input::BlockEvent,
     keys,
     reduce::{
-        Context, current, json_boolean, key_of, load_rows, put, raw_lower, raw_text, set,
+        Context, Preload, current, json_boolean, key_of, load_rows, put, raw_lower, raw_text, set,
         text_or_null,
     },
     store::{Row, RowSet},
@@ -89,6 +89,20 @@ fn subregistry_key(chain: &Value, event: &BlockEvent) -> Option<Row> {
     ))
 }
 
+const KEYED: [(&tables::TableSpec, KeyOf); 4] = [
+    (&tables::NAME_ALIAS, name_alias_key),
+    (&tables::RESOLVER_ALIAS, resolver_alias_key),
+    (&tables::CHILD_EDGE_CANDIDATE, edge_key),
+    (&tables::PARENT_SUBREGISTRY, subregistry_key),
+];
+
+/// The alias, edge and subregistry keys one block's events name.
+pub(super) fn preload(chain: &Value, events: &[BlockEvent], into: &mut Preload) {
+    for (table, key) in KEYED {
+        into.add(table, events.iter().filter_map(|event| key(chain, event)));
+    }
+}
+
 pub(super) async fn apply(
     transaction: &mut Transaction<'_, Postgres>,
     context: &Context<'_>,
@@ -96,13 +110,7 @@ pub(super) async fn apply(
     rows: &mut RowSet,
 ) -> Result<()> {
     let chain = json!(context.chain_id);
-    let keyed: [(&'static tables::TableSpec, KeyOf); 4] = [
-        (&tables::NAME_ALIAS, name_alias_key),
-        (&tables::RESOLVER_ALIAS, resolver_alias_key),
-        (&tables::CHILD_EDGE_CANDIDATE, edge_key),
-        (&tables::PARENT_SUBREGISTRY, subregistry_key),
-    ];
-    for (table, key) in keyed {
+    for (table, key) in KEYED {
         let keys = events
             .iter()
             .filter_map(|event| key(&chain, event))

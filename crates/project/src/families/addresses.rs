@@ -19,7 +19,9 @@ use sqlx::{Postgres, Transaction};
 
 use super::{
     input::BlockEvent,
-    reduce::{Context, current, key_of, load_rows, put, raw_lower, raw_text, set, text_or_null},
+    reduce::{
+        Context, Preload, current, key_of, load_rows, put, raw_lower, raw_text, set, text_or_null,
+    },
     store::RowSet,
     tables,
 };
@@ -105,6 +107,20 @@ fn candidate_key(chain: &Value, event: &BlockEvent) -> Option<super::store::Row>
             json!(event.position.event_identity),
         ],
     ))
+}
+
+/// The fold and controller candidate keys one block's events name.
+pub(super) fn preload(chain: &Value, events: &[BlockEvent], into: &mut Preload) {
+    into.add(
+        &tables::ADDRESS_NAME_FOLD,
+        events.iter().filter_map(|event| fold_key(chain, event)),
+    );
+    into.add(
+        &tables::ADDRESS_CONTROLLER_CANDIDATE,
+        events
+            .iter()
+            .filter_map(|event| candidate_key(chain, event)),
+    );
 }
 
 pub(super) async fn apply(

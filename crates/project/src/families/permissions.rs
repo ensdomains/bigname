@@ -14,11 +14,11 @@ use super::{
     input::{BlockEvent, Position},
     keys,
     reduce::{
-        Context, current, json_boolean, key_of, load_rows, put, raw_lower, raw_text, set,
+        Context, Preload, current, json_boolean, key_of, load_rows, put, raw_lower, raw_text, set,
         text_or_null,
     },
-    store::RowSet,
-    tables,
+    store::{Row, RowSet},
+    tables::{self, TableSpec},
 };
 use crate::Result;
 
@@ -99,53 +99,9 @@ pub(super) async fn apply(
 ) -> Result<()> {
     let chain = json!(context.chain_id);
     let grants: Vec<Grant<'_>> = events.iter().filter_map(grant).collect();
-    let grant_keys = grants
-        .iter()
-        .map(|grant| {
-            key_of(
-                &tables::GRANT,
-                [
-                    chain.clone(),
-                    json!(grant.resource),
-                    json!(grant.subject),
-                    json!(grant.scope),
-                ],
-            )
-        })
-        .collect();
-    let aggregate_keys = grants
-        .iter()
-        .map(|grant| {
-            key_of(
-                &tables::RESOURCE_ADMIN_AGGREGATE,
-                [chain.clone(), json!(grant.resource)],
-            )
-        })
-        .collect();
-    load_rows(transaction, rows, &tables::GRANT, grant_keys).await?;
-    load_rows(
-        transaction,
-        rows,
-        &tables::RESOURCE_ADMIN_AGGREGATE,
-        aggregate_keys,
-    )
-    .await?;
-    let registration_keys = grants
-        .iter()
-        .map(|grant| {
-            key_of(
-                &tables::LIFECYCLE_KEY_STATE,
-                [chain.clone(), json!(grant.resource)],
-            )
-        })
-        .collect();
-    load_rows(
-        transaction,
-        rows,
-        &tables::LIFECYCLE_KEY_STATE,
-        registration_keys,
-    )
-    .await?;
+    for (table, keys) in grant_keys(&chain, &grants) {
+        load_rows(transaction, rows, table, keys).await?;
+    }
     for grant in &grants {
         let registration = registration_position(rows, &chain, events, grant);
         apply_grant(rows, &chain, grant, registration)?;
@@ -157,12 +113,7 @@ pub(super) async fn apply(
         .collect();
     let approval_keys = approvals
         .iter()
-        .map(|(key, _)| {
-            key_of(
-                &tables::ACCOUNT_APPROVAL,
-                std::iter::once(chain.clone()).chain(key.clone()),
-            )
-        })
+        .map(|(key, _)| approval_row_key(&chain, key.clone()))
         .collect();
     load_rows(transaction, rows, &tables::ACCOUNT_APPROVAL, approval_keys).await?;
     for (key, event) in approvals {
@@ -227,6 +178,65 @@ pub(super) async fn apply(
         put(rows, table, row, event)?;
     }
     Ok(())
+}
+
+/// The grant, admin aggregate, registration and approval keys one block's events name.
+pub(super) fn preload(chain: &Value, events: &[BlockEvent], into: &mut Preload) {
+    let grants: Vec<Grant<'_>> = events.iter().filter_map(grant).collect();
+    for (table, keys) in grant_keys(chain, &grants) {
+        into.add(table, keys);
+    }
+    into.add(
+        &tables::ACCOUNT_APPROVAL,
+        events
+            .iter()
+            .filter_map(approval_key)
+            .map(|key| approval_row_key(chain, key)),
+    );
+}
+
+/// Each grant's own row, its resource's admin aggregate and its resource's F2a registration.
+fn grant_keys(chain: &Value, grants: &[Grant<'_>]) -> [(&'static TableSpec, Vec<Row>); 3] {
+    let resource_keys = |table: &TableSpec| {
+        grants
+            .iter()
+            .map(|grant| key_of(table, [chain.clone(), json!(grant.resource)]))
+            .collect()
+    };
+    [
+        (
+            &tables::GRANT,
+            grants
+                .iter()
+                .map(|grant| {
+                    key_of(
+                        &tables::GRANT,
+                        [
+                            chain.clone(),
+                            json!(grant.resource),
+                            json!(grant.subject),
+                            json!(grant.scope),
+                        ],
+                    )
+                })
+                .collect(),
+        ),
+        (
+            &tables::RESOURCE_ADMIN_AGGREGATE,
+            resource_keys(&tables::RESOURCE_ADMIN_AGGREGATE),
+        ),
+        (
+            &tables::LIFECYCLE_KEY_STATE,
+            resource_keys(&tables::LIFECYCLE_KEY_STATE),
+        ),
+    ]
+}
+
+fn approval_row_key(chain: &Value, key: Vec<Value>) -> Row {
+    key_of(
+        &tables::ACCOUNT_APPROVAL,
+        std::iter::once(chain.clone()).chain(key),
+    )
 }
 
 /// The approval key an AccountPermissionChanged the builder admits addresses.

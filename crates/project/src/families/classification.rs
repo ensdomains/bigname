@@ -31,7 +31,7 @@ use super::{
     input::{BlockEvent, Position},
     keys::{self, ZERO_ADDRESS},
     manifests,
-    reduce::{Context, in_family, key_of, load_rows, raw_lower, set},
+    reduce::{Context, Preload, in_family, key_of, load_rows, raw_lower, set},
     store::{Row, RowSet},
     tables,
 };
@@ -61,7 +61,7 @@ const ALIAS_FAMILIES: [&str; 3] = [
     "basenames_base_resolver",
 ];
 
-fn resolver(value: Option<String>) -> Option<String> {
+pub(super) fn resolver(value: Option<String>) -> Option<String> {
     value
         .map(|value| value.trim().to_ascii_lowercase())
         .filter(|value| !value.is_empty() && value != ZERO_ADDRESS)
@@ -122,6 +122,32 @@ fn object(row: &Row, column: &str) -> Map<String, Value> {
         .unwrap_or_default()
 }
 
+/// The resolver keys one block's proposals, upgrades and activations name; a pointer move or a
+/// manifest change adds the rest while folding.
+pub(super) fn preload(
+    chain: &Value,
+    events: &[BlockEvent],
+    activated: &BTreeSet<String>,
+    into: &mut Preload,
+) {
+    let table = &tables::RESOLVER_CLASSIFICATION;
+    into.add(
+        table,
+        events
+            .iter()
+            .flat_map(proposals)
+            .map(|(address, _, _)| address)
+            .chain(
+                events
+                    .iter()
+                    .filter_map(upgrade)
+                    .map(|(address, _)| address),
+            )
+            .chain(activated.iter().cloned())
+            .map(|address| key_of(table, [chain.clone(), json!(address)])),
+    );
+}
+
 pub(super) async fn apply(
     transaction: &mut Transaction<'_, Postgres>,
     context: &Context<'_>,
@@ -131,7 +157,10 @@ pub(super) async fn apply(
     let table = &tables::RESOLVER_CLASSIFICATION;
     let chain = json!(context.chain_id);
     let pointer_deltas = pointer_deltas(rows);
-    let activated = activated(transaction, context).await?;
+    let activated = match context.prefetched {
+        Some(prefetched) => prefetched.activated.clone(),
+        None => activated(transaction, context).await?,
+    };
     let mut touched: BTreeSet<String> = events
         .iter()
         .flat_map(proposals)
@@ -177,6 +206,15 @@ pub(super) async fn apply(
             candidates
                 .into_iter()
                 .map(|address| address.to_ascii_lowercase()),
+        );
+        // Resolvers an earlier block of a rebuild range classified are stored too. One that
+        // range removed still reads from the table; classifying it again changes nothing, since
+        // a row goes only when nothing proposes its resolver.
+        touched.extend(
+            rows.overlay(table, Vec::new(), |_| true)
+                .iter()
+                .filter_map(|row| row.get("resolver_address").and_then(Value::as_str))
+                .map(str::to_ascii_lowercase),
         );
     }
     if touched.is_empty() {
