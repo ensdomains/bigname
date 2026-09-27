@@ -300,6 +300,52 @@ async fn a_one_shot_redo_whose_family_run_is_skipped_on_the_served_block_fails()
     scratch.cleanup().await
 }
 
+// A block of the family run that sees the input revision change fails the Project batch with a
+// retryable error. The restart loop runs the redo again and the families reach the served marker
+// under the new revision; before, the run was counted as a skip and the families stayed behind.
+// The revision moves by Interpret's redo attempt, once, when family block 15 commits.
+#[tokio::test]
+async fn a_revision_change_mid_run_fails_the_batch_and_the_restart_catches_up() -> Result<()> {
+    let scratch = ready_through("families_runner_revision", 30).await?;
+    seed_thirty_blocks_of_work(&scratch).await?;
+    sqlx::raw_sql(
+        "CREATE TABLE revision_moved (fired boolean NOT NULL);
+         INSERT INTO revision_moved VALUES (false);
+         CREATE FUNCTION move_revision() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN
+             IF NOT (SELECT fired FROM revision_moved) THEN
+                 UPDATE chain_phase_state
+                 SET redo_attempt_generation = redo_attempt_generation + 1
+                 WHERE chain_id = NEW.chain_id AND phase_name = 'interpret';
+                 UPDATE revision_moved SET fired = true;
+             END IF;
+             RETURN NEW;
+         END $$;
+         CREATE TRIGGER move_revision AFTER UPDATE ON project_family_marker
+         FOR EACH ROW WHEN (NEW.current_block_number = 15)
+         EXECUTE FUNCTION move_revision();",
+    )
+    .execute(scratch.pool())
+    .await?;
+
+    redo_project_through(&scratch, FamilySettings::default(), 30).await?;
+    let fired: bool = sqlx::query_scalar("SELECT fired FROM revision_moved")
+        .fetch_one(scratch.pool())
+        .await?;
+    assert!(fired, "the revision moved during the family run");
+    assert_eq!(
+        project_state(&scratch).await?,
+        ("completed".into(), Some(30), false)
+    );
+    assert_eq!(
+        marker(&scratch).await?,
+        Some(30),
+        "the retried batch brought the families to the served marker"
+    );
+    assert!(repair_completed_for_current_attempt(&scratch).await?);
+    scratch.cleanup().await
+}
+
 /// Whether the repair record completed the Project redo attempt now on the served row, on the
 /// marker as it stands, at the served block. Marker height alone would not show it.
 async fn repair_completed_for_current_attempt(scratch: &ScratchDatabase) -> Result<bool> {

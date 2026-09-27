@@ -677,10 +677,14 @@ async fn endpoint_exports_what_each_project_batch_scoped_and_wrote() -> Result<(
     ensure!(
         sample(
             &body,
-            "phase_runner_project_family_skips_total",
+            "phase_runner_project_family_block_seconds_count",
             &[&chain_label]
-        )? == 0.0,
-        "no family loop was skipped"
+        )? > 0.0,
+        "each family block is observed"
+    );
+    ensure!(
+        !body.contains("phase_runner_project_family_skips_total"),
+        "a family failure fails the batch; nothing counts skips"
     );
     for gauge in [
         "phase_runner_project_changed_events",

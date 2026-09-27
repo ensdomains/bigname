@@ -38,8 +38,8 @@ async fn record_state(fixture: &Fixture) -> Result<Option<Value>> {
 }
 
 // Each block reads the input token in its own transaction. A revision that changes between two
-// blocks of one run stops the run at the block that saw it, counted as a skip; the next run
-// adopts it under the same attempt and continues.
+// blocks of one run stops the run at the block that saw it with an error the runner retries; the
+// next run adopts it under the same attempt and continues.
 #[tokio::test]
 async fn a_revision_that_changes_between_two_blocks_stops_the_run() -> Result<()> {
     let fixture = Fixture::new("families_repair_revision", 20).await?;
@@ -59,11 +59,13 @@ async fn a_revision_that_changes_between_two_blocks_stops_the_run() -> Result<()
          EXECUTE FUNCTION move_revision();",
     )
     .await?;
-    let stopped = fixture.apply(14, FamilyMode::Normal).await;
-    let reason = stopped.skipped.clone().unwrap_or_default();
+    let error = fixture
+        .apply(14, FamilyMode::Normal)
+        .await
+        .expect_err("the run stops at block 13");
     assert!(
-        reason.contains("revision changed"),
-        "the run stops at block 13: {reason}"
+        error.to_string().contains("revision changed"),
+        "the run stops at block 13: {error}"
     );
     assert_eq!(fixture.marker().await?.0, Some(12));
     assert_eq!(
@@ -77,14 +79,116 @@ async fn a_revision_that_changes_between_two_blocks_stops_the_run() -> Result<()
         "DROP TRIGGER move_revision ON project_family_marker",
     )
     .await?;
-    let resumed = fixture.apply(14, FamilyMode::Normal).await;
-    assert_eq!(resumed.skipped, None);
+    let resumed = fixture.apply(14, FamilyMode::Normal).await?;
     assert!(resumed.revision_adopted);
     assert_eq!(fixture.marker().await?.0, Some(14));
     assert_eq!(
         fixture.marker_revision().await?,
         (Some("h2".to_owned()), Some(1))
     );
+    fixture.cleanup().await
+}
+
+// A block is published once. A run that planned from a generation another writer has since moved
+// past is refused by the generation fence with an error, and the refused block leaves nothing
+// behind. Here the other writer commits with block 13, so the run's next block, 14, is refused.
+#[tokio::test]
+async fn a_second_application_of_a_published_block_is_refused_by_the_generation_fence()
+-> Result<()> {
+    let fixture = Fixture::new("families_repair_generation", 20).await?;
+    seed(&fixture, 11..=14).await?;
+    fixture.apply(12, FamilyMode::Normal).await?;
+    let (_, _, generation_at_12) = fixture.marker().await?;
+    sql(
+        &fixture,
+        "CREATE FUNCTION bump_generation() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN
+             UPDATE project_family_marker SET sequence = sequence + 1
+             WHERE chain_id = NEW.chain_id;
+             RETURN NEW;
+         END $$;
+         CREATE TRIGGER bump_generation AFTER UPDATE ON project_family_marker
+         FOR EACH ROW WHEN (OLD.current_block_number = 12 AND NEW.current_block_number = 13)
+         EXECUTE FUNCTION bump_generation();",
+    )
+    .await?;
+    let token = families::input_token(&fixture.pool, CHAIN).await?;
+    let error = families::apply(
+        &fixture.pool,
+        CHAIN,
+        &families_support::marker(14),
+        FamilyMode::Normal,
+        &token,
+        &FamilyOptions::new(CONTENT_HASH),
+    )
+    .await
+    .expect_err("the generation fence refuses block 14");
+    assert!(error.to_string().contains("expected"), "{error}");
+    assert_eq!(
+        fixture.marker().await?,
+        (Some(13), Some(hash(13)), generation_at_12 + 2),
+        "block 13 committed with the other writer's generation"
+    );
+    let refused = fixture.exact().await?;
+
+    // Block 14, applied and undone, restores exactly what the refused run left.
+    sql(
+        &fixture,
+        "DROP TRIGGER bump_generation ON project_family_marker",
+    )
+    .await?;
+    let applied = fixture.apply(14, FamilyMode::Normal).await?;
+    assert_eq!(applied.blocks, 1);
+    assert_eq!(families::undo_to(&fixture.pool, CHAIN, 13).await?, 1);
+    assert_eq!(
+        fixture.exact().await?,
+        refused,
+        "the refused block left nothing behind"
+    );
+    fixture.cleanup().await
+}
+
+// A block whose commit fails leaves the families at the block before it, row for row: the run
+// returns the error, and the next run applies the block and equals a rebuild. The failure is a
+// deferred trigger, so it fires at COMMIT after every row of the block is written.
+#[tokio::test]
+async fn a_failed_block_commit_leaves_the_families_at_the_block_before_it() -> Result<()> {
+    let fixture = Fixture::new("families_repair_commit_failure", 20).await?;
+    seed(&fixture, 11..=14).await?;
+    fixture.apply(12, FamilyMode::Normal).await?;
+    let before = fixture.exact().await?;
+    // A sequence survives the rollback it causes, so the refusal fires once.
+    sql(
+        &fixture,
+        "CREATE SEQUENCE refuse_commit_once;
+         CREATE FUNCTION refuse_commit() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN
+             IF nextval('refuse_commit_once') = 1 THEN
+                 RAISE EXCEPTION 'injected commit failure';
+             END IF;
+             RETURN NEW;
+         END $$;
+         CREATE CONSTRAINT TRIGGER refuse_commit AFTER UPDATE ON project_family_marker
+         DEFERRABLE INITIALLY DEFERRED
+         FOR EACH ROW WHEN (NEW.current_block_number = 13)
+         EXECUTE FUNCTION refuse_commit();",
+    )
+    .await?;
+    let error = fixture
+        .apply(13, FamilyMode::Normal)
+        .await
+        .expect_err("the commit of block 13 fails");
+    assert!(error.to_string().contains("injected commit failure"), "{error}");
+    assert_eq!(fixture.marker().await?.0, Some(12));
+    assert_eq!(
+        fixture.exact().await?,
+        before,
+        "nothing of block 13 committed"
+    );
+
+    let applied = fixture.apply(13, FamilyMode::Normal).await?;
+    assert_eq!((applied.blocks, fixture.marker().await?.0), (1, Some(13)));
+    fixture.assert_rebuild_equal(13).await?;
     fixture.cleanup().await
 }
 
