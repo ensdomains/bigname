@@ -705,3 +705,23 @@ async fn without_a_safe_block_ranges_stop_256_blocks_below_the_target() -> Resul
     assert_eq!(rebuilt.ranges, 3);
     fixture.cleanup().await
 }
+
+// A range ends before the block that would take its events past the event cap, and a block
+// holding more events than the cap still makes a range of its own; the families equal the
+// block-by-block follow.
+#[tokio::test]
+async fn a_range_ends_before_the_block_past_its_event_cap() -> Result<()> {
+    let fixture = Fixture::new("families_range_event_cap", 40).await?;
+    pointers(&fixture, 10..=29).await?;
+    fixture.resolver_changed(17, 2, 5, R1).await?;
+    filler(&fixture, 17).await?;
+    follow(&fixture, 10, 30).await?;
+    let rebuilt = rebuild_equal(&fixture, 30, &in_ranges(30).with_range_caps(1024, 2)).await?;
+    assert_eq!(rebuilt.ranges, 11);
+    assert_eq!(
+        fixture.journalled_blocks().await?,
+        vec![10, 12, 14, 16, 17, 19, 21, 23, 25, 27, 29, 30],
+        "two events a range: [10], then pairs, and block 17's three events alone"
+    );
+    fixture.cleanup().await
+}
