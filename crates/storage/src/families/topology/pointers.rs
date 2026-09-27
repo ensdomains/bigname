@@ -1,7 +1,9 @@
 //! Minimal reads of the resource resolver pointer (`project_resource_pointer`) and the resolver
-//! links (`project_resolver_link`). The full pointer and record readers are being written in
-//! parallel under the same names and signatures; when both land, one copy of each is kept and
-//! this file goes.
+//! links (`project_resolver_link`). The records module (`families::records`, `links.rs`) now holds
+//! its own readers under the same names: both take the newest link, but records returns eager
+//! default candidates and provenance and optional wildcard fields, where these return narrower
+//! views. The two contracts must be reconciled, with explicit adapters and comparison tests, before
+//! one copy replaces the other.
 use anyhow::{Context, Result};
 use serde_json::Value;
 use sqlx::PgPool;
