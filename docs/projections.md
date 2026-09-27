@@ -103,6 +103,32 @@ timestamps or whose lifecycle changed in the affected range. From either seed,
 it follows only activated canonical ENSv2 subregistry edges to descendants. The
 deleted or orphaned release is not served, and unrelated topology components are
 not admitted.
+The expansion also seeds the node of an `AuthorityTransferred` derived from an
+ENSv1 or Basenames registry `Transfer`, whose `source_event` is `Transfer`. The
+registry emits `Transfer(node, owner)` from `setOwner`, so the event carries the
+transferred node in `node`
+(upstream: .refs/ens_v1/contracts/registry/ENS.sol:L9 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L63-L69 @ ens_v1@91c966f)
+(upstream: .refs/basenames/lib/ens-contracts/contracts/registry/ENS.sol:L8 @ basenames@1809bbc)
+(upstream: .refs/basenames/src/L2/Registry.sol:L100-L103 @ basenames@1809bbc).
+The adapter attaches a logical
+name only when the ownership it tracks for that node, or for a transfer to the
+zero address the registry read it recorded for the node, had already seen the
+node's [name surface](glossary.md#surface-name-surface). So the event can
+arrive without a logical name while the node has an active surface. Project
+rebuilds the child edge of the after state's `node`, and of the before state's
+`node` as a conservative extra candidate, and like any rebuilt child edge the
+walk also rebuilds that node's own subtree. The child row follows the latest
+registry owner of the active surface at that node, so without this seed an
+incremental batch would keep a child that a `Transfer` to the zero address
+removes, while a rebuild drops it. An `AuthorityTransferred` derived from
+`NewOwner` names the parent in `node`, because `setSubnodeOwner` emits
+`NewOwner(node, label, owner)` with the parent node
+(upstream: .refs/ens_v1/contracts/registry/ENS.sol:L6 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L75-L84 @ ens_v1@91c966f)
+(upstream: .refs/basenames/lib/ens-contracts/contracts/registry/ENS.sol:L5 @ basenames@1809bbc)
+(upstream: .refs/basenames/src/L2/Registry.sol:L113-L124 @ basenames@1809bbc).
+It does not take this path; its parent stays ancestor evidence.
 `project_events` remains the single filter for data that builders may serve.
 
 Code that builds a replacement projection row may read normalized events staged
@@ -258,9 +284,8 @@ outcomes, or durable traces.
 - The independently admitted `registry_announcement` edge for an ENSv1→ENSv2
   migration-created registry remains ordinary because it drives the watch plan,
   not a product projection. Project ignores every candidate downstream effect.
-  After an activated parent transition, authority selection may classify a positive
-  child-registration [authority proof](glossary.md#authority-proof), and child reachability may prove the current subregistry is its migration-created `WrapperRegistry`.
-  Both require the readable canonical association, active ordinary announcement, and matching topology; reachability additionally requires non-empty association evidence contained in the parent boundary. The association proves neither result by itself.
+  After an activated parent transition, child reachability may prove the current subregistry is its migration-created `WrapperRegistry`.
+  That requires the readable canonical association, active ordinary announcement, matching topology, and non-empty association evidence contained in the parent boundary. The association proves nothing by itself, and authority selection does not read it.
 - Coverage and support are explicit. They are never inferred from row presence
   or a historical ingest range.
 - Verified provider answers are request-scoped lookup output, not projection
@@ -281,29 +306,27 @@ outcomes, or durable traces.
 | `resolver_current` | chain and resolver address | resolver overview |
 | `record_inventory_current` | resource plus record boundary key | indexed record inventory and values |
 | `primary_names_current` | address, coin type, and namespace | declared primary-name claims |
-| `project_*` owned key families | per family, see [below](#owned-key-families) | none yet: unread shadows until the per-block publication reads them |
+| `project_*` owned key families | per family, see [below](#owned-key-families) | no served path yet: the step 3 [shadow readers](glossary.md#shadow-read) (`crates/storage/src/families/control`) read them in the test harnesses only, until the per-block publication reads them |
 
 `surface_bindings` remains identity history rather than a `_current`
 projection. Exact-name reads ordinarily first select the logical name's
 [`authority epoch`](glossary.md#authority-epoch), then select fields only from
-that epoch's binding and resources at the requested position. An activated
-ENSv1→ENSv2 authority proof may select a closed ENSv2 binding after release;
-that [released v2 authority](glossary.md#released-v2-authority) does not fall
-back to an active retained ENSv1 binding. A released ENSv1 lease with no
+that epoch's binding and resources at the requested position. A released ENSv1 lease with no
 revived custody likewise selects its closed lease binding,
 or the closed NameWrapper binding that stands for a lease registered through
 the NameWrapper, or the open registry-only binding under which the lease lapsed
 after its token was transferred without `reclaim`,
-as a [released v1 authority](glossary.md#released-v1-authority) tombstone. The exact
-[shared ENS infrastructure](glossary.md#shared-ens-infrastructure) no-proof
-exception selects a current ENSv2 arm when ENSv1 evidence is current or
-historical, without establishing an authority epoch, so its epoch start and
-proof fields remain null. Historical ENSv2 evidence without a current ENSv2
-binding does not qualify. An ordinary name without a proof follows the chain
+as a [released v1 authority](glossary.md#released-v1-authority) tombstone. A
+name without a proof, the root, `eth`, `reverse`, and `addr.reverse` included,
+follows the chain
 ([ADR 0007](adrs/0007-follow-the-chain-ens-authority.md)): a current ENSv2
-binding selects ENSv2, with its epoch starting at that binding and null proof
-fields, and otherwise ENSv1 decides unless a qualifying ENSv2 release tombstone
-or regime applies.
+binding selects ENSv2, with its epoch starting at that binding and a migration
+recorded only as history; a released or expired ENSv2 registration with no
+later ENSv2 reservation that is still live stays with ENSv2 as a
+[released v2 authority](glossary.md#released-v2-authority) tombstone whatever
+ENSv1 holds, and ending that reservation restores the tombstone; a live ENSv1
+binding selects ENSv1 otherwise; and a name with no open binding follows its
+history.
 
 ## Exact-name projection
 
@@ -681,8 +704,13 @@ ENSv1→ENSv2 migration path: `unwrapped`, `unlocked_wrapped`, and
 `locked_child` parents retain only a [migratable child](glossary.md#migratable-child)
 through their [migration registry](glossary.md#migration-registry-wrapperregistry).
 An unknown activated path is a Project data-integrity failure. Child authority
-selection then chooses among the surviving arms; cross-era recency never chooses
-the arm. A surviving locked-path row cites the matched association's stable
+selection then keeps only the arm the child's own authority selects; cross-era
+recency never chooses the arm. A released ENSv2 child is a released v2
+authority tombstone and publishes no relation on either arm; a child publishes
+its ENSv1 relation only when its own selected arm is ENSv1 and the relation
+survived that filter. Any entry the child has had in the parent's migration
+registry, released or not, makes it non-migratable, so a released child of a
+locked parent publishes no relation while its ENSv1 wrapper binding is open. A surviving locked-path row cites the matched association's stable
 logical-edge and correlation identities plus its source manifest; its row-level
 manifest version therefore accounts for the association that authorized the
 migration registry. Its `normalized_event_ids`, `event_identities`,
@@ -1122,6 +1150,8 @@ name and resource consumers of that resolver. Incremental staging includes the
 resolver's canonical link and record history through the target, including
 updates with null name/resource fields. Full rebuild and redo use the same
 selection rule; retracted events never remain as synthetic per-name facts.
+On redo, a published row that cites an event that was deleted, is no longer
+canonical, or is no longer activated is rescoped and rebuilt.
 
 `resolver_current` summarizes one resolver contract across readable bound names,
 aliases, record links, roles, record evidence, and normalized events. Embedded
@@ -1626,7 +1656,13 @@ record-id records with resolver links, grants and account approvals, aliases,
 child edges, reverse tuples and claims, and the address associations. Each row
 belongs to one key and holds what the latest events of that key left, clears
 included: a zero pointer, record id `0`, a revoked grant or an inactive alias
-stays a row. A row goes only when nothing remains for its key.
+stays a row. A row goes only when nothing remains for its key. Each grant also
+carries `registration_position`, state new to the families rather than a copy of
+a served value: the position of the resource's latest `RegistrationGranted` or
+`RegistrationReserved` before the grant, earlier events of the grant's own block
+included, so the publishing steps can tell which registration of the resource a
+grant was written under. The served permissions read keeps no such value and
+masks by the resource's current registration.
 
 Registration and lease state also keeps every registration, renewal, release,
 reservation, expiry change and token transfer of a lease or ENSv2 triple as a
@@ -1634,36 +1670,426 @@ row of its own, never pruned. Each row keeps the name the adapter emitted,
 which nothing rewrites, beside the name the ENSv1 registrar and wrapper linking
 gives it. The address-to-name and address-to-record index rows are not kept
 state: after every block and every undo they are derived again for the keys the
-block touched. The resolver classification table exists but is not filled yet.
+block touched. Resolver classification classifies a resolver at the block that
+changed its candidates, the pointers that name it, its proxy upgrades, a
+discovery edge, address or declaration of it, or the [active manifest
+set](glossary.md#active-manifest-set-family-block), with the
+manifests active at that block, the way the served resolver build does.
 
-These tables are shadows today. Nothing reads them, and no served value
-depends on them. After each Project batch commits and its progress is
-recorded, the phase runner applies the families block by block, each block in
-a transaction of its own, from the family marker (`project_family_marker`) up
-to the served marker. A block applies only on top of the block before it on
-the readable lineage. It records the before-image of every row it changes and
-the prior marker in `project_family_undo`, advances the marker, and drops
-journal rows more than 256 blocks below it. A failure stops the loop for that
-batch, leaves the served publication and its progress as they were, and the
-next batch catches up from where the marker stands. `--project-families false`
-(or `BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES=false`) turns the loop off.
+These tables are shadows today. No production serving reader reads them, and
+no served value depends on them; only the family reducers, the step 3
+[shadow readers](glossary.md#shadow-read) in the test harnesses, and tests do.
+After each Project batch commits and its progress is recorded, the phase runner
+applies the families block by block, each block in
+a transaction of its own, from the [family marker](glossary.md#family-marker)
+(`project_family_marker`) up to the served marker. A batch's publication never
+waits for them, since it has committed before they run, but the next batch
+waits for one budgeted family run. The hook is driven by served batches and its
+pending work is held in memory, so a restart at a stalled head does not run the
+families until the next batch; while Interpret is in redo they do not advance,
+and they resume on the first batch after it clears. The families trail the
+served marker until the loop catches up, and
+`phase_runner_project_family_lag_blocks` reports by how much. It reads 0 only
+when the family marker is the served block, hash included. A marker above a
+lowered served marker counts the blocks in between, and a marker off the served
+branch (orphaned, or another hash at the served height) counts at least one
+block. One run applies or
+undoes at most 256 blocks (`--project-families-max-blocks`, or
+`BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES_MAX_BLOCKS`), so a rebuild or a long
+catch-up spans several runner cycles. The one-shot `redo` command has no later
+cycle, so after its batch it runs the loop again, in normal mode, while each
+run spends its budget, skips nothing and applies or undoes at least one block.
+A stop, a failed block or an Interpret revision change can still end it early.
+The served redo stays recorded, but the command exits non-zero with "family
+repair incomplete". The shortfall is recorded when the family run takes its
+pending work, before the run starts, and cleared only by a returned outcome
+that is not a skip and stands on the served block, hash included. So a skip
+while the family marker already stands on the served block still fails the
+command. The error always names the served marker's block and hash, and
+reports the family marker in one of three ways:
+
+- a run that was abandoned before it returned (its future dropped by a stop)
+  reports the family marker as unavailable;
+- a run that returned reports the marker it observed;
+- a run that returned with no family marker at all reports "no block"; a
+  marker whose hash is off the readable lineage is still reported as its block
+  and hash.
+
+A stop leaves family completion unconfirmed rather than failed: the final
+family block can commit before the stop drops the run, and the command still
+exits non-zero. Rerunning the same redo repairs the families once the cause is
+gone. The run reads the Interpret and Project
+rows of `chain_phase_state` within 2 seconds or is skipped for that batch.
+`--project-families false` (or `BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES=false`)
+turns the loop off.
+
+A block applies only on top of the block before it on the readable lineage.
+Inside its transaction it locks the family marker and the [repair
+record](glossary.md#repair-record) (`project_repair_record`) and requires both
+as the run planned them: the marker's generation (`sequence`, advanced by every
+block and undo) and the repair's state and attempt. It then reads the
+Interpret row's content hash and redo attempt, the [family input
+revision](glossary.md#family-input-revision), and stops the run, counted as a
+skip, when that revision differs from the one the run applies under or
+Interpret is in redo; the next run adopts the new revision or waits. The block
+records that revision and the whole input token on the marker. The run reads
+the chain's manifest updates once, before its first block; each block takes its
+active manifest set from that read and records the set's key, and a rebuild
+takes the declaration start blocks of its work list from the same read, so an
+update written during a run applies from the next run. The block writes the
+before-image of every row it changes and the prior marker to the [family undo
+journal](glossary.md#family-undo-journal) (`project_family_undo`) and advances
+the marker. A block's events are taken once per `event_identity`, which
+`normalized_events` already keeps unique; two deliveries of one identity that
+disagree keep the first in the [canonical event
+order](glossary.md#canonical-event-order) and count on
+`phase_runner_project_family_duplicate_anomalies_total`. A failure stops the
+loop for that batch and leaves the served publication and its progress as they
+were; the next batch catches up from where the marker stands.
+
+Facts within one emission batch apply in adapter write order: within one
+block, transaction and log the trailing
+[emission ordinal](glossary.md#emission-ordinal) of `event_identity` decides
+before the identity bytes (D12 as amended by Tate on 2026-09-26; the
+[canonical event order](glossary.md#canonical-event-order)).
+A NameWrapper transfer writes the delegate approval clear, the old holder's
+revoke, the new holder's grant and a retained delegate's re-grant at one log,
+so the name stays wrapped after a holder-to-holder transfer and a recipient
+that was the approved delegate keeps its holder powers. Facts with no
+transaction or log keep the identity byte order. The ordinal counts from 0
+again for every emission batch, and a source can carry several batches at one
+log. No two batches of the same source are known to write the same family key.
+Between batches the comparator's order is a disclosed precondition, not the
+adapter's write order: where batches of two sources write one key from one
+log, the fact with the higher ordinal (then the higher identity bytes) wins,
+not the one inserted last.
+
+One cross-batch instance is confirmed, and it differs from the served read in
+provenance only: a NameWrapped log writes the registry-node pointer from the
+wrapper (ordinal 4 or 5, depending on whether a SurfaceBound was emitted) and
+from the registry-read surface materialization (ordinal 0) with the same
+resolver. The families keep the wrapper row, the name's authority after
+NameWrapped, while the served read's generated-id tie-break keeps the registry
+row, so the resolver value agrees while the resource, source family and event
+attribution differ (`families_ordering.rs`,
+`name_wrapped_pointer_keeps_the_wrapper_row`, and
+`mirror_resolver/name_wrapped_sources.rs`, which drives the real adapter and
+the served mirror selector).
+
+Four more cross-batch shapes are read from the adapter code and pinned in
+`families_ordering_realistic_b.rs`; no adapter run has produced any of them
+yet:
+
+- F1 binding predecessor (`:701-716`): a NameWrapped over a registry-only
+  authority whose surface was unknown opens the wrapper binding (ordinal 3)
+  and a sourced registry-only binding (ordinal 0) at one log. When a later
+  log of the block makes the registry-only authority current again, its
+  binding hands off from the wrapper binding, and the sourced one has no
+  predecessor.
+- F4 registrar pointer (`:917-946`): a registrar `NameRegistered` that promotes
+  a pre-surface registry authority (the registry-authority surface
+  materialization) and also moves the name's authority to the registrar writes
+  the pointer from the registrar (`ResolverChanged:authority`, ordinal 6) and
+  from the sourced materialization (ordinal 1) with one resolver
+  (`crates/adapters/src/schema_v2/protocol/v1/registrar.rs:452-460`,
+  `:543-566`; `authority_transition.rs:215-285`). The families keep the
+  registrar row: a provenance difference.
+- F13 controller (`:947-975`): in the same `NameRegistered` log the sourced
+  registry-only SurfaceBound (ordinal 0) sets the controller to the registry
+  owner and the registrant's grant (ordinal 2) sets it to the registrant. The
+  families keep the registrant (ALICE in the fixture). The served controller
+  fold (`crates/project/src/builders/address_names.rs:228-237`) orders one log
+  by `normalized_event_id`, and Interpret inserts the sourced batch last, so
+  it would keep the registry owner. This is a value difference, not provenance
+  only.
+- F4 enrichment against the registrar surface (`:976-1046`): a controller
+  `NameRegistered` naming a surface the registry-only authority did not have,
+  with a proven registrar retained, writes the pointer from the enrichment's
+  resolver link replay (ordinal 0) and from the registrar surface snapshot
+  (ordinal 3). The families keep the snapshot's registrar row; the fixture
+  gives both one resolver.
+
+No exemption covers a cross-source value difference: a reader ported to the
+families must treat the F13 shape as a value change if an adapter run ever
+produces it. A registrar log's registry-read materialization never meets a
+registrar `ResolverChanged` at the same log, because it arises only when the
+registrar event leaves the name's authority where it was.
+
+The served builders do not share one tie-break at a log. Most selectors break
+it by `normalized_event_id DESC`, the insertion order, which agrees with the
+ordinal inside one batch and favours a sourced batch across batches. The
+children builder (`crates/project/src/builders/children.rs:41, 72, 160, 182,
+217, 355, 507`), the name-authority stage
+(`crates/project/src/builders/name_authority/stage.rs:231, 259, 323, 382`)
+and the name topology builder (`name_topology.rs:541, 578`) break it by
+`event_identity`, the old byte rule. The served binding choice
+(`name_authority/build.sql:53-56, 391-394, 512-519`; `stage.rs:78-81`) takes
+`surface_binding_id DESC` and ignores event order. Insertion order equals
+emission order only because Interpret writes a batch in list order
+(`crates/interpret/src/write/normalized.rs:44`), and a replayed identity keeps
+its old id, so a generated-id tie-break is not stable across replay; the
+families' rule does not use generated ids. The step that ports a served reader
+to the families (step 7) must use this rule with the SQL parse the glossary
+gives, which checks the digits before it casts.
+
+Undo rows are kept back to the lowest of: 256 blocks below the family marker,
+the chain's finalized block, its safe block, and the block an active repair
+still has to undo to or replay from. Without a finalized and a safe block
+nothing is pruned.
 
 A Project redo undoes the families from their journal down to the block before
 the redo range and replays them to the served marker. A marker left on a block
 that is no longer readable is undone the same way. A redo below the kept
 journal, a redo attempt the families never saw, or a served rebuild clears the
-families and rebuilds them from the blocks that carry events. The repair
-record (`project_repair_record`) describes the latest of these: its attempt,
-reason, trusted base, replay target, state and, once done, the marker it
-completed at. Each step is its own transaction, so a run that stops between
-blocks is resumed by the next. Each block also records the Interpret row's
-content hash and redo attempt it read, or nothing while Interpret is in redo.
+families and rebuilds them from the blocks that carry events or surface
+bindings or start or stop a resolver activation, so a rebuild visits every
+block the normal path writes a binding candidate in. So do families whose marker records a content hash
+other than the running binary's, which covers a served rebuild whose family run
+was skipped. An undo journal the families refuse, such as one whose prior
+markers form a cycle, does not trigger a rebuild: every run that needs it
+stops with a data-integrity skip, logs a warning and counts on
+`phase_runner_project_family_skips_total`, changing nothing, until an operator
+runs a rebuild or a redo below the kept journal. That is deliberate: a
+malformed journal is a defect to look at, not state to rebuild over silently.
+The repair record describes the latest of these: its
+attempt, reason, trusted base, replay target, state (`undoing`, `replaying`,
+`rebuilding` or `complete`) and, once done, the marker, generation and input
+content hash it completed with. Each transition commits with the work it
+describes: the reset commits with the rebuild's intent, the last undo with the
+move to replaying, and the final replayed or rebuilt block with the
+completion. A run that stops between blocks is resumed by the next. A redo
+retried after it completed is recognised only while the marker, its
+generation and the content hash still match. A rebuild refreshes the planner
+statistics of the family tables after 1, 2, 4, 8, ... blocks rebuilt since its
+reset, counted across runs from the generation the reset recorded.
+
+The families differ from the served build in these known places, which the
+steps that read them must key on. Each label names a family as the
+[owned key family](glossary.md#owned-key-family)
+entry maps them to tables and reducers:
+
+- F1: an `AuthorityEpochChanged` `registry_only` at an earlier block than a
+  binding does not mark the binding registry-only; the served handoff takes an
+  epoch on the name and resource at any position. Two synthesised bindings of
+  one name at the same position order by `event_identity`, then
+  `surface_binding_id`; the served selection orders them by
+  `surface_binding_id` alone.
+- F2b: a decimal-spelled wrapper expiry (`1.0`, `1.5`, `1000.0`) is null in
+  `project_wrapper_state.expiry_seconds`, because the family reads payloads
+  without arbitrary precision and a decimal can arrive rounded. The served
+  wrapper expiry expression keeps it as the numeric value
+  (`address_names.rs` `wrapper_expiries`, `children.rs`
+  `latest_wrapper_expiries`, `name_current/build.sql` `expiry_seconds`), while
+  the served bigint casts fail on it and fail the batch: the scope fuses cast
+  on decimal-spelled fuses whose numeric value is between 0 and
+  9223372036854775807, inclusive, and `name_current`'s
+  `servable_expiry_seconds` on an integral decimal expiry from 1 to
+  253402300799. The adapter writes both
+  numbers as JSON integers.
+- F2c: `AuthorityTransferred` and `SubregistryChanged` both set the owner
+  group, so a `SubregistryChanged` after a zero-getter transfer replaces the
+  owner and the served "ownerless" verdict cannot be recovered from the node
+  row; `project_registry_owner_event` keeps every owner-setting event of the
+  node by position, with its name, resource, authority kind, registry owner and
+  unmasked-word flag, for it. An
+  observation's `target_resource_id` is the name's ENSv1 or Basenames binding
+  active at the block, not the served authority selection.
+- F3: the pointer-family priority is approximated from the F4 and F5 pointer
+  rows that name the resolver, so an unnamed ENSv2 pointer can outrank an
+  ENSv1 event proposal. A resolver with candidates but no active manifest keeps
+  one `resolver_manifest_not_active` row. Discovery-edge and address activity
+  honours the wall-clock `deactivated_at` as the served build does, and a
+  manifest update with no block applies to every block.
+- F4 keeps the ENSv1 registry, registrar and wrapper families only, so a
+  `ResolverChanged` of another family with no resource (a Basenames reverse
+  node, for instance) lands in no family table.
+- F4 keys a pointer to its child node first (`pointer_node` in
+  `crates/project/src/families/keys.rs`), while today's reverse claim matches a
+  pointer's `node` only. A state-derived ENSv1 `ResolverChanged` that carries
+  the parent in `node` and a reverse node in `child_node` (a reverse node
+  reclaimed with the same resolver after its reverse name was wrapped and
+  unwrapped) is that reverse node's pointer here and skipped there; the
+  resolver agrees and `claim_provenance.resolver_event_id` differs (pinned in
+  `crates/project/tests/primary_names_reverse_node/reclaim_after_unwrap.rs`).
+- F5 keeps the unnamed resolver clear the interpreter emits at an ENSv2
+  root-registry TLD expiry. The served pointer read takes named
+  `ResolverChanged` only, never sees that clear, and keeps an inventory row the
+  name no longer reaches. The pinned registry returns the zero address from
+  `getResolver` once the token has expired, which F5 matches (upstream:
+  .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L255-L258,
+  L628-L630 @ ens_v2@a971bd64).
+- F7 keeps a `ResolverRecordLinked` whose payload has no resolver; the served
+  link reader requires the payload resolver equal to the emitter.
+- F14's node index (`project_address_record_node_index`) is a superset: it
+  keeps every EVM-shaped addr value past a version change, under the
+  `logical_name_id` it was written under, because a later link can keep such a
+  value served. The reader owns the version and link boundary (the table
+  comment, set by schema-migration `20260926101200`).
+- The undo journal is not pruned while the chain has no finalized or safe
+  head.
+
+Tests compare every family table and the marker, less its generation, as
+ordered JSON text before a block and after its undo, and compare the
+incremental families with a rebuild from scratch; both run the same reducers,
+so they cannot catch a mistake the two share.
 
 The per-block publication will read these tables in place of the builders;
-until then they cost one extra pass per batch, reported as
-`phase_runner_project_families_seconds`,
-`phase_runner_project_family_lag_blocks` and
-`phase_runner_project_family_skips_total`.
+until then they cost one extra pass per batch after the served commit,
+reported as `phase_runner_project_families_seconds`,
+`phase_runner_project_family_lag_blocks`,
+`phase_runner_project_family_skips_total` and
+`phase_runner_project_family_duplicate_anomalies_total`.
+
+The first readers of these tables live in the storage crate
+(`bigname_storage::families::control`) and run only in tests. They rebuild a
+name's registration and control blocks from the lease, wrapper, registry and
+identity families, and a resource's permission rows, restriction block,
+registry binding and registry-operator rows from the grant, approval, wrapper
+and registry families, all at the publication's block clock. Every selection of
+a latest event takes it in the canonical order (D12 as amended: block,
+transaction, log, then the emission ordinal of a raw log's fact, then event
+identity). Binding candidates are not events: two at the same block,
+transaction and log still break the tie by binding id, as the served stage does,
+and a fixture pins that. The registration's wrapped registrar lease is an event
+selection, not a candidate one: it is the lease the latest NameWrapper
+SurfaceBound of the resource recorded, taken in the canonical order, where
+today's builder takes block and generated id. The Project fixture
+tests and the phase runner's fixture-corpus run compare each value with what the
+production readers serve at the same publication, field by field. Every log
+read these checks make takes only the
+[publication-visible events](glossary.md#publication-visible-event): activated,
+canonical, at the canonical lineage's hash for their height and at or below the
+target, the set family intake reads. A comparison is for one publication, a
+height and its block's hash: before its first read and after its last, the block
+must be readable and the families and the served publication must both stand on
+it, or it reports nothing. That validates the endpoints only: the reads between
+them are separate reads, not one snapshot, so a change to another publication
+and back between the two checks is not seen. The harness is meant for a quiescent
+target, such as a disposable copy. Before any difference of a name can pass,
+the families must hold exactly the retained facts the log gives it under step
+2's retention rules, in both directions: the binding candidates with their
+handoffs, the epoch starts, triples, key states and retained lifecycle events,
+each event under the key step 2 derives, and the node's owner-setting events;
+otherwise the name gets no excuse. A name's checks then read its retained
+lifecycle events rebuilt from that log rather than the family rows, and those
+rebuilt events read in the canonical order must give the shadow value, so a
+missing, extra or misfiled retained event fails the fields it decides. Each
+family row must also equal its rebuild whole, so a wrong fact on a retained
+event leaves every differing field of the name a mismatch. A resource has its
+own guard for three fields only, its permission rows, admin powers and
+restriction block: their excuse needs the resource's retained events, and its
+root's, to match the log, and each row to equal its rebuild, so a wrong
+retained fact leaves those three a mismatch. Its registry binding and operator
+rows are checked separately, against observations rebuilt from the log (below).
+Each candidate's surface
+namehash must be the namehash part of its name, and the staging candidates of
+every unnamed registrar event of the name, whichever name they belong to, must
+be what the log gives. The wrapper rows are not rebuilt from the log, so a name
+that reads one gets no excuse. A missing or rekeyed wrapper row reads as no
+modifier on every side, so a name also gets none when the log gives an event the
+wrapper family folds on a resource it reaches, whether or not a row is there. The retained decoded name is not read, so a wrong
+value there is not caught by these checks. A differing field passes in two cases only. The first is a disclosed same-block ordering case: reading the
+rebuilt events with that block in the old generated-id order must give exactly
+the served value. For a resource's permission rows, admin powers and restriction
+block it passes only in one direction: the resource's rebuilt events keep the
+registration live in today's order and lapse it canonically, the served value is
+not empty, and the families read in today's order give it. That read also
+folds the registry root's admin powers in today's order, so when the resource
+has a root, the root's retained events must match the log too; if they do not,
+the resource's permission-row, admin-power and restriction excuses are refused.
+Its registry-binding and operator-row checks are separate.
+A served empty value against a family row is a mismatch. A live registration's restriction block
+reads its registry root's admin powers, so it also passes when only the root's
+lapse differs between the orders, the whole block read in today's order equals
+the served one and the canonical read the shadow one. The canonical side is the
+families read against themselves, so the rule is sound for the report, not for
+the field: a wrong root value leaves the root's own admin powers a mismatch, and
+a wrong child admin power the live root also holds can let the child's block
+pass while the child's own admin powers stay a mismatch; either fails the run.
+That holds because the root is compared itself: the compared resources are closed
+over the roots their served summaries name, so a root with no served summary or
+permission row of its own is still compared, and a resource whose root is not
+in the compared set gets no permission-row, admin-power or restriction excuse.
+The effective-permission reader selects direct rows by resource id, so it can
+serve another chain's row on a compared resource; every such row is a mismatch
+(`other_chain_rows`). That check covers the compared resources, closed over
+their roots, and nothing else: a resource outside that set is not read.
+The resource-side excuse reads the wrapper rows too: the permission rows and
+restriction block it reads in both orders come through the resource's wrapper
+row, which masks the powers when it has a modifier
+(crates/storage/src/families/control/permissions/grants.rs:84). It has no
+wrapper refusal; that side is the families read against themselves, the same
+disclosed class as the root rule. These checks run for
+the items that differ: a family value equal to the served one is not a
+difference. Several producer events can share one position. One ENSv1 NewOwner
+log yields a SubregistryChanged and then an AuthorityTransferred; the adapter
+numbers them 0 and 1, so the families, by emission ordinal, and today's
+builders, by generated id, both keep the AuthorityTransferred as the
+registry-binding observation of the name, and a replay of a real NewOwner log
+reads equal. Producer events that tie on position and ordinal, as facts of
+different sources can, fall to identity bytes in the families and to generated
+id in today's builders, and the fixtures cover that tie with synthetic
+identities. So the observations are rebuilt from the
+publication-visible event log in both orders, each identity's latest event
+chosen from the log and not from the family row, and a binding field passes only
+when the family observations equal their canonical rebuild, the canonical
+binding equals the shadow one whole, today's binding equals the served one
+whole, and the two select different events. The control block's same-block read
+orders the node's owner-setting events, the epoch starts and the registry-only
+SurfaceBounds by generated id too. A name field passes only when the epoch
+starts and the SurfaceBounds, which the registration's authority kind and key
+read too, equal their rebuild from the event log, and a control field only when
+the owner-setting events do as well. The second is a named
+cause whose own check holds for that field. Both named causes are served-side
+bugs. A step 2 family gap is never a named cause: where it changes a compared
+field and the checks above see it, the field stays a mismatch and fails the run
+until the owning reducer is fixed.
+
+Under Tate's ruling an expired or released ENSv2 registration stays ENSv2 and
+is served unregistered. Before step 6 (`main` at `de24ff32`) three served-side
+bugs broke that rule. Step 6 fixed the third and narrowed the first; the second
+remains. The harness reports what remains under two named causes:
+
+- Narrowed by step 6. When the interpreter's path-expiry release names only the
+  token resource, today's registration fold reads the name's own lifecycle rows
+  (name_current/build.sql:322, :383-389) and never sees it. Once the name's
+  ENSv2 binding is closed, the release can be the deciding fact of a released
+  tombstone (name_authority/build.sql:246-271), and `name_current` serves that
+  fact on the tombstone's resource (name_current/build.sql:349-364); both sides
+  then serve it released and the fields are equal. With the binding still open,
+  the fold serves the registration as active and the families serve it as
+  released. The harness counts that under
+  `served_membership_skips_unnamed_path_expiry`, which now covers only an open
+  binding. It includes `registration/expiry`: the families present the
+  release's own expiry (name_current/build.sql:45-49) where today's fold serves
+  the name's expiry rows, and the field is counted only where the two differ.
+  The run prints the names it finds in this shape.
+- Not fixed by step 6. The selection leaves a name with no authority arm when
+  no rule of name_authority/build.sql:440-450 applies, as for a name with ENSv2
+  and Basenames history, nothing open and no released ENSv2 tombstone. The
+  registration selection reads the missing arm as ENSv2
+  (name_current/build.sql:362) and can select an ENSv2 release, but the
+  presentation compares the raw arm with ENSv2 (name_current/build.sql:99,
+  :104, :113), so it keeps the release's expiry and does not close the control
+  block. The families decide both with one resolved arm and serve it released.
+  The harness counts this under `served_release_presentation_reads_the_raw_arm`,
+  and the fixture
+  `a_release_with_no_selected_arm_is_presented_as_an_ensv2_release` pins it.
+- Fixed by step 6. When the interpreter knows the name, it also closes the
+  ENSv2 binding at expiry. If the name had an open ENSv1 lease, the served name
+  authority used to select arm ens_v1 and serve that lease, and the shadow
+  reads, which take the authority selection from the served row as input,
+  agreed. Step 6 selects ENSv2 for a released tombstone before any ENSv1
+  binding is considered (name_authority/build.sql:443, :246-271). The fixture
+  `a_real_path_expiry_with_an_ensv1_lease_stays_released_under_ensv2` now pins
+  both sides at arm ens_v2, registration released and control unregistered,
+  and nothing is counted.
+
+The comparison covers the fields the readers list. It leaves out `created_at`,
+the lapsed registration's authority, the child rows and the whole-history
+evidence columns. Every test asserts its counted fields exactly, and a differing
+listed field with no disclosed case or named cause fails the run. These are
+[shadow reads](glossary.md#shadow-read). No API route calls them.
 
 ## Index baseline
 
@@ -1684,7 +2110,8 @@ new truth family.
   replay coordination, not projection writes.
 - Project reads canonical interpreted input and owns every projection write.
   Project also owns the [owned key families](#owned-key-families), their
-  marker, undo journal and repair record; they are unread shadows.
+  marker, undo journal and repair record; no served path reads them. The
+  step 3 shadow readers read them in the test harnesses only.
 - The API reads projections and request-scoped lookup output.
 - Storage exposes typed reads and phase publication boundaries; it does not
   grant adapters or API handlers a projection write shortcut.

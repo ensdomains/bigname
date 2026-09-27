@@ -872,3 +872,175 @@ async fn unlocked_to_locked_reclassification_restages_previously_hidden_children
     assert!(!incremental.as_array().unwrap().is_empty());
     Ok(())
 }
+
+// The open-ENSv1 WrapperRegistry case with the rows Interpret writes for it (the adapter test
+// `a_released_parent_owner_child_keeps_its_open_v1_wrapper_binding` checks those rows from raw
+// logs): the locked parent's owner registers the child directly into the parent's migration
+// registry, which opens the child's ENSv2 binding, and later unregisters it, which closes that
+// binding with a release on the same resource. The child's ENSv1 wrapper binding stays open with
+// `PARENT_CANNOT_CONTROL`. The entry makes the child non-migratable for good, so the children
+// projection publishes no relation on either arm.
+// (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L293-L307 @ ens_v2@a971bd64)
+#[tokio::test]
+async fn released_wrapper_registry_child_with_an_open_v1_binding_publishes_no_relation()
+-> Result<()> {
+    let (_db, pool) = database("issue503_released_wrapper_registry_child").await?;
+    seed_identity(&pool, &["ens_v1"]).await?;
+    seed_v1_relation(&pool, OWNER, 10).await?;
+    seed_wrapper(&pool, 65_536, 2_000_000_000).await?;
+    seed_parent_migration_registry(&pool, 10).await?;
+    seed_migration(&pool, "locked_wrapped", 10, "parent-migration").await?;
+    sqlx::query("INSERT INTO surface_bindings (surface_binding_id, logical_name_id, resource_id, binding_kind, authority_arm, active_from, active_to, chain_id, block_hash, block_number, provenance, canonicality_state) VALUES ($1::uuid, $2, $3::uuid, 'declared_registry_path', 'ens_v2', to_timestamp(1800000009), to_timestamp(1800000010), $4, $5, 10, '{\"transaction_index\":0,\"log_index\":6}', 'canonical')")
+        .bind(V2_BINDING).bind(CHILD).bind(V2_RESOURCE).bind(CHAIN).bind(hash(10)).execute(&pool).await?;
+    for (log, kind, after) in [
+        (
+            6,
+            "RegistrationGranted",
+            json!({"registry_contract_instance_id":REGISTRY,"status":"registered","registrant":OWNER}),
+        ),
+        (
+            7,
+            "RegistrationReleased",
+            json!({"registry_contract_instance_id":REGISTRY,"source_event":"LabelUnregistered"}),
+        ),
+    ] {
+        event(
+            &pool,
+            &format!("wrapper-registry-child-{kind}"),
+            CHILD,
+            Some(V2_RESOURCE),
+            "ens_v2_registry_l1",
+            kind,
+            10,
+            log,
+            after,
+        )
+        .await?;
+    }
+    run(&pool, 10, None, RunMode::Normal).await?;
+    assert!(!visible(&pool).await?, "no relation on either arm");
+    let authority: (Option<String>, Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT provenance #>> '{authority_selection,authority_arm}',
+                provenance #>> '{authority_selection,lifecycle_state}',
+                resource_id::text
+         FROM name_current WHERE logical_name_id = $1",
+    )
+    .bind(CHILD)
+    .fetch_one(&pool)
+    .await?;
+    // The released registration stays with ENSv2 whatever ENSv1 holds (product ruling of
+    // 2026-09-25), so `name_current` agrees with the omitted relation: released under ENSv2.
+    // Before the ruling the sole open ENSv1 binding held the name.
+    assert_eq!(
+        authority,
+        (
+            Some("ens_v2".into()),
+            Some("unregistered".into()),
+            Some(V2_RESOURCE.into())
+        )
+    );
+    Ok(())
+}
+
+/// The hash-only locked child with its parent's migration registry created at block 11, and
+/// optionally the child's ENSv2 grant in that registry at block 12, which hides the ENSv1 child.
+/// With `pointer_block` 10 the parent's subregistry pointer to that registry is written a block
+/// before the registry's creation association.
+async fn seed_late_migration_registry(
+    pool: &PgPool,
+    association: bool,
+    history: bool,
+    pointer_block: i64,
+) -> Result<()> {
+    seed_identity(pool, &["ens_v1"]).await?;
+    sqlx::query("UPDATE name_surfaces SET visibility_state = 'shadow', deactivation_reason = 'hash-only replay fixture', deactivated_at = now() WHERE logical_name_id = $1").bind(CHILD).execute(pool).await?;
+    seed_v1_relation(pool, OWNER, 10).await?;
+    seed_wrapper(pool, 65_536, 2_000_000_000).await?;
+    seed_parent_migration_registry(pool, 11).await?;
+    sqlx::query("UPDATE normalized_events SET block_number = $1, block_hash = $2 WHERE event_identity = 'v2-parent-registry'")
+        .bind(pointer_block).bind(hash(pointer_block)).execute(pool).await?;
+    if !association {
+        sqlx::query("DELETE FROM migration_discovery_associations WHERE block_number = 11")
+            .execute(pool)
+            .await?;
+    }
+    seed_migration(pool, "locked_wrapped", 10, "parent-migration").await?;
+    if history {
+        event(pool, &format!("history-{REGISTRY}"), CHILD, None, "ens_v2_registry_l1", "RegistrationGranted", 12, 6,
+            json!({"registry_contract_instance_id":REGISTRY,"status":"registered","registrant":OWNER})).await?;
+    }
+    Ok(())
+}
+
+/// An Interpret redo of block 11 that no longer writes the parent migration registry's creation
+/// association: Project redoes block 11 only, and its publication must match a fresh rebuild
+/// without the association. Returns whether the child was visible before the redo and after it.
+async fn association_retraction_converges(
+    prefix: &str,
+    history: bool,
+    pointer_block: i64,
+) -> Result<(bool, bool)> {
+    let (_redo_db, redo) = database(&format!("{prefix}_redo")).await?;
+    seed_late_migration_registry(&redo, true, history, pointer_block).await?;
+    run(&redo, 12, None, RunMode::Normal).await?;
+    let before = visible(&redo).await?;
+    sqlx::query("DELETE FROM migration_discovery_associations WHERE block_number = 11")
+        .execute(&redo)
+        .await?;
+    Engine::new(redo.clone())
+        .run_batch(BatchRequest {
+            chain_id: CHAIN.into(),
+            target_block: 12,
+            affected_from_block: 11,
+            affected_to_block: 11,
+            resume_current: Some(Marker {
+                number: 12,
+                hash: hash(12),
+            }),
+            mode: RunMode::Redo,
+        })
+        .await?;
+    let (_fresh_db, fresh) = database(&format!("{prefix}_fresh")).await?;
+    seed_late_migration_registry(&fresh, false, history, pointer_block).await?;
+    run(&fresh, 12, None, RunMode::Normal).await?;
+    assert_eq!(rows(&redo).await?, rows(&fresh).await?, "{prefix}");
+    Ok((before, visible(&redo).await?))
+}
+
+// Review thread on scope.rs (TYR-36 step 6). A parent's migration registry creation association
+// becomes unreadable through an Interpret redo while the child's ENSv2 grant in that registry
+// stays outside the redo range. Without a readable association the locked parent publishes no
+// ENSv1 child, so the grant decides nothing either way and the child stays hidden. It runs with
+// the parent's subregistry pointer inside the redo range and outside it, and each redo matches a
+// fresh rebuild.
+#[tokio::test]
+async fn a_retracted_migration_registry_association_with_child_history_converges_on_redo()
+-> Result<()> {
+    for pointer_block in [11, 10] {
+        let seen = association_retraction_converges(
+            &format!("issue503_assoc_retract_history_{pointer_block}"),
+            true,
+            pointer_block,
+        )
+        .await?;
+        assert_eq!(seen, (false, false), "pointer at block {pointer_block}");
+    }
+    Ok(())
+}
+
+// The same retraction with no child history: the association made the ENSv1 child visible, and
+// its retraction hides it. The redo must drop the published relation, with the parent's
+// subregistry pointer inside the redo range and outside it.
+#[tokio::test]
+async fn a_retracted_migration_registry_association_hides_the_child_on_redo() -> Result<()> {
+    for pointer_block in [11, 10] {
+        let seen = association_retraction_converges(
+            &format!("issue503_assoc_retract_{pointer_block}"),
+            false,
+            pointer_block,
+        )
+        .await?;
+        assert_eq!(seen, (true, false), "pointer at block {pointer_block}");
+    }
+    Ok(())
+}

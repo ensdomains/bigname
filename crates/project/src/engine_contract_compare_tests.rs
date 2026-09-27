@@ -599,14 +599,14 @@ async fn child_registration_fixture(tx: &mut Transaction<'_, Postgres>) -> Resul
     sqlx::query(
         "CREATE TEMP TABLE child_registration_events(parent_logical_name_id text,
          event_identity text, child_logical_name_id text, chain_id text, block_number bigint,
-         provenance jsonb, target_block_number bigint, target_block_hash text,
+         block_hash text, provenance jsonb, target_block_number bigint, target_block_hash text,
          last_recomputed_at text)",
     )
     .execute(&mut **tx)
     .await?;
     sqlx::query(
         "INSERT INTO child_registration_events VALUES
-         ('ens:parent', 'grant-15', 'ens:child', 'ethereum-sepolia', 15,
+         ('ens:parent', 'grant-15', 'ens:child', 'ethereum-sepolia', 15, 'block-15',
           '{\"source_family\":\"ens_v2_registry_l1\"}', 20, 'new', 'operational')",
     )
     .execute(&mut **tx)
@@ -628,8 +628,28 @@ async fn compare_child_registration_candidate(
     candidate_change: &str,
     reference_change: Option<&str>,
 ) -> Result<()> {
+    child_registration_fixture(tx).await?;
+    compare_child_registration_fixture(tx, mandatory, root, candidate_change, reference_change)
+        .await
+}
+
+/// Compares a candidate and a reference change against the fixture already in `tx`.
+async fn compare_child_registration_fixture(
+    tx: &mut Transaction<'_, Postgres>,
+    mandatory: &Scopes,
+    root: &std::path::Path,
+    candidate_change: &str,
+    reference_change: Option<&str>,
+) -> Result<()> {
     use sqlx::Acquire;
-    let target = child_registration_fixture(tx).await?;
+    let target = Target::load(
+        tx,
+        &crate::Marker {
+            number: 20,
+            hash: "new".into(),
+        },
+    )
+    .await?;
     let mut baseline = Snapshot::capture(tx, root).await?;
     let mut branch = tx.begin().await?;
     sqlx::query(candidate_change).execute(&mut *branch).await?;
@@ -765,6 +785,71 @@ async fn child_registration_rows_in_the_batch_window_follow_the_reference() -> R
     Ok(())
 }
 
+/// The publisher's window delete also removes rows at or above the window start whose block is
+/// no longer readable canonical lineage, even above the window, and never touches another
+/// chain. The mandatory scope must own exactly those rows, captured from the table the delete
+/// runs against.
+#[tokio::test]
+async fn child_registration_rows_the_publisher_deletes_above_the_window_are_owned() -> Result<()> {
+    use bigname_test_support::{TestDatabase, TestDatabaseConfig};
+    let database = TestDatabase::create(TestDatabaseConfig::new("contract_child_orphans")).await?;
+    let root = std::env::temp_dir().join(format!("contract-orphans-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&root)?;
+    let deleted = "DELETE FROM child_registration_events";
+    let kept = "SELECT 1";
+    let canonical = "INSERT INTO chain_lineage VALUES
+        ('ethereum-sepolia', 15, 'block-15', to_timestamp(1800000015), 'canonical')";
+    let foreign = "UPDATE child_registration_events SET chain_id = 'ethereum-mainnet'";
+    // The fixture row sits at block 15 on a block hash the lineage does not hold.
+    for (setup, window, candidate, reference, accepted) in [
+        // Orphaned above a window that ends below it: both derivations delete it.
+        (None, (11, 12), deleted, Some(deleted), true),
+        // Only the reference deletes the orphan.
+        (None, (11, 12), kept, Some(deleted), false),
+        // Only the candidate deletes the orphan.
+        (None, (11, 12), deleted, None, false),
+        // A canonical row above the window stays, so deleting it is a change.
+        (Some(canonical), (11, 12), deleted, Some(deleted), false),
+        // An orphan below the window start stays too.
+        (None, (16, 20), deleted, Some(deleted), false),
+        // Another chain's rows are never in the batch, inside the window or above it.
+        (Some(foreign), (11, 20), deleted, Some(deleted), false),
+        (Some(foreign), (11, 12), deleted, Some(deleted), false),
+    ] {
+        let mut tx = database.pool().begin().await?;
+        child_registration_fixture(&mut tx).await?;
+        if let Some(setup) = setup {
+            sqlx::query(setup).execute(&mut *tx).await?;
+        }
+        sqlx::raw_sql(
+            "CREATE TEMP TABLE project_scope_names(logical_name_id text);
+             CREATE TEMP TABLE project_scope_resources(resource_id text);
+             CREATE TEMP TABLE project_scope_children(logical_name_id text);
+             CREATE TEMP TABLE project_scope_resolvers(resolver_address text);
+             CREATE TEMP TABLE project_scope_account_permissions(chain_id text,
+                 authority_kind text, authority_contract text, owner text, subject text,
+                 relation_kind text);
+             CREATE TEMP TABLE project_scope_primary(address text, coin_type text,
+                 namespace text)",
+        )
+        .execute(&mut *tx)
+        .await?;
+        let mandatory = Scopes::capture(&mut tx, window).await?;
+        let result =
+            compare_child_registration_fixture(&mut tx, &mandatory, &root, candidate, reference)
+                .await;
+        tx.rollback().await?;
+        assert_eq!(
+            result.is_ok(),
+            accepted,
+            "{setup:?} window {window:?}: {candidate} against {reference:?}: {result:?}"
+        );
+    }
+    std::fs::remove_dir_all(root)?;
+    database.cleanup().await?;
+    Ok(())
+}
+
 /// The publication record must be the same in all three snapshots, and a same-head rerun must
 /// reproduce every row apart from operational timestamps.
 #[tokio::test]
@@ -793,36 +878,43 @@ async fn publication_record_and_same_head_output_must_not_change() -> Result<()>
         baseline.publication["project"][0]["current_block_number"],
         10
     );
-    let mut branch = tx.begin().await?;
-    sqlx::query(
+    // Readers take the served generation from the Project row's `xmin`, so a rewrite that keeps
+    // every value changes the publication as much as a moved block does.
+    for change in [
         "UPDATE chain_phase_state SET current_block_number = 20 WHERE phase_name = 'project'",
-    )
-    .execute(&mut *branch)
-    .await?;
-    let mut moved = Snapshot::capture(&mut branch, &root).await?;
-    branch.rollback().await?;
-    let mut reference = Snapshot::capture(&mut tx, &root).await?;
-    let error = snapshot::compare(
-        &mut tx,
-        snapshot::Snapshots {
-            baseline: &mut baseline,
-            candidate: &mut moved,
-            reference: &mut reference,
-        },
-        snapshot::Expectations {
-            mandatory: &Scopes::default(),
-            old_scope: &Scopes::default(),
-            target: &target,
-            previous: 10,
-        },
-    )
-    .await
-    .unwrap_err();
-    assert!(
-        error.to_string().contains("publication record"),
-        "{error:#}"
-    );
+        "UPDATE chain_phase_state SET current_block_number = current_block_number
+         WHERE phase_name = 'project'",
+    ] {
+        let mut branch = tx.begin().await?;
+        sqlx::query(change).execute(&mut *branch).await?;
+        let mut moved = Snapshot::capture(&mut branch, &root).await?;
+        branch.rollback().await?;
+        let mut reference = Snapshot::capture(&mut tx, &root).await?;
+        let result = snapshot::compare(
+            &mut tx,
+            snapshot::Snapshots {
+                baseline: &mut baseline,
+                candidate: &mut moved,
+                reference: &mut reference,
+            },
+            snapshot::Expectations {
+                mandatory: &Scopes::default(),
+                old_scope: &Scopes::default(),
+                target: &target,
+                previous: 10,
+            },
+        )
+        .await;
+        let error = result
+            .err()
+            .unwrap_or_else(|| panic!("the comparator accepted a candidate that ran: {change}"));
+        assert!(
+            error.to_string().contains("publication record"),
+            "{change}: {error:#}"
+        );
+    }
 
+    let mut reference = Snapshot::capture(&mut tx, &root).await?;
     let mut rerun = Snapshot::capture(&mut tx, &root).await?;
     assert_eq!(assert_same_output(&mut reference, &mut rerun)?, 1);
     for (change, same) in [
@@ -844,7 +936,7 @@ async fn publication_record_and_same_head_output_must_not_change() -> Result<()>
         let result = assert_same_output(&mut first, &mut changed);
         assert_eq!(result.is_ok(), same, "{change}: {result:?}");
     }
-    drop((baseline, moved, reference, rerun));
+    drop((baseline, reference, rerun));
     std::fs::remove_dir_all(root)?;
     tx.rollback().await?;
     database.cleanup().await?;

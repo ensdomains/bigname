@@ -51,405 +51,238 @@
             FROM project_binding_candidates binding
             WHERE binding.authority_arm = 'ens_v2'
             ORDER BY binding.logical_name_id, binding.block_number DESC,
-                     COALESCE(
-                         (binding.provenance ->> 'transaction_index')::bigint, -1
-                     ) DESC,
-                     COALESCE(
-                         (binding.provenance ->> 'log_index')::bigint, -1
-                     ) DESC,
+                     COALESCE((binding.provenance ->> 'transaction_index')::bigint, -1) DESC,
+                     COALESCE((binding.provenance ->> 'log_index')::bigint, -1) DESC,
                      binding.surface_binding_id DESC
         ), latest_v2_lifecycle AS (
-            SELECT DISTINCT ON (event.logical_name_id)
-                   event.logical_name_id, event.resource_id, event.event_kind,
-                   event.block_number, event.transaction_index, event.log_index
-            FROM project_events event
-            JOIN latest_v2_binding binding
-              ON binding.logical_name_id = event.logical_name_id
-             AND binding.resource_id = event.resource_id
-            WHERE event.logical_name_id IS NOT NULL
-              AND event.resource_id IS NOT NULL
-              AND event.source_family IN (
-                  'ens_v2_root_l1', 'ens_v2_registry_l1',
-                  'ens_v2_registrar_l1'
-              )
-              AND event.event_kind IN (
-                  'RegistrationGranted', 'RegistrationRenewed',
-                  'RegistrationReleased', 'RegistrationReserved'
-              )
-            ORDER BY event.logical_name_id, event.block_number DESC,
-                     event.transaction_index DESC, event.log_index DESC,
-                     event.normalized_event_id DESC
+            -- The latest lifecycle fact of each arm decides a name that neither arm holds now.
+            -- For ENSv2 that is the latest grant, renewal, release or reservation of the
+            -- registration the name was last bound to. `unregister` burns the token and sets its
+            -- expiry to now, so a released ENSv2 registration reports as expired and available.
+            -- (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L195-L207 @ ens_v2@a971bd64)
+            SELECT DISTINCT ON (fact.logical_name_id)
+                   fact.logical_name_id, fact.resource_id, fact.event_kind,
+                   fact.block_number, fact.transaction_index, fact.log_index,
+                   fact.normalized_event_id
+            FROM (
+                SELECT binding.logical_name_id, event.resource_id, event.event_kind,
+                       event.block_number, event.transaction_index, event.log_index,
+                       event.normalized_event_id
+                FROM project_events event
+                JOIN latest_v2_binding binding
+                  ON binding.resource_id = event.resource_id
+                 AND (
+                      binding.logical_name_id = event.logical_name_id
+                      -- When Interpret retires a token that has no name any more, it writes the
+                      -- path-expiry release on the token's resource without a name. It is still
+                      -- the release of the registration the name was last bound to. Only the
+                      -- release is taken this way: a nameless renewal of a token cut from its
+                      -- path does not give the name back.
+                      OR (
+                          event.logical_name_id IS NULL
+                          AND event.event_kind = 'RegistrationReleased'
+                      )
+                 )
+                WHERE event.source_family IN (
+                      'ens_v2_root_l1', 'ens_v2_registry_l1',
+                      'ens_v2_registrar_l1'
+                  )
+                  AND event.event_kind IN (
+                      'RegistrationGranted', 'RegistrationRenewed',
+                      'RegistrationReleased', 'RegistrationReserved'
+                  )
+                UNION ALL
+                -- A reservation of the name counts whatever its resource. `unregister` of an
+                -- owned token bumps its token version, so a later `LabelReserved` carries a
+                -- versioned token id, and Interpret writes that reservation with the name but
+                -- without the released registration's resource, or any resource.
+                -- (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L201-L205 @ ens_v2@a971bd64)
+                -- (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L649-L651 @ ens_v2@a971bd64)
+                -- (upstream: .refs/ens_v2/contracts/src/utils/LibLabel.sol:L15-L17 @ ens_v2@a971bd64)
+                -- The hand-back lasts only while that reservation is live. When a versioned
+                -- reservation is unregistered or lapses, Interpret writes its end as a named
+                -- release without a resource; a registration always has a resource and a path-cut
+                -- release carries it, so a named ENSv2 release without one is a reservation's end.
+                -- It ends the name's current reservation only when that reservation is the same
+                -- entry: without a resource, the registry instance and token id Interpret writes
+                -- on both rows tell reservations apart, so the end of an older reservation in
+                -- another registry does not end a later one. The label is then available: the
+                -- registry answers a zero resolver for it, and a WrapperRegistry never falls back
+                -- to ENSv1 once the expiry is nonzero. The released registration the name was
+                -- last bound to stands again as its tombstone.
+                -- (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L196-L207 @ ens_v2@a971bd64)
+                -- (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L255-L258 @ ens_v2@a971bd64)
+                -- (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L294-L297 @ ens_v2@a971bd64)
+                SELECT event.logical_name_id,
+                       CASE WHEN event.event_kind = 'RegistrationReleased'
+                           THEN binding.resource_id ELSE event.resource_id END,
+                       event.event_kind,
+                       event.block_number, event.transaction_index, event.log_index,
+                       event.normalized_event_id
+                FROM project_events event
+                JOIN latest_v2_binding binding
+                  ON binding.logical_name_id = event.logical_name_id
+                WHERE event.source_family IN (
+                      'ens_v2_root_l1', 'ens_v2_registry_l1',
+                      'ens_v2_registrar_l1'
+                  )
+                  AND (
+                      (event.event_kind = 'RegistrationReserved'
+                       AND event.resource_id IS DISTINCT FROM binding.resource_id)
+                      -- The latest earlier fact among the name's reservations and
+                      -- registrations must be a reservation of the same registry instance and
+                      -- token. A release at the block boundary is compared as the end of its
+                      -- block, as below. A registry instance or token id that is missing or JSON
+                      -- null is never a match: the equality is NULL and IS TRUE rejects it, even
+                      -- when both sides are null. Every writer of these rows, derived ones
+                      -- included, must keep the concrete registry instance and token id on both.
+                      OR (event.event_kind = 'RegistrationReleased'
+                          AND event.resource_id IS NULL
+                          AND (
+                              SELECT witness.event_kind = 'RegistrationReserved'
+                                     AND witness.after_state ->> 'registry_contract_instance_id'
+                                         = event.after_state ->> 'registry_contract_instance_id'
+                                     AND witness.after_state ->> 'token_id'
+                                         = event.after_state ->> 'token_id'
+                              FROM project_events witness
+                              WHERE witness.source_family IN (
+                                    'ens_v2_root_l1', 'ens_v2_registry_l1',
+                                    'ens_v2_registrar_l1'
+                                )
+                                AND witness.logical_name_id = event.logical_name_id
+                                AND witness.event_kind IN (
+                                    'RegistrationReserved', 'RegistrationGranted'
+                                )
+                                AND (witness.block_number,
+                                     COALESCE(witness.transaction_index, -1),
+                                     COALESCE(witness.log_index, -1))
+                                    < (event.block_number,
+                                       COALESCE(event.transaction_index, 9223372036854775807),
+                                       COALESCE(event.log_index, 9223372036854775807))
+                              ORDER BY witness.block_number DESC,
+                                       COALESCE(witness.transaction_index, -1) DESC,
+                                       COALESCE(witness.log_index, -1) DESC,
+                                       witness.normalized_event_id DESC
+                              LIMIT 1
+                          ) IS TRUE)
+                      -- A version-zero reservation carries its own resource, and so does its
+                      -- release when it is unregistered or lapses. That release ends the
+                      -- reservation of this name like a resource-less one, but only when the
+                      -- reservation it ends is the name's current one: the latest earlier fact
+                      -- among the name's reservations, on any resource, and the registrations on
+                      -- the release's resource must be a reservation on that resource. A
+                      -- registration of the reserved label keeps the resource, since the registry
+                      -- bumps the token version only when it replaces an owner, so its later
+                      -- release ends a registration, not a reservation; and a release does not
+                      -- end a later reservation of the name on another resource. A release at the
+                      -- block boundary has no transaction or log index and is compared as the end
+                      -- of its block here, so it still ends a reservation written in its own block
+                      -- that was already expired.
+                      -- (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L435-L471 @ ens_v2@a971bd64)
+                      OR (event.event_kind = 'RegistrationReleased'
+                          AND event.resource_id IS DISTINCT FROM binding.resource_id
+                          AND (
+                              SELECT witness.event_kind = 'RegistrationReserved'
+                                     AND witness.resource_id = event.resource_id
+                              FROM project_events witness
+                              WHERE witness.source_family IN (
+                                    'ens_v2_root_l1', 'ens_v2_registry_l1',
+                                    'ens_v2_registrar_l1'
+                                )
+                                AND (
+                                    (witness.event_kind = 'RegistrationReserved'
+                                     AND witness.logical_name_id = event.logical_name_id)
+                                    OR (witness.event_kind = 'RegistrationGranted'
+                                        AND witness.resource_id = event.resource_id)
+                                )
+                                AND (witness.block_number,
+                                     COALESCE(witness.transaction_index, -1),
+                                     COALESCE(witness.log_index, -1))
+                                    < (event.block_number,
+                                       COALESCE(event.transaction_index, 9223372036854775807),
+                                       COALESCE(event.log_index, 9223372036854775807))
+                              ORDER BY witness.block_number DESC,
+                                       COALESCE(witness.transaction_index, -1) DESC,
+                                       COALESCE(witness.log_index, -1) DESC,
+                                       witness.normalized_event_id DESC
+                              LIMIT 1
+                          ) IS TRUE)
+                  )
+            ) fact
+            -- A reservation whose own expiry is already at or before its block's timestamp is
+            -- never live: an ownerless entry may be written with a past nonzero expiry, and the
+            -- registry reports an entry as available once `block.timestamp >= expiry`. Interpret
+            -- writes its state-derived release in the same block at the block boundary, with no
+            -- transaction or log index, so by position the release would sort before the
+            -- reservation it ends. The reservation takes no part and its release does. The expiry
+            -- is compared with the reservation's own block, not the target block, because a later
+            -- renewal can revive the entry.
+            -- (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L452-L454 @ ens_v2@a971bd64)
+            -- (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L628-L630 @ ens_v2@a971bd64)
+            -- (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L654-L660 @ ens_v2@a971bd64)
+            WHERE NOT EXISTS (
+                SELECT 1
+                FROM project_events reservation
+                JOIN chain_lineage lineage
+                  ON lineage.chain_id = reservation.chain_id
+                 AND lineage.block_hash = reservation.block_hash
+                 AND lineage.block_number = reservation.block_number
+                WHERE reservation.normalized_event_id = fact.normalized_event_id
+                  AND reservation.event_kind = 'RegistrationReserved'
+                  -- An expiry that is not a JSON number leaves the reservation in.
+                  AND CASE
+                          WHEN jsonb_typeof(reservation.after_state -> 'expiry') = 'number'
+                              THEN (reservation.after_state ->> 'expiry')::numeric <=
+                                   extract(epoch FROM lineage.block_timestamp)
+                          ELSE FALSE
+                      END
+            )
+            -- A block-boundary fact has no transaction or log index and sorts first in its
+            -- block, as in every other position comparison here.
+            ORDER BY fact.logical_name_id, fact.block_number DESC,
+                     COALESCE(fact.transaction_index, -1) DESC,
+                     COALESCE(fact.log_index, -1) DESC,
+                     fact.normalized_event_id DESC
         ), released_v2_authority AS (
+            -- A released ENSv2 registration stays with ENSv2 whatever ENSv1 holds (product ruling
+            -- of 2026-09-25): when the latest lifecycle fact of the registration the name was last
+            -- bound to is its release, by `unregister` or by lapsing at expiry, and no ENSv2
+            -- binding is open, the name is the released tombstone even beside a live ENSv1 lease. A
+            -- later reservation of the name, with or without a resource, is a later lifecycle fact
+            -- and defers to ENSv1 while it is live. The contracts never route a registered label
+            -- back to ENSv1: `unregister` writes the release time as the expiry, the registry
+            -- returns no resolver for an expired entry, and a WrapperRegistry stops answering with
+            -- ENSV1Resolver for a label whose stored expiry is nonzero.
+            -- (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L196-L207 @ ens_v2@a971bd64)
+            -- (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L255-L258 @ ens_v2@a971bd64)
+            -- (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L294-L297 @ ens_v2@a971bd64)
+            -- The winning fact is kept apart from the tombstone's resource: an end of a
+            -- reservation can have no resource, or another one, and still restore the tombstone of
+            -- the registration the name was last bound to. `name_current` serves that fact.
             SELECT lifecycle.logical_name_id,
-                   lifecycle.resource_id AS released_v2_resource_id
+                   lifecycle.resource_id AS released_v2_resource_id,
+                   lifecycle.normalized_event_id AS released_v2_event_id
             FROM latest_v2_lifecycle lifecycle
             WHERE lifecycle.event_kind = 'RegistrationReleased'
-              AND EXISTS (
-                  SELECT 1 FROM project_binding_candidates binding
-                  WHERE binding.logical_name_id = lifecycle.logical_name_id
-                    AND binding.authority_arm = 'ens_v2'
-                    AND binding.resource_id = lifecycle.resource_id
-              )
               AND NOT EXISTS (
-                  SELECT 1 FROM open_bindings binding
-                  WHERE binding.logical_name_id = lifecycle.logical_name_id
-                    AND binding.authority_arm = 'ens_v2'
+                  SELECT 1 FROM open_bindings open
+                  WHERE open.logical_name_id = lifecycle.logical_name_id
+                    AND open.authority_arm = 'ens_v2'
               )
-              AND NOT EXISTS (
-                  SELECT 1 FROM project_binding_candidates predecessor
-                  WHERE predecessor.logical_name_id = lifecycle.logical_name_id
-                    AND predecessor.authority_arm = 'ens_v1'
-                    AND (
-                        predecessor.block_number,
-                        COALESCE(
-                            (predecessor.provenance ->> 'transaction_index')::bigint, -1
-                        ),
-                        COALESCE(
-                            (predecessor.provenance ->> 'log_index')::bigint, -1
-                        )
-                    ) <= (
-                        lifecycle.block_number,
-                        COALESCE(lifecycle.transaction_index, -1),
-                        COALESCE(lifecycle.log_index, -1)
-                    )
-              )
-              AND NOT EXISTS (
-                  SELECT 1 FROM project_events predecessor
-                  WHERE predecessor.logical_name_id = lifecycle.logical_name_id
-                    AND predecessor.source_family LIKE 'ens_v1_%'
-                    AND predecessor.event_kind IN (
-                        'RegistrationGranted', 'RegistrationRenewed',
-                        'RegistrationReleased', 'RegistrationReserved',
-                        'ExpiryChanged', 'AuthorityTransferred',
-                        'TokenControlTransferred', 'AuthorityEpochChanged'
-                    )
-                    AND (
-                        predecessor.block_number,
-                        COALESCE(predecessor.transaction_index, -1),
-                        COALESCE(predecessor.log_index, -1)
-                    ) <= (
-                        lifecycle.block_number,
-                        COALESCE(lifecycle.transaction_index, -1),
-                        COALESCE(lifecycle.log_index, -1)
-                    )
-              )
-        ), released_v2_regime AS (
-            -- Regime entry keys on a qualifying release's presence in epoch
-            -- history, never on it being the latest v2 lifecycle row: v1 facts
-            -- at or before the release suppress entry, later ones are residue.
-            SELECT release.logical_name_id
-            FROM project_events release
-            WHERE release.logical_name_id IS NOT NULL
-              AND release.resource_id IS NOT NULL
-              AND release.source_family IN ('ens_v2_root_l1', 'ens_v2_registry_l1',
-                                             'ens_v2_registrar_l1')
-              AND release.event_kind = 'RegistrationReleased'
-              AND EXISTS (
-                  SELECT 1 FROM project_binding_candidates binding
-                  WHERE binding.logical_name_id = release.logical_name_id
-                    AND binding.authority_arm = 'ens_v2'
-                    AND binding.resource_id = release.resource_id
-                    AND (binding.block_number, COALESCE((binding.provenance ->> 'transaction_index')::bigint, -1), COALESCE((binding.provenance ->> 'log_index')::bigint, -1))
-                        <= (release.block_number, COALESCE(release.transaction_index, -1), COALESCE(release.log_index, -1))
-              )
-              AND NOT EXISTS (
-                  SELECT 1 FROM project_binding_candidates predecessor
-                  WHERE predecessor.logical_name_id = release.logical_name_id
-                    AND predecessor.authority_arm = 'ens_v1'
-                    AND (
-                        predecessor.block_number,
-                        COALESCE(
-                            (predecessor.provenance ->> 'transaction_index')::bigint, -1
-                        ),
-                        COALESCE(
-                            (predecessor.provenance ->> 'log_index')::bigint, -1
-                        )
-                    ) <= (
-                        release.block_number,
-                        COALESCE(release.transaction_index, -1),
-                        COALESCE(release.log_index, -1)
-                    )
-              )
-              AND NOT EXISTS (
-                  SELECT 1 FROM project_events predecessor
-                  WHERE predecessor.logical_name_id = release.logical_name_id
-                    AND predecessor.source_family LIKE 'ens_v1_%'
-                    AND predecessor.event_kind IN (
-                        'RegistrationGranted', 'RegistrationRenewed',
-                        'RegistrationReleased', 'RegistrationReserved',
-                        'ExpiryChanged', 'AuthorityTransferred',
-                        'TokenControlTransferred', 'AuthorityEpochChanged'
-                    )
-                    AND (
-                        predecessor.block_number,
-                        COALESCE(predecessor.transaction_index, -1),
-                        COALESCE(predecessor.log_index, -1)
-                    ) <= (
-                        release.block_number,
-                        COALESCE(release.transaction_index, -1),
-                        COALESCE(release.log_index, -1)
-                    )
-              )
-              AND NOT EXISTS (
-                  SELECT 1 FROM project_events predecessor_grant
-                  WHERE predecessor_grant.logical_name_id = release.logical_name_id
-                    AND predecessor_grant.source_family IN (
-                        'ens_v2_root_l1', 'ens_v2_registry_l1',
-                        'ens_v2_registrar_l1'
-                    )
-                    AND predecessor_grant.event_kind = 'RegistrationGranted'
-                    AND predecessor_grant.resource_id IS NOT NULL
-                    AND predecessor_grant.resource_id <> release.resource_id
-                    AND (
-                        predecessor_grant.block_number,
-                        COALESCE(predecessor_grant.transaction_index, -1),
-                        COALESCE(predecessor_grant.log_index, -1)
-                    ) <= (
-                        release.block_number,
-                        COALESCE(release.transaction_index, -1),
-                        COALESCE(release.log_index, -1)
-                    )
-              )
-              AND EXISTS (
-                  SELECT 1 FROM project_events regrant
-                  WHERE regrant.logical_name_id = release.logical_name_id
-                    AND regrant.source_family IN (
-                        'ens_v2_root_l1', 'ens_v2_registry_l1',
-                        'ens_v2_registrar_l1'
-                    )
-                    AND regrant.event_kind = 'RegistrationGranted'
-                    AND (
-                        regrant.block_number,
-                        COALESCE(regrant.transaction_index, -1),
-                        COALESCE(regrant.log_index, -1)
-                    ) > (
-                        release.block_number,
-                        COALESCE(release.transaction_index, -1),
-                        COALESCE(release.log_index, -1)
-                    )
-              )
-            GROUP BY release.logical_name_id
-        ), transition_proof AS (
+        ), migration_history AS (
+            -- The latest ENSv1->ENSv2 migration of the name. It is served history (the
+            -- migration time and whether the name migrated) and decides nothing about authority:
+            -- the ENSv2 registration the migration made is a registration like any other.
             SELECT DISTINCT ON (event.logical_name_id)
                    event.logical_name_id,
                    event.normalized_event_id AS proof_event_id,
                    event.event_identity AS proof_event_identity,
-                   event.migration_correlation_ids[1] AS transition_id,
-                   event.block_number AS epoch_block_number,
-                   event.transaction_index AS epoch_transaction_index,
-                   event.log_index AS epoch_log_index,
-                   (event.after_state #>> '{successor_binding,binding_id}')::uuid
-                       AS successor_binding_id,
-                   (event.after_state #>> '{successor_binding,resource_id}')::uuid
-                       AS successor_resource_id
+                   event.migration_correlation_ids[1] AS transition_id
             FROM project_events event
             WHERE event.event_kind = 'MigrationApplied'
             ORDER BY event.logical_name_id, event.block_number DESC,
                      event.transaction_index DESC, event.log_index DESC,
                      event.normalized_event_id DESC
-        ), child_proof AS (
-            SELECT DISTINCT ON (registration.logical_name_id)
-                   registration.logical_name_id,
-                   registration.normalized_event_id AS proof_event_id,
-                   registration.event_identity AS proof_event_identity,
-                   registration.block_number AS epoch_block_number,
-                   registration.transaction_index AS epoch_transaction_index,
-                   registration.log_index AS epoch_log_index,
-                   registration.resource_id AS successor_resource_id
-            FROM project_events registration
-            JOIN project_surfaces child
-              ON child.logical_name_id = registration.logical_name_id
-            JOIN migration_discovery_associations migration_registry
-              ON migration_registry.chain_id = registration.chain_id
-             AND migration_registry.registry_contract_instance_id::text =
-                 registration.after_state ->> 'registry_contract_instance_id'
-             AND migration_registry.correlation_kind = 'migration_registry_creation'
-            JOIN discovery_edges registry_edge
-              ON registry_edge.chain_id = migration_registry.chain_id
-             AND registry_edge.edge_kind = 'registry_announcement'
-             AND registry_edge.to_contract_instance_id =
-                 migration_registry.registry_contract_instance_id
-             AND registry_edge.source_manifest_id = migration_registry.source_manifest_id
-             AND registry_edge.active_from_block_number = migration_registry.block_number
-             AND registry_edge.active_from_block_hash = migration_registry.block_hash
-             AND (registry_edge.provenance ->> 'transaction_index')::bigint =
-                 migration_registry.transaction_index
-             AND (registry_edge.provenance ->> 'log_index')::bigint =
-                 migration_registry.log_index
-            JOIN contract_instance_addresses registry_address
-              ON registry_address.chain_id = migration_registry.chain_id
-             AND registry_address.contract_instance_id =
-                 migration_registry.registry_contract_instance_id
-             AND lower(registry_address.address) =
-                 lower(migration_registry.registry_address)
-            JOIN chain_lineage migration_registry_lineage
-              ON migration_registry_lineage.chain_id = migration_registry.chain_id
-             AND migration_registry_lineage.block_hash = migration_registry.block_hash
-             AND migration_registry_lineage.block_number = migration_registry.block_number
-            WHERE registration.event_kind = 'RegistrationGranted'
-              AND registration.source_family = 'ens_v2_registry_l1'
-              AND registration.resource_id IS NOT NULL
-              AND registration.after_state ->> 'status' = 'registered'
-              AND EXISTS (
-                  SELECT 1
-                  FROM project_events parent_boundary
-                  JOIN name_surfaces parent
-                    ON parent.logical_name_id = parent_boundary.logical_name_id
-                   AND parent.chain_id = parent_boundary.chain_id
-                  JOIN project_events parent_registry
-                    ON parent_registry.chain_id = parent_boundary.chain_id
-                   AND parent_registry.logical_name_id = parent_boundary.logical_name_id
-                   AND parent_registry.event_kind = 'SubregistryChanged'
-                   AND parent_registry.source_family IN (
-                       'ens_v2_root_l1', 'ens_v2_registry_l1'
-                   )
-                  JOIN chain_lineage parent_surface_lineage
-                    ON parent_surface_lineage.chain_id = parent.chain_id
-                   AND parent_surface_lineage.block_hash = parent.block_hash
-                   AND parent_surface_lineage.block_number = parent.block_number
-                  JOIN chain_lineage parent_lineage
-                    ON parent_lineage.chain_id = parent_boundary.chain_id
-                   AND parent_lineage.block_hash = parent_boundary.block_hash
-                   AND parent_lineage.block_number = parent_boundary.block_number
-                  JOIN chain_lineage parent_registry_lineage
-                    ON parent_registry_lineage.chain_id = parent_registry.chain_id
-                   AND parent_registry_lineage.block_hash = parent_registry.block_hash
-                   AND parent_registry_lineage.block_number = parent_registry.block_number
-                  WHERE parent_boundary.chain_id = $1
-                    AND parent_boundary.block_number <= $2
-                    AND parent_boundary.event_kind = 'MigrationApplied'
-                    AND parent_boundary.consumer_visibility = 'activated'
-                    AND parent_boundary.canonicality_state IN (
-                        'canonical', 'safe', 'finalized'
-                    )
-                    AND parent.block_number <= $2
-                    AND parent.canonicality_state IN ('canonical', 'safe', 'finalized')
-                    AND parent_lineage.canonicality_state IN (
-                        'canonical', 'safe', 'finalized'
-                    )
-                    AND parent_surface_lineage.canonicality_state IN (
-                        'canonical', 'safe', 'finalized'
-                    )
-                    AND migration_registry.block_number <= registration.block_number
-                    AND migration_registry.canonicality_state IN (
-                        'canonical', 'safe', 'finalized'
-                    )
-                    AND migration_registry_lineage.canonicality_state IN (
-                        'canonical', 'safe', 'finalized'
-                    )
-                    AND registry_edge.canonicality_state IN (
-                        'canonical', 'safe', 'finalized'
-                    )
-                    AND registry_edge.active_from_block_number <=
-                        registration.block_number
-                    AND (
-                        registry_edge.active_to_block_number IS NULL
-                        OR registry_edge.active_to_block_number >=
-                           registration.block_number
-                    )
-                    AND COALESCE(registry_address.active_from_block_number, 0) <=
-                        registration.block_number
-                    AND (
-                        registry_address.active_to_block_number IS NULL
-                        OR registry_address.active_to_block_number >=
-                           registration.block_number
-                    )
-                    AND lower(parent_registry.after_state ->> 'subregistry') =
-                        lower(migration_registry.registry_address)
-                    AND parent_registry.block_number <= registration.block_number
-                    AND parent_registry.consumer_visibility = 'activated'
-                    AND parent_registry.canonicality_state IN (
-                        'canonical', 'safe', 'finalized'
-                    )
-                    AND parent_registry_lineage.canonicality_state IN (
-                        'canonical', 'safe', 'finalized'
-                    )
-                    AND NOT EXISTS (
-                        SELECT 1
-                        FROM project_events later_registry
-                        WHERE later_registry.chain_id = parent_registry.chain_id
-                          AND later_registry.logical_name_id =
-                              parent_registry.logical_name_id
-                          AND later_registry.event_kind = 'SubregistryChanged'
-                          AND later_registry.source_family IN (
-                              'ens_v2_root_l1', 'ens_v2_registry_l1'
-                          )
-                          AND (
-                              later_registry.block_number,
-                              COALESCE(later_registry.transaction_index, -1),
-                              COALESCE(later_registry.log_index, -1),
-                              later_registry.normalized_event_id
-                          ) > (
-                              parent_registry.block_number,
-                              COALESCE(parent_registry.transaction_index, -1),
-                              COALESCE(parent_registry.log_index, -1),
-                              parent_registry.normalized_event_id
-                          )
-                          AND (
-                              later_registry.block_number,
-                              COALESCE(later_registry.transaction_index, -1),
-                              COALESCE(later_registry.log_index, -1)
-                          ) <= (
-                              registration.block_number,
-                              COALESCE(registration.transaction_index, -1),
-                              COALESCE(registration.log_index, -1)
-                          )
-                    )
-                    AND cardinality(child.labelhashes) =
-                        cardinality(parent.labelhashes) + 1
-                    AND child.labelhashes[2:cardinality(child.labelhashes)] =
-                        parent.labelhashes
-                    AND (
-                        migration_registry.block_number,
-                        migration_registry.transaction_index,
-                        migration_registry.log_index
-                    ) <= (
-                        parent_registry.block_number,
-                        COALESCE(parent_registry.transaction_index, -1),
-                        COALESCE(parent_registry.log_index, -1)
-                    )
-                    AND (
-                        parent_boundary.block_number,
-                        COALESCE(parent_boundary.transaction_index, -1),
-                        COALESCE(parent_boundary.log_index, -1)
-                    ) <= (
-                        parent_registry.block_number,
-                        COALESCE(parent_registry.transaction_index, -1),
-                        COALESCE(parent_registry.log_index, -1)
-                    )
-                    AND (
-                        parent_registry.block_number,
-                        COALESCE(parent_registry.transaction_index, -1),
-                        COALESCE(parent_registry.log_index, -1)
-                    ) <= (
-                        registration.block_number,
-                        COALESCE(registration.transaction_index, -1),
-                        COALESCE(registration.log_index, -1)
-                    )
-              )
-            ORDER BY registration.logical_name_id, registration.block_number,
-                     registration.transaction_index, registration.log_index,
-                     registration.normalized_event_id
-        ), proof AS (
-            SELECT logical_name_id, 'migration_authority_transition'::text AS proof_kind,
-                   proof_event_id, proof_event_identity, transition_id,
-                   epoch_block_number, epoch_transaction_index, epoch_log_index,
-                   successor_binding_id, successor_resource_id
-            FROM transition_proof
-            UNION ALL
-            SELECT child.logical_name_id,
-                   'positive_v2_child_registration'::text,
-                   child.proof_event_id, child.proof_event_identity, NULL::text,
-                   child.epoch_block_number, child.epoch_transaction_index,
-                   child.epoch_log_index, NULL::uuid, child.successor_resource_id
-            FROM child_proof child
-            WHERE NOT EXISTS (
-                SELECT 1 FROM transition_proof transition
-                WHERE transition.logical_name_id = child.logical_name_id
-            )
-        ), shared_ens_infrastructure AS (
-            -- ENSv2 deploys root and canonically parented eth, then registers or preserves reverse. (upstream: .refs/ens_v2/contracts/deploy/00_RootRegistry.ts:L15-L29 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/deploy/01_ETHRegistry.ts:L23-L64 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/deploy/01_ReverseMirror.ts:L13-L34 @ ens_v2@a971bd64) ENSv1 defines addr.reverse as its reverse registrar node and assigns it directly on testnets. (upstream: .refs/ens_v1/contracts/reverseRegistrar/ReverseRegistrar.sol:L15-L37 @ ens_v1@91c966f) (upstream: .refs/ens_v1/deploy/reverseregistrar/00_deploy_reverse_registrar.ts:L30-L48 @ ens_v1@91c966f)
-            SELECT logical_name_id FROM project_surfaces WHERE namespace = 'ens' AND visibility_state = 'active' AND raw_name IN ('', 'eth', 'reverse', 'addr.reverse')
         ), latest_v1_lifecycle AS (
             SELECT DISTINCT ON (event.logical_name_id)
                    event.logical_name_id, event.resource_id, event.event_kind,
@@ -598,18 +431,16 @@
         ), decision AS (
             SELECT surface.logical_name_id,
                    CASE
-                       WHEN proof.logical_name_id IS NOT NULL THEN 'ens_v2'
-                       WHEN released.logical_name_id IS NOT NULL THEN 'ens_v2'
-                       WHEN regime.logical_name_id IS NOT NULL THEN 'ens_v2'
-                       WHEN shared.logical_name_id IS NOT NULL
-                        AND COALESCE(summary.has_ens_v2, false) THEN 'ens_v2'
                        -- Follow the chain (docs/adrs/0007-follow-the-chain-ens-authority.md). Only a
                        -- registered ENSv2 entry opens an ENSv2 binding, and it decides the name
                        -- whatever ENSv1 holds, without a proof; a reservation opens none and
-                       -- defers to ENSv1. Only arms that hold the name now are candidates.
+                       -- defers to ENSv1.
                        -- (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/universalResolver/libraries/LibResolution.sol:L58-L85 @ ens_v2_sepolia_20260916@366de741)
                        -- (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/resolver/ENSV1Resolver.sol:L40-L43 @ ens_v2_sepolia_20260916@366de741)
                        WHEN COALESCE(summary.has_ens_v2, false) THEN 'ens_v2'
+                       -- A released or expired ENSv2 registration stays with ENSv2 as a released
+                       -- tombstone, before any ENSv1 binding is considered.
+                       WHEN released.logical_name_id IS NOT NULL THEN 'ens_v2'
                        WHEN summary.arm_count = 1 THEN summary.sole_arm
                        -- Nothing is open on either arm: ENSv1 history decides first, as it
                        -- would for a name with no ENSv2 entry.
@@ -618,69 +449,40 @@
                        WHEN summary.logical_name_id IS NULL
                         AND event_summary.arm_count = 1 THEN event_summary.sole_arm
                    END AS selected_authority_arm,
-                   proof.proof_kind, proof.proof_event_id,
-                   proof.proof_event_identity, proof.transition_id,
-                   proof.epoch_block_number, proof.epoch_transaction_index,
-                   proof.epoch_log_index, proof.successor_binding_id,
-                   proof.successor_resource_id,
-                   released.released_v2_resource_id,
+                   CASE WHEN migration.logical_name_id IS NOT NULL
+                       THEN 'migration_authority_transition' END AS proof_kind,
+                   migration.proof_event_id, migration.proof_event_identity,
+                   migration.transition_id,
+                   released.released_v2_resource_id, released.released_v2_event_id,
                    released_v1.released_v1_resource_id, released_v1.released_v1_binding_id,
-                   -- Any ENSv1 evidence, open or historical: a shared-infrastructure selection
-                   -- of ENSv2 over it publishes no authority epoch.
-                   COALESCE(summary.has_ens_v1, false)
-                       OR COALESCE(event_summary.has_ens_v1, false) AS has_ens_v1,
-                   (shared.logical_name_id IS NOT NULL
-                    AND COALESCE(summary.has_ens_v2, false)
-                    AND proof.logical_name_id IS NULL AND released.logical_name_id IS NULL AND regime.logical_name_id IS NULL) AS shared_infrastructure_authority,
                    -- The arm was selected from event history with nothing open: the sole arm with
                    -- history, or ENSv1 when both arms have history and no ENSv2 release tombstone
-                   -- or regime applies. Its lifecycle state then reads that arm's events.
+                   -- applies. Its lifecycle state then reads that arm's events.
                    COALESCE(
-                       proof.logical_name_id IS NULL
-                           AND summary.logical_name_id IS NULL
+                       summary.logical_name_id IS NULL
                            AND (
                                event_summary.arm_count = 1
                                OR (
                                    released.logical_name_id IS NULL
-                                   AND regime.logical_name_id IS NULL
                                    AND event_summary.has_ens_v1
                                )
                            ),
                        false
-                   ) AS bindingless_event_authority,
-                   CASE
-                       WHEN $1 = 'ethereum-sepolia' OR EXISTS (
-                           SELECT 1 FROM project_manifests manifest
-                           WHERE manifest.namespace = 'ens'
-                             AND manifest.deployment_label IN (
-                                 'ens_v2_sepolia_post_audit', 'ens_v2_sepolia_hackathon', 'ens_v2_sepolia_20260915'
-                             )
-                       ) THEN 'sepolia'
-                       ELSE 'mainnet'
-                   END AS deployment_profile
+                   ) AS bindingless_event_authority
             FROM project_surfaces surface
             LEFT JOIN arm_summary summary USING (logical_name_id)
             LEFT JOIN event_arm_summary event_summary USING (logical_name_id)
-            LEFT JOIN proof USING (logical_name_id)
+            LEFT JOIN migration_history migration USING (logical_name_id)
             LEFT JOIN released_v2_authority released USING (logical_name_id)
-            LEFT JOIN released_v2_regime regime USING (logical_name_id)
             LEFT JOIN released_v1_authority released_v1 USING (logical_name_id)
-            LEFT JOIN shared_ens_infrastructure shared USING (logical_name_id)
         ), selected AS (
             SELECT decision.*, binding.surface_binding_id AS selected_binding_id,
                    binding.resource_id AS selected_resource_id,
                    binding.binding_kind AS selected_binding_kind,
-                   COALESCE(
-                       decision.epoch_block_number, binding.block_number
-                   ) AS selected_epoch_block_number,
-                   COALESCE(
-                       decision.epoch_transaction_index,
-                       (binding.provenance ->> 'transaction_index')::bigint
-                   ) AS selected_epoch_transaction_index,
-                   COALESCE(
-                       decision.epoch_log_index,
-                       (binding.provenance ->> 'log_index')::bigint
-                   ) AS selected_epoch_log_index
+                   binding.block_number AS selected_epoch_block_number,
+                   (binding.provenance ->> 'transaction_index')::bigint
+                       AS selected_epoch_transaction_index,
+                   (binding.provenance ->> 'log_index')::bigint AS selected_epoch_log_index
             FROM decision
             LEFT JOIN LATERAL (
                 SELECT candidate.*
@@ -697,8 +499,7 @@
                       OR candidate.resource_id = decision.released_v2_resource_id
                   )
                   AND (
-                      decision.proof_event_id IS NOT NULL
-                      OR decision.released_v2_resource_id IS NOT NULL
+                      decision.released_v2_resource_id IS NOT NULL
                       OR candidate.surface_binding_id = decision.released_v1_binding_id
                       OR (
                           candidate.active_from < target_time.cutoff
@@ -706,40 +507,6 @@
                               candidate.active_to IS NULL
                               OR candidate.active_to >= target_time.cutoff
                           )
-                      )
-                  )
-                  AND (
-                      decision.epoch_block_number IS NULL
-                      OR candidate.surface_binding_id = decision.successor_binding_id
-                      OR (
-                          decision.successor_binding_id IS NULL
-                          AND candidate.resource_id = decision.successor_resource_id
-                          AND (
-                              candidate.block_number,
-                              COALESCE(
-                                  (candidate.provenance ->> 'transaction_index')::bigint, -1
-                              ),
-                              COALESCE(
-                                  (candidate.provenance ->> 'log_index')::bigint, -1
-                              )
-                          ) = (
-                              decision.epoch_block_number,
-                              COALESCE(decision.epoch_transaction_index, -1),
-                              COALESCE(decision.epoch_log_index, -1)
-                          )
-                      )
-                      OR (
-                          candidate.block_number,
-                          COALESCE(
-                              (candidate.provenance ->> 'transaction_index')::bigint, -1
-                          ),
-                          COALESCE(
-                              (candidate.provenance ->> 'log_index')::bigint, -1
-                          )
-                      ) > (
-                          decision.epoch_block_number,
-                          COALESCE(decision.epoch_transaction_index, -1),
-                          COALESCE(decision.epoch_log_index, -1)
                       )
                   )
                 ORDER BY candidate.block_number DESC,
@@ -797,11 +564,14 @@
                ownerless.resource_id AS ownerless_registry_resource_id, ownerless.owner_getter_reason,
                (selected.released_v1_binding_id IS NOT NULL
                 AND selected.selected_binding_id = selected.released_v1_binding_id) AS released_v1_tombstone,
-               CASE WHEN selected.shared_infrastructure_authority AND selected.has_ens_v1 THEN NULL ELSE jsonb_strip_nulls(jsonb_build_object(
-                   'block_number', selected.selected_epoch_block_number, 'transaction_index', selected.selected_epoch_transaction_index, 'log_index', selected.selected_epoch_log_index)) END AS authority_epoch_start_position,
+               jsonb_strip_nulls(jsonb_build_object(
+                   'block_number', selected.selected_epoch_block_number, 'transaction_index', selected.selected_epoch_transaction_index, 'log_index', selected.selected_epoch_log_index)) AS authority_epoch_start_position,
                selected.proof_kind AS authority_proof_kind, selected.proof_event_id AS authority_proof_event_id,
                selected.proof_event_identity AS authority_proof_event_identity, selected.transition_id AS authority_transition_id,
                CASE
+                   -- A released ENSv2 tombstone was selected because its release is the latest
+                   -- fact of its registration, which may be a release written without a name.
+                   WHEN selected.released_v2_resource_id IS NOT NULL THEN 'unregistered'
                    WHEN lifecycle.event_kind = 'RegistrationReleased' THEN 'unregistered'
                    WHEN lifecycle.event_kind = 'RegistrationReserved' THEN 'reserved'
                    WHEN lifecycle.event_kind IN ('RegistrationGranted', 'RegistrationRenewed')
@@ -809,6 +579,12 @@
                    WHEN selected.selected_binding_id IS NULL THEN 'unregistered'
                    ELSE 'registered'
                END AS lifecycle_state,
+               -- A released ENSv2 tombstone's resource and the lifecycle fact that decided it,
+               -- which the registration section serves as its release.
+               CASE WHEN selected.selected_authority_arm = 'ens_v2'
+                   THEN selected.released_v2_resource_id END AS released_v2_resource_id,
+               CASE WHEN selected.selected_authority_arm = 'ens_v2'
+                   THEN selected.released_v2_event_id END AS released_v2_event_id,
                CASE
                    WHEN ownerless_profile.eligible THEN NULL
                    WHEN selected.selected_binding_id IS NULL THEN 'current_authority_not_projected'
@@ -818,7 +594,6 @@
                        THEN 'old' ELSE 'current' END
                END AS registry_generation,
                records.current_record_block AS registry_handoff_block_number,
-               selected.deployment_profile,
                jsonb_strip_nulls(jsonb_build_object('authority_arm',
                    selected.selected_authority_arm, 'binding_kind', selected.selected_binding_kind,
                    'resource_id', selected.selected_resource_id, 'surface_binding_id',
@@ -830,8 +605,7 @@
         LEFT JOIN project_latest_registry_owner ownerless USING (logical_name_id)
         LEFT JOIN registry_records records USING (logical_name_id)
         -- The ownerless-registry profile serves an ENSv1 or Basenames registry row, so it never
-        -- applies under ENSv2 authority: a released ENSv2 regime keeps retained or later ENSv1
-        -- registry facts as history (docs/glossary.md#released-v2-authority).
+        -- applies under ENSv2 authority.
         CROSS JOIN LATERAL (
             SELECT ownerless.logical_name_id IS NOT NULL
                    AND selected.selected_binding_id IS NULL

@@ -13,6 +13,10 @@
 -- On top: `.eth` leases whose label is never learned, reverse claims with a primary name for every
 -- second name, and node-keyed resolver records (coin-60 `AddressChanged` with and without its
 -- `AddrChanged` sibling, other coins, text records, version bumps) for the ENSv1 names.
+-- Every known name's binding pairs with a SurfaceBound at the same (transaction, log), as the
+-- adapter guarantees. That adds one `seed:bound:` event per known non-wrapped name; the wrapped
+-- names already carried theirs. Served row counts before and after that change were not
+-- compared; four served builders read SurfaceBound, so they may differ from the older seed.
 INSERT INTO chain_lineage (chain_id, block_hash, block_number, block_timestamp, canonicality_state)
 SELECT '__CHAIN__', '0x' || lpad(to_hex(block), 64, '0'), block,
        to_timestamp(1700000000 + block * 12), 'canonical'::canonicality_state
@@ -114,8 +118,43 @@ SELECT md5('b' || i)::uuid, logical_name_id,
                   WHEN 'registry_only' THEN registry_node ELSE registrar END,
        'declared_registry_path', CASE WHEN shape = 'v2' THEN 'ens_v2' ELSE 'ens_v1' END,
        to_timestamp(1700000000 + block * 12 - 1), '__CHAIN__', block_hash, block, 'canonical'::canonicality_state,
-       '{"transaction_index":0,"log_index":1}'
+       -- The adapter writes a binding and its opening SurfaceBound from one raw log, so the
+       -- provenance names the SurfaceBound's log below.
+       jsonb_build_object('transaction_index', 0, 'log_index',
+           CASE shape WHEN 'wrapped' THEN 5 WHEN 'registry_only' THEN 9 WHEN 'v2' THEN 1
+                      ELSE 2 END)
 FROM seed WHERE known;
+
+-- The SurfaceBound that opens each binding, at the binding's log: the registrar registration for
+-- the `.eth` registrar shapes, the NewOwner for registry-only subnames and the token resource for
+-- ENSv2 names. The wrapped shape's SurfaceBound is among the NameWrapper rows below.
+INSERT INTO normalized_events (event_identity, namespace, logical_name_id, resource_id,
+    event_kind, source_family, manifest_version, chain_id, block_number, block_hash,
+    transaction_hash, transaction_index, log_index, derivation_kind, canonicality_state,
+    after_state, raw_fact_ref)
+SELECT 'seed:bound:' || i, 'ens', logical_name_id,
+       CASE shape WHEN 'v2' THEN token WHEN 'registry_only' THEN registry_node ELSE registrar END,
+       'SurfaceBound',
+       CASE shape WHEN 'v2' THEN 'ens_v2_registry_l1' WHEN 'registry_only' THEN 'ens_v1_registry_l1'
+                  ELSE 'ens_v1_registrar_l1' END,
+       1, '__CHAIN__', block, block_hash, '0x' || md5('t' || i || ':0'), 0,
+       CASE shape WHEN 'registry_only' THEN 9 WHEN 'v2' THEN 1 ELSE 2 END,
+       CASE shape WHEN 'v2' THEN 'ens_v2_registry_resource_surface'
+                  ELSE 'ens_v1_unwrapped_authority' END,
+       'canonical'::canonicality_state,
+       jsonb_build_object('source_event',
+           CASE shape WHEN 'v2' THEN 'TokenResource' WHEN 'registry_only' THEN 'NewOwner'
+                      ELSE 'NameRegistered' END,
+           'node', namehash, 'owner', owner, 'binding_kind', 'declared_registry_path',
+           'authority_kind', CASE shape WHEN 'v2' THEN 'ens_v2_registry'
+                                        WHEN 'registry_only' THEN 'registry_only'
+                                        ELSE 'registrar' END,
+           'active_from', 1700000000 + block * 12 - 1),
+       jsonb_build_object('emitting_address', CASE shape
+           WHEN 'v2' THEN '0x00000000000000000000000000000000000000a4'
+           WHEN 'registry_only' THEN '0x00000000000000000000000000000000000000a3'
+           ELSE '0x00000000000000000000000000000000000000a1' END)
+FROM seed WHERE known AND shape <> 'wrapped';
 
 -- `.eth` registrar lifecycle: grant, expiry, a later renewal and a token transfer. Rows carry the
 -- name only for the `v1_named` shape.

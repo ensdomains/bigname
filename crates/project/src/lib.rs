@@ -14,6 +14,7 @@ mod reference;
 mod resolver_address;
 mod scope;
 mod stage;
+mod steps;
 
 pub use builders::child_registrations::EXCLUDED_CHILD_REGISTRATION_PARENTS;
 pub use engine::{BatchOutcome, BatchRequest, Engine, Marker, RunMode, WriteSummary};
@@ -22,3 +23,4 @@ pub use hydration::{HydrationOutcome, Hydrator};
 pub use integrity::{
     DUAL_CURRENT_CHILD_AUTHORITY, DUAL_CURRENT_EXACT_NAME_AUTHORITY, GenerationFailureEvidence,
 };
+pub use steps::{PROJECT_STEPS, StepObserver};

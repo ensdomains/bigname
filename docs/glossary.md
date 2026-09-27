@@ -76,17 +76,13 @@ arm against the `verified_authority_arms` the deployment profile's
 `ens_execution` manifest declares (`manifests.md` § `verified_authority_arms`):
 an arm outside that list is refused in band rather than resolved through an
 entrypoint the selection has ruled out. Project stages the selected arm,
-binding, resource, start position, lifecycle state, and proof together; field
+binding, resource, start position, lifecycle state, and migration history together; field
 selection cannot rank events from different arms or combine them in one
-`name_current` row. The exact [shared ENS
-infrastructure](#shared-ens-infrastructure) no-proof exception is not an
-authority epoch: it selects the ENSv2 arm for current fields while its
-epoch start and proof fields remain null. The related `AuthorityEpochChanged`
+`name_current` row. The related `AuthorityEpochChanged`
 normalized event is broader than an era flip: it records every move of a
 name's authority anchor (registry-, registrar-, or wrapper-held), so most such
 rows — millions on Basenames alone — mark within-era anchor transitions.
 
-<a id="shared-ens-infrastructure"></a>
 ## Implementation-announcement watch
 
 a [watch plan](#watch-plan--watched-tuple) entry compiled from one
@@ -128,38 +124,23 @@ reads it as proof that a name in its namespace uses the address. Defined in
 [`manifests.md` § Resolver creation
 capture](manifests.md#resolver-creation-capture).
 
-## Shared ENS infrastructure
-
-the exact ENS root, `eth`, `reverse`, and `addr.reverse` names. When an active
-surface has a current ENSv2 arm and ENSv1 evidence from a current binding or
-historical events, but no higher-precedence authority evidence, Project selects
-the ENSv2 arm for these four names without creating an authority proof or epoch:
-their epoch start stays null, where an ordinary name selected by its current
-ENSv2 registration starts its epoch at that binding. Historical ENSv2 evidence
-without a current ENSv2 binding does not qualify, and descendants are not
-included in the exception. A current ENSv2 binding with no ENSv1 evidence
-remains the ordinary single-arm ENSv2 case.
-
 ## Authority proof
 
-the evidence that selects an authority epoch before any
-current field is chosen. For an ENSv1→ENSv2 boundary it is the activated
-`MigrationApplied` event that Interpret already matched one-to-one with a
-validated [migration authority transition](#migration-authority-transition);
-Project trusts its successor binding, resource, position, and ENSv1→ENSv2 migration correlation ID rather than
-repeating raw ENSv1→ENSv2 migration correlation. A current positive ENSv2 child registration in an
-admitted [migration registry](#migration-registry-wrapperregistry) below a
-proven migrated parent is the other proof. The readable canonical
-`migration_registry_creation` association classifies that registry but does not
-establish authority by itself. Once the positive registration establishes the
-child epoch, later topology or manifest changes do not erase it. That child proof does not synthesize
-`MigrationApplied`, ENSv1→ENSv2 migration history, or a binding transition. Candidate
-events, reservations, event recency, binding UUID order, and `active_from`
-order are not authority proof. A proof is not needed for ENSv2 to hold a name:
-a current ENSv2 registration selects ENSv2 without one, following the chain
-([ADR 0007](adrs/0007-follow-the-chain-ens-authority.md)). A proof decides
-where the authority epoch starts, and it is what arms the dual-current
-generation checks.
+an earlier bigname rule, removed in TYR-36 step 6, under which an activated
+`MigrationApplied` event or a positive ENSv2 child registration in a
+[migration registry](#migration-registry-wrapperregistry) selected the ENSv2
+arm, its binding and its authority epoch start. Neither is an authority
+condition now. The latest activated `MigrationApplied` of a name, which
+Interpret matches one-to-one with a validated
+[migration authority transition](#migration-authority-transition), is kept as
+served migration history: Project records it in
+`provenance.authority_selection` as `proof_kind`
+`migration_authority_transition` with its event id, identity and
+ENSv1→ENSv2 migration correlation ID, and the API reads it for `migrated_at`
+and `is_migrated`. Authority follows the chain
+([ADR 0007](adrs/0007-follow-the-chain-ens-authority.md)): the ENSv2
+registration the migration made is selected like any other registration in an
+admitted registry, and the authority epoch starts at its binding.
 
 ## Backfill coverage fact
 
@@ -1096,16 +1077,19 @@ is the discriminator. Its `correlation_kind` is the ordinary
 `authority_transition`; there is no child-specific correlation kind. An
 incomplete or refused child group remains candidate or derives no boundary. A
 [complete group](#complete-group) instead activates its `MigrationApplied`,
-schedules the exact child predecessor transition, and becomes Project authority
-evidence.
+schedules the exact child predecessor transition, and becomes the migration
+history Project serves.
 
 Inert output is not the same as inert cost. Admitting a child registry writes a
 `migration_registry_creation` discovery association, and Project's rebuild scope
 reads that table without a visibility filter, so names registered into a
-newly-admitted child registry enter delete-and-rebuild candidacy. What those
-rebuilds publish still depends on proof: the child-registration authority rule
-requires an activated parent boundary, while the child's own arm changes only
-when its complete child group activates.
+newly-admitted child registry enter delete-and-rebuild candidacy. That read only
+widens rebuild scope; it admits nothing. What those rebuilds publish follows the
+ordinary open-binding rule: a child registration in the migration registry opens
+an ENSv2 binding and selects ENSv2 like any other registration, with no
+activated boundary needed for the child or its parent. When the child's complete
+group activates, it adds migration history (`migrated_at`, `is_migrated`) and
+selects nothing.
 
 The child's ENSv1 predecessor uses its own anchor kind,
 `wrapper_backed_child_control`. That anchor points at the child's position in
@@ -1150,8 +1134,8 @@ registration.
 
 Five shapes are refused, and one more never arises. A self-claim with no ENSv1
 predecessor cleanup is not a migration, whatever its sender. A parent owner registering
-an unprotected child label directly is a real registration and an authority
-proof, but never a child `MigrationApplied`
+an unprotected child label directly is a real, independently authoritative
+registration, but never a child `MigrationApplied`
 (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L172 @ ens_v2@a971bd64)
 (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L175 @ ens_v2@a971bd64).
 An unmigrated [migratable child](#migratable-child) emits no ENSv2 registration
@@ -1945,6 +1929,17 @@ an orphaned block hash stays resolvable through lineage, which is how a stale
 row is told apart from a live one. Operator diagnostics read this table; product
 routes do not.
 
+<a id="publication-visible-event"></a>
+## Publication-visible event
+
+a normalized event a publication at a target block can read: activated
+(`consumer_visibility = 'activated'`), `canonical`, `safe` or `finalized`
+([canonicality](#canonicality)), at or below the target, and at the hash the
+canonical lineage holds for its height. It is the set the [owned key
+families](#owned-key-family)' intake reads (`crates/project/src/families/input.rs`),
+and every log read a [shadow read](#shadow-read)'s checks make takes only these
+events.
+
 <a id="raw-fact"></a>
 ## Raw facts
 
@@ -2151,23 +2146,57 @@ lease's original registration time and current state. The lease's original rows 
 <a id="released-v2-authority"></a>
 ## Released v2 authority
 
-the authority tombstone left when an
-ENSv2-authoritative registration is released or unregistered. Its current
-registration lifecycle is unregistered, but its authority epoch remains
-`ens_v2`; retained or later ENSv1 facts are history and cannot restore current
-registration, owner, resolver, expiry, or control. A later positive ENSv2
-registration continues within that v2 authority regime when the release's
-regime evidence is unambiguous. If earlier ENSv2 grants on other resources
-leave the release's lifecycle epoch ambiguous, the regime does not continue;
-a later re-registration that is current is still selected as the name's
-current ENSv2 registration.
-Without an [authority proof](#authority-proof), this tombstone is established
-only by a qualifying release boundary — a release of the then-current ENSv2
-registration with no ENSv1 activity at or before it — and later ENSv1 facts do
-not retroactively validate a non-qualifying release. A release that does not
-qualify leaves no ENSv2 tombstone: ENSv1 then decides the name when it holds the
-name or has history for it, and the name is otherwise explicit
-`current_authority_not_projected`.
+the authority tombstone left when an ENSv2 registration is released, whether
+by `unregister` or by lapsing at its expiry, and no ENSv2 registration is
+current. It applies when the release is the latest lifecycle fact of the ENSv2
+registration the name was last bound to, and it holds whatever ENSv1 holds: a
+live ENSv1 lease, an open ENSv1 registrar, registry or wrapper binding, and any
+ENSv1 fact recorded after the release leave it in place. Only a later ENSv2
+reservation of the label, which defers to ENSv1 like any
+[premigration reservation](#premigration-reservation), or a new ENSv2
+registration changes the name's arm. The reservation defers to ENSv1 only while
+it is live: when it is unregistered or lapses, the label is available again and
+the tombstone returns. The reservation counts by name: after `unregister` bumps
+the token version, the reservation carries a versioned token id and no
+resource, so it is not a fact of the released resource, and Interpret writes its
+end as a named release without a resource. That resource-less end counts only
+when the name's latest earlier reservation-or-registration fact is a
+reservation with the same registry instance and token id, both present and
+not null on the end and on that reservation, so the end of an older reservation
+in another registry does not end a later one. A registry instance or token id
+that is missing or null on either row is unknown and never matches, not even
+another unknown one. A version-zero reservation, such as
+one in a replacement registry, carries its own resource, and its end carries the
+same resource. Either end returns the tombstone. A release on that resource
+counts as the reservation's end only when, among the name's reservations on any
+resource and the registrations on the released resource, nameless ones
+included, the latest earlier fact is a reservation on that resource. So the
+release of a registration that kept the reservation's resource is not one, and
+neither is a release on one resource after a later reservation of the name on
+another. A reservation whose expiry is
+already at or before its own block's time is never live and does not defer. A
+path-expiry release that Interpret
+writes on the resource without a name, because the token had already lost its
+name, still counts as that registration's release. Its current registration
+lifecycle is unregistered and its selected arm is `ens_v2`, bound to the
+released resource. The name's registration section serves the lifecycle fact
+authority selection chose for a released tombstone, this release included, on
+the tombstone's resource and binding (product ruling of 2026-09-26). When a
+named path-cut release comes before it, the served release, `released_at` and
+`expiry` come from this later release. When the deciding fact is the end of a later
+reservation, the tombstone's `expiry` and `released_at` are that end's. An end by
+`unregister` is an explicit release, which serves no expiry.
+This follows the ENSv2 contracts, which never route a label that has been
+registered back to ENSv1: `unregister` burns the token and writes the release
+time as the entry's expiry, which nothing sets back to zero
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L196-L207 @ ens_v2@a971bd64);
+the registry returns no resolver for an expired entry
+(upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L255-L258 @ ens_v2@a971bd64);
+and a migration `WrapperRegistry` treats any label with a nonzero stored expiry
+as ENSv2's for good, so it no longer answers with `ENSV1Resolver` for it
+(upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L180-L187 @ ens_v2@a971bd64)
+(upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L294-L297 @ ens_v2@a971bd64).
+Product ruling of 2026-09-25 (Linear TYR-36 step 6).
 
 <a id="released-v1-authority"></a>
 ## Released v1 authority
@@ -2289,6 +2318,16 @@ expiry never does.
 but general public reads are not enabled; (2) *shadow comparison*:
 running a new read surface in parallel with an existing one and diffing
 responses during a migration (the identity route's `profile=shadow`).
+
+## Shadow read
+
+a value computed from the [owned key families](#owned-key-family) by the
+readers in `bigname_storage::families::control`, compared with the value the
+production reader serves from today's tables at the same publication. Shadow
+reads run only in tests and the fixture-corpus harness. A differing field passes
+only as a disclosed same-block ordering case or under a named cause whose check
+holds for that field, and no API response uses a shadow read
+([projections](projections.md#owned-key-families)).
 
 ## Sidecar
 
@@ -2445,27 +2484,127 @@ runbook](runbooks/pipeline-monitoring.md#project-batch-writes)).
 per-key current state Project keeps for one kind of fact, such as a name's
 binding candidates, a resource's resolver pointer or a resolver's records at a
 node. A block writes only the keys its own events name, and each row holds
-what the latest events of its key left, clears included. The families are
-unread shadows until the per-block publication reads them
+what the latest events of its key left, clears included. No served path reads
+the families until the per-block publication does; the step 3
+[shadow readers](#shadow-read) read them in the test harnesses only
 ([projections](projections.md#owned-key-families)).
 
-## Family undo record
+The families carry labels F1 to F14, used in the difference lists, the table
+comments and the reducers' module headers. Each label names these tables and
+the reducer under `crates/project/src/families/` that writes them:
+
+| Label | Tables | Reducer |
+| --- | --- | --- |
+| F1, name identity | `project_name_state`, `project_binding_candidate` | `identity.rs` |
+| F2a, registration and lease state | `project_lifecycle_key_state`, `project_lifecycle_triple_summary`, `project_lifecycle_association`, `project_lifecycle_event`, `project_child_registration_state` | `lifecycle.rs` |
+| F2b, wrapper state | `project_wrapper_state` | `wrapper.rs` |
+| F2c, registry ownership | `project_registry_node_state`, `project_registry_owner_event`, `project_registry_binding_observation` | `registry.rs` |
+| F3, resolver classification | `project_resolver_classification` | `classification.rs` |
+| F4, registry-node resolver pointer | `project_registry_pointer` | `resolver.rs` |
+| F5, resource resolver pointer | `project_resource_pointer` | `resolver.rs` |
+| F6, node records | `project_node_record_partition`, `project_node_record_value` | `records.rs` |
+| F7, record-id records and resolver links | `project_record_id_value`, `project_resolver_link` | `records.rs` |
+| F8, grants | `project_grant`, `project_resource_admin_aggregate` | `permissions.rs` |
+| F9, account approvals | `project_account_approval` | `permissions.rs` |
+| F10, aliases | `project_name_alias`, `project_resolver_alias` | `topology.rs` |
+| F11, child edges | `project_child_edge_candidate`, `project_parent_subregistry` | `topology.rs` |
+| F12, reverse tuples and claims | `project_reverse_tuple`, `project_reverse_node_claim`, `project_claim_normalization` | `reverse.rs` |
+| F13, address-to-name association | `project_address_name_fold`, `project_address_controller_candidate`, `project_address_name_index` | `addresses.rs`, with the index derived in `derived.rs` |
+| F14, address-to-record association | `project_address_record_node_index`, `project_address_record_id_index` | `derived.rs` |
+
+## Family marker
+
+`project_family_marker`: the block and hash a chain's [owned key
+families](#owned-key-family) stand at, the generation (`sequence`) every block
+and undo advances, and the input token, input revision and [active manifest
+set](#active-manifest-set-family-block) key the last block read. A block or undo applies only against the generation it
+planned from.
+
+## Family undo journal
 
 the rows of `project_family_undo`: for every owned key family row a block
 changed, the row as it was before the block (or nothing, when the block
 created it), plus the family marker before the block. Undoing the block puts
-those images back and returns the marker; the last 256 blocks are kept.
+those images back and returns the marker. Rows are kept back to the lowest of
+256 blocks below the marker, the finalized block, the safe block and an active
+repair's floor ([projections](projections.md#owned-key-families)).
 
 ## Repair record
 
 `project_repair_record`: the latest undo-then-replay or rebuild of a chain's
 owned key families, with the Project redo attempt that caused it, its reason,
-the block it trusts, the block it replays to, its state and, when complete,
-the marker it finished at. Undo never rewrites it.
+the block it trusts, the block it replays to, its state (`undoing`,
+`replaying`, `rebuilding` or `complete`) and, when complete, the marker,
+generation and input content hash it finished with. Each state change commits
+in the same transaction as the reset, undo or block it describes.
 
 ## Family input revision
 
 the Interpret row's `input_content_hash` and `redo_attempt_generation` a family
-block read before it ran, recorded on the family marker; nothing while
-Interpret is in redo. Distinct from the retired [raw-log input
+block read inside its own transaction, recorded on the family marker; nothing
+while Interpret is in redo, and the block then waits. Distinct from the retired [raw-log input
 revision](#input-revision-raw-log-input-revision).
+
+## Active manifest set (family block)
+
+the manifests a family block classifies resolvers under: for every manifest
+the chain reads, its latest `SourceManifestUpdated` event at or below the block
+(or with no block) on the readable lineage, and those that are active with a
+payload. The block records the set's key, `manifest_id:event_id` per manifest,
+as `admission_manifests`; a different key reclassifies every stored resolver
+and every address an active resolver edge reaches, so an edge-only resolver
+whose origin manifest returns gets its row back. A
+family run reads the manifest updates once, before its first block. Distinct
+from the retired [admission epoch](#admission-epoch).
+
+## Canonical event order
+
+the one order Project applies a chain's events in (D12, amended by Tate on
+2026-09-26): block number, then transaction index, then log index, then, for an
+event with both a transaction and a log index, its
+[emission ordinal](#emission-ordinal), then `event_identity` compared as bytes
+(`COLLATE "C"` in SQL). Facts of one emission batch at one log therefore apply
+in the order the adapter wrote them: a NameWrapper transfer's resource-scoped
+facts (the delegate approval clear, the old holder's revoke, the new holder's
+grant, a retained delegate's re-grant) end on what the adapter wrote last. A
+synthesised event has no transaction or log position, sorts before every
+transaction of its block and keeps the identity byte order, since its trailing
+number is not an emission index. Owned key family reducers, the dedupe of
+repeated deliveries and every position comparison use it
+([projections](projections.md#owned-key-families)).
+
+## Emission ordinal
+
+the index of a fact within the adapter emission batch that wrote it, which the
+adapter appends as the final `:`-separated segment of a raw-log
+`event_identity` (`crates/adapters/src/schema_v2/normalized.rs:118-131`). It
+counts from 0 again for every batch: once for a log's primary events and once
+for each sourced batch (`sourced_events.rs:57-71`), and one source can carry
+several batches at one log. It is that segment when it is a nonempty run of
+ASCII digits no greater than 4294967295, leading zeros allowed, on an event
+with both a transaction and a log index; any other event has none, and none
+sorts first in the [canonical event order](#canonical-event-order). Within one
+batch it is the adapter's write order. Between batches at one log it is not,
+and that order is a disclosed precondition: no two batches of one source are
+known to write one family key, and where batches of two sources write one key
+from one log, the fact with the higher ordinal (then the higher identity
+bytes) wins, not the one inserted last. Its one confirmed instance is the
+NameWrapped registry-node pointer, where the resolver value agrees with the
+served read and only the resource, source family and event attribution differ.
+Four more shapes are read from the adapter code and pinned by tests but not
+yet produced by an adapter run: an F1 binding predecessor, an F4 registrar
+pointer, an F4 enrichment pointer against the registrar surface, and an F13
+controller. The F13 shape is a value difference: the families keep the
+registrant as controller where the served fold would keep the registry owner
+([projections](projections.md#owned-key-families) lists all four). No
+cross-source value difference is exempted. A
+served reader ported to the canonical event order (step 7) must parse the
+ordinal the same way. Only when both indexes are present, match
+`regexp_match(event_identity COLLATE "C", ':([0-9]+)$') m`, strip leading
+zeros with `d = ltrim(m[1], '0')`, then take
+`CASE WHEN d = '' THEN 0::bigint WHEN length(d) < 10 OR (length(d) = 10 AND d COLLATE "C" <= '4294967295' COLLATE "C") THEN d::bigint END`,
+ordered `NULLS FIRST`, with the full identity bytes last. It checks the
+significant length before it casts, so no suffix errors where the Rust parse
+yields none; a cast to numeric first fails on 131073 digits.
+`crates/project/tests/families_ordinal_sql.rs` checks this form against the
+Rust parse.

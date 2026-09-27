@@ -1114,6 +1114,12 @@ CREATE TABLE IF NOT EXISTS project_family_marker (
     interpret_input_content_hash text,
     interpret_redo_attempt bigint,
     state text NOT NULL,
+    interpret_redo_in_progress boolean,
+    project_redo_attempt bigint,
+    project_redo_mode text,
+    project_redo_from bigint,
+    project_redo_to bigint,
+    admission_manifests text,
     PRIMARY KEY (chain_id),
     CHECK ((current_block_number IS NULL) = (current_block_hash IS NULL)),
     CHECK (state IN ('live', 'bootstrap_pending')),
@@ -1134,11 +1140,23 @@ COMMENT ON COLUMN project_family_marker.input_content_hash IS
 COMMENT ON COLUMN project_family_marker.sequence IS
     'This value counts every family block and every family undo applied on the chain; it only grows. It is the explicit publication generation of the design, named so because schema-v2 reserves generation for authorised columns.';
 COMMENT ON COLUMN project_family_marker.interpret_input_content_hash IS
-    'This value is the Interpret row''s input_content_hash read before the block, the first half of the input revision; null while Interpret was in redo.';
+    'This value is the Interpret row''s input_content_hash the last block read inside its own transaction, the first half of the input revision.';
 COMMENT ON COLUMN project_family_marker.interpret_redo_attempt IS
-    'This value is the Interpret row''s redo_attempt_generation read before the block, the second half of the input revision; null while Interpret was in redo.';
+    'This value is the Interpret row''s redo_attempt_generation the last block read inside its own transaction, the second half of the input revision.';
 COMMENT ON COLUMN project_family_marker.state IS
     'This value is live when the marker follows the served publication and bootstrap_pending while a rebuild is populating the families.';
+COMMENT ON COLUMN project_family_marker.interpret_redo_in_progress IS
+    'This value is the Interpret row''s redo_in_progress the last block read; always false after a block, since no block applies while Interpret is in redo, and null on a reset marker.';
+COMMENT ON COLUMN project_family_marker.project_redo_attempt IS
+    'This value is the Project row''s redo_attempt_generation the last block read inside its own transaction.';
+COMMENT ON COLUMN project_family_marker.project_redo_mode IS
+    'This value is the Project row''s redo_mode the last block read, null when no redo was open.';
+COMMENT ON COLUMN project_family_marker.project_redo_from IS
+    'This value is the Project row''s redo_from_block_number the last block read.';
+COMMENT ON COLUMN project_family_marker.project_redo_to IS
+    'This value is the Project row''s redo_to_block_number the last block read.';
+COMMENT ON COLUMN project_family_marker.admission_manifests IS
+    'This value is the key of the active manifest set the last block classified under: manifest_id:event_id of the latest SourceManifestUpdated event of every manifest the chain reads, at or below the block or with no block. A family run reads the manifest updates once, so an update written during a run applies from the next run; a block that sees another key classifies every stored resolver again. An update with no block applies to every block, so it is not tied to the block it was written at.';
 
 CREATE TABLE IF NOT EXISTS project_family_undo (
     chain_id text NOT NULL,
@@ -1151,7 +1169,7 @@ CREATE TABLE IF NOT EXISTS project_family_undo (
     CHECK (btrim(block_hash) <> '')
 );
 COMMENT ON TABLE project_family_undo IS
-    'Project-owned undo record of the owned key families: per applied block, the image each family row had before the block first changed it, plus the prior marker under family marker. Undoing a block restores these images; rows below the retained depth are pruned as the marker advances. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
+    'Project-owned undo record of the owned key families: per applied block, the image each family row had before the block first changed it, plus the prior marker under family marker. Undoing a block restores these images. Rows are kept back to the lowest of 256 blocks below the marker, the finalized block, the safe block and an active repair''s floor; with no finalized or safe head nothing is pruned, so the journal grows by every block until the heads appear and is then pruned in one delete. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
 COMMENT ON COLUMN project_family_undo.chain_id IS
     'This value is the chain of the block.';
 COMMENT ON COLUMN project_family_undo.block_number IS
@@ -1183,6 +1201,8 @@ CREATE TABLE IF NOT EXISTS project_repair_record (
     completed_marker_hash text,
     completed_input_hash text,
     updated_at timestamptz NOT NULL DEFAULT now(),
+    prefix_recorded boolean NOT NULL DEFAULT false,
+    reset_sequence bigint,
     PRIMARY KEY (chain_id),
     CHECK (reason IN ('required_redo_range', 'orphaned_lineage', 'content_hash_rebuild', 'operator_redo')),
     CHECK (state IN ('undoing', 'replaying', 'rebuilding', 'complete')),
@@ -1190,7 +1210,9 @@ CREATE TABLE IF NOT EXISTS project_repair_record (
     CHECK (state = 'complete' OR (completed_sequence IS NULL AND completed_marker_number IS NULL AND completed_marker_hash IS NULL AND completed_input_hash IS NULL)),
     CHECK (state <> 'undoing' OR (prefix_interpret_input_content_hash IS NULL AND prefix_interpret_redo_attempt IS NULL)),
     CHECK ((trusted_base_number IS NULL) = (trusted_base_hash IS NULL)),
-    CHECK (state <> 'rebuilding' OR trusted_base_number IS NULL)
+    CHECK (state <> 'rebuilding' OR trusted_base_number IS NULL),
+    CONSTRAINT project_repair_record_prefix_recorded_check
+        CHECK (state <> 'undoing' OR NOT prefix_recorded)
 );
 COMMENT ON TABLE project_repair_record IS
     'Project-owned repair record: the durable description of the latest family undo-then-replay or rebuild of a chain, its attempt, reason, trusted base, replay target, state, input revision and completion identity. Undo never rewrites it. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
@@ -1228,6 +1250,10 @@ COMMENT ON COLUMN project_repair_record.completed_input_hash IS
     'This value is the interpreter content hash the completing loop ran under; null until complete.';
 COMMENT ON COLUMN project_repair_record.updated_at IS
     'This value is when the record last changed.';
+COMMENT ON COLUMN project_repair_record.reset_sequence IS
+    'This value is the family marker generation the rebuild''s reset wrote; null for an undo-then-replay.';
+COMMENT ON COLUMN project_repair_record.prefix_recorded IS
+    'This value is true once the replay or rebuild captured its input revision in prefix_interpret_input_content_hash and prefix_interpret_redo_attempt, which may both be null when the chain has no Interpret row; false while undoing.';
 
 CREATE TABLE IF NOT EXISTS project_name_state (
     namespace text NOT NULL,
@@ -1243,7 +1269,7 @@ CREATE TABLE IF NOT EXISTS project_name_state (
     migration_position jsonb,
     migrated_at timestamptz,
     authority_start_positions jsonb NOT NULL DEFAULT '{}'::jsonb,
-    PRIMARY KEY (namespace, logical_name_id),
+    PRIMARY KEY (chain_id, namespace, logical_name_id),
     CHECK ((transaction_index IS NULL) = (log_index IS NULL))
 );
 COMMENT ON TABLE project_name_state IS
@@ -1253,7 +1279,7 @@ COMMENT ON COLUMN project_name_state.namespace IS
 COMMENT ON COLUMN project_name_state.logical_name_id IS
     'This value identifies the name.';
 COMMENT ON COLUMN project_name_state.chain_id IS
-    'This value is the chain whose events wrote the row.';
+    'This value is the chain whose events wrote the row; each chain keeps its own row for a name.';
 COMMENT ON COLUMN project_name_state.block_number IS
     'This value is the block number of the event that last wrote the row.';
 COMMENT ON COLUMN project_name_state.transaction_index IS
@@ -1273,7 +1299,7 @@ COMMENT ON COLUMN project_name_state.migration_position IS
 COMMENT ON COLUMN project_name_state.migrated_at IS
     'This value is that event''s block timestamp.';
 COMMENT ON COLUMN project_name_state.authority_start_positions IS
-    'This value maps each authority arm to the position of the name''s latest AuthorityEpochChanged in that arm.';
+    'This value maps each authority arm to the position of the name''s latest AuthorityEpochChanged in that arm, with its authority_kind, authority_key, resource and the owner it reports to the served control block.';
 
 CREATE TABLE IF NOT EXISTS project_binding_candidate (
     surface_binding_id uuid NOT NULL,
@@ -1303,13 +1329,17 @@ CREATE TABLE IF NOT EXISTS project_binding_candidate (
     transaction_hash text,
     emitting_address text,
     surface_bound_position jsonb,
+    authority_key text,
+    predecessor_wrapped_registrar_resource_id uuid,
+    predecessor_node text,
+    bound_owner text,
     PRIMARY KEY (surface_binding_id),
     CHECK ((transaction_index IS NULL) = (log_index IS NULL))
 );
 COMMENT ON TABLE project_binding_candidate IS
     'Project-owned binding candidates of family F1: every surface binding of a name, selected or not, with the registry-only handoff facts and the wrapper facts the authority admission reads at publication. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
 COMMENT ON COLUMN project_binding_candidate.surface_binding_id IS
-    'This value identifies the surface binding.';
+    'This value identifies the surface binding. It orders candidates only after the whole position: two bindings of one name at the same position with no transaction or log (synthesised) order by event_identity and then this id, where the served selection orders equal (block, transaction, log) by surface_binding_id descending without the identity.';
 COMMENT ON COLUMN project_binding_candidate.logical_name_id IS
     'This value is the bound name.';
 COMMENT ON COLUMN project_binding_candidate.namespace IS
@@ -1329,39 +1359,54 @@ COMMENT ON COLUMN project_binding_candidate.active_from IS
 COMMENT ON COLUMN project_binding_candidate.surface_namehash IS
     'This value is the lower-cased namehash of the bound surface, which the direct-binding pass compares with a registrar event''s namehash.';
 COMMENT ON COLUMN project_binding_candidate.block_number IS
-    'This value is the block number of the binding row: its block and the transaction and log index of its provenance; event_identity is the surface binding id, the tiebreak stage.rs uses.';
+    'This value is the block number of the binding''s position: the position of the SurfaceBound that opened it (the block''s SurfaceBound of the same name and resource at the transaction and log index of the binding''s provenance), else the binding''s own block and provenance index with the identity binding:<surface_binding_id>.';
 COMMENT ON COLUMN project_binding_candidate.transaction_index IS
-    'This value is the transaction index of the binding row: its block and the transaction and log index of its provenance; event_identity is the surface binding id, the tiebreak stage.rs uses; null with log_index for a synthesised event, which sorts before every transaction of its block.';
+    'This value is the transaction index of the binding''s position: the position of the SurfaceBound that opened it (the block''s SurfaceBound of the same name and resource at the transaction and log index of the binding''s provenance), else the binding''s own block and provenance index with the identity binding:<surface_binding_id>. Null with log_index for a synthesised event, which sorts before every transaction of its block.';
 COMMENT ON COLUMN project_binding_candidate.log_index IS
-    'This value is the log index of the binding row: its block and the transaction and log index of its provenance; event_identity is the surface binding id, the tiebreak stage.rs uses; null with transaction_index for a synthesised event.';
+    'This value is the log index of the binding''s position: the position of the SurfaceBound that opened it (the block''s SurfaceBound of the same name and resource at the transaction and log index of the binding''s provenance), else the binding''s own block and provenance index with the identity binding:<surface_binding_id>. Null with transaction_index for a synthesised event.';
 COMMENT ON COLUMN project_binding_candidate.event_identity IS
-    'This value is the event identity of the binding row: its block and the transaction and log index of its provenance; event_identity is the surface binding id, the tiebreak stage.rs uses, the final tiebreak of the canonical event order, compared as bytes.';
+    'This value is the event identity of the binding''s position: the position of the SurfaceBound that opened it (the block''s SurfaceBound of the same name and resource at the transaction and log index of the binding''s provenance), else the binding''s own block and provenance index with the identity binding:<surface_binding_id>. It is the final tiebreak of the canonical event order, compared as bytes; two bindings one event opened are ordered by surface_binding_id. The adapter materializes one raw log''s events and bindings together (adapters schema_v2/session.rs:490 and :512) and stamps each log-sourced binding with that log''s provenance (schema_v2/identity.rs:229 and :329); a block-boundary binding and its SurfaceBound come from one block with no transaction or log (identity/boundary.rs:137). The families assume, as an adapter precondition, that an identity binding:<surface_binding_id> means the adapter''s reconcile dropped the SurfaceBound (schema_v2/protocol/v1/reconcile_support.rs:42-43), not that the SurfaceBound sits at another position; the cited lines show that a binding and its SurfaceBound share provenance, not that every binding has an opener. If the precondition fails, the family positions the binding at its own block and provenance index under the identity binding:<surface_binding_id>, with no error and no anomaly count.';
 COMMENT ON COLUMN project_binding_candidate.normalized_event_id IS
-    'This value names the binding row: its block and the transaction and log index of its provenance; event_identity is the surface binding id, the tiebreak stage.rs uses in normalized_events as attribution only; it never takes part in ordering.';
+    'This value names the SurfaceBound that opened the binding in normalized_events as attribution only; it never takes part in ordering.';
 COMMENT ON COLUMN project_binding_candidate.state_derived IS
-    'This value is the state_derived flag of the latest SurfaceBound for this name and resource.';
+    'This value is the state_derived flag of the SurfaceBound that opened the binding.';
 COMMENT ON COLUMN project_binding_candidate.authority_kind IS
-    'This value is the authority_kind of that SurfaceBound.';
+    'This value is the authority_kind of the SurfaceBound that opened the binding.';
 COMMENT ON COLUMN project_binding_candidate.registry_only IS
-    'This value is true when an AuthorityEpochChanged registry_only was seen on this name and resource.';
+    'This value is true once an AuthorityEpochChanged registry_only was seen on this name and resource, in the binding''s block or later. An epoch at an earlier block than the binding does not set it, where the served REGISTRY_ONLY_HANDOFFS (name_authority/stage.rs:127-134) takes an epoch on the name and resource at any position.';
 COMMENT ON COLUMN project_binding_candidate.predecessor_resource_id IS
-    'This value is the resource of the latest same-arm candidate positioned before a registry-only binding.';
+    'This value is the resource of the latest candidate of the same name and arm positioned before a registry-only binding.';
 COMMENT ON COLUMN project_binding_candidate.predecessor_position IS
     'This value is that predecessor candidate''s position.';
 COMMENT ON COLUMN project_binding_candidate.lease_resource_id IS
-    'This value is the successor registrar lease a registry-only binding recorded.';
+    'This value is the lease a registry-only handoff stands for (stage.rs:47-135): the latest ens_v1 registrar grant of the name after the binding, on another resource, with a registrar release of the predecessor''s resource before it; else the predecessor''s resource.';
 COMMENT ON COLUMN project_binding_candidate.lease_position IS
-    'This value is the position of the grant that created that lease.';
+    'This value is the position of that successor grant, else the predecessor''s position.';
 COMMENT ON COLUMN project_binding_candidate.wrapped_registrar_resource_id IS
-    'This value is the registrar lease a wrapper SurfaceBound for this name and resource recorded.';
+    'This value is the registrar lease the NameWrapper SurfaceBound that opened the binding recorded.';
 COMMENT ON COLUMN project_binding_candidate.node IS
-    'This value is the lower-cased node of that wrapper SurfaceBound.';
+    'This value is the lower-cased node of that NameWrapper SurfaceBound.';
 COMMENT ON COLUMN project_binding_candidate.transaction_hash IS
-    'This value is that wrapper SurfaceBound''s transaction hash.';
+    'This value is that NameWrapper SurfaceBound''s transaction hash.';
 COMMENT ON COLUMN project_binding_candidate.emitting_address IS
-    'This value is the lower-cased address that emitted that wrapper SurfaceBound.';
+    'This value is the lower-cased address that emitted that NameWrapper SurfaceBound.';
 COMMENT ON COLUMN project_binding_candidate.surface_bound_position IS
-    'This value is the position of the latest SurfaceBound that set the flags and wrapper facts above.';
+    'This value is the position of the SurfaceBound that opened the binding, null when none did.';
+COMMENT ON COLUMN project_binding_candidate.authority_key IS
+    'This value is the authority_key of the SurfaceBound that opened the binding.';
+COMMENT ON COLUMN project_binding_candidate.predecessor_wrapped_registrar_resource_id IS
+    'This value is the registrar lease the handoff''s predecessor recorded when the predecessor is a NameWrapper binding, the lease authority_events.sql:164-186 admits registrar grants and releases of.';
+COMMENT ON COLUMN project_binding_candidate.predecessor_node IS
+    'This value is the lower-cased node the handoff''s predecessor recorded when it is a NameWrapper binding.';
+COMMENT ON COLUMN project_binding_candidate.bound_owner IS
+    'This value is the owner the SurfaceBound that opened the binding reports to the served control block (name_current/build.sql:650-671): null when its owner word is unmasked, else its registry_owner, else its owner, lower-cased; its position is surface_bound_position.';
+CREATE INDEX IF NOT EXISTS project_binding_candidate_wrapped_lease_idx
+    ON project_binding_candidate (chain_id, wrapped_registrar_resource_id)
+    WHERE wrapped_registrar_resource_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS project_binding_candidate_resource_idx
+    ON project_binding_candidate (chain_id, resource_id);
+CREATE INDEX IF NOT EXISTS project_binding_candidate_name_idx
+    ON project_binding_candidate (chain_id, logical_name_id);
 
 CREATE TABLE IF NOT EXISTS project_lifecycle_key_state (
     chain_id text NOT NULL,
@@ -1403,7 +1448,7 @@ COMMENT ON COLUMN project_lifecycle_key_state.event_identity IS
 COMMENT ON COLUMN project_lifecycle_key_state.normalized_event_id IS
     'This value names the event that last wrote the row in normalized_events as attribution only; it never takes part in ordering.';
 COMMENT ON COLUMN project_lifecycle_key_state.last_grant IS
-    'This value holds the latest RegistrationGranted: position, registrant, expiry, authority_kind, status and the registered_at source.';
+    'This value holds the latest RegistrationGranted: position, registrant, expiry, authority_kind and authority_key as the payload has them (null when absent), status and the registered_at source.';
 COMMENT ON COLUMN project_lifecycle_key_state.last_reservation IS
     'This value holds the latest RegistrationReserved: position, registrant, expiry and status.';
 COMMENT ON COLUMN project_lifecycle_key_state.last_active IS
@@ -1463,7 +1508,7 @@ COMMENT ON COLUMN project_lifecycle_triple_summary.event_identity IS
 COMMENT ON COLUMN project_lifecycle_triple_summary.normalized_event_id IS
     'This value names the event that last wrote the row in normalized_events as attribution only; it never takes part in ordering.';
 COMMENT ON COLUMN project_lifecycle_triple_summary.last_grant IS
-    'This value holds the latest RegistrationGranted: position, registrant, expiry, authority_kind, status and the registered_at source.';
+    'This value holds the latest RegistrationGranted: position, registrant, expiry, authority_kind and authority_key as the payload has them (null when absent), status and the registered_at source.';
 COMMENT ON COLUMN project_lifecycle_triple_summary.last_reservation IS
     'This value holds the latest RegistrationReserved: position, registrant, expiry and status.';
 COMMENT ON COLUMN project_lifecycle_triple_summary.last_active IS
@@ -1554,6 +1599,7 @@ CREATE TABLE IF NOT EXISTS project_lifecycle_event (
     owner_getter text,
     owner_word_unmasked boolean,
     registry_owner text,
+    authority_key text,
     PRIMARY KEY (chain_id, state_kind, state_key, event_identity),
     CHECK ((transaction_index IS NULL) = (log_index IS NULL)),
     CHECK (state_kind IN ('resource', 'triple'))
@@ -1587,7 +1633,7 @@ COMMENT ON COLUMN project_lifecycle_event.resource_id IS
 COMMENT ON COLUMN project_lifecycle_event.source_family IS
     'This value is the event''s source family.';
 COMMENT ON COLUMN project_lifecycle_event.authority_kind IS
-    'This value is COALESCE(NULLIF(after_state authority_kind, ''''), ''registrar'').';
+    'This value is the after-state authority_kind as ->> reads it, null when absent; the admission reads default it to registrar (COALESCE(NULLIF(authority_kind, ''''), ''registrar'')) and the served name block reports it as it is (name_current/build.sql:30).';
 COMMENT ON COLUMN project_lifecycle_event.transaction_hash IS
     'This value is the event''s transaction hash.';
 COMMENT ON COLUMN project_lifecycle_event.to_address IS
@@ -1628,6 +1674,14 @@ COMMENT ON COLUMN project_lifecycle_event.owner_word_unmasked IS
     'This value is the after-state owner_word_unmasked.';
 COMMENT ON COLUMN project_lifecycle_event.registry_owner IS
     'This value is the lower-cased after-state registry_owner.';
+COMMENT ON COLUMN project_lifecycle_event.authority_key IS
+    'This value is the event''s after_state authority_key as ->> reads it, which the served authority context reports with the authority kind (name_current/build.sql:393-395).';
+CREATE INDEX IF NOT EXISTS project_lifecycle_event_unnamed_lease_idx
+    ON project_lifecycle_event (chain_id, state_key)
+    WHERE state_kind = 'resource' AND source_family = 'ens_v1_registrar_l1'
+      AND original_logical_name_id IS NULL AND decoded_logical_name_id IS NULL;
+CREATE INDEX IF NOT EXISTS project_lifecycle_event_decoded_name_idx
+    ON project_lifecycle_event (chain_id, decoded_logical_name_id);
 
 CREATE TABLE IF NOT EXISTS project_child_registration_state (
     chain_id text NOT NULL,
@@ -1684,11 +1738,15 @@ CREATE TABLE IF NOT EXISTS project_wrapper_state (
     expiry_seconds numeric,
     expiry_position jsonb,
     owner_word_unmasked boolean,
+    lifecycle_source text,
+    lifecycle_unwrapped boolean,
+    lifecycle_position jsonb,
+    unwrapped_position jsonb,
     PRIMARY KEY (chain_id, resource_id),
     CHECK ((transaction_index IS NULL) = (log_index IS NULL))
 );
 COMMENT ON TABLE project_wrapper_state IS
-    'Project-owned wrapper state of family F2b per wrapper resource: the latest wrapper_state and fuses and the latest wrapper expiry, unmasked; masks are applied at read against the block clock. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
+    'Project-owned wrapper state of family F2b per wrapper resource: the latest wrapper_state and fuses, the latest wrapper expiry, and the newest wrapper lifecycle event with the latest unwrap, unmasked; masks are applied at read against the block clock. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
 COMMENT ON COLUMN project_wrapper_state.chain_id IS
     'This value is the chain.';
 COMMENT ON COLUMN project_wrapper_state.resource_id IS
@@ -1708,15 +1766,23 @@ COMMENT ON COLUMN project_wrapper_state.normalized_event_id IS
 COMMENT ON COLUMN project_wrapper_state.wrapper_state IS
     'This value is wrapped, emancipated or locked from the latest PermissionScopeChanged; null for any other value.';
 COMMENT ON COLUMN project_wrapper_state.fuses IS
-    'This value is that event''s fuses when a JSON number from 0 to 4294967295.';
+    'This value is the fuses of the latest PermissionScopeChanged when a JSON number whose value is an integer from 0 to 9223372036854775807, the range builders/permissions.rs modifiers and address_names.rs scope_modifiers read before casting to bigint; null otherwise. The served children and name blocks read a narrower range, 0 to 4294967295 (children.rs:146-148, name_current/build.sql:541-544), so a publisher for those two readers must reapply it; the NameWrapper emits fuses as uint32 (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L27-L37 @ ens_v1@91c966f), so the ranges differ only for a value the contract never emits. A non-integral spelling such as 1.0 fails the served bigint cast and the Project batch, so it never reaches a served row.';
 COMMENT ON COLUMN project_wrapper_state.wrapper_state_position IS
     'This value is that PermissionScopeChanged''s position.';
 COMMENT ON COLUMN project_wrapper_state.expiry_seconds IS
-    'This value is the latest wrapper expiry: a JSON number from 0 to 18446744073709551615.';
+    'This value is the latest wrapper expiry when a JSON integer from 0 to 18446744073709551615, the range the served numeric read keeps (address_names.rs wrapper_expiries, children.rs latest_wrapper_expiries); null otherwise. A decimal spelling such as 1.0 or 1.5, which the served read keeps as that numeric, is null here: the Project reads event payloads without arbitrary precision, so a decimal can arrive rounded (9007199254740991.0 as 9007199254740990). The adapter writes the expiry as a JSON integer (adapters schema_v2/protocol/v1/wrapper.rs decodes a uint64), so only a hand-written payload reaches the difference.';
 COMMENT ON COLUMN project_wrapper_state.expiry_position IS
     'This value is that ExpiryChanged''s position.';
 COMMENT ON COLUMN project_wrapper_state.owner_word_unmasked IS
     'This value is the latest owner_word_unmasked flag the wrapper events carried.';
+COMMENT ON COLUMN project_wrapper_state.lifecycle_source IS
+    'This value is the source of the newest wrapper lifecycle event of the resource: NameWrapped, NameUnwrapped, holder_grant or holder_revoke (resource_summary.rs wrapper_lifecycles). NameWrapped is the mint: the pinned NameWrapper emits it only from _wrap, right after minting the token of the node (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L878-L903 @ ens_v1@91c966f).';
+COMMENT ON COLUMN project_wrapper_state.lifecycle_unwrapped IS
+    'This value is true when the newest wrapper lifecycle event leaves the resource unwrapped: a NameUnwrapped or a holder revoke with no powers. The pinned NameWrapper emits NameUnwrapped when _unwrap burns the token (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1022-L1031 @ ens_v1@91c966f) and when a mint burns a still-held token first (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L878-L903 @ ens_v1@91c966f); its upgrade, which no manifest admits, burns without NameUnwrapped, so there only the holder revoke leaves the resource unwrapped (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L483-L509 @ ens_v1@91c966f). The served wrapper restrictions are served only while it is false.';
+COMMENT ON COLUMN project_wrapper_state.lifecycle_position IS
+    'This value is the canonical position of the newest wrapper lifecycle event.';
+COMMENT ON COLUMN project_wrapper_state.unwrapped_position IS
+    'This value is the canonical position of the latest NameUnwrapped of the resource, kept when a later mint or holder grant becomes the newest lifecycle event; a re-wrap over a still-held token emits NameUnwrapped to the zero address before its NameWrapped (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L878-L903 @ ens_v1@91c966f).';
 
 CREATE TABLE IF NOT EXISTS project_registry_node_state (
     chain_id text NOT NULL,
@@ -1736,6 +1802,9 @@ CREATE TABLE IF NOT EXISTS project_registry_node_state (
     registry_contract text,
     has_old_record boolean NOT NULL DEFAULT false,
     first_current_record_block bigint,
+    owner_event_kind text,
+    owner_position jsonb,
+    owner_resource_id uuid,
     PRIMARY KEY (chain_id, namespace, node),
     CHECK ((transaction_index IS NULL) = (log_index IS NULL))
 );
@@ -1758,15 +1827,15 @@ COMMENT ON COLUMN project_registry_node_state.event_identity IS
 COMMENT ON COLUMN project_registry_node_state.normalized_event_id IS
     'This value names the event that last wrote the row in normalized_events as attribution only; it never takes part in ordering.';
 COMMENT ON COLUMN project_registry_node_state.owner IS
-    'This value is the lower-cased after-state owner.';
+    'This value is the lower-cased owner of the latest AuthorityTransferred or SubregistryChanged for the node.';
 COMMENT ON COLUMN project_registry_node_state.owner_getter IS
-    'This value is the after-state owner_getter as written.';
+    'This value is the lower-cased owner_getter of that event.';
 COMMENT ON COLUMN project_registry_node_state.owner_getter_reason IS
-    'This value is the after-state owner_getter_reason.';
+    'This value is the owner_getter_reason of that event.';
 COMMENT ON COLUMN project_registry_node_state.owner_word_unmasked IS
-    'This value is the after-state owner_word_unmasked.';
+    'This value is the owner_word_unmasked of that event.';
 COMMENT ON COLUMN project_registry_node_state.registry_owner IS
-    'This value is the lower-cased after-state registry_owner.';
+    'This value is the lower-cased registry_owner of that event.';
 COMMENT ON COLUMN project_registry_node_state.emitter_role IS
     'This value is the after-state emitter_role of the latest event.';
 COMMENT ON COLUMN project_registry_node_state.registry_contract IS
@@ -1775,11 +1844,84 @@ COMMENT ON COLUMN project_registry_node_state.has_old_record IS
     'This value is true once any event with emitter_role registry_old addressed the node.';
 COMMENT ON COLUMN project_registry_node_state.first_current_record_block IS
     'This value is the first block with an emitter_role registry event for the node.';
+COMMENT ON COLUMN project_registry_node_state.owner_event_kind IS
+    'This value is the kind of the registry event that last set the owner group: AuthorityTransferred or SubregistryChanged, both of which report the owner (name_authority/stage.rs:200-261). Either overwrites the group, so a SubregistryChanged after an AuthorityTransferred whose getter was zero replaces the owner; the served ownerless verdict, which reads AuthorityTransferred only, cannot be recovered from this row, and project_registry_owner_event keeps every owner-setting event for it.';
+COMMENT ON COLUMN project_registry_node_state.owner_position IS
+    'This value is the position of that event, apart from the row''s last-write position.';
+COMMENT ON COLUMN project_registry_node_state.owner_resource_id IS
+    'This value is that event''s resource.';
+
+CREATE TABLE IF NOT EXISTS project_registry_owner_event (
+    chain_id text NOT NULL,
+    namespace text NOT NULL,
+    node text NOT NULL,
+    block_number bigint NOT NULL,
+    transaction_index bigint,
+    log_index bigint,
+    event_identity text NOT NULL,
+    normalized_event_id bigint,
+    transaction_hash text,
+    logical_name_id text,
+    resource_id uuid,
+    event_kind text NOT NULL,
+    source_family text NOT NULL,
+    authority_kind text,
+    owner text,
+    owner_getter text,
+    owner_getter_reason text,
+    registry_owner text,
+    owner_word_unmasked boolean,
+    PRIMARY KEY (chain_id, namespace, node, event_identity),
+    CHECK ((transaction_index IS NULL) = (log_index IS NULL))
+);
+COMMENT ON TABLE project_registry_owner_event IS
+    'Project-owned owner-setting registry events of family F2c: every AuthorityTransferred and SubregistryChanged an ENSv1 or Basenames registry reported for a node, keyed by position, with the name, resource, authority kind and owner facts each carried. The node row keeps only the latest owner group, which a SubregistryChanged after a zero-getter transfer replaces; the served ownerless verdict and owner history are recovered from these rows. Unpruned; a row leaves only when undo removes its block. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
+COMMENT ON COLUMN project_registry_owner_event.chain_id IS
+    'This value is the chain.';
+COMMENT ON COLUMN project_registry_owner_event.namespace IS
+    'This value is the namespace.';
+COMMENT ON COLUMN project_registry_owner_event.node IS
+    'This value is the lower-cased node the event addresses: child_node, else node.';
+COMMENT ON COLUMN project_registry_owner_event.block_number IS
+    'This value is the event''s block number.';
+COMMENT ON COLUMN project_registry_owner_event.transaction_index IS
+    'This value is the event''s transaction index; null with log_index for a synthesised event, which sorts before every transaction of its block.';
+COMMENT ON COLUMN project_registry_owner_event.log_index IS
+    'This value is the event''s log index; null with transaction_index for a synthesised event.';
+COMMENT ON COLUMN project_registry_owner_event.event_identity IS
+    'This value is the event identity, the final tiebreak of the canonical event order, compared as bytes.';
+COMMENT ON COLUMN project_registry_owner_event.normalized_event_id IS
+    'This value names the event in normalized_events as attribution only; it never takes part in ordering.';
+COMMENT ON COLUMN project_registry_owner_event.transaction_hash IS
+    'This value is the event''s transaction hash, null for a synthesised event.';
+COMMENT ON COLUMN project_registry_owner_event.logical_name_id IS
+    'This value is the event''s name, null when it carried none.';
+COMMENT ON COLUMN project_registry_owner_event.resource_id IS
+    'This value is the event''s resource.';
+COMMENT ON COLUMN project_registry_owner_event.event_kind IS
+    'This value is AuthorityTransferred or SubregistryChanged.';
+COMMENT ON COLUMN project_registry_owner_event.source_family IS
+    'This value is the registry source family.';
+COMMENT ON COLUMN project_registry_owner_event.authority_kind IS
+    'This value is the after-state authority_kind of the event.';
+COMMENT ON COLUMN project_registry_owner_event.owner IS
+    'This value is the lower-cased owner the event reported.';
+COMMENT ON COLUMN project_registry_owner_event.owner_getter IS
+    'This value is the lower-cased owner_getter of the event.';
+COMMENT ON COLUMN project_registry_owner_event.owner_getter_reason IS
+    'This value is the owner_getter_reason of the event.';
+COMMENT ON COLUMN project_registry_owner_event.registry_owner IS
+    'This value is the lower-cased registry_owner of the event, as the node row keeps it for its latest event.';
+COMMENT ON COLUMN project_registry_owner_event.owner_word_unmasked IS
+    'This value is the owner_word_unmasked flag of the event, as the node row keeps it for its latest event.';
 
 CREATE TABLE IF NOT EXISTS project_registry_binding_observation (
     chain_id text NOT NULL,
+    observation_identity text NOT NULL,
+    logical_name_id text,
     resource_id uuid NOT NULL,
     attributed_via text NOT NULL,
+    target_resource_id uuid NOT NULL,
     block_number bigint NOT NULL,
     transaction_index bigint,
     log_index bigint,
@@ -1791,18 +1933,24 @@ CREATE TABLE IF NOT EXISTS project_registry_binding_observation (
     provenance jsonb,
     applicable boolean NOT NULL,
     clear_event_identity text,
-    PRIMARY KEY (chain_id, resource_id, attributed_via),
+    PRIMARY KEY (chain_id, observation_identity),
     CHECK ((transaction_index IS NULL) = (log_index IS NULL)),
     CHECK (attributed_via IN ('own', 'name'))
 );
 COMMENT ON TABLE project_registry_binding_observation IS
-    'Project-owned registry binding observations of family F2c: per resource and attribution, the latest AuthorityTransferred, SubregistryChanged, SurfaceBound or SurfaceUnbound observation; a read takes the latest of the two attributions. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
+    'Project-owned registry binding observations of family F2c: per observation identity (the name, else the resource; permission_resources.rs:10-11), the latest AuthorityTransferred, SubregistryChanged, SurfaceBound or SurfaceUnbound observation with the resource it reaches. The resource summary takes, per target resource, the latest row that reaches it. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
 COMMENT ON COLUMN project_registry_binding_observation.chain_id IS
     'This value is the chain.';
+COMMENT ON COLUMN project_registry_binding_observation.observation_identity IS
+    'This value is COALESCE(logical_name_id, resource_id) of the observation, its DISTINCT ON key.';
+COMMENT ON COLUMN project_registry_binding_observation.logical_name_id IS
+    'This value is the event''s name, null for an unnamed observation.';
 COMMENT ON COLUMN project_registry_binding_observation.resource_id IS
-    'This value is the observed resource.';
+    'This value is the event''s own resource.';
 COMMENT ON COLUMN project_registry_binding_observation.attributed_via IS
-    'This value is own when the event''s resource is the resource and name when the event reached it through the name''s current resource.';
+    'This value is name for a named AuthorityTransferred or SubregistryChanged, which reaches the name''s current resource, and own for every other observation, which reaches its own resource.';
+COMMENT ON COLUMN project_registry_binding_observation.target_resource_id IS
+    'This value is the resource the observation reaches after the block: for attributed_via name the name''s ENSv1 or Basenames binding active at the block, else resource_id; a block that moves the name''s current binding moves it. A reader whose authority selection differs re-resolves it from logical_name_id.';
 COMMENT ON COLUMN project_registry_binding_observation.block_number IS
     'This value is the block number of the event that last wrote the row.';
 COMMENT ON COLUMN project_registry_binding_observation.transaction_index IS
@@ -1820,11 +1968,13 @@ COMMENT ON COLUMN project_registry_binding_observation.registry_owner IS
 COMMENT ON COLUMN project_registry_binding_observation.registry_contract IS
     'This value is the lower-cased registry contract the observation names.';
 COMMENT ON COLUMN project_registry_binding_observation.provenance IS
-    'This value is the observation''s source family, event kind and namespace.';
+    'This value is the observation''s raw fact reference and name.';
 COMMENT ON COLUMN project_registry_binding_observation.applicable IS
     'This value is true when owner and contract are well-formed addresses and the owner is not zero.';
 COMMENT ON COLUMN project_registry_binding_observation.clear_event_identity IS
     'This value is the event identity when the observation is not applicable.';
+CREATE INDEX IF NOT EXISTS project_registry_binding_observation_target_idx
+    ON project_registry_binding_observation (chain_id, target_resource_id);
 
 CREATE TABLE IF NOT EXISTS project_resolver_classification (
     chain_id text NOT NULL,
@@ -1841,32 +1991,36 @@ CREATE TABLE IF NOT EXISTS project_resolver_classification (
     manifest_event_id bigint,
     admission_namespace text,
     summary_version text,
+    observed_families jsonb NOT NULL DEFAULT '{}'::jsonb,
+    pointer_families jsonb NOT NULL DEFAULT '{}'::jsonb,
+    upgrades jsonb NOT NULL DEFAULT '{}'::jsonb,
+    admission_manifests text,
     PRIMARY KEY (chain_id, resolver_address),
     CHECK ((transaction_index IS NULL) = (log_index IS NULL)),
     CHECK (support_status IN ('supported', 'unsupported'))
 );
 COMMENT ON TABLE project_resolver_classification IS
-    'Project-owned resolver classification of family F3, pinned to the declaration epoch active at the block that last touched the resolver: resolver_current without its sampled sections. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
+    'Project-owned resolver classification of family F3, pinned to the block that last classified it: resolver_current without its sampled sections, from the candidate accumulators the row keeps and the discovery edges, declarations and manifests active at that block. A resolver is classified again when an event names it, a pointer moves to or from it, a resolver edge, its address or a declaration of it starts or stops, and when the active manifest set changes. Edge and address activity also honours deactivated_at, a wall-clock time as in the served build, so a classification can differ from a later rebuild once an edge is deactivated. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
 COMMENT ON COLUMN project_resolver_classification.chain_id IS
     'This value is the chain.';
 COMMENT ON COLUMN project_resolver_classification.resolver_address IS
     'This value is the lower-cased resolver address.';
 COMMENT ON COLUMN project_resolver_classification.block_number IS
-    'This value is the block number of the event that last wrote the row.';
+    'This value is the block number of the latest event that named the resolver, or of the activation block for a row written by a resolver edge, address or declaration activation.';
 COMMENT ON COLUMN project_resolver_classification.transaction_index IS
     'This value is the transaction index of the event that last wrote the row; null with log_index for a synthesised event, which sorts before every transaction of its block.';
 COMMENT ON COLUMN project_resolver_classification.log_index IS
     'This value is the log index of the event that last wrote the row; null with transaction_index for a synthesised event.';
 COMMENT ON COLUMN project_resolver_classification.event_identity IS
-    'This value is the event identity of the event that last wrote the row, the final tiebreak of the canonical event order, compared as bytes.';
+    'This value is the event identity of that event, or activation:<block> for an activation; the final tiebreak of the canonical event order, compared as bytes. An epoch change reclassifies the row without moving it.';
 COMMENT ON COLUMN project_resolver_classification.normalized_event_id IS
     'This value names the event that last wrote the row in normalized_events as attribution only; it never takes part in ordering.';
 COMMENT ON COLUMN project_resolver_classification.classification IS
-    'This value is the source family, role and basis of the declaration or upgrade that classifies the resolver.';
+    'This value is the source family, role, basis, implementation, read features, mirror and latest upgrade of the classifying candidate.';
 COMMENT ON COLUMN project_resolver_classification.support_status IS
     'This value is supported or unsupported.';
 COMMENT ON COLUMN project_resolver_classification.unsupported_reason IS
-    'This value is the reason when unsupported.';
+    'This value is the reason when unsupported: resolver_not_declared, resolver_implementation_unknown, resolver_implementation_not_declared, or resolver_manifest_not_active for a resolver with candidates but no active manifest of its family, which the served build leaves out (one such row per resolver).';
 COMMENT ON COLUMN project_resolver_classification.manifest_id IS
     'This value is the declaring manifest.';
 COMMENT ON COLUMN project_resolver_classification.manifest_event_id IS
@@ -1875,6 +2029,14 @@ COMMENT ON COLUMN project_resolver_classification.admission_namespace IS
     'This value is the namespace of the declaring manifest.';
 COMMENT ON COLUMN project_resolver_classification.summary_version IS
     'This value is the classification summary version.';
+COMMENT ON COLUMN project_resolver_classification.observed_families IS
+    'This value maps each resolver family an event proposed the resolver under to its best priority: 3 for an ENSv2 Upgraded proxy, an AliasChanged and either side of a ResolverChanged, 4 for either side of a PermissionChanged scope (resolver/build.sql:5-86).';
+COMMENT ON COLUMN project_resolver_classification.pointer_families IS
+    'This value maps each resolver family to the number of F4 and F5 pointer rows pointing at the resolver now, standing for the priority 2 name pointers. It approximates the served candidates: an unnamed ENSv2 pointer row counts here though the served build has no candidate for it, so a resolver with an ENSv1 event proposal and such a pointer can classify under ens_v2_resolver_l1 here and ens_v1_resolver_l1 served.';
+COMMENT ON COLUMN project_resolver_classification.upgrades IS
+    'This value maps each family to the latest Upgraded of the proxy: its position, implementation and normalized event id.';
+COMMENT ON COLUMN project_resolver_classification.admission_manifests IS
+    'This value is the key of the active manifest set the classification was made under (project_family_marker.admission_manifests).';
 
 CREATE TABLE IF NOT EXISTS project_registry_pointer (
     chain_id text NOT NULL,
@@ -1892,7 +2054,7 @@ CREATE TABLE IF NOT EXISTS project_registry_pointer (
     CHECK ((transaction_index IS NULL) = (log_index IS NULL))
 );
 COMMENT ON TABLE project_registry_pointer IS
-    'Project-owned ENSv1 registry-node resolver pointer of family F4: the latest ResolverChanged per node, clears included. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
+    'Project-owned ENSv1 registry-node resolver pointer of family F4: the latest ResolverChanged per node, clears included, from the ENSv1 registry, registrar and wrapper families only (record_inventory/mirror.rs:100). A ResolverChanged of another family with no resource, such as a Basenames reverse node pointer, lands in neither F4 nor F5, where the served reverse-claim resolver (builders/primary_names.rs:103-113) reads the latest ResolverChanged at the node from any family. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
 COMMENT ON COLUMN project_registry_pointer.chain_id IS
     'This value is the chain.';
 COMMENT ON COLUMN project_registry_pointer.namespace IS
@@ -1955,7 +2117,7 @@ COMMENT ON COLUMN project_resource_pointer.event_identity IS
 COMMENT ON COLUMN project_resource_pointer.normalized_event_id IS
     'This value names the event that last wrote the row in normalized_events as attribution only; it never takes part in ordering.';
 COMMENT ON COLUMN project_resource_pointer.resolver_address IS
-    'This value is the lower-cased resolver of the latest ResolverChanged, the zero address for a clear.';
+    'This value is the lower-cased resolver of the latest ResolverChanged on the resource, named or not, clears included. At an ENSv2 root-registry TLD expiry the interpreter emits the resolver clear with no logical name (adapters schema_v2/protocol/v2_registry/expiry.rs); this row keeps that clear, where the served pointer read takes named ResolverChanged only (builders/linked_records.rs, project_record_pointer_latest) and never sees it, so the served inventory keeps a row the name no longer reaches. The pinned registry returns the zero address from getResolver once the token has expired (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L255-L258, L628-L630 @ ens_v2@a971bd64), which this row matches.';
 COMMENT ON COLUMN project_resource_pointer.pointer_position IS
     'This value is that ResolverChanged''s position.';
 COMMENT ON COLUMN project_resource_pointer.namespace IS
@@ -1963,9 +2125,9 @@ COMMENT ON COLUMN project_resource_pointer.namespace IS
 COMMENT ON COLUMN project_resource_pointer.source_family IS
     'This value is that event''s source family.';
 COMMENT ON COLUMN project_resource_pointer.namehash IS
-    'This value is the lower-cased namehash that event carries.';
+    'This value is the namehash of the pointer''s name when it is named, else the node the event addresses (child_node, namehash or node).';
 COMMENT ON COLUMN project_resource_pointer.nonzero_resolver_address IS
-    'This value is the resolver of the latest non-zero ResolverChanged.';
+    'This value is the latest pointer whose resolver is a non-empty, non-zero address.';
 COMMENT ON COLUMN project_resource_pointer.nonzero_position IS
     'This value is that event''s position.';
 COMMENT ON COLUMN project_resource_pointer.boundary_kind IS
@@ -2057,6 +2219,10 @@ CREATE TABLE IF NOT EXISTS project_node_record_value (
     source_manifest_id bigint,
     hydrated_value jsonb,
     hydrated_at_block bigint,
+    sibling_status text,
+    sibling_address_bytes_hex text,
+    raw_name jsonb,
+    raw_name_bytes jsonb,
     PRIMARY KEY (chain_id, resolver_address, arm, arm_identity, record_key),
     CHECK ((transaction_index IS NULL) = (log_index IS NULL)),
     CHECK (arm IN ('named', 'native', 'guarded'))
@@ -2119,6 +2285,16 @@ COMMENT ON COLUMN project_node_record_value.hydrated_value IS
     'This value is the hydrated text value; null until hydration moves into the block.';
 COMMENT ON COLUMN project_node_record_value.hydrated_at_block IS
     'This value is the block the hydrated value was read at.';
+COMMENT ON COLUMN project_node_record_value.sibling_status IS
+    'This value is the status of the AddressChanged half of a coin-60 pair, the half the served inventory keeps.';
+COMMENT ON COLUMN project_node_record_value.sibling_address_bytes_hex IS
+    'This value is the address_bytes_hex of that AddressChanged half.';
+COMMENT ON COLUMN project_node_record_value.raw_name IS
+    'This value is the after-state raw_name of a name record, the claim input a reverse claim reads.';
+COMMENT ON COLUMN project_node_record_value.raw_name_bytes IS
+    'This value is the after-state raw_name_bytes of a name record.';
+CREATE INDEX IF NOT EXISTS project_node_record_value_node_idx
+    ON project_node_record_value (chain_id, resolver_address, node);
 
 CREATE TABLE IF NOT EXISTS project_record_id_value (
     chain_id text NOT NULL,
@@ -2141,6 +2317,8 @@ CREATE TABLE IF NOT EXISTS project_record_id_value (
     source_family text NOT NULL,
     namespace text NOT NULL,
     source_manifest_id bigint,
+    raw_name jsonb,
+    raw_name_bytes jsonb,
     PRIMARY KEY (chain_id, resolver_address, record_id, record_key),
     CHECK ((transaction_index IS NULL) = (log_index IS NULL))
 );
@@ -2186,6 +2364,10 @@ COMMENT ON COLUMN project_record_id_value.namespace IS
     'This value is the record''s namespace.';
 COMMENT ON COLUMN project_record_id_value.source_manifest_id IS
     'This value is the record''s source manifest.';
+COMMENT ON COLUMN project_record_id_value.raw_name IS
+    'This value is the after-state raw_name of a name record.';
+COMMENT ON COLUMN project_record_id_value.raw_name_bytes IS
+    'This value is the after-state raw_name_bytes of a name record.';
 
 CREATE TABLE IF NOT EXISTS project_resolver_link (
     chain_id text NOT NULL,
@@ -2202,11 +2384,11 @@ CREATE TABLE IF NOT EXISTS project_resolver_link (
     CHECK ((transaction_index IS NULL) = (log_index IS NULL))
 );
 COMMENT ON TABLE project_resolver_link IS
-    'Project-owned resolver links of family F7: per resolver and node, the latest ResolverRecordLinked; record id 0 is an explicit clear. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
+    'Project-owned resolver links of family F7: per resolver and node, the latest ResolverRecordLinked; record id 0 is an explicit clear. A link whose payload carries no resolver is kept, where the served links.sql requires the payload resolver to be present and equal to the emitter. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
 COMMENT ON COLUMN project_resolver_link.chain_id IS
     'This value is the chain.';
 COMMENT ON COLUMN project_resolver_link.resolver_address IS
-    'This value is the lower-cased resolver.';
+    'This value is the lower-cased resolver that emitted the ResolverRecordLinked; a link whose payload names another resolver is not kept (resolvers/collections/links.sql:16-17).';
 COMMENT ON COLUMN project_resolver_link.node IS
     'This value is the lower-cased node; 32 zero bytes is the default link.';
 COMMENT ON COLUMN project_resolver_link.block_number IS
@@ -2286,7 +2468,7 @@ COMMENT ON COLUMN project_grant.transfer_behavior IS
 COMMENT ON COLUMN project_grant.revoked IS
     'This value is true when the effective powers are empty; the row stays as a clear.';
 COMMENT ON COLUMN project_grant.registration_position IS
-    'This value is the position of the resource''s latest grant or reservation when the grant was written, the registration the grant belongs to.';
+    'This value is the position of the resource''s latest RegistrationGranted or RegistrationReserved before the grant, counting earlier events of the grant''s own block: the registration the grant was written under, by the rule F2a keeps as last_active. It is new state for the per-block publisher, not a copy of a served value: the served permissions read has no per-grant registration and masks by the resource''s current registration (builders/permissions.rs v2_registration_current). Null when the resource has no earlier grant or reservation.';
 
 CREATE TABLE IF NOT EXISTS project_resource_admin_aggregate (
     chain_id text NOT NULL,
@@ -2512,7 +2694,7 @@ CREATE TABLE IF NOT EXISTS project_child_edge_candidate (
     CHECK ((transaction_index IS NULL) = (log_index IS NULL))
 );
 COMMENT ON TABLE project_child_edge_candidate IS
-    'Project-owned ENSv1 and Basenames child edge candidates of family F11: the latest SubregistryChanged per child and arm, kept while ineligible; a later edge for the child under another parent replaces it. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
+    'Project-owned ENSv1 and Basenames child edge candidates of family F11: the latest SubregistryChanged per parent, child and arm, kept while ineligible. Candidates are retained per parent: a later edge for the child under another parent adds a row and leaves the earlier parent''s row in place, so the reader selects the latest per child and arm. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
 COMMENT ON COLUMN project_child_edge_candidate.chain_id IS
     'This value is the chain.';
 COMMENT ON COLUMN project_child_edge_candidate.namespace IS
@@ -2522,7 +2704,7 @@ COMMENT ON COLUMN project_child_edge_candidate.parent_node IS
 COMMENT ON COLUMN project_child_edge_candidate.child_node IS
     'This value is the lower-cased child node.';
 COMMENT ON COLUMN project_child_edge_candidate.authority_arm IS
-    'This value is ens_v1 or basenames.';
+    'This value is the canonical authority arm of the edge''s registry: basenames for basenames_base_registry, ens_v1 for ens_v1_registry_l1 (children.rs:271-273).';
 COMMENT ON COLUMN project_child_edge_candidate.block_number IS
     'This value is the block number of the event that last wrote the row.';
 COMMENT ON COLUMN project_child_edge_candidate.transaction_index IS
@@ -2655,14 +2837,14 @@ CREATE TABLE IF NOT EXISTS project_reverse_node_claim (
     log_index bigint,
     event_identity text NOT NULL,
     normalized_event_id bigint,
-    resolver_address text,
+    resolver_address text NOT NULL,
     raw_name jsonb,
     raw_name_bytes jsonb,
-    PRIMARY KEY (namespace, reverse_node),
+    PRIMARY KEY (namespace, reverse_node, resolver_address),
     CHECK ((transaction_index IS NULL) = (log_index IS NULL))
 );
 COMMENT ON TABLE project_reverse_node_claim IS
-    'Project-owned node-selected claim facts of family F12: per node, the latest name record, the claim a ReverseClaimed tuple selects through the node''s resolver. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
+    'Project-owned node-selected claim facts of family F12: per node and resolver, the latest name record or version change, the claim a ReverseClaimed tuple selects through the node''s current resolver. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
 COMMENT ON COLUMN project_reverse_node_claim.namespace IS
     'This value is the namespace.';
 COMMENT ON COLUMN project_reverse_node_claim.reverse_node IS
@@ -2680,9 +2862,9 @@ COMMENT ON COLUMN project_reverse_node_claim.event_identity IS
 COMMENT ON COLUMN project_reverse_node_claim.normalized_event_id IS
     'This value names the event that last wrote the row in normalized_events as attribution only; it never takes part in ordering.';
 COMMENT ON COLUMN project_reverse_node_claim.resolver_address IS
-    'This value is the lower-cased resolver the name record was written at.';
+    'This value is the lower-cased after-state resolver of the name record or version change; a read follows the node''s resolver pointer to one row.';
 COMMENT ON COLUMN project_reverse_node_claim.raw_name IS
-    'This value is the record''s raw_name.';
+    'This value is the record''s raw_name, null when the latest event is a version change.';
 COMMENT ON COLUMN project_reverse_node_claim.raw_name_bytes IS
     'This value is the record''s raw_name_bytes.';
 
@@ -2697,6 +2879,8 @@ CREATE TABLE IF NOT EXISTS project_claim_normalization (
     status text NOT NULL,
     normalized_name text,
     reason text,
+    raw_name jsonb,
+    raw_name_bytes jsonb,
     PRIMARY KEY (chain_id, claim_event_identity),
     CHECK ((transaction_index IS NULL) = (log_index IS NULL))
 );
@@ -2722,6 +2906,10 @@ COMMENT ON COLUMN project_claim_normalization.normalized_name IS
     'This value is the normalized name on success.';
 COMMENT ON COLUMN project_claim_normalization.reason IS
     'This value is the reason when not successful.';
+COMMENT ON COLUMN project_claim_normalization.raw_name IS
+    'This value is the claim event''s after-state raw_name, the original claim input.';
+COMMENT ON COLUMN project_claim_normalization.raw_name_bytes IS
+    'This value is the claim event''s after-state raw_name_bytes.';
 
 CREATE TABLE IF NOT EXISTS project_address_name_fold (
     chain_id text NOT NULL,
@@ -2743,7 +2931,7 @@ CREATE TABLE IF NOT EXISTS project_address_name_fold (
     CHECK ((transaction_index IS NULL) = (log_index IS NULL))
 );
 COMMENT ON TABLE project_address_name_fold IS
-    'Project-owned per-name address fold of family F13: the ordered controller fold, the token holder and the registrant, unmasked. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
+    'Project-owned per-name address fold of family F13: the ordered controller fold, the token holder and the registrant read from the name''s retained F2a rows, unmasked. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
 COMMENT ON COLUMN project_address_name_fold.chain_id IS
     'This value is the chain.';
 COMMENT ON COLUMN project_address_name_fold.logical_name_id IS
@@ -2771,9 +2959,53 @@ COMMENT ON COLUMN project_address_name_fold.token_holder IS
 COMMENT ON COLUMN project_address_name_fold.token_holder_position IS
     'This value is that transfer''s position.';
 COMMENT ON COLUMN project_address_name_fold.registrant IS
-    'This value is the lower-cased registrant of the latest grant naming one.';
+    'This value is the lower-cased registrant of the latest retained F2a row of the name that names one (a grant''s registrant, a release''s prior registrant, a transfer''s recipient; name_current/build.sql:440-491 unmasked).';
 COMMENT ON COLUMN project_address_name_fold.registrant_position IS
-    'This value is that grant''s position.';
+    'This value is that row''s position.';
+
+CREATE TABLE IF NOT EXISTS project_address_controller_candidate (
+    chain_id text NOT NULL,
+    logical_name_id text NOT NULL,
+    event_identity text NOT NULL,
+    block_number bigint NOT NULL,
+    transaction_index bigint,
+    log_index bigint,
+    normalized_event_id bigint,
+    resource_id uuid,
+    event_kind text NOT NULL,
+    source_family text NOT NULL,
+    action text NOT NULL,
+    subject text,
+    PRIMARY KEY (chain_id, logical_name_id, event_identity),
+    CHECK ((transaction_index IS NULL) = (log_index IS NULL)),
+    CHECK (action IN ('set', 'revoke'))
+);
+COMMENT ON TABLE project_address_controller_candidate IS
+    'Project-owned controller candidates of family F13: every named controller event (AuthorityTransferred, state-derived registry-only SurfaceBound, resource-scoped PermissionChanged) with its resource and position, never pruned, so a read folds the candidates the served admission keeps (address_names.rs:115-283). Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
+COMMENT ON COLUMN project_address_controller_candidate.chain_id IS
+    'This value is the chain.';
+COMMENT ON COLUMN project_address_controller_candidate.logical_name_id IS
+    'This value is the event''s name.';
+COMMENT ON COLUMN project_address_controller_candidate.event_identity IS
+    'This value is the event identity, the final tiebreak of the canonical event order, compared as bytes.';
+COMMENT ON COLUMN project_address_controller_candidate.block_number IS
+    'This value is the event''s block number.';
+COMMENT ON COLUMN project_address_controller_candidate.transaction_index IS
+    'This value is the event''s transaction index; null with log_index for a synthesised event, which sorts before every transaction of its block.';
+COMMENT ON COLUMN project_address_controller_candidate.log_index IS
+    'This value is the event''s log index; null with transaction_index for a synthesised event.';
+COMMENT ON COLUMN project_address_controller_candidate.normalized_event_id IS
+    'This value names the event in normalized_events as attribution only; it never takes part in ordering.';
+COMMENT ON COLUMN project_address_controller_candidate.resource_id IS
+    'This value is the event''s resource, which the admission compares with the selected resource and the registry-only predecessor window.';
+COMMENT ON COLUMN project_address_controller_candidate.event_kind IS
+    'This value is the event kind.';
+COMMENT ON COLUMN project_address_controller_candidate.source_family IS
+    'This value is the event''s source family.';
+COMMENT ON COLUMN project_address_controller_candidate.action IS
+    'This value is set for an AuthorityTransferred, a SurfaceBound and a PermissionChanged whose effective powers hold resource_control, and revoke for any other resource-scoped PermissionChanged, before any read-time mask.';
+COMMENT ON COLUMN project_address_controller_candidate.subject IS
+    'This value is the lower-cased controller the event names: the registry owner (the zero address for a masked owner word), the SurfaceBound owner or the permission subject.';
 
 CREATE TABLE IF NOT EXISTS project_address_name_index (
     address text NOT NULL,
@@ -2783,15 +3015,17 @@ CREATE TABLE IF NOT EXISTS project_address_name_index (
     PRIMARY KEY (address, logical_name_id, relation)
 );
 COMMENT ON TABLE project_address_name_index IS
-    'Project-owned address-to-name index of family F13, re-derived from project_address_name_fold and never journalled. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
+    'Project-owned address-to-name index of family F13, re-derived from the controller candidates, the fold''s token holder and the retained F2a rows of each touched name and never journalled. It holds every address a relation can take under some admission and mask, so reads only remove rows. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
 COMMENT ON COLUMN project_address_name_index.address IS
     'This value is the lower-cased address.';
 COMMENT ON COLUMN project_address_name_index.logical_name_id IS
     'This value is the name.';
 COMMENT ON COLUMN project_address_name_index.relation IS
-    'This value is controller, token_holder or registrant.';
+    'This value is registrant, token_holder or effective_controller.';
 COMMENT ON COLUMN project_address_name_index.chain_id IS
     'This value is the chain.';
+CREATE INDEX IF NOT EXISTS project_address_name_index_name_idx
+    ON project_address_name_index (chain_id, logical_name_id);
 
 CREATE TABLE IF NOT EXISTS project_address_record_node_index (
     address text NOT NULL,
@@ -2799,10 +3033,11 @@ CREATE TABLE IF NOT EXISTS project_address_record_node_index (
     chain_id text NOT NULL,
     resolver_address text NOT NULL,
     node text NOT NULL,
-    PRIMARY KEY (address, coin_type, chain_id, resolver_address, node)
+    logical_name_id text NOT NULL DEFAULT '',
+    PRIMARY KEY (address, coin_type, chain_id, resolver_address, node, logical_name_id)
 );
 COMMENT ON TABLE project_address_record_node_index IS
-    'Project-owned inverse address record index of family F14 for node-keyed values, re-derived from project_node_record_value and never journalled. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
+    'Project-owned inverse address record index of family F14 for node-keyed values, re-derived from project_node_record_value and never journalled. It holds every successful EVM-shaped addr value whatever its partition''s version, with the name it was written under; readers apply the version and link boundary. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
 COMMENT ON COLUMN project_address_record_node_index.address IS
     'This value is the lower-cased address.';
 COMMENT ON COLUMN project_address_record_node_index.coin_type IS
@@ -2813,6 +3048,13 @@ COMMENT ON COLUMN project_address_record_node_index.resolver_address IS
     'This value is the resolver.';
 COMMENT ON COLUMN project_address_record_node_index.node IS
     'This value is the node.';
+COMMENT ON COLUMN project_address_record_node_index.logical_name_id IS
+    'This value is the name the value was written under, empty for a value written with no name; a named write whose node is not the name''s namehash is found by it.';
+CREATE INDEX IF NOT EXISTS project_address_record_node_index_node_idx
+    ON project_address_record_node_index (chain_id, resolver_address, node);
+CREATE INDEX IF NOT EXISTS project_address_record_node_index_name_idx
+    ON project_address_record_node_index (chain_id, logical_name_id)
+    WHERE logical_name_id <> '';
 
 CREATE TABLE IF NOT EXISTS project_address_record_id_index (
     address text NOT NULL,
@@ -2834,3 +3076,5 @@ COMMENT ON COLUMN project_address_record_id_index.resolver_address IS
     'This value is the resolver.';
 COMMENT ON COLUMN project_address_record_id_index.record_id IS
     'This value is the record id.';
+CREATE INDEX IF NOT EXISTS project_address_record_id_index_record_idx
+    ON project_address_record_id_index (chain_id, resolver_address, record_id);

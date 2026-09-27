@@ -1,0 +1,1324 @@
+//! Same-block order shadow reads (TYR-36 step 3, brief section 4.3, docs/glossary.md "Shadow
+//! read"): the families order events in one block by the canonical order (D12) while today's
+//! builders break the tie by the generated normalized event id. A difference passes as a
+//! same-block delta only when reading the same families again in today's order, at the selectors
+//! today's builders use it, gives exactly the served value and the canonical read gives exactly
+//! the shadow value. Each case pins the served and shadow values it was written for, and the
+//! mutation cases show that a wrong value under the same field label fails.
+#[path = "families_shadow_support/mod.rs"]
+mod shadow_support;
+#[path = "families_support/mod.rs"]
+mod support;
+
+use anyhow::Result;
+use bigname_storage::{
+    families::control::{
+        compare::Difference,
+        lifecycle::{AuthoritySelection, Clock, NameFacts, NameInput, evaluate, load_name_facts},
+        permissions::ResourceInput,
+        position::EventOrder,
+    },
+    load_name_current_by_logical_name_ids,
+};
+use serde_json::{Value, json};
+use shadow_support::{
+    assert_counts,
+    compare::{
+        Excuse, association_keys, control_positions, generated_ids, legacy_facts, resource_excuses,
+    },
+    publish_and_compare,
+    wrapper::timestamp,
+};
+use support::{CHAIN, Event, Fixture, uuid};
+
+const REGISTRY: &str = "0x00000000000000000000000000000000000000e5";
+const ALICE: &str = "0x00000000000000000000000000000000000000aa";
+const BOB: &str = "0x00000000000000000000000000000000000000bb";
+const V2_REGISTRY: &str = "ens_v2_registry_l1";
+
+fn node(n: u64) -> String {
+    format!("0x{n:064x}")
+}
+
+fn name(n: u64) -> String {
+    format!("ens:{}", node(n))
+}
+
+/// Name 1's ENSv2 binding to `resource` at block 9 with the SurfaceBound that opened it.
+async fn v2_binding(fixture: &Fixture, resource: &str) -> Result<()> {
+    fixture
+        .binding(&uuid(100), &name(1), resource, "ens_v2", 9, 0, None)
+        .await?;
+    fixture
+        .write(
+            9,
+            0,
+            "SurfaceBound",
+            V2_REGISTRY,
+            Some(&name(1)),
+            Some(resource),
+            json!({"authority_kind": "registrar", "state_derived": false}),
+            REGISTRY,
+        )
+        .await?;
+    Ok(())
+}
+
+/// An ENSv2 registry grant of triple (`name`, registry R, token 7) on `resource`.
+fn grant<'a>(
+    identity: &'a str,
+    block: i64,
+    name: &'a str,
+    resource: &'a str,
+    registrant: &str,
+) -> Event<'a> {
+    Event::new(identity, block, 1, "RegistrationGranted", V2_REGISTRY)
+        .name(name)
+        .resource(resource)
+        .after(
+            json!({"registry_contract_instance_id": "R", "token_id": "7",
+                      "authority_kind": "registrar", "status": "registered",
+                      "registrant": registrant, "expiry": 2_000_000_000u64}),
+        )
+        .raw(json!({"emitting_address": REGISTRY}))
+}
+
+/// The interpreter's path-expiry release of `resource`: the resource and no name, no
+/// transaction or log (crates/adapters/src/schema_v2/protocol/v2_registry/expiry.rs:57-64).
+fn unnamed_path_expiry<'a>(identity: &'a str, block: i64, resource: &'a str) -> Event<'a> {
+    Event::new(identity, block, 0, "RegistrationReleased", V2_REGISTRY)
+        .resource(resource)
+        .after(json!({"source_event": "RegistryPathExpired",
+                      "derived_from": "interpreter_state",
+                      "terminal_reason": "registry_name_binding_expired",
+                      "expiry": 1_800_000_100u64,
+                      "registry_contract_instance_id": "R", "token_id": "7"}))
+        .raw(json!({"emitting_address": REGISTRY}))
+        .synthesised()
+}
+
+/// A registry-scoped ENSv2 permission grant to `subject` on `resource`.
+fn registry_grant<'a>(
+    identity: &'a str,
+    block: i64,
+    resource: &'a str,
+    subject: &str,
+) -> Event<'a> {
+    Event::new(identity, block, 1, "PermissionChanged", V2_REGISTRY)
+        .resource(resource)
+        .after(json!({
+            "subject": subject,
+            "scope": {"kind": "registry", "chain_id": CHAIN, "registry_address": REGISTRY},
+            "effective_powers": ["set_resolver", "set_subregistry"],
+            "grant_source": {"kind": "raw_log", "source_event": "EACRolesChanged"},
+            "revocation_source": null, "inheritance_path": [], "transfer_behavior": {},
+            "source_event": "EACRolesChanged",
+        }))
+        .raw(json!({"emitting_address": REGISTRY}))
+}
+
+/// The served summary input the harness reads for `resource`.
+async fn resource_input(fixture: &Fixture, resource: &str) -> Result<ResourceInput> {
+    let (authority_kind, root_resource_id): (Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT authority_kind, root_resource_id::text FROM permissions_current_resource_summary
+         WHERE resource_id = $1::uuid",
+    )
+    .bind(resource)
+    .fetch_optional(&fixture.pool)
+    .await?
+    .unwrap_or_default();
+    Ok(ResourceInput {
+        resource_id: resource.to_owned(),
+        authority_kind,
+        root_resource_id,
+    })
+}
+
+async fn served_rows(fixture: &Fixture, resource: &str) -> Result<Vec<Value>> {
+    Ok(sqlx::query_scalar(
+        "SELECT jsonb_build_object('subject', subject, 'effective_powers', effective_powers)
+         FROM permissions_current WHERE resource_id = $1::uuid ORDER BY subject, scope",
+    )
+    .bind(resource)
+    .fetch_all(&fixture.pool)
+    .await?)
+}
+
+/// The one differing field of `diffs` with the excuse the harness gives it.
+async fn excuse(
+    fixture: &Fixture,
+    target: i64,
+    input: &ResourceInput,
+    field: &str,
+    served: Value,
+    shadow: Value,
+) -> Result<Excuse> {
+    let clock = Clock {
+        block_number: target,
+        timestamp_seconds: timestamp(target),
+    };
+    let diffs = [Difference {
+        field: field.to_owned(),
+        served,
+        shadow,
+    }];
+    Ok(resource_excuses(&fixture.pool, CHAIN, &clock, input, &diffs).await?[0])
+}
+
+/// The registry-scoped row BOB holds on `resource` as the summary serves it.
+fn bob_row(resource: &str) -> Value {
+    json!({
+        "resource_id": resource, "subject": BOB, "scope": "registry",
+        "scope_kind": "registry",
+        "scope_detail": {"kind": "registry", "chain_id": CHAIN, "registry_address": REGISTRY},
+        "effective_powers": ["set_resolver", "set_subregistry"],
+        "grant_source": {"kind": "raw_log", "source_event": "EACRolesChanged"},
+        "revocation_source": null, "inheritance_path": [], "transfer_behavior": {},
+    })
+}
+
+/// Items 1 and F1 of the TYR-36 step 3 reviews (Q7): a grant and the interpreter's unnamed
+/// path-expiry release of one resource in one block, the grant written first. D12 puts the
+/// release, which has no transaction or log, before the grant, so the registration is live and
+/// the shadow serves the permission row; today's (block, generated id) order puts the release
+/// last, so the drop rule (permissions.rs:111-133, :391-398) serves nothing. The families read
+/// in today's order are empty too, so matching them would only show that the served value is
+/// empty: the harness leaves this direction a mismatch, whatever the shadow row holds.
+#[tokio::test]
+async fn a_same_block_path_expiry_today_serves_as_empty_is_a_mismatch() -> Result<()> {
+    let fixture = Fixture::new("families_shadow_order_permissions", 20).await?;
+    let (k1, n1) = (uuid(1), name(1));
+    v2_binding(&fixture, &k1).await?;
+    fixture
+        .event(grant("grant-10", 10, &n1, &k1, ALICE))
+        .await?;
+    fixture
+        .event(registry_grant("permission-11", 11, &k1, BOB))
+        .await?;
+    fixture
+        .event(grant("grant-14", 14, &n1, &k1, ALICE))
+        .await?;
+    fixture
+        .event(unnamed_path_expiry("path-expiry-14", 14, &k1))
+        .await?;
+    let report = publish_and_compare(&fixture, 16).await?;
+    assert!(report.known_discrepancy.is_empty(), "{:#?}", report.lines);
+    assert!(
+        report.expected_delta_fields.is_empty(),
+        "{:#?}",
+        report.lines
+    );
+    assert_eq!(report.mismatched, 1, "{:#?}", report.lines);
+    assert_eq!(served_rows(&fixture, &k1).await?, Vec::<Value>::new());
+    let input = resource_input(&fixture, &k1).await?;
+    assert_eq!(
+        excuse(
+            &fixture,
+            16,
+            &input,
+            "permissions_current",
+            json!([]),
+            json!([bob_row(&k1)])
+        )
+        .await?,
+        Excuse::None,
+    );
+    fixture.cleanup().await
+}
+
+/// The name side of the passing fixture: the families select the unnamed path-expiry release,
+/// which today's name-scoped membership never sees (the served-side bug the harness names), and
+/// present it with its own expiry (build.sql:45-49).
+const RELEASED_NAME: [(&str, usize); 8] = [
+    (
+        "served_membership_skips_unnamed_path_expiry:control/expiry",
+        1,
+    ),
+    (
+        "served_membership_skips_unnamed_path_expiry:control/registrant",
+        1,
+    ),
+    (
+        "served_membership_skips_unnamed_path_expiry:control/status",
+        1,
+    ),
+    (
+        "served_membership_skips_unnamed_path_expiry:registration/authority_kind",
+        1,
+    ),
+    (
+        "served_membership_skips_unnamed_path_expiry:registration/expiry",
+        1,
+    ),
+    (
+        "served_membership_skips_unnamed_path_expiry:registration/latest_event_kind",
+        1,
+    ),
+    (
+        "served_membership_skips_unnamed_path_expiry:registration/registrant",
+        1,
+    ),
+    (
+        "served_membership_skips_unnamed_path_expiry:registration/status",
+        1,
+    ),
+];
+const DELTA: [(&str, usize); 1] = [("d12_same_block_order:permissions_current", 1)];
+
+/// Item F1 of the TYR-36 step 3 review (Q7), the direction that passes. The unnamed path-expiry
+/// release of the resource is written first at transaction 0 log 2 and a grant second at log 1
+/// of the same block. D12 puts the grant first and the release last, so the registration lapses
+/// and the shadow serves no row; today's order puts the grant last, so the registration is live
+/// and the summary serves BOB's row. The difference passes as a same-block delta because the
+/// families read again in today's order give exactly that row. Each mutation writes a wrong
+/// value into the families themselves and runs the whole comparison again: the read in today's
+/// order then differs from the served row and the field fails.
+#[tokio::test]
+async fn a_same_block_release_after_a_grant_passes_only_from_the_families_read() -> Result<()> {
+    let fixture = Fixture::new("families_shadow_order_permissions_live", 20).await?;
+    let (k1, n1) = (uuid(1), name(1));
+    v2_binding(&fixture, &k1).await?;
+    fixture
+        .event(grant("grant-10", 10, &n1, &k1, ALICE))
+        .await?;
+    fixture
+        .event(registry_grant("permission-11", 11, &k1, BOB))
+        .await?;
+    fixture
+        .event(unnamed_path_expiry("path-expiry-14", 14, &k1).at(0, 2))
+        .await?;
+    fixture
+        .event(grant("grant-14", 14, &n1, &k1, ALICE))
+        .await?;
+    let report = publish_and_compare(&fixture, 16).await?;
+    assert_counts(&report, &RELEASED_NAME, &DELTA);
+    let served = served_rows(&fixture, &k1).await?;
+    assert_eq!(
+        served,
+        vec![json!({"subject": BOB, "effective_powers": ["set_resolver", "set_subregistry"]})]
+    );
+
+    for (case, update) in [
+        (
+            "wrong subject",
+            "UPDATE bigname_phase.project_grant SET subject = $2
+             WHERE resource_id = $1::uuid AND subject = $3",
+        ),
+        (
+            "wrong powers",
+            "UPDATE bigname_phase.project_grant SET effective_powers = '[\"set_resolver\"]'
+             WHERE resource_id = $1::uuid AND subject = $3 AND $2 <> ''",
+        ),
+    ] {
+        sqlx::query(update)
+            .bind(&k1)
+            .bind(ALICE)
+            .bind(BOB)
+            .execute(&fixture.pool)
+            .await?;
+        let mutated = shadow_support::compare::compare(&fixture.pool, CHAIN, 16).await?;
+        assert!(
+            mutated.expected_delta_fields.is_empty() && mutated.mismatched == 1,
+            "{case} must fail: {:#?}",
+            mutated.lines
+        );
+        assert_eq!(
+            mutated.known_discrepancy,
+            RELEASED_NAME
+                .iter()
+                .map(|(field, count)| ((*field).to_owned(), *count))
+                .collect(),
+            "{case}: the released name's named causes stand whole"
+        );
+        let failed: Vec<&str> = mutated
+            .lines
+            .iter()
+            .filter(|line| line.starts_with("SEPOLIA_END_TO_END_SHADOW_MISMATCH"))
+            .filter_map(|line| line.split(" field=").nth(1)?.split(' ').next())
+            .collect();
+        assert_eq!(
+            failed,
+            vec!["permissions_current"],
+            "{case}: {:#?}",
+            mutated.lines
+        );
+        // Put the families back for the next mutation.
+        sqlx::query(
+            "UPDATE bigname_phase.project_grant
+             SET subject = $2, effective_powers = '[\"set_resolver\", \"set_subregistry\"]'
+             WHERE resource_id = $1::uuid AND subject IN ($2, $3) AND scope = 'registry'",
+        )
+        .bind(&k1)
+        .bind(BOB)
+        .bind(ALICE)
+        .execute(&fixture.pool)
+        .await?;
+        let restored = shadow_support::compare::compare(&fixture.pool, CHAIN, 16).await?;
+        assert_counts(&restored, &RELEASED_NAME, &DELTA);
+    }
+
+    let input = resource_input(&fixture, &k1).await?;
+    let restriction = json!({"kind": "ens_v2_registry", "locked_roles": ["unregister"]});
+    assert_eq!(
+        excuse(
+            &fixture,
+            16,
+            &input,
+            "resource_restrictions",
+            restriction,
+            Value::Null
+        )
+        .await?,
+        Excuse::None,
+        "a restriction the families do not give must fail"
+    );
+    fixture.cleanup().await
+}
+
+/// Pro Q3 and Q5 on 6c8bdf8b: the same-block release shape with the family row of the block-10
+/// grant deleted. The lapse still reads the same in both orders, but the log holds the grant on
+/// the resource, so the families lack a retained event the reducer keeps and the permission
+/// rows must not pass.
+#[tokio::test]
+async fn a_missing_resource_event_row_fails_the_permission_excuse() -> Result<()> {
+    let fixture = Fixture::new("families_shadow_order_missing_event", 20).await?;
+    let (k1, n1) = (uuid(1), name(1));
+    v2_binding(&fixture, &k1).await?;
+    fixture
+        .event(grant("grant-10", 10, &n1, &k1, ALICE))
+        .await?;
+    fixture
+        .event(registry_grant("permission-11", 11, &k1, BOB))
+        .await?;
+    fixture
+        .event(unnamed_path_expiry("path-expiry-14", 14, &k1).at(0, 2))
+        .await?;
+    fixture
+        .event(grant("grant-14", 14, &n1, &k1, ALICE))
+        .await?;
+    let report = publish_and_compare(&fixture, 16).await?;
+    assert_counts(&report, &RELEASED_NAME, &DELTA);
+    sqlx::query(
+        "DELETE FROM bigname_phase.project_lifecycle_event WHERE event_identity = 'grant-10'",
+    )
+    .execute(&fixture.pool)
+    .await?;
+    let mutated = shadow_support::compare::compare(&fixture.pool, CHAIN, 16).await?;
+    let failed: Vec<&str> = mutated
+        .lines
+        .iter()
+        .filter(|line| line.starts_with("SEPOLIA_END_TO_END_SHADOW_MISMATCH"))
+        .filter_map(|line| line.split(" field=").nth(1)?.split(' ').next())
+        .collect();
+    assert!(
+        failed.contains(&"permissions_current"),
+        "a missing retained event must fail the permission rows: {:#?}",
+        mutated.lines
+    );
+    assert!(
+        mutated.expected_delta_fields.is_empty() && mutated.known_discrepancy.is_empty(),
+        "{:#?}",
+        mutated.lines
+    );
+    fixture.cleanup().await
+}
+
+/// Codex thread PRRT_kwDOSJpxAs6l_B6G: the lapse is decided from the log, but today's read of
+/// the permission rows refolds the family rows, so a retained resource event must equal its
+/// log rebuild, payload included, before the rows can pass. In the same-block release shape,
+/// the release's family row given another terminal reason, its identity, position and key
+/// state unchanged, leaves the permission rows a mismatch, and the name's fields too.
+#[tokio::test]
+async fn a_wrong_payload_on_a_retained_resource_event_fails_the_permission_excuse() -> Result<()> {
+    let fixture = Fixture::new("families_shadow_order_resource_payload", 20).await?;
+    let (k1, n1) = (uuid(1), name(1));
+    v2_binding(&fixture, &k1).await?;
+    fixture
+        .event(grant("grant-10", 10, &n1, &k1, ALICE))
+        .await?;
+    fixture
+        .event(registry_grant("permission-11", 11, &k1, BOB))
+        .await?;
+    fixture
+        .event(unnamed_path_expiry("path-expiry-14", 14, &k1).at(0, 2))
+        .await?;
+    fixture
+        .event(grant("grant-14", 14, &n1, &k1, ALICE))
+        .await?;
+    let report = publish_and_compare(&fixture, 16).await?;
+    assert_counts(&report, &RELEASED_NAME, &DELTA);
+    sqlx::query(
+        "UPDATE bigname_phase.project_lifecycle_event SET terminal_reason = 'owner_released'
+         WHERE event_identity = 'path-expiry-14'",
+    )
+    .execute(&fixture.pool)
+    .await?;
+    let mutated = shadow_support::compare::compare(&fixture.pool, CHAIN, 16).await?;
+    let failed: Vec<&str> = mutated
+        .lines
+        .iter()
+        .filter(|line| line.starts_with("SEPOLIA_END_TO_END_SHADOW_MISMATCH"))
+        .filter_map(|line| line.split(" field=").nth(1)?.split(' ').next())
+        .collect();
+    assert!(
+        failed.contains(&"permissions_current"),
+        "a wrong retained payload must fail the permission rows: {:#?}",
+        mutated.lines
+    );
+    // Name 1 reads the same corrupt row: its fields are mismatches too, neither the named
+    // cause nor a same-block delta, because every retained row must equal its log rebuild.
+    assert!(
+        mutated.expected_delta_fields.is_empty() && mutated.known_discrepancy.is_empty(),
+        "{:#?}",
+        mutated.lines
+    );
+    fixture.cleanup().await
+}
+
+/// Codex thread PRRT_kwDOSJpxAs6l4hOv: the passing direction of the same-block release with
+/// BOB's registry grant carrying an admin power. Today's order keeps the registration live and
+/// serves the admin power from BOB's row (resource_summary.rs:272-297); the canonical order
+/// lapses it and the families serve no admin powers (permissions/mod.rs, `admins`). The admin
+/// difference has the same cause as the permission rows and passes the same way: the families
+/// read again in today's order give exactly the served admin powers.
+#[tokio::test]
+async fn a_same_block_release_moves_the_admin_powers_with_the_rows() -> Result<()> {
+    let fixture = Fixture::new("families_shadow_order_permissions_admin", 20).await?;
+    let (k1, n1) = (uuid(1), name(1));
+    v2_binding(&fixture, &k1).await?;
+    fixture
+        .event(grant("grant-10", 10, &n1, &k1, ALICE))
+        .await?;
+    fixture
+        .event(
+            Event::new("permission-11", 11, 1, "PermissionChanged", V2_REGISTRY)
+                .resource(&k1)
+                .after(json!({
+                    "subject": BOB,
+                    "scope": {"kind": "registry", "chain_id": CHAIN, "registry_address": REGISTRY},
+                    "effective_powers": ["admin_set_resolver", "set_resolver"],
+                    "grant_source": {"kind": "raw_log", "source_event": "EACRolesChanged"},
+                    "revocation_source": null, "inheritance_path": [], "transfer_behavior": {},
+                    "source_event": "EACRolesChanged",
+                }))
+                .raw(json!({"emitting_address": REGISTRY})),
+        )
+        .await?;
+    fixture
+        .event(unnamed_path_expiry("path-expiry-14", 14, &k1).at(0, 2))
+        .await?;
+    fixture
+        .event(grant("grant-14", 14, &n1, &k1, ALICE))
+        .await?;
+    let report = publish_and_compare(&fixture, 16).await?;
+    let served: Vec<String> = sqlx::query_scalar(
+        r"SELECT DISTINCT power.value FROM permissions_current served
+          CROSS JOIN LATERAL jsonb_array_elements_text(served.effective_powers) power
+          WHERE served.resource_id = $1::uuid AND power.value LIKE 'admin\_%'",
+    )
+    .bind(&k1)
+    .fetch_all(&fixture.pool)
+    .await?;
+    assert_eq!(served, vec!["admin_set_resolver".to_owned()]);
+    assert_counts(
+        &report,
+        &RELEASED_NAME,
+        &[
+            ("d12_same_block_order:admin_powers", 1),
+            ("d12_same_block_order:permissions_current", 1),
+        ],
+    );
+    fixture.cleanup().await
+}
+
+/// Name 1's facts as the harness loads them.
+async fn name_facts(fixture: &Fixture) -> Result<NameFacts> {
+    let rows = load_name_current_by_logical_name_ids(&fixture.pool, &[name(1)]).await?;
+    let row = &rows[&name(1)];
+    let input = NameInput {
+        logical_name_id: row.logical_name_id.clone(),
+        namehash: row.namehash.to_ascii_lowercase(),
+        selection: AuthoritySelection::from_provenance(&row.provenance),
+    };
+    Ok(load_name_facts(&fixture.pool, CHAIN, &[input])
+        .await?
+        .pop()
+        .expect("name 1 has facts"))
+}
+
+/// Name 1's facts as the harness loads them, with the counterfactual that reads them in today's
+/// order.
+async fn facts_and_legacy(fixture: &Fixture) -> Result<(NameFacts, NameFacts)> {
+    let facts = name_facts(fixture).await?;
+    let identities: Vec<String> = facts
+        .events
+        .iter()
+        .map(|event| event.position.event_identity.clone())
+        .chain(
+            control_positions(&facts)
+                .into_iter()
+                .map(|position| position.event_identity),
+        )
+        .collect();
+    let ids = generated_ids(&fixture.pool, CHAIN, 16, &identities).await?;
+    let keys = association_keys(&fixture.pool, CHAIN, 16, &identities).await?;
+    let legacy =
+        legacy_facts(&facts, &ids, &keys).expect("a block reads differently in today's order");
+    Ok((facts, legacy))
+}
+
+fn admitted(facts: &NameFacts, target: i64) -> Value {
+    let clock = Clock {
+        block_number: target,
+        timestamp_seconds: timestamp(target),
+    };
+    evaluate(facts, &clock)
+        .expect("the fixture's facts are decidable")
+        .trace["admitted"]
+        .clone()
+}
+
+/// An ENSv2 event of name 1 on `resource` at `(transaction 0, log)`.
+fn v2_event<'a>(
+    identity: &'a str,
+    block: i64,
+    log: i64,
+    kind: &'a str,
+    name: &'a str,
+    resource: Option<&'a str>,
+    after: Value,
+) -> Event<'a> {
+    let mut after = after;
+    after["registry_contract_instance_id"] = after
+        .get("registry_contract_instance_id")
+        .cloned()
+        .unwrap_or(json!("R"));
+    after["token_id"] = after.get("token_id").cloned().unwrap_or(json!("7"));
+    after["authority_kind"] = json!("registrar");
+    let mut event = Event::new(identity, block, log, kind, V2_REGISTRY)
+        .name(name)
+        .after(after)
+        .raw(json!({"emitting_address": REGISTRY}));
+    if let Some(resource) = resource {
+        event = event.resource(resource);
+    }
+    event
+}
+
+/// Since TYR-36 step 6 (de24ff32) today's ENSv2 name membership compares block, transaction and
+/// log before the generated id (name_current/build.sql:322-347), so a release and a grant of one
+/// block at distinct logs fold in log order in both orders. Block 12 holds a release at log 3,
+/// written second, and a grant at log 7, written first: both orders keep the grant after the
+/// release and serve the registration active. Block 14 holds two ExpiryChanged facts of one log,
+/// ordinal 1 written before ordinal 0: today's laterals take the higher generated id and the
+/// canonical order the higher ordinal, so the two expiry fields are a same-block delta. The
+/// counterfactual that shows it reads the name's membership in today's order too; read by block
+/// and generated id alone it would put the release last, present the name released and leave
+/// the delta unexplained.
+#[tokio::test]
+async fn a_same_block_release_before_a_grant_stays_live_in_todays_membership_order() -> Result<()> {
+    let fixture = Fixture::new("families_shadow_order_name_membership", 20).await?;
+    let (k1, n1) = (uuid(1), name(1));
+    v2_binding(&fixture, &k1).await?;
+    fixture
+        .event(grant("grant-10", 10, &n1, &k1, ALICE))
+        .await?;
+    for event in [
+        v2_event(
+            "grant-12",
+            12,
+            7,
+            "RegistrationGranted",
+            &n1,
+            Some(&k1),
+            json!({"status": "registered", "registrant": ALICE, "expiry": 2_000_000_000u64}),
+        ),
+        v2_event(
+            "release-12",
+            12,
+            3,
+            "RegistrationReleased",
+            &n1,
+            Some(&k1),
+            json!({"status": "released", "source_event": "LabelUnregistered"}),
+        ),
+        v2_event(
+            "expiry-14:1",
+            14,
+            5,
+            "ExpiryChanged",
+            &n1,
+            Some(&k1),
+            json!({"expiry": 2_300_000_000u64}),
+        ),
+        v2_event(
+            "expiry-14:0",
+            14,
+            5,
+            "ExpiryChanged",
+            &n1,
+            Some(&k1),
+            json!({"expiry": 2_200_000_000u64}),
+        ),
+    ] {
+        fixture.event(event).await?;
+    }
+    let report = publish_and_compare(&fixture, 16).await?;
+    assert_counts(
+        &report,
+        &[],
+        &[
+            ("d12_same_block_order:control/expiry", 1),
+            ("d12_same_block_order:registration/expiry", 1),
+        ],
+    );
+    let (facts, legacy) = facts_and_legacy(&fixture).await?;
+    let clock = Clock {
+        block_number: 16,
+        timestamp_seconds: timestamp(16),
+    };
+    let (canonical, today) = (evaluate(&facts, &clock)?, evaluate(&legacy, &clock)?);
+    for read in [&canonical, &today] {
+        assert_eq!(read.trace["selected_event"], json!("grant-12"));
+        assert_eq!(read.registration["status"], json!("active"));
+    }
+    assert_eq!(canonical.registration["expiry"], json!(2_300_000_000u64));
+    assert_eq!(today.registration["expiry"], json!(2_200_000_000u64));
+    fixture.cleanup().await
+}
+
+/// Item 4 of the TYR-36 step 3 review (Q7): the same-block counterfactual reads the name's
+/// facts in today's order at the selectors that use it and keeps every event at its own
+/// position, so the admission reads exactly what the canonical read admits. Name 1 has a grant at
+/// block 10 and, in block 12, two ExpiryChanged facts of one log (log 7), ordinal 1 written
+/// before ordinal 0, and a renewal at log 3, written last. The expiry pair is an ordering
+/// difference that remains in today's builders: their laterals take the higher generated id
+/// (ordinal 0) and the canonical order the higher ordinal (ordinal 1), so the counterfactual
+/// runs and the two expiry fields are a same-block delta. The renewal and the pair sit at
+/// distinct logs, which today's name membership and laterals compare before the id since
+/// TYR-36 step 6 (de24ff32, name_current/build.sql:322-347), so that reversal alone is no
+/// difference and runs no counterfactual.
+#[tokio::test]
+async fn the_order_counterfactual_keeps_every_position_and_the_admission() -> Result<()> {
+    let fixture = Fixture::new("families_shadow_order_admission", 20).await?;
+    let (k1, n1) = (uuid(1), name(1));
+    v2_binding(&fixture, &k1).await?;
+    fixture
+        .event(grant("grant-10", 10, &n1, &k1, ALICE))
+        .await?;
+    for event in [
+        v2_event(
+            "expiry-12:1",
+            12,
+            7,
+            "ExpiryChanged",
+            &n1,
+            Some(&k1),
+            json!({"expiry": 2_300_000_000u64}),
+        ),
+        v2_event(
+            "expiry-12:0",
+            12,
+            7,
+            "ExpiryChanged",
+            &n1,
+            Some(&k1),
+            json!({"expiry": 2_200_000_000u64}),
+        ),
+        v2_event(
+            "renewal-12",
+            12,
+            3,
+            "RegistrationRenewed",
+            &n1,
+            Some(&k1),
+            json!({"expiry": 2_100_000_000u64}),
+        ),
+    ] {
+        fixture.event(event).await?;
+    }
+    let report = publish_and_compare(&fixture, 16).await?;
+    assert_counts(
+        &report,
+        &[],
+        &[
+            ("d12_same_block_order:control/expiry", 1),
+            ("d12_same_block_order:registration/expiry", 1),
+        ],
+    );
+    let (facts, legacy) = facts_and_legacy(&fixture).await?;
+    let positions = |facts: &NameFacts| -> Vec<_> {
+        facts
+            .events
+            .iter()
+            .map(|event| event.position.clone())
+            .collect()
+    };
+    assert_eq!(
+        positions(&legacy),
+        positions(&facts),
+        "every position is kept"
+    );
+    let clock = Clock {
+        block_number: 16,
+        timestamp_seconds: timestamp(16),
+    };
+    assert_eq!(
+        evaluate(&facts, &clock)?.registration["expiry"],
+        json!(2_300_000_000u64),
+        "the canonical order takes ordinal 1"
+    );
+    assert_eq!(
+        evaluate(&legacy, &clock)?.registration["expiry"],
+        json!(2_200_000_000u64),
+        "today's order takes the higher generated id, ordinal 0"
+    );
+    let mut held: Vec<String> = serde_json::from_value(admitted(&facts, 16))?;
+    held.sort();
+    assert_eq!(
+        held,
+        ["expiry-12:0", "expiry-12:1", "grant-10", "renewal-12"]
+    );
+    assert_eq!(admitted(&legacy, 16), admitted(&facts, 16));
+
+    // Without the ordinal pair the renewal and the expiry at distinct logs, written in the
+    // reverse of their log order, read the same in both orders: no block disagrees, so there is
+    // no counterfactual.
+    let identities: Vec<String> = facts
+        .events
+        .iter()
+        .map(|event| event.position.event_identity.clone())
+        .chain(
+            control_positions(&facts)
+                .into_iter()
+                .map(|at| at.event_identity),
+        )
+        .collect();
+    let ids = generated_ids(&fixture.pool, CHAIN, 16, &identities).await?;
+    let keys = association_keys(&fixture.pool, CHAIN, 16, &identities).await?;
+    let mut distinct_logs = facts.clone();
+    distinct_logs
+        .events
+        .retain(|event| event.position.event_identity != "expiry-12:0");
+    let at = |identity: &str| {
+        facts
+            .events
+            .iter()
+            .find(|event| event.position.event_identity == identity)
+            .map(|event| event.position.clone())
+            .expect("the event is retained")
+    };
+    let (renewal, expiry) = (at("renewal-12"), at("expiry-12:1"));
+    assert!(ids[&renewal.event_identity] > ids[&expiry.event_identity]);
+    assert_eq!(
+        EventOrder::Generated(ids.clone()).name_membership(&renewal, &expiry),
+        renewal.cmp(&expiry),
+        "today's name membership orders the distinct logs as the canonical order does"
+    );
+    assert!(legacy_facts(&distinct_logs, &ids, &keys).is_none());
+
+    // A control position the event log does not name leaves today's order unknown, so there is
+    // no reread rather than a partly ordered one.
+    let controls = control_positions(&facts);
+    assert!(!controls.is_empty(), "the name has control positions");
+    let identities: Vec<String> = facts
+        .events
+        .iter()
+        .map(|event| event.position.event_identity.clone())
+        .chain(
+            controls
+                .iter()
+                .map(|position| position.event_identity.clone()),
+        )
+        .collect();
+    let mut ids = generated_ids(&fixture.pool, CHAIN, 16, &identities).await?;
+    let keys = association_keys(&fixture.pool, CHAIN, 16, &identities).await?;
+    ids.remove(&controls[0].event_identity);
+    assert!(legacy_facts(&facts, &ids, &keys).is_none());
+
+    // Pro Q7b: the reordered block makes the name's same-block read run, but it computes only
+    // the registration and control blocks. A wrong non-null handoff block in the families, the
+    // served one null, must stay a mismatch rather than match an uncomputed null.
+    sqlx::query(
+        "INSERT INTO bigname_phase.project_registry_node_state (chain_id, namespace, node,
+             block_number, event_identity, first_current_record_block)
+         VALUES ($1, 'ens', $2, 5, 'node-5', 5)",
+    )
+    .bind(CHAIN)
+    .bind(node(1))
+    .execute(&fixture.pool)
+    .await?;
+    let mutated = shadow_support::compare::compare(&fixture.pool, CHAIN, 16).await?;
+    assert!(
+        mutated.expected_delta_fields.is_empty()
+            && mutated.known_discrepancy.is_empty()
+            && mutated.mismatched == 1,
+        "a wrong handoff block must fail: {:#?}",
+        mutated.lines
+    );
+    assert!(
+        mutated.lines.iter().any(|line| {
+            line.starts_with("SEPOLIA_END_TO_END_SHADOW_MISMATCH")
+                && line.contains("field=authority_selection/registry_handoff_block_number")
+        }),
+        "{:#?}",
+        mutated.lines
+    );
+    fixture.cleanup().await
+}
+
+/// A migrated name's events before its authority epoch start are admitted, as production admits
+/// them since TYR-36 step 6 (de24ff32) deleted the epoch cut of
+/// name_authority/authority_events.sql (:262-311 before it). Name 1 has a grant at block 10;
+/// at block 12 its ENSv2 binding opens and a MigrationApplied sits at log 5, so the selection
+/// carries the migration as its proof and starts the epoch at (12, 0, 5); in that block a
+/// renewal at log 3 precedes the start and an ExpiryChanged at log 7 follows it. The served row
+/// and the families read all three.
+#[tokio::test]
+async fn a_migrated_name_admits_its_events_before_the_epoch_start() -> Result<()> {
+    let fixture = Fixture::new("families_shadow_order_migrated_admission", 20).await?;
+    let (k1, n1) = (uuid(1), name(1));
+    fixture.surface(&n1, &node(1)).await?;
+    fixture.resource(&k1).await?;
+    fixture
+        .event(grant("grant-10", 10, &n1, &k1, ALICE))
+        .await?;
+    fixture
+        .binding(&uuid(100), &n1, &k1, "ens_v2", 12, 5, None)
+        .await?;
+    fixture
+        .write(
+            12,
+            5,
+            "SurfaceBound",
+            V2_REGISTRY,
+            Some(&n1),
+            Some(&k1),
+            json!({"authority_kind": "registrar", "state_derived": false}),
+            REGISTRY,
+        )
+        .await?;
+    fixture
+        .event(
+            Event::new(
+                "migration-12",
+                12,
+                5,
+                "MigrationApplied",
+                "ens_v2_migration_l1",
+            )
+            .name(&n1)
+            .after(json!({"migration_path": "unlocked_wrapped",
+                              "successor_binding": {"binding_id": uuid(100), "resource_id": k1}})),
+        )
+        .await?;
+    fixture
+        .event(v2_event(
+            "renewal-12",
+            12,
+            3,
+            "RegistrationRenewed",
+            &n1,
+            Some(&k1),
+            json!({"expiry": 2_100_000_000u64}),
+        ))
+        .await?;
+    fixture
+        .event(v2_event(
+            "expiry-12",
+            12,
+            7,
+            "ExpiryChanged",
+            &n1,
+            Some(&k1),
+            json!({"expiry": 2_200_000_000u64}),
+        ))
+        .await?;
+    let report = publish_and_compare(&fixture, 16).await?;
+    let facts = name_facts(&fixture).await?;
+    assert!(
+        facts.input.selection.has_proof,
+        "the migration is the proof"
+    );
+    assert_eq!(facts.input.selection.epoch_start, Some((12, 0, 5)));
+    let mut held: Vec<String> = serde_json::from_value(admitted(&facts, 16))?;
+    held.sort();
+    assert_eq!(held, ["expiry-12", "grant-10", "renewal-12"]);
+    assert_counts(&report, &[], &[]);
+    // The served row reads the events before the start too: its registration time is grant-10's
+    // block and its expiry the ExpiryChanged after the start, over the renewal before it.
+    let (served, shadow) = shadow_support::name(&fixture, 16, &n1).await?;
+    assert_eq!(
+        served.registration("registered_at"),
+        json!("2027-01-15T08:02:00+00:00")
+    );
+    assert_eq!(served.registration("expiry"), json!(2_200_000_000u64));
+    assert_eq!(
+        shadow.registration["registered_at"],
+        served.registration("registered_at")
+    );
+    fixture.cleanup().await
+}
+
+/// Item 4 of the TYR-36 step 3 review (Q7): today's association takes the latest linked grant
+/// of the same name, registry and token (v2_lifecycle_events.sql:13-24), so the counterfactual
+/// may move a triple's association only to a grant of that complete triple. Name 1 has a grant
+/// of triple (R, 7) on K1 and, at the same transaction and log, a grant of the unrelated triple
+/// (R2, 9) on K2, emission ordinals 1 and 0, written in that order, then a null-resource
+/// ExpiryChanged of (R, 7). The generated ids and the ordinals order the block's two grants
+/// oppositely, which today's builders still decide by the id, so the block disagrees; but the
+/// unrelated grant is no rival: the triple stays on K1.
+#[tokio::test]
+async fn an_unrelated_triple_in_the_block_is_not_an_association_rival() -> Result<()> {
+    let fixture = Fixture::new("families_shadow_order_unrelated_triple", 20).await?;
+    let (k1, k2, n1) = (uuid(1), uuid(2), name(1));
+    v2_binding(&fixture, &k1).await?;
+    fixture.resource(&k2).await?;
+    fixture
+        .event(v2_event(
+            "grants-12:1",
+            12,
+            5,
+            "RegistrationGranted",
+            &n1,
+            Some(&k1),
+            json!({"status": "registered", "registrant": ALICE, "expiry": 2_000_000_000u64}),
+        ))
+        .await?;
+    fixture
+        .event(v2_event(
+            "grants-12:0",
+            12,
+            5,
+            "RegistrationGranted",
+            &n1,
+            Some(&k2),
+            json!({"status": "registered", "registrant": BOB, "expiry": 2_000_000_000u64,
+                   "registry_contract_instance_id": "R2", "token_id": "9"}),
+        ))
+        .await?;
+    fixture
+        .event(v2_event(
+            "expiry-r7",
+            14,
+            1,
+            "ExpiryChanged",
+            &n1,
+            None,
+            json!({"expiry": 2_100_000_000u64}),
+        ))
+        .await?;
+    let report = publish_and_compare(&fixture, 16).await?;
+    assert_counts(&report, &[], &[]);
+    let (facts, legacy) = facts_and_legacy(&fixture).await?;
+    let target = |facts: &NameFacts| {
+        facts
+            .triples
+            .iter()
+            .find(|triple| triple.key[1] == "R" && triple.key[2] == "7")
+            .map(|triple| {
+                (
+                    triple.target.clone(),
+                    triple
+                        .target_position
+                        .as_ref()
+                        .map(|position| position.event_identity.clone()),
+                )
+            })
+    };
+    let expected = Some((Some(k1.clone()), Some("grants-12:1".to_owned())));
+    assert_eq!(target(&facts), expected);
+    assert_eq!(target(&legacy), expected, "the unrelated grant is no rival");
+    fixture.cleanup().await
+}
+
+/// Pro Q4 on a5f61182: the path-expiry drop's lapse is decided from the resource's retained
+/// lifecycle events rebuilt from the publication-visible log, not from the family rows. The
+/// unnamed path-expiry release is written first at transaction 0 log 0 and the grant second at
+/// log 1 of block 14, so both orders keep the registration live and both sides serve BOB's row.
+/// Moving the family's release row to log 2, with the key state that folds it, lapses the
+/// registration canonically while today's order keeps it live: the family rows alone would then
+/// supply both the reason for the excuse and the empty shadow. The permission rows must stay a
+/// mismatch, because the release in the log is at log 0.
+#[tokio::test]
+async fn a_family_lapse_the_log_does_not_give_stays_a_mismatch() -> Result<()> {
+    let fixture = Fixture::new("families_shadow_order_family_lapse", 20).await?;
+    let (k1, n1) = (uuid(1), name(1));
+    v2_binding(&fixture, &k1).await?;
+    fixture
+        .event(grant("grant-10", 10, &n1, &k1, ALICE))
+        .await?;
+    fixture
+        .event(registry_grant("permission-11", 11, &k1, BOB))
+        .await?;
+    fixture
+        .event(unnamed_path_expiry("path-expiry-14", 14, &k1).at(0, 0))
+        .await?;
+    fixture
+        .event(grant("grant-14", 14, &n1, &k1, ALICE))
+        .await?;
+    let report = publish_and_compare(&fixture, 16).await?;
+    assert_counts(&report, &[], &[]);
+    assert_eq!(
+        served_rows(&fixture, &k1).await?,
+        vec![json!({"subject": BOB, "effective_powers": ["set_resolver", "set_subregistry"]})]
+    );
+    sqlx::query(
+        "UPDATE bigname_phase.project_lifecycle_event SET log_index = 2
+         WHERE event_identity = 'path-expiry-14'",
+    )
+    .execute(&fixture.pool)
+    .await?;
+    sqlx::query(
+        "UPDATE bigname_phase.project_lifecycle_key_state
+         SET last_path_expiry = jsonb_set(last_path_expiry, '{position,log_index}', '2')
+         WHERE resource_id = $1::uuid",
+    )
+    .bind(&k1)
+    .execute(&fixture.pool)
+    .await?;
+    let mutated = shadow_support::compare::compare(&fixture.pool, CHAIN, 16).await?;
+    let failed: Vec<&str> = mutated
+        .lines
+        .iter()
+        .filter(|line| line.starts_with("SEPOLIA_END_TO_END_SHADOW_MISMATCH"))
+        .filter_map(|line| line.split(" field=").nth(1)?.split(' ').next())
+        .collect();
+    assert!(
+        failed.contains(&"permissions_current"),
+        "a lapse the log does not give must fail: {:#?}",
+        mutated.lines
+    );
+    assert!(
+        !mutated
+            .expected_delta_fields
+            .contains_key("d12_same_block_order:permissions_current"),
+        "{:#?}",
+        mutated.lines
+    );
+    fixture.cleanup().await
+}
+
+/// Codex thread PRRT_kwDOSJpxAs6l8Nw6: a stale permission row of an orphaned publication is
+/// not served (canonicality.rs `DEFAULT_PERMISSIONS_CURRENT_READ_FILTER`), so the comparison
+/// does not count it. The lapse fixture's baseline serves BOB's row on both sides; a copy of it
+/// for ALICE whose canonicality summary is orphaned leaves the comparison equal.
+#[tokio::test]
+async fn a_permission_row_the_serving_reader_excludes_is_not_compared() -> Result<()> {
+    let fixture = Fixture::new("families_shadow_order_served_filter", 20).await?;
+    let (k1, n1) = (uuid(1), name(1));
+    v2_binding(&fixture, &k1).await?;
+    fixture
+        .event(grant("grant-10", 10, &n1, &k1, ALICE))
+        .await?;
+    fixture
+        .event(registry_grant("permission-11", 11, &k1, BOB))
+        .await?;
+    let report = publish_and_compare(&fixture, 16).await?;
+    assert_counts(&report, &[], &[]);
+    sqlx::query(
+        "INSERT INTO permissions_current
+         SELECT (jsonb_populate_record(NULL::permissions_current,
+                    to_jsonb(row) || jsonb_build_object('subject', $1::text,
+                        'canonicality_summary', row.canonicality_summary
+                            || '{\"state\": \"orphaned\"}'::jsonb))).*
+         FROM permissions_current row WHERE row.subject = $2",
+    )
+    .bind(ALICE)
+    .bind(BOB)
+    .execute(&fixture.pool)
+    .await?;
+    let filtered = shadow_support::compare::compare(&fixture.pool, CHAIN, 16).await?;
+    assert_counts(&filtered, &[], &[]);
+    fixture.cleanup().await
+}
+
+/// Pro Q6 on 6c8bdf8b: the including side of the same filter. A copy of BOB's row for ALICE
+/// marked safe is served (`DEFAULT_PERMISSIONS_CURRENT_READ_FILTER` admits canonical, safe and
+/// finalized), so the comparison reads it and counts the permission rows as a mismatch the
+/// families do not hold.
+#[tokio::test]
+async fn a_permission_row_the_serving_reader_includes_is_compared() -> Result<()> {
+    let fixture = Fixture::new("families_shadow_order_served_included", 20).await?;
+    let (k1, n1) = (uuid(1), name(1));
+    v2_binding(&fixture, &k1).await?;
+    fixture
+        .event(grant("grant-10", 10, &n1, &k1, ALICE))
+        .await?;
+    fixture
+        .event(registry_grant("permission-11", 11, &k1, BOB))
+        .await?;
+    let report = publish_and_compare(&fixture, 16).await?;
+    assert_counts(&report, &[], &[]);
+    sqlx::query(
+        "INSERT INTO permissions_current
+         SELECT (jsonb_populate_record(NULL::permissions_current,
+                    to_jsonb(row) || jsonb_build_object('subject', $1::text,
+                        'canonicality_summary', row.canonicality_summary
+                            || '{\"state\": \"safe\"}'::jsonb))).*
+         FROM permissions_current row WHERE row.subject = $2",
+    )
+    .bind(ALICE)
+    .bind(BOB)
+    .execute(&fixture.pool)
+    .await?;
+    let included = shadow_support::compare::compare(&fixture.pool, CHAIN, 16).await?;
+    let failed: Vec<&str> = included
+        .lines
+        .iter()
+        .filter(|line| line.starts_with("SEPOLIA_END_TO_END_SHADOW_MISMATCH"))
+        .filter_map(|line| line.split(" field=").nth(1)?.split(' ').next())
+        .collect();
+    assert_eq!(failed, vec!["permissions_current"], "{:#?}", included.lines);
+    fixture.cleanup().await
+}
+
+/// Codex thread PRRT_kwDOSJpxAs6l9h_i: a comparison is for one chain. A second chain's served
+/// name, resource summary and permission row, readable on that chain's own lineage, are what
+/// the serving readers expose for that chain (their read filters scope each row by its
+/// provenance chain), so they must not be compared against this chain's families: the report
+/// stays exactly the baseline. A row of the other chain on this chain's own resource is served
+/// by the effective-permission reader, so it is a mismatch.
+#[tokio::test]
+async fn another_chain_served_rows_are_not_compared() -> Result<()> {
+    const OTHER: &str = "other-chain";
+    let fixture = Fixture::new("families_shadow_order_other_chain", 20).await?;
+    let (k1, n1) = (uuid(1), name(1));
+    v2_binding(&fixture, &k1).await?;
+    fixture
+        .event(grant("grant-10", 10, &n1, &k1, ALICE))
+        .await?;
+    fixture
+        .event(registry_grant("permission-11", 11, &k1, BOB))
+        .await?;
+    let baseline = publish_and_compare(&fixture, 16).await?;
+    assert_counts(&baseline, &[], &[]);
+    // The other chain's lineage carries the same hashes, so its rows are readable there.
+    sqlx::query(
+        "INSERT INTO chain_lineage (chain_id, block_hash, parent_hash, block_number,
+             block_timestamp, canonicality_state)
+         SELECT $2, block_hash, parent_hash, block_number, block_timestamp, canonicality_state
+         FROM chain_lineage WHERE chain_id = $1",
+    )
+    .bind(CHAIN)
+    .bind(OTHER)
+    .execute(&fixture.pool)
+    .await?;
+    let (other_name, other_resource) = (name(7), uuid(7));
+    fixture
+        .binding(
+            &uuid(107),
+            &other_name,
+            &other_resource,
+            "ens_v2",
+            9,
+            7,
+            None,
+        )
+        .await?;
+    let chain = json!({"chain_id": OTHER});
+    sqlx::query(
+        "INSERT INTO name_current
+         SELECT (jsonb_populate_record(NULL::name_current,
+                    to_jsonb(row) || jsonb_build_object('logical_name_id', $1::text,
+                        'namehash', split_part($1::text, ':', 2),
+                        'surface_binding_id', $4::text, 'resource_id', $5::text,
+                        'provenance', row.provenance || $2::jsonb))).*
+         FROM name_current row WHERE row.logical_name_id = $3",
+    )
+    .bind(&other_name)
+    .bind(&chain)
+    .bind(&n1)
+    .bind(uuid(107))
+    .bind(&other_resource)
+    .execute(&fixture.pool)
+    .await?;
+    for table in [
+        "permissions_current_resource_summary",
+        "permissions_current",
+    ] {
+        sqlx::query(&format!(
+            "INSERT INTO {table}
+             SELECT (jsonb_populate_record(NULL::{table},
+                        to_jsonb(row) || jsonb_build_object('resource_id', $1::text,
+                            'provenance', row.provenance || $2::jsonb))).*
+             FROM {table} row WHERE row.resource_id = $3::uuid"
+        ))
+        .bind(&other_resource)
+        .bind(&chain)
+        .bind(&k1)
+        .execute(&fixture.pool)
+        .await?;
+    }
+    let served = bigname_storage::load_name_current_by_logical_name_ids(
+        &fixture.pool,
+        std::slice::from_ref(&other_name),
+    )
+    .await?;
+    assert!(
+        served.contains_key(&other_name),
+        "the other chain serves its name"
+    );
+    let report = shadow_support::compare::compare(&fixture.pool, CHAIN, 16).await?;
+    assert_counts(&report, &[], &[]);
+    assert_eq!(
+        (report.names, report.resources, report.equal),
+        (baseline.names, baseline.resources, baseline.equal),
+        "{:#?}",
+        report.lines
+    );
+    // Adversarial pass on 5bf7fca1 (item 7) and Pro r5 Q7 on c23e3e5b: the other chain's
+    // permission row on this chain's resource id, an admin power for another subject, is neither
+    // a grant nor an admin power of the resource here (both reads scope by provenance chain).
+    // The effective-permission reader serves it all the same, since it selects direct rows by
+    // resource id, so the comparison must reject it rather than drop it.
+    sqlx::query(
+        "INSERT INTO permissions_current
+         SELECT (jsonb_populate_record(NULL::permissions_current,
+                    to_jsonb(row) || jsonb_build_object('subject', $1::text,
+                        'effective_powers', '[\"admin_set_resolver\"]'::jsonb,
+                        'provenance', row.provenance || $2::jsonb))).*
+         FROM permissions_current row WHERE row.resource_id = $3::uuid AND row.subject = $4",
+    )
+    .bind("0x00000000000000000000000000000000000000cc")
+    .bind(&chain)
+    .bind(&k1)
+    .bind(BOB)
+    .execute(&fixture.pool)
+    .await?;
+    let resource: uuid::Uuid = k1.parse()?;
+    let effective = bigname_storage::load_effective_permissions_by_resource_ids(
+        &fixture.pool,
+        &[resource],
+        None,
+    )
+    .await?;
+    assert!(
+        effective.iter().any(|row| {
+            row.subject == "0x00000000000000000000000000000000000000cc"
+                && row.provenance["chain_id"] == json!(OTHER)
+        }),
+        "the API serves the other chain's row on this chain's resource"
+    );
+    let admins = shadow_support::compare::compare(&fixture.pool, CHAIN, 16).await?;
+    assert!(
+        admins.known_discrepancy.is_empty() && admins.expected_delta_fields.is_empty(),
+        "{:#?}",
+        admins.lines
+    );
+    let failed: Vec<&str> = admins
+        .lines
+        .iter()
+        .filter(|line| line.starts_with("SEPOLIA_END_TO_END_SHADOW_MISMATCH"))
+        .filter(|line| line.contains(&format!("key={k1} ")))
+        .filter_map(|line| line.split(" field=").nth(1)?.split(' ').next())
+        .collect();
+    assert_eq!(failed, ["other_chain_rows"], "{:#?}", admins.lines);
+    assert_eq!(
+        (admins.names, admins.resources, admins.mismatched),
+        (baseline.names, baseline.resources, 1),
+        "{:#?}",
+        admins.lines
+    );
+    fixture.cleanup().await
+}

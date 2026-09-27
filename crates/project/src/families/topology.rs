@@ -11,7 +11,10 @@ use sqlx::{Postgres, Transaction};
 use super::{
     input::BlockEvent,
     keys,
-    reduce::{Context, current, key_of, load_rows, put, raw_lower, raw_text, set, text_or_null},
+    reduce::{
+        Context, current, json_boolean, key_of, load_rows, put, raw_lower, raw_text, set,
+        text_or_null,
+    },
     store::{Row, RowSet},
     tables,
 };
@@ -61,9 +64,19 @@ fn edge_key(chain: &Value, event: &BlockEvent) -> Option<Row> {
             json!(event.namespace),
             json!(raw_lower(after, "node")?),
             json!(raw_lower(after, "child_node")?),
-            json!(event.source_family),
+            json!(edge_arm(&event.source_family)),
         ],
     ))
+}
+
+/// The authority arm of an ENSv1 or Basenames registry edge, as children.rs:271-273 names it:
+/// `basenames` for the Basenames registry, `ens_v1` for the ENSv1 registry.
+pub(crate) fn edge_arm(source_family: &str) -> &'static str {
+    if source_family == "basenames_base_registry" {
+        "basenames"
+    } else {
+        "ens_v1"
+    }
 }
 
 fn subregistry_key(chain: &Value, event: &BlockEvent) -> Option<Row> {
@@ -147,12 +160,12 @@ pub(super) async fn apply(
             set(
                 &mut row,
                 "owner",
-                text_or_null(raw_text(&event.after, "owner")),
+                text_or_null(raw_lower(&event.after, "owner")),
             );
             set(
                 &mut row,
                 "owner_getter",
-                text_or_null(raw_text(&event.after, "owner_getter")),
+                text_or_null(raw_lower(&event.after, "owner_getter")),
             );
             set(
                 &mut row,
@@ -177,11 +190,20 @@ pub(super) async fn apply(
 }
 
 /// The event's active flag, active when it carries none, as both alias readers take it
-/// (`COALESCE((after_state ->> 'active')::boolean, true)`).
+/// (`COALESCE((after_state ->> 'active')::boolean, true)`). A text or number is read the way
+/// PostgreSQL reads a boolean; a spelling it rejects fails the served batch, and is kept active
+/// here.
 fn active(event: &BlockEvent) -> Value {
-    Value::Bool(match field(event, "active") {
-        Value::Bool(flag) => flag,
-        Value::String(text) => !matches!(text.trim().to_ascii_lowercase().as_str(), "false" | "f"),
-        _ => true,
-    })
+    Value::Bool(json_boolean(&field(event, "active")).unwrap_or(true))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::edge_arm;
+
+    #[test]
+    fn an_edge_carries_the_canonical_authority_arm_of_its_registry() {
+        assert_eq!(edge_arm("ens_v1_registry_l1"), "ens_v1");
+        assert_eq!(edge_arm("basenames_base_registry"), "basenames");
+    }
 }

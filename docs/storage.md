@@ -209,10 +209,23 @@ mandatory full Interpret and Project redos.
 | `migration_event_associations`, `migration_discovery_associations`, `migration_candidate_identity_effects`, `migration_candidate_discovery_effects` | Interpret | Correlation-versioned diagnostic associations and effects that slice 1 must not use to alter independently admitted normalized events, identity rows, or [discovery edges](glossary.md#discovery-graph--discovery-edge). The ordinary `registry_announcement` indexability edge remains a watch-plan input. |
 | `*_current` projection families | Project | Current serving state, rebuildable from canonical interpreted input. |
 | `child_registration_events` | Project | Historical membership of each name's [direct child registration](glossary.md#direct-child-registration) events, rebuildable from canonical interpreted input; name history selects rows through it and reads the events themselves from `normalized_events`. |
-| `project_family_marker`, `project_family_undo`, `project_repair_record` and the owned key family tables (`project_name_state` through `project_address_record_id_index`) | Project, after each batch's progress is recorded | [Owned key families](projections.md#owned-key-families): per-key current state, its block marker, its 256-block undo journal and the record of the latest family repair or rebuild. Unread shadows, rebuildable from canonical interpreted input; never serving data until the per-block publication reads them. |
+| `project_family_marker`, `project_family_undo`, `project_repair_record` and the owned key family tables (`project_name_state` through `project_address_record_id_index`) | Project, after each batch's progress is recorded | [Owned key families](projections.md#owned-key-families): per-key current state, its block marker, its undo journal (kept back to the lowest of 256 blocks, the finalized and safe blocks and an active repair's floor) and the record of the latest family repair or rebuild. Shadows that no served path reads; the step 3 [shadow harness](glossary.md#shadow-read) reads them in tests only. Rebuildable from canonical interpreted input; never serving data until the per-block publication reads them. |
 | `chain_phase_state`, redo/invalidation state, `service_heartbeats` | phase runner; manifest synchronization may stamp or widen required Ingest redo work recorded by the [manifest-authority marker](glossary.md#manifest-authority-marker), and Interpret may stamp discovery-owned required Ingest work in the transaction that finalizes a completed pass | Phase progress, repair work, and runtime liveness. Both coordination writers use the shared required-Ingest installer under the existing synchronization and runner phase-exclusion rules. They preserve lifecycle backup fields, clear resumable evidence for genuinely new demand, and never execute the redo. The phase runner remains the sole executor and redo authority. |
 | `project_generation_failures` | phase runner after Project rollback | Append-only audit evidence for a [projection generation failure](glossary.md#projection-generation-failure); never a product projection. |
 | `resolution_divergences` | guarded lookup functions; Project publication may only clear outdated direct observations | Active live/indexed resolver disagreements and retained observations retired after the exact resolver becomes null; diagnostic only. |
+
+Interpret writes `discovery_edges` and `contract_instance_addresses`. A phase
+that reads them may add read-only indexes through its own schema-migration, never
+changing a row, when it records each index here with the statement it serves.
+The owned key families add five, named for their reader:
+
+| Index | Serves |
+| --- | --- |
+| `project_families_discovery_edges_resolver_from_block_idx` | `project:families.classification.activated`: resolver edges that start at the block |
+| `project_families_discovery_edges_resolver_to_block_idx` | `project:families.classification.activated`: resolver edges that stop at the block |
+| `project_families_contract_instance_addresses_from_block_idx` | `project:families.classification.activated`: contract addresses that start at the block |
+| `project_families_contract_instance_addresses_to_block_idx` | `project:families.classification.activated`: contract addresses that stop at the block |
+| `project_families_discovery_edges_resolver_destination_idx` | `project:families.classification.activated`: whether an address that starts or stops at the block is any resolver edge's destination, deactivated edges included |
 
 When an ENSv1 BaseRegistrar manifest admits ordinary numeric registration and renewal,
 Interpret retains the registrar resource, token lineage, owner and expiry independently of
@@ -652,16 +665,14 @@ parent and still reads `canonical`. Any reader that reaches these rows without
 that join, or treats one as current, must anchor the row's own
 `(chain_id, block_number, block_hash)` on `chain_lineage` with a readable-state
 predicate. The readers that treat these rows as current — the children builder,
-the name-authority child proof, the Interpret admission loader, and Project
-scoping — all anchor on `chain_lineage` today; two scope-widening reads —
+the Interpret admission loader, and Project scoping — all anchor on `chain_lineage` today; two scope-widening reads —
 `include_topology_dependents` in `crates/project/src/scope/authority.rs` and
 `capture_child_registration_history` in `crates/interpret/src/write/redo.rs` —
 do not, which can only enlarge a rebuild's scope, never publish a row.
 
-In today's two publishing readers the association-lineage predicate cannot be
-the reason a row is withheld, so no test isolates it. Both the children builder
-(`crates/project/src/builders/children.rs`) and the name-authority child proof
-(`crates/project/src/builders/name_authority.rs`) reach a correlation row only
+In today's one publishing reader the association-lineage predicate cannot be
+the reason a row is withheld, so no test isolates it. The children builder
+(`crates/project/src/builders/children.rs`) reaches a correlation row only
 through rows that sit at or after its block, and that ordering is bigname's own
 invariant rather than a claim about ENSv2. A migration boundary's `evidence`
 array is built from the raw-log observations the interpreter had already decoded
@@ -722,9 +733,8 @@ traverses it. Interpret attaches the `migration_registry_creation` relationship
 in `migration_discovery_associations`, keyed to that ordinary edge;
 the association does not change the edge's columns or active range. After an
 activated parent transition, Project may use the readable canonical association
-and active ordinary announcement to classify a positive child-registration
-emitter or prove the current parent subregistry is the migration-created
-`WrapperRegistry`. Candidate or activated, the association establishes neither
+and active ordinary announcement to prove the current parent subregistry is the
+migration-created `WrapperRegistry`; authority selection does not read it. Candidate or activated, the association establishes neither
 result by itself and activates no correlation-dependent effect. Parent
 reachability additionally requires the association's evidence-reference array
 to be non-empty, every reference to be a non-empty object, and the whole array

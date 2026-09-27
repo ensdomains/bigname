@@ -6,6 +6,7 @@
 use serde_json::{Map, Value, json};
 use sqlx::{Postgres, Transaction};
 
+use super::manifests::ActiveSet;
 use super::{
     input::{BlockEvent, BlockHeader},
     keys::{BlockKeys, Key, Space},
@@ -18,6 +19,10 @@ pub(crate) struct Context<'a> {
     pub(crate) chain_id: &'a str,
     pub(crate) block: &'a BlockHeader,
     pub(crate) keys: &'a BlockKeys,
+    /// The active manifest set at the block, from the run's read of the manifest updates.
+    pub(crate) manifests: &'a ActiveSet,
+    /// Whether its key differs from the one the previous block recorded.
+    pub(crate) manifests_changed: bool,
 }
 
 /// Name the family in a reducer error, so a skipped block says which family failed.
@@ -43,6 +48,7 @@ pub(crate) async fn apply(
     super::registry::apply(transaction, context, events, rows).await?;
     super::resolver::registry_pointers(transaction, context, events, rows).await?;
     super::resolver::resource_pointers(transaction, context, events, rows).await?;
+    super::classification::apply(transaction, context, events, rows).await?;
     super::records::apply(transaction, context, events, rows).await?;
     super::wrapper::apply(transaction, context, events, rows).await?;
     super::permissions::apply(transaction, context, events, rows).await?;
@@ -133,6 +139,18 @@ pub(crate) fn raw_text(value: &Value, field: &str) -> Option<String> {
     }
 }
 
+/// A boolean flag: a JSON boolean, or the string `"true"` or `"false"`, else null. It is true
+/// exactly when the served builders' `->> field = 'true'` holds.
+pub(crate) fn flag(value: &Value, field: &str) -> Value {
+    match value.get(field) {
+        Some(Value::Bool(flag)) => Value::Bool(*flag),
+        Some(Value::String(text)) if text == "true" || text == "false" => {
+            Value::Bool(text == "true")
+        }
+        _ => Value::Null,
+    }
+}
+
 /// `raw_text` lower-cased, as `lower(... ->> field)` reads an address.
 pub(crate) fn raw_lower(value: &Value, field: &str) -> Option<String> {
     raw_text(value, field).map(|text| text.to_ascii_lowercase())
@@ -143,4 +161,111 @@ pub(crate) fn namehash_of(logical_name_id: &str) -> Option<String> {
     logical_name_id
         .split_once(':')
         .map(|(_, namehash)| namehash.to_ascii_lowercase())
+}
+
+/// A JSON integer from 0 to `high`, as `jsonb_typeof(value) = 'number' AND (... ->> field)::numeric
+/// BETWEEN 0 AND high` reads it for an integral spelling (a jsonb literal `1e3` is already
+/// numeric 1000). A decimal spelling such as `1.0` or `1.5` reads as no number: numbers arrive
+/// as serde numbers without arbitrary precision, a decimal parsed best-effort into an f64, so it
+/// can arrive already changed (`9007199254740991.0` arrives as 9007199254740990). The served
+/// numeric read keeps a decimal; the family keeps no value there rather than a different one.
+pub(crate) fn json_number_between(value: Option<&Value>, high: u64) -> Option<&serde_json::Number> {
+    let Some(Value::Number(number)) = value else {
+        return None;
+    };
+    number
+        .as_u64()
+        .is_some_and(|integer| integer <= high)
+        .then_some(number)
+}
+
+/// A JSON value as `(... ->> field)::boolean` reads it: a JSON boolean as itself, a string or a
+/// number through PostgreSQL's boolean input, anything else (null included) as no boolean.
+pub(crate) fn json_boolean(value: &Value) -> Option<bool> {
+    match value {
+        Value::Bool(flag) => Some(*flag),
+        Value::String(text) => postgres_boolean(text),
+        Value::Number(number) => postgres_boolean(&number.to_string()),
+        _ => None,
+    }
+}
+
+/// PostgreSQL's boolean input: trimmed of ASCII space, tab, line feed, carriage return, vertical
+/// tab and form feed only (not Unicode whitespace), case-insensitive, `1` or `0`, or a unique
+/// prefix of `true`, `false`, `yes`, `no`, `on` or `off` (`o` alone is ambiguous).
+pub(crate) fn postgres_boolean(text: &str) -> Option<bool> {
+    let text = text
+        .trim_matches([' ', '\t', '\n', '\r', '\u{b}', '\u{c}'])
+        .to_ascii_lowercase();
+    if text.is_empty() {
+        return None;
+    }
+    match text.as_str() {
+        "1" => return Some(true),
+        "0" => return Some(false),
+        "o" => return None,
+        _ => {}
+    }
+    [
+        ("true", true),
+        ("false", false),
+        ("yes", true),
+        ("no", false),
+        ("on", true),
+        ("off", false),
+    ]
+    .into_iter()
+    .find_map(|(word, flag)| word.starts_with(&text).then_some(flag))
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::{Value, json};
+
+    use super::{flag, postgres_boolean};
+
+    // `flag` is true exactly when the served `after_state ->> field = 'true'` holds; every
+    // other value that is not the string "false" or a JSON false reads as null.
+    #[test]
+    fn a_flag_is_true_exactly_when_the_served_text_is_true() {
+        for (after, expected) in [
+            (json!({"flag": true}), Value::Bool(true)),
+            (json!({"flag": false}), Value::Bool(false)),
+            (json!({"flag": "true"}), Value::Bool(true)),
+            (json!({"flag": "false"}), Value::Bool(false)),
+            (json!({"flag": "TRUE"}), Value::Null),
+            (json!({"flag": "t"}), Value::Null),
+            (json!({"flag": 1}), Value::Null),
+            (json!({"flag": null}), Value::Null),
+            (json!({}), Value::Null),
+            (json!({"flag": [true]}), Value::Null),
+        ] {
+            assert_eq!(flag(&after, "flag"), expected, "{after}");
+        }
+    }
+
+    #[test]
+    fn a_boolean_reads_as_postgresql_reads_it() {
+        for (text, flag) in [
+            ("t", Some(true)),
+            ("TRUE", Some(true)),
+            (" y ", Some(true)),
+            ("on", Some(true)),
+            ("1", Some(true)),
+            ("f", Some(false)),
+            ("fals", Some(false)),
+            ("NO", Some(false)),
+            ("of", Some(false)),
+            ("0", Some(false)),
+            ("o", None),
+            ("", None),
+            ("2", None),
+            ("maybe", None),
+            ("truex", None),
+            ("\u{b}off\u{c}", Some(false)),
+            ("\u{a0}off\u{a0}", None),
+        ] {
+            assert_eq!(postgres_boolean(text), flag, "{text:?}");
+        }
+    }
 }

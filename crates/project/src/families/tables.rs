@@ -15,7 +15,7 @@ macro_rules! tables {
 }
 
 tables! {
-    NAME_STATE = "project_name_state" ["namespace", "logical_name_id"];
+    NAME_STATE = "project_name_state" ["chain_id", "namespace", "logical_name_id"];
     BINDING_CANDIDATE = "project_binding_candidate" ["surface_binding_id"];
     LIFECYCLE_KEY_STATE = "project_lifecycle_key_state" ["chain_id", "resource_id"];
     LIFECYCLE_TRIPLE_SUMMARY = "project_lifecycle_triple_summary"
@@ -28,8 +28,10 @@ tables! {
         ["chain_id", "logical_name_id", "registry_contract_instance_id"];
     WRAPPER_STATE = "project_wrapper_state" ["chain_id", "resource_id"];
     REGISTRY_NODE_STATE = "project_registry_node_state" ["chain_id", "namespace", "node"];
+    REGISTRY_OWNER_EVENT = "project_registry_owner_event"
+        ["chain_id", "namespace", "node", "event_identity"];
     REGISTRY_BINDING_OBSERVATION = "project_registry_binding_observation"
-        ["chain_id", "resource_id", "attributed_via"];
+        ["chain_id", "observation_identity"];
     RESOLVER_CLASSIFICATION = "project_resolver_classification" ["chain_id", "resolver_address"];
     REGISTRY_POINTER = "project_registry_pointer" ["chain_id", "namespace", "node"];
     RESOURCE_POINTER = "project_resource_pointer" ["chain_id", "resource_id"];
@@ -50,9 +52,12 @@ tables! {
         ["chain_id", "namespace", "parent_node", "child_node", "authority_arm"];
     PARENT_SUBREGISTRY = "project_parent_subregistry" ["chain_id", "logical_name_id"];
     REVERSE_TUPLE = "project_reverse_tuple" ["address", "coin_type", "namespace"];
-    REVERSE_NODE_CLAIM = "project_reverse_node_claim" ["namespace", "reverse_node"];
+    REVERSE_NODE_CLAIM = "project_reverse_node_claim"
+        ["namespace", "reverse_node", "resolver_address"];
     CLAIM_NORMALIZATION = "project_claim_normalization" ["chain_id", "claim_event_identity"];
     ADDRESS_NAME_FOLD = "project_address_name_fold" ["chain_id", "logical_name_id"];
+    ADDRESS_CONTROLLER_CANDIDATE = "project_address_controller_candidate"
+        ["chain_id", "logical_name_id", "event_identity"];
 }
 
 /// The derived index tables, cleared with the chain and rebuilt from their base rows.

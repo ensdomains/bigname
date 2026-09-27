@@ -1,6 +1,9 @@
 //! Builder-level coverage for `address_records_current`, the reverse index over current
 //! `addr:<coin_type>` resolver records ("names that resolve to this address").
 
+#[path = "support/family_shadow.rs"]
+mod family_shadow;
+
 use anyhow::{Context, Result};
 use bigname_project::{BatchRequest, Engine, Marker, RunMode};
 use bigname_test_support::{TestDatabase, TestDatabaseConfig};
@@ -417,6 +420,7 @@ async fn run(
         })
         .await?;
     assert!(outcome.complete);
+    family_shadow::assert_family_reads_match(pool, &outcome.current).await?;
     Ok(())
 }
 

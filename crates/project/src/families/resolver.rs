@@ -1,10 +1,12 @@
 //! F4 and F5, the resolver pointers. F4 keeps the ENSv1 registry-node pointer: the latest
 //! ResolverChanged of an ENSv1 registry, registrar or wrapper for the node it addresses, clears
 //! included (record_inventory/mirror.rs, `registry_state`). F5 keeps a resource's pointer in
-//! three groups: the latest named ResolverChanged on the resource, clears included
-//! (linked_records.rs, `project_record_pointer_latest`); the latest whose resolver is not the
-//! zero address (name_topology.rs, the wildcard source); and the latest of RecordVersionChanged
-//! or ResolverChanged, the wildcard version boundary.
+//! three groups: the latest ResolverChanged on the resource, named or not, clears included
+//! (linked_records.rs, `project_record_pointer_latest`, reads the named ones; the ENSv2 TLD root
+//! pointer of stage.rs:333-404 reads an unnamed one); the latest whose resolver is a non-empty,
+//! non-zero address (name_topology.rs, the wildcard source); and the latest of
+//! RecordVersionChanged or ResolverChanged, the wildcard version boundary. The namehash is the
+//! name's when the event is named, else the node the event addresses.
 use serde_json::{Value, json};
 use sqlx::{Postgres, Transaction};
 
@@ -85,7 +87,9 @@ pub(super) async fn resource_pointers(
     )
     .await?;
     for event in events {
-        let (Some(resource), Some(name)) = (&event.resource_id, &event.logical_name_id) else {
+        // Named or not: an unnamed pointer (the unbound ENSv2 TLD root, stage.rs:333-404) and
+        // an unnamed version boundary are the resource's own facts.
+        let Some(resource) = &event.resource_id else {
             continue;
         };
         let pointer = event.event_kind == "ResolverChanged";
@@ -101,12 +105,16 @@ pub(super) async fn resource_pointers(
             set(&mut row, "pointer_position", position.clone());
             set(&mut row, "namespace", event.namespace.clone());
             set(&mut row, "source_family", event.source_family.clone());
-            set(
-                &mut row,
-                "namehash",
-                text_or_null(reduce::namehash_of(name)),
-            );
-            if resolver.as_deref().unwrap_or_default() != ZERO_ADDRESS {
+            let namehash = event
+                .logical_name_id
+                .as_deref()
+                .and_then(reduce::namehash_of)
+                .or_else(|| keys::pointer_node(&event.after));
+            set(&mut row, "namehash", text_or_null(namehash));
+            if resolver
+                .as_deref()
+                .is_some_and(|resolver| !resolver.is_empty() && resolver != ZERO_ADDRESS)
+            {
                 set(&mut row, "nonzero_resolver_address", text_or_null(resolver));
                 set(&mut row, "nonzero_position", position.clone());
             }

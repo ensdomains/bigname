@@ -19,6 +19,7 @@ mod resolver;
 mod resolver_dependents;
 mod retracted;
 mod topology;
+mod v2_release_names;
 mod wrapper;
 mod wrapper_registrar;
 
@@ -52,13 +53,12 @@ pub(crate) async fn initialize(
     labels::include_changed_children(transaction, chain_id).await?;
     inventory::include_changed_record_consumers(transaction, chain_id, target.number).await?;
     registry_resolver::include_parent_names(transaction, chain_id, target.number).await?;
-    authority::include_changed_child_proofs(
+    authority::include_changed_migration_registry_members(
         transaction,
         chain_id,
         window.from_block,
         window.to_block,
         target.number,
-        window.retain_retracted,
     )
     .await?;
     wrapper::include_time_boundaries(transaction, chain_id, window.previous, target).await?;
@@ -86,6 +86,7 @@ pub(crate) async fn initialize(
         crate::stage::mirror_evidence::invalidate_resolver_dependents(transaction, chain_id)
             .await?;
     }
+    v2_release_names::include_names_bound_to_released_resources(transaction, target.number).await?;
     close_binding_scope(transaction, chain_id, target).await?;
     include_alias_and_wildcard_scope(transaction, chain_id, target).await?;
     close_binding_scope(transaction, chain_id, target).await?;
@@ -201,25 +202,47 @@ async fn seed_direct_scope(
     }
 
     // A changed registry edge rebuilds the child's edge; the parent node is an ancestor whose
-    // evidence stages without restaging its other children.
-    for (table, columns) in [
+    // evidence stages without restaging its other children. An AuthorityTransferred derived from
+    // a registry Transfer (`source_event = 'Transfer'`) names the transferred node in `node`, and
+    // that node's own edge is rebuilt too. The adapter attributes the event to a logical name
+    // through the linked authority or, for a zero owner, the node's registry read anchor, so it
+    // can arrive without one while the node has an active surface; the child row follows that
+    // surface's latest registry owner. The before-state `node` is a conservative extra candidate.
+    // `setOwner` emits `Transfer(node, owner)` with the transferred node, while `setSubnodeOwner`
+    // emits `NewOwner(node, label, owner)` with the parent node:
+    // (upstream: .refs/ens_v1/contracts/registry/ENS.sol:L6-L9 @ ens_v1@91c966f)
+    // (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L63-L84 @ ens_v1@91c966f)
+    // (upstream: .refs/basenames/lib/ens-contracts/contracts/registry/ENS.sol:L5-L8 @ basenames@1809bbc)
+    // (upstream: .refs/basenames/src/L2/Registry.sol:L100-L124 @ basenames@1809bbc)
+    for (seed, table, columns, events) in [
         (
             "project_scope_children",
+            "project_scope_children",
             "(event.after_state ->> 'child_node'), (event.before_state ->> 'child_node')",
+            "event.event_kind IN ('SubregistryChanged', 'AuthorityTransferred')",
         ),
         (
             "project_scope_ancestors",
+            "project_scope_ancestors",
             "(event.after_state ->> 'node'), (event.before_state ->> 'node')",
+            "event.event_kind IN ('SubregistryChanged', 'AuthorityTransferred')",
+        ),
+        (
+            "project_scope_children_from_transfer",
+            "project_scope_children",
+            "(event.after_state ->> 'node'), (event.before_state ->> 'node')",
+            "event.event_kind = 'AuthorityTransferred'
+               AND event.after_state ->> 'source_event' = 'Transfer'",
         ),
     ] {
         let statement = format!(
-            "/* project:scope.seed_direct_scope.insert_{table} */ INSERT INTO {table}
+            "/* project:scope.seed_direct_scope.insert_{seed} */ INSERT INTO {table}
              SELECT event.namespace || ':' || lower(candidate.node)
              FROM project_changed_events event
              CROSS JOIN LATERAL (
                  VALUES {columns}
              ) candidate(node)
-             WHERE event.event_kind IN ('SubregistryChanged', 'AuthorityTransferred')
+             WHERE {events}
                AND event.source_family IN (
                    'ens_v1_registry_l1', 'basenames_base_registry'
                )

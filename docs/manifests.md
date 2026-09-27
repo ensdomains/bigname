@@ -465,20 +465,17 @@ The pins also carry a tracked Sepolia v1-reference address for `WrappedETHRegist
 Registrar-controller coverage remains a known asymmetry against the mainnet deployment profile; resolver-log coverage for the approved four-address set is no longer one.
 
 An ordinary active name with facts on both ENSv1 and ENSv2 on this deployment
-profile, and no admitted authority proof, qualifying release, or
-deployment-wide ENSv2 release-threshold decision, follows the chain
+profile, and no admitted authority proof, follows the chain
 ([ADR 0007](adrs/0007-follow-the-chain-ens-authority.md) and
 [architecture](architecture.md#ensv1ensv2-current-authority)): a current ENSv2
-registration selects ENSv2, and otherwise ENSv1 decides. A premigration
-reservation is not a registration and defers to ENSv1. Only an admitted
-ENSv1→ENSv2 migration boundary sets an authority epoch at the boundary itself.
-The exact [shared ENS infrastructure](glossary.md#shared-ens-infrastructure)
-names (root, `eth`, `reverse`, and `addr.reverse`) select a current ENSv2 arm
-without publishing an authority epoch when ENSv1 evidence exists as either a
-current binding or historical events and none of those higher-precedence
-decisions applies. Historical ENSv2 evidence alone does not qualify, and
-descendants do not inherit the exception. A current ENSv2 arm without ENSv1
-evidence remains the ordinary single-arm ENSv2 case.
+registration selects ENSv2, a released or expired ENSv2 registration stays
+with ENSv2 as released, and otherwise ENSv1 decides. A premigration
+reservation is not a registration and defers to ENSv1. An admitted
+ENSv1→ENSv2 [migration boundary](glossary.md#migration-boundary) is history and
+sets no authority epoch: a migrated name's epoch starts at its successor ENSv2
+binding's own position, like any other ENSv2 registration's.
+The root, `eth`, `reverse`, and `addr.reverse` follow the same rule as every
+other name.
 Admitting ENSv1 sources here makes names with facts on both arms reachable in
 production; it does not establish an ENSv1→ENSv2 migration boundary.
 
@@ -847,14 +844,12 @@ or normalized-event output that `ens_v2_registry_l1` derives from the ordinary
 edge and raw event without ENSv1→ENSv2 migration correlation remains ordinary and
 byte-for-byte unchanged. Only the additional meaning that depends on the
 correlation follows candidate-to-activated complete-group visibility. Beyond
-that rebuild-scope use, Project has two narrow semantic reads: after
-an activated parent boundary, the exact-name authority selector may require the
-readable ordinary edge and its canonical `migration_registry_creation`
-association to classify a positive child-registration emitter, while child
-reachability may require them to prove the current parent subregistry is the
-migration-created `WrapperRegistry`. Neither
-row is authority proof by itself, and no product route consumes either row
-directly. A later
+that rebuild-scope use, Project has one narrow semantic read: after an
+activated parent boundary, child reachability may require the readable
+ordinary edge and its canonical `migration_registry_creation` association to
+prove the current parent subregistry is the migration-created
+`WrapperRegistry`. Authority selection reads neither row, and no product route
+consumes either row directly. A later
 `SubregistryUpdated` remains the bidirectional parent-child topology edge and
 does not itself admit the target. (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L131 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L133 @ ens_v2@a971bd64) (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L134 @ ens_v2@a971bd64) The implementation at
 `0x2741543c3b14640b97bc70a233318032f7e35bac`, starting at block `11709090`,
@@ -927,8 +922,8 @@ fallback, and a sixth never arises at all:
   (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L186 @ ens_v2@a971bd64)
 - A parent-controlled child that the parent's owner registers directly. The
   registry permits that registration because the label is not protected as
-  migratable, so it is a real ordinary registry fact and, under consumer slice
-  2C, an authority proof — but it is never a child `MigrationApplied`.
+  migratable, so it is a real ordinary registry fact that selects ENSv2 like
+  any other registration — but it is never a child `MigrationApplied`.
   (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L172 @ ens_v2@a971bd64)
   (upstream: .refs/ens_v2/contracts/src/registry/WrapperRegistry.sol:L175 @ ens_v2@a971bd64)
 - A `ProxyDeployed` factory log without the `RegistryCreated` announcement of
@@ -950,8 +945,8 @@ Diagnostic correlation output does not mean zero effect on Project. Admitting a 
 registry writes a `migration_registry_creation` discovery association, and
 Project's rebuild scope and parent-reachability selector read that table without a `consumer_visibility` filter,
 so names registered into a newly-admitted child registry enter delete-and-rebuild
-candidacy. What those rebuilds publish is unchanged: the child-registration
-authority proof also requires an activated parent boundary. Complete parent and
+candidacy. What those rebuilds publish is unchanged: authority selection does
+not read the association. Complete parent and
 child groups now receive that visibility through the shared production
 activation function after correlation is complete.
 

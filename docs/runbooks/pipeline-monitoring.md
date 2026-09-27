@@ -326,6 +326,41 @@ statement behind a slow stage. The name is the source file under
 `crates/project/src` with `.` for `/`, followed by the statement, for example
 `publish.insert.name_current` or `builders.name_authority.build`.
 
+## Long Project runs
+
+A full rebuild (a Project run with no earlier publication to build on) or a
+redo (a repair run over a block range) runs Project as one database transaction
+that can take tens of minutes, and its block gauges do not move until it
+commits. The Project refresh of a recompute-flags run is also a redo, so it
+counts too. Three gauges show which step it is in instead. They have no
+dashboard panel or alert yet; those arrive with the ops dashboards tracked in
+Linear TYR-34.
+
+- `phase_runner_project_step{chain, step}` is `1` for the active step and `0`
+  for every other step.
+- `phase_runner_project_step_index{chain}` is the active step's position,
+  starting at 1.
+- `phase_runner_project_step_total{chain}` is the number of steps, currently 20.
+
+The steps run in this order: `prepare`, `scope`, `inputs`, one step per
+projection builder named after it (`name_authority` through
+`child_registrations`), `integrity`, `publish` and `commit`. All three gauges
+read `0` once the metrics worker has applied the latest recorded idle state,
+so they are `0` whenever no full rebuild or redo is running. Normal
+incremental batches never set them. The values live only in the running
+process, so a restart starts them at zero.
+
+The runner records each step the moment it starts, but a separate metrics
+worker copies the latest recorded step into the gauges a moment later. A step
+that finishes quickly may never show up in the gauges or in a scrape.
+
+The gauges cover the engine's derivation and its commit, not the hydration or
+the progress write that follow. When a reporting engine run completes, fails
+or is dropped, the observer records idle; the previous step can stay visible
+until the metrics worker applies that idle state. After a failed redo, the
+gauges may read `0` while PostgreSQL is still rolling the transaction back and
+the Project row still says `running`.
+
 ## Alerts
 
 | Alert | Threshold | Plain-language meaning |

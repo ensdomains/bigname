@@ -390,6 +390,7 @@ include!("tests/v2_history_publication_bounds.rs");
 include!("tests/v2_history_bounded_membership.rs");
 include!("tests/v2_history_bounded_registration.rs");
 include!("tests/v2_history_bounded_relation_loss.rs");
+include!("tests/v2_wrapped_name_control.rs");
 include!("tests/v2_history_redo.rs");
 include!("tests/v2_history_paging.rs");
 include!("tests/v2_history_keyset.rs");

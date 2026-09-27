@@ -9,6 +9,7 @@
 // that are unused until then.
 mod addresses;
 mod block;
+mod classification;
 mod decode;
 mod derived;
 mod driver;
@@ -16,8 +17,10 @@ mod identity;
 mod input;
 mod keys;
 mod lifecycle;
+mod manifests;
 mod marker;
 mod permissions;
+mod position;
 mod records;
 mod reduce;
 mod registry;
@@ -30,7 +33,8 @@ mod topology;
 mod undo;
 mod wrapper;
 
-pub use input::{InputToken, input_token};
+pub use input::{InputToken, Revision, input_token};
+pub use position::emission_ordinal;
 
 use std::{collections::BTreeMap, time::Instant};
 
@@ -38,9 +42,14 @@ use sqlx::PgPool;
 
 use crate::Marker;
 
-/// Undo rows are kept for this many blocks below the family marker (docs/projections.md,
-/// "Owned key families"); the per-block publication tunes it.
+/// Undo rows are kept at least this many blocks below the family marker, and further back to the
+/// chain's finalized and safe blocks and an active repair's floor (docs/projections.md, "Owned
+/// key families"); the per-block publication tunes it.
 pub const RETAINED_UNDO_DEPTH: i64 = 256;
+
+/// The most blocks one run applies or undoes before it stops and leaves the rest to the next
+/// run. Live follow applies a block or two per run; a rebuild or a long catch-up spans many runs.
+pub const MAX_BLOCKS_PER_RUN: u64 = 256;
 
 /// Every owned key family table, journalled and derived, for tests that compare the families
 /// of two runs.
@@ -52,15 +61,68 @@ pub fn family_tables() -> impl Iterator<Item = &'static str> {
 }
 
 /// Undo the families block by block until their marker is at or below `number`, each block in
-/// its own transaction. Returns the blocks undone; stops early, leaving the families where they
-/// stand, when the journal no longer holds the next block.
+/// its own transaction, under a repair record opened for it (reason operator_redo, the Project
+/// row's attempt); the last undo moves the record to replaying, and the next run replays.
+/// Returns the blocks undone; stops early, leaving the families where they stand, when the
+/// journal no longer holds the next block.
 pub async fn undo_to(pool: &PgPool, chain_id: &str, number: i64) -> crate::Result<u64> {
+    let family = marker::read(pool, chain_id).await?;
+    let Some(current) = family.current.clone() else {
+        return Ok(0);
+    };
+    if current.number <= number {
+        return Ok(0);
+    }
+    let Some(base) = undo::undo_target(pool, chain_id, &current, number).await? else {
+        return Ok(0);
+    };
+    let planned = repair::read(pool, chain_id).await?;
+    let token = input_token(pool, chain_id).await?;
+    let mut transaction = pool
+        .begin()
+        .await
+        .map_err(|error| crate::ProjectError::database("failed to begin an undo", error))?;
+    let locked = marker::lock(&mut transaction, chain_id).await?;
+    marker::require(chain_id, &locked, Some(&current), family.sequence)?;
+    let record = repair::lock(&mut transaction, chain_id).await?;
+    repair::require_unchanged(chain_id, record.as_ref(), planned.as_ref())?;
+    repair::begin_undo(
+        &mut transaction,
+        chain_id,
+        &repair::NewRepair {
+            attempt: token.project_redo_attempt_generation,
+            reason: repair::Reason::OperatorRedo,
+            trusted_base: Some(&base),
+            replay_target: &current,
+            pending_undo_target: base.number,
+        },
+    )
+    .await?;
+    transaction
+        .commit()
+        .await
+        .map_err(|error| crate::ProjectError::database("failed to commit an undo", error))?;
+    let mut family = marker::read(pool, chain_id).await?;
     let mut undone = 0;
-    while let Some(current) = marker::read(pool, chain_id).await?.current {
-        if current.number <= number || undo::undo_block(pool, chain_id, &current).await?.is_none() {
-            break;
+    while family
+        .current
+        .as_ref()
+        .is_some_and(|marker| marker.number > base.number)
+    {
+        match undo::undo_block(
+            pool,
+            chain_id,
+            &family,
+            token.project_redo_attempt_generation,
+        )
+        .await?
+        {
+            Some(restored) => {
+                family = restored;
+                undone += 1;
+            }
+            None => break,
         }
-        undone += 1;
     }
     Ok(undone)
 }
@@ -80,8 +142,10 @@ pub enum FamilyMode {
 pub struct FamilyOptions {
     /// The interpreter content hash the marker records for every block.
     pub input_content_hash: String,
-    /// Blocks of undo rows kept below the marker.
+    /// Blocks of undo rows kept below the marker at least.
     pub retained_undo_depth: i64,
+    /// Blocks one run applies or undoes at most.
+    pub max_blocks_per_run: u64,
 }
 
 impl FamilyOptions {
@@ -89,7 +153,13 @@ impl FamilyOptions {
         Self {
             input_content_hash: input_content_hash.into(),
             retained_undo_depth: RETAINED_UNDO_DEPTH,
+            max_blocks_per_run: MAX_BLOCKS_PER_RUN,
         }
+    }
+
+    pub fn with_max_blocks_per_run(mut self, blocks: u64) -> Self {
+        self.max_blocks_per_run = blocks.max(1);
+        self
     }
 
     pub fn with_retained_undo_depth(mut self, depth: i64) -> Self {
@@ -105,6 +175,8 @@ pub struct FamilyOutcome {
     pub target: Option<Marker>,
     /// The family marker when the loop stopped.
     pub marker: Option<Marker>,
+    /// Whether the family marker's hash is readable on the lineage at its height.
+    pub marker_readable: bool,
     /// Blocks applied.
     pub blocks: u64,
     /// Blocks undone.
@@ -119,21 +191,43 @@ pub struct FamilyOutcome {
     pub block_ms: Vec<u64>,
     /// Why the loop stopped early; the families then lag and the next run catches up.
     pub skipped: Option<String>,
+    /// Whether the run stopped because it spent its block budget; the next run continues.
+    pub budget_exhausted: bool,
+    /// Whether the run adopted an input revision other than the one the last block recorded.
+    pub revision_adopted: bool,
+    /// Deliveries of one event identity that disagreed with the kept one and were dropped.
+    pub duplicate_anomalies: u64,
+    /// Times a rebuild refreshed the planner statistics of the family tables.
+    pub statistics_refreshes: u64,
     /// Elapsed milliseconds of the whole run.
     pub elapsed_ms: u64,
 }
 
 impl FamilyOutcome {
-    /// Served marker minus family marker, zero when the families are current.
+    /// Blocks between the families and the served marker, zero only when the family marker is the
+    /// served block itself. A readable marker below or above the served height counts the blocks
+    /// in between. A marker off the served branch (orphaned, or another hash at the served
+    /// height) counts from the block below the lower of the two heights, a lower bound because the
+    /// branch point can sit deeper.
     pub fn lag_blocks(&self) -> u64 {
-        let target = self.target.as_ref().map_or(0, |marker| marker.number);
-        let current = self.marker.as_ref().map_or(-1, |marker| marker.number);
-        u64::try_from(target - current).unwrap_or(0)
+        let Some(target) = self.target.as_ref() else {
+            return 0;
+        };
+        let Some(marker) = self.marker.as_ref() else {
+            return u64::try_from(target.number + 1).unwrap_or(0);
+        };
+        let on_branch =
+            self.marker_readable && (marker.number != target.number || marker.hash == target.hash);
+        if on_branch {
+            return (target.number - marker.number).unsigned_abs();
+        }
+        u64::try_from(target.number - marker.number.min(target.number) + 1).unwrap_or(0)
     }
 
     fn record(&mut self, stats: block::BlockStats) {
         self.blocks += 1;
         self.undo_rows += stats.undo_rows;
+        self.duplicate_anomalies += stats.duplicate_anomalies;
         self.block_ms.push(stats.elapsed_ms);
         for (table, rows) in stats.rows {
             *self.rows.entry(table).or_default() += rows;
@@ -141,14 +235,17 @@ impl FamilyOutcome {
     }
 }
 
-/// Bring the families to the served `target`. Never fails: an error stops the loop, is logged
-/// and returned in `skipped`, and leaves the families at the last complete block.
+/// Bring the families to the served `target`, at most `options.max_blocks_per_run` blocks this
+/// run. `session` is the input token the Project phase read before recording the batch, while a
+/// finished redo's session was still open; it names that redo's reason. Every block reads the
+/// token again inside its own transaction. Never fails: an error stops the loop, is logged and
+/// returned in `skipped`, and leaves the families at the last complete block.
 pub async fn apply(
     pool: &PgPool,
     chain_id: &str,
     target: &Marker,
     mode: FamilyMode,
-    token: &InputToken,
+    session: &InputToken,
     options: &FamilyOptions,
 ) -> FamilyOutcome {
     let started = Instant::now();
@@ -156,8 +253,16 @@ pub async fn apply(
         target: Some(target.clone()),
         ..FamilyOutcome::default()
     };
-    if let Err(error) =
-        driver::run(pool, chain_id, target, &mode, token, options, &mut outcome).await
+    if let Err(error) = driver::run(
+        pool,
+        chain_id,
+        target,
+        &mode,
+        session,
+        options,
+        &mut outcome,
+    )
+    .await
     {
         tracing::warn!(
             target: "bigname_project::families",
@@ -168,10 +273,7 @@ pub async fn apply(
         );
         outcome.skipped = Some(error.to_string());
     }
-    outcome.marker = marker::read(pool, chain_id)
-        .await
-        .ok()
-        .and_then(|marker| marker.current);
+    (outcome.marker, outcome.marker_readable) = current_marker(pool, chain_id).await;
     outcome.elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
     let mut sorted = outcome.block_ms.clone();
     sorted.sort_unstable();
@@ -188,10 +290,56 @@ pub async fn apply(
         block_ms_median = sorted.get(sorted.len() / 2).copied(),
         block_ms_max = sorted.last().copied(),
         elapsed_ms = outcome.elapsed_ms,
+        budget_exhausted = outcome.budget_exhausted,
+        revision_adopted = outcome.revision_adopted,
+        duplicate_anomalies = outcome.duplicate_anomalies,
         skipped = outcome.skipped.as_deref(),
         "Project families applied"
     );
     outcome
+}
+
+/// The outcome of a run that could not start, for example because the input token did not read
+/// in time: the families stay where they stand and the skip is reported like any other.
+pub async fn skipped(
+    pool: &PgPool,
+    chain_id: &str,
+    target: &Marker,
+    reason: String,
+) -> FamilyOutcome {
+    tracing::warn!(
+        target: "bigname_project::families",
+        chain_id,
+        target_block = target.number,
+        reason,
+        "Project families skipped this batch; they catch up on the next"
+    );
+    let (marker, marker_readable) = current_marker(pool, chain_id).await;
+    FamilyOutcome {
+        target: Some(target.clone()),
+        marker,
+        marker_readable,
+        skipped: Some(reason),
+        ..FamilyOutcome::default()
+    }
+}
+
+/// The family marker and whether its hash is readable at its height; a read that fails reports
+/// no marker, as the lag then counts the whole served chain.
+async fn current_marker(pool: &PgPool, chain_id: &str) -> (Option<Marker>, bool) {
+    let Some(current) = marker::read(pool, chain_id)
+        .await
+        .ok()
+        .and_then(|marker| marker.current)
+    else {
+        return (None, false);
+    };
+    let readable = input::readable_hash(pool, chain_id, current.number)
+        .await
+        .ok()
+        .flatten()
+        .is_some_and(|hash| hash == current.hash);
+    (Some(current), readable)
 }
 
 #[cfg(test)]
@@ -200,3 +348,6 @@ mod guard_tests;
 #[cfg(test)]
 #[path = "undo_tests.rs"]
 mod undo_tests;
+#[cfg(test)]
+#[path = "work_tests.rs"]
+mod work_tests;

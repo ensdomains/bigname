@@ -1,9 +1,10 @@
 //! F12, reverse tuples and claims. A tuple (address, coin type, namespace) keeps its latest
 //! ReverseChanged (reverse node, source event, claim provenance) and, separately, its latest
 //! direct claim, a RecordChanged whose `primary_claim_source` names the tuple (primary_names.rs,
-//! `latest_reverse` and `latest_claim`). A node keeps its latest name record or version change,
-//! the claim a ReverseClaimed tuple selects through the node (`node_claim`). Each claim event keeps
-//! its normalization result, stored once (`stage_claim_normalization`). The served stage only
+//! `latest_reverse` and `latest_claim`). A node keeps, per resolver, its latest name record or
+//! version change, the claim a ReverseClaimed tuple selects through the node and the node's
+//! current resolver (`node_claim`). Each claim event keeps its normalization result and its raw
+//! claim input, stored once (`stage_claim_normalization`). The served stage only
 //! normalizes a name record at a node some ReverseClaimed points to; the family keeps every name
 //! record's result, since a later ReverseClaimed can select it. Hydration results stay with the
 //! served rows until the per-block publication commits them here.
@@ -13,7 +14,10 @@ use sqlx::{Postgres, Transaction};
 
 use super::{
     input::BlockEvent,
-    reduce::{Context, current, key_of, load_rows, put, raw_lower, raw_text, set, text_or_null},
+    keys::Space,
+    reduce::{
+        Context, current, key_of, load, load_rows, put, raw_lower, raw_text, set, text_or_null,
+    },
     store::{Row, RowSet},
     tables,
 };
@@ -48,7 +52,10 @@ fn name_record(event: &BlockEvent) -> bool {
         && raw_text(&event.after, "record_key").as_deref() == Some("name")
 }
 
-/// The node a name record or version change addresses.
+/// The node and resolver a name record or version change addresses. The served read takes the
+/// latest such event at the reverse node whose payload resolver is the node's current resolver
+/// (primary_names.rs, `node_claim`), so each resolver of the node keeps its own row and a read
+/// follows the pointer to one of them; an event without a resolver is never selected.
 fn node_claim(event: &BlockEvent) -> Option<Row> {
     (name_record(event) || event.event_kind == "RecordVersionChanged").then_some(())?;
     Some(key_of(
@@ -56,6 +63,7 @@ fn node_claim(event: &BlockEvent) -> Option<Row> {
         [
             json!(event.namespace),
             json!(raw_lower(&event.after, "node")?),
+            json!(raw_lower(&event.after, "resolver")?),
         ],
     ))
 }
@@ -76,6 +84,19 @@ pub(super) async fn apply(
     rows: &mut RowSet,
 ) -> Result<()> {
     let chain = json!(context.chain_id);
+    // Every tuple an event names before or after (keys.rs, `derive_reverse`) is loaded; only
+    // the after-state tuple is written, since the served selection keys a ReverseChanged and a
+    // direct claim by their after state alone (primary_names.rs, `latest_reverse` and
+    // `latest_claim`): the tuple an event moves away from keeps its own latest event.
+    load(
+        transaction,
+        rows,
+        &tables::REVERSE_TUPLE,
+        context.keys,
+        Space::ReverseTuple,
+        |key| key_of(&tables::REVERSE_TUPLE, key.iter().map(|part| json!(part))),
+    )
+    .await?;
     let tuples = events
         .iter()
         .filter_map(|event| reverse_tuple(event).or_else(|| claim_tuple(event)))
@@ -142,17 +163,11 @@ pub(super) async fn apply(
             put(rows, table, row, event)?;
         }
         if let Some(key) = node_claim(event) {
-            // The served read takes the node's latest name record or version change at the
-            // resolver it points to; the row keeps the latest one with its resolver.
+            // The row keeps the latest name record or version change of this node and resolver.
             let table = &tables::REVERSE_NODE_CLAIM;
             let mut row = current(rows, table, &key);
             let after = &event.after;
             set(&mut row, "chain_id", context.chain_id);
-            set(
-                &mut row,
-                "resolver_address",
-                text_or_null(raw_lower(after, "resolver")),
-            );
             set(
                 &mut row,
                 "raw_name",
@@ -166,6 +181,15 @@ pub(super) async fn apply(
             let table = &tables::CLAIM_NORMALIZATION;
             let mut row = current(rows, table, &key);
             let (status, normalized, reason) = normalization(&event.after);
+            // The claim input as the event carried it, so a read that selects an older claim
+            // through its resolver's row still has the original payload.
+            for field in ["raw_name", "raw_name_bytes"] {
+                set(
+                    &mut row,
+                    field,
+                    event.after.get(field).cloned().unwrap_or(Value::Null),
+                );
+            }
             set(&mut row, "status", status);
             set(&mut row, "normalized_name", text_or_null(normalized));
             set(&mut row, "reason", text_or_null(reason.map(str::to_owned)));

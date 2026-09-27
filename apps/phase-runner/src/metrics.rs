@@ -12,8 +12,10 @@ use tokio_util::sync::CancellationToken;
 
 use crate::progress_monitor::RunnerPhaseProgress;
 
+mod project_steps;
 mod project_writes;
 mod served_lag;
+use project_steps::{ProjectStepGauges, project_step_loop};
 use project_writes::ProjectWriteGauges;
 pub use served_lag::RunnerMetricsFeed;
 use served_lag::ServedLagGauges;
@@ -87,6 +89,7 @@ struct PipelineMetrics {
     cursor_stall_age_seconds: IntGaugeVec,
     served_lag: ServedLagGauges,
     project_writes: ProjectWriteGauges,
+    project_steps: ProjectStepGauges,
     refresh_success: IntGauge,
     last_refresh_timestamp_seconds: IntGauge,
     loop_heartbeat: RunnerLoopHeartbeat,
@@ -223,6 +226,7 @@ impl PipelineMetrics {
         )?;
         let served_lag = ServedLagGauges::new(&registry)?;
         let project_writes = ProjectWriteGauges::new(&registry)?;
+        let project_steps = ProjectStepGauges::new(&registry)?;
         let refresh_success = registry.int_gauge(
             "phase_runner_metrics_refresh_success",
             "Whether the latest database refresh succeeded.",
@@ -250,6 +254,7 @@ impl PipelineMetrics {
             cursor_stall_age_seconds,
             served_lag,
             project_writes,
+            project_steps,
             refresh_success,
             last_refresh_timestamp_seconds,
             loop_heartbeat,
@@ -444,6 +449,7 @@ pub async fn start(
 ) -> Result<SocketAddr> {
     let metrics = PipelineMetrics::new(heartbeat_stale_after_secs, loop_heartbeat, phase_progress)?;
     metrics.served_lag.configure(&feed.configured_chains());
+    metrics.project_steps.apply(&feed.project_steps.snapshot());
     metrics.refresh(&pool).await?;
     let server = MetricsServer::bind(bind_addr, metrics.registry.clone()).await?;
     let local_addr = server.local_addr()?;
@@ -458,6 +464,11 @@ pub async fn start(
             () = server_cancellation.cancelled() => {}
         }
     });
+    tokio::spawn(project_step_loop(
+        metrics.project_steps.clone(),
+        feed.project_steps.clone(),
+        cancellation.clone(),
+    ));
     tokio::spawn(refresh_loop(metrics, pool, feed, cancellation));
     Ok(local_addr)
 }
