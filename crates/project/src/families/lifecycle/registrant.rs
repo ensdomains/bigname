@@ -37,9 +37,8 @@ pub(super) async fn fold_registrants(
 ) -> Result<()> {
     let table = &tables::LIFECYCLE_EVENT;
     let changed: Vec<(String, Option<Row>, Option<Row>)> = rows
-        .changes()
+        .changes_in(table)
         .into_iter()
-        .filter(|change| change.table.name == table.name)
         .map(|change| {
             (
                 change.key.to_owned(),
@@ -79,16 +78,18 @@ pub(super) async fn fold_registrants(
     .map_err(|error| ProjectError::database("failed to read names' retained rows", error))
     .map_err(in_family(tables::ADDRESS_NAME_FOLD.name))?;
     // Rows an earlier block of a rebuild range retained or named are not in the table yet.
-    let stored = rows.overlay(table, store::objects(stored), |row| {
-        store::column(row, "decoded_logical_name_id").is_some_and(|name| {
-            names
-                .binary_search_by(|known| known.as_str().cmp(name))
-                .is_ok()
-        }) && matches!(
-            store::column(row, "event_kind"),
-            Some("RegistrationGranted" | "RegistrationReleased" | "TokenControlTransferred")
-        )
-    });
+    let named: Vec<&str> = names.iter().map(String::as_str).collect();
+    let stored = rows.overlay_where(
+        table,
+        store::objects(stored),
+        ("decoded_logical_name_id", &named),
+        |row| {
+            matches!(
+                store::column(row, "event_kind"),
+                Some("RegistrationGranted" | "RegistrationReleased" | "TokenControlTransferred")
+            )
+        },
+    );
     let mut current: std::collections::BTreeMap<String, Row> = stored
         .into_iter()
         .map(|row| (store::key_text(table, &row), row))

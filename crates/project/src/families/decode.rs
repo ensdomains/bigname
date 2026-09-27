@@ -63,9 +63,8 @@ impl Candidates {
     ) -> Result<Self> {
         let table = &tables::BINDING_CANDIDATE;
         let changed: BTreeMap<String, Option<Row>> = rows
-            .changes()
+            .changes_in(table)
             .into_iter()
-            .filter(|change| change.table.name == table.name)
             .map(|change| (change.key.to_owned(), change.after.cloned()))
             .collect();
         let mut arrived = Vec::new();

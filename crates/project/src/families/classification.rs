@@ -329,12 +329,11 @@ fn pointer_deltas(rows: &RowSet) -> BTreeMap<(String, &'static str), i64> {
         let family = resolver_family(row.get("source_family").and_then(Value::as_str)?);
         Some((address, family))
     };
-    for change in rows.changes() {
-        if change.table.name != tables::REGISTRY_POINTER.name
-            && change.table.name != tables::RESOURCE_POINTER.name
-        {
-            continue;
-        }
+    for change in rows
+        .changes_in(&tables::REGISTRY_POINTER)
+        .into_iter()
+        .chain(rows.changes_in(&tables::RESOURCE_POINTER))
+    {
         let (before, after) = (pointer(change.before), pointer(change.after));
         if before == after {
             continue;

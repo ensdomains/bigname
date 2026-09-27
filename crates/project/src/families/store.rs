@@ -41,7 +41,18 @@ pub(crate) struct RowSet {
     dirty: BTreeSet<(&'static str, RowKey)>,
     /// Rows an earlier block of the range left other than the table holds them.
     moved: BTreeMap<&'static str, BTreeSet<RowKey>>,
+    /// The moved rows by the value of each `INDEXED` column of their pre-block image.
+    moved_by: BTreeMap<(&'static str, &'static str), BTreeMap<String, BTreeSet<RowKey>>>,
 }
+
+/// The columns the reads made once per event find moved rows by (lease.rs: a grant's name and
+/// a release's resource, a registry-only candidate's name), so each such read looks up its rows
+/// rather than scanning every row the range moved.
+const INDEXED: [(&str, &str); 3] = [
+    ("project_binding_candidate", "logical_name_id"),
+    ("project_lifecycle_event", "decoded_logical_name_id"),
+    ("project_lifecycle_event", "state_key"),
+];
 
 /// One row changed: its table, key and earlier image (`None` when it did not exist), before the
 /// block for `changes` and before the transaction for `written`.
@@ -137,14 +148,18 @@ impl RowSet {
             })
     }
 
-    /// Every row the block being folded changed, with its pre-block image, by table then key.
-    pub(crate) fn changes(&self) -> Vec<Change<'_>> {
+    /// Every row of `table` the block being folded changed, with its pre-block image, by key.
+    pub(crate) fn changes_in(&self, table: &'static TableSpec) -> Vec<Change<'_>> {
+        let Some(slots) = self.tables.get(table.name) else {
+            return Vec::new();
+        };
         self.dirty
-            .iter()
-            .filter_map(|(name, key)| {
-                let (key, slot) = self.tables.get(name)?.get_key_value(key)?;
+            .range((table.name, RowKey::new())..)
+            .take_while(|(name, _)| *name == table.name)
+            .filter_map(|(_, key)| {
+                let (key, slot) = slots.get_key_value(key)?;
                 (slot.base != slot.after).then(|| Change {
-                    table: tables::spec(name),
+                    table,
                     key,
                     before: slot.base.as_ref(),
                     after: slot.after.as_ref(),
@@ -183,13 +198,37 @@ impl RowSet {
             else {
                 continue;
             };
-            slot.base.clone_from(&slot.after);
             let moved = self.moved.entry(name).or_default();
+            let indexed = INDEXED.iter().filter(|(table, _)| *table == name);
+            if moved.contains(&key)
+                && let Some(base) = &slot.base
+            {
+                for &(table, name) in indexed.clone() {
+                    if let Some(keys) = column(base, name)
+                        .and_then(|value| self.moved_by.get_mut(&(table, name))?.get_mut(value))
+                    {
+                        keys.remove(&key);
+                    }
+                }
+            }
+            slot.base.clone_from(&slot.after);
             if slot.base == slot.before {
                 moved.remove(&key);
-            } else {
-                moved.insert(key);
+                continue;
             }
+            if let Some(base) = &slot.base {
+                for &(table, name) in indexed {
+                    if let Some(value) = column(base, name) {
+                        self.moved_by
+                            .entry((table, name))
+                            .or_default()
+                            .entry(value.to_owned())
+                            .or_default()
+                            .insert(key.clone());
+                    }
+                }
+            }
+            moved.insert(key);
         }
     }
 
@@ -204,6 +243,30 @@ impl RowSet {
         stored: Vec<Row>,
         selected: impl Fn(&Row) -> bool,
     ) -> Vec<Row> {
+        self.overlay_keys(table, stored, None, selected)
+    }
+
+    /// `overlay` for a read that keeps only rows whose text `column` is one of `values`; an
+    /// indexed column finds the moved rows without scanning them all.
+    pub(crate) fn overlay_where(
+        &self,
+        table: &'static TableSpec,
+        stored: Vec<Row>,
+        (name, values): (&'static str, &[&str]),
+        selected: impl Fn(&Row) -> bool,
+    ) -> Vec<Row> {
+        self.overlay_keys(table, stored, Some((name, values)), |row| {
+            column(row, name).is_some_and(|value| values.contains(&value)) && selected(row)
+        })
+    }
+
+    fn overlay_keys(
+        &self,
+        table: &'static TableSpec,
+        stored: Vec<Row>,
+        by: Option<(&'static str, &[&str])>,
+        selected: impl Fn(&Row) -> bool,
+    ) -> Vec<Row> {
         let (Some(moved), Some(slots)) = (self.moved.get(table.name), self.tables.get(table.name))
         else {
             return stored;
@@ -215,10 +278,26 @@ impl RowSet {
             .into_iter()
             .filter(|row| !moved.contains(&key_text(table, row)))
             .collect();
+        let indexed = by.and_then(|(name, values)| {
+            let index = self.moved_by.get(&(table.name, name))?;
+            Some(
+                values
+                    .iter()
+                    .filter_map(|value| index.get(*value))
+                    .flatten()
+                    .collect::<BTreeSet<_>>()
+                    .into_iter(),
+            )
+        });
+        let keys: Box<dyn Iterator<Item = &RowKey>> = match indexed {
+            Some(keys) => Box::new(keys),
+            None if by.is_some_and(|(name, _)| INDEXED.contains(&(table.name, name))) => {
+                Box::new(std::iter::empty())
+            }
+            None => Box::new(moved.iter()),
+        };
         rows.extend(
-            moved
-                .iter()
-                .filter_map(|key| slots.get(key)?.base.as_ref())
+            keys.filter_map(|key| slots.get(key)?.base.as_ref())
                 .filter(|row| selected(row))
                 .cloned(),
         );
