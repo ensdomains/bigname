@@ -9,8 +9,9 @@
 /// `admissions` starts from the input addresses and asks, per active manifest, for one
 /// qualifying resolver edge: a resolver many names point at has far more edges than the block
 /// has touched resolvers, and every consumer reads only the (address, namespace, family) set.
-/// It relies on `project_families_discovery_edges_resolver_admission_idx`; the served build
-/// (declaration_precedence.rs) keeps its edge-driven scan over every resolver.
+/// It tries the newest edge first, so a resolver with many closed edges under a manifest is not
+/// walked oldest-first. It relies on `project_families_discovery_edges_resolver_admission_idx`;
+/// the served build (declaration_precedence.rs) keeps its edge-driven scan over every resolver.
 pub(super) const CLASSIFY: &str = r#"
 declared AS (
     SELECT manifest.namespace, manifest.source_family,
@@ -70,6 +71,7 @@ admissions AS (
                 AND lineage.block_number = edge.active_from_block_number
                 AND lineage.block_hash = edge.active_from_block_hash
                 AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')))
+        ORDER BY edge.active_from_block_number DESC
         LIMIT 1
     ) admitting
     WHERE (address.active_from_block_number IS NULL OR address.active_from_block_number <= $2)
