@@ -59,7 +59,7 @@ use phase_runner::{
     heads::{BlockMarker, HeadMarkers, publish_heads},
     metrics::RunnerMetricsFeed,
     phase::{Phase, PhaseContext, PhaseName, PhaseResume, RunMode},
-    project_phase::ProjectPhase,
+    project_phase::{FamilySettings, ProjectPhase},
     state::PhaseStore,
 };
 use sqlx::{
@@ -460,6 +460,7 @@ async fn run(
     let mut resume = load_marker(pool, previous).await?;
     let mut compared = Vec::new();
     let mut shadows = Vec::new();
+    let mut topology_targets = Vec::new();
     ensure!(
         publication(pool).await? == (Some(previous), Some(resume.hash.clone()), false),
         "Project is not published at the requested previous marker"
@@ -473,7 +474,14 @@ async fn run(
     // As main.rs builds it, so the batch log and the metrics handoff fall inside the clock. No
     // metrics worker consumes the feed here: applying the summary and scraping it are not timed.
     let metrics_feed = RunnerMetricsFeed::default();
+    // A disposable copy starts with empty families, so their first run is a rebuild over the
+    // whole chain; the one-shot `redo` command finishes it the same way. The fixture's families
+    // fit in one budget either way.
     let project = ProjectPhase::with_hydration(pool.clone(), ChainRpcUrls::default())
+        .with_family_settings(FamilySettings {
+            finish_each_batch: true,
+            ..FamilySettings::default()
+        })
         .with_metrics_feed(metrics_feed.clone());
     for &number in targets {
         let target = follow_head(pool, number).await?;
@@ -628,6 +636,7 @@ async fn run(
                 "extra resolver_manifest_not_active rows at {number}: {:?}",
                 report.f3_extra_not_active
             );
+            topology_targets.push(report.target);
         }
         if let (Some(children_page), Some(baseline)) = (compare, baseline) {
             let retention = endpoint::Retention::load(
@@ -648,6 +657,17 @@ async fn run(
         }
         resume = target;
     }
+    // Either switch runs the topology comparison at every target; the branch above proving that
+    // for itself would not notice a guard that skips it.
+    let expected_topology_targets: &[i64] = if compare.is_some() || shadow.is_some() {
+        targets
+    } else {
+        &[]
+    };
+    ensure!(
+        topology_targets.as_slice() == expected_topology_targets,
+        "expected topology comparisons at {expected_topology_targets:?}, got {topology_targets:?}"
+    );
     Ok((compared, shadows))
 }
 
