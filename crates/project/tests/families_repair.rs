@@ -632,10 +632,12 @@ async fn edge_starting_at(fixture: &Fixture, block: i64) -> Result<()> {
 // read it has the whole remainder and adds the target when no work falls on it; with more, it
 // applies its budget, reports it spent, and leaves the target to the next run. Every block carries
 // two events, and one case adds a discovery edge that starts on an event block: each block is
-// work once.
+// work once. Each case runs with ranges off and with every work block below the target in
+// ranges, on a fresh fixture each: the budget counts the blocks of a range as it counts single
+// blocks, so both see the same runs, and only the ranged runs that apply work below the target
+// commit ranges.
 #[tokio::test]
 async fn a_rebuild_run_reads_one_work_block_past_its_budget() -> Result<()> {
-    let small = FamilyOptions::new(CONTENT_HASH).with_max_blocks_per_run(3);
     // (work blocks, a discovery edge starting at, per run: marker, blocks applied, budget spent)
     type Run = (i64, u64, bool);
     let cases: [(&[i64], Option<i64>, &[Run]); 7] = [
@@ -648,30 +650,49 @@ async fn a_rebuild_run_reads_one_work_block_past_its_budget() -> Result<()> {
         (&[5, 7, 9], Some(7), &[(9, 3, true), (12, 1, false)]),
     ];
     for (work, edge, runs) in cases {
-        let fixture = Fixture::new("families_repair_work_budget", 20).await?;
-        for &block in work {
-            seed(&fixture, block..=block).await?;
+        for ranges in [RebuildRanges::Off, RebuildRanges::Through(12)] {
+            let small = FamilyOptions::new(CONTENT_HASH)
+                .with_max_blocks_per_run(3)
+                .with_rebuild_ranges(ranges);
+            let fixture = Fixture::new("families_repair_work_budget", 20).await?;
+            for &block in work {
+                seed(&fixture, block..=block).await?;
+            }
+            if let Some(block) = edge {
+                edge_starting_at(&fixture, block).await?;
+            }
+            let mut seen = Vec::new();
+            for run in 0..runs.len() {
+                let mode = if run == 0 {
+                    FamilyMode::Rebuild
+                } else {
+                    FamilyMode::Normal
+                };
+                // A fresh fixture has no family marker before its first run.
+                let before = match run {
+                    0 => None,
+                    _ => fixture.marker().await?.0,
+                };
+                let outcome = fixture.apply_with(12, mode, &small).await;
+                assert_eq!(outcome.skipped, None, "{work:?} {ranges:?}");
+                let marker = fixture.marker().await?.0.unwrap_or(-1);
+                // The target is applied on its own, so the run's other blocks are its work
+                // below the target.
+                let target = u64::from(marker == 12 && before != Some(12));
+                let below_target = outcome.blocks - target;
+                assert_eq!(
+                    outcome.ranges > 0,
+                    matches!(ranges, RebuildRanges::Through(_)) && below_target > 0,
+                    "work {work:?}, edge {edge:?}, {ranges:?}, run {run}: {} ranges for {} \
+                     blocks",
+                    outcome.ranges,
+                    outcome.blocks
+                );
+                seen.push((marker, outcome.blocks, outcome.budget_exhausted));
+            }
+            assert_eq!(seen, runs, "work {work:?}, edge {edge:?}, {ranges:?}");
+            fixture.cleanup().await?;
         }
-        if let Some(block) = edge {
-            edge_starting_at(&fixture, block).await?;
-        }
-        let mut seen = Vec::new();
-        for run in 0..runs.len() {
-            let mode = if run == 0 {
-                FamilyMode::Rebuild
-            } else {
-                FamilyMode::Normal
-            };
-            let outcome = fixture.apply_with(12, mode, &small).await;
-            assert_eq!(outcome.skipped, None, "{work:?}");
-            seen.push((
-                fixture.marker().await?.0.unwrap_or(-1),
-                outcome.blocks,
-                outcome.budget_exhausted,
-            ));
-        }
-        assert_eq!(seen, runs, "work {work:?}, edge {edge:?}");
-        fixture.cleanup().await?;
     }
     Ok(())
 }
