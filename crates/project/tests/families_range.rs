@@ -298,8 +298,14 @@ async fn manifest(
 }
 
 /// A resolver discovery edge that manifest `origin` admitted, to a contract at `address`,
-/// active from `block`.
-async fn resolver_edge(fixture: &Fixture, address: &str, origin: i64, block: i64) -> Result<()> {
+/// active from `block` and, with `until`, up to that block.
+async fn resolver_edge(
+    fixture: &Fixture,
+    address: &str,
+    origin: i64,
+    block: i64,
+    until: Option<i64>,
+) -> Result<()> {
     let (from, to) = (uuid(0xf001), uuid(0xf002));
     for instance in [&from, &to] {
         sqlx::query(
@@ -323,9 +329,10 @@ async fn resolver_edge(fixture: &Fixture, address: &str, origin: i64, block: i64
     sqlx::query(
         "INSERT INTO discovery_edges (chain_id, edge_kind, from_contract_instance_id,
              to_contract_instance_id, discovery_source, admission_basis, source_manifest_id,
-             active_from_block_number, active_from_block_hash, canonicality_state)
-         VALUES ($1, 'resolver', $2::uuid, $3::uuid, 'NewResolver', 'fixture', $4, $5, $6,
-                 'canonical')",
+             active_from_block_number, active_from_block_hash, active_to_block_number,
+             active_to_block_hash, canonicality_state)
+         VALUES ($1, 'resolver', $2::uuid, $3::uuid, 'NewResolver', 'fixture', $4, $5, $6, $7,
+                 $8, 'canonical')",
     )
     .bind(CHAIN)
     .bind(&from)
@@ -333,6 +340,8 @@ async fn resolver_edge(fixture: &Fixture, address: &str, origin: i64, block: i64
     .bind(origin)
     .bind(block)
     .bind(hash(block))
+    .bind(until)
+    .bind(until.map(hash))
     .execute(&fixture.pool)
     .await?;
     Ok(())
@@ -388,7 +397,7 @@ async fn a_manifest_change_and_an_activation_inside_a_range_classify_at_their_bl
                              {"address": R3, "role": "public_resolver"}]}),
     )
     .await?;
-    resolver_edge(&fixture, R3, registry, 13).await?;
+    resolver_edge(&fixture, R3, registry, 13, None).await?;
     filler(&fixture, 14).await?;
     follow(&fixture, 1, 15).await?;
     let mut classified: Vec<String> = fixture
@@ -418,6 +427,131 @@ async fn a_manifest_change_and_an_activation_inside_a_range_classify_at_their_bl
         vec![1, 3, 14, 15],
         "blocks 10 to 14 share one range"
     );
+    fixture.cleanup().await
+}
+
+/// The resolvers `project_resolver_classification` holds.
+async fn classified(fixture: &Fixture) -> Result<Vec<Value>> {
+    Ok(fixture
+        .rows("project_resolver_classification")
+        .await?
+        .iter()
+        .map(|row| row["resolver_address"].clone())
+        .collect())
+}
+
+// F3 across a deletion inside one range: a resolver edge alone classifies R3 at 3, in the range
+// [2, 3], and ends at 5, which deletes R3's row inside the range [4 to 7]; a manifest update at 6
+// then declares R3. The update classifies every stored resolver again, and the range still reads
+// R3 from the table, where the range before committed it; with no edge left it has no candidate
+// and nothing is written for it. Block by block, 6 never sees R3. The manifest's declaration
+// alone must not classify R3 in the range either.
+#[tokio::test]
+async fn a_resolver_deleted_earlier_in_a_range_stays_deleted_through_a_manifest_change()
+-> Result<()> {
+    let fixture = Fixture::new("families_range_deleted_resolver", 20).await?;
+    let resolvers = manifest(
+        &fixture,
+        None,
+        "ens_v1_resolver_l1",
+        1,
+        json!({"contracts": [{"address": R1, "role": "public_resolver"}]}),
+    )
+    .await?;
+    let registry = manifest(
+        &fixture,
+        None,
+        "ens_v1_registry_l1",
+        1,
+        json!({"contracts": []}),
+    )
+    .await?;
+    filler(&fixture, 2).await?;
+    resolver_edge(&fixture, R3, registry, 3, Some(5)).await?;
+    filler(&fixture, 4).await?;
+    manifest(
+        &fixture,
+        Some(resolvers),
+        "ens_v1_resolver_l1",
+        6,
+        json!({"contracts": [{"address": R1, "role": "public_resolver"},
+                             {"address": R3, "role": "public_resolver"}]}),
+    )
+    .await?;
+    filler(&fixture, 7).await?;
+    follow(&fixture, 1, 4).await?;
+    assert_eq!(classified(&fixture).await?, vec![json!(R3)]);
+    follow(&fixture, 5, 8).await?;
+    assert_eq!(classified(&fixture).await?, Vec::<Value>::new());
+    rebuild_equal(&fixture, 8, &in_ranges(8)).await?;
+    assert_eq!(
+        fixture.journalled_blocks().await?,
+        vec![1, 3, 7, 8],
+        "ranges [1], [2, 3] and [4 to 7], then the target"
+    );
+    fixture.assert_rebuild_equal(8).await?;
+    fixture.cleanup().await
+}
+
+// F13 inside one range: name 1's grant to OWNER at 3 is committed by the range [3, 4]; the grant
+// to OTHER at 5 is the name's latest reporting row, and the renewal at 6, in the same range, is
+// the only row block 6 changes and reports no registrant. Refolding at 6 must read the grant at 5
+// from the range, not only the table's grant at 3, so the registrant stays OTHER.
+#[tokio::test]
+async fn a_registrant_refold_reads_the_latest_grant_from_earlier_in_the_range() -> Result<()> {
+    const OTHER: &str = "0x00000000000000000000000000000000000000b2";
+    let fixture = Fixture::new("families_range_registrant", 20).await?;
+    let lease = uuid(1);
+    filler(&fixture, 2).await?;
+    registrar_event(&fixture, 3, 1, "RegistrationGranted", &lease).await?;
+    filler(&fixture, 4).await?;
+    fixture
+        .write(
+            5,
+            1,
+            "RegistrationGranted",
+            "ens_v1_registrar_l1",
+            Some(&name(1)),
+            Some(&lease),
+            json!({"namehash": node(1), "registrant": OTHER}),
+            REGISTRAR,
+        )
+        .await?;
+    fixture
+        .write(
+            6,
+            1,
+            "RegistrationRenewed",
+            "ens_v1_registrar_l1",
+            Some(&name(1)),
+            Some(&lease),
+            json!({"namehash": node(1), "expiry": 900}),
+            REGISTRAR,
+        )
+        .await?;
+    for block in 7..=8 {
+        filler(&fixture, block).await?;
+    }
+    follow(&fixture, 2, 9).await?;
+    let registrant: Vec<Value> = fixture
+        .rows("project_address_name_fold")
+        .await?
+        .iter()
+        .map(|row| {
+            json!([
+                row["registrant"],
+                row["registrant_position"]["block_number"]
+            ])
+        })
+        .collect();
+    assert_eq!(registrant, vec![json!([OTHER, 5])]);
+    rebuild_equal(&fixture, 9, &in_ranges(9)).await?;
+    assert_eq!(
+        fixture.journalled_blocks().await?,
+        vec![2, 4, 8, 9],
+        "ranges [2], [3, 4] and [5 to 8], then the target"
+    );
+    fixture.assert_rebuild_equal(9).await?;
     fixture.cleanup().await
 }
 
