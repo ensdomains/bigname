@@ -1,6 +1,6 @@
 //! The family readers step 5 shares and the classification switch, over hand-written family rows
 //! (TYR-36 step 4): the resolver classification per resolver with its fallback, the link
-//! selection's storage model filter, the alias source's latest-then-reject pointer and the
+//! selection's newest-link rule, the alias source's latest-then-reject pointer and the
 //! wildcard source's historical resolver.
 #[path = "families_support/mod.rs"]
 mod families_support;
@@ -218,10 +218,17 @@ async fn link(
     Ok(())
 }
 
-// A link row of another storage model is not a record-id link: it neither selects a record nor
-// hides the default link. A resolver with only such links has no selection.
+// The storage model is a bigname annotation, not chain state. The resolver keeps one record id
+// per node
+// (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L96-L97 @ ens_v2@a971bd64)
+// and each `Linked` overwrites it
+// (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L363-L367 @ ens_v2@a971bd64),
+// so the newest link per (resolver, node) serves whatever its annotation, and the default serves
+// only when the exact link is absent or 0
+// (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L380-L387 @ ens_v2@a971bd64).
+// Ruling: PR 954, the second bullet under Decisions (the newest link per (resolver, node) wins).
 #[tokio::test]
-async fn the_link_selection_reads_record_id_links_only() -> Result<()> {
+async fn the_link_selection_takes_the_newest_link_whatever_its_storage_model() -> Result<()> {
     let fixture = Fixture::new("family_reads_links", 2).await?;
     let pool = &fixture.pool;
     link(pool, R1, NODE, "5", "node_keyed", 1).await?;
@@ -229,16 +236,28 @@ async fn the_link_selection_reads_record_id_links_only() -> Result<()> {
     link(pool, R2, NODE, "7", "node_keyed", 3).await?;
     let selection = load_family_link_selection(pool, CHAIN, R1, NODE)
         .await?
-        .context("the default link selects")?;
-    assert_eq!(selection.exact, None);
-    assert_eq!(selection.active_record_id(), Some("6"));
-    assert_eq!(selection.exact_link_event_id, None);
-    assert_eq!(selection.default_link_event_id, Some(2));
-    assert!(
-        load_family_link_selection(pool, CHAIN, R2, NODE)
-            .await?
-            .is_none()
+        .context("the exact link selects")?;
+    assert_eq!(
+        selection.exact.as_ref().map(|link| link.record_id.as_str()),
+        Some("5")
     );
+    assert_eq!(selection.active_record_id(), Some("5"));
+    assert_eq!(selection.exact_link_event_id, Some(1));
+    assert_eq!(selection.default_link_event_id, None);
+    // The records reader returns the default candidate eagerly; it does not contribute.
+    assert_eq!(
+        selection
+            .default
+            .as_ref()
+            .map(|link| link.record_id.as_str()),
+        Some("6")
+    );
+    assert_eq!(selection.contributing_links().count(), 1);
+    let only_other_model = load_family_link_selection(pool, CHAIN, R2, NODE)
+        .await?
+        .context("a link of another storage model selects")?;
+    assert_eq!(only_other_model.active_record_id(), Some("7"));
+    assert_eq!(only_other_model.exact_link_event_id, Some(3));
     fixture.cleanup().await
 }
 
