@@ -105,11 +105,12 @@ pub fn family_tables() -> impl Iterator<Item = &'static str> {
         .chain(tables::DERIVED)
 }
 
-/// Undo the families block by block until their marker is at or below `number`, each block in
-/// its own transaction, under a repair record opened for it (reason operator_redo, the Project
-/// row's attempt); the last undo moves the record to replaying, and the next run replays.
-/// Returns the blocks undone; stops early, leaving the families where they stand, when the
-/// journal no longer holds the next block.
+/// Undo the families one journal generation at a time until their marker is at or below
+/// `number`, each generation (one block, or one rebuild range) in its own transaction, under a
+/// repair record opened for it (reason operator_redo, the Project row's attempt); the last undo
+/// moves the record to replaying, and the next run replays. An undo into a range stops on the
+/// range's predecessor. Returns the generations undone; stops early, leaving the families where
+/// they stand, when the journal no longer holds the next generation.
 pub async fn undo_to(pool: &PgPool, chain_id: &str, number: i64) -> crate::Result<u64> {
     let family = marker::read(pool, chain_id).await?;
     let Some(current) = family.current.clone() else {
@@ -248,7 +249,7 @@ pub struct FamilyOutcome {
     pub blocks: u64,
     /// Rebuild ranges committed; their blocks count in `blocks`.
     pub ranges: u64,
-    /// Blocks undone.
+    /// Journal generations undone, each one block or one rebuild range.
     pub undone_blocks: u64,
     /// Whether the families were cleared and rebuilt.
     pub reset: bool,

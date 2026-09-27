@@ -113,9 +113,9 @@ impl Run<'_> {
         // Work blocks at or below the switch point go in ranges; the rest and the target one by
         // one. Right after the reset the first range holds one block, so the families gain rows
         // and the statistics refresh below runs before a range grows large; a run that resumes
-        // a rebuild starts with a range of its whole remaining budget. Each range committed
-        // doubles the next, up to the cap, and a range never holds more blocks than the budget
-        // has left.
+        // a rebuild starts with a range of its whole remaining budget. The next range asks for
+        // twice the blocks the last one applied, up to the cap, and a range never holds more
+        // blocks than the budget has left.
         let switch = self.switch_point().await?;
         let ranged = |number: &i64| {
             *number != self.target.number && switch.is_some_and(|switch| *number <= switch)

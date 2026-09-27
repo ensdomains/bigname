@@ -1763,30 +1763,43 @@ head still undoes single blocks. The switch follows the safe block, not the
 finalized one, by the product owner's ruling; a safe block is not final, and a
 reorg whose fork point lies inside a range undoes that whole range and replays
 from its predecessor. The first range after the rebuild's reset holds one work
-block, and each range committed doubles the next; a later run that resumes the
-rebuild starts with a range of up to its whole remaining budget. Each block
-counts against the run's budget, and a range never holds more blocks than the
-budget has left. A range's own cap, 1,024 work blocks, binds only when a run's
-budget is larger; under the default budget of 256 blocks a run, the budget is
-the cap. A range also ends at 4,096 events: a range whose next block would pass
-the event cap ends before it, and a first block over the cap is a range of its
-own. A range passes the fences above once, for its first block, and reads the
-lineage rows, events, surface bindings and resolver activations of all its
-blocks in one statement each, grouped back by block: events are ordered and
-taken once per `event_identity` within their own block, and each block takes
-its own active manifest set. It folds the blocks one at a time through the same
-reducers, each block seeing the families as the blocks before it left them,
-including the rows a reducer reads from a family table mid-fold, which the
-range has not written yet; a block classifies resolvers and reads a name's
+block. After each range commits, the next asks for twice the blocks that range
+actually applied, which after an event-cap cut is fewer than it asked for; a
+later run that resumes the rebuild starts by asking for its whole remaining
+budget. A request is capped at 1,024 work blocks and at what the run's budget
+has left, since each block counts against the budget: under the default budget
+of 256 blocks a run the budget is the binding cap, and 1,024 binds only when a
+run's budget is larger. A range also ends at 4,096 events, counted per block
+before duplicates are dropped: it ends before the block that would take it past
+the cap and always holds its first block, so a first block over the cap is a
+range of its own. A range opens with its first block as a single block does,
+passing the fences above once and reading that block's lineage row, then reads
+the remaining blocks' lineage rows in one statement and their event counts in
+another. For the blocks it keeps it reads the events, surface bindings and
+resolver activations in one statement each, grouped back by block: events are
+ordered and taken once per `event_identity` within their own block, and each
+block takes its own active manifest set. Before folding it loads, once per
+table, the rows the blocks' events and prefetched bindings and activations
+name; a row a reducer finds only while folding is loaded then. It folds the
+blocks one at a time through the same reducers, each block seeing the families
+as the blocks before it left them. The eight reads that go to a family table
+mid-fold also see the rows the range changed and has not written yet: the name
+candidates, registry-only candidates, retained grants and predecessor releases
+of F1's binding candidates, F3's stored classifications, the lease candidates
+and unnamed registrar rows of name decoding, and the lifecycle rows of F13's
+registrant fold. The classification read adds the resolvers the range stored;
+one the range removed still comes from the table, but with no candidate left it
+gets no row, as block by block. A block classifies resolvers and reads a name's
 current binding at its own height. The range then journals, for every row it
 changed, the row as it was before the range and the prior marker, under its
 last block, writes once, advances the marker to its last block still in
 `bootstrap_pending`, prunes and commits: one generation. An undo takes the
 whole range back at once, so undo to a block inside a range stops on the
-range's predecessor. The result equals applying the same blocks one by one
+range's predecessor. The family tables, and the marker apart from its
+generation, equal applying the same blocks one by one
 (`crates/project/tests/families_range.rs`, and every test's rebuild comparison,
-which rebuilds both ways). Redo replay and live follow stay one block to a
-transaction.
+which rebuilds both ways); the undo rows and the generation count differ by
+design. Redo replay and live follow stay one block to a transaction.
 
 Facts within one emission batch apply in adapter write order: within one
 block, transaction and log the trailing
