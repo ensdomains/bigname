@@ -259,10 +259,12 @@ impl BlockEvent {
 /// history the run captured (`manifests::History::declaration_starts`), the one population
 /// classifies under, not from a read of their own. A rebuild visits only these: any other block
 /// owns no family fact. At most `limit` blocks are returned, the lowest first. Each source takes
-/// its own lowest `limit` distinct readable blocks and stops (the events and bindings can walk
-/// their `(chain_id, block_number)` indexes in order), so a run reads a bounded prefix of every
-/// source rather than the whole rest of the chain; the lowest `limit` of their union is the
-/// lowest `limit` overall. Readability is checked inside each source, before its limit, so no
+/// its own lowest `limit` distinct readable blocks: the events and bindings sources can walk
+/// their `(chain_id, block_number)` indexes in order and stop early, the two resolver edge
+/// sources scan the chain's resolver edges (their block numbers come out of a lateral VALUES
+/// list no index orders) and then sort, and the declaration source unnests a short list. So a
+/// run's cost is bounded by `limit` and the chain's resolver edges rather than by the rest of
+/// the chain; the lowest `limit` of the sources' union is the lowest `limit` overall. Readability is checked inside each source, before its limit, so no
 /// source spends its limit on blocks that are then dropped.
 pub(crate) async fn work_blocks(
     pool: &sqlx::PgPool,

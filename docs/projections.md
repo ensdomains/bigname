@@ -1918,7 +1918,10 @@ retried after it completed is recognised only while the marker, its
 generation and the content hash still match. A rebuild refreshes the planner
 statistics of the family tables after 1, 2, 4, 8, ... generations (single
 blocks or rebuild ranges) committed since its reset, counted across runs from
-the generation the reset recorded.
+the generation the reset recorded. Because a range is one generation, a
+rebuild in ranges refreshes after more blocks than one block by block: with a
+resumed run applying its 256-block budget in one range, the fourth refresh
+lands near 2,000 blocks and the seventh near 30,000.
 
 The families differ from the served build in these known places, which the
 steps that read them must key on. Each label names a family as the
