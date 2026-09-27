@@ -12,6 +12,7 @@ mod support;
 mod topology_shadow;
 
 use anyhow::{Context, Result, ensure};
+use bigname_storage::families::records::load_family_link_selection as records_link_selection;
 use bigname_storage::families::topology::{
     FamilyCollectionPage, load_family_link_selection, load_resolver_links_shadow,
     load_resolver_shadow,
@@ -733,6 +734,21 @@ async fn a_link_of_another_storage_model_hides_the_record_id_link() -> Result<()
                 .is_some_and(|link| link.record_id == "9"
                     && link.storage_model.as_deref() == Some("resolver_node")),
         "{selection:?}"
+    );
+    // Step 4's copy of the link selection takes the same newest row: record 9 at the exact
+    // node, with no default contributing. Its eager default candidate stays in its view.
+    let records = records_link_selection(fixture.pool(), CHAIN, &first, &one.node)
+        .await?
+        .context("the records reader sees the newer link")?;
+    ensure!(
+        records.active_record_id() == Some("9")
+            && records
+                .exact
+                .as_ref()
+                .is_some_and(|link| link.record_id == "9")
+            && records.default_link_event_id.is_none()
+            && records.contributing_links().count() == 1,
+        "{records:?}"
     );
     // The check sees a change: with the family row's record changed, the shadow row at that
     // node no longer equals the one the newer link event makes, and the check fails.

@@ -66,7 +66,9 @@ impl LinkSelection {
 }
 
 /// The link selection of `resolver_address` for `namehash`: two probes of
-/// `project_resolver_link`, exact then default. `None` when the resolver has neither link.
+/// `project_resolver_link`, exact then default. `None` when the resolver has neither link. Each
+/// probe takes the row F7 kept, the newest link at that node whatever its storage model, as the
+/// resolver keeps one record id per node (PR 954, the newest-link ruling under Decisions).
 pub async fn load_family_link_selection(
     pool: &PgPool,
     chain_id: &str,
@@ -77,8 +79,7 @@ pub async fn load_family_link_selection(
         "SELECT node, record_id, block_number, transaction_index, log_index, event_identity,
                 normalized_event_id
          FROM bigname_phase.project_resolver_link
-         WHERE chain_id = $1 AND resolver_address = $2 AND node = ANY($3::text[])
-           AND storage_model = 'resolver_record_id'",
+         WHERE chain_id = $1 AND resolver_address = $2 AND node = ANY($3::text[])",
     )
     .bind(chain_id)
     .bind(resolver_address.to_ascii_lowercase())
