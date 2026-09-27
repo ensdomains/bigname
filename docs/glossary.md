@@ -2568,7 +2568,10 @@ the blocks at or below the chain's safe block minus 5 (or 256 blocks below the
 target with no safe block). The range folds its blocks one by one exactly as
 single blocks would, then journals, writes and advances the [family
 marker](#family-marker) once, to its last block, as one generation
-([projections](projections.md#owned-key-families)).
+([projections](projections.md#owned-key-families)). The first range after the
+rebuild's reset holds one block and each range doubles the next; a run that
+resumes the rebuild starts with a range of up to its whole remaining budget,
+256 blocks by default.
 
 ## Repair record
 

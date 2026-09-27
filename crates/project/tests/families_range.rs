@@ -628,6 +628,64 @@ async fn a_range_rebuild_resumes_after_a_stop_and_equals_the_follow() -> Result<
     fixture.cleanup().await
 }
 
+// Ranges double from one block only right after the reset: a run that resumes a rebuild starts
+// with a range as large as its budget. With a budget of eight, the first run commits [10],
+// [11, 12], [13 to 16] and [17]; the second commits [18 to 25] as one range.
+#[tokio::test]
+async fn a_resumed_range_rebuild_starts_with_a_range_of_its_whole_budget() -> Result<()> {
+    let fixture = Fixture::new("families_range_resume_size", 40).await?;
+    pointers(&fixture, 10..=29).await?;
+    follow(&fixture, 10, 30).await?;
+    let incremental = fixture.exact().await?;
+    let options = in_ranges(30).with_max_blocks_per_run(8);
+    let first = fixture.apply_with(30, FamilyMode::Rebuild, &options).await;
+    assert_eq!(first.skipped, None);
+    assert_eq!(
+        (first.blocks, first.ranges, first.budget_exhausted),
+        (8, 4, true)
+    );
+    assert_eq!(fixture.journalled_blocks().await?, vec![10, 12, 16, 17]);
+    let second = fixture.apply_with(30, FamilyMode::Normal, &options).await;
+    assert_eq!(second.skipped, None);
+    assert_eq!(
+        (second.blocks, second.ranges, second.reset),
+        (8, 1, false),
+        "the resumed run applies its whole budget in one range"
+    );
+    assert_eq!(fixture.marker().await?.0, Some(25));
+    let third = fixture.apply_with(30, FamilyMode::Normal, &options).await;
+    assert_eq!(third.skipped, None);
+    assert_eq!(
+        (third.blocks, third.ranges),
+        (5, 1),
+        "[26 to 29], then the target on its own"
+    );
+    assert_eq!(
+        fixture.journalled_blocks().await?,
+        vec![10, 12, 16, 17, 25, 29, 30]
+    );
+    assert_eq!(marker_state(&fixture).await?, "live");
+    let rebuilt = fixture.exact().await?;
+    for ((table, was), (_, now)) in incremental.iter().zip(&rebuilt) {
+        assert_eq!(was, now, "{table}");
+    }
+    fixture.cleanup().await
+}
+
+// A range cap of zero, set on the option field rather than through `with_range_caps`, counts as
+// one block: every range holds one work block.
+#[tokio::test]
+async fn a_range_cap_of_zero_counts_as_one_block() -> Result<()> {
+    let fixture = Fixture::new("families_range_zero_cap", 20).await?;
+    pointers(&fixture, 10..=13).await?;
+    follow(&fixture, 10, 14).await?;
+    let mut options = in_ranges(14);
+    options.max_range_blocks = 0;
+    let outcome = rebuild_equal(&fixture, 14, &options).await?;
+    assert_eq!((outcome.blocks, outcome.ranges), (5, 4));
+    fixture.cleanup().await
+}
+
 // Undo to a block inside a range lands on the range's predecessor, since the range journals as
 // one step; replaying from there block by block equals a fresh rebuild.
 #[tokio::test]

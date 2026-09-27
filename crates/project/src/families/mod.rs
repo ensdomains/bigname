@@ -64,8 +64,12 @@ pub const RANGE_TARGET_MARGIN: i64 = RETAINED_UNDO_DEPTH;
 /// The most work blocks one rebuild range applies. A range saves the fixed statements of every
 /// block after its first (the fences, the marker journal and advance, the retention read and
 /// prune, the commit), about fifteen round trips, so past a few hundred blocks the saving no
-/// longer shows beside the blocks' own reads; 1,024 keeps a sparse stretch to one transaction a
-/// run while bounding how much one failure has to redo.
+/// longer shows beside the blocks' own reads. A range also never holds more blocks than its run
+/// has left of its budget, so under the default budget, [`MAX_BLOCKS_PER_RUN`], that budget is
+/// the effective cap: a resumed run applies up to 256 work blocks as one range when their events
+/// fit [`MAX_RANGE_EVENTS`].
+/// This cap binds only when a run is given a larger budget, where it bounds how much one failure
+/// has to redo.
 pub const MAX_RANGE_BLOCKS: u64 = 1024;
 
 /// The most events one rebuild range applies, unless its first block alone holds more. The
@@ -187,7 +191,8 @@ pub struct FamilyOptions {
     pub max_blocks_per_run: u64,
     /// Which work blocks a rebuild applies in ranges.
     pub rebuild_ranges: RebuildRanges,
-    /// Work blocks one rebuild range applies at most.
+    /// Work blocks one rebuild range applies at most, and never more than the run's budget has
+    /// left; zero counts as one.
     pub max_range_blocks: u64,
     /// Events one rebuild range applies at most, unless its first block alone holds more.
     pub max_range_events: u64,

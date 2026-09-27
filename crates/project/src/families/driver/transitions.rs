@@ -110,14 +110,25 @@ impl Run<'_> {
         if whole && blocks.last() != Some(&self.target.number) {
             blocks.push(self.target.number);
         }
-        // Work blocks at or below the switch point go in ranges that start at one block and
-        // double with every range committed, up to the cap; the rest and the target one by one.
+        // Work blocks at or below the switch point go in ranges; the rest and the target one by
+        // one. Right after the reset the first range holds one block, so the families gain rows
+        // and the statistics refresh below runs before a range grows large; a run that resumes
+        // a rebuild starts with a range of its whole remaining budget. Each range committed
+        // doubles the next, up to the cap, and a range never holds more blocks than the budget
+        // has left.
         let switch = self.switch_point().await?;
         let ranged = |number: &i64| {
             *number != self.target.number && switch.is_some_and(|switch| *number <= switch)
         };
-        let cap = usize::try_from(self.options.max_range_blocks).unwrap_or(usize::MAX);
-        let (mut index, mut size) = (0, 1);
+        let cap = usize::try_from(self.options.max_range_blocks)
+            .unwrap_or(usize::MAX)
+            .max(1);
+        let mut size = if family.sequence == reset_sequence {
+            1
+        } else {
+            cap
+        };
+        let mut index = 0;
         while let Some(&number) = blocks.get(index) {
             if !self.budget.take(outcome) {
                 return Ok(());

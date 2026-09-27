@@ -510,8 +510,9 @@ async fn a_rebuild_over_two_runs_refreshes_the_statistics_once_per_threshold() -
     );
 
     // In ranges, the first run commits [11], [12, 13] and [14, 15]: three generations for five
-    // blocks, refreshed after the first and the second. The second run's ranges [16], [17, 18]
-    // and [19, 20] start at generation 3, so only the fourth refreshes.
+    // blocks, refreshed after the first and the second. The second run resumes the rebuild with
+    // one range of its whole budget, [16 to 20], generation 4; the refresh after it runs at the
+    // start of the third run, before that run's range [21 to 25].
     let ranged = FamilyOptions::new(CONTENT_HASH)
         .with_max_blocks_per_run(5)
         .with_rebuild_ranges(RebuildRanges::Through(30));
@@ -524,9 +525,15 @@ async fn a_rebuild_over_two_runs_refreshes_the_statistics_once_per_threshold() -
     let second = fixture.apply_with(30, FamilyMode::Normal, &ranged).await;
     assert_eq!(
         (second.skipped.as_deref(), second.blocks, second.ranges),
-        (None, 5, 3)
+        (None, 5, 1)
     );
-    assert_eq!(second.statistics_refreshes, 1, "after 4 generations");
+    assert_eq!(second.statistics_refreshes, 0, "generation 4 ends the run");
+    let third = fixture.apply_with(30, FamilyMode::Normal, &ranged).await;
+    assert_eq!(
+        (third.skipped.as_deref(), third.blocks, third.ranges),
+        (None, 5, 1)
+    );
+    assert_eq!(third.statistics_refreshes, 1, "after 4 generations");
     fixture.cleanup().await
 }
 
