@@ -36,8 +36,9 @@ struct RangeBlock {
 }
 
 /// Apply the work blocks `numbers` (ascending, none the target) in one transaction, or a prefix
-/// of them: the range ends before the block that would take its events past
-/// `options.max_range_events`, and always holds its first block. Returns the marker the range
+/// of them: the range ends before the block whose events, counted before duplicates are
+/// dropped, would take its total past `options.max_range_events`, and always holds its first
+/// block. Returns the marker the range
 /// published, the number of blocks it applied and what it wrote.
 pub(crate) async fn apply(
     pool: &sqlx::PgPool,
@@ -53,11 +54,12 @@ pub(crate) async fn apply(
     let mut opened = block::open(pool, chain_id, first, plan).await?;
     let mut headers = vec![opened.block.clone()];
     headers.extend(reads::headers(&mut opened.transaction, chain_id, rest).await?);
-    let mut events = reads::events(&mut opened.transaction, chain_id, &headers).await?;
-    // The blocks whose events fit the cap, and the first block whatever it holds.
+    // The blocks whose events fit the cap, and the first block whatever it holds; counted
+    // before the events are read so a range reads only the blocks it applies.
+    let counts = reads::event_counts(&mut opened.transaction, chain_id, &headers).await?;
     let (mut total, mut applied) = (0_u64, 0);
-    for (block, _) in &events {
-        let count = u64::try_from(block.len()).unwrap_or(u64::MAX);
+    for header in &headers {
+        let count = counts.get(&header.number).copied().unwrap_or(0);
         if applied > 0 && total.saturating_add(count) > options.max_range_events {
             break;
         }
@@ -65,7 +67,7 @@ pub(crate) async fn apply(
         applied += 1;
     }
     headers.truncate(applied);
-    events.truncate(applied);
+    let events = reads::events(&mut opened.transaction, chain_id, &headers).await?;
     let mut bindings = reads::bindings(&mut opened.transaction, chain_id, &headers).await?;
     let mut activated =
         reads::activated(&mut opened.transaction, chain_id, &headers, plan.manifests).await?;

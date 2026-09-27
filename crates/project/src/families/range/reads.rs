@@ -162,6 +162,36 @@ pub(super) async fn events(
         .collect())
 }
 
+/// How many activated canonical events each block holds at its readable hash, before duplicates
+/// are dropped, to size a range before reading its events.
+pub(super) async fn event_counts(
+    transaction: &mut Transaction<'_, Postgres>,
+    chain_id: &str,
+    blocks: &[BlockHeader],
+) -> Result<BTreeMap<i64, u64>> {
+    let (numbers, hashes) = arrays(blocks);
+    let rows: Vec<(i64, i64)> = sqlx::query_as(
+        "/* project:families.range.event_counts */ SELECT block.number, count(*)
+         FROM unnest($2::bigint[], $3::text[]) AS block (number, hash)
+         JOIN normalized_events event
+           ON event.chain_id = $1 AND event.block_number = block.number
+          AND event.block_hash = block.hash
+         WHERE event.consumer_visibility = 'activated'
+           AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
+         GROUP BY block.number",
+    )
+    .bind(chain_id)
+    .bind(&numbers)
+    .bind(&hashes)
+    .fetch_all(&mut **transaction)
+    .await
+    .map_err(|error| ProjectError::database("failed to count family range events", error))?;
+    Ok(rows
+        .into_iter()
+        .map(|(number, count)| (number, u64::try_from(count).unwrap_or(0)))
+        .collect())
+}
+
 /// Each block's readable surface bindings, as `to_jsonb` rows.
 pub(super) async fn bindings(
     transaction: &mut Transaction<'_, Postgres>,
