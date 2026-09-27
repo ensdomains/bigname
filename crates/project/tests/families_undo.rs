@@ -4,7 +4,7 @@
 mod families_support;
 
 use anyhow::Result;
-use bigname_project::families::{FamilyMode, FamilyOptions};
+use bigname_project::families::{FamilyMode, FamilyOptions, RebuildRanges};
 use families_support::{CHAIN, CONTENT_HASH, Fixture, hash};
 use serde_json::{Value, json};
 
@@ -139,7 +139,11 @@ async fn a_redo_undoes_to_the_range_predecessor_and_replays_to_a_complete_record
 async fn a_redo_below_the_retained_journal_rebuilds_from_scratch() -> Result<()> {
     let fixture = Fixture::new("families_undo_depth", 20).await?;
     let dropped = seed(&fixture).await?;
-    let shallow = FamilyOptions::new(CONTENT_HASH).with_retained_undo_depth(2);
+    // Block by block, so each block keeps its own journal entry until the depth prunes it; a
+    // rebuild below the safe block would put 11 to 13 in ranges.
+    let shallow = FamilyOptions::new(CONTENT_HASH)
+        .with_retained_undo_depth(2)
+        .with_rebuild_ranges(RebuildRanges::Off);
     fixture.heads(20, 20, 20).await?;
     fixture.apply_with(14, FamilyMode::Normal, &shallow).await;
     assert_eq!(fixture.journalled_blocks().await?, vec![12, 13, 14]);

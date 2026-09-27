@@ -18,7 +18,7 @@ use std::sync::Mutex;
 use anyhow::{Result, bail, ensure};
 use bigname_project::{
     Marker,
-    families::{self, FamilyMode, FamilyOptions},
+    families::{self, FamilyMode, FamilyOptions, RebuildRanges},
 };
 use bigname_storage::families::records::{ShadowReport, compare_family_reads};
 use serde_json::Value;
@@ -170,6 +170,15 @@ pub async fn shadow_report_at(pool: &PgPool, target: &Marker) -> Result<ShadowRe
 
 /// Rebuild the families at `target` without comparing; returns the chain.
 pub async fn rebuild_families_at(pool: &PgPool, target: &Marker) -> Result<String> {
+    rebuild_families_with(pool, target, &FamilyOptions::new("family-shadow")).await
+}
+
+/// Rebuild the families at `target` with `options` without comparing; returns the chain.
+async fn rebuild_families_with(
+    pool: &PgPool,
+    target: &Marker,
+    options: &FamilyOptions,
+) -> Result<String> {
     let chain_id: String = sqlx::query_scalar(
         "SELECT chain_id FROM bigname_phase.chain_lineage
          WHERE block_number = $1 AND block_hash = $2 LIMIT 1",
@@ -185,7 +194,7 @@ pub async fn rebuild_families_at(pool: &PgPool, target: &Marker) -> Result<Strin
         target,
         FamilyMode::Rebuild,
         &token,
-        &FamilyOptions::new("family-shadow"),
+        options,
     )
     .await;
     ensure!(
@@ -243,5 +252,12 @@ pub async fn compare_family_reads_at(
 
 /// [`compare_family_reads_at`] with no difference and no diagnostic expected.
 pub async fn assert_family_reads_match(pool: &PgPool, target: &Marker) -> Result<ShadowReport> {
+    // First a rebuild that applies every work block below the target in rebuild ranges, then the
+    // default rebuild, whose report is returned; both must read as today's readers do.
+    let ranges = FamilyOptions::new("family-shadow")
+        .with_rebuild_ranges(RebuildRanges::Through(target.number));
+    let chain_id = rebuild_families_with(pool, target, &ranges).await?;
+    let ranged = compare_family_reads_on(pool, &chain_id, target).await?;
+    Expectations::none().check(target.number, &ranged)?;
     compare_family_reads_at(pool, target, &Expectations::none()).await
 }
