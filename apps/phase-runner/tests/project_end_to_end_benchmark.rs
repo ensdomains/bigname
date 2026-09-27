@@ -471,12 +471,16 @@ async fn run(
     store
         .start_phase(CHAIN, PhaseName::Project, &RunMode::Normal)
         .await?;
-    // As main.rs builds it, so the batch log and the metrics handoff fall inside the clock. No
-    // metrics worker consumes the feed here: applying the summary and scraping it are not timed.
+    // The metrics feed is wired as main.rs wires it, so the batch log and the metrics handoff fall
+    // inside the clock. No metrics worker consumes the feed here: applying the summary and
+    // scraping it are not timed.
     let metrics_feed = RunnerMetricsFeed::default();
-    // A disposable copy starts with empty families, so their first run is a rebuild over the
+    // A disposable copy may start with empty families, so their first run is a rebuild over the
     // whole chain; the one-shot `redo` command finishes it the same way. The fixture's families
-    // fit in one budget either way.
+    // fit in one budget either way. Unlike the supervised runner, which performs one budgeted
+    // family run per cycle, the harness drains every required family budget before the readers
+    // compare or the next target starts. That work is outside the served clock and is reported
+    // separately; it does not measure supervised-runner cycle throughput.
     let project = ProjectPhase::with_hydration(pool.clone(), ChainRpcUrls::default())
         .with_family_settings(FamilySettings {
             finish_each_batch: true,
