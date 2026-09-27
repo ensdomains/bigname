@@ -16,9 +16,9 @@ const ROOT_NODE: &str = "0x00000000000000000000000000000000000000000000000000000
 /// ResolverChanged, clears included, and nothing when that latest pointer is null, zero or empty
 /// (crates/project/src/builders/name_topology.rs, the alias resolver lateral;
 /// crates/project/src/builders/linked_records.rs, the pointer drop). An empty resolver means no
-/// alias (Tate, 2026-09-26), the record pointer's rule; the ENSv2 registry adapter writes the
-/// resolver through `nullable_address` (crates/adapters/src/schema_v2/protocol/v2_registry.rs),
-/// so only a fixture can hold an empty one.
+/// alias (Tate, 2026-09-26), the record pointer's rule. No traced producer writes an empty one
+/// (the registry adapters decode the address through `address_hex` and `nullable_address`), and
+/// the read rejects it regardless.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FamilyAliasSourcePointer {
     pub chain_id: String,

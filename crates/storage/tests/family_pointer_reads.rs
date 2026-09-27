@@ -195,10 +195,9 @@ async fn pointer(
     Ok(())
 }
 
-// The alias read takes the current pointer and then rejects a null or zero resolver, so a clear
-// never exposes an older pointer. No producer writes an empty resolver: the ENSv1 registry
-// decodes a `0x` address and the ENSv2 registry adapter writes it through `nullable_address`, so
-// there is no empty case here.
+// The alias read takes the current pointer before rejecting a clear, so no older pointer is
+// exposed. This fixture covers null and zero; empty-address rejection remains implemented, and
+// the empty current pointer is exercised by crates/project/tests/family_reads_pointers.rs.
 #[tokio::test]
 async fn alias_pointer_rejects_null_and_zero() -> Result<()> {
     with_database("family_alias_pointer", |pool| async move {
