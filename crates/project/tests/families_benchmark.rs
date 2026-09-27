@@ -6,7 +6,7 @@
 //! ```
 //!
 //! It seeds `rebuild_performance/seed.sql`, rebuilds the families to `FAMILY_BENCHMARK_BASE`
-//! (default 200), follows block by block to 300, undoes back to the base and replays. It prints the
+//! (default 200) block by block and again in ranges, follows block by block to 300, undoes back to the base and replays. It prints the
 //! elapsed time of each phase and the per-block distribution. With `FAMILY_BENCHMARK_MIN_MS`
 //! set, it writes what `auto_explain` reports for every statement of the follow, the undo and
 //! the replay slower than that to `FAMILY_BENCHMARK_LOG`; the plans reach the client as `LOG`
@@ -16,7 +16,7 @@ use std::{fs::File, sync::Mutex, time::Instant};
 use anyhow::{Context, Result, ensure};
 use bigname_project::{
     Marker,
-    families::{self, FamilyMode, FamilyOptions, FamilyOutcome},
+    families::{self, FamilyMode, FamilyOptions, FamilyOutcome, RebuildRanges},
 };
 use bigname_test_support::{TestDatabase, TestDatabaseConfig};
 use sqlx::{PgPool, postgres::PgPoolOptions, raw_sql};
@@ -38,6 +38,15 @@ async fn marker(pool: &PgPool, number: i64) -> Result<Marker> {
 }
 
 async fn run(pool: &PgPool, target: i64, mode: FamilyMode) -> Result<FamilyOutcome> {
+    run_with(pool, target, mode, RebuildRanges::BelowSafe).await
+}
+
+async fn run_with(
+    pool: &PgPool,
+    target: i64,
+    mode: FamilyMode,
+    ranges: RebuildRanges,
+) -> Result<FamilyOutcome> {
     let token = families::input_token(pool, CHAIN).await?;
     let outcome = families::apply(
         pool,
@@ -45,11 +54,29 @@ async fn run(pool: &PgPool, target: i64, mode: FamilyMode) -> Result<FamilyOutco
         &marker(pool, target).await?,
         mode,
         &token,
-        &FamilyOptions::new(CONTENT_HASH).with_max_blocks_per_run(u64::MAX),
+        &FamilyOptions::new(CONTENT_HASH)
+            .with_max_blocks_per_run(u64::MAX)
+            .with_rebuild_ranges(ranges),
     )
     .await;
     ensure!(outcome.skipped.is_none(), "{:?}", outcome.skipped);
     Ok(outcome)
+}
+
+/// Every family table as text, to compare two rebuilds.
+async fn families_text(pool: &PgPool) -> Result<Vec<String>> {
+    let mut tables = Vec::new();
+    for table in families::family_tables() {
+        tables.push(
+            sqlx::query_scalar(&format!(
+                "SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text), '[]')::text
+                 FROM {table} t"
+            ))
+            .fetch_one(pool)
+            .await?,
+        );
+    }
+    Ok(tables)
 }
 
 fn distribution(label: &str, mut samples: Vec<u64>) {
@@ -138,11 +165,34 @@ async fn family_block_timings() -> Result<()> {
     .await?;
     println!("FAMILY_BENCHMARK names={names} base={base} followed_events={events}");
 
+    // The rebuild block by block, then in ranges: every work block below the base in ranges,
+    // the base on its own. The ranged rebuild must leave the same families; the rest of the
+    // benchmark starts from it.
     let started = Instant::now();
-    run(&pool, base, FamilyMode::Rebuild).await?;
+    let per_block = run_with(&pool, base, FamilyMode::Rebuild, RebuildRanges::Off).await?;
     println!(
-        "FAMILY_BENCHMARK rebuild_to={base} elapsed_ms={}",
+        "FAMILY_BENCHMARK rebuild_to={base} ranges=off blocks={} elapsed_ms={}",
+        per_block.blocks,
         started.elapsed().as_millis()
+    );
+    let per_block = families_text(&pool).await?;
+    let started = Instant::now();
+    let ranged = run_with(
+        &pool,
+        base,
+        FamilyMode::Rebuild,
+        RebuildRanges::Through(base),
+    )
+    .await?;
+    println!(
+        "FAMILY_BENCHMARK rebuild_to={base} ranges=on blocks={} range_count={} elapsed_ms={}",
+        ranged.blocks,
+        ranged.ranges,
+        started.elapsed().as_millis()
+    );
+    ensure!(
+        families_text(&pool).await? == per_block,
+        "the ranged rebuild differs from the block-by-block one"
     );
     // The seed writes every binding at its opening SurfaceBound's log, as the adapter does. Each
     // binding the rebuild reached (through the base) must have one candidate at that

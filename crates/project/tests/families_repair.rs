@@ -7,7 +7,7 @@ mod families_support;
 use anyhow::Result;
 use bigname_project::{
     Marker,
-    families::{self, FamilyMode, FamilyOptions},
+    families::{self, FamilyMode, FamilyOptions, RebuildRanges},
 };
 use families_support::{CHAIN, CONTENT_HASH, Fixture, hash};
 use serde_json::{Value, json};
@@ -485,25 +485,48 @@ async fn a_key_written_twice_in_one_block_undoes_to_its_state_before_the_block()
     fixture.cleanup().await
 }
 
-// A rebuild refreshes the family statistics after 1, 2, 4, 8, ... blocks since its reset, counted
-// across runs: a rebuild split over two runs refreshes at each of those points once.
+// A rebuild refreshes the family statistics after 1, 2, 4, 8, ... generations since its reset,
+// counted across runs: a rebuild split over two runs refreshes at each of those points once. A
+// generation is one committed transaction, a single block or a range: block by block the
+// generations are the blocks, in ranges fewer.
 #[tokio::test]
 async fn a_rebuild_over_two_runs_refreshes_the_statistics_once_per_threshold() -> Result<()> {
     let fixture = Fixture::new("families_repair_statistics", 40).await?;
     seed(&fixture, 11..=30).await?;
-    let small = FamilyOptions::new(CONTENT_HASH).with_max_blocks_per_run(5);
+    let small = FamilyOptions::new(CONTENT_HASH)
+        .with_max_blocks_per_run(5)
+        .with_rebuild_ranges(RebuildRanges::Off);
     let first = fixture.apply_with(30, FamilyMode::Rebuild, &small).await;
     assert_eq!((first.skipped.as_deref(), first.blocks), (None, 5));
     assert_eq!(
         first.statistics_refreshes, 3,
-        "after 1, 2 and 4 rebuilt blocks"
+        "after 1, 2 and 4 generations, one block each"
     );
     let second = fixture.apply_with(30, FamilyMode::Normal, &small).await;
     assert_eq!((second.skipped.as_deref(), second.blocks), (None, 5));
     assert_eq!(
         second.statistics_refreshes, 1,
-        "after 8 rebuilt blocks; 1, 2 and 4 were the first run's"
+        "after 8 generations; 1, 2 and 4 were the first run's"
     );
+
+    // In ranges, the first run commits [11], [12, 13] and [14, 15]: three generations for five
+    // blocks, refreshed after the first and the second. The second run's ranges [16], [17, 18]
+    // and [19, 20] start at generation 3, so only the fourth refreshes.
+    let ranged = FamilyOptions::new(CONTENT_HASH)
+        .with_max_blocks_per_run(5)
+        .with_rebuild_ranges(RebuildRanges::Through(30));
+    let first = fixture.apply_with(30, FamilyMode::Rebuild, &ranged).await;
+    assert_eq!(
+        (first.skipped.as_deref(), first.blocks, first.ranges),
+        (None, 5, 3)
+    );
+    assert_eq!(first.statistics_refreshes, 2, "after 1 and 2 generations");
+    let second = fixture.apply_with(30, FamilyMode::Normal, &ranged).await;
+    assert_eq!(
+        (second.skipped.as_deref(), second.blocks, second.ranges),
+        (None, 5, 3)
+    );
+    assert_eq!(second.statistics_refreshes, 1, "after 4 generations");
     fixture.cleanup().await
 }
 

@@ -6,7 +6,7 @@
 use anyhow::Result;
 use bigname_project::{
     Marker,
-    families::{self, FamilyMode, FamilyOptions, FamilyOutcome},
+    families::{self, FamilyMode, FamilyOptions, FamilyOutcome, RebuildRanges},
 };
 use bigname_test_support::{TestDatabase, TestDatabaseConfig};
 use serde_json::{Value, json};
@@ -579,17 +579,39 @@ impl Fixture {
         Ok(())
     }
 
-    /// The families after the incremental run must equal a rebuild from scratch at `target`.
+    /// The families after the incremental run must equal a rebuild from scratch at `target`,
+    /// both a rebuild that applies every work block below the target in ranges and one that
+    /// applies each block in a transaction of its own. The per-block rebuild runs last, so the
+    /// fixture is left as a per-block rebuild leaves it.
     pub async fn assert_rebuild_equal(&self, target: i64) -> Result<()> {
         let incremental = self.exact().await?;
-        let rebuilt = self.apply(target, FamilyMode::Rebuild).await;
-        anyhow::ensure!(rebuilt.skipped.is_none(), "rebuild: {:?}", rebuilt.skipped);
-        let fresh = self.exact().await?;
-        for ((table, was), (_, now)) in incremental.iter().zip(&fresh) {
+        for (label, ranges) in [
+            ("in ranges", RebuildRanges::Through(target)),
+            ("block by block", RebuildRanges::Off),
+        ] {
+            let options = FamilyOptions::new(CONTENT_HASH).with_rebuild_ranges(ranges);
+            let rebuilt = self.apply_with(target, FamilyMode::Rebuild, &options).await;
             anyhow::ensure!(
-                was == now,
-                "a rebuild at {target} left {table} as {now}, not {was}"
+                rebuilt.skipped.is_none(),
+                "rebuild {label}: {:?}",
+                rebuilt.skipped
             );
+            // Every rebuild visits the target on its own; any other work block below it goes
+            // into a range when ranges are on.
+            let expected_ranges = matches!(ranges, RebuildRanges::Through(_)) && rebuilt.blocks > 1;
+            anyhow::ensure!(
+                (rebuilt.ranges > 0) == expected_ranges,
+                "rebuild {label} at {target} applied {} blocks in {} ranges",
+                rebuilt.blocks,
+                rebuilt.ranges
+            );
+            let fresh = self.exact().await?;
+            for ((table, was), (_, now)) in incremental.iter().zip(&fresh) {
+                anyhow::ensure!(
+                    was == now,
+                    "a rebuild {label} at {target} left {table} as {now}, not {was}"
+                );
+            }
         }
         Ok(())
     }
