@@ -1919,9 +1919,11 @@ generation and the content hash still match. A rebuild refreshes the planner
 statistics of the family tables after 1, 2, 4, 8, ... generations (single
 blocks or rebuild ranges) committed since its reset, counted across runs from
 the generation the reset recorded. Because a range is one generation, a
-rebuild in ranges refreshes after more blocks than one block by block: with a
-resumed run applying its 256-block budget in one range, the fourth refresh
-lands near 2,000 blocks and the seventh near 30,000.
+rebuild in ranges refreshes after more blocks than one block by block. With
+the default 256-block budget, no event-cap cuts and work still below the
+range switch, the first run commits nine generations (1, 2, 4, ..., 128 and 1
+blocks) and each later run one, so the fifth refresh (after 16 generations)
+lands after 2,048 work blocks and the eighth (after 128) after 30,720.
 
 The families differ from the served build in these known places, which the
 steps that read them must key on. Each label names a family as the
