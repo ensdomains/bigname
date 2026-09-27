@@ -133,8 +133,11 @@ async fn disposable_copy_publishes_hydrates_and_reads_each_target() -> Result<()
 /// owner). The defaults serve 3 subnames at block 35 and 4 at block 40, so with pages of one row
 /// every target reads that parent over several pages, which the test requires. More names or
 /// later targets serve more: 5,000 names at blocks 241 to 245 serve 240.
-#[tokio::test]
-async fn fixture_corpus_publishes_hydrates_reads_and_matches_a_rebuild() -> Result<()> {
+/// One seeded fixture database with the disposable-copy marker: the rebuild-performance seed
+/// with observed blocks past `previous`, subnames, and Interpret through the last target. The two
+/// fixture tests below share it and take turns on `FIXTURE_LOCK`, since the control reports they
+/// count live in one store (`shadow::take_reports`).
+async fn seed_fixture() -> Result<(ScratchDatabase, i64, Vec<i64>)> {
     let setting = |name: &str, default: &str| {
         std::env::var(format!("BIGNAME_END_TO_END_FIXTURE_{name}"))
             .unwrap_or_else(|_| default.to_owned())
@@ -194,6 +197,16 @@ async fn fixture_corpus_publishes_hydrates_reads_and_matches_a_rebuild() -> Resu
     .execute(pool)
     .await?;
     require_disposable_copy(pool).await?;
+    Ok((scratch, previous, targets))
+}
+
+static FIXTURE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+#[tokio::test]
+async fn fixture_corpus_publishes_hydrates_reads_and_matches_a_rebuild() -> Result<()> {
+    let _turn = FIXTURE_LOCK.lock().await;
+    let (scratch, previous, targets) = seed_fixture().await?;
+    let pool = scratch.pool();
     shadow::take_reports();
     let (compared, shadows) = run(
         pool,
@@ -242,6 +255,50 @@ async fn fixture_corpus_publishes_hydrates_reads_and_matches_a_rebuild() -> Resu
             compared.subname_rows,
             compared.subname_pages,
             compared.subname_parents
+        );
+    }
+    scratch.cleanup().await
+}
+
+/// The same fixture under `BIGNAME_END_TO_END_SHADOW=1` alone, the disposable-copy shape: no
+/// baseline read and no rebuild, and the control, records and topology comparisons all run at
+/// each target. The corpus counts prove the control comparison ran; one records report per target
+/// proves the rebuild did not.
+#[tokio::test]
+async fn fixture_corpus_compares_the_family_readers_under_the_shadow_switch_alone() -> Result<()> {
+    let _turn = FIXTURE_LOCK.lock().await;
+    let (scratch, previous, targets) = seed_fixture().await?;
+    let pool = scratch.pool();
+    shadow::take_reports();
+    let (compared, shadows) = run(
+        pool,
+        previous,
+        &targets,
+        None,
+        true,
+        Some(FIXTURE_CHILDREN_PAGE),
+    )
+    .await?;
+    ensure!(
+        compared.is_empty(),
+        "no target is rebuilt without the compare switch"
+    );
+    shadow::assert_fixture_corpus_counts(&targets)?;
+    ensure!(
+        shadows.len() == targets.len(),
+        "every target, and no rebuild, is shadow compared"
+    );
+    ensure!(
+        shadows.iter().all(|shadow| shadow.stage == "incremental"),
+        "only incremental records comparisons run without the compare switch"
+    );
+    records_shadow::require_clean(&shadows)?;
+    for shadow in &shadows {
+        ensure!(
+            shadow.report.compatibility_pairs > 0,
+            "the {} shadow comparison at {} checked no compatibility pairs",
+            shadow.stage,
+            shadow.target
         );
     }
     scratch.cleanup().await
