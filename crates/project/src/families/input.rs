@@ -264,11 +264,12 @@ impl BlockEvent {
 /// `limit` overall. That bounds each source's output, not its scan: the events and bindings
 /// sources can stop early when the planner walks their `(chain_id, block_number)` indexes in
 /// order, but duplicate rows per block, rejected rows and other plans can make them read much or
-/// all of the remaining interval; the two resolver edge sources read the chain's resolver edges
-/// (and the matching addresses) because their block numbers come out of a lateral VALUES list no
-/// index orders; the declaration source reads the captured start list. Readability is checked
-/// inside each source, before its limit, so no source spends its limit on blocks that are then
-/// dropped.
+/// all of the remaining interval. The two resolver edge sources first collect their distinct
+/// boundaries in the interval and then check readability in block order until the limit, so they
+/// read the chain's resolver edges (and the matching addresses) but probe the lineage only up to
+/// the boundaries they return; the declaration source reads the captured start list. Readability
+/// is checked inside each source, before its limit, so no source spends its limit on blocks that
+/// are then dropped.
 pub(crate) async fn work_blocks(
     pool: &sqlx::PgPool,
     chain_id: &str,
@@ -305,35 +306,38 @@ pub(crate) async fn work_blocks(
               ORDER BY 1
               LIMIT $5)
              UNION ALL
-             (SELECT DISTINCT boundary.block_number
-              FROM discovery_edges edge
-              CROSS JOIN LATERAL (VALUES (edge.active_from_block_number),
-                                         (edge.active_to_block_number)) boundary (block_number)
-              WHERE edge.chain_id = $1 AND edge.edge_kind = 'resolver'
-                AND boundary.block_number BETWEEN $3 AND $2
-                -- An activation below the retained lineage has no block to apply; the first
-                -- readable work block classifies under it.
-                AND EXISTS (
-                    SELECT 1 FROM chain_lineage lineage
-                    WHERE lineage.chain_id = $1 AND lineage.block_number = boundary.block_number
-                      AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized'))
+             (SELECT boundary.block_number
+              FROM (SELECT DISTINCT boundary.block_number
+                    FROM discovery_edges edge
+                    CROSS JOIN LATERAL (VALUES (edge.active_from_block_number),
+                                               (edge.active_to_block_number))
+                        boundary (block_number)
+                    WHERE edge.chain_id = $1 AND edge.edge_kind = 'resolver'
+                      AND boundary.block_number BETWEEN $3 AND $2) boundary
+              -- An activation below the retained lineage has no block to apply; the first
+              -- readable work block classifies under it.
+              WHERE EXISTS (
+                  SELECT 1 FROM chain_lineage lineage
+                  WHERE lineage.chain_id = $1 AND lineage.block_number = boundary.block_number
+                    AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized'))
               ORDER BY 1
               LIMIT $5)
              UNION ALL
-             (SELECT DISTINCT boundary.block_number
-              FROM discovery_edges edge
-              JOIN contract_instance_addresses address
-                ON address.contract_instance_id = edge.to_contract_instance_id
-               AND address.chain_id = edge.chain_id
-              CROSS JOIN LATERAL (VALUES (address.active_from_block_number),
-                                         (address.active_to_block_number))
-                  boundary (block_number)
-              WHERE edge.chain_id = $1 AND edge.edge_kind = 'resolver'
-                AND boundary.block_number BETWEEN $3 AND $2
-                AND EXISTS (
-                    SELECT 1 FROM chain_lineage lineage
-                    WHERE lineage.chain_id = $1 AND lineage.block_number = boundary.block_number
-                      AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized'))
+             (SELECT boundary.block_number
+              FROM (SELECT DISTINCT boundary.block_number
+                    FROM discovery_edges edge
+                    JOIN contract_instance_addresses address
+                      ON address.contract_instance_id = edge.to_contract_instance_id
+                     AND address.chain_id = edge.chain_id
+                    CROSS JOIN LATERAL (VALUES (address.active_from_block_number),
+                                               (address.active_to_block_number))
+                        boundary (block_number)
+                    WHERE edge.chain_id = $1 AND edge.edge_kind = 'resolver'
+                      AND boundary.block_number BETWEEN $3 AND $2) boundary
+              WHERE EXISTS (
+                  SELECT 1 FROM chain_lineage lineage
+                  WHERE lineage.chain_id = $1 AND lineage.block_number = boundary.block_number
+                    AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized'))
               ORDER BY 1
               LIMIT $5)
              UNION ALL
