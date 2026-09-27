@@ -26,6 +26,7 @@ mod permissions;
 mod phase_projection_reads;
 mod primary_name;
 mod projection_helpers;
+pub mod publication_source;
 mod record_inventory;
 mod registries;
 mod resolution_support;
