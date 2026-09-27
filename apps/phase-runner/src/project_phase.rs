@@ -6,7 +6,7 @@ use std::{
 
 use bigname_project::{
     BatchRequest, Engine, ErrorKind as ProjectErrorKind, Marker, RunMode as ProjectRunMode,
-    families::{FamilyMode, FamilyOptions, InputToken},
+    families::{FamilyMode, FamilyOptions, InputToken, RebuildRanges},
 };
 use sqlx::PgPool;
 
@@ -40,6 +40,9 @@ pub struct FamilySettings {
     /// batch follows it. The supervised run leaves it off: the batch's publication is already
     /// committed, and the next batch waits for one budgeted family run rather than a series.
     pub finish_each_batch: bool,
+    /// Which work blocks a family rebuild applies several to a transaction; production keeps the
+    /// switch below the chain's safe block.
+    pub rebuild_ranges: RebuildRanges,
 }
 
 impl Default for FamilySettings {
@@ -49,6 +52,7 @@ impl Default for FamilySettings {
             max_blocks_per_run: bigname_project::families::MAX_BLOCKS_PER_RUN,
             token_budget: Duration::from_secs(2),
             finish_each_batch: false,
+            rebuild_ranges: RebuildRanges::BelowSafe,
         }
     }
 }
@@ -245,7 +249,8 @@ impl Phase for ProjectPhase {
                 return;
             };
             let options = FamilyOptions::new(bigname_content_hash::INTERPRETER_CONTENT_HASH)
-                .with_max_blocks_per_run(self.families.max_blocks_per_run);
+                .with_max_blocks_per_run(self.families.max_blocks_per_run)
+                .with_rebuild_ranges(self.families.rebuild_ranges);
             let token = match token {
                 Ok(token) => token,
                 Err(reason) => {

@@ -484,6 +484,10 @@ async fn run(
     let project = ProjectPhase::with_hydration(pool.clone(), ChainRpcUrls::default())
         .with_family_settings(FamilySettings {
             finish_each_batch: true,
+            // With no safe block published the production switch point sits 256 blocks under
+            // the target, above every fixture block; the harness puts every work block below
+            // the target in rebuild ranges, so each rebuild comparison covers them.
+            rebuild_ranges: bigname_project::families::RebuildRanges::Through(i64::MAX),
             ..FamilySettings::default()
         })
         .with_metrics_feed(metrics_feed.clone());
