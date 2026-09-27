@@ -264,12 +264,14 @@ impl BlockEvent {
 /// `limit` overall. That bounds each source's output, not its scan: the events and bindings
 /// sources can stop early when the planner walks their `(chain_id, block_number)` indexes in
 /// order, but duplicate rows per block, rejected rows and other plans can make them read much or
-/// all of the remaining interval. The two resolver edge sources first collect their distinct
-/// boundaries in the interval and then check readability in block order until the limit, so they
-/// read the chain's resolver edges (and the matching addresses) but probe the lineage only up to
-/// the boundaries they return; the declaration source reads the captured start list. Readability
-/// is checked inside each source, before its limit, so no source spends its limit on blocks that
-/// are then dropped.
+/// all of the remaining interval. The two resolver edge sources deduplicate their in-range
+/// boundaries before applying readability and the per-source limit; with an ordered nested-loop
+/// plan the lineage probes stop once enough readable boundaries are produced or the candidates
+/// are exhausted (unreadable candidates need probes too), but that plan is not guaranteed and
+/// other plans may read more lineage rows. Collecting the boundaries still reads the chain's
+/// resolver edges and the matching addresses; the declaration source reads the captured start
+/// list. Readability is checked inside each source, before its limit, so no source spends its
+/// limit on blocks that are then dropped.
 pub(crate) async fn work_blocks(
     pool: &sqlx::PgPool,
     chain_id: &str,
