@@ -22,7 +22,42 @@ pub async fn load_phase_expected_status_chain_ids(pool: &PgPool) -> Result<Vec<S
     .context("failed to load expected schema-v2 indexing status chains")
 }
 
+/// Whether the served publication belongs to this build's interpreter generation and sits at or
+/// just behind the stored head (at the head only on the head's own hash): the Project row's
+/// position, or the family marker's while the [publication switch](crate::publication_source)
+/// is on, which must also be `live`.
+const PROJECT_ROW_GENERATION_CURRENT: &str = r#"            COALESCE(
+                project.input_content_hash = $1
+                AND project.current_block_number <= head.latest_block_number
+                AND (
+                    project.current_block_number < head.latest_block_number
+                    OR project.current_block_hash = head.latest_block_hash
+                ),
+                false
+            ) AS project_generation_current,
+"#;
+const FAMILY_MARKER_GENERATION_CURRENT: &str = r#"            COALESCE(
+                marker.state = 'live'
+                AND marker.input_content_hash = $1
+                AND marker.current_block_number <= head.latest_block_number
+                AND (
+                    marker.current_block_number < head.latest_block_number
+                    OR marker.current_block_hash = head.latest_block_hash
+                ),
+                false
+            ) AS project_generation_current,
+"#;
+const FAMILY_MARKER_JOIN: &str = r#"
+        LEFT JOIN bigname_phase.project_family_marker marker
+          ON marker.chain_id = known_chains.chain_id"#;
+
 pub async fn load_phase_indexing_status(pool: &PgPool) -> Result<IndexingStatusRead> {
+    let (project_generation_current, family_marker_join) =
+        if crate::publication_source::serve_from_families() {
+            (FAMILY_MARKER_GENERATION_CURRENT, FAMILY_MARKER_JOIN)
+        } else {
+            (PROJECT_ROW_GENERATION_CURRENT, "")
+        };
     let rows = sqlx::query(&format!(
         r#"
         WITH known_chains AS ({PHASE_EXPECTED_CHAIN_IDS_SELECT})
@@ -43,16 +78,7 @@ pub async fn load_phase_indexing_status(pool: &PgPool) -> Result<IndexingStatusR
             COALESCE(settlement.any_phase_settled_while_unconfigured, false)
                 AS any_phase_settled_while_unconfigured,
             known_chains.chain_id = $2 AS provider_trusted_verification_required,
-            COALESCE(
-                project.input_content_hash = $1
-                AND project.current_block_number <= head.latest_block_number
-                AND (
-                    project.current_block_number < head.latest_block_number
-                    OR project.current_block_hash = head.latest_block_hash
-                ),
-                false
-            ) AS project_generation_current,
-            COALESCE(interpret.redo_in_progress, false) AS interpret_redo_in_progress,
+{project_generation_current}            COALESCE(interpret.redo_in_progress, false) AS interpret_redo_in_progress,
             COALESCE(project.redo_in_progress, false) AS project_redo_in_progress,
             heartbeat.age_seconds AS phase_runner_heartbeat_age_seconds
         FROM known_chains
@@ -60,7 +86,7 @@ pub async fn load_phase_indexing_status(pool: &PgPool) -> Result<IndexingStatusR
           ON head.chain_id = known_chains.chain_id
         LEFT JOIN chain_phase_state project
           ON project.chain_id = known_chains.chain_id
-         AND project.phase_name = 'project'
+         AND project.phase_name = 'project'{family_marker_join}
         LEFT JOIN chain_phase_state interpret
           ON interpret.chain_id = known_chains.chain_id
          AND interpret.phase_name = 'interpret'

@@ -752,7 +752,10 @@ or a paused, redoing, or missing-heartbeat Project maps
 to `degraded`. A running Project with a completed publication remains eligible
 for `ready` when its block and time lag are within the configured thresholds,
 its interpreter content hash matches this API build, and a same-height
-publication has the stored head's exact block hash. A generation mismatch or
+publication has the stored head's exact block hash. With the
+[publication switch](glossary.md#publication-switch) on, those last two checks
+read the [family marker](glossary.md#family-marker), which must also be `live`.
+A generation mismatch or
 running without a completed publication is `degraded`. The schema-v2 project phase has no
 invalidation queue or dead-letter table, so the retained response fields map
 to `pending_invalidation_count=0`,
@@ -867,6 +870,24 @@ it trails by exactly one block, the selected position is the publication (and
 unchanged. A publication further behind, one from a different interpreter
 generation, or one whose block a reorg has orphaned (until Project republishes
 on the new fork) is `409 stale`, so a wedged or paused Project still surfaces.
+
+With the [publication switch](glossary.md#publication-switch) on, the
+publication is the [family marker](glossary.md#family-marker)'s block instead
+of the project row's. The marker must be `live`: while a rebuild is still
+populating the [owned key families](glossary.md#owned-key-family) it is
+`bootstrap_pending`, and reads are `409 stale`. It must also carry this build's
+interpreter content hash, sit on readable lineage, and trail the stored head by
+at most one block, as above. The generation the API captures before a read and
+compares after it is the marker's `sequence`, which every family block
+advances, in place of the project row's version. Clients only see it compared
+for equality, so nothing changes on the wire, except that a continuation cursor
+issued before the switch was turned on returns `409 stale` once and must
+restart. Collection expiry filters, such as `include_expired=false` on
+subnames, are evaluated at the published block's timestamp on the first page and
+every continuation, not at the time of the first request; a scope spanning
+several chains uses the earliest of their published block timestamps. Verified
+lookup also requires the marker to pass these checks before provider execution;
+its post-call guard still compares the project row's generation.
 
 Indexed lookup names, record inventories, address-name relations, resolver
 overviews, and resolver bound names now come from `bigname_phase` projections.

@@ -47,8 +47,14 @@ pub(super) async fn ensure_project_at_head(
 ) -> Result<Value> {
     // The publication may trail the stored head within the shared lag tolerance (see
     // bigname_storage::PROJECT_PUBLICATION_LAG_TOLERANCE_BLOCKS); it must be on the readable
-    // lineage and belong to this build's interpreter generation.
-    let publication: Option<Value> = sqlx::query_scalar(
+    // lineage and belong to this build's interpreter generation. While the publication switch is
+    // on, the family marker must pass the same admission and be `live` too.
+    let family_marker_admission = if bigname_storage::publication_source::serve_from_families() {
+        FAMILY_MARKER_ADMISSION
+    } else {
+        ""
+    };
+    let publication: Option<Value> = sqlx::query_scalar(&format!(
         r#"
         SELECT jsonb_build_object(
             'row_xmin', project.xmin::text,
@@ -61,7 +67,7 @@ pub(super) async fn ensure_project_at_head(
           ON lineage.chain_id = project.chain_id
          AND lineage.block_number = project.current_block_number
          AND lineage.block_hash = project.current_block_hash
-         AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+         AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized'){family_marker_admission}
         WHERE project.chain_id = $1
           AND project.phase_name = 'project'
           AND project.phase_status IN ('completed', 'running')
@@ -69,7 +75,7 @@ pub(super) async fn ensure_project_at_head(
           AND (project.current_block_number <> $2 OR project.current_block_hash = $3)
           AND project.input_content_hash = $4
         "#,
-    )
+    ))
     .bind(&head.chain_id)
     .bind(head.block_number)
     .bind(&head.block_hash)
@@ -85,6 +91,23 @@ pub(super) async fn ensure_project_at_head(
         ))
     })
 }
+
+/// The family marker's admission while the publication switch is on. The generation the lookup
+/// records (`row_xmin`) stays the Project row's `xmin`: the database guard
+/// `revalidate_resolution_lookup_state` rechecks it against `chain_phase_state`, and moving it to
+/// the marker's `sequence` needs that guard redefined by a schema-migration.
+const FAMILY_MARKER_ADMISSION: &str = r#"
+        JOIN project_family_marker marker
+          ON marker.chain_id = project.chain_id
+         AND marker.state = 'live'
+         AND marker.input_content_hash = $4
+         AND $2 - marker.current_block_number BETWEEN 0 AND $5
+         AND (marker.current_block_number <> $2 OR marker.current_block_hash = $3)
+        JOIN chain_lineage marker_lineage
+          ON marker_lineage.chain_id = marker.chain_id
+         AND marker_lineage.block_number = marker.current_block_number
+         AND marker_lineage.block_hash = marker.current_block_hash
+         AND marker_lineage.canonicality_state IN ('canonical', 'safe', 'finalized')"#;
 
 pub(super) async fn inventory_position(
     transaction: &mut Transaction<'_, Postgres>,

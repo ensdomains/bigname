@@ -743,6 +743,7 @@ GRANT SELECT ON TABLE
     bigname_phase.chain_header_audit,
     bigname_phase.chain_lineage,
     bigname_phase.chain_phase_state,
+    bigname_phase.project_family_marker,
     bigname_phase.service_heartbeats,
     bigname_phase.normalized_events,
     bigname_phase.migration_event_associations,
@@ -782,6 +783,13 @@ block. The grant is SELECT-only and does not admit discovery writes.
 Reapply these explicit relation and function grants after a reviewed
 phase-schema replacement; do not use ownership
 or schema-wide write grants as a shortcut.
+
+`project_family_marker` is on the list for the
+[publication switch](glossary.md#publication-switch): with
+`BIGNAME_SERVE_FROM_FAMILIES` on, snapshot selection, the verified lookup and
+`/v1/status` read the [family marker](glossary.md#family-marker), and startup
+refuses a role that cannot read it. With the switch off the API does not read
+it.
 
 `migration_event_associations` is on the list because
 `GET /v1/diagnostics/events` selects the ENSv1→ENSv2 migration correlation rows

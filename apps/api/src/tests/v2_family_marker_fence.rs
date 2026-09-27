@@ -333,3 +333,25 @@ async fn v2_get_subnames_include_expired_false_is_evaluated_at_the_published_blo
     .await?;
     database.cleanup().await
 }
+
+#[tokio::test]
+async fn api_preflight_requires_the_family_marker_only_with_the_switch_on() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    sqlx::query("DROP TABLE bigname_phase.project_family_marker")
+        .execute(&database.lookup_pool)
+        .await?;
+    let missing = |on| {
+        bigname_storage::publication_source::with_serve_from_families(
+            on,
+            bigname_storage::load_missing_api_lookup_ddl(&database.lookup_pool),
+        )
+    };
+    let marker = |objects: &[bigname_storage::ApiLookupDdlObject]| {
+        objects
+            .iter()
+            .any(|object| object.identity == "bigname_phase.project_family_marker")
+    };
+    assert!(marker(&missing(true).await?), "switch on: the marker is a serving read");
+    assert!(missing(false).await?.is_empty(), "switch off: nothing reads it");
+    database.cleanup().await
+}

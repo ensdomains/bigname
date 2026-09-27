@@ -6,7 +6,7 @@
 //! and computes one `sort_timestamp` column; the outer SELECT applies the keyset predicate and
 //! order over that column so the cursor logic is written once per sort, not once per filter.
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use sqlx::{PgPool, Postgres, QueryBuilder, Row, postgres::PgRow, types::time::OffsetDateTime};
 
 use crate::address_names::{
@@ -63,9 +63,17 @@ pub async fn load_children_current_page_filtered(
     if let Some(cursor) = cursor {
         ensure_cursor_matches_sort(filter.sort, cursor)?;
     }
+    let expiry_clock = match (filter.include_expired, filter.evaluated_at) {
+        (true, _) => None,
+        (false, Some(evaluated_at)) => Some(evaluated_at),
+        (false, None) => bail!(
+            "children_current include_expired=false needs the publication's evaluation time; \
+             the expiry fence never falls back to the database clock"
+        ),
+    };
 
     let mut builder = QueryBuilder::<Postgres>::new("WITH children AS (");
-    push_children_cte(&mut builder, parent_logical_name_id, filter);
+    push_children_cte(&mut builder, parent_logical_name_id, filter, expiry_clock);
     builder.push(") SELECT * FROM children WHERE TRUE");
     if let Some(cursor) = cursor {
         push_cursor_after(&mut builder, filter.order, cursor);
@@ -99,7 +107,7 @@ pub async fn load_children_current_page_filtered(
         u64::try_from(summary.child_count).context("negative child count")?
     } else {
         let mut count = QueryBuilder::<Postgres>::new("WITH children AS (");
-        push_children_cte(&mut count, parent_logical_name_id, filter);
+        push_children_cte(&mut count, parent_logical_name_id, filter, expiry_clock);
         count.push(") SELECT COUNT(*)::BIGINT FROM children");
         u64::try_from(count.build_query_scalar::<i64>().fetch_one(pool).await?)
             .context("negative filtered child count")?
@@ -112,10 +120,12 @@ pub async fn load_children_current_page_filtered(
     })
 }
 
+/// `expiry_clock` is `Some` exactly when the page omits expired children.
 fn push_children_cte<'a>(
     builder: &mut QueryBuilder<'a, Postgres>,
     parent_logical_name_id: &'a str,
     filter: &ChildrenCurrentPageFilter<'a>,
+    expiry_clock: Option<OffsetDateTime>,
 ) {
     builder.push(format!(
         r#"
@@ -151,9 +161,9 @@ fn push_children_cte<'a>(
         builder.push_bind(format!("{}%", escape_like_pattern(prefix)));
         builder.push(" ESCAPE '\\'");
     }
-    if !filter.include_expired {
+    if let Some(expiry_clock) = expiry_clock {
         // A child is expired when its current registration is released, or when the expiry the
-        // `sort=expires_at` order reads is already behind the database's transaction time. A
+        // `sort=expires_at` order reads is already behind the caller's evaluation time. A
         // child with no name row, no registration, or no expiry is not expired, so the expiry
         // comparison is folded to TRUE when it is NULL instead of dropping the row.
         builder.push(
@@ -161,11 +171,7 @@ fn push_children_cte<'a>(
         );
         push_expires_at_timestamp_expr(builder);
         builder.push(" >= ");
-        if let Some(evaluated_at) = filter.evaluated_at {
-            builder.push_bind(evaluated_at);
-        } else {
-            builder.push("NOW()");
-        }
+        builder.push_bind(expiry_clock);
         builder.push(", TRUE)");
     }
 }
