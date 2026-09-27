@@ -150,3 +150,46 @@ async fn the_work_list_returns_the_lowest_blocks_up_to_its_limit() -> Result<()>
     database.cleanup().await?;
     Ok(())
 }
+
+// Each source of the work list stops at `limit` blocks of its own, and the list is still the
+// lowest `limit` blocks across all of them. Events fill blocks 4 to 10, three to a block, more
+// blocks than the limit; declarations start at 2, below every event, and at 11. A source that
+// stopped at `limit` rows rather than `limit` blocks would give the events one block.
+#[tokio::test]
+async fn each_work_source_stops_at_the_limit_and_the_lowest_blocks_win_across_them() -> Result<()> {
+    let (database, pool) = database().await?;
+    sqlx::query(
+        "INSERT INTO normalized_events (event_identity, namespace, event_kind, source_family,
+             manifest_version, chain_id, block_number, block_hash, transaction_hash,
+             transaction_index, log_index, derivation_kind, canonicality_state, before_state,
+             after_state, raw_fact_ref)
+         SELECT 'work:' || block || ':' || log, 'ens', 'PreimageObserved', 'ens_v1_registry_l1',
+                1, $1, block, '0x' || lpad(to_hex(block), 64, '0'), '0xfeed', 0, log,
+                'ens_v2_registry_resource_surface', 'canonical', '{}'::jsonb, '{}'::jsonb,
+                '{}'::jsonb
+         FROM generate_series(4, 10) block, generate_series(0, 2) log",
+    )
+    .bind(CHAIN)
+    .execute(&pool)
+    .await?;
+    blockless_update(&pool, &[2, 11]).await?;
+    let history = manifests::History::read(&pool, CHAIN, 12).await?;
+    assert_eq!(
+        input::work_blocks(&pool, CHAIN, 1, 12, &history, i64::MAX).await?,
+        [2, 4, 5, 6, 7, 8, 9, 10, 11]
+    );
+    assert_eq!(
+        input::work_blocks(&pool, CHAIN, 1, 12, &history, 3).await?,
+        [2, 4, 5]
+    );
+    assert_eq!(
+        input::work_blocks(&pool, CHAIN, 5, 12, &history, 3).await?,
+        [5, 6, 7]
+    );
+    assert_eq!(
+        input::work_blocks(&pool, CHAIN, 9, 12, &history, 3).await?,
+        [9, 10, 11]
+    );
+    database.cleanup().await?;
+    Ok(())
+}

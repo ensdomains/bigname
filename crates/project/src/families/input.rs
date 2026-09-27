@@ -258,9 +258,12 @@ impl BlockEvent {
 /// is; classification.rs, `activated`). The declaration start blocks come from the manifest
 /// history the run captured (`manifests::History::declaration_starts`), the one population
 /// classifies under, not from a read of their own. A rebuild visits only these: any other block
-/// owns no family fact. At most `limit` blocks are returned, the lowest first. That bounds the
-/// rows returned and retained by the caller; how much of each source the query scans, and the
-/// UNION's deduplication, remain plan-dependent.
+/// owns no family fact. At most `limit` blocks are returned, the lowest first. Each source takes
+/// its own lowest `limit` distinct readable blocks and stops (the events and bindings can walk
+/// their `(chain_id, block_number)` indexes in order), so a run reads a bounded prefix of every
+/// source rather than the whole rest of the chain; the lowest `limit` of their union is the
+/// lowest `limit` overall. Readability is checked inside each source, before its limit, so no
+/// source spends its limit on blocks that are then dropped.
 pub(crate) async fn work_blocks(
     pool: &sqlx::PgPool,
     chain_id: &str,
@@ -271,54 +274,73 @@ pub(crate) async fn work_blocks(
 ) -> Result<Vec<i64>> {
     sqlx::query_scalar(
         "/* project:families.input.work_blocks */
-         SELECT work.block_number FROM (
-             SELECT event.block_number
-             FROM normalized_events event
-             JOIN chain_lineage lineage
-               ON lineage.chain_id = event.chain_id
-              AND lineage.block_number = event.block_number
-              AND lineage.block_hash = event.block_hash
-             WHERE event.chain_id = $1 AND event.block_number BETWEEN $3 AND $2
-               AND event.consumer_visibility = 'activated'
-               AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
-               AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
-             UNION
-             SELECT binding.block_number
-             FROM surface_bindings binding
-             JOIN chain_lineage lineage
-               ON lineage.chain_id = binding.chain_id
-              AND lineage.block_number = binding.block_number
-              AND lineage.block_hash = binding.block_hash
-             WHERE binding.chain_id = $1 AND binding.block_number BETWEEN $3 AND $2
-               AND binding.canonicality_state IN ('canonical', 'safe', 'finalized')
-               AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
-             UNION
-             SELECT boundary.block_number
-             FROM discovery_edges edge
-             CROSS JOIN LATERAL (VALUES (edge.active_from_block_number),
-                                        (edge.active_to_block_number)) boundary (block_number)
-             WHERE edge.chain_id = $1 AND edge.edge_kind = 'resolver'
-               AND boundary.block_number BETWEEN $3 AND $2
-             UNION
-             SELECT boundary.block_number
-             FROM discovery_edges edge
-             JOIN contract_instance_addresses address
-               ON address.contract_instance_id = edge.to_contract_instance_id
-              AND address.chain_id = edge.chain_id
-             CROSS JOIN LATERAL (VALUES (address.active_from_block_number),
-                                        (address.active_to_block_number))
-                 boundary (block_number)
-             WHERE edge.chain_id = $1 AND edge.edge_kind = 'resolver'
-               AND boundary.block_number BETWEEN $3 AND $2
-             UNION
-             SELECT start.block_number FROM unnest($4::bigint[]) start (block_number)
+         SELECT DISTINCT work.block_number FROM (
+             (SELECT DISTINCT event.block_number
+              FROM normalized_events event
+              JOIN chain_lineage lineage
+                ON lineage.chain_id = event.chain_id
+               AND lineage.block_number = event.block_number
+               AND lineage.block_hash = event.block_hash
+              WHERE event.chain_id = $1 AND event.block_number BETWEEN $3 AND $2
+                AND event.consumer_visibility = 'activated'
+                AND event.canonicality_state IN ('canonical', 'safe', 'finalized')
+                AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+              ORDER BY 1
+              LIMIT $5)
+             UNION ALL
+             (SELECT DISTINCT binding.block_number
+              FROM surface_bindings binding
+              JOIN chain_lineage lineage
+                ON lineage.chain_id = binding.chain_id
+               AND lineage.block_number = binding.block_number
+               AND lineage.block_hash = binding.block_hash
+              WHERE binding.chain_id = $1 AND binding.block_number BETWEEN $3 AND $2
+                AND binding.canonicality_state IN ('canonical', 'safe', 'finalized')
+                AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+              ORDER BY 1
+              LIMIT $5)
+             UNION ALL
+             (SELECT DISTINCT boundary.block_number
+              FROM discovery_edges edge
+              CROSS JOIN LATERAL (VALUES (edge.active_from_block_number),
+                                         (edge.active_to_block_number)) boundary (block_number)
+              WHERE edge.chain_id = $1 AND edge.edge_kind = 'resolver'
+                AND boundary.block_number BETWEEN $3 AND $2
+                -- An activation below the retained lineage has no block to apply; the first
+                -- readable work block classifies under it.
+                AND EXISTS (
+                    SELECT 1 FROM chain_lineage lineage
+                    WHERE lineage.chain_id = $1 AND lineage.block_number = boundary.block_number
+                      AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized'))
+              ORDER BY 1
+              LIMIT $5)
+             UNION ALL
+             (SELECT DISTINCT boundary.block_number
+              FROM discovery_edges edge
+              JOIN contract_instance_addresses address
+                ON address.contract_instance_id = edge.to_contract_instance_id
+               AND address.chain_id = edge.chain_id
+              CROSS JOIN LATERAL (VALUES (address.active_from_block_number),
+                                         (address.active_to_block_number))
+                  boundary (block_number)
+              WHERE edge.chain_id = $1 AND edge.edge_kind = 'resolver'
+                AND boundary.block_number BETWEEN $3 AND $2
+                AND EXISTS (
+                    SELECT 1 FROM chain_lineage lineage
+                    WHERE lineage.chain_id = $1 AND lineage.block_number = boundary.block_number
+                      AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized'))
+              ORDER BY 1
+              LIMIT $5)
+             UNION ALL
+             (SELECT DISTINCT start.block_number
+              FROM unnest($4::bigint[]) start (block_number)
+              WHERE EXISTS (
+                  SELECT 1 FROM chain_lineage lineage
+                  WHERE lineage.chain_id = $1 AND lineage.block_number = start.block_number
+                    AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized'))
+              ORDER BY 1
+              LIMIT $5)
          ) work
-         -- An activation below the retained lineage has no block to apply; the first readable
-         -- work block classifies under it.
-         WHERE EXISTS (
-             SELECT 1 FROM chain_lineage lineage
-             WHERE lineage.chain_id = $1 AND lineage.block_number = work.block_number
-               AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized'))
          ORDER BY 1
          LIMIT $5",
     )
