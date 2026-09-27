@@ -31,7 +31,10 @@
 //!
 //! With `BIGNAME_END_TO_END_SHADOW=1` (always on the fixture) each target, and each rebuild when
 //! compared, also compares the owned key family readers with today's readers
-//! (`project_end_to_end/records_shadow.rs`). Production serves today's tables either way.
+//! (`project_end_to_end/records_shadow.rs`), and the control and topology comparisons above run
+//! at each target as well, without the rebuild: a disposable copy can compare all three family
+//! reader groups per target with `SHADOW=1` alone, and reserve `COMPARE=1`, which rebuilds the
+//! whole copy at every target, for one target. Production serves today's tables either way.
 #[path = "project_end_to_end/endpoint.rs"]
 mod endpoint;
 #[path = "project_end_to_end/records_shadow.rs"]
@@ -487,7 +490,10 @@ async fn run(
             family_marker == Some(number),
             "the owned key families stopped at {family_marker:?}, not at target {number}"
         );
-        if compare.is_some() {
+        // The control and topology family readers beside the served readers at the same
+        // publication, under either switch; the rebuild below stays behind `compare`.
+        let readers_page = compare.or(shadow);
+        if readers_page.is_some() {
             // The family readers beside the served readers at the same publication.
             // With `corpus`, the comparison also reads the fixture corpus's expected counts at
             // this publication, which the corpus test asserts after the run.
@@ -526,7 +532,7 @@ async fn run(
                 records_shadow::compare(pool, CHAIN, &target, page_size, "incremental").await?,
             );
         }
-        if let Some(children_page) = compare {
+        if let Some(children_page) = readers_page {
             let report = topology_shadow::compare(
                 pool,
                 CHAIN,
