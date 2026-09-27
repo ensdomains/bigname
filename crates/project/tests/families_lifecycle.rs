@@ -111,7 +111,7 @@ async fn five_position_history_moves_the_association_and_nothing_else() -> Resul
         json!({"expiry": 300}),
     )
     .await?;
-    fixture.apply(14, FamilyMode::Normal).await;
+    fixture.apply(14, FamilyMode::Normal).await?;
 
     let association = one(&fixture, "project_lifecycle_association").await?;
     assert_eq!(
@@ -146,7 +146,7 @@ async fn five_position_history_moves_the_association_and_nothing_else() -> Resul
         json!({"expiry": 500}),
     )
     .await?;
-    fixture.apply(18, FamilyMode::Normal).await;
+    fixture.apply(18, FamilyMode::Normal).await?;
     let association = one(&fixture, "project_lifecycle_association").await?;
     assert_eq!(association[0]["target_resource_id"], json!(k2));
     assert_eq!(association[0]["block_number"], json!(16));
@@ -189,7 +189,7 @@ async fn competing_grants_in_one_block_associate_the_later_transaction() -> Resu
             )
             .await?;
     }
-    fixture.apply(10, FamilyMode::Normal).await;
+    fixture.apply(10, FamilyMode::Normal).await?;
     let association = one(&fixture, "project_lifecycle_association").await?;
     assert_eq!(association[0]["target_resource_id"], json!(k2));
     assert_eq!(association[0]["transaction_index"], json!(2));
@@ -224,7 +224,7 @@ async fn registry_identifier_comes_from_instance_then_emitter_then_registry() ->
             )
             .await?;
     }
-    fixture.apply(10, FamilyMode::Normal).await;
+    fixture.apply(10, FamilyMode::Normal).await?;
     let mut registries: Vec<Value> = one(&fixture, "project_lifecycle_triple_summary")
         .await?
         .iter()
@@ -296,7 +296,7 @@ async fn round_seven(holder: &str) -> Result<(Fixture, Vec<Value>)> {
             WRAPPER,
         )
         .await?;
-    fixture.apply(18, FamilyMode::Normal).await;
+    fixture.apply(18, FamilyMode::Normal).await?;
     let rows = retained(&fixture, &p).await?;
     Ok((fixture, rows))
 }
@@ -381,7 +381,7 @@ async fn round_eight(named: bool) -> Result<(Fixture, Value)> {
             WRAPPER,
         )
         .await?;
-    fixture.apply(12, FamilyMode::Normal).await;
+    fixture.apply(12, FamilyMode::Normal).await?;
     let grant = retained(&fixture, &lease).await?.remove(0);
     Ok((fixture, grant))
 }
@@ -468,7 +468,7 @@ async fn round_eight_same_transaction_witness_keeps_both_grants() -> Result<()> 
                 .at(3, 1),
         )
         .await?;
-    fixture.apply(12, FamilyMode::Normal).await;
+    fixture.apply(12, FamilyMode::Normal).await?;
     let rows = retained(&fixture, &lease).await?;
     assert_eq!(
         rows.iter()
@@ -568,7 +568,7 @@ async fn maxima_follow_the_reducer_table() -> Result<()> {
             )
             .await?;
     }
-    fixture.apply(16, FamilyMode::Normal).await;
+    fixture.apply(16, FamilyMode::Normal).await?;
     let state = |rows: &[Value], resource: &str| {
         rows.iter()
             .find(|row| row["resource_id"] == json!(resource))
@@ -591,7 +591,7 @@ async fn maxima_follow_the_reducer_table() -> Result<()> {
         json!(16)
     );
 
-    fixture.apply(17, FamilyMode::Normal).await;
+    fixture.apply(17, FamilyMode::Normal).await?;
     let key = state(&one(&fixture, "project_lifecycle_key_state").await?, &k);
     assert_eq!(key["last_path_expiry"]["position"]["log_index"], json!(1));
     assert_eq!(key["last_active"]["kind"], json!("RegistrationGranted"));
@@ -625,7 +625,7 @@ async fn child_rows_select_granted_renewed_released_and_count_reservations() -> 
             REGISTRY,
         )
         .await?;
-    fixture.apply(10, FamilyMode::Normal).await;
+    fixture.apply(10, FamilyMode::Normal).await?;
     let child = one(&fixture, "project_child_registration_state").await?;
     assert_eq!(
         pick(&child[0], &["event_kind", "exists"]),
@@ -667,7 +667,7 @@ async fn child_rows_select_granted_renewed_released_and_count_reservations() -> 
             REGISTRY,
         )
         .await?;
-    fixture.apply(12, FamilyMode::Normal).await;
+    fixture.apply(12, FamilyMode::Normal).await?;
     let child = one(&fixture, "project_child_registration_state").await?;
     assert_eq!(
         pick(

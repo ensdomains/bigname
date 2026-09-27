@@ -23,42 +23,31 @@ use support::{ScratchDatabase, seed_lineage};
 
 const CHAIN: &str = "families-runner";
 
-// The family loop runs after the batch's progress is recorded, in its own transactions. A
-// failure there must leave the Project batch, its recorded progress and the served tables as
-// they would have been without it; the next batch catches the families up.
+// The family loop runs after the batch's progress is recorded, in its own transactions. A failure
+// there fails the Project run with a retryable error once that progress is recorded: the served
+// redo's progress stands, the restart loop retries, and the families never block the batch. Here
+// every family run fails until the trigger goes, so the command is stopped while it retries; the
+// rerun that follows catches the families up.
 #[tokio::test]
-async fn a_failing_family_loop_leaves_project_progress_recorded() -> Result<()> {
-    let scratch = ScratchDatabase::create("families_runner_failure").await?;
-    seed_lineage(scratch.pool(), CHAIN, 3).await?;
-    sqlx::query("UPDATE chain_lineage SET canonicality_state = 'canonical' WHERE chain_id = $1")
-        .bind(CHAIN)
-        .execute(scratch.pool())
-        .await?;
-    PhaseStore::new(scratch.pool().clone())
-        .initialize_chain(CHAIN)
-        .await?;
-    seed_completed_extent(scratch.pool(), 3).await?;
-    sqlx::query(
-        "CREATE FUNCTION refuse_family_marker() RETURNS trigger LANGUAGE plpgsql AS $$
-         BEGIN RAISE EXCEPTION 'injected family failure'; END $$",
-    )
-    .execute(scratch.pool())
-    .await?;
-    sqlx::query(
-        "CREATE TRIGGER refuse_family_marker BEFORE INSERT OR UPDATE ON project_family_marker
-         FOR EACH ROW EXECUTE FUNCTION refuse_family_marker()",
-    )
-    .execute(scratch.pool())
-    .await?;
+async fn a_failing_family_run_fails_project_after_its_progress_is_recorded() -> Result<()> {
+    let scratch = ready("families_runner_failure").await?;
+    refuse_marker_writes(&scratch, "TRUE").await?;
 
-    redo_project(&scratch).await?;
+    let (error, failure) = redo_until_family_error(&scratch, default_project(&scratch), 3).await?;
+    assert!(failure.contains("injected family failure"), "{failure}");
+    assert!(
+        failure.contains("stopped at no block") && failure.contains("served marker block 3 ("),
+        "{failure}"
+    );
     assert_eq!(
-        project_state(&scratch).await?,
-        ("completed".into(), Some(3), false)
+        redo_progress(&scratch).await?,
+        (true, Some(3)),
+        "the served redo recorded its progress before the families failed"
     );
     assert_eq!(marker(&scratch).await?, None, "the family loop was refused");
+    assert!(error.to_string().contains("is incomplete"), "{error}");
 
-    sqlx::query("DROP TRIGGER refuse_family_marker ON project_family_marker")
+    sqlx::query("DROP TRIGGER refuse_marker ON project_family_marker")
         .execute(scratch.pool())
         .await?;
     redo_project(&scratch).await?;
@@ -66,65 +55,35 @@ async fn a_failing_family_loop_leaves_project_progress_recorded() -> Result<()> 
         project_state(&scratch).await?,
         ("completed".into(), Some(3), false)
     );
-    assert_eq!(marker(&scratch).await?, Some(3), "the next batch caught up");
+    assert_eq!(marker(&scratch).await?, Some(3), "the rerun caught up");
     scratch.cleanup().await
 }
 
-// A schema whose family tables were never migrated: every family run fails and is counted as a
-// skip, and the Project batch and its progress commit as they would without the families.
+// A schema whose family tables were never migrated: every family run fails, and the failure is
+// the Project run's, retried by the restart loop, instead of a count beside a completed batch.
 #[tokio::test]
-async fn a_missing_family_migration_leaves_project_progress_recorded() -> Result<()> {
+async fn a_missing_family_migration_fails_project_and_is_retried() -> Result<()> {
     let scratch = ready("families_runner_missing").await?;
     sqlx::query("DROP TABLE project_family_marker")
         .execute(scratch.pool())
         .await?;
-    redo_project(&scratch).await?;
-    assert_eq!(
-        project_state(&scratch).await?,
-        ("completed".into(), Some(3), false)
-    );
+    let (_, failure) = redo_until_family_error(&scratch, default_project(&scratch), 3).await?;
+    assert!(failure.contains("project_family_marker"), "{failure}");
+    assert_eq!(redo_progress(&scratch).await?, (true, Some(3)));
     scratch.cleanup().await
 }
 
-// The input token read before the progress write is bounded. When it does not finish in time the
-// families skip the batch, the progress write is not held up, and the next batch catches up.
+// A family rebuild that needs more blocks than one run's budget: the batch starts one run after
+// another until the families reach its served marker, so the one-shot redo, which no later batch
+// follows, returns with the rebuild finished.
 #[tokio::test]
-async fn a_late_input_token_skips_the_families_and_the_next_batch_catches_up() -> Result<()> {
-    let scratch = ready("families_runner_token").await?;
-    redo_project_with(
-        &scratch,
-        FamilySettings {
-            token_budget: Duration::ZERO,
-            ..FamilySettings::default()
-        },
-    )
-    .await?;
-    assert_eq!(
-        project_state(&scratch).await?,
-        ("completed".into(), Some(3), false)
-    );
-    assert_eq!(
-        marker(&scratch).await?,
-        None,
-        "the families skipped the batch"
-    );
-
-    redo_project(&scratch).await?;
-    assert_eq!(marker(&scratch).await?, Some(3), "the next batch caught up");
-    scratch.cleanup().await
-}
-
-// A one-shot redo whose family rebuild needs more blocks than one run's budget: nothing calls the
-// family loop after the command returns, so the command finishes the rebuild before it does.
-#[tokio::test]
-async fn a_one_shot_redo_finishes_a_family_rebuild_longer_than_one_budget() -> Result<()> {
+async fn a_batch_runs_the_families_to_its_served_marker_across_budgets() -> Result<()> {
     let scratch = ready_through("families_runner_budget", 30).await?;
     seed_thirty_blocks_of_work(&scratch).await?;
     redo_project_through(
         &scratch,
         FamilySettings {
             max_blocks_per_run: 10,
-            finish_each_batch: true,
             ..FamilySettings::default()
         },
         30,
@@ -139,54 +98,34 @@ async fn a_one_shot_redo_finishes_a_family_rebuild_longer_than_one_budget() -> R
         Some(30),
         "the family rebuild finished before the command returned"
     );
+    assert!(repair_completed_for_current_attempt(&scratch).await?);
     scratch.cleanup().await
 }
 
-// A one-shot redo whose family runs stop short of the served marker, here on a failing block,
-// reports it: the served redo is recorded, the command fails, and rerunning it repairs the
-// families.
+// A family run that stops short of the served marker, here on a failing block, fails the Project
+// run with the block the families reached; the restart loop retries it, and once the block
+// applies a rerun of the same redo repairs the families.
 #[tokio::test]
 async fn a_one_shot_redo_whose_families_stop_short_fails_and_a_rerun_repairs_them() -> Result<()> {
     let scratch = ready_through("families_runner_short", 30).await?;
     seed_thirty_blocks_of_work(&scratch).await?;
-    sqlx::query(
-        "CREATE FUNCTION refuse_block_15() RETURNS trigger LANGUAGE plpgsql AS $$
-         BEGIN
-             IF NEW.current_block_number = 15 THEN RAISE EXCEPTION 'injected family failure'; END IF;
-             RETURN NEW;
-         END $$",
-    )
-    .execute(scratch.pool())
-    .await?;
-    sqlx::query(
-        "CREATE TRIGGER refuse_block_15 BEFORE INSERT OR UPDATE ON project_family_marker
-         FOR EACH ROW EXECUTE FUNCTION refuse_block_15()",
-    )
-    .execute(scratch.pool())
-    .await?;
+    refuse_marker_writes(&scratch, "NEW.current_block_number = 15").await?;
     let families = FamilySettings {
         max_blocks_per_run: 10,
-        finish_each_batch: true,
         ..FamilySettings::default()
     };
     let project =
         Arc::new(ProjectPhase::new(scratch.pool().clone()).with_family_settings(families));
-    let error = redo_with_phase(&scratch, project, 30)
-        .await
-        .expect_err("the families stopped short of the served marker");
-    assert_eq!(
-        project_state(&scratch).await?,
-        ("completed".into(), Some(30), false)
-    );
+    let (_, failure) = redo_until_family_error(&scratch, project, 30).await?;
     assert_eq!(marker(&scratch).await?, Some(14), "block 15 was refused");
-    let message = error.to_string();
-    assert!(message.contains("family repair incomplete"), "{message}");
+    assert!(failure.contains("injected family failure"), "{failure}");
     assert!(
-        message.contains("families at block 14 (") && message.contains("served marker block 30 ("),
-        "{message}"
+        failure.contains("stopped at block 14 (") && failure.contains("served marker block 30 ("),
+        "{failure}"
     );
+    assert_eq!(redo_progress(&scratch).await?, (true, Some(30)));
 
-    sqlx::query("DROP TRIGGER refuse_block_15 ON project_family_marker")
+    sqlx::query("DROP TRIGGER refuse_marker ON project_family_marker")
         .execute(scratch.pool())
         .await?;
     let project =
@@ -197,112 +136,115 @@ async fn a_one_shot_redo_whose_families_stop_short_fails_and_a_rerun_repairs_the
     scratch.cleanup().await
 }
 
-// The token-read failure with the families already on the served block: the run is skipped
-// through the token error path, which reads the marker but repairs nothing. The command fails, and
-// a rerun with the token readable completes the current repair attempt.
-#[tokio::test]
-async fn a_one_shot_redo_whose_token_read_fails_on_the_served_block_fails() -> Result<()> {
-    let scratch = ready_through("families_runner_token_skip", 30).await?;
-    seed_thirty_blocks_of_work(&scratch).await?;
-    let families = FamilySettings {
-        finish_each_batch: true,
-        ..FamilySettings::default()
-    };
-    redo_project_through(&scratch, families, 30).await?;
-    let before = marker_row(&scratch).await?;
-    assert_eq!(before.0, Some(30), "the families stand on the served block");
-
-    let late = FamilySettings {
-        token_budget: Duration::ZERO,
-        ..families
-    };
-    let error = redo_project_through(&scratch, late, 30)
-        .await
-        .expect_err("the token read failed");
-    assert_eq!(
-        project_state(&scratch).await?,
-        ("completed".into(), Some(30), false),
-        "the served redo is recorded"
-    );
-    assert_eq!(
-        marker_row(&scratch).await?,
-        before,
-        "the families did not move"
-    );
-    assert!(!repair_completed_for_current_attempt(&scratch).await?);
-    let message = error.to_string();
-    assert!(message.contains("family repair incomplete"), "{message}");
-    assert!(
-        message.contains("families at block 30 (")
-            && message.contains("served marker block 30 (")
-            && message.contains("the input token did not read within"),
-        "{message}"
-    );
-
-    redo_project_through(&scratch, families, 30).await?;
-    assert!(repair_completed_for_current_attempt(&scratch).await?);
-    scratch.cleanup().await
-}
-
-// A skipped family run is a shortfall even when the family marker already stands on the served
-// block: a redo that ends where the served marker was keeps its block and hash, so only the skip
+// A failed family run is a failure even when the family marker already stands on the served
+// block: a redo that ends where the served marker was keeps its block and hash, so only the error
 // shows the families never applied the redo attempt. Here the repair's first marker write fails
 // before it commits, so the marker stays on block 30.
 #[tokio::test]
-async fn a_one_shot_redo_whose_family_run_is_skipped_on_the_served_block_fails() -> Result<()> {
+async fn a_one_shot_redo_whose_family_run_fails_on_the_served_block_fails() -> Result<()> {
     let scratch = ready_through("families_runner_skip", 30).await?;
     seed_thirty_blocks_of_work(&scratch).await?;
-    let families = FamilySettings {
-        finish_each_batch: true,
-        ..FamilySettings::default()
-    };
-    redo_project_through(&scratch, families, 30).await?;
+    redo_project_through(&scratch, FamilySettings::default(), 30).await?;
     let before = marker_row(&scratch).await?;
     assert_eq!(before.0, Some(30), "the families stand on the served block");
 
-    sqlx::query(
-        "CREATE FUNCTION refuse_marker() RETURNS trigger LANGUAGE plpgsql AS $$
-         BEGIN RAISE EXCEPTION 'injected family failure'; END $$",
-    )
-    .execute(scratch.pool())
-    .await?;
-    sqlx::query(
-        "CREATE TRIGGER refuse_marker BEFORE INSERT OR UPDATE ON project_family_marker
-         FOR EACH ROW EXECUTE FUNCTION refuse_marker()",
-    )
-    .execute(scratch.pool())
-    .await?;
-    let error = redo_project_through(&scratch, families, 30)
-        .await
-        .expect_err("the family run was skipped");
-    assert_eq!(
-        project_state(&scratch).await?,
-        ("completed".into(), Some(30), false)
-    );
+    refuse_marker_writes(&scratch, "TRUE").await?;
+    let (_, failure) = redo_until_family_error(&scratch, default_project(&scratch), 30).await?;
     assert_eq!(
         marker_row(&scratch).await?,
         before,
         "nothing family-side committed"
     );
     assert!(!repair_completed_for_current_attempt(&scratch).await?);
-    let message = error.to_string();
-    assert!(message.contains("family repair incomplete"), "{message}");
     assert!(
-        message.contains("families at block 30 (") && message.contains("served marker block 30 ("),
-        "{message}"
+        failure.contains("stopped at block 30 (") && failure.contains("served marker block 30 ("),
+        "{failure}"
     );
 
     sqlx::query("DROP TRIGGER refuse_marker ON project_family_marker")
         .execute(scratch.pool())
         .await?;
-    redo_project_through(&scratch, families, 30).await?;
+    redo_project_through(&scratch, FamilySettings::default(), 30).await?;
     assert!(repair_completed_for_current_attempt(&scratch).await?);
     scratch.cleanup().await
 }
 
+/// A trigger that refuses every write of the family marker for which `condition` holds.
+async fn refuse_marker_writes(scratch: &ScratchDatabase, condition: &str) -> Result<()> {
+    sqlx::raw_sql(&format!(
+        "CREATE FUNCTION refuse_marker() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN
+             IF {condition} THEN RAISE EXCEPTION 'injected family failure'; END IF;
+             RETURN NEW;
+         END $$;
+         CREATE TRIGGER refuse_marker BEFORE INSERT OR UPDATE ON project_family_marker
+         FOR EACH ROW EXECUTE FUNCTION refuse_marker();"
+    ))
+    .execute(scratch.pool())
+    .await?;
+    Ok(())
+}
+
+fn default_project(scratch: &ScratchDatabase) -> Arc<dyn Phase> {
+    Arc::new(ProjectPhase::new(scratch.pool().clone()))
+}
+
+/// Run a Project redo through `head` until its family run has failed and the failure is recorded
+/// on the Project row, then stop the command, which the restart loop would otherwise keep
+/// retrying. Returns the command's error and the recorded failure.
+async fn redo_until_family_error(
+    scratch: &ScratchDatabase,
+    project: Arc<dyn Phase>,
+    head: i64,
+) -> Result<(anyhow::Error, String)> {
+    let stop = CancellationToken::new();
+    let watch = async {
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        loop {
+            let failure: Option<String> = sqlx::query_scalar(
+                "SELECT last_error FROM chain_phase_state
+                 WHERE chain_id = $1 AND phase_name = 'project'",
+            )
+            .bind(CHAIN)
+            .fetch_one(scratch.pool())
+            .await?;
+            if let Some(failure) = failure.filter(|failure| failure.contains("owned key families"))
+            {
+                stop.cancel();
+                return Ok::<_, anyhow::Error>(failure);
+            }
+            anyhow::ensure!(
+                std::time::Instant::now() < deadline,
+                "no family failure was recorded"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    };
+    let (command, failure) = tokio::join!(
+        redo_with_phase_and_stop(scratch, project, head, stop.clone()),
+        watch
+    );
+    let failure = failure?;
+    let error = command
+        .err()
+        .ok_or_else(|| anyhow::anyhow!("the redo completed despite the family failure"))?;
+    Ok((error, failure))
+}
+
+/// Whether the Project row is in redo, and the redo's recorded progress.
+async fn redo_progress(scratch: &ScratchDatabase) -> Result<(bool, Option<i64>)> {
+    Ok(sqlx::query_as(
+        "SELECT redo_in_progress, redo_current_block_number
+         FROM chain_phase_state WHERE chain_id = $1 AND phase_name = 'project'",
+    )
+    .bind(CHAIN)
+    .fetch_one(scratch.pool())
+    .await?)
+}
+
 // A block of the family run that sees the input revision change fails the Project batch with a
 // retryable error. The restart loop runs the redo again and the families reach the served marker
-// under the new revision; before, the run was counted as a skip and the families stayed behind.
+// under the new revision.
 // The revision moves by Interpret's redo attempt, once, when family block 15 commits.
 #[tokio::test]
 async fn a_revision_change_mid_run_fails_the_batch_and_the_restart_catches_up() -> Result<()> {
@@ -381,8 +323,9 @@ async fn marker_row(scratch: &ScratchDatabase) -> Result<(Option<i64>, Option<St
 }
 
 // A stop that arrives while the final served batch is being recorded abandons the family run
-// before it starts. The redo still records the served batch, and the command fails with the
-// families reported short; an uncancelled rerun repairs them.
+// before it commits anything, and the run ends as cancelled: the redo stays in progress with the
+// served batch's progress recorded, the command fails, and an uncancelled rerun repairs the
+// families.
 #[tokio::test]
 async fn a_stop_during_the_final_served_batch_fails_the_one_shot_redo_and_a_rerun_repairs_it()
 -> Result<()> {
@@ -390,7 +333,6 @@ async fn a_stop_during_the_final_served_batch_fails_the_one_shot_redo_and_a_reru
     seed_thirty_blocks_of_work(&scratch).await?;
     let families = FamilySettings {
         max_blocks_per_run: 10,
-        finish_each_batch: true,
         ..FamilySettings::default()
     };
     let stop = CancellationToken::new();
@@ -402,22 +344,17 @@ async fn a_stop_during_the_final_served_batch_fails_the_one_shot_redo_and_a_reru
         .await
         .expect_err("the stop abandoned the family run");
     assert_eq!(
-        project_state(&scratch).await?,
-        ("completed".into(), Some(30), false),
-        "the served batch is recorded"
+        redo_progress(&scratch).await?,
+        (true, Some(30)),
+        "the served batch is recorded and the redo stays open"
     );
     assert_eq!(
         marker(&scratch).await?,
         None,
-        "the family run never started"
+        "the family run committed nothing"
     );
     let message = error.to_string();
-    assert!(message.contains("family repair incomplete"), "{message}");
-    assert!(
-        message.contains("served marker block 30 (")
-            && message.contains("the family marker is unavailable"),
-        "{message}"
-    );
+    assert!(message.contains("is incomplete"), "{message}");
 
     let project =
         Arc::new(ProjectPhase::new(scratch.pool().clone()).with_family_settings(families));

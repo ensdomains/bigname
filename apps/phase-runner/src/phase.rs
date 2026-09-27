@@ -10,7 +10,7 @@ pub type PhaseFuture<'a> =
     Pin<Box<dyn Future<Output = RunnerResult<PhaseBatchOutcome>> + Send + 'a>>;
 pub type CompletedPhaseFuture<'a> =
     Pin<Box<dyn Future<Output = RunnerResult<Option<PhaseProgress>>> + Send + 'a>>;
-pub type AfterProgressFuture<'a> = Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
+pub type AfterProgressFuture<'a> = Pin<Box<dyn Future<Output = RunnerResult<()>> + Send + 'a>>;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum PhaseName {
@@ -238,15 +238,16 @@ pub trait Phase: Send + Sync {
 
     fn run_batch(&self, context: PhaseContext) -> PhaseFuture<'_>;
 
-    /// Work that follows a batch once its progress is recorded, in transactions of its own. It
-    /// cannot fail or roll back the batch; Project applies the owned key families here.
+    /// Work that follows a batch once its progress is recorded, in transactions of its own; Project
+    /// applies the owned key families here. It cannot roll back the batch or its recorded
+    /// progress. An error fails the phase run as a batch error would, and the restart loop
+    /// retries a retryable one.
     fn after_progress_recorded(&self, _chain_id: &str) -> AfterProgressFuture<'_> {
-        Box::pin(async {})
+        Box::pin(async { Ok(()) })
     }
 
     /// Checked once an operator redo of the chain has finished and been recorded. An error fails
-    /// the redo command without undoing its recorded work; Project reports owned key families
-    /// that its finishing runs left short of the served marker.
+    /// the redo command without undoing its recorded work.
     fn after_redo(&self, _chain_id: &str) -> RunnerResult<()> {
         Ok(())
     }

@@ -18,7 +18,8 @@ pub(super) struct ProjectFamiliesArgs {
         long,
         env = "BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES_MAX_BLOCKS",
         default_value_t = bigname_project::families::MAX_BLOCKS_PER_RUN,
-        help = "most owned key family blocks one runner cycle applies or undoes"
+        help = "most owned key family blocks one family run applies or undoes; a batch runs \
+                the families to its served marker in as many runs as it takes"
     )]
     project_families_max_blocks: u64,
 }

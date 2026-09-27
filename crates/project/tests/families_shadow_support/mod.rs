@@ -10,7 +10,7 @@ pub mod compare;
 pub mod replay;
 pub mod wrapper;
 
-use anyhow::{Result, ensure};
+use anyhow::Result;
 use bigname_project::{BatchRequest, Engine, RunMode, families::FamilyMode};
 use bigname_storage::{
     families::control::lifecycle::{
@@ -25,12 +25,10 @@ use crate::support::{CHAIN, Fixture};
 /// Publish `target` with the production batch, then apply the families to it.
 pub async fn publish(fixture: &Fixture, target: i64) -> Result<()> {
     publish_served(fixture, target).await?;
-    let outcome = fixture.apply(target, FamilyMode::Normal).await;
-    ensure!(
-        outcome.skipped.is_none(),
-        "the families followed {target}: {:?}",
-        outcome.skipped
-    );
+    fixture
+        .apply(target, FamilyMode::Normal)
+        .await
+        .map_err(|error| anyhow::anyhow!("the families followed {target}: {error}"))?;
     Ok(())
 }
 

@@ -91,7 +91,7 @@ async fn tuples_keep_the_latest_reverse_change_and_direct_claim_apart() -> Resul
             REVERSE,
         )
         .await?;
-    fixture.apply(12, FamilyMode::Normal).await;
+    fixture.apply(12, FamilyMode::Normal).await?;
 
     let tuples = fixture.rows("project_reverse_tuple").await?;
     assert_eq!(tuples.len(), 1, "one tuple for the lower-cased address");
@@ -235,7 +235,7 @@ async fn nodes_keep_their_latest_name_record_and_claims_their_classification() -
             R1,
         )
         .await?;
-    fixture.apply(12, FamilyMode::Normal).await;
+    fixture.apply(12, FamilyMode::Normal).await?;
 
     let nodes = fixture.rows("project_reverse_node_claim").await?;
     let nine = nodes

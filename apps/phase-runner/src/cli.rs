@@ -447,11 +447,7 @@ fn resolve_redo(args: RedoArgs) -> RunnerResult<ResolvedCommand> {
         range,
         watch_set_coverage_attestations,
         hydration_rpc_urls: resolve_hydration_rpc_urls(&args.hydration_rpc_urls)?,
-        // Nothing follows a one-shot redo, so its family runs finish before it returns.
-        project_families: FamilySettings {
-            finish_each_batch: true,
-            ..args.project_families.into()
-        },
+        project_families: args.project_families.into(),
     })
 }
 

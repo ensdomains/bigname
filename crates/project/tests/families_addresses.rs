@@ -74,7 +74,7 @@ async fn names_fold_their_controller_and_index_every_relation() -> Result<()> {
             .write(block, log, kind, v1, Some(&one), Some(&resource), after, R1)
             .await?;
     }
-    fixture.apply(12, FamilyMode::Normal).await;
+    fixture.apply(12, FamilyMode::Normal).await?;
 
     let folds = fixture.rows("project_address_name_fold").await?;
     assert_eq!(folds.len(), 1);
@@ -134,13 +134,13 @@ async fn names_fold_their_controller_and_index_every_relation() -> Result<()> {
 
     fixture.assert_undo_restores(12).await?;
     // Block 11's grant still stands after undoing 12, so Bob is the controller there.
-    fixture.apply(11, FamilyMode::Rebuild).await;
+    fixture.apply(11, FamilyMode::Rebuild).await?;
     let controllers = fixture.rows("project_address_name_index").await?;
     assert!(
         controllers.contains(&json!({"address": BOB, "logical_name_id": one,
                                           "relation": "effective_controller"}))
     );
-    fixture.apply(12, FamilyMode::Normal).await;
+    fixture.apply(12, FamilyMode::Normal).await?;
     fixture.assert_rebuild_equal(12).await?;
     fixture.cleanup().await
 }
@@ -174,7 +174,7 @@ async fn a_masked_owner_word_clears_the_controller() -> Result<()> {
             R1,
         )
         .await?;
-    fixture.apply(11, FamilyMode::Normal).await;
+    fixture.apply(11, FamilyMode::Normal).await?;
     let folds = fixture.rows("project_address_name_fold").await?;
     assert_eq!(
         folds[0]["controller"],
@@ -270,7 +270,7 @@ async fn addr_values_index_their_address_past_a_version_change() -> Result<()> {
             R1,
         )
         .await?;
-    fixture.apply(10, FamilyMode::Normal).await;
+    fixture.apply(10, FamilyMode::Normal).await?;
     let lower = ALICE.to_lowercase();
     let node_one = vec![
         json!({"address": lower, "coin_type": "60", "resolver_address": R1, "node": node(1)}),
@@ -307,7 +307,7 @@ async fn addr_values_index_their_address_past_a_version_change() -> Result<()> {
             R1,
         )
         .await?;
-    fixture.apply(11, FamilyMode::Normal).await;
+    fixture.apply(11, FamilyMode::Normal).await?;
     assert_eq!(
         index(
             &fixture.rows("project_address_record_node_index").await?,
@@ -399,7 +399,7 @@ async fn the_index_holds_the_served_half_of_a_pair_and_hex_payloads() -> Result<
                 .raw(json!({"emitting_address": R1})),
         )
         .await?;
-    fixture.apply(11, FamilyMode::Normal).await;
+    fixture.apply(11, FamilyMode::Normal).await?;
     let mut rows = index(
         &fixture.rows("project_address_record_node_index").await?,
         &["address", "node"],
@@ -439,7 +439,7 @@ async fn a_grant_named_later_puts_its_registrant_in_the_index() -> Result<()> {
             R1,
         )
         .await?;
-    fixture.apply(10, FamilyMode::Normal).await;
+    fixture.apply(10, FamilyMode::Normal).await?;
     assert_eq!(
         fixture.rows("project_address_name_index").await?,
         Vec::<Value>::new(),
@@ -460,7 +460,7 @@ async fn a_grant_named_later_puts_its_registrant_in_the_index() -> Result<()> {
             R1,
         )
         .await?;
-    fixture.apply(11, FamilyMode::Normal).await;
+    fixture.apply(11, FamilyMode::Normal).await?;
     let mut rows = index(
         &fixture.rows("project_address_name_index").await?,
         &["address", "logical_name_id", "relation"],
@@ -497,7 +497,7 @@ async fn a_named_value_indexes_the_name_it_was_written_under() -> Result<()> {
             R1,
         )
         .await?;
-    fixture.apply(10, FamilyMode::Normal).await;
+    fixture.apply(10, FamilyMode::Normal).await?;
     assert_eq!(
         index(
             &fixture.rows("project_address_record_node_index").await?,
@@ -634,10 +634,10 @@ async fn a_named_write_keeps_its_name_through_a_rebinding_versions_and_a_link() 
         .write(11, 1, "RecordChanged", v1, Some(&a), None, addr(DAVE), R1)
         .await?;
     let mut steps = Vec::new();
-    fixture.apply(11, FamilyMode::Normal).await;
+    fixture.apply(11, FamilyMode::Normal).await?;
     steps.push(("write under A", served_addresses(&fixture, 11).await?));
     served_name(&fixture, 8, 12).await?;
-    fixture.apply(12, FamilyMode::Normal).await;
+    fixture.apply(12, FamilyMode::Normal).await?;
     steps.push(("B bound at node 8", served_addresses(&fixture, 12).await?));
     let version = |n: &str| json!({"node": node(8), "resolver": R1, "version": n});
     fixture
@@ -652,7 +652,7 @@ async fn a_named_write_keeps_its_name_through_a_rebinding_versions_and_a_link() 
             R1,
         )
         .await?;
-    fixture.apply(13, FamilyMode::Normal).await;
+    fixture.apply(13, FamilyMode::Normal).await?;
     steps.push(("named version", served_addresses(&fixture, 13).await?));
     fixture
         .write(
@@ -666,7 +666,7 @@ async fn a_named_write_keeps_its_name_through_a_rebinding_versions_and_a_link() 
             R1,
         )
         .await?;
-    fixture.apply(14, FamilyMode::Normal).await;
+    fixture.apply(14, FamilyMode::Normal).await?;
     steps.push(("unnamed version", served_addresses(&fixture, 14).await?));
     fixture
         .write(
@@ -680,7 +680,7 @@ async fn a_named_write_keeps_its_name_through_a_rebinding_versions_and_a_link() 
             R1,
         )
         .await?;
-    fixture.apply(15, FamilyMode::Normal).await;
+    fixture.apply(15, FamilyMode::Normal).await?;
     steps.push((
         "named version under A",
         served_addresses(&fixture, 15).await?,
@@ -699,7 +699,7 @@ async fn a_named_write_keeps_its_name_through_a_rebinding_versions_and_a_link() 
             R1,
         )
         .await?;
-    fixture.apply(16, FamilyMode::Normal).await;
+    fixture.apply(16, FamilyMode::Normal).await?;
     steps.push(("later link", served_addresses(&fixture, 16).await?));
     let indexed = index(
         &fixture.rows("project_address_record_node_index").await?,
@@ -774,7 +774,7 @@ async fn a_transfer_named_later_becomes_the_name_folds_token_holder() -> Result<
             R1,
         )
         .await?;
-    fixture.apply(10, FamilyMode::Normal).await;
+    fixture.apply(10, FamilyMode::Normal).await?;
     fixture
         .binding(&uuid(106), &name(4), &lease, "ens_v1", 11, 1, None)
         .await?;
@@ -790,7 +790,7 @@ async fn a_transfer_named_later_becomes_the_name_folds_token_holder() -> Result<
             R1,
         )
         .await?;
-    fixture.apply(11, FamilyMode::Normal).await;
+    fixture.apply(11, FamilyMode::Normal).await?;
     let fold = fixture.rows("project_address_name_fold").await?;
     let fold = fold
         .iter()
@@ -833,7 +833,7 @@ async fn token_holder_after_naming(
             )
             .await?;
     }
-    fixture.apply(10, FamilyMode::Normal).await;
+    fixture.apply(10, FamilyMode::Normal).await?;
     fixture
         .binding(&uuid(106), &name(4), &lease, "ens_v1", 11, 1, None)
         .await?;
@@ -849,7 +849,7 @@ async fn token_holder_after_naming(
             R1,
         )
         .await?;
-    fixture.apply(11, FamilyMode::Normal).await;
+    fixture.apply(11, FamilyMode::Normal).await?;
     let fold = fixture.rows("project_address_name_fold").await?;
     let holder = fold
         .iter()

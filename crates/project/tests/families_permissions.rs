@@ -75,7 +75,7 @@ async fn wrapper_state_keeps_the_latest_fuses_and_the_latest_wrapper_expiry() ->
             WRAPPER,
         )
         .await?;
-    fixture.apply(12, FamilyMode::Normal).await;
+    fixture.apply(12, FamilyMode::Normal).await?;
     let rows = fixture.rows("project_wrapper_state").await?;
     assert_eq!(rows.len(), 1);
     assert_eq!(
@@ -141,7 +141,7 @@ async fn grants_keep_revocations_and_the_admin_aggregate_follows_each_holder() -
             REGISTRY,
         )
         .await?;
-    fixture.apply(11, FamilyMode::Normal).await;
+    fixture.apply(11, FamilyMode::Normal).await?;
 
     let mut grants = fixture.rows("project_grant").await?;
     grants.sort_by_key(|row| row["subject"].to_string());
@@ -189,7 +189,7 @@ async fn grants_keep_revocations_and_the_admin_aggregate_follows_each_holder() -
             REGISTRY,
         )
         .await?;
-    fixture.apply(12, FamilyMode::Normal).await;
+    fixture.apply(12, FamilyMode::Normal).await?;
     assert!(
         fixture
             .rows("project_resource_admin_aggregate")
@@ -235,7 +235,7 @@ async fn approvals_keep_an_explicit_false() -> Result<()> {
             REGISTRY,
         )
         .await?;
-    fixture.apply(11, FamilyMode::Normal).await;
+    fixture.apply(11, FamilyMode::Normal).await?;
     let rows = fixture.rows("project_account_approval").await?;
     assert_eq!(
         rows.iter()
@@ -355,7 +355,7 @@ async fn an_approval_flag_matches_the_served_boolean_cast() -> Result<()> {
             .await?;
         expected.push((value.clone(), subject, flag));
     }
-    fixture.apply(10, FamilyMode::Normal).await;
+    fixture.apply(10, FamilyMode::Normal).await?;
     let rows = fixture.rows("project_account_approval").await?;
     let mismatches: Vec<String> = expected
         .iter()
@@ -520,7 +520,7 @@ async fn wrapper_numbers_match_the_served_numeric_reads() -> Result<()> {
         expected.push((resource, literal, fuses, expiry));
     }
     assert_eq!(servable_failures, ["1.0", "1000.0"]);
-    fixture.apply(10, FamilyMode::Normal).await;
+    fixture.apply(10, FamilyMode::Normal).await?;
     let rows = fixture.rows("project_wrapper_state").await?;
     let mut mismatches = Vec::new();
     for (resource, literal, fuses, expiry) in expected {
@@ -580,7 +580,7 @@ async fn a_decimal_expiry_is_not_rounded() -> Result<()> {
         .execute(&fixture.pool)
         .await?;
     }
-    fixture.apply(10, FamilyMode::Normal).await;
+    fixture.apply(10, FamilyMode::Normal).await?;
     let mut mismatches = Vec::new();
     for (n, (spelling, expected)) in (1..).zip(&cases) {
         let got: Option<String> = sqlx::query_scalar(
@@ -650,7 +650,7 @@ async fn a_grant_is_revoked_exactly_when_its_powers_are_empty() -> Result<()> {
             )
             .await?;
     }
-    fixture.apply(10, FamilyMode::Normal).await;
+    fixture.apply(10, FamilyMode::Normal).await?;
     let rows = fixture.rows("project_grant").await?;
     for (subject, _, revoked) in cases {
         let row = rows
@@ -703,7 +703,7 @@ async fn a_grant_records_the_registration_it_was_written_under() -> Result<()> {
             REGISTRY,
         )
         .await?;
-    fixture.apply(11, FamilyMode::Normal).await;
+    fixture.apply(11, FamilyMode::Normal).await?;
     fixture
         .write(
             12,
@@ -752,7 +752,7 @@ async fn a_grant_records_the_registration_it_was_written_under() -> Result<()> {
             REGISTRY,
         )
         .await?;
-    fixture.apply(12, FamilyMode::Normal).await;
+    fixture.apply(12, FamilyMode::Normal).await?;
     let rows = fixture.rows("project_grant").await?;
     let registration_of = |resource: &str, subject: &str| {
         rows.iter()
@@ -819,7 +819,7 @@ async fn a_release_before_the_grant_leaves_its_registration_position() -> Result
             REGISTRY,
         )
         .await?;
-    fixture.apply(12, FamilyMode::Normal).await;
+    fixture.apply(12, FamilyMode::Normal).await?;
     let rows = fixture.rows("project_grant").await?;
     assert_eq!(
         rows.iter()

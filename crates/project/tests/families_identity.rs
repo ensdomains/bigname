@@ -71,7 +71,7 @@ async fn a_name_keeps_its_migration_and_each_arms_epoch_start() -> Result<()> {
             REGISTRY,
         )
         .await?;
-    fixture.apply(12, FamilyMode::Normal).await;
+    fixture.apply(12, FamilyMode::Normal).await?;
     let rows = fixture.rows("project_name_state").await?;
     assert_eq!(rows.len(), 1);
     assert_eq!(
@@ -137,8 +137,8 @@ async fn each_chain_keeps_its_own_epoch_start_for_one_name() -> Result<()> {
             .raw(json!({"emitting_address": REGISTRY})),
         )
         .await?;
-    fixture.apply(12, FamilyMode::Normal).await;
-    fixture.apply_on(OTHER, 12).await;
+    fixture.apply(12, FamilyMode::Normal).await?;
+    fixture.apply_on(OTHER, 12).await?;
     let starts: Vec<(String, Value)> = sqlx::query_as(
         "SELECT chain_id, authority_start_positions -> 'ens_v1'
          FROM project_name_state WHERE logical_name_id = $1 ORDER BY chain_id",
@@ -230,7 +230,7 @@ async fn binding_candidates_keep_their_bound_facts_and_registry_only_predecessor
             REGISTRY,
         )
         .await?;
-    fixture.apply(12, FamilyMode::Normal).await;
+    fixture.apply(12, FamilyMode::Normal).await?;
 
     let mut candidates = fixture.rows("project_binding_candidate").await?;
     candidates.sort_by_key(|row| row["block_number"].as_i64());
@@ -341,7 +341,7 @@ async fn registry_nodes_fold_the_old_registry_and_observations_keep_their_clear(
             REGISTRAR,
         )
         .await?;
-    fixture.apply(12, FamilyMode::Normal).await;
+    fixture.apply(12, FamilyMode::Normal).await?;
     let nodes = fixture.rows("project_registry_node_state").await?;
     assert_eq!(
         nodes
@@ -433,7 +433,7 @@ async fn each_binding_keeps_its_own_surface_bound_and_a_later_epoch_makes_it_reg
             REGISTRY,
         )
         .await?;
-    fixture.apply(11, FamilyMode::Normal).await;
+    fixture.apply(11, FamilyMode::Normal).await?;
     let mut candidates = fixture.rows("project_binding_candidate").await?;
     candidates.sort_by_key(|row| {
         row["log_index"].as_i64().unwrap_or_default()
@@ -452,7 +452,7 @@ async fn each_binding_keeps_its_own_surface_bound_and_a_later_epoch_makes_it_reg
         "each binding is associated with the SurfaceBound at its own log"
     );
 
-    fixture.apply(12, FamilyMode::Normal).await;
+    fixture.apply(12, FamilyMode::Normal).await?;
     let mut candidates = fixture.rows("project_binding_candidate").await?;
     candidates.sort_by_key(|row| {
         row["log_index"].as_i64().unwrap_or_default()
@@ -563,7 +563,7 @@ async fn a_successor_grant_after_a_release_becomes_the_handoff_lease() -> Result
             REGISTRAR,
         )
         .await?;
-    fixture.apply(12, FamilyMode::Normal).await;
+    fixture.apply(12, FamilyMode::Normal).await?;
     let owner = fixture
         .rows("project_binding_candidate")
         .await?
@@ -589,7 +589,7 @@ async fn a_successor_grant_after_a_release_becomes_the_handoff_lease() -> Result
         Some(json!(lease)),
         "no release of the predecessor yet: the lease stands at the predecessor"
     );
-    fixture.apply(13, FamilyMode::Normal).await;
+    fixture.apply(13, FamilyMode::Normal).await?;
     let rows = fixture.rows("project_binding_candidate").await?;
     assert_eq!(
         lease_of(&rows),
@@ -697,13 +697,13 @@ async fn an_epoch_after_the_successor_grant_takes_that_grant_as_the_lease() -> R
             REGISTRY,
         )
         .await?;
-    fixture.apply(12, FamilyMode::Normal).await;
+    fixture.apply(12, FamilyMode::Normal).await?;
     let rows = fixture.rows("project_binding_candidate").await?;
     assert!(
         rows.iter().all(|row| row["registry_only"] == json!(false)),
         "no epoch yet: no candidate is registry-only"
     );
-    fixture.apply(13, FamilyMode::Normal).await;
+    fixture.apply(13, FamilyMode::Normal).await?;
     let rows = fixture.rows("project_binding_candidate").await?;
     let handoff = rows
         .iter()
@@ -856,7 +856,7 @@ async fn a_grant_in_the_epochs_own_block_becomes_the_lease() -> Result<()> {
     )
     .await?;
     registry_only_epoch(&fixture, 13, 2, &registry).await?;
-    fixture.apply(13, FamilyMode::Normal).await;
+    fixture.apply(13, FamilyMode::Normal).await?;
     assert_eq!(
         handoffs(&fixture).await?,
         vec![json!({"predecessor": lease, "lease": successor, "lease_at": [13, 1]})]
@@ -894,7 +894,7 @@ async fn the_grant_replay_skips_a_grant_of_another_authority_kind() -> Result<()
     )
     .await?;
     registry_only_epoch(&fixture, 13, 1, &registry).await?;
-    fixture.apply(13, FamilyMode::Normal).await;
+    fixture.apply(13, FamilyMode::Normal).await?;
     assert_eq!(
         handoffs(&fixture).await?,
         vec![json!({"predecessor": lease, "lease": successor, "lease_at": [12, 2]})]
@@ -926,7 +926,7 @@ async fn one_epoch_converting_two_candidates_gives_each_its_own_lease() -> Resul
     bound(&fixture, 103, &second_lease, 14, Some(15)).await?;
     bound(&fixture, 104, &registry, 15, None).await?;
     registry_only_epoch(&fixture, 16, 1, &registry).await?;
-    fixture.apply(16, FamilyMode::Normal).await;
+    fixture.apply(16, FamilyMode::Normal).await?;
     assert_eq!(
         handoffs(&fixture).await?,
         vec![
@@ -951,9 +951,9 @@ async fn a_binding_in_a_block_without_events_survives_a_rebuild() -> Result<()> 
         .binding(&uuid(102), &name(1), &registry, "ens_v1", 11, 1, None)
         .await?;
     registrar_event(&fixture, 12, 1, "RegistrationReleased", &lease, json!({})).await?;
-    fixture.apply(10, FamilyMode::Normal).await;
-    fixture.apply(11, FamilyMode::Normal).await;
-    fixture.apply(12, FamilyMode::Normal).await;
+    fixture.apply(10, FamilyMode::Normal).await?;
+    fixture.apply(11, FamilyMode::Normal).await?;
+    fixture.apply(12, FamilyMode::Normal).await?;
     let rows = fixture.rows("project_binding_candidate").await?;
     let unpaired = rows
         .iter()

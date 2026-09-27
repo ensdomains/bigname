@@ -414,7 +414,7 @@ impl Fixture {
                 outcome.progress(),
             )
             .await?;
-        self.project.after_progress_recorded(CHAIN).await;
+        self.project.after_progress_recorded(CHAIN).await?;
         let family: Option<i64> = sqlx::query_scalar(
             "SELECT current_block_number FROM project_family_marker WHERE chain_id = $1",
         )

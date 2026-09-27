@@ -2586,7 +2586,8 @@ in the same transaction as the reset, undo or block it describes.
 
 the Interpret row's `input_content_hash` and `redo_attempt_generation` a family
 block read inside its own transaction, recorded on the family marker; nothing
-while Interpret is in redo, and the block then waits. Distinct from the retired [raw-log input
+while Interpret is in redo. A block that reads a revision other than the one its run applies
+under, or none, stops the run with an error the runner retries. Distinct from the retired [raw-log input
 revision](#input-revision-raw-log-input-revision).
 
 ## Active manifest set (family block)

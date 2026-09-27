@@ -295,7 +295,7 @@ async fn f2a_topology_rebind_leaves_the_resource_under_the_current_name() -> Res
         &[&unbound, &released, &bound, &granted, &transferred, &expiry],
     )
     .await?;
-    fixture.apply(BLOCK, FamilyMode::Normal).await;
+    fixture.apply(BLOCK, FamilyMode::Normal).await?;
     let row = only(&fixture, "project_lifecycle_key_state").await?;
     assert_eq!(
         pick(
@@ -419,7 +419,7 @@ async fn f2a_expiry_revival_folds_the_grant_after_the_renewal() -> Result<()> {
         ],
     )
     .await?;
-    fixture.apply(BLOCK, FamilyMode::Normal).await;
+    fixture.apply(BLOCK, FamilyMode::Normal).await?;
     let row = only(&fixture, "project_lifecycle_key_state").await?;
     assert_eq!(
         (
@@ -538,7 +538,7 @@ async fn f2b_name_wrapped_lifecycle_ends_on_the_holder_grant() -> Result<()> {
         &[&minted, &expiry, &scope, &bound, &epoch, &granted],
     )
     .await?;
-    fixture.apply(BLOCK, FamilyMode::Normal).await;
+    fixture.apply(BLOCK, FamilyMode::Normal).await?;
     let row = only(&fixture, "project_wrapper_state").await?;
     assert_eq!(
         pick(
@@ -630,7 +630,7 @@ async fn f2b_name_unwrapped_lifecycle_ends_on_the_holder_revoke() -> Result<()> 
     old_rule_flips(&unbound, &revoked);
     old_rule_flips(&unbound, &epoch);
     write(&fixture, &[&minted, &wrapped, &unbound, &epoch, &revoked]).await?;
-    fixture.apply(BLOCK, FamilyMode::Normal).await;
+    fixture.apply(BLOCK, FamilyMode::Normal).await?;
     let row = only(&fixture, "project_wrapper_state").await?;
     assert_eq!(
         pick(
@@ -690,7 +690,7 @@ async fn f2c_new_owner_node_row_keeps_the_authority_transfer() -> Result<()> {
         .after(body);
     old_rule_flips(&subregistry, &transferred);
     write(&fixture, &[&subregistry, &transferred]).await?;
-    fixture.apply(BLOCK, FamilyMode::Normal).await;
+    fixture.apply(BLOCK, FamilyMode::Normal).await?;
     let row = only(&fixture, "project_registry_node_state").await?;
     assert_eq!(
         pick(
@@ -743,7 +743,7 @@ async fn f2c_new_owner_to_zero_keeps_the_anchor_resource() -> Result<()> {
         .after(body);
     old_rule_flips(&subregistry, &transferred);
     write(&fixture, &[&subregistry, &transferred]).await?;
-    fixture.apply(BLOCK, FamilyMode::Normal).await;
+    fixture.apply(BLOCK, FamilyMode::Normal).await?;
     let row = only(&fixture, "project_registry_node_state").await?;
     assert_eq!(
         pick(
@@ -827,7 +827,7 @@ async fn f2c_registry_transfer_observation_is_the_surface_bound() -> Result<()> 
         .after(body.clone());
     old_rule_flips(&unbound, &bound);
     write(&fixture, &[&transferred, &unbound, &bound, &epoch]).await?;
-    fixture.apply(BLOCK, FamilyMode::Normal).await;
+    fixture.apply(BLOCK, FamilyMode::Normal).await?;
     let row = row_where(
         &fixture,
         "project_registry_binding_observation",
@@ -895,7 +895,7 @@ async fn f4_fallback_handoff_pointer_keeps_the_last_retired_link() -> Result<()>
     let (first, last) = (handoff(&linked, 1), handoff(&authority, 2));
     old_rule_flips(&first, &last);
     write(&fixture, &[&first, &last]).await?;
-    fixture.apply(BLOCK, FamilyMode::Normal).await;
+    fixture.apply(BLOCK, FamilyMode::Normal).await?;
     let row = only(&fixture, "project_registry_pointer").await?;
     assert_eq!(
         pick(

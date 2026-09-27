@@ -188,7 +188,7 @@ async fn rebuild_families_with(
     .fetch_one(pool)
     .await?;
     let token = families::input_token(pool, &chain_id).await?;
-    let outcome = families::apply(
+    families::apply(
         pool,
         &chain_id,
         target,
@@ -196,12 +196,8 @@ async fn rebuild_families_with(
         &token,
         options,
     )
-    .await;
-    ensure!(
-        outcome.skipped.is_none(),
-        "the families stopped before the served marker: {:?}",
-        outcome.skipped
-    );
+    .await
+    .map_err(|error| anyhow::anyhow!("the families stopped before the served marker: {error}"))?;
     Ok(chain_id)
 }
 

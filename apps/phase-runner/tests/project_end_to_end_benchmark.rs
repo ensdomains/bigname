@@ -477,14 +477,11 @@ async fn run(
     // scraping it are not timed.
     let metrics_feed = RunnerMetricsFeed::default();
     // A disposable copy may start with empty families, so their first run is a rebuild over the
-    // whole chain; the one-shot `redo` command finishes it the same way. The fixture's families
-    // fit in one budget either way. Unlike the supervised runner, which performs one budgeted
-    // family run per cycle, the harness drains every required family budget before the readers
-    // compare or the next target starts. That work is outside the served clock and is reported
-    // separately; it does not measure supervised-runner cycle throughput.
+    // whole chain; every batch, the harness's as the runner's, runs the families to its served
+    // marker. The fixture's families fit in one budget either way. That work is outside the
+    // served clock and is reported separately.
     let project = ProjectPhase::with_hydration(pool.clone(), ChainRpcUrls::default())
         .with_family_settings(FamilySettings {
-            finish_each_batch: true,
             // With no safe block published the production switch point sits 256 blocks under
             // the target, below every fixture block, so no fixture block would form a range; the
             // fixture corpus puts every work block below the target in rebuild ranges, so each
@@ -556,7 +553,7 @@ async fn run(
         // The owned key families follow in their own transactions once progress is recorded,
         // as the runner calls them; their time is outside the served clock above.
         let families_started = Instant::now();
-        project.after_progress_recorded(CHAIN).await;
+        project.after_progress_recorded(CHAIN).await?;
         let families_ms = families_started.elapsed().as_millis();
         let family_marker: Option<i64> = sqlx::query_scalar(
             "SELECT current_block_number FROM project_family_marker WHERE chain_id = $1",
@@ -704,7 +701,7 @@ async fn compare_with_rebuild(
     // The rebuilt batch rebuilds the owned key families from scratch; they must equal the
     // families the incremental blocks left, row for row, the marker's sequence aside.
     let families_started = Instant::now();
-    project.after_progress_recorded(CHAIN).await;
+    project.after_progress_recorded(CHAIN).await?;
     let families_rebuild_ms = families_started.elapsed().as_millis();
     let rebuilt_families = families(pool).await?;
     let differing: Vec<&str> = incremental_families

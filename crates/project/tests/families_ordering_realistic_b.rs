@@ -352,7 +352,7 @@ async fn f8_registrar_self_transfer_keeps_the_grant() -> Result<()> {
     );
     old_rule_flips(&transfer.revoked, &transfer.granted);
     write(&fixture, &transfer.facts()).await?;
-    fixture.apply(BLOCK, FamilyMode::Normal).await;
+    fixture.apply(BLOCK, FamilyMode::Normal).await?;
     let rows = fixture.rows("project_grant").await?;
     let row = rows
         .iter()
@@ -401,7 +401,7 @@ async fn f12_name_for_addr_changed_row_ends_on_the_claim() -> Result<()> {
     }));
     old_rule_flips(&reverse, &claim);
     write(&fixture, &[&reverse, &claim]).await?;
-    fixture.apply(BLOCK, FamilyMode::Normal).await;
+    fixture.apply(BLOCK, FamilyMode::Normal).await?;
     let row = only(&fixture, "project_reverse_tuple").await?;
     assert_eq!(
         pick(
@@ -507,7 +507,7 @@ async fn f13_transfer_to_the_delegate_leaves_it_the_controller() -> Result<()> {
         &[&wrapped, &transferred, &cleared, &revoked, &granted],
     )
     .await?;
-    fixture.apply(BLOCK, FamilyMode::Normal).await;
+    fixture.apply(BLOCK, FamilyMode::Normal).await?;
     assert_eq!(
         controller(&fixture).await?,
         json!({"controller": DELEGATE, "controller_action": "set",
@@ -556,7 +556,7 @@ async fn f13_transfer_without_reclaim_leaves_the_registry_owner_the_controller()
     let mut facts = vec![&prior];
     facts.extend(transfer.facts());
     write(&fixture, &facts).await?;
-    fixture.apply(BLOCK, FamilyMode::Normal).await;
+    fixture.apply(BLOCK, FamilyMode::Normal).await?;
     assert_eq!(
         controller(&fixture).await?,
         json!({"controller": ALICE, "controller_action": "set", "controller_subject": ALICE,
@@ -590,7 +590,7 @@ async fn f13_transfer_back_to_the_registry_owner_clears_the_unmasked_controller(
     let mut facts = vec![&prior];
     facts.extend(transfer.facts());
     write(&fixture, &facts).await?;
-    fixture.apply(BLOCK, FamilyMode::Normal).await;
+    fixture.apply(BLOCK, FamilyMode::Normal).await?;
     assert_eq!(
         controller(&fixture).await?,
         json!({"controller": null, "controller_action": "revoke", "controller_subject": OWNER,
@@ -811,7 +811,7 @@ async fn cross_batch_f1_the_wrapper_binding_follows_the_materialized_one() -> Re
         ],
     )
     .await?;
-    fixture.apply(BLOCK, FamilyMode::Normal).await;
+    fixture.apply(BLOCK, FamilyMode::Normal).await?;
     let mut rows: Vec<Value> = fixture
         .rows("project_binding_candidate")
         .await?
@@ -926,7 +926,7 @@ async fn cross_batch_f4_name_registered_pointer_keeps_the_registrar_row() -> Res
     let log = name_registered(&named, &registrar, &registry_only);
     old_rule_flips(&log.sourced_pointer, &log.pointer);
     log.write(&fixture).await?;
-    fixture.apply(BLOCK, FamilyMode::Normal).await;
+    fixture.apply(BLOCK, FamilyMode::Normal).await?;
     let row = only(&fixture, "project_registry_pointer").await?;
     assert_eq!(
         pick(
@@ -957,7 +957,7 @@ async fn cross_batch_f13_name_registered_controller_is_the_registrant() -> Resul
     let log = name_registered(&named, &registrar, &registry_only);
     old_rule_flips(&log.sourced_bound, &log.grant);
     log.write(&fixture).await?;
-    fixture.apply(BLOCK, FamilyMode::Normal).await;
+    fixture.apply(BLOCK, FamilyMode::Normal).await?;
     assert_eq!(
         controller(&fixture).await?,
         json!({"controller": ALICE, "controller_action": "set", "controller_subject": ALICE,
@@ -1027,7 +1027,7 @@ async fn cross_batch_f4_registrar_surface_pointer_follows_the_enrichment() -> Re
         );
     old_rule_flips(&enrichment, &snapshot);
     write(&fixture, &[&enrichment, &snapshot]).await?;
-    fixture.apply(BLOCK, FamilyMode::Normal).await;
+    fixture.apply(BLOCK, FamilyMode::Normal).await?;
     let row = only(&fixture, "project_registry_pointer").await?;
     assert_eq!(
         pick(

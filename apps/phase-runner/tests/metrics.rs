@@ -640,9 +640,9 @@ async fn endpoint_exports_what_each_project_batch_scoped_and_wrote() -> Result<(
     // Each batch is followed by the owned key families, as the runner does once it has recorded
     // the batch's progress.
     project.run_batch(context(30, None)?).await?;
-    project.after_progress_recorded(chain).await;
+    project.after_progress_recorded(chain).await?;
     project.run_batch(context(40, Some(30))?).await?;
-    project.after_progress_recorded(chain).await;
+    project.after_progress_recorded(chain).await?;
     feed.batch_committed();
 
     let chain_label = format!("chain=\"{chain}\"");

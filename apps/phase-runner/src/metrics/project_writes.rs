@@ -1,29 +1,34 @@
 //! What each Project batch read and wrote. The gauges hold the newest committed batch of each
 //! chain, so a scrape answers "what did the last block cost"; the counter adds up the rows every
 //! batch wrote to each served table. The owned key families that follow each batch report their
-//! own wall time, lag and skips, apart from the batch's stages.
+//! own wall time, lag and per-block time, apart from the batch's stages.
 use std::{
     collections::BTreeMap,
     sync::{Arc, Mutex},
 };
 
 use anyhow::Result;
-use bigname_metrics::{GaugeVec, IntCounterVec, IntGaugeVec, MetricsRegistry};
+use bigname_metrics::{GaugeVec, HistogramVec, IntCounterVec, IntGaugeVec, MetricsRegistry};
 use bigname_project::{WriteSummary, families::FamilyOutcome};
 
 /// Batches Project reported that the metrics task has not applied yet: the newest summary of each
-/// chain, and the rows written since the last apply. Both stay bounded however long the task waits.
+/// chain, the rows written since the last apply, and up to [`MAX_PENDING_FAMILY_BLOCKS`] family
+/// block times per chain. All stay bounded however long the task waits.
 #[derive(Clone, Default)]
 pub(super) struct PendingProjectWrites {
     inner: Arc<Mutex<Pending>>,
 }
+
+/// Family block times kept per chain until the metrics task applies them; further blocks are not
+/// observed. The task wakes on every family run, so only a feed nothing drains reaches it.
+const MAX_PENDING_FAMILY_BLOCKS: usize = 65_536;
 
 #[derive(Default)]
 pub(super) struct Pending {
     latest: BTreeMap<String, WriteSummary>,
     rows: BTreeMap<(String, &'static str, &'static str), u64>,
     families: BTreeMap<String, (f64, u64)>,
-    family_skips: BTreeMap<String, u64>,
+    family_block_ms: BTreeMap<String, Vec<u64>>,
     family_anomalies: BTreeMap<String, u64>,
 }
 
@@ -51,8 +56,9 @@ impl PendingProjectWrites {
             chain.to_owned(),
             (outcome.elapsed_ms as f64 / 1_000.0, outcome.lag_blocks()),
         );
-        let skips = pending.family_skips.entry(chain.to_owned()).or_default();
-        *skips += u64::from(outcome.skipped.is_some());
+        let block_ms = pending.family_block_ms.entry(chain.to_owned()).or_default();
+        let room = MAX_PENDING_FAMILY_BLOCKS.saturating_sub(block_ms.len());
+        block_ms.extend(outcome.block_ms.iter().take(room));
         let anomalies = pending
             .family_anomalies
             .entry(chain.to_owned())
@@ -75,7 +81,7 @@ pub(super) struct ProjectWriteGauges {
     stage_duration: GaugeVec,
     families_seconds: GaugeVec,
     family_lag: IntGaugeVec,
-    family_skips: IntCounterVec,
+    family_block: HistogramVec,
     family_anomalies: IntCounterVec,
 }
 
@@ -127,11 +133,11 @@ impl ProjectWriteGauges {
                  off the served branch counts from below the branch point, at least 1.",
                 &["chain"],
             )?,
-            family_skips: registry.int_counter_vec(
-                "phase_runner_project_family_skips_total",
-                "Family loops that stopped early and left the families behind the served marker: \
-                 a failing block, a changed input revision, Interpret in redo, or an input token \
-                 that did not read in time.",
+            family_block: registry.histogram_vec(
+                "phase_runner_project_family_block_seconds",
+                "Wall time of each owned key family block applied in a transaction of its own, \
+                 from its first read to its commit; a rebuild range is not a block and is not \
+                 observed.",
                 &["chain"],
             )?,
             family_anomalies: registry.int_counter_vec(
@@ -152,8 +158,11 @@ impl ProjectWriteGauges {
                 .with_label_values(&[&chain])
                 .set(gauge_value(lag));
         }
-        for (chain, skips) in pending.family_skips {
-            self.family_skips.with_label_values(&[&chain]).inc_by(skips);
+        for (chain, block_ms) in pending.family_block_ms {
+            let histogram = self.family_block.with_label_values(&[&chain]);
+            for elapsed_ms in block_ms {
+                histogram.observe(elapsed_ms as f64 / 1_000.0);
+            }
         }
         for (chain, anomalies) in pending.family_anomalies {
             self.family_anomalies

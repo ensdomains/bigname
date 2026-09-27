@@ -58,8 +58,7 @@ async fn run_with(
             .with_max_blocks_per_run(u64::MAX)
             .with_rebuild_ranges(ranges),
     )
-    .await;
-    ensure!(outcome.skipped.is_none(), "{:?}", outcome.skipped);
+    .await?;
     Ok(outcome)
 }
 

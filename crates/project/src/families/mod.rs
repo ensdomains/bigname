@@ -3,8 +3,10 @@
 //!
 //! The loop runs after a Project batch has committed and its progress is recorded, never inside
 //! the served transaction: each family block is its own transaction, so a family failure or a
-//! slow block can never delay or roll back a served publication. The families follow the served
-//! marker from their own shadow marker, catching up from wherever it stands.
+//! slow block can never roll back a served publication. The families follow the served marker
+//! from their own shadow marker, catching up from wherever it stands. A block that fails,
+//! including one refused by a fence, stops the run with an error: the families stay at the last
+//! complete block and the caller retries.
 // The reducers land in the commits that follow and use the helpers
 // that are unused until then.
 mod addresses;
@@ -48,8 +50,9 @@ use crate::Marker;
 /// key families"); the per-block publication tunes it.
 pub const RETAINED_UNDO_DEPTH: i64 = 256;
 
-/// The most blocks one run applies or undoes before it stops and leaves the rest to the next
-/// run. Live follow applies a block or two per run; a rebuild or a long catch-up spans many runs.
+/// The most blocks one run applies or undoes before it stops and reports it spent its budget.
+/// Live follow applies a block or two per run; the Project phase runs a rebuild or a long
+/// catch-up as a series of runs until the families reach the served marker.
 pub const MAX_BLOCKS_PER_RUN: u64 = 256;
 
 /// A rebuild applies the work blocks at or below this many blocks under the chain's safe block
@@ -260,8 +263,6 @@ pub struct FamilyOutcome {
     /// Elapsed milliseconds of each block applied in a transaction of its own; a rebuild range
     /// adds none.
     pub block_ms: Vec<u64>,
-    /// Why the loop stopped early; the families then lag and the next run catches up.
-    pub skipped: Option<String>,
     /// Whether the run stopped because it spent its block budget; the next run continues.
     pub budget_exhausted: bool,
     /// Whether the run adopted an input revision other than the one the last block recorded.
@@ -318,10 +319,11 @@ impl FamilyOutcome {
 }
 
 /// Bring the families to the served `target`, at most `options.max_blocks_per_run` blocks this
-/// run. `session` is the input token the Project phase read before recording the batch, while a
-/// finished redo's session was still open; it names that redo's reason. Every block reads the
-/// token again inside its own transaction. Never fails: an error stops the loop, is logged and
-/// returned in `skipped`, and leaves the families at the last complete block.
+/// run; `budget_exhausted` in the outcome says the run stopped on its budget and another run
+/// continues. `session` is the input token the Project phase read before recording the batch,
+/// while a finished redo's session was still open; it names that redo's reason. Every block reads
+/// the token again inside its own transaction. An error, a refused fence included, stops the run
+/// at the last complete block and is returned; its kind says whether a retry can succeed.
 pub async fn apply(
     pool: &PgPool,
     chain_id: &str,
@@ -329,13 +331,13 @@ pub async fn apply(
     mode: FamilyMode,
     session: &InputToken,
     options: &FamilyOptions,
-) -> FamilyOutcome {
+) -> crate::Result<FamilyOutcome> {
     let started = Instant::now();
     let mut outcome = FamilyOutcome {
         target: Some(target.clone()),
         ..FamilyOutcome::default()
     };
-    if let Err(error) = driver::run(
+    let result = driver::run(
         pool,
         chain_id,
         target,
@@ -344,21 +346,12 @@ pub async fn apply(
         options,
         &mut outcome,
     )
-    .await
-    {
-        tracing::warn!(
-            target: "bigname_project::families",
-            chain_id,
-            target_block = target.number,
-            %error,
-            "Project families stopped; they catch up on the next batch"
-        );
-        outcome.skipped = Some(error.to_string());
-    }
+    .await;
     (outcome.marker, outcome.marker_readable) = current_marker(pool, chain_id).await;
     outcome.elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
     let mut sorted = outcome.block_ms.clone();
     sorted.sort_unstable();
+    let error = result.err();
     tracing::info!(
         target: "bigname_project::families",
         chain_id,
@@ -376,33 +369,23 @@ pub async fn apply(
         budget_exhausted = outcome.budget_exhausted,
         revision_adopted = outcome.revision_adopted,
         duplicate_anomalies = outcome.duplicate_anomalies,
-        skipped = outcome.skipped.as_deref(),
+        error = error.as_ref().map(tracing::field::display),
         "Project families applied"
     );
-    outcome
+    match error {
+        Some(error) => Err(error),
+        None => Ok(outcome),
+    }
 }
 
-/// The outcome of a run that could not start, for example because the input token did not read
-/// in time: the families stay where they stand and the skip is reported like any other.
-pub async fn skipped(
-    pool: &PgPool,
-    chain_id: &str,
-    target: &Marker,
-    reason: String,
-) -> FamilyOutcome {
-    tracing::warn!(
-        target: "bigname_project::families",
-        chain_id,
-        target_block = target.number,
-        reason,
-        "Project families skipped this batch; they catch up on the next"
-    );
+/// Where the families stand against the served `target`, with nothing applied: the outcome a
+/// caller reports after a run returned an error, so the lag that run left still shows.
+pub async fn standing(pool: &PgPool, chain_id: &str, target: &Marker) -> FamilyOutcome {
     let (marker, marker_readable) = current_marker(pool, chain_id).await;
     FamilyOutcome {
         target: Some(target.clone()),
         marker,
         marker_readable,
-        skipped: Some(reason),
         ..FamilyOutcome::default()
     }
 }

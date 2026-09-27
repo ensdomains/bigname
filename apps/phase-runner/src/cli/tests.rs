@@ -226,8 +226,6 @@ fn redo_finishes_each_family_run_the_supervised_run_does_not() {
         panic!("expected redo command");
     };
     assert_eq!(project_families.max_blocks_per_run, 10);
-    assert!(project_families.finish_each_batch);
-    assert!(!crate::project_phase::FamilySettings::default().finish_each_batch);
 }
 
 #[test]

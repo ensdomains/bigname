@@ -45,7 +45,7 @@ async fn a_revision_that_changes_between_two_blocks_stops_the_run() -> Result<()
     let fixture = Fixture::new("families_repair_revision", 20).await?;
     seed(&fixture, 11..=14).await?;
     fixture.interpret_row("h1", 1, false).await?;
-    fixture.apply(10, FamilyMode::Normal).await;
+    fixture.apply(10, FamilyMode::Normal).await?;
     sql(
         &fixture,
         "CREATE FUNCTION move_revision() RETURNS trigger LANGUAGE plpgsql AS $$
@@ -93,8 +93,8 @@ async fn a_revision_that_changes_between_two_blocks_stops_the_run() -> Result<()
 // past is refused by the generation fence with an error, and the refused block leaves nothing
 // behind. Here the other writer commits with block 13, so the run's next block, 14, is refused.
 #[tokio::test]
-async fn a_second_application_of_a_published_block_is_refused_by_the_generation_fence()
--> Result<()> {
+async fn a_second_application_of_a_published_block_is_refused_by_the_generation_fence() -> Result<()>
+{
     let fixture = Fixture::new("families_repair_generation", 20).await?;
     seed(&fixture, 11..=14).await?;
     fixture.apply(12, FamilyMode::Normal).await?;
@@ -178,7 +178,10 @@ async fn a_failed_block_commit_leaves_the_families_at_the_block_before_it() -> R
         .apply(13, FamilyMode::Normal)
         .await
         .expect_err("the commit of block 13 fails");
-    assert!(error.to_string().contains("injected commit failure"), "{error}");
+    assert!(
+        error.to_string().contains("injected commit failure"),
+        "{error}"
+    );
     assert_eq!(fixture.marker().await?.0, Some(12));
     assert_eq!(
         fixture.exact().await?,
@@ -199,7 +202,7 @@ async fn a_revision_that_changes_during_a_replay_replays_again_under_it() -> Res
     let fixture = Fixture::new("families_repair_replay_revision", 20).await?;
     seed(&fixture, 11..=14).await?;
     fixture.interpret_row("h1", 1, false).await?;
-    fixture.apply(14, FamilyMode::Normal).await;
+    fixture.apply(14, FamilyMode::Normal).await?;
     sql(
         &fixture,
         "CREATE FUNCTION move_revision() RETURNS trigger LANGUAGE plpgsql AS $$
@@ -214,10 +217,10 @@ async fn a_revision_that_changes_during_a_replay_replays_again_under_it() -> Res
     )
     .await?;
     fixture.project_row(1, Some((13, 14, "operator"))).await?;
-    let stopped = fixture
+    fixture
         .apply(14, FamilyMode::Redo { from: 13, to: 14 })
-        .await;
-    assert!(stopped.skipped.is_some());
+        .await
+        .expect_err("the run stops with an error");
     assert_eq!(fixture.marker().await?.0, Some(13));
     assert_eq!(record_state(&fixture).await?, Some(json!("replaying")));
 
@@ -226,8 +229,7 @@ async fn a_revision_that_changes_during_a_replay_replays_again_under_it() -> Res
         "DROP TRIGGER move_revision ON project_family_marker",
     )
     .await?;
-    let resumed = fixture.apply(14, FamilyMode::Normal).await;
-    assert_eq!(resumed.skipped, None);
+    fixture.apply(14, FamilyMode::Normal).await?;
     assert_eq!(fixture.marker().await?.0, Some(14));
     let record = fixture.repair_record().await?.unwrap_or_default();
     assert_eq!(
@@ -238,7 +240,7 @@ async fn a_revision_that_changes_during_a_replay_replays_again_under_it() -> Res
         (&json!("complete"), &json!("h2"))
     );
     let incremental = fixture.snapshot().await?;
-    fixture.apply(14, FamilyMode::Rebuild).await;
+    fixture.apply(14, FamilyMode::Rebuild).await?;
     assert_eq!(fixture.snapshot().await?, incremental);
     fixture.cleanup().await
 }
@@ -273,28 +275,30 @@ async fn allow_record(fixture: &Fixture) -> Result<()> {
 async fn each_repair_transition_commits_with_the_work_it_describes() -> Result<()> {
     let fixture = Fixture::new("families_repair_transitions", 20).await?;
     seed(&fixture, 11..=14).await?;
-    fixture.apply(14, FamilyMode::Normal).await;
+    fixture.apply(14, FamilyMode::Normal).await?;
 
     // A missed attempt rebuilds; the reset fails with its intent.
     let before = fixture.snapshot().await?;
     fixture.project_row(1, None).await?;
     refuse_record(&fixture, "NEW.state = 'rebuilding'").await?;
-    let failed = fixture.apply(14, FamilyMode::Normal).await;
-    assert!(failed.skipped.is_some());
+    fixture
+        .apply(14, FamilyMode::Normal)
+        .await
+        .expect_err("the run stops with an error");
     assert_eq!(fixture.snapshot().await?, before, "nothing was reset");
     assert_eq!(fixture.marker().await?.0, Some(14));
     allow_record(&fixture).await?;
-    let rebuilt = fixture.apply(14, FamilyMode::Normal).await;
+    let rebuilt = fixture.apply(14, FamilyMode::Normal).await?;
     assert!(rebuilt.reset);
     assert_eq!(record_state(&fixture).await?, Some(json!("complete")));
 
     // A redo whose last undo fails with the move to replaying keeps that block applied.
     fixture.project_row(2, Some((13, 14, "operator"))).await?;
     refuse_record(&fixture, "NEW.state = 'replaying'").await?;
-    let failed = fixture
+    fixture
         .apply(14, FamilyMode::Redo { from: 13, to: 14 })
-        .await;
-    assert!(failed.skipped.is_some());
+        .await
+        .expect_err("the run stops with an error");
     assert_eq!(
         fixture.marker().await?.0,
         Some(13),
@@ -305,13 +309,14 @@ async fn each_repair_transition_commits_with_the_work_it_describes() -> Result<(
 
     // The final replayed block fails with the completion.
     refuse_record(&fixture, "NEW.state = 'complete'").await?;
-    let failed = fixture.apply(14, FamilyMode::Normal).await;
-    assert!(failed.skipped.is_some());
+    fixture
+        .apply(14, FamilyMode::Normal)
+        .await
+        .expect_err("the run stops with an error");
     assert_eq!(fixture.marker().await?.0, Some(13));
     assert_eq!(record_state(&fixture).await?, Some(json!("replaying")));
     allow_record(&fixture).await?;
-    let done = fixture.apply(14, FamilyMode::Normal).await;
-    assert_eq!(done.skipped, None);
+    fixture.apply(14, FamilyMode::Normal).await?;
     assert_eq!(fixture.marker().await?.0, Some(14));
     assert_eq!(record_state(&fixture).await?, Some(json!("complete")));
     assert_eq!(fixture.snapshot().await?, before);
@@ -325,15 +330,15 @@ async fn each_repair_transition_commits_with_the_work_it_describes() -> Result<(
 async fn a_completed_redo_is_recognised_only_under_its_content_hash() -> Result<()> {
     let fixture = Fixture::new("families_repair_completed", 20).await?;
     seed(&fixture, 11..=14).await?;
-    fixture.apply(14, FamilyMode::Normal).await;
+    fixture.apply(14, FamilyMode::Normal).await?;
     fixture.project_row(1, Some((13, 14, "operator"))).await?;
     let redo = fixture
         .apply(14, FamilyMode::Redo { from: 13, to: 14 })
-        .await;
+        .await?;
     assert_eq!((redo.undone_blocks, redo.blocks), (2, 2));
     let again = fixture
         .apply(14, FamilyMode::Redo { from: 13, to: 14 })
-        .await;
+        .await?;
     assert_eq!(
         (again.undone_blocks, again.blocks, again.reset),
         (0, 0, false)
@@ -344,8 +349,7 @@ async fn a_completed_redo_is_recognised_only_under_its_content_hash() -> Result<
             FamilyMode::Redo { from: 13, to: 14 },
             &FamilyOptions::new("another-content-hash"),
         )
-        .await;
-    assert_eq!(other.skipped, None);
+        .await?;
     assert!(
         other.blocks > 0,
         "the recorded completion names another content hash"
@@ -354,7 +358,7 @@ async fn a_completed_redo_is_recognised_only_under_its_content_hash() -> Result<
     // Complete again, then move the marker generation as a block or an undo would.
     fixture
         .apply(14, FamilyMode::Redo { from: 13, to: 14 })
-        .await;
+        .await?;
     sql(
         &fixture,
         "UPDATE project_family_marker SET sequence = sequence + 1",
@@ -362,8 +366,7 @@ async fn a_completed_redo_is_recognised_only_under_its_content_hash() -> Result<
     .await?;
     let moved = fixture
         .apply(14, FamilyMode::Redo { from: 13, to: 14 })
-        .await;
-    assert_eq!(moved.skipped, None);
+        .await?;
     assert!(
         moved.blocks > 0,
         "the recorded completion names another marker generation"
@@ -378,11 +381,10 @@ async fn retention_follows_the_finality_heads_and_a_deeper_redo_rebuilds() -> Re
     let fixture = Fixture::new("families_repair_retention", 700).await?;
     seed(&fixture, 101..=102).await?;
     fixture.heads(700, 400, 300).await?;
-    fixture.apply(1, FamilyMode::Normal).await;
+    fixture.apply(1, FamilyMode::Normal).await?;
     let mut runs = 0;
     while fixture.marker().await?.0 != Some(700) {
-        let outcome = fixture.apply(700, FamilyMode::Normal).await;
-        assert_eq!(outcome.skipped, None);
+        fixture.apply(700, FamilyMode::Normal).await?;
         runs += 1;
         assert!(runs < 10, "the follow does not converge");
     }
@@ -397,8 +399,7 @@ async fn retention_follows_the_finality_heads_and_a_deeper_redo_rebuilds() -> Re
     fixture.project_row(1, Some((100, 700, "operator"))).await?;
     let redo = fixture
         .apply(700, FamilyMode::Redo { from: 100, to: 700 })
-        .await;
-    assert_eq!(redo.skipped, None);
+        .await?;
     assert!(redo.reset, "block 100's undo rows were pruned");
     assert_eq!(record_state(&fixture).await?, Some(json!("complete")));
     fixture.cleanup().await
@@ -408,10 +409,9 @@ async fn retention_follows_the_finality_heads_and_a_deeper_redo_rebuilds() -> Re
 #[tokio::test]
 async fn without_finality_heads_no_undo_row_is_pruned() -> Result<()> {
     let fixture = Fixture::new("families_repair_no_heads", 300).await?;
-    fixture.apply(1, FamilyMode::Normal).await;
+    fixture.apply(1, FamilyMode::Normal).await?;
     while fixture.marker().await?.0 != Some(300) {
-        let outcome = fixture.apply(300, FamilyMode::Normal).await;
-        assert_eq!(outcome.skipped, None);
+        fixture.apply(300, FamilyMode::Normal).await?;
     }
     let journalled = fixture.journalled_blocks().await?;
     assert!(
@@ -429,15 +429,16 @@ async fn a_rebuild_spans_several_runs_while_the_served_marker_moves() -> Result<
     let fixture = Fixture::new("families_repair_budget", 80).await?;
     seed(&fixture, 11..=50).await?;
     let small = FamilyOptions::new(CONTENT_HASH).with_max_blocks_per_run(10);
-    let first = fixture.apply_with(50, FamilyMode::Normal, &small).await;
+    let first = fixture.apply_with(50, FamilyMode::Normal, &small).await?;
     assert!(first.reset && first.budget_exhausted);
     assert_eq!(record_state(&fixture).await?, Some(json!("rebuilding")));
     let mut target = 50;
     let mut runs = 1;
     while fixture.marker().await?.0 != Some(target) {
         target += 1;
-        let outcome = fixture.apply_with(target, FamilyMode::Normal, &small).await;
-        assert_eq!(outcome.skipped, None);
+        let outcome = fixture
+            .apply_with(target, FamilyMode::Normal, &small)
+            .await?;
         assert!(outcome.blocks <= 10);
         runs += 1;
         assert!(runs < 20, "the rebuild does not converge");
@@ -445,7 +446,7 @@ async fn a_rebuild_spans_several_runs_while_the_served_marker_moves() -> Result<
     assert!(runs >= 4, "forty event blocks at ten a run");
     assert_eq!(record_state(&fixture).await?, Some(json!("complete")));
     let incremental = fixture.snapshot().await?;
-    fixture.apply(target, FamilyMode::Rebuild).await;
+    fixture.apply(target, FamilyMode::Rebuild).await?;
     assert_eq!(fixture.snapshot().await?, incremental);
     fixture.cleanup().await
 }
@@ -520,10 +521,12 @@ async fn reorg(fixture: &Fixture) -> Result<Marker> {
     })
 }
 
-async fn apply_to(fixture: &Fixture, target: &Marker, mode: FamilyMode) -> families::FamilyOutcome {
-    let token = families::input_token(&fixture.pool, CHAIN)
-        .await
-        .expect("the input token reads");
+async fn apply_to(
+    fixture: &Fixture,
+    target: &Marker,
+    mode: FamilyMode,
+) -> bigname_project::Result<families::FamilyOutcome> {
+    let token = families::input_token(&fixture.pool, CHAIN).await?;
     families::apply(
         &fixture.pool,
         CHAIN,
@@ -541,7 +544,7 @@ async fn apply_to(fixture: &Fixture, target: &Marker, mode: FamilyMode) -> famil
 async fn a_two_block_reorg_undoes_newest_first_and_equals_a_fresh_rebuild() -> Result<()> {
     let fixture = Fixture::new("families_repair_reorg", 20).await?;
     seed(&fixture, 11..=14).await?;
-    fixture.apply(14, FamilyMode::Normal).await;
+    fixture.apply(14, FamilyMode::Normal).await?;
     sql(
         &fixture,
         "CREATE TABLE marker_moves (at bigserial, number bigint);
@@ -552,8 +555,7 @@ async fn a_two_block_reorg_undoes_newest_first_and_equals_a_fresh_rebuild() -> R
     )
     .await?;
     let target = reorg(&fixture).await?;
-    let outcome = apply_to(&fixture, &target, FamilyMode::Normal).await;
-    assert_eq!(outcome.skipped, None);
+    let outcome = apply_to(&fixture, &target, FamilyMode::Normal).await?;
     assert_eq!((outcome.undone_blocks, outcome.blocks), (2, 2));
     let moves: Vec<i64> = sqlx::query_scalar("SELECT number FROM marker_moves ORDER BY at")
         .fetch_all(&fixture.pool)
@@ -568,7 +570,7 @@ async fn a_two_block_reorg_undoes_newest_first_and_equals_a_fresh_rebuild() -> R
     let fresh = Fixture::new("families_repair_reorg_fresh", 20).await?;
     seed(&fresh, 11..=14).await?;
     let target = reorg(&fresh).await?;
-    apply_to(&fresh, &target, FamilyMode::Rebuild).await;
+    apply_to(&fresh, &target, FamilyMode::Rebuild).await?;
     assert_eq!(incremental, fresh.snapshot().await?);
     fresh.cleanup().await?;
     fixture.cleanup().await
@@ -600,14 +602,14 @@ async fn a_rebuild_over_two_runs_refreshes_the_statistics_once_per_threshold() -
     let small = FamilyOptions::new(CONTENT_HASH)
         .with_max_blocks_per_run(5)
         .with_rebuild_ranges(RebuildRanges::Off);
-    let first = fixture.apply_with(30, FamilyMode::Rebuild, &small).await;
-    assert_eq!((first.skipped.as_deref(), first.blocks), (None, 5));
+    let first = fixture.apply_with(30, FamilyMode::Rebuild, &small).await?;
+    assert_eq!(first.blocks, 5);
     assert_eq!(
         first.statistics_refreshes, 3,
         "after 1, 2 and 4 generations, one block each"
     );
-    let second = fixture.apply_with(30, FamilyMode::Normal, &small).await;
-    assert_eq!((second.skipped.as_deref(), second.blocks), (None, 5));
+    let second = fixture.apply_with(30, FamilyMode::Normal, &small).await?;
+    assert_eq!(second.blocks, 5);
     assert_eq!(
         second.statistics_refreshes, 1,
         "after 8 generations; 1, 2 and 4 were the first run's"
@@ -620,39 +622,29 @@ async fn a_rebuild_over_two_runs_refreshes_the_statistics_once_per_threshold() -
     let ranged = FamilyOptions::new(CONTENT_HASH)
         .with_max_blocks_per_run(5)
         .with_rebuild_ranges(RebuildRanges::Through(30));
-    let first = fixture.apply_with(30, FamilyMode::Rebuild, &ranged).await;
-    assert_eq!(
-        (first.skipped.as_deref(), first.blocks, first.ranges),
-        (None, 5, 3)
-    );
+    let first = fixture.apply_with(30, FamilyMode::Rebuild, &ranged).await?;
+    assert_eq!((first.blocks, first.ranges), (5, 3));
     assert_eq!(first.statistics_refreshes, 2, "after 1 and 2 generations");
-    let second = fixture.apply_with(30, FamilyMode::Normal, &ranged).await;
-    assert_eq!(
-        (second.skipped.as_deref(), second.blocks, second.ranges),
-        (None, 5, 1)
-    );
+    let second = fixture.apply_with(30, FamilyMode::Normal, &ranged).await?;
+    assert_eq!((second.blocks, second.ranges), (5, 1));
     assert_eq!(second.statistics_refreshes, 0, "generation 4 ends the run");
-    let third = fixture.apply_with(30, FamilyMode::Normal, &ranged).await;
-    assert_eq!(
-        (third.skipped.as_deref(), third.blocks, third.ranges),
-        (None, 5, 1)
-    );
+    let third = fixture.apply_with(30, FamilyMode::Normal, &ranged).await?;
+    assert_eq!((third.blocks, third.ranges), (5, 1));
     assert_eq!(third.statistics_refreshes, 1, "after 4 generations");
     fixture.cleanup().await
 }
 
-// A served rebuild under a new binary whose family run was skipped (a late or failed token read)
-// leaves families written under the old content hash. The next run, even a plain follow,
+// A served rebuild under a new binary whose family run never finished (a stop, or families turned
+// off) leaves families written under the old content hash. The next run, even a plain follow,
 // rebuilds them under its own hash.
 #[tokio::test]
-async fn families_from_another_content_hash_rebuild_after_a_skipped_rebuild() -> Result<()> {
+async fn families_from_another_content_hash_rebuild_after_an_unfinished_rebuild() -> Result<()> {
     let fixture = Fixture::new("families_repair_hash_fence", 20).await?;
     seed(&fixture, 11..=15).await?;
-    fixture.apply(14, FamilyMode::Normal).await;
+    fixture.apply(14, FamilyMode::Normal).await?;
     // The served rebuild's family run under the new binary never ran.
     let rotated = FamilyOptions::new("rotated-content-hash");
-    let next = fixture.apply_with(15, FamilyMode::Normal, &rotated).await;
-    assert_eq!(next.skipped, None);
+    let next = fixture.apply_with(15, FamilyMode::Normal, &rotated).await?;
     assert!(next.reset, "the families were written by another binary");
     let record = fixture.repair_record().await?.unwrap_or_default();
     assert_eq!(
@@ -675,7 +667,9 @@ async fn families_from_another_content_hash_rebuild_after_a_skipped_rebuild() ->
     .await?;
     assert_eq!(hash.as_deref(), Some("rotated-content-hash"));
     let incremental = fixture.snapshot().await?;
-    fixture.apply_with(15, FamilyMode::Rebuild, &rotated).await;
+    fixture
+        .apply_with(15, FamilyMode::Rebuild, &rotated)
+        .await?;
     assert_eq!(fixture.snapshot().await?, incremental);
     fixture.cleanup().await
 }
@@ -777,8 +771,7 @@ async fn a_rebuild_run_reads_one_work_block_past_its_budget() -> Result<()> {
                     0 => None,
                     _ => fixture.marker().await?.0,
                 };
-                let outcome = fixture.apply_with(12, mode, &small).await;
-                assert_eq!(outcome.skipped, None, "{work:?} {ranges:?}");
+                let outcome = fixture.apply_with(12, mode, &small).await?;
                 let marker = fixture.marker().await?.0.unwrap_or(-1);
                 // The target is applied on its own, so the run's other blocks are its work
                 // below the target.
@@ -802,13 +795,13 @@ async fn a_rebuild_run_reads_one_work_block_past_its_budget() -> Result<()> {
 }
 
 // A refused undo journal (here a marker row that names itself) is not a reason to rebuild: the
-// run reports a skip and changes nothing, every later run does the same, and an operator rebuild
+// run returns an error and changes nothing, every later run does the same, and an operator rebuild
 // or a redo below the kept journal is the way out.
 #[tokio::test]
-async fn a_cyclic_undo_journal_skips_the_run_instead_of_rebuilding() -> Result<()> {
+async fn a_cyclic_undo_journal_fails_the_run_instead_of_rebuilding() -> Result<()> {
     let fixture = Fixture::new("families_repair_cycle", 20).await?;
     seed(&fixture, 11..=12).await?;
-    fixture.apply(12, FamilyMode::Normal).await;
+    fixture.apply(12, FamilyMode::Normal).await?;
     let before = fixture.snapshot().await?;
     sql(
         &fixture,
@@ -824,14 +817,17 @@ async fn a_cyclic_undo_journal_skips_the_run_instead_of_rebuilding() -> Result<(
     .await?;
     fixture.project_row(1, Some((11, 12, "operator"))).await?;
     for _ in 0..2 {
-        let outcome = fixture
+        let error = fixture
             .apply(12, FamilyMode::Redo { from: 11, to: 12 })
-            .await;
-        let skipped = outcome.skipped.clone().unwrap_or_default();
-        assert!(skipped.contains("cycle"), "{skipped}");
-        assert!(!outcome.reset, "a refused journal does not rebuild");
-        assert_eq!(outcome.blocks + outcome.undone_blocks, 0);
-        assert_eq!(fixture.snapshot().await?, before, "nothing changed");
+            .await
+            .expect_err("a refused journal fails the run")
+            .to_string();
+        assert!(error.contains("cycle"), "{error}");
+        assert_eq!(
+            fixture.snapshot().await?,
+            before,
+            "nothing changed: no rebuild, no block applied or undone"
+        );
     }
     fixture.cleanup().await
 }
@@ -917,8 +913,9 @@ async fn a_new_content_hash_replaces_state_the_old_order_wrote() -> Result<()> {
     };
     let ordinal_winner = json!({"resolver": RESOLVER_B, "pointer": position(&later),
                                 "nonzero": RESOLVER_B, "nonzero_position": position(&later)});
-    let applied = fixture.apply_with(13, FamilyMode::Normal, &old_hash).await;
-    assert_eq!(applied.skipped, None);
+    fixture
+        .apply_with(13, FamilyMode::Normal, &old_hash)
+        .await?;
     assert_eq!(pointer(&fixture).await?, ordinal_winner);
 
     // The old comparator's state: the byte-greater set wins the pointer, in the row and in the
@@ -965,8 +962,9 @@ async fn a_new_content_hash_replaces_state_the_old_order_wrote() -> Result<()> {
     };
     assert_eq!(seeded(&fixture).await?, 1, "the seeded image is journalled");
 
-    let moved = fixture.apply_with(13, FamilyMode::Normal, &new_hash).await;
-    assert_eq!(moved.skipped, None);
+    let moved = fixture
+        .apply_with(13, FamilyMode::Normal, &new_hash)
+        .await?;
     assert!(
         moved.reset,
         "the families were written under another content hash"
@@ -1000,10 +998,13 @@ async fn a_new_content_hash_replaces_state_the_old_order_wrote() -> Result<()> {
         json!({"resolver": RESOLVER_B, "pointer": position(&later),
                "boundary": position(&later), "event_identity": later})
     );
-    fixture.apply_with(13, FamilyMode::Normal, &new_hash).await;
+    fixture
+        .apply_with(13, FamilyMode::Normal, &new_hash)
+        .await?;
     assert_eq!(fixture.exact().await?, incremental);
-    let rebuilt = fixture.apply_with(13, FamilyMode::Rebuild, &new_hash).await;
-    assert_eq!(rebuilt.skipped, None);
+    fixture
+        .apply_with(13, FamilyMode::Rebuild, &new_hash)
+        .await?;
     assert_eq!(
         fixture.exact().await?,
         incremental,
