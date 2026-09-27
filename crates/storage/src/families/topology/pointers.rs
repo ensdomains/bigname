@@ -184,8 +184,8 @@ impl LinkSelection {
 /// the F7 reducer keeps there (crates/project/src/families/records.rs, `link`; the F7 row in
 /// docs/glossary.md). `storage_model` is an annotation and plays no part. Today's link staging
 /// drops links not annotated `resolver_record_id`
-/// (crates/project/src/builders/resolver/link_summary.rs), so for such a row, which only a fixture
-/// writes, the served read serves an older link instead. `None` when neither probe finds a row.
+/// (crates/project/src/builders/resolver/link_summary.rs); no producer writes such a row, so on
+/// real data the two agree. `None` when neither probe finds a row.
 pub async fn load_family_link_selection(
     pool: &PgPool,
     chain_id: &str,

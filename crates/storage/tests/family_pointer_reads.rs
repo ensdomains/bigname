@@ -195,18 +195,17 @@ async fn pointer(
     Ok(())
 }
 
-// The alias read takes the current pointer and then rejects a null, zero or empty resolver, so a
-// clear never exposes an older pointer. An empty resolver means no alias (Tate, 2026-09-26): it is
-// the same "no resolver" rule the record pointer applies, and the ENSv2 registry adapter writes
-// the resolver through `nullable_address`, so only a fixture can hold an empty one.
+// The alias read takes the current pointer and then rejects a null or zero resolver, so a clear
+// never exposes an older pointer. No producer writes an empty resolver: the ENSv1 registry
+// decodes a `0x` address and the ENSv2 registry adapter writes it through `nullable_address`, so
+// there is no empty case here.
 #[tokio::test]
-async fn alias_pointer_rejects_null_zero_and_empty() -> Result<()> {
+async fn alias_pointer_rejects_null_and_zero() -> Result<()> {
     with_database("family_alias_pointer", |pool| async move {
         let cases = [
             (Uuid::from_u128(1), Some(RESOLVER), Some(RESOLVER)),
             (Uuid::from_u128(2), None, None),
             (Uuid::from_u128(3), Some(ZERO), None),
-            (Uuid::from_u128(4), Some(""), None),
         ];
         for (resource, current, _) in cases {
             pointer(&pool, resource, current, Some(Some(OLDER))).await?;

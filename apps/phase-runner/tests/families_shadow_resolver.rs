@@ -1,7 +1,8 @@
 //! TYR-36 step 5: the resolver readers over the families against the served ones at one
-//! publication: `bound_names` over the F5 resolver index, `/aliases` (F10 per-resolver rows and
-//! the alias-path binding arm over F5), `/links` (F7) and `/roles` (F8), each paged at size one
-//! so every page and its total are compared.
+//! publication: `bound_names` over the F5 resolver index, `/aliases` (F10 per-resolver rows),
+//! `/links` (F7) and `/roles` (F8), each paged at size one so every page and its total are
+//! compared. The `/aliases` alias-path binding arm over F5 has no fixture: no producer writes a
+//! `resolver_alias_path` binding (the ENSv2 resolver adapter observes those names unbound).
 #[allow(dead_code)]
 #[path = "project_end_to_end/shadow_fixture.rs"]
 mod shadow_fixture;
@@ -12,10 +13,8 @@ mod support;
 mod topology_shadow;
 
 use anyhow::{Context, Result, ensure};
-use bigname_storage::families::records::load_family_link_selection as records_link_selection;
 use bigname_storage::families::topology::{
-    FamilyCollectionPage, load_family_link_selection, load_resolver_links_shadow,
-    load_resolver_shadow,
+    FamilyCollectionPage, load_resolver_links_shadow, load_resolver_shadow,
 };
 use serde_json::{Value, json};
 use shadow_fixture::{
@@ -135,31 +134,6 @@ async fn link(
     emitter: &str,
     block: i64,
 ) -> Result<()> {
-    link_of_model(
-        fixture,
-        identity,
-        resolver,
-        node,
-        record_id,
-        "resolver_record_id",
-        emitter,
-        block,
-    )
-    .await
-}
-
-/// A `ResolverRecordLinked` of the given storage model.
-#[allow(clippy::too_many_arguments)]
-async fn link_of_model(
-    fixture: &Fixture,
-    identity: &str,
-    resolver: &str,
-    node: &str,
-    record_id: &str,
-    storage_model: &str,
-    emitter: &str,
-    block: i64,
-) -> Result<()> {
     fixture
         .event(
             identity,
@@ -169,7 +143,7 @@ async fn link_of_model(
             "ResolverRecordLinked",
             block,
             json!({"resolver": resolver, "node": node, "resolver_record_id": record_id,
-                   "storage_model": storage_model}),
+                   "storage_model": "resolver_record_id"}),
             emitter,
         )
         .await?;
@@ -234,7 +208,6 @@ async fn resolver_collections_and_bound_names_match_the_served_readers() -> Resu
     let two = name(&fixture, 2, "two", "declared_registry_path").await?;
     let three = name(&fixture, 3, "three", "declared_registry_path").await?;
     let four = name(&fixture, 4, "four", "declared_registry_path").await?;
-    let path = name(&fixture, 5, "path", "resolver_alias_path").await?;
     let aliased = name(&fixture, 6, "aliased", "declared_registry_path").await?;
 
     for (identity, target, resolver) in [
@@ -242,11 +215,10 @@ async fn resolver_collections_and_bound_names_match_the_served_readers() -> Resu
         ("two-first", &two, &first),
         ("three-first", &three, &first),
         ("four-first", &four, &first),
-        ("path-first", &path, &first),
     ] {
         point(&fixture, identity, target, resolver, 2).await?;
     }
-    // Aliases at two resolvers, one of them removed, and the alias-path binding at the first.
+    // Aliases at two resolvers, one of them removed.
     alias(
         &fixture,
         "alias-aliased-first",
@@ -278,7 +250,6 @@ async fn resolver_collections_and_bound_names_match_the_served_readers() -> Resu
         3,
     )
     .await?;
-    alias(&fixture, "alias-path", &path, &first, true, &one, 2).await?;
     // Links: a named node, the default node, one cleared by record 0, and one whose later
     // record replaces an earlier one.
     link(&fixture, "link-one", &first, &one.node, "5", &first, 2).await?;
@@ -360,7 +331,7 @@ async fn resolver_collections_and_bound_names_match_the_served_readers() -> Resu
     let report = fixture.compare(1).await?;
     unexpected(&report, &[])?;
     ensure!(
-        report.bound_names == 5 && report.aliases >= 4 && report.links >= 3 && report.roles >= 2,
+        report.bound_names == 4 && report.aliases >= 2 && report.links >= 3 && report.roles >= 2,
         "{}",
         report.line()
     );
@@ -417,7 +388,7 @@ async fn resolver_collections_and_bound_names_match_the_served_readers() -> Resu
         "a changed link position passed the check"
     );
     unexpected(&fixture.compare(1).await?, &[format!("links of {first}")])?;
-    ensure!(report.bound_names == 4, "{}", report.line());
+    ensure!(report.bound_names == 3, "{}", report.line());
     fixture.cleanup().await
 }
 
@@ -676,163 +647,6 @@ async fn roles_leave_out_a_grant_whose_resource_is_not_readable() -> Result<()> 
     unexpected(&report, &[])?;
     ensure!(report.roles == 1, "{}", report.line());
     fixture.cleanup().await
-}
-
-// A record-ID link followed, at the same resolver and node, by a link annotated with another
-// storage model; no producer writes that annotation, the record-ID adapter stamps
-// `resolver_record_id` on every `Linked`. The newest link per (resolver, node) wins (Tate,
-// 2026-09-26), as on chain, where the resolver keeps one record id per node and each `Linked`
-// overwrites it (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L363-L367
-// @ ens_v2@a971bd64). The F7 reducer keeps that one row (crates/project/src/families/records.rs,
-// `link`), so the shadow serves record 9 at that node and the name's link selection serves it too.
-// Today's `/links` drops a link not annotated `resolver_record_id` before selection
-// (crates/project/src/builders/resolver/link_summary.rs:32-41), so it still serves record 5.
-// Expected difference by that ruling, until the served read switches to these readers.
-#[tokio::test]
-async fn a_link_of_another_storage_model_hides_the_record_id_link() -> Result<()> {
-    let mut fixture = Fixture::new("families_shadow_link_model", 12).await?;
-    let first = address(0xd1);
-    fixture.declare_resolvers(RESOLVER, &[&first]).await?;
-    let one = name(&fixture, 1, "one", "declared_registry_path").await?;
-    let two = name(&fixture, 2, "two", "declared_registry_path").await?;
-    point(&fixture, "one-first", &one, &first, 2).await?;
-    point(&fixture, "two-first", &two, &first, 2).await?;
-    link(&fixture, "link-one", &first, &one.node, "5", &first, 2).await?;
-    link(&fixture, "link-two", &first, &two.node, "6", &first, 2).await?;
-    link(&fixture, "link-default", &first, ZERO_NODE, "7", &first, 2).await?;
-    fixture.publish(4).await?;
-    unexpected(&fixture.compare(1).await?, &[])?;
-
-    link_of_model(
-        &fixture,
-        "link-one-other-model",
-        &first,
-        &one.node,
-        "9",
-        "resolver_node",
-        &first,
-        5,
-    )
-    .await?;
-    fixture.publish(6).await?;
-    let report = fixture.compare(1).await?;
-    let differing = DifferingLink {
-        resolver: &first,
-        node: &one.node,
-        name: &one.logical,
-        served: ("link-one", "5"),
-        shadow: ("link-one-other-model", "9"),
-    };
-    differing.check(fixture.pool()).await?;
-    let selection = load_family_link_selection(fixture.pool(), CHAIN, &first, &one.node)
-        .await?
-        .context("the newer link remains")?;
-    ensure!(
-        selection.default.is_none()
-            && selection
-                .selected()
-                .is_some_and(|link| link.record_id == "9"
-                    && link.storage_model.as_deref() == Some("resolver_node")),
-        "{selection:?}"
-    );
-    // Step 4's copy of the link selection takes the same newest row: record 9 at the exact
-    // node, with no default contributing. Its eager default candidate stays in its view.
-    let records = records_link_selection(fixture.pool(), CHAIN, &first, &one.node)
-        .await?
-        .context("the records reader sees the newer link")?;
-    ensure!(
-        records.active_record_id() == Some("9")
-            && records
-                .exact
-                .as_ref()
-                .is_some_and(|link| link.record_id == "9")
-            && records.default_link_event_id.is_none()
-            && records.contributing_links().count() == 1,
-        "{records:?}"
-    );
-    // The check sees a change: with the family row's record changed, the shadow row at that
-    // node no longer equals the one the newer link event makes, and the check fails.
-    let set_record = "UPDATE project_resolver_link SET record_id = $4
-                      WHERE chain_id = $1 AND resolver_address = $2 AND node = $3";
-    sqlx::query(set_record)
-        .bind(CHAIN)
-        .bind(&first)
-        .bind(&one.node)
-        .bind("10")
-        .execute(fixture.pool())
-        .await?;
-    ensure!(
-        differing.check(fixture.pool()).await.is_err(),
-        "a changed family row passed the check"
-    );
-    sqlx::query(set_record)
-        .bind(CHAIN)
-        .bind(&first)
-        .bind(&one.node)
-        .bind("9")
-        .execute(fixture.pool())
-        .await?;
-    differing.check(fixture.pool()).await?;
-    unexpected(&report, &[format!("links of {first}")])?;
-    fixture.cleanup().await
-}
-
-/// A `/links` node where the readers serve different rows: at `node` the served collection
-/// serves exactly the row the link event `served` makes and the shadow exactly the row the link
-/// event `shadow` makes, every other row agrees and the totals are equal.
-struct DifferingLink<'a> {
-    resolver: &'a str,
-    node: &'a str,
-    name: &'a str,
-    served: (&'a str, &'a str),
-    shadow: (&'a str, &'a str),
-}
-
-impl DifferingLink<'_> {
-    async fn check(&self, pool: &PgPool) -> Result<()> {
-        let (height, _) = topology_shadow::publication(pool, CHAIN).await?;
-        let served = topology_shadow::served_collection(
-            pool,
-            CHAIN,
-            self.resolver,
-            "links",
-            height,
-            None,
-            1_000,
-        )
-        .await?;
-        let shadowed =
-            load_resolver_links_shadow(pool, CHAIN, self.resolver, "ens", None, 1_000).await?;
-        let at = LinkRow {
-            resolver: self.resolver,
-            node: self.node,
-            name: self.name,
-            event: self.served,
-        };
-        let served_row = at.row(pool, self.served.0, self.served.1).await?;
-        let shadow_row = at.row(pool, self.shadow.0, self.shadow.1).await?;
-        let split = |page: &FamilyCollectionPage| -> (Vec<_>, Vec<_>) {
-            page.rows
-                .iter()
-                .cloned()
-                .partition(|(_, node, _)| node == self.node)
-        };
-        let (served_at, served_rest) = split(&served);
-        let (shadow_at, shadow_rest) = split(&shadowed);
-        ensure!(
-            served_at == [served_row.clone()],
-            "served {served_at:?}, expected {served_row:?}"
-        );
-        ensure!(
-            shadow_at == [shadow_row.clone()],
-            "shadow {shadow_at:?}, expected {shadow_row:?}"
-        );
-        ensure!(
-            served_rest == shadow_rest && served.total_count == shadowed.total_count,
-            "served {served:?}, shadow {shadowed:?}"
-        );
-        Ok(())
-    }
 }
 
 /// The `/links` row at one node, which both readers must serve exactly: the row the link event
