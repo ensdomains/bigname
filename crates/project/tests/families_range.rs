@@ -807,7 +807,8 @@ async fn a_resumed_range_rebuild_starts_with_a_range_of_its_whole_budget() -> Re
 }
 
 // A range cap of zero, set on the option field rather than through `with_range_caps`, counts as
-// one block: every range holds one work block.
+// one block: the rebuild completes with every work block a range of its own, then the target,
+// and equals both the block-by-block follow and a rebuild with ranges off.
 #[tokio::test]
 async fn a_range_cap_of_zero_counts_as_one_block() -> Result<()> {
     let fixture = Fixture::new("families_range_zero_cap", 20).await?;
@@ -817,6 +818,11 @@ async fn a_range_cap_of_zero_counts_as_one_block() -> Result<()> {
     options.max_range_blocks = 0;
     let outcome = rebuild_equal(&fixture, 14, &options).await?;
     assert_eq!((outcome.blocks, outcome.ranges), (5, 4));
+    assert_eq!(marker_state(&fixture).await?, "live");
+    assert_eq!(fixture.journalled_blocks().await?, vec![10, 11, 12, 13, 14]);
+    let off = FamilyOptions::new(CONTENT_HASH).with_rebuild_ranges(RebuildRanges::Off);
+    let outcome = rebuild_equal(&fixture, 14, &off).await?;
+    assert_eq!((outcome.blocks, outcome.ranges), (5, 0));
     fixture.cleanup().await
 }
 
