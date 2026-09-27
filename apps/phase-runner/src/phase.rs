@@ -239,9 +239,7 @@ pub trait Phase: Send + Sync {
     fn run_batch(&self, context: PhaseContext) -> PhaseFuture<'_>;
 
     /// Work that follows a batch once its progress is recorded, in transactions of its own; Project
-    /// applies the owned key families here. It cannot roll back the batch or its recorded
-    /// progress. An error fails the phase run as a batch error would, and the restart loop
-    /// retries a retryable one.
+    /// applies the owned key families here. An error fails the phase run, keeping the batch.
     fn after_progress_recorded(&self, _chain_id: &str) -> AfterProgressFuture<'_> {
         Box::pin(async { Ok(()) })
     }
