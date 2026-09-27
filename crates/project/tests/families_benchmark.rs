@@ -176,6 +176,17 @@ async fn family_block_timings() -> Result<()> {
         started.elapsed().as_millis()
     );
     let per_block = families_text(&pool).await?;
+    // Empty the families as the first rebuild found them, so the ranged rebuild does not pay
+    // for deleting and stepping over the first one's rows.
+    let tables: Vec<&str> = families::family_tables()
+        .chain(["project_family_undo"])
+        .collect();
+    raw_sql(&format!(
+        "TRUNCATE {tables}; ANALYZE {tables}",
+        tables = tables.join(", ")
+    ))
+    .execute(&pool)
+    .await?;
     let started = Instant::now();
     let ranged = run_with(
         &pool,
