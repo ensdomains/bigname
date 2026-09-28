@@ -395,3 +395,103 @@ async fn v2_child_reads_refuse_an_unservable_family_marker() -> Result<()> {
     }
     database.cleanup().await
 }
+
+/// Runs `uri` with the switch on, pausing before every composed or child read's snapshot, and at
+/// the `flip_at`-th pause (from 1; none when 0) runs `flip` on the family marker before resuming.
+/// Returns the answer and how many reads paused.
+async fn v2_get_with_marker_flip_at(
+    database: &TestDatabase,
+    uri: &str,
+    flip: &str,
+    flip_at: usize,
+) -> Result<(StatusCode, Value, usize)> {
+    let reached = std::sync::Arc::new(tokio::sync::Notify::new());
+    let resume = std::sync::Arc::new(tokio::sync::Notify::new());
+    let request = bigname_storage::families::name::seams::with_pause_before_snapshot(
+        std::sync::Arc::clone(&reached),
+        std::sync::Arc::clone(&resume),
+        bigname_storage::publication_source::with_serve_from_families(
+            true,
+            v2_get_response(database, uri),
+        ),
+    );
+    tokio::pin!(request);
+    let mut paused = 0;
+    let response = loop {
+        tokio::select! {
+            response = &mut request => break response?,
+            () = reached.notified() => {
+                paused += 1;
+                if paused == flip_at {
+                    sqlx::query(flip).execute(&database.pool).await?;
+                }
+                resume.notify_one();
+            }
+        }
+    };
+    let status = response.status();
+    let body: Value = read_json(response).await?;
+    Ok((status, body, paused))
+}
+
+// Every route that reads the child families answers the stale 409, never a server error or an
+// empty list, when the marker is not servable: before the request (a rebuild in flight, where the
+// fence refuses first), and when it stops being servable after the route's fence, at each of the
+// route's composed and child reads in turn, which reaches every child read's error mapping.
+#[tokio::test]
+async fn v2_child_reads_answer_409_when_the_marker_is_not_servable() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_switch_children_fixture(&database).await?;
+    let uris = [
+        "/v1/names/alpha.eth/subnames".to_owned(),
+        "/v1/names/alpha.eth/subnames?include=counts&include_expired=false".to_owned(),
+        format!("/v1/registries/1/{CHILD_ALPHA_REGISTRY}/labels?include=counts"),
+        format!("/v1/registries/1/{CHILD_ALPHA_REGISTRY}?include=counts"),
+        "/v1/names/alpha.eth?include=counts".to_owned(),
+        format!("/v1/addresses/{CHILD_OWNER}/names?namespace=ens&include=counts"),
+    ];
+    let flips = [
+        "UPDATE bigname_phase.project_family_marker SET state = 'bootstrap_pending'",
+        "UPDATE bigname_phase.project_family_marker SET input_content_hash = 'another-build'",
+    ];
+    let servable: (String, String) = sqlx::query_as(
+        "SELECT state, input_content_hash FROM bigname_phase.project_family_marker",
+    )
+    .fetch_one(&database.pool)
+    .await?;
+    let restore = || async {
+        sqlx::query(
+            "UPDATE bigname_phase.project_family_marker SET state = $1, input_content_hash = $2",
+        )
+        .bind(&servable.0)
+        .bind(&servable.1)
+        .execute(&database.pool)
+        .await
+    };
+    let mut answers = Vec::new();
+    for uri in &uris {
+        let (status, body, reads) = v2_get_with_marker_flip_at(&database, uri, "SELECT 1", 0).await?;
+        assert_eq!(status, StatusCode::OK, "{uri} with a servable marker: {body:#}");
+        assert!(reads > 0, "{uri}: no composed or child read");
+        for flip in flips {
+            // Before the request.
+            sqlx::query(flip).execute(&database.pool).await?;
+            let (status, body, _) =
+                v2_get_with_marker_flip_at(&database, uri, "SELECT 1", 0).await?;
+            restore().await?;
+            answers.push((uri.clone(), flip, 0, status, body["error"]["code"].clone()));
+            // After the fence, at each read.
+            for at in 1..=reads {
+                let (status, body, _) = v2_get_with_marker_flip_at(&database, uri, flip, at).await?;
+                restore().await?;
+                answers.push((uri.clone(), flip, at, status, body["error"]["code"].clone()));
+            }
+        }
+    }
+    let expected: Vec<_> = answers
+        .iter()
+        .map(|(uri, flip, at, ..)| (uri.clone(), *flip, *at, StatusCode::CONFLICT, json!("stale")))
+        .collect();
+    assert_eq!(answers, expected);
+    database.cleanup().await
+}
