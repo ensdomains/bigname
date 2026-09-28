@@ -1629,6 +1629,7 @@ dependencies = [
  "alloy-sol-types",
  "anyhow",
  "bigname-content-hash",
+ "bigname-domain",
  "bigname-interpret",
  "bigname-lookup",
  "bigname-project",
