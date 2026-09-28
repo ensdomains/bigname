@@ -684,13 +684,8 @@ async fn run(
             topology_targets.push(report.target);
             // The permission and resolver collection reads under both switch states (TYR-36
             // step 7b slice 4).
-            let permissions = permissions_shadow::compare(
-                pool,
-                CHAIN,
-                u64::try_from(children_page)?,
-                &control_differing,
-            )
-            .await?;
+            let permissions =
+                permissions_shadow::compare(pool, CHAIN, children_page, &control_differing).await?;
             eprintln!("{}", permissions.line());
             permissions.require_clean()?;
             ensure!(
