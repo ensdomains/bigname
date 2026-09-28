@@ -11,7 +11,7 @@ async fn a_name_wrapped_after_registration_serves_its_control_on_the_authority_r
     let database = TestDatabase::new_migrated().await?;
     seed_bounded_membership_blocks(&database, 240).await?;
     let (logical_name_id, resource) =
-        seed_switch_name(&database, NAME, 0xb0a_6900, "ens_v1").await?;
+        seed_family_name(&database, NAME, 0xb0a_6900, "ens_v1").await?;
     let mut registered = v2_history_event(
         &format!("{NAME}-registered"),
         Some(&logical_name_id),

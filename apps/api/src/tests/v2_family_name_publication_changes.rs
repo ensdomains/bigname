@@ -37,15 +37,15 @@ where
 
 /// Run the production reset transaction and stop before its first replay block. This clears
 /// the marker's block/hash and every family table, unlike changing only its state.
-async fn reset_switch_families(database: &TestDatabase) -> Result<()> {
-    let token = bigname_project::families::input_token(&database.pool, SWITCH_CHAIN).await?;
+async fn reset_family_families(database: &TestDatabase) -> Result<()> {
+    let token = bigname_project::families::input_token(&database.pool, FAMILY_CHAIN).await?;
     let mut options = bigname_project::families::FamilyOptions::new(
         bigname_content_hash::INTERPRETER_CONTENT_HASH,
     );
     options.max_blocks_per_run = 0;
     let outcome = bigname_project::families::apply(
         &database.pool,
-        SWITCH_CHAIN,
+        FAMILY_CHAIN,
         &bigname_project::Marker {
             number: 240,
             hash: "0xhistory240".to_owned(),
@@ -66,7 +66,7 @@ async fn reset_switch_families(database: &TestDatabase) -> Result<()> {
         let count: i64 = sqlx::query_scalar(&format!(
             "SELECT count(*) FROM bigname_phase.{table} WHERE chain_id = $1"
         ))
-        .bind(SWITCH_CHAIN)
+        .bind(FAMILY_CHAIN)
         .fetch_one(&database.pool)
         .await?;
         anyhow::ensure!(count == 0, "reset left {count} rows in {table}");
@@ -77,12 +77,12 @@ async fn reset_switch_families(database: &TestDatabase) -> Result<()> {
 #[tokio::test]
 async fn v2_search_refuses_a_real_family_reset_after_its_fence() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    seed_switch_names_fixture(&database).await?;
-    let (status, before) = read_family_response(&database, SWITCH_SEARCH).await?;
+    seed_family_names_fixture(&database).await?;
+    let (status, before) = read_family_response(&database, FAMILY_SEARCH).await?;
     assert_eq!(status, StatusCode::OK, "{before:#}");
     assert_eq!(before["data"].as_array().map(Vec::len), Some(2));
-    let (status, body) = get_with_family_change_after_fence(&database, SWITCH_SEARCH, || {
-        reset_switch_families(&database)
+    let (status, body) = get_with_family_change_after_fence(&database, FAMILY_SEARCH, || {
+        reset_family_families(&database)
     })
     .await?;
     assert_eq!(status, StatusCode::CONFLICT, "{body:#}");
@@ -92,8 +92,8 @@ async fn v2_search_refuses_a_real_family_reset_after_its_fence() -> Result<()> {
 #[tokio::test]
 async fn v2_resource_permissions_refuse_a_real_family_reset_after_their_fence() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    seed_switch_routes_fixture(&database).await?;
-    let uri = format!("/v1/permissions?address={SWITCH_BOB}&namespace=ens");
+    seed_family_routes_fixture(&database).await?;
+    let uri = format!("/v1/permissions?address={FAMILY_BOB}&namespace=ens");
     let (status, before) = read_family_response(&database, &uri).await?;
     assert_eq!(status, StatusCode::OK, "{before:#}");
     assert!(
@@ -103,7 +103,7 @@ async fn v2_resource_permissions_refuse_a_real_family_reset_after_their_fence() 
         "{before:#}"
     );
     let (status, body) =
-        get_with_family_change_after_fence(&database, &uri, || reset_switch_families(&database))
+        get_with_family_change_after_fence(&database, &uri, || reset_family_families(&database))
             .await?;
     assert_eq!(status, StatusCode::CONFLICT, "{body:#}");
     database.cleanup().await
@@ -112,7 +112,7 @@ async fn v2_resource_permissions_refuse_a_real_family_reset_after_their_fence() 
 #[tokio::test]
 async fn v2_missing_subnames_parent_refuses_a_replacement_live_publication() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    seed_switch_names_fixture(&database).await?;
+    seed_family_names_fixture(&database).await?;
     let uri = "/v1/names/alpha.eth/subnames";
     let (status, before) = read_family_response(&database, uri).await?;
     assert_eq!(status, StatusCode::OK, "{before:#}");
@@ -137,27 +137,27 @@ async fn v2_missing_subnames_parent_refuses_a_replacement_live_publication() -> 
 
 async fn assert_mixed_width_expiry_pages(order: &str) -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    seed_switch_names_events(&database).await?;
+    seed_family_names_events(&database).await?;
     let (later, later_resource) =
-        seed_switch_name(&database, "later.eth", 0x5f1_0000, "ens_v1").await?;
+        seed_family_name(&database, "later.eth", 0x5f1_0000, "ens_v1").await?;
     let (unbounded, unbounded_resource) =
-        seed_switch_name(&database, "unbounded.eth", 0x5f2_0000, "ens_v1").await?;
+        seed_family_name(&database, "unbounded.eth", 0x5f2_0000, "ens_v1").await?;
     bigname_storage::insert_normalized_event_fixtures(
         &database.pool,
         &[
-            switch_event(
-                "switch-later-grant",
+            family_event(
+                "family-later-grant",
                 Some(&later),
                 Some(later_resource),
                 "RegistrationGranted",
                 "ens_v1_registrar_l1",
                 206,
                 0,
-                json!({"authority_kind": "registrar", "registrant": SWITCH_ALICE,
+                json!({"authority_kind": "registrar", "registrant": FAMILY_ALICE,
                    "expiry": 10_000_000_000i64}),
             ),
-            switch_event(
-                "switch-unbounded-wrapper",
+            family_event(
+                "family-unbounded-wrapper",
                 Some(&unbounded),
                 Some(unbounded_resource),
                 "ExpiryChanged",

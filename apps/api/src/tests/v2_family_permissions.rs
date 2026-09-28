@@ -1,9 +1,9 @@
-const SWITCH_V2_RESOLVER: &str = "0x0000000000000000000000000000000000000e2e";
-const SWITCH_V2_IMPLEMENTATION: &str = "0x0000000000000000000000000000000000000e21";
-const SWITCH_CAROL: &str = "0x00000000000000000000000000000000000ca201";
+const FAMILY_V2_RESOLVER: &str = "0x0000000000000000000000000000000000000e2e";
+const FAMILY_V2_IMPLEMENTATION: &str = "0x0000000000000000000000000000000000000e21";
+const FAMILY_CAROL: &str = "0x00000000000000000000000000000000000ca201";
 /// A granted resource no name is bound to.
-const SWITCH_NAMELESS: u128 = 0x5f1_0000;
-fn switch_v2_resolver_event(
+const FAMILY_NAMELESS: u128 = 0x5f1_0000;
+fn family_v2_resolver_event(
     identity: &str,
     resource_id: Option<Uuid>,
     kind: &str,
@@ -12,7 +12,7 @@ fn switch_v2_resolver_event(
     manifest_id: i64,
     after_state: Value,
 ) -> NormalizedEvent {
-    let mut event = switch_event(
+    let mut event = family_event(
         identity,
         None,
         resource_id,
@@ -23,14 +23,14 @@ fn switch_v2_resolver_event(
         after_state,
     );
     event.derivation_kind = derivation.to_owned();
-    event.raw_fact_ref["emitting_address"] = json!(SWITCH_V2_RESOLVER);
+    event.raw_fact_ref["emitting_address"] = json!(FAMILY_V2_RESOLVER);
     event.source_manifest_id = Some(manifest_id);
     event.manifest_version = 1;
     event
 }
 
 /// A role change on the permissioned resolver: `subject` holds `powers` on `resource`'s node.
-fn switch_v2_role(
+fn family_v2_role(
     identity: &str,
     resource_id: Uuid,
     node: &str,
@@ -39,7 +39,7 @@ fn switch_v2_role(
     powers: Value,
     manifest_id: i64,
 ) -> NormalizedEvent {
-    switch_v2_resolver_event(
+    family_v2_resolver_event(
         identity,
         Some(resource_id),
         "PermissionChanged",
@@ -48,27 +48,27 @@ fn switch_v2_role(
         manifest_id,
         json!({
             "subject": subject,
-            "scope": {"kind": "resolver", "chain_id": SWITCH_CHAIN,
-                      "resolver_address": SWITCH_V2_RESOLVER},
+            "scope": {"kind": "resolver", "chain_id": FAMILY_CHAIN,
+                      "resolver_address": FAMILY_V2_RESOLVER},
             "effective_powers": powers,
             "grant_source": {"kind": "raw_log", "source_event": "EACRolesChanged",
                 "upstream_resource": node, "root_resource": false, "changed_powers": powers},
             "revocation_source": null, "inheritance_path": [], "transfer_behavior": {},
             "source_event": "EACRolesChanged", "upstream_resource": node, "resource": node,
             "root_resource": false, "storage_model": "resolver_record_id",
-            "resolver": SWITCH_V2_RESOLVER, "resolver_record_id": "0",
+            "resolver": FAMILY_V2_RESOLVER, "resolver_record_id": "0",
             "record_key": "permission",
         }),
     )
 }
 
-/// `seed_switch_routes_fixture` (alpha.eth and beta.eth on an ENSv1 resolver, bob holding a
+/// `seed_family_routes_fixture` (alpha.eth and beta.eth on an ENSv1 resolver, bob holding a
 /// role on an ENSv1 resolver) plus the permissioned resolver: its manifest, its upgrade at 206,
 /// role changes for bob on alpha.eth (210), alice on beta.eth (211, narrowed at 213) and carol on
 /// a nameless resource (212), a record link for alpha.eth and a default link (214), and an alias
 /// (215); all published at 240.
-async fn seed_switch_permissions_fixture(database: &TestDatabase) -> Result<()> {
-    seed_switch_routes_events(database).await?;
+async fn seed_family_permissions_fixture(database: &TestDatabase) -> Result<()> {
+    seed_family_routes_events(database).await?;
     let alpha = bigname_storage::logical_name_id_for_name("ens", "alpha.eth");
     let beta = bigname_storage::logical_name_id_for_name("ens", "beta.eth");
     let node = |id: &str| id.strip_prefix("ens:").expect("ens id").to_owned();
@@ -85,7 +85,7 @@ async fn seed_switch_permissions_fixture(database: &TestDatabase) -> Result<()> 
     let payload = json!({
         "deployment_epoch": "fixture",
         "resolver_implementations": [{"role": "permissioned_resolver",
-                                      "address": SWITCH_V2_IMPLEMENTATION}],
+                                      "address": FAMILY_V2_IMPLEMENTATION}],
         "contracts": [], "capability_flags": {},
         "abi": {"events": [{"name": "Linked",
             "fragment": "event Linked(uint256 indexed recordId, bytes32 indexed node, bytes name)",
@@ -96,10 +96,10 @@ async fn seed_switch_permissions_fixture(database: &TestDatabase) -> Result<()> 
              source_family, chain_id, deployment_label, rollout_status, normalizer_version,
              file_path, manifest_payload)
          VALUES (1, 'ens', 'ens_v2_resolver_l1', $1, 'fixture', 'active', 'fixture',
-                 'fixture/switch-v2-resolver.toml', $2)
+                 'fixture/family-v2-resolver.toml', $2)
          RETURNING manifest_id",
     )
-    .bind(SWITCH_CHAIN)
+    .bind(FAMILY_CHAIN)
     .bind(&payload)
     .fetch_one(&database.pool)
     .await?;
@@ -107,29 +107,29 @@ async fn seed_switch_permissions_fixture(database: &TestDatabase) -> Result<()> 
         "INSERT INTO bigname_phase.normalized_events (event_identity, namespace, event_kind,
              source_family, manifest_version, source_manifest_id, chain_id, derivation_kind,
              canonicality_state, after_state)
-         VALUES ('switch-v2-manifest', 'ens', 'SourceManifestUpdated', 'ens_v2_resolver_l1', 1,
+         VALUES ('family-v2-manifest', 'ens', 'SourceManifestUpdated', 'ens_v2_resolver_l1', 1,
                  $1, $2, 'manifest_sync', 'canonical', $3)",
     )
     .bind(manifest_id)
-    .bind(SWITCH_CHAIN)
+    .bind(FAMILY_CHAIN)
     .bind(json!({"rollout_status": "active", "normalizer_version": "fixture",
                  "manifest_payload": payload}))
     .execute(&database.pool)
     .await?;
-    let nameless = Uuid::from_u128(SWITCH_NAMELESS);
+    let nameless = Uuid::from_u128(FAMILY_NAMELESS);
     sqlx::query(
         "INSERT INTO bigname_phase.resources (resource_id, chain_id, block_hash, block_number,
              canonicality_state)
          VALUES ($1, $2, $3, 212, 'canonical')",
     )
     .bind(nameless)
-    .bind(SWITCH_CHAIN)
+    .bind(FAMILY_CHAIN)
     .bind("0xhistory212")
     .execute(&database.pool)
     .await?;
     let nameless_node = format!("0x{:064x}", 0x5f1u64);
     let link = |identity: &str, node: &str, record: &str, name: &str, log: i64| {
-        switch_v2_resolver_event(
+        family_v2_resolver_event(
             identity,
             None,
             "ResolverRecordLinked",
@@ -137,73 +137,73 @@ async fn seed_switch_permissions_fixture(database: &TestDatabase) -> Result<()> 
             "ens_v2_resolver",
             manifest_id,
             json!({"source_event": "Linked", "storage_model": "resolver_record_id",
-                   "resolver": SWITCH_V2_RESOLVER, "node": node,
+                   "resolver": FAMILY_V2_RESOLVER, "node": node,
                    "resolver_record_id": record, "dns_encoded_name": name}),
         )
     };
     let events = vec![
-        switch_v2_resolver_event(
-            "switch-v2-upgrade",
+        family_v2_resolver_event(
+            "family-v2-upgrade",
             None,
             "Upgraded",
             (206, 1),
             "proxy_upgrade",
             manifest_id,
-            json!({"source_event": "Upgraded", "proxy_address": SWITCH_V2_RESOLVER,
-                   "implementation": SWITCH_V2_IMPLEMENTATION}),
+            json!({"source_event": "Upgraded", "proxy_address": FAMILY_V2_RESOLVER,
+                   "implementation": FAMILY_V2_IMPLEMENTATION}),
         ),
-        switch_v2_role(
-            "switch-v2-bob",
+        family_v2_role(
+            "family-v2-bob",
             alpha_resource,
             &node(&alpha),
-            SWITCH_BOB,
+            FAMILY_BOB,
             (210, 0),
             json!(["set_text"]),
             manifest_id,
         ),
-        switch_v2_role(
-            "switch-v2-alice",
+        family_v2_role(
+            "family-v2-alice",
             beta_resource,
             &node(&beta),
-            SWITCH_ALICE,
+            FAMILY_ALICE,
             (211, 0),
             json!(["set_addr", "set_text"]),
             manifest_id,
         ),
-        switch_v2_role(
-            "switch-v2-carol",
+        family_v2_role(
+            "family-v2-carol",
             nameless,
             &nameless_node,
-            SWITCH_CAROL,
+            FAMILY_CAROL,
             (212, 0),
             json!(["set_text"]),
             manifest_id,
         ),
-        switch_v2_role(
-            "switch-v2-alice-narrowed",
+        family_v2_role(
+            "family-v2-alice-narrowed",
             beta_resource,
             &node(&beta),
-            SWITCH_ALICE,
+            FAMILY_ALICE,
             (213, 0),
             json!(["set_addr"]),
             manifest_id,
         ),
-        link("switch-v2-link-alpha", &node(&alpha), "1", "0x05616c70686103657468", 0),
+        link("family-v2-link-alpha", &node(&alpha), "1", "0x05616c70686103657468", 0),
         link(
-            "switch-v2-link-default",
+            "family-v2-link-default",
             "0x0000000000000000000000000000000000000000000000000000000000000000",
             "2",
             "0x00",
             1,
         ),
-        switch_v2_resolver_event(
-            "switch-v2-alias",
+        family_v2_resolver_event(
+            "family-v2-alias",
             None,
             "AliasChanged",
             (215, 0),
             "ens_v2_resolver",
             manifest_id,
-            json!({"source_event": "AliasChanged", "resolver": SWITCH_V2_RESOLVER,
+            json!({"source_event": "AliasChanged", "resolver": FAMILY_V2_RESOLVER,
                    "from_name": "old.eth", "to_name": "alpha.eth", "active": true}),
         ),
     ];
@@ -212,25 +212,25 @@ async fn seed_switch_permissions_fixture(database: &TestDatabase) -> Result<()> 
 }
 
 /// Every moved route over the fixture, and whether its `data` must list rows.
-fn switch_permission_uris() -> Vec<(String, bool)> {
-    let resolver = format!("/v1/resolvers/1/{SWITCH_V2_RESOLVER}");
+fn family_permission_uris() -> Vec<(String, bool)> {
+    let resolver = format!("/v1/resolvers/1/{FAMILY_V2_RESOLVER}");
     vec![
         ("/v1/permissions?name=alpha.eth".to_owned(), true),
         ("/v1/permissions?name=beta.eth&include=lineage".to_owned(), true),
-        (format!("/v1/permissions?address={SWITCH_BOB}&namespace=ens"), true),
-        (format!("/v1/permissions?address={SWITCH_ALICE}&namespace=ens"), true),
+        (format!("/v1/permissions?address={FAMILY_BOB}&namespace=ens"), true),
+        (format!("/v1/permissions?address={FAMILY_ALICE}&namespace=ens"), true),
         (
-            format!("/v1/permissions?address={SWITCH_CAROL}&namespace=ens&include=lineage"),
+            format!("/v1/permissions?address={FAMILY_CAROL}&namespace=ens&include=lineage"),
             true,
         ),
         (format!("/v1/permissions?registration_id={}&namespace=ens",
-                Uuid::from_u128(SWITCH_NAMELESS)), true),
+                Uuid::from_u128(FAMILY_NAMELESS)), true),
         ("/v1/permissions?name=nobody.eth".to_owned(), false),
         (resolver.clone(), false),
         (format!("{resolver}/aliases"), true),
         (format!("{resolver}/links"), true),
         (format!("{resolver}/roles"), true),
-        (format!("/v1/resolvers/1/{SWITCH_RESOLVER}/roles"), false),
+        (format!("/v1/resolvers/1/{FAMILY_RESOLVER}/roles"), false),
         ("/v1/resolvers/1/0x0000000000000000000000000000000000000def".to_owned(), false),
     ]
 }
@@ -239,8 +239,8 @@ fn switch_permission_uris() -> Vec<(String, bool)> {
 async fn v2_permissions_and_resolver_collections_from_families(
 ) -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    seed_switch_permissions_fixture(&database).await?;
-    for (uri, rows) in switch_permission_uris() {
+    seed_family_permissions_fixture(&database).await?;
+    for (uri, rows) in family_permission_uris() {
         let (status, body) = read_family_response(&database, &uri).await?;
         if rows {
             assert_eq!(status, StatusCode::OK, "{uri}: {body:#}");
@@ -254,7 +254,7 @@ async fn v2_permissions_and_resolver_collections_from_families(
     // carol on the nameless resource.
     let (_, roles) = read_family_response(
         &database,
-        &format!("/v1/resolvers/1/{SWITCH_V2_RESOLVER}/roles"),
+        &format!("/v1/resolvers/1/{FAMILY_V2_RESOLVER}/roles"),
     )
     .await?;
     let listed: Vec<(&Value, &Value, &Value)> = roles["data"]
@@ -266,16 +266,16 @@ async fn v2_permissions_and_resolver_collections_from_families(
     assert_eq!(
         listed,
         [
-            (&json!(SWITCH_BOB), &json!(["set_text"]), &json!(210)),
-            (&json!(SWITCH_ALICE), &json!(["set_addr"]), &json!(211)),
-            (&json!(SWITCH_CAROL), &json!(["set_text"]), &json!(212)),
+            (&json!(FAMILY_BOB), &json!(["set_text"]), &json!(210)),
+            (&json!(FAMILY_ALICE), &json!(["set_addr"]), &json!(211)),
+            (&json!(FAMILY_CAROL), &json!(["set_text"]), &json!(212)),
         ],
         "{roles:#}"
     );
     for uri in [
-        format!("/v1/resolvers/1/{SWITCH_V2_RESOLVER}/roles?page_size=1"),
-        format!("/v1/resolvers/1/{SWITCH_V2_RESOLVER}/links?page_size=1"),
-        format!("/v1/permissions?address={SWITCH_ALICE}&namespace=ens&page_size=1"),
+        format!("/v1/resolvers/1/{FAMILY_V2_RESOLVER}/roles?page_size=1"),
+        format!("/v1/resolvers/1/{FAMILY_V2_RESOLVER}/links?page_size=1"),
+        format!("/v1/permissions?address={FAMILY_ALICE}&namespace=ens&page_size=1"),
         "/v1/permissions?name=beta.eth&page_size=1".to_owned(),
     ] {
         read_family_pages(&database, &uri).await?;
@@ -285,45 +285,45 @@ async fn v2_permissions_and_resolver_collections_from_families(
 
 
 
-// J13: the families keep no lineage check at request time, so a role whose evidence event is
+// The families keep no lineage check at request time, so a role whose evidence event is
 // orphaned after the publication is still listed, with the earliest readable event as its grant
 // event; but a grant on a resource whose row is not readable is not served, on `/roles` or
-// `/v1/permissions`, the same as the served route's readability join.
+// `/v1/permissions`.
 #[tokio::test]
 async fn v2_resolver_roles_leave_out_an_unreadable_resource(
 ) -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    seed_switch_permissions_fixture(&database).await?;
+    seed_family_permissions_fixture(&database).await?;
     // Alice's first role change orphaned after the publication: her row is still listed (no
     // lineage check at request time), and its grant event is the earliest one still readable.
     sqlx::query(
         "UPDATE bigname_phase.normalized_events SET canonicality_state = 'orphaned'
-         WHERE event_identity = 'switch-v2-alice'",
+         WHERE event_identity = 'family-v2-alice'",
     )
     .execute(&database.pool)
     .await?;
     let (_, roles) = read_family_response(
         &database,
-        &format!("/v1/resolvers/1/{SWITCH_V2_RESOLVER}/roles"),
+        &format!("/v1/resolvers/1/{FAMILY_V2_RESOLVER}/roles"),
     )
     .await?;
     let alice = roles["data"]
         .as_array()
         .into_iter()
         .flatten()
-        .find(|row| row["address"] == json!(SWITCH_ALICE))
+        .find(|row| row["address"] == json!(FAMILY_ALICE))
         .with_context(|| format!("no row for alice in {roles:#}"))?;
     assert_eq!(alice["grant_event"]["block_number"], json!(213), "{roles:#}");
     sqlx::query(
         "UPDATE bigname_phase.resources SET canonicality_state = 'orphaned'
          WHERE resource_id = $1",
     )
-    .bind(Uuid::from_u128(SWITCH_NAMELESS))
+    .bind(Uuid::from_u128(FAMILY_NAMELESS))
     .execute(&database.pool)
     .await?;
     let (_, roles) = read_family_response(
         &database,
-        &format!("/v1/resolvers/1/{SWITCH_V2_RESOLVER}/roles"),
+        &format!("/v1/resolvers/1/{FAMILY_V2_RESOLVER}/roles"),
     )
     .await?;
     let holders: Vec<&Value> = roles["data"]
@@ -332,10 +332,10 @@ async fn v2_resolver_roles_leave_out_an_unreadable_resource(
         .flatten()
         .map(|row| &row["address"])
         .collect();
-    assert_eq!(holders, [&json!(SWITCH_BOB), &json!(SWITCH_ALICE)], "{roles:#}");
+    assert_eq!(holders, [&json!(FAMILY_BOB), &json!(FAMILY_ALICE)], "{roles:#}");
     assert_eq!(roles["page"]["total_count"], json!(2), "{roles:#}");
     let (_, carol) =
-        read_family_response(&database, &format!("/v1/permissions?address={SWITCH_CAROL}&namespace=ens"))
+        read_family_response(&database, &format!("/v1/permissions?address={FAMILY_CAROL}&namespace=ens"))
             .await?;
     assert_eq!(carol["data"], json!([]), "{carol:#}");
     database.cleanup().await
@@ -344,11 +344,11 @@ async fn v2_resolver_roles_leave_out_an_unreadable_resource(
 async fn v2_permissions_and_resolver_collections_answer_409_while_the_families_rebuild(
 ) -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    seed_switch_permissions_fixture(&database).await?;
+    seed_family_permissions_fixture(&database).await?;
     sqlx::query("UPDATE bigname_phase.project_family_marker SET state = 'bootstrap_pending'")
         .execute(&database.pool)
         .await?;
-    for (uri, _) in switch_permission_uris() {
+    for (uri, _) in family_permission_uris() {
         let response = v2_get_response(&database, &uri)
         .await?;
         let status = response.status();
@@ -367,9 +367,9 @@ async fn v2_permissions_and_resolver_collections_answer_409_while_the_families_r
 #[tokio::test]
 async fn v2_resolver_family_reads_answer_409_after_preflight() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    seed_switch_permissions_fixture(&database).await?;
+    seed_family_permissions_fixture(&database).await?;
     for suffix in ["", "/aliases", "/links", "/roles"] {
-        let uri = format!("/v1/resolvers/1/{SWITCH_V2_RESOLVER}{suffix}");
+        let uri = format!("/v1/resolvers/1/{FAMILY_V2_RESOLVER}{suffix}");
         let (status, body) = v2_get_with_marker_flip_after_fence(
             &database, &uri,
             "UPDATE bigname_phase.project_family_marker SET state = 'bootstrap_pending'",

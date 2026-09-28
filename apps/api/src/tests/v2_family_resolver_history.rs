@@ -1,7 +1,7 @@
 const ROUND2_RESOLVER: &str = "0x0000000000000000000000000000000000000ab2";
 
-async fn seed_switch_project_resolver(database: &TestDatabase) -> Result<()> {
-    seed_switch_routes_fixture(database).await?;
+async fn seed_family_project_resolver(database: &TestDatabase) -> Result<()> {
+    seed_family_routes_fixture(database).await?;
     // This second resolver has a permission grant for alpha.eth, while alpha still points to
     // the first resolver. Its empty bound-name page and nonempty roles page are both real.
     let implementation = "0x0000000000000000000000000000000000000fed";
@@ -15,7 +15,7 @@ async fn seed_switch_project_resolver(database: &TestDatabase) -> Result<()> {
             'fixture/round2-resolver.toml', $1) RETURNING manifest_id",
     )
     .bind(&payload)
-    .bind(SWITCH_CHAIN)
+    .bind(FAMILY_CHAIN)
     .fetch_one(&database.pool)
     .await?;
     sqlx::query("INSERT INTO normalized_events (event_identity, namespace, event_kind, source_family,
@@ -23,8 +23,8 @@ async fn seed_switch_project_resolver(database: &TestDatabase) -> Result<()> {
         VALUES ('round2-manifest', 'ens', 'SourceManifestUpdated', 'ens_v2_resolver_l1', 1, $2, $3,
         'manifest_sync', 'canonical', $1)")
         .bind(json!({"rollout_status": "active", "normalizer_version": "fixture", "manifest_payload": payload}))
-        .bind(manifest_id).bind(SWITCH_CHAIN).execute(&database.pool).await?;
-    let mut upgrade = switch_event(
+        .bind(manifest_id).bind(FAMILY_CHAIN).execute(&database.pool).await?;
+    let mut upgrade = family_event(
         "round2-resolver-upgrade",
         None,
         None,
@@ -35,11 +35,11 @@ async fn seed_switch_project_resolver(database: &TestDatabase) -> Result<()> {
         json!({"proxy_address": ROUND2_RESOLVER, "implementation": implementation}),
     );
     let (resource, mut grant): (Uuid, Value) = sqlx::query_as(
-        "SELECT resource_id, after_state FROM normalized_events WHERE event_identity = 'switch-alpha-role'",
+        "SELECT resource_id, after_state FROM normalized_events WHERE event_identity = 'family-alpha-role'",
     ).fetch_one(&database.pool).await?;
     grant["scope"]["resolver_address"] = json!(ROUND2_RESOLVER);
     grant["resolver"] = json!(ROUND2_RESOLVER);
-    let mut role = switch_event(
+    let mut role = family_event(
         "round2-alpha-role",
         None,
         Some(resource),
@@ -56,12 +56,12 @@ async fn seed_switch_project_resolver(database: &TestDatabase) -> Result<()> {
         event.raw_fact_ref["emitting_address"] = json!(ROUND2_RESOLVER);
     }
     bigname_storage::insert_normalized_event_fixtures(&database.pool, &[upgrade, role]).await?;
-    reset_switch_families(database).await?;
+    reset_family_families(database).await?;
     publish_test_families(database, 240).await?;
     Ok(())
 }
 
-async fn advance_switch_without_resolver_changes(database: &TestDatabase) -> Result<()> {
+async fn advance_family_without_resolver_changes(database: &TestDatabase) -> Result<()> {
 
     publish_bounded_membership_at(database, 241).await?;
     sqlx::query(
@@ -69,13 +69,13 @@ async fn advance_switch_without_resolver_changes(database: &TestDatabase) -> Res
         current_block_hash = '0xhistory241', target_block_hash = '0xhistory241'
         WHERE chain_id = $1 AND phase_name = 'interpret'",
     )
-    .bind(SWITCH_CHAIN)
+    .bind(FAMILY_CHAIN)
     .execute(&database.pool)
     .await?;
-    let token = bigname_project::families::input_token(&database.pool, SWITCH_CHAIN).await?;
+    let token = bigname_project::families::input_token(&database.pool, FAMILY_CHAIN).await?;
     let outcome = bigname_project::families::apply(
         &database.pool,
-        SWITCH_CHAIN,
+        FAMILY_CHAIN,
         &bigname_project::Marker {
             number: 241,
             hash: "0xhistory241".to_owned(),
@@ -97,7 +97,7 @@ async fn advance_switch_without_resolver_changes(database: &TestDatabase) -> Res
 #[tokio::test]
 async fn v2_resolver_roles_reject_historical_at_before_attaching_current_names() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    seed_switch_project_resolver(&database).await?;
+    seed_family_project_resolver(&database).await?;
     let uri = format!("/v1/resolvers/1/{ROUND2_RESOLVER}/roles");
     let (status, current) = read_family_response(&database, &uri).await?;
     assert_eq!(status, StatusCode::OK, "{current:#}");
@@ -107,8 +107,8 @@ async fn v2_resolver_roles_reject_historical_at_before_attaching_current_names()
             .is_some_and(|rows| rows.iter().any(|row| row["name"] == "alpha.eth")),
         "{current:#}"
     );
-    advance_switch_without_resolver_changes(&database).await?;
-    let at = switch_timestamp(1_700_000_240)?;
+    advance_family_without_resolver_changes(&database).await?;
+    let at = family_timestamp(1_700_000_240)?;
     let (status, historical) = read_family_response(&database, &format!("{uri}?at={at}")).await?;
     assert_eq!(status, StatusCode::CONFLICT, "{historical:#}");
     assert_eq!(historical["error"]["code"], "stale");
@@ -118,16 +118,16 @@ async fn v2_resolver_roles_reject_historical_at_before_attaching_current_names()
 #[tokio::test]
 async fn v2_empty_bound_names_refuse_a_historical_family_publication() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    seed_switch_project_resolver(&database).await?;
+    seed_family_project_resolver(&database).await?;
     let uri = format!("/v1/resolvers/1/{ROUND2_RESOLVER}");
     let (status, before) = read_family_response(&database, &uri).await?;
     assert_eq!(status, StatusCode::OK, "{before:#}");
     assert_eq!(before["data"]["bound_names"]["data"], json!([]));
-    advance_switch_without_resolver_changes(&database).await?;
+    advance_family_without_resolver_changes(&database).await?;
     let (status, current) = read_family_response(&database, &uri).await?;
     assert_eq!(status, StatusCode::OK, "{current:#}");
     assert_eq!(current["data"]["bound_names"]["data"], json!([]));
-    let at = switch_timestamp(1_700_000_240)?;
+    let at = family_timestamp(1_700_000_240)?;
     let (status, historical) = read_family_response(&database, &format!("{uri}?at={at}")).await?;
     assert_eq!(status, StatusCode::CONFLICT, "{historical:#}");
     assert_eq!(historical["error"]["code"], "stale");

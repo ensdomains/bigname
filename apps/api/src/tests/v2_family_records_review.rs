@@ -6,7 +6,7 @@
 #[tokio::test]
 async fn v2_empty_ens_address_reads_ignore_an_unrelated_family_rebuild() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    seed_switch_records_fixture(&database).await?;
+    seed_family_records_fixture(&database).await?;
     sqlx::query(
         "INSERT INTO bigname_phase.project_family_marker (chain_id, state)
          VALUES ('base-mainnet', 'bootstrap_pending')",
@@ -37,28 +37,28 @@ async fn seed_partial_base_address_families(database: &TestDatabase) -> Result<(
     upsert_phase_raw_blocks(&database.pool, &blocks).await?;
     seed_schema_v2_lookup_head(&database.pool, chain, 240, "0xhistory240",
         &crate::v2::format_timestamp(OffsetDateTime::from_unix_timestamp(1_700_000_240)?)).await?;
-    let (name, resource) = seed_switch_name_on(database, "alpha.base.eth", 0x5f1_0000,
+    let (name, resource) = seed_family_name_on(database, "alpha.base.eth", 0x5f1_0000,
         "basenames", "basenames", chain).await?;
     let node = name.strip_prefix("basenames:").expect("Basenames id");
     let mut events = vec![
-        switch_event("switch-base-grant", Some(&name), Some(resource), "RegistrationGranted",
+        family_event("family-base-grant", Some(&name), Some(resource), "RegistrationGranted",
             "basenames_base_registrar", 201, 0,
-            json!({"authority_kind": "registrar", "registrant": SWITCH_ALICE,
+            json!({"authority_kind": "registrar", "registrant": FAMILY_ALICE,
                    "expiry": 1_900_000_000})),
-        switch_event("switch-base-resolver", Some(&name), Some(resource), "ResolverChanged",
+        family_event("family-base-resolver", Some(&name), Some(resource), "ResolverChanged",
             "basenames_base_registry", 202, 0,
-            json!({"node": node, "resolver": SWITCH_RESOLVER})),
-        switch_event("switch-base-addr", None, None, "RecordChanged",
+            json!({"node": node, "resolver": FAMILY_RESOLVER})),
+        family_event("family-base-addr", None, None, "RecordChanged",
             "basenames_base_resolver", 203, 0,
-            json!({"source_event": "AddressChanged", "node": node, "resolver": SWITCH_RESOLVER,
+            json!({"source_event": "AddressChanged", "node": node, "resolver": FAMILY_RESOLVER,
                    "record_key": "addr:60", "record_family": "addr", "selector_key": "60",
-                   "value": SWITCH_ALICE})),
+                   "value": FAMILY_ALICE})),
     ];
     for event in &mut events {
         event.chain_id = Some(chain.to_owned());
         event.namespace = "basenames".to_owned();
     }
-    events[2].raw_fact_ref["emitting_address"] = json!(SWITCH_RESOLVER);
+    events[2].raw_fact_ref["emitting_address"] = json!(FAMILY_RESOLVER);
     bigname_storage::insert_normalized_event_fixtures(&database.pool, &events).await?;
     let token = bigname_project::families::input_token(&database.pool, chain).await?;
     let mut options = bigname_project::families::FamilyOptions::new(
@@ -83,7 +83,7 @@ async fn seed_partial_base_address_families(database: &TestDatabase) -> Result<(
                           ON pointer.chain_id = index.chain_id AND pointer.namehash = index.node
                          AND pointer.resolver_address = index.resolver_address
                         WHERE index.chain_id = $1 AND index.address = $2)")
-        .bind(chain).bind(SWITCH_ALICE).fetch_one(&database.pool).await?;
+        .bind(chain).bind(FAMILY_ALICE).fetch_one(&database.pool).await?;
     assert_eq!(indexed, (true, true), "both nonempty address candidate paths must reach Base");
     Ok(())
 }
@@ -91,11 +91,11 @@ async fn seed_partial_base_address_families(database: &TestDatabase) -> Result<(
 #[tokio::test]
 async fn v2_nonempty_ens_address_reads_ignore_an_unrelated_family_rebuild() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    seed_switch_records_fixture(&database).await?;
+    seed_family_records_fixture(&database).await?;
     let relations = ["", "&relation=resolves_to&coin_type=60", "&relation=resolves_to&coin_type=evm"];
     let mut expected = Vec::new();
     for relation in relations {
-        let uri = format!("/v1/addresses/{SWITCH_ALICE}/names?namespace=ens{relation}");
+        let uri = format!("/v1/addresses/{FAMILY_ALICE}/names?namespace=ens{relation}");
         let (status, body) = read_family_response(&database, &uri).await?;
         assert_eq!(status, StatusCode::OK, "{uri}: {body:#}");
         assert!(!body["data"].as_array().expect("name list").is_empty());
@@ -105,7 +105,7 @@ async fn v2_nonempty_ens_address_reads_ignore_an_unrelated_family_rebuild() -> R
     let mut actual = Vec::new();
     for relation in relations {
         actual.push(read_family_response(&database,
-            &format!("/v1/addresses/{SWITCH_ALICE}/names?namespace=ens{relation}")).await?);
+            &format!("/v1/addresses/{FAMILY_ALICE}/names?namespace=ens{relation}")).await?);
     }
     assert_eq!(actual.iter().map(|(status, _)| *status).collect::<Vec<_>>(),
         vec![StatusCode::OK; relations.len()], "ENS scope must ignore unavailable Base");
@@ -114,7 +114,7 @@ async fn v2_nonempty_ens_address_reads_ignore_an_unrelated_family_rebuild() -> R
     }
     for relation in relations {
         for namespace in ["", "namespace=basenames"] {
-            let uri = format!("/v1/addresses/{SWITCH_ALICE}/names?{namespace}{relation}");
+            let uri = format!("/v1/addresses/{FAMILY_ALICE}/names?{namespace}{relation}");
             let (status, body) = read_family_response(&database, &uri).await?;
             assert_eq!((status, &body["error"]["code"]),
                 (StatusCode::CONFLICT, &json!("stale")), "{uri}: {body:#}");
@@ -124,14 +124,14 @@ async fn v2_nonempty_ens_address_reads_ignore_an_unrelated_family_rebuild() -> R
 }
 
 async fn reset_records_families(database: &TestDatabase) -> Result<()> {
-    let token = bigname_project::families::input_token(&database.pool, SWITCH_CHAIN).await?;
+    let token = bigname_project::families::input_token(&database.pool, FAMILY_CHAIN).await?;
     let mut options = bigname_project::families::FamilyOptions::new(
         bigname_content_hash::INTERPRETER_CONTENT_HASH,
     );
     options.max_blocks_per_run = 0;
     let outcome = bigname_project::families::apply(
         &database.pool,
-        SWITCH_CHAIN,
+        FAMILY_CHAIN,
         &bigname_project::Marker { number: 240, hash: "0xhistory240".to_owned() },
         bigname_project::families::FamilyMode::Rebuild,
         &token,
@@ -144,8 +144,8 @@ async fn reset_records_families(database: &TestDatabase) -> Result<()> {
 
 async fn assert_address_counts_reset_is_stale(relation: &str) -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    seed_switch_records_fixture(&database).await?;
-    let uri = format!("/v1/addresses/{SWITCH_ALICE}/names?namespace=ens&q=alpha\
+    seed_family_records_fixture(&database).await?;
+    let uri = format!("/v1/addresses/{FAMILY_ALICE}/names?namespace=ens&q=alpha\
                       &include=counts,role_summary{relation}");
     let (status, before) = read_family_response(&database, &uri).await?;
     assert_eq!(status, StatusCode::OK, "{before:#}");
@@ -182,7 +182,7 @@ async fn v2_resolves_to_counts_after_family_reset_are_stale() -> Result<()> {
 async fn v2_empty_address_collections_revalidate_the_requested_family_publication() -> Result<()> {
     for relation in ["", "&relation=resolves_to&coin_type=60", "&relation=resolves_to&coin_type=evm"] {
         let database = TestDatabase::new_migrated().await?;
-        seed_switch_records_fixture(&database).await?;
+        seed_family_records_fixture(&database).await?;
         let uri = format!("/v1/addresses/0x0000000000000000000000000000000000000fff/names?namespace=ens{relation}");
         let (_guard, control) =
             crate::v2::collection_snapshot::finish_test_hooks::install(&database.lookup_pool).await?;
@@ -207,7 +207,7 @@ async fn v2_empty_address_collections_revalidate_the_requested_family_publicatio
 #[tokio::test]
 async fn v2_missing_primary_claim_revalidates_the_requested_family_publication() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    seed_switch_records_fixture(&database).await?;
+    seed_family_records_fixture(&database).await?;
     let uri = "/v1/addresses/0x0000000000000000000000000000000000000fff/primary-name?namespace=ens&source=indexed";
     let (_guard, control) =
         crate::v2::support::indexed_read_test_hooks::install(&database.lookup_pool).await?;

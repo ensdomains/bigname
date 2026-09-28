@@ -3,12 +3,6 @@ async fn v2_published_bindings_survive_later_interpret_closures() -> Result<()> 
     let database = TestDatabase::new_migrated().await?;
     seed_v2_address_names_fixture(&database).await?;
     seed_v2_resolves_to_records(&database).await?;
-    // The collection fixture's untimed primary claim is deliberately ineligible for reverse
-    // lookup. This test covers binding publication, so start without that unrelated claim.
-    sqlx::query("DELETE FROM primary_names_current WHERE address=$1")
-        .bind(V2_ADDRESS)
-        .execute(&database.pool)
-        .await?;
     upsert_phase_raw_blocks(
         &database.pool,
         &[raw_block(

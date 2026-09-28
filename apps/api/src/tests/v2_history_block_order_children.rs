@@ -4,12 +4,12 @@
 // page needs is dropped (docs/api-v1-routes.md, "Direct child registrations").
 
 /// An event's transaction hash, transaction index and log index.
-type D12cPosition<'a> = (&'a str, i64, i64);
+type ChildOrderPosition<'a> = (&'a str, i64, i64);
 
 /// Sets each event's transaction hash, index and log index; `None` clears all three.
-async fn d12c_position(
+async fn child_order_position(
     database: &TestDatabase,
-    positions: &[(&str, Option<D12cPosition<'_>>)],
+    positions: &[(&str, Option<ChildOrderPosition<'_>>)],
 ) -> Result<()> {
     for (identity, position) in positions {
         let updated = sqlx::query(
@@ -29,7 +29,7 @@ async fn d12c_position(
     Ok(())
 }
 
-async fn d12c_parent(database: &TestDatabase, parent: &str, seed: u128) -> Result<()> {
+async fn child_order_parent(database: &TestDatabase, parent: &str, seed: u128) -> Result<()> {
     seed_v2_history_blocks(database, 80..=80).await?;
     seed_family_identity_inputs(
         &database.pool,
@@ -50,8 +50,8 @@ async fn d12c_parent(database: &TestDatabase, parent: &str, seed: u128) -> Resul
 /// `trio.eth` has three child registrations in block 132 and no rows of its own: A in
 /// transaction 1 with the greatest hash, B in transaction 2, C in transaction 3 with the
 /// smallest hash.
-async fn d12c_seed_trio(database: &TestDatabase) -> Result<()> {
-    d12c_parent(database, "trio.eth", 0xd100).await?;
+async fn child_order_seed_trio(database: &TestDatabase) -> Result<()> {
+    child_order_parent(database, "trio.eth", 0xd100).await?;
     seed_child_surfaces(database, &["a.trio.eth", "b.trio.eth", "c.trio.eth"]).await?;
     seed_v2_history_blocks(database, 131..=133).await?;
     let events = ["a", "b", "c"].map(|label| {
@@ -64,7 +64,7 @@ async fn d12c_seed_trio(database: &TestDatabase) -> Result<()> {
         )
     });
     bigname_storage::insert_normalized_event_fixtures(&database.pool, &events).await?;
-    d12c_position(
+    child_order_position(
         database,
         &[
             ("trio-a", Some(("0xffa", 1, 1))),
@@ -79,8 +79,8 @@ async fn d12c_seed_trio(database: &TestDatabase) -> Result<()> {
 /// `kids.eth` has its own rows in blocks 141 and 143, and block 142 holds five child
 /// registrations and two of its own rows across five transactions whose hash order is the
 /// reverse of their index order, plus a child registration with no transaction position.
-async fn d12c_seed_kids(database: &TestDatabase) -> Result<()> {
-    d12c_parent(database, "kids.eth", 0xd200).await?;
+async fn child_order_seed_kids(database: &TestDatabase) -> Result<()> {
+    child_order_parent(database, "kids.eth", 0xd200).await?;
     seed_child_surfaces(
         database,
         &[
@@ -120,7 +120,7 @@ async fn d12c_seed_kids(database: &TestDatabase) -> Result<()> {
         ));
     }
     bigname_storage::insert_normalized_event_fixtures(&database.pool, &events).await?;
-    d12c_position(
+    child_order_position(
         database,
         &[
             ("kids-a", Some(("0xf1", 1, 1))),
@@ -142,7 +142,7 @@ const KIDS_NEWEST_FIRST: [&str; 10] = [
     "kids-n0",
 ];
 
-fn d12c_expected(newest_first: &[&str], order: &str) -> Vec<String> {
+fn child_order_expected(newest_first: &[&str], order: &str) -> Vec<String> {
     let mut expected = newest_first
         .iter()
         .map(|identity| hkw_id(identity))
@@ -154,7 +154,7 @@ fn d12c_expected(newest_first: &[&str], order: &str) -> Vec<String> {
 }
 
 /// Every row from the start in pages of `page_size`.
-async fn d12c_walk(database: &TestDatabase, base: &str, page_size: usize) -> Result<Vec<String>> {
+async fn child_order_walk(database: &TestDatabase, base: &str, page_size: usize) -> Result<Vec<String>> {
     let mut ids = Vec::new();
     let mut cursor: Option<String> = None;
     loop {
@@ -179,34 +179,34 @@ async fn d12c_walk(database: &TestDatabase, base: &str, page_size: usize) -> Res
 #[tokio::test]
 async fn v2_child_history_pages_one_block_by_transaction_index() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    d12c_seed_trio(&database).await?;
+    child_order_seed_trio(&database).await?;
     let route = "/v1/names/trio.eth/history?include=child_registrations";
     for order in ["desc", "asc"] {
         let base = format!("{route}&order={order}");
-        let expected = d12c_expected(&["trio-c", "trio-b", "trio-a"], order);
+        let expected = child_order_expected(&["trio-c", "trio-b", "trio-a"], order);
         let first = hk_ok(&database, &format!("{base}&page_size=1")).await?;
         assert_eq!(hk_ids(&first), expected[..1].to_vec(), "{base}: first page");
-        assert_eq!(d12c_walk(&database, &base, 1).await?, expected, "{base}");
+        assert_eq!(child_order_walk(&database, &base, 1).await?, expected, "{base}");
     }
     database.cleanup().await
 }
 
 /// Five children and the name's own rows in one block, more than one page's lookahead: every
-/// page size walks the same D12 order through both arms in both directions, the count agrees,
+/// page size walks the same block order through both arms in both directions, the count agrees,
 /// and every accepted cursor layout continues from child and name rows alike.
 #[tokio::test]
 async fn v2_child_history_mixed_pages_follow_the_block_order() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    d12c_seed_kids(&database).await?;
+    child_order_seed_kids(&database).await?;
     let route = "/v1/names/kids.eth/history?include=child_registrations";
     for order in ["desc", "asc"] {
         let base = format!("{route}&order={order}");
-        let expected = d12c_expected(&KIDS_NEWEST_FIRST, order);
+        let expected = child_order_expected(&KIDS_NEWEST_FIRST, order);
         let unpaged = hk_ok(&database, &format!("{base}&page_size=50")).await?;
         assert_eq!(hk_ids(&unpaged), expected, "{base}: unpaged");
         for page_size in [1, 2, 3] {
             assert_eq!(
-                d12c_walk(&database, &base, page_size).await?,
+                child_order_walk(&database, &base, page_size).await?,
                 expected,
                 "{base}: {page_size}"
             );
@@ -223,9 +223,9 @@ async fn v2_child_history_mixed_pages_follow_the_block_order() -> Result<()> {
             json!(expected.len()),
             "{base}: count"
         );
-        for token in [D12Token::TransactionHash, D12Token::Both, D12Token::Legacy] {
+        for token in [OrderToken::TransactionHash, OrderToken::Both, OrderToken::Legacy] {
             assert_eq!(
-                d12_walk(&database, &base, token).await?,
+                order_walk(&database, &base, token).await?,
                 expected,
                 "{base}: {token:?}"
             );

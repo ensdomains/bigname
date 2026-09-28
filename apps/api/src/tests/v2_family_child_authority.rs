@@ -5,7 +5,7 @@
 #[tokio::test]
 async fn v2_child_relations_keep_the_selected_arm_after_token_anchor_redo() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    seed_switch_children_fixture(&database).await?;
+    seed_family_children_fixture(&database).await?;
     let one = bigname_storage::logical_name_id_for_name("ens", "one.alpha.eth");
     let alpha = bigname_storage::logical_name_id_for_name("ens", "alpha.eth");
     let (resource, token): (Uuid, Uuid) = sqlx::query_as(
@@ -20,7 +20,7 @@ async fn v2_child_relations_keep_the_selected_arm_after_token_anchor_redo() -> R
              canonicality_state) VALUES ($1, '0xhistory199', 199, to_timestamp(1700000199),
              'canonical') ON CONFLICT DO NOTHING",
     )
-    .bind(SWITCH_CHAIN)
+    .bind(FAMILY_CHAIN)
     .execute(&database.pool)
     .await?;
     // The first token/resource observation predates the later surfaced topology binding.
@@ -41,7 +41,7 @@ async fn v2_child_relations_keep_the_selected_arm_after_token_anchor_redo() -> R
     bigname_storage::insert_normalized_event_fixtures(
         &database.pool,
         &[
-            switch_event(
+            family_event(
                 "child-original-token-observation",
                 None,
                 Some(resource),
@@ -51,7 +51,7 @@ async fn v2_child_relations_keep_the_selected_arm_after_token_anchor_redo() -> R
                 0,
                 json!({"token_lineage_id": token, "owner": CHILD_OWNER}),
             ),
-            switch_event(
+            family_event(
                 "child-competing-v1-edge",
                 Some(&one),
                 None,
@@ -66,7 +66,7 @@ async fn v2_child_relations_keep_the_selected_arm_after_token_anchor_redo() -> R
         ],
     )
     .await?;
-    reset_switch_families(&database).await?;
+    reset_family_families(&database).await?;
     publish_test_families(&database, 240).await?;
     let uri = "/v1/names/alpha.eth/subnames";
     let (status, before) = read_family_response(&database, uri).await?;
@@ -79,7 +79,7 @@ async fn v2_child_relations_keep_the_selected_arm_after_token_anchor_redo() -> R
         .insert_manifest(
             "ens",
             "ens_v2_registry_l1",
-            SWITCH_CHAIN,
+            FAMILY_CHAIN,
             "fixture",
             1,
             "active",
@@ -88,7 +88,7 @@ async fn v2_child_relations_keep_the_selected_arm_after_token_anchor_redo() -> R
         .await?;
     bigname_interpret::Engine::new(database.pool.clone())
         .run_batch(bigname_interpret::BatchRequest {
-            chain_id: SWITCH_CHAIN.to_owned(),
+            chain_id: FAMILY_CHAIN.to_owned(),
             from_block: 199,
             to_block: 199,
             resume_current: None,
@@ -107,7 +107,7 @@ async fn v2_child_relations_keep_the_selected_arm_after_token_anchor_redo() -> R
         identity,
         ("orphaned".to_owned(), "canonical".to_owned(), 205)
     );
-    reset_switch_families(&database).await?;
+    reset_family_families(&database).await?;
     publish_test_families(&database, 240).await?;
     let (status, absent) = read_family_response(&database, "/v1/names/one.alpha.eth").await?;
     assert_eq!(status, StatusCode::NOT_FOUND, "{absent:#}");

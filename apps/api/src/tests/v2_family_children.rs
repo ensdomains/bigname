@@ -18,7 +18,7 @@ fn child_registry_event(
     emitter: &str,
     after_state: Value,
 ) -> NormalizedEvent {
-    let mut event = switch_event(
+    let mut event = family_event(
         identity,
         logical_name_id,
         None,
@@ -42,22 +42,22 @@ fn child_registry_event(
 /// dave's node is later transferred to the zero owner; dave has no surface, and the override is
 /// keyed by name, so dave stays listed. one.alpha.eth holds an ENSv1 edge of its own (erin), so
 /// its subname count is one. Published at 240.
-async fn seed_switch_children_fixture(database: &TestDatabase) -> Result<()> {
-    seed_switch_children_fixture_expiring(database, 1_900_000_000, 1_900_000_000).await
+async fn seed_family_children_fixture(database: &TestDatabase) -> Result<()> {
+    seed_family_children_fixture_expiring(database, 1_900_000_000, 1_900_000_000).await
 }
 
 /// The fixture with one.alpha.eth's and two.alpha.eth's registrations expiring at `one_expiry`
 /// and `two_expiry` seconds.
-async fn seed_switch_children_fixture_expiring(
+async fn seed_family_children_fixture_expiring(
     database: &TestDatabase,
     one_expiry: i64,
     two_expiry: i64,
 ) -> Result<()> {
     seed_bounded_membership_blocks(database, 240).await?;
     let (alpha, alpha_resource) =
-        seed_switch_name(database, "alpha.eth", 0x6a1_0000, "ens_v1").await?;
-    let (one, _) = seed_switch_name(database, "one.alpha.eth", 0x6b1_0000, "ens_v2").await?;
-    let (two, _) = seed_switch_name(database, "two.alpha.eth", 0x6c1_0000, "ens_v2").await?;
+        seed_family_name(database, "alpha.eth", 0x6a1_0000, "ens_v1").await?;
+    let (one, _) = seed_family_name(database, "one.alpha.eth", 0x6b1_0000, "ens_v2").await?;
+    let (two, _) = seed_family_name(database, "two.alpha.eth", 0x6c1_0000, "ens_v2").await?;
     let alpha_node = alpha.strip_prefix("ens:").expect("ens id").to_owned();
     for label in ["carol", "dave", "erin", "one", "two"] {
         insert_family_label_preimage(&database.pool, label.as_bytes()).await?;
@@ -70,7 +70,7 @@ async fn seed_switch_children_fixture_expiring(
          VALUES ($1, $2, 'contract') ON CONFLICT DO NOTHING",
     )
     .bind(alpha_registry)
-    .bind(SWITCH_CHAIN)
+    .bind(FAMILY_CHAIN)
     .execute(&database.pool)
     .await?;
     sqlx::query(
@@ -79,13 +79,13 @@ async fn seed_switch_children_fixture_expiring(
          VALUES ($1, $2, $3, 200)",
     )
     .bind(alpha_registry)
-    .bind(SWITCH_CHAIN)
+    .bind(FAMILY_CHAIN)
     .bind(CHILD_ALPHA_REGISTRY)
     .execute(&database.pool)
     .await?;
     for (parent, label, block) in [("alpha.eth", "carol", 202), ("alpha.eth", "dave", 202), ("one.alpha.eth", "erin", 207)] {
         let labelhash = child_labelhash(label);
-        insert_family_registry_child_edge(&database.pool, "ens", SWITCH_CHAIN, parent, &labelhash,
+        insert_family_registry_child_edge(&database.pool, "ens", FAMILY_CHAIN, parent, &labelhash,
             CHILD_OWNER, block, &format!("0xhistory{block}")).await?;
     }
     let registration = |identity: &str, name: &str, block: i64, expiry: i64| {
@@ -109,7 +109,7 @@ async fn seed_switch_children_fixture_expiring(
     bigname_storage::insert_normalized_event_fixtures(
         &database.pool,
         &[
-            switch_event(
+            family_event(
                 "children-alpha-grant",
                 Some(&alpha),
                 Some(alpha_resource),
@@ -150,7 +150,7 @@ async fn seed_switch_children_fixture_expiring(
             ),
             registration("children-one", &one, 205, one_expiry),
             registration("children-two", &two, 206, two_expiry),
-            switch_event(
+            family_event(
                 "children-dave-zeroed",
                 None,
                 None,
@@ -172,7 +172,7 @@ async fn seed_switch_children_fixture_expiring(
 #[tokio::test]
 async fn v2_subnames_from_families() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    seed_switch_children_fixture(&database).await?;
+    seed_family_children_fixture(&database).await?;
     let pages =
         read_family_pages(&database, "/v1/names/alpha.eth/subnames?page_size=1")
             .await?;
@@ -237,7 +237,7 @@ async fn v2_subnames_from_families() -> Result<()> {
 #[tokio::test]
 async fn v2_registry_labels_from_families() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    seed_switch_children_fixture(&database).await?;
+    seed_family_children_fixture(&database).await?;
     let pages = read_family_pages(
         &database,
         &format!("/v1/registries/1/{CHILD_ALPHA_REGISTRY}/labels?page_size=1"),
@@ -280,7 +280,7 @@ async fn v2_registry_labels_from_families() -> Result<()> {
 #[tokio::test]
 async fn v2_child_reads_refuse_an_unservable_family_marker() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    seed_switch_children_fixture(&database).await?;
+    seed_family_children_fixture(&database).await?;
     let parent = bigname_storage::logical_name_id_for_name("ens", "alpha.eth");
     let registry = CHILD_ALPHA_REGISTRY.to_ascii_lowercase();
     for (label, update) in [
@@ -383,7 +383,7 @@ async fn v2_get_with_marker_flip_at(
 #[tokio::test]
 async fn v2_child_reads_answer_409_when_the_marker_is_not_servable() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    seed_switch_children_fixture(&database).await?;
+    seed_family_children_fixture(&database).await?;
     let uris = [
         "/v1/names/alpha.eth/subnames".to_owned(),
         "/v1/names/alpha.eth/subnames?include=counts&include_expired=false".to_owned(),

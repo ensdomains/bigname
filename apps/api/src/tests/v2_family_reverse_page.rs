@@ -10,9 +10,9 @@ async fn family_reverse_body(database: &TestDatabase, input: Value) -> Result<Va
 
 async fn seed_family_reverse_page_fixture(database: &TestDatabase) -> Result<()> {
     // beta sorts after alpha lexically; the reverse claim must move it ahead on page one.
-    let mut events = switch_primary_claim_events();
+    let mut events = family_primary_claim_events();
     events[1].after_state["raw_name"] = json!("beta.eth");
-    seed_switch_routes_fixture_with(database, events).await
+    seed_family_routes_fixture_with(database, events).await
 }
 
 #[tokio::test]
@@ -25,7 +25,7 @@ async fn v2_family_reverse_pages_counts_and_follow_primary_order() -> Result<()>
             let mut cursor = None;
             let mut names = Vec::new();
             for _ in 0..5 {
-                let mut input = json!({"id": "address", "address": SWITCH_ALICE, "page_size": 1});
+                let mut input = json!({"id": "address", "address": FAMILY_ALICE, "page_size": 1});
                 if let Some(relation) = relation { input["relation"] = json!(relation); }
                 if let Some(cursor) = cursor { input["cursor"] = cursor; }
                 let request = json!({"profile": profile, "inputs": [input]});
@@ -43,7 +43,7 @@ async fn v2_family_reverse_pages_counts_and_follow_primary_order() -> Result<()>
             assert_eq!(names, expected, "profile={profile} relation={relation:?}");
         }
     }
-    for address in [SWITCH_ALICE, "0x0000000000000000000000000000000000000fff"] {
+    for address in [FAMILY_ALICE, "0x0000000000000000000000000000000000000fff"] {
         let request = json!({"inputs": [
             {"id": "eth", "address": address, "coin_type": 60, "page_size": 1},
             {"id": "other", "address": address, "coin_type": 0, "page_size": 1}
@@ -67,7 +67,7 @@ async fn v2_family_reverse_publication_loss_after_fence_is_stale() -> Result<()>
     let database = TestDatabase::new_migrated().await?;
     seed_family_reverse_page_fixture(&database).await?;
     for relation in [None, Some("owner"), Some("resolves_to")] {
-        let mut input = json!({"address": SWITCH_ALICE, "page_size": 1});
+        let mut input = json!({"address": FAMILY_ALICE, "page_size": 1});
         if let Some(relation) = relation { input["relation"] = json!(relation); }
         let request = json!({"inputs": [input]});
         let live = family_reverse_body(&database, request.clone()).await?;
@@ -106,19 +106,19 @@ async fn v2_family_reverse_count_crosses_candidate_batches_and_ignores_cursor() 
     seed_bounded_membership_blocks(&database, 240).await?;
     let mut events = Vec::new();
     for index in 0..67 {
-        let (id, resource) = seed_switch_name(&database, &format!("reverse{index:03}.eth"), 0x770_0000 + index * 4, "ens_v1").await?;
-        events.push(switch_event(&format!("reverse-grant-{index}"), Some(&id), Some(resource),
+        let (id, resource) = seed_family_name(&database, &format!("reverse{index:03}.eth"), 0x770_0000 + index * 4, "ens_v1").await?;
+        events.push(family_event(&format!("reverse-grant-{index}"), Some(&id), Some(resource),
             "RegistrationGranted", "ens_v1_registrar_l1", 201, index as i64,
-            json!({"authority_kind": "registrar", "registrant": SWITCH_ALICE, "expiry": 1_900_000_000})));
+            json!({"authority_kind": "registrar", "registrant": FAMILY_ALICE, "expiry": 1_900_000_000})));
     }
     bigname_storage::insert_normalized_event_fixtures(&database.pool, &events).await?;
     publish_test_families(&database, 240).await?;
     let mut input = bigname_storage::ReverseIdentityStorageInput {
-        address: SWITCH_ALICE.to_owned(), coin_type: "60".to_owned(),
+        address: FAMILY_ALICE.to_owned(), coin_type: "60".to_owned(),
         roles: bigname_storage::ReverseIdentityRoles::Both, page_size: 33, cursor: None,
     };
     let namespaces = vec!["ens".to_owned()];
-    let chains = vec![SWITCH_CHAIN.to_owned()];
+    let chains = vec![FAMILY_CHAIN.to_owned()];
     let mut names = Vec::new();
     for _ in 0..3 {
         let mut groups = bigname_storage::families::records::load_family_reverse_identity_groups(
@@ -147,15 +147,15 @@ async fn v2_family_reverse_count_crosses_candidate_batches_and_ignores_cursor() 
 async fn v2_family_reverse_page_count_and_claim_hold_one_publication() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_bounded_membership_blocks(&database, 240).await?;
-    let (gamma, resource) = seed_switch_name(&database, "gamma.eth", 0x771_0000, "ens_v1").await?;
+    let (gamma, resource) = seed_family_name(&database, "gamma.eth", 0x771_0000, "ens_v1").await?;
     seed_family_reverse_page_fixture(&database).await?;
     let input = bigname_storage::ReverseIdentityStorageInput {
-        address: SWITCH_ALICE.to_owned(), coin_type: "60".to_owned(),
+        address: FAMILY_ALICE.to_owned(), coin_type: "60".to_owned(),
         roles: bigname_storage::ReverseIdentityRoles::Both, page_size: 10, cursor: None,
     };
     let inputs = [input];
     let namespaces = vec!["ens".to_owned()];
-    let chains = vec![SWITCH_CHAIN.to_owned()];
+    let chains = vec![FAMILY_CHAIN.to_owned()];
     let reached = std::sync::Arc::new(tokio::sync::Notify::new());
     let resume = std::sync::Arc::new(tokio::sync::Notify::new());
     let read_pool = database.pool.clone();
@@ -171,15 +171,15 @@ async fn v2_family_reverse_page_count_and_claim_hold_one_publication() -> Result
             result = &mut read => break result?,
             () = reached.notified() => {
                 if !advanced {
-                    let mut claim = switch_primary_claim_events().pop().unwrap();
-                    claim.event_identity = "switch-next-claim".to_owned();
+                    let mut claim = family_primary_claim_events().pop().unwrap();
+                    claim.event_identity = "family-next-claim".to_owned();
                     claim.block_number = Some(241);
                     claim.block_hash = Some("0xhistory241".to_owned());
                     bigname_storage::insert_normalized_event_fixtures(&database.pool, &[
                         claim,
-                        switch_event("switch-gamma-grant", Some(&gamma), Some(resource),
+                        family_event("family-gamma-grant", Some(&gamma), Some(resource),
                             "RegistrationGranted", "ens_v1_registrar_l1", 241, 1,
-                            json!({"authority_kind": "registrar", "registrant": SWITCH_ALICE, "expiry": 1_900_000_000})),
+                            json!({"authority_kind": "registrar", "registrant": FAMILY_ALICE, "expiry": 1_900_000_000})),
                     ]).await?;
                     publish_test_families(&database, 241).await?;
                     advanced = true;
@@ -204,28 +204,28 @@ async fn v2_family_reverse_page_count_and_claim_hold_one_publication() -> Result
 async fn v2_family_reverse_primary_manager_precedes_owned_names() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_bounded_membership_blocks(&database, 240).await?;
-    let (gamma, resource) = seed_switch_name(&database, "gamma.eth", 0x772_0000, "ens_v1").await?;
+    let (gamma, resource) = seed_family_name(&database, "gamma.eth", 0x772_0000, "ens_v1").await?;
     seed_family_reverse_page_fixture(&database).await?;
-    let mut claim = switch_primary_claim_events().pop().unwrap();
-    claim.event_identity = "switch-gamma-claim".to_owned();
+    let mut claim = family_primary_claim_events().pop().unwrap();
+    claim.event_identity = "family-gamma-claim".to_owned();
     claim.block_number = Some(241);
     claim.block_hash = Some("0xhistory241".to_owned());
     claim.after_state["raw_name"] = json!("gamma.eth");
     bigname_storage::insert_normalized_event_fixtures(&database.pool, &[
         claim,
-        switch_event("switch-gamma-owned", Some(&gamma), Some(resource),
+        family_event("family-gamma-owned", Some(&gamma), Some(resource),
             "RegistrationGranted", "ens_v1_registrar_l1", 241, 1,
-            json!({"authority_kind": "registrar", "registrant": SWITCH_BOB, "expiry": 1_900_000_000})),
-        switch_event("switch-gamma-controller", Some(&gamma), Some(resource),
+            json!({"authority_kind": "registrar", "registrant": FAMILY_BOB, "expiry": 1_900_000_000})),
+        family_event("family-gamma-controller", Some(&gamma), Some(resource),
             "AuthorityTransferred", "ens_v1_registry_l1", 241, 2,
-            json!({"authority_kind": "registry", "owner": SWITCH_ALICE, "owner_getter": SWITCH_ALICE, "node": gamma.strip_prefix("ens:").unwrap()})),
+            json!({"authority_kind": "registry", "owner": FAMILY_ALICE, "owner_getter": FAMILY_ALICE, "node": gamma.strip_prefix("ens:").unwrap()})),
     ]).await?;
     publish_test_families(&database, 241).await?;
     for relation in [None, Some("manager"), Some("owner,registrant")] {
         let mut cursor = None;
         let mut names = Vec::new();
         for _ in 0..4 {
-            let mut input = json!({"address": SWITCH_ALICE, "page_size": 1});
+            let mut input = json!({"address": FAMILY_ALICE, "page_size": 1});
             if let Some(relation) = relation { input["relation"] = json!(relation); }
             if let Some(cursor) = cursor { input["cursor"] = cursor; }
             let request = json!({"inputs": [input]});

@@ -52,20 +52,20 @@ impl RedoFixture {
         )
         .await?;
         PhaseStore::new(runner_db.pool().clone())
-            .initialize_chain(SWITCH_CHAIN)
+            .initialize_chain(FAMILY_CHAIN)
             .await?;
         // The family publication/head stay at 240. An already processed block 241 lets the
         // non-overlap control redo only work above that publication, through the real runner.
         sqlx::query("INSERT INTO chain_lineage (chain_id,block_number,block_hash,parent_hash,block_timestamp,canonicality_state) VALUES ($1,241,'0xhistory241','0xhistory240',to_timestamp(241),'canonical') ON CONFLICT DO NOTHING")
-            .bind(SWITCH_CHAIN).execute(&database.pool).await?;
+            .bind(FAMILY_CHAIN).execute(&database.pool).await?;
         sqlx::query("UPDATE chain_phase_state SET phase_status='completed',current_block_number=241,current_block_hash='0xhistory241',target_block_number=241,target_block_hash='0xhistory241',input_content_hash=$2,started_at=now(),finished_at=now() WHERE chain_id=$1")
-            .bind(SWITCH_CHAIN).bind(bigname_content_hash::INTERPRETER_CONTENT_HASH).execute(&database.pool).await?;
+            .bind(FAMILY_CHAIN).bind(bigname_content_hash::INTERPRETER_CONTENT_HASH).execute(&database.pool).await?;
         sqlx::query("INSERT INTO ingest_cursors (chain_id,source_key,source_kind,seed_basis,start_block_number,next_block_number,target_block_number,last_processed_block_number,last_processed_block_hash) VALUES ($1,'lookup-redo','jsonrpc','new_signature_range',200,242,241,241,'0xhistory241')")
-            .bind(SWITCH_CHAIN).execute(&database.pool).await?;
+            .bind(FAMILY_CHAIN).execute(&database.pool).await?;
         let chain = ChainConfig::new(
-            SWITCH_CHAIN,
+            FAMILY_CHAIN,
             vec![SourceConfig::new(
-                SWITCH_CHAIN,
+                FAMILY_CHAIN,
                 "lookup-redo",
                 "jsonrpc",
                 SeedBasis::NewSignatureRange,
@@ -132,7 +132,7 @@ async fn lookup_answer(
             .await?;
     let engine = bigname_lookup::LookupEngine::new(
         database.pool.clone(),
-        bigname_lookup::ChainRpcUrls::from_entries(&[format!("{SWITCH_CHAIN}={url}")])?,
+        bigname_lookup::ChainRpcUrls::from_entries(&[format!("{FAMILY_CHAIN}={url}")])?,
     );
     let response = engine
         .lookup(bigname_lookup::LookupRequest::new(id, ["addr:60"])?)
@@ -150,24 +150,24 @@ async fn family_lookup_refuses_insert_and_clear_after_actual_overlapping_redo() 
             let redo = RedoFixture::new(&database, phase).await?;
             if clearing {
                 assert_eq!(
-                    lookup_answer(&database, &id, SWITCH_BOB).await?.records[0].ledger_action,
+                    lookup_answer(&database, &id, FAMILY_BOB).await?.records[0].ledger_action,
                     bigname_lookup::LedgerAction::Written
                 );
             }
             let before: Value = sqlx::query_scalar("SELECT jsonb_build_object('head',(SELECT to_jsonb(h) FROM chain_heads h WHERE chain_id=$1),'marker',(SELECT to_jsonb(m) FROM project_family_marker m WHERE chain_id=$1),'manifests',(SELECT jsonb_agg(to_jsonb(m) ORDER BY manifest_id) FROM manifest_versions m WHERE chain_id=$1))")
-                .bind(SWITCH_CHAIN).fetch_one(&database.pool).await?;
+                .bind(FAMILY_CHAIN).fetch_one(&database.pool).await?;
             let (url, reached, release, handle) =
                 spawn_primary_name_mock_rpc_with_last_response_gate(vec![
                     resolution_universal_resolver_addr60_response(if clearing {
-                        SWITCH_ALICE
+                        FAMILY_ALICE
                     } else {
-                        SWITCH_BOB
+                        FAMILY_BOB
                     }),
                 ])
                 .await?;
             let engine = bigname_lookup::LookupEngine::new(
                 database.pool.clone(),
-                bigname_lookup::ChainRpcUrls::from_entries(&[format!("{SWITCH_CHAIN}={url}")])?,
+                bigname_lookup::ChainRpcUrls::from_entries(&[format!("{FAMILY_CHAIN}={url}")])?,
             );
             let request = bigname_lookup::LookupRequest::new(&id, ["addr:60"])?;
             let lookup = tokio::spawn(async move { engine.lookup(request).await });
@@ -181,7 +181,7 @@ async fn family_lookup_refuses_insert_and_clear_after_actual_overlapping_redo() 
                 _ = tokio::time::sleep(Duration::from_secs(10)) => anyhow::bail!("redo did not reach its batch"),
             }
             let after: Value = sqlx::query_scalar("SELECT jsonb_build_object('head',(SELECT to_jsonb(h) FROM chain_heads h WHERE chain_id=$1),'marker',(SELECT to_jsonb(m) FROM project_family_marker m WHERE chain_id=$1),'manifests',(SELECT jsonb_agg(to_jsonb(m) ORDER BY manifest_id) FROM manifest_versions m WHERE chain_id=$1))")
-                .bind(SWITCH_CHAIN).fetch_one(&database.pool).await?;
+                .bind(FAMILY_CHAIN).fetch_one(&database.pool).await?;
             assert_eq!(
                 before, after,
                 "redo start must leave captured lookup inputs fixed"
@@ -235,7 +235,7 @@ async fn family_lookup_refuses_insert_and_clear_after_actual_overlapping_redo() 
 async fn forward_lookup_maps_publication_loss_to_stale_for_both_profiles() -> Result<()> {
     for profile in ["feed", "detail"] {
         let database = TestDatabase::new_migrated().await?;
-        seed_switch_records_fixture(&database).await?;
+        seed_family_records_fixture(&database).await?;
         let redo = RedoFixture::new(&database, PhaseName::Interpret).await?;
         let reached = Arc::new(Notify::new());
         let resume = Arc::new(Notify::new());
@@ -304,12 +304,12 @@ async fn family_lookup_holds_redo_admission_until_the_ledger_commits() -> Result
             .await?;
         let (url, handle) =
             spawn_primary_name_mock_rpc(vec![resolution_universal_resolver_addr60_response(
-                SWITCH_BOB,
+                FAMILY_BOB,
             )])
             .await?;
         let engine = bigname_lookup::LookupEngine::new(
             database.pool.clone(),
-            bigname_lookup::ChainRpcUrls::from_entries(&[format!("{SWITCH_CHAIN}={url}")])?,
+            bigname_lookup::ChainRpcUrls::from_entries(&[format!("{FAMILY_CHAIN}={url}")])?,
         );
         let request = bigname_lookup::LookupRequest::new(&id, ["addr:60"])?;
         let lookup = tokio::spawn(async move { engine.lookup(request).await });
@@ -356,7 +356,7 @@ async fn family_lookup_holds_redo_admission_until_the_ledger_commits() -> Result
 #[tokio::test]
 async fn forward_lookup_keeps_unrelated_database_failures_internal() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    seed_switch_records_fixture(&database).await?;
+    seed_family_records_fixture(&database).await?;
     let reached = Arc::new(Notify::new());
     let resume = Arc::new(Notify::new());
     let state = database.app_state();

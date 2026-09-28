@@ -89,7 +89,7 @@ async fn seed_registry_fixture(database: &TestDatabase) -> Result<()> {
     sqlx::query("INSERT INTO contract_instance_addresses (contract_instance_id, chain_id, address, active_from_block_number)
         VALUES ($1, $2, $3, 61)").bind(alpha_instance).bind(REGISTRY_CHAIN_ID).bind(ALPHA_REGISTRY).execute(&database.pool).await?;
     {
-        let grant = switch_event(
+        let grant = family_event(
             "registry-alpha-grant",
             Some(&registry_logical_name_id("alpha.eth")),
             Some(Uuid::from_u128(0xA000)),

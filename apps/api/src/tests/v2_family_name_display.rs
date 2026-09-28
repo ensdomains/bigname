@@ -1,7 +1,7 @@
 #[tokio::test]
 async fn v2_search_cursor_keeps_its_independent_normalized_name_boundary() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    seed_switch_names_fixture(&database).await?;
+    seed_family_names_fixture(&database).await?;
     let uri = "/v1/search?q=eth&match=contains&namespace=ens&page_size=1";
     let (_, next) = list_cursor_page(&database, uri, "").await?;
     let cursor = list_cursor_at(
@@ -24,16 +24,16 @@ async fn v2_search_cursor_keeps_its_independent_normalized_name_boundary() -> Re
 
 /// Interpret stores the normalized labels as the surface. Display is recovered with the same
 /// shared normalizer when serving it; it is not a separately forced fixture value.
-async fn seed_switch_emoji_names(database: &TestDatabase) -> Result<()> {
+async fn seed_family_emoji_names(database: &TestDatabase) -> Result<()> {
     seed_bounded_membership_blocks(database, 240).await?;
-    let manifest = seed_switch_resolver_declaration(database).await?;
+    let manifest = seed_family_resolver_declaration(database).await?;
     for (index, input) in ["🅰️🅱.eth", "🅰️🅲.eth"].into_iter().enumerate() {
         let normalized = bigname_domain::normalization::normalize_name(input)?;
         assert_ne!(
             normalized.normalized_name,
             normalized.canonical_display_name
         );
-        let (name, resource) = seed_switch_name(
+        let (name, resource) = seed_family_name(
             database,
             &normalized.normalized_name,
             0x968_0000 + index as u128 * 16,
@@ -49,7 +49,7 @@ async fn seed_switch_emoji_names(database: &TestDatabase) -> Result<()> {
         bigname_storage::insert_normalized_event_fixtures(
             &database.pool,
             &[
-                switch_event(
+                family_event(
                     &format!("emoji-grant-{index}"),
                     Some(&name),
                     Some(resource),
@@ -57,10 +57,10 @@ async fn seed_switch_emoji_names(database: &TestDatabase) -> Result<()> {
                     "ens_v1_registrar_l1",
                     201,
                     index as i64,
-                    json!({"authority_kind": "registrar", "registrant": SWITCH_ALICE,
+                    json!({"authority_kind": "registrar", "registrant": FAMILY_ALICE,
                        "expiry": 1_900_000_000i64}),
                 ),
-                switch_event(
+                family_event(
                     &format!("emoji-resolver-{index}"),
                     Some(&name),
                     Some(resource),
@@ -68,12 +68,12 @@ async fn seed_switch_emoji_names(database: &TestDatabase) -> Result<()> {
                     "ens_v1_registry_l1",
                     202,
                     index as i64,
-                    json!({"node": name.trim_start_matches("ens:"), "resolver": SWITCH_RESOLVER}),
+                    json!({"node": name.trim_start_matches("ens:"), "resolver": FAMILY_RESOLVER}),
                 ),
             ],
         )
         .await?;
-        let mut address = switch_event(
+        let mut address = family_event(
             &format!("emoji-address-{index}"),
             None,
             None,
@@ -81,11 +81,11 @@ async fn seed_switch_emoji_names(database: &TestDatabase) -> Result<()> {
             "ens_v1_resolver_l1",
             203,
             index as i64,
-            json!({"node": name.trim_start_matches("ens:"), "resolver": SWITCH_RESOLVER,
+            json!({"node": name.trim_start_matches("ens:"), "resolver": FAMILY_RESOLVER,
                 "source_event": "AddressChanged", "record_key": "addr:60", "record_family": "addr",
-                "selector_key": "60", "value": SWITCH_ALICE}),
+                "selector_key": "60", "value": FAMILY_ALICE}),
         );
-        address.raw_fact_ref["emitting_address"] = json!(SWITCH_RESOLVER);
+        address.raw_fact_ref["emitting_address"] = json!(FAMILY_RESOLVER);
         address.source_manifest_id = Some(manifest);
         address.manifest_version = 1;
         address.derivation_kind = "ens_v1_unwrapped_authority".into();
@@ -97,8 +97,8 @@ async fn seed_switch_emoji_names(database: &TestDatabase) -> Result<()> {
 #[tokio::test]
 async fn v2_bound_name_display_and_cursors_use_shared_emoji_normalization() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    seed_switch_emoji_names(&database).await?;
-    let uri = format!("/v1/resolvers/1/{SWITCH_RESOLVER}?page_size=1");
+    seed_family_emoji_names(&database).await?;
+    let uri = format!("/v1/resolvers/1/{FAMILY_RESOLVER}?page_size=1");
     let pages = read_family_pages_in(&database, &uri, "/data/bound_names").await?;
     assert_eq!(pages.len(), 2);
     for page in &pages {
@@ -134,13 +134,13 @@ async fn v2_bound_name_display_and_cursors_use_shared_emoji_normalization() -> R
 #[tokio::test]
 async fn v2_address_name_display_uses_shared_emoji_normalization() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    seed_switch_emoji_names(&database).await?;
+    seed_family_emoji_names(&database).await?;
     for suffix in [
         "",
         "&relation=resolves_to&coin_type=60",
         "&relation=resolves_to&coin_type=evm",
     ] {
-        let uri = format!("/v1/addresses/{SWITCH_ALICE}/names?namespace=ens&page_size=1{suffix}");
+        let uri = format!("/v1/addresses/{FAMILY_ALICE}/names?namespace=ens&page_size=1{suffix}");
         let pages = read_family_pages(&database, &uri).await?;
         assert_eq!(pages.len(), 2, "{uri}: {pages:#?}");
         for page in &pages {

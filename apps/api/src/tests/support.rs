@@ -3580,21 +3580,21 @@ async fn join_primary_name_mock_rpc_requests(
 
 /// Blocks 200..=241 of ethereum-mainnet (hash `0xhistory{n}`, time 1_700_000_000 + n), the
 /// shape the bounded-membership tests use.
-const SWITCH_CHAIN: &str = "ethereum-mainnet";
-const SWITCH_FIRST_BLOCK: i64 = 200;
+const FAMILY_CHAIN: &str = "ethereum-mainnet";
+const FAMILY_FIRST_BLOCK: i64 = 200;
 
 /// A name for an event-built family fixture: its surface, its own resource with a token lineage, and an open
 /// binding under `arm`, all at the first block. Returns the name id and the resource.
-async fn seed_switch_name(
+async fn seed_family_name(
     database: &TestDatabase,
     name: &str,
     seed: u128,
     arm: &str,
 ) -> Result<(String, Uuid)> {
-    seed_switch_name_on(database, name, seed, arm, "ens", SWITCH_CHAIN).await
+    seed_family_name_on(database, name, seed, arm, "ens", FAMILY_CHAIN).await
 }
 
-async fn seed_switch_name_on(
+async fn seed_family_name_on(
     database: &TestDatabase,
     name: &str,
     seed: u128,
@@ -3608,7 +3608,7 @@ async fn seed_switch_name_on(
         Uuid::from_u128(seed + 1),
         Uuid::from_u128(seed + 2),
     );
-    let hash = format!("0xhistory{SWITCH_FIRST_BLOCK}");
+    let hash = format!("0xhistory{FAMILY_FIRST_BLOCK}");
     upsert_test_name_surfaces(
         &database.pool,
         &[NameSurface {
@@ -3625,8 +3625,8 @@ async fn seed_switch_name_on(
             normalization_errors: json!([]),
             chain_id: chain_id.to_owned(),
             block_hash: hash.clone(),
-            block_number: SWITCH_FIRST_BLOCK,
-            provenance: json!({"seed": "switch_differential"}),
+            block_number: FAMILY_FIRST_BLOCK,
+            provenance: json!({"seed": "family_differential"}),
             canonicality_state: CanonicalityState::Canonical,
         }],
     )
@@ -3637,8 +3637,8 @@ async fn seed_switch_name_on(
             token_lineage_id,
             chain_id: chain_id.to_owned(),
             block_hash: hash.clone(),
-            block_number: SWITCH_FIRST_BLOCK,
-            provenance: json!({"seed": "switch_differential"}),
+            block_number: FAMILY_FIRST_BLOCK,
+            provenance: json!({"seed": "family_differential"}),
             canonicality_state: CanonicalityState::Canonical,
         }],
     )
@@ -3650,8 +3650,8 @@ async fn seed_switch_name_on(
             token_lineage_id: Some(token_lineage_id),
             chain_id: chain_id.to_owned(),
             block_hash: hash.clone(),
-            block_number: SWITCH_FIRST_BLOCK,
-            provenance: json!({"seed": "switch_differential"}),
+            block_number: FAMILY_FIRST_BLOCK,
+            provenance: json!({"seed": "family_differential"}),
             canonicality_state: CanonicalityState::Canonical,
         }],
     )
@@ -3665,12 +3665,12 @@ async fn seed_switch_name_on(
             resource_id,
             binding_kind: SurfaceBindingKind::DeclaredRegistryPath,
             authority_arm: arm.to_owned(),
-            active_from: OffsetDateTime::from_unix_timestamp(1_700_000_000 + SWITCH_FIRST_BLOCK)?,
+            active_from: OffsetDateTime::from_unix_timestamp(1_700_000_000 + FAMILY_FIRST_BLOCK)?,
             active_to: None,
             chain_id: chain_id.to_owned(),
             block_hash: hash,
-            block_number: SWITCH_FIRST_BLOCK,
-            provenance: json!({"seed": "switch_differential", "transaction_index": 0,
+            block_number: FAMILY_FIRST_BLOCK,
+            provenance: json!({"seed": "family_differential", "transaction_index": 0,
                                "log_index": 0}),
             canonicality_state: CanonicalityState::Canonical,
         }],
@@ -3681,7 +3681,7 @@ async fn seed_switch_name_on(
 
 /// One event of the differential at `block` and `log` in transaction 0.
 #[allow(clippy::too_many_arguments)]
-fn switch_event(
+fn family_event(
     identity: &str,
     logical_name_id: Option<&str>,
     resource_id: Option<Uuid>,
@@ -3714,13 +3714,13 @@ async fn publish_test_families(database: &TestDatabase, target: i64) -> Result<(
              target_block_number = EXCLUDED.target_block_number,
              target_block_hash = EXCLUDED.target_block_hash",
     )
-    .bind(SWITCH_CHAIN)
+    .bind(FAMILY_CHAIN)
     .bind(target)
     .bind(format!("0xhistory{target}"))
     .bind(bigname_content_hash::INTERPRETER_CONTENT_HASH)
     .execute(&database.pool)
     .await?;
-    publish_test_families_on(&database.pool, SWITCH_CHAIN, target).await
+    publish_test_families_on(&database.pool, FAMILY_CHAIN, target).await
 }
 
 /// Follow/rebuild the fixture's real canonical inputs; the family marker owns resume state.

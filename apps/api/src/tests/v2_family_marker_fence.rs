@@ -10,7 +10,7 @@ async fn commit_family_block(pool: &PgPool) -> Result<()> {
 }
 
 async fn seed_marker_collection_fixture(database: &TestDatabase) -> Result<()> {
-    seed_switch_names_fixture(database).await
+    seed_family_names_fixture(database).await
 }
 
 fn ens_head_scope() -> bigname_storage::SnapshotSelectionScope {
@@ -140,7 +140,7 @@ const ONE_EXPIRY: i64 = 1_600_000_000;
 async fn v2_get_subnames_include_expired_false_is_evaluated_at_the_published_block_time()
 -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    seed_switch_children_fixture_expiring(&database, ONE_EXPIRY, TWO_EXPIRY).await?;
+    seed_family_children_fixture_expiring(&database, ONE_EXPIRY, TWO_EXPIRY).await?;
     let published: Vec<i64> = sqlx::query_scalar(
         "SELECT extract(epoch FROM block_timestamp)::bigint FROM project_family_marker",
     )
@@ -231,7 +231,7 @@ async fn assert_family_publication_restarts(
 #[tokio::test]
 async fn v2_a_subnames_cursor_restarts_after_family_publication_changes() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    seed_switch_children_fixture(&database).await?;
+    seed_family_children_fixture(&database).await?;
     assert_family_publication_restarts(&database, "/v1/names/alpha.eth/subnames?page_size=1")
         .await?;
     database.cleanup().await
@@ -240,8 +240,8 @@ async fn v2_a_subnames_cursor_restarts_after_family_publication_changes() -> Res
 #[tokio::test]
 async fn v2_a_resolver_overview_cursor_continues_after_family_publication_changes() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    seed_switch_routes_fixture(&database).await?;
-    let base = format!("/v1/resolvers/1/{SWITCH_RESOLVER}?page_size=1");
+    seed_family_routes_fixture(&database).await?;
+    let base = format!("/v1/resolvers/1/{FAMILY_RESOLVER}?page_size=1");
     let page = v2_resolver_payload_for_database(&database, &base).await?;
     assert_eq!(
         page["data"]["bound_names"]["data"][0]["name"],
@@ -267,8 +267,8 @@ async fn v2_a_resolver_overview_cursor_continues_after_family_publication_change
 #[tokio::test]
 async fn v2_a_resolver_collection_cursor_binds_its_family_generation() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    seed_switch_permissions_fixture(&database).await?;
-    let base = format!("/v1/resolvers/1/{SWITCH_V2_RESOLVER}/roles?page_size=1");
+    seed_family_permissions_fixture(&database).await?;
+    let base = format!("/v1/resolvers/1/{FAMILY_V2_RESOLVER}/roles?page_size=1");
     assert_family_publication_restarts(&database, &base).await?;
     let page = v2_resolver_payload_for_database(&database, &base).await?;
     let mut spliced = crate::v2::decode(&collection_next_cursor(&page).context("a continuation")?)

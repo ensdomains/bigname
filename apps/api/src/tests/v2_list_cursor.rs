@@ -10,10 +10,10 @@ const LIST_CURSOR_OTHER_RESOLVER: &str = "0x000000000000000000000000000000000000
 const LIST_CURSOR_INVALID: &str = "cursor must be a valid pagination cursor";
 const LIST_CURSOR_RETRY: &str = "collection publication changed during the read; retry the request";
 
-/// The adopted lists over the switch fixture: each walks in two pages of one row.
+/// The adopted lists over the family fixture: each walks in two pages of one row.
 fn list_cursor_routes() -> Result<Vec<(String, &'static str)>> {
-    let after = switch_timestamp(1_700_000_000)?;
-    let before = switch_timestamp(1_960_000_000)?;
+    let after = family_timestamp(1_700_000_000)?;
+    let before = family_timestamp(1_960_000_000)?;
     Ok(vec![
         ("/v1/search?q=eth&match=contains&page_size=1".to_owned(), ""),
         (
@@ -35,7 +35,7 @@ fn list_cursor_routes() -> Result<Vec<(String, &'static str)>> {
             "",
         ),
         (
-            format!("/v1/resolvers/1/{SWITCH_RESOLVER}?page_size=1"),
+            format!("/v1/resolvers/1/{FAMILY_RESOLVER}?page_size=1"),
             "/data/bound_names",
         ),
     ])
@@ -150,7 +150,7 @@ async fn advance_list_cursor_fixture(database: &TestDatabase) -> Result<()> {
     bigname_storage::insert_normalized_event_fixtures(
         &database.pool,
         &[
-            switch_event(
+            family_event(
                 "list-cursor-alpha-resolver",
                 Some(&alpha),
                 Some(alpha_resource),
@@ -160,7 +160,7 @@ async fn advance_list_cursor_fixture(database: &TestDatabase) -> Result<()> {
                 0,
                 json!({"node": alpha_node, "resolver": LIST_CURSOR_OTHER_RESOLVER}),
             ),
-            switch_event(
+            family_event(
                 "list-cursor-alpha-renewal",
                 Some(&alpha),
                 Some(alpha_resource),
@@ -192,8 +192,8 @@ async fn v2_list_cursor_issued_before_a_publication_reads_what_is_there_now() ->
     let database = TestDatabase::new_migrated().await?;
     seed_list_cursor_fixture(&database).await?;
     let routes = list_cursor_routes()?;
-    let at_240 = switch_timestamp(1_700_000_240)?;
-    let pinned = format!("/v1/resolvers/1/{SWITCH_RESOLVER}?page_size=1&at={at_240}");
+    let at_240 = family_timestamp(1_700_000_240)?;
+    let pinned = format!("/v1/resolvers/1/{FAMILY_RESOLVER}?page_size=1&at={at_240}");
     let mut issued = Vec::new();
     {
         for (uri, holder) in &routes {
@@ -319,10 +319,10 @@ async fn v2_list_cursor_past_the_end_answers_an_empty_last_page() -> Result<()> 
     let database = TestDatabase::new_migrated().await?;
     seed_list_cursor_fixture(&database).await?;
     let namehash_ff = format!("0x{}", "ff".repeat(32));
-    let end_expiry = switch_timestamp(1_959_999_999)?;
-    let gap_expiry = switch_timestamp(1_850_000_000)?;
+    let end_expiry = family_timestamp(1_959_999_999)?;
+    let gap_expiry = family_timestamp(1_850_000_000)?;
     // Descending, "after the last row" is below the earliest expiry in the window.
-    let desc_end_expiry = switch_timestamp(1_700_000_001)?;
+    let desc_end_expiry = family_timestamp(1_700_000_001)?;
     let namehash_00 = format!("0x{}", "00".repeat(32));
     let routes = list_cursor_routes()?;
     {
@@ -446,13 +446,13 @@ async fn v2_list_cursor_continuation_retries_when_publication_changes_during_the
 #[tokio::test]
 async fn v2_list_cursor_pinned_at_answers_409_after_any_newer_publication() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    seed_switch_names_events(&database).await?;
+    seed_family_names_events(&database).await?;
     let (gamma, gamma_resource) =
-        seed_switch_name(&database, "gamma.eth", 0x5c1_0000, "ens_v1").await?;
-    seed_switch_resolver_declaration(&database).await?;
+        seed_family_name(&database, "gamma.eth", 0x5c1_0000, "ens_v1").await?;
+    seed_family_resolver_declaration(&database).await?;
     publish_test_families(&database, 240).await?;
-    let at_240 = switch_timestamp(1_700_000_240)?;
-    let pinned = format!("/v1/resolvers/1/{SWITCH_RESOLVER}?page_size=1&at={at_240}");
+    let at_240 = family_timestamp(1_700_000_240)?;
+    let pinned = format!("/v1/resolvers/1/{FAMILY_RESOLVER}?page_size=1&at={at_240}");
     let mut issued = Vec::new();
     {
         let (first, next) = list_cursor_page(&database, &pinned, "/data/bound_names").await?;
@@ -470,7 +470,7 @@ async fn v2_list_cursor_pinned_at_answers_409_after_any_newer_publication() -> R
     }
     bigname_storage::insert_normalized_event_fixtures(
         &database.pool,
-        &[switch_event(
+        &[family_event(
             "list-cursor-gamma-grant",
             Some(&gamma),
             Some(gamma_resource),
@@ -478,7 +478,7 @@ async fn v2_list_cursor_pinned_at_answers_409_after_any_newer_publication() -> R
             "ens_v1_registrar_l1",
             241,
             0,
-            json!({"authority_kind": "registrar", "registrant": SWITCH_ALICE,
+            json!({"authority_kind": "registrar", "registrant": FAMILY_ALICE,
                    "expiry": 1_900_000_000i64}),
         )],
     )
@@ -497,7 +497,7 @@ async fn v2_list_cursor_pinned_at_answers_409_after_any_newer_publication() -> R
         // Latest bound names are unchanged, so the refusal is the pin alone.
         let (latest, _) = list_cursor_page(
             &database,
-            &format!("/v1/resolvers/1/{SWITCH_RESOLVER}?page_size=5"),
+            &format!("/v1/resolvers/1/{FAMILY_RESOLVER}?page_size=5"),
             "/data/bound_names",
         )
         .await?;
@@ -519,7 +519,7 @@ async fn v2_list_cursor_malformed_on_the_resolver_overview_answers_400_before_re
     let empty = TestDatabase::new_migrated().await?;
     let database = TestDatabase::new_migrated().await?;
     seed_list_cursor_fixture(&database).await?;
-    let base = format!("/v1/resolvers/1/{SWITCH_RESOLVER}?page_size=1");
+    let base = format!("/v1/resolvers/1/{FAMILY_RESOLVER}?page_size=1");
     let search = "/v1/search?q=eth&match=contains&page_size=1";
     {
         let (_, search_next) = list_cursor_page(&database, search, "").await?;
@@ -652,7 +652,7 @@ async fn v2_list_cursor_raw_wire_defects_answer_400_and_a_fabricated_position_pa
                 .await?;
         }
         let gap = list_cursor_raw(&next, |raw| {
-            raw["last_item"]["expires_at"] = json!(switch_timestamp(1_850_000_000).expect("time"));
+            raw["last_item"]["expires_at"] = json!(family_timestamp(1_850_000_000).expect("time"));
             raw["last_item"]["name"] = json!("gap.eth");
         });
         let (rows, last) =
@@ -671,9 +671,9 @@ async fn v2_list_cursor_raw_wire_defects_answer_400_and_a_fabricated_position_pa
 async fn v2_list_cursor_pinned_to_another_at_answers_400_before_availability() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_list_cursor_fixture(&database).await?;
-    let base = format!("/v1/resolvers/1/{SWITCH_RESOLVER}?page_size=1");
-    let at_240 = switch_timestamp(1_700_000_240)?;
-    let at_230 = switch_timestamp(1_700_000_230)?;
+    let base = format!("/v1/resolvers/1/{FAMILY_RESOLVER}?page_size=1");
+    let at_240 = family_timestamp(1_700_000_240)?;
+    let at_230 = family_timestamp(1_700_000_230)?;
     {
         let pinned = format!("{base}&at={at_240}");
         let (_, pinned_next) = list_cursor_page(&database, &pinned, "/data/bound_names").await?;
@@ -697,7 +697,7 @@ async fn v2_list_cursor_pinned_to_another_at_answers_400_before_availability() -
 }
 
 async fn seed_list_cursor_fixture(database: &TestDatabase) -> Result<()> {
-    seed_switch_names_events(database).await?;
-    seed_switch_resolver_declaration(database).await?;
+    seed_family_names_events(database).await?;
+    seed_family_resolver_declaration(database).await?;
     publish_test_families(database, 240).await
 }

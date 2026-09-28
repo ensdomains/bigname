@@ -4,7 +4,7 @@
 async fn v2_history_classification_refuses_reset_after_anchor_capture() -> Result<()> {
     for republished in [false, true] {
         let database = TestDatabase::new_migrated().await?;
-        seed_switch_routes_fixture(&database).await?;
+        seed_family_routes_fixture(&database).await?;
         let uri = "/v1/names/alpha.eth/history";
         let (status, before) = read_family_response(&database, uri).await?;
         assert_eq!(status, StatusCode::OK, "{before:#}");
@@ -30,7 +30,7 @@ async fn v2_history_classification_refuses_reset_after_anchor_capture() -> Resul
         )
         .await
         .context("history did not capture anchors")?;
-        reset_switch_families(&database).await?;
+        reset_family_families(&database).await?;
         if republished {
             publish_test_families(&database, 240).await?;
         }

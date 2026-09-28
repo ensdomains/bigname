@@ -512,7 +512,7 @@ async fn v2_get_names_lists_a_released_name_inside_the_window_next_to_a_live_one
     database.cleanup().await
 }
 
-// D10: a names cursor holds the window, order and last row's position only. A continuation
+// A names cursor holds the window, order and last row's position only. A continuation
 // reads the publication current when it runs, so a new Project publication between pages does
 // not refuse it; a cursor that still carries the publication binding answers 400.
 #[tokio::test]

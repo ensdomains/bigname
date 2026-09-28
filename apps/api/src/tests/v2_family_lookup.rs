@@ -1,8 +1,8 @@
 async fn seed_family_lookup_fixture(database: &TestDatabase) -> Result<String> {
-    seed_switch_records_fixture(database).await?;
+    seed_family_records_fixture(database).await?;
     seed_schema_v2_ens_manifest_on_chain(
         &database.pool,
-        SWITCH_CHAIN,
+        FAMILY_CHAIN,
         "ens_execution",
         "universal_resolver",
         "0xeeeeeeee14d718c2b47d9923deab1335e144eeee",
@@ -18,7 +18,7 @@ async fn seed_family_lookup_fixture(database: &TestDatabase) -> Result<String> {
     let family = bigname_storage::families::name::load_family_name(&database.pool, &id)
         .await?.context("family name")?;
     assert_eq!(family.declared_summary["topology"]["resolver_path"][0]["address"],
-        json!(SWITCH_RESOLVER));
+        json!(FAMILY_RESOLVER));
     sqlx::query("UPDATE bigname_phase.chain_phase_state SET current_block_number = 200, current_block_hash = '0xhistory200' WHERE phase_name = 'project'")
         .execute(&database.pool).await?;
     Ok(id)
@@ -29,9 +29,9 @@ async fn family_lookup_compares_and_clears_divergence() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     let id = seed_family_lookup_fixture(&database).await?;
     for (address, action, count) in [
-        (SWITCH_ALICE, bigname_lookup::LedgerAction::None, 0_i64),
-        (SWITCH_BOB, bigname_lookup::LedgerAction::Written, 1),
-        (SWITCH_ALICE, bigname_lookup::LedgerAction::Cleared, 0),
+        (FAMILY_ALICE, bigname_lookup::LedgerAction::None, 0_i64),
+        (FAMILY_BOB, bigname_lookup::LedgerAction::Written, 1),
+        (FAMILY_ALICE, bigname_lookup::LedgerAction::Cleared, 0),
     ] {
         let (url, handle) =
             spawn_primary_name_mock_rpc(vec![resolution_universal_resolver_addr60_response(
@@ -40,7 +40,7 @@ async fn family_lookup_compares_and_clears_divergence() -> Result<()> {
             .await?;
         let engine = bigname_lookup::LookupEngine::new(
             database.pool.clone(),
-            bigname_lookup::ChainRpcUrls::from_entries(&[format!("{SWITCH_CHAIN}={url}")])?,
+            bigname_lookup::ChainRpcUrls::from_entries(&[format!("{FAMILY_CHAIN}={url}")])?,
         );
         let answer = engine.lookup(bigname_lookup::LookupRequest::new(&id, ["addr:60"])?)
         .await?;
@@ -76,12 +76,12 @@ async fn family_lookup_guards_its_publication_during_rpc() -> Result<()> {
         let id = seed_family_lookup_fixture(&database).await?;
         let (url, reached, release, handle) =
             spawn_primary_name_mock_rpc_with_last_response_gate(vec![
-                resolution_universal_resolver_addr60_response(SWITCH_BOB),
+                resolution_universal_resolver_addr60_response(FAMILY_BOB),
             ])
             .await?;
         let engine = bigname_lookup::LookupEngine::new(
             database.pool.clone(),
-            bigname_lookup::ChainRpcUrls::from_entries(&[format!("{SWITCH_CHAIN}={url}")])?,
+            bigname_lookup::ChainRpcUrls::from_entries(&[format!("{FAMILY_CHAIN}={url}")])?,
         );
         let request = bigname_lookup::LookupRequest::new(&id, ["addr:60"])?;
         let lookup = tokio::spawn(
@@ -121,7 +121,7 @@ async fn family_lookup_guards_its_publication_during_rpc() -> Result<()> {
 async fn family_lookup_batch_reads_names_inventory_and_relations() -> Result<()>
 {
     let database = TestDatabase::new_migrated().await?;
-    seed_switch_records_fixture(&database).await?;
+    seed_family_records_fixture(&database).await?;
     for profile in ["feed", "detail"] {
         let request =
             json!({"profile":profile,"inputs":[{"name":"alpha.eth"},{"name":"beta.eth"}]});
@@ -129,7 +129,7 @@ async fn family_lookup_batch_reads_names_inventory_and_relations() -> Result<()>
         assert_eq!(family["data"][0]["status"], "ok", "{family:#}");
         if profile == "detail" {
             assert_eq!(
-                family["data"][0]["record"]["addresses"]["60"], SWITCH_ALICE,
+                family["data"][0]["record"]["addresses"]["60"], FAMILY_ALICE,
                 "{family:#}"
             );
         }
