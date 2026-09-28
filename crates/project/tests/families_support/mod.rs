@@ -287,7 +287,7 @@ impl Fixture {
             "INSERT INTO name_surfaces (logical_name_id, namespace, raw_name, raw_labels,
                  dns_encoded_name, namehash, labelhashes, normalizer_version, visibility_state,
                  chain_id, block_hash, block_number, canonicality_state)
-             VALUES ($1, 'ens', $5, $6, $7, $2, $8, $9, 'active',
+             VALUES ($1, $10, $5, $6, $7, $2, $8, $9, 'active',
                      $3, $4, 0, 'canonical')
              ON CONFLICT DO NOTHING",
         )
@@ -300,6 +300,12 @@ impl Fixture {
         .bind(normalized.dns_encoded_name)
         .bind(labelhashes)
         .bind(bigname_domain::normalization::ENS_NORMALIZER_VERSION)
+        .bind(
+            logical_name_id
+                .split_once(':')
+                .expect("fixture namespace")
+                .0,
+        )
         .execute(&self.pool)
         .await?;
         Ok(())
