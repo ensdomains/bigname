@@ -130,16 +130,19 @@ async fn load_name_records(
             bigname_storage::load_phase_identity_records_by_ids(&state.pool, logical_name_ids).await
         }
     }
-    .map_err(|load_error| {
-        error!(
-            service = "api",
-            input_count = logical_name_ids.len(),
-            profile = ?profile,
-            error = ?load_error,
-            "failed to load v2 lookup name records"
-        );
-        V2Error::internal_error("failed to load lookup name records")
-    })?;
+    .map_err(crate::v2::snapshots::name_rows_error(
+        crate::v2::SnapshotReadResource::Name,
+        |load_error| {
+            error!(
+                service = "api",
+                input_count = logical_name_ids.len(),
+                profile = ?profile,
+                error = ?load_error,
+                "failed to load v2 lookup name records"
+            );
+            V2Error::internal_error("failed to load lookup name records")
+        },
+    ))?;
     if let Some(selected_snapshot) = selected_snapshot {
         require_name_records_at_served_head(&records, selected_snapshot)?;
     }

@@ -52,7 +52,11 @@ pub(super) async fn load_address_history_selector(
     // A current relation counts only when some binding of the name to the row's resource and the
     // event Project cites for the row lie at or below the read's published block; one acquired
     // later must not admit the resource's older events.
+    // Raw diagnostics audit retained relation evidence, including former controllers. They
+    // must not depend on a current family publication during a Project reset or rebuild.
+    let raw_audit = include_candidates && published.is_none();
     let current_rows = match published {
+        None if raw_audit => Ok(Vec::new()),
         Some(published) => {
             load_address_names_current_at_bound(
                 pool,
@@ -120,6 +124,21 @@ pub(super) async fn load_address_history_selector(
         }
         if let Some(resource_id) = anchor.resource_id {
             resource_ids.insert(resource_id);
+        }
+    }
+
+    if raw_audit
+        && relations.is_none_or(|values| values.contains(&AddressNameRelation::EffectiveController))
+    {
+        for anchor in
+            load_retained_controller_matches(pool, address, namespace, canonical_only).await?
+        {
+            if let Some(name) = anchor.logical_name_id {
+                logical_name_ids.insert(name);
+            }
+            if let Some(resource) = anchor.resource_id {
+                resource_ids.insert(resource);
+            }
         }
     }
 
@@ -369,3 +388,47 @@ fn push_registry_owner_match_filter<'a>(
 #[cfg(test)]
 #[path = "address_plan_tests.rs"]
 mod plan_tests;
+
+/// Diagnostic-only control evidence from either side of a permission change. A revocation can
+/// itself prove the earlier controller even when the granting event predates retained intake.
+async fn load_retained_controller_matches(
+    pool: &PgPool,
+    address: &str,
+    namespace: Option<&str>,
+    canonical_only: bool,
+) -> Result<Vec<AddressHistoryAnchor>> {
+    let mut query = QueryBuilder::<Postgres>::new(
+        "SELECT DISTINCT ne.logical_name_id, ne.resource_id FROM normalized_events ne ",
+    );
+    push_history_lineage_join(&mut query);
+    query.push(" WHERE ne.resource_id IS NOT NULL AND (");
+    query.push(
+        "(ne.event_kind='PermissionChanged' AND EXISTS (
+        SELECT 1 FROM (VALUES (ne.before_state), (ne.after_state)) states(value)
+        WHERE value #>> '{scope,kind}' = 'resource'
+          AND value -> 'effective_powers' @> '[\"resource_control\"]'::jsonb
+          AND lower(value ->> 'subject') = ",
+    );
+    query.push_bind(address);
+    query.push(
+        ")) OR (ne.event_kind='SurfaceBound'
+        AND ne.after_state ->> 'state_derived' = 'true'
+        AND ne.after_state ->> 'authority_kind' = 'registry_only'
+        AND lower(ne.after_state ->> 'owner') = ",
+    );
+    query.push_bind(address);
+    query.push("))");
+    push_history_canonicality_filter(&mut query, canonical_only);
+    if let Some(namespace) = namespace {
+        query.push(" AND ne.namespace = ");
+        query.push_bind(namespace);
+    }
+    query
+        .build()
+        .fetch_all(pool)
+        .await
+        .context("failed to load retained diagnostic controller evidence")?
+        .into_iter()
+        .map(decode_address_history_anchor)
+        .collect()
+}

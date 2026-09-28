@@ -63,11 +63,11 @@ async fn rebuild_equal(
     target: i64,
     options: &FamilyOptions,
 ) -> Result<FamilyOutcome> {
-    let incremental = fixture.exact().await?;
+    let incremental = fixture.rebuild_state().await?;
     let outcome = fixture
         .apply_with(target, FamilyMode::Rebuild, options)
         .await?;
-    let rebuilt = fixture.exact().await?;
+    let rebuilt = fixture.rebuild_state().await?;
     for ((table, was), (_, now)) in incremental.iter().zip(&rebuilt) {
         ensure!(
             was == now,
@@ -730,7 +730,7 @@ async fn a_range_rebuild_resumes_after_a_stop_and_equals_the_follow() -> Result<
     let fixture = Fixture::new("families_range_resume", 40).await?;
     pointers(&fixture, 10..=29).await?;
     follow(&fixture, 10, 30).await?;
-    let incremental = fixture.exact().await?;
+    let incremental = fixture.rebuild_state().await?;
     let options = in_ranges(30).with_max_blocks_per_run(5);
     let mut mode = FamilyMode::Rebuild;
     let mut runs = 0;
@@ -749,7 +749,7 @@ async fn a_range_rebuild_resumes_after_a_stop_and_equals_the_follow() -> Result<
     }
     assert_eq!(runs, 5, "21 work blocks at five a run");
     assert_eq!(marker_state(&fixture).await?, "live");
-    let rebuilt = fixture.exact().await?;
+    let rebuilt = fixture.rebuild_state().await?;
     for ((table, was), (_, now)) in incremental.iter().zip(&rebuilt) {
         assert_eq!(was, now, "{table}");
     }
@@ -764,7 +764,7 @@ async fn a_resumed_range_rebuild_starts_with_a_range_of_its_whole_budget() -> Re
     let fixture = Fixture::new("families_range_resume_size", 40).await?;
     pointers(&fixture, 10..=29).await?;
     follow(&fixture, 10, 30).await?;
-    let incremental = fixture.exact().await?;
+    let incremental = fixture.rebuild_state().await?;
     let options = in_ranges(30).with_max_blocks_per_run(8);
     let first = fixture
         .apply_with(30, FamilyMode::Rebuild, &options)
@@ -792,7 +792,7 @@ async fn a_resumed_range_rebuild_starts_with_a_range_of_its_whole_budget() -> Re
         vec![10, 12, 16, 17, 25, 29, 30]
     );
     assert_eq!(marker_state(&fixture).await?, "live");
-    let rebuilt = fixture.exact().await?;
+    let rebuilt = fixture.rebuild_state().await?;
     for ((table, was), (_, now)) in incremental.iter().zip(&rebuilt) {
         assert_eq!(was, now, "{table}");
     }
@@ -841,7 +841,7 @@ async fn an_undo_into_a_range_lands_on_its_predecessor_and_replays_to_a_rebuild(
     assert_eq!(fixture.marker().await?.0, Some(12));
     let replayed = fixture.apply(21, FamilyMode::Normal).await?;
     assert_eq!(replayed.blocks, 9, "13 to 21, block by block");
-    let incremental = fixture.exact().await?;
+    let incremental = fixture.rebuild_state().await?;
     fixture
         .apply_with(
             21,
@@ -849,7 +849,7 @@ async fn an_undo_into_a_range_lands_on_its_predecessor_and_replays_to_a_rebuild(
             &FamilyOptions::new(CONTENT_HASH).with_rebuild_ranges(RebuildRanges::Off),
         )
         .await?;
-    let rebuilt = fixture.exact().await?;
+    let rebuilt = fixture.rebuild_state().await?;
     for ((table, was), (_, now)) in incremental.iter().zip(&rebuilt) {
         assert_eq!(was, now, "{table}");
     }

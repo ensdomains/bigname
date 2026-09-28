@@ -261,7 +261,7 @@ fn push_entries_cte<'a>(
                 arc.logical_name_id,
                 arc.namespace,
                 arc.raw_name AS canonical_display_name,
-                arc.raw_name AS normalized_name,
+                arc.normalized_name,
                 arc.namehash,
                 arc.surface_binding_id,
                 -- Sorting and dedupe need a stable key even when authority is absent; keep
@@ -352,7 +352,7 @@ fn push_entries_cte<'a>(
         AddressRecordsCoinSelector::Evm => {}
     }
     if let Some(prefix) = filter.q {
-        builder.push(" AND arc.raw_name LIKE ");
+        builder.push(" AND arc.normalized_name LIKE ");
         builder.push_bind(format!("{}%", escape_like_pattern(prefix)));
         builder.push(" ESCAPE '\\'");
     }

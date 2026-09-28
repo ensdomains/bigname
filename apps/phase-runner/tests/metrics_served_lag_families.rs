@@ -1,8 +1,5 @@
-//! The served-lag gauges under the publication switch (TYR-36 step 7b-6): with
-//! `BIGNAME_SERVE_FROM_FAMILIES` on, `phase_runner_served_lag_blocks` and
-//! `phase_runner_served_publication_block` measure the family marker, the publication the API
-//! then serves; with it off they keep measuring the Project row. The metrics task reads the
-//! switch once when it starts, as the process does.
+//! Served-lag gauges measure the live family publication; rebuilding, absent and foreign
+//! markers report unavailable even when an older Project progress row is present.
 #[allow(dead_code)]
 mod support;
 
@@ -20,7 +17,7 @@ use tokio_util::sync::CancellationToken;
 use support::ScratchDatabase;
 
 /// Blocks 90, 95 and 100 readable, the stored head at 100, Live's observed head at 104, and the
-/// Project row completed at 90: the served gauges read 14 and 90 with the switch off.
+/// Project row completed at 90, older than the live family publication.
 async fn seed_chain(pool: &sqlx::PgPool, chain: &str) -> Result<()> {
     for block in [90_i64, 95, 100] {
         sqlx::query(
@@ -80,20 +77,17 @@ async fn seed_marker(pool: &sqlx::PgPool, chain: &str, state: &str, hash: &str) 
     Ok(())
 }
 
-async fn scrape_gauges(pool: &sqlx::PgPool, on: bool, chains: &[&str]) -> Result<Vec<(f64, f64)>> {
+async fn scrape_gauges(pool: &sqlx::PgPool, chains: &[&str]) -> Result<Vec<(f64, f64)>> {
     let cancellation = CancellationToken::new();
     let feed = RunnerMetricsFeed::default();
-    let address = bigname_storage::publication_source::with_serve_from_families(
-        on,
-        phase_runner::metrics::start(
-            "127.0.0.1:0".parse()?,
-            pool.clone(),
-            cancellation.clone(),
-            900,
-            RunnerLoopHeartbeat::default(),
-            RunnerPhaseProgress::default(),
-            feed,
-        ),
+    let address = phase_runner::metrics::start(
+        "127.0.0.1:0".parse()?,
+        pool.clone(),
+        cancellation.clone(),
+        900,
+        RunnerLoopHeartbeat::default(),
+        RunnerPhaseProgress::default(),
+        feed,
     )
     .await?;
     let response = tokio::task::spawn_blocking(move || scrape(address))
@@ -114,7 +108,7 @@ async fn scrape_gauges(pool: &sqlx::PgPool, on: bool, chains: &[&str]) -> Result
 }
 
 #[tokio::test]
-async fn served_lag_measures_the_family_marker_only_with_the_switch_on() -> Result<()> {
+async fn served_lag_measures_only_the_live_family_marker() -> Result<()> {
     let scratch = ScratchDatabase::create("phase_runner_served_lag_families").await?;
     let pool = scratch.pool();
     let store = PhaseStore::new(pool.clone());
@@ -139,15 +133,10 @@ async fn served_lag_measures_the_family_marker_only_with_the_switch_on() -> Resu
     .await?;
     seed_marker(pool, "older-hash", "live", "older-fingerprint").await?;
 
-    // Switch off: the Project row at 90 for every chain, whatever its marker says.
+    // Only a live marker of this build is a publication; rebuilding, absent and
+    // foreign markers report unavailable (-1).
     assert_eq!(
-        scrape_gauges(pool, false, &chains).await?,
-        vec![(14.0, 90.0); 4]
-    );
-    // Switch on: only a live marker of this build is a publication; the rebuild window
-    // and a missing or foreign marker report the unavailable -1.
-    assert_eq!(
-        scrape_gauges(pool, true, &chains).await?,
+        scrape_gauges(pool, &chains).await?,
         vec![(9.0, 95.0), (-1.0, -1.0), (-1.0, -1.0), (-1.0, -1.0)]
     );
     scratch.cleanup().await

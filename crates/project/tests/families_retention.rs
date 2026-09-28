@@ -4,8 +4,8 @@
 mod families_support;
 
 use anyhow::Result;
-use bigname_project::{BatchRequest, Engine, RunMode, families::FamilyMode};
-use families_support::{CHAIN, Fixture, uuid};
+use bigname_project::families::FamilyMode;
+use families_support::{Fixture, uuid};
 use serde_json::{Value, json};
 
 const WRAPPER: &str = "0x00000000000000000000000000000000000000e3";
@@ -191,30 +191,6 @@ async fn every_owner_setting_registry_event_of_a_node_is_kept() -> Result<()> {
     fixture.assert_undo_restores(12).await?;
     fixture.assert_rebuild_equal(12).await?;
     fixture.cleanup().await
-}
-
-/// The served wrapper of a name after a served build to `target`: name_current's
-/// `wrapper_state` and fuses, masked against the target block's clock.
-async fn served_wrapper(fixture: &Fixture, logical_name_id: &str, target: i64) -> Result<Value> {
-    Engine::new(fixture.pool.clone())
-        .run_batch(BatchRequest {
-            chain_id: CHAIN.to_owned(),
-            target_block: target,
-            affected_from_block: 0,
-            affected_to_block: target,
-            resume_current: None,
-            mode: RunMode::Normal,
-        })
-        .await?;
-    Ok(sqlx::query_scalar(
-        "SELECT jsonb_build_object('wrapper_state', declared_summary -> 'wrapper_state',
-                                   'fuses', declared_summary #> '{wrapper_fuses,fuses}')
-         FROM name_current WHERE logical_name_id = $1",
-    )
-    .bind(logical_name_id)
-    .fetch_optional(&fixture.pool)
-    .await?
-    .unwrap_or(Value::Null))
 }
 
 /// A block's timestamp in the fixture lineage.
@@ -453,14 +429,15 @@ async fn an_unwrap_before_expiry_keeps_the_served_name_wrapped_but_closes_the_re
                 &["wrapper_state", "lifecycle_unwrapped"],
             );
             let name = served_wrapper(fixture, logical, target).await?;
-            let restrictions: Option<Value> = sqlx::query_scalar(
-                "SELECT resource_restrictions #- '{expiry_seconds}'
-                 FROM permissions_current_resource_summary WHERE resource_id = $1::uuid",
-            )
-            .bind(resource)
-            .fetch_optional(&fixture.pool)
-            .await?
-            .flatten();
+            let id = resource.parse()?;
+            let mut restrictions =
+                bigname_storage::load_serving_permission_summaries(&fixture.pool, &[id])
+                    .await?
+                    .remove(&id)
+                    .and_then(|summary| summary.resource_restrictions);
+            if let Some(Value::Object(restrictions)) = restrictions.as_mut() {
+                restrictions.remove("expiry_seconds");
+            }
             anyhow::Ok((target, row, name, restrictions))
         }
     };
@@ -633,4 +610,17 @@ async fn a_textual_unmasked_flag_is_kept_as_the_served_predicate_reads_it() -> R
     fixture.assert_undo_restores(10).await?;
     fixture.assert_rebuild_equal(10).await?;
     fixture.cleanup().await
+}
+
+async fn served_wrapper(fixture: &Fixture, logical_name_id: &str, target: i64) -> Result<Value> {
+    fixture.apply(target, FamilyMode::Normal).await?;
+    Ok(
+        bigname_storage::families::name::load_family_name(&fixture.pool, logical_name_id)
+            .await?
+            .map(|row| {
+                json!({"wrapper_state": row.declared_summary["wrapper_state"],
+                               "fuses": row.declared_summary["wrapper_fuses"]["fuses"]})
+            })
+            .unwrap_or(Value::Null),
+    )
 }

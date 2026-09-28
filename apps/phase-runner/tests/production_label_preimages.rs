@@ -10,7 +10,10 @@ use bigname_interpret::{
     BatchRequest as InterpretBatchRequest, Engine as InterpretEngine,
     NORMALIZATION_STATE_REPAIR_REASON, RunMode as InterpretRunMode, finalize_recompute_flags,
 };
-use bigname_project::{BatchRequest, Engine, Marker, RunMode};
+use bigname_project::{
+    Marker,
+    families::{self, FamilyMode, FamilyOptions},
+};
 use bigname_storage::{
     ENS_RAINBOW_SOURCE_KIND, ens_namehash_label_bytes, import_label_preimages_from_ens_names_table,
     load_children_current_page,
@@ -20,7 +23,7 @@ use phase_runner::{
     capacity::CapacityGuard,
     config::{CapacityConfig, ChainConfig, SeedBasis, SourceConfig, TimingConfig},
     interpret_phase::InterpretPhase,
-    phase::{BlockRange, LoopbackPhase, PhaseName, PhaseSet},
+    phase::{BlockRange, LoopbackPhase, PhaseName, PhaseSet, RunMode},
     project_phase::ProjectPhase,
     runner::{PhaseRunner, RedoPhase},
     state::PhaseStore,
@@ -124,7 +127,14 @@ async fn rainbow_import_then_project_redo_serves_decoded_labels() -> Result<()> 
         "the hash-mismatched candidate must leave no row"
     );
 
-    run_project(scratch.pool(), None, RunMode::Redo, 0, 3).await?;
+    run_project(
+        scratch.pool(),
+        None,
+        RunMode::Redo(BlockRange::new(0, 3)?),
+        0,
+        3,
+    )
+    .await?;
     // The proof-checked "Alice" row keeps its raw bytes and honest verdict in the store, but
     // its text fails normalization, so serving must not attach it to the raw-byte node: the
     // row serves the same placeholder as an unobserved label.
@@ -136,19 +146,17 @@ async fn rainbow_import_then_project_redo_serves_decoded_labels() -> Result<()> 
             placeholder("mallory"),
         ])
     );
-    let gated: (Option<Vec<u8>>, Option<String>, Vec<u8>, Option<String>) = sqlx::query_as(
-        "SELECT raw_name, decoded_name, raw_label, decoded_label
-         FROM children_current WHERE labelhash = $1",
-    )
-    .bind(labelhash_hex("Alice"))
-    .fetch_one(scratch.pool())
-    .await?;
-    assert_eq!(gated, (None, None, b"Alice".to_vec(), None));
+    let raw: Vec<u8> =
+        sqlx::query_scalar("SELECT raw_label FROM label_preimages WHERE labelhash=$1")
+            .bind(labelhash_hex("Alice"))
+            .fetch_one(scratch.pool())
+            .await?;
+    assert_eq!(raw, b"Alice");
     scratch.cleanup().await
 }
 
 #[tokio::test]
-async fn surface_less_verdict_flip_serves_stale_text_until_full_range_project_redo() -> Result<()> {
+async fn surface_less_verdict_flip_updates_child_text_and_survives_project_redo() -> Result<()> {
     let scratch = ScratchDatabase::create("production_surface_less_verdict_flip").await?;
     seed_children_fixture(scratch.pool(), &["alice"]).await?;
     seed_ens_names(scratch.pool(), &[("alice", "alice")]).await?;
@@ -180,10 +188,8 @@ async fn surface_less_verdict_flip_serves_stale_text_until_full_range_project_re
     .execute(scratch.pool())
     .await?;
 
-    // The child is registry-event-only and has no name surface, so the flip produces no
-    // visibility-class transition. The redo trigger keys on the summary's earliest transition
-    // block, so no redo is stamped and the stale text keeps serving: the limitation the
-    // deployment runbook's full-range redo requirement exists for.
+    // A surface-less child has no visibility transition to request replay. Its family
+    // reader still applies the current label verdict, so no stale display text is served.
     let mut transaction = scratch.pool().begin().await?;
     let recompute = finalize_recompute_flags(&mut transaction, CHAIN, 0, 3).await?;
     transaction.commit().await?;
@@ -201,10 +207,17 @@ async fn surface_less_verdict_flip_serves_stale_text_until_full_range_project_re
     );
     assert_eq!(
         child_display_names(scratch.pool()).await?,
-        vec!["alice.eth".to_owned()]
+        vec![placeholder("alice")]
     );
 
-    run_project(scratch.pool(), None, RunMode::Redo, 0, 3).await?;
+    run_project(
+        scratch.pool(),
+        None,
+        RunMode::Redo(BlockRange::new(0, 3)?),
+        0,
+        3,
+    )
+    .await?;
     assert_eq!(
         child_display_names(scratch.pool()).await?,
         vec![placeholder("alice")]
@@ -396,7 +409,7 @@ async fn rainbow_rows_are_reachable_by_recompute_flags_after_a_version_bump() ->
 }
 
 #[tokio::test]
-async fn windowed_project_run_does_not_pick_up_a_newly_imported_preimage() -> Result<()> {
+async fn imported_preimage_is_read_without_replaying_child_events() -> Result<()> {
     let scratch = ScratchDatabase::create("production_rainbow_windowed_run").await?;
     seed_children_fixture(scratch.pool(), &["alice"]).await?;
     seed_lineage(scratch.pool(), 4, 5).await?;
@@ -410,9 +423,12 @@ async fn windowed_project_run_does_not_pick_up_a_newly_imported_preimage() -> Re
     seed_ens_names(scratch.pool(), &[("alice", "alice")]).await?;
     import_label_preimages_from_ens_names_table(scratch.pool(), None, None).await?;
 
-    // A windowed catch-up run re-derives only names whose events fall inside the window, so
-    // the imported preimage does not re-enter scope here; the documented repair is the
-    // full-range redo below.
+    // Child display reads the proven preimage directly; an unrelated catch-up and a
+    // full replay preserve the imported spelling without re-observing the child event.
+    assert_eq!(
+        child_display_names(scratch.pool()).await?,
+        vec!["alice.eth".to_owned()]
+    );
     let resume = Marker {
         number: 3,
         hash: block_hash(3),
@@ -420,10 +436,17 @@ async fn windowed_project_run_does_not_pick_up_a_newly_imported_preimage() -> Re
     run_project(scratch.pool(), Some(resume), RunMode::Normal, 4, 5).await?;
     assert_eq!(
         child_display_names(scratch.pool()).await?,
-        vec![placeholder("alice")]
+        vec!["alice.eth".to_owned()]
     );
 
-    run_project(scratch.pool(), None, RunMode::Redo, 0, 5).await?;
+    run_project(
+        scratch.pool(),
+        None,
+        RunMode::Redo(BlockRange::new(0, 5)?),
+        0,
+        5,
+    )
+    .await?;
     assert_eq!(
         child_display_names(scratch.pool()).await?,
         vec!["alice.eth".to_owned()]
@@ -464,22 +487,35 @@ fn sorted(mut names: Vec<String>) -> Vec<String> {
 
 async fn run_project(
     pool: &PgPool,
-    resume: Option<Marker>,
+    _resume: Option<Marker>,
     mode: RunMode,
     from_block: i64,
     to_block: i64,
 ) -> Result<()> {
-    let outcome = Engine::new(pool.clone())
-        .run_batch(BatchRequest {
-            chain_id: CHAIN.into(),
-            target_block: to_block,
-            affected_from_block: from_block,
-            affected_to_block: to_block,
-            resume_current: resume,
-            mode,
-        })
-        .await?;
-    assert!(outcome.complete);
+    let target = Marker {
+        number: to_block,
+        hash: block_hash(to_block),
+    };
+    let token = families::input_token(pool, CHAIN).await?;
+    let mode = match mode {
+        RunMode::Normal => FamilyMode::Normal,
+        RunMode::Redo(_) => FamilyMode::Redo {
+            from: from_block,
+            to: to_block,
+        },
+        RunMode::RecomputeFlags(_) => anyhow::bail!("flag recomputation belongs to Interpret"),
+    };
+    let outcome = families::apply(
+        pool,
+        CHAIN,
+        &target,
+        mode,
+        &token,
+        &FamilyOptions::new(INTERPRETER_CONTENT_HASH),
+    )
+    .await?;
+    assert!(!outcome.budget_exhausted);
+    assert_eq!(outcome.marker, Some(target));
     Ok(())
 }
 

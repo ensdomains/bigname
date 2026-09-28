@@ -10,28 +10,8 @@ async fn a_name_wrapped_after_registration_serves_its_control_on_the_authority_r
     const NAME: &str = "wrapped-after-grant.eth";
     let database = TestDatabase::new_migrated().await?;
     seed_bounded_membership_blocks(&database, 240).await?;
-    let (logical_name_id, resource) = seed_bounded_name(
-        &database,
-        NAME,
-        0xb0a_6900,
-        BOUNDED_ADDRESS,
-        bigname_storage::AddressNameRelation::Registrant,
-        205,
-    )
-    .await?;
-    // Project writes the rows below from the events. Open the fixture's binding before the
-    // events' timestamps so they fall inside it.
-    sqlx::query("DELETE FROM bigname_phase.address_names_current WHERE logical_name_id = $1")
-        .bind(&logical_name_id)
-        .execute(&database.pool)
-        .await?;
-    sqlx::query(
-        "UPDATE bigname_phase.surface_bindings SET active_from = '2023-11-14T00:00:00Z'
-         WHERE logical_name_id = $1",
-    )
-    .bind(&logical_name_id)
-    .execute(&database.pool)
-    .await?;
+    let (logical_name_id, resource) =
+        seed_switch_name(&database, NAME, 0xb0a_6900, "ens_v1").await?;
     let mut registered = v2_history_event(
         &format!("{NAME}-registered"),
         Some(&logical_name_id),
@@ -64,6 +44,7 @@ async fn a_name_wrapped_after_registration_serves_its_control_on_the_authority_r
     registry_owner.source_family = "ens_v1_registry_l1".to_owned();
     registry_owner.log_index = Some(1);
     registry_owner.after_state = json!({
+        "node": logical_name_id.trim_start_matches("ens:"),
         "owner": WRAPPER_CONTRACT,
         "owner_getter": WRAPPER_CONTRACT,
     });
@@ -72,35 +53,33 @@ async fn a_name_wrapped_after_registration_serves_its_control_on_the_authority_r
         &[registered, wrapped, registry_owner],
     )
     .await?;
-    bigname_project::Engine::new(database.pool.clone())
-        .run_batch(bigname_project::BatchRequest {
-            chain_id: BOUNDED_CHAIN.to_owned(),
-            target_block: 240,
-            affected_from_block: 200,
-            affected_to_block: 240,
-            resume_current: None,
-            mode: bigname_project::RunMode::Normal,
-        })
-        .await?;
-    publish_bounded_membership_at(&database, 240).await?;
+    publish_test_families(&database, 240).await?;
     // The shape the removed API rule matched: the grant says registrar, the served authority kind
     // says wrapper.
-    let (grant_kind, served_kind): (Option<String>, Option<String>) = sqlx::query_as(
-        "SELECT (SELECT after_state ->> 'authority_kind' FROM normalized_events
-                 WHERE event_identity = $2),
-                current.declared_summary #>> '{registration,authority_kind}'
-         FROM bigname_phase.name_current current WHERE current.logical_name_id = $1",
+    let grant_kind: Option<String> = sqlx::query_scalar(
+        "SELECT after_state ->> 'authority_kind' FROM normalized_events WHERE event_identity = $1",
     )
-    .bind(&logical_name_id)
     .bind(format!("{NAME}-registered"))
     .fetch_one(&database.pool)
     .await?;
+    let composed =
+        bigname_storage::families::name::load_family_name(&database.pool, &logical_name_id)
+            .await?
+            .context("wrapped family name")?;
+    let served_kind = composed
+        .declared_summary
+        .pointer("/registration/authority_kind")
+        .and_then(Value::as_str);
     assert_eq!(
-        (grant_kind.as_deref(), served_kind.as_deref()),
+        (grant_kind.as_deref(), served_kind),
         (Some("registrar"), Some("wrapper"))
     );
 
-    let payload = v2_get_json(&database, &format!("/v1/diagnostics/names/{NAME}/authority")).await?;
+    let payload = v2_get_json(
+        &database,
+        &format!("/v1/diagnostics/names/{NAME}/authority"),
+    )
+    .await?;
     let control = &payload["data"]["control"];
     assert_ne!(control["status"], "unsupported", "{control:#}");
     assert!(control.get("unsupported_reason").is_none(), "{control:#}");

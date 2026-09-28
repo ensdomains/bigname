@@ -130,15 +130,14 @@ pub(crate) async fn compose_address_name_rows(
             for (related, relation) in relations(&input) {
                 if related == wanted {
                     let mut relation_row = address_name_row(&related, relation, row, &publication);
-                    if with_history_evidence {
-                        if let Some(position) =
+                    if with_history_evidence
+                        && let Some(position) =
                             super::address_relations::relation_position(&input, relation)
-                        {
-                            relation_row["provenance"]["event_identity"] =
-                                json!(position.event_identity);
-                            relation_row["chain_positions"]["block_number"] =
-                                json!(position.block_number);
-                        }
+                    {
+                        relation_row["provenance"]["event_identity"] =
+                            json!(position.event_identity);
+                        relation_row["chain_positions"]["block_number"] =
+                            json!(position.block_number);
                     }
                     rows.push(relation_row);
                     listed = true;
@@ -194,6 +193,7 @@ fn address_name_row(
         "relation": relation,
         "namespace": row.namespace,
         "raw_name": row.canonical_display_name,
+        "normalized_name": row.normalized_name,
         "namehash": row.namehash,
         "surface_binding_id": row.surface_binding_id,
         "resource_id": row.resource_id,

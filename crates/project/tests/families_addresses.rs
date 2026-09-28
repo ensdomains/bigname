@@ -5,7 +5,7 @@
 mod families_support;
 
 use anyhow::Result;
-use bigname_project::{BatchRequest, Engine, RunMode, families::FamilyMode};
+use bigname_project::families::FamilyMode;
 use families_support::{CHAIN, Fixture, uuid};
 use serde_json::{Value, json};
 
@@ -514,28 +514,6 @@ async fn a_named_value_indexes_the_name_it_was_written_under() -> Result<()> {
 const REGISTRY: &str = "0x00000000000000000000000000000000000000e1";
 const OWNER: &str = "0x00000000000000000000000000000000000000c1";
 
-/// The served address rows (`address_records_current`, the table the served resolves-to reader
-/// reads) as (address, coin type, name).
-async fn served_addresses(fixture: &Fixture, target: i64) -> Result<Vec<Value>> {
-    Engine::new(fixture.pool.clone())
-        .run_batch(BatchRequest {
-            chain_id: CHAIN.to_owned(),
-            target_block: target,
-            affected_from_block: 0,
-            affected_to_block: target,
-            resume_current: None,
-            mode: RunMode::Normal,
-        })
-        .await?;
-    Ok(sqlx::query_scalar(
-        "SELECT jsonb_build_object('address', address, 'coin_type', coin_type,
-                                   'logical_name_id', logical_name_id)
-         FROM address_records_current ORDER BY address, coin_type, logical_name_id",
-    )
-    .fetch_all(&fixture.pool)
-    .await?)
-}
-
 /// A name the served build publishes: bound at `block` to its own resource, owned through the
 /// registry and pointing at R1, which an active manifest declares.
 async fn served_name(fixture: &Fixture, n: u64, block: i64) -> Result<()> {
@@ -891,4 +869,33 @@ async fn two_transfers_named_later_in_one_block_take_the_later_log() -> Result<(
     .await?;
     assert_eq!(holder, json!([DAVE, 9, 2]));
     Ok(())
+}
+
+async fn served_addresses(fixture: &Fixture, target: i64) -> Result<Vec<Value>> {
+    use bigname_storage::{
+        AddressNamesCurrentDedupe, AddressNamesCurrentOrder, AddressNamesCurrentSort,
+    };
+    fixture.apply(target, FamilyMode::Normal).await?;
+    let page = bigname_storage::families::records::load_family_resolves_to_page(
+        &fixture.pool,
+        DAVE,
+        "60",
+        None,
+        AddressNamesCurrentDedupe::Surface,
+        None,
+        None,
+        AddressNamesCurrentSort::Name,
+        AddressNamesCurrentOrder::Asc,
+        None,
+        100,
+    )
+    .await?;
+    Ok(page
+        .entries
+        .into_iter()
+        .map(|row| {
+            json!({"address": row.address,
+        "coin_type": row.coin_type, "logical_name_id": row.logical_name_id})
+        })
+        .collect())
 }

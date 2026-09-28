@@ -58,7 +58,7 @@ COMMENT ON INDEX resolution_divergences_one_active_request_idx IS
 -- Keep serving-path row locks behind a narrow privilege boundary. The API role
 -- receives EXECUTE on this function, not UPDATE on the guarded projection and
 -- head tables. Both locks remain held by the caller's transaction.
-CREATE OR REPLACE FUNCTION bigname_phase.revalidate_resolution_lookup_state(
+CREATE OR REPLACE FUNCTION revalidate_resolution_lookup_state(
     requested_authoritative_chain_id text,
     requested_authoritative_block_number bigint,
     requested_authoritative_block_hash text,
@@ -112,6 +112,20 @@ BEGIN
     IF compared_family_publication IS NULL THEN
         RETURN 'invalid_comparison';
     END IF;
+        -- Redo begins by locking this chain's phase rows in phase-name order. Hold
+        -- the same rows through the caller's commit, without comparing ordinary row
+        -- versions, so a redo cannot start after admission but before a ledger mutation.
+        PERFORM 1
+        FROM chain_phase_state input_phase
+        WHERE input_phase.chain_id = requested_authoritative_chain_id
+          AND input_phase.phase_name IN ('interpret', 'project')
+        ORDER BY input_phase.phase_name
+        FOR SHARE;
+
+        IF NOT FOUND THEN
+            RETURN 'project_changed';
+        END IF;
+
         -- Only the lookup builds this object, with every field; a missing field fails the
         -- equality match below and reads as project_changed.
         PERFORM 1
@@ -132,6 +146,13 @@ BEGIN
           AND requested_authoritative_block_number - marker.current_block_number BETWEEN 0 AND 1
           AND (marker.current_block_number <> requested_authoritative_block_number
                OR marker.current_block_hash = requested_authoritative_block_hash)
+          AND NOT EXISTS (
+              SELECT 1 FROM chain_phase_state input_phase
+              WHERE input_phase.chain_id = marker.chain_id
+                AND input_phase.phase_name IN ('interpret', 'project')
+                AND input_phase.redo_in_progress
+                AND input_phase.redo_from_block_number <= marker.current_block_number
+          )
         FOR SHARE OF marker, lineage;
 
         IF NOT FOUND THEN
@@ -258,7 +279,7 @@ REVOKE ALL ON FUNCTION revalidate_resolution_lookup_state(
 
 -- Authorized by simplification-build-plan-20260730.md § B6, lines 100-104.
 -- The compared projection row is locked until the caller's transaction ends.
-CREATE OR REPLACE FUNCTION bigname_phase.write_resolution_divergence(
+CREATE OR REPLACE FUNCTION write_resolution_divergence(
     compared_resource_id uuid,
     compared_boundary_key text,
     compared_row_xmin text,

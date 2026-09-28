@@ -29,7 +29,3 @@ time = "0.3.47"
 tokio.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
-
-[[test]]
-name = "issue_435_measurement"
-path = "tests/issue_435/issue_435_measurement.rs"

@@ -51,7 +51,6 @@ async fn repeated_deprecation_stays_aligned_and_resolver_coverage_stays_clean() 
         ("deprecated".to_owned(), "deprecated".to_owned())
     );
     publish_project_heads(&scratch).await?;
-    seed_healthy_basenames_resolver(&scratch).await?;
 
     let failures = api_load::resolver_coverage_failures(scratch.pool()).await?;
 
@@ -82,7 +81,6 @@ async fn manufactured_swallowed_deprecation_is_rejected_by_resolver_coverage() -
         ("deprecated".to_owned(), "active".to_owned())
     );
     publish_project_heads(&scratch).await?;
-    seed_healthy_basenames_resolver(&scratch).await?;
 
     let failures = api_load::resolver_coverage_failures(scratch.pool()).await?;
 
@@ -113,6 +111,22 @@ async fn sync_resolver_manifest_cycle(scratch: &ScratchDatabase) -> Result<()> {
     sync_schema_v2_repository(scratch.pool(), &full_repository).await?;
     advance_chain_head(scratch.pool(), "ethereum-mainnet", 30_000_001).await?;
     sync_schema_v2_repository(scratch.pool(), &base_repository).await?;
+    // Basenames classification is reached by a registry pointer; the declaration alone
+    // is intentionally not a resolver-discovery edge.
+    sqlx::query(
+        "INSERT INTO normalized_events (
+             event_identity, namespace, event_kind, source_family, manifest_version,
+             chain_id, block_number, block_hash, derivation_kind, canonicality_state, after_state
+         ) SELECT 'benchmark-base-pointer', 'basenames', 'ResolverChanged',
+                  'basenames_base_registry', 1, head.chain_id, head.latest_block_number,
+                  head.latest_block_hash, 'ens_v1_unwrapped_authority', 'canonical',
+                  jsonb_build_object('resolver', lower(contract ->> 'address'))
+           FROM manifest_versions manifest
+           JOIN chain_heads head ON head.chain_id = manifest.chain_id
+           CROSS JOIN LATERAL jsonb_array_elements(manifest.manifest_payload -> 'contracts') contract
+           WHERE manifest.source_family = 'basenames_base_resolver'
+           LIMIT 1",
+    ).execute(scratch.pool()).await?;
     Ok(())
 }
 
@@ -157,74 +171,36 @@ async fn publish_project_heads(scratch: &ScratchDatabase) -> Result<()> {
         .bind(INTERPRETER_CONTENT_HASH)
         .execute(scratch.pool())
         .await?;
+        let (number, hash) = sqlx::query_as::<_, (i64, String)>(
+            "SELECT latest_block_number, latest_block_hash FROM chain_heads WHERE chain_id = $1",
+        )
+        .bind(chain_id)
+        .fetch_one(scratch.pool())
+        .await?;
+        let target = bigname_project::Marker { number, hash };
+        let token = bigname_project::families::input_token(scratch.pool(), chain_id).await?;
+        let outcome = bigname_project::families::apply(
+            scratch.pool(),
+            chain_id,
+            &target,
+            bigname_project::families::FamilyMode::Rebuild,
+            &token,
+            &bigname_project::families::FamilyOptions::new(INTERPRETER_CONTENT_HASH),
+        )
+        .await?;
+        assert_eq!(outcome.marker.as_ref(), Some(&target));
+        assert!(!outcome.budget_exhausted);
     }
-    Ok(())
-}
-
-async fn seed_healthy_basenames_resolver(scratch: &ScratchDatabase) -> Result<()> {
-    let (manifest_id, manifest_version, resolver_address, manifest_event_id): (
-        i64,
-        i64,
-        String,
-        i64,
-    ) = sqlx::query_as(
-        "SELECT manifest.manifest_id,
-                manifest.manifest_version,
-                lower(contract ->> 'address'),
-                max(event.normalized_event_id)
-         FROM manifest_versions manifest
-         CROSS JOIN LATERAL jsonb_array_elements(manifest.manifest_payload -> 'contracts') contract
-         JOIN normalized_events event
-           ON event.source_manifest_id = manifest.manifest_id
-          AND event.event_kind = 'SourceManifestUpdated'
-         WHERE manifest.chain_id = 'base-mainnet'
-           AND manifest.source_family = 'basenames_base_resolver'
-           AND manifest.rollout_status = 'active'
-         GROUP BY manifest.manifest_id, manifest.manifest_version, contract ->> 'address'
-         ORDER BY contract ->> 'address'
-         LIMIT 1",
-    )
-    .fetch_one(scratch.pool())
-    .await?;
-    let (target_block_number, target_block_hash): (i64, String) = sqlx::query_as(
-        "SELECT latest_block_number, latest_block_hash
-         FROM chain_heads
-         WHERE chain_id = 'base-mainnet'",
-    )
-    .fetch_one(scratch.pool())
-    .await?;
-
-    sqlx::query(
-        "INSERT INTO resolver_current (
-             chain_id, resolver_address, support_status, chain_positions,
-             canonicality_summary, provenance, manifest_version
-         ) VALUES (
-             'base-mainnet', $1, 'supported',
-             jsonb_build_object(
-                 'target_block_number', $2::bigint,
-                 'target_block_hash', $3::text
-             ),
-             '{\"state\":\"canonical_lineage\"}',
-             jsonb_build_object(
-                 'manifest_id', $4::bigint,
-                 'manifest_event_id', $5::bigint
-             ),
-             $6
-         )",
-    )
-    .bind(resolver_address)
-    .bind(target_block_number)
-    .bind(target_block_hash)
-    .bind(manifest_id)
-    .bind(manifest_event_id)
-    .bind(manifest_version)
-    .execute(scratch.pool())
-    .await?;
     Ok(())
 }
 
 async fn seed_chain_head(pool: &sqlx::PgPool, chain_id: &str, number: i64) -> Result<()> {
     let hash = format!("{chain_id}-benchmark-manifest-head-{number}");
+    sqlx::query(
+        "INSERT INTO chain_lineage (chain_id, block_hash, block_number, block_timestamp, canonicality_state)
+         VALUES ($1, $2, 0, to_timestamp(0), 'canonical') ON CONFLICT DO NOTHING",
+    )
+    .bind(chain_id).bind(format!("{chain_id}-genesis")).execute(pool).await?;
     sqlx::query(
         "INSERT INTO chain_lineage (
              chain_id, block_hash, block_number, block_timestamp, canonicality_state

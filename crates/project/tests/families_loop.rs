@@ -7,11 +7,10 @@ mod support;
 
 use anyhow::Result;
 use bigname_project::{
-    BatchRequest, Engine, Marker, RunMode,
+    Marker,
     families::{self, FamilyMode},
 };
-use serde_json::json;
-use support::{CHAIN, Event, Fixture, hash, marker};
+use support::{CHAIN, Fixture, hash, marker};
 
 async fn bootstrapped(prefix: &str) -> Result<Fixture> {
     let fixture = Fixture::new(prefix, 20).await?;
@@ -90,79 +89,6 @@ async fn a_failing_block_stops_the_loop_and_the_next_run_resumes_there() -> Resu
     assert_eq!(outcome.blocks, 2);
     assert_eq!(fixture.marker().await?.0, Some(14));
     fixture.cleanup().await
-}
-
-#[tokio::test]
-async fn a_family_failure_leaves_the_served_publication_as_committed() -> Result<()> {
-    let fixture = Fixture::new("families_loop_served", 14).await?;
-    let name = "ens:0x01";
-    fixture.surface(name, "0x01").await?;
-    fixture
-        .event(
-            Event::new("fixture:grant", 12, 0, "RegistrationGranted", "ens_v2_registry_l1")
-                .name(name)
-                .after(json!({"status": "registered", "registrant": "0x00000000000000000000000000000000000000aa",
-                              "token_id": "1", "registry_contract_instance_id": "r"})),
-        )
-        .await?;
-    let served = Engine::new(fixture.pool.clone())
-        .run_batch(BatchRequest {
-            chain_id: CHAIN.to_owned(),
-            target_block: 14,
-            affected_from_block: 0,
-            affected_to_block: 14,
-            resume_current: None,
-            mode: RunMode::Normal,
-        })
-        .await?;
-    let published = served_digest(&fixture).await?;
-    sqlx::raw_sql(
-        "CREATE FUNCTION fail_families() RETURNS trigger LANGUAGE plpgsql AS $$
-         BEGIN RAISE EXCEPTION 'injected family failure'; END $$;
-         CREATE TRIGGER fail_families BEFORE INSERT ON project_family_undo
-         FOR EACH ROW EXECUTE FUNCTION fail_families();",
-    )
-    .execute(&fixture.pool)
-    .await?;
-    fixture
-        .apply(served.current.number, FamilyMode::Rebuild)
-        .await
-        .expect_err("the family failure stops the loop");
-    assert_eq!(
-        served_digest(&fixture).await?,
-        published,
-        "the served rows are what the batch committed"
-    );
-    assert_eq!(
-        fixture.marker().await?.0,
-        None,
-        "the families never applied a block"
-    );
-    fixture.cleanup().await
-}
-
-/// Every row of the served tables the batch wrote, as text.
-async fn served_digest(fixture: &Fixture) -> Result<Vec<String>> {
-    let mut digest = Vec::new();
-    for table in [
-        "name_current",
-        "children_current",
-        "permissions_current",
-        "record_inventory_current",
-        "resolver_current",
-        "address_names_current",
-        "primary_names_current",
-        "child_registration_events",
-    ] {
-        let rows: Vec<String> = sqlx::query_scalar(&format!(
-            "SELECT (to_jsonb(served) - 'inserted_at' - 'last_recomputed_at')::text
-             FROM {table} served ORDER BY 1"
-        ))
-        .fetch_all(&fixture.pool)
-        .await?;
-        digest.push(format!("{table}: {}", rows.join("\n")));
-    }
-    Ok(digest)
 }
 
 // Every block reads the input token inside its own transaction and records it on the marker. No

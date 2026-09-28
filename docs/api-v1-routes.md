@@ -1250,7 +1250,10 @@ collection route carry neither header.
     reason covers an inventory row that Project replaced after the route
     loaded it and before it read the resolver's classification: the answer is
     withheld rather than computed from the older row and the newer
-    classification, and a retry reads the new row.
+    classification, and a retry reads the new row. Family inventories capture
+    classification in the same read snapshot as their selected writes; a later
+    family reset or completed replacement therefore leaves that coherent ABI
+    answer intact while its selected event evidence remains canonical and retained.
   - `abi_content_type_not_single_bit`: a selected ABI write names a content
     type that is zero or has more than one bit set. The ENS setters reject
     such types, so only a nonstandard resolver emits them; bigname neither
@@ -3612,8 +3615,16 @@ so there is no persisted artifact to explain. See
   registry-resource row remains product-visible.
   (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L89-L94 @ ens_v1@91c966f)
   When `address` is present, diagnostics derives its name/resource anchor set
-  from both activated and candidate address-relation evidence. Candidate
-  evidence never contributes anchors to `/v1/events` or product history routes.
+  from retained activated and candidate address-relation evidence, independently
+  of current Project family publication. In addition to registration, token
+  transfer and registry-owner evidence, resource-scoped `PermissionChanged`
+  evidence whose before or after state gives that subject `resource_control`,
+  and state-derived registry-only `SurfaceBound` owner evidence, anchor the raw
+  audit. Former controllers therefore remain searchable after revocation,
+  replacement, or a Project family reset/rebuild. These anchors identify retained
+  evidence, not a claim that the address controls the name now. Current address
+  listings and bounded product history retain their current-relation admission;
+  candidate evidence never contributes anchors to `/v1/events` or product history.
   A behavior-preserving full re-walk may assign a different numeric
   `normalized_event_id` to a pre-existing row while its `event_identity` and
   pre-existing semantic fields remain stable; the numeric ID change and the

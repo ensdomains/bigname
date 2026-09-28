@@ -1,26 +1,8 @@
-// The permissions and resolver collections group under the publication switch (TYR-36 step 7b
-// slice 4): `/v1/permissions`, the resolver overview and its `/aliases`, `/links` and `/roles`
-// answer the same body with the switch off and on, `meta.as_of` excepted, over a fixture that
-// Project and the owned key families both build from the same normalized events; with the switch
-// on they read no served permission or resolver row.
-
-/// An ENSv2 permissioned resolver, a proxy upgraded to a declared implementation, so its role
-/// holders, aliases and record links are all supported.
 const SWITCH_V2_RESOLVER: &str = "0x0000000000000000000000000000000000000e2e";
 const SWITCH_V2_IMPLEMENTATION: &str = "0x0000000000000000000000000000000000000e21";
 const SWITCH_CAROL: &str = "0x00000000000000000000000000000000000ca201";
 /// A granted resource no name is bound to.
 const SWITCH_NAMELESS: u128 = 0x5f1_0000;
-
-/// The tables the moved routes read with the switch off.
-const SWITCH_SERVED_PERMISSION_TABLES: [&str; 4] = [
-    "permissions_current",
-    "permissions_current_resource_summary",
-    "account_permission_state_current",
-    "resolver_current",
-];
-
-/// One event the permissioned resolver emits, from its manifest.
 fn switch_v2_resolver_event(
     identity: &str,
     resource_id: Option<Uuid>,
@@ -226,7 +208,7 @@ async fn seed_switch_permissions_fixture(database: &TestDatabase) -> Result<()> 
         ),
     ];
     bigname_storage::insert_normalized_event_fixtures(&database.pool, &events).await?;
-    publish_project_and_families(database, 240).await
+    publish_test_families(database, 240).await
 }
 
 /// Every moved route over the fixture, and whether its `data` must list rows.
@@ -254,12 +236,12 @@ fn switch_permission_uris() -> Vec<(String, bool)> {
 }
 
 #[tokio::test]
-async fn v2_permissions_and_resolver_collections_are_the_same_with_the_switch_off_and_on(
+async fn v2_permissions_and_resolver_collections_from_families(
 ) -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_switch_permissions_fixture(&database).await?;
     for (uri, rows) in switch_permission_uris() {
-        let (status, body) = assert_switch_differential(&database, &uri).await?;
+        let (status, body) = read_family_response(&database, &uri).await?;
         if rows {
             assert_eq!(status, StatusCode::OK, "{uri}: {body:#}");
             assert!(
@@ -270,7 +252,7 @@ async fn v2_permissions_and_resolver_collections_are_the_same_with_the_switch_of
     }
     // /roles: bob on alpha.eth, alice on beta.eth with the grant event of her first change,
     // carol on the nameless resource.
-    let (_, roles) = assert_switch_differential(
+    let (_, roles) = read_family_response(
         &database,
         &format!("/v1/resolvers/1/{SWITCH_V2_RESOLVER}/roles"),
     )
@@ -296,31 +278,19 @@ async fn v2_permissions_and_resolver_collections_are_the_same_with_the_switch_of
         format!("/v1/permissions?address={SWITCH_ALICE}&namespace=ens&page_size=1"),
         "/v1/permissions?name=beta.eth&page_size=1".to_owned(),
     ] {
-        assert_switch_differential_pages(&database, &uri).await?;
+        read_family_pages(&database, &uri).await?;
     }
     database.cleanup().await
 }
 
-// With the served permission and resolver rows emptied, the switch-on answers do not move: the
-// routes read the families.
-#[tokio::test]
-async fn v2_permissions_and_resolver_collections_read_no_served_row_with_the_switch_on(
-) -> Result<()> {
-    let database = TestDatabase::new_migrated().await?;
-    seed_switch_permissions_fixture(&database).await?;
-    for (uri, _) in switch_permission_uris() {
-        assert_switch_on_ignores_served_tables(&database, &uri, &SWITCH_SERVED_PERMISSION_TABLES)
-            .await?;
-    }
-    database.cleanup().await
-}
+
 
 // J13: the families keep no lineage check at request time, so a role whose evidence event is
 // orphaned after the publication is still listed, with the earliest readable event as its grant
 // event; but a grant on a resource whose row is not readable is not served, on `/roles` or
 // `/v1/permissions`, the same as the served route's readability join.
 #[tokio::test]
-async fn v2_resolver_roles_leave_out_an_unreadable_resource_with_the_switch_off_and_on(
+async fn v2_resolver_roles_leave_out_an_unreadable_resource(
 ) -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_switch_permissions_fixture(&database).await?;
@@ -332,7 +302,7 @@ async fn v2_resolver_roles_leave_out_an_unreadable_resource_with_the_switch_off_
     )
     .execute(&database.pool)
     .await?;
-    let (_, roles) = assert_switch_differential(
+    let (_, roles) = read_family_response(
         &database,
         &format!("/v1/resolvers/1/{SWITCH_V2_RESOLVER}/roles"),
     )
@@ -351,7 +321,7 @@ async fn v2_resolver_roles_leave_out_an_unreadable_resource_with_the_switch_off_
     .bind(Uuid::from_u128(SWITCH_NAMELESS))
     .execute(&database.pool)
     .await?;
-    let (_, roles) = assert_switch_differential(
+    let (_, roles) = read_family_response(
         &database,
         &format!("/v1/resolvers/1/{SWITCH_V2_RESOLVER}/roles"),
     )
@@ -365,14 +335,11 @@ async fn v2_resolver_roles_leave_out_an_unreadable_resource_with_the_switch_off_
     assert_eq!(holders, [&json!(SWITCH_BOB), &json!(SWITCH_ALICE)], "{roles:#}");
     assert_eq!(roles["page"]["total_count"], json!(2), "{roles:#}");
     let (_, carol) =
-        assert_switch_differential(&database, &format!("/v1/permissions?address={SWITCH_CAROL}&namespace=ens"))
+        read_family_response(&database, &format!("/v1/permissions?address={SWITCH_CAROL}&namespace=ens"))
             .await?;
     assert_eq!(carol["data"], json!([]), "{carol:#}");
     database.cleanup().await
 }
-
-// A family rebuild in flight leaves nothing servable: each moved route answers a stale 409 with
-// the switch on.
 #[tokio::test]
 async fn v2_permissions_and_resolver_collections_answer_409_while_the_families_rebuild(
 ) -> Result<()> {
@@ -382,10 +349,7 @@ async fn v2_permissions_and_resolver_collections_answer_409_while_the_families_r
         .execute(&database.pool)
         .await?;
     for (uri, _) in switch_permission_uris() {
-        let response = bigname_storage::publication_source::with_serve_from_families(
-            true,
-            v2_get_response(&database, &uri),
-        )
+        let response = v2_get_response(&database, &uri)
         .await?;
         let status = response.status();
         let body: Value = read_json(response).await?;

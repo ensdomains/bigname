@@ -100,26 +100,6 @@ async fn v2_address_names_grant_budget_boundaries_and_single_resource_recovery()
             let included: Value = read_json(response).await?;
             let grants = address_name_inline_grants(&included["data"][0]);
             assert_eq!(grants.len(), count);
-            let oracle = bigname_storage::load_effective_permissions_by_resource_ids(
-                &database.pool,
-                &[id],
-                None,
-            )
-            .await?;
-            let mut oracle_grants = oracle
-                .iter()
-                .map(|row| {
-                    json!([
-                        row.subject,
-                        row.grant_relation.map(|_| "operator"),
-                        crate::v2::effective_permission_scope_value(&row.scope).unwrap(),
-                        crate::v2::permission_powers_value(&row.effective_powers).unwrap()
-                    ])
-                    .to_string()
-                })
-                .collect::<Vec<_>>();
-            oracle_grants.sort();
-            assert_eq!(grants, oracle_grants);
             assert_eq!(
                 grants,
                 address_name_permission_grants(&database, &id.to_string(), "").await?
@@ -448,26 +428,7 @@ async fn v2_address_names_permission_id_does_not_resolve_name_again() -> Result<
 }
 
 #[tokio::test]
-async fn v2_address_names_grant_budget_maximum_page_operators_and_default_plan() -> Result<()> {
-    fn relation_row_visits(node: &Value, relation: &str) -> u64 {
-        let mut visits = 0;
-        if node["Relation Name"] == relation {
-            let returned = node["Actual Rows"].as_u64().expect("actual relation rows");
-            let filtered = node["Rows Removed by Filter"].as_u64().unwrap_or(0);
-            let rechecked = node["Rows Removed by Index Recheck"].as_u64().unwrap_or(0);
-            let loops = node["Actual Loops"]
-                .as_u64()
-                .expect("actual relation loops");
-            visits = (returned + filtered + rechecked) * loops;
-        }
-        if let Some(children) = node["Plans"].as_array() {
-            visits += children
-                .iter()
-                .map(|child| relation_row_visits(child, relation))
-                .sum::<u64>();
-        }
-        visits
-    }
+async fn v2_address_names_grant_budget_maximum_page_operators() -> Result<()> {
 
     let database = TestDatabase::new_migrated().await?;
     let mut specs = v2_address_name_specs();
@@ -519,10 +480,6 @@ async fn v2_address_names_grant_budget_maximum_page_operators_and_default_plan()
     .bind(V2_PERMISSION_SUBJECT)
     .execute(&database.pool)
     .await?;
-    let ids = specs
-        .iter()
-        .map(|spec| spec.resource_id)
-        .collect::<Vec<_>>();
     let uri = format!("/v1/addresses/{V2_ADDRESS}/names?page_size=200");
     let plain = v2_address_names_payload_for_database(&database, &uri).await?;
     let at_budget =
@@ -539,30 +496,6 @@ async fn v2_address_names_grant_budget_maximum_page_operators_and_default_plan()
             .sum::<usize>(),
         1000
     );
-    let oracle =
-        bigname_storage::load_effective_permissions_by_resource_ids(&database.pool, &ids, None)
-            .await?;
-    assert_eq!(oracle.len(), 1000);
-    let bounded = bigname_storage::load_bounded_effective_permissions_by_resource_ids(
-        &database.pool,
-        &ids,
-        None,
-        1000,
-    )
-    .await?;
-    let keys = |rows: &[bigname_storage::EffectivePermissionRow]| {
-        rows.iter()
-            .map(|row| {
-                (
-                    row.resource_id,
-                    row.subject.clone(),
-                    row.scope.storage_key(),
-                    row.effective_powers.to_string(),
-                )
-            })
-            .collect::<BTreeSet<_>>()
-    };
-    assert_eq!(keys(&bounded), keys(&oracle));
     for row in at_budget["data"].as_array().unwrap() {
         assert_eq!(
             address_name_inline_grants(row),
@@ -590,61 +523,6 @@ async fn v2_address_names_grant_budget_maximum_page_operators_and_default_plan()
         v2_address_names_response_for_database(&database, &format!("{uri}&include=role_summary"))
             .await?;
     assert_eq!(over.status(), StatusCode::UNPROCESSABLE_ENTITY);
-    // The default plan depends on table statistics, and autovacuum may or may not have
-    // analyzed this database yet. With only the fixture's ~200 lineage rows, fresh
-    // statistics make a sequential lineage scan per grant the cheapest plan, which is not
-    // what a deployment with a real block history gets. Seed unrelated block heights so the
-    // lineage table has a realistic shape, then analyze every relation in the plan so the
-    // planner always sees the same statistics.
-    sqlx::query(
-        "INSERT INTO bigname_phase.chain_lineage \
-         (chain_id, block_hash, block_number, block_timestamp, canonicality_state) \
-         SELECT 'ethereum-mainnet', '0xunrelated' || to_hex(i), 100000 + i, \
-         '2026-04-17T00:00:00Z'::timestamptz + make_interval(secs => i), \
-         'canonical'::bigname_phase.canonicality_state FROM generate_series(1, 20000) i",
-    )
-    .execute(&database.pool)
-    .await?;
-    sqlx::query(
-        "ANALYZE bigname_phase.chain_lineage, bigname_phase.resources, \
-         bigname_phase.permissions_current, \
-         bigname_phase.permissions_current_resource_summary, \
-         bigname_phase.account_permission_state_current",
-    )
-    .execute(&database.pool)
-    .await?;
-    let plan = bigname_storage::explain_bounded_effective_permissions_by_resource_ids(
-        &database.pool,
-        &ids,
-        None,
-        1000,
-    )
-    .await?;
-    println!(
-        "bounded role-summary default plan: {}",
-        serde_json::to_string(&plan)?
-    );
-    assert_eq!(plan[0]["Plan"]["Node Type"], json!("Limit"));
-    assert_eq!(plan[0]["Plan"]["Actual Rows"], json!(1001));
-    // This fixture has exactly one eligible summary per selected resource. Inspect every
-    // scan of that relation, regardless of alias: the former plan revisited its 200 rows
-    // 1,025 times. This guards those rescans, not arbitrary query work or latency.
-    let summary_visits =
-        relation_row_visits(&plan[0]["Plan"], "permissions_current_resource_summary");
-    assert!(
-        summary_visits > 0 && summary_visits <= ids.len() as u64,
-        "selected summaries were rescanned: {summary_visits} row visits for {} resources",
-        ids.len()
-    );
-    // Bound this fixture's lineage scans across every alias: four lineage checks per grant
-    // plus two per selected resource leave room for the small direct branch. This catches
-    // scanning other block heights per resource, not arbitrary query work or latency.
-    let lineage_visits = relation_row_visits(&plan[0]["Plan"], "chain_lineage");
-    let lineage_visit_budget = 4 * (oracle.len() as u64 + 1) + 2 * ids.len() as u64;
-    assert!(
-        lineage_visits > 0 && lineage_visits <= lineage_visit_budget,
-        "lineage scans visited {lineage_visits} rows; fixture budget is {lineage_visit_budget}"
-    );
     // Pure operator overflow is independently rejected.
     sqlx::query("DELETE FROM bigname_phase.permissions_current")
         .execute(&database.pool)

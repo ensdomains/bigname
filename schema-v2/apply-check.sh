@@ -531,7 +531,7 @@ intentional_phase_migration_skips=()
 refusal_assertions_passed=0
 expected_refusal_assertions=263
 predecessor_shape_proof_count=0
-expected_predecessor_shape_proof_count=48
+expected_predecessor_shape_proof_count=49
 refusal_probe_seconds=0
 timing_started=$SECONDS
 
@@ -547,23 +547,56 @@ cleanup() {
     if [ -n "${migration_application_log:-}" ]; then
         rm -f -- "$migration_application_log"
     fi
-    printf 'DROP SCHEMA IF EXISTS "%s" CASCADE;\nDROP SCHEMA IF EXISTS "%s_foreign" CASCADE;\n' \
-        "$scratch_schema" "$scratch_schema" \
+    printf 'DROP SCHEMA IF EXISTS "%s" CASCADE;\nDROP SCHEMA IF EXISTS "%s_foreign" CASCADE;\nDROP SCHEMA IF EXISTS "%s_removal" CASCADE;\nDROP SCHEMA IF EXISTS "%s_fresh" CASCADE;\n' \
+        "$scratch_schema" "$scratch_schema" "$scratch_schema" "$scratch_schema" \
         | run_psql >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
 printf 'CREATE SCHEMA "%s";\n' "$scratch_schema" | run_psql
 
-apply_baseline() {
+apply_historical_baseline() {
     local sql_file
     for sql_file in "$ROOT"/schema-v2/baseline/*.sql; do
         {
             printf 'SET client_min_messages TO warning;\n'
             printf 'SET search_path TO "%s";\n' "$scratch_schema"
-            cat "$sql_file"
+            if [ -f "$ROOT/schema-v2/fixtures/pre-7c/${sql_file##*/}" ]; then
+                cat "$ROOT/schema-v2/fixtures/pre-7c/${sql_file##*/}"
+            else
+                cat "$sql_file"
+            fi
         } | run_psql
     done
+}
+
+# The fresh initializer must equal an actual pre-7c installation after removal. Keep
+# the historical migration probes below on their own installed-schema fixture.
+check_served_projection_removal() {
+    local original_schema="$scratch_schema"
+    local sql_file fixture_file suffix
+    {
+        printf 'CREATE SCHEMA "%s_removal"; CREATE SCHEMA "%s_fresh";\n' "$original_schema" "$original_schema"
+        for suffix in removal fresh; do
+            local scratch_schema="${original_schema}_${suffix}"
+            printf 'SET search_path TO "%s";\n' "$scratch_schema"
+            for sql_file in "$ROOT"/schema-v2/baseline/*.sql; do
+                fixture_file="$sql_file"
+                if [ "$suffix" = removal ] && [ -f "$ROOT/schema-v2/fixtures/pre-7c/${sql_file##*/}" ]; then
+                    fixture_file="$ROOT/schema-v2/fixtures/pre-7c/${sql_file##*/}"
+                fi
+                render_phase_migration "$fixture_file"
+            done
+            if [ "$suffix" = removal ]; then
+                emit_phase_migration "$ROOT/migrations/20260929160000_remove_served_projections.sql" preceding-shape
+            fi
+            emit_phase_migration "$ROOT/migrations/20260929160000_remove_served_projections.sql" baseline-first
+            emit_phase_migration "$ROOT/migrations/20260929160000_remove_served_projections.sql" baseline-first
+        done
+        printf "SET bigname.removal_schema = '%s_removal'; SET bigname.fresh_schema = '%s_fresh';\n" "$original_schema" "$original_schema"
+        cat "$ROOT/schema-v2/fixtures/removal-parity.sql"
+        printf 'DROP SCHEMA "%s_removal" CASCADE; DROP SCHEMA "%s_fresh" CASCADE;\n' "$original_schema" "$original_schema"
+    } | run_psql
 }
 
 # A schema-migration database can exist before phase-runner installs the phase
@@ -668,7 +701,9 @@ for migration_file in \
     "$ROOT/migrations/20260928190000_project_families_permission_read_indexes.sql" \
     "$ROOT/migrations/20260928223000_project_permission_candidate_indexes.sql" \
     "$ROOT/migrations/20260929120000_lookup_guard_family_marker.sql" \
-    "$ROOT/migrations/20260929140000_named_resource_pointer.sql"
+    "$ROOT/migrations/20260929130000_lookup_family_inputs.sql" \
+    "$ROOT/migrations/20260929140000_named_resource_pointer.sql" \
+    "$ROOT/migrations/20260929160000_remove_served_projections.sql"
 do
     emit_phase_migration "$migration_file" empty-schema | run_psql
 done
@@ -703,8 +738,11 @@ SQL
 } | run_psql
 report_timing empty-schema
 
-apply_baseline
-apply_baseline
+# Existing historical probes exercise the installed pre-removal schema. The final
+# fresh schema and exact removal upgrade are checked separately below.
+check_served_projection_removal
+apply_historical_baseline
+apply_historical_baseline
 report_timing baseline-install
 # The production functions intentionally bind their SECURITY DEFINER lookups
 # to bigname_phase. Prove that contract before rebinding only this scratch
@@ -9872,6 +9910,11 @@ SQL
 
 report_timing specialized-predecessor "$refusal_probe_seconds"
 if [ "${SCHEMA_V2_APPLY_CHECK_TIMING:-0}" = 1 ]; then printf 'schema-v2 timing: refusal-probes=%ss\n' "$refusal_probe_seconds"; fi
+# This later lookup function replacement follows the historical exact-zero writer probes.
+# Applying it before those probes would change their expected predecessor implementation.
+for pass in 1 2; do
+    emit_phase_migration "$ROOT/migrations/20260929130000_lookup_family_inputs.sql" baseline-first | run_psql
+done
 assert_reviewed_phase_migrations_applied
 if [ "$refusal_assertions_passed" -ne "$expected_refusal_assertions" ]; then
     printf '%s\n' \
@@ -9880,6 +9923,6 @@ if [ "$refusal_assertions_passed" -ne "$expected_refusal_assertions" ]; then
 fi
 report_timing final-assertions
 printf '%s\n' \
-    "schema-v2 baseline applied twice and passed structural and behavior checks"
+    "pre-removal schema passed historical migration probes; permanent fresh schema equals its removal upgrade"
 printf '%s\n' \
     "schema-migration coverage: expected reviewed phase schema-migrations=$expected_reviewed_phase_migration_count; applied on maintained paths=$unique_successful_migration_count; exact-predecessor-shape proofs=$predecessor_shape_proof_count/$expected_reviewed_phase_migration_count; without exact-predecessor-shape proof=$((expected_reviewed_phase_migration_count - predecessor_shape_proof_count)); total successful applications=$total_successful_migration_applications; intentional skips=$intentional_phase_migration_skip_count; refusal assertions=$refusal_assertions_passed/$expected_refusal_assertions"

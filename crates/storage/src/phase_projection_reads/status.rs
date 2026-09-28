@@ -22,16 +22,9 @@ pub async fn load_phase_expected_status_chain_ids(pool: &PgPool) -> Result<Vec<S
     .context("failed to load expected schema-v2 indexing status chains")
 }
 
-/// Whether the served publication belongs to this build's interpreter generation and sits at or
-/// just behind the stored head (at the head only on the head's own hash): the Project row's
-/// position, with the [publication switch](crate::publication_source) off.
-
-/// With the switch on, the serving fence's own rule for the family marker
-/// (`load_served_project_generation`): `live`, this build's interpreter hash, its block and hash
-/// on the readable lineage, and between zero and
-/// [`PROJECT_PUBLICATION_LAG_TOLERANCE_BLOCKS`](crate::PROJECT_PUBLICATION_LAG_TOLERANCE_BLOCKS)
-/// blocks behind the stored head, and at the head only on the head's own hash, as the verified
-/// lookup's admission also requires.
+/// The serving fence requires a live family marker from this build on readable lineage,
+/// within [`PROJECT_PUBLICATION_LAG_TOLERANCE_BLOCKS`](crate::PROJECT_PUBLICATION_LAG_TOLERANCE_BLOCKS)
+/// of the stored head. At the head, its hash must match the head's hash.
 fn family_marker_generation_current() -> String {
     let lag_tolerance = crate::PROJECT_PUBLICATION_LAG_TOLERANCE_BLOCKS;
     format!(

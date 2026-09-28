@@ -17,7 +17,6 @@ use bigname_storage::{
         load_family_name,
     },
     load_name_current_for_snapshot,
-    publication_source::with_serve_from_families,
 };
 use serde_json::json;
 use sqlx::types::time::OffsetDateTime;
@@ -109,12 +108,7 @@ async fn an_unknown_name_during_a_rebuild_is_stale() -> Result<()> {
     }))
     .map_err(|error| anyhow::anyhow!(error.message().to_owned()))?;
     let unknown = name(99);
-    let read = || {
-        with_serve_from_families(
-            true,
-            load_name_current_for_snapshot(&fixture.pool, &unknown, &positions),
-        )
-    };
+    let read = || load_name_current_for_snapshot(&fixture.pool, &unknown, &positions);
     assert!(
         matches!(read().await, Ok(SnapshotProjectionRead::NotFound)),
         "a live marker answers not found"
@@ -171,19 +165,7 @@ async fn ens_expiring(fixture: &Fixture) -> Result<(Vec<String>, String)> {
 /// A Basenames name on `BASE`, granted with `expiry` (a JSON number) on its own lease.
 async fn basenames_grant(fixture: &Fixture, n: u64, expiry: serde_json::Value) -> Result<()> {
     let other = format!("basenames:{}", node(n));
-    sqlx::query(
-        "INSERT INTO name_surfaces (logical_name_id, namespace, raw_name, raw_labels,
-             dns_encoded_name, namehash, labelhashes, normalizer_version, visibility_state,
-             chain_id, block_hash, block_number, canonicality_state)
-         VALUES ($1, 'basenames', $1, ARRAY[$1], '\\x00', $2, ARRAY[$2], 'ensip15', 'active',
-                 $3, $4, 0, 'canonical')",
-    )
-    .bind(&other)
-    .bind(node(n))
-    .bind(BASE)
-    .bind(hash(0))
-    .execute(&fixture.pool)
-    .await?;
+    fixture.surface_on(BASE, &other, &node(n)).await?;
     let lease = uuid(u32::try_from(n)?);
     sqlx::query(
         "INSERT INTO resources (resource_id, chain_id, block_hash, block_number,
@@ -269,11 +251,7 @@ async fn an_unknown_name_below_the_publication_is_stale() -> Result<()> {
         position(12, "2027-01-15T08:02:24Z")?,
         position(11, "2027-01-15T08:02:12Z")?,
     ] {
-        let read = with_serve_from_families(
-            true,
-            load_name_current_for_snapshot(&fixture.pool, &unknown, &positions),
-        )
-        .await;
+        let read = load_name_current_for_snapshot(&fixture.pool, &unknown, &positions).await;
         answers.push(match read {
             Ok(SnapshotProjectionRead::NotFound) => "not found".to_owned(),
             Ok(_) => "found".to_owned(),

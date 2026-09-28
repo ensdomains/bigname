@@ -241,7 +241,7 @@ fn push_declared_resolver_arm(
         "
         SELECT pointer.resource_id, record.normalized_event_id
         FROM pointers pointer
-        JOIN bigname_phase.resolver_current resolver
+        JOIN __family_resolver_classification__ resolver
           ON resolver.chain_id = pointer.chain_id
          AND resolver.resolver_address = pointer.resolver_address
          AND resolver.support_status = 'supported'
@@ -255,7 +255,7 @@ fn push_declared_resolver_arm(
              'manifest_declared_address'
         JOIN"
             .replace(
-                "bigname_phase.resolver_current",
+                "__family_resolver_classification__",
                 &crate::families::topology::resolver_classification_relation(),
             ),
     );

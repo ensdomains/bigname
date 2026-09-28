@@ -1,9 +1,6 @@
-// Actual Project/family event publications exercise the public reverse page and count path.
-async fn family_reverse_body(database: &TestDatabase, on: bool, input: Value) -> Result<Value> {
-    let response = bigname_storage::publication_source::with_serve_from_families(
-        on,
-        v2_lookup_response_for_database_with_public_namespaces(database, "/v1/lookup", input, &["ens"]),
-    ).await?;
+// Actual family event publications exercise the public reverse page and count path.
+async fn family_reverse_body(database: &TestDatabase, input: Value) -> Result<Value> {
+    let response = v2_lookup_response_for_database_with_public_namespaces(database, "/v1/lookup", input, &["ens"]).await?;
     let status = response.status();
     let mut body: Value = read_json(response).await?;
     anyhow::ensure!(status == StatusCode::OK, "{status}: {body:#}");
@@ -19,7 +16,7 @@ async fn seed_family_reverse_page_fixture(database: &TestDatabase) -> Result<()>
 }
 
 #[tokio::test]
-async fn v2_family_reverse_pages_counts_and_primary_order_match_served() -> Result<()> {
+async fn v2_family_reverse_pages_counts_and_follow_primary_order() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_family_reverse_page_fixture(&database).await?;
     let mut requests = Vec::new();
@@ -32,9 +29,9 @@ async fn v2_family_reverse_pages_counts_and_primary_order_match_served() -> Resu
                 if let Some(relation) = relation { input["relation"] = json!(relation); }
                 if let Some(cursor) = cursor { input["cursor"] = cursor; }
                 let request = json!({"profile": profile, "inputs": [input]});
-                let served = family_reverse_body(&database, false, request.clone()).await?;
-                let family = family_reverse_body(&database, true, request.clone()).await?;
-                assert_eq!(family, served, "{request:#}");
+
+                let family = family_reverse_body(&database, request.clone()).await?;
+
                 requests.push((request, family.clone()));
                 let records = family["data"][0]["records"].as_array().expect("reverse records");
                 assert!(!records.is_empty(), "{family:#}");
@@ -51,20 +48,16 @@ async fn v2_family_reverse_pages_counts_and_primary_order_match_served() -> Resu
             {"id": "eth", "address": address, "coin_type": 60, "page_size": 1},
             {"id": "other", "address": address, "coin_type": 0, "page_size": 1}
         ]});
-        let served = family_reverse_body(&database, false, request.clone()).await?;
-        let family = family_reverse_body(&database, true, request.clone()).await?;
-        assert_eq!(family, served, "{request:#}");
+
+        let family = family_reverse_body(&database, request.clone()).await?;
+
         requests.push((request, family));
     }
     // A chain outside the admitted ENS scope must not gate its missing tuples or counts.
     sqlx::query("INSERT INTO bigname_phase.project_family_marker (chain_id, state) VALUES ('base-mainnet', 'bootstrap_pending')")
         .execute(&database.pool).await?;
-    // The live families are the only successful data source after the old projections vanish.
-    for table in ["address_names_current", "primary_names_current", "record_inventory_current", "name_current", "address_records_current"] {
-        sqlx::query(&format!("DELETE FROM bigname_phase.{table}")).execute(&database.pool).await?;
-    }
     for (request, expected) in requests {
-        assert_eq!(family_reverse_body(&database, true, request.clone()).await?, expected, "{request:#}");
+        assert_eq!(family_reverse_body(&database, request.clone()).await?, expected, "{request:#}");
     }
     database.cleanup().await
 }
@@ -77,14 +70,13 @@ async fn v2_family_reverse_publication_loss_after_fence_is_stale() -> Result<()>
         let mut input = json!({"address": SWITCH_ALICE, "page_size": 1});
         if let Some(relation) = relation { input["relation"] = json!(relation); }
         let request = json!({"inputs": [input]});
-        let live = family_reverse_body(&database, true, request.clone()).await?;
+        let live = family_reverse_body(&database, request.clone()).await?;
         assert_eq!(live["data"][0]["records"].as_array().unwrap().len(), 1);
         let reached = std::sync::Arc::new(tokio::sync::Notify::new());
         let resume = std::sync::Arc::new(tokio::sync::Notify::new());
         let request = bigname_storage::families::name::seams::with_pause_before_snapshot(
             reached.clone(), resume.clone(),
-            bigname_storage::publication_source::with_serve_from_families(true,
-                v2_lookup_response_for_database_with_public_namespaces(&database, "/v1/lookup", request, &["ens"])),
+            v2_lookup_response_for_database_with_public_namespaces(&database, "/v1/lookup", request, &["ens"]),
         );
         tokio::pin!(request);
         let mut paused = 0;
@@ -120,7 +112,7 @@ async fn v2_family_reverse_count_crosses_candidate_batches_and_ignores_cursor() 
             json!({"authority_kind": "registrar", "registrant": SWITCH_ALICE, "expiry": 1_900_000_000})));
     }
     bigname_storage::insert_normalized_event_fixtures(&database.pool, &events).await?;
-    publish_project_and_families(&database, 240).await?;
+    publish_test_families(&database, 240).await?;
     let mut input = bigname_storage::ReverseIdentityStorageInput {
         address: SWITCH_ALICE.to_owned(), coin_type: "60".to_owned(),
         roles: bigname_storage::ReverseIdentityRoles::Both, page_size: 33, cursor: None,
@@ -189,7 +181,7 @@ async fn v2_family_reverse_page_count_and_claim_hold_one_publication() -> Result
                             "RegistrationGranted", "ens_v1_registrar_l1", 241, 1,
                             json!({"authority_kind": "registrar", "registrant": SWITCH_ALICE, "expiry": 1_900_000_000})),
                     ]).await?;
-                    publish_project_and_families(&database, 241).await?;
+                    publish_test_families(&database, 241).await?;
                     advanced = true;
                 }
                 resume.notify_one();
@@ -228,7 +220,7 @@ async fn v2_family_reverse_primary_manager_precedes_owned_names() -> Result<()> 
             "AuthorityTransferred", "ens_v1_registry_l1", 241, 2,
             json!({"authority_kind": "registry", "owner": SWITCH_ALICE, "owner_getter": SWITCH_ALICE, "node": gamma.strip_prefix("ens:").unwrap()})),
     ]).await?;
-    publish_project_and_families(&database, 241).await?;
+    publish_test_families(&database, 241).await?;
     for relation in [None, Some("manager"), Some("owner,registrant")] {
         let mut cursor = None;
         let mut names = Vec::new();
@@ -237,9 +229,9 @@ async fn v2_family_reverse_primary_manager_precedes_owned_names() -> Result<()> 
             if let Some(relation) = relation { input["relation"] = json!(relation); }
             if let Some(cursor) = cursor { input["cursor"] = cursor; }
             let request = json!({"inputs": [input]});
-            let served = family_reverse_body(&database, false, request.clone()).await?;
-            let family = family_reverse_body(&database, true, request.clone()).await?;
-            assert_eq!(family, served, "{request:#}");
+
+            let family = family_reverse_body(&database, request.clone()).await?;
+
             names.extend(family["data"][0]["records"].as_array().unwrap().iter().map(|r| r["name"].as_str().unwrap().to_owned()));
             cursor = family["data"][0]["page"]["next_cursor"].as_str().map(|v| json!(v));
             if cursor.is_none() { break; }

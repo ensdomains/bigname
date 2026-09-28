@@ -4,15 +4,13 @@
 //! that name's row and no other, undo puts the previous row back, and a rebuild writes the same
 //! rows as the incremental follow. Every row carries the fields of the name's served row, and a
 //! name whose composition the clock changes is composed again at the first block past it.
-#[path = "families_shadow_support/mod.rs"]
-mod shadow_support;
 #[path = "families_support/mod.rs"]
 mod support;
 
 use anyhow::{Result, ensure};
 use bigname_project::families;
+use bigname_storage::families::name::load_family_name;
 use serde_json::{Value, json};
-use shadow_support::{publish, served};
 use support::{CHAIN, Event, Fixture, uuid};
 
 const REGISTRAR: &str = "0x00000000000000000000000000000000000000e3";
@@ -89,7 +87,9 @@ async fn assert_matches_served(fixture: &Fixture, logical_name_id: &str) -> Resu
     let (row, _) = summary(fixture, logical_name_id)
         .await?
         .ok_or_else(|| anyhow::anyhow!("{logical_name_id} has no summary row"))?;
-    let served = served(fixture, logical_name_id).await?;
+    let served = load_family_name(&fixture.pool, logical_name_id)
+        .await?
+        .expect("composed name");
     let expiry: Option<i64> = sqlx::query_scalar(
         "SELECT extract(epoch FROM expires_at)::bigint FROM project_name_summary
          WHERE chain_id = $1 AND logical_name_id = $2",
@@ -113,14 +113,15 @@ async fn assert_matches_served(fixture: &Fixture, logical_name_id: &str) -> Resu
         served.provenance
     );
     ensure!(
-        row["registration_status"] == served.registration("status"),
+        row["registration_status"] == served.declared_summary["registration"]["status"],
         "{logical_name_id}: status {row} against {}",
-        served.summary
+        served.declared_summary
     );
     ensure!(
-        expiry.map(Value::from).unwrap_or(Value::Null) == served.registration("expiry"),
+        expiry.map(Value::from).unwrap_or(Value::Null)
+            == served.declared_summary["registration"]["expiry"],
         "{logical_name_id}: expiry {expiry:?} against {}",
-        served.summary
+        served.declared_summary
     );
     Ok(row)
 }
@@ -152,11 +153,9 @@ async fn a_block_rewrites_the_summary_of_the_name_it_touches_and_undo_restores_i
             REGISTRAR,
         )
         .await?;
-    shadow_support::publish_served(&fixture, 8).await?;
     let outcome = fixture
         .apply(8, bigname_project::families::FamilyMode::Normal)
-        .await;
-    ensure!(outcome.skipped.is_none(), "block 8: {:?}", outcome.skipped);
+        .await?;
     let renewed = assert_matches_served(&fixture, &name(1)).await?;
     assert_matches_served(&fixture, &name(2)).await?;
     ensure!(renewed != first, "the renewal left {renewed}");
@@ -210,7 +209,7 @@ async fn a_block_rewrites_the_summary_of_the_name_it_touches_and_undo_restores_i
     // Replay, then the block-by-block and ranged rebuilds write the same rows.
     fixture
         .apply(8, bigname_project::families::FamilyMode::Normal)
-        .await;
+        .await?;
     let (replayed, _) = summary(&fixture, &name(1)).await?.expect("first row");
     ensure!(
         replayed == renewed,
@@ -225,12 +224,11 @@ async fn the_family_undo_and_rebuild_keep_every_summary_row() -> Result<()> {
     let fixture = Fixture::new("families_name_summary_undo", 12).await?;
     registered(&fixture, 1, 2, 2_000_000_000).await?;
     registered(&fixture, 2, 6, 2_100_000_000).await?;
-    shadow_support::publish_served(&fixture, 9).await?;
     // Block 7 grants the second name: undoing it restores its summary row as block 6 left it.
     fixture.assert_undo_restores(7).await?;
     fixture
         .apply(9, bigname_project::families::FamilyMode::Normal)
-        .await;
+        .await?;
     fixture.assert_rebuild_equal(9).await?;
     let rows = fixture.rows("project_name_summary").await?;
     ensure!(rows.len() == 2, "{rows:#?}");
@@ -306,7 +304,7 @@ async fn a_binding_that_closes_by_the_clock_is_composed_again_at_the_first_block
 
     fixture
         .apply(8, bigname_project::families::FamilyMode::Normal)
-        .await;
+        .await?;
     let (closed, _) = summary(&fixture, &name(1)).await?.expect("first row");
     ensure!(
         closed != open,
@@ -584,7 +582,7 @@ async fn a_name_with_no_composed_row_keeps_its_clock_boundary() -> Result<()> {
     );
     fixture
         .apply(8, bigname_project::families::FamilyMode::Normal)
-        .await;
+        .await?;
     let (opened, _) = summary(&fixture, &name(1)).await?.expect("a summary row");
     ensure!(
         !opened["registration_status"].is_null(),
@@ -611,7 +609,7 @@ async fn undo_restores_a_clock_only_summary_and_rewrites_nothing_for_an_empty_bl
     // Block 8 has no events: only the clock closes name 1's binding.
     fixture
         .apply(8, bigname_project::families::FamilyMode::Normal)
-        .await;
+        .await?;
     let (closed, _) = summary(&fixture, &name(1)).await?.expect("first row");
     ensure!(closed != open, "block 8 left {closed}");
     let journalled: Vec<String> = sqlx::query_scalar(
@@ -631,7 +629,7 @@ async fn undo_restores_a_clock_only_summary_and_rewrites_nothing_for_an_empty_bl
     ensure!(restored == open, "undo left {restored}, not {open}");
     fixture
         .apply(8, bigname_project::families::FamilyMode::Normal)
-        .await;
+        .await?;
     let (replayed, _) = summary(&fixture, &name(1)).await?.expect("first row");
     ensure!(
         replayed == closed,
@@ -646,7 +644,7 @@ async fn undo_restores_a_clock_only_summary_and_rewrites_nothing_for_an_empty_bl
             .await?;
     fixture
         .apply(9, bigname_project::families::FamilyMode::Normal)
-        .await;
+        .await?;
     let summaries: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM project_family_undo
          WHERE chain_id = $1 AND block_number = 9 AND family = 'project_name_summary'",
@@ -765,7 +763,7 @@ async fn a_rebuild_range_reads_the_registry_events_of_every_block_it_applies() -
         .with_rebuild_ranges(families::RebuildRanges::Through(7));
     let rebuilt = fixture
         .apply_with(7, families::FamilyMode::Rebuild, &options)
-        .await;
+        .await?;
     let dbg: Vec<(i64, String)> =
         sqlx::query_as("SELECT DISTINCT block_number, 'x' FROM project_family_undo ORDER BY 1")
             .fetch_all(&fixture.pool)
@@ -776,11 +774,10 @@ async fn a_rebuild_range_reads_the_registry_events_of_every_block_it_applies() -
     );
     // Ranges grow 1, 2, 4 blocks: [2], [3, 4] and [5, 6], then the target on its own.
     ensure!(
-        rebuilt.skipped.is_none() && rebuilt.ranges == 3,
-        "the rebuild applied {} blocks in {} ranges: {:?}",
+        rebuilt.ranges == 3,
+        "the rebuild applied {} blocks in {} ranges",
         rebuilt.blocks,
-        rebuilt.ranges,
-        rebuilt.skipped
+        rebuilt.ranges
     );
     for ((table, was), (_, now)) in followed.iter().zip(&fixture.exact().await?) {
         ensure!(
@@ -789,4 +786,9 @@ async fn a_rebuild_range_reads_the_registry_events_of_every_block_it_applies() -
         );
     }
     fixture.cleanup().await
+}
+
+async fn publish(fixture: &Fixture, target: i64) -> Result<()> {
+    fixture.apply(target, families::FamilyMode::Normal).await?;
+    Ok(())
 }

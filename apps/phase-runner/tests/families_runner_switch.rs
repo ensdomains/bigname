@@ -1,14 +1,11 @@
-//! The Project batch with the publication switch on (TYR-36 step 7b): the owned key family loop is
-//! the batch, the served engine and hydrator do not run, and the batch's progress is the family
-//! marker. Every served table here carries a statement trigger that refuses any write, so a batch
-//! that reached the served engine fails, even one that would change no row.
+//! The permanent Project batch publishes through the family loop. These cases retain
+//! progress, bounded work, cancellation, retry and redo behavior at the actual runner boundary.
 #[allow(dead_code)]
 mod support;
 
 use std::{sync::Arc, time::Duration};
 
 use anyhow::{Result, ensure};
-use bigname_storage::publication_source::with_serve_from_families;
 use phase_runner::{
     INTERPRETER_CONTENT_HASH,
     capacity::CapacityGuard,
@@ -29,20 +26,6 @@ use support::{ScratchDatabase, seed_lineage};
 const CHAIN: &str = "families-runner-switch";
 const HEAD: i64 = 30;
 
-/// The tables the served Project batch publishes; step 7c drops them.
-const SERVED_TABLES: &[&str] = &[
-    "name_current",
-    "children_current",
-    "record_inventory_current",
-    "resolver_current",
-    "permissions_current",
-    "permissions_current_resource_summary",
-    "account_permission_state_current",
-    "address_names_current",
-    "address_records_current",
-    "primary_names_current",
-];
-
 // A normal batch with the switch on: the families rebuild to the head in one run, the batch
 // completes with the family marker as its progress, and no statement reached a served table.
 // With the switch off the same batch runs the served engine, which the triggers refuse.
@@ -50,18 +33,10 @@ const SERVED_TABLES: &[&str] = &[
 async fn a_project_batch_under_the_switch_writes_no_served_row_and_advances_the_marker_to_the_head()
 -> Result<()> {
     let scratch = ready("families_switch_batch").await?;
-    refuse_served_writes(&scratch).await?;
     let head = head_marker(&scratch, HEAD).await?;
     let project = ProjectPhase::new(scratch.pool().clone());
 
-    let served = with_serve_from_families(false, project.run_batch(context(&head, None))).await;
-    let refused = served
-        .expect_err("with the switch off the served engine runs")
-        .to_string();
-    ensure!(refused.contains("served table written"), "{refused}");
-    ensure!(marker(&scratch).await?.is_none(), "no family run followed");
-
-    let outcome = with_serve_from_families(true, project.run_batch(context(&head, None))).await?;
+    let outcome = project.run_batch(context(&head, None)).await?;
     let PhaseBatchOutcome::Complete(progress) = outcome else {
         anyhow::bail!("the family batch did not complete: {outcome:?}");
     };
@@ -80,8 +55,7 @@ async fn a_project_batch_under_the_switch_writes_no_served_row_and_advances_the_
 
     // The next batch follows from the recorded marker in normal mode.
     let next = head_marker(&scratch, HEAD).await?;
-    let outcome =
-        with_serve_from_families(true, project.run_batch(context(&next, Some(&head)))).await?;
+    let outcome = project.run_batch(context(&next, Some(&head))).await?;
     ensure!(
         matches!(outcome, PhaseBatchOutcome::Complete(_)),
         "{outcome:?}"
@@ -95,7 +69,6 @@ async fn a_project_batch_under_the_switch_writes_no_served_row_and_advances_the_
 #[tokio::test]
 async fn a_budgeted_family_batch_continues_the_rebuild_from_its_marker() -> Result<()> {
     let scratch = ready("families_switch_budget").await?;
-    refuse_served_writes(&scratch).await?;
     let head = head_marker(&scratch, HEAD).await?;
     let project = ProjectPhase::new(scratch.pool().clone()).with_family_settings(FamilySettings {
         max_blocks_per_run: 10,
@@ -104,9 +77,7 @@ async fn a_budgeted_family_batch_continues_the_rebuild_from_its_marker() -> Resu
     let mut resume: Option<BlockMarker> = None;
     let mut continued = 0;
     loop {
-        let outcome =
-            with_serve_from_families(true, project.run_batch(context(&head, resume.as_ref())))
-                .await?;
+        let outcome = project.run_batch(context(&head, resume.as_ref())).await?;
         let progress = outcome.progress().clone();
         ensure!(progress.target.as_ref() == Some(&head), "{progress:?}");
         resume = progress.current.clone();
@@ -139,13 +110,12 @@ async fn a_budgeted_family_batch_continues_the_rebuild_from_its_marker() -> Resu
 async fn a_one_shot_redo_under_the_switch_replays_the_families_and_writes_no_served_row()
 -> Result<()> {
     let scratch = ready("families_switch_redo").await?;
-    refuse_served_writes(&scratch).await?;
     let settings = FamilySettings {
         max_blocks_per_run: 10,
         retry_family_failures: false,
         ..FamilySettings::default()
     };
-    with_serve_from_families(true, redo(&scratch, settings)).await?;
+    redo(&scratch, settings).await?;
     ensure!(
         project_state(&scratch).await? == ("completed".into(), Some(HEAD), false),
         "the redo completed at the head"
@@ -156,28 +126,10 @@ async fn a_one_shot_redo_under_the_switch_replays_the_families_and_writes_no_ser
         "the repair record completed"
     );
     // A second redo undoes and replays from the live families.
-    with_serve_from_families(true, redo(&scratch, settings)).await?;
+    redo(&scratch, settings).await?;
     ensure!(marker(&scratch).await? == Some(HEAD));
     ensure!(repair_completed(&scratch).await?);
     scratch.cleanup().await
-}
-
-async fn refuse_served_writes(scratch: &ScratchDatabase) -> Result<()> {
-    sqlx::query(
-        "CREATE FUNCTION refuse_served_write() RETURNS trigger LANGUAGE plpgsql AS $$
-         BEGIN RAISE EXCEPTION 'served table written: %', TG_TABLE_NAME; END $$",
-    )
-    .execute(scratch.pool())
-    .await?;
-    for table in SERVED_TABLES {
-        sqlx::query(&format!(
-            "CREATE TRIGGER refuse_served_write BEFORE INSERT OR UPDATE OR DELETE OR TRUNCATE
-             ON {table} FOR EACH STATEMENT EXECUTE FUNCTION refuse_served_write()"
-        ))
-        .execute(scratch.pool())
-        .await?;
-    }
-    Ok(())
 }
 
 async fn redo(scratch: &ScratchDatabase, settings: FamilySettings) -> Result<()> {

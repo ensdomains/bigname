@@ -1,28 +1,21 @@
-//! The effective-permission page and resource summary `GET /v1/permissions` reads, served from
-//! the owned key families under the publication switch (TYR-36 step 7b slice 4): each case
-//! publishes twice, and at each publication the page read with the switch on equals the page
-//! read with the switch off, and moves between the two publications as the served page does.
-//! `publish_and_compare` also walks every subject and resource of the chain under both switch
-//! states (apps/phase-runner/tests/project_end_to_end/permissions_shadow.rs).
+//! Wrapper permission pages retain fuse, grace, cursor, namespace and overflow behavior
+//! across actual family publications and rebuild windows.
 //! (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L214-L238 @ ens_v1@91c966f)
-#[path = "families_shadow_support/mod.rs"]
-mod shadow_support;
+#[path = "families_read_support/mod.rs"]
+mod read_support;
 #[path = "families_support/mod.rs"]
 mod support;
 
 use anyhow::Result;
-use bigname_storage::{
-    load_serving_effective_permissions_page, load_serving_permission_summaries,
-    publication_source::with_serve_from_families,
-};
-use serde_json::{Value, json};
-use shadow_support::{
-    publish_and_compare,
+use bigname_storage::{load_serving_effective_permissions_page, load_serving_permission_summaries};
+use read_support::{
+    publish,
     wrapper::{
         CANNOT_UNWRAP, GRACE_PERIOD, HOLDER, HOLDER_POWERS, IS_DOT_ETH, OPERATOR,
         PARENT_CANNOT_CONTROL, node, timestamp, wrapped, wrapper_event,
     },
 };
+use serde_json::{Value, json};
 use support::Fixture;
 use uuid::Uuid;
 
@@ -32,17 +25,12 @@ use uuid::Uuid;
 async fn read(
     fixture: &Fixture,
     resource: &str,
-    on: bool,
 ) -> Result<(Vec<(String, bool, Value)>, Option<Value>)> {
     let id: Uuid = resource.parse()?;
-    let page = with_serve_from_families(
-        on,
-        load_serving_effective_permissions_page(&fixture.pool, None, Some(id), None, None, 50),
-    )
-    .await?;
-    let summaries =
-        with_serve_from_families(on, load_serving_permission_summaries(&fixture.pool, &[id]))
+    let page =
+        load_serving_effective_permissions_page(&fixture.pool, None, Some(id), None, None, 50)
             .await?;
+    let summaries = load_serving_permission_summaries(&fixture.pool, &[id]).await?;
     Ok((
         page.rows
             .iter()
@@ -60,20 +48,6 @@ async fn read(
     ))
 }
 
-/// The page with the switch on, checked equal to the page with the switch off.
-async fn page(
-    fixture: &Fixture,
-    resource: &str,
-) -> Result<(Vec<(String, bool, Value)>, Option<Value>)> {
-    let served = read(fixture, resource, false).await?;
-    let families = read(fixture, resource, true).await?;
-    assert_eq!(
-        served, families,
-        "the switch-off page (left) and the switch-on page (right)"
-    );
-    Ok(families)
-}
-
 fn without(powers: &[&str], dropped: &[&str]) -> Value {
     json!(
         powers
@@ -88,14 +62,13 @@ fn without(powers: &[&str], dropped: &[&str]) -> Value {
 /// page published at 14 has neither `unwrap` nor `resource_control`, with the restriction block
 /// locked, from the families as from the served tables.
 #[tokio::test]
-async fn a_fuse_burn_between_two_publications_moves_the_page_with_the_switch_on() -> Result<()> {
+async fn a_fuse_burn_between_two_publications_moves_the_page() -> Result<()> {
     let fixture = Fixture::new("families_shadow_permission_pages_fuse_burn", 20).await?;
     let fuses = PARENT_CANNOT_CONTROL | IS_DOT_ETH;
     let expiry = timestamp(20) + 10 * GRACE_PERIOD;
     let resource = wrapped(&fixture, fuses, expiry).await?;
-    let before = publish_and_compare(&fixture, 12).await?;
-    shadow_support::assert_counts(&before, &[], &[]);
-    let (rows, restrictions) = page(&fixture, &resource).await?;
+    publish(&fixture, 12).await?;
+    let (rows, restrictions) = read(&fixture, &resource).await?;
     let emancipated = without(HOLDER_POWERS, &["extend_expiry"]);
     assert_eq!(
         rows,
@@ -121,9 +94,8 @@ async fn a_fuse_burn_between_two_publications_moves_the_page_with_the_switch_on(
                "wrapper_state": "locked", "expiry": expiry}),
     )
     .await?;
-    let after = publish_and_compare(&fixture, 14).await?;
-    shadow_support::assert_counts(&after, &[], &[]);
-    let (rows, restrictions) = page(&fixture, &resource).await?;
+    publish(&fixture, 14).await?;
+    let (rows, restrictions) = read(&fixture, &resource).await?;
     let locked = without(
         HOLDER_POWERS,
         &["extend_expiry", "unwrap", "resource_control"],
@@ -151,25 +123,23 @@ async fn a_fuse_burn_between_two_publications_moves_the_page_with_the_switch_on(
 /// serves every emancipated power, and the page published at 15, inside the grace window, only
 /// approval; the families mask at each publication's own block time, as the served build does.
 #[tokio::test]
-async fn a_role_change_crossing_the_clock_moves_the_page_with_the_switch_on() -> Result<()> {
+async fn a_role_change_crossing_the_clock_moves_the_page() -> Result<()> {
     let fixture = Fixture::new("families_shadow_permission_pages_clock", 20).await?;
     let fuses = PARENT_CANNOT_CONTROL | IS_DOT_ETH;
     let resource = wrapped(&fixture, fuses, timestamp(14) + GRACE_PERIOD).await?;
-    let before = publish_and_compare(&fixture, 14).await?;
-    shadow_support::assert_counts(&before, &[], &[]);
+    publish(&fixture, 14).await?;
     let emancipated = without(HOLDER_POWERS, &["extend_expiry"]);
     assert_eq!(
-        page(&fixture, &resource).await?.0,
+        read(&fixture, &resource).await?.0,
         vec![
             (HOLDER.to_owned(), false, emancipated.clone()),
             (OPERATOR.to_owned(), false, emancipated),
         ],
         "at 14"
     );
-    let after = publish_and_compare(&fixture, 15).await?;
-    shadow_support::assert_counts(&after, &[], &[]);
+    publish(&fixture, 15).await?;
     assert_eq!(
-        page(&fixture, &resource).await?.0,
+        read(&fixture, &resource).await?.0,
         vec![
             (HOLDER.to_owned(), false, json!(["approve"])),
             (OPERATOR.to_owned(), false, json!(["approve"])),
@@ -185,26 +155,18 @@ async fn a_role_change_crossing_the_clock_moves_the_page_with_the_switch_on() ->
 async fn a_permission_read_refuses_while_the_families_rebuild() -> Result<()> {
     let fixture = Fixture::new("families_shadow_permission_pages_rebuild", 20).await?;
     let resource = wrapped(&fixture, PARENT_CANNOT_CONTROL | IS_DOT_ETH, timestamp(40)).await?;
-    publish_and_compare(&fixture, 12).await?;
+    publish(&fixture, 12).await?;
     sqlx::query("UPDATE project_family_marker SET state = 'bootstrap_pending'")
         .execute(&fixture.pool)
         .await?;
     let id: Uuid = resource.parse()?;
-    let page = with_serve_from_families(
-        true,
-        load_serving_effective_permissions_page(&fixture.pool, Some(HOLDER), None, None, None, 50),
-    )
-    .await;
-    let summaries = with_serve_from_families(
-        true,
-        load_serving_permission_summaries(&fixture.pool, &[id]),
-    )
-    .await;
-    let by_resource = with_serve_from_families(
-        true,
-        load_serving_effective_permissions_page(&fixture.pool, None, Some(id), None, None, 50),
-    )
-    .await;
+    let page =
+        load_serving_effective_permissions_page(&fixture.pool, Some(HOLDER), None, None, None, 50)
+            .await;
+    let summaries = load_serving_permission_summaries(&fixture.pool, &[id]).await;
+    let by_resource =
+        load_serving_effective_permissions_page(&fixture.pool, None, Some(id), None, None, 50)
+            .await;
     for (read, error) in [
         ("subject page", page.err()),
         ("summaries", summaries.err()),
@@ -217,8 +179,6 @@ async fn a_permission_read_refuses_while_the_families_rebuild() -> Result<()> {
             "{read}: {error:?}"
         );
     }
-    // The served tables still answer with the switch off.
-    assert!(!read(&fixture, &resource, false).await?.0.is_empty());
     fixture.cleanup().await
 }
 
@@ -259,31 +219,25 @@ async fn namespace_filters_permission_resources_before_their_publication() -> Re
         .bind(base)
         .execute(&fixture.pool)
         .await?;
-    shadow_support::publish(&fixture, 12).await?;
-    let outcome = fixture.apply_on(base, 12).await;
-    anyhow::ensure!(outcome.skipped.is_none(), "{outcome:?}");
+    read_support::publish(&fixture, 12).await?;
+    fixture.apply_on(base, 12).await?;
     sqlx::query("UPDATE project_family_marker SET state = 'bootstrap_pending' WHERE chain_id = $1")
         .bind(base)
         .execute(&fixture.pool)
         .await?;
-    let ens = with_serve_from_families(
-        true,
-        load_serving_effective_permissions_page(
-            &fixture.pool,
-            Some(HOLDER),
-            None,
-            Some("ens"),
-            None,
-            50,
-        ),
+    let ens = load_serving_effective_permissions_page(
+        &fixture.pool,
+        Some(HOLDER),
+        None,
+        Some("ens"),
+        None,
+        50,
     )
     .await?;
     assert_eq!(ens.rows.len(), 1);
-    let all = with_serve_from_families(
-        true,
-        load_serving_effective_permissions_page(&fixture.pool, Some(HOLDER), None, None, None, 50),
-    )
-    .await;
+    let all =
+        load_serving_effective_permissions_page(&fixture.pool, Some(HOLDER), None, None, None, 50)
+            .await;
     assert!(
         all.as_ref()
             .err()
@@ -301,7 +255,7 @@ async fn account_pages_walk_direct_and_registry_permissions_without_skips() -> R
     let registry = "0x00000000000000000000000000000000000000e5";
     for n in 1..=12 {
         let resource = uuid(1000 + n);
-        let name = shadow_support::wrapper::name(u64::from(n));
+        let name = read_support::wrapper::name(u64::from(n));
         fixture
             .binding(
                 &uuid(2000 + n),
@@ -363,22 +317,19 @@ async fn account_pages_walk_direct_and_registry_permissions_without_skips() -> R
             .raw(json!({"emitting_address": registry})),
         )
         .await?;
-    shadow_support::publish(&fixture, 12).await?;
+    read_support::publish(&fixture, 12).await?;
     let mut answers = Vec::new();
-    for on in [false, true] {
+    {
         let mut cursor = None;
         let mut keys = Vec::new();
         loop {
-            let page = with_serve_from_families(
-                on,
-                load_serving_effective_permissions_page(
-                    &fixture.pool,
-                    Some(OPERATOR),
-                    None,
-                    Some("ens"),
-                    cursor.as_ref(),
-                    1,
-                ),
+            let page = load_serving_effective_permissions_page(
+                &fixture.pool,
+                Some(OPERATOR),
+                None,
+                Some("ens"),
+                cursor.as_ref(),
+                1,
             )
             .await?;
             keys.extend(
@@ -395,18 +346,14 @@ async fn account_pages_walk_direct_and_registry_permissions_without_skips() -> R
         answers.push(keys);
     }
     assert_eq!(answers[0].len(), 24);
-    assert_eq!(answers[0], answers[1]);
     let ids: Vec<Uuid> = (1..=12).map(|n| uuid(1000 + n).parse().unwrap()).collect();
     let mut inline_answers = Vec::new();
-    for on in [false, true] {
-        let overflow = with_serve_from_families(
-            on,
-            bigname_storage::load_bounded_effective_permissions_by_resource_ids(
-                &fixture.pool,
-                &ids,
-                Some("ens"),
-                3,
-            ),
+    {
+        let overflow = bigname_storage::load_bounded_effective_permissions_by_resource_ids(
+            &fixture.pool,
+            &ids,
+            Some("ens"),
+            3,
         )
         .await?;
         assert_eq!(
@@ -414,14 +361,11 @@ async fn account_pages_walk_direct_and_registry_permissions_without_skips() -> R
             4,
             "the inline expansion keeps one overflow sentinel"
         );
-        let complete = with_serve_from_families(
-            on,
-            bigname_storage::load_bounded_effective_permissions_by_resource_ids(
-                &fixture.pool,
-                &ids,
-                Some("ens"),
-                30,
-            ),
+        let complete = bigname_storage::load_bounded_effective_permissions_by_resource_ids(
+            &fixture.pool,
+            &ids,
+            Some("ens"),
+            30,
         )
         .await?;
         let mut keys: Vec<_> = complete
@@ -432,7 +376,6 @@ async fn account_pages_walk_direct_and_registry_permissions_without_skips() -> R
         inline_answers.push(keys);
     }
     assert_eq!(inline_answers[0].len(), 24);
-    assert_eq!(inline_answers[0], inline_answers[1]);
     fixture.cleanup().await
 }
 
@@ -442,17 +385,13 @@ async fn account_pages_walk_direct_and_registry_permissions_without_skips() -> R
 async fn wrapper_summary_does_not_expand_operator_approvals() -> Result<()> {
     let fixture = Fixture::new("permission_summary_without_approval_scan", 20).await?;
     let resource = wrapped(&fixture, PARENT_CANNOT_CONTROL, timestamp(40)).await?;
-    shadow_support::publish(&fixture, 12).await?;
+    read_support::publish(&fixture, 12).await?;
     let ids = [resource.parse()?];
-    let before =
-        with_serve_from_families(true, load_serving_permission_summaries(&fixture.pool, &ids))
-            .await?;
+    let before = load_serving_permission_summaries(&fixture.pool, &ids).await?;
     sqlx::query("ALTER TABLE project_account_approval RENAME TO approvals_not_read_by_summary")
         .execute(&fixture.pool)
         .await?;
-    let after =
-        with_serve_from_families(true, load_serving_permission_summaries(&fixture.pool, &ids))
-            .await?;
+    let after = load_serving_permission_summaries(&fixture.pool, &ids).await?;
     assert_eq!(
         before[&ids[0]].resource_restrictions,
         after[&ids[0]].resource_restrictions

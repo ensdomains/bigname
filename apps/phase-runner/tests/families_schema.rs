@@ -44,6 +44,7 @@ const FAMILY_TABLES: &[&str] = &[
     "project_address_record_node_index",
     "project_address_record_id_index",
     "project_name_history",
+    "project_name_summary",
 ];
 
 const BASELINE: &[&str] = &[
@@ -77,7 +78,20 @@ async fn install_baseline(database: &TestDatabase, without_families: bool) -> Re
     sqlx::query("SET LOCAL search_path TO bigname_phase, public")
         .execute(&mut *transaction)
         .await?;
-    for sql in BASELINE {
+    for (index, current) in BASELINE.iter().enumerate() {
+        let sql = if without_families {
+            match index {
+                4 => include_str!("../../../schema-v2/fixtures/pre-7c/05_normalized_events.sql"),
+                5 => include_str!("../../../schema-v2/fixtures/pre-7c/06_projections.sql"),
+                8 => include_str!("../../../schema-v2/fixtures/pre-7c/09_divergence.sql"),
+                11 => include_str!(
+                    "../../../schema-v2/fixtures/pre-7c/12_project_generation_failures.sql"
+                ),
+                _ => current,
+            }
+        } else {
+            current
+        };
         sqlx::raw_sql(sql).execute(&mut *transaction).await?;
     }
     if without_families {
@@ -132,11 +146,17 @@ async fn schema_migrations_create_the_family_tables_the_baseline_installs() -> R
     let current = database("families_schema_current").await?;
     install_baseline(&current, false).await?;
     let before = structures(&current).await?;
-    bigname_storage::MIGRATOR.run(current.pool()).await?;
+    // A fresh initializer already contains historical changes. Only the forward removal
+    // upgrade is meaningful on both fresh and installed pre-removal schema shapes.
+    sqlx::raw_sql(include_str!(
+        "../../../migrations/20260929160000_remove_served_projections.sql"
+    ))
+    .execute(current.pool())
+    .await?;
     assert_eq!(
         structures(&current).await?,
         before,
-        "the schema-migrations change nothing on a baseline that already has the tables"
+        "the removal upgrade changes nothing on the fresh family baseline"
     );
 
     installed.cleanup().await?;

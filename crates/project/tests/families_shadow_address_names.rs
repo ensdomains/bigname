@@ -1,25 +1,14 @@
-//! F13 address relations across the NameWrapper masks (TYR-36 step 7b slice 3): one unchanged
-//! wrapper row read at two successive publications, with the mask crossing between them, the
-//! pattern of `families_shadow_wrapper.rs`. The served `address_names_current` relations of the
-//! holder change across the crossing, and at each publication every address's names page, read
-//! through the served reader and through the F13 reader over the composed names
-//! (`bigname_storage::families::records::load_family_address_names_page`, compared in
-//! `compare_family_reads`), is the same in every served sort, dedupe mode and filter.
-//!
-//! - the effective controller: a `resource_control` PermissionChanged sets it only while the name
-//!   is wrapped or emancipated and out of the `.eth` grace window (address_names.rs:228-252);
-//! - the token holder and the registrant: past the wrapper expiry an emancipated name has no
-//!   wrapper state and no owner (address_names.rs:425-439, name_current/build.sql:618-641).
-//!
+//! Family address relations across NameWrapper grace and expiry boundaries, including
+//! effective controllers, token holders, registrants and locked or lineageless names.
 //! (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L843-L856 @ ens_v1@91c966f)
-#[path = "families_shadow_support/mod.rs"]
-mod shadow_support;
+#[path = "families_read_support/mod.rs"]
+mod read_support;
 #[path = "families_support/mod.rs"]
 mod support;
 
-use anyhow::{Result, ensure};
-use shadow_support::{
-    publish_and_compare,
+use anyhow::Result;
+use read_support::{
+    publish,
     wrapper::{
         CANNOT_UNWRAP, GRACE_PERIOD, HOLDER, IS_DOT_ETH, PARENT_CANNOT_CONTROL, timestamp, wrapped,
     },
@@ -45,47 +34,6 @@ async fn with_token_lineage(fixture: &Fixture, resource: &str) -> Result<()> {
         .execute(&fixture.pool)
         .await?;
     Ok(())
-}
-
-/// The holder's served relations, in rank order.
-async fn served_relations(fixture: &Fixture) -> Result<Vec<String>> {
-    Ok(sqlx::query_scalar(
-        "SELECT relation::text FROM address_names_current WHERE address = $1
-         ORDER BY CASE relation::text WHEN 'registrant' THEN 0 WHEN 'token_holder' THEN 1
-                  ELSE 2 END",
-    )
-    .bind(HOLDER)
-    .fetch_all(&fixture.pool)
-    .await?)
-}
-
-/// Publish `target`, compare every name, then every address page with the F13 reader.
-async fn publish_and_compare_addresses(fixture: &Fixture, target: i64) -> Result<Vec<String>> {
-    let names = publish_and_compare(fixture, target).await?;
-    shadow_support::assert_counts(&names, &[], &[]);
-    let report = bigname_storage::families::records::compare_family_reads(
-        &fixture.pool,
-        CHAIN,
-        Some((target, hash(target))),
-        1,
-    )
-    .await?;
-    eprintln!(
-        "F13_SHADOW target={target} address_name_addresses={} address_name_pages={} \
-         differences={:#?}",
-        report.address_name_addresses, report.address_name_pages, report.differences
-    );
-    ensure!(report.current(), "the families did not follow {target}");
-    ensure!(
-        report.differences.is_empty(),
-        "the family reads differ at {target}: {:#?}",
-        report.differences
-    );
-    ensure!(
-        report.listing_excused == 0,
-        "nothing is excused in a fixture: {report:?}"
-    );
-    served_relations(fixture).await
 }
 
 /// The effective controller across grace entry: the wrapper expiry is one grace period after
@@ -164,4 +112,15 @@ async fn a_locked_name_keeps_its_holder_and_a_lineageless_name_has_none() -> Res
         Vec::<String>::new()
     );
     fixture.cleanup().await
+}
+
+async fn publish_and_compare_addresses(fixture: &Fixture, target: i64) -> Result<Vec<String>> {
+    publish(fixture, target).await?;
+    Ok(
+        bigname_storage::load_address_names_current(&fixture.pool, HOLDER, None, None)
+            .await?
+            .into_iter()
+            .map(|row| row.relation.as_str().to_owned())
+            .collect(),
+    )
 }
