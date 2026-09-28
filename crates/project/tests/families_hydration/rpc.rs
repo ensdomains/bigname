@@ -53,6 +53,7 @@ impl Rpc {
     pub fn calls(&self) -> Vec<(String, usize)> {
         self.responses.calls.lock().unwrap().clone()
     }
+    #[allow(dead_code)] // The text integration binary shares this helper without its race hook.
     pub fn before_reply(&self, pool: &sqlx::PgPool, sql: &str) {
         *self.responses.before_reply.lock().unwrap() = Some((pool.clone(), sql.to_owned()));
     }
@@ -70,7 +71,7 @@ async fn respond(State(state): State<Responses>, Json(request): Json<Value>) -> 
         .unwrap()
         .to_owned();
     let data = request["params"][0]["data"].as_str().unwrap();
-    let count = data.matches("691f3431").count();
+    let count = data.matches("691f3431").count() + data.matches("59d1d43c").count();
     state.calls.lock().unwrap().push((hash.clone(), count));
     let hook = state.before_reply.lock().unwrap().take();
     if let Some((pool, statement)) = hook {

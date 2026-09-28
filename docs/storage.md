@@ -105,8 +105,11 @@ diagnostic input only until their contracted consumer activation. Current
 projections can be rebuilt from canonical consumer-visible identity and
 normalized events. Canonical-head
 [hydration](glossary.md#hydration) is execution-derived enrichment applied by
-Project to the documented record and primary-name surfaces after event-derived
-publication.
+Project to the documented record and primary-name surfaces. The served hydrator
+runs after event-derived publication; the family path applies prepared results
+inside follow-block publication and journals them with the event-derived rows.
+The [projection contract](projections.md) describes text and reverse hydration
+admission, invalidation, and replay behavior.
 
 ## Identity
 

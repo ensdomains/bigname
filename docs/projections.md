@@ -188,8 +188,25 @@ baseline immediately when a hydration block is orphaned, even before a retry
 runs. This text policy does not change the bounded refresh of event-silent
 reverse claims described below.
 
-Hydration uses the exact number and hash from `chain_heads`, revalidates that
-head in the publication transaction, and never calls provider `latest`.
+With family hydration configured, mainnet follow blocks prepare text reads from
+the post-reducer F6 record and partition rows and F3 resolver classification.
+The same four-resolver admission above applies. RPC runs outside the publication
+transaction at the exact block number and hash being published. The transaction
+rechecks the record event position, partition version, namehash, and classification
+before accepting a result. `project_node_record_value.hydrated_value` holds the
+outcome, value, block hash, and those selectors; `hydrated_at_block` holds its
+height. The event-derived columns remain the baseline. Successful empty results
+are `not_found`; failure or lost admission removes the overlay and the block
+still publishes. A later follow block retries missing values. Canonical results
+are retained until their selectors or readable lineage change, and readers
+reject a mismatched or orphaned overlay immediately. All overlay changes use the
+ordinary [family undo journal](glossary.md#family-undo-journal). Replay, rebuild,
+and rebuild ranges make no hydration calls; subsequent follow blocks repair
+their missing overlays. The served hydrator remains unchanged while the switch
+is off.
+
+The served hydrator uses the exact number and hash from `chain_heads`, revalidates
+that head in its publication transaction, and never calls provider `latest`.
 Failed calls restore the event-derived baseline and keep Project retryable. It
 does not write raw facts, identity rows, normalized events, reusable execution
 outcomes, or durable traces.

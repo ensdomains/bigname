@@ -174,6 +174,7 @@ pub(crate) fn entry(
             json!("value_not_retained_in_normalized_events"),
         );
     }
+    super::rows::text_hydration::apply(&mut entry, payload);
     Some(strip_nulls(Value::Object(entry)))
 }
 
