@@ -1,9 +1,16 @@
 # site
 
-The public face of the bigname API: a landing page (`index.html`) and the
-hand-written API reference (`docs/index.html`). It is a static site with no
+The public face of the bigname API: a landing page (`index.html`), the
+hand-written API reference (`docs/index.html`), the shared network switcher
+(`network.js`), and a not-found page (`404.html`). It is a static site with no
 build step, no package manager and no framework; the files here are the files
 that get served.
+
+`404.html` matters to the host: Cloudflare Pages serves it for any missing
+path. Without it, Pages treats the site as a single-page app and answers every
+unknown path (`/openapi.json`, say) with the landing page and `200`. It loads
+no script and links to `/` and `/docs/` by absolute path, because it can be
+served at any depth.
 
 The API binary does not serve these pages. The site is hosted on its own
 origin and talks to an API across origins, which the API allows (it answers

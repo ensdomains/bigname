@@ -17,7 +17,11 @@ fail() {
 
 pages=(site/index.html site/docs/index.html)
 
-for file in "${pages[@]}" site/network.js site/README.md; do
+# 404.html is what the host serves for any missing path; without it the host
+# answers every unknown path with the landing page and 200.
+not_found=site/404.html
+
+for file in "${pages[@]}" site/network.js site/README.md "$not_found"; do
   [ -f "$file" ] || fail "missing $file"
 done
 [ "$failures" -eq 0 ] || exit 1
@@ -41,9 +45,13 @@ if grep -rnE "fetch\(\s*['\"\`]/" site; then
 fi
 # Other ways to reach or name the page's own origin. Links between the pages
 # are relative (docs/, ../, #anchor) so the site works under any host.
-code_files=("${pages[@]}" site/network.js)
+# 404.html is exempt from the root-relative href ban only: it is served for
+# missing paths at any depth, so its links to / and /docs/ must be absolute.
+code_files=("${pages[@]}" site/network.js "$not_found")
+if grep -nF 'href="/' "${pages[@]}" site/network.js; then
+  fail "site code uses a root-relative href; link relatively (docs/, ../, #anchor)"
+fi
 for banned in \
-  'href="/' \
   'src="/' \
   'location.host' \
   'location.hostname' \
@@ -85,6 +93,14 @@ if [ -n "$unquoted_curl" ]; then
   printf '%s\n' "$unquoted_curl" >&2
   fail "a generated curl command interpolates a value without shq()"
 fi
+
+# The not-found page stands alone: no scripts loaded, no requests, and a way
+# back to the landing page and the docs.
+if grep -nE '<script src=|fetch\(' "$not_found"; then
+  fail "$not_found loads a script or makes a request"
+fi
+grep -qF 'href="/"' "$not_found" || fail "$not_found does not link to /"
+grep -qF 'href="/docs/"' "$not_found" || fail "$not_found does not link to /docs/"
 
 for page in "${pages[@]}"; do
   grep -qE '<script src="(\.\./)?network\.js"></script>' "$page" \
