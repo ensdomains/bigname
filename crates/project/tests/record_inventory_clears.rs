@@ -252,7 +252,7 @@ async fn seed(pool: &PgPool, fixture: &Value) -> Result<()> {
         .bind(format!("manifest:{case_id}")).bind(namespace).bind(source_family).bind(manifest_id).bind(chain).bind(json!({"rollout_status":"active","normalizer_version":"fixture","manifest_payload":payload})).execute(pool).await?;
     let first_block = fixture_blocks.first().context("fixture block")?;
     sqlx::query("INSERT INTO name_surfaces (logical_name_id,namespace,raw_name,raw_labels,dns_encoded_name,namehash,labelhashes,normalizer_version,visibility_state,chain_id,block_hash,block_number,canonicality_state) VALUES ($1,$2,$3,ARRAY[$3],decode('00','hex'),$4,ARRAY[$4],'fixture','active',$5,$6,$7,'canonical')")
-        .bind(&logical_name_id).bind(namespace).bind(format!("{case_id}.fixture")).bind(node).bind(chain).bind(&first_block.hash).bind(first_block.number).execute(pool).await?;
+        .bind(&logical_name_id).bind(namespace).bind(format!("{}.fixture", case_id.replace('_', "-"))).bind(node).bind(chain).bind(&first_block.hash).bind(first_block.number).execute(pool).await?;
     sqlx::query("INSERT INTO resources (resource_id,chain_id,block_hash,block_number,canonicality_state) VALUES ($1::uuid,$2,$3,$4,'canonical')")
         .bind(RESOURCE).bind(chain).bind(&first_block.hash).bind(first_block.number).execute(pool).await?;
     sqlx::query("INSERT INTO surface_bindings (surface_binding_id,logical_name_id,resource_id,binding_kind,authority_arm,active_from,chain_id,block_hash,block_number,canonicality_state) VALUES ($1::uuid,$2,$3::uuid,'declared_registry_path',$4,to_timestamp($5),$6,$7,$8,'canonical')")

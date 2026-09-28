@@ -849,13 +849,13 @@ async fn a_pair_across_attribution_arms_is_expected_as_today_serves_it() -> Resu
     let entry = |address: &str, event: i64| {
         json!({
             "address": address, "binding_kind": "DeclaredRegistryPath",
-            "canonical_display_name": format!("{}.fixture", fixture.id),
+            "canonical_display_name": format!("{}.fixture", fixture.id.replace('_', "-")),
             "canonicality_summary": {"state": "canonical_lineage"},
             "chain_positions": {"block_hash": block_hash(11), "block_number": 11},
             "coin_type": "60",
             "coverage": {"exhaustiveness": "not_asserted", "status": "projected"},
             "logical_name_id": logical_name_id, "namehash": NODE, "namespace": "ens",
-            "normalized_name": format!("{}.fixture", fixture.id),
+            "normalized_name": format!("{}.fixture", fixture.id.replace('_', "-")),
             "provenance": {
                 "chain_id": fixture.chain,
                 "coverage": {"exhaustiveness": "not_asserted", "status": "projected"},
@@ -1465,7 +1465,7 @@ async fn seed(pool: &PgPool, fixture: &Case) -> Result<()> {
     let name = if persistence {
         "zero.fixture".to_owned()
     } else {
-        format!("{}.fixture", fixture.id)
+        format!("{}.fixture", fixture.id.replace('_', "-"))
     };
     let dns = if persistence {
         b"\x04zero\x07fixture\0".as_slice()
