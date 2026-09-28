@@ -669,8 +669,7 @@ for migration_file in \
     "$ROOT/migrations/20260928223000_project_permission_candidate_indexes.sql" \
     "$ROOT/migrations/20260929120000_lookup_guard_family_marker.sql" \
     "$ROOT/migrations/20260929130000_lookup_family_inputs.sql" \
-    "$ROOT/migrations/20260929140000_named_resource_pointer.sql" \
-    "$ROOT/migrations/20260929150000_project_served_stop.sql"
+    "$ROOT/migrations/20260929140000_named_resource_pointer.sql"
 do
     emit_phase_migration "$migration_file" empty-schema | run_psql
 done
@@ -991,9 +990,7 @@ for migration_file in \
     "$ROOT/migrations/20260929120000_lookup_guard_family_marker.sql" \
     "$ROOT/migrations/20260929130000_lookup_family_inputs.sql" \
     "$ROOT/migrations/20260929140000_named_resource_pointer.sql" \
-    "$ROOT/migrations/20260929140000_named_resource_pointer.sql" \
-    "$ROOT/migrations/20260929150000_project_served_stop.sql" \
-    "$ROOT/migrations/20260929150000_project_served_stop.sql"
+    "$ROOT/migrations/20260929140000_named_resource_pointer.sql"
 do
     emit_phase_migration "$migration_file" baseline-first | run_psql
 done

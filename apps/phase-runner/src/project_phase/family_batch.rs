@@ -48,8 +48,6 @@ impl ProjectPhase {
                 ),
             ));
         }
-        // Before this batch can move the Project row past the served tables.
-        self.record_served_stop(chain_id).await?;
         let Some(available) = context.available_heads.as_ref() else {
             if let Some(range) = context.mode.range() {
                 return Err(RunnerError::new(

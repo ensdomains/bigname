@@ -44,8 +44,6 @@ const FAMILY_TABLES: &[&str] = &[
     "project_address_record_node_index",
     "project_address_record_id_index",
     "project_name_history",
-    // Not a family: the switch's served-table stop, created the same way (TYR-36 step 7b).
-    "project_served_stop",
 ];
 
 const BASELINE: &[&str] = &[

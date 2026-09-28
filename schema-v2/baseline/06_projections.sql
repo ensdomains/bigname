@@ -1158,19 +1158,6 @@ COMMENT ON COLUMN project_family_marker.project_redo_to IS
 COMMENT ON COLUMN project_family_marker.admission_manifests IS
     'This value is the key of the active manifest set the last block classified under: manifest_id:event_id of the latest SourceManifestUpdated event of every manifest the chain reads, at or below the block or with no block. A family run reads the manifest updates once, so an update written during a run applies from the next run; a block that sees another key classifies every stored resolver again. An update with no block applies to every block, so it is not tied to the block it was written at.';
 
-CREATE TABLE IF NOT EXISTS project_served_stop (
-    chain_id text NOT NULL,
-    block_number bigint,
-    PRIMARY KEY (chain_id),
-    CHECK (block_number IS NULL OR block_number >= 0)
-);
-COMMENT ON TABLE project_served_stop IS
-    'Project-owned record, per chain, that the publication switch ran Project (TYR-36 step 7b). The served engine does not run under the switch, so the served tables stop while the Project row follows the family marker. With the switch off, the phase runner and the API refuse a chain whose served tables stopped short of the Project row until a Project redo over the gap replays them and deletes the row. Step 7c removes the switch and this table.';
-COMMENT ON COLUMN project_served_stop.chain_id IS
-    'This value is the chain the switch ran Project on.';
-COMMENT ON COLUMN project_served_stop.block_number IS
-    'This value is the Project row''s block when the switch first ran Project, the last block the served tables applied; null when Project had applied no block.';
-
 CREATE TABLE IF NOT EXISTS project_family_undo (
     chain_id text NOT NULL,
     block_number bigint NOT NULL,

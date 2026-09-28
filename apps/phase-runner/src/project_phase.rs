@@ -12,7 +12,6 @@ use bigname_project::{
 use sqlx::PgPool;
 
 mod family_batch;
-mod served_stop;
 
 use crate::{
     error::{ErrorKind, RunnerError, RunnerResult},
@@ -73,8 +72,6 @@ pub struct ProjectPhase {
     /// With the publication switch on, each chain's family batch that spent its budget and
     /// answered `Continue`, which the next batch of the same run resumes.
     family_continuations: Arc<Mutex<BTreeMap<String, family_batch::Continuation>>>,
-    /// Chains whose served-table stop this process has recorded or checked (`served_stop`).
-    served_stop_settled: Arc<Mutex<served_stop::Settled>>,
 }
 
 impl ProjectPhase {
@@ -87,7 +84,6 @@ impl ProjectPhase {
             families: FamilySettings::default(),
             pending_families: Arc::default(),
             family_continuations: Arc::default(),
-            served_stop_settled: Arc::default(),
         }
     }
 
@@ -100,7 +96,6 @@ impl ProjectPhase {
             families: FamilySettings::default(),
             pending_families: Arc::default(),
             family_continuations: Arc::default(),
-            served_stop_settled: Arc::default(),
         }
     }
 
@@ -297,7 +292,6 @@ impl Phase for ProjectPhase {
             if bigname_storage::publication_source::serve_from_families() {
                 return self.run_family_batch(context).await;
             }
-            let served_stop = self.check_served_stop(&context).await?;
             if let Some(hydrator) = &self.hydrator {
                 hydrator
                     .require_rpc_configuration(&context.chain_id)
@@ -380,12 +374,6 @@ impl Phase for ProjectPhase {
                     });
                 }
             };
-            if let (Some(stop), RunMode::Redo(range), Some(head)) =
-                (served_stop, &context.mode, &redo_target)
-            {
-                self.clear_served_stop(&context, stop, *range, head.number)
-                    .await?;
-            }
             if let Some(feed) = &self.metrics_feed {
                 feed.project_batch(&context.chain_id, &outcome.write_summary);
             }

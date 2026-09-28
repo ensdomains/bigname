@@ -38,7 +38,6 @@ const EXPECTED_TABLES: &[&str] = &[
     "project_family_marker",
     "project_family_undo",
     "project_repair_record",
-    "project_served_stop",
     "project_name_state",
     "project_binding_candidate",
     "project_lifecycle_key_state",
