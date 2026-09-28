@@ -122,6 +122,15 @@ name = "Upgraded"
 fragment = "event Upgraded(address indexed implementation)"
 normalized_events = ["Upgraded"]
 
+# PublicResolverV2 composes ENS's ABIResolver profile and emits its standard ABI-change event.
+# (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/resolver/PublicResolverV2.sol:L26 @ ens_v2_sepolia_20260916@366de741)
+# (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/PublicResolverV2.json:L79 @ ens_v2_sepolia_20260916@366de741)
+[[abi.events]]
+name = "ABIChanged"
+fragment = "event ABIChanged(bytes32 indexed node, uint256 indexed contentType)"
+normalized_events = ["RecordChanged"]
+emitter_roles = ["public_resolver_v2"]
+
 # (upstream: .refs/ens_v2_sepolia_20260916/contracts/deployments/sepolia/PublicResolverV2.json:L98 @ ens_v2_sepolia_20260916@366de741)
 [[abi.events]]
 name = "AddrChanged"

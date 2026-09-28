@@ -387,7 +387,7 @@ pub(super) fn validate_manifest(
                 .any(|role| role == "public_resolver_v2")
             && !public_resolver_v2_signature(&event.signature)
         {
-            bail!("PublicResolverV2 admits only the five node record events");
+            bail!("PublicResolverV2 admits only its node record events");
         }
         if !supports_signature(&source.source_family, &event.signature) {
             bail!(
@@ -557,6 +557,7 @@ fn supports_signature(source_family: &str, signature: &str) -> bool {
                 | "NameUpdated(uint256,string)"
                 | "ABIUpdated(uint256,uint256)"
                 | "InterfaceUpdated(uint256,bytes4,address)"
+                | "ABIChanged(bytes32,uint256)"
                 | "AddrChanged(bytes32,address)"
                 | "AddressChanged(bytes32,uint256,bytes)"
                 | "TextChanged(bytes32,string,string,string)"

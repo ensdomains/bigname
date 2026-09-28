@@ -1219,14 +1219,13 @@ collection route carry neither header.
   - `inventory_not_authoritative`: the inventory row is `unsupported`, so it
     cannot speak for the resolver's storage.
   - `abi_observations_not_supported`: the selected resolver storage has no
-    ABI-change event that bigname admits. The declared direct
-    PublicResolverV2 classification (role `public_resolver_v2`) admits only
-    address, text, contenthash, and version events, and the Basenames
-    resolver manifests declare no
-    `ABIChanged`, so both answer this way even when their inventory is
-    supported and the other keys are served. Both contracts inherit ENS's
-    ABI resolver and do emit `ABIChanged` on chain; the gap is bigname's
-    admission, not the contracts.
+    ABI-change event that bigname admits. Every supported resolver
+    classification admits one under the same rules as its other record
+    events: node-keyed resolvers (ENSv1, Basenames, and the declared direct
+    PublicResolverV2) emit `ABIChanged`, and ENSv2 record-ID resolvers emit
+    `ABIUpdated`, so no current supported inventory answers this way; the
+    reason remains for a supported row whose captured provenance names no
+    chain or resolver.
     (upstream: .refs/ens_v2/contracts/src/resolver/PublicResolverV2.sol:L23-L26 @ ens_v2@a971bd64)
     (upstream: .refs/basenames/src/L2/L2Resolver.sol:L29-L31 @ basenames@1809bbc)
   - `abi_observations_stale`: a write the inventory selected is no longer

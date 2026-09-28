@@ -6,6 +6,9 @@ use uuid::Uuid;
 
 use super::*;
 
+#[path = "tests/abi_changed.rs"]
+mod abi_changed;
+
 #[path = "tests/lookahead.rs"]
 mod lookahead;
 mod migration;

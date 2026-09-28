@@ -171,6 +171,13 @@ pub const ROLE_INSENSITIVE_EVENTS: &[RoleInsensitiveEvent] = &[
     // Adapter: crates/adapters/src/schema_v2/protocol/v1/resolver.rs.
     RoleInsensitiveEvent {
         source_family: "basenames_base_resolver",
+        event: "ABIChanged",
+        justification: V1_RESOLVER_JUSTIFICATION,
+        adapter_file: V1_RESOLVER_ADAPTER,
+    },
+    // Adapter: crates/adapters/src/schema_v2/protocol/v1/resolver.rs.
+    RoleInsensitiveEvent {
+        source_family: "basenames_base_resolver",
         event: "AddrChanged",
         justification: V1_RESOLVER_JUSTIFICATION,
         adapter_file: V1_RESOLVER_ADAPTER,

@@ -40,6 +40,16 @@ proxy_kind = "none"
 # (upstream: .refs/basenames/src/L2/resolver/NameResolver.sol:L30 @ basenames@1809bbc)
 # (upstream: .refs/basenames/src/L2/resolver/TextResolver.sol:L33 @ basenames@1809bbc)
 # (upstream: .refs/basenames/src/L2/resolver/ResolverBase.sol:L38 @ basenames@1809bbc).
+# The admitted L2Resolver composes ENS's ABIResolver profile, which emits the standard
+# ABI-change event on every set and clear.
+# (upstream: .refs/basenames/src/L2/L2Resolver.sol:L4 @ basenames@1809bbc)
+# (upstream: .refs/basenames/lib/ens-contracts/contracts/resolvers/profiles/ABIResolver.sol:L27 @ basenames@1809bbc)
+# (upstream: .refs/basenames/lib/ens-contracts/contracts/resolvers/profiles/IABIResolver.sol:L5 @ basenames@1809bbc).
+[[abi.events]]
+name = "ABIChanged"
+fragment = "event ABIChanged(bytes32 indexed node, uint256 indexed contentType)"
+normalized_events = ["RecordChanged"]
+
 [[abi.events]]
 name = "AddrChanged"
 fragment = "event AddrChanged(bytes32 indexed node, address a)"

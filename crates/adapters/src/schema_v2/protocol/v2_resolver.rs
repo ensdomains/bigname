@@ -45,10 +45,15 @@ sol! {
     event ResolverCreated();
 }
 
+/// The node-keyed ENSv1 record events a directly declared PublicResolverV2 is decoded for. The
+/// contract composes the ENSv1 resolver profiles, so these are the same events and the same
+/// decoder as an ENSv1 resolver's
+/// (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/resolver/PublicResolverV2.sol:L23-L35 @ ens_v2_sepolia_20260916@366de741).
 pub(in crate::schema_v2) fn public_resolver_v2_signature(signature: &str) -> bool {
     matches!(
         signature,
-        "AddrChanged(bytes32,address)"
+        "ABIChanged(bytes32,uint256)"
+            | "AddrChanged(bytes32,address)"
             | "AddressChanged(bytes32,uint256,bytes)"
             | "TextChanged(bytes32,string,string,string)"
             | "ContenthashChanged(bytes32,bytes)"
@@ -63,7 +68,7 @@ pub(super) fn is_public_node_event(selected: &Selected) -> bool {
     ) {
         (
             "ens_v2_resolver_l1",
-            "AddrChanged" | "AddressChanged" | "TextChanged" | "ContenthashChanged"
+            "ABIChanged" | "AddrChanged" | "AddressChanged" | "TextChanged" | "ContenthashChanged"
             | "VersionChanged",
         ) => selected.emitter_role.as_deref() == Some("public_resolver_v2"),
         _ => false,
