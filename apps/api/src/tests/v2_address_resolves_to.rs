@@ -10,21 +10,8 @@ async fn v2_lookup_resolves_to_includes_root_pointer_without_authority() -> Resu
     let address = "0x0000000000000000000000000000000000000abc";
     seed_v2_lookup_reverse_fixture(&database, address).await?;
     seed_v2_lookup_resolves_to_records(&database, address).await?;
-    sqlx::query(r#"UPDATE name_current SET serving_resource_id = resource_id,
-        resource_id = NULL, surface_binding_id = NULL, binding_kind = NULL,
-        token_lineage_id = NULL, support_status = 'unsupported',
-        unsupported_reason = 'current_authority_not_projected',
-        declared_summary = declared_summary || '{"registration":{"status":null},"control":{"status":null}}'::jsonb,
-        provenance = (provenance - 'authority_selection') ||
-          '{"read_reachability":{"basis":"root_registry_resolver_pointer"}}'::jsonb
-        WHERE raw_name = 'alice.eth'"#)
-        .execute(&database.pool).await?;
-    sqlx::query(
-        "UPDATE address_records_current SET resource_id = NULL,
-        surface_binding_id = NULL, binding_kind = NULL WHERE raw_name = 'alice.eth'",
-    )
-    .execute(&database.pool)
-    .await?;
+    // The `eth` TLD is served through its ENSv2 root-registry resolver pointer alone.
+    seed_resolves_to_root_tld(&database, "eth", address).await?;
     for profile in ["feed", "detail"] {
         let request =
             json!({"profile":profile,"inputs":[{"address":address,"relation":"resolves_to"}]});
@@ -32,48 +19,29 @@ async fn v2_lookup_resolves_to_includes_root_pointer_without_authority() -> Resu
         let records = payload["data"][0]["records"]
             .as_array()
             .expect("root pointer records");
-        assert_eq!(names(records), vec!["alice.eth"], "{payload}");
-        assert_eq!(records[0]["relations"], json!(["resolves_to"]));
+        assert_eq!(names(records), vec!["alice.eth", "eth"], "{payload}");
+        assert_eq!(records[1]["relations"], json!(["resolves_to"]));
         for field in ["owner", "registration_id", "authority"] {
             assert!(
-                records[0].get(field).is_none_or(Value::is_null),
+                records[1].get(field).is_none_or(Value::is_null),
                 "{field}: {payload}"
             );
         }
     }
-    sqlx::query("UPDATE name_current SET unsupported_reason = 'resolver_not_projected' WHERE raw_name = 'alice.eth'")
-        .execute(&database.pool).await?;
-    let payload = v2_lookup_json(
-        &database,
-        json!({"profile":"detail","inputs":[{"address":address,"relation":"resolves_to"}]}),
-    )
-    .await?;
-    assert_eq!(
-        payload["data"][0]["records"],
-        json!([]),
-        "other unsupported states stay excluded"
-    );
     database.cleanup().await
 }
 
 #[tokio::test]
 async fn v2_resolves_to_pages_names_without_authority_or_registration() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    seed_v2_address_names_fixture(&database).await?;
-    seed_v2_resolves_to_records(&database).await?;
-    sqlx::query(
-        r#"UPDATE name_current SET serving_resource_id = resource_id,
-        resource_id = NULL, surface_binding_id = NULL, binding_kind = NULL,
-        token_lineage_id = NULL, declared_summary = declared_summary ||
-        '{"registration":{"status":"unregistered"},"control":{"status":"unregistered"}}'::jsonb,
-        provenance = provenance - 'authority_selection'
-        WHERE raw_name IN ('alpha.eth', 'gamma.eth')"#,
-    )
-    .execute(&database.pool)
-    .await?;
-    sqlx::query("UPDATE address_records_current SET resource_id = NULL,
-        surface_binding_id = NULL, binding_kind = NULL WHERE raw_name IN ('alpha.eth', 'gamma.eth')")
-        .execute(&database.pool).await?;
+    database
+        .seed_default_ens_snapshot_selector_position()
+        .await?;
+    seed_v2_address_name_identities(&database, &[]).await?;
+    // Registry nodes whose owner was cleared keep serving their retained resolver pointer.
+    for (name, seed) in [("alpha.eth", 0xa500), ("gamma.eth", 0xc500)] {
+        seed_resolves_to_ownerless_name(&database, name, seed).await?;
+    }
     for (dedupe, sort) in [
         ("name", "name"),
         ("registration", "name"),
@@ -118,13 +86,6 @@ async fn v2_get_address_names_resolves_to_filters_authority_before_pagination() 
     let database = TestDatabase::new_migrated().await?;
     seed_v2_address_names_fixture(&database).await?;
     seed_v2_resolves_to_records(&database).await?;
-    sqlx::query(
-        "UPDATE name_current SET provenance = provenance || \
-         '{\"authority_selection\": {\"authority_arm\": \"ens_v1\"}}'::jsonb",
-    )
-    .execute(&database.pool)
-    .await?;
-
     let empty = v2_address_names_payload_for_database(
         &database,
         &format!("/v1/addresses/{V2_ADDRESS}/names?relation=resolves_to&authority=ens_v2"),
@@ -132,13 +93,7 @@ async fn v2_get_address_names_resolves_to_filters_authority_before_pagination() 
     .await?;
     assert_eq!(empty["data"], json!([]));
 
-    sqlx::query(
-        "UPDATE name_current SET provenance = jsonb_set(\
-         provenance, '{authority_selection,authority_arm}', '\"ens_v2\"') \
-         WHERE raw_name = 'alpha.eth'",
-    )
-    .execute(&database.pool)
-    .await?;
+    bind_address_name_ens_v2(&database, "alpha.eth", 0xa200, false).await?;
     let filtered = v2_address_names_payload_for_database(
         &database,
         &format!(
@@ -160,15 +115,14 @@ async fn v2_get_address_names_resolves_to_filters_authority_before_pagination() 
 async fn v2_get_address_names_resolves_to_role_summary_includes_restrictions() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_address_names_fixture(&database).await?;
+    wrap_address_name(
+        &database,
+        "beta.eth",
+        0xb300,
+        Some(("emancipated", 65_536, 1_900_000_000)),
+    )
+    .await?;
     seed_v2_resolves_to_records(&database).await?;
-    let mut summary = permission_current_resource_summary(Uuid::from_u128(0xb100), Some("wrapper"));
-    summary.resource_restrictions = Some(json!({
-        "kind": "ens_v1_wrapper",
-        "wrapper_state": "emancipated",
-        "fuses": 65536,
-        "expiry_seconds": 1900000000
-    }));
-    upsert_phase_permissions_current_resource_summary(&database.pool, &summary).await?;
 
     let owned = v2_address_names_payload_for_database(
         &database,
@@ -216,10 +170,7 @@ async fn v2_get_address_names_resolves_to_lists_names_whose_addr_record_points_h
     );
     assert_eq!(rows[0]["is_primary"], json!(true));
     assert_eq!(rows[1]["is_primary"], json!(false));
-    assert_eq!(
-        rows[0]["owner"],
-        json!("0x00000000000000000000000000000000000000a1")
-    );
+    assert_eq!(rows[0]["owner"], json!(V2_PERMISSION_SUBJECT));
     assert_eq!(rows[0]["registration_status"], json!("active"));
     assert_eq!(rows[0]["expires_at"], json!("2027-01-02T00:00:00Z"));
     assert_eq!(payload["page"]["total_count"], Value::Null);
@@ -502,7 +453,10 @@ async fn v2_lookup_reverse_resolves_to_returns_records_with_resolution() -> Resu
             .iter()
             .all(|record| record.get("resolution").is_none())
     );
-    assert_eq!(any_records[0]["relations"], json!(["owner"]));
+    assert_eq!(
+        any_records[0]["relations"],
+        json!(["owner", "manager", "registrant"])
+    );
     assert!(payload["meta"]["as_of"].is_object());
 
     // Feed profile keeps the relation and resolution on the reduced record.
@@ -535,16 +489,11 @@ async fn v2_lookup_reverse_resolves_to_paginates_with_a_bound_cursor() -> Result
     seed_v2_lookup_reverse_fixture(&database, address).await?;
     seed_v2_lookup_resolves_to_records(&database, address).await?;
     // bob also resolves here on coin 60 so the page has two rows.
-    upsert_phase_address_records_current_row(
-        &database.pool,
-        address,
-        "ens",
+    write_lookup_resolves_to_records(
+        &database,
         "bob.eth",
-        Uuid::from_u128(0x5a0213),
-        Uuid::from_u128(0x5a0211),
-        "60",
-        "addr:60",
-        json!({}),
+        address,
+        &[family_fixture_record_write("addr:60", Some(json!(address)))],
     )
     .await?;
 
@@ -612,161 +561,317 @@ async fn v2_lookup_reverse_resolves_to_paginates_with_a_bound_cursor() -> Result
     Ok(())
 }
 
-/// Reverse-index rows for the `seed_v2_address_names_fixture` names: alpha and gamma resolve
+const V2_RESOLVES_TO_RESOLVER: &str = "0x0000000000000000000000000000000000000aaa";
+
+/// Records for the `seed_v2_address_names_fixture` names on one resolver: alpha and gamma resolve
 /// to the address for coin 60; beta for another EVM coin type only; shared-one through the
-/// ENSIP-19 default EVM address whose exact addr:60 clear shadows coin 60.
+/// ENSIP-19 default EVM address, whose cleared exact addr:60 shadows coin 60.
 async fn seed_v2_resolves_to_records(database: &TestDatabase) -> Result<()> {
+    write_address_name_records(
+        database,
+        &[
+            ("alpha.eth", vec![("addr:60".into(), V2_ADDRESS.into())]),
+            ("gamma.eth", vec![("addr:60".into(), V2_ADDRESS.into())]),
+            (
+                "beta.eth",
+                vec![("addr:2147483658".into(), V2_ADDRESS.into())],
+            ),
+            (
+                "shared-one.eth",
+                vec![
+                    ("addr:2147483648".into(), V2_ADDRESS.into()),
+                    (
+                        "addr:60".into(),
+                        "0x0000000000000000000000000000000000000000".into(),
+                    ),
+                ],
+            ),
+        ],
+    )
+    .await
+}
+
+/// Write records for fixture names on `V2_RESOLVES_TO_RESOLVER` at the head block and publish
+/// them. A name not yet pointing at that resolver gets the registry pointer from its current
+/// binding, which gives its registry owner resolver control.
+async fn write_address_name_records(
+    database: &TestDatabase,
+    names: &[(&str, Vec<(String, String)>)],
+) -> Result<()> {
     let specs = v2_address_name_specs();
-    let spec = |name: &str| {
-        specs
+    let (block, hash) = address_fixture_head(database).await?;
+    let mut events = Vec::new();
+    for (name, writes) in names {
+        let logical = bigname_storage::logical_name_id_for_name("ens", name);
+        let resource: Uuid = sqlx::query_scalar(
+            "SELECT resource_id FROM surface_bindings WHERE logical_name_id = $1 AND active_to IS NULL",
+        )
+        .bind(&logical)
+        .fetch_one(&database.pool)
+        .await?;
+        let pointed: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM normalized_events WHERE event_kind = 'ResolverChanged'
+             AND logical_name_id = $1 AND resource_id = $2 AND after_state ->> 'resolver' = $3)",
+        )
+        .bind(&logical)
+        .bind(resource)
+        .bind(V2_RESOLVES_TO_RESOLVER)
+        .fetch_one(&database.pool)
+        .await?;
+        if !pointed {
+            let node = bigname_lookup::ens_namehash_hex(name)?;
+            events.push(address_fixture_event(
+                &format!("resolves-to-pointer-{name}-{resource}"),
+                Some(&logical),
+                Some(resource),
+                "ResolverChanged",
+                "ens_v1_registry_l1",
+                block,
+                &hash,
+                NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed) as i64 + 100,
+                json!({"source_event":"NewResolver", "node":node, "resolver":V2_RESOLVES_TO_RESOLVER}),
+            ));
+            if let Some(spec) = specs.iter().find(|spec| spec.name == *name) {
+                let mut grant = address_owner_grant(
+                    spec,
+                    json!({"kind":"resolver", "chain_id":"ethereum-mainnet",
+                        "resolver_address":V2_RESOLVES_TO_RESOLVER}),
+                    "resolver_control",
+                    block,
+                    &hash,
+                )?;
+                grant.resource_id = Some(resource);
+                events.push(grant);
+            }
+        }
+        let writes = writes
             .iter()
-            .find(|spec| spec.name == name)
-            .unwrap_or_else(|| panic!("fixture must include {name}"))
-    };
-    for (name, coin_type, record_key, provenance_extra) in [
-        ("alpha.eth", "60", "addr:60", json!({})),
-        ("gamma.eth", "60", "addr:60", json!({})),
-        (
-            "beta.eth",
-            V2_RESOLVES_TO_OTHER_EVM_COIN,
-            "addr:2147483658",
-            json!({}),
-        ),
-        (
-            "shared-one.eth",
-            V2_ENSIP19_DEFAULT_COIN,
-            "addr:2147483648",
-            json!({"ensip19_default_address": true, "shadowed_coin_types": ["60"]}),
-        ),
-    ] {
-        let spec = spec(name);
-        upsert_phase_address_records_current_row(
+            .map(|(key, value)| family_fixture_record_write(key, Some(json!(value))))
+            .collect::<Vec<_>>();
+        insert_family_fixture_record_writes(
             &database.pool,
-            V2_ADDRESS,
             "ens",
-            spec.name,
-            spec.surface_binding_id,
-            spec.resource_id,
-            coin_type,
-            record_key,
-            provenance_extra,
+            "ethereum-mainnet",
+            name,
+            V2_RESOLVES_TO_RESOLVER,
+            block,
+            &hash,
+            &writes,
         )
         .await?;
     }
-    Ok(())
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &events).await?;
+    declare_resolves_to_default_address(database).await?;
+    rebuild_address_fixture(database).await
 }
 
-/// Reverse-index rows for the `seed_v2_lookup_reverse_fixture` names: alice on coin 60, bob on
-/// another EVM coin type.
-async fn seed_v2_lookup_resolves_to_records(database: &TestDatabase, address: &str) -> Result<()> {
-    upsert_phase_address_records_current_row(
-        &database.pool,
-        address,
-        "ens",
-        "alice.eth",
-        Uuid::from_u128(0x5a0203),
-        Uuid::from_u128(0x5a0201),
-        "60",
-        "addr:60",
-        json!({}),
+/// Declare the ENSIP-19 default-address read on `V2_RESOLVES_TO_RESOLVER`, as the mainnet
+/// ENSv1 resolver manifest does for the public resolvers.
+async fn declare_resolves_to_default_address(database: &TestDatabase) -> Result<()> {
+    let (manifest, mut payload): (i64, Value) = sqlx::query_as(
+        "SELECT manifest_id, manifest_payload FROM manifest_versions
+         WHERE source_family = 'ens_v1_resolver_l1' AND chain_id = 'ethereum-mainnet'
+           AND rollout_status = 'active'
+           AND manifest_payload -> 'contracts' @> jsonb_build_array(jsonb_build_object('address', $1::text))",
     )
+    .bind(V2_RESOLVES_TO_RESOLVER)
+    .fetch_one(&database.pool)
     .await?;
-    upsert_phase_address_records_current_row(
-        &database.pool,
-        address,
-        "ens",
-        "bob.eth",
-        Uuid::from_u128(0x5a0213),
-        Uuid::from_u128(0x5a0211),
-        V2_RESOLVES_TO_OTHER_EVM_COIN,
-        "addr:2147483658",
-        json!({}),
-    )
-    .await?;
-    Ok(())
-}
-
-/// Insert one `address_records_current` row the way Project publishes it: identity from the
-/// phase `name_current` row, target position from that row's publication, coverage projected.
-#[allow(clippy::too_many_arguments)]
-async fn upsert_phase_address_records_current_row(
-    pool: &PgPool,
-    address: &str,
-    namespace: &str,
-    name: &str,
-    surface_binding_id: Uuid,
-    resource_id: Uuid,
-    coin_type: &str,
-    record_key: &str,
-    provenance_extra: Value,
-) -> Result<()> {
-    let normalized_name = bigname_domain::normalization::normalize_name(name)
-        .map_err(|error| anyhow::anyhow!(error.message().to_owned()))?
-        .normalized_name;
-    let (logical_name_id, namehash) = phase_logical_identity(namespace, &normalized_name)?;
-    let chain_positions: Value = sqlx::query_scalar(
-        "SELECT chain_positions FROM bigname_phase.name_current WHERE logical_name_id = $1",
-    )
-    .bind(&logical_name_id)
-    .fetch_one(pool)
-    .await
-    .with_context(|| format!("phase name_current row for {logical_name_id} must exist"))?;
-    let chain_id = phase_projection_source_position(&chain_positions)?
-        .get("chain_id")
-        .and_then(Value::as_str)
-        .context("address_records_current fixture position must include chain_id")?
-        .to_owned();
-    let (target_block_number, target_block_hash) =
-        phase_projection_target_for_chain(pool, &chain_id, &chain_positions).await?;
-    let mut provenance = json!({
-        "chain_id": chain_id,
-        "logical_name_id": logical_name_id,
-        "coverage": {"status": "projected", "exhaustiveness": "not_asserted"},
-    });
-    if let (Some(base), Some(extra)) = (provenance.as_object_mut(), provenance_extra.as_object()) {
-        for (key, value) in extra {
-            base.insert(key.clone(), value.clone());
-        }
+    let contract = payload["contracts"]
+        .as_array_mut()
+        .and_then(|contracts| {
+            contracts
+                .iter_mut()
+                .find(|contract| contract["address"] == V2_RESOLVES_TO_RESOLVER)
+        })
+        .context("the fixture resolver must be declared")?;
+    if contract["read_features"] == json!(["ensip19_default_address"]) {
+        return Ok(());
     }
-    sqlx::query(
-        r#"
-        INSERT INTO bigname_phase.address_records_current (
-            address, coin_type, logical_name_id, namespace, raw_name, namehash,
-            surface_binding_id, resource_id, record_resource_id, binding_kind, record_key,
-            support_status, unsupported_reason, provenance, chain_positions,
-            canonicality_summary, manifest_version
-        )
-        VALUES (
-            $1, $2, $3, $4, $5, $6, $7, $8, $8, 'declared_registry_path', $9,
-            'supported', NULL, $10, $11, $12, 1
-        )
-        ON CONFLICT (address, coin_type, logical_name_id) DO UPDATE SET
-            record_key = EXCLUDED.record_key,
-            provenance = EXCLUDED.provenance,
-            chain_positions = EXCLUDED.chain_positions,
-            canonicality_summary = EXCLUDED.canonicality_summary
-        "#,
+    contract["read_features"] = json!(["ensip19_default_address"]);
+    sqlx::query("UPDATE manifest_versions SET manifest_payload = $2 WHERE manifest_id = $1")
+        .bind(manifest)
+        .bind(&payload)
+        .execute(&database.pool)
+        .await?;
+    seed_fixture_manifest_update(
+        &database.pool,
+        manifest,
+        "ethereum-mainnet",
+        "ens",
+        "ens_v1_resolver_l1",
+        &payload,
     )
-    .bind(address.to_ascii_lowercase())
-    .bind(coin_type)
-    .bind(&logical_name_id)
-    .bind(namespace)
-    .bind(&normalized_name)
-    .bind(namehash)
-    .bind(surface_binding_id)
-    .bind(resource_id)
-    .bind(record_key)
-    .bind(provenance)
-    .bind(phase_flat_projection_position(
-        target_block_number,
-        &target_block_hash,
-    ))
-    .bind(json!({
-        "state": "canonical_lineage",
-        "target_block_number": target_block_number,
-        "target_block_hash": target_block_hash,
-    }))
-    .execute(pool)
+    .await
+}
+
+/// Record writes for the `seed_v2_lookup_reverse_fixture` names, whose resolver is the address
+/// itself, published at the Ethereum head.
+async fn write_lookup_resolves_to_records(
+    database: &TestDatabase,
+    name: &str,
+    resolver: &str,
+    writes: &[Value],
+) -> Result<()> {
+    let (block, hash): (i64, String) = sqlx::query_as(
+        "SELECT latest_block_number, latest_block_hash FROM chain_heads WHERE chain_id = 'ethereum-mainnet'",
+    )
+    .fetch_one(&database.pool)
     .await?;
-    Ok(())
+    insert_family_fixture_record_writes(
+        &database.pool,
+        "ens",
+        "ethereum-mainnet",
+        name,
+        resolver,
+        block,
+        &hash,
+        writes,
+    )
+    .await?;
+    rebuild_fixture_families(&database.pool, "ethereum-mainnet", block, &hash).await
+}
+
+/// The lookup fixture's names both resolve to the address on coin 60. Keep that for alice and
+/// move bob to another EVM coin type.
+async fn seed_v2_lookup_resolves_to_records(database: &TestDatabase, address: &str) -> Result<()> {
+    write_lookup_resolves_to_records(
+        database,
+        "bob.eth",
+        address,
+        &[
+            family_fixture_record_write("addr:60", Some(json!("0x"))),
+            family_fixture_record_write(
+                &format!("addr:{V2_RESOLVES_TO_OTHER_EVM_COIN}"),
+                Some(json!(address)),
+            ),
+        ],
+    )
+    .await
+}
+
+/// A root-registry TLD with a resolver pointer and no registration binding, whose addr:60 is
+/// `address` on the resolver at `address`.
+async fn seed_resolves_to_root_tld(
+    database: &TestDatabase,
+    name: &str,
+    address: &str,
+) -> Result<()> {
+    let (block, hash): (i64, String) = sqlx::query_as(
+        "SELECT latest_block_number, latest_block_hash FROM chain_heads WHERE chain_id = 'ethereum-mainnet'",
+    )
+    .fetch_one(&database.pool)
+    .await?;
+    let (resource, binding) = (Uuid::from_u128(0x7d0100), Uuid::from_u128(0x7d0102));
+    let logical = seed_family_identity_inputs(
+        &database.pool,
+        "ens",
+        name,
+        "ethereum-mainnet",
+        block,
+        &hash,
+        resource,
+        Uuid::from_u128(0x7d0101),
+        binding,
+        "ens_v2",
+    )
+    .await?;
+    sqlx::query("DELETE FROM surface_bindings WHERE surface_binding_id = $1")
+        .bind(binding)
+        .execute(&database.pool)
+        .await?;
+    let pointer = address_fixture_event(
+        &format!("resolves-to-root-pointer-{name}"),
+        Some(&logical),
+        Some(resource),
+        "ResolverChanged",
+        "ens_v2_root_l1",
+        block,
+        &hash,
+        NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed) as i64 + 100,
+        json!({"node":bigname_lookup::ens_namehash_hex(name)?, "resolver":address}),
+    );
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[pointer]).await?;
+    write_lookup_resolves_to_records(
+        database,
+        name,
+        address,
+        &[family_fixture_record_write("addr:60", Some(json!(address)))],
+    )
+    .await
+}
+
+/// A registry-only node whose owner was set to zero: no token lineage and no binding, served
+/// through its retained resolver pointer, whose addr:60 is `V2_ADDRESS`.
+async fn seed_resolves_to_ownerless_name(
+    database: &TestDatabase,
+    name: &str,
+    seed: u128,
+) -> Result<()> {
+    let (block, hash) = address_fixture_head(database).await?;
+    let (resource, binding) = (Uuid::from_u128(seed), Uuid::from_u128(seed + 2));
+    let logical = seed_family_identity_inputs(
+        &database.pool,
+        "ens",
+        name,
+        "ethereum-mainnet",
+        block,
+        &hash,
+        resource,
+        Uuid::from_u128(seed + 1),
+        binding,
+        "ens_v1",
+    )
+    .await?;
+    sqlx::query("DELETE FROM surface_bindings WHERE surface_binding_id = $1")
+        .bind(binding)
+        .execute(&database.pool)
+        .await?;
+    sqlx::query("UPDATE resources SET token_lineage_id = NULL WHERE resource_id = $1")
+        .bind(resource)
+        .execute(&database.pool)
+        .await?;
+    let node = bigname_lookup::ens_namehash_hex(name)?;
+    let zero = "0x0000000000000000000000000000000000000000";
+    let ordinal = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed) as i64 + 100;
+    let events = [
+        address_fixture_event(
+            &format!("resolves-to-ownerless-owner-{name}"),
+            Some(&logical),
+            Some(resource),
+            "AuthorityTransferred",
+            "ens_v1_registry_l1",
+            block,
+            &hash,
+            ordinal,
+            json!({"node":node, "source_event":"Transfer", "owner":zero, "owner_getter":zero}),
+        ),
+        address_fixture_event(
+            &format!("resolves-to-ownerless-pointer-{name}"),
+            Some(&logical),
+            Some(resource),
+            "ResolverChanged",
+            "ens_v1_registry_l1",
+            block,
+            &hash,
+            ordinal + 1,
+            json!({"node":node, "resolver":V2_RESOLVES_TO_RESOLVER}),
+        ),
+    ];
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &events).await?;
+    insert_family_fixture_record_writes(
+        &database.pool,
+        "ens",
+        "ethereum-mainnet",
+        name,
+        V2_RESOLVES_TO_RESOLVER,
+        block,
+        &hash,
+        &[family_fixture_record_write(
+            "addr:60",
+            Some(json!(V2_ADDRESS)),
+        )],
+    )
+    .await?;
+    rebuild_address_fixture(database).await
 }
