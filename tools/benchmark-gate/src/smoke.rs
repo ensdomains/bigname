@@ -4,9 +4,6 @@ use anyhow::{Context, Result, ensure};
 use bigname_interpret::{
     BatchRequest as InterpretRequest, Engine as InterpretEngine, RunMode as InterpretMode,
 };
-use bigname_project::{
-    BatchRequest as ProjectRequest, Engine as ProjectEngine, RunMode as ProjectMode,
-};
 use bigname_test_support::{TestDatabase, TestDatabaseConfig, database_url_from_env};
 use serde::Serialize;
 use sqlx::{
@@ -70,7 +67,6 @@ async fn run_in_scratch(
     let writer = smoke_writer_pool(scratch_url).await?;
     fixture::seed(&writer).await?;
     prepare_existing_projection(&writer).await?;
-    fixture::seed_publication_state(&writer).await?;
 
     let indexing = indexing::run(
         &writer,
@@ -84,7 +80,6 @@ async fn run_in_scratch(
         budgets,
     )
     .await?;
-    fixture::normalize_serving_timestamps(&writer).await?;
 
     let (api_addr, metrics_addr) = reserve_addresses().await?;
     let mut api = spawn_api(api_binary, scratch_url, &api_addr, &metrics_addr)?;
@@ -121,21 +116,28 @@ async fn prepare_existing_projection(pool: &PgPool) -> Result<()> {
         }
         resume_current = Some(outcome.current);
     }
-    let project = ProjectEngine::new(pool.clone())
-        .run_batch(ProjectRequest {
-            chain_id: CHAIN.to_owned(),
-            target_block: HEAD,
-            affected_from_block: 0,
-            affected_to_block: HEAD,
-            resume_current: None,
-            mode: ProjectMode::Normal,
-        })
-        .await
-        .context("failed to prepare smoke projection rows")?;
-    ensure!(
-        project.complete,
-        "smoke projection preparation did not complete"
+    fixture::seed_publication_state(pool).await?;
+    let target = bigname_project::Marker {
+        number: HEAD,
+        hash: fixture::block_hash(HEAD),
+    };
+    let options = bigname_project::families::FamilyOptions::new(
+        bigname_content_hash::INTERPRETER_CONTENT_HASH,
     );
+    let mut mode = bigname_project::families::FamilyMode::Rebuild;
+    loop {
+        let token = bigname_project::families::input_token(pool, CHAIN).await?;
+        let outcome =
+            bigname_project::families::apply(pool, CHAIN, &target, mode, &token, &options).await?;
+        if outcome.marker.as_ref() == Some(&target) {
+            break;
+        }
+        ensure!(
+            outcome.budget_exhausted && outcome.blocks > 0,
+            "smoke family rebuild made no progress"
+        );
+        mode = bigname_project::families::FamilyMode::Normal;
+    }
     Ok(())
 }
 
@@ -255,6 +257,66 @@ mod tests {
     use crate::budgets::{BudgetProfile, BudgetsFile};
 
     #[tokio::test]
+    async fn family_project_replay_rebuild_and_scale_use_current_publications() -> Result<()> {
+        let scratch =
+            TestDatabase::create(TestDatabaseConfig::new("benchmark_family_project")).await?;
+        let url = scratch_database_url(scratch.database_name())?;
+        initialize_schema_v2(scratch.pool()).await?;
+        let writer = smoke_writer_pool(&url).await?;
+        fixture::seed(&writer).await?;
+        prepare_existing_projection(&writer).await?;
+        let input = IndexingInput {
+            chain_id: CHAIN.into(),
+            head_block: HEAD,
+            walk_from_block: 1,
+            walk_to_block: HEAD,
+            hydration_rpc_urls: Some(bigname_lookup::ChainRpcUrls::from_entries(&[format!(
+                "{CHAIN}=http://127.0.0.1:1"
+            )])?),
+        };
+        let count = indexing::publication::projection_name_count(&writer, CHAIN).await?;
+        assert!(count > 0);
+        assert_eq!(
+            indexing::publication::projection_name_count(&writer, "base-mainnet").await?,
+            0
+        );
+        let mut sequence: i64 =
+            sqlx::query_scalar("SELECT sequence FROM project_family_marker WHERE chain_id=$1")
+                .bind(CHAIN)
+                .fetch_one(&writer)
+                .await?;
+        for from in [HEAD, HEAD, 0] {
+            assert_eq!(indexing::project::replay(&writer, &input, from).await?, 0);
+            let next: i64 =
+                sqlx::query_scalar("SELECT sequence FROM project_family_marker WHERE chain_id=$1")
+                    .bind(CHAIN)
+                    .fetch_one(&writer)
+                    .await?;
+            assert!(
+                next > sequence,
+                "every invocation must actually publish, including repeated same-head redo"
+            );
+            sequence = next;
+            indexing::publication::require_published_head(&writer, CHAIN, HEAD).await?;
+            assert_eq!(
+                indexing::publication::projection_name_count(&writer, CHAIN).await?,
+                count
+            );
+        }
+        sqlx::query("UPDATE name_surfaces SET canonicality_state='orphaned'")
+            .execute(&writer)
+            .await?;
+        assert_eq!(
+            indexing::publication::projection_name_count(&writer, CHAIN).await?,
+            0,
+            "unreadable identity must not satisfy the scale floor"
+        );
+        writer.close().await;
+        scratch.cleanup().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn fixture_projects_admitted_resolver_and_bound_names() {
         let scratch = TestDatabase::create(TestDatabaseConfig::new("benchmark_resolver_fixture"))
             .await
@@ -264,7 +326,6 @@ mod tests {
         let writer = smoke_writer_pool(&scratch_url).await.unwrap();
         fixture::seed(&writer).await.unwrap();
         prepare_existing_projection(&writer).await.unwrap();
-        fixture::seed_publication_state(&writer).await.unwrap();
         let budgets = BudgetsFile::load(
             &Path::new(env!("CARGO_MANIFEST_DIR")).join("../../benchmarks/release-gate.toml"),
         )
@@ -284,7 +345,7 @@ mod tests {
         .unwrap();
 
         let resolver_rows: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM resolver_current
+            "SELECT count(*) FROM project_resolver_classification
              WHERE chain_id = $1 AND resolver_address = lower($2)",
         )
         .bind(CHAIN)
@@ -292,14 +353,20 @@ mod tests {
         .fetch_one(&writer)
         .await
         .unwrap();
-        let bound_names: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM name_current
-             WHERE lower(declared_summary #>> '{resolver,address}') = lower($1)",
+        let ids: Vec<String> = sqlx::query_scalar(
+            "SELECT logical_name_id FROM name_surfaces ORDER BY logical_name_id",
         )
-        .bind(fixture::RESOLVER)
-        .fetch_one(&writer)
+        .fetch_all(&writer)
         .await
         .unwrap();
+        let names =
+            bigname_storage::families::name::load_family_names_by_logical_name_ids(&writer, &ids)
+                .await
+                .unwrap();
+        let bound_names = names
+            .values()
+            .filter(|name| name.declared_summary["resolver"]["address"] == fixture::RESOLVER)
+            .count();
         let resolver_bindings: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM normalized_events event
              JOIN surface_bindings binding
@@ -310,15 +377,13 @@ mod tests {
         .fetch_one(&writer)
         .await
         .unwrap();
-        let projected_children: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM children_current child
-             JOIN name_current parent
-               ON parent.logical_name_id = child.parent_logical_name_id
-             WHERE parent.namespace = 'ens' AND parent.raw_name <> ''",
-        )
-        .fetch_one(&writer)
-        .await
-        .unwrap();
+        let projected_children: u64 =
+            bigname_storage::families::topology::count_children_shadow(&writer, &ids)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|(_, count)| count)
+                .sum();
         let manifest_events: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM normalized_events
              WHERE event_kind = 'SourceManifestUpdated'",
@@ -326,16 +391,15 @@ mod tests {
         .fetch_one(&writer)
         .await
         .unwrap();
-        let corpus_resolver_rows: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM (
-                 SELECT declared_summary FROM name_current
-                 ORDER BY logical_name_id LIMIT 8
-             ) corpus
-             WHERE corpus.declared_summary #>> '{resolver,address}' IS NOT NULL",
-        )
-        .fetch_one(&writer)
-        .await
-        .unwrap();
+        let corpus_resolver_rows = names
+            .values()
+            .take(8)
+            .filter(|name| {
+                name.declared_summary["resolver"]["address"]
+                    .as_str()
+                    .is_some()
+            })
+            .count();
         assert_eq!(manifest_events, 3, "all fixture sources must be admitted");
         assert!(
             resolver_bindings >= HEAD,
@@ -347,7 +411,7 @@ mod tests {
         );
         assert!(bound_names > 1, "Project must publish pageable bound names");
         assert!(
-            projected_children >= HEAD,
+            projected_children >= HEAD as u64,
             "Project must publish every admitted registry child"
         );
         assert_eq!(

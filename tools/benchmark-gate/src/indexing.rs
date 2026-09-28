@@ -13,17 +13,14 @@ use bigname_interpret::{
     RunMode as InterpretMode,
 };
 use bigname_lookup::ChainRpcUrls;
-use bigname_project::{
-    BatchRequest as ProjectRequest, Engine as ProjectEngine, Marker as ProjectMarker,
-    RunMode as ProjectMode,
-};
 use serde::Serialize;
 use sqlx::PgPool;
 
 use crate::{budgets::GateBudgets, database};
 
 mod deadline;
-mod publication;
+pub(crate) mod project;
+pub(crate) mod publication;
 mod report;
 mod verdict;
 use deadline::{InterpretWalkMetrics, InterpretWalkOutcome};
@@ -31,7 +28,6 @@ use publication::projection_name_count;
 use report::{head_reapply_failure_report, scale_failure_report, walk_failure_report};
 use verdict::{database_instance_identity_failures, projection_scale_failures};
 
-const PROJECTION_NAME_COUNT_SQL: &str = "SELECT count(*) FROM name_current WHERE provenance ->> 'chain_id' = $1 AND support_status = 'supported'";
 const PROC_SELF_STATUS: &str = "/proc/self/status";
 const PROC_SELF_CLEAR_REFS: &str = "/proc/self/clear_refs";
 static HWM_RESET_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -123,16 +119,15 @@ pub async fn run(
     .context("failed to count dense-era raw logs")?;
     let density = raw_logs as f64 * 1_000.0 / walk_blocks as f64;
 
-    // This re-applies the published head; a true head-1 rewind needs Project capability
-    // tracked by https://github.com/ensdomains/bigname/issues/467.
+    // Replay the published head through the real runner redo transition. This measures
+    // journal undo/replay; live-follow hydration remains a separate acceptance check.
     let reapply_from = input.head_block;
-    let resume = publication::project_marker(pool, &input.chain_id, reapply_from - 1).await?;
     let reapply_started = Instant::now();
     let head_reapply_timeout =
         Duration::from_millis(budgets.project_head_reapply_max_ms.saturating_mul(2));
     let project_head_reapply_result = tokio::time::timeout(
         head_reapply_timeout,
-        run_project_head_reapply(pool, input, reapply_from, resume),
+        project::replay(pool, input, reapply_from),
     )
     .await;
     let project_head_reapply_elapsed = reapply_started.elapsed();
@@ -200,7 +195,7 @@ pub async fn run(
     let rebuild_started = Instant::now();
     let rebuild_result = tokio::time::timeout(
         Duration::from_secs(budgets.project_rebuild_max_seconds),
-        run_full_project_rebuild(pool, input),
+        project::replay(pool, input, 0),
     )
     .await;
     let project_rebuild_seconds = rebuild_started.elapsed().as_secs_f64();
@@ -294,70 +289,6 @@ pub async fn run(
         green: failures.is_empty(),
         failures,
     })
-}
-
-async fn run_project_head_reapply(
-    pool: &PgPool,
-    input: &IndexingInput,
-    reapply_from: i64,
-    resume: ProjectMarker,
-) -> Result<usize> {
-    let outcome = ProjectEngine::new(pool.clone())
-        .run_batch(ProjectRequest {
-            chain_id: input.chain_id.clone(),
-            target_block: input.head_block,
-            affected_from_block: reapply_from,
-            affected_to_block: input.head_block,
-            resume_current: Some(resume),
-            mode: ProjectMode::Normal,
-        })
-        .await
-        .context("published-head projection re-apply failed")?;
-    ensure!(outcome.complete, "published-head re-apply did not complete");
-    hydrate_project_head(pool, input, &outcome.current).await
-}
-
-async fn run_full_project_rebuild(pool: &PgPool, input: &IndexingInput) -> Result<usize> {
-    let rebuild = ProjectEngine::new(pool.clone())
-        .run_batch(ProjectRequest {
-            chain_id: input.chain_id.clone(),
-            target_block: input.head_block,
-            affected_from_block: 0,
-            affected_to_block: input.head_block,
-            resume_current: None,
-            mode: ProjectMode::Normal,
-        })
-        .await
-        .context("full projection rebuild failed")?;
-    ensure!(rebuild.complete, "full projection rebuild did not complete");
-
-    hydrate_project_head(pool, input, &rebuild.current).await
-}
-
-async fn hydrate_project_head(
-    pool: &PgPool,
-    input: &IndexingInput,
-    head: &ProjectMarker,
-) -> Result<usize> {
-    let Some(rpc_urls) = &input.hydration_rpc_urls else {
-        return Ok(0);
-    };
-    let hydrator = bigname_project::Hydrator::new(pool.clone(), rpc_urls.clone());
-    hydrator.require_rpc_configuration(&input.chain_id)?;
-    let hydration = hydrator
-        .hydrate_if_canonical_head(&input.chain_id, head)
-        .await
-        .context("canonical-head projection hydration failed")?
-        .context("selected rebuild head is not the current canonical head")?;
-    require_completed_hydration(hydration)
-}
-
-fn require_completed_hydration(hydration: bigname_project::HydrationOutcome) -> Result<usize> {
-    ensure!(
-        !hydration.deferred_for_redo,
-        "canonical-head projection hydration was deferred for an Interpret redo"
-    );
-    Ok(hydration.updated_rows)
 }
 
 async fn run_interpret_walk(
@@ -522,7 +453,6 @@ mod publication_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bigname_test_support::{TestDatabase, TestDatabaseConfig};
 
     #[test]
     fn parses_kernel_high_water_mark_from_proc_status() {
@@ -619,21 +549,6 @@ mod tests {
     }
 
     #[test]
-    fn hydration_deferred_for_redo_cannot_count_as_complete() {
-        let deferred = bigname_project::HydrationOutcome {
-            head: ProjectMarker {
-                number: 16,
-                hash: "block-16".to_owned(),
-            },
-            deferred_for_redo: true,
-            reverse_candidates: 0,
-            text_candidates: 0,
-            updated_rows: 0,
-        };
-        assert!(require_completed_hydration(deferred).is_err());
-    }
-
-    #[test]
     fn undersized_projection_returns_a_red_preflight_report() {
         let budgets = crate::budgets::BudgetsFile::load(
             &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -664,52 +579,6 @@ mod tests {
     #[test]
     fn rebuild_that_drops_projection_scale_is_red() {
         assert!(!projection_scale_failures(3_500_000, 2_900_000, 3_000_000).is_empty());
-    }
-
-    #[test]
-    fn projection_scale_uses_selected_project_ownership() {
-        assert!(PROJECTION_NAME_COUNT_SQL.contains("provenance ->> 'chain_id' = $1"));
-        assert!(PROJECTION_NAME_COUNT_SQL.contains("support_status = 'supported'"));
-    }
-
-    #[tokio::test]
-    async fn unsupported_projection_rows_do_not_satisfy_the_scale_floor() {
-        let database = TestDatabase::create(TestDatabaseConfig::new(
-            "benchmark_supported_projection_scale",
-        ))
-        .await
-        .unwrap();
-        sqlx::query(
-            "CREATE TABLE name_current (
-                 provenance jsonb NOT NULL,
-                 support_status text NOT NULL
-             )",
-        )
-        .execute(database.pool())
-        .await
-        .unwrap();
-        sqlx::query(
-            "INSERT INTO name_current
-             SELECT jsonb_build_object('chain_id', 'ethereum-mainnet'), 'unsupported'
-             FROM generate_series(1, 8)",
-        )
-        .execute(database.pool())
-        .await
-        .unwrap();
-        sqlx::query(
-            "INSERT INTO name_current VALUES
-                 (jsonb_build_object('chain_id', 'ethereum-mainnet'), 'supported')",
-        )
-        .execute(database.pool())
-        .await
-        .unwrap();
-
-        let count = projection_name_count(database.pool(), "ethereum-mainnet")
-            .await
-            .unwrap();
-
-        database.cleanup().await.unwrap();
-        assert_eq!(count, 1);
     }
 
     #[test]
