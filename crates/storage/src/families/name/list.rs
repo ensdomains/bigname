@@ -113,7 +113,12 @@ pub async fn load_family_search_page(
             NameCurrentListCursorValue::Name(name) => name.clone(),
             NameCurrentListCursorValue::Timestamp(_) => cursor.normalized_name.clone(),
         };
-        (name, cursor.namespace.clone(), cursor.namehash.clone())
+        (
+            name,
+            cursor.namespace.clone(),
+            cursor.normalized_name.clone(),
+            cursor.namehash.clone(),
+        )
     });
     let mut snapshot = batch::read_snapshot(pool).await?;
     let mut gathered = Gathered::default();
@@ -123,7 +128,12 @@ pub async fn load_family_search_page(
         after = candidates
             .last()
             .map(|(_, name, namespace, namehash)| {
-                (name.clone(), namespace.clone(), namehash.clone())
+                (
+                    name.clone(),
+                    namespace.clone(),
+                    name.clone(),
+                    namehash.clone(),
+                )
             })
             .or(after);
         gathered
@@ -154,7 +164,7 @@ pub async fn load_family_search_page(
 async fn search_candidates(
     conn: &mut PgConnection,
     filter: &NameCurrentListFilter,
-    after: Option<&(String, String, String)>,
+    after: Option<&(String, String, String, String)>,
     limit: usize,
 ) -> Result<Vec<(String, String, String, String)>> {
     let namespaces: Option<Vec<String>> = match (&filter.namespaces, &filter.namespace) {
@@ -193,15 +203,16 @@ async fn search_candidates(
            AND ($3::text IS NULL OR surface.raw_name LIKE $3 ESCAPE '\')
            AND ($4::text IS NULL
                 OR (surface.raw_name, surface.namespace, surface.raw_name, surface.namehash)
-                   > ($4, $5, $4, $6))
+                   > ($4, $5, $6, $7))
          ORDER BY surface.raw_name ASC, surface.namespace ASC, surface.namehash ASC
-         LIMIT $7",
+         LIMIT $8",
     )
     .bind(namespaces)
     .bind(filter.name.as_deref())
     .bind(like)
     .bind(after.map(|(name, ..)| name.as_str()))
-    .bind(after.map(|(_, namespace, _)| namespace.as_str()))
+    .bind(after.map(|(_, namespace, ..)| namespace.as_str()))
+    .bind(after.map(|(_, _, normalized, _)| normalized.as_str()))
     .bind(after.map(|(.., namehash)| namehash.as_str()))
     .bind(i64::try_from(limit).context("search batch exceeds i64")?)
     .fetch_all(conn)
