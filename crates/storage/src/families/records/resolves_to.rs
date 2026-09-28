@@ -18,7 +18,7 @@ use std::collections::BTreeSet;
 
 use bigname_domain::resolver_read::ensip19_default_fallback_target;
 use serde_json::{Value, json};
-use sqlx::Row;
+
 use uuid::Uuid;
 
 use super::{inventory::FamilyRecordInventory, payload::strip_nulls};

@@ -82,7 +82,7 @@ pub(super) fn registrant(
     in_scope: &[&Tagged<'_>],
     is_v2: bool,
     selected_key: Option<&str>,
-) -> Option<String> {
+) -> Option<(String, super::Position)> {
     let selection = authority.selection;
     let handoff = authority.registry_only_binding().filter(|_| {
         selection.unsupported_reason.is_none()
@@ -167,7 +167,7 @@ pub(super) fn registrant(
                 && value(tagged.event).is_some()
         });
     latest(order, candidates, |tagged| &tagged.event.position)
-        .and_then(|tagged| value(tagged.event))
+        .and_then(|tagged| value(tagged.event).map(|value| (value, tagged.event.position.clone())))
 }
 
 /// The authority kind and key the registration serves (build.sql:411-438).

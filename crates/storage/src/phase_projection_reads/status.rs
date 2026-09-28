@@ -25,16 +25,6 @@ pub async fn load_phase_expected_status_chain_ids(pool: &PgPool) -> Result<Vec<S
 /// Whether the served publication belongs to this build's interpreter generation and sits at or
 /// just behind the stored head (at the head only on the head's own hash): the Project row's
 /// position, with the [publication switch](crate::publication_source) off.
-const PROJECT_ROW_GENERATION_CURRENT: &str = r#"            COALESCE(
-                project.input_content_hash = $1
-                AND project.current_block_number <= head.latest_block_number
-                AND (
-                    project.current_block_number < head.latest_block_number
-                    OR project.current_block_hash = head.latest_block_hash
-                ),
-                false
-            ) AS project_generation_current,
-"#;
 
 /// With the switch on, the serving fence's own rule for the family marker
 /// (`load_served_project_generation`): `live`, this build's interpreter hash, its block and hash

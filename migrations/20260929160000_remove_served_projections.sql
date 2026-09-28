@@ -508,3 +508,19 @@ $$;
     $definition$;
 END
 $migration$;
+
+-- Owned-family undo replaces the old rebuild state; retained history is not dropped.
+DROP TABLE IF EXISTS bigname_phase.name_current;
+DROP TABLE IF EXISTS bigname_phase.children_current;
+DROP TABLE IF EXISTS bigname_phase.permissions_current;
+DROP TABLE IF EXISTS bigname_phase.account_permission_state_current;
+DROP TABLE IF EXISTS bigname_phase.permissions_current_resource_summary;
+DROP TABLE IF EXISTS bigname_phase.record_inventory_current;
+DROP TABLE IF EXISTS bigname_phase.resolver_current;
+DROP TABLE IF EXISTS bigname_phase.address_names_current;
+DROP TABLE IF EXISTS bigname_phase.address_records_current;
+DROP TABLE IF EXISTS bigname_phase.primary_names_current;
+DROP TABLE IF EXISTS bigname_phase.project_generation_failures;
+DROP TABLE IF EXISTS bigname_phase.project_redo_resolver_evidence;
+DROP TABLE IF EXISTS bigname_phase.project_redo_expiry_roots;
+DROP TABLE IF EXISTS bigname_phase.project_redo_child_registration_history;

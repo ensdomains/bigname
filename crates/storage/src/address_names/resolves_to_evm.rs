@@ -12,7 +12,7 @@
 //! chosen, so a representative never hides another coin type the group matched, and a group past
 //! the limit is always reported by its count.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use bigname_domain::resolver_read::{ENSIP19_DEFAULT_COIN_TYPE, ETH_COIN_TYPE};
 use sqlx::{PgConnection, PgPool, Postgres, QueryBuilder, postgres::PgRow};
 

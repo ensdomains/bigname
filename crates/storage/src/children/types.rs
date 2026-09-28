@@ -75,14 +75,6 @@ impl ChildrenCurrentPageFilter<'_> {
     pub const fn admits_every_child(&self) -> bool {
         self.q.is_none() && self.include_expired
     }
-
-    const fn needs_name_current(&self) -> bool {
-        self.sort.is_timestamp() || !self.include_expired
-    }
-
-    pub(super) const fn joins_name_current(&self) -> bool {
-        self.needs_name_current()
-    }
 }
 
 /// Sort-specific keyset position for declared direct child page reads. The name sort orders by

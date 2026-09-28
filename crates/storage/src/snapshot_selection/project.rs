@@ -65,20 +65,6 @@ pub(super) async fn load_current_project_publication(
     }))
 }
 
-const CURRENT_PROJECT_ROW_PUBLICATION: &str = r#"
-        SELECT project.current_block_number, project.current_block_hash
-        FROM bigname_phase.chain_phase_state project
-        JOIN bigname_phase.chain_lineage lineage
-          ON lineage.chain_id = project.chain_id
-         AND lineage.block_number = project.current_block_number
-         AND lineage.block_hash = project.current_block_hash
-         AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
-        WHERE project.chain_id = $1
-          AND project.phase_name = 'project'
-          AND project.phase_status IN ('completed', 'running')
-          AND project.input_content_hash = $2
-        "#;
-
 /// The servable family marker of a chain, as a `FROM ... WHERE` clause binding the chain as `$1`
 /// and this build's interpreter content hash as `$2`, with the marker as `marker`. A marker is
 /// servable once it is `live` (`bootstrap_pending` means a rebuild is still populating the
@@ -164,37 +150,6 @@ pub async fn load_served_project_generation(
         .fetch_optional(pool)
         .await
 }
-
-const SERVED_PROJECT_ROW_GENERATION: &str = r#"
-        SELECT project.xmin::TEXT
-        FROM bigname_phase.chain_heads head
-        JOIN bigname_phase.chain_phase_state project
-          ON project.chain_id = head.chain_id
-         AND project.phase_name = 'project'
-         AND project.phase_status IN ('completed', 'running')
-         AND project.input_content_hash = $4
-         AND head.latest_block_number - project.current_block_number BETWEEN 0 AND $5
-        JOIN bigname_phase.chain_lineage lineage
-          ON lineage.chain_id = project.chain_id
-         AND lineage.block_number = project.current_block_number
-         AND lineage.block_hash = project.current_block_hash
-         AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
-        WHERE head.chain_id = $1
-          AND (
-              NOT $6
-              OR (project.current_block_number = $2 AND project.current_block_hash = $3)
-          )
-          AND (
-              NOT $7
-              OR EXISTS (
-                  SELECT 1
-                  FROM bigname_phase.chain_phase_state interpret
-                  WHERE interpret.chain_id = head.chain_id
-                    AND interpret.phase_name = 'interpret'
-                    AND interpret.redo_in_progress = false
-              )
-          )
-        "#;
 
 /// The marker's `sequence` grows with every family block and undo, so it is the generation a
 /// same-request recheck compares. The Interpret-not-in-redo clause stays on `chain_phase_state`.
