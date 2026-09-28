@@ -4693,6 +4693,24 @@ async fn publish_project_and_families(database: &TestDatabase, target: i64) -> R
         })
         .await?;
     publish_bounded_membership_at(database, target).await?;
+    // Collections also require an Interpret phase that is not redoing history.
+    sqlx::query(
+        "INSERT INTO chain_phase_state (chain_id, phase_name, phase_status, current_block_number,
+             current_block_hash, target_block_number, target_block_hash, input_content_hash,
+             started_at, finished_at)
+         VALUES ($1, 'interpret', 'completed', $2, $3, $2, $3, $4, now(), now())
+         ON CONFLICT (chain_id, phase_name) DO UPDATE SET
+             current_block_number = EXCLUDED.current_block_number,
+             current_block_hash = EXCLUDED.current_block_hash,
+             target_block_number = EXCLUDED.target_block_number,
+             target_block_hash = EXCLUDED.target_block_hash",
+    )
+    .bind(SWITCH_CHAIN)
+    .bind(target)
+    .bind(format!("0xhistory{target}"))
+    .bind(bigname_content_hash::INTERPRETER_CONTENT_HASH)
+    .execute(&database.pool)
+    .await?;
     let token = bigname_project::families::input_token(&database.pool, SWITCH_CHAIN).await?;
     let outcome = bigname_project::families::apply(
         &database.pool,
@@ -4777,4 +4795,44 @@ async fn assert_switch_on_ignores_served_tables(
         "{uri}: the switch-on answer changed when {served_tables:?} were emptied"
     );
     Ok(())
+}
+
+/// Walk every page of `uri` (which must carry `page_size`) with the switch off and on, following
+/// each side's own cursors; each page's status, data and `has_more` must be equal. A cursor binds
+/// its side's served generation, so the cursors themselves differ. Returns the switch-off pages.
+async fn assert_switch_differential_pages(
+    database: &TestDatabase,
+    uri: &str,
+) -> Result<Vec<Value>> {
+    let mut sides = Vec::new();
+    for on in [false, true] {
+        let mut pages = Vec::new();
+        let mut next: Option<String> = None;
+        loop {
+            let page_uri = match &next {
+                None => uri.to_owned(),
+                Some(cursor) => format!("{uri}&cursor={cursor}"),
+            };
+            let response = bigname_storage::publication_source::with_serve_from_families(
+                on,
+                v2_get_response(database, &page_uri),
+            )
+            .await?;
+            let status = response.status();
+            let body: Value = read_json(response).await?;
+            anyhow::ensure!(status == StatusCode::OK, "{page_uri} (switch {on}): {body:#}");
+            next = body["page"]["next_cursor"].as_str().map(str::to_owned);
+            pages.push(json!({"data": body["data"], "has_more": body["page"]["has_more"]}));
+            if next.is_none() {
+                break;
+            }
+            anyhow::ensure!(pages.len() < 100, "{uri}: too many pages");
+        }
+        sides.push(pages);
+    }
+    assert_eq!(
+        sides[0], sides[1],
+        "{uri}: the switch-off pages (left) and the switch-on pages (right) differ"
+    );
+    Ok(sides.swap_remove(0))
 }

@@ -118,3 +118,87 @@ async fn v2_name_detail_refuses_an_at_below_the_publication_both_ways() -> Resul
     assert_eq!(status, StatusCode::OK);
     database.cleanup().await
 }
+
+fn switch_timestamp(seconds: i64) -> Result<String> {
+    Ok(crate::v2::format_timestamp(
+        OffsetDateTime::from_unix_timestamp(seconds)?,
+    ))
+}
+
+#[tokio::test]
+async fn v2_expiring_names_are_the_same_with_the_switch_off_and_on() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_switch_names_fixture(&database).await?;
+    let after = switch_timestamp(1_700_000_000)?;
+    let before = switch_timestamp(1_960_000_000)?;
+    for order in ["asc", "desc"] {
+        let pages = assert_switch_differential_pages(
+            &database,
+            &format!(
+                "/v1/names?namespace=ens&expires_after={after}&expires_before={before}\
+                 &order={order}&page_size=1"
+            ),
+        )
+        .await?;
+        let names: Vec<&Value> = pages
+            .iter()
+            .flat_map(|page| page["data"].as_array().into_iter().flatten())
+            .map(|row| &row["name"])
+            .collect();
+        let expected = if order == "asc" {
+            vec![json!("beta.eth"), json!("alpha.eth")]
+        } else {
+            vec![json!("alpha.eth"), json!("beta.eth")]
+        };
+        assert_eq!(names, expected.iter().collect::<Vec<_>>(), "{pages:#?}");
+    }
+    // A window that holds only the renewed expiry, and one that holds only the replaced one.
+    for (after, before, count) in [
+        (1_940_000_000, 1_960_000_000, 1),
+        (1_890_000_000, 1_910_000_000, 0),
+    ] {
+        let pages = assert_switch_differential_pages(
+            &database,
+            &format!(
+                "/v1/names?namespace=ens&expires_after={}&expires_before={}&page_size=5",
+                switch_timestamp(after)?,
+                switch_timestamp(before)?
+            ),
+        )
+        .await?;
+        assert_eq!(pages[0]["data"].as_array().map(Vec::len), Some(count));
+    }
+    assert_switch_on_ignores_served_tables(
+        &database,
+        &format!("/v1/names?namespace=ens&expires_after={after}&page_size=5"),
+        &["name_current"],
+    )
+    .await?;
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_search_is_the_same_with_the_switch_off_and_on() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_switch_names_fixture(&database).await?;
+    for query in [
+        "q=a&match=prefix&page_size=1",
+        "q=eth&match=contains&page_size=1",
+        "q=eth&match=contains&namespace=ens&page_size=5",
+        "q=zzz&match=prefix&page_size=5",
+    ] {
+        assert_switch_differential_pages(&database, &format!("/v1/search?{query}")).await?;
+    }
+    let pages =
+        assert_switch_differential_pages(&database, "/v1/search?q=eth&match=contains&page_size=1")
+            .await?;
+    assert_eq!(pages.len(), 2, "{pages:#?}");
+    assert_switch_on_ignores_served_tables(
+        &database,
+        "/v1/search?q=eth&match=contains&page_size=5",
+        &["name_current"],
+    )
+    .await?;
+    database.cleanup().await
+}
+
