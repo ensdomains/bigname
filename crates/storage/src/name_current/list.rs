@@ -1,13 +1,7 @@
 use anyhow::{Context, Result};
-use sqlx::{
-    PgExecutor, PgPool, Postgres, QueryBuilder, postgres::PgRow, types::time::OffsetDateTime,
-};
+use sqlx::{PgExecutor, Postgres, QueryBuilder, postgres::PgRow, types::time::OffsetDateTime};
 
-use super::{
-    DEFAULT_ADDRESS_NAMES_MEMBERSHIP_JOINS, DEFAULT_ADDRESS_NAMES_MEMBERSHIP_READ_FILTER,
-    DEFAULT_NAME_CURRENT_LINEAGE_JOINS, DEFAULT_NAME_CURRENT_READ_FILTER, NameCurrentRow,
-    decode_name_current_row,
-};
+use super::{NameCurrentRow, decode_name_current_row};
 use crate::{
     AddressNameRelation,
     projection_helpers::{checked_page_limit_i64_from_usize, checked_page_size_usize},
@@ -162,26 +156,6 @@ pub(super) const NAME_CURRENT_LIST_SELECT: &str = r#"
         FROM filtered_names
 "#;
 
-pub async fn load_name_current_list_page(
-    pool: &PgPool,
-    filter: &NameCurrentListFilter,
-    sort: NameCurrentListSort,
-    order: NameCurrentListOrder,
-    cursor: Option<&NameCurrentListCursor>,
-    page_size: u64,
-    include_total_count: bool,
-) -> Result<NameCurrentListPage> {
-    list_page_limits(page_size)?;
-    let total_count = if include_total_count {
-        Some(count_name_current_list(pool, filter).await?)
-    } else {
-        None
-    };
-    let mut page = list_page_from(pool, filter, (sort, order), cursor, page_size, None).await?;
-    page.total_count = total_count;
-    Ok(page)
-}
-
 fn list_page_limits(page_size: u64) -> Result<(usize, i64)> {
     let page_size = checked_page_size_usize(
         page_size,
@@ -206,7 +180,7 @@ pub(crate) async fn list_page_from(
     (sort, order): (NameCurrentListSort, NameCurrentListOrder),
     cursor: Option<&NameCurrentListCursor>,
     page_size: u64,
-    composed: Option<&serde_json::Value>,
+    composed: &serde_json::Value,
 ) -> Result<NameCurrentListPage> {
     let (page_size, page_limit) = list_page_limits(page_size)?;
 
@@ -245,133 +219,6 @@ pub(crate) async fn list_page_from(
     })
 }
 
-/// Load a single derived list row by EIP-137 namehash (case-insensitive), or `None` if no current
-/// name matches. Reuses the list CTE so the caller gets the same derived
-/// owner / token_id / dates / resolver_address as paged reads, rather than the bare projection row
-/// from [`load_name_current`](super::load_name_current).
-pub async fn load_name_current_list_row_by_namehash(
-    pool: &PgPool,
-    namehash: &str,
-) -> Result<Option<NameCurrentListRow>> {
-    let filter = NameCurrentListFilter::default();
-    let mut builder = QueryBuilder::<Postgres>::new("");
-    push_filtered_name_current_cte(&mut builder, &filter);
-    builder.push(NAME_CURRENT_LIST_SELECT);
-    builder.push(" WHERE LOWER(namehash) = LOWER(");
-    builder.push_bind(namehash);
-    builder.push(") LIMIT 1");
-
-    let row = builder
-        .build()
-        .fetch_optional(pool)
-        .await
-        .with_context(|| {
-            format!("failed to load name_current compact row for namehash {namehash}")
-        })?;
-    row.map(decode_name_current_list_row).transpose()
-}
-
-/// Load a single derived list row by byte-exact `raw_name` match within a namespace, or `None` if
-/// no current name matches.
-///
-/// Schema-v2 has no name index, so this read is unindexed and currently has no production caller.
-/// Callers must pass ENSIP-15-normalized bytes. The shared filter predicates keep the lookup
-/// injection-safe and return the same derived columns as the paged reads.
-pub async fn load_name_current_list_row_by_name(
-    pool: &PgPool,
-    namespace: &str,
-    name: &str,
-) -> Result<Option<NameCurrentListRow>> {
-    let filter = NameCurrentListFilter {
-        namespace: Some(namespace.to_owned()),
-        name: Some(name.to_owned()),
-        ..Default::default()
-    };
-    let mut builder = QueryBuilder::<Postgres>::new("");
-    push_filtered_name_current_cte(&mut builder, &filter);
-    builder.push(NAME_CURRENT_LIST_SELECT);
-    builder.push(" LIMIT 1");
-
-    let row = builder
-        .build()
-        .fetch_optional(pool)
-        .await
-        .with_context(|| {
-            format!(
-                "failed to load name_current compact row for name {name} in namespace {namespace}"
-            )
-        })?;
-    row.map(decode_name_current_list_row).transpose()
-}
-
-/// Load a derived list page by absolute `LIMIT`/`OFFSET` instead of a keyset cursor. Applies the
-/// same ordering and total-order tie-break as [`load_name_current_list_page`], so windows are
-/// stable and disjoint across offsets. Bridges the subgraph `first`/`skip` paging onto the
-/// otherwise cursor-only storage; the caller counts separately via [`count_name_current_list`] when
-/// a total is needed.
-pub async fn load_name_current_list_page_offset(
-    pool: &PgPool,
-    filter: &NameCurrentListFilter,
-    sort: NameCurrentListSort,
-    order: NameCurrentListOrder,
-    limit: u64,
-    offset: u64,
-) -> Result<Vec<NameCurrentListRow>> {
-    let page_size = checked_page_size_usize(
-        limit,
-        "name_current offset page limit must be positive",
-        "name_current offset page limit does not fit in usize",
-    )?;
-    // Bind the exact LIMIT — unlike the keyset reader, offset paging must not fetch the extra
-    // sentinel row `checked_page_limit_i64_from_usize` adds for next-page detection.
-    let page_limit =
-        i64::try_from(page_size).context("name_current offset page limit exceeds SQL limit")?;
-    let page_offset = i64::try_from(offset).context("name_current offset does not fit in i64")?;
-
-    let mut builder = QueryBuilder::<Postgres>::new("");
-    push_filtered_name_current_cte(&mut builder, filter);
-    builder.push(NAME_CURRENT_LIST_SELECT);
-    builder.push(" WHERE TRUE ");
-    push_name_current_list_order(&mut builder, sort, order);
-    builder.push(" LIMIT ");
-    builder.push_bind(page_limit);
-    builder.push(" OFFSET ");
-    builder.push_bind(page_offset);
-
-    let rows = builder
-        .build()
-        .fetch_all(pool)
-        .await
-        .with_context(|| format!("failed to load name_current offset page for {filter:?}"))?;
-    rows.into_iter().map(decode_name_current_list_row).collect()
-}
-
-pub async fn count_name_current_list(pool: &PgPool, filter: &NameCurrentListFilter) -> Result<u64> {
-    let mut builder = QueryBuilder::<Postgres>::new("");
-    push_filtered_name_current_cte(&mut builder, filter);
-    builder.push(
-        r#"
-        SELECT COUNT(*)::BIGINT AS total_count
-        FROM filtered_names
-        "#,
-    );
-
-    let row = builder
-        .build()
-        .fetch_one(pool)
-        .await
-        .with_context(|| format!("failed to count name_current compact rows for {filter:?}"))?;
-    let total_count = crate::sql_row::get::<i64>(&row, "total_count")?;
-    u64::try_from(total_count).context("negative name_current compact total_count")
-}
-
-fn push_filtered_name_current_cte<'a>(
-    builder: &mut QueryBuilder<'a, Postgres>,
-    filter: &'a NameCurrentListFilter,
-) {
-    push_filtered_name_list_cte(builder, filter, None, |_| {});
-}
-
 /// The column list of a composed row set bound as `jsonb_to_recordset` (the rows
 /// `source_row` in families/name/list.rs builds).
 pub(crate) const COMPOSED_NC_COLUMNS: &str =
@@ -388,18 +235,10 @@ pub(crate) const COMPOSED_NC_COLUMNS: &str =
 pub(super) fn push_filtered_name_list_cte<'a>(
     builder: &mut QueryBuilder<'a, Postgres>,
     filter: &'a NameCurrentListFilter,
-    composed: Option<&'a serde_json::Value>,
+    composed: &'a serde_json::Value,
     push_extra_predicates: impl FnOnce(&mut QueryBuilder<'a, Postgres>),
 ) {
     builder.push("WITH ");
-    if let Some(address_filter) = filter.address.as_ref() {
-        let address_namespace = match filter.namespaces.as_ref() {
-            Some(namespaces) if !namespaces.is_empty() => None,
-            _ => filter.namespace.as_deref(),
-        };
-        push_address_membership_cte(builder, address_filter, address_namespace);
-        builder.push(", ");
-    }
     builder.push(
         r#"
         filtered_names AS (
@@ -476,13 +315,13 @@ pub(super) fn push_filtered_name_list_cte<'a>(
                 NULLIF(LOWER(nc.declared_summary #>> '{resolver,address}'), '') AS resolver_address
         "#,
     );
-    if let Some(composed) = composed {
-        builder.push(" FROM JSONB_TO_RECORDSET(");
-        builder.push_bind(composed);
-        builder.push(") AS ");
-        builder.push(COMPOSED_NC_COLUMNS);
-        builder.push(
-            r#"
+
+    builder.push(" FROM JSONB_TO_RECORDSET(");
+    builder.push_bind(composed);
+    builder.push(") AS ");
+    builder.push(COMPOSED_NC_COLUMNS);
+    builder.push(
+        r#"
             JOIN bigname_phase.name_surfaces surface
               ON surface.logical_name_id = nc.logical_name_id
             JOIN bigname_phase.chain_lineage surface_lineage
@@ -490,36 +329,7 @@ pub(super) fn push_filtered_name_list_cte<'a>(
              AND surface_lineage.block_hash = surface.block_hash
             WHERE TRUE
             "#,
-        );
-        push_name_current_filter_predicates(builder, filter);
-        push_extra_predicates(builder);
-        builder.push(")");
-        return;
-    }
-    builder.push(
-        r#"
-            FROM bigname_phase.name_current nc
-            JOIN bigname_phase.name_surfaces surface
-              ON surface.logical_name_id = nc.logical_name_id
-            LEFT JOIN bigname_phase.resources resource
-              ON resource.resource_id = nc.resource_id
-            LEFT JOIN bigname_phase.surface_bindings binding
-              ON binding.surface_binding_id = nc.surface_binding_id
-            LEFT JOIN bigname_phase.token_lineages token_lineage
-              ON token_lineage.token_lineage_id = nc.token_lineage_id
-        "#,
     );
-    builder.push(DEFAULT_NAME_CURRENT_LINEAGE_JOINS);
-    if filter.address.is_some() {
-        builder.push(
-            r#"
-            JOIN address_membership
-              ON address_membership.logical_name_id = nc.logical_name_id
-            "#,
-        );
-    }
-    builder.push(" WHERE TRUE ");
-    builder.push(DEFAULT_NAME_CURRENT_READ_FILTER);
     push_name_current_filter_predicates(builder, filter);
     push_extra_predicates(builder);
     builder.push(")");

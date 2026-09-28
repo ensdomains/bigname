@@ -1,10 +1,7 @@
 mod abi_content_types;
 mod boundary_key;
 mod canonicality;
-mod counts;
 mod row_decode;
-mod snapshot_reads;
-mod validation;
 
 #[cfg(any(test, feature = "test-support"))]
 pub use abi_content_types::explain_record_inventory_abi_evidence_for_test;
@@ -21,9 +18,4 @@ pub use canonicality::{
     RECORD_INVENTORY_RESOURCE_CANONICALITY_FILTER, RECORD_INVENTORY_RESOURCE_LINEAGE_FILTER,
     RESOURCE_CANONICALITY_JOINS,
 };
-pub use counts::count_record_inventory_selectors_by_lookup_keys;
 pub use row_decode::RecordInventoryCurrentRow;
-pub use snapshot_reads::{
-    load_record_inventory_current, load_record_inventory_current_for_snapshot,
-    load_record_inventory_current_with_anchor_fallback,
-};

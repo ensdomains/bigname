@@ -11,7 +11,7 @@
 //! whose only expiry is in one of those forms is outside this listing by design.
 
 use anyhow::{Context, Result, bail};
-use sqlx::{PgExecutor, PgPool, Postgres, QueryBuilder, types::time::OffsetDateTime};
+use sqlx::{PgExecutor, Postgres, QueryBuilder, types::time::OffsetDateTime};
 
 use super::list::{
     NAME_CURRENT_LIST_SELECT, NameCurrentListCursor, NameCurrentListCursorValue,
@@ -33,21 +33,6 @@ pub struct NameCurrentExpiringFilter {
     pub expires_before: Option<OffsetDateTime>,
 }
 
-/// Load a bounded page of supported current names whose registration expiry falls in the window,
-/// ordered by expiry then by name identity. Rows with no numeric `registration.expiry` are never
-/// listed, so the page carries no null-expiry rows in either order.
-/// A released name keeps its lapsed registration's numeric expiry and stays listed: the window
-/// selects registrations by expiry, whether they are live, in grace or released.
-pub async fn load_name_current_expiring_page(
-    pool: &PgPool,
-    filter: &NameCurrentExpiringFilter,
-    order: NameCurrentListOrder,
-    cursor: Option<&NameCurrentListCursor>,
-    page_size: u64,
-) -> Result<NameCurrentListPage> {
-    expiring_page_from(pool, filter, order, cursor, page_size, None).await
-}
-
 /// The expiring page over the served rows, or with `composed` over those rows instead (see
 /// `list_page_from`). One statement, so the composed reader runs it inside its read snapshot.
 pub(crate) async fn expiring_page_from(
@@ -56,7 +41,7 @@ pub(crate) async fn expiring_page_from(
     order: NameCurrentListOrder,
     cursor: Option<&NameCurrentListCursor>,
     page_size: u64,
-    composed: Option<&serde_json::Value>,
+    composed: &serde_json::Value,
 ) -> Result<NameCurrentListPage> {
     if filter.expires_after.is_none() && filter.expires_before.is_none() {
         bail!("name_current expiring page requires an expires_after or expires_before bound");

@@ -1,41 +1,6 @@
 // The `filtered_names` predicates of the list reader, included into list.rs.
 
-fn push_address_membership_cte<'a>(
-    builder: &mut QueryBuilder<'a, Postgres>,
-    address_filter: &'a NameCurrentAddressFilter,
-    namespace: Option<&'a str>,
-) {
-    builder.push(
-        r#"
-        address_membership AS (
-            SELECT DISTINCT anc.logical_name_id
-            FROM bigname_phase.address_names_current anc
-        "#,
-    );
-    builder.push(DEFAULT_ADDRESS_NAMES_MEMBERSHIP_JOINS);
-    builder.push(" WHERE ");
-    match address_filter.addresses.as_ref() {
-        Some(addresses) => {
-            builder.push("anc.address = ANY(");
-            builder.push_bind(addresses.as_slice());
-            builder.push(")");
-        }
-        None => {
-            builder.push("anc.address = ");
-            builder.push_bind(&address_filter.address);
-        }
-    }
-    if let Some(namespace) = namespace {
-        builder.push(" AND anc.namespace = ");
-        builder.push_bind(namespace);
-    }
-    if let NameCurrentAddressRelationFilter::Relation(relation) = address_filter.relation {
-        builder.push(" AND anc.relation = ");
-        builder.push_bind(relation.as_str());
-    }
-    builder.push(DEFAULT_ADDRESS_NAMES_MEMBERSHIP_READ_FILTER);
-    builder.push(")");
-}
+
 
 fn push_name_current_filter_predicates<'a>(
     builder: &mut QueryBuilder<'a, Postgres>,

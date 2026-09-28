@@ -25,8 +25,6 @@ const ADDRESS_RECORDS_COLUMNS: &str = "arc(address text, coin_type text, logical
 /// The source of one page's rows.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum RowSource<'a> {
-    /// The served tables.
-    Served,
     /// Composed rows: `rows` in the served relation table's shape, and `names` the composed name
     /// rows (`logical_name_id`, `declared_summary`, `provenance`) the authority and migration
     /// filters and the timestamp sorts read in place of `name_current`.
@@ -37,7 +35,8 @@ impl<'a> RowSource<'a> {
     /// `WITH`, and for composed rows the `composed_names` CTE the name reads use.
     pub(super) fn push_with(self, builder: &mut QueryBuilder<'a, Postgres>) {
         builder.push("\n        WITH ");
-        if let Self::Composed { names, .. } = self {
+        let Self::Composed { names, .. } = self;
+        {
             builder.push("composed_names AS (SELECT * FROM JSONB_TO_RECORDSET(");
             builder.push_bind(names);
             builder.push(
@@ -49,39 +48,22 @@ impl<'a> RowSource<'a> {
     /// The relation holding the name rows: `name_current`, or the composed `composed_names`.
     pub(super) fn names(self) -> &'static str {
         match self {
-            Self::Served => "bigname_phase.name_current",
             Self::Composed { .. } => "composed_names",
         }
     }
 
     /// The `address_names_current` rows, aliased `anc`.
     pub(super) fn push_address_names(self, builder: &mut QueryBuilder<'a, Postgres>) {
-        self.push_rows(
-            builder,
-            "bigname_phase.address_names_current anc",
-            ADDRESS_NAMES_COLUMNS,
-        );
+        self.push_rows(builder, ADDRESS_NAMES_COLUMNS);
     }
 
     /// The `address_records_current` rows, aliased `arc`.
     pub(super) fn push_address_records(self, builder: &mut QueryBuilder<'a, Postgres>) {
-        self.push_rows(
-            builder,
-            "bigname_phase.address_records_current arc",
-            ADDRESS_RECORDS_COLUMNS,
-        );
+        self.push_rows(builder, ADDRESS_RECORDS_COLUMNS);
     }
 
-    fn push_rows(
-        self,
-        builder: &mut QueryBuilder<'a, Postgres>,
-        served: &str,
-        columns: &'static str,
-    ) {
+    fn push_rows(self, builder: &mut QueryBuilder<'a, Postgres>, columns: &'static str) {
         match self {
-            Self::Served => {
-                builder.push(served);
-            }
             Self::Composed { rows, .. } => {
                 builder.push("JSONB_TO_RECORDSET(");
                 builder.push_bind(rows);

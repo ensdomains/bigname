@@ -170,29 +170,13 @@ pub(crate) async fn load_classification_on(
     chain_id: &str,
     resolver_address: &str,
 ) -> Result<Option<ResolverClassification>> {
-    // Both sources key resolvers lower-case. The F3 row when the resolver has one, else
-    // resolver_current; either way the declaration's namespace comes from its manifest, admitted
-    // at the block the families stand at. F3 keeps a `resolver_manifest_not_active` row for a
-    // resolver the served build leaves out; resolver_current has no row for it either, so it
-    // reads as unclassified, as today.
+    // Classification and its admission are read at the family publication.
     let row = sqlx::query(
         "WITH source AS (
              SELECT classification, support_status, unsupported_reason, manifest_id
-             FROM (
-                 SELECT family.classification, family.support_status,
-                        family.unsupported_reason, family.manifest_id, 0 AS preference
-                 FROM bigname_phase.project_resolver_classification family
-                 WHERE family.chain_id = $1 AND family.resolver_address = $2
-                   AND family.unsupported_reason IS DISTINCT FROM 'resolver_manifest_not_active'
-                 UNION ALL
-                 SELECT resolver.declared_summary -> 'classification',
-                        resolver.support_status, resolver.unsupported_reason,
-                        (resolver.provenance ->> 'manifest_id')::bigint, 1
-                 FROM bigname_phase.resolver_current resolver
-                 WHERE resolver.chain_id = $1 AND resolver.resolver_address = $2
-             ) candidates
-             ORDER BY preference
-             LIMIT 1
+             FROM bigname_phase.project_resolver_classification
+             WHERE chain_id = $1 AND resolver_address = $2
+               AND unsupported_reason IS DISTINCT FROM 'resolver_manifest_not_active'
          )
          SELECT source.classification, source.support_status, source.unsupported_reason,
                 source.manifest_id, declaration.namespace AS declaration_namespace
