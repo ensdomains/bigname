@@ -2577,8 +2577,10 @@ serving pointer and resolver, history heads and coverage. It describes the
 [publication switch](#publication-switch) on, the names group serves these rows
 and every route that joins name rows takes them from here
 ([API](api-v1.md#tier-2-product-reads)); each read sees one committed family
-block, and none is served while the marker is not `live` for this build. The name comparison of the
-fixture-corpus harness checks every composed row against the served row.
+block, and none is served unless the marker is servable by the publication
+fence's rule (`live`, this build's, on the readable lineage). The name
+comparison of the fixture-corpus harness checks every composed row against the
+served row.
 
 ## Family undo journal
 
