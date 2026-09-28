@@ -8,9 +8,11 @@ use super::support::{
 use super::{CursorPayload, Meta, V2Error, V2Result, api_error_to_v2};
 
 /// The publication a collection read is admitted against. Current projections are not retained
-/// after publication, so a current-state continuation must restart when it changes. History
-/// collections (`capture_history`, `finish_history`) are walks: they are bounded by the captured
-/// publication but never refused because a newer one exists.
+/// after publication, so a continuation whose cursor binds the publication (`validate_cursor`,
+/// `bind_cursor`) must restart when it changes. A current-state list cursor (`list_cursor`) binds
+/// none: its route captures without the cursor and only `finish`'s same-request recheck can
+/// refuse it, with a retry. History collections (`capture_history`, `finish_history`) are walks:
+/// they are bounded by the captured publication but never refused because a newer one exists.
 pub(crate) struct CollectionSnapshot {
     namespaces: PublicNamespaceSet,
     token: String,
@@ -133,6 +135,27 @@ impl CollectionSnapshot {
                 .or_insert(position.block_number);
         }
         bounds
+    }
+
+    /// Under the [publication switch](bigname_storage::publication_source), a name with no
+    /// composed row may be one a family rebuild has yet to reach: before a route answers it not
+    /// found, the family markers of this snapshot's chains must be servable, otherwise it is the
+    /// stale 409 for `resource`. A no-op with the switch off.
+    pub(crate) async fn ensure_families_published(
+        &self,
+        state: &AppState,
+        resource: super::SnapshotReadResource,
+    ) -> V2Result<()> {
+        if !bigname_storage::publication_source::serve_from_families() {
+            return Ok(());
+        }
+        let chains: Vec<String> = self.block_bounds().into_keys().collect();
+        bigname_storage::families::name::ensure_family_publications(&state.pool, &chains)
+            .await
+            .map(|_| ())
+            .map_err(super::name_rows_error(resource, |_| {
+                super::V2Error::internal_error("failed to read the family publication")
+            }))
     }
 
     pub(crate) fn validate_cursor(&self, cursor: &CursorPayload) -> V2Result<()> {

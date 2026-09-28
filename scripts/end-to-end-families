@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# Runs the Project end-to-end harness (apps/phase-runner/tests/project_end_to_end_benchmark.rs)
+# with the publication switch on: the served clock waits for the family marker, the routes'
+# readers serve the owned key families, the shadow comparisons keep their served side on the
+# served tables, and the composed listing walks print their cost in submitted rows
+# (SEPOLIA_END_TO_END_WALK lines).
+#
+#   scripts/end-to-end-families            # both fixture corpus tests (needs a test database)
+#   scripts/end-to-end-families copy       # the disposable-copy test; set BIGNAME_END_TO_END=1,
+#                                          # BIGNAME_BENCHMARK_DATABASE_URL, _PREVIOUS, _TARGETS
+#                                          # and optionally BIGNAME_END_TO_END_SHADOW / _COMPARE
+#   BIGNAME_SERVE_FROM_FAMILIES=0 scripts/end-to-end-families   # the same run with the switch off
+#
+# Extra arguments after the mode go to cargo test before `--`.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+
+mode="${1:-fixture}"
+if [ "$#" -gt 0 ]; then
+  shift
+fi
+export BIGNAME_SERVE_FROM_FAMILIES="${BIGNAME_SERVE_FROM_FAMILIES:-1}"
+
+case "$mode" in
+  fixture)
+    exec cargo test -p phase-runner --test project_end_to_end_benchmark "$@" -- \
+      --nocapture fixture_corpus
+    ;;
+  copy)
+    exec cargo test -p phase-runner --test project_end_to_end_benchmark "$@" -- \
+      --ignored --nocapture disposable_copy_publishes_hydrates_and_reads_each_target
+    ;;
+  *)
+    echo "usage: scripts/end-to-end-families [fixture|copy] [cargo test arguments]" >&2
+    exit 2
+    ;;
+esac

@@ -34,9 +34,18 @@
 //! (`project_end_to_end/records_shadow.rs`), and the control and topology comparisons above run
 //! at each target as well, without the rebuild: a disposable copy can compare all three family
 //! reader groups per target with `SHADOW=1` alone, and reserve `COMPARE=1`, which rebuilds the
-//! whole copy at every target, for one target. Production serves today's tables either way.
+//! whole copy at every target, for one target.
+//!
+//! Every test runs under the publication switch the binaries would hold
+//! (`BIGNAME_SERVE_FROM_FAMILIES` over the build's default; `project_end_to_end/families_mode.rs`).
+//! With it on, the served clock includes the family run and stops when the family marker is
+//! servable, the rebuild comparison reads the owned key families through the routes' readers, the
+//! shadow comparisons keep their served side on the served tables, and the listing walks' cost is
+//! printed in submitted rows.
 #[path = "project_end_to_end/endpoint.rs"]
 mod endpoint;
+#[path = "project_end_to_end/families_mode.rs"]
+mod families_mode;
 #[path = "project_end_to_end/name_shadow.rs"]
 mod name_shadow;
 #[path = "project_end_to_end/records_shadow.rs"]
@@ -119,7 +128,8 @@ async fn disposable_copy_publishes_hydrates_and_reads_each_target() -> Result<()
         .then_some(COPY_CHILDREN_PAGE);
     let shadow = (std::env::var("BIGNAME_END_TO_END_SHADOW").as_deref() == Ok("1"))
         .then_some(COPY_CHILDREN_PAGE);
-    let (_, shadows) = run(&pool, previous, &targets, compare, false, shadow).await?;
+    let (_, shadows) =
+        families_mode::scoped(run(&pool, previous, &targets, compare, false, shadow)).await??;
     pool.close().await;
     if shadow.is_some() {
         records_shadow::require_clean(&shadows)?;
@@ -211,15 +221,15 @@ async fn fixture_corpus_publishes_hydrates_reads_and_matches_a_rebuild() -> Resu
     let (scratch, previous, targets) = seed_fixture().await?;
     let pool = scratch.pool();
     shadow::take_reports();
-    let (compared, shadows) = run(
+    let (compared, shadows) = families_mode::scoped(run(
         pool,
         previous,
         &targets,
         Some(FIXTURE_CHILDREN_PAGE),
         true,
         Some(FIXTURE_CHILDREN_PAGE),
-    )
-    .await?;
+    ))
+    .await??;
     ensure!(compared.len() == targets.len(), "every target is compared");
     shadow::assert_fixture_corpus_counts(&targets)?;
     ensure!(
@@ -273,15 +283,15 @@ async fn fixture_corpus_compares_the_family_readers_under_the_shadow_switch_alon
     let (scratch, previous, targets) = seed_fixture().await?;
     let pool = scratch.pool();
     shadow::take_reports();
-    let (compared, shadows) = run(
+    let (compared, shadows) = families_mode::scoped(run(
         pool,
         previous,
         &targets,
         None,
         true,
         Some(FIXTURE_CHILDREN_PAGE),
-    )
-    .await?;
+    ))
+    .await??;
     ensure!(
         compared.is_empty(),
         "no target is rebuilt without the compare switch"
@@ -401,9 +411,12 @@ async fn prepare_fixture(pool: &PgPool, previous: i64, interpreted_through: i64)
     store
         .start_phase(CHAIN, PhaseName::Project, &RunMode::Normal)
         .await?;
-    let outcome = ProjectPhase::new(pool.clone())
-        .run_batch(context(&marker, None))
-        .await?;
+    let project = ProjectPhase::new(pool.clone()).with_family_settings(FamilySettings {
+        finish_each_batch: true,
+        rebuild_ranges: RebuildRanges::Through(i64::MAX),
+        ..FamilySettings::default()
+    });
+    let outcome = project.run_batch(context(&marker, None)).await?;
     store
         .record_progress(
             CHAIN,
@@ -413,6 +426,13 @@ async fn prepare_fixture(pool: &PgPool, previous: i64, interpreted_through: i64)
             outcome.progress(),
         )
         .await?;
+    // With the switch on the routes read the families, so they serve the previous publication
+    // before the first target, as on a deployment that already follows the chain: the rebuild
+    // comparison's baseline read needs them there. With it off the families start empty, as
+    // before.
+    if families_mode::configured()? {
+        project.after_progress_recorded(CHAIN).await;
+    }
     Ok(())
 }
 
@@ -522,6 +542,13 @@ async fn run(
             .await?;
         // The runner notifies here too, after `confirm_progress`, which this test skips.
         metrics_feed.batch_committed();
+        // With the switch on the served publication is the family marker, so the family run is
+        // inside the clock; with it off the families follow outside it, below.
+        let families_in_clock = families_mode::on();
+        let families_started = Instant::now();
+        if families_in_clock {
+            project.after_progress_recorded(CHAIN).await;
+        }
         while load_served_project_generation(pool, CHAIN, number, &target.hash, true, true)
             .await?
             .is_none()
@@ -532,6 +559,7 @@ async fn run(
             );
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         }
+        let families_ms = families_in_clock.then(|| families_started.elapsed().as_millis());
         let rewritten: Vec<String> = sqlx::query_scalar(
             "SELECT logical_name_id FROM name_current
              WHERE last_recomputed_at >= $1::timestamptz ORDER BY logical_name_id",
@@ -551,15 +579,25 @@ async fn run(
         let elapsed = started.elapsed();
         eprintln!(
             "SEPOLIA_END_TO_END target={number} elapsed_ms={} commit=included hydration=invoked \
-             marker=written read={read} rewritten_names={}",
+             marker=written read={read} rewritten_names={} served={}",
             elapsed.as_millis(),
-            rewritten.len()
+            rewritten.len(),
+            if families_in_clock {
+                "families"
+            } else {
+                "project"
+            }
         );
         // The owned key families follow in their own transactions once progress is recorded,
-        // as the runner calls them; their time is outside the served clock above.
-        let families_started = Instant::now();
-        project.after_progress_recorded(CHAIN).await;
-        let families_ms = families_started.elapsed().as_millis();
+        // as the runner calls them; with the switch off their time is outside the served clock.
+        let families_ms = match families_ms {
+            Some(ms) => ms,
+            None => {
+                let families_started = Instant::now();
+                project.after_progress_recorded(CHAIN).await;
+                families_started.elapsed().as_millis()
+            }
+        };
         let family_marker: Option<i64> = sqlx::query_scalar(
             "SELECT current_block_number FROM project_family_marker WHERE chain_id = $1",
         )
@@ -587,14 +625,21 @@ async fn run(
                 number,
                 hash: target.hash.clone(),
             };
-            let report = shadow::compare_with(pool, CHAIN, &publication, options).await?;
+            let report = families_mode::served_side(shadow::compare_with(
+                pool,
+                CHAIN,
+                &publication,
+                options,
+            ))
+            .await?;
             report.print(number);
             ensure!(
                 report.mismatched == 0,
                 "the family readers differ from the served values at {number}"
             );
             // The composed name rows beside the served name rows (TYR-36 step 7b).
-            let names = name_shadow::compare(pool, CHAIN, number).await?;
+            let names =
+                families_mode::served_side(name_shadow::compare(pool, CHAIN, number)).await?;
             names.print();
             names.require_clean()?;
             ensure!(names.names > 0, "no name was compared at {number}");
@@ -614,13 +659,36 @@ async fn run(
             hash.as_deref() == Some(INTERPRETER_CONTENT_HASH),
             "the publication does not carry this binary's interpreter hash"
         );
+        if families_in_clock {
+            // Flip prerequisite 1: the composed listing walks' cost in submitted rows. The
+            // fixture walks every page; a copy walks the first pages only.
+            let (page_size, max_pages) = if corpus {
+                (FIXTURE_CHILDREN_PAGE, u64::MAX)
+            } else {
+                (COPY_CHILDREN_PAGE, 20)
+            };
+            let (search, expiring) =
+                families_mode::measure_walks(pool, number, CHAIN, "ens", page_size, max_pages)
+                    .await?;
+            ensure!(
+                search.rows > 0 && expiring.rows > 0,
+                "the composed listings served nothing at {number}"
+            );
+        }
         if let Some(page_size) = shadow {
             shadows.push(
-                records_shadow::compare(pool, CHAIN, &target, page_size, "incremental").await?,
+                families_mode::served_side(records_shadow::compare(
+                    pool,
+                    CHAIN,
+                    &target,
+                    page_size,
+                    "incremental",
+                ))
+                .await?,
             );
         }
         if let Some(children_page) = readers_page {
-            let report = topology_shadow::compare(
+            let report = families_mode::served_side(topology_shadow::compare(
                 pool,
                 CHAIN,
                 topology_shadow::Settings {
@@ -629,7 +697,7 @@ async fn run(
                     every_child_filter: children_page == FIXTURE_CHILDREN_PAGE,
                     prefixes: &[],
                 },
-            )
+            ))
             .await?;
             eprintln!("{}", report.line());
             ensure!(
@@ -690,7 +758,10 @@ async fn run(
             );
             if let Some(page_size) = shadow {
                 shadows.push(
-                    records_shadow::compare(pool, CHAIN, &target, page_size, "rebuild").await?,
+                    families_mode::served_side(records_shadow::compare(
+                        pool, CHAIN, &target, page_size, "rebuild",
+                    ))
+                    .await?,
                 );
             }
         }

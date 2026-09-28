@@ -452,8 +452,11 @@ async fn v2_resolver_collection_role_provenance_stays_registration_scoped() -> R
     database.cleanup().await
 }
 
+// D10: the overview's bound-names cursor carries no publication or resolver generation, so a
+// same-height republish between pages does not refuse it; a cursor that still carries the
+// resolver generation answers 400.
 #[tokio::test]
-async fn v2_resolver_collection_overview_cursor_rejects_same_height_republish() -> Result<()> {
+async fn v2_resolver_overview_cursor_continues_across_a_same_height_republish() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_resolver_bound_names_fixture(&database).await?;
     upsert_test_resolver_current_rows(
@@ -469,22 +472,24 @@ async fn v2_resolver_collection_overview_cursor_rejects_same_height_republish() 
     let cursor = first["data"]["bound_names"]["page"]["next_cursor"]
         .as_str()
         .unwrap();
-    let mut wrong_generation = crate::v2::decode(cursor).expect("decode overview cursor");
-    wrong_generation.last_item.insert(
+    let second =
+        v2_resolver_payload_for_database(&database, &format!("{base}&cursor={cursor}")).await?;
+    let mut with_generation = crate::v2::decode(cursor).expect("decode overview cursor");
+    with_generation.last_item.insert(
         "resolver_generation".to_owned(),
         "old-selected-chain".to_owned(),
     );
     let response = v2_resolver_response_for_database(
         &database,
-        &format!("{base}&cursor={}", crate::v2::encode(&wrong_generation)),
+        &format!("{base}&cursor={}", crate::v2::encode(&with_generation)),
     )
     .await?;
-    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     sqlx::query("UPDATE bigname_phase.chain_phase_state SET updated_at = now() WHERE phase_name = 'project' AND chain_id = 'ethereum-mainnet'")
         .execute(&database.pool).await?;
-    let response =
-        v2_resolver_response_for_database(&database, &format!("{base}&cursor={cursor}")).await?;
-    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let again =
+        v2_resolver_payload_for_database(&database, &format!("{base}&cursor={cursor}")).await?;
+    assert_eq!(again["data"]["bound_names"], second["data"]["bound_names"]);
     database.cleanup().await
 }
 
@@ -531,8 +536,11 @@ const RESTART_WITHOUT_CURSOR: &str =
     "collection publication is no longer available; restart pagination without a cursor";
 const RETRY_REQUEST: &str = "collection publication changed during the read; retry the request";
 
+// D10: a publication during the continuation's own read still refuses it, but its cursor is
+// not bound to the publication it replaced, so the answer asks for a retry, and the same cursor
+// then continues.
 #[tokio::test]
-async fn v2_resolver_overview_continuation_restarts_when_publication_changes_before_finish()
+async fn v2_resolver_overview_continuation_retries_when_publication_changes_before_finish()
 -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_resolver_bound_names_fixture(&database).await?;
@@ -553,7 +561,8 @@ async fn v2_resolver_overview_continuation_restarts_when_publication_changes_bef
     let continued =
         resolver_publication_replaced_before_finish(&database, format!("{base}&cursor={cursor}"))
             .await?;
-    assert_eq!(continued, RESTART_WITHOUT_CURSOR);
+    assert_eq!(continued, RETRY_REQUEST);
+    v2_resolver_payload_for_database(&database, &format!("{base}&cursor={cursor}")).await?;
     let cursorless = resolver_publication_replaced_before_finish(&database, base).await?;
     assert_eq!(cursorless, RETRY_REQUEST);
     database.cleanup().await

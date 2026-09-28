@@ -83,6 +83,9 @@ pub(super) struct ServedLagRow {
 
 #[derive(Clone)]
 pub(super) struct ServedLagGauges {
+    /// The [publication switch](bigname_storage::publication_source), read once when the metrics
+    /// start: on, the gauges measure the family marker; off, the Project row.
+    from_families: bool,
     lag_blocks: IntGaugeVec,
     publication_block: IntGaugeVec,
     incoherent: Arc<Mutex<BTreeMap<String, (i64, i64)>>>,
@@ -93,21 +96,28 @@ pub(super) struct ServedLagGauges {
 impl ServedLagGauges {
     pub(super) fn new(registry: &MetricsRegistry) -> Result<Self> {
         Ok(Self {
+            from_families: bigname_storage::publication_source::serve_from_families(),
             lag_blocks: registry.int_gauge_vec(
                 "phase_runner_served_lag_blocks",
                 "Newest observed execution-client head minus the block of the newest readable \
-                 Project publication, or -1 when either is unavailable.",
+                 served publication (the Project row, or the live family marker with \
+                 BIGNAME_SERVE_FROM_FAMILIES on), or -1 when either is unavailable.",
                 &["chain"],
             )?,
             publication_block: registry.int_gauge_vec(
                 "phase_runner_served_publication_block",
-                "Block of the newest readable Project publication, or -1 when there is none.",
+                "Block of the newest readable served publication (the Project row, or the live \
+                 family marker with BIGNAME_SERVE_FROM_FAMILIES on), or -1 when there is none.",
                 &["chain"],
             )?,
             incoherent: Arc::default(),
             configured: Arc::default(),
             exported: Arc::default(),
         })
+    }
+
+    pub(super) fn reads_families(&self) -> bool {
+        self.from_families
     }
 
     /// Seeds -1 for configured chains before the first refresh and keeps their series
@@ -208,31 +218,61 @@ pub(super) fn served_lag(observed_head: Option<i64>, publication: Option<i64>) -
 /// - it ignores the requested-position gate, which for a per-chain gauge would only
 ///   compare the publication with itself;
 /// - it ignores the Interpret-redo gate: the redo gauges already show that state,
-///   and this gauge measures Project publication eligibility only.
-pub(super) async fn load(pool: &PgPool) -> Result<Vec<ServedLagRow>> {
-    sqlx::query_as(
-        "SELECT project.chain_id,
-                GREATEST(live.target_block_number, head.latest_block_number)
-                    AS observed_head_block_number,
-                lineage.block_number AS publication_block_number
-         FROM chain_phase_state project
-         LEFT JOIN chain_phase_state live
-           ON live.chain_id = project.chain_id
-          AND live.phase_name = 'live'
-         LEFT JOIN chain_heads head ON head.chain_id = project.chain_id
-         LEFT JOIN chain_lineage lineage
-           ON project.phase_status IN ('completed', 'running')
-          AND project.input_content_hash = $1
-          AND project.current_block_number <= head.latest_block_number
-          AND lineage.chain_id = project.chain_id
-          AND lineage.block_number = project.current_block_number
-          AND lineage.block_hash = project.current_block_hash
-          AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
-         WHERE project.phase_name = 'project'
-         ORDER BY project.chain_id",
-    )
-    .bind(crate::INTERPRETER_CONTENT_HASH)
-    .fetch_all(pool)
-    .await
-    .context("failed to read served-lag state")
+///   and this gauge measures publication eligibility only.
+///
+/// With `from_families` the publication is the family marker while it is `live` with this
+/// build's interpreter hash; a rebuild (`bootstrap_pending`) or a missing marker reports -1,
+/// since nothing is served then. Chains are still those with a Project row.
+pub(super) async fn load(pool: &PgPool, from_families: bool) -> Result<Vec<ServedLagRow>> {
+    let sql = if from_families {
+        FAMILY_MARKER_SERVED_LAG
+    } else {
+        PROJECT_ROW_SERVED_LAG
+    };
+    sqlx::query_as(sql)
+        .bind(crate::INTERPRETER_CONTENT_HASH)
+        .fetch_all(pool)
+        .await
+        .context("failed to read served-lag state")
 }
+
+const PROJECT_ROW_SERVED_LAG: &str = "SELECT project.chain_id,
+        GREATEST(live.target_block_number, head.latest_block_number)
+            AS observed_head_block_number,
+        lineage.block_number AS publication_block_number
+ FROM chain_phase_state project
+ LEFT JOIN chain_phase_state live
+   ON live.chain_id = project.chain_id
+  AND live.phase_name = 'live'
+ LEFT JOIN chain_heads head ON head.chain_id = project.chain_id
+ LEFT JOIN chain_lineage lineage
+   ON project.phase_status IN ('completed', 'running')
+  AND project.input_content_hash = $1
+  AND project.current_block_number <= head.latest_block_number
+  AND lineage.chain_id = project.chain_id
+  AND lineage.block_number = project.current_block_number
+  AND lineage.block_hash = project.current_block_hash
+  AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+ WHERE project.phase_name = 'project'
+ ORDER BY project.chain_id";
+
+const FAMILY_MARKER_SERVED_LAG: &str = "SELECT project.chain_id,
+        GREATEST(live.target_block_number, head.latest_block_number)
+            AS observed_head_block_number,
+        lineage.block_number AS publication_block_number
+ FROM chain_phase_state project
+ LEFT JOIN chain_phase_state live
+   ON live.chain_id = project.chain_id
+  AND live.phase_name = 'live'
+ LEFT JOIN chain_heads head ON head.chain_id = project.chain_id
+ LEFT JOIN project_family_marker marker ON marker.chain_id = project.chain_id
+ LEFT JOIN chain_lineage lineage
+   ON marker.state = 'live'
+  AND marker.input_content_hash = $1
+  AND marker.current_block_number <= head.latest_block_number
+  AND lineage.chain_id = marker.chain_id
+  AND lineage.block_number = marker.current_block_number
+  AND lineage.block_hash = marker.current_block_hash
+  AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+ WHERE project.phase_name = 'project'
+ ORDER BY project.chain_id";

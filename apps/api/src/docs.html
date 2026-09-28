@@ -545,7 +545,7 @@ const ROUTES = [
       ['status', 'The worst readiness across chains: <code>ready</code>, <code>degraded</code>, or <code>stale</code>.'],
       ['chains.{id}.latest_block, safe_block, finalized_block', 'The stored head and finality positions.'],
       ['chains.{id}.indexed_block', 'The most recent completed projection publication.'],
-      ['chains.{id}.lag_blocks, lag_seconds', 'How far the indexed position trails the head. Both clamp at zero.'],
+      ['chains.{id}.lag_blocks, lag_seconds', 'How far the indexed position trails the head. Both clamp at zero, and both are <code>null</code> during an Interpret or Project redo, when lag is unknown.'],
       ['chains.{id}.network_block, network_head_observed_at, network_head_age_seconds, network_head_status', 'The cached comparison against the provider\'s head. The status is <code>fresh</code>, <code>stale</code>, <code>unavailable</code>, <code>pending</code>, or <code>unconfigured</code>.'],
       ['chains.{id}.ingestion_lag_blocks, ingestion_lag_seconds', 'How far the ingested head trails the provider\'s head.'],
       ['chains.{id}.status', 'Readiness for that chain alone.'],

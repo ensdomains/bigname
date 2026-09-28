@@ -42,17 +42,20 @@ mod loaders;
 pub mod seams;
 pub mod selection;
 pub mod serving;
+mod summary;
 
 use sqlx::types::time::OffsetDateTime;
 
-pub(crate) use batch::{load as load_composed, read_snapshot, servable_publication};
+pub(crate) use batch::{load as load_composed, servable_publication};
 pub use bound::load_family_bound_names;
 pub use list::{load_family_expiring_page, load_family_search_page};
+pub use summary::compose_name_summaries;
 
 pub use batch::{
-    load_family_name, load_family_names_by_logical_name_ids, load_family_names_by_resource_ids,
-    load_family_publication,
+    ensure_family_publications, load_family_name, load_family_names_by_logical_name_ids,
+    load_family_names_by_resource_ids, load_family_publication,
 };
+pub(crate) use batch::{ensure_published, read_snapshot};
 
 /// A composed read reached a chain whose family marker is not servable: missing, not `live` (a
 /// rebuild is still populating the families) or written by another interpreter build. The rule

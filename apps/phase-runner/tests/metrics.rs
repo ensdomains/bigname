@@ -277,14 +277,19 @@ async fn endpoint_exports_served_lag_against_the_readable_project_publication() 
     let feed = RunnerMetricsFeed::default();
     feed.seed_chain("configured-without-rows");
     feed.seed_chain("served");
-    let address = phase_runner::metrics::start(
-        "127.0.0.1:0".parse()?,
-        scratch.pool().clone(),
-        cancellation.clone(),
-        900,
-        RunnerLoopHeartbeat::default(),
-        RunnerPhaseProgress::default(),
-        feed.clone(),
+    // The cases seed the Project row as the served publication, so the gauges measure it with
+    // the switch off whatever the build's default (metrics_served_lag_families covers it on).
+    let address = bigname_storage::publication_source::with_serve_from_families(
+        false,
+        phase_runner::metrics::start(
+            "127.0.0.1:0".parse()?,
+            scratch.pool().clone(),
+            cancellation.clone(),
+            900,
+            RunnerLoopHeartbeat::default(),
+            RunnerPhaseProgress::default(),
+            feed.clone(),
+        ),
     )
     .await?;
     let first_refresh_tick = std::time::Instant::now() + std::time::Duration::from_secs(5);

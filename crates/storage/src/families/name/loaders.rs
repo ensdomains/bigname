@@ -236,6 +236,57 @@ pub(super) async fn resource_pointers(
     Ok((by_resource, roots))
 }
 
+/// The latest named `ResolverChanged` for each requested (resource, name) pair. F5 keeps the
+/// resource's latest pointer independently; these owned rows keep each name's own pointer,
+/// including clears, in the family's canonical event order. Only pairs whose F5 row names a
+/// different name are requested. The primary key bounds reads to those pairs.
+pub(super) async fn named_resource_pointers(
+    conn: &mut PgConnection,
+    chain_id: &str,
+    target: i64,
+    pairs: &[(String, String)],
+) -> Result<BTreeMap<(String, String), PointerRow>> {
+    if pairs.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let (resources, names): (Vec<String>, Vec<String>) = pairs.iter().cloned().unzip();
+    let rows = sqlx::query(
+        "/* storage:families.name.named_resource_pointers */
+         SELECT pointer.resource_id::text AS resource_id, pointer.resolver_address,
+                jsonb_build_object('block_number', pointer.block_number,
+                    'transaction_index', pointer.transaction_index,
+                    'log_index', pointer.log_index,
+                    'event_identity', pointer.event_identity) AS pointer_position,
+                pointer.source_family, pointer.logical_name_id AS event_name,
+                pointer.normalized_event_id AS event_id
+         FROM bigname_phase.project_named_resource_pointer pointer
+         JOIN unnest($3::text[], $4::text[]) wanted(resource_id, logical_name_id)
+           ON pointer.resource_id = wanted.resource_id::uuid
+          AND pointer.logical_name_id = wanted.logical_name_id
+         WHERE pointer.chain_id = $1 AND pointer.block_number <= $2",
+    )
+    .bind(chain_id)
+    .bind(target)
+    .bind(&resources)
+    .bind(&names)
+    .fetch_all(&mut *conn)
+    .await
+    .context("failed to load the named resource pointers")?;
+    let mut out = BTreeMap::new();
+    for row in &rows {
+        let Some(pointer) = pointer_of(row, row.try_get("pointer_position")?)? else {
+            continue;
+        };
+        let (Some(resource), Some(name)) =
+            (pointer.resource_id.clone(), pointer.logical_name_id.clone())
+        else {
+            continue;
+        };
+        out.insert((resource, name), pointer);
+    }
+    Ok(out)
+}
+
 /// F4 pointers by `(namespace, node)`.
 pub(super) async fn node_pointers(
     conn: &mut PgConnection,

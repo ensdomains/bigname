@@ -1,22 +1,63 @@
-//! Test-only seams of the composed name reader. Like the
+//! Test seams of the composed name reader. Like the
 //! [publication switch](crate::publication_source)'s scoped value each is a task-local, so tests
-//! running in parallel do not see each other's, and each compiles to its production behaviour
-//! outside test builds.
+//! running in parallel do not see each other's, and each is inert unless a test sets its scope:
+//! with no scope set it takes the production path. They are compiled in wherever the
+//! `test-support` feature is enabled, which feature unification can do for a release build of
+//! the whole workspace.
 //!
+//! - A pause before a composed read opens its snapshot, so a test can change the family marker
+//!   after a route's fence passed and before the composed read sees it
+//!   (apps/api/src/tests/v2_switch_names.rs).
 //! - A pause inside a composed load, between its publication read and the statements that
 //!   follow, so a test can commit the next block in between and prove the load still reads one
 //!   snapshot (crates/project/tests/families_name_snapshot.rs).
 //! - The candidate batch size of the listings (`list.rs`, `bound.rs`), so a test over a handful
 //!   of names can make a page straddle candidate batches.
+//! - A counter of the composed rows the search and expiring walks submit to their page
+//!   statement, summed over every batch, so the harness can measure the walk's cost in rows
+//!   rather than time (flip prerequisite 1).
 #[cfg(any(test, feature = "test-support"))]
 mod scoped {
-    use std::{future::Future, sync::Arc};
+    use std::{
+        future::Future,
+        sync::{
+            Arc,
+            atomic::{AtomicU64, Ordering},
+        },
+    };
 
     use tokio::sync::Notify;
 
     tokio::task_local! {
+        static PAUSE_BEFORE: (Arc<Notify>, Arc<Notify>);
         static PAUSE: (Arc<Notify>, Arc<Notify>);
         static BATCH_SIZE: usize;
+        static SUBMITTED_ROWS: Arc<AtomicU64>;
+    }
+
+    /// Runs `future` adding to `counter` every composed row a listing walk in it submits to its
+    /// page statement.
+    pub async fn with_submitted_rows_counter<F: Future>(
+        counter: Arc<AtomicU64>,
+        future: F,
+    ) -> F::Output {
+        SUBMITTED_ROWS.scope(counter, future).await
+    }
+
+    pub(in crate::families::name) fn note_submitted_rows(rows: usize) {
+        let _ = SUBMITTED_ROWS.try_with(|counter| {
+            counter.fetch_add(u64::try_from(rows).unwrap_or(u64::MAX), Ordering::Relaxed)
+        });
+    }
+
+    /// Runs `future` so that every composed read in it, before it opens its snapshot, notifies
+    /// `reached` and waits for `resume`.
+    pub async fn with_pause_before_snapshot<F: Future>(
+        reached: Arc<Notify>,
+        resume: Arc<Notify>,
+        future: F,
+    ) -> F::Output {
+        PAUSE_BEFORE.scope((reached, resume), future).await
     }
 
     /// Runs `future` so that every composed load in it, once it has read its publication,
@@ -34,6 +75,13 @@ mod scoped {
         BATCH_SIZE.scope(size.max(1), future).await
     }
 
+    pub(in crate::families::name) async fn before_snapshot() {
+        if let Ok((reached, resume)) = PAUSE_BEFORE.try_with(Clone::clone) {
+            reached.notify_one();
+            resume.notified().await;
+        }
+    }
+
     pub(in crate::families::name) async fn after_publication() {
         if let Ok((reached, resume)) = PAUSE.try_with(Clone::clone) {
             reached.notify_one();
@@ -47,9 +95,15 @@ mod scoped {
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(super) use scoped::{after_publication, batch_size};
+pub(super) use scoped::{after_publication, batch_size, before_snapshot, note_submitted_rows};
 #[cfg(any(test, feature = "test-support"))]
-pub use scoped::{with_batch_size, with_pause_after_publication};
+pub use scoped::{
+    with_batch_size, with_pause_after_publication, with_pause_before_snapshot,
+    with_submitted_rows_counter,
+};
+
+#[cfg(not(any(test, feature = "test-support")))]
+pub(super) async fn before_snapshot() {}
 
 #[cfg(not(any(test, feature = "test-support")))]
 pub(super) async fn after_publication() {}
@@ -58,3 +112,6 @@ pub(super) async fn after_publication() {}
 pub(super) fn batch_size(production: usize) -> usize {
     production
 }
+
+#[cfg(not(any(test, feature = "test-support")))]
+pub(super) fn note_submitted_rows(_rows: usize) {}

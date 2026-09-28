@@ -114,6 +114,13 @@ async fn attributed_transfer(
 // hides its edges.
 #[tokio::test]
 async fn ens_v1_edges_match_the_served_children() -> Result<()> {
+    // The served side of each comparison reads the served tables, so the switch stays off
+    // whatever the build's default; with it on the switch-aware readers would read the families
+    // and compare them with themselves.
+    bigname_storage::publication_source::with_serve_from_families(false, ens_v1_edges()).await
+}
+
+async fn ens_v1_edges() -> Result<()> {
     let mut fixture = Fixture::new("families_shadow_children_v1", 12).await?;
     let (first, first_node, _) = parent(&fixture, 1, "first").await?;
     let (second, second_node, _) = parent(&fixture, 2, "second").await?;
@@ -883,6 +890,161 @@ async fn zero_owner_attribution_follows_the_served_precedence() -> Result<()> {
         .collect();
     ensure!(visible == expected, "{visible:?}");
     fixture.cleanup().await
+}
+
+// Today's stage links an unnamed Transfer to the latest named event of its resource and family
+// of any kind, not only to the registry's owner events. Child 48's name is carried only by a
+// registry event of another kind on its resource at block 2, and an unnamed zero Transfer of that
+// resource at a node with no surface follows at block 3: the Transfer is 48's, so 48 is zeroed.
+// Child 46's name carries a non-zero Transfer of another resource at block 2 and an unnamed zero
+// Transfer of that resource follows at block 3, which zeroes 46. At block 4 a registry event of
+// another kind names child 47 and carries 46's resource, so it is that resource's latest named
+// event and the zero Transfer moves to 47: 46 is listed again with its edge owner and 47 is not.
+// Every summary must follow, 46's though block 4 names only 47.
+#[tokio::test]
+async fn zero_owner_links_the_latest_named_event_of_any_kind() -> Result<()> {
+    let mut fixture = Fixture::new("families_shadow_children_linked", 12).await?;
+    let (parent_id, parent_node, parent_labels) = parent(&fixture, 1, "linked").await?;
+    let resource = uuid(0xd046);
+    fixture.resource(&resource, 1).await?;
+    let hinted = uuid(0xd048);
+    fixture.resource(&hinted, 1).await?;
+    let mut names = Vec::new();
+    for (child, label) in [(46, "owned"), (47, "resolved"), (48, "hinted")] {
+        fixture.label(&word(0x5000 + child), label, true).await?;
+        edge(
+            &fixture,
+            &format!("edge-{label}"),
+            &parent_node,
+            child,
+            &owner(child),
+            2,
+        )
+        .await?;
+        let logical = child_surface(
+            &fixture,
+            child,
+            &format!("{label}.linked.eth"),
+            &parent_labels,
+        )
+        .await?;
+        {
+            // As for 43 above, the named children keep inactive surfaces.
+            sqlx::query(
+                "UPDATE name_surfaces SET visibility_state = 'shadow',
+                     deactivation_reason = 'fixture', deactivated_at = now()
+                 WHERE logical_name_id = $1",
+            )
+            .bind(&logical)
+            .execute(fixture.pool())
+            .await?;
+        }
+        names.push(logical);
+    }
+    attributed_transfer(
+        &fixture,
+        "named-owned",
+        46,
+        &owner(146),
+        2,
+        Some(&names[0]),
+        Some(&resource),
+    )
+    .await?;
+    transfer_of(&fixture, "zero-linked", 146, 3, &resource).await?;
+    fixture
+        .event(
+            "preimage-hinted",
+            Some(&names[2]),
+            Some(&hinted),
+            V1_REGISTRY,
+            "PreimageObserved",
+            2,
+            json!({"node": word(48)}),
+            &address(0xe1),
+        )
+        .await?;
+    transfer_of(&fixture, "zero-hinted", 148, 3, &hinted).await?;
+    fixture.publish(3).await?;
+    ensure!(
+        zero_owners(&fixture, &names).await? == [true, false, true],
+        "block 3 zero owners of 46, 47, 48"
+    );
+    let report = fixture.compare(1).await?;
+    unexpected(&report, &[])?;
+    let listed = |children: &[u64]| -> std::collections::BTreeSet<String> {
+        children
+            .iter()
+            .map(|child| format!("ens:{}", word(*child)))
+            .collect()
+    };
+    let visible = topology_shadow::shadow_children(fixture.pool(), &parent_id).await?;
+    ensure!(visible == listed(&[47]), "block 3: {visible:?}");
+
+    fixture
+        .event(
+            "preimage-resolved",
+            Some(&names[1]),
+            Some(&resource),
+            V1_REGISTRY,
+            "PreimageObserved",
+            4,
+            json!({"node": word(47)}),
+            &address(0xe1),
+        )
+        .await?;
+    fixture.publish(5).await?;
+    // The served incremental batch does not revisit 46's row, so the comparison is against a
+    // served rebuild; the families followed block by block.
+    fixture.rebuild().await?;
+    let report = fixture.compare(1).await?;
+    unexpected(&report, &[])?;
+    let visible = topology_shadow::shadow_children(fixture.pool(), &parent_id).await?;
+    ensure!(visible == listed(&[46]), "block 5: {visible:?}");
+    ensure!(
+        zero_owners(&fixture, &names).await? == [false, true, true],
+        "block 5 zero owners of 46, 47, 48"
+    );
+    fixture.cleanup().await
+}
+
+/// The stored summaries' `zero_owner` of `names`, in order.
+async fn zero_owners(fixture: &Fixture, names: &[String]) -> Result<Vec<bool>> {
+    let mut out = Vec::with_capacity(names.len());
+    for name in names {
+        out.push(
+            sqlx::query_scalar(
+                "SELECT zero_owner FROM project_name_summary
+                 WHERE chain_id = $1 AND logical_name_id = $2",
+            )
+            .bind(CHAIN)
+            .bind(name)
+            .fetch_one(fixture.pool())
+            .await
+            .with_context(|| format!("{name} has no summary"))?,
+        );
+    }
+    Ok(out)
+}
+
+/// An unnamed ENSv1 registry Transfer of `node` to the zero owner carrying `resource`.
+async fn transfer_of(
+    fixture: &Fixture,
+    identity: &str,
+    child: u64,
+    block: i64,
+    resource: &str,
+) -> Result<()> {
+    attributed_transfer(
+        fixture,
+        identity,
+        child,
+        ZERO_ADDRESS,
+        block,
+        None,
+        Some(resource),
+    )
+    .await
 }
 
 // A locked parent whose migration registry evidence is rejected, by a missing registry

@@ -156,8 +156,17 @@ whose families were built without it, resets every family table and the
 [family marker](glossary.md#family-marker), so the next family run rebuilds
 them. Apply it before `BIGNAME_SERVE_FROM_FAMILIES` is ever turned on: with the
 [publication switch](glossary.md#publication-switch) on, every fenced route
-answers `409 stale` until that rebuild finishes. It takes no marker lock, so a
-family run in flight when it applies fails once and the next run rebuilds.
+answers `409 stale` until that rebuild finishes. It does not coordinate with a
+running family publisher: a family run in flight when it applies fails once and
+the next run rebuilds.
+
+`20260928160000_project_families_name_summary.sql` adds `project_name_summary`,
+the [name summary](glossary.md#name-summary), the same way, with the indexes its
+writer reads. Apply it before starting a release that writes it, whatever the
+publication switch: that release's family step writes the table on every block,
+so it fails until the table exists. Apply it before the switch is ever turned on
+too, for the same `409 stale` window, and, as above, a family run in flight when
+it applies fails once and the next run rebuilds.
 
 The API binds to the configured `BIGNAME_API_HOST` and
 `BIGNAME_API_PORT`; `/healthz` remains its local readiness endpoint. Current
@@ -174,9 +183,12 @@ container listener at `0.0.0.0:9464`; `BIGNAME_API_METRICS_HOST` and
 [publication switch](glossary.md#publication-switch). The server Compose file
 forwards it from the host environment or `.env.server` to both the `api` and
 the `phase-runner` services; Compose forwards only the variables it lists, so
-without that entry the containers would never see it. Unset or empty means
-off, and only `1` or `true` turns it on. Both binaries read it once at startup,
-so set it the same for both. To change it, edit `.env.server` (or the host
+without that entry the containers would never see it. Unset or empty keeps
+the build's default (`SERVE_FROM_FAMILIES_DEFAULT` in
+`crates/storage/src/publication_source.rs`, off in this release), `1` or `true`
+turns it on, and `0` or `false` turns it off. Any other value stops both
+binaries at startup rather than silently keeping the default. Both binaries
+read it once at startup, so set it the same for both. To change it, edit `.env.server` (or the host
 environment) and recreate both containers:
 
 ```sh
@@ -191,9 +203,12 @@ do not forward the variable: anyone running the binaries that way must pass
 `-e BIGNAME_SERVE_FROM_FAMILIES` (or an explicit value) to both the `api` and
 the `phases` invocations.
 
-Production leaves the switch off until the row and guard cutovers are complete:
-with it on, served-table reads can return inconsistent membership or counts
-(see [`api-v1.md`](api-v1.md), the publication switch paragraph).
+This release carries the guard cutover: with the switch on, the verified
+lookup's guard fences the family marker. Production still leaves the switch off
+until the row cutovers are complete: with it on, the reads that still use the
+served tables, the lookup's inputs among them, can return inconsistent
+membership or counts (see [`api-v1.md`](api-v1.md), the publication switch
+paragraph).
 
 ## Phase-runner configuration
 
@@ -823,7 +838,7 @@ or schema-wide write grants as a shortcut.
 `project_family_marker` is on the list for the
 [publication switch](glossary.md#publication-switch): with
 `BIGNAME_SERVE_FROM_FAMILIES` on, snapshot selection, the verified lookup and
-`/v1/status` read the [family marker](glossary.md#family-marker), and startup
+its guard, and `/v1/status` read the [family marker](glossary.md#family-marker), and startup
 refuses a role that cannot read it. With the switch off the API does not read
 it.
 
