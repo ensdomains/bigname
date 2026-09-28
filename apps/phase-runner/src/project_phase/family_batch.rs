@@ -12,6 +12,9 @@ use crate::{
     phase::{PhaseBatchOutcome, PhaseContext, PhaseProgress, RedoAttemptFence, RunMode},
 };
 
+/// The chain whose follow blocks hydrate reverse names and text records from RPC.
+const HYDRATED_CHAIN: &str = "ethereum-mainnet";
+
 /// A family batch that answered `Continue`. The next batch of the same run and redo attempt
 /// resumes it in normal mode:
 /// in its own mode an unfinished rebuild would start again and a redo would undo its replayed
@@ -30,6 +33,18 @@ impl ProjectPhase {
         context: PhaseContext,
     ) -> RunnerResult<PhaseBatchOutcome> {
         let chain_id = context.chain_id.as_str();
+        // Follow blocks on this chain hydrate from RPC. A configured runner without its URL is
+        // stopped before any publication, so a rebuild cannot publish values that the first
+        // follow block would then fail to refresh.
+        if let Some(rpc_urls) = &self.hydration_rpc_urls
+            && chain_id == HYDRATED_CHAIN
+            && rpc_urls.url_for(chain_id).is_none()
+        {
+            return Err(RunnerError::new(
+                ErrorKind::Configuration,
+                format!("canonical-head hydration requires an RPC URL for {chain_id}"),
+            ));
+        }
         let Some(available) = context.available_heads.as_ref() else {
             if let Some(range) = context.mode.range() {
                 return Err(RunnerError::new(

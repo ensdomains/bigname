@@ -251,6 +251,33 @@ async fn missing_hydration_rpc_fails_before_retracting_existing_values() -> Resu
     db.cleanup().await
 }
 
+/// A runner configured without the mainnet hydration URL stops before its first rebuild
+/// publishes anything, not at the first follow block with a hydration candidate.
+#[tokio::test]
+async fn missing_hydration_rpc_fails_before_a_rebuild_publishes() -> Result<()> {
+    let db = setup("live_family_missing_rpc_rebuild", 2).await?;
+    seed_reverse(db.pool(), ADDRESS).await?;
+    publish(db.pool(), ETHEREUM, 1, 1, 0, 0).await?;
+    let error = project(db.pool(), Some(ChainRpcUrls::default()), 1, 1, true)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error
+            .downcast_ref::<RunnerError>()
+            .context("runner error")?
+            .kind(),
+        ErrorKind::Configuration
+    );
+    let marker: Option<i64> = sqlx::query_scalar(
+        "SELECT current_block_number FROM project_family_marker WHERE chain_id=$1",
+    )
+    .bind(ETHEREUM)
+    .fetch_optional(db.pool())
+    .await?;
+    assert_eq!(marker, Some(0), "the rebuild published before the check");
+    db.cleanup().await
+}
+
 #[tokio::test]
 async fn project_redo_behind_the_canonical_head_defers_hydration() -> Result<()> {
     let db = setup("live_family_redo_rpc_free", 2).await?;
@@ -346,7 +373,7 @@ async fn reverse_hydration_retracts_when_the_legacy_resolver_becomes_ineligible(
     follow(db.pool(), &rpc.endpoint, 1, 1).await?;
     event(db.pool(),2,"ResolverChanged","ens_v1_registry_l1",json!({"node":reverse_node(ADDRESS),"resolver":"0x0000000000000000000000000000000000000000"}),None,None).await?;
     publish(db.pool(), ETHEREUM, 1, 2, 0, 0).await?;
-    project(db.pool(), Some(ChainRpcUrls::default()), 1, 2, false).await?;
+    project(db.pool(), Some(urls(&rpc.endpoint)?), 1, 2, false).await?;
     assert_primary(db.pool(), ADDRESS, "not_found", None, None).await?;
     assert_eq!(rpc.calls.lock().unwrap().len(), 1);
     rpc.server.abort();
@@ -403,7 +430,7 @@ async fn text_hydration_rejects_unknown_resolvers_and_restores_ineligible_values
         .bind(block_hash(1,2)).execute(db.pool()).await?;
     event(db.pool(),2,"RecordChanged","ens_v1_resolver_l1",json!({"node":TEXT_NODE,"resolver":"0x0000000000000000000000000000000000000022","record_key":"text:unknown","record_family":"text","selector_key":"unknown","source_event":"TextChanged"}),None,None).await?;
     publish(db.pool(), ETHEREUM, 1, 2, 0, 0).await?;
-    project(db.pool(), Some(ChainRpcUrls::default()), 1, 2, false).await?;
+    project(db.pool(), Some(urls(&rpc.endpoint)?), 1, 2, false).await?;
     let entry = text_entry(db.pool(), resource).await?;
     assert_eq!(entry["status"], "unsupported");
     assert!(entry.get("value").is_none());
