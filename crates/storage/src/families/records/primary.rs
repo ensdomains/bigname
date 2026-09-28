@@ -171,8 +171,7 @@ async fn hydrate(
         "claim_name_is_normalized": claim.claim_name_is_normalized,
         "unsupported_reason": prepared_baseline.get("unsupported_reason").cloned().unwrap_or(Value::Null),
     });
-    // The served classification of a hydrated name (crates/project/src/hydration/reverse.rs,
-    // `classify_result`).
+    // The served classification of a hydrated name.
     let (status, raw, normalized) = if name.trim().is_empty() {
         (PrimaryNameClaimStatus::NotFound, None, false)
     } else {

@@ -39,10 +39,10 @@ pub struct LifecycleEvent {
     pub resource_id: Option<String>,
     pub source_family: String,
     /// `COALESCE(NULLIF(after_state ->> 'authority_kind', ''), 'registrar')`, the kind the
-    /// admission reads (authority_events.sql).
+    /// admission reads.
     pub authority_kind: String,
     /// `after_state ->> 'authority_kind'` as the row stores it, null when absent: the kind the
-    /// served name block reports (name_current/build.sql:30).
+    /// served name block reports.
     pub authority_kind_raw: Option<String>,
     /// `after_state ->> 'authority_key'`.
     pub authority_key: Option<String>,
@@ -108,7 +108,7 @@ impl LifecycleEvent {
         })
     }
 
-    /// The ENSv2 registry's path-expiry release (build.sql:324): source event
+    /// The ENSv2 registry's path-expiry release: source event
     /// RegistryPathExpired, derived from interpreter state, terminal reason
     /// registry_name_binding_expired.
     pub fn is_path_expiry(&self) -> bool {
@@ -118,7 +118,7 @@ impl LifecycleEvent {
             && self.terminal_reason.as_deref() == Some("registry_name_binding_expired")
     }
 
-    /// The authority arm the event's family belongs to (authority_events.sql:19-23).
+    /// The authority arm the event's family belongs to.
     pub fn family_arm(&self) -> Option<&'static str> {
         family_arm(&self.source_family)
     }
@@ -130,7 +130,7 @@ impl LifecycleEvent {
         )
     }
 
-    /// Whether `after_state -> 'expiry'` is a JSON number (build.sql:543-546).
+    /// Whether `after_state -> 'expiry'` is a JSON number.
     pub fn numeric_expiry(&self) -> bool {
         self.expiry.is_number()
     }
@@ -215,7 +215,7 @@ pub struct BindingCandidate {
     pub canonicality_state: Option<String>,
     pub surface_namehash: Option<String>,
     /// The binding's place: its block and the transaction and log its provenance records, with
-    /// the binding id as the identity (stage.rs, `registry_only_handoffs`).
+    /// the binding id as the identity.
     pub block_number: i64,
     pub transaction_index: Option<i64>,
     pub log_index: Option<i64>,
@@ -223,7 +223,7 @@ pub struct BindingCandidate {
     pub authority_kind: Option<String>,
     /// The SurfaceBound's after-state authority key.
     pub authority_key: Option<String>,
-    /// The owner the SurfaceBound reports to the served control block (build.sql:668-689),
+    /// The owner the SurfaceBound reports to the served control block,
     /// positioned at `surface_bound_position`.
     pub bound_owner: Option<String>,
     pub registry_only: bool,
@@ -236,7 +236,7 @@ pub struct BindingCandidate {
     pub emitting_address: Option<String>,
     pub surface_bound_position: Option<Position>,
     /// The surface binding's `active_from` and `active_to` in seconds, read from the identity
-    /// row as the served name authority reads them (name_authority/build.sql:7-12); the lifecycle
+    /// row as name authority selection reads them; the lifecycle
     /// loader alone reads them, so they are none elsewhere.
     pub active_from_seconds: Option<f64>,
     pub active_to_seconds: Option<f64>,
@@ -245,7 +245,7 @@ pub struct BindingCandidate {
 impl BindingCandidate {
     /// Whether the binding is open at a publication whose block has timestamp `seconds`:
     /// `active_from < cutoff AND (active_to IS NULL OR active_to >= cutoff)` with the cutoff one
-    /// second after the block (name_authority/build.sql:3-12). A binding with no start is not
+    /// second after the block. A binding with no start is not
     /// open, as the comparison with NULL is not true there.
     pub fn open_at(&self, seconds: i64) -> bool {
         let cutoff = seconds as f64 + 1.0;
@@ -310,7 +310,7 @@ impl BindingCandidate {
             || self.node.is_some()
     }
 
-    /// The order stage.rs compares candidates in: block, transaction and log with a missing one
+    /// The order binding candidates compare in: block, transaction and log with a missing one
     /// read as -1, then the binding id. This is not the canonical event order: two candidates at
     /// the same place break the tie by binding id, not by their SurfaceBound identities (fixture
     /// in admission.rs). The canonical order covers event-derived latest selections only.

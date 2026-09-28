@@ -221,7 +221,7 @@ async fn search_candidates(
         .collect()
 }
 
-/// The composed expiring page of /v1/names (`load_name_current_expiring_page`'s contract).
+/// The composed expiring page of /v1/names.
 /// `chains` are the chains the request selected for `filter.namespace`: their markers are read
 /// before the walk, which reads family tables a rebuild empties, so a rebuild refuses rather than
 /// answers an empty page. Only names of `filter.namespace` are walked and composed.

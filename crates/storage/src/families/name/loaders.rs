@@ -324,7 +324,7 @@ pub(super) async fn node_pointers(
     Ok(out)
 }
 
-/// The latest root-registry release position of each resource (stage.rs:385-395).
+/// The latest root-registry release position of each resource.
 pub(super) async fn root_releases(
     conn: &mut PgConnection,
     chain_id: &str,

@@ -1,10 +1,9 @@
-//! The authority admission of authority_events.sql, evaluated per retained event against the F1
-//! selection (design, note "F2a authority admission", table at design:88-95), and the two
-//! staging passes that name an unnamed `.eth` registrar row (name_authority/stage.rs:149-158 and
-//! :174-198). The passes are recomputed from the immutable original name and the current binding
-//! candidates on every read, never read from the name the family writer decoded; the writer does
-//! the same at write time in crates/project/src/families/decode.rs:110-140, and this is a
-//! deliberate second copy because the storage crate cannot depend on the Project crate.
+//! The authority admission: which of a name's retained events count as its authority events,
+//! evaluated per retained event against the F1 selection, and the two staging passes that name an
+//! unnamed `.eth` registrar row. The passes are recomputed from the immutable original name and the
+//! current binding candidates on every read, never read from the name the family writer decoded;
+//! the writer does the same at write time in crates/project/src/families/decode.rs:110-140, and
+//! this is a deliberate second copy because the storage crate cannot depend on the Project crate.
 use std::collections::BTreeSet;
 
 use crate::families::control::{
@@ -16,7 +15,7 @@ use super::AuthoritySelection;
 
 pub(crate) const REGISTRAR: &str = "ens_v1_registrar_l1";
 const WRAPPER: &str = "ens_v1_wrapper_l1";
-/// The registrar lifecycle kinds staging names (stage.rs:153-157).
+/// The registrar lifecycle kinds staging names.
 const STAGED_KINDS: [&str; 5] = [
     "RegistrationGranted",
     "RegistrationRenewed",
@@ -83,7 +82,7 @@ pub(crate) struct Authority<'a> {
     /// the name sits on or that a NameWrapper candidate recorded as its lease: the two staging
     /// passes decide among all of them.
     pub(crate) lease_candidates: &'a [BindingCandidate],
-    /// The selected binding (`project_bindings`, name_authority/stage.rs:277-280).
+    /// The selected binding.
     pub(crate) binding: Option<&'a BindingCandidate>,
     /// Whether the selected resource has a NameWrapper PermissionScopeChanged (F2b).
     pub(crate) wrapper_modifier: bool,
@@ -110,7 +109,7 @@ pub(crate) enum Pass {
 
 impl<'a> Authority<'a> {
     /// The name the two staging passes give an unnamed registrar row, over the candidates of
-    /// every name (stage.rs:149-158 and :174-198; decode.rs:110-139): pass one first, and pass
+    /// every name (as crates/project/src/families/decode.rs does): pass one first, and pass
     /// two only when pass one matches no name. A pass names the row only through one name: a
     /// logical name id is `<namespace>:<namehash>` and every match carries the row's namehash,
     /// so two names can match only across namespaces, which a registrar lease does not span;
@@ -178,7 +177,7 @@ impl<'a> Authority<'a> {
     }
 
     /// The selected NameWrapper SurfaceBounds: wrapper candidates of the name at the selected
-    /// resource (authority_events.sql:119-125).
+    /// resource.
     fn selected_wrappers(&self) -> impl Iterator<Item = &'a BindingCandidate> + '_ {
         let selected = self.selection.resource_id.as_deref();
         self.candidates.iter().filter(move |candidate| {
@@ -186,8 +185,7 @@ impl<'a> Authority<'a> {
         })
     }
 
-    /// The latest ENSv1 candidate strictly before the selected binding (authority_events.sql
-    /// :38-81).
+    /// The latest ENSv1 candidate strictly before the selected binding.
     fn predecessor(&self) -> Option<&'a BindingCandidate> {
         let binding = self.binding?;
         let (block, transaction, log, _) = binding.order();
@@ -228,8 +226,8 @@ impl<'a> Authority<'a> {
             })
     }
 
-    /// The two rules of authority_events.sql:91-118 between the event, the selected wrapper
-    /// and a registrar grant of the event's resource.
+    /// The two rules between the event, the selected wrapper and a registrar grant of the
+    /// event's resource.
     fn wrapper_relationship(
         &self,
         probe: &Probe<'_>,
@@ -256,7 +254,7 @@ impl<'a> Authority<'a> {
         rule_one || rule_two
     }
 
-    /// The registry-only handoff window (authority_events.sql:136-249).
+    /// The registry-only handoff window.
     fn handoff(&self, probe: &Probe<'_>) -> bool {
         let arm = self.selection.authority_arm.as_deref();
         if !matches!(arm, Some("ens_v1" | "basenames")) || !SIX_KINDS.contains(&probe.event_kind) {
@@ -308,9 +306,8 @@ impl<'a> Authority<'a> {
         lower && upper
     }
 
-    /// The selected binding when it is a registry-only binding at the selected resource: the
-    /// AuthorityEpochChanged registry_only of authority_events.sql:143-149 and the handoff row
-    /// of :156-157.
+    /// The selected binding when it is a registry-only binding at the selected resource: its
+    /// registry-only AuthorityEpochChanged and handoff row.
     pub(crate) fn registry_only_binding(&self) -> Option<&'a BindingCandidate> {
         self.binding.filter(|binding| {
             binding.registry_only
@@ -318,10 +315,10 @@ impl<'a> Authority<'a> {
         })
     }
 
-    /// Whether `project_authority_events` holds the probe for this name (authority_events.sql
-    /// :12-261). The caller has already established that the probe carries the name. No epoch
-    /// bound applies: no cut of events before a proof's authority epoch start is made, so a
-    /// migration's proof id is history and admits or refuses nothing.
+    /// Whether the probe is one of this name's authority events. The caller has already established
+    /// that the probe carries the name. No epoch bound applies: no cut of events before a proof's
+    /// authority epoch start is made, so a migration's proof id is history and admits or refuses
+    /// nothing.
     pub(crate) fn admits(&self, probe: &Probe<'_>) -> bool {
         match self.selection.unsupported_reason.as_deref() {
             None => {
@@ -343,7 +340,7 @@ impl<'a> Authority<'a> {
     }
 
     /// A NameWrapper SurfaceBound of the name as a member of the admitted set, for the custody
-    /// exclusion of registration_events.sql:63-83.
+    /// exclusion of the registrant fold.
     pub(crate) fn admits_wrapper_binding(&self, wrapper: &BindingCandidate) -> bool {
         let fallback = Position {
             block_number: wrapper.block_number,
@@ -365,7 +362,7 @@ impl<'a> Authority<'a> {
     }
 }
 
-/// The custody exclusion of stage.rs:189-194 and authority_events.sql:104-111: the transfer
+/// The custody exclusion of the staging passes and the authority admission: the transfer
 /// that moves the registrar token into the NameWrapper in the wrap's own transaction. The
 /// pinned NameWrapper takes custody inside each `.eth` wrap: `wrapETH2LD` transfers the token
 /// from the registrant to itself and then wraps, `registerAndWrapETH2LD` registers the token to
@@ -426,7 +423,7 @@ mod tests {
 
     /// Two ENSv1 bindings of one name at the same block,
     /// transaction and log, whose binding ids sort opposite to their SurfaceBound identities.
-    /// The binding order mirrors stage.rs and ends with the binding id, so the predecessor is
+    /// The binding order ends with the binding id, so the predecessor is
     /// the binding with the larger id, not the one whose event is later in the canonical order.
     /// The canonical event order covers event-derived latest selections only; this binding-id
     /// tie-break is pinned as it is.

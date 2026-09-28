@@ -1,11 +1,9 @@
 //! The alias and wildcard arms of a name's `declared_summary.topology`, read from the aliases
-//! (`project_name_alias`) and the resource resolver pointers (`project_resource_pointer`), as
-//! crates/project/src/builders/name_topology.rs builds them in `project_alias_topology` and
-//! `project_wildcard_topology`. The direct, ownerless and Basenames transport arms are not read
-//! here.
+//! (`project_name_alias`) and the resource resolver pointers (`project_resource_pointer`). The
+//! direct, ownerless and Basenames transport arms are not read here.
 //!
 //! The name's selected binding, and each wildcard ancestor's, is the one the composed name reader
-//! selects (`families::name`), not `name_current`'s.
+//! selects (`families::name`).
 //!
 //! The alias arm joins the name's current pointer (latest, then reject zero), never the
 //! historical non-zero pointer, so a pointer clear with no alias event leaves no alias topology

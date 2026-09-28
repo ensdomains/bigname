@@ -113,11 +113,10 @@ pub(crate) fn chain_position(
 /// manifest is admitted (latest `SourceManifestUpdated` active with a payload, at or before the
 /// block the families stand at).
 ///
-/// The switch to the owned key family F3 (`project_resolver_classification`) is per resolver: a
-/// resolver with an F3 row is read from it, and a resolver without one is read from
-/// `resolver_current`. Either way the declaration manifest's namespace is read from the manifest
-/// events the way today's builders read it; F3's own `admission_namespace` is the resolver
-/// edge's admission, not the declaration's.
+/// Read from the owned key family F3 (`project_resolver_classification`). The declaration
+/// manifest's namespace is read from the latest readable manifest event at or below the family
+/// publication; F3's own `admission_namespace` is the resolver edge's admission, not the
+/// declaration's.
 #[derive(Clone, Debug, Default)]
 pub struct ResolverClassification {
     pub classification: Value,

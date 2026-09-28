@@ -3,11 +3,10 @@
 //! per-registry child registrations (`project_child_registration_state`), child wrapper fuses
 //! (`project_wrapper_state`) and the parent's migration state (`project_name_state`), with the
 //! identity tables, label preimages and the children's name summaries
-//! (`project_name_summary`: selected arm, serving resource, zero-owner transfer). It
-//! reproduces the relation crates/project/src/builders/children.rs builds into
-//! `children_current` (its candidates, then the arm selection of `publish`) and the read filter
-//! of crates/storage/src/children/page.rs, evaluated at read against the family marker's block:
-//! no stored eligibility and no maintained count.
+//! (`project_name_summary`: selected arm, serving resource, zero-owner transfer). It builds the
+//! served child relation (the edge candidates, then the arm selection) and the read filter of
+//! crates/storage/src/children/page.rs, evaluated at read against the family marker's block: no
+//! stored eligibility and no maintained count.
 use sqlx::{Postgres, QueryBuilder};
 
 use super::{
@@ -100,9 +99,8 @@ pub(super) fn push_selected<'a>(builder: &mut QueryBuilder<'a, Postgres>, parent
             FROM parent_surface surface JOIN clock ON clock.chain_id = surface.chain_id
             WHERE surface.visibility_state = 'active' AND {parent_readable}
         ), parent_migration AS (
-            -- Today's ENSv1 migration gate (crates/project/src/builders/children.rs, the
-            -- migration path test in `v1_rows`). Removing that gate from the builder must
-            -- remove this block in the same change.
+            -- The ENSv1 migration gate: a migrated parent's migration path and migration
+            -- registry, which decide below which ENSv1 edges the parent still lists.
             SELECT parent.logical_name_id AS parent_logical_name_id, state.migration_path,
                    registry.registry_contract_instance_id::text
                        AS migration_registry_contract_instance_id

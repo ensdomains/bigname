@@ -1,7 +1,6 @@
 //! The served permission rows of one resource from its raw F8 grants: the NameWrapper fuse
-//! masks and `.eth` grace at the publication clock (permissions.rs:310-380), the empty-row drop
-//! (:390), the ENSv2 path-expiry drop (:391-398) read from the F2a key state, and the wrapper
-//! operator fan-out with its collision rule (wrapper_operators.rs:21-137).
+//! masks and `.eth` grace at the publication clock, the empty-row drop, the ENSv2 path-expiry
+//! drop read from the F2a key state, and the wrapper operator fan-out with its collision rule.
 use serde_json::{Map, Value, json};
 
 use crate::families::control::{
@@ -60,7 +59,7 @@ pub struct ServedGrant {
     pub transfer_behavior: Value,
 }
 
-/// Whether the fuses block a power (permissions.rs:348-377): CANNOT_UNWRAP 1, CANNOT_BURN_FUSES
+/// Whether the fuses block a power: CANNOT_UNWRAP 1, CANNOT_BURN_FUSES
 /// 2, CANNOT_TRANSFER 4, CANNOT_SET_RESOLVER 8, CANNOT_SET_TTL 16, CANNOT_CREATE_SUBDOMAIN 32,
 /// CANNOT_APPROVE 64, PARENT_CANNOT_CONTROL 65536, CAN_EXTEND_EXPIRY 262144.
 /// (upstream: .refs/ens_v1/contracts/wrapper/INameWrapper.sol:L10-L20 @ ens_v1@91c966f)
@@ -145,7 +144,7 @@ pub struct WrapperApproval {
     pub approved: bool,
 }
 
-/// The wrapper operator fan-out (wrapper_operators.rs:21-137): every served NameWrapper holder
+/// The wrapper operator fan-out: every served NameWrapper holder
 /// row is copied to each operator its holder approved on that wrapper contract; an operator who
 /// already has a row for the resource and scope keeps the operator's powers, source and transfer
 /// behaviour (the operator set is a superset), and every other operator row is added.

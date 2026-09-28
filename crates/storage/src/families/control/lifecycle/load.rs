@@ -1,5 +1,5 @@
 //! The loaders: one statement per family table for a batch of names, reading family tables and
-//! identity rows only (no normalized_events, no project_events; design:597). Every statement
+//! identity rows only (no normalized_events). Every statement
 //! carries a `storage:families.control.lifecycle.*` prefix for the slow log.
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -36,7 +36,7 @@ async fn json_rows(
 }
 
 /// The namespace of a logical name id: the part before the first `:`, or `ens` when the id
-/// has none. The shadow harness's retention check reads owner events by the same rule.
+/// has none.
 pub fn namespace_of(name: &str) -> &str {
     name.split_once(':')
         .map_or("ens", |(namespace, _)| namespace)
@@ -198,7 +198,7 @@ pub async fn load_name_facts_on(
         .filter_map(LifecycleEvent::from_row)
         .collect();
     // The candidates of every name the staging passes choose among for the unnamed registrar
-    // rows loaded (decode.rs:41-106 loads the same set).
+    // rows loaded (crates/project/src/families/decode.rs loads the same set).
     let leases: Vec<String> = events
         .iter()
         .filter(|event| {
@@ -231,8 +231,7 @@ pub async fn load_name_facts_on(
         .into_iter()
         .collect();
     // Each retained event's block is on the canonical lineage, so its canonical row at that
-    // height is the row the served reads join by hash (build.sql:399-403,
-    // v2_lifecycle_events.sql:28-31).
+    // height is the row whose timestamp the reads take for that block.
     let block_rows = sqlx::query_as::<_, (i64, Value, i64)>(
         "/* storage:families.control.lifecycle.block_timestamps */
          SELECT lineage.block_number, to_jsonb(lineage.block_timestamp),

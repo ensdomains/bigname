@@ -8,8 +8,8 @@
 //!
 //! The rows carry what a route reads: identity, relations, the publication's position. They do
 //! not carry the served event attribution (`provenance.normalized_event_id`, the relation's own
-//! block in `chain_positions`, `manifest_version`) or the effective-controller support status the
-//! served row takes from `permissions_current_resource_summary`; no route reads them.
+//! block in `chain_positions`, `manifest_version`) or the effective-controller support status
+//! from the permission resource summary; no route reads them.
 //!
 //! A page is read in one snapshot (`read_snapshot`).
 use std::collections::{BTreeMap, BTreeSet};

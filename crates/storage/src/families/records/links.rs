@@ -146,12 +146,9 @@ fn select(exact: Option<FamilyLink>, default: Option<FamilyLink>) -> Option<Link
 }
 
 /// The pointer the alias topology join reads: the resource's current pointer, and nothing when
-/// that pointer is a clear (name_topology.rs, the binding resource's latest `ResolverChanged`,
-/// then zero rejected). An older non-zero pointer is never exposed. Not the same key as that
-/// read: name_topology.rs:189 takes the latest pointer of the resource attributed to the surface
-/// being read (`event.logical_name_id = surface.logical_name_id`), while F5 keeps one pointer per
-/// resource. The two agree only when the resource's latest pointer is attributed to that surface;
-/// a later unnamed pointer, or one attributed to another name, answers here and not there.
+/// that pointer is a clear. An older non-zero pointer is never exposed. F5 keeps one pointer per
+/// resource, so a later unnamed pointer, or one attributed to another name, answers here even
+/// though it is not attributed to the surface being read.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FamilyAliasSourcePointer {
     pub resource_id: Uuid,
@@ -193,9 +190,9 @@ pub async fn load_family_alias_source_pointer(
 /// wildcard lateral): the latest non-zero pointer, zero filtered before the latest is taken, and
 /// the latest `RecordVersionChanged` or `ResolverChanged` with clears included as its boundary.
 /// A non-zero pointer followed by a clear keeps the non-zero resolver with the clear as boundary.
-/// As with [`FamilyAliasSourcePointer`], the served lateral (name_topology.rs:349) reads the
-/// events attributed to the ancestor surface and F5 keeps one row per resource, so the two agree
-/// only when the resource's latest pointer and boundary events are attributed to that surface.
+/// As with [`FamilyAliasSourcePointer`], F5 keeps one row per resource, so the pointer and
+/// boundary are the resource's latest whether or not they are attributed to the ancestor
+/// surface.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FamilyWildcardSource {
     pub resource_id: Uuid,

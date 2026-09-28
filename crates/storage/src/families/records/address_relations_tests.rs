@@ -14,7 +14,7 @@ fn wrapper(fuses: Option<i64>, expiry: Option<&str>) -> WrapperRow {
 }
 
 // The served `in_grace` is null, not false, when the fuses or the expiry is unknown, so the
-// wrapped-and-out-of-grace mask stays closed there (address_names.rs:62-91).
+// wrapped-and-out-of-grace mask stays closed there.
 #[test]
 fn grace_is_unknown_without_fuses_or_expiry() {
     assert_eq!(in_grace(&wrapper(None, Some("100")), 50), None);

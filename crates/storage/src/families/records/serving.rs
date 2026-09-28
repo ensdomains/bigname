@@ -28,8 +28,7 @@ pub(crate) struct ServingPointer {
 /// has only version changes. The row keeps neither the pointer event's normalized event id (when
 /// a later version change owns the row) nor its logical name, so both are read back from
 /// `normalized_events` by the pointer's event identity. A pointer event without a logical name
-/// serves no records here, as today's serving pointer requires one; the comparison then reports
-/// the row that today's reader serves through an older named pointer.
+/// serves no records here, as the serving pointer requires one.
 pub(crate) async fn serving_pointer(
     conn: &mut PgConnection,
     pointer: &FamilyResourcePointer,

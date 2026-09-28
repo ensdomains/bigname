@@ -1,8 +1,8 @@
 # Mirror pointer index
 
-Project follows a name whose ENSv2 resolver is the declared
+A read that follows a name whose ENSv2 resolver is the declared
 [ENSv1 mirror resolver](../../docs/glossary.md#ensv1-mirror-resolver-ensv1_mirror_resolver)
-by reading the ENSv1 registry's resolver pointers for the name and each of its
+reads the ENSv1 registry's resolver pointers for the name and each of its
 ancestors. It finds those pointers by the name each `ResolverChanged` event
 addresses, read in the adapters' shared order `child_node`, then `namehash`, then
 `node` (`V1_EVENT_NODE_FIELDS` in `crates/adapters/src/schema_v2/seam.rs`). A
@@ -11,13 +11,10 @@ the child in `child_node`, so the node field alone files it under the parent.
 
 The index `normalized_events_project_v1_pointer_addressed_node_idx` keys ENSv1
 registry, registrar and wrapper `ResolverChanged` rows by chain, namespace, that
-addressed name and block. Project's mirror dependency expansion
-(`crates/project/src/scope/mirror_bulk.sql`) and mirror evidence staging
-(`crates/project/src/stage/mirror_evidence.rs`) probe it once per consulted name,
-and the history reader's mirror lookup
-(`crates/storage/src/history/attribution/mirror.rs`) can use it too. The older
-`normalized_events_project_v1_pointer_node_idx` keys `node` alone, so it cannot
-serve the corrected lookups. Without the new index each probe reads every ENSv1
+addressed name and block. The history reader's mirror lookup
+(`crates/storage/src/history/attribution/mirror.rs`) reads the pointers by that
+addressed name. The older `normalized_events_project_v1_pointer_node_idx` keys
+`node` alone, so it cannot serve that lookup. Without the new index each probe reads every ENSv1
 pointer on the chain: on an 800,000-event test table one consulted name took a
 sequential scan of the whole table per probe, and with the index each probe read
 one row.

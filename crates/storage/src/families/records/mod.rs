@@ -3,14 +3,11 @@
 //! node-keyed and record-id record families (F6, F7), the link selection, the inverse address
 //! index (F14) and the reverse claim (F12).
 //!
-//! Every reader returns the value today's reader serves for the same key, built from the family
-//! rows instead of the served tables, so the harness can compare the two field by field. Every
-//! production response is still served from today's tables; nothing outside the harness calls
-//! these readers. Events are ordered in the canonical event order of the families (block number,
-//! transaction index, log index, then the emission ordinal (docs/glossary.md#emission-ordinal)
-//! when both indexes are present, then the event identity as bytes, with a synthesised event's
-//! missing positions first; see `FamilyPosition`), so a same-position tie can resolve differently
-//! from today's readers, which break it by the generated event id.
+//! Every reader builds the served value for its key from the family rows. Events are ordered in the
+//! canonical event order of the families (block number, transaction index, log index, then the
+//! emission ordinal (docs/glossary.md#emission-ordinal) when both indexes are present, then the
+//! event identity as bytes, with a synthesised event's missing positions first; see
+//! `FamilyPosition`), never by the generated event id.
 mod address_names;
 mod address_relations;
 mod assemble;
