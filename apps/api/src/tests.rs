@@ -442,3 +442,5 @@ include!("tests/v2_switch_name_recompute.rs");
 include!("tests/v2_switch_resolver_history.rs");
 include!("tests/v2_switch_child_authority.rs");
 include!("tests/v2_switch_name_display.rs");
+
+include!("tests/v2_switch_history_publication.rs");

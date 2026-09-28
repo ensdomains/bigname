@@ -3,7 +3,7 @@ async fn v2_search_cursor_keeps_its_independent_normalized_name_boundary() -> Re
     let database = TestDatabase::new_migrated().await?;
     seed_switch_names_fixture(&database).await?;
     let uri = "/v1/search?q=eth&match=contains&namespace=ens&page_size=1";
-    let (_, next) = list_cursor_page(&database, false, uri, "").await?;
+    let (_, next) = list_cursor_page(&database, uri, "").await?;
     let cursor = list_cursor_at(
         &next.context("alpha has a continuation")?,
         &[("normalized_name", "aardvark.eth")],
@@ -12,7 +12,7 @@ async fn v2_search_cursor_keeps_its_independent_normalized_name_boundary() -> Re
     for batch in [1, 200] {
         let (status, body) = bigname_storage::families::name::seams::with_batch_size(
             batch,
-            assert_switch_differential(&database, &continuation),
+            read_family_response(&database, &continuation),
         )
         .await?;
         assert_eq!(status, StatusCode::OK, "{body:#}");
@@ -73,8 +73,8 @@ async fn seed_switch_emoji_names(database: &TestDatabase) -> Result<()> {
         )
         .await?;
     }
-    publish_project_and_families(database, 240).await?;
-    seed_switch_resolver_current(database).await
+    seed_switch_resolver_declaration(database).await?;
+    publish_test_families(database, 240).await
 }
 
 #[tokio::test]
@@ -82,7 +82,7 @@ async fn v2_bound_name_display_and_cursors_use_shared_emoji_normalization() -> R
     let database = TestDatabase::new_migrated().await?;
     seed_switch_emoji_names(&database).await?;
     let uri = format!("/v1/resolvers/1/{SWITCH_RESOLVER}?page_size=1");
-    let pages = assert_switch_differential_pages_in(&database, &uri, "/data/bound_names").await?;
+    let pages = read_family_pages_in(&database, &uri, "/data/bound_names").await?;
     assert_eq!(pages.len(), 2);
     for page in &pages {
         let row = &page["data"][0];
@@ -91,12 +91,8 @@ async fn v2_bound_name_display_and_cursors_use_shared_emoji_normalization() -> R
         assert_eq!(row["display_name"], normalized.canonical_display_name);
         assert_eq!(row["name"], normalized.normalized_name);
     }
-    for on in [false, true] {
-        let response = bigname_storage::publication_source::with_serve_from_families(
-            on,
-            v2_get_response(&database, &uri),
-        )
-        .await?;
+    {
+        let response = v2_get_response(&database, &uri).await?;
         let body: Value = read_json(response).await?;
         let bound = &body["data"]["bound_names"];
         let cursor = bound["page"]["next_cursor"]
@@ -114,6 +110,25 @@ async fn v2_bound_name_display_and_cursors_use_shared_emoji_normalization() -> R
             decoded.last_item["normalized_name"],
             normalized.normalized_name
         );
+    }
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn v2_address_name_display_uses_shared_emoji_normalization() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_switch_emoji_names(&database).await?;
+    let uri = format!("/v1/addresses/{SWITCH_ALICE}/names?namespace=ens&page_size=1");
+    let pages = read_family_pages(&database, &uri).await?;
+    assert_eq!(pages.len(), 2);
+    for page in &pages {
+        let row = &page["data"][0];
+        let normalized = bigname_domain::normalization::normalize_name(
+            row["name"].as_str().context("address name")?,
+        )?;
+        assert_eq!(row["name"], normalized.normalized_name);
+        assert_eq!(row["display_name"], normalized.canonical_display_name);
+        assert_ne!(row["name"], row["display_name"]);
     }
     database.cleanup().await
 }

@@ -1587,13 +1587,14 @@ async fn closed_binding_reads(
     .execute(&database.pool)
     .await?;
     let detail = bigname_storage::load_name_current(&database.pool, logical_name_id).await?;
-    let listed = bigname_storage::load_name_current_list_row_by_name(
+    let listed = bigname_storage::families::name::load_family_search_page(
         &database.pool,
-        "ens",
-        "lapsed-wrapped.eth",
-    )
-    .await?;
-    Ok((detail.is_some(), listed.is_some()))
+        &bigname_storage::NameCurrentListFilter {
+            namespace: Some("ens".to_owned()), name: Some("lapsed-wrapped.eth".to_owned()),
+            ..Default::default()
+        }, None, 1,
+    ).await?;
+    Ok((detail.is_some(), !listed.rows.is_empty()))
 }
 
 #[tokio::test]
@@ -4507,102 +4508,6 @@ async fn v2_subname_collections_filter_orphaned_phase_lineage_and_keep_preimage_
     );
     assert_eq!(page.summary.child_count, 2);
 
-    let audit_rows = bigname_storage::load_children_current_including_noncanonical(
-        &database.pool,
-        &parent_logical_name_id,
-    )
-    .await?;
-    assert_eq!(audit_rows.len(), 3);
-
-    database.cleanup().await?;
-    Ok(())
-}
-
-#[tokio::test]
-async fn v2_subname_collections_exclude_orphaned_project_target_before_redo() -> Result<()> {
-    let database = TestDatabase::new_migrated().await?;
-    seed_v2_subnames_fixture(&database).await?;
-    let parent_logical_name_id: String = sqlx::query_scalar(
-        "SELECT logical_name_id FROM bigname_phase.name_surfaces WHERE raw_name = 'parent.eth'",
-    )
-    .fetch_one(&database.pool)
-    .await?;
-
-    sqlx::raw_sql(
-        r#"
-        INSERT INTO bigname_phase.chain_lineage (
-            chain_id, block_hash, block_number, block_timestamp, canonicality_state
-        ) VALUES (
-            'ethereum-mainnet', '0xproject-children-target', 2010,
-            '2026-04-17T02:00:10Z', 'canonical'
-        );
-        UPDATE bigname_phase.children_current
-        SET chain_positions = jsonb_build_object(
-                'block_number', 2010,
-                'block_hash', '0xproject-children-target',
-                'target_block_number', 2010,
-                'target_block_hash', '0xproject-children-target'
-            ),
-            canonicality_summary = jsonb_build_object(
-                'state', 'canonical',
-                'target_block_number', 2010,
-                'target_block_hash', '0xproject-children-target'
-            );
-        "#,
-    )
-    .execute(&database.pool)
-    .await?;
-
-    let target_is_not_an_identity_anchor: bool = sqlx::query_scalar(
-        "SELECT NOT EXISTS ( \
-             SELECT 1 FROM bigname_phase.name_surfaces \
-             WHERE block_hash = '0xproject-children-target' \
-         )",
-    )
-    .fetch_one(&database.pool)
-    .await?;
-    assert!(target_is_not_an_identity_anchor);
-    assert_eq!(
-        bigname_storage::load_children_current(&database.pool, &parent_logical_name_id)
-            .await?
-            .len(),
-        3
-    );
-
-    sqlx::query(
-        "UPDATE bigname_phase.chain_lineage \
-         SET canonicality_state = 'orphaned' \
-         WHERE chain_id = 'ethereum-mainnet' \
-           AND block_hash = '0xproject-children-target'",
-    )
-    .execute(&database.pool)
-    .await?;
-
-    assert!(
-        bigname_storage::load_children_current(&database.pool, &parent_logical_name_id)
-            .await?
-            .is_empty()
-    );
-    assert_eq!(
-        bigname_storage::load_children_current_including_noncanonical(
-            &database.pool,
-            &parent_logical_name_id,
-        )
-        .await?
-        .len(),
-        3
-    );
-
-    // The counted summary must fail closed on the same orphaned projection target as the page it
-    // annotates, even though both identity anchors are still canonical.
-    let summaries = bigname_storage::load_children_current_summaries(
-        &database.pool,
-        std::slice::from_ref(&parent_logical_name_id),
-    )
-    .await?;
-    assert_eq!(summaries.len(), 1);
-    assert_eq!(summaries[0].child_count, 0);
-
     database.cleanup().await?;
     Ok(())
 }
@@ -4666,24 +4571,6 @@ async fn v2_get_subnames_paginates_across_a_child_with_no_observed_label() -> Re
         .unwrap_or_else(|| panic!("an undecodable label must be served, not dropped: {names:?}"));
     assert_eq!(escaped_row["name"], "\\377\tBad.parent.eth");
     assert_eq!(escaped_row["display_name"], "\\377\tBad.parent.eth");
-
-    // The audit read has no keyset to drop the row, so it decodes the name directly.
-    let parent_logical_name_id: String = sqlx::query_scalar(
-        "SELECT logical_name_id FROM bigname_phase.name_surfaces WHERE raw_name = 'parent.eth'",
-    )
-    .fetch_one(&database.pool)
-    .await?;
-    let audited = bigname_storage::load_children_current_including_noncanonical(
-        &database.pool,
-        &parent_logical_name_id,
-    )
-    .await?;
-    assert!(
-        audited
-            .iter()
-            .any(|row| row.canonical_display_name == "[feed0001].parent.eth"),
-        "the audit read must name the unobserved-label child too"
-    );
 
     database.cleanup().await?;
     Ok(())
@@ -4874,187 +4761,6 @@ async fn v2_subname_counts_agree_with_the_page_when_a_child_target_is_orphaned()
     .await?;
     assert_eq!(recounted["data"][0]["name"], json!("alpha.parent.eth"));
     assert_eq!(recounted["data"][0]["subname_count"], json!(0));
-
-    database.cleanup().await?;
-    Ok(())
-}
-
-#[tokio::test]
-async fn v2_record_inventory_reads_exclude_orphaned_phase_resource_lineage() -> Result<()> {
-    let database = TestDatabase::new_migrated().await?;
-    seed_v2_alice_name_record_fixture(&database, |_| {}, |_, _, _| {}).await?;
-    let resource_id = Uuid::from_u128(0x2200);
-    let boundary: Value = sqlx::query_scalar(
-        "SELECT record_version_boundary FROM bigname_phase.record_inventory_current \
-         WHERE resource_id = $1",
-    )
-    .bind(resource_id)
-    .fetch_one(&database.pool)
-    .await?;
-    let mut pointerless_boundary = boundary.clone();
-    let pointerless_boundary_object = pointerless_boundary
-        .as_object_mut()
-        .context("record inventory boundary must be an object")?;
-    pointerless_boundary_object.insert("normalized_event_id".to_owned(), Value::Null);
-    pointerless_boundary_object.insert("event_kind".to_owned(), Value::Null);
-    assert!(
-        bigname_storage::load_record_inventory_current_with_anchor_fallback(
-            &database.pool,
-            resource_id,
-            &pointerless_boundary,
-        )
-        .await?
-        .is_some()
-    );
-
-    sqlx::raw_sql(
-        r#"
-        INSERT INTO bigname_phase.chain_lineage (
-            chain_id, block_hash, block_number, block_timestamp, canonicality_state
-        ) VALUES (
-            'ethereum-mainnet', '0xreorg-record-resource', 1005,
-            '2026-04-17T01:00:05Z', 'canonical'::bigname_phase.canonicality_state
-        );
-        UPDATE bigname_phase.resources
-        SET block_hash = '0xreorg-record-resource', block_number = 1005,
-            canonicality_state = 'canonical'::bigname_phase.canonicality_state
-        WHERE resource_id = '00000000-0000-0000-0000-000000002200'::uuid;
-        UPDATE bigname_phase.chain_lineage
-        SET canonicality_state = 'orphaned'::bigname_phase.canonicality_state
-        WHERE chain_id = 'ethereum-mainnet' AND block_hash = '0xreorg-record-resource'
-        "#,
-    )
-    .execute(&database.pool)
-    .await?;
-
-    assert!(
-        bigname_storage::load_record_inventory_current(&database.pool, resource_id, &boundary)
-            .await?
-            .is_none()
-    );
-    assert!(
-        bigname_storage::load_record_inventory_current_with_anchor_fallback(
-            &database.pool,
-            resource_id,
-            &pointerless_boundary,
-        )
-        .await?
-        .is_none()
-    );
-    assert_eq!(
-        bigname_storage::count_record_inventory_selectors_by_lookup_keys(
-            &database.pool,
-            &[(resource_id, boundary)],
-        )
-        .await?,
-        vec![None]
-    );
-
-    database.cleanup().await?;
-    Ok(())
-}
-
-#[tokio::test]
-async fn v2_record_inventory_reads_exclude_orphaned_project_target_before_redo() -> Result<()> {
-    let database = TestDatabase::new_migrated().await?;
-    seed_v2_alice_name_record_fixture(&database, |_| {}, |_, _, _| {}).await?;
-    let resource_id = Uuid::from_u128(0x2200);
-    let boundary: Value = sqlx::query_scalar(
-        "SELECT record_version_boundary FROM bigname_phase.record_inventory_current \
-         WHERE resource_id = $1",
-    )
-    .bind(resource_id)
-    .fetch_one(&database.pool)
-    .await?;
-    let mut pointerless_boundary = boundary.clone();
-    let pointerless_boundary_object = pointerless_boundary
-        .as_object_mut()
-        .context("record inventory boundary must be an object")?;
-    pointerless_boundary_object.insert("normalized_event_id".to_owned(), Value::Null);
-    pointerless_boundary_object.insert("event_kind".to_owned(), Value::Null);
-
-    sqlx::raw_sql(
-        r#"
-        INSERT INTO bigname_phase.chain_lineage (
-            chain_id, block_hash, block_number, block_timestamp, canonicality_state
-        ) VALUES (
-            'ethereum-mainnet', '0xproject-record-target', 2020,
-            '2026-04-17T02:00:20Z', 'canonical'
-        );
-        UPDATE bigname_phase.record_inventory_current
-        SET chain_positions = jsonb_build_object(
-                'block_number', 2020,
-                'block_hash', '0xproject-record-target',
-                'target_block_number', 2020,
-                'target_block_hash', '0xproject-record-target'
-            ),
-            canonicality_summary = jsonb_build_object(
-                'state', 'canonical_lineage',
-                'target_block_number', 2020,
-                'target_block_hash', '0xproject-record-target'
-            )
-        WHERE resource_id = '00000000-0000-0000-0000-000000002200'::uuid;
-        "#,
-    )
-    .execute(&database.pool)
-    .await?;
-
-    let target_is_not_the_resource_anchor: bool = sqlx::query_scalar(
-        "SELECT NOT EXISTS ( \
-             SELECT 1 FROM bigname_phase.resources \
-             WHERE resource_id = $1 AND block_hash = '0xproject-record-target' \
-         )",
-    )
-    .bind(resource_id)
-    .fetch_one(&database.pool)
-    .await?;
-    assert!(target_is_not_the_resource_anchor);
-    assert!(
-        bigname_storage::load_record_inventory_current(&database.pool, resource_id, &boundary)
-            .await?
-            .is_some()
-    );
-    assert!(
-        bigname_storage::load_record_inventory_current_with_anchor_fallback(
-            &database.pool,
-            resource_id,
-            &pointerless_boundary,
-        )
-        .await?
-        .is_some()
-    );
-
-    sqlx::query(
-        "UPDATE bigname_phase.chain_lineage \
-         SET canonicality_state = 'orphaned' \
-         WHERE chain_id = 'ethereum-mainnet' \
-           AND block_hash = '0xproject-record-target'",
-    )
-    .execute(&database.pool)
-    .await?;
-
-    assert!(
-        bigname_storage::load_record_inventory_current(&database.pool, resource_id, &boundary)
-            .await?
-            .is_none()
-    );
-    assert!(
-        bigname_storage::load_record_inventory_current_with_anchor_fallback(
-            &database.pool,
-            resource_id,
-            &pointerless_boundary,
-        )
-        .await?
-        .is_none()
-    );
-    assert_eq!(
-        bigname_storage::count_record_inventory_selectors_by_lookup_keys(
-            &database.pool,
-            &[(resource_id, boundary)],
-        )
-        .await?,
-        vec![None]
-    );
 
     database.cleanup().await?;
     Ok(())

@@ -5,7 +5,6 @@ use bigname_adapters::schema_v2::{
     AddressAdmissionInput, BatchInput, ManifestInput, RawBlockInput, RawLogInput,
     StateCacheCapacity, prepare_schema_v2_batch_incremental,
 };
-use bigname_project::{BatchRequest, Engine, RunMode};
 
 const REGISTRY: &str = "0x00000000000000000000000000000000000000a1";
 const REGISTRAR: &str = "0x00000000000000000000000000000000000000a2";
@@ -267,16 +266,7 @@ async fn resolver_roles_follow_real_presurface_registry_grants_at_the_publicatio
         })
         .collect::<Vec<_>>();
     bigname_storage::insert_normalized_event_fixtures(&database.pool, &events).await?;
-    Engine::new(database.pool.clone())
-        .run_batch(BatchRequest {
-            chain_id: CHAIN.into(),
-            target_block: 124,
-            affected_from_block: 120,
-            affected_to_block: 124,
-            resume_current: None,
-            mode: RunMode::Normal,
-        })
-        .await?;
+    publish_test_families_on(&database.pool, CHAIN, 124).await?;
     let names: i64 = sqlx::query_scalar("SELECT count(*) FROM bigname_phase.name_current")
         .fetch_one(&database.pool)
         .await?;

@@ -55,14 +55,14 @@ async fn seed_switch_old_normalizer(database: &TestDatabase) -> Result<()> {
     )
     .execute(&database.pool)
     .await?;
-    publish_project_and_families(database, 240).await
+    publish_test_families(database, 240).await
 }
 
 #[tokio::test]
 async fn v2_recomputed_name_flags_refuse_the_old_publication_until_project_replays() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_switch_old_normalizer(&database).await?;
-    let (status, before) = with_serve_on(&database, "/v1/names/alpha.eth").await?;
+    let (status, before) = read_family_response(&database, "/v1/names/alpha.eth").await?;
     assert_eq!(status, StatusCode::NOT_FOUND, "{before:#}");
     finalize_switch_name_flags(&database).await?;
     let flags: String = sqlx::query_scalar(
@@ -78,7 +78,7 @@ async fn v2_recomputed_name_flags_refuse_the_old_publication_until_project_repla
             finish_switch_phase_redo(&database, "interpret").await?;
         }
         for uri in ["/v1/names/alpha.eth", SWITCH_SEARCH] {
-            let (status, body) = with_serve_on(&database, uri).await?;
+            let (status, body) = read_family_response(&database, uri).await?;
             assert_eq!(
                 status,
                 StatusCode::CONFLICT,
@@ -89,7 +89,7 @@ async fn v2_recomputed_name_flags_refuse_the_old_publication_until_project_repla
             }
         }
         let (status, events) =
-            with_serve_on(&database, "/v1/diagnostics/events?name=alpha.eth").await?;
+            read_family_response(&database, "/v1/diagnostics/events?name=alpha.eth").await?;
         assert_eq!(status, StatusCode::OK, "{events:#}");
         assert!(
             events["data"]
@@ -108,16 +108,7 @@ async fn v2_recomputed_name_flags_refuse_the_old_publication_until_project_repla
     }
     // Actual Project/family replacement consumes the now-active identity and restores reads.
     reset_switch_families(&database).await?;
-    bigname_project::Engine::new(database.pool.clone())
-        .run_batch(bigname_project::BatchRequest {
-            chain_id: SWITCH_CHAIN.to_owned(),
-            target_block: 240,
-            affected_from_block: 200,
-            affected_to_block: 240,
-            resume_current: None,
-            mode: bigname_project::RunMode::Redo,
-        })
-        .await?;
+
     let token = bigname_project::families::input_token(&database.pool, SWITCH_CHAIN).await?;
     let outcome = bigname_project::families::apply(
         &database.pool,
@@ -138,7 +129,7 @@ async fn v2_recomputed_name_flags_refuse_the_old_publication_until_project_repla
         "Project replay replaced the families: {outcome:?}"
     );
     finish_switch_phase_redo(&database, "project").await?;
-    let (status, after) = with_serve_on(&database, "/v1/names/alpha.eth").await?;
+    let (status, after) = read_family_response(&database, "/v1/names/alpha.eth").await?;
     assert_eq!(status, StatusCode::OK, "{after:#}");
     database.cleanup().await
 }
@@ -147,7 +138,7 @@ async fn v2_recomputed_name_flags_refuse_the_old_publication_until_project_repla
 async fn v2_recompute_after_collection_capture_refuses_changed_names() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_switch_old_normalizer(&database).await?;
-    let (status, before) = with_serve_on(&database, SWITCH_SEARCH).await?;
+    let (status, before) = read_family_response(&database, SWITCH_SEARCH).await?;
     assert_eq!(status, StatusCode::OK, "{before:#}");
     assert_eq!(before["data"].as_array().map(Vec::len), Some(1));
     let (status, body) = get_with_family_change_after_fence(&database, SWITCH_SEARCH, || async {

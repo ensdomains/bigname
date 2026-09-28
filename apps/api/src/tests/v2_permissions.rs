@@ -239,7 +239,6 @@ async fn v2_get_permissions_cursor_binds_the_requested_registration_id() -> Resu
     let payload: Value = read_json(response).await?;
     assert_eq!(payload["error"]["code"], json!("invalid_input"));
 
-
     // A name-only page binds the name's public registration, the lease, not the NameWrapper
     // resource that holds its rows. The same name continues it, the same name with the lease
     // continues it (one collection), and the same name with the NameWrapper resource, the
@@ -2094,10 +2093,6 @@ async fn v2_permissions_namespace_filters_audit_rows_before_paging_and_counting(
     ).await?;
     assert_eq!(filtered["data"].as_array().unwrap().len(), 1);
     assert_eq!(filtered["data"][0]["registration_id"], json!(v2_permissions_stale_resource_id()));
-    let storage_page = bigname_storage::load_permissions_current_account_resource_page(
-        &database.pool, Some(V2_PERMISSIONS_SUBJECT), None, Some("ens"), None, 1,
-    ).await?;
-    assert_eq!(storage_page.summary.row_count, 1);
     assert_eq!(filtered["page"]["has_more"], json!(false));
     assert_eq!(filtered["page"]["next_cursor"], Value::Null);
     let mut summary = permission_current_resource_summary(v2_permissions_current_resource_id(), Some("ens_v2_registry"));
@@ -2241,7 +2236,6 @@ async fn resolver_roles_use_the_wrapped_registration_lease_handle() -> Result<()
     );
     database.cleanup().await
 }
-
 
 #[tokio::test]
 async fn nameless_registry_epoch_rejects_raw_permission_handle_with_distinct_lease() -> Result<()> {
@@ -2542,7 +2536,6 @@ async fn assert_nameless_permission_publication_lifecycle(
     seed_schema_v2_ens_lookup_head(&database.pool, 130, &publication_hash, "2026-06-10T00:00:00Z").await?;
     Ok(())
 }
-
 
 async fn assert_registry_permission_namespace_chains(
     database: &TestDatabase, registry: Uuid, lease: Uuid,

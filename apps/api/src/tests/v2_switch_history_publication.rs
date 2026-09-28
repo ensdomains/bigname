@@ -6,7 +6,7 @@ async fn v2_history_classification_refuses_reset_after_anchor_capture() -> Resul
         let database = TestDatabase::new_migrated().await?;
         seed_switch_routes_fixture(&database).await?;
         let uri = "/v1/names/alpha.eth/history";
-        let (status, before) = with_serve_on(&database, uri).await?;
+        let (status, before) = read_family_response(&database, uri).await?;
         assert_eq!(status, StatusCode::OK, "{before:#}");
         assert!(
             before["data"]
@@ -20,12 +20,9 @@ async fn v2_history_classification_refuses_reset_after_anchor_capture() -> Resul
         .await?;
         let state = database.app_state_with_public_namespaces(&["ens"]);
         let request = tokio::spawn(async move {
-            bigname_storage::publication_source::with_serve_from_families(true, async move {
-                app_router(state)
-                    .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
-                    .await
-            })
-            .await
+            app_router(state)
+                .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+                .await
         });
         tokio::time::timeout(
             std::time::Duration::from_secs(10),
@@ -35,7 +32,7 @@ async fn v2_history_classification_refuses_reset_after_anchor_capture() -> Resul
         .context("history did not capture anchors")?;
         reset_switch_families(&database).await?;
         if republished {
-            publish_project_and_families(&database, 240).await?;
+            publish_test_families(&database, 240).await?;
         }
         control.resume().await;
         let response = request.await??;

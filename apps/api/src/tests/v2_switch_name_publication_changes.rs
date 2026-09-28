@@ -14,7 +14,7 @@ where
     let request = bigname_storage::families::name::seams::with_pause_before_snapshot(
         std::sync::Arc::clone(&reached),
         std::sync::Arc::clone(&resume),
-        with_serve_on(database, uri),
+        read_family_response(database, uri),
     );
     tokio::pin!(request);
     let mut changed = false;
@@ -78,7 +78,7 @@ async fn reset_switch_families(database: &TestDatabase) -> Result<()> {
 async fn v2_search_refuses_a_real_family_reset_after_its_fence() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_switch_names_fixture(&database).await?;
-    let (status, before) = with_serve_on(&database, SWITCH_SEARCH).await?;
+    let (status, before) = read_family_response(&database, SWITCH_SEARCH).await?;
     assert_eq!(status, StatusCode::OK, "{before:#}");
     assert_eq!(before["data"].as_array().map(Vec::len), Some(2));
     let (status, body) = get_with_family_change_after_fence(&database, SWITCH_SEARCH, || {
@@ -94,7 +94,7 @@ async fn v2_resource_permissions_refuse_a_real_family_reset_after_their_fence() 
     let database = TestDatabase::new_migrated().await?;
     seed_switch_routes_fixture(&database).await?;
     let uri = format!("/v1/permissions?address={SWITCH_BOB}&namespace=ens");
-    let (status, before) = with_serve_on(&database, &uri).await?;
+    let (status, before) = read_family_response(&database, &uri).await?;
     assert_eq!(status, StatusCode::OK, "{before:#}");
     assert!(
         before["data"]
@@ -114,7 +114,7 @@ async fn v2_missing_subnames_parent_refuses_a_replacement_live_publication() -> 
     let database = TestDatabase::new_migrated().await?;
     seed_switch_names_fixture(&database).await?;
     let uri = "/v1/names/alpha.eth/subnames";
-    let (status, before) = with_serve_on(&database, uri).await?;
+    let (status, before) = read_family_response(&database, uri).await?;
     assert_eq!(status, StatusCode::OK, "{before:#}");
     let (status, body) = get_with_family_change_after_fence(&database, uri, || async {
         // The old-fork parent is no longer readable when the replacement publication is live.
@@ -124,7 +124,7 @@ async fn v2_missing_subnames_parent_refuses_a_replacement_live_publication() -> 
         )
         .execute(&database.pool)
         .await?;
-        publish_project_and_families(&database, 241).await
+        publish_test_families(&database, 241).await
     })
     .await?;
     assert_eq!(
@@ -169,7 +169,7 @@ async fn assert_mixed_width_expiry_pages(order: &str) -> Result<()> {
         ],
     )
     .await?;
-    publish_project_and_families(&database, 240).await?;
+    publish_test_families(&database, 240).await?;
     let wrapper_expiry: String = sqlx::query_scalar(
         "SELECT expiry_seconds::text FROM bigname_phase.project_wrapper_state
          WHERE resource_id = $1",
@@ -184,7 +184,7 @@ async fn assert_mixed_width_expiry_pages(order: &str) -> Result<()> {
     );
     let pages = bigname_storage::families::name::seams::with_batch_size(
         1,
-        assert_switch_differential_pages(&database, &uri),
+        read_family_pages(&database, &uri),
     )
     .await?;
     let names: Vec<_> = pages
