@@ -40,7 +40,7 @@ fn batch_size(page_size: u64) -> usize {
 }
 
 /// One composed row as the list CTE binds it (name_current/list.rs, `COMPOSED_NC_COLUMNS`).
-fn source_row(row: &NameCurrentRow) -> Value {
+pub(super) fn source_row(row: &NameCurrentRow) -> Value {
     let unsupported = row.coverage.get("status").and_then(Value::as_str) == Some("unsupported");
     json!({
         "logical_name_id": row.logical_name_id,

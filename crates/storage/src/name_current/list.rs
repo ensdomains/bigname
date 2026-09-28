@@ -373,7 +373,8 @@ fn push_filtered_name_current_cte<'a>(
 
 /// The column list of a composed row set bound as `jsonb_to_recordset` (see
 /// [`composed_list_source`]).
-const COMPOSED_NC_COLUMNS: &str = "nc(logical_name_id text, namespace text, raw_name text,
+pub(crate) const COMPOSED_NC_COLUMNS: &str =
+    "nc(logical_name_id text, namespace text, raw_name text,
     namehash text, surface_binding_id uuid, resource_id uuid, serving_resource_id uuid,
     token_lineage_id uuid, binding_kind text, declared_summary jsonb, provenance jsonb,
     support_status text, unsupported_reason text, chain_positions jsonb,

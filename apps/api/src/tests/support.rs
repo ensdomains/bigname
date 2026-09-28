@@ -4804,6 +4804,16 @@ async fn assert_switch_differential_pages(
     database: &TestDatabase,
     uri: &str,
 ) -> Result<Vec<Value>> {
+    assert_switch_differential_pages_in(database, uri, "").await
+}
+
+/// `assert_switch_differential_pages` for a page nested in the body: `holder` is the JSON pointer
+/// of the object carrying `data` and `page` (the empty pointer for the envelope itself).
+async fn assert_switch_differential_pages_in(
+    database: &TestDatabase,
+    uri: &str,
+    holder: &str,
+) -> Result<Vec<Value>> {
     let mut sides = Vec::new();
     for on in [false, true] {
         let mut pages = Vec::new();
@@ -4821,8 +4831,11 @@ async fn assert_switch_differential_pages(
             let status = response.status();
             let body: Value = read_json(response).await?;
             anyhow::ensure!(status == StatusCode::OK, "{page_uri} (switch {on}): {body:#}");
-            next = body["page"]["next_cursor"].as_str().map(str::to_owned);
-            pages.push(json!({"data": body["data"], "has_more": body["page"]["has_more"]}));
+            let held = body
+                .pointer(holder)
+                .with_context(|| format!("{page_uri}: no {holder} in {body:#}"))?;
+            next = held["page"]["next_cursor"].as_str().map(str::to_owned);
+            pages.push(json!({"data": held["data"], "has_more": held["page"]["has_more"]}));
             if next.is_none() {
                 break;
             }

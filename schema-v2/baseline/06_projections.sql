@@ -2053,6 +2053,7 @@ CREATE TABLE IF NOT EXISTS project_registry_pointer (
     PRIMARY KEY (chain_id, namespace, node),
     CHECK ((transaction_index IS NULL) = (log_index IS NULL))
 );
+CREATE INDEX IF NOT EXISTS project_registry_pointer_resolver_idx ON project_registry_pointer (chain_id, resolver_address);
 COMMENT ON TABLE project_registry_pointer IS
     'Project-owned ENSv1 registry-node resolver pointer of family F4: the latest ResolverChanged per node, clears included, from the ENSv1 registry, registrar and wrapper families only (record_inventory/mirror.rs:100). A ResolverChanged of another family with no resource, such as a Basenames reverse node pointer, lands in neither F4 nor F5, where the served reverse-claim resolver (builders/primary_names.rs:103-113) reads the latest ResolverChanged at the node from any family. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
 COMMENT ON COLUMN project_registry_pointer.chain_id IS

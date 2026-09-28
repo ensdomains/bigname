@@ -17,6 +17,9 @@
 //!   (`heads.rs`), which the binding diagnostics route serves;
 //! - the coverage and support columns.
 //!
+//! The listings over composed rows are `list.rs` (search, expiring) and `bound.rs` (the names
+//! bound to a resolver).
+//!
 //! The whole-history evidence the served row also carries (`provenance.selected_event_ids`,
 //! `raw_fact_refs`, `manifest_versions`) is not read by any route and is not composed.
 //! `declared_summary.topology` is not composed here either: the alias and wildcard arms come from
@@ -27,6 +30,7 @@
 //! position of its own and an `at` below the publication cannot be served from it
 //! (docs/api-v1.md, "Publication switch").
 mod batch;
+mod bound;
 mod compose;
 mod heads;
 mod list;
@@ -36,6 +40,7 @@ pub mod serving;
 
 use sqlx::types::time::OffsetDateTime;
 
+pub use bound::load_family_bound_names;
 pub use list::{load_family_expiring_page, load_family_search_page};
 
 pub use batch::{

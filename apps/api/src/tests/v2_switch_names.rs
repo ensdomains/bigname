@@ -7,7 +7,7 @@ const SWITCH_ALICE: &str = "0x00000000000000000000000000000000000a11ce";
 const SWITCH_RESOLVER: &str = "0x0000000000000000000000000000000000000abc";
 
 /// alpha.eth granted at 201, pointed at a resolver at 202 and renewed at 203; beta.eth granted
-/// at 204; both published at 240.
+/// at 204 and pointed at the same resolver at 205; both published at 240.
 async fn seed_switch_names_fixture(database: &TestDatabase) -> Result<()> {
     seed_bounded_membership_blocks(database, 240).await?;
     let (alpha, alpha_resource) = seed_switch_name(database, "alpha.eth", 0x5a1_0000, "ens_v1").await?;
@@ -48,6 +48,16 @@ async fn seed_switch_names_fixture(database: &TestDatabase) -> Result<()> {
                 203,
                 0,
                 json!({"expiry": 1_950_000_000i64}),
+            ),
+            switch_event(
+                "switch-beta-resolver",
+                Some(&beta),
+                Some(beta_resource),
+                "ResolverChanged",
+                "ens_v1_registry_l1",
+                205,
+                0,
+                json!({"node": beta.strip_prefix("ens:").expect("ens id"), "resolver": SWITCH_RESOLVER}),
             ),
             switch_event(
                 "switch-beta-grant",
@@ -210,3 +220,53 @@ async fn v2_search_is_the_same_with_the_switch_off_and_on() -> Result<()> {
     database.cleanup().await
 }
 
+
+#[tokio::test]
+async fn v2_resolver_bound_names_are_the_same_with_the_switch_off_and_on() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_switch_names_fixture(&database).await?;
+    // The route's resolver overview still reads the served resolver row (its move is packet E5),
+    // which Project writes only for a declared resolver: seed one at the publication.
+    sqlx::query(
+        "INSERT INTO bigname_phase.resolver_current (chain_id, resolver_address,
+             declared_summary, support_status, chain_positions, canonicality_summary,
+             manifest_version)
+         SELECT lineage.chain_id, $2, '{}'::jsonb, 'supported',
+                jsonb_build_object('target_block_number', lineage.block_number,
+                                   'target_block_hash', lineage.block_hash),
+                jsonb_build_object('state', 'canonical_lineage'), 1
+         FROM bigname_phase.chain_lineage lineage
+         WHERE lineage.chain_id = $1 AND lineage.block_number = 240",
+    )
+    .bind(SWITCH_CHAIN)
+    .bind(SWITCH_RESOLVER)
+    .execute(&database.pool)
+    .await?;
+    let uri = format!("/v1/resolvers/1/{SWITCH_RESOLVER}?page_size=1");
+    let pages = assert_switch_differential_pages_in(&database, &uri, "/data/bound_names").await?;
+    let names: Vec<&Value> = pages
+        .iter()
+        .flat_map(|page| page["data"].as_array().into_iter().flatten())
+        .map(|name| &name["name"])
+        .collect();
+    assert_eq!(names, [&json!("alpha.eth"), &json!("beta.eth")], "{pages:#?}");
+    for uri in [
+        format!("/v1/resolvers/1/{SWITCH_RESOLVER}"),
+        format!("/v1/resolvers/1/{SWITCH_RESOLVER}?page_size=5"),
+    ] {
+        assert_switch_differential_pages_in(&database, &uri, "/data/bound_names").await?;
+    }
+    let (status, _) = assert_switch_differential(
+        &database,
+        "/v1/resolvers/1/0x0000000000000000000000000000000000000def",
+    )
+    .await?;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_switch_on_ignores_served_tables(
+        &database,
+        &format!("/v1/resolvers/1/{SWITCH_RESOLVER}"),
+        &["name_current"],
+    )
+    .await?;
+    database.cleanup().await
+}

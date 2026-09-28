@@ -286,15 +286,28 @@ async fn load_bound_name_rows(
     chain_id: u64,
     resolver_address: &str,
 ) -> V2Result<(Vec<NameCurrentListRow>, Option<NameCurrentListCursor>)> {
-    let loaded = bigname_storage::load_phase_resolver_bound_name_rows(
-        pool,
-        chain_id_slug,
-        resolver_address,
-        namespace,
-        cursor,
-        page_size.saturating_add(1) as i64,
-    )
-    .await
+    let limit = page_size.saturating_add(1) as i64;
+    let loaded = if bigname_storage::publication_source::serve_from_families() {
+        bigname_storage::families::name::load_family_bound_names(
+            pool,
+            chain_id_slug,
+            resolver_address,
+            namespace,
+            cursor,
+            limit,
+        )
+        .await
+    } else {
+        bigname_storage::load_phase_resolver_bound_name_rows(
+            pool,
+            chain_id_slug,
+            resolver_address,
+            namespace,
+            cursor,
+            limit,
+        )
+        .await
+    }
     .map_err(|_| {
         V2Error::internal_error(format!(
             "failed to load bound names for resolver {resolver_address} on chain {chain_id}"
