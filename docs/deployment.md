@@ -854,7 +854,45 @@ GRANT SELECT ON TABLE
     bigname_phase.primary_names_current,
     bigname_phase.manifest_versions,
     bigname_phase.manifest_contract_instances,
-    bigname_phase.contract_instance_addresses
+    bigname_phase.contract_instance_addresses,
+    bigname_phase.discovery_edges,
+    bigname_phase.label_preimages,
+    bigname_phase.migration_discovery_associations,
+    bigname_phase.project_account_approval,
+    bigname_phase.project_address_controller_candidate,
+    bigname_phase.project_address_name_index,
+    bigname_phase.project_address_record_id_index,
+    bigname_phase.project_address_record_node_index,
+    bigname_phase.project_binding_candidate,
+    bigname_phase.project_child_edge_candidate,
+    bigname_phase.project_child_registration_state,
+    bigname_phase.project_claim_normalization,
+    bigname_phase.project_grant,
+    bigname_phase.project_lifecycle_association,
+    bigname_phase.project_lifecycle_event,
+    bigname_phase.project_lifecycle_key_state,
+    bigname_phase.project_lifecycle_triple_summary,
+    bigname_phase.project_name_alias,
+    bigname_phase.project_name_history,
+    bigname_phase.project_name_state,
+    bigname_phase.project_name_summary,
+    bigname_phase.project_named_resource_pointer,
+    bigname_phase.project_node_record_partition,
+    bigname_phase.project_node_record_value,
+    bigname_phase.project_parent_subregistry,
+    bigname_phase.project_record_id_value,
+    bigname_phase.project_registry_binding_observation,
+    bigname_phase.project_registry_node_state,
+    bigname_phase.project_registry_owner_event,
+    bigname_phase.project_registry_pointer,
+    bigname_phase.project_resolver_alias,
+    bigname_phase.project_resolver_classification,
+    bigname_phase.project_resolver_link,
+    bigname_phase.project_resource_admin_aggregate,
+    bigname_phase.project_resource_pointer,
+    bigname_phase.project_reverse_node_claim,
+    bigname_phase.project_reverse_tuple,
+    bigname_phase.project_wrapper_state
 TO bigname_api;
 GRANT EXECUTE ON FUNCTION bigname_phase.revalidate_resolution_lookup_state(
     text, bigint, text, jsonb, jsonb, uuid, text, text
@@ -880,6 +918,12 @@ or schema-wide write grants as a shortcut.
 its guard, and `/v1/status` read the [family marker](glossary.md#family-marker), and startup
 refuses a role that cannot read it. With the switch off the API does not read
 it.
+
+The `project_*` owned key families after it, and `discovery_edges`,
+`label_preimages` and `migration_discovery_associations`, which the family
+children reader joins, are on the list for the same switch: with it on, the
+family readers serve every route from them, and startup refuses a role that
+cannot read any of them. With the switch off the API reads none of them.
 
 `migration_event_associations` is on the list because
 `GET /v1/diagnostics/events` selects the ENSv1→ENSv2 migration correlation rows

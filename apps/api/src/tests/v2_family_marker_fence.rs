@@ -632,3 +632,84 @@ async fn api_preflight_requires_a_readable_family_marker_only_with_the_switch_on
         .await?;
     database.cleanup().await
 }
+
+/// The documented `bigname_api` grant covers every relation the switch-on readers use, and the
+/// preflight lists a family relation, or a label or discovery relation the family readers join,
+/// that the login cannot read, only with the switch on.
+#[tokio::test]
+async fn api_preflight_and_documented_grant_cover_the_family_reads_with_the_switch_on()
+-> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    let role = format!("family_grant_preflight_{}", std::process::id());
+    let deployment = include_str!("../../../../docs/deployment.md");
+    let grants = deployment
+        .split_once("GRANT SELECT ON TABLE\n")
+        .context("deployment docs must contain the API SELECT grant")?
+        .1
+        .split_once("TO bigname_api;")
+        .context("deployment docs must terminate the API SELECT grant")?
+        .0;
+    for statement in [
+        format!("CREATE ROLE {role} NOLOGIN"),
+        format!("GRANT USAGE ON SCHEMA bigname_phase TO {role}"),
+        format!("GRANT SELECT ON TABLE {grants} TO {role}"),
+    ] {
+        sqlx::query(&statement)
+            .execute(&database.lookup_pool)
+            .await?;
+    }
+    let config = database.database_config(1)?;
+    let options =
+        PgConnectOptions::from_str(config.database_url.as_deref().context("test URL")?)?;
+    let set_role = format!("SET ROLE {role}");
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .after_connect(move |connection, _| {
+            let set_role = set_role.clone();
+            Box::pin(async move { sqlx::query(&set_role).execute(connection).await.map(|_| ()) })
+        })
+        .connect_with(options)
+        .await?;
+    let missing = |on| {
+        let pool = pool.clone();
+        bigname_storage::publication_source::with_serve_from_families(on, async move {
+            let missing = bigname_storage::load_missing_api_lookup_ddl(&pool).await?;
+            anyhow::Ok(
+                missing
+                    .into_iter()
+                    .map(|object| object.identity)
+                    .collect::<Vec<_>>(),
+            )
+        })
+    };
+    assert_eq!(missing(true).await?, Vec::<String>::new());
+    assert_eq!(missing(false).await?, Vec::<String>::new());
+    for relation in ["project_name_state", "label_preimages"] {
+        sqlx::query(&format!(
+            "REVOKE SELECT ON bigname_phase.{relation} FROM {role}"
+        ))
+        .execute(&database.lookup_pool)
+        .await?;
+    }
+    assert_eq!(
+        missing(true).await?,
+        vec![
+            "bigname_phase.label_preimages".to_owned(),
+            "bigname_phase.project_name_state".to_owned(),
+        ],
+        "switch on: the family readers need both"
+    );
+    assert_eq!(
+        missing(false).await?,
+        Vec::<String>::new(),
+        "switch off: nothing reads them"
+    );
+    pool.close().await;
+    sqlx::query(&format!("DROP OWNED BY {role}"))
+        .execute(&database.lookup_pool)
+        .await?;
+    sqlx::query(&format!("DROP ROLE {role}"))
+        .execute(&database.lookup_pool)
+        .await?;
+    database.cleanup().await
+}
