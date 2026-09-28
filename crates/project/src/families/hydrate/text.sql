@@ -112,16 +112,32 @@ WITH value_changes AS (
     LEFT JOIN partitions partition USING (chain_id, resolver_address, arm, arm_identity)
     LEFT JOIN admissions admission USING (chain_id, resolver_address)
     LEFT JOIN name_surfaces surface ON surface.logical_name_id = value.logical_name_id
-    -- The record version as a position, when it is one (Position::of_row).
+    -- The record version as a position, when it is one (Position::of_row). A part reads as
+    -- serde_json's `as_i64` reads it: an integer JSON number in the i64 range, else absent, so
+    -- a fractional or out-of-range block number leaves no boundary.
     LEFT JOIN LATERAL (
-        SELECT (version.v ->> 'block_number')::bigint AS block_number,
-            CASE WHEN jsonb_typeof(version.v -> 'transaction_index') = 'number'
-                THEN (version.v ->> 'transaction_index')::bigint END AS transaction_index,
-            CASE WHEN jsonb_typeof(version.v -> 'log_index') = 'number'
-                THEN (version.v ->> 'log_index')::bigint END AS log_index,
+        SELECT parts.block_number, parts.transaction_index, parts.log_index,
             version.v ->> 'event_identity' AS event_identity
         FROM (SELECT partition.version_position AS v) version
-        WHERE jsonb_typeof(version.v -> 'block_number') = 'number'
+        CROSS JOIN LATERAL (
+            SELECT
+                CASE WHEN jsonb_typeof(version.v -> 'block_number') = 'number'
+                        AND (version.v ->> 'block_number') ~ '^-?[0-9]{1,19}$'
+                        AND (version.v ->> 'block_number')::numeric
+                            BETWEEN -9223372036854775808 AND 9223372036854775807
+                    THEN (version.v ->> 'block_number')::bigint END AS block_number,
+                CASE WHEN jsonb_typeof(version.v -> 'transaction_index') = 'number'
+                        AND (version.v ->> 'transaction_index') ~ '^-?[0-9]{1,19}$'
+                        AND (version.v ->> 'transaction_index')::numeric
+                            BETWEEN -9223372036854775808 AND 9223372036854775807
+                    THEN (version.v ->> 'transaction_index')::bigint END AS transaction_index,
+                CASE WHEN jsonb_typeof(version.v -> 'log_index') = 'number'
+                        AND (version.v ->> 'log_index') ~ '^-?[0-9]{1,19}$'
+                        AND (version.v ->> 'log_index')::numeric
+                            BETWEEN -9223372036854775808 AND 9223372036854775807
+                    THEN (version.v ->> 'log_index')::bigint END AS log_index
+        ) parts
+        WHERE parts.block_number IS NOT NULL
           AND jsonb_typeof(version.v -> 'event_identity') = 'string'
     ) boundary ON true
     WHERE value.namespace = 'ens' AND value.record_family = 'text'

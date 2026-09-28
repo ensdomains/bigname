@@ -462,3 +462,51 @@ async fn text_backlog_is_cut_in_the_query_behind_thousands_of_current_selectors(
     );
     fixture.cleanup().await
 }
+
+// The query reads a record version position as Position::of_row does, part by part through
+// serde_json's `as_i64`: a fractional or out-of-range block number leaves no boundary, and an
+// out-of-range transaction or log index reads as absent (families/position_tests.rs, SHARED_JSON).
+#[tokio::test]
+async fn text_selection_reads_the_version_position_as_rust_does() -> Result<()> {
+    let (fixture, rpc) = fixture().await?;
+    text(&fixture, 1, None).await?;
+    rpc.answer(1, Some("current"));
+    run(&fixture, 1, FamilyMode::Normal, &rpc).await?;
+    // The selector sits at block 1, never read. A boundary after it keeps it inactive.
+    sqlx::query(
+        "UPDATE project_node_record_value SET hydrated_value = NULL, hydrated_at_block = NULL",
+    )
+    .execute(&fixture.pool)
+    .await?;
+    for version in [
+        json!({"block_number": 5, "event_identity": "e"}),
+        json!({"block_number": 0, "event_identity": "e"}),
+        json!({"block_number": 7.5, "event_identity": "e"}),
+        json!({"block_number": 1e20, "event_identity": "e"}),
+        json!({"block_number": 5, "event_identity": 5}),
+        json!({"block_number": 5, "transaction_index": 1e20, "log_index": 0.5,
+               "event_identity": "e"}),
+        json!({"block_number": 0, "transaction_index": 1e20, "log_index": 0,
+               "event_identity": "e"}),
+    ] {
+        // As Rust reads it back from the database.
+        let stored: Value = sqlx::query_scalar(
+            "UPDATE project_node_record_partition SET version_position = $1
+             RETURNING version_position",
+        )
+        .bind(&version)
+        .fetch_one(&fixture.pool)
+        .await?;
+        let boundary = stored["block_number"]
+            .as_i64()
+            .filter(|_| stored["event_identity"].is_string());
+        let active = boundary.is_none_or(|block| 1 > block);
+        let expected: Vec<String> = if active {
+            vec!["url".into()]
+        } else {
+            Vec::new()
+        };
+        assert_eq!(selected(&fixture, 2).await?, expected, "{stored}");
+    }
+    fixture.cleanup().await
+}
