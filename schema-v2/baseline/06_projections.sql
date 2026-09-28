@@ -1975,6 +1975,10 @@ COMMENT ON COLUMN project_registry_binding_observation.clear_event_identity IS
     'This value is the event identity when the observation is not applicable.';
 CREATE INDEX IF NOT EXISTS project_registry_binding_observation_target_idx
     ON project_registry_binding_observation (chain_id, target_resource_id);
+CREATE INDEX IF NOT EXISTS project_registry_binding_observation_resource_idx
+    ON project_registry_binding_observation (chain_id, resource_id);
+CREATE INDEX IF NOT EXISTS project_registry_binding_observation_owner_idx
+    ON project_registry_binding_observation (chain_id, registry_contract, registry_owner);
 
 CREATE TABLE IF NOT EXISTS project_resolver_classification (
     chain_id text NOT NULL,
@@ -2430,6 +2434,8 @@ CREATE TABLE IF NOT EXISTS project_grant (
     PRIMARY KEY (chain_id, resource_id, subject, scope),
     CHECK ((transaction_index IS NULL) = (log_index IS NULL))
 );
+CREATE INDEX IF NOT EXISTS project_grant_subject_idx ON project_grant (subject);
+CREATE INDEX IF NOT EXISTS project_grant_scope_idx ON project_grant (chain_id, scope);
 COMMENT ON TABLE project_grant IS
     'Project-owned raw grants of family F8: per resource, subject and scope, the latest PermissionChanged or RootPermissionChanged, unmasked; wrapper masks, grace and expiry retirement apply at read. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
 COMMENT ON COLUMN project_grant.chain_id IS
@@ -2524,6 +2530,8 @@ CREATE TABLE IF NOT EXISTS project_account_approval (
     PRIMARY KEY (chain_id, authority_kind, authority_contract, owner, subject, relation_kind),
     CHECK ((transaction_index IS NULL) = (log_index IS NULL))
 );
+CREATE INDEX IF NOT EXISTS project_account_approval_subject_idx
+    ON project_account_approval (subject, authority_kind);
 COMMENT ON TABLE project_account_approval IS
     'Project-owned account approvals of family F9: the latest AccountPermissionChanged per authority contract, owner, subject and relation; an explicit false stays as a row. Step 2 of TYR-36 writes it block by block beside the served tables and nothing reads it yet.';
 COMMENT ON COLUMN project_account_approval.chain_id IS

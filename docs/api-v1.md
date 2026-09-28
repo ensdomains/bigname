@@ -915,17 +915,32 @@ in flight (the marker is not `live`, or carries another build's hash) no
 composed row is served: a route whose fence has not already refused answers
 `409 stale` with "requested snapshot is not available for" its resource.
 
-Two differences remain with the switch on. A bound-name listing still decides
-whether the resolver serves bound names at all from the served resolver row
-(`resolver_current`'s bindings status); that gate moves with the resolver
-reads. And after an ENSv1 registry `Transfer` to the zero address leaves a
-name's registry node ownerless, the served name row keeps its earlier state
-(unsupported, so unlisted) until Project next rebuilds the served tables, while
-the composed row reads the node at once (unregistered but projected), so
-`GET /v1/search` can list with the switch on a name it omits with the switch
-off. A composed row also does not yet carry the declared resolution topology
-(`declared_summary.topology`), which the records route's verified lookup
-admission and avatar readback read; that moves with the record inventories.
+With the switch on, `GET /v1/permissions` and the resolver routes also serve
+their own rows from the families. The permission rows, the registry operator
+rows and each registration's authority context and restrictions are built at
+read from the grants, approvals and registry bindings the families keep, masked
+at the published block's time. The resolver overview (`GET
+/v1/resolvers/{chain_id}/{address}`, including whether it lists bound names)
+and whether its `/aliases`, `/links` and `/roles` collections are supported come
+from the families' resolver classification, and those collections list the
+families' rows, with the names each row joins read from composed rows. History
+attribution through a resolver's classification reads the same classification.
+A role holder's `grant_event` is the earliest permission event of that holder
+at that resolver scope, as before. Grants on a registration whose row is not
+readable are not listed; no other request-time lineage check applies, since a
+dropped block's grants leave the families when that block is undone. The bodies
+are meant to be identical to the served ones, and these routes answer
+`409 stale` while the families are not servable, as above.
+
+One difference remains with the switch on. After an ENSv1 registry `Transfer` to
+the zero address leaves a name's registry node ownerless, the served name row
+keeps its earlier state (unsupported, so unlisted) until Project next rebuilds
+the served tables, while the composed row reads the node at once (unregistered
+but projected), so `GET /v1/search` can list with the switch on a name it omits
+with the switch off. A composed row also does not yet carry the declared
+resolution topology (`declared_summary.topology`), which the records route's
+verified lookup admission and avatar readback read; that moves with the record
+inventories.
 
 Indexed lookup names, record inventories, address-name relations, resolver
 overviews, and resolver bound names now come from `bigname_phase` projections.

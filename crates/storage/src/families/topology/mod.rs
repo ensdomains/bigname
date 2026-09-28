@@ -38,7 +38,9 @@ pub use collections::{
 };
 pub use name_topology::load_name_topology_shadow;
 pub use overview::load_family_resolver_current;
-pub(crate) use overview::{FAMILY_RESOLVER_SERVED_ROWS, FAMILY_RESOLVER_SUMMARY};
+pub(crate) use overview::{
+    FAMILY_RESOLVER_SERVED_ROWS, FAMILY_RESOLVER_SUMMARY, resolver_classification_relation,
+};
 pub use pointers::{
     FamilyAliasSourcePointer, FamilyLink, FamilyWildcardSource, LinkSelection,
     load_family_alias_source_pointer, load_family_link_selection, load_family_wildcard_source,

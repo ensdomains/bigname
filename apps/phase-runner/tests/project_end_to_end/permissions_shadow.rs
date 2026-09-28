@@ -15,7 +15,8 @@
 //! - resource summaries (`load_serving_permission_summaries`): authority kind, registry root,
 //!   coverage and restriction block of every resource of the chain;
 //! - resolvers: for every resolver `resolver_current` or F3 names, the overview row
-//!   (`load_phase_resolver_current`): whether it exists, its classification and the support of
+//!   (`load_phase_resolver_current`): whether it exists, its classification, declaring manifest
+//!   and coverage, and the support of
 //!   every section the routes gate on; and the `/aliases`, `/links` and `/roles` pages walked by
 //!   key, each side read the way the route reads it (the served statements of
 //!   apps/api/src/v2/resolvers/collections/reads.rs, the family collection readers), with totals.
@@ -410,8 +411,11 @@ async fn resolvers(
                     json!([summary["status"], summary["unsupported_reason"]]),
                 );
             }
+            // The classification, support and declaring manifest are also what history
+            // attribution joins as `resolver_current` (`resolver_classification_relation`).
             json!({"classification": row.declared_summary["classification"],
-                   "sections": sections, "coverage": row.coverage})
+                   "sections": sections, "coverage": row.coverage,
+                   "manifest_id": row.provenance["manifest_id"]})
         };
         let pair = (served.as_ref().map(overview), shadow.as_ref().map(overview));
         if pair.0 != pair.1 {

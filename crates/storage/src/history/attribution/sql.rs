@@ -231,7 +231,8 @@ pub(super) fn push_pointer_window_attribution<'a>(
 /// ENSv2-origin writes: an ENSv2 registry or root pointer attributes the node-keyed writes of a
 /// resolver whose classification is a supported, manifest-declared ENSv1 resolver or
 /// `public_resolver_v2`, when the declaring manifest is in the pointer's namespace. The
-/// classification is read from `resolver_current`, as the producer reads it.
+/// classification is read from `resolver_current`, as the producer reads it, or from its F3
+/// rows under the publication switch (`resolver_classification_relation`).
 fn push_declared_resolver_arm(
     builder: &mut QueryBuilder<'_, Postgres>,
     published: Option<&BTreeMap<String, i64>>,
@@ -252,7 +253,11 @@ fn push_declared_resolver_arm(
                       'public_resolver_v2'))
          AND resolver.declared_summary #>> '{classification,basis}' =
              'manifest_declared_address'
-        JOIN",
+        JOIN"
+            .replace(
+                "bigname_phase.resolver_current",
+                &crate::families::topology::resolver_classification_relation(),
+            ),
     );
     push_declaration_manifest(
         builder,

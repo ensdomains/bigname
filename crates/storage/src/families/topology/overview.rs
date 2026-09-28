@@ -87,6 +87,27 @@ pub(crate) const FAMILY_RESOLVER_SUMMARY: &str = r#"(
 pub(crate) const FAMILY_RESOLVER_SERVED_ROWS: &str =
     "classification_row.unsupported_reason IS DISTINCT FROM 'resolver_manifest_not_active'";
 
+/// The relation a statement joins as `resolver_current` for a resolver's classification: the
+/// served table with the publication switch off; with it on, the F3 rows the served build would
+/// write, with the served table's `chain_id`, `resolver_address`, `support_status`,
+/// `declared_summary -> 'classification'` and `provenance ->> 'manifest_id'`. Only those columns
+/// may be read through it.
+pub(crate) fn resolver_classification_relation() -> String {
+    if !crate::publication_source::serve_from_families() {
+        return "bigname_phase.resolver_current".to_owned();
+    }
+    format!(
+        "(SELECT classification_row.chain_id, classification_row.resolver_address,
+                 classification_row.support_status,
+                 jsonb_build_object('classification',
+                     COALESCE(classification_row.classification, '{{}}'::jsonb) - 'upgrade')
+                     AS declared_summary,
+                 jsonb_build_object('manifest_id', classification_row.manifest_id) AS provenance
+          FROM bigname_phase.project_resolver_classification classification_row
+          WHERE {FAMILY_RESOLVER_SERVED_ROWS})"
+    )
+}
+
 /// The overview row of `resolver_address` on `chain_id` from F3, at the family marker's
 /// publication; none when F3 holds no servable row for it.
 pub async fn load_family_resolver_current(

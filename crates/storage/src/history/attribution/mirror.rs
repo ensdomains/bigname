@@ -18,6 +18,8 @@ use alloy_primitives::{B256, keccak256};
 use anyhow::{Context, Result};
 use serde_json::Value;
 use sqlx::{PgConnection, Postgres, QueryBuilder, Row};
+
+use crate::families::topology::resolver_classification_relation;
 use uuid::Uuid;
 
 use super::sql::{
@@ -96,7 +98,11 @@ async fn load_mirror_pointers(
          AND resolver.resolver_address = latest.resolver_address
          AND resolver.declared_summary #>> '{classification,source_family}' = 'ens_v2_resolver_l1'
          AND resolver.declared_summary #>> '{classification,role}' = 'ensv1_mirror_resolver'
-        LEFT JOIN",
+        LEFT JOIN"
+            .replace(
+                "bigname_phase.resolver_current",
+                &resolver_classification_relation(),
+            ),
     );
     push_declaration_manifest(
         &mut builder,
@@ -302,10 +308,11 @@ fn push_mirror_writes<'a>(
         followed AS (
             SELECT nearest.*
             FROM nearest
-            JOIN bigname_phase.resolver_current resolver
+            JOIN {} resolver
               ON resolver.chain_id = nearest.chain_id
              AND resolver.resolver_address = nearest.mirrored_resolver_address
-            JOIN"
+            JOIN",
+        resolver_classification_relation()
     ));
     push_declaration_manifest(
         builder,
