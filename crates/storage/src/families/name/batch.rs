@@ -244,6 +244,8 @@ pub(super) async fn load(
 /// that second can bring back.
 pub(super) struct Composed {
     pub(super) row: Option<NameCurrentRow>,
+    // Child relation selection needs the arm even when token readability withholds the row.
+    pub(super) authority_arm: Option<String>,
     pub(super) recompose_at: Option<i64>,
 }
 
@@ -410,6 +412,7 @@ pub(super) async fn load_chain(
                 name.to_owned(),
                 Composed {
                     row: None,
+                    authority_arm: decided.selection.authority_arm.clone(),
                     recompose_at: recompose_at(facts, clock.timestamp_seconds),
                 },
             );
@@ -436,6 +439,7 @@ pub(super) async fn load_chain(
             name.to_owned(),
             Composed {
                 row: Some(row),
+                authority_arm: decided.selection.authority_arm,
                 recompose_at: recompose_at(facts, clock.timestamp_seconds),
             },
         );
