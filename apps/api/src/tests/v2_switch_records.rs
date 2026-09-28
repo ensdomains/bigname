@@ -404,9 +404,16 @@ async fn v2_family_abi_inventory_keeps_classification_across_reset() -> Result<(
         let (_guard, control) =
             crate::v2::abi_content_types_test_hooks::pause(&database.pool).await?;
         let state = database.app_state();
+        // The paused request waits out the reset and republish below, which can outlast the
+        // default 30 s request timeout on a slow runner and turn the answer into a 408.
+        let bounds = ApiBoundsConfig {
+            request_timeout_ms: 600_000,
+            ..ApiBoundsConfig::default()
+        };
         let request = tokio::spawn(async move {
             bigname_storage::publication_source::with_serve_from_families(true, async move {
-                app_router(state)
+                let health_pool = state.pool.clone();
+                app_router_with_bounds(state, health_pool, &bounds)
                     .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
                     .await
             })
