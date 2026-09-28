@@ -2,8 +2,7 @@
 // history read admits must come from evidence at or below the block the read is bound to: a
 // relation or resolver pointer recorded after that block must not pull older events into it.
 // These tests bind storage reads to a block below the newest evidence, and bind the routes to a
-// publication below it, which is also the state a read sees between Project's projection swap and
-// its recorded position.
+// family publication below it.
 
 const BOUNDED_CHAIN: &str = "ethereum-mainnet";
 const BOUNDED_ADDRESS: &str = "0x00000000000000000000000000000000000b0a01";
@@ -37,22 +36,6 @@ async fn publish_bounded_membership_at(database: &TestDatabase, block: i64) -> R
         &crate::v2::format_timestamp(timestamp),
     )
     .await
-}
-
-/// Move Project's recorded position to `block`, leaving the chain head where it is.
-async fn move_bounded_publication_to(database: &TestDatabase, block: i64) -> Result<()> {
-    sqlx::query(
-        "UPDATE chain_phase_state
-         SET current_block_number = $1, current_block_hash = $2,
-             target_block_number = $1, target_block_hash = $2
-         WHERE chain_id = $3 AND phase_name = 'project'",
-    )
-    .bind(block)
-    .bind(format!("0xhistory{block}"))
-    .bind(BOUNDED_CHAIN)
-    .execute(&database.pool)
-    .await?;
-    Ok(())
 }
 
 fn bounded_at(block: i64) -> std::collections::BTreeMap<String, i64> {
@@ -201,33 +184,9 @@ async fn address_relation_cited_above_the_bound_admits_no_older_events() -> Resu
     )
     .await?;
 
-    // Seeding a name moves the publication to its block; Project has published 240.
-    move_bounded_publication_to(&database, 240).await?;
-
-    for relation in [
-        None,
-        Some(bigname_storage::AddressNameRelation::TokenHolder),
-    ] {
-        let hashes = bounded_address_history_hashes(&database, relation, 240).await?;
-        assert!(
-            !hashes
-                .iter()
-                .any(|hash| hash == "0xtx230" || hash == "0xtx238"),
-            "relation={relation:?}: a relation cited at block 241 admitted older events into a \
-             read bound at 240: {hashes:?}"
-        );
-        let hashes = bounded_address_history_hashes(&database, relation, 241).await?;
-        assert!(
-            hashes.iter().any(|hash| hash == "0xtx238")
-                && hashes.iter().any(|hash| hash == "0xtx230"),
-            "relation={relation:?}: a read bound at 241 must admit the relation: {hashes:?}"
-        );
-    }
-    let before = bounded_address_history_hashes(&database, None, 240).await?;
-    assert_eq!(before, vec!["0xtx215", "0xtx210"]);
-
-    // The route bound to the publication at 240 sees the same rows, although the relation row
-    // for block 241 is already in place (Project swapped its projection before recording 241).
+    // Project has published 240: the relation cited at 241 is not part of that publication.
+    publish_bounded_membership_at(&database, 240).await?;
+    rebuild_fixture_families(&database.pool, BOUNDED_CHAIN, 240, "0xhistory240").await?;
     let payload = v2_history_payload_for_database(
         &database,
         &format!("/v1/addresses/{BOUNDED_ADDRESS}/history?page_size=20&include=total_count"),
@@ -250,7 +209,31 @@ async fn address_relation_cited_above_the_bound_admits_no_older_events() -> Resu
         "{events}"
     );
 
-    publish_bounded_membership_at(&database, 241).await?;
+    // Once 241 is published, a storage read bound at 240 still excludes the relation cited
+    // at 241, and one bound at 241 admits it.
+    publish_test_families(&database, 241).await?;
+    for relation in [
+        None,
+        Some(bigname_storage::AddressNameRelation::TokenHolder),
+    ] {
+        let hashes = bounded_address_history_hashes(&database, relation, 240).await?;
+        assert!(
+            !hashes
+                .iter()
+                .any(|hash| hash == "0xtx230" || hash == "0xtx238"),
+            "relation={relation:?}: a relation cited at block 241 admitted older events into a \
+             read bound at 240: {hashes:?}"
+        );
+        let hashes = bounded_address_history_hashes(&database, relation, 241).await?;
+        assert!(
+            hashes.iter().any(|hash| hash == "0xtx238")
+                && hashes.iter().any(|hash| hash == "0xtx230"),
+            "relation={relation:?}: a read bound at 241 must admit the relation: {hashes:?}"
+        );
+    }
+    let before = bounded_address_history_hashes(&database, None, 240).await?;
+    assert_eq!(before, vec!["0xtx215", "0xtx210"]);
+
     let published = v2_history_payload_for_database(
         &database,
         &format!("/v1/addresses/{BOUNDED_ADDRESS}/history?page_size=20"),
@@ -366,6 +349,18 @@ async fn resolver_pointer_above_the_bound_attributes_no_older_write() -> Result<
         205,
     )
     .await?;
+    // The resolver the registration points at from 241 is a declared ENSv1 resolver.
+    let manifest = declare_family_fixture_resolver(
+        &database.pool,
+        "ens",
+        BOUNDED_CHAIN,
+        "ens_v1_resolver_l1",
+        BOUNDED_RESOLVER,
+    )
+    .await?;
+    let mut write = bounded_node_write("pointed-write-220", NAME, BOUNDED_RESOLVER, 220)?;
+    write.source_manifest_id = Some(manifest);
+    write.manifest_version = 1;
     bigname_storage::insert_normalized_event_fixtures(
         &database.pool,
         &[
@@ -376,7 +371,7 @@ async fn resolver_pointer_above_the_bound_attributes_no_older_write() -> Result<
                 "RegistrationGranted",
                 205,
             ),
-            bounded_node_write("pointed-write-220", NAME, BOUNDED_RESOLVER, 220)?,
+            write,
             bounded_pointer(
                 "pointed-pointer-241",
                 NAME,
@@ -388,21 +383,29 @@ async fn resolver_pointer_above_the_bound_attributes_no_older_write() -> Result<
         ],
     )
     .await?;
-    // Seeding the name moves the head and publication to its block; publish 240 again.
-    publish_bounded_membership_at(&database, 240).await?;
-    let write = bounded_event_id(&database, "pointed-write-220").await?;
-    // Project's row for 241 attributes the write through the new pointer.
-    sqlx::query(
-        "UPDATE bigname_phase.record_inventory_current
-         SET provenance = provenance
-             || jsonb_build_object('attributed_event_ids', jsonb_build_array($2::bigint))
-         WHERE resource_id = $1",
-    )
-    .bind(resource)
-    .bind(write)
-    .execute(&database.pool)
-    .await?;
+    // Project publishes 240; the pointer at 241 is not part of that publication.
+    publish_test_families(&database, 240).await?;
+    for route in [
+        format!("/v1/names/{NAME}/history?scope=registration&page_size=20&include=total_count"),
+        format!("/v1/names/{NAME}/history?scope=both&page_size=20&include=total_count"),
+        format!("/v1/events?registration_id={resource}&page_size=20&include=total_count"),
+    ] {
+        let payload = v2_history_payload_for_database(&database, &route).await?;
+        assert_eq!(
+            bounded_route_hashes(&payload),
+            vec!["0xtx205"],
+            "{route}: {payload}"
+        );
+        assert_eq!(
+            payload["page"]["total_count"],
+            json!(1),
+            "{route}: {payload}"
+        );
+    }
 
+    // Project's publication at 241 attributes the write through the new pointer. A storage read
+    // bound at 240 still must not list it.
+    publish_test_families(&database, 241).await?;
     for scope in [
         bigname_storage::HistoryScope::Resource,
         bigname_storage::HistoryScope::Both,
@@ -424,25 +427,6 @@ async fn resolver_pointer_above_the_bound_attributes_no_older_write() -> Result<
         );
     }
 
-    for route in [
-        format!("/v1/names/{NAME}/history?scope=registration&page_size=20&include=total_count"),
-        format!("/v1/names/{NAME}/history?scope=both&page_size=20&include=total_count"),
-        format!("/v1/events?registration_id={resource}&page_size=20&include=total_count"),
-    ] {
-        let payload = v2_history_payload_for_database(&database, &route).await?;
-        assert_eq!(
-            bounded_route_hashes(&payload),
-            vec!["0xtx205"],
-            "{route}: {payload}"
-        );
-        assert_eq!(
-            payload["page"]["total_count"],
-            json!(1),
-            "{route}: {payload}"
-        );
-    }
-
-    publish_bounded_membership_at(&database, 241).await?;
     for route in [
         format!("/v1/names/{NAME}/history?scope=registration&page_size=20"),
         format!("/v1/events?registration_id={resource}&page_size=20"),
@@ -476,15 +460,29 @@ async fn ens_v2_pointer_attributes_public_resolver_v2_writes() -> Result<()> {
         205,
     )
     .await?;
+    // The ENSv2 registry admitted the resolver, and the resolver manifest declares it as a
+    // public_resolver_v2.
+    admit_fixture_resolver(
+        &database.pool,
+        "ens_v2_registry_l1",
+        "0x00000000000000000000000000000000000b0a2e",
+        RESOLVER_V2,
+    )
+    .await?;
+    let declared = |role: &str| {
+        json!({"contracts":[{"role":role, "address":RESOLVER_V2, "proxy_kind":"none",
+            "start_block":0, "read_features":[]}]})
+    };
     let manifest_id: i64 = sqlx::query_scalar(
         "INSERT INTO bigname_phase.manifest_versions
             (manifest_version, namespace, source_family, chain_id, deployment_label,
              rollout_status, normalizer_version, file_path, manifest_payload)
          VALUES (1, 'ens', 'ens_v2_resolver_l1', $1, 'bounded-v2', 'shadow', 'test',
-                 'test/ens/bounded-v2-resolver.toml', '{}'::jsonb)
+                 'test/ens/bounded-v2-resolver.toml', $2)
          RETURNING manifest_id",
     )
     .bind(BOUNDED_CHAIN)
+    .bind(declared("public_resolver_v2"))
     .fetch_one(&database.pool)
     .await?;
 
@@ -494,7 +492,8 @@ async fn ens_v2_pointer_attributes_public_resolver_v2_writes() -> Result<()> {
     declaration.derivation_kind = "manifest_sync".to_owned();
     declaration.source_manifest_id = Some(manifest_id);
     declaration.manifest_version = 1;
-    declaration.after_state = json!({"rollout_status": "active", "manifest_payload": {}});
+    declaration.after_state =
+        json!({"rollout_status": "active", "manifest_payload": declared("public_resolver_v2")});
     let mut pointer = v2_history_event(
         "v2-pointer-210",
         Some(&logical_name_id),
@@ -541,24 +540,7 @@ async fn ens_v2_pointer_attributes_public_resolver_v2_writes() -> Result<()> {
         ],
     )
     .await?;
-    let mut resolver = resolver_current_row(BOUNDED_CHAIN, RESOLVER_V2);
-    resolver.declared_summary["classification"] = json!({
-        "source_family": "ens_v2_resolver_l1",
-        "role": "public_resolver_v2",
-        "basis": "manifest_declared_address",
-    });
-    resolver.provenance["manifest_id"] = json!(manifest_id);
-    upsert_phase_resolver_current_rows(&database.pool, &[resolver]).await?;
-    sqlx::query(
-        "UPDATE bigname_phase.resolver_current
-         SET support_status = 'supported', unsupported_reason = NULL
-         WHERE chain_id = $1 AND resolver_address = $2",
-    )
-    .bind(BOUNDED_CHAIN)
-    .bind(RESOLVER_V2)
-    .execute(&database.pool)
-    .await?;
-    publish_bounded_membership_at(&database, 240).await?;
+    publish_test_families(&database, 240).await?;
     let write = bounded_event_id(&database, "v2-write-220").await?;
 
     let attributed = bigname_storage::load_bounded_record_attribution(
@@ -587,18 +569,18 @@ async fn ens_v2_pointer_attributes_public_resolver_v2_writes() -> Result<()> {
         );
     }
 
-    // A resolver that is not a declared public_resolver_v2 attributes nothing through this arm.
-    sqlx::query(
-        "UPDATE bigname_phase.resolver_current
-         SET declared_summary = jsonb_set(
-             declared_summary, '{classification,role}', '\"permissioned_resolver\"'
-         )
-         WHERE chain_id = $1 AND resolver_address = $2",
-    )
-    .bind(BOUNDED_CHAIN)
-    .bind(RESOLVER_V2)
-    .execute(&database.pool)
-    .await?;
+    // A resolver that is not a declared public_resolver_v2 attributes nothing through this arm:
+    // the manifest later declares the address in another role.
+    let mut redeclaration =
+        v2_history_event("v2-redeclaration", None, None, "SourceManifestUpdated", 230);
+    redeclaration.source_family = "ens_v2_resolver_l1".to_owned();
+    redeclaration.derivation_kind = "manifest_sync".to_owned();
+    redeclaration.source_manifest_id = Some(manifest_id);
+    redeclaration.manifest_version = 1;
+    redeclaration.after_state = json!({"rollout_status": "active",
+        "manifest_payload": declared("permissioned_resolver")});
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[redeclaration]).await?;
+    rebuild_fixture_families(&database.pool, BOUNDED_CHAIN, 240, "0xhistory240").await?;
     let attributed = bigname_storage::load_bounded_record_attribution(
         &database.pool,
         &[resource],

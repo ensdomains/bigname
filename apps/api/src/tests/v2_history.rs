@@ -531,23 +531,19 @@ async fn v2_tokenized_registry_history_keeps_identity_outside_the_binding_window
 
 #[tokio::test]
 async fn v2_ownerless_registry_history_omits_registration_identity() -> Result<()> {
-    const ADDRESS: &str = "0x0000000000000000000000000000000000007130";
     let database = TestDatabase::new_migrated().await?;
     let logical_name_id = "ens:ownerless-history.eth";
     let control_resource_id = Uuid::from_u128(0x7130);
     let read_resource_id = Uuid::from_u128(0x7131);
-    seed_identity_name(
+    seed_v2_history_name(
         &database,
         logical_name_id,
         "ownerless-history.eth",
-        "ownerless-history.eth",
         "node:ownerless-history.eth",
+        80,
         control_resource_id,
         Uuid::from_u128(0x8130),
         Uuid::from_u128(0x9130),
-        ADDRESS,
-        bigname_storage::AddressNameRelation::EffectiveController,
-        80,
     )
     .await?;
     upsert_test_resources(
@@ -560,21 +556,12 @@ async fn v2_ownerless_registry_history_omits_registration_identity() -> Result<(
         )],
     )
     .await?;
+    // The name's registrar binding ended; the registry now reports no owner for the node.
     sqlx::query(
-        "UPDATE bigname_phase.name_current
-         SET serving_resource_id = $2,
-             surface_binding_id = NULL,
-             resource_id = NULL,
-             token_lineage_id = NULL,
-             binding_kind = NULL,
-             declared_summary = jsonb_build_object(
-                 'registration', jsonb_build_object('status', 'unregistered'),
-                 'control', jsonb_build_object('status', 'unregistered')
-             )
-         WHERE logical_name_id = $1",
+        "UPDATE bigname_phase.surface_bindings SET active_to = to_timestamp(1700000120)
+         WHERE surface_binding_id = $1",
     )
-    .bind(logical_name_id)
-    .bind(read_resource_id)
+    .bind(Uuid::from_u128(0x9130))
     .execute(&database.pool)
     .await?;
     seed_v2_history_blocks(&database, 121..=122).await?;
@@ -587,7 +574,7 @@ async fn v2_ownerless_registry_history_omits_registration_identity() -> Result<(
     );
     authority.source_family = "ens_v1_registry_l1".to_owned();
     authority.after_state = json!({
-        "node": "node:ownerless-history.eth",
+        "node": bigname_lookup::ens_namehash_hex("ownerless-history.eth")?,
         "owner": "0x0000000000000000000000000000000000000000",
         "owner_getter": "0x0000000000000000000000000000000000000000",
         "owner_getter_reason": "literal_zero",
@@ -602,7 +589,7 @@ async fn v2_ownerless_registry_history_omits_registration_identity() -> Result<(
     );
     epoch.source_family = "ens_v1_registry_l1".to_owned();
     epoch.after_state = json!({
-        "node": "node:ownerless-history.eth",
+        "node": bigname_lookup::ens_namehash_hex("ownerless-history.eth")?,
         "owner": "0x0000000000000000000000000000000000000000",
         "owner_getter": "0x0000000000000000000000000000000000000000",
         "owner_getter_reason": "literal_zero",
@@ -617,7 +604,7 @@ async fn v2_ownerless_registry_history_omits_registration_identity() -> Result<(
     );
     resolver.source_family = "ens_v1_registry_l1".to_owned();
     resolver.after_state = json!({
-        "node": "node:ownerless-history.eth",
+        "node": bigname_lookup::ens_namehash_hex("ownerless-history.eth")?,
         "resolver": "0x00000000000000000000000000000000000000aa"
     });
     bigname_storage::insert_normalized_event_fixtures(
@@ -625,6 +612,7 @@ async fn v2_ownerless_registry_history_omits_registration_identity() -> Result<(
         &[authority, epoch, resolver],
     )
     .await?;
+    rebuild_fixture_families(&database.pool, "ethereum-mainnet", 21_000_003, "0xbinding").await?;
 
     for route in [
         "/v1/names/ownerless-history.eth/history?scope=both&page_size=20",
@@ -915,7 +903,7 @@ async fn v2_product_event_routes_preserves_stored_ensip15_normalized_name_bytes(
     )
     .await?;
     let stored_raw_name: String = sqlx::query_scalar(
-        "SELECT raw_name FROM bigname_phase.name_current WHERE raw_name = $1",
+        "SELECT raw_name FROM bigname_phase.name_surfaces WHERE raw_name = $1",
     )
     .bind(NORMALIZED_NAME)
     .fetch_one(&database.pool)
