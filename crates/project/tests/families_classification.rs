@@ -752,7 +752,7 @@ async fn a_resolver_is_admitted_only_by_manifests_with_a_qualifying_edge() -> Re
     )
     .await?;
 
-    fixture.apply(10, FamilyMode::Normal).await;
+    fixture.apply(10, FamilyMode::Normal).await?;
     assert_eq!(
         classifications(&fixture).await?,
         vec![
@@ -915,7 +915,7 @@ async fn an_undated_edge_admits_beside_rejected_undated_and_dated_edges() -> Res
     )
     .await?;
 
-    fixture.apply(10, FamilyMode::Normal).await;
+    fixture.apply(10, FamilyMode::Normal).await?;
     assert_eq!(
         classifications(&fixture).await?,
         vec![
@@ -966,7 +966,7 @@ async fn an_open_dated_edge_admits_beside_a_closed_one_of_the_same_manifest() ->
     edge(&fixture, 0x2201, &r2, registry, Some(3), None, false).await?;
     edge(&fixture, 0x2202, &r2, registry, Some(7), Some(9), false).await?;
 
-    fixture.apply(10, FamilyMode::Normal).await;
+    fixture.apply(10, FamilyMode::Normal).await?;
     let supported = |address: &str| {
         json!({"resolver_address": address, "support_status": "supported",
                "unsupported_reason": null, "block_number": 10,
