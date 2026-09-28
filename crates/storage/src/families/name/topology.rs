@@ -34,7 +34,9 @@ pub(super) async fn enrich(conn: &mut PgConnection, row: &mut NameCurrentRow) ->
             FamilyAttribution::Given(Default::default()),
         )
         .await?;
-        if row.namespace == "ens" && inventory.is_some() {
+        if row.namespace == "ens"
+            && let Some(inventory) = &inventory
+        {
             let resolver = &row.declared_summary["resolver"];
             let ownerless = row.serving_resource_id.is_some();
             let direct = topology.is_none()
@@ -62,12 +64,7 @@ pub(super) async fn enrich(conn: &mut PgConnection, row: &mut NameCurrentRow) ->
                         resolver["address"].clone(),
                         resolver["latest_event_kind"].clone(),
                     ),
-                    inventory
-                        .as_ref()
-                        .unwrap()
-                        .row
-                        .record_version_boundary
-                        .clone(),
+                    inventory.row.record_version_boundary.clone(),
                 ));
             }
         }
