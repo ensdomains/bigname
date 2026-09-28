@@ -16,6 +16,16 @@
 //!   `/links` and `/roles` pages and totals against the served collection statements (the API's
 //!   own SQL files, and a copy of its inline roles statement).
 //!
+//! - listings (TYR-36 step 7b): the expiring listing of `/v1/names`, paged through
+//!   `load_name_current_expiring_page` and the composed `load_family_expiring_page` over the whole
+//!   expiry range and one narrow window, in both orders; and the `/v1/search` page, through
+//!   `load_name_current_list_page` and `load_family_search_page`, for every first character of a
+//!   served name as a prefix and for one contains query. Rows are compared by name and derived
+//!   columns, page by page with the cursors, unless a name the name comparison leaves to the
+//!   control comparison (`name_shadow.rs`, `covered_names`) is listed: its registration can
+//!   differ by a cause that comparison decides and place it elsewhere, so then the whole listing
+//!   is compared as one sequence without those names, counted as `listing_excused`.
+//!
 //! The `/roles` comparison is row parity before the API's enrichment: address, registration,
 //! powers and record selector as the collection statement returns them. It does not cover the
 //! `grant_event` provenance the API attaches afterwards, the evidence ids (the family row keeps
@@ -33,13 +43,15 @@ use std::{
 use anyhow::{Context, Result, ensure};
 use bigname_storage::{
     ChildrenCurrentKeysetCursor, ChildrenCurrentOrder, ChildrenCurrentPageFilter,
-    ChildrenCurrentRow, ChildrenCurrentSort, NameCurrentListCursor, NameCurrentListCursorValue,
-    NameCurrentRow,
-    families::topology::{
-        self as family, ClassificationSource, FamilyChildRow, FamilyCollectionPage,
+    ChildrenCurrentRow, ChildrenCurrentSort, NameCurrentExpiringFilter, NameCurrentListCursor,
+    NameCurrentListCursorValue, NameCurrentListFilter, NameCurrentListOrder, NameCurrentListPage,
+    NameCurrentListRow, NameCurrentListSort, NameCurrentRow,
+    families::{
+        name as family_name,
+        topology::{self as family, ClassificationSource, FamilyChildRow, FamilyCollectionPage},
     },
-    load_children_current_page_filtered, load_phase_resolver_bound_name_rows,
-    load_phase_resolver_current,
+    load_children_current_page_filtered, load_name_current_expiring_page,
+    load_name_current_list_page, load_phase_resolver_bound_name_rows, load_phase_resolver_current,
 };
 use serde_json::{Value, json};
 use sqlx::{PgPool, types::time::OffsetDateTime};
@@ -84,6 +96,11 @@ pub struct Report {
     pub aliases: usize,
     pub links: usize,
     pub roles: usize,
+    /// Rows compared on the expiring listing and the search page.
+    pub expiring_rows: usize,
+    pub search_rows: usize,
+    /// Listings compared as one sequence without the names left to the control comparison.
+    pub listing_excused: usize,
     /// Served resolvers the shadow classified from the declaration manifest because
     /// `project_resolver_classification` has no row for them, and the subset whose served mirror
     /// that fallback does not reproduce. The fallback is a partial comparison: the mirror only.
@@ -126,7 +143,7 @@ impl Report {
         format!(
             "SEPOLIA_END_TO_END_SHADOW target={} parents={} child_rows={} child_pages={} \
              topology_names={} resolvers={} bound_names={} aliases={} links={} roles={} \
-             f3_unfilled={} f3_unfilled_mirror_differs={} f3_extra_not_active={} mismatches={} \
+             expiring_rows={} search_rows={} listing_excused={} f3_unfilled={} f3_unfilled_mirror_differs={} f3_extra_not_active={} mismatches={} \
              {timings}",
             self.target,
             self.parents,
@@ -138,6 +155,9 @@ impl Report {
             self.aliases,
             self.links,
             self.roles,
+            self.expiring_rows,
+            self.search_rows,
+            self.listing_excused,
             self.f3_unfilled,
             self.f3_unfilled_mirror_differs,
             self.f3_extra_not_active.len(),
@@ -207,6 +227,7 @@ pub async fn compare(pool: &PgPool, chain: &str, settings: Settings) -> Result<R
     children(pool, chain, settings, start.clock, &mut report).await?;
     topology(pool, chain, &mut report).await?;
     resolvers(pool, chain, start.block_number, settings, &mut report).await?;
+    listings(pool, chain, settings, &mut report).await?;
     // The comparison read one publication throughout: the same block, the same block hash, so a
     // same-height reorg fails it, and the same marker sequence, so a family undo and reapply at
     // the same block fails it too.
@@ -852,4 +873,210 @@ pub fn describe(report: &Report) -> Value {
             .map(ToString::to_string)
             .collect::<Vec<_>>(),
     })
+}
+
+/// A list row as the listings compare it: the name and the derived columns the wire serves.
+fn listed(row: &NameCurrentListRow) -> Value {
+    json!({
+        "name": row.row.logical_name_id,
+        "labelhash": row.labelhash,
+        "token_id": row.token_id,
+        "owner": row.owner,
+        "registrant": row.registrant,
+        "created_at": row.created_at.map(|at| at.unix_timestamp()),
+        "registration_date": row.registration_date.map(|at| at.unix_timestamp()),
+        "expiry_date": row.expiry_date.map(|at| at.unix_timestamp()),
+        "resolver_address": row.resolver_address,
+    })
+}
+
+/// Compare one listing page by page: the served and composed pages must hold the same rows and
+/// hand out the same cursor. When either side lists an `excused` name, the listing is compared
+/// as one sequence without those names instead.
+async fn compare_listing<S, F>(
+    key: String,
+    report: &mut Report,
+    excused: &BTreeSet<String>,
+    mut served: impl FnMut(Option<NameCurrentListCursor>) -> S,
+    mut composed: impl FnMut(Option<NameCurrentListCursor>) -> F,
+) -> Result<usize>
+where
+    S: std::future::Future<Output = Result<NameCurrentListPage>>,
+    F: std::future::Future<Output = Result<NameCurrentListPage>>,
+{
+    let mut pages: [Vec<(Vec<Value>, Option<NameCurrentListCursor>)>; 2] = [Vec::new(), Vec::new()];
+    for (side, pages) in pages.iter_mut().enumerate() {
+        let mut cursor = None;
+        loop {
+            ensure!(pages.len() < 10_000, "{key}: too many pages");
+            let started = Instant::now();
+            let page = if side == 0 {
+                served(cursor.clone()).await?
+            } else {
+                composed(cursor.clone()).await?
+            };
+            if side == 1 {
+                report.time("listings", started);
+            }
+            pages.push((
+                page.rows.iter().map(listed).collect(),
+                page.next_cursor.clone(),
+            ));
+            match page.next_cursor {
+                Some(next) => cursor = Some(next),
+                None => break,
+            }
+        }
+    }
+    let [served_pages, composed_pages] = pages;
+    let listed_excused = served_pages
+        .iter()
+        .chain(&composed_pages)
+        .flat_map(|(rows, _)| rows)
+        .any(|row| {
+            row["name"]
+                .as_str()
+                .is_some_and(|name| excused.contains(name))
+        });
+    if !listed_excused {
+        if served_pages != composed_pages {
+            report.mismatch(
+                key,
+                format!("served {served_pages:?}, composed {composed_pages:?}"),
+            );
+        }
+        return Ok(served_pages.iter().map(|(rows, _)| rows.len()).sum());
+    }
+    report.listing_excused += 1;
+    let sequence = |pages: &[(Vec<Value>, Option<NameCurrentListCursor>)]| -> Vec<Value> {
+        pages
+            .iter()
+            .flat_map(|(rows, _)| rows.iter().cloned())
+            .filter(|row| {
+                row["name"]
+                    .as_str()
+                    .is_none_or(|name| !excused.contains(name))
+            })
+            .collect()
+    };
+    let (left, right) = (sequence(&served_pages), sequence(&composed_pages));
+    if left != right {
+        report.mismatch(key, format!("served {left:?}, composed {right:?}"));
+    }
+    Ok(left.len())
+}
+
+async fn listings(
+    pool: &PgPool,
+    chain: &str,
+    settings: Settings,
+    report: &mut Report,
+) -> Result<()> {
+    let namespace = namespace_of(chain);
+    let excused = crate::name_shadow::compare(pool, chain, report.target)
+        .await?
+        .covered_names;
+    let page = settings.collection_page;
+    let median: Option<f64> = sqlx::query_scalar(
+        "SELECT percentile_disc(0.5) WITHIN GROUP (
+                    ORDER BY (declared_summary #>> '{registration,expiry}')::double precision)
+         FROM name_current
+         WHERE namespace = $1 AND provenance ->> 'chain_id' = $2
+           AND jsonb_typeof(declared_summary #> '{registration,expiry}') = 'number'",
+    )
+    .bind(namespace)
+    .bind(chain)
+    .fetch_one(pool)
+    .await?;
+    let at = |seconds: i64| OffsetDateTime::from_unix_timestamp(seconds);
+    let mut windows = vec![(at(0)?, at(253_402_300_000)?)];
+    if let Some(median) = median.filter(|median| (0.0..2.5e11).contains(median)) {
+        let median = median as i64;
+        windows.push((at(median)?, at(median + 180 * 86_400)?));
+    }
+    for (after, before) in windows {
+        for order in [NameCurrentListOrder::Asc, NameCurrentListOrder::Desc] {
+            let filter = NameCurrentExpiringFilter {
+                namespace: namespace.to_owned(),
+                expires_after: Some(after),
+                expires_before: Some(before),
+            };
+            report.expiring_rows += compare_listing(
+                format!("expiring {namespace} {after}..{before} {}", order.as_str()),
+                report,
+                &excused,
+                |cursor| {
+                    let filter = filter.clone();
+                    async move {
+                        load_name_current_expiring_page(pool, &filter, order, cursor.as_ref(), page)
+                            .await
+                    }
+                },
+                |cursor| {
+                    let filter = filter.clone();
+                    async move {
+                        family_name::load_family_expiring_page(
+                            pool,
+                            &filter,
+                            order,
+                            cursor.as_ref(),
+                            page,
+                        )
+                        .await
+                    }
+                },
+            )
+            .await?;
+        }
+    }
+    let prefixes: Vec<String> = sqlx::query_scalar(
+        "SELECT DISTINCT left(raw_name, 1) FROM name_current
+         WHERE namespace = $1 AND provenance ->> 'chain_id' = $2 AND raw_name <> ''
+         ORDER BY 1 LIMIT 40",
+    )
+    .bind(namespace)
+    .bind(chain)
+    .fetch_all(pool)
+    .await?;
+    let queries = prefixes
+        .into_iter()
+        .map(|prefix| (Some(prefix), None))
+        .chain([(None, Some("eth".to_owned()))]);
+    for (prefix, contains) in queries {
+        let filter = NameCurrentListFilter {
+            namespace: Some(namespace.to_owned()),
+            supported_only: true,
+            prefix: prefix.clone(),
+            contains: contains.clone(),
+            ..NameCurrentListFilter::default()
+        };
+        report.search_rows += compare_listing(
+            format!("search {namespace} prefix {prefix:?} contains {contains:?}"),
+            report,
+            &excused,
+            |cursor| {
+                let filter = filter.clone();
+                async move {
+                    load_name_current_list_page(
+                        pool,
+                        &filter,
+                        NameCurrentListSort::Name,
+                        NameCurrentListOrder::Asc,
+                        cursor.as_ref(),
+                        page,
+                        false,
+                    )
+                    .await
+                }
+            },
+            |cursor| {
+                let filter = filter.clone();
+                async move {
+                    family_name::load_family_search_page(pool, &filter, cursor.as_ref(), page).await
+                }
+            },
+        )
+        .await?;
+    }
+    Ok(())
 }
