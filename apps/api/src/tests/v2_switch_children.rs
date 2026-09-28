@@ -385,7 +385,7 @@ async fn v2_child_reads_refuse_an_unservable_family_marker() -> Result<()> {
             );
             unavailable(
                 "child counts",
-                bigname_storage::load_children_current_summaries(pool, &[parent.clone()])
+                bigname_storage::load_children_current_summaries(pool, std::slice::from_ref(parent))
                     .await
                     .map(drop),
             );
