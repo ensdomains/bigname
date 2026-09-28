@@ -417,6 +417,8 @@ pub(crate) fn map_history_page_error(
     {
         tracing::debug!(error = ?error, "history page refused during Interpret redo");
         history_redo_stale_error()
+    } else if bigname_storage::families::name::is_publication_unavailable(&error) {
+        V2Error::stale("history resolver classification is temporarily unavailable")
     } else if error
         .downcast_ref::<bigname_storage::InvalidHistoryCursor>()
         .is_some()

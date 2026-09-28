@@ -960,6 +960,10 @@ and whether its `/aliases`, `/links` and `/roles` collections are supported come
 from the families' resolver classification, and those collections list the
 families' rows, with the names each row joins read from composed rows. History
 attribution through a resolver's classification reads the same classification.
+Its bounded pointer walk checks the relevant chains' classification publications
+in the same database snapshot; a partial rebuild returns `409 stale`, while a
+completed newer publication does not invalidate the bounded history walk. This
+classification check does not add a redo gate to raw audit diagnostics.
 A role holder's `grant_event` is the earliest permission event of that holder
 at that resolver scope, as before. Grants on a registration whose row is not
 readable are not listed; no other request-time lineage check applies, since a
