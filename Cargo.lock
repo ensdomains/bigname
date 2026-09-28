@@ -1720,6 +1720,7 @@ dependencies = [
  "anyhow",
  "bigname-content-hash",
  "bigname-domain",
+ "bigname-project",
  "bigname-storage",
  "bigname-test-support",
  "futures-util",
