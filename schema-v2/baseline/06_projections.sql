@@ -3,14 +3,6 @@ CREATE SEQUENCE IF NOT EXISTS reverse_hydration_attempt_ordinal_seq AS bigint;
 COMMENT ON SEQUENCE reverse_hydration_attempt_ordinal_seq IS
     'This sequence assigns durable order to reverse-name polling batches; its values are not serving data.';
 
-COMMENT ON INDEX name_current_lookup_idx IS
-    'This bounded index supports namespace and name identity lookup by name hash. Verbatim names remain unbounded payload and are not btree-indexed.';
-COMMENT ON INDEX children_current_parent_idx IS
-    'This bounded index supports direct-child enumeration by parent, surface class, and child name hash. Verbatim child names and labels remain unbounded payload.';
-COMMENT ON INDEX address_names_current_address_idx IS
-    'This bounded index supports address relation reads by namespace and name hash. Verbatim names remain unbounded payload and are not btree-indexed.';
-COMMENT ON INDEX primary_names_current_claim_idx IS
-    'This bounded partial index supports successful-claim scans by namespace, coin type, and address. The verbatim claim is returned payload, not an index key.';
 
 CREATE TABLE IF NOT EXISTS child_registration_events (
     parent_logical_name_id text NOT NULL,
@@ -2207,7 +2199,7 @@ CREATE TABLE IF NOT EXISTS project_name_summary (
     PRIMARY KEY (chain_id, logical_name_id)
 );
 COMMENT ON TABLE project_name_summary IS
-    'Project-owned name summary family (TYR-36 step 7b slice 2b): per name, the fields the child and label lists filter, sort and count by inside one statement, which they cannot compose at read for every child of a parent. The family step writes the row for every name a block touches, from the same composition as the composed name row (bigname_storage::families::name), and journals it like every other family. Every name with a surface has a row; one the composed reader serves no row for has no serving arm, resource or registration fields, but retains the next recomposition deadline. Each column but zero_owner is the value the served lists read from the name''s name_current row.';
+    'Project-owned name summary: fields the child and label lists filter, sort and count inside one statement. The family writer refreshes touched names from the shared name composition and journals every change for undo. Every name surface has a row. A name without a composed row has no serving resource or registration, while its selected authority arm and next clock boundary can remain. No composed name row is persisted.';
 COMMENT ON COLUMN project_name_summary.chain_id IS
     'This value is the chain of the name''s surface.';
 COMMENT ON COLUMN project_name_summary.logical_name_id IS

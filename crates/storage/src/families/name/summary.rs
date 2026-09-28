@@ -42,13 +42,30 @@ use crate::address_names::{push_expires_at_timestamp_expr, push_registered_at_ti
 /// state; a bound name withheld for unreadable token lineage keeps its selected arm and clock
 /// boundary, but has no serving resource or registration. `conn` may be the family block's own transaction, whose
 /// writes the composition then reads.
+/// Summary rows and exact null-resolver names from the same composition. The family writer
+/// uses the latter to retire direct-resolution evidence in its publication transaction.
+#[derive(Default)]
+pub struct NameSummaryPublication {
+    pub rows: BTreeMap<String, Value>,
+    pub null_resolver_names: Vec<String>,
+}
+
 pub async fn compose_name_summaries(
     conn: &mut PgConnection,
     publication: &FamilyPublication,
     logical_name_ids: &[String],
 ) -> Result<BTreeMap<String, Value>> {
+    Ok(compose_name_summary_publication(conn, publication, logical_name_ids).await?.rows)
+}
+
+/// Composition for a Project publication, including evidence-retirement inputs.
+pub async fn compose_name_summary_publication(
+    conn: &mut PgConnection,
+    publication: &FamilyPublication,
+    logical_name_ids: &[String],
+) -> Result<NameSummaryPublication> {
     if logical_name_ids.is_empty() {
-        return Ok(BTreeMap::new());
+        return Ok(NameSummaryPublication::default());
     }
     // The block's own surfaces and every earlier one; the marker has not moved to it yet.
     let surfaces: Vec<_> = surfaces(&mut *conn, logical_name_ids)
@@ -67,6 +84,15 @@ pub async fn compose_name_summaries(
         false,
     )
     .await?;
+    let null_resolver_names = if publication.chain_id == "ethereum-mainnet" {
+        composed.values().filter_map(|composed| composed.row.as_ref()).filter(|row| {
+            row.namespace == "ens"
+                && row.declared_summary.pointer("/resolver/chain_id") == Some(&Value::Null)
+                && row.declared_summary.pointer("/resolver/address") == Some(&Value::Null)
+        }).map(|row| row.logical_name_id.clone()).collect()
+    } else {
+        Vec::new()
+    };
     let source = Value::Array(
         composed
             .iter()
@@ -125,7 +151,7 @@ pub async fn compose_name_summaries(
         .fetch_all(&mut *conn)
         .await
         .context("failed to shape the name summaries")?;
-    Ok(rows.into_iter().collect())
+    Ok(NameSummaryPublication { rows: rows.into_iter().collect(), null_resolver_names })
 }
 
 /// `zero_owner` of the name `named.logical_name_id` at the block `$2` of chain `$1` (the binds of

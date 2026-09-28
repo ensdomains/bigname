@@ -524,3 +524,13 @@ DROP TABLE IF EXISTS bigname_phase.project_generation_failures;
 DROP TABLE IF EXISTS bigname_phase.project_redo_resolver_evidence;
 DROP TABLE IF EXISTS bigname_phase.project_redo_expiry_roots;
 DROP TABLE IF EXISTS bigname_phase.project_redo_child_registration_history;
+
+DROP FUNCTION IF EXISTS bigname_phase.retire_direct_divergences_for_null_resolver();
+
+DO $comment$
+BEGIN
+    IF to_regclass('bigname_phase.project_name_summary') IS NOT NULL THEN
+        COMMENT ON TABLE bigname_phase.project_name_summary IS
+            'Project-owned name summary: fields the child and label lists filter, sort and count inside one statement. The family writer refreshes touched names from the shared name composition and journals every change for undo. Every name surface has a row. A name without a composed row has no serving resource or registration, while its selected authority arm and next clock boundary can remain. No composed name row is persisted.';
+    END IF;
+END $comment$;
