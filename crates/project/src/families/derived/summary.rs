@@ -123,6 +123,8 @@ pub(super) async fn refresh(
 /// name or node (name state, triples, associations, history, registry node and pointer, owner
 /// events), and the rows of every resource its candidates, key states, association targets,
 /// lifecycle events and owner events sit on; each changed resource is widened to those names.
+/// A registry event of the block that carries a resource adds every name a registry event of that
+/// resource carries, since it can move the resource's unnamed Transfers from one to another.
 const WORK_LIST: &str = r#"/* project:families.derived.summary_names */
     WITH journal AS (
         SELECT family, key::jsonb AS key, before_image
@@ -281,6 +283,23 @@ const WORK_LIST: &str = r#"/* project:families.derived.summary_names */
         FROM resourced JOIN project_resource_pointer pointer
           ON pointer.chain_id = $1 AND pointer.resource_id = resourced.resource_id
     ),
+    -- A registry event of this block that carries a resource can move that resource's unnamed
+    -- Transfers to another name: the zero-owner attribution links them to the resource's latest
+    -- named registry event of any kind (the served `project_latest_registry_owner`). Every name
+    -- a registry event of the resource carries is composed again.
+    linked AS (
+        SELECT DISTINCT carried.logical_name_id
+        FROM normalized_events registry_event
+        JOIN normalized_events carried
+          ON carried.resource_id = registry_event.resource_id
+         AND carried.chain_id = $1
+         AND carried.source_family = registry_event.source_family
+         AND carried.logical_name_id IS NOT NULL
+         AND carried.canonicality_state IN ('canonical', 'safe', 'finalized')
+        WHERE registry_event.chain_id = $1 AND registry_event.block_number = $2
+          AND registry_event.resource_id IS NOT NULL
+          AND registry_event.source_family IN ('ens_v1_registry_l1', 'basenames_base_registry')
+    ),
     -- A name whose composition the clock changes by this block's time.
     clocked AS (
         SELECT summary.logical_name_id
@@ -298,6 +317,7 @@ const WORK_LIST: &str = r#"/* project:families.derived.summary_names */
     SELECT logical_name_id FROM (
         SELECT logical_name_id FROM named
         UNION SELECT logical_name_id FROM widened
+        UNION SELECT logical_name_id FROM linked
         UNION SELECT logical_name_id FROM clocked
         UNION SELECT logical_name_id FROM surfaced
     ) every

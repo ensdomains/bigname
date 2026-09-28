@@ -17,12 +17,11 @@
 //!   names the zero owner, which zeroes a registry child's owner. The served child builder
 //!   attributes a Transfer as `project_latest_registry_owner` does
 //!   (crates/project/src/builders/name_authority/stage.rs): by the name it carries, else by the
-//!   latest named event of its resource and family, else by an active, readable surface at its
-//!   node. That is not the composed name row's rule (its node's latest Transfer), so this field
-//!   is the child builder's attribution over the registry owner events
-//!   (`project_registry_owner_event`), whose named events are the registry's `SubregistryChanged`
-//!   and `AuthorityTransferred` rows: a resource named only by another registry event kind links
-//!   no name here;
+//!   latest named event of its resource and family, of any kind, else by an active, readable
+//!   surface at its node. That is not the composed name row's rule (its node's latest Transfer),
+//!   so this field is the child builder's attribution: the Transfers are the registry owner
+//!   events (`project_registry_owner_event`), and the named events that link a resource are read
+//!   from the readable interpreted events, as the served stage reads them;
 //! - `recompose_at`: the first second after the composition's block at which the composition
 //!   can change with no fact changing (a binding interval opening or closing, a NameWrapper
 //!   expiry or grace boundary); the writer composes the name again at the first block whose time
@@ -81,7 +80,7 @@ pub async fn compose_name_summaries(
             })
             .collect(),
     );
-    // The chain and block bind first, as `$1` and `$2`, which ZERO_OWNER reads.
+    // The chain and block bind first, as `$1` and `$2`, which `zero_owner` reads.
     let mut builder = QueryBuilder::<Postgres>::new(
         "/* storage:families.name.summaries */ SELECT named.logical_name_id, to_jsonb(summary)
          FROM (SELECT ",
@@ -116,8 +115,9 @@ pub async fn compose_name_summaries(
     builder.push(" AS expires_at, ");
     push_registered_at_timestamp_expr(&mut builder);
     builder.push(format!(
-        " AS registered_at, {ZERO_OWNER} AS zero_owner,
-                to_timestamp(nc.recompose_at) AS recompose_at) summary"
+        " AS registered_at, {} AS zero_owner,
+                to_timestamp(nc.recompose_at) AS recompose_at) summary",
+        zero_owner()
     ));
     let rows: Vec<(String, Value)> = builder
         .build_query_as()
@@ -128,13 +128,18 @@ pub async fn compose_name_summaries(
 }
 
 /// `zero_owner` of the name `named.logical_name_id` at the block `$2` of chain `$1` (the binds of
-/// the summary statement), over the registry owner events: its candidate Transfers are those
-/// naming it, the unnamed ones at its node, and the unnamed ones of a resource one of its named
-/// registry events carries; each is attributed by its name, else the latest named event of its
-/// resource and family, else an active, readable surface at its node; the latest one attributed
-/// to the name decides, in the served order (block, transaction index, log index with nulls
-/// lowest, then event identity).
-const ZERO_OWNER: &str = "COALESCE((
+/// the summary statement): its candidate Transfers are those naming it, the unnamed ones at its
+/// node, and the unnamed ones of a resource one of its named registry events carries; each is
+/// attributed by its name, else the latest named event of its resource and family, else an
+/// active, readable surface at its node; the latest one attributed to the name decides, in the
+/// served order (block, transaction index, log index with nulls lowest, then event identity).
+/// The named events are the ones the served stage reads (`project_events`,
+/// crates/project/src/stage/events.rs): activated, readable and at or below the block.
+fn zero_owner() -> String {
+    let own = readable_event("own");
+    let latest = readable_event("latest");
+    format!(
+        "COALESCE((
     SELECT attributed.owner_getter = '0x0000000000000000000000000000000000000000'
     FROM (
         SELECT transfer.owner_getter, transfer.block_number, transfer.transaction_index,
@@ -155,20 +160,20 @@ const ZERO_OWNER: &str = "COALESCE((
             SELECT candidate.* FROM bigname_phase.project_registry_owner_event candidate
             WHERE candidate.chain_id = $1 AND candidate.logical_name_id IS NULL
               AND candidate.resource_id IN (
-                  SELECT own.resource_id FROM bigname_phase.project_registry_owner_event own
-                  WHERE own.chain_id = $1 AND own.logical_name_id = named.logical_name_id
+                  SELECT own.resource_id FROM bigname_phase.normalized_events own
+                  WHERE own.logical_name_id = named.logical_name_id AND {own}
                     AND own.resource_id IS NOT NULL
-                    AND own.source_family IN ('ens_v1_registry_l1', 'basenames_base_registry'))
+                    AND own.source_family IN ({REGISTRIES}))
         ) transfer
         LEFT JOIN LATERAL (
-            SELECT named.logical_name_id
-            FROM bigname_phase.project_registry_owner_event named
-            WHERE transfer.logical_name_id IS NULL AND named.chain_id = transfer.chain_id
-              AND named.resource_id = transfer.resource_id
-              AND named.source_family = transfer.source_family
-              AND named.logical_name_id IS NOT NULL
-            ORDER BY named.block_number DESC, named.transaction_index DESC NULLS LAST,
-                     named.log_index DESC NULLS LAST, named.event_identity DESC
+            SELECT latest.logical_name_id
+            FROM bigname_phase.normalized_events latest
+            WHERE transfer.logical_name_id IS NULL AND latest.resource_id = transfer.resource_id
+              AND latest.source_family = transfer.source_family
+              AND latest.logical_name_id IS NOT NULL AND {latest}
+            ORDER BY latest.block_number DESC NULLS LAST,
+                     latest.transaction_index DESC NULLS LAST,
+                     latest.log_index DESC NULLS LAST, latest.event_identity DESC
             LIMIT 1
         ) linked ON TRUE
         LEFT JOIN bigname_phase.name_surfaces at_node
@@ -176,18 +181,38 @@ const ZERO_OWNER: &str = "COALESCE((
          AND at_node.chain_id = transfer.chain_id AND at_node.namespace = transfer.namespace
          AND lower(at_node.namehash) = transfer.node
          AND at_node.visibility_state = 'active' AND at_node.block_number <= $2
-         AND at_node.canonicality_state IN ('canonical', 'safe', 'finalized')
+         AND at_node.canonicality_state IN {READABLE}
          AND EXISTS (SELECT 1 FROM bigname_phase.chain_lineage at_node_lineage
                      WHERE at_node_lineage.chain_id = at_node.chain_id
                        AND at_node_lineage.block_hash = at_node.block_hash
                        AND at_node_lineage.block_number = at_node.block_number
-                       AND at_node_lineage.canonicality_state
-                           IN ('canonical', 'safe', 'finalized'))
+                       AND at_node_lineage.canonicality_state IN {READABLE})
         WHERE transfer.event_kind = 'AuthorityTransferred'
-          AND transfer.source_family IN ('ens_v1_registry_l1', 'basenames_base_registry')
+          AND transfer.source_family IN ({REGISTRIES})
     ) attributed
     WHERE attributed.logical_name_id = named.logical_name_id
     ORDER BY attributed.block_number DESC, attributed.transaction_index DESC NULLS LAST,
              attributed.log_index DESC NULLS LAST, attributed.event_identity DESC
     LIMIT 1
-), FALSE)";
+), FALSE)"
+    )
+}
+
+const REGISTRIES: &str = "'ens_v1_registry_l1', 'basenames_base_registry'";
+const READABLE: &str = "('canonical', 'safe', 'finalized')";
+
+/// An interpreted event `alias` of chain `$1` the served stage reads at block `$2`: activated,
+/// readable, and on a readable block at or below it (or on none).
+fn readable_event(alias: &str) -> String {
+    format!(
+        "{alias}.chain_id = $1 AND {alias}.consumer_visibility = 'activated'
+         AND {alias}.canonicality_state IN {READABLE}
+         AND (({alias}.block_number IS NULL AND {alias}.block_hash IS NULL)
+              OR ({alias}.block_number <= $2
+                  AND EXISTS (SELECT 1 FROM bigname_phase.chain_lineage {alias}_lineage
+                              WHERE {alias}_lineage.chain_id = {alias}.chain_id
+                                AND {alias}_lineage.block_hash = {alias}.block_hash
+                                AND {alias}_lineage.block_number = {alias}.block_number
+                                AND {alias}_lineage.canonicality_state IN {READABLE})))"
+    )
+}
