@@ -1073,9 +1073,11 @@ const ROUTES = [
     const hit = (r.outcomes || []).find(([c]) => c.startsWith(String(status)));
     return hit ? hit[1] : status === 404 ? 'Nothing there.' : '';
   }
+  // POSIX single-quote a whole shell word, so a quote in the URL or body cannot end it
+  const shq = s => `'${String(s).replace(/'/g, `'\\''`)}'`;
   function curlFor(r, url, body) {
     const full = NET.apiBase() + url;
-    return r.method === 'POST' ? `curl -s -X POST '${full}' -H 'content-type: application/json' -d '${body.replace(/'/g, "'\\''")}'` : `curl -s '${full}'`;
+    return r.method === 'POST' ? `curl -s -X POST ${shq(full)} -H 'content-type: application/json' -d ${shq(body)}` : `curl -s ${shq(full)}`;
   }
 
   // ---- the request line: the URL is the form --------------------------
@@ -1145,7 +1147,9 @@ const ROUTES = [
     });
     form.addEventListener('submit', async e => {
       e.preventDefault();
-      const u = url(), btn = $('.run', form);
+      // Only the newest request on the page it was sent from may write the output;
+      // a page change or a network change (which redraws the page) drops it.
+      const gen = ++reqGen, base = NET.apiBase(), u = url(), btn = $('.run', form);
       btn.disabled = true; out.hidden = false; out.className = 'out';
       out.innerHTML = `<div class="oh">${MARK.replace('class="mark"', 'class="mark busy" style="height:14px;width:auto"')}<span>asking ${esc(NET.apiHost())}</span></div><pre> </pre>`;
       const t0 = performance.now();
@@ -1154,18 +1158,22 @@ const ROUTES = [
         if (r.method === 'POST') { init.headers['content-type'] = 'application/json'; init.body = body; }
         const res = await fetch(NET.apiBase() + u, init);
         const ms = Math.round(performance.now() - t0), text = await res.text();
+        if (gen !== reqGen) return;
         let pretty = text; try { pretty = JSON.stringify(JSON.parse(text), null, 2); } catch (err) {}
         const why = outcomeText(r, res.status);
         const back = r.response && r.response.sample ? '<span class="sp"><button type="button" class="ex-back">example</button></span>' : '';
         out.innerHTML = `<div class="oh"><span class="chip${res.ok ? '' : ' pink'}">${res.status}</span><span>${ms} ms · ${text.length} bytes</span>${back}</div>${why ? `<p class="why">${why}</p>` : ''}<pre>${hlJson(pretty)}</pre>`;
       } catch (err) {
-        out.innerHTML = `<div class="oh"><span class="chip pink">no answer</span><span>${Math.round(performance.now() - t0)} ms</span></div><p class="why" style="padding-bottom:12px">Nothing answered at ${esc(NET.apiBase())}. Check the ${esc(NET.label())} status in the header, or pick another network.</p>`;
-      } finally { btn.disabled = false; }
+        if (gen !== reqGen) return;
+        out.innerHTML = `<div class="oh"><span class="chip pink">no answer</span><span>${Math.round(performance.now() - t0)} ms</span></div><p class="why" style="padding-bottom:12px">Nothing answered at ${esc(base)}. Check the ${esc(NET.label())} status in the header, or pick another network.</p>`;
+      } finally { if (gen === reqGen) btn.disabled = false; }
     });
   }
 
   // ---- routing --------------------------------------------------------
+  let reqGen = 0;
   function show(id) {
+    reqGen++;
     const e = BY_ID[id] || BY_ID.overview;
     document.body.classList.toggle('at', !!BY_ID[id]);
     setCurrent(e.id);

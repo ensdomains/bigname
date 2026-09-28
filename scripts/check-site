@@ -39,6 +39,24 @@ fi
 if grep -rnE "fetch\(\s*['\"\`]/" site; then
   fail "site/ fetches a same-origin path; go through BignameNetwork.apiBase()"
 fi
+# Other ways to reach or name the page's own origin. Links between the pages
+# are relative (docs/, ../, #anchor) so the site works under any host.
+code_files=("${pages[@]}" site/network.js)
+for banned in \
+  'href="/' \
+  'src="/' \
+  'location.host' \
+  'location.hostname' \
+  'document.location' \
+  'XMLHttpRequest' \
+  'new Request(' \
+  'EventSource' \
+  'sendBeacon'; do
+  if grep -nF -- "$banned" "${code_files[@]}"; then
+    fail "site code uses ${banned}; link relatively and send API requests through BignameNetwork.apiBase()"
+  fi
+done
+
 # Every fetch in the pages goes through the switcher's base; network.js's own
 # status fetch uses the base it just read.
 if grep -rnE 'fetch\(' "${pages[@]}" | grep -vE 'fetch\(NET\.apiBase\(\) \+ '; then
@@ -46,6 +64,21 @@ if grep -rnE 'fetch\(' "${pages[@]}" | grep -vE 'fetch\(NET\.apiBase\(\) \+ '; t
 fi
 if grep -nE 'fetch\(' site/network.js | grep -vE "fetch\(base \+ '/v1/status'"; then
   fail "a network.js fetch does not start from the selected base"
+fi
+
+# Generated curl commands are copied into a shell. Every value interpolated
+# into one goes through shq(), which single-quotes the whole word; a
+# hand-written '${...}' lets a quote in the URL or body end the word early.
+if grep -nE 'curl -s' "${pages[@]}" | grep -F "'\${"; then
+  fail "a generated curl command interpolates inside hand-written quotes; use shq()"
+fi
+unquoted_curl="$(awk '/curl -s/ {
+  all = gsub(/\$\{/, "&"); quoted = gsub(/\$\{shq\(/, "&")
+  if (all != quoted) print FILENAME ":" FNR ": " $0
+}' "${pages[@]}")"
+if [ -n "$unquoted_curl" ]; then
+  printf '%s\n' "$unquoted_curl" >&2
+  fail "a generated curl command interpolates a value without shq()"
 fi
 
 for page in "${pages[@]}"; do

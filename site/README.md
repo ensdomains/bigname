@@ -14,9 +14,10 @@ origin and talks to an API across origins, which the API allows (it answers
 `network.js` is shared by both pages. It holds the table of networks and the
 API each one is served from, renders the switcher in the page header, and
 fetches `<api>/v1/status` for the selected network to show each chain's head
-block and status. Every request the pages make (the status pill, the try-it
-panels, the curl commands they print) goes through its `apiBase()`, never the
-page's own origin.
+block and status. Every API request the pages make (the status pill, the
+try-it panels, the curl commands they print) goes through its `apiBase()`,
+never the page's own origin. The docs page still loads its web fonts from
+Google Fonts, as it did before.
 
 - Sepolia is the default: `https://sepolia.api.bigname.sh`.
 - Mainnet is listed as coming and cannot be selected until its API exists.
@@ -26,9 +27,15 @@ The selection lives in the URL, so a link says which network it means:
 
 - `?network=sepolia` or `?network=mainnet` picks from the table.
 - `?api=<absolute url>` points the site at any API and wins over the table;
-  the switcher shows it as "custom". Use it for local development.
+  the switcher shows it as "custom". Use it for local development. A value
+  with a quote, backslash, whitespace, semicolon or angle bracket is rejected,
+  not cleaned, because the pages print the base into curl commands.
 
-Links between the two pages carry the query (`data-carry` in the markup).
+An unknown `?network=`, one still marked coming, or a rejected `?api=` falls
+back to Sepolia, and the address bar is rewritten to say so. Switching
+networks rewrites the query string to just `network` (and `api` when set);
+any other query parameters are dropped. Links between the two pages carry the
+same query (`data-carry` in the markup).
 
 ## Preview locally
 
@@ -43,8 +50,9 @@ with `cargo run -p bigname-api`.
 
 ## Checks
 
-`scripts/check-site` runs in CI: the files exist, no request goes to the page's
-own origin, and no server-side placeholder is left. The API crate's
+`scripts/check-site` runs in CI: the files exist, no API request or link goes
+to the page's own origin, generated curl commands quote every value with
+`shq()`, and no server-side placeholder is left. The API crate's
 `site_pages` tests hold the reference to the router: every `/v1` route the API
 serves must have a manual page here, and every upstream citation here must be
 in a contract doc.

@@ -459,7 +459,7 @@ const GLYPHS = {
   tryForm.addEventListener('submit', async e => {
     e.preventDefault();
     if (tryBusy) return;
-    const gen = ++tryGen, u = tryUrl(), docs = `<span class="sp"><a href="${view.docs}" data-carry="${view.docs}">manual page &rarr;</a></span>`;
+    const gen = ++tryGen, base = NET.apiBase(), u = tryUrl(), docs = `<span class="sp"><a href="${view.docs}" data-carry="${view.docs}">manual page &rarr;</a></span>`;
     setTryBusy(true); tryOut.className = 'out';
     tryOut.innerHTML = `<div class="oh">${MARK.replace('class="mark"', 'class="mark busy" style="height:14px;width:auto"')}<span>asking ${esc(NET.apiHost())}</span></div><pre> </pre>`;
     const t0 = performance.now();
@@ -471,7 +471,7 @@ const GLYPHS = {
       tryOut.innerHTML = `<div class="oh"><span class="chip${res.ok ? '' : ' pink'}">${res.status}</span><span>${ms} ms · ${text.length} bytes</span>${docs}</div><pre>${hlJson(pretty)}</pre>`;
     } catch (err) {
       if (gen !== tryGen) return;
-      tryOut.innerHTML = `<div class="oh"><span class="chip pink">no answer</span><span>${Math.round(performance.now() - t0)} ms</span>${docs}</div><p class="why" style="padding-bottom:14px">Nothing answered at ${esc(NET.apiBase())}. Check the ${esc(NET.label())} status in the header, or pick another network.</p>`;
+      tryOut.innerHTML = `<div class="oh"><span class="chip pink">no answer</span><span>${Math.round(performance.now() - t0)} ms</span>${docs}</div><p class="why" style="padding-bottom:14px">Nothing answered at ${esc(base)}. Check the ${esc(NET.label())} status in the header, or pick another network.</p>`;
     } finally { if (gen === tryGen) setTryBusy(false); }
   });
 
@@ -755,8 +755,10 @@ const GLYPHS = {
   NET.mount($('#network'));
   NET.statusPill($('#status'));
   NET.statusDetail($('#ver'));
-  // A different network answers differently: go back to the example.
-  NET.onChange(() => { if (!tryBusy) showExample(); });
+  // A different network answers differently: drop any request still out to the
+  // old one (its late response fails the generation check), unfreeze the line
+  // and go back to the example.
+  NET.onChange(() => { tryGen++; setTryBusy(false); showExample(); });
 })();
 </script>
 </body>

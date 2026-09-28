@@ -21,9 +21,12 @@
 
   const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
   const selectable = id => NETWORKS.find(n => n.id === id && !n.coming) || null;
-  // An override must be an absolute http(s) URL; anything else is ignored.
+  // An override must be an absolute http(s) URL; anything else is ignored. A
+  // value with a quote, backslash, whitespace, semicolon or angle bracket is
+  // rejected outright rather than cleaned, since the pages print the base into
+  // shell commands and markup.
   function parseApi(raw) {
-    if (!raw) return null;
+    if (!raw || /['"`\\\s;<>]/.test(raw)) return null;
     try {
       const u = new URL(raw);
       if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
@@ -43,6 +46,12 @@
     q.set('network', network.id);
     if (custom) q.set('api', custom);
     return '?' + q.toString();
+  }
+  // An unknown or not-yet-live ?network= falls back to the default, and a
+  // rejected ?api= is dropped; say so in the address bar too, so it agrees with
+  // the links and the switcher.
+  if ((initial.has('network') && initial.get('network') !== network.id) || (initial.has('api') && !custom)) {
+    try { history.replaceState(history.state, '', location.pathname + query() + location.hash); } catch (e) {}
   }
   // Add the current query to a page-relative link, keeping its #fragment.
   function carry(href) {
