@@ -56,7 +56,11 @@ pub async fn compose_name_summaries(
     publication: &FamilyPublication,
     logical_name_ids: &[String],
 ) -> Result<BTreeMap<String, Value>> {
-    Ok(compose_name_summary_publication(conn, publication, logical_name_ids).await?.rows)
+    Ok(
+        compose_name_summary_publication(conn, publication, logical_name_ids)
+            .await?
+            .rows,
+    )
 }
 
 /// Composition for a Project publication, including evidence-retirement inputs.
@@ -86,11 +90,16 @@ pub async fn compose_name_summary_publication(
     )
     .await?;
     let null_resolver_names = if publication.chain_id == "ethereum-mainnet" {
-        composed.values().filter_map(|composed| composed.row.as_ref()).filter(|row| {
-            row.namespace == "ens"
-                && row.declared_summary.pointer("/resolver/chain_id") == Some(&Value::Null)
-                && row.declared_summary.pointer("/resolver/address") == Some(&Value::Null)
-        }).map(|row| row.logical_name_id.clone()).collect()
+        composed
+            .values()
+            .filter_map(|composed| composed.row.as_ref())
+            .filter(|row| {
+                row.namespace == "ens"
+                    && row.declared_summary.pointer("/resolver/chain_id") == Some(&Value::Null)
+                    && row.declared_summary.pointer("/resolver/address") == Some(&Value::Null)
+            })
+            .map(|row| row.logical_name_id.clone())
+            .collect()
     } else {
         Vec::new()
     };
@@ -151,7 +160,10 @@ pub async fn compose_name_summary_publication(
         .fetch_all(&mut *conn)
         .await
         .context("failed to shape the name summaries")?;
-    Ok(NameSummaryPublication { rows: rows.into_iter().collect(), null_resolver_names })
+    Ok(NameSummaryPublication {
+        rows: rows.into_iter().collect(),
+        null_resolver_names,
+    })
 }
 
 /// `zero_owner` of the name `named.logical_name_id` at the block `$2` of chain `$1` (the binds of

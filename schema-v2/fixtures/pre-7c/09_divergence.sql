@@ -77,6 +77,8 @@ DECLARE
     position_slot text;
     position_value jsonb;
     manifest_authority jsonb;
+    compared_project_row_xmin text;
+    compared_publication jsonb;
     compared_family_publication jsonb;
     compared_logical_name_id text;
     compared_name_row_xmin text;
@@ -102,16 +104,31 @@ BEGIN
         RETURN 'invalid_comparison';
     END IF;
 
+    compared_publication := compared_execution_authority -> 'project_publication';
+    IF compared_publication IS NOT NULL AND (
+        jsonb_typeof(compared_publication) IS DISTINCT FROM 'object'
+        OR compared_publication ->> 'block_number' IS NULL
+        OR compared_publication ->> 'block_hash' IS NULL
+        OR compared_publication ->> 'input_content_hash' IS NULL
+        OR compared_publication ->> 'row_xmin' IS NULL
+    ) THEN
+        RETURN 'invalid_comparison';
+    END IF;
+
+    compared_project_row_xmin :=
+        compared_execution_authority ->> 'project_row_xmin';
     compared_logical_name_id :=
         compared_execution_authority ->> 'logical_name_id';
     compared_name_row_xmin :=
         compared_execution_authority ->> 'name_row_xmin';
 
-    -- Bind every input to the captured family publication and hold its row through commit.
-    compared_family_publication := compared_execution_authority -> 'family_publication';
-    IF compared_family_publication IS NULL THEN
-        RETURN 'invalid_comparison';
-    END IF;
+    -- With the publication switch on (TYR-36 step 7b), the caller captured the family
+    -- marker instead: the fence is the marker's sequence while it is live, and the Project
+    -- row's version is not compared. Keep the one-block bound aligned with
+    -- PROJECT_PUBLICATION_LAG_TOLERANCE_BLOCKS in crates/storage.
+    compared_family_publication :=
+        compared_execution_authority -> 'family_publication';
+    IF compared_family_publication IS NOT NULL THEN
         -- Only the lookup builds this object, with every field; a missing field fails the
         -- equality match below and reads as project_changed.
         PERFORM 1
@@ -137,6 +154,49 @@ BEGIN
         IF NOT FOUND THEN
             RETURN 'project_changed';
         END IF;
+    ELSE
+        IF compared_project_row_xmin IS NULL
+            OR btrim(compared_project_row_xmin) = ''
+        THEN
+            RETURN 'invalid_comparison';
+        END IF;
+
+        -- Lock the captured publication, including its generation, while a running
+        -- pass may be preparing its successor. Older callers without a publication
+        -- object retain the exact-head fence. Keep the one-block bound aligned with
+        -- PROJECT_PUBLICATION_LAG_TOLERANCE_BLOCKS in crates/storage.
+        PERFORM 1
+        FROM chain_phase_state project
+        JOIN chain_lineage lineage
+          ON lineage.chain_id = project.chain_id
+         AND lineage.block_number = project.current_block_number
+         AND lineage.block_hash = project.current_block_hash
+         AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+        WHERE project.chain_id = requested_authoritative_chain_id
+          AND project.phase_name = 'project'
+          AND project.phase_status IN ('completed', 'running')
+          AND project.current_block_number::text = COALESCE(
+              compared_publication ->> 'block_number',
+              requested_authoritative_block_number::text
+          )
+          AND project.current_block_hash = COALESCE(
+              compared_publication ->> 'block_hash',
+              requested_authoritative_block_hash
+          )
+          AND requested_authoritative_block_number - project.current_block_number BETWEEN 0 AND 1
+          AND (project.current_block_number <> requested_authoritative_block_number
+               OR project.current_block_hash = requested_authoritative_block_hash)
+          AND (compared_publication IS NULL OR (
+              project.input_content_hash = compared_publication ->> 'input_content_hash'
+              AND project.xmin::text = compared_publication ->> 'row_xmin'
+          ))
+          AND project.xmin::text = compared_project_row_xmin
+        FOR SHARE OF project, lineage;
+
+        IF NOT FOUND THEN
+            RETURN 'project_changed';
+        END IF;
+    END IF;
 
     IF jsonb_typeof(requested_observed_positions) IS DISTINCT FROM 'object'
         OR requested_observed_positions = '{}'::jsonb
@@ -174,6 +234,10 @@ BEGIN
         END IF;
     END LOOP;
 
+    -- Match project publication order: name_current is locked before
+    -- record_inventory_current. This prevents serving-path writes from
+    -- deadlocking with a same-height projection swap.
+    IF compared_family_publication IS NOT NULL THEN
         -- The composed name was read in the same snapshot as this locked marker.
         IF compared_logical_name_id IS NOT NULL AND (
             compared_execution_authority #>> '{family_name,logical_name_id}'
@@ -182,6 +246,26 @@ BEGIN
         ) THEN
             RETURN 'name_changed';
         END IF;
+    ELSIF compared_logical_name_id IS NULL
+        AND compared_name_row_xmin IS NULL
+    THEN
+        NULL;
+    ELSIF compared_logical_name_id IS NULL
+        OR compared_name_row_xmin IS NULL
+    THEN
+        RETURN 'invalid_comparison';
+    ELSE
+        PERFORM 1
+        FROM name_current
+        WHERE logical_name_id = compared_logical_name_id
+          AND support_status = 'supported'
+          AND xmin::text = compared_name_row_xmin
+        FOR SHARE;
+
+        IF NOT FOUND THEN
+            RETURN 'name_changed';
+        END IF;
+    END IF;
 
     IF jsonb_typeof(
         compared_execution_authority -> 'manifest_authorities'
@@ -235,6 +319,7 @@ BEGIN
         RETURN 'invalid_comparison';
     END IF;
 
+    IF compared_family_publication IS NOT NULL THEN
         -- All record families are published atomically with the marker. The input payload is
         -- composed by lookup in that captured snapshot; neither the payload nor its results
         -- are persisted as reusable serving data.
@@ -248,6 +333,20 @@ BEGIN
         THEN
             RETURN 'record_changed';
         END IF;
+        RETURN 'unchanged';
+    END IF;
+
+    PERFORM 1
+    FROM record_inventory_current
+    WHERE resource_id = compared_resource_id
+      AND record_version_boundary_key = compared_boundary_key
+      AND xmin::text = compared_row_xmin
+    FOR SHARE;
+
+    IF NOT FOUND THEN
+        RETURN 'record_changed';
+    END IF;
+
     RETURN 'unchanged';
 END
 $$;
@@ -345,6 +444,7 @@ BEGIN
             RETURN 'guard_rejected';
     END CASE;
 
+    IF compared_execution_authority -> 'family_publication' IS NOT NULL THEN
         -- The guard holds the captured publication until this transaction commits. Lookup
         -- supplies the composed inventory from that publication; apply the identical indexed
         -- evaluator below, including unsupported coverage and default-address rules.
@@ -354,6 +454,28 @@ BEGIN
             WHEN compared_execution_authority #>> '{family_comparison,coverage,status}' = 'projected'
             THEN 'supported' ELSE 'unsupported' END;
         resolver_path := compared_execution_authority #> '{family_name,resolver_path}';
+    ELSE
+    SELECT inventory.entries,
+           inventory.provenance,
+           inventory.support_status,
+           name.declared_summary #> '{topology,resolver_path}'
+    INTO compared_entries, compared_provenance, compared_support_status, resolver_path
+    FROM record_inventory_current AS inventory
+    JOIN name_current AS name
+      ON name.logical_name_id = requested_logical_name_id
+     AND name.support_status = 'supported'
+     AND name.declared_summary
+            #> '{topology,version_boundaries,record_version_boundary}' =
+         inventory.record_version_boundary
+    WHERE inventory.resource_id = compared_resource_id
+      AND inventory.record_version_boundary_key = compared_boundary_key
+      AND inventory.xmin::text = compared_row_xmin
+    FOR SHARE OF inventory, name;
+
+        IF NOT FOUND THEN
+            RETURN 'guard_rejected';
+        END IF;
+    END IF;
 
     IF jsonb_typeof(resolver_path) IS DISTINCT FROM 'array'
         OR jsonb_array_length(resolver_path) = 0
@@ -665,6 +787,61 @@ BEFORE INSERT OR UPDATE ON resolution_divergences
 FOR EACH ROW
 EXECUTE FUNCTION validate_resolution_divergence_positions();
 
+CREATE OR REPLACE FUNCTION retire_direct_divergences_for_null_resolver()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, bigname_phase, pg_temp
+AS $$
+DECLARE
+    surface_on_ethereum_mainnet boolean;
+BEGIN
+    -- Rust lookup admission excludes resolver.status = 'unsupported', but
+    -- retirement intentionally does not: once the exact resolver is null,
+    -- prior direct-resolver observations are stale regardless of that status.
+    IF NEW.namespace = 'ens'
+        AND NEW.declared_summary -> 'resolver' ? 'chain_id'
+        AND NEW.declared_summary -> 'resolver' ? 'address'
+        AND NEW.declared_summary -> 'resolver' -> 'chain_id' = 'null'::jsonb
+        AND NEW.declared_summary -> 'resolver' -> 'address' = 'null'::jsonb
+    THEN
+        EXECUTE format(
+            'SELECT EXISTS (
+                SELECT 1 FROM %I.name_surfaces
+                WHERE logical_name_id = $1
+                  AND chain_id = ''ethereum-mainnet''
+            )',
+            TG_TABLE_SCHEMA
+        )
+        INTO surface_on_ethereum_mainnet
+        USING NEW.logical_name_id;
+
+        IF surface_on_ethereum_mainnet THEN
+            EXECUTE format(
+                'UPDATE %I.resolution_divergences
+                 SET cleared_at = GREATEST(statement_timestamp(), last_observed_at)
+                 WHERE logical_name_id = $1
+                   AND resolver_chain_id = ''ethereum-mainnet''
+                   AND cleared_at IS NULL',
+                TG_TABLE_SCHEMA
+            )
+            USING NEW.logical_name_id;
+        END IF;
+    END IF;
+    RETURN NEW;
+END
+$$;
+
+REVOKE ALL ON FUNCTION retire_direct_divergences_for_null_resolver()
+    FROM PUBLIC;
+
+DROP TRIGGER IF EXISTS name_current_retire_null_resolver_divergences
+    ON name_current;
+CREATE TRIGGER name_current_retire_null_resolver_divergences
+AFTER INSERT OR UPDATE OF declared_summary ON name_current
+FOR EACH ROW
+EXECUTE FUNCTION retire_direct_divergences_for_null_resolver();
+
 CREATE OR REPLACE FUNCTION clear_resolution_divergences_for_block()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -736,3 +913,5 @@ COMMENT ON FUNCTION revalidate_resolution_lookup_state(
     text, bigint, text, jsonb, jsonb, uuid, text, text
 ) IS
     'Locks and revalidates the authoritative head, project generation, optional exact name and inventory rows, manifest declarations, and all observed canonical positions without granting the caller UPDATE on those relations.';
+COMMENT ON FUNCTION retire_direct_divergences_for_null_resolver() IS
+    'Retires active direct-resolver observations during projection publication when an ENS Mainnet exact resolver becomes null; it performs no live/indexed comparison.';

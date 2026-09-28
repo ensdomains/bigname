@@ -41,8 +41,7 @@ pub(crate) async fn candidate_resources_from(
 ) -> Result<BTreeMap<(String, Uuid), Candidate>> {
     // A node-index row written under a name also reaches the pointers at that name's namehash
     // (the named arm admits by logical name, `namespace:namehash`, with no node test).
-    let sql = format!(
-        "WITH keys AS (
+    let sql = "WITH keys AS (
              SELECT chain_id, resolver_address, node, NULL::text AS record_id,
                     NULL::uuid AS named_resource,
                     CASE WHEN logical_name_id <> ''
@@ -75,9 +74,8 @@ pub(crate) async fn candidate_resources_from(
               OR (keys.record_id IS NOT NULL
                   AND pointer.resolver_address = keys.resolver_address)
           )
-         GROUP BY pointer.chain_id, pointer.resource_id, keys.coin_type"
-    );
-    let rows = sqlx::query(&sql)
+         GROUP BY pointer.chain_id, pointer.resource_id, keys.coin_type";
+    let rows = sqlx::query(sql)
         .bind(address)
         .bind(coin_types)
         .fetch_all(&mut *conn)

@@ -97,14 +97,19 @@ pub(super) async fn refresh(
             ))
         })?;
         if !fresh.null_resolver_names.is_empty() {
-            sqlx::query("/* project:families.derived.retire_null_resolver_divergences */
+            sqlx::query(
+                "/* project:families.derived.retire_null_resolver_divergences */
                 UPDATE resolution_divergences
                 SET cleared_at = GREATEST(statement_timestamp(), last_observed_at)
                 WHERE logical_name_id = ANY($1) AND resolver_chain_id = 'ethereum-mainnet'
-                  AND cleared_at IS NULL")
-                .bind(&fresh.null_resolver_names)
-                .execute(&mut **transaction).await
-                .map_err(|error| ProjectError::database("failed to retire null-resolver evidence", error))?;
+                  AND cleared_at IS NULL",
+            )
+            .bind(&fresh.null_resolver_names)
+            .execute(&mut **transaction)
+            .await
+            .map_err(|error| {
+                ProjectError::database("failed to retire null-resolver evidence", error)
+            })?;
         }
         let stored: BTreeMap<String, Value> = sqlx::query_as::<_, (String, Value)>(
             "/* project:families.derived.summary_rows */ SELECT summary.logical_name_id,
