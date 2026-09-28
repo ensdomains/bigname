@@ -886,20 +886,24 @@ async fn zero_owner_attribution_follows_the_served_precedence() -> Result<()> {
 }
 
 // Today's stage links an unnamed Transfer to the latest named event of its resource and family
-// of any kind, not only to the registry's owner events. Child 46's name carries a non-zero
-// Transfer of the resource at block 2 and an unnamed zero Transfer of the resource follows at
-// block 3, which zeroes 46. At block 4 a registry event of another kind names child 47 and
-// carries the same resource, so it is the resource's latest named event and the zero Transfer
-// moves to 47: 46 is listed again with its edge owner and 47 is not. Both summaries must follow,
-// 46's though block 4 names only 47.
+// of any kind, not only to the registry's owner events. Child 48's name is carried only by a
+// registry event of another kind on its resource at block 2, and an unnamed zero Transfer of that
+// resource at a node with no surface follows at block 3: the Transfer is 48's, so 48 is zeroed.
+// Child 46's name carries a non-zero Transfer of another resource at block 2 and an unnamed zero
+// Transfer of that resource follows at block 3, which zeroes 46. At block 4 a registry event of
+// another kind names child 47 and carries 46's resource, so it is that resource's latest named
+// event and the zero Transfer moves to 47: 46 is listed again with its edge owner and 47 is not.
+// Every summary must follow, 46's though block 4 names only 47.
 #[tokio::test]
 async fn zero_owner_links_the_latest_named_event_of_any_kind() -> Result<()> {
     let mut fixture = Fixture::new("families_shadow_children_linked", 12).await?;
     let (parent_id, parent_node, parent_labels) = parent(&fixture, 1, "linked").await?;
     let resource = uuid(0xd046);
     fixture.resource(&resource, 1).await?;
+    let hinted = uuid(0xd048);
+    fixture.resource(&hinted, 1).await?;
     let mut names = Vec::new();
-    for (child, label) in [(46, "owned"), (47, "resolved")] {
+    for (child, label) in [(46, "owned"), (47, "resolved"), (48, "hinted")] {
         fixture.label(&word(0x5000 + child), label, true).await?;
         edge(
             &fixture,
@@ -941,7 +945,24 @@ async fn zero_owner_links_the_latest_named_event_of_any_kind() -> Result<()> {
     )
     .await?;
     transfer_of(&fixture, "zero-linked", 146, 3, &resource).await?;
+    fixture
+        .event(
+            "preimage-hinted",
+            Some(&names[2]),
+            Some(&hinted),
+            V1_REGISTRY,
+            "PreimageObserved",
+            2,
+            json!({"node": word(48)}),
+            &address(0xe1),
+        )
+        .await?;
+    transfer_of(&fixture, "zero-hinted", 148, 3, &hinted).await?;
     fixture.publish(3).await?;
+    ensure!(
+        zero_owners(&fixture, &names).await? == [true, false, true],
+        "block 3 zero owners of 46, 47, 48"
+    );
     let report = fixture.compare(1).await?;
     unexpected(&report, &[])?;
     let listed = |children: &[u64]| -> std::collections::BTreeSet<String> {
@@ -973,7 +994,30 @@ async fn zero_owner_links_the_latest_named_event_of_any_kind() -> Result<()> {
     unexpected(&report, &[])?;
     let visible = topology_shadow::shadow_children(fixture.pool(), &parent_id).await?;
     ensure!(visible == listed(&[46]), "block 5: {visible:?}");
+    ensure!(
+        zero_owners(&fixture, &names).await? == [false, true, true],
+        "block 5 zero owners of 46, 47, 48"
+    );
     fixture.cleanup().await
+}
+
+/// The stored summaries' `zero_owner` of `names`, in order.
+async fn zero_owners(fixture: &Fixture, names: &[String]) -> Result<Vec<bool>> {
+    let mut out = Vec::with_capacity(names.len());
+    for name in names {
+        out.push(
+            sqlx::query_scalar(
+                "SELECT zero_owner FROM project_name_summary
+                 WHERE chain_id = $1 AND logical_name_id = $2",
+            )
+            .bind(CHAIN)
+            .bind(name)
+            .fetch_one(fixture.pool())
+            .await
+            .with_context(|| format!("{name} has no summary"))?,
+        );
+    }
+    Ok(out)
 }
 
 /// An unnamed ENSv1 registry Transfer of `node` to the zero owner carrying `resource`.
