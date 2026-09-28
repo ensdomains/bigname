@@ -92,8 +92,8 @@ impl Gathered {
     }
 }
 
-/// The composed /v1/search page: `filter` must carry no address filter (the address membership
-/// is still the served table's), and the page is sorted by name ascending.
+/// The composed /v1/search page: `filter` must carry no address filter (the search route has
+/// none), and the page is sorted by name ascending.
 pub async fn load_family_search_page(
     pool: &PgPool,
     filter: &NameCurrentListFilter,

@@ -61,22 +61,20 @@ pub(super) async fn render_resolves_to_lookup_results(
     let selected_snapshot = served_head.map(ServedHead::selected);
     for input in inputs.iter().filter(|input| is_resolves_to_input(input)) {
         let coin_type = input.coin_type.to_string();
-        let page = {
-            bigname_storage::families::records::load_family_resolves_to_page(
-                &state.pool,
-                &input.address,
-                &coin_type,
-                Some(public_namespaces),
-                AddressNamesCurrentDedupe::Surface,
-                None,
-                None,
-                AddressNamesCurrentSort::Name,
-                AddressNamesCurrentOrder::Asc,
-                input.resolves_to_cursor.as_ref(),
-                input.page_size,
-            )
-            .await
-        }
+        let page = bigname_storage::families::records::load_family_resolves_to_page(
+            &state.pool,
+            &input.address,
+            &coin_type,
+            Some(public_namespaces),
+            AddressNamesCurrentDedupe::Surface,
+            None,
+            None,
+            AddressNamesCurrentSort::Name,
+            AddressNamesCurrentOrder::Asc,
+            input.resolves_to_cursor.as_ref(),
+            input.page_size,
+        )
+        .await
         .map_err(crate::v2::snapshots::name_rows_error(
             crate::v2::snapshots::SnapshotReadResource::Name,
             |load_error| {

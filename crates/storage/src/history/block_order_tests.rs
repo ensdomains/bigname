@@ -50,22 +50,22 @@ const BLOCK_FIXTURE: &str = r#"
            'chain-a-block-' || block, block, tx_hash, tx_index, log, 'ens_v1_unwrapped_authority',
            'canonical', '{}'::jsonb
     FROM (VALUES
-        ('d12:block-1', 1, '0x11', 0, 0),
-        ('d12:a-log-3', 2, '0xff', 1, 3),
-        ('d12:a-log-7', 2, '0xff', 1, 7),
-        ('d12:b', 2, '0x00', 2, 9),
-        ('d12:synthesised', 2, NULL, NULL, NULL),
-        ('d12:block-3', 3, '0x33', 0, 0)
+        ('order:block-1', 1, '0x11', 0, 0),
+        ('order:a-log-3', 2, '0xff', 1, 3),
+        ('order:a-log-7', 2, '0xff', 1, 7),
+        ('order:b', 2, '0x00', 2, 9),
+        ('order:synthesised', 2, NULL, NULL, NULL),
+        ('order:block-3', 3, '0x33', 0, 0)
     ) AS event(identity, block, tx_hash, tx_index, log);
 "#;
 
 const NEWEST_FIRST: [&str; 6] = [
-    "d12:block-3",
-    "d12:b",
-    "d12:a-log-7",
-    "d12:a-log-3",
-    "d12:synthesised",
-    "d12:block-1",
+    "order:block-3",
+    "order:b",
+    "order:a-log-7",
+    "order:a-log-3",
+    "order:synthesised",
+    "order:block-1",
 ];
 
 fn events_filter(order: HistoryOrder) -> EventHistoryReadFilter {
@@ -152,7 +152,7 @@ async fn cursor_after(pool: &PgPool, order: HistoryOrder, anchor: &str) -> Resul
 
 #[tokio::test]
 async fn one_block_orders_by_transaction_index_in_both_directions() -> Result<()> {
-    let database = phase_database("history_d12_block_order", BLOCK_FIXTURE).await?;
+    let database = phase_database("history_order_block_order", BLOCK_FIXTURE).await?;
     let result = async {
         let pool = database.pool();
         for order in [HistoryOrder::Desc, HistoryOrder::Asc] {
@@ -169,20 +169,20 @@ async fn one_block_orders_by_transaction_index_in_both_directions() -> Result<()
         // Mid-block continuations carry the transaction index. Newest first, after A's last
         // row the event without a transaction follows, never B; oldest first, after A's last
         // row B follows.
-        let desc = cursor_after(pool, HistoryOrder::Desc, "d12:a-log-3").await?;
+        let desc = cursor_after(pool, HistoryOrder::Desc, "order:a-log-3").await?;
         let (rows, _) = page(pool, HistoryOrder::Desc, Some(&desc), 1).await?;
-        ensure!(rows == ["d12:synthesised"], "descending after A: {rows:?}");
-        let asc = cursor_after(pool, HistoryOrder::Asc, "d12:a-log-7").await?;
+        ensure!(rows == ["order:synthesised"], "descending after A: {rows:?}");
+        let asc = cursor_after(pool, HistoryOrder::Asc, "order:a-log-7").await?;
         let (rows, _) = page(pool, HistoryOrder::Asc, Some(&asc), 1).await?;
-        ensure!(rows == ["d12:b"], "ascending after A: {rows:?}");
+        ensure!(rows == ["order:b"], "ascending after A: {rows:?}");
         // The position the cursor carries continues the same way once its anchor is gone.
-        let mid = cursor_after(pool, HistoryOrder::Desc, "d12:a-log-7").await?;
-        sqlx::query("DELETE FROM normalized_events WHERE event_identity = 'd12:a-log-7'")
+        let mid = cursor_after(pool, HistoryOrder::Desc, "order:a-log-7").await?;
+        sqlx::query("DELETE FROM normalized_events WHERE event_identity = 'order:a-log-7'")
             .execute(pool)
             .await?;
         let rest = walk(pool, HistoryOrder::Desc, Some(mid)).await?;
         ensure!(
-            rest == ["d12:a-log-3", "d12:synthesised", "d12:block-1"],
+            rest == ["order:a-log-3", "order:synthesised", "order:block-1"],
             "descending after a deleted anchor: {rest:?}"
         );
         Ok(())
@@ -301,7 +301,7 @@ async fn pointer_attribution_breaks_exact_position_ties_by_identity() -> Result<
             &pointer_b,
         ),
     ]);
-    let database = phase_database("history_d12_pointer_tie", &fixture).await?;
+    let database = phase_database("history_order_pointer_tie", &fixture).await?;
     super::super::family_test_support::publish(database.pool(), "ethereum-mainnet", 5).await?;
     let result = async {
         let pool = database.pool();
@@ -410,7 +410,7 @@ async fn link_selection_breaks_exact_position_ties_by_identity() -> Result<()> {
             &write_2,
         ),
     ]);
-    let database = phase_database("history_d12_link_tie", &fixture).await?;
+    let database = phase_database("history_order_link_tie", &fixture).await?;
     super::super::family_test_support::publish(database.pool(), "ethereum-mainnet", 5).await?;
     let result = async {
         let attributed = attributed(database.pool()).await?;

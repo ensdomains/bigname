@@ -60,10 +60,10 @@ fn without(powers: &[&str], dropped: &[&str]) -> Value {
 /// A fuse burn between two publications: the emancipated `.eth` name published at 12 serves
 /// `unwrap` to its holder and the operator fan-out; at 13 the holder burns CANNOT_UNWRAP, and the
 /// page published at 14 has neither `unwrap` nor `resource_control`, with the restriction block
-/// locked, from the families as from the served tables.
+/// locked.
 #[tokio::test]
 async fn a_fuse_burn_between_two_publications_moves_the_page() -> Result<()> {
-    let fixture = Fixture::new("families_shadow_permission_pages_fuse_burn", 20).await?;
+    let fixture = Fixture::new("families_permission_pages_fuse_burn", 20).await?;
     let fuses = PARENT_CANNOT_CONTROL | IS_DOT_ETH;
     let expiry = timestamp(20) + 10 * GRACE_PERIOD;
     let resource = wrapped(&fixture, fuses, expiry).await?;
@@ -124,7 +124,7 @@ async fn a_fuse_burn_between_two_publications_moves_the_page() -> Result<()> {
 /// approval; the families mask at each publication's own block time, as the served build does.
 #[tokio::test]
 async fn a_role_change_crossing_the_clock_moves_the_page() -> Result<()> {
-    let fixture = Fixture::new("families_shadow_permission_pages_clock", 20).await?;
+    let fixture = Fixture::new("families_permission_pages_clock", 20).await?;
     let fuses = PARENT_CANNOT_CONTROL | IS_DOT_ETH;
     let resource = wrapped(&fixture, fuses, timestamp(14) + GRACE_PERIOD).await?;
     publish(&fixture, 14).await?;
@@ -153,7 +153,7 @@ async fn a_role_change_crossing_the_clock_moves_the_page() -> Result<()> {
 /// flight) refuses with the publication-unavailable error the API answers as a stale 409.
 #[tokio::test]
 async fn a_permission_read_refuses_while_the_families_rebuild() -> Result<()> {
-    let fixture = Fixture::new("families_shadow_permission_pages_rebuild", 20).await?;
+    let fixture = Fixture::new("families_permission_pages_rebuild", 20).await?;
     let resource = wrapped(&fixture, PARENT_CANNOT_CONTROL | IS_DOT_ETH, timestamp(40)).await?;
     publish(&fixture, 12).await?;
     sqlx::query("UPDATE project_family_marker SET state = 'bootstrap_pending'")

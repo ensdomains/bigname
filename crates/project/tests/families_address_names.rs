@@ -42,7 +42,7 @@ async fn with_token_lineage(fixture: &Fixture, resource: &str) -> Result<()> {
 /// window, the grant reads as a revoke, and only the registrant and token holder remain.
 #[tokio::test]
 async fn the_effective_controller_crosses_grace_entry() -> Result<()> {
-    let fixture = Fixture::new("families_shadow_address_names_grace", 20).await?;
+    let fixture = Fixture::new("families_address_names_grace", 20).await?;
     let fuses = PARENT_CANNOT_CONTROL | IS_DOT_ETH;
     let resource = wrapped(&fixture, fuses, timestamp(14) + GRACE_PERIOD).await?;
     with_token_lineage(&fixture, &resource).await?;
@@ -62,7 +62,7 @@ async fn the_effective_controller_crosses_grace_entry() -> Result<()> {
 /// at block 15 the state and the owner lapse and the holder has no relation left.
 #[tokio::test]
 async fn the_token_holder_and_registrant_cross_the_expiry() -> Result<()> {
-    let fixture = Fixture::new("families_shadow_address_names_expiry", 20).await?;
+    let fixture = Fixture::new("families_address_names_expiry", 20).await?;
     let fuses = PARENT_CANNOT_CONTROL | IS_DOT_ETH;
     let resource = wrapped(&fixture, fuses, timestamp(14)).await?;
     with_token_lineage(&fixture, &resource).await?;
@@ -83,7 +83,7 @@ async fn the_token_holder_and_registrant_cross_the_expiry() -> Result<()> {
 /// leaves unset, so the name has no relation at all.
 #[tokio::test]
 async fn a_locked_name_keeps_its_holder_and_a_lineageless_name_has_none() -> Result<()> {
-    let fixture = Fixture::new("families_shadow_address_names_locked", 20).await?;
+    let fixture = Fixture::new("families_address_names_locked", 20).await?;
     let fuses = PARENT_CANNOT_CONTROL | IS_DOT_ETH | CANNOT_UNWRAP;
     let resource = wrapped(&fixture, fuses, timestamp(14) + GRACE_PERIOD).await?;
     with_token_lineage(&fixture, &resource).await?;
@@ -96,7 +96,7 @@ async fn a_locked_name_keeps_its_holder_and_a_lineageless_name_has_none() -> Res
     }
     fixture.cleanup().await?;
 
-    let fixture = Fixture::new("families_shadow_address_names_no_lineage", 20).await?;
+    let fixture = Fixture::new("families_address_names_no_lineage", 20).await?;
     wrapped(
         &fixture,
         PARENT_CANNOT_CONTROL | IS_DOT_ETH,

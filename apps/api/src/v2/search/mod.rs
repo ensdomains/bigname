@@ -359,19 +359,12 @@ async fn load_search_storage_page(
     page_size: u64,
 ) -> V2Result<bigname_storage::NameCurrentListPage> {
     // The rows are composed from the owned key families; the candidates are the name surfaces.
-    let page = {
-        bigname_storage::families::name::load_family_search_page(
-            &state.pool,
-            filter,
-            cursor,
-            page_size,
-        )
+    bigname_storage::families::name::load_family_search_page(&state.pool, filter, cursor, page_size)
         .await
-    };
-    page.map_err(crate::v2::name_rows_error(
-        crate::v2::SnapshotReadResource::Name,
-        |_| V2Error::internal_error("failed to load search results"),
-    ))
+        .map_err(crate::v2::name_rows_error(
+            crate::v2::SnapshotReadResource::Name,
+            |_| V2Error::internal_error("failed to load search results"),
+        ))
 }
 
 fn cursor_filters(binding: &SearchCursorBinding<'_>) -> BTreeMap<String, String> {
