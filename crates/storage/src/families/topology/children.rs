@@ -61,17 +61,21 @@ pub(super) fn push_selected<'a>(
         "
         ), clock AS (
             -- The clock: the family marker's block of the parent's chain, never NOW(), when
-            -- the marker is servable: live and written by this build (the fence's rule,
-            -- snapshot_selection/project.rs). The readers check that first
-            -- (`children_page::require_publication`); without a servable marker there is no
-            -- clock and no child.
+            -- the marker is servable by the fence's rule (`servable_family_marker`,
+            -- snapshot_selection/project.rs): live, written by this build, on a readable block.
+            -- The readers check that first (`children_page::require_publication`); without a
+            -- servable marker there is no clock and no child.
             SELECT marker.chain_id, marker.current_block_number AS block_number,
                    marker.block_timestamp,
                    extract(epoch FROM marker.block_timestamp) AS epoch_seconds
             FROM bigname_phase.project_family_marker marker
             JOIN parent_surface ON parent_surface.chain_id = marker.chain_id
-            WHERE marker.state = 'live' AND marker.current_block_number IS NOT NULL
-              AND marker.input_content_hash = ",
+            JOIN bigname_phase.chain_lineage marker_lineage
+              ON marker_lineage.chain_id = marker.chain_id
+             AND marker_lineage.block_number = marker.current_block_number
+             AND marker_lineage.block_hash = marker.current_block_hash
+             AND marker_lineage.canonicality_state IN ('canonical', 'safe', 'finalized')
+            WHERE marker.state = 'live' AND marker.input_content_hash = ",
     );
     builder.push_bind(bigname_content_hash::INTERPRETER_CONTENT_HASH);
     builder.push(format!(

@@ -470,3 +470,50 @@ async fn an_ensv2_reservation_defers_to_the_ensv1_registration() -> Result<()> {
     );
     fixture.cleanup().await
 }
+
+/// Two names bound to one resource, the resolver set on the first and later on the second: the
+/// resource's latest pointer belongs to the second name, and the served row picks each name's
+/// latest pointer among its own events, so the first name still serves its own earlier pointer
+/// (name_current/build.sql, the `resolver` lateral filters by logical name first).
+#[tokio::test]
+async fn a_shared_resource_serves_each_name_its_own_latest_pointer() -> Result<()> {
+    let fixture = Fixture::new("families_shadow_names_shared_resource", 20).await?;
+    let lease = uuid(1);
+    for (n, binding) in [(1u64, 100u32), (2, 101)] {
+        fixture
+            .binding(
+                &uuid(binding),
+                &name(n),
+                &lease,
+                "ens_v1",
+                9,
+                n as i64,
+                None,
+            )
+            .await?;
+        fixture
+            .write(
+                10,
+                n as i64,
+                "RegistrationGranted",
+                V1_REGISTRAR,
+                Some(&name(n)),
+                Some(&lease),
+                json!({"authority_kind": "registrar", "status": "registered", "registrant": OWNER,
+                       "expiry": 2_000_000_000u64}),
+                REGISTRAR,
+            )
+            .await?;
+    }
+    pointer(&fixture, 11, 1, V1_REGISTRY, Some(&lease), RESOLVER).await?;
+    pointer(&fixture, 12, 2, V1_REGISTRY, Some(&lease), LATER).await?;
+    publish_and_compare(&fixture, 13).await?;
+    assert_eq!(
+        (
+            served(&fixture, 1, "/declared_summary/resolver/address").await?,
+            served(&fixture, 2, "/declared_summary/resolver/address").await?,
+        ),
+        (json!(RESOLVER), json!(LATER))
+    );
+    fixture.cleanup().await
+}

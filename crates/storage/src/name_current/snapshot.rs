@@ -79,6 +79,26 @@ async fn family_name_for_snapshot(
             ))
         })?;
     let Some(row) = row else {
+        // No row composed: the name may be one a rebuild has yet to reach, so the selected
+        // chains' markers must be servable before the name is called absent.
+        let chain_ids: Vec<String> = selected_chain_positions
+            .as_map()
+            .values()
+            .map(|position| position.chain_id.clone())
+            .collect();
+        crate::families::name::ensure_family_publications(pool, &chain_ids)
+            .await
+            .map_err(|error| {
+                if crate::families::name::is_publication_unavailable(&error) {
+                    return SnapshotSelectionError::stale(format!(
+                        "name data is unavailable while the families rebuild: {error}"
+                    ));
+                }
+                SnapshotSelectionError::internal(format!(
+                    "failed to read the family markers for logical_name_id {logical_name_id}: \
+                     {error}"
+                ))
+            })?;
         return Ok(SnapshotProjectionRead::NotFound);
     };
     let publication = ChainPositions::from_value(&row.chain_positions).map_err(|error| {

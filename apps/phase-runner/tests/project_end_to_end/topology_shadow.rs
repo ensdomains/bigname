@@ -1327,6 +1327,7 @@ async fn listings(
                             order,
                             cursor.as_ref(),
                             page,
+                            &[chain.to_owned()],
                         )
                         .await
                     }
