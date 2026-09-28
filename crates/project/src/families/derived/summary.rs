@@ -68,7 +68,7 @@ pub(super) async fn refresh(
     let mut rows = Vec::new();
     for chunk in names.chunks(CHUNK) {
         let fresh = bigname_storage::families::name::compose_name_summaries(
-            &mut **transaction,
+            transaction,
             &publication,
             chunk,
         )
