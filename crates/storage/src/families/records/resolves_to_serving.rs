@@ -291,6 +291,7 @@ fn address_record_row(
         "logical_name_id": row.logical_name_id,
         "namespace": row.namespace,
         "raw_name": row.canonical_display_name,
+        "normalized_name": row.normalized_name,
         "namehash": row.namehash,
         "surface_binding_id": row.surface_binding_id,
         "resource_id": row.resource_id,
