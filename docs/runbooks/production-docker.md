@@ -470,10 +470,10 @@ below, then apply all three schema-migrations in order as step 4. The first adds
 three internal reverse-name polling selection columns, their sequence, and an
 unvalidated all-null-or-complete constraint; the second validates that
 constraint. The third adds the bounded Interpret-to-Project redo handoff for
-resolver evidence. Before deploying the new binary, confirm the sequence, all
-three columns, the handoff table, and its range index exist; also confirm that
-`primary_names_current_reverse_hydration_attempt_check` has
-`pg_constraint.convalidated = true`.
+resolver evidence. The polling columns belonged to the old primary-name table,
+and the removal schema-migration [`20260929160000_remove_served_projections.sql`](../deployment.md#server-compose) later drops that table
+and the handoff table, so an upgrade that applies it has nothing from these
+three schema-migrations to validate.
 
 The release containing Issue #591 adds schema-migration
 `20260827120000_normalized_events_ens_v1_record_node_resolver_idx.sql`. On an
@@ -503,9 +503,8 @@ Interpret-to-Project handoff for logical names from deleted state-derived ENSv2
 path-expiry releases. The follow-up
 `20260902150000_project_redo_expiry_resources.sql` admits resource-only releases
 and records the resource identifier when available. Apply both schema-migrations
-in step 4 before deploying the new binary. Before starting any Project process,
-confirm the handoff table, nullable identifier columns, and range index exist and
-that the index is ready and valid with the query below.
+in step 4. The removal schema-migration later drops this handoff table, so there
+is nothing of it to validate once that has applied.
 
 The release containing
 `20260911120000_normalized_events_emitter_history_idx.sql` adds the bounded
@@ -711,8 +710,7 @@ ordinary index build blocks writes. After the new binary starts in step 9, run
 [`ops/project-progressive/validate-after-switch.sql`](../../ops/project-progressive/validate-after-switch.sql),
 which fails while either earlier label-array index still exists.
 
-This release also edits Project SQL under `crates/project/src/scope/`, a
-covered input of the
+This release also edits Project SQL, a covered input of the
 [interpreter content hash](../glossary.md#interpreter-content-hash), so the new
 binary's hash differs from the running one's and it must re-walk the complete
 retained range before normal derived writes continue: run the full-history
@@ -805,107 +803,28 @@ ENSv1→ENSv2 [migration-registry](../glossary.md#migration-registry-wrapperregi
 entry history. A fresh namespace receives the table and range index from
 `schema-v2/baseline`; an initialized namespace needs the schema-migration
 because its already-installed baseline is unchanged. Apply the schema-migration
-in step 4 before deploying the new binary. Before starting any Project process,
-confirm the handoff table and range index exist and that the index is ready and
-valid with the query below.
+in step 4. The removal schema-migration later drops this handoff table, so there
+is nothing of it to validate once that has applied.
 
 The registry-operator projection release adds the ordered schema-migrations
 `20260902160000_registry_operator_account_permissions.sql`,
 `20260902160100_registry_operator_account_permissions_validate.sql`, and
 `20260902160200_registry_operator_account_permissions_swap.sql`. Apply all
-three in step 4 before deploying the new binary. Before starting Project,
-confirm that the [account-permission state](../glossary.md#account-permission-state) table,
-both account lookup indexes, the four [registry-owner binding](../glossary.md#registry-owner-binding)
-summary columns, and the validated final binding constraint exist with the query below.
+three in step 4. They change the old
+[account-permission state](../glossary.md#account-permission-state) and permission
+resource-summary tables, which the removal schema-migration later drops, so there
+is nothing of them to validate once that has applied.
+
+The release containing [`20260929160000_remove_served_projections.sql`](../deployment.md#server-compose) removes the old serving tables
+and Project redo handoffs described in
+[`deployment.md`](../deployment.md#server-compose). Keep the API and every
+phase-runner or one-shot redo process stopped from step 1 until the new binary
+starts: the previous binaries read the tables it drops. Apply it in step 4 with
+the rest of the release's schema-migrations, then reapply the API-role grant
+block in step 11. Any export of old generation-failure audit rows must happen
+before step 4.
 
 ```sql
-SELECT
-    to_regclass('bigname_phase.project_redo_resolver_evidence') IS NOT NULL
-        AS redo_handoff_exists,
-    EXISTS (
-        SELECT 1
-        FROM pg_class index_relation
-        JOIN pg_index index_state ON index_state.indexrelid = index_relation.oid
-        WHERE index_relation.oid =
-              to_regclass('bigname_phase.project_redo_resolver_evidence_range_idx')
-          AND index_state.indisvalid
-          AND index_state.indisready
-    ) AS redo_handoff_range_index_ready;
-
-SELECT
-    to_regclass('bigname_phase.project_redo_expiry_roots') IS NOT NULL
-        AS expiry_redo_handoff_exists,
-    EXISTS (
-        SELECT 1
-        FROM information_schema.columns
-        WHERE table_schema = 'bigname_phase'
-          AND table_name = 'project_redo_expiry_roots'
-          AND column_name = 'logical_name_id'
-          AND is_nullable = 'YES'
-    ) AS expiry_redo_logical_name_nullable,
-    EXISTS (
-        SELECT 1
-        FROM information_schema.columns
-        WHERE table_schema = 'bigname_phase'
-          AND table_name = 'project_redo_expiry_roots'
-          AND column_name = 'resource_id'
-          AND is_nullable = 'YES'
-    ) AS expiry_redo_resource_available,
-    EXISTS (
-        SELECT 1
-        FROM pg_class index_relation
-        JOIN pg_index index_state ON index_state.indexrelid = index_relation.oid
-        WHERE index_relation.oid = to_regclass(
-                  'bigname_phase.project_redo_expiry_roots_range_idx'
-              )
-          AND index_state.indisvalid
-          AND index_state.indisready
-    ) AS expiry_redo_handoff_range_index_ready;
-
-SELECT
-    to_regclass(
-        'bigname_phase.project_redo_child_registration_history'
-    ) IS NOT NULL AS child_registration_history_handoff_exists,
-    EXISTS (
-        SELECT 1
-        FROM pg_class index_relation
-        JOIN pg_index index_state ON index_state.indexrelid = index_relation.oid
-        WHERE index_relation.oid = to_regclass(
-                  'bigname_phase.project_redo_child_registration_history_range_idx'
-              )
-          AND index_state.indisvalid
-          AND index_state.indisready
-    ) AS child_registration_history_range_index_ready;
-
-SELECT
-    to_regclass('bigname_phase.account_permission_state_current') IS NOT NULL
-        AS account_permission_state_exists,
-    to_regclass('bigname_phase.account_permission_state_current_active_subject_idx') IS NOT NULL
-        AS active_subject_index_exists,
-    to_regclass('bigname_phase.account_permission_state_current_applicability_idx') IS NOT NULL
-        AS applicability_index_exists,
-    (
-        SELECT count(*) = 4
-        FROM information_schema.columns
-        WHERE table_schema = 'bigname_phase'
-          AND table_name = 'permissions_current_resource_summary'
-          AND column_name IN (
-              'registry_owner',
-              'registry_contract',
-              'registry_binding_provenance',
-              'registry_binding_chain_positions'
-          )
-    ) AS registry_binding_columns_exist,
-    EXISTS (
-        SELECT 1
-        FROM pg_constraint
-        WHERE conrelid =
-              'bigname_phase.permissions_current_resource_summary'::regclass
-          AND conname =
-              'permissions_current_resource_summary_registry_binding_check'
-          AND convalidated
-    ) AS registry_binding_constraint_validated;
-
 SELECT EXISTS (
     SELECT 1
     FROM pg_class index_relation
@@ -1142,41 +1061,15 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS surface_bindings_chain_block_number_idx
     ON bigname_phase.surface_bindings (chain_id, block_number);
 CREATE INDEX CONCURRENTLY IF NOT EXISTS resources_chain_block_number_idx
     ON bigname_phase.resources (chain_id, block_number);
-CREATE INDEX CONCURRENTLY IF NOT EXISTS children_current_labelhash_idx
-    ON bigname_phase.children_current
-       (namespace, lower(labelhash), parent_logical_name_id, child_logical_name_id);
-CREATE INDEX CONCURRENTLY IF NOT EXISTS name_current_resolver_idx
-    ON bigname_phase.name_current
-       ((declared_summary #>> '{resolver,chain_id}'),
-        lower(declared_summary #>> '{resolver,address}'), logical_name_id)
-    WHERE declared_summary #>> '{resolver,address}' IS NOT NULL;
-CREATE INDEX CONCURRENTLY IF NOT EXISTS permissions_current_resolver_scope_idx
-    ON bigname_phase.permissions_current
-       ((scope_detail ->> 'chain_id'),
-        lower(scope_detail ->> 'resolver_address'), resource_id)
-    WHERE scope_kind = 'resolver'
-      AND scope_detail ->> 'resolver_address' IS NOT NULL;
-CREATE INDEX CONCURRENTLY IF NOT EXISTS record_inventory_current_resolver_idx
-    ON bigname_phase.record_inventory_current
-       ((provenance ->> 'chain_id'), lower(provenance ->> 'resolver_address'), resource_id)
-    WHERE provenance ->> 'resolver_address' IS NOT NULL;
-CREATE INDEX CONCURRENTLY IF NOT EXISTS primary_names_current_reverse_node_idx
-    ON bigname_phase.primary_names_current
-       ((claim_provenance ->> 'chain_id'),
-        lower(claim_provenance ->> 'reverse_node'), address, coin_type, namespace)
-    WHERE claim_provenance ->> 'reverse_node' IS NOT NULL;
-CREATE INDEX CONCURRENTLY IF NOT EXISTS permissions_current_resource_wrapper_expiry_idx
-    ON bigname_phase.permissions_current_resource_summary
-       ((provenance ->> 'chain_id'),
-        ((provenance -> 'wrapper_expiry_boundary' ->> 'expiry_seconds')::numeric),
-        resource_id)
-    WHERE provenance ? 'wrapper_expiry_boundary';
 ```
 
 Record this manual index step, its start/end times, validity check, and the
 pre/post published-head Project re-apply measurements in the release record for
 the shared re-derivation boundary, alongside the complete artifact set. These
-indexes are additive; rollback may leave them in place.
+indexes are additive; rollback may leave them in place. The block no longer prebuilds
+indexes on the old serving tables: an older namespace still gets them from their
+schema-migrations in step 4, on tables the removal schema-migration drops later
+in the same step.
 
 1. stop the API and phase runner;
 2. take and verify a database backup;
@@ -1324,7 +1217,7 @@ indexes are additive; rollback may leave them in place.
    the supervisor's Verify completion output (`/v1/status` cannot be used here
    because the API is stopped; after startup, the API accepts every known verification level at or above Sepolia's `quick_synced` floor and rejects unknown
    levels);
-11. before starting the API, apply the explicit API-role `GRANT SELECT` inventory in [`deployment.md`](../deployment.md#surviving-services), including `account_permission_state_current`, and verify the configured login with `has_table_privilege`; then start the API built from the same commit and confirm `/v1/status` reports
+11. before starting the API, apply the explicit API-role `GRANT SELECT` inventory in [`deployment.md`](../deployment.md#surviving-services), including every `project_*` family table and the child reader's `label_preimages`, `discovery_edges` and `migration_discovery_associations`, and verify the configured login with `has_table_privilege`; then start the API built from the same commit and confirm `/v1/status` reports
    current phase state and no pending redo; and
 12. run the release smoke and public-edge checks before undraining traffic.
 
@@ -1490,9 +1383,9 @@ Compose's 10s default is not that. `stop_grace_period` is set explicitly on the
 
 A grace period that expires is a SIGKILL. Nothing is corrupted, but a batch is
 not one transaction. Each phase commits its own writes before the runner
-records progress: Project commits the projection swap
-(`crates/project/src/engine.rs`) and may then commit a separate canonical-head
-hydration transaction (`apps/phase-runner/src/project_phase.rs`); Interpret
+records progress: Project commits each family block or rebuild range, with its
+hydration overlays, undo journal and [family marker](../glossary.md#family-marker),
+in one transaction (`crates/project/src/families/driver.rs`); Interpret
 commits its normalized-event and identity writes
 (`crates/interpret/src/write.rs`); Ingest commits raw facts
 (`crates/ingest/src/write/mod.rs`) and the runner then publishes chain heads.
@@ -1503,10 +1396,10 @@ committed phase output whose progress marker still points at the previous
 batch. That is safe by design: the next start resumes from the durable marker
 and re-executes the batch, and every write path is replay-safe — raw facts
 insert if absent and are verified immutable, Interpret rows upsert on their
-identities and fail closed on divergent data, and Project's publication is a
-set-based delete-and-reinsert of the affected scope — so the redo costs the
-batch's wall time plus fresh `observed_at` timestamps and a new hydration
-attempt ordinal, and produces no duplicate or orphaned rows. The phase lock is
+identities and fail closed on divergent data, and Project resumes from its
+committed family marker and repair record rather than from the progress row —
+so the redo costs the batch's wall time plus fresh `observed_at` timestamps,
+and produces no duplicate or orphaned rows. The phase lock is
 only released when PostgreSQL reaps the dead session, so the next start can
 find the phase still held.
 
@@ -1523,10 +1416,6 @@ Route from the first confirmed symptom:
   [follow the reorg and verification incident play](#reorg-and-verification-incidents).
 - rollback requires an older binary, deleted schema, or restored data ->
   [follow the rollback boundary](#rollback).
-- `project` refuses a Mainnet or Sepolia projection with
-  `dual_current_exact_name_authority` or `dual_current_child_authority` ->
-  [follow the dual-current generation-failure runbook](dual-current-generation-failure.md),
-  including its evidence-preserving child-failure escalation path.
 
 Use the exact Compose file set deployed on the host for every recovery command,
 retaining every active overlay. Replace `<compose-files>` below with that exact
