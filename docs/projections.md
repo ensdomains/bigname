@@ -1696,8 +1696,9 @@ reader's own selection, for every name the block touched: the names, nodes and
 resources of every row its journal names, each resource widened to the names
 whose candidates, key states, association targets, lifecycle events, wrapper
 row, owner events or pointer read it, every name a registry event carries on a
-resource one of the block's registry events carries (such an event can move the
-resource's unnamed Transfers to another name), every name whose surface
+resource that a registry event of a block since the family marker's carries
+(such an event can move the resource's unnamed Transfers to another name, and a
+rebuild range composes once for all its blocks), every name whose surface
 appeared since the family marker's block, and every name whose stored
 `recompose_at` the block's time has reached. `recompose_at` is the first second
 at which the name's composition can change with no fact changing: a binding

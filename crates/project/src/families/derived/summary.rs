@@ -15,8 +15,9 @@
 //! NameWrapper expiry masks, and a binding can close at a time ahead of the event that set it
 //! (an ENSv2 path expiry), so each row stores the first second at which its composition can
 //! change with no fact changing, and the first block at or past it composes the name again.
-//! A registry event also adds every name a registry event of its resource carries, since it can
-//! move that resource's unnamed Transfers from one name to another.
+//! A registry event of any block since the family marker's also adds every name a registry event
+//! of its resource carries, since it can move that resource's unnamed Transfers from one name to
+//! another; a rebuild range composes once, at its last block, for all of its blocks.
 //!
 //! So a stored summary is refreshed when a block touches the name or its scheduled boundary
 //! passes, and the work list is deliberately no wider. An input that changes in place without
@@ -292,20 +293,24 @@ const WORK_LIST: &str = r#"/* project:families.derived.summary_names */
         FROM resourced JOIN project_resource_pointer pointer
           ON pointer.chain_id = $1 AND pointer.resource_id = resourced.resource_id
     ),
-    -- A registry event of this block that carries a resource can move that resource's unnamed
-    -- Transfers to another name: the zero-owner attribution links them to the resource's latest
-    -- named registry event of any kind (the served `project_latest_registry_owner`). Every name
-    -- a registry event of the resource carries is composed again.
+    -- A registry event that carries a resource can move that resource's unnamed Transfers to
+    -- another name: the zero-owner attribution links them to the resource's latest named
+    -- registry event of any kind (the served `project_latest_registry_owner`). Every name a
+    -- registry event of the resource carries is composed again. The events are those of every
+    -- block since the family marker's, as for `surfaced`: a rebuild range composes once, at its
+    -- last block, for all of its blocks.
     linked AS (
         SELECT DISTINCT carried.logical_name_id
         FROM normalized_events registry_event
+        LEFT JOIN project_family_marker marker ON marker.chain_id = registry_event.chain_id
         JOIN normalized_events carried
           ON carried.resource_id = registry_event.resource_id
          AND carried.chain_id = $1
          AND carried.source_family = registry_event.source_family
          AND carried.logical_name_id IS NOT NULL
          AND carried.canonicality_state IN ('canonical', 'safe', 'finalized')
-        WHERE registry_event.chain_id = $1 AND registry_event.block_number = $2
+        WHERE registry_event.chain_id = $1 AND registry_event.block_number <= $2
+          AND registry_event.block_number > COALESCE(marker.current_block_number, -1)
           AND registry_event.resource_id IS NOT NULL
           AND registry_event.source_family IN ('ens_v1_registry_l1', 'basenames_base_registry')
     ),

@@ -646,3 +646,126 @@ async fn undo_restores_a_clock_only_summary_and_rewrites_nothing_for_an_empty_bl
     );
     fixture.cleanup().await
 }
+
+// A rebuild range applies several blocks and composes its summaries once, at its last block, so
+// the registry events that can move a resource's unnamed Transfer to another name are read for
+// every block of the range, not only the last. Name 1 carries a non-zero Transfer of the
+// resource at block 2 and an unnamed zero Transfer of it follows at block 3, which zeroes name 1;
+// at block 5 a registry event of another kind names name 2 on the resource, which moves the
+// Transfer to name 2 and changes no other family row. Block 5 sits inside the rebuild range
+// [5, 6], and the rebuild must write the summaries the block-by-block follow wrote.
+#[tokio::test]
+async fn a_rebuild_range_reads_the_registry_events_of_every_block_it_applies() -> Result<()> {
+    let fixture = Fixture::new("families_name_summary_range_link", 12).await?;
+    let resource = uuid(0x4001);
+    let node = |n: u64| format!("0x{n:064x}");
+    fixture
+        .write(
+            2,
+            0,
+            "AuthorityTransferred",
+            V1_REGISTRY,
+            Some(&name(1)),
+            Some(&resource),
+            json!({"source_event": "Transfer", "node": node(1), "owner": OWNER,
+                   "owner_getter": OWNER}),
+            REGISTRY,
+        )
+        .await?;
+    fixture
+        .write(
+            3,
+            0,
+            "AuthorityTransferred",
+            V1_REGISTRY,
+            None,
+            Some(&resource),
+            json!({"source_event": "Transfer", "node": node(0x901), "owner": ZERO,
+                   "owner_getter": ZERO}),
+            REGISTRY,
+        )
+        .await?;
+    // Name 2's first event is at block 2, so block 5's changes no family row of it.
+    fixture
+        .write(
+            2,
+            1,
+            "PreimageObserved",
+            V1_REGISTRY,
+            Some(&name(2)),
+            None,
+            json!({"node": node(2)}),
+            REGISTRY,
+        )
+        .await?;
+    fixture
+        .write(
+            5,
+            0,
+            "PreimageObserved",
+            V1_REGISTRY,
+            Some(&name(2)),
+            Some(&resource),
+            json!({"node": node(2)}),
+            REGISTRY,
+        )
+        .await?;
+    for (block, filler) in [(4, "filler:4"), (6, "filler:6")] {
+        fixture
+            .event(Event::new(
+                filler,
+                block,
+                90,
+                "PreimageObserved",
+                V1_REGISTRY,
+            ))
+            .await?;
+    }
+    publish(&fixture, 7).await?;
+    let zero_owner = |n: u64| {
+        let pool = fixture.pool.clone();
+        async move {
+            sqlx::query_scalar::<_, bool>(
+                "SELECT zero_owner FROM project_name_summary
+                 WHERE chain_id = $1 AND logical_name_id = $2",
+            )
+            .bind(CHAIN)
+            .bind(name(n))
+            .fetch_one(&pool)
+            .await
+        }
+    };
+    ensure!(
+        !zero_owner(1).await? && zero_owner(2).await?,
+        "the follow did not move the zero Transfer to name 2"
+    );
+    let followed = fixture.exact().await?;
+    let options = families::FamilyOptions::new(support::CONTENT_HASH)
+        .with_rebuild_ranges(families::RebuildRanges::Through(7));
+    let rebuilt = fixture
+        .apply_with(7, families::FamilyMode::Rebuild, &options)
+        .await;
+    let dbg: Vec<(i64, String)> =
+        sqlx::query_as("SELECT DISTINCT block_number, 'x' FROM project_family_undo ORDER BY 1")
+            .fetch_all(&fixture.pool)
+            .await?;
+    eprintln!(
+        "DEBUG rebuilt {} {} journal {dbg:#?}",
+        rebuilt.blocks, rebuilt.ranges
+    );
+    // Ranges grow 1, 2, 4 blocks: [2], [3, 4] and [5, 6], then the target on its own.
+    ensure!(
+        rebuilt.skipped.is_none() && rebuilt.ranges == 3,
+        "the rebuild applied {} blocks in {} ranges: {:?}",
+        rebuilt.blocks,
+        rebuilt.ranges,
+        rebuilt.skipped
+    );
+    for ((table, was), (_, now)) in followed.iter().zip(&fixture.exact().await?) {
+        ensure!(
+            was == now,
+            "the ranged rebuild left {table} as {now}, not {was}"
+        );
+    }
+    fixture.cleanup().await
+}
