@@ -224,28 +224,14 @@ pub(crate) enum RedoRerun {
     RecomputeFlags,
 }
 
-/// The stamp records neither the sources, the verifier URL, nor the hydration
-/// RPC, and the CLI or the Project phase rejects the bare command without them,
-/// so every rerun instruction names what it cannot fill. Hydration belongs to
-/// every path that runs Project: Project itself, Interpret (which cascades into
-/// it), all phases, and recompute-flags.
+/// The stamp records neither the sources nor the verifier URL, so rerun
+/// instructions name what they cannot fill. Bounded replay needs no hydration RPC.
 pub(crate) fn redo_rerun_options(rerun: RedoRerun) -> &'static str {
     match rerun {
-        RedoRerun::RecomputeFlags => {
-            " with --hydration-rpc for the chain (or BIGNAME_PHASE_RUNNER_HYDRATION_RPC_URLS)"
-        }
-        RedoRerun::All => {
-            " with the chain's configured sources as --source options, \
-             --verification-database-url, and --hydration-rpc for the chain (or \
-             BIGNAME_PHASE_RUNNER_HYDRATION_RPC_URLS)"
-        }
-        RedoRerun::Phase(PhaseName::Verify) => {
+        RedoRerun::RecomputeFlags => "",
+        RedoRerun::All | RedoRerun::Phase(PhaseName::Verify) => {
             " with the chain's configured sources as --source options and \
              --verification-database-url"
-        }
-        RedoRerun::Phase(PhaseName::Interpret | PhaseName::Project) => {
-            " with the chain's configured sources as --source options and --hydration-rpc \
-             for the chain (or BIGNAME_PHASE_RUNNER_HYDRATION_RPC_URLS)"
         }
         RedoRerun::Phase(_) => " with the chain's configured sources as --source options",
     }

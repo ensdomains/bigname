@@ -3293,7 +3293,7 @@ async fn recompute_holds_the_project_lock_through_interpret_completion() -> Resu
 }
 
 #[tokio::test]
-async fn recompute_widens_but_does_not_absorb_a_pending_operator_project_redo() -> Result<()> {
+async fn recompute_preserves_a_pending_operator_project_redo() -> Result<()> {
     assert_pending_project_redo_survives(
         "production_interpret_flags_pending_project",
         "interpret-flags-pending-project",
@@ -3412,8 +3412,8 @@ async fn recompute_transition_reinstall_advances_pending_project_redo_generation
     .await?;
     assert_eq!(
         project,
-        (generation_before + 2, 0, 1, None),
-        "recompute preparation and its visibility-transition stamp must each supersede older progress"
+        (generation_before + 1, 1, 1, None),
+        "the visibility-transition stamp must supersede older Project progress"
     );
     let interpret: (i64, i64, i64, Option<i64>) = sqlx::query_as(
         "SELECT redo_attempt_generation, redo_from_block_number,
@@ -3433,64 +3433,7 @@ async fn recompute_transition_reinstall_advances_pending_project_redo_generation
 }
 
 #[tokio::test]
-async fn recompute_resumes_its_own_queued_project_refresh() -> Result<()> {
-    let scratch = ScratchDatabase::create("production_interpret_flags_queued_refresh").await?;
-    let chain = "interpret-flags-queued-refresh";
-    seed_fixture(scratch.pool(), chain, &[(1, "alice"), (2, "bob")]).await?;
-    run_engine(scratch.pool(), chain, 0, 2, InterpretRunMode::Normal).await?;
-    initialize_completed_recompute_extent(scratch.pool(), chain, 2).await?;
-    sqlx::query(
-        "UPDATE label_preimages
-         SET normalizer_version = 'stale-version',
-             normalized_under_version = false,
-             normalization_error = 'stale flag'
-         WHERE decoded_label = 'alice'",
-    )
-    .execute(scratch.pool())
-    .await?;
-    sqlx::query(
-        "UPDATE chain_phase_state
-         SET phase_status = 'running',
-             redo_in_progress = true,
-             redo_mode = 'redo',
-             redo_previous_phase_status = 'completed',
-             redo_previous_last_error = NULL,
-             redo_previous_started_at = started_at,
-             redo_previous_finished_at = finished_at,
-             redo_from_block_number = 0,
-             redo_to_block_number = 2,
-             last_error = 'required downstream redo: recompute-flags scoped projection refresh',
-             started_at = now(),
-             finished_at = NULL,
-             updated_at = now()
-         WHERE chain_id = $1 AND phase_name = 'project'",
-    )
-    .bind(chain)
-    .execute(scratch.pool())
-    .await?;
-
-    recompute_runner(&scratch, chain, "interpret-flags-queued-refresh-runner")?
-        .redo(
-            &chain_config(chain)?,
-            RedoPhase::RecomputeFlags,
-            BlockRange::new(0, 2)?,
-            CancellationToken::new(),
-        )
-        .await?;
-
-    assert_no_interpret_project_redo(scratch.pool(), chain).await?;
-    let repaired: (String, bool) = sqlx::query_as(
-        "SELECT normalizer_version, normalized_under_version
-         FROM label_preimages WHERE decoded_label = 'alice'",
-    )
-    .fetch_one(scratch.pool())
-    .await?;
-    assert_eq!(repaired, (NORMALIZER.into(), true));
-    scratch.cleanup().await
-}
-
-#[tokio::test]
-async fn source_free_recompute_flags_runs_its_internal_project_refresh() -> Result<()> {
+async fn source_free_recompute_flags_updates_normalization_without_project() -> Result<()> {
     let scratch = ScratchDatabase::create("production_interpret_source_free_recompute").await?;
     let chain = "interpret-source-free-recompute";
     seed_fixture(scratch.pool(), chain, &[(1, "alice")]).await?;
@@ -3528,150 +3471,64 @@ async fn source_free_recompute_flags_runs_its_internal_project_refresh() -> Resu
 }
 
 #[tokio::test]
-async fn failed_recompute_project_refresh_retains_ownership_and_resumes() -> Result<()> {
-    let scratch = ScratchDatabase::create("production_interpret_flags_failed_refresh").await?;
-    let chain = "interpret-flags-failed-refresh";
+async fn recompute_runs_only_interpret_and_preserves_project_state() -> Result<()> {
+    let scratch = ScratchDatabase::create("production_interpret_flags_without_refresh").await?;
+    let chain = "interpret-flags-without-refresh";
     seed_fixture(scratch.pool(), chain, &[(1, "alice")]).await?;
     run_engine(scratch.pool(), chain, 0, 1, InterpretRunMode::Normal).await?;
     initialize_completed_recompute_extent(scratch.pool(), chain, 1).await?;
-    let phases = PhaseSet::with_ingest_interpret_and_project(
-        Arc::new(LoopbackPhase::new(PhaseName::Ingest)),
-        Arc::new(InterpretPhase::new(scratch.pool().clone())),
-        Arc::new(FailProjectOncePhase {
-            inner: ProjectPhase::new(scratch.pool().clone()),
-            attempts: AtomicUsize::new(0),
-        }),
-    )?;
-    let runner = PhaseRunner::new(
-        scratch.runner(),
-        phases,
-        CapacityGuard::system(CapacityConfig::default()),
-        "interpret-flags-failed-refresh-runner",
-        test_timing(),
-    )?;
-
-    let error = runner
-        .redo(
-            &chain_config(chain)?,
-            RedoPhase::RecomputeFlags,
-            BlockRange::new(0, 1)?,
-            CancellationToken::new(),
-        )
-        .await
-        .expect_err("the first scoped project refresh must fail");
-    assert!(
-        error
-            .to_string()
-            .contains("injected project refresh failure")
-    );
-    let failed_owner: Option<String> = sqlx::query_scalar(
-        "SELECT last_error FROM chain_phase_state
-         WHERE chain_id = $1 AND phase_name = 'project' AND redo_in_progress",
+    sqlx::query(
+        "UPDATE label_preimages
+         SET normalizer_version = 'stale', normalized_under_version = false,
+             normalization_error = 'stale flag'
+         WHERE decoded_label = 'alice'",
+    )
+    .execute(scratch.pool())
+    .await?;
+    let before: Value = sqlx::query_scalar(
+        "SELECT to_jsonb(state) FROM chain_phase_state state
+         WHERE chain_id = $1 AND phase_name = 'project'",
     )
     .bind(chain)
     .fetch_one(scratch.pool())
     .await?;
-    assert!(
-        failed_owner
-            .as_deref()
-            .is_some_and(|message| message.contains("recompute-flags scoped projection refresh"))
-    );
-
-    runner
-        .redo(
-            &chain_config(chain)?,
-            RedoPhase::RecomputeFlags,
-            BlockRange::new(0, 1)?,
-            CancellationToken::new(),
-        )
-        .await?;
-    assert_no_interpret_project_redo(scratch.pool(), chain).await?;
-    scratch.cleanup().await
-}
-
-#[tokio::test]
-async fn project_refresh_handoff_keeps_a_durable_recompute_marker() -> Result<()> {
-    let scratch = ScratchDatabase::create("production_interpret_flags_project_handoff").await?;
-    let chain = "interpret-flags-project-handoff";
-    seed_fixture(scratch.pool(), chain, &[(1, "alice")]).await?;
-    run_engine(scratch.pool(), chain, 0, 1, InterpretRunMode::Normal).await?;
-    initialize_completed_recompute_extent(scratch.pool(), chain, 1).await?;
-    let cancellation = CancellationToken::new();
     let phases = PhaseSet::with_ingest_interpret_and_project(
         Arc::new(LoopbackPhase::new(PhaseName::Ingest)),
         Arc::new(InterpretPhase::new(scratch.pool().clone())),
-        Arc::new(CancelAfterProjectPhase {
-            inner: ProjectPhase::new(scratch.pool().clone()),
-            cancellation: cancellation.clone(),
-        }),
+        Arc::new(UnavailableProjectPhase),
     )?;
-    let interrupted_runner = PhaseRunner::new(
+    PhaseRunner::new(
         scratch.runner(),
         phases,
         CapacityGuard::system(CapacityConfig::default()),
-        "interpret-flags-project-handoff-runner",
+        "interpret-flags-without-refresh-runner",
         test_timing(),
-    )?;
-
-    interrupted_runner
-        .redo(
-            &chain_config(chain)?,
-            RedoPhase::RecomputeFlags,
-            BlockRange::new(0, 1)?,
-            cancellation,
-        )
-        .await
-        .expect_err("cancellation after Project must stop before Interpret");
-    let durable_marker: Option<(String, String)> = sqlx::query_as(
-        "SELECT redo_mode, last_error FROM chain_phase_state
-         WHERE chain_id = $1 AND phase_name = 'project' AND redo_in_progress",
-    )
-    .bind(chain)
-    .fetch_optional(scratch.pool())
-    .await?;
-    assert_eq!(
-        durable_marker,
-        Some((
-            "redo".into(),
-            "recompute-flags project refresh complete; interpret flags pending".into(),
-        ))
-    );
-
-    let ordinary_project_error = recompute_runner(
-        &scratch,
-        chain,
-        "interpret-flags-project-handoff-ordinary-project",
     )?
     .redo(
-        &chain_config(chain)?,
-        RedoPhase::Phase(PhaseName::Project),
+        &ChainConfig::new(chain, Vec::new(), false)?,
+        RedoPhase::RecomputeFlags,
         BlockRange::new(0, 1)?,
         CancellationToken::new(),
     )
-    .await
-    .expect_err("ordinary Project redo must not consume the recompute handoff marker");
-    assert!(
-        ordinary_project_error
-            .to_string()
-            .contains("--phase recompute-flags --from-block 0 --to-block 1")
-    );
-    let marker_after_ordinary_project: Option<(String, String)> = sqlx::query_as(
-        "SELECT redo_mode, last_error FROM chain_phase_state
-         WHERE chain_id = $1 AND phase_name = 'project' AND redo_in_progress",
+    .await?;
+    let repaired: (String, bool) = sqlx::query_as(
+        "SELECT normalizer_version, normalized_under_version
+         FROM label_preimages WHERE decoded_label = 'alice'",
+    )
+    .fetch_one(scratch.pool())
+    .await?;
+    assert_eq!(repaired, (NORMALIZER.into(), true));
+    let after: Value = sqlx::query_scalar(
+        "SELECT to_jsonb(state) FROM chain_phase_state state
+         WHERE chain_id = $1 AND phase_name = 'project'",
     )
     .bind(chain)
-    .fetch_optional(scratch.pool())
+    .fetch_one(scratch.pool())
     .await?;
-    assert_eq!(marker_after_ordinary_project, durable_marker);
-
-    recompute_runner(&scratch, chain, "interpret-flags-project-handoff-resume")?
-        .redo(
-            &chain_config(chain)?,
-            RedoPhase::RecomputeFlags,
-            BlockRange::new(0, 1)?,
-            CancellationToken::new(),
-        )
-        .await?;
+    assert_eq!(
+        after, before,
+        "same-class normalization must not refresh or stamp Project"
+    );
     assert_no_interpret_project_redo(scratch.pool(), chain).await?;
     scratch.cleanup().await
 }
@@ -3740,8 +3597,8 @@ async fn assert_pending_project_redo_survives(
             "running".into(),
             true,
             "redo".into(),
-            0,
-            2,
+            1,
+            1,
             operator_error.map(str::to_owned),
         )
     );
@@ -11493,43 +11350,29 @@ impl Phase for BlockingInterpretPhase {
     }
 }
 
-struct FailProjectOncePhase {
-    inner: ProjectPhase,
-    attempts: AtomicUsize,
-}
+struct UnavailableProjectPhase;
 
-impl Phase for FailProjectOncePhase {
+impl Phase for UnavailableProjectPhase {
     fn name(&self) -> PhaseName {
         PhaseName::Project
     }
 
-    fn run_batch(&self, context: PhaseContext) -> PhaseFuture<'_> {
-        Box::pin(async move {
-            if self.attempts.fetch_add(1, Ordering::SeqCst) == 0 {
-                return Err(RunnerError::data_integrity(
-                    "injected project refresh failure",
-                ));
-            }
-            self.inner.run_batch(context).await
-        })
-    }
-}
-
-struct CancelAfterProjectPhase {
-    inner: ProjectPhase,
-    cancellation: CancellationToken,
-}
-
-impl Phase for CancelAfterProjectPhase {
-    fn name(&self) -> PhaseName {
-        PhaseName::Project
+    fn preflight(
+        &self,
+        _chain_id: &str,
+        _sources: &[SourceConfig],
+        _mode: &phase_runner::phase::RunMode,
+    ) -> phase_runner::error::RunnerResult<()> {
+        Err(RunnerError::data_integrity(
+            "recompute must not preflight Project",
+        ))
     }
 
-    fn run_batch(&self, context: PhaseContext) -> PhaseFuture<'_> {
-        Box::pin(async move {
-            let outcome = self.inner.run_batch(context).await?;
-            self.cancellation.cancel();
-            Ok(outcome)
+    fn run_batch(&self, _context: PhaseContext) -> PhaseFuture<'_> {
+        Box::pin(async {
+            Err(RunnerError::data_integrity(
+                "recompute must not run Project",
+            ))
         })
     }
 }

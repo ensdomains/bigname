@@ -3259,11 +3259,10 @@ async fn redo_restores_the_full_phase_lifecycle_state() -> Result<()> {
 }
 
 #[tokio::test]
-async fn recompute_flags_stopped_during_its_project_refresh_says_to_rerun_recompute_flags()
--> Result<()> {
-    let scratch = ScratchDatabase::create("phase_runner_recompute_stop_during_refresh").await?;
+async fn recompute_flags_stopped_during_interpret_says_to_rerun_recompute_flags() -> Result<()> {
+    let scratch = ScratchDatabase::create("phase_runner_recompute_stop_during_interpret").await?;
     let store = PhaseStore::new(scratch.runner().pool().clone());
-    let chain_id = "recompute-stop-during-refresh-chain";
+    let chain_id = "recompute-stop-during-interpret-chain";
     store.initialize_chain(chain_id).await?;
     seed_interpret_redo_presence(scratch.pool(), chain_id, 1).await?;
     for (phase, hash) in [
@@ -3282,13 +3281,11 @@ async fn recompute_flags_stopped_during_its_project_refresh_says_to_rerun_recomp
         set_phase_extent(scratch.pool(), chain_id, phase, 1).await?;
     }
 
-    // The scoped Project refresh runs as a Project redo. Its first batch accepts
-    // the stop and asks to continue, so the batch loop observes the stop before
-    // the refresh completes.
+    // A stop during normalization keeps its Interpret redo marker and the exact rerun command.
     let cancellation = CancellationToken::new();
     let stop = cancellation.clone();
-    let project = Arc::new(FunctionPhase {
-        name: PhaseName::Project,
+    let interpret = Arc::new(FunctionPhase {
+        name: PhaseName::Interpret,
         handler: Arc::new(move |_| {
             stop.cancel();
             Ok(PhaseBatchOutcome::Continue(PhaseProgress::default()))
@@ -3296,9 +3293,9 @@ async fn recompute_flags_stopped_during_its_project_refresh_says_to_rerun_recomp
     }) as Arc<dyn Phase>;
     let phase_runner = runner(
         scratch.runner(),
-        phase_set_replacing(PhaseName::Project, project)?,
+        phase_set_replacing(PhaseName::Interpret, interpret)?,
         available_capacity(),
-        "recompute-stop-during-refresh-runner",
+        "recompute-stop-during-interpret-runner",
     )?;
     let error = phase_runner
         .redo(
@@ -3308,7 +3305,7 @@ async fn recompute_flags_stopped_during_its_project_refresh_says_to_rerun_recomp
             cancellation,
         )
         .await
-        .expect_err("a stop during the refresh must not read as a finished recompute");
+        .expect_err("a stop during normalization must not read as a finished recompute");
     let message = error.to_string();
     assert_eq!(error.kind(), ErrorKind::InvalidTransition, "{message}");
     assert!(

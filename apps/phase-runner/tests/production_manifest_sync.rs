@@ -1083,7 +1083,7 @@ async fn interrupted_recompute_resume_waits_for_required_ingest() -> Result<()> 
              redo_previous_finished_at = now(), redo_from_block_number = 0, redo_to_block_number = 1,
              last_error = CASE phase_name
                  WHEN 'interpret' THEN 'injected interrupted recompute-flags'
-                 ELSE 'recompute-flags project refresh complete; interpret flags pending' END,
+                 ELSE 'ordinary Project redo remains pending' END,
              started_at = now(), finished_at = NULL
          WHERE chain_id = $1 AND phase_name IN ('interpret', 'project')",
     )
@@ -1144,7 +1144,7 @@ async fn interrupted_recompute_resume_waits_for_required_ingest() -> Result<()> 
     .bind(chain_id)
     .execute(scratch.pool())
     .await
-    .context("failed to seed the Project-only recompute marker")?;
+    .context("failed to seed the pending ordinary Project marker")?;
     loopback_runner(&scratch, "manifest-recompute-ingest-fence-project-resume")?
         .redo(
             &chain,
@@ -1153,7 +1153,7 @@ async fn interrupted_recompute_resume_waits_for_required_ingest() -> Result<()> 
             CancellationToken::new(),
         )
         .await
-        .expect_err("Project-only recompute resume must wait for required Ingest");
+        .expect_err("recompute beside pending Project redo must wait for required Ingest");
     let project_checkpoint: (Option<i64>, Option<String>) = sqlx::query_as(
         "SELECT redo_current_block_number, redo_current_block_hash
          FROM chain_phase_state WHERE chain_id = $1 AND phase_name = 'project'",
