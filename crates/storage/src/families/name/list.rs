@@ -14,7 +14,8 @@
 //!   (control::lifecycle::served, the registration expiry), so a name first seen at expiry `x`
 //!   has an expiry at or past `x` in walk order, and the walk stops once `page_size + 1` rows
 //!   sort strictly before the walk position. Events whose expiry is a JSON number that is not an
-//!   integral second carry no indexed expiry and are always considered.
+//!   integral second carry no indexed expiry and are always considered. The walk key stays
+//!   numeric: a NameWrapper expiry keeps the full u64 range, past the largest bigint.
 //!
 //! A page is read in one snapshot (`batch::read_snapshot`): the walk, every batch's composition
 //! and the page statement see the same family block.
@@ -258,7 +259,7 @@ pub async fn load_family_expiring_page(
     let mut gathered = Gathered::default();
     let inexact = inexact_expiry_names(&mut snapshot, namespace).await?;
     gathered.add(&mut snapshot, inexact).await?;
-    let mut position: Option<(i64, String)> = None;
+    let mut position: Option<(i128, String)> = None;
     loop {
         let pairs = expiry_pairs(
             &mut snapshot,
@@ -290,7 +291,7 @@ pub async fn load_family_expiring_page(
         let settled = page.rows.len() as u64 > page_size
             && match (page.rows.last().and_then(|row| row.expiry_date), &position) {
                 (Some(last), Some((walked, _))) => {
-                    let last = last.unix_timestamp();
+                    let last = i128::from(last.unix_timestamp());
                     if ascending {
                         last < *walked
                     } else {
@@ -356,9 +357,9 @@ async fn expiry_pairs(
     namespace: &str,
     (low, high): (Option<i64>, Option<i64>),
     ascending: bool,
-    after: Option<&(i64, String)>,
+    after: Option<&(i128, String)>,
     limit: usize,
-) -> Result<Vec<(i64, String)>> {
+) -> Result<Vec<(i128, String)>> {
     let (compare, direction) = if ascending {
         (">", "ASC")
     } else {
@@ -367,7 +368,7 @@ async fn expiry_pairs(
     let sql = format!(
         "/* storage:families.name.expiry_pairs */
          WITH hits AS (
-             SELECT event.chain_id, event.expiry_seconds AS at, event.state_kind,
+             SELECT event.chain_id, event.expiry_seconds::numeric AS at, event.state_kind,
                     event.state_key,
                     CASE WHEN event.state_kind = 'resource' THEN event.state_key::uuid END
                         AS resource_id,
@@ -377,7 +378,7 @@ async fn expiry_pairs(
                AND ($1::bigint IS NULL OR event.expiry_seconds >= $1)
                AND ($2::bigint IS NULL OR event.expiry_seconds < $2)
              UNION ALL
-             SELECT wrapper.chain_id, FLOOR(wrapper.expiry_seconds)::bigint, 'resource',
+             SELECT wrapper.chain_id, FLOOR(wrapper.expiry_seconds), 'resource',
                     wrapper.resource_id::text, wrapper.resource_id, wrapper.logical_name_id, NULL
              FROM bigname_phase.project_wrapper_state wrapper
              WHERE wrapper.expiry_seconds IS NOT NULL
@@ -410,15 +411,15 @@ async fn expiry_pairs(
                    WHERE surface.logical_name_id = name.logical_name_id
                      AND surface.namespace = $6)
          )
-         SELECT at, logical_name_id FROM pairs
-         WHERE $3::bigint IS NULL OR (at, logical_name_id) {compare} ($3, $4)
+         SELECT at::text AS at, logical_name_id FROM pairs
+         WHERE $3::numeric IS NULL OR (at, logical_name_id) {compare} ($3::numeric, $4)
          ORDER BY at {direction}, logical_name_id {direction}
          LIMIT $5"
     );
     let rows = sqlx::query(&sql)
         .bind(low)
         .bind(high)
-        .bind(after.map(|(at, _)| *at))
+        .bind(after.map(|(at, _)| at.to_string()))
         .bind(after.map(|(_, name)| name.as_str()))
         .bind(i64::try_from(limit).context("expiry batch exceeds i64")?)
         .bind(namespace)
@@ -426,6 +427,13 @@ async fn expiry_pairs(
         .await
         .context("failed to walk the expiry candidates")?;
     rows.into_iter()
-        .map(|row| Ok((row.try_get("at")?, row.try_get("logical_name_id")?)))
+        .map(|row| {
+            let at: String = row.try_get("at")?;
+            Ok((
+                at.parse::<i128>()
+                    .with_context(|| format!("expiry walk position {at} is not an integer"))?,
+                row.try_get("logical_name_id")?,
+            ))
+        })
         .collect()
 }

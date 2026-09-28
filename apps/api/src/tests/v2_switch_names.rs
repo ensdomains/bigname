@@ -725,3 +725,45 @@ async fn with_serve_on(database: &TestDatabase, uri: &str) -> Result<(StatusCode
     let status = response.status();
     Ok((status, read_json(response).await?))
 }
+
+// A NameWrapper expiry keeps the full u64 range (families/wrapper.rs), so the expiring walk
+// meets expiries past the largest bigint; the listing still answers, the same with the switch
+// off and on.
+#[tokio::test]
+async fn v2_expiring_names_walk_a_wrapper_expiry_past_bigint() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_switch_names_events(&database).await?;
+    let (gamma, gamma_resource) =
+        seed_switch_name(&database, "gamma.eth", 0x5c1_0000, "ens_v1").await?;
+    bigname_storage::insert_normalized_event_fixtures(
+        &database.pool,
+        &[switch_event(
+            "switch-gamma-wrapper-expiry",
+            Some(&gamma),
+            Some(gamma_resource),
+            "ExpiryChanged",
+            "ens_v1_wrapper_l1",
+            206,
+            0,
+            json!({"expiry": u64::MAX}),
+        )],
+    )
+    .await?;
+    publish_project_and_families(&database, 240).await?;
+    let stored: Option<String> = sqlx::query_scalar(
+        "SELECT expiry_seconds::text FROM bigname_phase.project_wrapper_state
+         WHERE resource_id = $1",
+    )
+    .bind(gamma_resource)
+    .fetch_optional(&database.pool)
+    .await?;
+    assert_eq!(stored.as_deref(), Some("18446744073709551615"));
+    for uri in [
+        "/v1/names?namespace=ens&expires_after=2020-01-01T00:00:00Z&page_size=1".to_owned(),
+        "/v1/names?namespace=ens&expires_after=2020-01-01T00:00:00Z&order=desc&page_size=1"
+            .to_owned(),
+    ] {
+        assert_switch_differential_pages(&database, &uri).await?;
+    }
+    database.cleanup().await
+}
