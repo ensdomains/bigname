@@ -268,22 +268,8 @@ async fn v2_resolver_bound_names_are_the_same_with_the_switch_off_and_on() -> Re
 #[tokio::test]
 async fn v2_name_listings_are_the_same_across_candidate_batches() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    seed_switch_names_fixture(&database).await?;
-    sqlx::query(
-        "INSERT INTO bigname_phase.resolver_current (chain_id, resolver_address,
-             declared_summary, support_status, chain_positions, canonicality_summary,
-             manifest_version)
-         SELECT lineage.chain_id, $2, '{}'::jsonb, 'supported',
-                jsonb_build_object('target_block_number', lineage.block_number,
-                                   'target_block_hash', lineage.block_hash),
-                jsonb_build_object('state', 'canonical_lineage'), 1
-         FROM bigname_phase.chain_lineage lineage
-         WHERE lineage.chain_id = $1 AND lineage.block_number = 240",
-    )
-    .bind(SWITCH_CHAIN)
-    .bind(SWITCH_RESOLVER)
-    .execute(&database.pool)
-    .await?;
+    // The declared resolver of the routes fixture, which Project and the families both describe.
+    seed_switch_routes_fixture(&database).await?;
     let after = switch_timestamp(1_700_000_000)?;
     let before = switch_timestamp(1_960_000_000)?;
     for batch in [1, 2] {
