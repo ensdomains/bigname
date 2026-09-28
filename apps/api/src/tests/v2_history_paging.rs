@@ -58,6 +58,7 @@ async fn v2_history_routes_treat_internal_only_matches_as_no_product_matches() -
         .collect::<Vec<_>>();
     bigname_storage::insert_normalized_event_fixtures(&database.pool, &internal).await?;
 
+    rebuild_fixture_families(&database.pool, "ethereum-mainnet", 21_000_003, "0xbinding").await?;
     let routes = [
         "/v1/events?name=quiet.eth&page_size=2".to_owned(),
         "/v1/names/quiet.eth/history?page_size=2".to_owned(),
@@ -163,7 +164,7 @@ async fn v2_history_routes_continue_from_bound_non_product_cursor() -> Result<()
                 &anchor,
                 &address_binding,
             )),
-            vec!["record", "authority"],
+            vec!["renewal", "expiry"],
         ),
     ];
     sqlx::query("UPDATE bigname_phase.normalized_events SET normalized_event_id = DEFAULT")
