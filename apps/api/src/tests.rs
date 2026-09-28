@@ -431,3 +431,6 @@ include!("tests/v2_switch_names.rs");
 include!("tests/v2_list_cursor.rs");
 include!("tests/v2_switch_children.rs");
 include!("tests/v2_switch_name_publication_changes.rs");
+include!("tests/v2_switch_name_recompute.rs");
+include!("tests/v2_switch_resolver_history.rs");
+include!("tests/v2_switch_child_authority.rs");

@@ -122,18 +122,23 @@ pub(crate) async fn get_diagnostic_events(
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();
-    let names = bigname_storage::load_name_current_by_logical_name_ids(
+    let names = match bigname_storage::load_name_current_by_logical_name_ids(
         &state.pool,
         &logical_name_ids,
     )
     .await
-    .map_err(super::name_rows_error(
-        super::SnapshotReadResource::DiagnosticData,
-        |error| {
+    {
+        Ok(names) => names,
+        // The event audit is intentionally available during replay. Published names are an
+        // optional display attachment; an unavailable publication must not hide its events.
+        Err(error) if bigname_storage::families::name::is_publication_unavailable(&error) => {
+            Default::default()
+        }
+        Err(error) => {
             tracing::error!(error = ?error, "failed to load diagnostic event names from phase projections");
-            V2Error::internal_error("failed to load diagnostic events")
-        },
-    ))?;
+            return Err(V2Error::internal_error("failed to load diagnostic events"));
+        }
+    };
     let data = storage_page
         .rows
         .iter()
