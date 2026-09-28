@@ -167,10 +167,20 @@ async fn load_expected_status_chain_ids_at_startup(pool: &PgPool) -> Result<Vec<
     }
 }
 
+/// Request timeout for routers the tests build. Many tests pause a request at a seam while they
+/// reset or republish families; on a slow CI runner that outlasts the product's 30 s default and
+/// the timeout layer answers 408 first. Tests that assert timeout behaviour set their own bounds.
+#[cfg(test)]
+const TEST_REQUEST_TIMEOUT_MS: u64 = 600_000;
+
 #[cfg(test)]
 pub(crate) fn app_router(state: AppState) -> Router {
     let health_pool = state.pool.clone();
-    app_router_with_bounds(state, health_pool, &ApiBoundsConfig::default())
+    let bounds = ApiBoundsConfig {
+        request_timeout_ms: TEST_REQUEST_TIMEOUT_MS,
+        ..ApiBoundsConfig::default()
+    };
+    app_router_with_bounds(state, health_pool, &bounds)
 }
 
 fn app_router_with_bounds(
