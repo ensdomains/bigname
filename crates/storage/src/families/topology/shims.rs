@@ -4,9 +4,6 @@
 //! stay inline in the reader queries and are listed after them, so not every interim dependency
 //! is one replaceable function.
 //!
-//! - [`selected_binding`]: the name's selected binding. Interim: `name_current.surface_binding_id`
-//!   joined to its `project_binding_candidate` row, until the selection among a name's binding
-//!   candidates is computed at read.
 //! - [`selected_authority_arm`]: the child's selected authority arm. Interim:
 //!   `name_current.provenance.authority_selection.authority_arm`, until it is computed from the
 //!   binding candidates.
@@ -28,7 +25,7 @@
 //! - `/aliases` (`collections.rs`), binding arm: reads `name_current` directly for the selected
 //!   binding, resource and token lineage ids, the raw name and namehash it returns, and the
 //!   shared current-name readability predicates (`DEFAULT_NAME_CURRENT_READ_FILTER`). That is
-//!   both its eligibility and its payload, and more than [`selected_binding`].
+//!   both its eligibility and its payload.
 //! - `load_bound_names_shadow` (`resolver.rs`): only the resolver match comes from
 //!   `project_resource_pointer`. The name's eligibility, the registration, release and control
 //!   checks, the namespace filter and the page order are `name_current` columns, the same
@@ -83,9 +80,6 @@
 //!   `children_current` writer (crates/project/src/builders/children.rs) builds its provenance
 //!   without a `label` object, so the branch is unreachable today and the family rows carry no
 //!   label source to mirror it with. If a writer starts setting it, the shadow must learn it.
-use anyhow::{Context, Result};
-use sqlx::PgPool;
-use uuid::Uuid;
 
 /// The canonical event order over a family row's own position columns
 /// (docs/glossary.md#canonical-event-order; D12 as amended on 2026-09-26), as a row value that
@@ -239,42 +233,6 @@ pub(super) fn json_position(expression: &str) -> String {
         "(({expression} ->> 'block_number')::bigint, COALESCE({transaction}, -1), \
          COALESCE({log}, -1), {ordinal}, {identity} COLLATE \"C\")"
     )
-}
-
-/// A name's selected binding: its `project_binding_candidate` row.
-#[derive(Clone, Debug, PartialEq)]
-pub(super) struct SelectedBinding {
-    pub(super) chain_id: String,
-    pub(super) resource_id: Uuid,
-    pub(super) binding_kind: String,
-    pub(super) block_number: i64,
-}
-
-/// Interim: the binding `name_current` selected, read from its `project_binding_candidate` row.
-pub(super) async fn selected_binding(
-    pool: &PgPool,
-    logical_name_id: &str,
-) -> Result<Option<SelectedBinding>> {
-    let row: Option<(String, Uuid, String, i64)> = sqlx::query_as(
-        "SELECT candidate.chain_id, candidate.resource_id, candidate.binding_kind,
-                candidate.block_number
-         FROM bigname_phase.name_current nc
-         JOIN bigname_phase.project_binding_candidate candidate
-           ON candidate.surface_binding_id = nc.surface_binding_id
-         WHERE nc.logical_name_id = $1",
-    )
-    .bind(logical_name_id)
-    .fetch_optional(pool)
-    .await
-    .with_context(|| format!("failed to load the selected binding of {logical_name_id}"))?;
-    Ok(row.map(
-        |(chain_id, resource_id, binding_kind, block_number)| SelectedBinding {
-            chain_id,
-            resource_id,
-            binding_kind,
-            block_number,
-        },
-    ))
 }
 
 /// Interim: the child's selected authority arm (`ens_v1`, `basenames` or `ens_v2`), null when

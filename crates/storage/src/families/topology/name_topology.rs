@@ -4,6 +4,9 @@
 //! `project_wildcard_topology`. The direct, ownerless and Basenames transport arms are not read
 //! here.
 //!
+//! The name's selected binding, and each wildcard ancestor's, is the one the composed name reader
+//! selects (`families::name`), not `name_current`'s.
+//!
 //! The alias arm joins the name's current pointer (latest, then reject zero), never the
 //! historical non-zero pointer, so a pointer clear with no alias event leaves no alias topology
 //! and exposes no older pointer. The wildcard arm takes the longest ancestor by suffix with a
@@ -14,10 +17,45 @@ use serde_json::{Map, Value, json};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use super::{
-    pointers::{load_family_alias_source_pointer, load_family_wildcard_source},
-    shims::{SelectedBinding, selected_binding},
-};
+use super::pointers::{load_family_alias_source_pointer, load_family_wildcard_source};
+
+/// A name's selected binding: its `project_binding_candidate` row.
+#[derive(Clone, Debug, PartialEq)]
+struct SelectedBinding {
+    chain_id: String,
+    resource_id: Uuid,
+    binding_kind: String,
+    block_number: i64,
+}
+
+/// The binding the composed name reader selects for `logical_name_id`
+/// (`families::name`, the `surface_binding_id` of its row), read from its
+/// `project_binding_candidate` row.
+async fn selected_binding(pool: &PgPool, logical_name_id: &str) -> Result<Option<SelectedBinding>> {
+    let Some(binding_id) = crate::families::name::load_family_name(pool, logical_name_id)
+        .await?
+        .and_then(|row| row.surface_binding_id)
+    else {
+        return Ok(None);
+    };
+    let row: Option<(String, Uuid, String, i64)> = sqlx::query_as(
+        "SELECT chain_id, resource_id, binding_kind, block_number
+         FROM bigname_phase.project_binding_candidate
+         WHERE surface_binding_id = $1",
+    )
+    .bind(binding_id)
+    .fetch_optional(pool)
+    .await
+    .with_context(|| format!("failed to load the selected binding of {logical_name_id}"))?;
+    Ok(row.map(
+        |(chain_id, resource_id, binding_kind, block_number)| SelectedBinding {
+            chain_id,
+            resource_id,
+            binding_kind,
+            block_number,
+        },
+    ))
+}
 
 const ALIAS_PATH: &str = "resolver_alias_path";
 const WILDCARD_PATH: &str = "observed_wildcard_path";
