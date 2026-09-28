@@ -3835,6 +3835,10 @@ async fn make_null_resolver_discovery(fixture: &Fixture) -> AnyResult<()> {
 }
 
 async fn setup_fixture(kind: FixtureKind, indexed_value: &str) -> AnyResult<Fixture> {
+    // These fixtures seed the Project row as the served publication, so the lookup tests hold
+    // the switch off whatever the build's default; `family_marker` scopes it where it tests the
+    // family marker.
+    bigname_storage::publication_source::hold_for_test_process(false);
     let database =
         TestDatabase::create(TestDatabaseConfig::new("bigname_lookup").pool_max_connections(6))
             .await?;
