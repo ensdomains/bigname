@@ -1139,8 +1139,8 @@ fn display_names(rows: &[FamilyChildRow]) -> Vec<&str> {
 }
 
 // The subnames filters at the block clock. ENSv2 children have mixed null and non-null expiries
-// and registration times (two are bound, so their grant gives them one), labels a prefix must
-// match literally (`_` and `%`), and an expiry exactly at the publication's time, which the
+// and registration times (two are bound, so their grant gives them one), normalized labels with a leading underscore, and a literal `%` prefix that must
+// match no name, and an expiry exactly at the publication's time, which the
 // fence keeps. An expiry-sorted, fenced page is then continued from one publication into the
 // next at the new block's time, after a child on the remaining pages expired in between. Every
 // page's rows, total and cursor are compared.
@@ -1165,12 +1165,12 @@ async fn child_filters_sort_page_and_expire_at_the_block_clock() -> Result<()> {
         .await?;
     let epoch = shadow_fixture::EPOCH;
     let cases: [(u64, &str, Option<i64>, i64); 6] = [
-        (1, "a_one", Some(epoch + 6), 2),
-        (2, "a%two", Some(epoch + 1_000_000), 2),
+        (1, "_one", Some(epoch + 6), 2),
+        (2, "atwo", Some(epoch + 1_000_000), 2),
         (3, "bthree", Some(epoch + 8), 3),
         (4, "anull", None, 3),
         (5, "zeta", Some(epoch + 1_000_000), 4),
-        (6, "a_b", Some(epoch + 7), 4),
+        (6, "_b", Some(epoch + 7), 4),
     ];
     for (n, label, expiry, block) in cases {
         let labelhash = word(0x6000 + n);
@@ -1265,13 +1265,13 @@ async fn child_filters_sort_page_and_expire_at_the_block_clock() -> Result<()> {
         served == shadowed
             && served_total == 6
             && shadow_total == 6
-            && display_names(&served).contains(&"a_one.clock.eth"),
+            && display_names(&served).contains(&"_one.clock.eth"),
         "{served:?}"
     );
     // Prefixes match literally: `_` and `%` are not wildcards.
     for (prefix, expected) in [
-        ("a_", vec!["a_b.clock.eth", "a_one.clock.eth"]),
-        ("a%", vec!["a%two.clock.eth"]),
+        ("_", vec!["_b.clock.eth", "_one.clock.eth"]),
+        ("a%", vec![]),
     ] {
         let filter = ChildrenCurrentPageFilter {
             q: Some(prefix),
@@ -1303,7 +1303,7 @@ async fn child_filters_sort_page_and_expire_at_the_block_clock() -> Result<()> {
         served_rows == shadowed.rows
             && served.total_count == shadowed.total_count
             && served.next_cursor == shadowed.next_cursor
-            && display_names(&served_rows) == ["a_one.clock.eth", "a_b.clock.eth"],
+            && display_names(&served_rows) == ["_one.clock.eth", "_b.clock.eth"],
         "served {served:?}, shadow {shadowed:?}"
     );
     let mut served_cursor = served
@@ -1347,7 +1347,7 @@ async fn child_filters_sort_page_and_expire_at_the_block_clock() -> Result<()> {
         }
     }
     ensure!(
-        display_names(&continued) == ["a%two.clock.eth", "zeta.clock.eth", "anull.clock.eth"],
+        display_names(&continued) == ["atwo.clock.eth", "zeta.clock.eth", "anull.clock.eth"],
         "{continued:?}"
     );
     let report = fixture.compare_with_prefixes(1, PREFIXES).await?;
@@ -1355,11 +1355,9 @@ async fn child_filters_sort_page_and_expire_at_the_block_clock() -> Result<()> {
     fixture.cleanup().await
 }
 
-// Backslash is the escape character of both readers' prefix patterns, so a prefix holding one
-// must still match literally: `a\` alone, `a\%` and `a\_`. Each decoy would match only if a
-// backslash in the prefix escaped the character after it (`a%four` for `a\%` and `a\`,
-// `a_five` for `a\_`). Kept apart from the clock fixture so its totals and orders stay as they
-// are; the prefixes run through the whole filter matrix and are then checked by name.
+// Backslashes may occur in a requested prefix, but cannot occur in an active ENS name.
+// Such requests must remain empty against actual normalized surfaces. The clock fixture
+// separately checks literal underscore matching using admitted leading-underscore labels.
 #[tokio::test]
 async fn child_prefixes_match_backslashes_literally() -> Result<()> {
     const PREFIXES: &[&str] = &["a\\", "a\\%", "a\\_"];
@@ -1380,11 +1378,11 @@ async fn child_prefixes_match_backslashes_literally() -> Result<()> {
         )
         .await?;
     for (n, label) in [
-        (1, "a\\one"),
-        (2, "a\\%two"),
-        (3, "a\\_three"),
-        (4, "a%four"),
-        (5, "a_five"),
+        (1, "aone"),
+        (2, "atwo"),
+        (3, "athree"),
+        (4, "afour"),
+        (5, "afive"),
         (6, "ab"),
     ] {
         let labelhash = word(0x6100 + n);
@@ -1414,18 +1412,8 @@ async fn child_prefixes_match_backslashes_literally() -> Result<()> {
     let report = fixture.compare_with_prefixes(1, PREFIXES).await?;
     unexpected(&report, &[])?;
     let pool = fixture.pool();
-    for (prefix, expected) in [
-        (
-            "a\\",
-            vec![
-                "a\\%two.slash.eth",
-                "a\\_three.slash.eth",
-                "a\\one.slash.eth",
-            ],
-        ),
-        ("a\\%", vec!["a\\%two.slash.eth"]),
-        ("a\\_", vec!["a\\_three.slash.eth"]),
-    ] {
+    for prefix in PREFIXES {
+        let expected: Vec<&str> = Vec::new();
         let filter = ChildrenCurrentPageFilter {
             q: Some(prefix),
             ..ChildrenCurrentPageFilter::default()

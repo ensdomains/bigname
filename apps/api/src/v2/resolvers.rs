@@ -22,7 +22,8 @@ use crate::AppState;
 #[path = "resolvers/bound_names_cursor.rs"]
 mod bound_names_cursor;
 pub(crate) use bound_names_cursor::{
-    BoundNamesCursorBinding, bound_names_cursor_payload, bound_names_storage_cursor,
+    BoundNamesCursorBinding, bound_names_next_cursor, bound_names_storage_cursor,
+    check_bound_names_cursor_shape,
 };
 
 #[path = "resolvers/link_items.rs"]
@@ -41,7 +42,7 @@ use snapshot_checks::{require_phase_name_snapshot, require_phase_target_snapshot
 use super::{
     Envelope, Finality, NameRecord, PRODUCT_PIPELINE_TERMS, Page, QueryParamAllowlist,
     SnapshotReadResource, StrictQueryParams, V2Error, V2Result, api_error_to_v2, build_name_record,
-    contains_boundary_vocabulary, decode, encode, encode_at_token, name_record, numeric_to_slug,
+    contains_boundary_vocabulary, encode_at_token, name_record, numeric_to_slug,
     resolve_v2_snapshot_for, snapshot_meta, snapshot_slot_for_slug,
     vocab::{Resolver, Status},
 };
@@ -89,13 +90,27 @@ pub(crate) async fn get_resolver(
     let params = params.into_inner();
     let (numeric_chain_id, chain_id_slug) = parse_numeric_chain_id(&chain_id)?;
     let normalized_address = parse_evm_address(&address, "address").map_err(api_error_to_v2)?;
+    // A cursor this list could not have written is refused before anything is read; only its
+    // `at` pin, which needs the selected snapshot, is compared once the snapshot is selected.
+    check_bound_names_cursor_shape(
+        params.cursor.as_deref(),
+        &BoundNamesCursorBinding {
+            chain_id: numeric_chain_id,
+            resolver_address: &normalized_address,
+            namespace: params.namespace.as_deref(),
+            sort: BOUND_NAMES_SORT_TOKEN,
+            at: None,
+        },
+        params.at.is_some(),
+    )?;
+    // Admitted without the cursor: a bound-names cursor binds no publication (`list_cursor`), so
+    // only a publication during this read refuses it, with a retry.
     let publication = super::collection_snapshot::CollectionSnapshot::capture_for_namespace(
         &state,
         None,
         Some(resolver_namespace(chain_id_slug)?),
     )
-    .await?
-    .continuing_from_request_cursor(params.cursor.is_some());
+    .await?;
 
     let scope = resolver_snapshot_scope(chain_id_slug)?;
     // Family bound names describe only their publication, including an empty page. A served
@@ -110,6 +125,45 @@ pub(crate) async fn get_resolver(
         SnapshotReadResource::Resolver,
     )
     .await?;
+    // The cursor binds `at` only when the request pinned it; a latest continuation reads the
+    // publication current when it runs.
+    let at_token = params
+        .at
+        .is_some()
+        .then(|| encode_at_token(&selected_snapshot));
+    let cursor_binding = BoundNamesCursorBinding {
+        chain_id: numeric_chain_id,
+        resolver_address: &normalized_address,
+        namespace: params.namespace.as_deref(),
+        sort: BOUND_NAMES_SORT_TOKEN,
+        at: at_token.as_deref(),
+    };
+    let storage_cursor = params
+        .cursor
+        .as_deref()
+        .map(|cursor| bound_names_storage_cursor(cursor, &cursor_binding))
+        .transpose()?;
+    // A cursor pinned to `at` is tied to that block (ruling J5): once a later block is published,
+    // the continuation is stale, whatever rows the later block changed. A same-block rebuild is
+    // not detected; the cursor holds no generation (`list_cursor`).
+    if storage_cursor.is_some() && params.at.is_some() {
+        let published = publication.block_bounds().get(chain_id_slug).copied();
+        let pinned = selected_snapshot
+            .chain_positions
+            .as_map()
+            .values()
+            .find(|position| position.chain_id == chain_id_slug)
+            .map(|position| position.block_number);
+        if published
+            .zip(pinned)
+            .is_none_or(|(published, pinned)| published > pinned)
+        {
+            return Err(V2Error::stale(
+                "resolver data is unavailable at the selected historical position",
+            ));
+        }
+    }
+
     let project_generations =
         load_resolver_project_generations(&state.pool, &selected_snapshot, require_selected_head)
             .await?;
@@ -146,40 +200,6 @@ pub(crate) async fn get_resolver(
         )));
     };
     require_phase_target_snapshot(&row.chain_positions, &row.chain_id, &selected_snapshot)?;
-    let snapshot_token = encode_at_token(&selected_snapshot);
-    let resolver_generation = crate::v2::support::publication_source_tagged(
-        serde_json::to_string(&project_generations).expect("resolver generation map serializes"),
-    );
-    let cursor_binding = BoundNamesCursorBinding {
-        chain_id: numeric_chain_id,
-        resolver_address: &normalized_address,
-        namespace: params.namespace.as_deref(),
-        sort: BOUND_NAMES_SORT_TOKEN,
-        snapshot_token: &snapshot_token,
-    };
-    let storage_cursor = params
-        .cursor
-        .as_deref()
-        .map(|cursor| {
-            let payload = decode(cursor)?;
-            let mut storage_payload = payload.clone();
-            storage_payload.last_item.remove("publication");
-            storage_payload.last_item.remove("resolver_generation");
-            let mut structural_payload = storage_payload.clone();
-            if payload.last_item.contains_key("publication") {
-                structural_payload.snapshot = Some(snapshot_token.clone());
-            }
-            bound_names_storage_cursor(&structural_payload, &cursor_binding)?;
-            publication.validate_token(payload.last_item.get("publication").map(String::as_str))?;
-            if payload.last_item.get("resolver_generation") != Some(&resolver_generation) {
-                return Err(V2Error::stale(
-                    "resolver publication changed; restart pagination",
-                ));
-            }
-            bound_names_storage_cursor(&storage_payload, &cursor_binding)
-        })
-        .transpose()?;
-
     let (bound_name_rows, storage_next_cursor) = load_bound_name_rows(
         &state.pool,
         chain_id_slug,
@@ -202,14 +222,9 @@ pub(crate) async fn get_resolver(
         ));
     }
 
-    let next_cursor = storage_next_cursor.as_ref().map(|cursor| {
-        let mut cursor = bound_names_cursor_payload(cursor, &cursor_binding);
-        cursor.last_item.insert(
-            "resolver_generation".to_owned(),
-            resolver_generation.clone(),
-        );
-        encode(&collections::bind_publication(&publication, cursor))
-    });
+    let next_cursor = storage_next_cursor
+        .as_ref()
+        .map(|cursor| bound_names_next_cursor(cursor, &cursor_binding));
     let has_more = next_cursor.is_some();
     let bound_name_records = bound_name_rows
         .iter()

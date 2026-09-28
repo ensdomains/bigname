@@ -13,6 +13,7 @@ mod event_data;
 mod events;
 mod history;
 pub(crate) mod history_keyset;
+mod list_cursor;
 pub(crate) mod lookup;
 mod name_filter;
 mod name_record;
@@ -106,7 +107,7 @@ pub(crate) use registries::{
 #[cfg(test)]
 #[allow(unused_imports)]
 pub(crate) use resolvers::{
-    BoundNames, BoundNamesCursorBinding, bound_names_cursor_payload, bound_names_storage_cursor,
+    BoundNames, BoundNamesCursorBinding, bound_names_next_cursor, bound_names_storage_cursor,
     build_resolver_overview,
 };
 pub(crate) use resolvers::{

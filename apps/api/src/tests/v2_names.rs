@@ -443,8 +443,11 @@ async fn v2_get_names_lists_a_released_name_inside_the_window_next_to_a_live_one
     database.cleanup().await
 }
 
+// D10: a names cursor holds the window, order and last row's position only. A continuation
+// reads the publication current when it runs, so a new Project publication between pages does
+// not refuse it; a cursor that still carries the publication binding answers 400.
 #[tokio::test]
-async fn v2_collection_cursor_requires_same_publication_and_bound_evaluation_time() -> Result<()> {
+async fn v2_names_cursor_holds_no_publication_and_continues_across_one() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_names_fixture(&database).await?;
     seed_schema_v2_ens_lookup_head(
@@ -460,36 +463,10 @@ async fn v2_collection_cursor_requires_same_publication_and_bound_evaluation_tim
         .as_str()
         .context("first page has continuation")?;
     let payload = crate::v2::decode(cursor).expect("issued cursor decodes");
-    assert!(
-        payload
-            .snapshot
-            .as_deref()
-            .is_some_and(|token| token.starts_with("publication-"))
-    );
-    assert!(payload.evaluated_at.is_some());
+    assert_eq!(payload.snapshot, None);
+    assert_eq!(payload.evaluated_at, None);
+    assert_eq!(payload.last_item.len(), 4);
     let second = v2_names_payload(&database, &format!("{base}&cursor={cursor}")).await?;
-    let second_cursor = crate::v2::decode(
-        second["page"]["next_cursor"]
-            .as_str()
-            .context("second continuation")?,
-    )
-    .expect("issued continuation decodes");
-    assert_eq!(second_cursor.evaluated_at, payload.evaluated_at);
-    assert_eq!(second["meta"]["as_of"], first["meta"]["as_of"]);
-
-    let mut legacy = payload;
-    legacy.snapshot = None;
-    legacy.evaluated_at = None;
-    let response = v2_names_response(
-        &database,
-        &format!("{base}&cursor={}", crate::v2::encode(&legacy)),
-    )
-    .await?;
-    assert_eq!(response.status(), StatusCode::CONFLICT);
-    assert_eq!(
-        read_json::<Value>(response).await?["error"]["code"],
-        "stale"
-    );
 
     // Same block and hash, but a new Project publication transaction.
     seed_schema_v2_ens_lookup_head(
@@ -499,15 +476,24 @@ async fn v2_collection_cursor_requires_same_publication_and_bound_evaluation_tim
         "2026-06-10T00:00:00Z",
     )
     .await?;
-    let response = v2_names_response(&database, &format!("{base}&cursor={cursor}")).await?;
-    assert_eq!(response.status(), StatusCode::CONFLICT);
-    let stale: Value = read_json(response).await?;
-    assert_eq!(stale["error"]["code"], "stale");
-    assert!(
-        stale["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("restart")
+    let again = v2_names_payload(&database, &format!("{base}&cursor={cursor}")).await?;
+    assert_eq!(again["data"], second["data"]);
+    assert_eq!(again["page"], second["page"]);
+
+    let mut bound = payload;
+    bound.snapshot = Some(format!("publication-0x{}", "ab".repeat(32)));
+    bound.evaluated_at = Some("2026-06-10T00:00:00Z".to_owned());
+    let response = v2_names_response(
+        &database,
+        &format!("{base}&cursor={}", crate::v2::encode(&bound)),
+    )
+    .await?;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let refused: Value = read_json(response).await?;
+    assert_eq!(refused["error"]["code"], "invalid_input");
+    assert_eq!(
+        refused["error"]["message"],
+        "cursor must be a valid pagination cursor"
     );
     database.cleanup().await
 }

@@ -8,7 +8,8 @@ const DIVERGENT_CONTROL_REGISTRANT: &str = "0x0000000000000000000000000000000000
 fn v2_bound_names_cursor_payload_round_trips_storage_cursor() {
     let cursor = v2_bound_names_cursor();
     let binding = v2_bound_names_cursor_binding(V2_RESOLVER_ADDRESS, "snapshot-1");
-    let payload = crate::v2::bound_names_cursor_payload(&cursor, &binding);
+    let next = crate::v2::bound_names_next_cursor(&cursor, &binding);
+    let payload = crate::v2::decode(&next).expect("issued cursor decodes");
 
     assert_eq!(payload.sort, "name_asc");
     assert_eq!(
@@ -20,7 +21,7 @@ fn v2_bound_names_cursor_payload_round_trips_storage_cursor() {
         ])
     );
     assert_eq!(
-        crate::v2::bound_names_storage_cursor(&payload, &binding).expect("cursor must decode"),
+        crate::v2::bound_names_storage_cursor(&next, &binding).expect("cursor must decode"),
         cursor
     );
 }
@@ -29,27 +30,34 @@ fn v2_bound_names_cursor_payload_round_trips_storage_cursor() {
 fn v2_bound_names_cursor_rejects_wrong_chain_resolver_sort_or_snapshot() {
     let cursor = v2_bound_names_cursor();
     let binding = v2_bound_names_cursor_binding(V2_RESOLVER_ADDRESS, "snapshot-1");
+    let issued = || {
+        crate::v2::decode(&crate::v2::bound_names_next_cursor(&cursor, &binding))
+            .expect("issued cursor decodes")
+    };
+    let refused = |payload: &crate::v2::CursorPayload| {
+        crate::v2::bound_names_storage_cursor(&crate::v2::encode(payload), &binding).is_err()
+    };
 
-    let mut payload = crate::v2::bound_names_cursor_payload(&cursor, &binding);
+    let mut payload = issued();
     payload.sort = "wrong".to_owned();
-    assert!(crate::v2::bound_names_storage_cursor(&payload, &binding).is_err());
+    assert!(refused(&payload));
 
-    let mut payload = crate::v2::bound_names_cursor_payload(&cursor, &binding);
+    let mut payload = issued();
     payload
         .filters
         .insert("chain_id".to_owned(), "8453".to_owned());
-    assert!(crate::v2::bound_names_storage_cursor(&payload, &binding).is_err());
+    assert!(refused(&payload));
 
-    let mut payload = crate::v2::bound_names_cursor_payload(&cursor, &binding);
+    let mut payload = issued();
     payload.filters.insert(
         "resolver".to_owned(),
         "0x0000000000000000000000000000000000000bbb".to_owned(),
     );
-    assert!(crate::v2::bound_names_storage_cursor(&payload, &binding).is_err());
+    assert!(refused(&payload));
 
-    let mut payload = crate::v2::bound_names_cursor_payload(&cursor, &binding);
+    let mut payload = issued();
     payload.snapshot = Some("snapshot-2".to_owned());
-    assert!(crate::v2::bound_names_storage_cursor(&payload, &binding).is_err());
+    assert!(refused(&payload));
 }
 
 #[test]
@@ -285,11 +293,10 @@ async fn v2_get_resolver_rejects_pre_unification_cursor_snapshot_binding() -> Re
         "0xname66",
         "2026-04-17T00:00:02Z",
     )?;
-    let old_cursor_payload = crate::v2::bound_names_cursor_payload(
+    let old_cursor = crate::v2::bound_names_next_cursor(
         &v2_bound_names_cursor(),
         &v2_bound_names_cursor_binding(V2_RESOLVER_ADDRESS, &old_resolver_snapshot_token),
     );
-    let old_cursor = crate::v2::encode(&old_cursor_payload);
 
     let response = v2_resolver_response_for_database(
         &database,
@@ -1339,16 +1346,17 @@ fn v2_bound_names_cursor() -> bigname_storage::NameCurrentListCursor {
     }
 }
 
+/// A binding pinned to the `at` token `at`.
 fn v2_bound_names_cursor_binding<'a>(
     resolver_address: &'a str,
-    snapshot_token: &'a str,
+    at: &'a str,
 ) -> crate::v2::BoundNamesCursorBinding<'a> {
     crate::v2::BoundNamesCursorBinding {
         chain_id: 1,
         resolver_address,
         namespace: Some("ens"),
         sort: "name_asc",
-        snapshot_token,
+        at: Some(at),
     }
 }
 

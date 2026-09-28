@@ -592,11 +592,15 @@ Rules:
 - `meta` is always present. Single-resource routes that read chain-derived state
   include `meta.as_of` and `meta.as_of_token` when they can attribute at least
   one served snapshot-pinned chain position. Product name, subname, ownership,
-  and permission collections disclose `meta.as_of` and bind cursors to
-  the current publication; they omit `meta.as_of_token` because old publications
-  are not retained for collection replay. A changed publication returns `409 stale`
-  requiring a restart without the cursor; a first page, sent without one, is
-  simply retried. History collections (`/v1/events`, name history, and address
+  and permission collections disclose `meta.as_of` and omit `meta.as_of_token`
+  because old publications are not retained for collection replay. Subname,
+  ownership, and permission collections bind cursors to the current
+  publication: a changed publication returns `409 stale` requiring a restart
+  without the cursor; a first page, sent without one, is simply retried.
+  `GET /v1/names` binds none: its
+  [current-state list cursor](glossary.md#current-state-list-cursor) holds a
+  position that a continuation reads from the current publication (see
+  [current-state list cursors](#current-state-list-cursors)). History collections (`/v1/events`, name history, and address
   history) disclose in `meta.as_of` the publication captured when the request
   was admitted and do not bind cursors to it; see [Cursors And Pagination](#cursors-and-pagination).
   `/v1/search` reports request-scoped `meta.as_of` as
@@ -861,13 +865,16 @@ interpreter content hash, sit on readable lineage, and trail the stored head by
 at most one block, as above. The generation the API captures before a read and
 compares after it is the marker's `sequence`, which every family block
 advances, in place of the project row's version. Clients only see it compared
-for equality, so nothing changes on the wire, except that turning the switch on
-or off makes publication-bound current-state continuation cursors (history
-cursors carry no publication token) issued before the change return
-`409 stale`, asking the client to restart pagination without the cursor. Such a
-cursor stays rejected until the client restarts pagination. The API tags these
-cursors with the publication source, so this holds even when the project row's
-version and the marker's `sequence` happen to be the same number.
+for equality, so nothing changes on the wire, with one exception for cursors
+that bind the publication (subnames, address names, `resolves_to`, permissions,
+registries and their labels, and the resolver `/aliases`, `/links`, and `/roles`
+collections). Such a cursor issued before the switch is turned on or off returns
+`409 stale`, asking the client to restart pagination without the cursor, and
+stays rejected until the client does. The API tags these cursors with the
+publication source, so this holds even when the project row's version and the
+marker's `sequence` happen to be the same number. History cursors and
+[current-state list cursors](#current-state-list-cursors) carry no publication
+token and continue across the change.
 Until the later step 7b slices move a route's rows onto the families, that
 route still reads the served tables while the switch is on. The served rows are
 committed before the family marker moves, so a served batch that lands between
@@ -1255,8 +1262,10 @@ from `chain_heads`, project progress from the `project` row in
 
 Top-level collections page over mutable latest-state tables. They omit
 `meta.as_of_token`, because old publications are not retained for replay
-through `at`. Product name, subname, ownership, and permission collections
-report in `meta.as_of` the publication their cursors are bound to; history
+through `at`. Subname, ownership, and permission collections
+report in `meta.as_of` the publication their cursors are bound to;
+`GET /v1/names` reports the publication each page read, since its cursor holds
+only a position; history
 collections report the publication captured when the request was admitted,
 as a [history walk](glossary.md#history-walk) whose cursor holds only a
 position; search reports request-scoped `meta.as_of` for staleness
@@ -1310,8 +1319,13 @@ The `chain_positions` query parameter from `v1` does not exist in `v2`.
 Cursors are opaque and versioned. They are not bound to the route path string,
 so route evolution does not invalidate outstanding cursors. Top-level
 collection cursors bind the collection anchor, namespace, filters, and sort.
-Current-state product collection cursors also bind the publication they read,
-as described under `meta` above. History collection cursors bind no snapshot or
+The cursors of `GET /v1/search`, `GET /v1/names`, and the resolver overview's
+`bound_names` hold a position in current state and bind no publication; see
+[current-state list cursors](#current-state-list-cursors). The other
+current-state product collection cursors (subnames, address names, `resolves_to`,
+permissions, registries and their labels, and the resolver `/aliases`, `/links`,
+and `/roles` collections) still bind the publication they read, as described
+under `meta` above. History collection cursors bind no snapshot or
 publication, and the publication token of a history cursor issued before the
 walk rule is ignored. A bare search cursor uses the request's derived namespace
 set as its namespace anchor and fails closed if that set has changed. Cursors
@@ -1484,6 +1498,49 @@ same way as a [released v1 authority](glossary.md#released-v1-authority):
 the lapsed lease's own `expires_at`, no current owner, `registrant`, resolver or
 records, and its history intact. Only a name that never had a
 readable surface answers `404 not_found`.
+
+### Current-state list cursors
+
+A [current-state list cursor](glossary.md#current-state-list-cursor), the
+cursor of `GET /v1/search`, `GET /v1/names`, or the resolver overview's
+`bound_names`, holds the list's sort and filters, the sort position of the last
+row it returned, and, when the request pinned `at`, that `at` token (of these
+three, only the resolver overview accepts `at`). It holds no publication,
+generation, or evaluation time. A continuation reads whatever is published when
+it runs and returns the rows that sort after that position:
+
+- The row the cursor came from need not still exist or still sort where it did;
+  the page starts after the position either way.
+- Pages of one walk can read different publications, and `meta.as_of` reports
+  the one each page read. A row whose sort key changed between pages can be
+  returned again or not at all: a renewal moves a name's `expires_at` in
+  `GET /v1/names`, and a resolver change moves a name into or out of
+  `bound_names`. Rows published after the first page can appear on later
+  pages. Turning the [publication switch](glossary.md#publication-switch) on or
+  off between pages does not refuse the cursor either.
+- A position after the last row returns `200` with empty `data`,
+  `has_more: false`, and `next_cursor: null`.
+- A cursor that does not decode, comes from another list, carries different
+  filters or sort, or carries a field this contract does not write returns
+  `400 invalid_input` with `cursor must be a valid pagination cursor`; restart
+  without the cursor. That includes the publication token, evaluation time, or
+  resolver generation that `GET /v1/names` and `bound_names` cursors carried
+  before this contract, and the snapshot field of `GET /v1/search` cursors
+  issued before July 2026, so such a cursor is refused once.
+- With `at`, the continuation must send the same `at`, or it returns
+  `400 invalid_input`. The cursor is then pinned to that block: once a later
+  block is published, the continuation returns `409 stale` with
+  `resolver data is unavailable at the selected historical position`, whatever
+  rows the later block changed. The pin is a chain position, not a publication
+  generation: a rebuild that republishes the same block (same number and hash)
+  is not detected, and the continuation reads the rebuilt rows.
+- A publication that lands while one page is being read still refuses that
+  request with a retryable error, and retrying with the same cursor then
+  continues. The error is route-specific: `GET /v1/names` and `bound_names`
+  return `409 stale` with a message asking to retry; `GET /v1/search` keeps its
+  documented request-scope recheck, which returns `409 conflict` for a head,
+  publication, or readiness change and `409 stale` when an Interpret redo is
+  involved (see [`GET /v1/search`](api-v1-routes.md#get-v1search)).
 
 ### Lapsed registration
 
