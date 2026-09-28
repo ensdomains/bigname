@@ -3546,42 +3546,50 @@ async fn make_null_resolver_discovery(fixture: &Fixture) -> AnyResult<()> {
 mod fixture;
 use fixture::{publish_lookup_families, setup_fixture};
 
-async fn apply_baseline(pool: &PgPool) -> AnyResult<()> {
-    let database_name: String = sqlx::query_scalar("SELECT current_database()")
-        .fetch_one(pool)
-        .await?;
+const PHASE_BASELINE: [&str; 14] = [
+    include_str!("../../../schema-v2/baseline/01_chain.sql"),
+    include_str!("../../../schema-v2/baseline/02_raw_facts.sql"),
+    include_str!("../../../schema-v2/baseline/03_identity.sql"),
+    include_str!("../../../schema-v2/baseline/04_manifests.sql"),
+    include_str!("../../../schema-v2/baseline/05_normalized_events.sql"),
+    include_str!("../../../schema-v2/baseline/06_projections.sql"),
+    include_str!("../../../schema-v2/baseline/07_labels.sql"),
+    include_str!("../../../schema-v2/baseline/08_heartbeats.sql"),
+    include_str!("../../../schema-v2/baseline/09_divergence.sql"),
+    include_str!("../../../schema-v2/baseline/10_phase_state.sql"),
+    include_str!("../../../schema-v2/baseline/11_manifest_authority_attestations.sql"),
+    include_str!("../../../schema-v2/baseline/12_project_generation_failures.sql"),
+    include_str!("../../../schema-v2/baseline/13_interpret_decode_skips.sql"),
+    include_str!("../../../schema-v2/baseline/14_discovery_watch_admissions.sql"),
+];
+
+/// Template contents: the phase schema and its baseline tables.
+async fn install_baseline(pool: &PgPool) -> AnyResult<()> {
     let mut transaction = pool.begin().await?;
     sqlx::query("CREATE SCHEMA bigname_phase")
         .execute(&mut *transaction)
+        .await?;
+    sqlx::query("SET LOCAL search_path TO bigname_phase, public")
+        .execute(&mut *transaction)
+        .await?;
+    for script in PHASE_BASELINE {
+        raw_sql(script).execute(&mut *transaction).await?;
+    }
+    transaction.commit().await?;
+    Ok(())
+}
+
+/// Per-copy settings: a database-level `search_path` is not copied from the template.
+async fn apply_baseline(pool: &PgPool) -> AnyResult<()> {
+    let database_name: String = sqlx::query_scalar("SELECT current_database()")
+        .fetch_one(pool)
         .await?;
     raw_sql(&format!(
         "ALTER DATABASE {} SET search_path TO bigname_phase, public",
         quote_identifier(&database_name)
     ))
-    .execute(&mut *transaction)
+    .execute(pool)
     .await?;
-    sqlx::query("SET LOCAL search_path TO bigname_phase, public")
-        .execute(&mut *transaction)
-        .await?;
-    for script in [
-        include_str!("../../../schema-v2/baseline/01_chain.sql"),
-        include_str!("../../../schema-v2/baseline/02_raw_facts.sql"),
-        include_str!("../../../schema-v2/baseline/03_identity.sql"),
-        include_str!("../../../schema-v2/baseline/04_manifests.sql"),
-        include_str!("../../../schema-v2/baseline/05_normalized_events.sql"),
-        include_str!("../../../schema-v2/baseline/06_projections.sql"),
-        include_str!("../../../schema-v2/baseline/07_labels.sql"),
-        include_str!("../../../schema-v2/baseline/08_heartbeats.sql"),
-        include_str!("../../../schema-v2/baseline/09_divergence.sql"),
-        include_str!("../../../schema-v2/baseline/10_phase_state.sql"),
-        include_str!("../../../schema-v2/baseline/11_manifest_authority_attestations.sql"),
-        include_str!("../../../schema-v2/baseline/12_project_generation_failures.sql"),
-        include_str!("../../../schema-v2/baseline/13_interpret_decode_skips.sql"),
-        include_str!("../../../schema-v2/baseline/14_discovery_watch_admissions.sql"),
-    ] {
-        raw_sql(script).execute(&mut *transaction).await?;
-    }
-    transaction.commit().await?;
 
     pool.set_connect_options(
         pool.connect_options()

@@ -15,9 +15,13 @@ async fn setup_fixture_inner(
     indexed_value: &str,
     publish: bool,
 ) -> AnyResult<Fixture> {
-    let database =
-        TestDatabase::create(TestDatabaseConfig::new("bigname_lookup").pool_max_connections(6))
-            .await?;
+    let database = TestDatabase::create_from_template(
+        TestDatabaseConfig::new("bigname_lookup").pool_max_connections(6),
+        "lookup_phase",
+        &PHASE_BASELINE.map(str::as_bytes),
+        |pool| async move { install_baseline(&pool).await },
+    )
+    .await?;
     let pool = database.pool();
     apply_baseline(pool).await?;
     seed_heads(pool, kind).await?;
