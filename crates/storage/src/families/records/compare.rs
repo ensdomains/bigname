@@ -73,7 +73,7 @@ fn keyed(value: &Value, key_field: &str) -> Option<(Map<String, Value>, Vec<Stri
 const LIST_KEYS: [&str; 2] = ["record_key", "record_family"];
 
 /// Push one difference per differing field under `path`.
-fn diff(differences: &mut Vec<Difference>, path: &str, today: &Value, family: &Value) {
+pub(super) fn diff(differences: &mut Vec<Difference>, path: &str, today: &Value, family: &Value) {
     if today == family {
         return;
     }
@@ -145,7 +145,7 @@ fn diff_keyed(
     );
 }
 
-fn without(value: &Value, keys: &[&str]) -> Value {
+pub(super) fn without(value: &Value, keys: &[&str]) -> Value {
     match value {
         Value::Object(map) => Value::Object(
             map.iter()
@@ -157,7 +157,7 @@ fn without(value: &Value, keys: &[&str]) -> Value {
     }
 }
 
-const TARGET: [&str; 2] = ["target_block_number", "target_block_hash"];
+pub(super) const TARGET: [&str; 2] = ["target_block_number", "target_block_hash"];
 const HYDRATION: &str = "canonical_head_multicall_hydration";
 
 /// Today's entries with each hydrated entry read as the baseline it overlays.
@@ -334,7 +334,7 @@ pub fn compare_primary_name(
     differences
 }
 
-fn address_entry(entry: &AddressRecordCurrentEntry) -> Value {
+pub(super) fn address_entry(entry: &AddressRecordCurrentEntry) -> Value {
     json!({
         "address": entry.address,
         "logical_name_id": entry.logical_name_id,

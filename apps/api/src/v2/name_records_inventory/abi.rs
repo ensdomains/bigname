@@ -70,10 +70,27 @@ pub(crate) async fn fill_records_route_abi_content_types(
                 error!(service = "api", error = ?key_error, "record inventory boundary key");
                 V2Error::internal_error("failed to load record inventory ABI content types")
             })?;
-            load_abi_content_types(pool, &[abi_input_for_row(row, &boundary_key)])
-                .await?
-                .pop()
-                .expect("one ABI answer per inventory row")
+            let input = abi_input_for_row(row, &boundary_key);
+            if bigname_storage::publication_source::serve_from_families() {
+                // The route's row is a family inventory under the switch (TYR-36 step 7b).
+                bigname_storage::load_family_record_inventory_abi_content_types(pool, &[input])
+                    .await
+                    .map_err(|load_error| {
+                        error!(
+                            service = "api",
+                            error = ?load_error,
+                            "failed to load family record inventory ABI content types"
+                        );
+                        V2Error::internal_error("failed to load record inventory ABI content types")
+                    })?
+                    .pop()
+                    .expect("one ABI answer per inventory row")
+            } else {
+                load_abi_content_types(pool, &[input])
+                    .await?
+                    .pop()
+                    .expect("one ABI answer per inventory row")
+            }
         }
         None => AbiContentTypes::Unavailable(AbiContentTypesUnavailable::InventoryNotAvailable),
     };

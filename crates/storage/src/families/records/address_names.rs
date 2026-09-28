@@ -1,0 +1,285 @@
+//! `GET /v1/addresses/{address}/names` over the families (TYR-36 step 7b, F13): the names the
+//! address index (`project_address_name_index`) lists for the address, composed at read
+//! (`families::name`), with each name's relations recomputed at its publication
+//! (`address_relations.rs`). The index holds every address a relation can take under some
+//! admission and mask, so the read only removes rows. The rows are bound in the served
+//! `address_names_current` shape into the served page statements (`address_names::source`), so
+//! the grouping, dedupe, filters, sorts, cursors and totals are the served SQL.
+//!
+//! The rows carry what a route reads: identity, relations, the publication's position. They do
+//! not carry the served event attribution (`provenance.normalized_event_id`, the relation's own
+//! block in `chain_positions`, `manifest_version`) or the effective-controller support status the
+//! served row takes from `permissions_current_resource_summary`; no route reads them.
+//!
+//! A page is read in one snapshot (`read_snapshot`).
+use std::collections::{BTreeMap, BTreeSet};
+
+use anyhow::{Context, Result};
+use serde_json::{Value, json};
+use sqlx::{PgConnection, PgPool, Row};
+
+use super::{
+    FamilyPosition,
+    address_relations::{ControllerCandidate, NameRelationsInput, relations},
+};
+use crate::{
+    AddressNameRelation, AddressNamesCurrentDedupe, AddressNamesCurrentOrder,
+    AddressNamesCurrentSort, AddressNamesCurrentSortedCursor, AddressNamesCurrentSortedPage,
+    NameCurrentRow,
+    address_names::{RowSource, load_address_names_page_from},
+    families::{
+        control::{
+            rows::{BindingCandidate, WrapperRow},
+            wrapper::load_wrapper_rows,
+        },
+        name::{
+            CoverageShape, FamilyPublication, all_servable_publications, load_composed,
+            servable_publication,
+        },
+    },
+};
+
+/// `load_address_names_current_page_filtered` over the families.
+#[allow(clippy::too_many_arguments)]
+pub async fn load_family_address_names_page(
+    pool: &PgPool,
+    address: &str,
+    namespace: Option<&str>,
+    relations: Option<&[AddressNameRelation]>,
+    dedupe_by: AddressNamesCurrentDedupe,
+    q: Option<&str>,
+    authority: Option<&str>,
+    is_migrated: Option<bool>,
+    sort: AddressNamesCurrentSort,
+    order: AddressNamesCurrentOrder,
+    cursor: Option<&AddressNamesCurrentSortedCursor>,
+    page_size: u64,
+) -> Result<AddressNamesCurrentSortedPage> {
+    let mut snapshot = crate::families::read_snapshot(pool).await?;
+    let (rows, names) = compose_address_name_rows(&mut snapshot, address).await?;
+    let page = load_address_names_page_from(
+        &mut snapshot,
+        RowSource::Composed {
+            rows: &rows,
+            names: &names,
+        },
+        address,
+        namespace,
+        relations,
+        dedupe_by,
+        q,
+        authority,
+        is_migrated,
+        sort,
+        order,
+        cursor,
+        page_size,
+    )
+    .await?;
+    snapshot.commit().await?;
+    Ok(page)
+}
+
+/// The composed `address_names_current` rows of `address` and the composed name rows they read,
+/// as JSON record sets.
+pub(super) async fn compose_address_name_rows(
+    conn: &mut PgConnection,
+    address: &str,
+) -> Result<(Value, Value)> {
+    let indexed: Vec<(String, String)> = sqlx::query_as(
+        "/* storage:families.records.address_name_index */
+         SELECT DISTINCT chain_id, logical_name_id
+         FROM bigname_phase.project_address_name_index
+         WHERE address = lower($1)",
+    )
+    .bind(address)
+    .fetch_all(&mut *conn)
+    .await
+    .with_context(|| format!("failed to load the address index of {address}"))?;
+    if indexed.is_empty() {
+        // Nothing listed: an answer only when every chain's families are published.
+        all_servable_publications(conn).await?;
+        return Ok((json!([]), json!([])));
+    }
+    let mut by_chain: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (chain_id, name) in indexed {
+        by_chain.entry(chain_id).or_default().push(name);
+    }
+    let wanted = address.to_ascii_lowercase();
+    let (mut rows, mut names) = (Vec::new(), Vec::new());
+    for (chain_id, ids) in by_chain {
+        let publication = servable_publication(conn, &chain_id).await?;
+        let composed = load_composed(conn, &ids, CoverageShape::Plain).await?;
+        let inputs = ChainInputs::load(conn, &chain_id, &composed).await?;
+        for row in composed.values() {
+            let candidates = inputs.candidates_of(&row.logical_name_id);
+            let input = NameRelationsInput {
+                row,
+                candidates: &candidates,
+                binding: inputs.selected_binding(row),
+                wrapper: row
+                    .resource_id
+                    .and_then(|resource| inputs.wrappers.get(&resource.to_string())),
+                clock_seconds: publication.timestamp_seconds(),
+            };
+            let mut listed = false;
+            for (related, relation) in relations(&input) {
+                if related == wanted {
+                    rows.push(address_name_row(&related, relation, row, &publication));
+                    listed = true;
+                }
+            }
+            if listed {
+                names.push(name_row(row));
+            }
+        }
+    }
+    Ok((Value::Array(rows), Value::Array(names)))
+}
+
+/// The name columns the page's authority and migration filters and timestamp sorts read.
+pub(super) fn name_row(row: &NameCurrentRow) -> Value {
+    json!({
+        "logical_name_id": row.logical_name_id,
+        "declared_summary": row.declared_summary,
+        "provenance": row.provenance,
+    })
+}
+
+/// The publication stamps a composed relation row carries: the served read filter checks that
+/// the target block is on canonical lineage.
+pub(super) fn publication_stamps(publication: &FamilyPublication) -> (Value, Value, Value) {
+    (
+        json!({
+            "chain_id": publication.chain_id,
+            "coverage": {"status": "projected", "exhaustiveness": "not_asserted"},
+        }),
+        json!({
+            "target_block_number": publication.block_number,
+            "target_block_hash": publication.block_hash,
+        }),
+        json!({
+            "state": "canonical_lineage",
+            "target_block_number": publication.block_number,
+            "target_block_hash": publication.block_hash,
+        }),
+    )
+}
+
+fn address_name_row(
+    address: &str,
+    relation: &str,
+    row: &NameCurrentRow,
+    publication: &FamilyPublication,
+) -> Value {
+    let (provenance, chain_positions, canonicality_summary) = publication_stamps(publication);
+    json!({
+        "address": address,
+        "logical_name_id": row.logical_name_id,
+        "relation": relation,
+        "namespace": row.namespace,
+        "raw_name": row.normalized_name,
+        "namehash": row.namehash,
+        "surface_binding_id": row.surface_binding_id,
+        "resource_id": row.resource_id,
+        "token_lineage_id": row.token_lineage_id,
+        "binding_kind": row.binding_kind.map(|kind| kind.as_str()),
+        "support_status": "supported",
+        "unsupported_reason": null,
+        "provenance": provenance,
+        "chain_positions": chain_positions,
+        "canonicality_summary": canonicality_summary,
+        "manifest_version": row.manifest_version,
+        "last_recomputed_at": crate::time::format_timestamp(row.last_recomputed_at),
+    })
+}
+
+/// The per-chain family rows the relations of a batch of composed names read.
+struct ChainInputs {
+    candidates: Vec<ControllerCandidate>,
+    bindings: BTreeMap<String, BindingCandidate>,
+    wrappers: BTreeMap<String, WrapperRow>,
+}
+
+impl ChainInputs {
+    async fn load(
+        conn: &mut PgConnection,
+        chain_id: &str,
+        composed: &BTreeMap<String, NameCurrentRow>,
+    ) -> Result<Self> {
+        let ids: Vec<String> = composed.keys().cloned().collect();
+        let candidates = sqlx::query(
+            "/* storage:families.records.address_controller_candidates */
+             SELECT logical_name_id, block_number, transaction_index, log_index, event_identity,
+                    resource_id::text AS resource_id, event_kind, source_family, action, subject
+             FROM bigname_phase.project_address_controller_candidate
+             WHERE chain_id = $1 AND logical_name_id = ANY($2)",
+        )
+        .bind(chain_id)
+        .bind(&ids)
+        .fetch_all(&mut *conn)
+        .await
+        .context("failed to load the address controller candidates")?
+        .iter()
+        .map(|row| {
+            Ok(ControllerCandidate {
+                logical_name_id: row.try_get("logical_name_id")?,
+                position: FamilyPosition::from_row(row)?,
+                resource_id: row.try_get("resource_id")?,
+                event_kind: row.try_get("event_kind")?,
+                source_family: row.try_get("source_family")?,
+                set: row.try_get::<String, _>("action")? == "set",
+                subject: row.try_get("subject")?,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+        let selected: Vec<String> = composed
+            .values()
+            .filter_map(|row| row.surface_binding_id.map(|id| id.to_string()))
+            .collect();
+        let bindings: Vec<Value> = sqlx::query_scalar(
+            "/* storage:families.records.address_selected_bindings */
+             SELECT to_jsonb(candidate) FROM bigname_phase.project_binding_candidate candidate
+             WHERE candidate.chain_id = $1 AND candidate.surface_binding_id::text = ANY($2)",
+        )
+        .bind(chain_id)
+        .bind(&selected)
+        .fetch_all(&mut *conn)
+        .await
+        .context("failed to load the selected binding candidates")?;
+        let bindings = bindings
+            .iter()
+            .filter_map(BindingCandidate::from_row)
+            .map(|binding| (binding.surface_binding_id.clone(), binding))
+            .collect();
+        let resources: Vec<String> = composed
+            .values()
+            .filter_map(|row| row.resource_id.map(|id| id.to_string()))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let wrappers = load_wrapper_rows(&mut *conn, chain_id, &resources)
+            .await?
+            .into_iter()
+            .map(|wrapper| (wrapper.resource_id.clone(), wrapper))
+            .collect();
+        Ok(Self {
+            candidates,
+            bindings,
+            wrappers,
+        })
+    }
+
+    fn candidates_of(&self, logical_name_id: &str) -> Vec<&ControllerCandidate> {
+        self.candidates
+            .iter()
+            .filter(|candidate| candidate.logical_name_id == logical_name_id)
+            .collect()
+    }
+
+    fn selected_binding(&self, row: &NameCurrentRow) -> Option<&BindingCandidate> {
+        self.bindings
+            .get(&row.surface_binding_id?.to_string())
+            .filter(|binding| binding.logical_name_id == row.logical_name_id)
+    }
+}

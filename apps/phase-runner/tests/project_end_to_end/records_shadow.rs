@@ -6,7 +6,7 @@
 use std::time::Instant;
 
 use anyhow::{Result, ensure};
-use bigname_storage::families::records::{ShadowReport, compare_family_reads};
+use bigname_storage::families::records::{ShadowReport, compare_family_reads_excusing};
 use phase_runner::heads::BlockMarker;
 use sqlx::PgPool;
 
@@ -26,12 +26,18 @@ pub async fn compare(
     page_size: u64,
     stage: &'static str,
 ) -> Result<Shadow> {
+    // The names the name comparison leaves to the control comparison (`name_shadow.rs`,
+    // `covered_names`): a page listing one is compared without it (`listing_excused`).
+    let excused = crate::name_shadow::compare(pool, chain_id, target.number)
+        .await?
+        .covered_names;
     let started = Instant::now();
-    let report = compare_family_reads(
+    let report = compare_family_reads_excusing(
         pool,
         chain_id,
         Some((target.number, target.hash.clone())),
         page_size,
+        &excused,
     )
     .await?;
     eprintln!(
@@ -52,6 +58,26 @@ pub async fn compare(
         report.classification_fallbacks.len(),
         started.elapsed().as_millis()
     );
+    eprintln!(
+        "SEPOLIA_END_TO_END_SHADOW_PAGES target={} stage={stage} address_name_addresses={} \
+         address_name_pages={} address_name_entries={} resolves_to_pages={} evm_pages={} \
+         primary_batches={} listing_excused={}",
+        target.number,
+        report.address_name_addresses,
+        report.address_name_pages,
+        report.address_name_entries,
+        report.production_address_pages,
+        report.evm_pages,
+        report.primary_batches,
+        report.listing_excused,
+    );
+    for (route, (served_us, family_us, reads)) in &report.read_timings {
+        eprintln!(
+            "SEPOLIA_END_TO_END_SHADOW_TIMING target={} stage={stage} route={route} reads={reads} \
+             served_us={served_us} family_us={family_us}",
+            target.number
+        );
+    }
     for (key, differences) in report.differences.iter().take(5) {
         eprintln!("SEPOLIA_END_TO_END_SHADOW_DIFFERENCE {key}: {differences:?}");
     }
@@ -69,7 +95,11 @@ pub fn require_clean(shadows: &[Shadow]) -> Result<()> {
     for shadow in shadows {
         let report = &shadow.report;
         ensure!(
-            report.current() && report.inventory_rows > 0 && report.primary_tuples > 0,
+            report.current()
+                && report.inventory_rows > 0
+                && report.primary_tuples > 0
+                && report.address_name_pages > 0
+                && report.primary_batches > 0,
             "the {} shadow comparison at {} compared nothing: {report:?}",
             shadow.stage,
             shadow.target
@@ -107,6 +137,8 @@ fn a_difference_or_a_diagnostic_fails_the_run() {
             served_marker: marker.clone(),
             inventory_rows: 1,
             primary_tuples: 1,
+            address_name_pages: 1,
+            primary_batches: 1,
             ..ShadowReport::default()
         },
     };
@@ -131,6 +163,9 @@ fn a_difference_or_a_diagnostic_fails_the_run() {
     let mut no_tuples = clean();
     no_tuples.report.primary_tuples = 0;
     assert!(require_clean(&[no_tuples]).is_err());
+    let mut no_address_names = clean();
+    no_address_names.report.address_name_pages = 0;
+    assert!(require_clean(&[no_address_names]).is_err());
     let mut gap = clean();
     gap.report
         .classification_fallbacks

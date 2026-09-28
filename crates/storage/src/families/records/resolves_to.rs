@@ -37,15 +37,15 @@ use crate::{
 const ZERO: &str = "0x0000000000000000000000000000000000000000";
 
 /// One `address_records_current`-shaped row the families derive for a resource.
-struct RecordRow {
-    record_resource_id: Uuid,
-    record_key: String,
-    coin_type: String,
-    provenance: Value,
-    chain_positions: Value,
+pub(super) struct RecordRow {
+    pub(super) record_resource_id: Uuid,
+    pub(super) record_key: String,
+    pub(super) coin_type: String,
+    pub(super) provenance: Value,
+    pub(super) chain_positions: Value,
 }
 
-fn may_fall_back(coin_type: &str) -> bool {
+pub(super) fn may_fall_back(coin_type: &str) -> bool {
     coin_type
         .parse::<u64>()
         .is_ok_and(ensip19_default_fallback_target)
@@ -81,9 +81,18 @@ fn entry_address(entry: &Value) -> Option<(String, String)> {
 }
 
 /// The rows `address_records.rs` publishes for one family inventory row that resolve to `address`.
-fn record_rows(chain_id: &str, inventory: &FamilyRecordInventory, address: &str) -> Vec<RecordRow> {
+pub(super) fn record_rows(
+    chain_id: &str,
+    inventory: &FamilyRecordInventory,
+    address: &str,
+) -> Vec<RecordRow> {
     let row = &inventory.row;
-    if row.coverage.get("status").and_then(Value::as_str) != Some("projected") {
+    if row.coverage.get("status").and_then(Value::as_str) != Some("projected")
+        || row
+            .provenance
+            .get("record_serving")
+            .is_some_and(|serving| serving == false)
+    {
         return Vec::new();
     }
     let entries = row.entries.as_array().cloned().unwrap_or_default();
@@ -219,7 +228,13 @@ pub async fn load_family_address_records(
     if may_fall_back(coin_type) {
         coin_types.push(ENSIP19_DEFAULT_ADDRESS_RECORD_KEY["addr:".len()..].to_owned());
     }
-    let candidates = candidate_resources(pool, &address, &coin_types).await?;
+    let candidates = {
+        let mut conn = pool
+            .acquire()
+            .await
+            .context("failed to acquire a connection for the family address records")?;
+        candidate_resources(&mut conn, &address, &coin_types).await?
+    };
     let mut records = Vec::new();
     let mut indexed = BTreeMap::new();
     for ((chain_id, resource_id), candidate) in candidates {

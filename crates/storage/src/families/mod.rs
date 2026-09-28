@@ -7,3 +7,5 @@ pub mod control;
 pub mod name;
 pub mod records;
 pub mod topology;
+
+pub(crate) use name::read_snapshot;

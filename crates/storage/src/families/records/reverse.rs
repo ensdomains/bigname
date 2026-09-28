@@ -6,7 +6,7 @@
 //! pre-hydration claim.
 use anyhow::{Context, Result};
 use serde_json::{Map, Value, json};
-use sqlx::{PgPool, Row};
+use sqlx::{PgConnection, Row};
 
 use super::{FamilyPosition, facts::probe_events, payload::strip_nulls};
 use crate::{PrimaryNameClaimStatus, PrimaryNameCurrentRow, PrimaryNameCurrentSnapshot};
@@ -21,9 +21,26 @@ pub struct FamilyReverseClaim {
     pub node_claim_at_other_resolver: bool,
 }
 
-/// The reverse claim of the tuple, `None` when the tuple has no `ReverseChanged`.
+/// The reverse claim of the tuple, `None` when the tuple has no `ReverseChanged`, read in one
+/// snapshot.
 pub async fn load_family_reverse_claim(
-    pool: &PgPool,
+    pool: &sqlx::PgPool,
+    chain_id: &str,
+    address: &str,
+    namespace: &str,
+    coin_type: &str,
+) -> Result<Option<FamilyReverseClaim>> {
+    let mut snapshot = crate::families::read_snapshot(pool).await?;
+    let claim =
+        load_family_reverse_claim_on(&mut snapshot, chain_id, address, namespace, coin_type)
+            .await?;
+    snapshot.commit().await?;
+    Ok(claim)
+}
+
+/// [`load_family_reverse_claim`] on `conn`, which the caller holds in one snapshot.
+pub(crate) async fn load_family_reverse_claim_on(
+    conn: &mut PgConnection,
     chain_id: &str,
     address: &str,
     namespace: &str,
@@ -40,7 +57,7 @@ pub async fn load_family_reverse_claim(
     .bind(coin_type)
     .bind(namespace)
     .bind(chain_id)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *conn)
     .await
     .context("failed to load the family reverse tuple")?;
     let Some(tuple) = tuple else {
@@ -59,7 +76,7 @@ pub async fn load_family_reverse_claim(
         .as_deref()
         == Some("ReverseClaimed");
     let pointer = match &reverse_node {
-        Some(node) => node_pointer(pool, chain_id, namespace, node).await?,
+        Some(node) => node_pointer(conn, chain_id, namespace, node).await?,
         None => None,
     };
 
@@ -81,7 +98,7 @@ pub async fn load_family_reverse_claim(
                 .bind(node)
                 .bind(chain_id)
                 .bind(resolver)
-                .fetch_optional(pool)
+                .fetch_optional(&mut *conn)
                 .await
                 .context("failed to load the family reverse node claim")?;
                 match claim {
@@ -96,7 +113,7 @@ pub async fn load_family_reverse_claim(
                         .bind(namespace)
                         .bind(node)
                         .bind(chain_id)
-                        .fetch_one(pool)
+                        .fetch_one(&mut *conn)
                         .await
                         .context("failed to probe the family reverse node claims")?;
                         None
@@ -111,7 +128,7 @@ pub async fn load_family_reverse_claim(
 
     let mut identities = vec![reverse.event_identity.clone()];
     identities.extend(claim_identity.clone());
-    let probed = probe_events(pool, &identities).await?;
+    let probed = probe_events(conn, &identities).await?;
     let claim = claim_identity
         .as_ref()
         .and_then(|identity| probed.get(identity));
@@ -122,7 +139,7 @@ pub async fn load_family_reverse_claim(
         )
         .bind(chain_id)
         .bind(identity)
-        .fetch_optional(pool)
+        .fetch_optional(&mut *conn)
         .await
         .context("failed to load the family claim normalization")?,
         None => None,
@@ -212,7 +229,7 @@ pub async fn load_family_reverse_claim(
 /// crates/project/tests/primary_names_reverse_node/reclaim_after_unwrap.rs. Returns its event id
 /// and resolver.
 async fn node_pointer(
-    pool: &PgPool,
+    conn: &mut PgConnection,
     chain_id: &str,
     namespace: &str,
     node: &str,
@@ -233,7 +250,7 @@ async fn node_pointer(
     .bind(chain_id)
     .bind(namespace)
     .bind(node.to_ascii_lowercase())
-    .fetch_all(pool)
+    .fetch_all(&mut *conn)
     .await
     .context("failed to load the family pointers of a reverse node")?;
     let mut latest: Option<(FamilyPosition, Option<i64>, Option<String>)> = None;
@@ -262,7 +279,7 @@ async fn node_pointer(
     };
     let id = match id {
         Some(id) => Some(id),
-        None => probe_events(pool, &unowned)
+        None => probe_events(conn, &unowned)
             .await?
             .get(&position.event_identity)
             .map(|event| event.normalized_event_id),

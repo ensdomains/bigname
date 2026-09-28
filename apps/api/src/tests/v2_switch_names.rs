@@ -320,7 +320,16 @@ async fn seed_switch_routes_fixture(database: &TestDatabase) -> Result<()> {
 }
 
 /// The events of `seed_switch_routes_fixture`, unpublished.
+async fn seed_switch_routes_fixture_with(database: &TestDatabase, extra: Vec<NormalizedEvent>) -> Result<()> {
+    seed_switch_routes_events_with(database, extra).await?;
+    publish_project_and_families(database, 240).await
+}
+
 async fn seed_switch_routes_events(database: &TestDatabase) -> Result<()> {
+    seed_switch_routes_events_with(database, Vec::new()).await
+}
+
+async fn seed_switch_routes_events_with(database: &TestDatabase, extra: Vec<NormalizedEvent>) -> Result<()> {
     let (_, alpha_node, alpha_resource) = seed_switch_names_events(database).await?;
     let (sub, _) = seed_switch_name(database, "sub.alpha.eth", 0x5c1_0000, "ens_v1").await?;
     let sub_node = sub.strip_prefix("ens:").expect("ens id").to_owned();
@@ -468,10 +477,9 @@ async fn seed_switch_routes_events(database: &TestDatabase) -> Result<()> {
     );
     child.derivation_kind = "ens_v2_registry_resource_surface".to_owned();
     child.raw_fact_ref["emitting_address"] = json!(SWITCH_REGISTRY);
-    bigname_storage::insert_normalized_event_fixtures(
-        &database.pool,
-        &[edge, role, record, subregistry, child],
-    )
+    let mut events = vec![edge, role, record, subregistry, child];
+    events.extend(extra);
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &events)
     .await?;
     Ok(())
 }
