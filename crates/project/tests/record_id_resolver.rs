@@ -1054,7 +1054,10 @@ async fn inverse_address_reads_find_values_the_address_index_drops() -> Result<(
 }
 
 // A named write is admitted by its logical name alone, with no node test, so a named address
-// write whose node is not the name's namehash is served forward and must be found inversely.
+// write whose node is not the name's namehash is served forward and must be found inversely. The
+// index row keeps the name the value was written under, and the index read reaches the pointers
+// at that name's namehash through it, so the index alone finds it: the production resolves_to
+// read, which reads the index alone (TYR-36 step 7b ruling J10), lists it too.
 #[tokio::test]
 async fn a_named_address_write_at_another_node_is_found_inversely() -> Result<()> {
     let (db, pool) = database("record_id_named_other_node").await?;
@@ -1070,16 +1073,7 @@ async fn a_named_address_write_at_another_node_is_found_inversely() -> Result<()
         json!({"source_event":"AddressChanged","node":node(7),"resolver":RESOLVER,"record_key":"addr:60","record_family":"addr","selector_key":"60","coin_type":"60","value":INVERSE_A}),
     )
     .await?;
-    let expected = Expectations {
-        index_misses: vec![(
-            19,
-            format!(
-                "resolves_to {INVERSE_A} coin 60 resource {} addr:60",
-                resource(1)
-            ),
-        )],
-        ..Expectations::none()
-    };
+    let expected = Expectations::none();
     run_expecting(&pool, 19, None, RunMode::Normal, &expected).await?;
     let listed: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM address_records_current
