@@ -651,6 +651,93 @@ async fn family_runs_reuse_a_fresh_capacity_measurement() -> Result<()> {
     .await
 }
 
+// With reuse on, a reading that has aged past the poll interval is measured again: the first
+// family run's block 10 holds its transaction past the 50 ms interval, so the check before the
+// second run probes afresh and sees the breach. The phase stays paused, probing afresh at every
+// poll, and resumes once a fresh reading shows room.
+#[tokio::test]
+async fn an_aged_reading_is_measured_again_and_a_breach_pauses_until_a_fresh_reading_clears()
+-> Result<()> {
+    within_case_deadline(async {
+        let scratch = ready_through("families_runner_capacity_aged", 30).await?;
+        seed_thirty_blocks_of_work(&scratch).await?;
+        sqlx::raw_sql(
+            "CREATE FUNCTION hold_block_10() RETURNS trigger LANGUAGE plpgsql AS $$
+             BEGIN
+                 PERFORM pg_sleep(0.2);
+                 RETURN NEW;
+             END $$;
+             CREATE TRIGGER hold_block_10 BEFORE INSERT OR UPDATE ON project_family_marker
+             FOR EACH ROW WHEN (NEW.current_block_number = 10)
+             EXECUTE FUNCTION hold_block_10();",
+        )
+        .execute(scratch.pool())
+        .await?;
+        let probe = Arc::new(TrippingProbe::new(|_, marker| {
+            marker.is_some_and(|block| block < 30)
+        }));
+        let capacity = CapacityGuard::new(
+            CapacityConfig {
+                database_max_bytes: Some(1 << 40),
+                poll_interval: Duration::from_millis(50),
+                ..CapacityConfig::default()
+            },
+            probe.clone(),
+        );
+        let project = Arc::new(
+            ProjectPhase::new(scratch.pool().clone()).with_family_settings(FamilySettings {
+                max_blocks_per_run: 10,
+                ..FamilySettings::default()
+            }),
+        );
+        let observe = async {
+            probe.breached.notified().await;
+            let paused_at = marker(&scratch).await?;
+            anyhow::ensure!(
+                paused_at == Some(10),
+                "paused after the first run: {paused_at:?}"
+            );
+            while project_state(&scratch).await?.0 != "paused" {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            let probed = probe.calls.load(Ordering::SeqCst);
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            anyhow::ensure!(
+                probe.calls.load(Ordering::SeqCst) > probed,
+                "the paused phase probed afresh at its polls"
+            );
+            anyhow::ensure!(marker(&scratch).await? == paused_at, "no run while paused");
+            anyhow::ensure!(project_state(&scratch).await?.0 == "paused");
+            probe.released.store(true, Ordering::SeqCst);
+            Ok(())
+        };
+        let (command, ()) = with_watcher(
+            redo_with_capacity(
+                scratch.runner(),
+                project,
+                30,
+                CancellationToken::new(),
+                capacity,
+                Measure::ReuseFresh,
+            ),
+            observe,
+        )
+        .await?;
+        command?;
+        assert_eq!(
+            project_state(&scratch).await?,
+            ("completed".into(), Some(30), false)
+        );
+        assert_eq!(
+            marker(&scratch).await?,
+            Some(30),
+            "the resumed runs finished"
+        );
+        scratch.cleanup().await
+    })
+    .await
+}
+
 /// Runs a Project redo through block 30 in family runs of ten blocks, under a probe that reports
 /// the database over its ceiling while `over(call, marker)` holds, until released. The runner
 /// probes at every check, as if each measurement had aged past the poll interval, so the probe is

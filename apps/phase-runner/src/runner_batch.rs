@@ -225,7 +225,15 @@ impl PhaseRunner {
                     )
                     .await?;
                 let stopped = self
-                    .wait_for_capacity(chain, phase.name(), 0, cancellation, heartbeat, phase_lock)
+                    .wait_for_capacity(
+                        chain,
+                        phase.name(),
+                        0,
+                        super::capacity_wait::Measure::ReuseFresh,
+                        cancellation,
+                        heartbeat,
+                        phase_lock,
+                    )
                     .await?;
                 Ok::<_, RunnerError>(!stopped)
             })

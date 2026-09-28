@@ -17,9 +17,10 @@ use crate::{
 
 use super::PhaseRunner;
 
-/// Each chain's last capacity measurement and when it was taken. A family run that follows a
+/// Each chain's last capacity measurement and when its probe started. A family run that follows a
 /// batch within the capacity poll interval reuses the batch prelude's measurement when it showed
-/// room, instead of a second `pg_database_size` and probe-file write moments later.
+/// room, instead of a second `pg_database_size` and probe-file write moments later. Writes made
+/// since that measurement are not in it, which is why batch preludes never reuse one.
 #[derive(Debug, Default)]
 pub(super) struct CapacityMemo {
     taken: Mutex<BTreeMap<String, (Instant, CapacityMeasurement)>>,
@@ -27,8 +28,9 @@ pub(super) struct CapacityMemo {
 }
 
 impl CapacityMemo {
-    /// The chain's last measurement when it is younger than `window`.
-    fn fresh(&self, chain_id: &str, window: Duration) -> Option<CapacityMeasurement> {
+    /// The chain's last measurement when, at `now`, less than `window` has passed since its probe
+    /// started. A lookup never extends that.
+    fn fresh(&self, chain_id: &str, window: Duration, now: Instant) -> Option<CapacityMeasurement> {
         if self.disabled.load(Ordering::Relaxed) {
             return None;
         }
@@ -36,32 +38,47 @@ impl CapacityMemo {
             .taken
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let (at, measurement) = taken.get(chain_id)?;
-        (at.elapsed() < window).then(|| measurement.clone())
+        let (started, measurement) = taken.get(chain_id)?;
+        (now.saturating_duration_since(*started) < window).then(|| measurement.clone())
     }
 
-    fn record(&self, chain_id: &str, measurement: CapacityMeasurement) {
+    /// Records a measurement whose probe started at `started`.
+    fn record(&self, chain_id: &str, measurement: CapacityMeasurement, started: Instant) {
         self.taken
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(chain_id.to_owned(), (Instant::now(), measurement));
+            .insert(chain_id.to_owned(), (started, measurement));
     }
 }
 
+/// Whether a capacity check may reuse a fresh measurement.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum Measure {
+    /// Probe every time: a batch prelude, whose last reading does not count the last batch's
+    /// writes.
+    Fresh,
+    /// Reuse a measurement younger than the poll interval that showed room: the check before a
+    /// family run, which moments earlier followed the batch prelude's probe.
+    ReuseFresh,
+}
+
 impl PhaseRunner {
-    /// Probe capacity at every check, never reusing a fresh measurement: for tests whose probe
-    /// must be asked before each family run.
+    /// Public test-support hook: probe capacity at every check, never reusing a fresh
+    /// measurement, for tests whose probe must be asked before each family run. `doc(hidden)`
+    /// hides it from the docs; the method is still public.
     #[doc(hidden)]
     pub fn without_capacity_reuse(self) -> Self {
         self.capacity_memo.disabled.store(true, Ordering::Relaxed);
         self
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn wait_for_capacity(
         &self,
         chain: &ChainConfig,
         phase: PhaseName,
         reserved_write_bytes: u64,
+        measure: Measure,
         cancellation: &CancellationToken,
         heartbeat: &mut HeartbeatThrottle,
         phase_lock: &mut PhaseLock,
@@ -69,16 +86,23 @@ impl PhaseRunner {
         let mut paused = false;
         loop {
             phase_lock.check_alive().await?;
-            // A fresh measurement is reused only while it shows room; a breach, or one older
-            // than the poll interval, is measured again.
-            let reused = self
-                .capacity_memo
-                .fresh(&chain.chain_id, self.capacity.poll_interval())
+            // Only a family run's check reuses, and only a fresh measurement that shows room;
+            // while paused every check probes.
+            let reused = (measure == Measure::ReuseFresh && !paused)
+                .then(|| {
+                    self.capacity_memo.fresh(
+                        &chain.chain_id,
+                        self.capacity.poll_interval(),
+                        Instant::now(),
+                    )
+                })
+                .flatten()
                 .map(|measurement| self.capacity.evaluate(measurement, reserved_write_bytes))
-                .filter(|status| !paused && status.is_available());
+                .filter(|status| status.is_available());
             let status = match reused {
                 Some(status) => status,
                 None => {
+                    let started = Instant::now();
                     let status = self
                         .capacity
                         .check(self.store.pool(), reserved_write_bytes)
@@ -86,7 +110,7 @@ impl PhaseRunner {
                     phase_lock.check_alive().await?;
                     let status = status?;
                     self.capacity_memo
-                        .record(&chain.chain_id, status.measurement.clone());
+                        .record(&chain.chain_id, status.measurement.clone(), started);
                     status
                 }
             };
@@ -136,22 +160,45 @@ mod tests {
         }
     }
 
+    const WINDOW: Duration = Duration::from_secs(5);
+
     #[test]
-    fn a_measurement_is_fresh_only_inside_its_window_and_per_chain() {
+    fn a_measurement_expires_a_window_after_its_probe_started() {
         let memo = CapacityMemo::default();
-        assert_eq!(memo.fresh("a", Duration::from_secs(60)), None);
-        memo.record("a", measurement(7));
-        assert_eq!(
-            memo.fresh("a", Duration::from_secs(60)),
-            Some(measurement(7))
-        );
-        assert_eq!(memo.fresh("b", Duration::from_secs(60)), None);
-        assert_eq!(
-            memo.fresh("a", Duration::ZERO),
-            None,
-            "an aged measurement is not reused"
-        );
+        let started = Instant::now();
+        memo.record("a", measurement(7), started);
+        let just_inside = started + WINDOW - Duration::from_millis(1);
+        assert_eq!(memo.fresh("a", WINDOW, just_inside), Some(measurement(7)));
+        assert_eq!(memo.fresh("a", WINDOW, started + WINDOW), None);
+        assert_eq!(memo.fresh("b", WINDOW, started), None, "per chain");
+    }
+
+    #[test]
+    fn a_probe_that_took_the_whole_window_is_already_stale() {
+        let memo = CapacityMemo::default();
+        let started = Instant::now();
+        memo.record("a", measurement(7), started);
+        assert_eq!(memo.fresh("a", WINDOW, started + WINDOW), None);
+    }
+
+    #[test]
+    fn lookups_do_not_extend_freshness() {
+        let memo = CapacityMemo::default();
+        let started = Instant::now();
+        memo.record("a", measurement(7), started);
+        for step in 1..5 {
+            let at = started + WINDOW * step / 5;
+            assert_eq!(memo.fresh("a", WINDOW, at), Some(measurement(7)));
+        }
+        assert_eq!(memo.fresh("a", WINDOW, started + WINDOW), None);
+    }
+
+    #[test]
+    fn a_disabled_memo_reuses_nothing() {
+        let memo = CapacityMemo::default();
+        let started = Instant::now();
+        memo.record("a", measurement(7), started);
         memo.disabled.store(true, Ordering::Relaxed);
-        assert_eq!(memo.fresh("a", Duration::from_secs(60)), None);
+        assert_eq!(memo.fresh("a", WINDOW, started), None);
     }
 }

@@ -513,6 +513,7 @@ impl PhaseRunner {
                         chain,
                         phase_name,
                         reserved_write_bytes,
+                        capacity_wait::Measure::Fresh,
                         &cancellation,
                         heartbeat,
                         phase_lock,
