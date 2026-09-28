@@ -14,7 +14,8 @@ Checks the public Caddy allowlist against a running bigname API:
     internally and publicly
   - the edge admits /v1 reads, POST /v1/lookup and its browser preflight,
     GraphQL POST and its browser preflight, and GET/HEAD /openapi.json
-    (which the API answers 404 until the OpenAPI document ships)
+    (which the API answers 404 until the OpenAPI document ships) with a
+    single wildcard Access-Control-Allow-Origin that / does not carry
   - the edge still denies /v2, GraphiQL, health, wrong-method, GET preflight,
     encoded-traversal (%2e%2e) paths, and unknown paths
 
@@ -259,6 +260,28 @@ assert_last_header() {
   fi
 }
 
+assert_no_last_header() {
+  local label="$1"
+  local pattern="$2"
+  if tr -d '\r' < "$last_headers" | grep -Eiq "$pattern"; then
+    show_last_response
+    fail "${label}: response headers unexpectedly matched ${pattern}"
+  fi
+}
+
+# The edge sets a single wildcard CORS origin on /openapi.json, replacing (not
+# duplicating) any the API sends, so browsers on the docs site can read it.
+assert_single_wildcard_origin() {
+  local label="$1"
+  local count
+  assert_last_header "$label" '^access-control-allow-origin:[[:space:]]*\*$'
+  count="$(tr -d '\r' < "$last_headers" | grep -Eic '^access-control-allow-origin:' || true)"
+  if [ "$count" != "1" ]; then
+    show_last_response
+    fail "${label}: expected one access-control-allow-origin header, got ${count}"
+  fi
+}
+
 assert_preflight_headers() {
   local label="$1"
   local requested_method="${2:-POST}"
@@ -353,13 +376,19 @@ assert_preflight_headers public-graphql-preflight
 
 log "checking public default-deny behavior"
 assert_status public-root 404 GET "${public_edge_url}/" ''
+assert_no_last_header public-root '^access-control-allow-origin:'
 assert_status public-docs 404 GET "${public_edge_url}/docs" ''
 assert_status public-docs-slash 404 GET "${public_edge_url}/docs/" ''
 assert_status public-docs-head 404 HEAD "${public_edge_url}/docs" ''
 # The edge admits GET/HEAD /openapi.json, but the API answers 404 until TYR-18
 # publishes the document; then internal-openapi and public-openapi flip to 200
 # together.
+# The CORS header is the edge's own mark on this path: public-root above has
+# none, so its presence here shows the @openapi matcher proxied the request.
 assert_status public-openapi 404 GET "${public_edge_url}/openapi.json" ''
+assert_single_wildcard_origin public-openapi
+assert_status public-openapi-head 404 HEAD "${public_edge_url}/openapi.json" ''
+assert_single_wildcard_origin public-openapi-head
 assert_status public-v2-status 404 GET "${public_edge_url}/v2/status" ''
 assert_status public-v2-lookup 404 POST "${public_edge_url}/v2/lookup" "$lookup_body"
 assert_status public-v1-identity-lookup 404 POST "${public_edge_url}/v1/identity:lookup" "$lookup_body"
