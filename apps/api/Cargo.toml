@@ -30,6 +30,8 @@ bigname-metrics.workspace = true
 bigname-storage.workspace = true
 
 [dev-dependencies]
+phase-runner = { path = "../phase-runner" }
+tokio-util.workspace = true
 alloy-sol-types.workspace = true
 bigname-adapters.workspace = true
 bigname-interpret.workspace = true

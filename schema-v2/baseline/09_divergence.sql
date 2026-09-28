@@ -112,6 +112,20 @@ BEGIN
     IF compared_family_publication IS NULL THEN
         RETURN 'invalid_comparison';
     END IF;
+        -- Redo begins by locking this chain's phase rows in phase-name order. Hold
+        -- the same rows through the caller's commit, without comparing ordinary row
+        -- versions, so a redo cannot start after admission but before a ledger mutation.
+        PERFORM 1
+        FROM chain_phase_state input_phase
+        WHERE input_phase.chain_id = requested_authoritative_chain_id
+          AND input_phase.phase_name IN ('interpret', 'project')
+        ORDER BY input_phase.phase_name
+        FOR SHARE;
+
+        IF NOT FOUND THEN
+            RETURN 'project_changed';
+        END IF;
+
         -- Only the lookup builds this object, with every field; a missing field fails the
         -- equality match below and reads as project_changed.
         PERFORM 1
@@ -132,6 +146,13 @@ BEGIN
           AND requested_authoritative_block_number - marker.current_block_number BETWEEN 0 AND 1
           AND (marker.current_block_number <> requested_authoritative_block_number
                OR marker.current_block_hash = requested_authoritative_block_hash)
+          AND NOT EXISTS (
+              SELECT 1 FROM chain_phase_state input_phase
+              WHERE input_phase.chain_id = marker.chain_id
+                AND input_phase.phase_name IN ('interpret', 'project')
+                AND input_phase.redo_in_progress
+                AND input_phase.redo_from_block_number <= marker.current_block_number
+          )
         FOR SHARE OF marker, lineage;
 
         IF NOT FOUND THEN
