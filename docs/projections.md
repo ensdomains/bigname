@@ -366,6 +366,18 @@ for was released; or a resource the name was never bound to), stay outside the w
 and is selected the way any re-registration is.
 (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L118-L152 @ ens_v1@91c966f)
 
+A registry-only binding can follow another registry-only binding of the same name and arm: a
+registry `Transfer` opens one, a `reclaim` closes it without opening a lease binding, and a later
+registry `Transfer` opens the next. A registry owner change writes no registrar state, so the
+later binding stands for the same lease as the one it replaced. When a binding's predecessor is
+a registry-only binding that stands for a lease, the binding takes that predecessor's whole
+handoff (the binding it replaced and its position, the wrapped registrar lease and node that
+binding recorded, and the lease with its position) instead of taking the registry-only
+predecessor itself as its lease. The registration then keeps the lease's `resource_id`,
+`registered_at`, expiry and registrant through any number of such bindings.
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L60-L69 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L175 @ ens_v1@91c966f)
+
 The release of the retained lease releases the name like any other lapse. On chain the registry
 keeps the owner and resolver it held after an ordinary lapse too; what makes a lapsed `.eth`
 name available again is the registrar, whose `ownerOf` reverts once the lease is past its expiry
@@ -726,6 +738,29 @@ interpreter content hash. Existing events need full-history Interpret redo,
 then stamped Project redo, before deploying the matching API as required by
 [the deployment contract](deployment.md). A Project-only rebuild cannot supply
 the missing event value.
+
+The owner fold reads an epoch's owner only when the epoch states one. An
+`AuthorityEpochChanged` whose after-state carries no `owner`, `registry_owner` or
+`owner_word_unmasked` field, as a registrar grant's or token transfer's, says nothing about the
+registry owner and leaves the fold as the earlier facts set it; an explicit null owner, as a
+release's, still clears. A registrar-authority `SurfaceBound` records as its bound owner the
+registry owner the registrar adapter read from retained registry state (`owner_getter`), and the
+fold reads that bound owner for every admitted, non-state-derived registrar binding of the
+selected resource. So a registry `Transfer` that opened a registry-only binding, whose
+`AuthorityTransferred` sits on the registry-only resource and is no longer admitted once a
+registrar token transfer binds the lease again, still decides the owner served.
+
+An `active`, unwrapped ENSv1 or Basenames registration whose authority is its registrar lease or
+its registry record always serves a registry owner, because the registry answers `owner(node)`
+for every node. When the fold finds no owner fact, or its latest fact cleared the owner, the
+served owner is the node's latest registry `AuthorityTransferred` kept in
+`project_registry_owner_event` (none when its owner word is unmasked), or the zero address when
+the registry holds no record of the node. A node with a registry record but no owner the
+families kept is a data-integrity failure: Project stops at that block and does not publish it,
+like any other integrity failure.
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L60-L84 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L123-L131 @ ens_v1@91c966f)
+(upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L175 @ ens_v1@91c966f)
 
 When a state-derived ENSv2 path-expiry release remains the resource's terminal
 lifecycle event and retires effective permission rows, the resource summary
