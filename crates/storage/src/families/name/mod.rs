@@ -49,7 +49,7 @@ pub(crate) use batch::{
 };
 pub use bound::load_family_bound_names;
 pub use list::{load_family_expiring_page, load_family_search_page};
-pub use summary::compose_name_summaries;
+pub use summary::{NameSummaryPublication, compose_name_summaries, compose_name_summary_publication};
 
 pub use batch::{
     ensure_family_publications, load_family_name, load_family_name_on,
