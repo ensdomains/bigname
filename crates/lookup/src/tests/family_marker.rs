@@ -161,7 +161,10 @@ async fn a_family_block_during_execution_is_refused_like_a_project_republish() -
     let family = family.expect_err("the marker guard refuses an advanced family sequence");
     assert_eq!(family.kind(), served.kind());
     assert_eq!(family.message(), served.message());
-    assert_eq!(family_ledger, 0, "a refused lookup writes no divergence row");
+    assert_eq!(
+        family_ledger, 0,
+        "a refused lookup writes no divergence row"
+    );
     Ok(())
 }
 
@@ -178,7 +181,11 @@ async fn each_switch_state_guards_only_its_own_publication() -> AnyResult<()> {
         let response = response.map_err(|error| {
             anyhow::anyhow!("switch {on}: {:?} {}", error.kind(), error.message())
         })?;
-        assert_eq!(response.records[0].value, Some(json!(LIVE_VALUE)), "switch {on}");
+        assert_eq!(
+            response.records[0].value,
+            Some(json!(LIVE_VALUE)),
+            "switch {on}"
+        );
         assert_eq!(
             response.records[0].ledger_action,
             LedgerAction::Written,
@@ -203,7 +210,8 @@ async fn a_family_rebuild_during_execution_refuses_the_lookup_only_with_the_swit
 
     let (served, ledger) =
         lookup_mutated_during_execution(false, "live", START_FAMILY_REBUILD).await?;
-    let served = served.map_err(|error| anyhow::anyhow!("{:?} {}", error.kind(), error.message()))?;
+    let served =
+        served.map_err(|error| anyhow::anyhow!("{:?} {}", error.kind(), error.message()))?;
     assert_eq!(served.records[0].ledger_action, LedgerAction::Written);
     assert_eq!(ledger, 1);
     Ok(())
@@ -240,7 +248,10 @@ async fn the_guard_compares_the_captured_family_sequence() -> AnyResult<()> {
 
     let mut stale = captured.clone();
     stale["family_publication"]["sequence"] = json!("0");
-    assert_eq!(guard_status(fixture.pool(), &stale).await?, "project_changed");
+    assert_eq!(
+        guard_status(fixture.pool(), &stale).await?,
+        "project_changed"
+    );
 
     let mut unsequenced = captured.clone();
     unsequenced["family_publication"]
@@ -255,7 +266,10 @@ async fn the_guard_compares_the_captured_family_sequence() -> AnyResult<()> {
     sqlx::query("UPDATE project_family_marker SET state = 'bootstrap_pending'")
         .execute(fixture.pool())
         .await?;
-    assert_eq!(guard_status(fixture.pool(), &captured).await?, "project_changed");
+    assert_eq!(
+        guard_status(fixture.pool(), &captured).await?,
+        "project_changed"
+    );
 
     // Captured with the switch off, the authority carries no family publication and the guard
     // keeps comparing the Project row, whatever the marker says.

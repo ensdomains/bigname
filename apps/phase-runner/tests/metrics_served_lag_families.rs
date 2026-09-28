@@ -40,7 +40,10 @@ async fn seed_chain(pool: &sqlx::PgPool, chain: &str) -> Result<()> {
     .bind(chain)
     .execute(pool)
     .await?;
-    for (phase, status, block, target) in [("project", "completed", 90, 90), ("live", "running", 100, 104)] {
+    for (phase, status, block, target) in [
+        ("project", "completed", 90, 90),
+        ("live", "running", 100, 104),
+    ] {
         sqlx::query(
             "UPDATE chain_phase_state
              SET phase_status = $3, current_block_number = $4,
@@ -120,9 +123,20 @@ async fn served_lag_measures_the_family_marker_only_with_the_switch_on() -> Resu
         store.initialize_chain(chain).await?;
         seed_chain(pool, chain).await?;
     }
-    seed_marker(pool, "live-marker", "live", phase_runner::INTERPRETER_CONTENT_HASH).await?;
-    seed_marker(pool, "rebuilding", "bootstrap_pending", phase_runner::INTERPRETER_CONTENT_HASH)
-        .await?;
+    seed_marker(
+        pool,
+        "live-marker",
+        "live",
+        phase_runner::INTERPRETER_CONTENT_HASH,
+    )
+    .await?;
+    seed_marker(
+        pool,
+        "rebuilding",
+        "bootstrap_pending",
+        phase_runner::INTERPRETER_CONTENT_HASH,
+    )
+    .await?;
     seed_marker(pool, "older-hash", "live", "older-fingerprint").await?;
 
     // Switch off: the Project row at 90 for every chain, whatever its marker says.

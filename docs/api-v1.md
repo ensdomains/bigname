@@ -733,9 +733,12 @@ publication has the stored head's exact block hash. With the
 [publication switch](glossary.md#publication-switch) on, those last two checks
 read the [family marker](glossary.md#family-marker), which must also pass the
 rest of the serving fence: `live`, on readable lineage, and at most one block
-behind the stored head. Status is mixed-source until the flip: the projected
-block, its timestamp and the Project phase state still come from the project
-row.
+behind the stored head. With the switch on, the projected block and its
+timestamp (`indexed_block`, and the lags computed from them) are the marker's
+too, and while an Interpret or Project redo is in progress `lag_blocks` and
+`lag_seconds` are `null`, because the redo holds both the stored head and the
+marker still and their difference would read 0. The Project phase state and
+the redo markers still come from the project row.
 A generation mismatch or
 running without a completed publication is `degraded`. The schema-v2 project phase has no
 invalidation queue or dead-letter table, so the retained response fields map
@@ -860,7 +863,15 @@ populating the [owned key families](glossary.md#owned-key-family) it is
 interpreter content hash, sit on readable lineage, and trail the stored head by
 at most one block, as above. The generation the API captures before a read and
 compares after it is the marker's `sequence`, which every family block
-advances, in place of the project row's version. Clients only see it compared
+advances, in place of the project row's version. The
+[verified lookup](glossary.md#verified-lookup)'s database guard
+(`revalidate_resolution_lookup_state`, which the divergence writer also calls)
+fences on the same marker: the lookup captures the marker's `sequence` before
+the provider call and is refused as stale, writing no divergence row, if a
+family block or a family rebuild has moved the marker by the time it writes.
+The name diagnostics routes and `/v1/diagnostics/events` answer `409 stale`
+while the switch is on, since they still read served tables or join name rows
+without a fence. Clients only see the generation compared
 for equality, so nothing changes on the wire, except that turning the switch on
 or off makes publication-bound current-state continuation cursors (history
 cursors carry no publication token) issued before the change return

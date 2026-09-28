@@ -174,9 +174,12 @@ container listener at `0.0.0.0:9464`; `BIGNAME_API_METRICS_HOST` and
 [publication switch](glossary.md#publication-switch). The server Compose file
 forwards it from the host environment or `.env.server` to both the `api` and
 the `phase-runner` services; Compose forwards only the variables it lists, so
-without that entry the containers would never see it. Unset or empty means
-off, and only `1` or `true` turns it on. Both binaries read it once at startup,
-so set it the same for both. To change it, edit `.env.server` (or the host
+without that entry the containers would never see it. Unset or empty keeps
+the build's default (`SERVE_FROM_FAMILIES_DEFAULT` in
+`crates/storage/src/publication_source.rs`, off in this release), `1` or `true`
+turns it on, and `0` or `false` turns it off. Any other value stops both
+binaries at startup rather than silently keeping the default. Both binaries
+read it once at startup, so set it the same for both. To change it, edit `.env.server` (or the host
 environment) and recreate both containers:
 
 ```sh
@@ -823,7 +826,7 @@ or schema-wide write grants as a shortcut.
 `project_family_marker` is on the list for the
 [publication switch](glossary.md#publication-switch): with
 `BIGNAME_SERVE_FROM_FAMILIES` on, snapshot selection, the verified lookup and
-`/v1/status` read the [family marker](glossary.md#family-marker), and startup
+its guard, and `/v1/status` read the [family marker](glossary.md#family-marker), and startup
 refuses a role that cannot read it. With the switch off the API does not read
 it.
 

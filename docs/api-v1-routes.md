@@ -474,6 +474,10 @@ collection route carry neither header.
   `chain_heads` positions. `indexed_block` maps to the `project` phase's
   `current_block_number`. `lag_seconds` compares the timestamps of the exact
   latest-head and project-current hashes in `bigname_phase.chain_lineage`.
+  With the [publication switch](glossary.md#publication-switch) on,
+  `indexed_block` and both lags come from the
+  [family marker](glossary.md#family-marker) instead, and both lags are `null`
+  while an Interpret or Project redo is in progress.
   Missing head, project, or lineage rows preserve the existing nullable fields.
   If the phase schema has not been created yet, API startup uses an empty
   expected-chain set and this route returns the same empty, `degraded` status
@@ -3398,6 +3402,11 @@ Diagnostic snapshot rules:
   omits snapshot metadata and rejects `at` and historical `finality`.
 - `/v1/diagnostics/namespaces/{namespace}/manifests` omits `meta.as_of` and
   `meta.as_of_token`; it is control-plane metadata.
+- With the [publication switch](glossary.md#publication-switch) on, the four
+  name routes and `/v1/diagnostics/events` answer `409 stale` ("requested
+  snapshot is not available for diagnostic data") after validating their
+  input: they still read served tables, or join name rows without a snapshot
+  fence. The manifests route is unaffected.
 
 `GET /v1/diagnostics/names/{name}/execution` is removed. The persisted-explain
 capability it served is retired with the C2 cutover, not deferred to a later

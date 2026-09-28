@@ -78,7 +78,11 @@ const FAMILY_MARKER_JOIN: &str = r#"
 pub async fn load_phase_indexing_status(pool: &PgPool) -> Result<IndexingStatusRead> {
     let (project_generation_current, family_marker_join, projected) =
         if crate::publication_source::serve_from_families() {
-            (family_marker_generation_current(), FAMILY_MARKER_JOIN, "marker")
+            (
+                family_marker_generation_current(),
+                FAMILY_MARKER_JOIN,
+                "marker",
+            )
         } else {
             (PROJECT_ROW_GENERATION_CURRENT.to_owned(), "", "project")
         };

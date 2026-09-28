@@ -170,6 +170,13 @@ Two gauges measure how far the newest data the API could serve trails the
 chain. They have no dashboard panel or paging rule yet; those arrive with the
 ops dashboards tracked in Linear TYR-34.
 
+- With the [publication switch](../glossary.md#publication-switch) on, both
+  served-lag gauges keep their names but measure the
+  [family marker](../glossary.md#family-marker) instead of the Project row:
+  the publication is the marker's block while it is `live` with this binary's
+  interpreter content hash, and `-1` while a family rebuild is
+  `bootstrap_pending` or no marker exists. The switch is read once when the
+  runner starts. The paragraphs below describe the switch-off source.
 - `phase_runner_served_publication_block{chain}` is an absolute block height:
   the block of the Project publication (the latest committed
   [projection generation](../glossary.md#projection-generation)) that the API

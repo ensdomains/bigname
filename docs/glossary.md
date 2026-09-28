@@ -2549,14 +2549,17 @@ admission accept a chain's publication only while its marker is `live` (never
 `bootstrap_pending`, the state of a rebuild still populating the families),
 belongs to this build's interpreter, sits on readable lineage and trails the
 stored head by at most one block, and the marker's `sequence` is the served
-generation a same-request recheck compares. `/v1/status` is mixed-source until
-the flip: its generation check applies the same rule to the marker, while its
-projected block and Project phase state still come from the Project row.
+generation a same-request recheck compares, and the verified lookup's guard
+compares too. With the switch on `/v1/status` and the served-lag gauges take
+the projected block from the marker, while the Project phase state still comes
+from the Project row.
 
 ## Publication switch
 
 `BIGNAME_SERVE_FROM_FAMILIES`: a process-wide setting the API and the phase
-runner read once at startup (`1` or `true` on; anything else, or unset, off).
+runner read once at startup (`1` or `true` on, `0` or `false` off; unset keeps
+the build's default, off until [the flip](#the-flip); any other value refuses
+to start).
 Off, the serving fence reads the Project row of `chain_phase_state` as it
 always has. On, it reads the [family marker](#family-marker) instead, and
 collection expiry filters are evaluated at the published block's timestamp
@@ -2565,6 +2568,15 @@ It exists only while the served reads move to the
 [owned key families](#owned-key-family) ahead of the
 [per-block publication](#per-block-publication), and goes with the served
 batch.
+
+## The flip
+
+the change of the [publication switch](#publication-switch)'s default from off
+to on (TYR-36 step 7b-6), after which every serving fence, the verified
+lookup's guard, `/v1/status` and the served-lag gauges follow the
+[family marker](#family-marker) unless `BIGNAME_SERVE_FROM_FAMILIES` overrides
+it. It is a one-line change of the default; the served batch and the switch
+itself are removed later (step 7c).
 
 ## Composed name row
 
