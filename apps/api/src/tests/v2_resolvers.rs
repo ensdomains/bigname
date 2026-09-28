@@ -85,38 +85,7 @@ fn v2_resolver_overview_serves_no_counts_or_sections() {
 async fn v2_get_resolver_returns_overview_with_nested_bound_names() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_resolver_bound_names_fixture(&database).await?;
-    let updated = sqlx::query(
-        "UPDATE bigname_phase.name_current
-         SET declared_summary = declared_summary || $1::jsonb
-         WHERE raw_name = 'alpha.eth'",
-    )
-    .bind(json!({
-        "wrapper_state": "locked",
-        "wrapper_fuses": {
-            "fuses": 65_537,
-            "cannot_unwrap": true,
-            "cannot_burn_fuses": false,
-            "cannot_transfer": false,
-            "cannot_set_resolver": false,
-            "cannot_set_ttl": false,
-            "cannot_create_subdomain": false,
-            "cannot_approve": false,
-            "parent_cannot_control": true,
-            "is_dot_eth": false,
-            "can_extend_expiry": false
-        }
-    }))
-    .execute(&database.pool)
-    .await?;
-    assert_eq!(updated.rows_affected(), 1);
-    upsert_test_resolver_current_rows(
-        &database,
-        &[resolver_current_row_with_writer_alias(
-            "ethereum-mainnet",
-            V2_RESOLVER_ADDRESS,
-        )],
-    )
-    .await?;
+    seed_v2_resolver_overview(&database, true).await?;
 
     let first_page = v2_resolver_payload_for_database(
         &database,
@@ -156,25 +125,17 @@ async fn v2_get_resolver_returns_overview_with_nested_bound_names() -> Result<()
         bound_names["data"][0]["registrant"],
         json!("0x00000000000000000000000000000000000000a2")
     );
-    assert_eq!(bound_names["data"][0]["registered_at"], json!("2024-01-02T00:00:00Z"));
-    assert_eq!(bound_names["data"][0]["created_at"], json!("2023-01-02T00:00:00Z"));
-    assert_eq!(bound_names["data"][0]["expires_at"], json!("2027-01-02T00:00:00Z"));
-    assert_eq!(bound_names["data"][0]["wrapper_state"], json!("locked"));
     assert_eq!(
-        bound_names["data"][0]["wrapper_fuses"],
-        json!({
-            "fuses": 65_537,
-            "cannot_unwrap": true,
-            "cannot_burn_fuses": false,
-            "cannot_transfer": false,
-            "cannot_set_resolver": false,
-            "cannot_set_ttl": false,
-            "cannot_create_subdomain": false,
-            "cannot_approve": false,
-            "parent_cannot_control": true,
-            "is_dot_eth": false,
-            "can_extend_expiry": false
-        })
+        bound_names["data"][0]["registered_at"],
+        json!("2024-01-02T00:00:00+00:00")
+    );
+    assert_eq!(
+        bound_names["data"][0]["created_at"],
+        json!("2023-01-02T00:00:00+00:00")
+    );
+    assert_eq!(
+        bound_names["data"][0]["expires_at"],
+        json!("2027-01-02T00:00:00Z")
     );
     assert_eq!(
         bound_names["data"][0]["resolver"],
@@ -189,8 +150,14 @@ async fn v2_get_resolver_returns_overview_with_nested_bound_names() -> Result<()
         &format!("/v1/resolvers/1/{V2_RESOLVER_ADDRESS}?page_size=1&cursor={next_cursor}"),
     )
     .await?;
-    assert_eq!(second_page["data"]["bound_names"]["data"][0]["name"], json!("beta.eth"));
-    assert_eq!(second_page["data"]["bound_names"]["page"]["has_more"], json!(false));
+    assert_eq!(
+        second_page["data"]["bound_names"]["data"][0]["name"],
+        json!("beta.eth")
+    );
+    assert_eq!(
+        second_page["data"]["bound_names"]["page"]["has_more"],
+        json!(false)
+    );
 
     database.cleanup().await?;
     Ok(())
@@ -199,65 +166,13 @@ async fn v2_get_resolver_returns_overview_with_nested_bound_names() -> Result<()
 #[tokio::test]
 async fn v2_get_resolver_rejects_include_and_serves_no_sampled_sections() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    let mut resolver = resolver_current_row("ethereum-mainnet", V2_RESOLVER_ADDRESS);
-    let nodes = (0..100)
-        .map(|ordinal| {
-            json!({
-                "logical_name_id": format!("ens:sample-{ordinal:03}.eth"),
-                "normalized_name": format!("sample-{ordinal:03}.eth"),
-                "namehash": format!("namehash:sample-{ordinal:03}.eth"),
-            })
-        })
-        .collect::<Vec<_>>();
-    let aliases = nodes.clone();
-    let roles = (0..100)
-        .map(|ordinal| {
-            json!({
-                "subject": format!("0x{ordinal:040x}"),
-                "resource_count": 1,
-                "permission_row_count": 1,
-                "effective_powers": ["set_resolver"],
-                "resource_ids": [format!(
-                    "00000000-0000-0000-0000-{ordinal:012}"
-                )],
-            })
-        })
-        .collect::<Vec<_>>();
-    resolver.declared_summary["bindings"] = json!({
-        "status": "supported",
-        "count": 101,
-        "total_count": 101,
-        "sample_limit": 100,
-        "sample_count": 100,
-        "truncated": true,
-        "items": nodes,
-    });
-    resolver.declared_summary["aliases"] = json!({
-        "status": "supported",
-        "count": 101,
-        "total_count": 101,
-        "sample_limit": 100,
-        "sample_count": 100,
-        "truncated": true,
-        "items": aliases,
-    });
-    resolver.declared_summary["role_holders"] = json!({
-        "status": "supported",
-        "count": 101,
-        "total_count": 101,
-        "sample_limit": 100,
-        "sample_count": 100,
-        "truncated": true,
-        "items": roles,
-    });
-    database
-        .seed_snapshot_selector_chain_positions(&resolver.chain_positions)
-        .await?;
-    upsert_test_resolver_current_rows(&database, &[resolver]).await?;
+    seed_v2_resolver_overview(&database, true).await?;
 
-    let payload =
-        v2_resolver_payload_for_database(&database, &format!("/v1/resolvers/1/{V2_RESOLVER_ADDRESS}"))
-            .await?;
+    let payload = v2_resolver_payload_for_database(
+        &database,
+        &format!("/v1/resolvers/1/{V2_RESOLVER_ADDRESS}"),
+    )
+    .await?;
     for removed in ["counts", "nodes", "aliases", "links", "roles", "events"] {
         assert!(payload["data"].get(removed).is_none(), "{removed}");
     }
@@ -281,11 +196,7 @@ async fn v2_get_resolver_rejects_include_and_serves_no_sampled_sections() -> Res
 async fn v2_get_resolver_rejects_pre_unification_cursor_snapshot_binding() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_resolver_bound_names_fixture(&database).await?;
-    upsert_test_resolver_current_rows(
-        &database,
-        &[resolver_current_row("ethereum-mainnet", V2_RESOLVER_ADDRESS)],
-    )
-    .await?;
+    seed_v2_resolver_overview(&database, true).await?;
     let old_resolver_snapshot_token = v2_at_token(
         "ethereum-mainnet",
         "ethereum-mainnet",
@@ -306,7 +217,10 @@ async fn v2_get_resolver_rejects_pre_unification_cursor_snapshot_binding() -> Re
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let payload: ErrorResponse = read_json(response).await?;
     assert_eq!(payload.error.code, "invalid_input");
-    assert_eq!(payload.error.message, "cursor must be a valid pagination cursor");
+    assert_eq!(
+        payload.error.message,
+        "cursor must be a valid pagination cursor"
+    );
 
     database.cleanup().await?;
     Ok(())
@@ -319,11 +233,7 @@ async fn v2_get_resolver_returns_empty_bound_names_when_overview_exists() -> Res
     database
         .seed_snapshot_selector_chain_positions(&resolver.chain_positions)
         .await?;
-    upsert_test_resolver_current_rows(
-        &database,
-        &[resolver],
-    )
-    .await?;
+    seed_v2_resolver_overview(&database, true).await?;
 
     let payload = v2_resolver_payload_for_database(
         &database,
@@ -332,7 +242,10 @@ async fn v2_get_resolver_returns_empty_bound_names_when_overview_exists() -> Res
     .await?;
 
     assert_eq!(payload["data"]["bound_names"]["data"], json!([]));
-    assert_eq!(payload["data"]["bound_names"]["page"]["has_more"], json!(false));
+    assert_eq!(
+        payload["data"]["bound_names"]["page"]["has_more"],
+        json!(false)
+    );
     assert!(payload.get("page").is_none());
 
     database.cleanup().await?;
@@ -351,11 +264,7 @@ async fn v2_get_resolver_omits_names_without_projected_authority() -> Result<()>
     )
     .execute(&database.pool)
     .await?;
-    upsert_test_resolver_current_rows(
-        &database,
-        &[resolver_current_row("ethereum-mainnet", V2_RESOLVER_ADDRESS)],
-    )
-    .await?;
+    seed_v2_resolver_overview(&database, true).await?;
 
     let payload = v2_resolver_payload_for_database(
         &database,
@@ -381,11 +290,7 @@ async fn v2_get_resolver_omits_names_without_projected_authority() -> Result<()>
 async fn v2_get_resolver_bound_names_ignore_an_ancestor_rejected_mirror_inventory() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_resolver_bound_names_fixture(&database).await?;
-    upsert_test_resolver_current_rows(
-        &database,
-        &[resolver_current_row("ethereum-mainnet", V2_RESOLVER_ADDRESS)],
-    )
-    .await?;
+    seed_v2_resolver_overview(&database, true).await?;
     let uri = format!("/v1/resolvers/1/{V2_RESOLVER_ADDRESS}");
     let before = v2_resolver_payload_for_database(&database, &uri).await?;
 
@@ -395,7 +300,9 @@ async fn v2_get_resolver_bound_names_ignore_an_ancestor_rejected_mirror_inventor
         .expect("fixture seeds alpha.eth");
     let mut inventory = address_name_record_inventory_current_row(&spec);
     ancestor_rejected_mirror_inventory(V2_RESOLVER_ADDRESS, &mut inventory);
-    database.insert_record_inventory_current_row(inventory).await?;
+    database
+        .insert_record_inventory_current_row(inventory)
+        .await?;
     let after = v2_resolver_payload_for_database(&database, &uri).await?;
 
     assert!(
@@ -439,11 +346,7 @@ async fn v2_get_resolver_omits_a_lapsed_handed_off_name_from_bound_names() -> Re
     )
     .execute(&database.pool)
     .await?;
-    upsert_test_resolver_current_rows(
-        &database,
-        &[resolver_current_row("ethereum-mainnet", V2_RESOLVER_ADDRESS)],
-    )
-    .await?;
+    seed_v2_resolver_overview(&database, true).await?;
 
     let payload = v2_resolver_payload_for_database(
         &database,
@@ -483,11 +386,7 @@ async fn v2_get_resolver_lists_a_root_registry_pointer_without_projected_authori
     )
     .execute(&database.pool)
     .await?;
-    upsert_test_resolver_current_rows(
-        &database,
-        &[resolver_current_row("ethereum-mainnet", V2_RESOLVER_ADDRESS)],
-    )
-    .await?;
+    seed_v2_resolver_overview(&database, true).await?;
 
     let payload = v2_resolver_payload_for_database(
         &database,
@@ -522,11 +421,7 @@ async fn v2_get_resolver_omits_ownerless_reservations_from_bound_names() -> Resu
     )
     .execute(&database.pool)
     .await?;
-    upsert_test_resolver_current_rows(
-        &database,
-        &[resolver_current_row("ethereum-mainnet", V2_RESOLVER_ADDRESS)],
-    )
-    .await?;
+    seed_v2_resolver_overview(&database, true).await?;
 
     let payload = v2_resolver_payload_for_database(
         &database,
@@ -549,11 +444,7 @@ async fn v2_get_resolver_omits_ownerless_reservations_from_bound_names() -> Resu
 async fn v2_get_resolver_serves_phase_rows() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_resolver_bound_names_fixture(&database).await?;
-    upsert_test_resolver_current_rows(
-        &database,
-        &[resolver_current_row("ethereum-mainnet", V2_RESOLVER_ADDRESS)],
-    )
-    .await?;
+    seed_v2_resolver_overview(&database, true).await?;
     database
         .seed_snapshot_selector_chain_positions(&json!({
             "ethereum": {
@@ -564,6 +455,7 @@ async fn v2_get_resolver_serves_phase_rows() -> Result<()> {
             }
         }))
         .await?;
+    rebuild_fixture_families(&database.pool, "ethereum-mainnet", 204, "0xresolvercc").await?;
     let payload = v2_resolver_payload_for_database(
         &database,
         &format!("/v1/resolvers/1/{V2_RESOLVER_ADDRESS}"),
@@ -581,11 +473,7 @@ async fn v2_get_resolver_serves_phase_rows() -> Result<()> {
 async fn v2_get_resolver_rejects_bound_name_from_another_phase_snapshot() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_resolver_bound_names_fixture(&database).await?;
-    upsert_test_resolver_current_rows(
-        &database,
-        &[resolver_current_row("ethereum-mainnet", V2_RESOLVER_ADDRESS)],
-    )
-    .await?;
+    seed_v2_resolver_overview(&database, true).await?;
     sqlx::query(
         r#"
         UPDATE name_current
@@ -622,11 +510,7 @@ async fn v2_get_resolver_rejects_bound_name_from_another_phase_snapshot() -> Res
 async fn v2_get_resolver_excludes_ownerless_name_when_bindings_are_unsupported() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_resolver_bound_names_fixture(&database).await?;
-    upsert_test_resolver_current_rows(
-        &database,
-        &[resolver_current_row("ethereum-mainnet", V2_RESOLVER_ADDRESS)],
-    )
-    .await?;
+    seed_v2_resolver_overview(&database, true).await?;
     sqlx::query(
         r#"UPDATE bigname_phase.resolver_current
          SET declared_summary = jsonb_set(
@@ -662,7 +546,10 @@ async fn v2_get_resolver_excludes_ownerless_name_when_bindings_are_unsupported()
     )
     .fetch_one(&database.pool)
     .await?;
-    assert!(ownerless_shape, "fixture must model event-linked ownerless serving");
+    assert!(
+        ownerless_shape,
+        "fixture must model event-linked ownerless serving"
+    );
 
     let payload = v2_resolver_payload_for_database(
         &database,
@@ -681,11 +568,7 @@ async fn v2_get_resolver_excludes_ownerless_name_when_bindings_are_unsupported()
 async fn v2_get_resolver_excludes_unclassified_serving_resource_row() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_resolver_bound_names_fixture(&database).await?;
-    upsert_test_resolver_current_rows(
-        &database,
-        &[resolver_current_row("ethereum-mainnet", V2_RESOLVER_ADDRESS)],
-    )
-    .await?;
+    seed_v2_resolver_overview(&database, true).await?;
     let updated = sqlx::query(
         r#"UPDATE bigname_phase.name_current
          SET serving_resource_id = resource_id, surface_binding_id = NULL,
@@ -716,11 +599,7 @@ async fn v2_get_resolver_excludes_unclassified_serving_resource_row() -> Result<
 async fn v2_get_resolver_includes_ownerless_name_when_bindings_are_supported() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_resolver_bound_names_fixture(&database).await?;
-    upsert_test_resolver_current_rows(
-        &database,
-        &[resolver_current_row("ethereum-mainnet", V2_RESOLVER_ADDRESS)],
-    )
-    .await?;
+    seed_v2_resolver_overview(&database, true).await?;
     let updated = sqlx::query(
         r#"UPDATE bigname_phase.name_current
          SET serving_resource_id = resource_id, surface_binding_id = NULL,
@@ -747,7 +626,10 @@ async fn v2_get_resolver_includes_ownerless_name_when_bindings_are_supported() -
     )
     .fetch_one(&database.pool)
     .await?;
-    assert!(ownerless_shape, "fixture must model event-linked ownerless serving");
+    assert!(
+        ownerless_shape,
+        "fixture must model event-linked ownerless serving"
+    );
 
     let payload = v2_resolver_payload_for_database(
         &database,
@@ -765,46 +647,42 @@ async fn v2_get_resolver_includes_ownerless_name_when_bindings_are_supported() -
     database.cleanup().await
 }
 
-#[tokio::test]
-async fn v2_get_resolver_uses_dictionary_owner_and_registrant_precedence_for_bound_names(
-) -> Result<()> {
-    let database = TestDatabase::new_migrated().await?;
-    seed_v2_resolver_bound_names_fixture_with_chains(
-        &database,
-        &[
-            "base-mainnet",
-            "base-mainnet",
-            "base-mainnet",
-            "base-mainnet",
-            "base-mainnet",
-            "ethereum-mainnet",
-        ],
-    )
-    .await?;
-    upsert_test_resolver_current_rows(
-        &database,
-        &[resolver_current_row("ethereum-mainnet", V2_RESOLVER_ADDRESS)],
-    )
-    .await?;
-
-    let payload = v2_resolver_payload_for_database(
-        &database,
-        &format!("/v1/resolvers/1/{V2_RESOLVER_ADDRESS}?page_size=50"),
-    )
-    .await?;
-    let rows = payload["data"]["bound_names"]["data"]
-        .as_array()
-        .expect("bound_names data must be an array");
-    let row = rows
-        .iter()
-        .find(|row| row["name"] == json!("precedence.eth"))
-        .expect("precedence row must be present");
-
-    assert_eq!(row["owner"], json!(DIVERGENT_CONTROL_OWNER));
-    assert_eq!(row["registrant"], json!(DIVERGENT_REGISTRATION_REGISTRANT));
-    assert_eq!(row["registration_status"], json!("active"));
-
-    database.cleanup().await?;
+#[test]
+fn v2_bound_name_presentation_preserves_dictionary_precedence_and_wrapper_flags() -> Result<()> {
+    let flags = json!({
+        "fuses":65537, "cannot_unwrap":true, "cannot_burn_fuses":false,
+        "cannot_transfer":false, "cannot_set_resolver":false, "cannot_set_ttl":false,
+        "cannot_create_subdomain":false, "cannot_approve":false, "parent_cannot_control":true,
+        "is_dot_eth":false, "can_extend_expiry":false
+    });
+    // Deliberately divergent dictionary fields test the renderer's precedence, without claiming
+    // that a single protocol event produces all four independent owner/registrant values.
+    let row = address_name_name_current_row(
+        "ens:precedence.eth",
+        "precedence.eth",
+        "precedence.eth",
+        "node:precedence.eth",
+        Uuid::from_u128(0xe102),
+        Uuid::from_u128(0xe100),
+        Some(Uuid::from_u128(0xe101)),
+        203,
+        json!({"registration":{"status":"active", "authority_kind":"registrar", "registrant":DIVERGENT_REGISTRATION_REGISTRANT},
+            "control":{"registry_owner":DIVERGENT_REGISTRY_OWNER,"owner":DIVERGENT_CONTROL_OWNER,"registrant":DIVERGENT_CONTROL_REGISTRANT},
+            "wrapper_state":"locked", "wrapper_fuses":flags}),
+    );
+    // The bound-name adapter delegates to this same name-record renderer.
+    let record = serde_json::to_value(
+        crate::v2::build_name_record(&row, None, Some(1), crate::v2::Status::Ok)
+            .map_err(|error| anyhow::anyhow!("{error:?}"))?,
+    )?;
+    assert_eq!(record["owner"], json!(DIVERGENT_CONTROL_OWNER));
+    assert_eq!(
+        record["registrant"],
+        json!(DIVERGENT_REGISTRATION_REGISTRANT)
+    );
+    assert_eq!(record["registration_status"], json!("active"));
+    assert_eq!(record["wrapper_state"], json!("locked"));
+    assert_eq!(record["wrapper_fuses"], flags);
     Ok(())
 }
 
@@ -815,7 +693,16 @@ async fn v2_get_resolver_serves_an_unsupported_resolver_without_section_meta() -
     database
         .seed_snapshot_selector_chain_positions(&resolver.chain_positions)
         .await?;
-    upsert_test_resolver_current_rows(&database, &[resolver]).await?;
+    seed_v2_resolver_overview(&database, false).await?;
+
+    let produced = bigname_storage::families::topology::load_family_resolver_current(
+        &database.pool,
+        "ethereum-mainnet",
+        V2_RESOLVER_ADDRESS,
+    )
+    .await?
+    .context("observed resolver classification")?;
+    assert_eq!(produced.coverage["status"], json!("unsupported"));
 
     let payload = v2_resolver_payload_for_database(
         &database,
@@ -851,11 +738,7 @@ async fn v2_get_resolver_filters_bound_names_by_declared_resolver_chain() -> Res
         &["ethereum-mainnet", "base-mainnet"],
     )
     .await?;
-    upsert_test_resolver_current_rows(
-        &database,
-        &[resolver_current_row("ethereum-mainnet", V2_RESOLVER_ADDRESS)],
-    )
-    .await?;
+    seed_v2_resolver_overview(&database, true).await?;
 
     let payload = v2_resolver_payload_for_database(
         &database,
@@ -880,14 +763,7 @@ async fn v2_get_resolver_excludes_lower_height_orphaned_project_targets() -> Res
         &["ethereum-mainnet", "base-mainnet"],
     )
     .await?;
-    upsert_test_resolver_current_rows(
-        &database,
-        &[resolver_current_row(
-            "ethereum-mainnet",
-            V2_RESOLVER_ADDRESS,
-        )],
-    )
-    .await?;
+    seed_v2_resolver_overview(&database, true).await?;
     sqlx::raw_sql(
         r#"
         INSERT INTO bigname_phase.chain_lineage (
@@ -954,11 +830,7 @@ async fn v2_get_resolver_paginates_route_chain_rows_across_interleaved_chains() 
         &["ethereum-mainnet", "base-mainnet", "ethereum-mainnet"],
     )
     .await?;
-    upsert_test_resolver_current_rows(
-        &database,
-        &[resolver_current_row("ethereum-mainnet", V2_RESOLVER_ADDRESS)],
-    )
-    .await?;
+    seed_v2_resolver_overview(&database, true).await?;
 
     let first_page = v2_resolver_payload_for_database(
         &database,
@@ -1008,11 +880,7 @@ async fn v2_get_resolver_does_not_advertise_wrong_chain_lookahead_as_more() -> R
         &["ethereum-mainnet", "base-mainnet"],
     )
     .await?;
-    upsert_test_resolver_current_rows(
-        &database,
-        &[resolver_current_row("ethereum-mainnet", V2_RESOLVER_ADDRESS)],
-    )
-    .await?;
+    seed_v2_resolver_overview(&database, true).await?;
 
     let payload = v2_resolver_payload_for_database(
         &database,
@@ -1028,8 +896,14 @@ async fn v2_get_resolver_does_not_advertise_wrong_chain_lookahead_as_more() -> R
         ),
         vec!["alpha.eth"]
     );
-    assert_eq!(payload["data"]["bound_names"]["page"]["has_more"], json!(false));
-    assert_eq!(payload["data"]["bound_names"]["page"]["next_cursor"], Value::Null);
+    assert_eq!(
+        payload["data"]["bound_names"]["page"]["has_more"],
+        json!(false)
+    );
+    assert_eq!(
+        payload["data"]["bound_names"]["page"]["next_cursor"],
+        Value::Null
+    );
 
     database.cleanup().await?;
     Ok(())
@@ -1044,6 +918,7 @@ async fn v2_get_resolver_missing_overview_returns_not_found() -> Result<()> {
         )
         .await?;
 
+    rebuild_fixture_families(&database.pool, "ethereum-mainnet", 202, "0xresolverc8").await?;
     let response = v2_resolver_response_for_database(
         &database,
         &format!("/v1/resolvers/1/{V2_RESOLVER_ADDRESS}"),
@@ -1062,14 +937,7 @@ async fn v2_get_resolver_missing_overview_returns_not_found() -> Result<()> {
 async fn v2_get_resolver_missing_historical_projection_returns_stale() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_resolver_bound_names_fixture(&database).await?;
-    upsert_test_resolver_current_rows(
-        &database,
-        &[resolver_current_row(
-            "ethereum-mainnet",
-            V2_RESOLVER_ADDRESS,
-        )],
-    )
-    .await?;
+    seed_v2_resolver_overview(&database, true).await?;
     let initial = v2_resolver_payload_for_database(
         &database,
         &format!("/v1/resolvers/1/{V2_RESOLVER_ADDRESS}"),
@@ -1078,9 +946,24 @@ async fn v2_get_resolver_missing_historical_projection_returns_stale() -> Result
     let token = initial["meta"]["as_of_token"]
         .as_str()
         .expect("resolver response must include a snapshot token");
-    sqlx::query("DELETE FROM resolver_current WHERE chain_id = 'ethereum-mainnet'")
-        .execute(&database.lookup_pool)
-        .await?;
+    let token_input =
+        bigname_project::families::input_token(&database.pool, "ethereum-mainnet").await?;
+    let mut options = bigname_project::families::FamilyOptions::new(
+        bigname_content_hash::INTERPRETER_CONTENT_HASH,
+    );
+    options.max_blocks_per_run = 0;
+    bigname_project::families::apply(
+        &database.pool,
+        "ethereum-mainnet",
+        &bigname_project::Marker {
+            number: 203,
+            hash: "0xresolvercb".into(),
+        },
+        bigname_project::families::FamilyMode::Rebuild,
+        &token_input,
+        &options,
+    )
+    .await?;
 
     let response = v2_resolver_response_for_database(
         &database,
@@ -1124,10 +1007,7 @@ async fn v2_resolver_payload_for_database(database: &TestDatabase, uri: &str) ->
     Ok(payload)
 }
 
-async fn v2_resolver_response_for_database(
-    database: &TestDatabase,
-    uri: &str,
-) -> Result<Response> {
+async fn v2_resolver_response_for_database(database: &TestDatabase, uri: &str) -> Result<Response> {
     app_router(database.app_state())
         .oneshot(
             Request::builder()
@@ -1184,9 +1064,16 @@ async fn upsert_test_resolver_current_rows(
             "supported"
         };
         let unsupported_reason = (support_status == "unsupported")
-            .then(|| row.coverage["unsupported_reason"].as_str().map(str::to_owned))
+            .then(|| {
+                row.coverage["unsupported_reason"]
+                    .as_str()
+                    .map(str::to_owned)
+            })
             .flatten()
-            .or_else(|| (support_status == "unsupported").then(|| "resolver_overview_not_supported".to_owned()));
+            .or_else(|| {
+                (support_status == "unsupported")
+                    .then(|| "resolver_overview_not_supported".to_owned())
+            });
         sqlx::query(
             r#"
             INSERT INTO resolver_current (
@@ -1240,101 +1127,209 @@ async fn seed_v2_resolver_bound_names_fixture(database: &TestDatabase) -> Result
     .await
 }
 
+/// Names on each requested chain have actual identity, registry, registrar and resolver inputs.
+/// Base uses its Basenames namespace; chain filtering is never fabricated in a name summary.
 async fn seed_v2_resolver_bound_names_fixture_with_chains(
     database: &TestDatabase,
     resolver_chains: &[&str],
 ) -> Result<()> {
-    let resolver_snapshot = resolver_current_row("ethereum-mainnet", V2_RESOLVER_ADDRESS)
-        .chain_positions;
-    database
-        .seed_snapshot_selector_chain_positions(&resolver_snapshot)
-        .await?;
-    let mut specs = v2_address_name_specs();
-    specs.push(V2AddressNameSpec {
-        logical_name_id: "ens:precedence.eth",
-        name: "precedence.eth",
-        namehash: "node:precedence.eth",
-        resource_id: Uuid::from_u128(0xe100),
-        token_lineage_id: Uuid::from_u128(0xe101),
-        surface_binding_id: Uuid::from_u128(0xe102),
-        block_hash: "0xname70",
-        block_number: 106,
-        owner: DIVERGENT_REGISTRY_OWNER,
-        registrant: DIVERGENT_REGISTRATION_REGISTRANT,
-        registered_at: "2024-07-03T00:00:00Z",
-        created_at: "2023-07-03T00:00:00Z",
-        expires_at: "2027-07-03T00:00:00Z",
-        relations: &[],
-    });
-    seed_v2_address_name_storage(database, &specs).await?;
-
-    for (spec, resolver_chain) in specs.iter().zip(resolver_chains.iter().copied()) {
-        let control_owner = (spec.logical_name_id == "ens:precedence.eth")
-            .then_some(DIVERGENT_CONTROL_OWNER);
-        let control_registrant = if spec.logical_name_id == "ens:precedence.eth" {
-            DIVERGENT_CONTROL_REGISTRANT
+    let specs = v2_address_name_specs();
+    anyhow::ensure!(
+        resolver_chains.len() <= 3,
+        "use the explicit precedence unit fixture"
+    );
+    for chain in ["ethereum-mainnet", "base-mainnet"] {
+        let selected: Vec<_> = specs
+            .iter()
+            .zip(resolver_chains)
+            .filter(|(_, selected)| **selected == chain)
+            .collect();
+        if selected.is_empty() {
+            continue;
+        }
+        let (namespace, arm, registry, registrar, resolver_family) = if chain == "base-mainnet" {
+            (
+                "basenames",
+                "basenames",
+                "basenames_base_registry",
+                "basenames_base_registrar",
+                "basenames_base_resolver",
+            )
         } else {
-            spec.registrant
+            (
+                "ens",
+                "ens_v1",
+                "ens_v1_registry_l1",
+                "ens_v1_registrar_l1",
+                "ens_v1_resolver_l1",
+            )
         };
-
-        let row = address_name_name_current_row(
-            spec.logical_name_id,
-            spec.name,
-            spec.name,
-            spec.namehash,
-            spec.surface_binding_id,
-            spec.resource_id,
-            Some(spec.token_lineage_id),
-            spec.block_number,
-            json!({
-                    "registration": {
-                        "status": "active",
-                        "authority_kind": "registrar",
-                        "registrant": spec.registrant,
-                        "registered_at": spec.registered_at,
-                        "created_at": spec.created_at,
-                        "expiry": spec.expires_at
-                    },
-                    "control": {
-                        "registry_owner": spec.owner,
-                        "owner": control_owner,
-                        "registrant": control_registrant,
-                        "expiry": spec.expires_at
-                    },
-                    "resolver": {
-                        "chain_id": resolver_chain,
-                        "address": V2_RESOLVER_ADDRESS,
-                        "latest_event_kind": "ResolverChanged"
-                    }
-            }),
-        );
-        database.insert_name_current_row(row.clone()).await?;
-        seed_phase_identity_name(
-            database,
-            spec.name,
-            spec.name,
-            spec.resource_id,
-            spec.token_lineage_id,
-            spec.surface_binding_id,
-            spec.owner,
-            bigname_storage::AddressNameRelation::TokenHolder,
-            &row.declared_summary,
+        let mut times = selected
+            .iter()
+            .flat_map(|(spec, _)| [spec.created_at, spec.registered_at])
+            .collect::<Vec<_>>();
+        times.sort_unstable();
+        times.dedup();
+        for (index, time) in times.iter().enumerate() {
+            seed_schema_v2_lookup_head(
+                &database.pool,
+                chain,
+                100 + index as i64,
+                &format!("0xresolver-input-{index}"),
+                time,
+            )
+            .await?;
+        }
+        database.seed_snapshot_selector_chain_positions(&json!({"head":{
+            "chain_id":chain, "block_number":203, "block_hash":"0xresolvercb", "timestamp":"2026-04-17T00:00:23Z"
+        }})).await?;
+        declare_family_fixture_resolver(
+            &database.pool,
+            namespace,
+            chain,
+            resolver_family,
+            V2_RESOLVER_ADDRESS,
         )
         .await?;
-    }
-
-    database
-        .seed_snapshot_selector_chain_positions(&json!({
-            "ethereum": {
-                "chain_id": "ethereum-mainnet",
-                "block_number": 203,
-                "block_hash": "0xresolvercb",
-                "timestamp": "2026-04-17T00:00:23Z",
+        let mut events = Vec::new();
+        for (index, (spec, _)) in selected.iter().enumerate() {
+            let name = if namespace == "basenames" {
+                spec.name.replace(".eth", ".base.eth")
+            } else {
+                spec.name.to_owned()
+            };
+            let created = times
+                .iter()
+                .position(|time| *time == spec.created_at)
+                .unwrap();
+            let granted = times
+                .iter()
+                .position(|time| *time == spec.registered_at)
+                .unwrap();
+            let logical = seed_family_identity_inputs(
+                &database.pool,
+                namespace,
+                &name,
+                chain,
+                100 + created as i64,
+                &format!("0xresolver-input-{created}"),
+                spec.resource_id,
+                spec.token_lineage_id,
+                spec.surface_binding_id,
+                arm,
+            )
+            .await?;
+            let node = bigname_lookup::ens_namehash_hex(&name)?;
+            // All three names are actively registered at this fixture's April 2026 publication.
+            let expiry = if spec.name == "beta.eth" {
+                "2027-01-02T00:00:00Z"
+            } else {
+                spec.expires_at
+            };
+            for (block, hash, kind, family, after) in [
+                (
+                    100 + created as i64,
+                    format!("0xresolver-input-{created}"),
+                    "AuthorityTransferred",
+                    registry,
+                    json!({"source_event":"Transfer", "node":node, "owner":spec.owner}),
+                ),
+                (
+                    100 + granted as i64,
+                    format!("0xresolver-input-{granted}"),
+                    "RegistrationGranted",
+                    registrar,
+                    json!({"authority_kind":"registrar", "registrant":spec.registrant,
+                        "expiry":parse_rfc3339_utc_timestamp(expiry).map_err(|error| anyhow::anyhow!("{error}"))?.unix_timestamp()}),
+                ),
+                (
+                    203,
+                    "0xresolvercb".to_owned(),
+                    "ResolverChanged",
+                    registry,
+                    json!({"node":node, "resolver":V2_RESOLVER_ADDRESS}),
+                ),
+            ] {
+                let mut event = history_event(
+                    &format!("resolver-{chain}-{index}-{kind}"),
+                    Some(&logical),
+                    Some(spec.resource_id),
+                    Some(chain),
+                    Some(block),
+                    Some(&hash),
+                    Some("0xresolver-input"),
+                    Some(index as i64),
+                    CanonicalityState::Canonical,
+                );
+                event.namespace = namespace.into();
+                event.source_family = family.into();
+                event.event_kind = kind.into();
+                event.before_state = json!({});
+                event.after_state = after;
+                events.push(event);
             }
-        }))
-        .await?;
-
+        }
+        bigname_storage::insert_normalized_event_fixtures(&database.pool, &events).await?;
+        rebuild_fixture_families(&database.pool, chain, 203, "0xresolvercb").await?;
+    }
     Ok(())
+}
+
+/// Declare a resolver (or observe an undeclared one) and publish its actual classification.
+/// The registry root pointer provides a candidate even when there are no bound name surfaces.
+async fn seed_v2_resolver_overview(database: &TestDatabase, declared: bool) -> Result<()> {
+    let chain = "ethereum-mainnet";
+    let position: Option<(i64, String)> = sqlx::query_as(
+        "SELECT current_block_number, current_block_hash FROM chain_phase_state WHERE chain_id = $1 AND phase_name = 'project'"
+    ).bind(chain).fetch_optional(&database.pool).await?;
+    let (block, hash) = position.unwrap_or((202, "0xresolverc8".to_owned()));
+    let at: Option<OffsetDateTime> = sqlx::query_scalar(
+        "SELECT block_timestamp FROM chain_lineage WHERE chain_id = $1 AND block_hash = $2",
+    )
+    .bind(chain)
+    .bind(&hash)
+    .fetch_optional(&database.pool)
+    .await?;
+    let at = at
+        .map(|at| at.format(&time::format_description::well_known::Rfc3339))
+        .transpose()?
+        .unwrap_or_else(|| "2026-04-17T00:00:22Z".to_owned());
+    database
+        .seed_snapshot_selector_chain_positions(&json!({"ethereum":{
+            "chain_id":chain, "block_number":block, "block_hash":hash, "timestamp":at
+        }}))
+        .await?;
+    // An undeclared address under the same active family is classified as unsupported.
+    declare_family_fixture_resolver(
+        &database.pool,
+        "ens",
+        chain,
+        "ens_v1_resolver_l1",
+        if declared {
+            V2_RESOLVER_ADDRESS
+        } else {
+            "0x0000000000000000000000000000000000000bbb"
+        },
+    )
+    .await?;
+    let mut event = history_event(
+        "resolver-overview-root",
+        None,
+        None,
+        Some(chain),
+        Some(block),
+        Some(&hash),
+        Some("0xresolver-root"),
+        Some(999),
+        CanonicalityState::Canonical,
+    );
+    event.source_family = "ens_v1_registry_l1".into();
+    event.event_kind = "ResolverChanged".into();
+    event.before_state = json!({});
+    event.after_state =
+        json!({"node":format!("0x{}", "00".repeat(32)), "resolver":V2_RESOLVER_ADDRESS});
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[event]).await?;
+    rebuild_fixture_families(&database.pool, chain, block, &hash).await
 }
 
 fn v2_bound_names_cursor() -> bigname_storage::NameCurrentListCursor {

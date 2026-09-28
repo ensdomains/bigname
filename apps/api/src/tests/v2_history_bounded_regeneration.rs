@@ -370,17 +370,30 @@ async fn project_to(pool: &PgPool, target: i64) -> Result<()> {
 
 /// The holder's token-holder row: its cited event id, that event's kind, and its cited block.
 async fn holder_row(pool: &PgPool) -> Result<Option<(i64, String, i64)>> {
-    Ok(sqlx::query_as(
-        "SELECT event.normalized_event_id, event.event_kind,
-                (anc.chain_positions ->> 'block_number')::bigint
-         FROM bigname_phase.address_names_current anc
-         JOIN normalized_events event
-           ON event.normalized_event_id = (anc.provenance ->> 'normalized_event_id')::bigint
-         WHERE anc.address = $1 AND anc.relation = 'token_holder'",
+    let rows = bigname_storage::load_address_names_current(
+        pool,
+        HOLDER,
+        None,
+        Some(bigname_storage::AddressNameRelation::TokenHolder),
     )
-    .bind(HOLDER)
-    .fetch_optional(pool)
-    .await?)
+    .await?;
+    let Some(row) = rows.first() else {
+        return Ok(None);
+    };
+    assert_eq!(rows.len(), 1, "one current token-holder relation");
+    let event_id = row.provenance["normalized_event_id"]
+        .as_i64()
+        .context("family holder evidence")?;
+    let kind: String = sqlx::query_scalar(
+        "SELECT event_kind FROM normalized_events WHERE normalized_event_id = $1",
+    )
+    .bind(event_id)
+    .fetch_one(pool)
+    .await?;
+    let block = row.chain_positions["block_number"]
+        .as_i64()
+        .context("holder relation position")?;
+    Ok(Some((event_id, kind, block)))
 }
 
 async fn owner_history_at(pool: &PgPool, block: i64) -> Result<Vec<String>> {
