@@ -735,10 +735,10 @@ read the [family marker](glossary.md#family-marker), which must also pass the
 rest of the serving fence: `live`, on readable lineage, and at most one block
 behind the stored head. With the switch on, the projected block and its
 timestamp (`indexed_block`, and the lags computed from them) are the marker's
-too, and while an Interpret or Project redo is in progress `lag_blocks` and
-`lag_seconds` are `null`, because the redo holds both the stored head and the
-marker still and their difference would read 0. The Project phase state and
-the redo markers still come from the project row.
+too. The Project phase state and the redo markers still come from the project
+row. With either setting, while an Interpret or Project redo is in progress
+`lag_blocks` and `lag_seconds` are `null`, because the redo holds both the
+stored head and the indexed position still and their difference would read 0.
 A generation mismatch or
 running without a completed publication is `degraded`. The schema-v2 project phase has no
 invalidation queue or dead-letter table, so the retained response fields map
@@ -869,9 +869,7 @@ advances, in place of the project row's version. The
 fences on the same marker: the lookup captures the marker's `sequence` before
 the provider call and is refused as stale, writing no divergence row, if a
 family block or a family rebuild has moved the marker by the time it writes.
-The name diagnostics routes and `/v1/diagnostics/events` answer `409 stale`
-while the switch is on, since they still read served tables or join name rows
-without a fence. Clients only see the generation compared
+Clients only see the generation compared
 for equality, so nothing changes on the wire, except that turning the switch on
 or off makes publication-bound current-state continuation cursors (history
 cursors carry no publication token) issued before the change return
@@ -904,8 +902,8 @@ whose per-row versions the guard also compares; they move to the families
 before the served batch stops.
 
 With the switch on, these routes read [composed name rows](glossary.md#composed-name-row)
-instead of `name_current` rows. Name detail (`GET /v1/names/{name}`),
-`GET /v1/search`, the expiring listing of `GET /v1/names` and a
+instead of `name_current` rows. Name detail (`GET /v1/names/{name}` and the name
+diagnostics), `GET /v1/search`, the expiring listing of `GET /v1/names` and a
 resolver's bound names (`GET /v1/resolvers/{chain_id}/{address}`) serve them
 whole. The following routes keep their own pages on the served tables until a
 later step 7b slice moves them, and take only the name rows they join from
@@ -914,8 +912,9 @@ registration), `GET /v1/registries/{chain_id}/{address}/labels` (each child's
 registration), `GET /v1/names/{name}/history` (whether the name exists),
 `GET /v1/permissions` and `GET /v1/resolvers/{chain_id}/{address}/roles` (the
 name of each registration), `GET /v1/addresses/{address}/names` (each name's
-registration, `relation=resolves_to` included), `GET /v1/events` and
-`GET /v1/addresses/{address}/history` (each event's name), and the primary-name claim gate of
+registration, `relation=resolves_to` included), `GET /v1/events`,
+`GET /v1/diagnostics/events` and `GET /v1/addresses/{address}/history` (each
+event's name), and the primary-name claim gate of
 `GET /v1/addresses/{address}/primary-name`. Their bodies are meant to be
 identical to the served ones. Each composed read sees one committed family
 block, so a row never mixes two blocks. A composed row describes the publication

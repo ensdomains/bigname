@@ -98,13 +98,19 @@ async fn v2_name_detail_is_the_same_with_the_switch_off_and_on() -> Result<()> {
         "/v1/names/beta.eth",
         "/v1/names/alpha.eth?include=counts",
         "/v1/names/missing.eth",
+        // The diagnostics name and authority reads take the same row (ruling J11).
+        "/v1/diagnostics/names/alpha.eth/coverage",
+        "/v1/diagnostics/names/alpha.eth/binding",
+        "/v1/diagnostics/names/alpha.eth/authority",
     ] {
         assert_switch_differential(&database, uri).await?;
     }
-    // The name diagnostics routes answer the diagnostics stale 409 with the switch on
-    // (v2_flip_readiness.rs), so they are not compared here.
-    assert_switch_on_ignores_served_tables(&database, "/v1/names/alpha.eth", &["name_current"])
-        .await?;
+    for uri in [
+        "/v1/names/alpha.eth",
+        "/v1/diagnostics/names/alpha.eth/authority",
+    ] {
+        assert_switch_on_ignores_served_tables(&database, uri, &["name_current"]).await?;
+    }
     database.cleanup().await
 }
 
@@ -550,8 +556,7 @@ async fn v2_routes_with_composed_name_rows_are_the_same_with_the_switch_off_and_
         (format!("/v1/registries/1/{SWITCH_REGISTRY}/labels"), "/data"),
         ("/v1/events?name=alpha.eth".to_owned(), "/data"),
         (format!("/v1/events?address={SWITCH_ALICE}"), "/data"),
-        // `/v1/diagnostics/events` answers the diagnostics stale 409 with the switch on
-        // (v2_flip_readiness.rs).
+        ("/v1/diagnostics/events?name=alpha.eth".to_owned(), "/data"),
         (format!("/v1/addresses/{SWITCH_ALICE}/history"), "/data"),
     ] {
         let (status, body) = assert_switch_differential(&database, &uri).await?;

@@ -1,7 +1,6 @@
 // What the flip (TYR-36 step 7b-6) changes outside the moved routes, under both states of the
 // publication switch: `/v1/status` reads the family marker's block as the indexed block with the
-// switch on, and the name diagnostics routes answer the stale 409 while they still read served
-// tables.
+// switch on, and reports no lag during a redo in either state.
 
 /// A head at 120 with the Project row published at the head and a live family marker one block
 /// behind at 119: the two publications differ, so the tests see which one status reads.
@@ -135,8 +134,7 @@ async fn v2_status_has_no_indexed_block_without_a_family_marker_with_the_switch_
     database.cleanup().await
 }
 
-/// A live family marker on the Project row's publication, so the switch-on fence admits the read
-/// and only the diagnostics gate can refuse it.
+/// A live family marker on the Project row's publication, so the switch-on fence admits the read.
 async fn seed_live_marker_on_the_project_publication(database: &TestDatabase) -> Result<()> {
     sqlx::query(
         "INSERT INTO bigname_phase.project_family_marker
@@ -153,73 +151,6 @@ async fn seed_live_marker_on_the_project_publication(database: &TestDatabase) ->
     )
     .execute(&database.lookup_pool)
     .await?;
-    Ok(())
-}
-
-/// Ruling J11 as the flip brief states it: the name diagnostics routes still read served tables
-/// (inventory, resolver and binding rows), so with the switch on they answer the stale 409 every
-/// fence gives for diagnostic data rather than serve rows the served batch no longer writes.
-/// With the switch off they serve as before.
-#[tokio::test]
-async fn v2_name_diagnostics_answer_stale_with_the_switch_on() -> Result<()> {
-    let database = TestDatabase::new_with_schemas(false, true).await?;
-    seed_v2_diagnostics_name_fixture(&database, "ens:alice.eth", 21_000_003).await?;
-    seed_live_marker_on_the_project_publication(&database).await?;
-
-    for suffix in ["coverage", "binding", "authority", "records"] {
-        let uri = format!("/v1/diagnostics/names/Alice.eth/{suffix}");
-        let payload = bigname_storage::publication_source::with_serve_from_families(
-            true,
-            request_v2_diagnostics_json(&database, &uri, StatusCode::CONFLICT),
-        )
-        .await?;
-        assert_eq!(payload["error"]["code"], json!("stale"), "{uri}");
-        assert_eq!(
-            payload["error"]["message"],
-            json!("requested snapshot is not available for diagnostic data"),
-            "{uri}"
-        );
-        assert!(payload.get("data").is_none(), "{uri}");
-    }
-    for suffix in ["coverage", "binding", "authority"] {
-        let uri = format!("/v1/diagnostics/names/Alice.eth/{suffix}");
-        bigname_storage::publication_source::with_serve_from_families(
-            false,
-            request_v2_diagnostics_json(&database, &uri, StatusCode::OK),
-        )
-        .await?;
-    }
-
-    database.cleanup().await?;
-    Ok(())
-}
-
-/// The records diagnostic with the switch off still executes its comparison; the gate above is
-/// the only switch-on difference.
-#[tokio::test]
-async fn v2_name_records_diagnostic_serves_with_the_switch_off() -> Result<()> {
-    let database = TestDatabase::new_with_schemas(false, true).await?;
-    seed_v2_alice_name_records_fixture(&database, |_, _, _| {}).await?;
-    seed_live_marker_on_the_project_publication(&database).await?;
-    bigname_storage::publication_source::with_serve_from_families(
-        false,
-        request_v2_diagnostics_json(
-            &database,
-            "/v1/diagnostics/names/Alice.eth/records",
-            StatusCode::OK,
-        ),
-    )
-    .await?;
-    bigname_storage::publication_source::with_serve_from_families(
-        true,
-        request_v2_diagnostics_json(
-            &database,
-            "/v1/diagnostics/names/Alice.eth/records",
-            StatusCode::CONFLICT,
-        ),
-    )
-    .await?;
-    database.cleanup().await?;
     Ok(())
 }
 
@@ -334,12 +265,11 @@ async fn v2_verified_records_answer_stale_during_a_family_rebuild_only_with_the_
     database.cleanup().await
 }
 
-/// Flip prerequisite 6: during an Interpret redo the stored head and the family marker both
-/// stall, so their difference reads 0 while the chain moves on. With the switch on, status
-/// reports the lags as unknown (null) for the redo's duration instead; with the switch off the
-/// Project row's lag is unchanged.
+/// Flip prerequisite 6: during an Interpret redo the stored head and the indexed position both
+/// stall, so their difference reads 0 while the chain moves on. Status reports the lags as
+/// unknown (null) for the redo's duration instead, with the switch on and off.
 #[tokio::test]
-async fn v2_status_lag_is_unknown_during_an_interpret_redo_with_the_switch_on() -> Result<()> {
+async fn v2_status_lag_is_unknown_during_an_interpret_redo_in_both_switch_states() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     let state = seed_flip_status_fixture(&database).await?;
     sqlx::query(
@@ -375,49 +305,10 @@ async fn v2_status_lag_is_unknown_during_an_interpret_redo_with_the_switch_on() 
     assert_eq!(families["status"], json!("degraded"));
 
     let served = flip_status_chain(&state, false).await?;
-    assert_eq!(served["lag_blocks"], json!(0));
+    assert_eq!(served["indexed_block"], json!(120));
+    assert_eq!(served["lag_blocks"], Value::Null);
+    assert_eq!(served["lag_seconds"], Value::Null);
     assert_eq!(served["status"], json!("degraded"));
 
-    database.cleanup().await
-}
-
-/// Flip prerequisite 8: `/v1/diagnostics/events` joins name rows without a snapshot fence, so
-/// with the switch on it answers the diagnostics stale 409 like the name diagnostics; with the
-/// switch off it serves as before.
-#[tokio::test]
-async fn v2_diagnostic_events_answer_stale_with_the_switch_on() -> Result<()> {
-    let database = TestDatabase::new_migrated().await?;
-    seed_v2_diag_events_fixture(&database).await?;
-    // A live marker, so the composed name rows the route joins are servable and only the gate
-    // can refuse.
-    sqlx::query(
-        "INSERT INTO bigname_phase.project_family_marker (
-             chain_id, current_block_number, current_block_hash, block_timestamp,
-             input_content_hash, sequence, state
-         ) VALUES ('ethereum-mainnet', 1, '0xdiag-marker', now(), $1, 1, 'live')",
-    )
-    .bind(bigname_content_hash::INTERPRETER_CONTENT_HASH)
-    .execute(&database.lookup_pool)
-    .await?;
-    let uri = "/v1/diagnostics/events?name=Diag.eth&page_size=10";
-
-    let response = bigname_storage::publication_source::with_serve_from_families(
-        true,
-        v2_diag_events_response_for_database(&database, uri),
-    )
-    .await?;
-    assert_eq!(response.status(), StatusCode::CONFLICT);
-    let payload: Value = read_json(response).await?;
-    assert_eq!(payload["error"]["code"], json!("stale"));
-    assert_eq!(
-        payload["error"]["message"],
-        json!("requested snapshot is not available for diagnostic data")
-    );
-
-    bigname_storage::publication_source::with_serve_from_families(
-        false,
-        v2_diag_events_payload_for_database(&database, uri),
-    )
-    .await?;
     database.cleanup().await
 }

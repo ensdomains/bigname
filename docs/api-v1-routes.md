@@ -476,8 +476,9 @@ collection route carry neither header.
   latest-head and project-current hashes in `bigname_phase.chain_lineage`.
   With the [publication switch](glossary.md#publication-switch) on,
   `indexed_block` and both lags come from the
-  [family marker](glossary.md#family-marker) instead, and both lags are `null`
-  while an Interpret or Project redo is in progress.
+  [family marker](glossary.md#family-marker) instead. With either setting,
+  both lags are `null` while an Interpret or Project redo is in progress,
+  since the redo holds the head and the indexed position still.
   Missing head, project, or lineage rows preserve the existing nullable fields.
   If the phase schema has not been created yet, API startup uses an empty
   expected-chain set and this route returns the same empty, `degraded` status
@@ -520,7 +521,8 @@ collection route carry neither header.
   threshold defaults to 60 seconds so a long database statement between
   five-second runner heartbeat opportunities.
 - `lag_blocks` and `lag_seconds` are independently nonnegative. Each field
-  clamps its own canonical-versus-projected difference at `0`.
+  clamps its own canonical-versus-projected difference at `0`, and both are
+  `null` during an Interpret or Project redo.
 - Pagination behavior: none.
 - Status semantics: route-local ops `status` is `ready`, `degraded`, or
   `stale`. This is the only non-result `status` enum in `v2`. `project`
@@ -3402,11 +3404,6 @@ Diagnostic snapshot rules:
   omits snapshot metadata and rejects `at` and historical `finality`.
 - `/v1/diagnostics/namespaces/{namespace}/manifests` omits `meta.as_of` and
   `meta.as_of_token`; it is control-plane metadata.
-- With the [publication switch](glossary.md#publication-switch) on, the four
-  name routes and `/v1/diagnostics/events` answer `409 stale` ("requested
-  snapshot is not available for diagnostic data") after validating their
-  input: they still read served tables, or join name rows without a snapshot
-  fence. The manifests route is unaffected.
 
 `GET /v1/diagnostics/names/{name}/execution` is removed. The persisted-explain
 capability it served is retired with the C2 cutover, not deferred to a later

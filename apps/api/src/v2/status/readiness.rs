@@ -12,15 +12,13 @@ pub(super) fn meets_floor(level: Option<&str>, floor: &str) -> bool {
         .is_some_and(|(floor_rank, level_rank)| level_rank >= floor_rank)
 }
 /// The block and time lag of the indexed position behind the stored head, each clamped at 0.
-/// With the publication switch on, an Interpret or Project redo holds both the stored head and
-/// the family marker still, so their difference would read 0 while the chain moves on: both
-/// lags are unknown for the redo's duration (the redo already makes the chain `degraded`).
+/// An Interpret or Project redo holds both the stored head and the indexed position still, so
+/// their difference would read 0 while the chain moves on: both lags are unknown for the redo's
+/// duration, with either publication source (the redo already makes the chain `degraded`).
 pub(super) fn projection_lags(
     row: &bigname_storage::IndexingStatusChainRow,
 ) -> (Option<i64>, Option<i64>) {
-    if bigname_storage::publication_source::serve_from_families()
-        && (row.interpret_redo_in_progress || row.project_redo_in_progress)
-    {
+    if row.interpret_redo_in_progress || row.project_redo_in_progress {
         return (None, None);
     }
     let blocks = row
