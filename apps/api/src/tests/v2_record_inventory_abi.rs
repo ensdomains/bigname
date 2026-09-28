@@ -203,7 +203,7 @@ async fn seed_abi_public_resolver_v2_name(database: &TestDatabase, name: &str) -
         Some(number),
         Some(&hash),
         Some("0xabi-v2"),
-        Some(2),
+        Some(4),
         CanonicalityState::Canonical,
     );
     write.event_kind = "RecordChanged".into();
@@ -220,7 +220,10 @@ async fn seed_abi_public_resolver_v2_name(database: &TestDatabase, name: &str) -
         registry_event("grant", "RegistrationGranted", 0,
             json!({"authority_kind":"ens_v2_registry", "status":"registered",
                 "registrant":ABI_RESOLVER, "expiry":1_900_000_000_i64})),
-        registry_event("pointer", "ResolverChanged", 1, json!({"node":node, "resolver":RESOLVER_V2})),
+        registry_event("holder", "TokenControlTransferred", 1,
+            json!({"source_event":"Transfer", "from":"0x0000000000000000000000000000000000000000",
+                "to":ABI_RESOLVER})),
+        registry_event("pointer", "ResolverChanged", 3, json!({"node":node, "resolver":RESOLVER_V2})),
         write,
     ];
     bigname_storage::insert_normalized_event_fixtures(&database.pool, &events).await?;

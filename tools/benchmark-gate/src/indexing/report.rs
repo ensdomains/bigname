@@ -16,7 +16,7 @@ pub(super) fn scale_failure_report(
     postflight_database_instance_identity: String,
 ) -> IndexingReport {
     let mut failures = vec![format!(
-        "name_current has {name_current_rows} rows; release profile requires {} before projection benchmarking",
+        "family readers compose {name_current_rows} supported names; release profile requires {} before projection benchmarking",
         budgets.project_min_name_current_rows
     )];
     failures.extend(database_instance_identity_failures(

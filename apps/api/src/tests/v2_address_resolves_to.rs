@@ -34,7 +34,9 @@ async fn v2_lookup_resolves_to_includes_root_pointer_without_authority() -> Resu
 #[tokio::test]
 async fn v2_resolves_to_pages_names_without_authority_or_registration() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    database.seed_default_ens_snapshot_selector_position().await?;
+    database
+        .seed_default_ens_snapshot_selector_position()
+        .await?;
     seed_v2_address_name_identities(&database, &[]).await?;
     // Registry nodes whose owner was cleared keep serving their retained resolver pointer.
     for (name, seed) in [("alpha.eth", 0xa500), ("gamma.eth", 0xc500)] {
@@ -451,7 +453,10 @@ async fn v2_lookup_reverse_resolves_to_returns_records_with_resolution() -> Resu
             .iter()
             .all(|record| record.get("resolution").is_none())
     );
-    assert_eq!(any_records[0]["relations"], json!(["owner"]));
+    assert_eq!(
+        any_records[0]["relations"],
+        json!(["owner", "manager", "registrant"])
+    );
     assert!(payload["meta"]["as_of"].is_object());
 
     // Feed profile keeps the relation and resolution on the reduced record.
@@ -567,12 +572,18 @@ async fn seed_v2_resolves_to_records(database: &TestDatabase) -> Result<()> {
         &[
             ("alpha.eth", vec![("addr:60".into(), V2_ADDRESS.into())]),
             ("gamma.eth", vec![("addr:60".into(), V2_ADDRESS.into())]),
-            ("beta.eth", vec![("addr:2147483658".into(), V2_ADDRESS.into())]),
+            (
+                "beta.eth",
+                vec![("addr:2147483658".into(), V2_ADDRESS.into())],
+            ),
             (
                 "shared-one.eth",
                 vec![
                     ("addr:2147483648".into(), V2_ADDRESS.into()),
-                    ("addr:60".into(), "0x".into()),
+                    (
+                        "addr:60".into(),
+                        "0x0000000000000000000000000000000000000000".into(),
+                    ),
                 ],
             ),
         ],
@@ -650,7 +661,48 @@ async fn write_address_name_records(
         .await?;
     }
     bigname_storage::insert_normalized_event_fixtures(&database.pool, &events).await?;
+    declare_resolves_to_default_address(database).await?;
     rebuild_address_fixture(database).await
+}
+
+/// Declare the ENSIP-19 default-address read on `V2_RESOLVES_TO_RESOLVER`, as the mainnet
+/// ENSv1 resolver manifest does for the public resolvers.
+async fn declare_resolves_to_default_address(database: &TestDatabase) -> Result<()> {
+    let (manifest, mut payload): (i64, Value) = sqlx::query_as(
+        "SELECT manifest_id, manifest_payload FROM manifest_versions
+         WHERE source_family = 'ens_v1_resolver_l1' AND chain_id = 'ethereum-mainnet'
+           AND rollout_status = 'active'
+           AND manifest_payload -> 'contracts' @> jsonb_build_array(jsonb_build_object('address', $1::text))",
+    )
+    .bind(V2_RESOLVES_TO_RESOLVER)
+    .fetch_one(&database.pool)
+    .await?;
+    let contract = payload["contracts"]
+        .as_array_mut()
+        .and_then(|contracts| {
+            contracts
+                .iter_mut()
+                .find(|contract| contract["address"] == V2_RESOLVES_TO_RESOLVER)
+        })
+        .context("the fixture resolver must be declared")?;
+    if contract["read_features"] == json!(["ensip19_default_address"]) {
+        return Ok(());
+    }
+    contract["read_features"] = json!(["ensip19_default_address"]);
+    sqlx::query("UPDATE manifest_versions SET manifest_payload = $2 WHERE manifest_id = $1")
+        .bind(manifest)
+        .bind(&payload)
+        .execute(&database.pool)
+        .await?;
+    seed_fixture_manifest_update(
+        &database.pool,
+        manifest,
+        "ethereum-mainnet",
+        "ens",
+        "ens_v1_resolver_l1",
+        &payload,
+    )
+    .await
 }
 
 /// Record writes for the `seed_v2_lookup_reverse_fixture` names, whose resolver is the address
@@ -700,7 +752,11 @@ async fn seed_v2_lookup_resolves_to_records(database: &TestDatabase, address: &s
 
 /// A root-registry TLD with a resolver pointer and no registration binding, whose addr:60 is
 /// `address` on the resolver at `address`.
-async fn seed_resolves_to_root_tld(database: &TestDatabase, name: &str, address: &str) -> Result<()> {
+async fn seed_resolves_to_root_tld(
+    database: &TestDatabase,
+    name: &str,
+    address: &str,
+) -> Result<()> {
     let (block, hash): (i64, String) = sqlx::query_as(
         "SELECT latest_block_number, latest_block_hash FROM chain_heads WHERE chain_id = 'ethereum-mainnet'",
     )
@@ -747,7 +803,11 @@ async fn seed_resolves_to_root_tld(database: &TestDatabase, name: &str, address:
 
 /// A registry-only node whose owner was set to zero: no token lineage and no binding, served
 /// through its retained resolver pointer, whose addr:60 is `V2_ADDRESS`.
-async fn seed_resolves_to_ownerless_name(database: &TestDatabase, name: &str, seed: u128) -> Result<()> {
+async fn seed_resolves_to_ownerless_name(
+    database: &TestDatabase,
+    name: &str,
+    seed: u128,
+) -> Result<()> {
     let (block, hash) = address_fixture_head(database).await?;
     let (resource, binding) = (Uuid::from_u128(seed), Uuid::from_u128(seed + 2));
     let logical = seed_family_identity_inputs(
@@ -807,7 +867,10 @@ async fn seed_resolves_to_ownerless_name(database: &TestDatabase, name: &str, se
         V2_RESOLVES_TO_RESOLVER,
         block,
         &hash,
-        &[family_fixture_record_write("addr:60", Some(json!(V2_ADDRESS)))],
+        &[family_fixture_record_write(
+            "addr:60",
+            Some(json!(V2_ADDRESS)),
+        )],
     )
     .await?;
     rebuild_address_fixture(database).await

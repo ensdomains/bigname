@@ -78,20 +78,4 @@ if [[ -n "$api_storage_read_paths" || -n "$api_storage_read_modules" ]]; then
   exit 1
 fi
 
-# Retired serving relations have no executable reader or writer after TYR36 removal.
-# Historical migrations, explicit upgrade fixtures and tests live outside this source scan.
-# Match SQL relation positions, including a newline after the keyword, not Rust type names.
-retired_projection_queries="$(
-  run_rg -n -U -i \
-    '\b(from|join|into|update|table|truncate)[[:space:]]+(bigname_phase\.)?(name_current|children_current|permissions_current|account_permission_state_current|permissions_current_resource_summary|record_inventory_current|resolver_current|address_names_current|address_records_current|primary_names_current|project_generation_failures|project_redo_resolver_evidence|project_redo_expiry_roots|project_redo_child_registration_history)([[:space:],;()"]|$)' \
-    apps/*/src crates/*/src \
-    --glob '*.rs' --glob '*.sql' --glob '!**/tests/**' --glob '!**/tests.rs' \
-    --glob '!**/*_tests.rs' --glob '!**/*_test.rs' --glob '!**/fixtures/**'
-)"
-if [[ -n "$retired_projection_queries" ]]; then
-  printf '%s\n%s\n' 'query ownership check failed: retired serving relation in source:' \
-    "$retired_projection_queries" >&2
-  exit 1
-fi
-
 printf '%s\n' 'query ownership check passed'

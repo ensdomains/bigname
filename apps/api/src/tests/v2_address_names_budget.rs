@@ -87,8 +87,15 @@ async fn address_budget_resolver_manifest(database: &TestDatabase) -> Result<i64
     .bind(&payload)
     .fetch_one(&database.pool)
     .await?;
-    seed_fixture_manifest_update(&database.pool, manifest, chain, "ens", "ens_v2_resolver_l1", &payload)
-        .await?;
+    seed_fixture_manifest_update(
+        &database.pool,
+        manifest,
+        chain,
+        "ens",
+        "ens_v2_resolver_l1",
+        &payload,
+    )
+    .await?;
     let (block, hash) = address_fixture_head(database).await?;
     let mut upgrade = address_fixture_event(
         "address-budget-resolver-upgrade",
@@ -120,7 +127,11 @@ fn address_budget_role_event(
 ) -> NormalizedEvent {
     let ordinal = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed) as i64 + 100;
     let node = format!("0x{:064x}", resource.as_u128());
-    let powers = if granted { json!(["set_addr"]) } else { json!([]) };
+    let powers = if granted {
+        json!(["set_addr"])
+    } else {
+        json!([])
+    };
     let source = json!({"kind":"raw_log", "source_event":"EACRolesChanged",
         "upstream_resource":node, "root_resource":false, "changed_powers":["set_addr"]});
     let mut event = address_fixture_event(
@@ -167,7 +178,10 @@ async fn seed_address_name_budget_grants(
         .filter(|row| row.subject.starts_with(&address_budget_subject(0)[..35]))
         .count();
     let others = rows.len() - active;
-    anyhow::ensure!(count >= others, "{resource} already has {others} other grants");
+    anyhow::ensure!(
+        count >= others,
+        "{resource} already has {others} other grants"
+    );
     let wanted = count - others;
     let (block, hash) = address_fixture_head(database).await?;
     let events = (wanted.min(active)..wanted.max(active))
@@ -273,7 +287,10 @@ async fn v2_address_names_grant_budget_counts_grants_across_returned_rows() -> R
         .await?;
         assert_eq!(one["data"].as_array().unwrap().len(), 1);
         assert_eq!(address_name_inline_grants(&one["data"][0]).len(), count);
-        assert_eq!(one["data"][0]["permission_resource_id"], json!(second.to_string()));
+        assert_eq!(
+            one["data"][0]["permission_resource_id"],
+            json!(second.to_string())
+        );
     }
     database.cleanup().await
 }
@@ -283,13 +300,20 @@ async fn v2_address_names_grant_budget_counts_grants_across_returned_rows() -> R
 // to the NameWrapper resource's rows, with and without `address`. The NameWrapper resource itself
 // is not a public registration handle.
 #[tokio::test]
-async fn v2_address_names_wrapped_name_permission_resource_id_is_the_registrar_lease()
--> Result<()> {
+async fn v2_address_names_wrapped_name_permission_resource_id_is_the_registrar_lease() -> Result<()>
+{
     let database = TestDatabase::new_migrated().await?;
     seed_v2_address_names_fixture(&database).await?;
     seed_v2_address_registry_operator(&database).await?;
     let lease_resource_id = Uuid::from_u128(0xa100);
-    let wrapper_resource_id = wrap_address_name(&database, "alpha.eth", 0xa300, None).await?;
+    // `wrapETH2LD` always records the fuses and expiry it wraps with.
+    let wrapper_resource_id = wrap_address_name(
+        &database,
+        "alpha.eth",
+        0xa300,
+        Some(("emancipated", 65_536, 1_900_000_000)),
+    )
+    .await?;
     let lease = lease_resource_id.to_string();
 
     for namespace in ["", "&namespace=ens"] {
@@ -369,7 +393,11 @@ async fn v2_address_names_permission_id_does_not_resolve_name_again() -> Result<
 
     // Advance the name to a new registration after the caller captured its permission ID.
     // The old binding ends where the new one starts; its grants remain an ID-only audit.
-    let replacement = (Uuid::from_u128(0xe100), Uuid::from_u128(0xe101), Uuid::from_u128(0xe102));
+    let replacement = (
+        Uuid::from_u128(0xe100),
+        Uuid::from_u128(0xe101),
+        Uuid::from_u128(0xe102),
+    );
     database
         .seed_snapshot_selector_chain_positions(&json!({"ethereum":{
             "chain_id":"ethereum-mainnet", "block_number":200, "block_hash":"0xnamec8",
@@ -459,7 +487,15 @@ async fn v2_address_names_grant_budget_maximum_page_operators() -> Result<()> {
     // both branch limits, and each approved operator applies to all 200 names.
     let (block, hash) = address_fixture_head(&database).await?;
     let approvals = (1..=1105_usize)
-        .map(|index| address_operator_approval(&address_budget_subject(index), OPERATOR_OWNER, index <= 5, block, &hash))
+        .map(|index| {
+            address_operator_approval(
+                &address_budget_subject(index),
+                OPERATOR_OWNER,
+                index <= 5,
+                block,
+                &hash,
+            )
+        })
         .collect::<Vec<_>>();
     bigname_storage::insert_normalized_event_fixtures(&database.pool, &approvals).await?;
     rebuild_address_fixture(&database).await?;
@@ -504,7 +540,13 @@ async fn v2_address_names_grant_budget_maximum_page_operators() -> Result<()> {
     // Pure operator overflow is independently rejected: the direct grant is revoked and a sixth
     // operator approved.
     let revoke = address_budget_role_event(alpha, &direct, false, manifest, block, &hash);
-    let sixth = address_operator_approval(&address_budget_subject(6), OPERATOR_OWNER, true, block, &hash);
+    let sixth = address_operator_approval(
+        &address_budget_subject(6),
+        OPERATOR_OWNER,
+        true,
+        block,
+        &hash,
+    );
     bigname_storage::insert_normalized_event_fixtures(&database.pool, &[revoke, sixth]).await?;
     rebuild_address_fixture(&database).await?;
     let over =
