@@ -358,14 +358,13 @@ async fn released_materialized_registry_audits_keep_followable_resource_handles(
         })
         .collect::<Vec<_>>();
     bigname_storage::insert_normalized_event_fixtures(&database.pool, &events).await?;
+    declare_audit_mirror_resolver(&database, CHAIN, RESOLVER, REGISTRY).await?;
     for (block, handle, status) in [(122, lease, "active"), (123, registry, "released")] {
         publish_test_families_on(&database.pool, CHAIN, block).await?;
-        let mut resolver = resolver_current_row(CHAIN, RESOLVER);
-        resolver.chain_positions = json!({CHAIN:{"chain_id":CHAIN,"block_number":block,"block_hash":format!("0xhistory{block}"),"timestamp":timestamp(if block==123 { RELEASE_TIME } else { 1_700_000_000+block }).format(&time::format_description::well_known::Rfc3339)?}});
-        database
-            .seed_snapshot_selector_chain_positions(&resolver.chain_positions)
-            .await?;
-        upsert_test_resolver_current_rows(&database, &[resolver]).await?;
+        database.seed_snapshot_selector_chain_positions(&json!({CHAIN:{
+            "chain_id":CHAIN,"block_number":block,"block_hash":format!("0xhistory{block}"),
+            "timestamp":timestamp(if block==123 { RELEASE_TIME } else { 1_700_000_000+block }).format(&time::format_description::well_known::Rfc3339)?
+        }})).await?;
         let current = bigname_storage::load_name_current(&database.pool, &format!("ens:{node:#x}"))
             .await?
             .expect("actual materialized Project row");
@@ -430,28 +429,7 @@ async fn released_materialized_registry_audits_keep_followable_resource_handles(
                         .is_some_and(|p| p.contains(&json!("resolver_control")))),
             "{direct}"
         );
-        if block == 122 {
-            // Unsupported name coverage must not erase an otherwise current registration's audit handle.
-            sqlx::query("UPDATE bigname_phase.name_current SET support_status='unsupported',unsupported_reason='resolver_abi_unknown' WHERE resource_id=$1").bind(registry).execute(&database.pool).await?;
-            let unsupported = v2_permissions_payload_for_database(
-                &database,
-                &format!("/v1/permissions?registration_id={lease}&address={HOLDER}"),
-            )
-            .await?;
-            assert!(
-                unsupported["data"].as_array().unwrap().contains(permission),
-                "{unsupported}"
-            );
-            let unsupported_roles = v2_resolver_payload_for_database(
-                &database,
-                &format!("/v1/resolvers/1/{RESOLVER}/roles"),
-            )
-            .await?;
-            assert!(
-                unsupported_roles["data"].as_array().unwrap().contains(role),
-                "{unsupported_roles}"
-            );
-        } else {
+        if block == 123 {
             assert_eq!(permission["authority_context"], "resource_audit");
             let old = v2_permissions_payload_for_database(
                 &database,

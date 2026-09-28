@@ -266,22 +266,18 @@ async fn resolver_roles_follow_real_presurface_registry_grants_at_the_publicatio
         })
         .collect::<Vec<_>>();
     bigname_storage::insert_normalized_event_fixtures(&database.pool, &events).await?;
+    declare_audit_mirror_resolver(&database, CHAIN, RESOLVER, REGISTRY).await?;
     publish_test_families_on(&database.pool, CHAIN, 124).await?;
-    let names: i64 = sqlx::query_scalar("SELECT count(*) FROM bigname_phase.name_current")
+    let names: i64 = sqlx::query_scalar("SELECT count(*) FROM bigname_phase.name_surfaces")
         .fetch_one(&database.pool)
         .await?;
     assert_eq!(
         names, 0,
         "Project must not invent a name from numeric identities"
     );
-    // Resolver discovery/overview support is a separate capability. Seed that declared metadata;
-    // the permission resources, subject, scope, powers and provenance came from adapter + Project.
-    let mut resolver = resolver_current_row(CHAIN, RESOLVER);
-    resolver.chain_positions = json!({CHAIN: {"chain_id":CHAIN,"block_number":124,"block_hash":"0xhistory124","timestamp":"2023-11-14T22:15:24Z"}});
-    database
-        .seed_snapshot_selector_chain_positions(&resolver.chain_positions)
-        .await?;
-    upsert_test_resolver_current_rows(&database, &[resolver]).await?;
+    database.seed_snapshot_selector_chain_positions(&json!({CHAIN: {
+        "chain_id":CHAIN,"block_number":124,"block_hash":"0xhistory124","timestamp":"2023-11-14T22:15:24Z"
+    }})).await?;
     let route = format!("/v1/resolvers/1/{RESOLVER}/roles?page_size=1");
     let first = v2_resolver_payload_for_database(&database, &route).await?;
     assert_eq!(first["page"]["total_count"], 2, "{first}");

@@ -257,11 +257,15 @@ async fn token_only_handoff_follows_actual_nodeless_authority_epoch() -> Result<
     for (block, expected_control) in [(121, registry), (122, lease), (123, registry)] {
         publish_test_families_on(&database.pool, CHAIN, block).await?;
         database.seed_snapshot_selector_chain_positions(&json!({CHAIN:{"chain_id":CHAIN,"block_number":block,"block_hash":format!("0xhistory{block}"),"timestamp":"2023-11-14T22:15:23Z"}})).await?;
-        let names: i64 = sqlx::query_scalar("SELECT count(*) FROM bigname_phase.name_current")
+        let names: i64 = sqlx::query_scalar("SELECT count(*) FROM bigname_phase.name_surfaces")
             .fetch_one(&database.pool)
             .await?;
         assert_eq!(names, 0);
-        let projected:Vec<Uuid>=sqlx::query_scalar("SELECT resource_id FROM bigname_phase.permissions_current WHERE subject=$1 AND scope='resource' AND effective_powers ? 'resource_control'").bind(REGISTRY_OWNER).fetch_all(&database.pool).await?;
+        let projected = bigname_storage::families::control::permissions::page::load_family_effective_permissions_page(
+            &database.pool, Some(REGISTRY_OWNER), None, None, None, 100).await?.rows
+            .into_iter().filter(|row| row.effective_powers.as_array()
+                .is_some_and(|powers| powers.contains(&json!("resource_control"))))
+            .map(|row| row.resource_id).collect::<Vec<_>>();
         assert_eq!(
             projected,
             vec![expected_control],
