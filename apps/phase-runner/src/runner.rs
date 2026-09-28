@@ -77,6 +77,7 @@ pub struct PhaseRunner {
     metrics_feed: crate::metrics::RunnerMetricsFeed,
     stop_budget: std::time::Duration,
     chain_stop_clocks: Arc<std::sync::Mutex<BTreeMap<String, Arc<StopClock>>>>,
+    capacity_memo: Arc<capacity_wait::CapacityMemo>,
 }
 
 impl PhaseRunner {
@@ -113,6 +114,7 @@ impl PhaseRunner {
             metrics_feed: crate::metrics::RunnerMetricsFeed::default(),
             stop_budget: StopClock::DEFAULT_BUDGET,
             chain_stop_clocks: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
+            capacity_memo: Arc::default(),
         })
     }
 

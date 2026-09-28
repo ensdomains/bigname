@@ -2545,9 +2545,9 @@ the reducer under `crates/project/src/families/` that writes them:
 
 `project_family_marker`: the block and hash a chain's [owned key
 families](#owned-key-family) stand at, the generation (`sequence`) every block,
-[rebuild range](#rebuild-range) and undo advances, and the input token, input
-revision and [active manifest set](#active-manifest-set-family-block) key the
-last block read. A block, range or undo applies only against the generation it
+[rebuild range](#rebuild-range) and undo advances, and the [input
+token](#family-input-token), input revision and [active manifest
+set](#active-manifest-set-family-block) key the last block read. A block, range or undo applies only against the generation it
 planned from.
 
 ## Family undo journal
@@ -2593,6 +2593,18 @@ the block it trusts, the block it replays to, its state (`undoing`,
 `replaying`, `rebuilding` or `complete`) and, when complete, the marker,
 generation and input content hash it finished with. Each state change commits
 in the same transaction as the reset, undo or block it describes.
+
+## Family input token
+
+the Interpret row's content hash, redo attempt and redo flag and the Project
+row's redo attempt, mode, range and last error, read from `chain_phase_state` in
+one statement (`input_token` in `crates/project/src/families/input.rs`). Every
+family block reads it inside its own transaction and records it on the [family
+marker](#family-marker); its [revision](#family-input-revision) is what a run
+applies under. The Project phase also reads it once after a batch commits and
+before the batch's progress is recorded, bounded at 30 seconds; a read that
+fails or outlasts the bound fails the family run that follows
+([projections](projections.md#owned-key-families)).
 
 ## Family input revision
 

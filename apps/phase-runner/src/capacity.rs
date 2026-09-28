@@ -107,6 +107,16 @@ impl CapacityGuard {
         reserved_write_bytes: u64,
     ) -> RunnerResult<CapacityStatus> {
         let measurement = self.probe.measure(pool, &self.config.writable_path).await?;
+        Ok(self.evaluate(measurement, reserved_write_bytes))
+    }
+
+    /// A measurement against the configured ceiling and floor, with `reserved_write_bytes` the
+    /// writes about to be made.
+    pub fn evaluate(
+        &self,
+        measurement: CapacityMeasurement,
+        reserved_write_bytes: u64,
+    ) -> CapacityStatus {
         let mut breach_reasons = Vec::new();
         if self.config.database_max_bytes.is_some_and(|maximum| {
             measurement
@@ -124,11 +134,11 @@ impl CapacityGuard {
         {
             breach_reasons.push("free_disk");
         }
-        Ok(CapacityStatus {
+        CapacityStatus {
             measurement,
             reserved_write_bytes,
             breach_reasons,
-        })
+        }
     }
 }
 
