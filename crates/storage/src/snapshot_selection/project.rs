@@ -103,6 +103,26 @@ macro_rules! servable_family_marker {
 }
 pub(crate) use servable_family_marker;
 
+/// Interpret identity is read alongside the families. A redo that overlaps their publication
+/// can change that identity before Project republishes it. Keep the old marker unavailable
+/// through the Interpret-to-Project handoff, even after Interpret has cleared its own redo.
+/// This predicate is for composed reads and their generation fences; raw diagnostic snapshot
+/// selection still uses `servable_family_marker` alone.
+macro_rules! family_inputs_not_in_redo {
+    () => {
+        r#"
+          AND NOT EXISTS (
+              SELECT 1 FROM bigname_phase.chain_phase_state input_phase
+              WHERE input_phase.chain_id = marker.chain_id
+                AND input_phase.phase_name IN ('interpret', 'project')
+                AND input_phase.redo_in_progress
+                AND input_phase.redo_from_block_number <= marker.current_block_number
+          )
+        "#
+    };
+}
+pub(crate) use family_inputs_not_in_redo;
+
 const CURRENT_FAMILY_MARKER_PUBLICATION: &str = concat!(
     "SELECT marker.current_block_number, marker.current_block_hash",
     servable_family_marker!()
@@ -121,7 +141,9 @@ const CURRENT_FAMILY_MARKER_PUBLICATION: &str = concat!(
 /// (the position a head-consistency selection returns); otherwise the position is left to the
 /// per-row projection-target checks, as for historical `at` reads. With
 /// `require_interpret_not_redo` a history-rewriting interpret redo also makes the publication
-/// unservable. With the switch on the marker must also be `live`.
+/// unservable. With the switch on the marker must also be `live`, and any Interpret or Project
+/// redo that overlaps the publication makes it unservable regardless of that option: the
+/// composed readers also consume mutable Interpret identity, including surface visibility.
 pub async fn load_served_project_generation(
     pool: &PgPool,
     chain_id: &str,
@@ -184,7 +206,8 @@ const SERVED_PROJECT_ROW_GENERATION: &str = r#"
 /// `sequence` unchanged and passes this check; only the per-row snapshot checks (no row target
 /// newer than the selected position) still refuse. The guard closes for a route once its rows
 /// come from the families, whose block commit advances `sequence` in the same transaction.
-const SERVED_FAMILY_MARKER_GENERATION: &str = r#"
+const SERVED_FAMILY_MARKER_GENERATION: &str = concat!(
+    r#"
         SELECT marker.sequence::TEXT
         FROM bigname_phase.chain_heads head
         JOIN bigname_phase.project_family_marker marker
@@ -212,7 +235,9 @@ const SERVED_FAMILY_MARKER_GENERATION: &str = r#"
                     AND interpret.redo_in_progress = false
               )
           )
-        "#;
+        "#,
+    family_inputs_not_in_redo!()
+);
 
 /// Every selected chain must have a completed, readable project publication at most
 /// [`PROJECT_PUBLICATION_LAG_TOLERANCE_BLOCKS`] behind the stored head. Historical `at`

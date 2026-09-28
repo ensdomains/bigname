@@ -952,6 +952,18 @@ answers `409 stale` rather than `404` or an empty page, and the expiring listing
 composes only names of the requested namespace, so another namespace's rebuild
 does not refuse it.
 
+Composed names also refuse a publication while Interpret or Project has a redo
+whose range overlaps it. Interpret's normalization-flag recompute can change a
+surface's visibility before the required Project replay publishes the new name
+state; finishing Interpret alone does not make the old publication readable.
+The composed reader and the collection's final generation check both enforce
+this rule. Diagnostic reads that do not compose published names keep their
+existing snapshot selection. Event diagnostics still return their audit rows
+when the name publication is unavailable, omitting the optional name attachment.
+Resolver bound-name pages require the selected family publication even when the
+page is empty, so an older `at` answers
+`409 stale` rather than reporting current absence as historical absence.
+
 With the switch on, `GET /v1/permissions` and the resolver routes also serve
 their own rows from the families. The permission rows, the registry operator
 rows and each registration's authority context and restrictions are built at
@@ -995,6 +1007,7 @@ and each child's registration come from composed rows. The bodies are meant to
 be identical to the served ones. Each child read sees one committed family
 block, and with no servable marker (a rebuild in flight, or another build's
 hash) it answers `409 stale` like the composed reads, never an empty list.
+
 
 Indexed lookup names, record inventories, address-name relations, resolver
 overviews, and resolver bound names now come from `bigname_phase` projections.
