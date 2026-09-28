@@ -195,6 +195,8 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> Result<ShadowName> {
     );
     trace.insert("selected_key".into(), opt_text(selected_key.as_deref()));
     trace.insert("identity_mismatch".into(), json!(mismatch));
+    trace.insert("event_resource".into(), opt_text(event_resource));
+    trace.insert("selected_kind".into(), opt_text(selected.kind()));
     // A release emitted without a name that the registration fold selected: the path-expiry
     // release the interpreter synthesises, which today's name-scoped fold never sees. The harness
     // reads these to check that the shadow serves the release. A released tombstone's deciding
@@ -318,6 +320,7 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> Result<ShadowName> {
     );
     let context = authority_context(facts, &authority, &in_scope, is_v2, selected_key.as_deref());
     trace.insert("authority_context_event".into(), context.event.clone());
+    trace.insert("authority_context_kind".into(), context.kind.clone());
     let latest_event_kind =
         latest_event_kind(facts, &selected, &in_scope, is_v2, selected_key.as_deref())?;
 

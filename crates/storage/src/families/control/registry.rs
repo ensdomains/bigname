@@ -51,6 +51,7 @@ pub struct OwnerEvent {
     pub registry_owner: Option<String>,
     pub owner_word_unmasked: Option<bool>,
     pub owner_getter: Option<String>,
+    pub owner_getter_reason: Option<String>,
 }
 
 impl OwnerEvent {
@@ -67,6 +68,7 @@ impl OwnerEvent {
             registry_owner: lower(row, "registry_owner"),
             owner_word_unmasked: flag(row, "owner_word_unmasked"),
             owner_getter: lower(row, "owner_getter"),
+            owner_getter_reason: text(row, "owner_getter_reason"),
         })
     }
 

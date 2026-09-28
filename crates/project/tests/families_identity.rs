@@ -1051,7 +1051,9 @@ async fn a_name_keeps_its_first_block_and_its_history_facts() -> Result<()> {
          renewal adds nothing"
     );
     assert_eq!(
-        rows[0]["created_at"].as_str().map(|at| at.replace('T', " ")),
+        rows[0]["created_at"]
+            .as_str()
+            .map(|at| at.replace('T', " ")),
         Some(first.replace('T', " ")),
         "created_at is the first block's time"
     );

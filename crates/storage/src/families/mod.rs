@@ -2,5 +2,6 @@
 //! shadow reads: nothing that serves a response calls them yet, and the harness compares what
 //! they return with what today's readers serve.
 pub mod control;
+pub mod name;
 pub mod records;
 pub mod topology;

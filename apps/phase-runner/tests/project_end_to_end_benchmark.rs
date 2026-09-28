@@ -37,6 +37,8 @@
 //! whole copy at every target, for one target. Production serves today's tables either way.
 #[path = "project_end_to_end/endpoint.rs"]
 mod endpoint;
+#[path = "project_end_to_end/name_shadow.rs"]
+mod name_shadow;
 #[path = "project_end_to_end/records_shadow.rs"]
 mod records_shadow;
 #[path = "project_end_to_end/shadow.rs"]
@@ -591,6 +593,11 @@ async fn run(
                 report.mismatched == 0,
                 "the family readers differ from the served values at {number}"
             );
+            // The composed name rows beside the served name rows (TYR-36 step 7b).
+            let names = name_shadow::compare(pool, CHAIN, number).await?;
+            names.print();
+            names.require_clean()?;
+            ensure!(names.names > 0, "no name was compared at {number}");
         }
         ensure!(
             publication(pool).await? == (Some(number), Some(target.hash.clone()), false),

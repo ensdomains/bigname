@@ -33,7 +33,7 @@ use serde_json::{Map, Value};
 use super::{
     position::{EventOrder, Position, bound_of},
     registry::RegistryNode,
-    rows::{BindingCandidate, LifecycleEvent, Maxima, WrapperRow},
+    rows::{self, BindingCandidate, LifecycleEvent, Maxima, WrapperRow},
 };
 
 pub use load::{load_name_facts, load_shadow_names, namespace_of};
@@ -205,4 +205,27 @@ pub const CONTROL_FIELDS: [&str; 6] = [
 /// reservation's fractional expiry (`membership::expired_when_written`), fails it.
 pub fn evaluate(facts: &NameFacts, clock: &Clock) -> anyhow::Result<ShadowName> {
     served::evaluate(facts, clock)
+}
+
+/// The released ENSv2 tombstone of a name whatever arm its input selection names: the
+/// resource the name was last bound to under ENSv2 and the identity of the release that decided
+/// it, none when an ENSv2 binding is open at `clock` or the latest lifecycle fact is not a
+/// release (name_authority/build.sql:48-271). The composed name read decides the arm with it.
+pub(crate) fn released_v2(
+    facts: &NameFacts,
+    clock: &Clock,
+) -> anyhow::Result<Option<(String, String)>> {
+    Ok(tombstone::released_fact(facts, clock)?.map(|tombstone| {
+        (
+            tombstone.resource,
+            tombstone.event.position.event_identity.clone(),
+        )
+    }))
+}
+
+/// Whether `event` carries the name once the two staging passes have run: emitted with it, or
+/// an unnamed `.eth` registrar row the passes give it (name_authority/stage.rs:149-198). The
+/// passes read the lease candidates only, not the selection.
+pub(crate) fn staged_as_own(facts: &NameFacts, event: &rows::LifecycleEvent) -> bool {
+    served::authority_of(facts).staged_name(event) == admission::StagedName::Ours
 }

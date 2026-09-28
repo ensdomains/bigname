@@ -7,6 +7,8 @@
 
 #[path = "../../../../apps/phase-runner/tests/project_end_to_end/shadow.rs"]
 pub mod compare;
+#[path = "../../../../apps/phase-runner/tests/project_end_to_end/name_shadow.rs"]
+pub mod names;
 pub mod replay;
 pub mod wrapper;
 
@@ -71,6 +73,9 @@ pub async fn publish_and_compare(fixture: &Fixture, target: i64) -> Result<compa
     publish(fixture, target).await?;
     let report = compare::compare(&fixture.pool, CHAIN, target).await?;
     report.print(target);
+    let names = names::compare(&fixture.pool, CHAIN, target).await?;
+    names.print();
+    names.require_clean()?;
     Ok(report)
 }
 

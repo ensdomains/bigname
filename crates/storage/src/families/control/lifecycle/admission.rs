@@ -398,6 +398,7 @@ mod tests {
             logical_name_id: "ens:0x01".into(),
             authority_arm: "ens_v1".into(),
             resource_id: resource.into(),
+            binding_kind: None,
             canonicality_state: None,
             surface_namehash: None,
             block_number: block,
