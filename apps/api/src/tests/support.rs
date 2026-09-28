@@ -40,19 +40,6 @@ struct RawBlock {
     canonicality_state: CanonicalityState,
 }
 
-fn phase_support_from_coverage(coverage: &Value) -> (&'static str, Option<String>) {
-    if coverage.get("status").and_then(Value::as_str) == Some("unsupported") {
-        let reason = coverage
-            .get("unsupported_reason")
-            .and_then(Value::as_str)
-            .unwrap_or("unsupported")
-            .to_owned();
-        ("unsupported", Some(reason))
-    } else {
-        ("supported", None)
-    }
-}
-
 fn phase_logical_identity(namespace: &str, name: &str) -> Result<(String, String)> {
     let namehash = bigname_lookup::ens_namehash_hex(name)?;
     Ok((format!("{namespace}:{namehash}"), namehash))
@@ -146,101 +133,6 @@ fn phase_projection_source_position(value: &Value) -> Result<&Value> {
             .and_then(|positions| positions.values().next())
             .context("projection fixture requires one source chain position")
     }
-}
-
-fn phase_flat_projection_position(block_number: i64, block_hash: &str) -> Value {
-    json!({
-        "block_number": block_number,
-        "block_hash": block_hash,
-        "target_block_number": block_number,
-        "target_block_hash": block_hash,
-    })
-}
-
-async fn upsert_phase_address_names_current_rows(
-    pool: &PgPool,
-    rows: &[bigname_storage::AddressNameCurrentRow],
-) -> Result<Vec<bigname_storage::AddressNameCurrentRow>> {
-    for row in rows {
-        let (support_status, unsupported_reason) = phase_support_from_coverage(&row.coverage);
-        let normalized_name = bigname_domain::normalization::normalize_name(
-            &row.canonical_display_name,
-        )
-        .map_err(|error| anyhow::anyhow!(error.message().to_owned()))?
-        .normalized_name;
-        let (logical_name_id, namehash) =
-            phase_logical_identity(&row.namespace, &normalized_name)?;
-        let chain_positions: Option<Value> = sqlx::query_scalar(
-            "SELECT chain_positions FROM bigname_phase.name_current
-             WHERE logical_name_id = $1",
-        )
-        .bind(&logical_name_id)
-        .fetch_optional(pool)
-        .await?;
-        let chain_positions = match chain_positions {
-            Some(chain_positions) => chain_positions,
-            None => align_phase_chain_positions(pool, &row.chain_positions).await?,
-        };
-        let chain_id = phase_projection_source_position(&chain_positions)?
-            .get("chain_id")
-            .and_then(Value::as_str)
-            .context("address_names_current fixture position must include chain_id")?
-            .to_owned();
-        let (target_block_number, target_block_hash) =
-            phase_projection_target_for_chain(pool, &chain_id, &chain_positions).await?;
-        let mut provenance = row.provenance.clone();
-        provenance
-            .as_object_mut()
-            .context("address_names_current fixture provenance must be an object")?
-            .insert("chain_id".to_owned(), json!(chain_id));
-        let chain_positions =
-            phase_flat_projection_position(target_block_number, &target_block_hash);
-        let canonicality_summary = json!({
-            "state": "canonical_lineage",
-            "target_block_number": target_block_number,
-            "target_block_hash": target_block_hash,
-        });
-        sqlx::query(
-            r#"
-            INSERT INTO bigname_phase.address_names_current (
-                address, logical_name_id, relation, namespace, raw_name, namehash,
-                surface_binding_id, resource_id, token_lineage_id, binding_kind,
-                support_status, unsupported_reason, provenance, chain_positions,
-                canonicality_summary, manifest_version, last_recomputed_at
-            )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
-            ON CONFLICT (address, logical_name_id, relation) DO UPDATE SET
-                raw_name = EXCLUDED.raw_name,
-                support_status = EXCLUDED.support_status,
-                unsupported_reason = EXCLUDED.unsupported_reason,
-                provenance = EXCLUDED.provenance,
-                chain_positions = EXCLUDED.chain_positions,
-                canonicality_summary = EXCLUDED.canonicality_summary,
-                manifest_version = EXCLUDED.manifest_version,
-                last_recomputed_at = EXCLUDED.last_recomputed_at
-            "#,
-        )
-        .bind(row.address.to_ascii_lowercase())
-        .bind(logical_name_id)
-        .bind(row.relation.as_str())
-        .bind(&row.namespace)
-        .bind(&normalized_name)
-        .bind(namehash)
-        .bind(row.surface_binding_id)
-        .bind(row.resource_id)
-        .bind(row.token_lineage_id)
-        .bind(row.binding_kind.as_str())
-        .bind(support_status)
-        .bind(unsupported_reason)
-        .bind(provenance)
-        .bind(chain_positions)
-        .bind(canonicality_summary)
-        .bind(row.manifest_version)
-        .bind(row.last_recomputed_at)
-        .execute(pool)
-        .await?;
-    }
-    Ok(rows.to_vec())
 }
 
 async fn phase_projection_target_for_chain(
@@ -2160,28 +2052,6 @@ fn name_surface(logical_name_id: &str) -> NameSurface {
     }
 }
 
-fn surface_binding(
-    surface_binding_id: Uuid,
-    logical_name_id: &str,
-    resource_id: Uuid,
-    active_from: OffsetDateTime,
-) -> SurfaceBinding {
-    SurfaceBinding {
-        surface_binding_id,
-        logical_name_id: logical_name_id.to_owned(),
-        resource_id,
-        binding_kind: SurfaceBindingKind::DeclaredRegistryPath,
-        authority_arm: "ens_v1".to_owned(),
-        active_from,
-        active_to: None,
-        chain_id: "ethereum-mainnet".to_owned(),
-        block_hash: "0xbinding".to_owned(),
-        block_number: 100,
-        provenance: json!({"seed": "binding"}),
-        canonicality_state: CanonicalityState::Canonical,
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 fn history_event(
     event_identity: &str,
@@ -2813,82 +2683,6 @@ fn address_name_surface_binding(
         block_number,
         provenance: json!({"seed": "address_name_binding"}),
         canonicality_state: CanonicalityState::Finalized,
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn address_name_current_row(
-    address: &str,
-    logical_name_id: &str,
-    relation: bigname_storage::AddressNameRelation,
-    display_name: &str,
-    normalized_name: &str,
-    namehash: &str,
-    surface_binding_id: Uuid,
-    resource_id: Uuid,
-    token_lineage_id: Option<Uuid>,
-    block_number: i64,
-) -> bigname_storage::AddressNameCurrentRow {
-    debug_assert_eq!(
-        bigname_domain::normalization::normalize_name(display_name)
-            .map(|name| name.normalized_name)
-            .ok()
-            .as_deref(),
-        Some(normalized_name)
-    );
-    let namespace = logical_name_id
-        .split_once(':')
-        .map(|(namespace, _)| namespace)
-        .expect("logical_name_id must include namespace");
-    let chain_id = chain_id_for_namespace(namespace);
-    let chain_slot = chain_slot_for_namespace(namespace);
-    bigname_storage::AddressNameCurrentRow {
-        address: address.to_ascii_lowercase(),
-        logical_name_id: logical_name_id.to_owned(),
-        relation,
-        namespace: namespace.to_owned(),
-        canonical_display_name: display_name.to_owned(),
-        namehash: namehash.to_owned(),
-        surface_binding_id,
-        resource_id,
-        token_lineage_id,
-        binding_kind: SurfaceBindingKind::DeclaredRegistryPath,
-        provenance: json!({
-            "normalized_event_ids": [block_number],
-            "raw_fact_refs": [{
-                "kind": "raw_log",
-                "block_number": block_number,
-            }],
-            "manifest_versions": [{
-                "manifest_version": 3,
-                "source_family": "ens_v1_registrar_l1",
-                "source_manifest_id": null,
-            }],
-            "derivation_kind": "address_names_current_rebuild",
-        }),
-        coverage: json!({
-            "status": "full",
-            "exhaustiveness": "authoritative",
-            "source_classes_considered": ["ensv1_registry_path"],
-            "unsupported_reason": null,
-            "enumeration_basis": "surface_current_relations",
-        }),
-        chain_positions: json!({
-            chain_slot: {
-                "chain_id": chain_id,
-                "block_number": block_number,
-                "block_hash": format!("0xaddr{block_number:02x}"),
-                "timestamp": format!("2026-04-17T00:00:{:02}Z", block_number % 60),
-            }
-        }),
-        canonicality_summary: json!({
-            "status": "finalized",
-            "chains": {
-                chain_id: "finalized"
-            }
-        }),
-        manifest_version: 3,
-        last_recomputed_at: timestamp(1_717_173_000 + block_number),
     }
 }
 
