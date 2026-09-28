@@ -10,7 +10,7 @@ use serde_json::{Map, Value, json};
 use super::{
     Clock, NameFacts, ShadowName,
     admission::{Authority, Probe, StagedName},
-    control::control_owner,
+    control::{control_owner, served_owner},
     laterals::{
         authority_context, expiry_candidate, format_utc, latest_event_kind, registered_at,
         registrant, registrar_resource,
@@ -401,6 +401,23 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> Result<ShadowName> {
         }
     }
 
+    let (folded, owner_kind) =
+        control_owner(facts, &authority, &in_scope, is_v2, selected_key.as_deref());
+    // An unwrapped ENSv1 or Basenames registration on its lease or registry record has a
+    // registry owner on chain; `served_owner` never serves it as absent.
+    let owner_required = !is_v2
+        && matches!(
+            selection.authority_arm.as_deref(),
+            Some("ens_v1" | "basenames")
+        )
+        && registration.get("status") == Some(&json!("active"))
+        && matches!(
+            registration.get("authority_kind").and_then(Value::as_str),
+            Some("registrar" | "registry_only")
+        );
+    let serves_control =
+        !(selection.ownerless_registry || selection.released_tombstone || v2_release);
+    let owner = served_owner(facts, folded, owner_required && serves_control)?;
     // A wrapper grant's control is built like any other grant's.
     let live_control = || {
         let mut control = Map::new();
@@ -432,16 +449,14 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> Result<ShadowName> {
                 opt_text(registrant.as_deref())
             },
         );
-        let (owner, kind) =
-            control_owner(facts, &authority, &in_scope, is_v2, selected_key.as_deref());
         control.insert("registry_owner".into(), opt_text(owner.as_deref()));
-        control.insert("latest_event_kind".into(), opt_text(kind.as_deref()));
+        control.insert("latest_event_kind".into(), opt_text(owner_kind.as_deref()));
         control
     };
-    let control = if selection.ownerless_registry || selection.released_tombstone || v2_release {
-        Map::from_iter([("status".to_owned(), json!("unregistered"))])
-    } else {
+    let control = if serves_control {
         live_control()
+    } else {
+        Map::from_iter([("status".to_owned(), json!("unregistered"))])
     };
     // With no selected arm, a presentation that compared the raw arm would not clear the
     // release; the trace records what that would have served.

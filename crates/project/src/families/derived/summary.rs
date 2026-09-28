@@ -91,10 +91,19 @@ pub(super) async fn refresh(
         )
         .await
         .map_err(|error| {
-            ProjectError::transient(format!(
+            let message = format!(
                 "failed to compose the name summaries of block {number} of chain {chain_id}: \
                  {error:#}"
-            ))
+            );
+            // A registered name that lost its required registry owner is not published.
+            if error
+                .downcast_ref::<bigname_storage::families::control::lifecycle::RequiredOwnerMissing>()
+                .is_some()
+            {
+                ProjectError::data_integrity(message)
+            } else {
+                ProjectError::transient(message)
+            }
         })?;
         if !fresh.null_resolver_names.is_empty() {
             sqlx::query(

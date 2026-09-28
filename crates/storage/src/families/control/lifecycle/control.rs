@@ -6,12 +6,14 @@ use super::{
     laterals::{admitted_epochs, admitted_registry_only},
     served::{Tagged, latest},
 };
-use crate::families::control::{position::Position, rows::family_arm};
+use crate::families::control::{position::Position, registry::ZERO_ADDRESS, rows::family_arm};
 
 /// The control block's registry owner and latest kind, from what the
 /// families keep: the latest admitted ENSv2 transfer or registrar snapshot grant, F1's latest
 /// admitted AuthorityEpochChanged with the owner it reports, an admitted registry-only
-/// SurfaceBound with its bound owner, and each of the name's registry AuthorityTransferred
+/// SurfaceBound with its bound owner, the registry owner an admitted registrar-authority
+/// SurfaceBound of the selected resource recorded (`admitted_registrar_bindings`), and each of
+/// the name's registry AuthorityTransferred
 /// events F2c keeps (`project_registry_owner_event`) that the admission holds, each reporting
 /// its own registry_owner and unmasked-word facts. For an ENSv2 name those are its ENSv2
 /// registry's transfers on the selected lifecycle key, so the owner a registration names counts
@@ -23,7 +25,7 @@ pub(super) fn control_owner(
     in_scope: &[&Tagged<'_>],
     is_v2: bool,
     selected_key: Option<&str>,
-) -> (Option<String>, Option<String>) {
+) -> (FoldedOwner, Option<String>) {
     let mut owners: Vec<(Position, Option<String>)> = Vec::new();
     let mut kinds: Vec<(Position, &str)> = Vec::new();
     for tagged in in_scope {
@@ -92,13 +94,139 @@ pub(super) fn control_owner(
         }
     }
     for epoch in admitted_epochs(facts, authority, is_v2, selected_key) {
-        owners.push((epoch.position.clone(), epoch.owner));
+        // An epoch that states no owner leaves the owner as the earlier facts set it.
+        if let Some(owner) = epoch.owner {
+            owners.push((epoch.position.clone(), owner));
+        }
         kinds.push((epoch.position, "AuthorityEpochChanged"));
     }
     for (position, candidate) in admitted_registry_only(facts, authority, is_v2, selected_key) {
         owners.push((position.clone(), candidate.bound_owner.clone()));
     }
-    let owner = latest(owners, |(position, _)| position).and_then(|(_, owner)| owner);
+    for (position, owner) in admitted_registrar_bindings(facts, authority, is_v2) {
+        owners.push((position.clone(), Some(owner.to_owned())));
+    }
+    let owner = latest(owners, |(position, _)| position).map(|(_, owner)| owner);
     let kind = latest(kinds, |(position, _)| position).map(|(_, kind)| kind.to_owned());
-    (owner, kind)
+    (
+        FoldedOwner {
+            found: owner.is_some(),
+            owner: owner.flatten(),
+        },
+        kind,
+    )
+}
+
+/// What the owner fold found: the owner its latest owner fact reports (none for a clear or an
+/// unmasked owner word), and whether it found any owner fact at all.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(super) struct FoldedOwner {
+    pub(super) owner: Option<String>,
+    pub(super) found: bool,
+}
+
+/// A registered ENSv1 or Basenames name whose authority is its registrar lease or its registry
+/// record has a registry owner on chain, zero included, and the families could not produce it.
+/// The name must not be served or published without it.
+#[derive(Debug)]
+pub struct RequiredOwnerMissing {
+    pub logical_name_id: String,
+}
+
+impl std::fmt::Display for RequiredOwnerMissing {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "registered name {} has a registry record but no registry owner the families can \
+             serve",
+            self.logical_name_id
+        )
+    }
+}
+
+impl std::error::Error for RequiredOwnerMissing {}
+
+/// The registry owner the control block serves. A name that needs one — an unwrapped ENSv1 or
+/// Basenames name whose `active` registration stands on its registrar lease or on its registry
+/// record (`owner_required`) — always has one on chain: the registry answers `owner(node)` for
+/// every node, zero when it holds no record. When the fold found no owner fact, or its latest
+/// fact cleared the owner, the owner is the node's latest registry `NewOwner` or `Transfer`
+/// (F2c keeps every one, whatever name it carried); with no registry record at all it is the
+/// zero address. An unmasked owner word names no owner, on the node or in the fold, and is
+/// served as none. A node that has a registry record but no owner-setting event the families
+/// kept is an integrity failure, never an absent owner.
+/// (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L60-L84 @ ens_v1@91c966f)
+/// (upstream: .refs/ens_v1/contracts/registry/ENSRegistry.sol:L123-L131 @ ens_v1@91c966f)
+pub(super) fn served_owner(
+    facts: &NameFacts,
+    folded: FoldedOwner,
+    owner_required: bool,
+) -> Result<Option<String>, RequiredOwnerMissing> {
+    if !owner_required || folded.owner.is_some() {
+        return Ok(folded.owner);
+    }
+    let node = facts.registry_node.as_ref();
+    if let Some(transfer) = node.and_then(|node| node.latest_transfer()) {
+        if transfer.owner_word_unmasked == Some(true) {
+            return Ok(None);
+        }
+        if let Some(owner) = transfer.reported_owner() {
+            return Ok(Some(owner));
+        }
+    }
+    let has_record = node.is_some_and(|node| {
+        node.has_old_record
+            || node.first_current_record_block.is_some()
+            || node.latest_transfer().is_some()
+    });
+    if !has_record {
+        return Ok(Some(ZERO_ADDRESS.to_owned()));
+    }
+    Err(RequiredOwnerMissing {
+        logical_name_id: facts.input.logical_name_id.clone(),
+    })
+}
+
+/// The registry owner each admitted, non-state-derived registrar-authority SurfaceBound of the
+/// name recorded when it opened a binding on the selected resource (F1 `bound_owner`: the owner
+/// its event reports, else the registry's owner getter the registrar adapter read from retained
+/// registry state). A registrar token transfer that hands a registry-only name back to its lease
+/// carries no owner of its own; this is the fact that keeps the registry owner a registry
+/// `Transfer` wrote while the registry-only binding was selected, whose AuthorityTransferred sits
+/// on the registry-only resource and so is not admitted once the lease is selected again.
+/// NameWrapper bindings are left to their own epochs, and ENSv2 names have no registrar binding.
+/// (upstream: .refs/ens_v1/contracts/ethregistrar/BaseRegistrarImplementation.sol:L171-L175 @ ens_v1@91c966f)
+fn admitted_registrar_bindings<'a>(
+    facts: &'a NameFacts,
+    authority: &Authority<'_>,
+    is_v2: bool,
+) -> Vec<(&'a Position, &'a str)> {
+    if is_v2 {
+        return Vec::new();
+    }
+    facts
+        .candidates
+        .iter()
+        .filter(|candidate| {
+            candidate.state_derived != Some(true)
+                && candidate.authority_kind.as_deref() == Some("registrar")
+                && !candidate.is_wrapper()
+        })
+        .filter_map(|candidate| {
+            let position = candidate.surface_bound_position.as_ref()?;
+            let owner = candidate.bound_owner.as_deref()?;
+            authority
+                .admits(&Probe {
+                    event_kind: "SurfaceBound",
+                    source_family: "registrar_binding",
+                    resource_id: Some(&candidate.resource_id),
+                    authority_kind: "registrar",
+                    position,
+                    transaction_hash: None,
+                    to_address: None,
+                    namehash: None,
+                })
+                .then_some((position, owner))
+        })
+        .collect()
 }

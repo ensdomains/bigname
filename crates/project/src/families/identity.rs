@@ -131,7 +131,12 @@ async fn names(
             let mut start = event.position.to_json();
             start["authority_kind"] = json!(raw_text(&event.after, "authority_kind"));
             start["authority_key"] = json!(raw_text(&event.after, "authority_key"));
-            start["owner"] = json!(control_owner(&event.after));
+            // An epoch whose after-state carries no owner field says nothing about the registry
+            // owner (a registrar token transfer or grant leaves it as it was), so it records no
+            // `owner` and the owner fold skips it; an explicit null owner, as a release's, clears.
+            if carries_owner(&event.after) {
+                start["owner"] = json!(control_owner(&event.after));
+            }
             start["resource_id"] = json!(event.resource_id);
             starts.insert(arm(&event.source_family).to_owned(), start);
             set(&mut row, "authority_start_positions", Value::Object(starts));
@@ -151,6 +156,29 @@ fn control_owner(after: &Value) -> Option<String> {
         return None;
     }
     raw_lower(after, "registry_owner").or_else(|| raw_lower(after, "owner"))
+}
+
+/// Whether an authority event's after-state states the registry owner at all: an `owner` or
+/// `registry_owner` field, null included, or an unmasked owner word.
+fn carries_owner(after: &Value) -> bool {
+    ["owner", "registry_owner", "owner_word_unmasked"]
+        .iter()
+        .any(|field| after.get(field).is_some())
+}
+
+/// The registry owner a SurfaceBound records for the binding it opens: the owner its authority
+/// event reports, else, for a registrar SurfaceBound, the registry's owner getter at the
+/// transition (`owner_getter`), which the adapter reads from retained registry state because a
+/// registrar token transfer or grant leaves the registry owner as it was.
+fn bound_owner(event: &BlockEvent) -> Option<String> {
+    control_owner(&event.after).or_else(|| {
+        matches!(
+            event.source_family.as_str(),
+            "ens_v1_registrar_l1" | "basenames_base_registrar"
+        )
+        .then(|| raw_lower(&event.after, "owner_getter"))
+        .flatten()
+    })
 }
 
 /// The transaction and log index a binding row's provenance records, both or neither.
@@ -465,7 +493,7 @@ fn candidate_row(
     set(
         &mut row,
         "bound_owner",
-        text_or_null(bound.and_then(|event| control_owner(&event.after))),
+        text_or_null(bound.and_then(bound_owner)),
     );
     let wrapper = bound.filter(|event| event.source_family == "ens_v1_wrapper_l1");
     set(
