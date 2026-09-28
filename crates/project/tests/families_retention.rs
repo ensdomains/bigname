@@ -55,7 +55,7 @@ async fn the_wrapper_row_keeps_its_lifecycle_and_its_latest_unwrap() -> Result<(
             WRAPPER,
         )
         .await?;
-    fixture.apply(10, FamilyMode::Normal).await;
+    fixture.apply(10, FamilyMode::Normal).await?;
     let lifecycle = [
         "lifecycle_source",
         "lifecycle_unwrapped",
@@ -81,7 +81,7 @@ async fn the_wrapper_row_keeps_its_lifecycle_and_its_latest_unwrap() -> Result<(
             WRAPPER,
         )
         .await?;
-    fixture.apply(12, FamilyMode::Normal).await;
+    fixture.apply(12, FamilyMode::Normal).await?;
     let unwrapped = at(12, 1, "AuthorityEpochChanged:12:1");
     assert_eq!(
         columns(&fixture.rows("project_wrapper_state").await?[0], &lifecycle),
@@ -104,7 +104,7 @@ async fn the_wrapper_row_keeps_its_lifecycle_and_its_latest_unwrap() -> Result<(
             WRAPPER,
         )
         .await?;
-    fixture.apply(13, FamilyMode::Normal).await;
+    fixture.apply(13, FamilyMode::Normal).await?;
     assert_eq!(
         columns(&fixture.rows("project_wrapper_state").await?[0], &lifecycle),
         json!({"lifecycle_source": "holder_grant", "lifecycle_unwrapped": false,
@@ -141,7 +141,7 @@ async fn every_owner_setting_registry_event_of_a_node_is_kept() -> Result<()> {
             REGISTRY,
         )
         .await?;
-    fixture.apply(10, FamilyMode::Normal).await;
+    fixture.apply(10, FamilyMode::Normal).await?;
     fixture
         .write(
             12,
@@ -155,7 +155,7 @@ async fn every_owner_setting_registry_event_of_a_node_is_kept() -> Result<()> {
             REGISTRY,
         )
         .await?;
-    fixture.apply(12, FamilyMode::Normal).await;
+    fixture.apply(12, FamilyMode::Normal).await?;
     let kept = [
         "namespace",
         "node",
@@ -300,7 +300,7 @@ async fn the_wrapper_row_stays_raw_through_expiry_unwrap_and_rewrap() -> Result<
     let observe = |target: i64| {
         let (fixture, logical) = (&fixture, &logical);
         async move {
-            fixture.apply(target, FamilyMode::Normal).await;
+            fixture.apply(target, FamilyMode::Normal).await?;
             anyhow::Ok((
                 target,
                 columns(&fixture.rows("project_wrapper_state").await?[0], &raw),
@@ -447,7 +447,7 @@ async fn an_unwrap_before_expiry_keeps_the_served_name_wrapped_but_closes_the_re
     let observe = |target: i64| {
         let (fixture, logical, resource) = (&fixture, &logical, &resource);
         async move {
-            fixture.apply(target, FamilyMode::Normal).await;
+            fixture.apply(target, FamilyMode::Normal).await?;
             let row = columns(
                 &fixture.rows("project_wrapper_state").await?[0],
                 &["wrapper_state", "lifecycle_unwrapped"],
@@ -554,7 +554,7 @@ async fn an_earlier_transfer_keeps_its_registry_owner_and_unmasked_flag() -> Res
             REGISTRY,
         )
         .await?;
-    fixture.apply(12, FamilyMode::Normal).await;
+    fixture.apply(12, FamilyMode::Normal).await?;
     let rows = fixture.rows("project_registry_owner_event").await?;
     let kept: Vec<Value> = rows
         .iter()
@@ -609,7 +609,7 @@ async fn a_textual_unmasked_flag_is_kept_as_the_served_predicate_reads_it() -> R
             )
             .await?;
     }
-    fixture.apply(10, FamilyMode::Normal).await;
+    fixture.apply(10, FamilyMode::Normal).await?;
     for table in [
         "project_registry_node_state",
         "project_registry_owner_event",

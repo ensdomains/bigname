@@ -146,10 +146,12 @@ impl Fixture {
     }
 
     /// One family run of `chain` to `target` in normal mode.
-    pub async fn apply_on(&self, chain: &str, target: i64) -> FamilyOutcome {
-        let token = families::input_token(&self.pool, chain)
-            .await
-            .expect("the input token reads");
+    pub async fn apply_on(
+        &self,
+        chain: &str,
+        target: i64,
+    ) -> bigname_project::Result<FamilyOutcome> {
+        let token = families::input_token(&self.pool, chain).await?;
         families::apply(
             &self.pool,
             chain,
@@ -165,7 +167,11 @@ impl Fixture {
         self.database.cleanup().await
     }
 
-    pub async fn apply(&self, target: i64, mode: FamilyMode) -> FamilyOutcome {
+    pub async fn apply(
+        &self,
+        target: i64,
+        mode: FamilyMode,
+    ) -> bigname_project::Result<FamilyOutcome> {
         self.apply_with(target, mode, &FamilyOptions::new(CONTENT_HASH))
             .await
     }
@@ -175,11 +181,9 @@ impl Fixture {
         target: i64,
         mode: FamilyMode,
         options: &FamilyOptions,
-    ) -> FamilyOutcome {
+    ) -> bigname_project::Result<FamilyOutcome> {
         // The Project phase reads the token right after its batch; the tests read it the same way.
-        let token = families::input_token(&self.pool, CHAIN)
-            .await
-            .expect("the input token reads");
+        let token = families::input_token(&self.pool, CHAIN).await?;
         families::apply(&self.pool, CHAIN, &marker(target), mode, &token, options).await
     }
 
@@ -561,14 +565,9 @@ impl Fixture {
     /// Apply through `last - 1`, keep the families, apply `last`, undo it and require the
     /// families byte for byte as they were; then apply `last` again.
     pub async fn assert_undo_restores(&self, last: i64) -> Result<()> {
-        self.apply(last - 1, FamilyMode::Normal).await;
+        self.apply(last - 1, FamilyMode::Normal).await?;
         let before = self.exact().await?;
-        let applied = self.apply(last, FamilyMode::Normal).await;
-        anyhow::ensure!(
-            applied.skipped.is_none(),
-            "block {last}: {:?}",
-            applied.skipped
-        );
+        self.apply(last, FamilyMode::Normal).await?;
         let undone = families::undo_to(&self.pool, CHAIN, last - 1).await?;
         anyhow::ensure!(undone == 1, "undid {undone} blocks, not block {last}");
         let after = self.exact().await?;
@@ -578,7 +577,7 @@ impl Fixture {
                 "undo of {last} left {table} as {now}, not {was}"
             );
         }
-        self.apply(last, FamilyMode::Normal).await;
+        self.apply(last, FamilyMode::Normal).await?;
         Ok(())
     }
 
@@ -593,12 +592,10 @@ impl Fixture {
             ("block by block", RebuildRanges::Off),
         ] {
             let options = FamilyOptions::new(CONTENT_HASH).with_rebuild_ranges(ranges);
-            let rebuilt = self.apply_with(target, FamilyMode::Rebuild, &options).await;
-            anyhow::ensure!(
-                rebuilt.skipped.is_none(),
-                "rebuild {label}: {:?}",
-                rebuilt.skipped
-            );
+            let rebuilt = self
+                .apply_with(target, FamilyMode::Rebuild, &options)
+                .await
+                .map_err(|error| anyhow::anyhow!("rebuild {label}: {error}"))?;
             // Every rebuild visits the target on its own; any other work block below it goes
             // into a range when ranges are on.
             let expected_ranges = matches!(ranges, RebuildRanges::Through(_)) && rebuilt.blocks > 1;

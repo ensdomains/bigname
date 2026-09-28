@@ -124,7 +124,7 @@ async fn transfer(prefix: &str, facts: &[Fact]) -> Result<Fixture> {
             )
             .await?;
     }
-    fixture.apply(12, FamilyMode::Normal).await;
+    fixture.apply(12, FamilyMode::Normal).await?;
     Ok(fixture)
 }
 
@@ -382,7 +382,7 @@ async fn boundary_facts_keep_identity_order() -> Result<()> {
             )
             .await?;
     }
-    fixture.apply(12, FamilyMode::Normal).await;
+    fixture.apply(12, FamilyMode::Normal).await?;
     let rows = grants(&fixture).await?;
     assert_eq!(
         rows,
@@ -443,7 +443,7 @@ async fn name_wrapped_pointer_keeps_the_wrapper_row() -> Result<()> {
         registry_identity.as_bytes() > wrapper_identity.as_bytes(),
         "identity bytes alone would pick the registry row"
     );
-    fixture.apply(12, FamilyMode::Normal).await;
+    fixture.apply(12, FamilyMode::Normal).await?;
     let pointers: Vec<(String, Option<String>, String, String)> = sqlx::query_as(
         "SELECT resolver_address, resource_id::text, source_family, event_identity
          FROM project_registry_pointer",

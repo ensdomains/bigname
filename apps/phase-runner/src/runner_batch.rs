@@ -7,14 +7,16 @@ use crate::{
     ingest_progress,
     metrics::{RunnerLoopHeartbeat, RunnerMetricsFeed},
     phase::{
-        PhaseBatchOutcome, PhaseContext, PhaseName, PhaseProgress, RedoAttemptFence, RunMode,
-        VerificationLevel,
+        AfterProgress, Phase, PhaseBatchOutcome, PhaseContext, PhaseName, PhaseProgress,
+        RedoAttemptFence, RunMode, VerificationLevel,
     },
     phase_lock::PhaseLock,
     progress_monitor::{ProgressToken, RunnerPhaseProgress},
     runner_support::HeartbeatThrottle,
+    shutdown::until_cancelled,
     state_persistence::validate_progress,
 };
+use tokio_util::sync::CancellationToken;
 
 use super::PhaseRunner;
 
@@ -190,5 +192,73 @@ impl PhaseRunner {
             .record_if_due(&self.store, &self.instance_id, &chain.chain_id, phase_name)
             .await?;
         Ok((outcome, progress))
+    }
+
+    /// The phase's shadow work after a recorded batch, call after call until it is done; its
+    /// error fails the run with the batch kept. With no work waiting it returns true without
+    /// calling the hook, stop or not, so a phase with nothing to follow finishes its batch as
+    /// before. Otherwise every call, the first included, is preceded by the lock probe, the
+    /// phase heartbeat and the capacity guard, with no write reservation, since a family run
+    /// carries no estimate. Unlike a batch prelude, which always probes, this check may reuse a
+    /// measurement younger than the capacity poll interval that showed room; served and family
+    /// writes made since that measurement are not in it. A breach it sees pauses the phase, and
+    /// while paused every poll probes afresh. A family catch-up that spans hours so stays
+    /// visibly alive. Returns false when a stop abandoned waiting work.
+    pub(super) async fn follow_batch(
+        &self,
+        chain: &ChainConfig,
+        phase: &dyn Phase,
+        cancellation: &CancellationToken,
+        heartbeat: &mut HeartbeatThrottle,
+        phase_lock: &mut PhaseLock,
+    ) -> RunnerResult<bool> {
+        if !phase.has_after_progress_work(&chain.chain_id) {
+            return Ok(true);
+        }
+        loop {
+            let admitted = until_cancelled(cancellation, async {
+                phase_lock.check_alive().await?;
+                heartbeat
+                    .record_if_due(
+                        &self.store,
+                        &self.instance_id,
+                        &chain.chain_id,
+                        phase.name(),
+                    )
+                    .await?;
+                let stopped = self
+                    .wait_for_capacity(
+                        chain,
+                        phase.name(),
+                        0,
+                        super::capacity_wait::Measure::ReuseFresh,
+                        cancellation,
+                        heartbeat,
+                        phase_lock,
+                    )
+                    .await?;
+                Ok::<_, RunnerError>(!stopped)
+            })
+            .await?;
+            if admitted != Some(true) {
+                return Ok(false);
+            }
+            // Asked again after the maintenance, which may have waited long for capacity.
+            if !phase.has_after_progress_work(&chain.chain_id) {
+                return Ok(true);
+            }
+            // The stop is checked first, and the hook is called only inside the polled branch:
+            // calling it plans a family run, so a stop observable here never reaches it. A stop
+            // raised once the run is under way abandons it at its next await.
+            let step = tokio::select! {
+                biased;
+                () = cancellation.cancelled() => return Ok(false),
+                result = async { phase.after_progress_recorded(&chain.chain_id).await } => result?,
+            };
+            if step == AfterProgress::Done {
+                return Ok(true);
+            }
+            self.record_loop_progress(&chain.chain_id);
+        }
     }
 }

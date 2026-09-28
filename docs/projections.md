@@ -1686,45 +1686,83 @@ After each Project batch commits and its progress is recorded, the phase runner
 applies the families block by block, each block in
 a transaction of its own, from the [family marker](glossary.md#family-marker)
 (`project_family_marker`) up to the served marker. Only a rebuild groups
-blocks: below its switch point it applies the work blocks in [rebuild
+blocks: below its switch point it applies the [work
+blocks](glossary.md#work-block) in [rebuild
 ranges](glossary.md#rebuild-range), described below. A batch's publication never
-waits for them, since it has committed before they run, but the next batch
-waits for one budgeted family run. The hook is driven by served batches and its
-pending work is held in memory, so a restart at a stalled head does not run the
-families until the next batch; while Interpret is in redo they do not advance,
-and they resume on the first batch after it clears. The families trail the
-served marker until the loop catches up, and
-`phase_runner_project_family_lag_blocks` reports by how much. It reads 0 only
-when the family marker is the served block, hash included. A marker above a
-lowered served marker counts the blocks in between, and a marker off the served
-branch (orphaned, or another hash at the served height) counts at least one
-block. One run applies or
-undoes at most 256 blocks (`--project-families-max-blocks`, or
-`BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES_MAX_BLOCKS`), so a rebuild or a long
-catch-up spans several runner cycles. The one-shot `redo` command has no later
-cycle, so after its batch it runs the loop again, in normal mode, while each
-run spends its budget, skips nothing and applies or undoes at least one block.
-A stop, a failed block or an Interpret revision change can still end it early.
-The served redo stays recorded, but the command exits non-zero with "family
-repair incomplete". The shortfall is recorded when the family run takes its
-pending work, before the run starts, and cleared only by a returned outcome
-that is not a skip and stands on the served block, hash included. So a skip
-while the family marker already stands on the served block still fails the
-command. The error always names the served marker's block and hash, and
-reports the family marker in one of three ways:
+waits for them, since it has committed before they run, but the Project phase
+does not finish a batch until the families reach its served marker. One family
+run applies or undoes at most 256 blocks (`--project-families-max-blocks`, or
+`BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES_MAX_BLOCKS`); while a run spends that
+budget and applies or undoes at least one block, the runner starts another, in
+normal mode, so a rebuild or a long catch-up holds up the next batch until it
+ends. Before each family run, the first after the batch included, the runner
+probes the phase lock, records the phase heartbeat as it does after a batch,
+so a catch-up that spans hours does not read as a stalled phase, and checks
+storage capacity, with no write reservation, since a family run carries no
+estimate. The batch prelude (the checks the runner makes before it starts a
+batch: the lock probe, the capacity check and the batch's context reads)
+always measures storage afresh. The check before a family run may instead
+reuse a measurement younger than the capacity poll interval that showed room,
+so the prelude's probe usually covers the first run; served and family writes
+made since that measurement are not in it. When the check sees a breach, the
+Project phase is paused and no further family run starts, and while it is
+paused every poll measures afresh until a reading shows room. After a run that
+leaves more to do, the runner records its loop progress. The one-shot `redo`
+command runs the same loop and returns with the families on the served
+marker. The family work is driven by served batches
+and held in memory, but every Project run starts with a batch, an empty
+incremental one when the head has not moved, so after a restart the families
+run on the first Project run. The families trail the served marker until the
+loop catches up, and `phase_runner_project_family_lag_blocks` reports by how
+much. It reads 0 only when the family marker is the served block, hash
+included. A marker above a lowered served marker counts the blocks in between,
+and a marker off the served branch (orphaned, or another hash at the served
+height) counts at least one block.
 
-- a run that was abandoned before it returned (its future dropped by a stop)
-  reports the family marker as unavailable;
-- a run that returned reports the marker it observed;
-- a run that returned with no family marker at all reports "no block"; a
-  marker whose hash is off the readable lineage is still reported as its block
-  and hash.
+A family failure stops the loop at the last complete block and fails the
+Project run. Failures include a failing block, a fence its transaction refuses,
+a changed [family input revision](glossary.md#family-input-revision), Interpret
+in redo, and an [input token](glossary.md#family-input-token) that did not
+read, or not in time. The error names the family
+marker and the served marker, block and hash, and reaches the runner after the
+batch's progress is recorded: the batch and its progress stand, the failure is
+recorded on the Project row, and the restart loop retries with backoff. In
+follow the retry runs a served batch again before the families: an empty
+incremental batch over the recorded head, which commits a publication as an
+idle cycle does. A failed redo stays in progress, and its retry runs the served
+redo again before the families. While the families are a shadow that nothing
+serves, the supervised runner, its required redos included, retries a
+data-integrity family failure like a transient one instead of stopping the
+phase, so the lag gauge shows the stall. Project runs inside the chain's Live
+cycle, so while it retries, Live and Interpret wait until the failure clears.
+The one-shot `redo` command retries no family failure: any family failure,
+transient or data-integrity, ends the command with its own kind and the family
+error recorded, the redo stays in progress and a rerun is admitted. Retrying
+would run the served redo again each time, forever when the failure persists,
+as it does while Interpret is in redo. A stop already observable at the
+runner's check before a run, including one raised while the batch's progress is
+recorded, ends the loop before that run is planned. A run admitted before the
+stop becomes observable is cancelled cooperatively, at its next await: a
+transaction whose commit has not begun is left to roll back, while a commit
+already in progress may complete. The next run resumes from the durable family
+marker and repair record, whichever happened. Either way the Project run ends
+as cancelled, so a redo stays in progress and rerunning it repairs the
+families. A settled batch with no family run waiting completes despite a
+pending stop. A family run is planned by the batch that precedes it and by
+none other: a batch that plans none, such as one that finds no readable head,
+drops any run an earlier batch left waiting.
 
-A stop leaves family completion unconfirmed rather than failed: the final
-family block can commit before the stop drops the run, and the command still
-exits non-zero. Rerunning the same redo repairs the families once the cause is
-gone. The run reads the Interpret and Project
-rows of `chain_phase_state` within 2 seconds or is skipped for that batch.
+The Project phase reads the family input token, the Interpret and Project rows
+of `chain_phase_state`, after the batch commits and before its progress is
+recorded, while a finished redo's session is still open. The read is bounded
+at 30 seconds: a read that fails or outlasts the bound is a transient family
+failure raised after the batch's progress is recorded, never a skip, so the
+supervised runner retries it and the one-shot `redo` command ends with it. The
+bound stops the runner waiting, not the database: a statement already
+executing on an acquired connection runs on, and that connection stays out of
+the pool until the statement finishes and is checked before reuse, so each
+such stall parks one connection for as long as it lasts. A read that times out
+while still waiting for a pool connection parks nothing extra.
 `--project-families false` (or `BIGNAME_PHASE_RUNNER_PROJECT_FAMILIES=false`)
 turns the loop off.
 
@@ -1734,10 +1772,13 @@ record](glossary.md#repair-record) (`project_repair_record`) and requires both
 as the run planned them: the marker's generation (`sequence`, advanced by every
 block and undo) and the repair's state and attempt. It then reads the
 Interpret row's content hash and redo attempt, the [family input
-revision](glossary.md#family-input-revision), and stops the run, counted as a
-skip, when that revision differs from the one the run applies under or
-Interpret is in redo; the next run adopts the new revision or waits. The block
-records that revision and the whole input token on the marker. The run reads
+revision](glossary.md#family-input-revision), and stops the run with an error
+when that revision differs from the one the run applies under or Interpret is
+in redo. The supervised runner retries it, and the retry adopts the new
+revision or fails again until the redo ends; the one-shot `redo` command
+returns the error and ends, as it does on any family failure. The block
+records that revision and the token's interpretation and redo fields on the
+marker; Project's last-error text is not stored there. The run reads
 the chain's manifest updates once, before its first block; each block takes its
 active manifest set from that read and records the set's key, and a rebuild
 takes the declaration start blocks of its work list from the same read, so an
@@ -1749,8 +1790,9 @@ the marker. A block's events are taken once per `event_identity`, which
 disagree keep the first in the [canonical event
 order](glossary.md#canonical-event-order) and count on
 `phase_runner_project_family_duplicate_anomalies_total`. A failure stops the
-loop for that batch and leaves the served publication and its progress as they
-were; the next batch catches up from where the marker stands.
+loop with an error and leaves the served publication and its progress as they
+were; the supervised runner's retry, or a rerun of the one-shot command,
+catches up from where the marker stands.
 
 A rebuild (a first build, or a rebuild after a content hash change, a redo
 below the kept journal or an orphaned lineage) applies its work blocks at or
@@ -1901,11 +1943,11 @@ families and rebuilds them from the blocks that carry events or surface
 bindings or start or stop a resolver activation, so a rebuild visits every
 block the normal path writes a binding candidate in. So do families whose marker records a content hash
 other than the running binary's, which covers a served rebuild whose family run
-was skipped. An undo journal the families refuse, such as one whose prior
+never finished. An undo journal the families refuse, such as one whose prior
 markers form a cycle, does not trigger a rebuild: every run that needs it
-stops with a data-integrity skip, logs a warning and counts on
-`phase_runner_project_family_skips_total`, changing nothing, until an operator
-runs a rebuild or a redo below the kept journal. That is deliberate: a
+fails with a data-integrity error and changes nothing, and the Project run
+fails and is retried, until an operator runs a rebuild or a redo below the kept
+journal. That is deliberate: a
 malformed journal is a defect to look at, not state to rebuild over silently.
 The repair record describes the latest of these: its
 attempt, reason, trusted base, replay target, state (`undoing`, `replaying`,
@@ -2005,8 +2047,15 @@ The per-block publication will read these tables in place of the builders;
 until then they cost one extra pass per batch after the served commit,
 reported as `phase_runner_project_families_seconds`,
 `phase_runner_project_family_lag_blocks`,
-`phase_runner_project_family_skips_total` and
-`phase_runner_project_family_duplicate_anomalies_total`.
+`phase_runner_project_family_block_seconds` (a histogram of each family block
+applied in a transaction of its own, from its first read to its commit; a
+rebuild range is not observed) and
+`phase_runner_project_family_duplicate_anomalies_total`. A run that fails still
+reports the blocks it committed before the failure, and its own wall time. A
+cancelled run can lose them: its outcome reaches the metrics only when
+`families::run` returns, so a stop that abandons the run drops the block times
+it had gathered. The block times wait in memory for the metrics task, at most
+65,536 per chain; blocks past that cap are not observed.
 
 The first readers of these tables live in the storage crate
 (`bigname_storage::families::control`) and run only in tests. They rebuild a

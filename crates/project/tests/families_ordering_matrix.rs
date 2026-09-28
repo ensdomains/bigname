@@ -240,7 +240,7 @@ async fn f1_the_arm_start_is_the_higher_ordinal_epoch() -> Result<()> {
         .resource(&lease),
     )
     .await?;
-    fixture.apply(BLOCK, FamilyMode::Normal).await;
+    fixture.apply(BLOCK, FamilyMode::Normal).await?;
     let row = only(&fixture, "project_name_state").await?;
     let mut start = facts.later_position();
     start["authority_kind"] = json!("registry_only");
@@ -314,7 +314,7 @@ async fn f1_the_predecessor_is_the_lower_ordinal_binding() -> Result<()> {
         .resource(&registry_only),
     )
     .await?;
-    fixture.apply(BLOCK, FamilyMode::Normal).await;
+    fixture.apply(BLOCK, FamilyMode::Normal).await?;
     let rows = fixture.rows("project_binding_candidate").await?;
     let columns = [
         "surface_binding_id",
@@ -442,7 +442,7 @@ async fn f1_a_higher_ordinal_grant_at_the_binding_log_takes_the_lease() -> Resul
         .resource(&registry_only),
     )
     .await?;
-    fixture.apply(BLOCK, FamilyMode::Normal).await;
+    fixture.apply(BLOCK, FamilyMode::Normal).await?;
     let rows = fixture.rows("project_binding_candidate").await?;
     let handoff = rows
         .iter()
@@ -507,7 +507,7 @@ async fn f2a_lifecycle_maxima_and_association_take_the_higher_ordinal() -> Resul
         .resource(&resource),
     )
     .await?;
-    fixture.apply(BLOCK, FamilyMode::Normal).await;
+    fixture.apply(BLOCK, FamilyMode::Normal).await?;
     let key = only(&fixture, "project_lifecycle_key_state").await?;
     assert_eq!(
         (
@@ -575,7 +575,7 @@ async fn f2c_the_registry_owner_is_the_higher_ordinal() -> Result<()> {
         ),
     )
     .await?;
-    fixture.apply(BLOCK, FamilyMode::Normal).await;
+    fixture.apply(BLOCK, FamilyMode::Normal).await?;
     let row = only(&fixture, "project_registry_node_state").await?;
     assert_eq!(
         pick(&row, &["owner", "owner_position", "event_identity"]),
@@ -616,7 +616,7 @@ async fn f4_the_registry_pointer_is_the_higher_ordinal() -> Result<()> {
         ),
     )
     .await?;
-    fixture.apply(BLOCK, FamilyMode::Normal).await;
+    fixture.apply(BLOCK, FamilyMode::Normal).await?;
     let row = only(&fixture, "project_registry_pointer").await?;
     assert_eq!(
         pick(
@@ -669,7 +669,7 @@ async fn f5_the_resource_pointer_groups_take_the_higher_ordinal() -> Result<()> 
         .resource(&resource),
     )
     .await?;
-    fixture.apply(BLOCK, FamilyMode::Normal).await;
+    fixture.apply(BLOCK, FamilyMode::Normal).await?;
     let row = only(&fixture, "project_resource_pointer").await?;
     assert_eq!(
         pick(

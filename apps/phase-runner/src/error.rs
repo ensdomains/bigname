@@ -21,6 +21,7 @@ pub struct RunnerError {
     lock_connection_lost: bool,
     redo_attempt_superseded: bool,
     stop_bound_expired: bool,
+    not_retried: bool,
 }
 
 impl RunnerError {
@@ -31,6 +32,7 @@ impl RunnerError {
             lock_connection_lost: false,
             redo_attempt_superseded: false,
             stop_bound_expired: false,
+            not_retried: false,
         }
     }
 
@@ -45,6 +47,16 @@ impl RunnerError {
         Self {
             stop_bound_expired: true,
             ..Self::transient(message)
+        }
+    }
+
+    /// The error as one the restart loop returns instead of retrying, whatever its kind: the
+    /// one-shot `redo` command's family failure, which a retry would meet again after running
+    /// the served redo once more.
+    pub(crate) fn not_retried(self) -> Self {
+        Self {
+            not_retried: true,
+            ..self
         }
     }
 
@@ -79,6 +91,7 @@ impl RunnerError {
         };
         Self {
             stop_bound_expired: self.stop_bound_expired || secondary.stop_bound_expired,
+            not_retried: self.not_retried || secondary.not_retried,
             ..Self::new(
                 kind,
                 format!("{self}; additionally failed to {action}: {secondary}"),
@@ -105,7 +118,7 @@ impl RunnerError {
     }
 
     pub fn is_retryable(&self) -> bool {
-        self.kind == ErrorKind::Transient && !self.stop_bound_expired
+        self.kind == ErrorKind::Transient && !self.stop_bound_expired && !self.not_retried
     }
 
     pub(crate) fn permits_pool_writes_after_error(&self) -> bool {

@@ -588,7 +588,7 @@ const PROJECT_WRITE_TABLES: [&str; 11] = [
 async fn endpoint_exports_what_each_project_batch_scoped_and_wrote() -> Result<()> {
     use phase_runner::{
         heads::{BlockMarker, HeadMarkers},
-        phase::{Phase, PhaseContext, PhaseName, PhaseResume, RunMode},
+        phase::{AfterProgress, Phase, PhaseContext, PhaseName, PhaseResume, RunMode},
         project_phase::ProjectPhase,
     };
 
@@ -640,9 +640,9 @@ async fn endpoint_exports_what_each_project_batch_scoped_and_wrote() -> Result<(
     // Each batch is followed by the owned key families, as the runner does once it has recorded
     // the batch's progress.
     project.run_batch(context(30, None)?).await?;
-    project.after_progress_recorded(chain).await;
+    while project.after_progress_recorded(chain).await? == AfterProgress::More {}
     project.run_batch(context(40, Some(30))?).await?;
-    project.after_progress_recorded(chain).await;
+    while project.after_progress_recorded(chain).await? == AfterProgress::More {}
     feed.batch_committed();
 
     let chain_label = format!("chain=\"{chain}\"");
@@ -677,10 +677,14 @@ async fn endpoint_exports_what_each_project_batch_scoped_and_wrote() -> Result<(
     ensure!(
         sample(
             &body,
-            "phase_runner_project_family_skips_total",
+            "phase_runner_project_family_block_seconds_count",
             &[&chain_label]
-        )? == 0.0,
-        "no family loop was skipped"
+        )? > 0.0,
+        "each family block is observed"
+    );
+    ensure!(
+        !body.contains("phase_runner_project_family_skips_total"),
+        "a family failure fails the batch; nothing counts skips"
     );
     for gauge in [
         "phase_runner_project_changed_events",

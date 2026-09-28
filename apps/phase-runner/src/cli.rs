@@ -450,9 +450,11 @@ fn resolve_redo(args: RedoArgs) -> RunnerResult<ResolvedCommand> {
         range,
         watch_set_coverage_attestations,
         hydration_rpc_urls: resolve_hydration_rpc_urls(&args.hydration_rpc_urls)?,
-        // Nothing follows a one-shot redo, so its family runs finish before it returns.
+        // The one-shot command does not retry a family failure of any kind: each retry would run
+        // the served redo again, and a persistent failure such as Interpret being in redo would
+        // never exit. The supervised runner, its required redos included, retries them all.
         project_families: FamilySettings {
-            finish_each_batch: true,
+            retry_family_failures: false,
             ..args.project_families.into()
         },
     })

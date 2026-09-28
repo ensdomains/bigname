@@ -4723,9 +4723,9 @@ async fn publish_project_and_families(database: &TestDatabase, target: i64) -> R
         &token,
         &bigname_project::families::FamilyOptions::new(bigname_content_hash::INTERPRETER_CONTENT_HASH),
     )
-    .await;
+    .await?;
     anyhow::ensure!(
-        outcome.skipped.is_none() && outcome.marker.as_ref().map(|marker| marker.number) == Some(target),
+        outcome.marker.as_ref().map(|marker| marker.number) == Some(target),
         "the families followed {target}: {outcome:?}"
     );
     Ok(())

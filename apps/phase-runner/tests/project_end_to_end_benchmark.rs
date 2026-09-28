@@ -70,7 +70,7 @@ use phase_runner::{
     INTERPRETER_CONTENT_HASH,
     heads::{BlockMarker, HeadMarkers, publish_heads},
     metrics::RunnerMetricsFeed,
-    phase::{Phase, PhaseContext, PhaseName, PhaseResume, RunMode},
+    phase::{AfterProgress, Phase, PhaseContext, PhaseName, PhaseResume, RunMode},
     project_phase::{FamilySettings, ProjectPhase},
     state::PhaseStore,
 };
@@ -412,7 +412,6 @@ async fn prepare_fixture(pool: &PgPool, previous: i64, interpreted_through: i64)
         .start_phase(CHAIN, PhaseName::Project, &RunMode::Normal)
         .await?;
     let project = ProjectPhase::new(pool.clone()).with_family_settings(FamilySettings {
-        finish_each_batch: true,
         rebuild_ranges: RebuildRanges::Through(i64::MAX),
         ..FamilySettings::default()
     });
@@ -431,7 +430,7 @@ async fn prepare_fixture(pool: &PgPool, previous: i64, interpreted_through: i64)
     // comparison's baseline read needs them there. With it off the families start empty, as
     // before.
     if families_mode::configured()? {
-        project.after_progress_recorded(CHAIN).await;
+        while project.after_progress_recorded(CHAIN).await? == AfterProgress::More {}
     }
     Ok(())
 }
@@ -499,14 +498,11 @@ async fn run(
     // scraping it are not timed.
     let metrics_feed = RunnerMetricsFeed::default();
     // A disposable copy may start with empty families, so their first run is a rebuild over the
-    // whole chain; the one-shot `redo` command finishes it the same way. The fixture's families
-    // fit in one budget either way. Unlike the supervised runner, which performs one budgeted
-    // family run per cycle, the harness drains every required family budget before the readers
-    // compare or the next target starts. That work is outside the served clock and is reported
-    // separately; it does not measure supervised-runner cycle throughput.
+    // whole chain; every batch, the harness's as the runner's, runs the families to its served
+    // marker. The fixture's families fit in one budget either way. That work is outside the
+    // served clock and is reported separately.
     let project = ProjectPhase::with_hydration(pool.clone(), ChainRpcUrls::default())
         .with_family_settings(FamilySettings {
-            finish_each_batch: true,
             // With no safe block published the production switch point sits 256 blocks under
             // the target, below every fixture block, so no fixture block would form a range; the
             // fixture corpus puts every work block below the target in rebuild ranges, so each
@@ -547,7 +543,7 @@ async fn run(
         let families_in_clock = families_mode::on();
         let families_started = Instant::now();
         if families_in_clock {
-            project.after_progress_recorded(CHAIN).await;
+            while project.after_progress_recorded(CHAIN).await? == AfterProgress::More {}
         }
         while load_served_project_generation(pool, CHAIN, number, &target.hash, true, true)
             .await?
@@ -594,7 +590,7 @@ async fn run(
             Some(ms) => ms,
             None => {
                 let families_started = Instant::now();
-                project.after_progress_recorded(CHAIN).await;
+                while project.after_progress_recorded(CHAIN).await? == AfterProgress::More {}
                 families_started.elapsed().as_millis()
             }
         };
@@ -822,7 +818,7 @@ async fn compare_with_rebuild(
     // The rebuilt batch rebuilds the owned key families from scratch; they must equal the
     // families the incremental blocks left, row for row, the marker's sequence aside.
     let families_started = Instant::now();
-    project.after_progress_recorded(CHAIN).await;
+    while project.after_progress_recorded(CHAIN).await? == AfterProgress::More {}
     let families_rebuild_ms = families_started.elapsed().as_millis();
     let rebuilt_families = families(pool).await?;
     let differing: Vec<&str> = incremental_families

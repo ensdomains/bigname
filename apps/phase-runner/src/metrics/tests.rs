@@ -561,7 +561,7 @@ fn project_batches_set_last_batch_gauges_and_add_up_written_rows() -> Result<()>
 }
 
 #[test]
-fn family_loops_set_their_own_time_and_lag_and_count_skips() -> Result<()> {
+fn family_loops_set_their_own_time_and_lag_and_observe_each_block() -> Result<()> {
     let metrics = PipelineMetrics::new(
         900,
         RunnerLoopHeartbeat::default(),
@@ -572,33 +572,34 @@ fn family_loops_set_their_own_time_and_lag_and_count_skips() -> Result<()> {
         number,
         hash: format!("0x{number:064x}"),
     };
-    let outcome = |elapsed_ms: u64, current: i64, skipped: Option<&str>| {
-        bigname_project::families::FamilyOutcome {
-            target: Some(marker(14)),
-            marker: Some(marker(current)),
-            marker_readable: true,
-            elapsed_ms,
-            skipped: skipped.map(str::to_owned),
-            duplicate_anomalies: u64::from(skipped.is_none()),
-            ..Default::default()
-        }
+    let outcome = |elapsed_ms: u64, current: i64| bigname_project::families::FamilyOutcome {
+        target: Some(marker(14)),
+        marker: Some(marker(current)),
+        marker_readable: true,
+        elapsed_ms,
+        block_ms: vec![40, 250],
+        duplicate_anomalies: 1,
+        ..Default::default()
     };
-    feed.project_families(
-        "ethereum-sepolia",
-        &outcome(40, 12, Some("block 13: failed")),
-    );
-    feed.project_families("ethereum-sepolia", &outcome(250, 14, None));
+    feed.project_families("ethereum-sepolia", &outcome(40, 12));
+    feed.project_families("ethereum-sepolia", &outcome(250, 14));
     metrics.project_writes.apply(feed.take_project_writes());
 
     let scrape = metrics.registry.encode()?;
     for line in [
-        "# TYPE phase_runner_project_family_skips_total counter",
+        "# TYPE phase_runner_project_family_block_seconds histogram",
         "phase_runner_project_families_seconds{chain=\"ethereum-sepolia\"} 0.25\n",
         "phase_runner_project_family_lag_blocks{chain=\"ethereum-sepolia\"} 0\n",
-        "phase_runner_project_family_skips_total{chain=\"ethereum-sepolia\"} 1\n",
-        "phase_runner_project_family_duplicate_anomalies_total{chain=\"ethereum-sepolia\"} 1\n",
+        "phase_runner_project_family_duplicate_anomalies_total{chain=\"ethereum-sepolia\"} 2\n",
+        "phase_runner_project_family_block_seconds_count{chain=\"ethereum-sepolia\"} 4\n",
+        "phase_runner_project_family_block_seconds_sum{chain=\"ethereum-sepolia\"} 0.58\n",
+        "phase_runner_project_family_block_seconds_bucket{chain=\"ethereum-sepolia\",le=\"+Inf\"} 4\n",
     ] {
         assert!(scrape.contains(line), "missing {line}");
     }
+    assert!(
+        !scrape.contains("phase_runner_project_family_skips_total"),
+        "a family failure fails the batch; nothing counts skips"
+    );
     Ok(())
 }

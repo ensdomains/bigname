@@ -93,7 +93,7 @@ pub(crate) fn preload(
     super::lifecycle::preload(&chain, events, into);
 }
 
-/// Name the family in a reducer error, so a skipped block says which family failed.
+/// Name the family in a reducer error, so a failed block says which family failed.
 pub(crate) fn in_family(family: &str) -> impl Fn(ProjectError) -> ProjectError + '_ {
     move |error| {
         let kind = error.kind();

@@ -1881,6 +1881,136 @@ async fn capacity_breach_pauses_and_then_resumes_the_phase() -> Result<()> {
     scratch.cleanup().await
 }
 
+// A batch prelude measures storage afresh rather than reuse a reading taken before the last batch:
+// that reading does not count the batch's own writes. The runner's capacity clock is held fixed,
+// so the first prelude's reading stays within the poll interval at the second prelude however
+// long the machine takes; only the pause's own polling sleeps in real time. The first batch grows
+// the database past its ceiling, so the second prelude must measure, see the breach and pause
+// before the second batch; once storage clears the second batch runs.
+#[tokio::test]
+async fn a_batch_prelude_measures_afresh_after_a_batch_consumed_the_headroom() -> Result<()> {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let chain_id = "capacity-prelude-chain";
+        let scratch = ScratchDatabase::create("phase_runner_capacity_prelude").await?;
+        let store = PhaseStore::new(scratch.runner().pool().clone());
+        store.initialize_chain(chain_id).await?;
+        seed_readable_lineage(scratch.pool(), chain_id, 0).await?;
+        mark_completed(
+            scratch.pool(),
+            chain_id,
+            PhaseName::Project,
+            Some(phase_runner::INTERPRETER_CONTENT_HASH),
+        )
+        .await?;
+        sqlx::query(
+            "UPDATE chain_phase_state
+             SET current_block_number = 0, current_block_hash = $1 || '-block-0',
+                 target_block_number = 0, target_block_hash = $1 || '-block-0'
+             WHERE chain_id = $1 AND phase_name = 'verify'",
+        )
+        .bind(chain_id)
+        .execute(scratch.pool())
+        .await?;
+        let probe = Arc::new(GrowingDatabaseProbe::default());
+        let capacity = CapacityGuard::new(
+            CapacityConfig {
+                database_max_bytes: Some(100),
+                poll_interval: Duration::from_secs(1),
+                ..CapacityConfig::default()
+            },
+            probe.clone(),
+        );
+        let batches = Arc::new(AtomicUsize::new(0));
+        let verify = Arc::new(FunctionPhase {
+            name: PhaseName::Verify,
+            handler: {
+                let batches = Arc::clone(&batches);
+                let probe = Arc::clone(&probe);
+                Arc::new(move |_| {
+                    if batches.fetch_add(1, Ordering::SeqCst) == 0 {
+                        probe.database_size_bytes.store(150, Ordering::SeqCst);
+                        Ok(PhaseBatchOutcome::Continue(PhaseProgress::default()))
+                    } else {
+                        Ok(PhaseBatchOutcome::Complete(PhaseProgress {
+                            verification_level: Some(VerificationLevel::QuickSynced),
+                            ..PhaseProgress::default()
+                        }))
+                    }
+                })
+            },
+        });
+        let runner = runner(
+            scratch.runner(),
+            phase_set_replacing(PhaseName::Verify, verify)?,
+            capacity,
+            "capacity-prelude-runner",
+        )?
+        .with_capacity_clock({
+            let fixed = std::time::Instant::now();
+            move || fixed
+        });
+        let chain = chain(chain_id)?;
+        let mut task = tokio::spawn(async move {
+            runner
+                .redo(
+                    &chain,
+                    RedoPhase::Phase(PhaseName::Verify),
+                    BlockRange::new(0, 0).expect("fixed range"),
+                    CancellationToken::new(),
+                )
+                .await
+        });
+        tokio::select! {
+            () = probe.breached.notified() => {}
+            finished = &mut task => {
+                finished??;
+                anyhow::bail!(
+                    "the second batch ran on the reading from before the first: {} batches",
+                    batches.load(Ordering::SeqCst)
+                );
+            }
+        }
+        wait_for_phase_status(scratch.pool(), chain_id, PhaseName::Verify, "paused").await?;
+        assert_eq!(
+            batches.load(Ordering::SeqCst),
+            1,
+            "the second batch waited for storage"
+        );
+        probe.database_size_bytes.store(0, Ordering::SeqCst);
+        task.await??;
+        assert_eq!(batches.load(Ordering::SeqCst), 2);
+        scratch.cleanup().await
+    })
+    .await
+    .map_err(|_| anyhow::anyhow!("the case did not finish within 60 s"))?
+}
+
+/// Reports whatever database size the test sets, notifying when it is over 100 bytes.
+#[derive(Default)]
+struct GrowingDatabaseProbe {
+    database_size_bytes: std::sync::atomic::AtomicU64,
+    breached: Notify,
+}
+
+impl CapacityProbe for GrowingDatabaseProbe {
+    fn measure<'a>(
+        &'a self,
+        _pool: &'a sqlx::PgPool,
+        _writable_path: &'a std::path::Path,
+    ) -> CapacityFuture<'a> {
+        Box::pin(async move {
+            let database_size_bytes = self.database_size_bytes.load(Ordering::SeqCst);
+            if database_size_bytes > 100 {
+                self.breached.notify_one();
+            }
+            Ok(CapacityMeasurement {
+                database_size_bytes,
+                free_disk_bytes: u64::MAX,
+            })
+        })
+    }
+}
+
 #[tokio::test]
 async fn transient_phase_error_restarts_with_backoff() -> Result<()> {
     let scratch = ScratchDatabase::create("phase_runner_restart").await?;

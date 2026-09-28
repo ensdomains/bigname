@@ -3168,7 +3168,7 @@ async fn a_same_height_replacement_is_compared_only_once_both_sides_follow_it() 
     let refused = shadow_support::compare::compare(&fixture.pool, CHAIN, 12).await;
     assert!(refused.is_err(), "neither side follows 12': {refused:?}");
     let token = bigname_project::families::input_token(&fixture.pool, CHAIN).await?;
-    let outcome = bigname_project::families::apply(
+    bigname_project::families::apply(
         &fixture.pool,
         CHAIN,
         &bigname_project::Marker {
@@ -3179,8 +3179,7 @@ async fn a_same_height_replacement_is_compared_only_once_both_sides_follow_it() 
         &token,
         &bigname_project::families::FamilyOptions::new(support::CONTENT_HASH),
     )
-    .await;
-    assert_eq!(outcome.skipped, None);
+    .await?;
     let refused = shadow_support::compare::compare(&fixture.pool, CHAIN, 12).await;
     assert!(
         refused.is_err(),
@@ -3304,13 +3303,10 @@ async fn two_chains_keep_their_own_epoch_start_for_one_name() -> Result<()> {
         .await?;
     let apply = |chain: &'static str, target: i64| {
         let fixture = &fixture;
-        async move {
-            let outcome = fixture.apply_on(chain, target).await;
-            assert_eq!(outcome.skipped, None, "{chain} at {target}");
-        }
+        async move { fixture.apply_on(chain, target).await }
     };
-    apply(CHAIN, 12).await;
-    apply(OTHER, 12).await;
+    apply(CHAIN, 12).await?;
+    apply(OTHER, 12).await?;
     // Each chain's row, and the start the loader reads for that chain.
     let starts = || async {
         let rows: Vec<(String, Value)> = sqlx::query_as(
@@ -3354,7 +3350,7 @@ async fn two_chains_keep_their_own_epoch_start_for_one_name() -> Result<()> {
     fixture
         .event(epoch("other:epoch:13", 13, OTHER, V1_REGISTRY))
         .await?;
-    apply(OTHER, 14).await;
+    apply(OTHER, 14).await?;
     let moved = json!({"chain": OTHER, "block_number": 13, "authority_kind": "registry_only"});
     assert_eq!(starts().await?, sorted(vec![this, moved]));
     fixture.cleanup().await

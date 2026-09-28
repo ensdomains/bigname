@@ -84,7 +84,7 @@ async fn pointers_keep_the_latest_resolver_per_node_and_resource_clears_included
         .await?;
     fixture
         .apply(12, bigname_project::families::FamilyMode::Normal)
-        .await;
+        .await?;
 
     let registry = fixture.rows("project_registry_pointer").await?;
     assert_eq!(
@@ -234,7 +234,7 @@ async fn node_records_keep_a_partition_per_arm_and_the_coin_60_pair() -> Result<
         .await?;
     fixture
         .apply(12, bigname_project::families::FamilyMode::Normal)
-        .await;
+        .await?;
 
     let partitions = fixture.rows("project_node_record_partition").await?;
     let arms: Vec<Value> = partitions
@@ -329,7 +329,7 @@ async fn record_id_values_and_links_keep_the_latest_with_the_zero_clear() -> Res
         .await?;
     fixture
         .apply(11, bigname_project::families::FamilyMode::Normal)
-        .await;
+        .await?;
 
     let links = fixture.rows("project_resolver_link").await?;
     assert_eq!(

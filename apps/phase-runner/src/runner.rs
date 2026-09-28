@@ -77,6 +77,7 @@ pub struct PhaseRunner {
     metrics_feed: crate::metrics::RunnerMetricsFeed,
     stop_budget: std::time::Duration,
     chain_stop_clocks: Arc<std::sync::Mutex<BTreeMap<String, Arc<StopClock>>>>,
+    capacity_memo: Arc<capacity_wait::CapacityMemo>,
 }
 
 impl PhaseRunner {
@@ -113,6 +114,7 @@ impl PhaseRunner {
             metrics_feed: crate::metrics::RunnerMetricsFeed::default(),
             stop_budget: StopClock::DEFAULT_BUDGET,
             chain_stop_clocks: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
+            capacity_memo: Arc::default(),
         })
     }
 
@@ -511,6 +513,7 @@ impl PhaseRunner {
                         chain,
                         phase_name,
                         reserved_write_bytes,
+                        capacity_wait::Measure::Fresh,
                         &cancellation,
                         heartbeat,
                         phase_lock,
@@ -559,12 +562,11 @@ impl PhaseRunner {
             .await?;
             self.record_loop_progress(&chain.chain_id);
             reserved_write_bytes = progress.estimated_write_bytes;
-            // Shadow work after the recorded progress. A stop abandons it; its own transactions
-            // roll back and the next batch catches up.
-            tokio::select! {
-                biased;
-                () = cancellation.cancelled() => {}
-                () = phase.after_progress_recorded(&chain.chain_id) => {}
+            if !self
+                .follow_batch(chain, &*phase, &cancellation, heartbeat, phase_lock)
+                .await?
+            {
+                return Ok(PhaseLoopResult::Cancelled);
             }
 
             match outcome {

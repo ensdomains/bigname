@@ -2538,10 +2538,15 @@ the reducer under `crates/project/src/families/` that writes them:
 
 `project_family_marker`: the block and hash a chain's [owned key
 families](#owned-key-family) stand at, the generation (`sequence`) every block,
-[rebuild range](#rebuild-range) and undo advances, and the input token, input
-revision and [active manifest set](#active-manifest-set-family-block) key the
-last block read. A block, range or undo applies only against the generation it
-planned from.
+[rebuild range](#rebuild-range) and undo advances, and what the last write
+applied under: the [input token](#family-input-token)'s interpretation and redo
+fields (the Interpret row's content hash, redo attempt and redo flag, which
+make up the [input revision](#family-input-revision), and the Project row's
+redo attempt, mode and range) and the [active manifest
+set](#active-manifest-set-family-block) key. A single block records its own
+token and set key. A range records the token fields it read at its opening
+fence and its final block's set key. A block, range or undo applies only
+against the generation it planned from.
 
 While the [publication switch](#publication-switch) is on, the marker is also
 what the API serves from: snapshot selection and the verified lookup's
@@ -2603,11 +2608,23 @@ range, so it is undone as one step. Rows are kept back to the lowest of
 256 blocks below the marker, the finalized block, the safe block and an active
 repair's floor ([projections](projections.md#owned-key-families)).
 
+## Work block
+
+a block on the readable lineage that carries [owned key
+family](#owned-key-family) input: one with an activated canonical event, a
+canonical surface binding, a resolver discovery edge or its target's contract
+address starting or stopping there, or the start block of a manifest
+declaration the run captured. A rebuild visits only these blocks, plus its
+target, since no other block owns a family fact; the block-by-block catch-up
+outside a rebuild applies every block. The sources are the five unions of
+`work_blocks` in `crates/project/src/families/input.rs`
+([projections](projections.md#owned-key-families)).
+
 ## Rebuild range
 
-several work blocks of an owned key family rebuild applied in one transaction:
-the blocks at or below the chain's safe block minus 5 (or 256 blocks below the
-target with no safe block). The range folds its blocks one by one exactly as
+several [work blocks](#work-block) of an owned key family rebuild applied in
+one transaction: the blocks at or below the chain's safe block minus 5 (or 256
+blocks below the target with no safe block). The range folds its blocks one by one exactly as
 single blocks would, then journals, writes and advances the [family
 marker](#family-marker) once, to its last block, as one generation
 ([projections](projections.md#owned-key-families)). The first range after the
@@ -2624,11 +2641,28 @@ the block it trusts, the block it replays to, its state (`undoing`,
 generation and input content hash it finished with. Each state change commits
 in the same transaction as the reset, undo or block it describes.
 
+## Family input token
+
+the Interpret row's content hash, redo attempt and redo flag and the Project
+row's redo attempt, mode, range and last error, read from `chain_phase_state` in
+one statement (`input_token` in `crates/project/src/families/input.rs`). A
+single-block transaction reads the token inside that transaction. A [rebuild
+range](#rebuild-range) reads it once at its opening fence. Each records the
+token's interpretation and redo fields with its final [family
+marker](#family-marker); Project's last-error text is not stored on the marker.
+Its [revision](#family-input-revision) is what a run applies under. The Project phase also reads it once after a batch commits and
+before the batch's progress is recorded, bounded at 30 seconds; a read that
+fails or outlasts the bound fails the family run that follows
+([projections](projections.md#owned-key-families)).
+
 ## Family input revision
 
 the Interpret row's `input_content_hash` and `redo_attempt_generation` a family
 block read inside its own transaction, recorded on the family marker; nothing
-while Interpret is in redo, and the block then waits. Distinct from the retired [raw-log input
+while Interpret is in redo. A block that reads a revision other than the one
+its run applies under, or none, stops the run with an error: the supervised
+runner retries it, and the one-shot `redo` command returns it and ends.
+Distinct from the retired [raw-log input
 revision](#input-revision-raw-log-input-revision).
 
 ## Active manifest set (family block)

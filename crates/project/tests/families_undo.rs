@@ -32,7 +32,7 @@ async fn fresh_rebuild(prefix: &str, dropped: bool) -> Result<Value> {
     if dropped {
         drop_events(&fixture, &ids).await?;
     }
-    fixture.apply(14, FamilyMode::Rebuild).await;
+    fixture.apply(14, FamilyMode::Rebuild).await?;
     let snapshot = fixture.snapshot().await?;
     fixture.cleanup().await?;
     Ok(snapshot)
@@ -50,8 +50,7 @@ async fn drop_events(fixture: &Fixture, ids: &[i64]) -> Result<()> {
 async fn a_redo_undoes_to_the_range_predecessor_and_replays_to_a_complete_record() -> Result<()> {
     let fixture = Fixture::new("families_undo_redo", 20).await?;
     let dropped = seed(&fixture).await?;
-    let first = fixture.apply(14, FamilyMode::Normal).await;
-    assert_eq!(first.skipped, None);
+    let first = fixture.apply(14, FamilyMode::Normal).await?;
     assert!(first.reset, "the first run populates from scratch");
     assert_eq!(
         fixture
@@ -76,8 +75,7 @@ async fn a_redo_undoes_to_the_range_predecessor_and_replays_to_a_complete_record
         .await?;
     let redo = fixture
         .apply(14, FamilyMode::Redo { from: 13, to: 14 })
-        .await;
-    assert_eq!(redo.skipped, None);
+        .await?;
     assert!(!redo.reset);
     assert_eq!(redo.undone_blocks, 2, "blocks 14 and 13 are undone");
     assert_eq!(redo.blocks, 2, "blocks 13 and 14 are replayed");
@@ -118,7 +116,7 @@ async fn a_redo_undoes_to_the_range_predecessor_and_replays_to_a_complete_record
     let before = (fixture.snapshot().await?, fixture.repair_record().await?);
     let retry = fixture
         .apply(14, FamilyMode::Redo { from: 13, to: 14 })
-        .await;
+        .await?;
     assert_eq!(
         (retry.blocks, retry.undone_blocks, retry.reset),
         (0, 0, false)
@@ -145,15 +143,14 @@ async fn a_redo_below_the_retained_journal_rebuilds_from_scratch() -> Result<()>
         .with_retained_undo_depth(2)
         .with_rebuild_ranges(RebuildRanges::Off);
     fixture.heads(20, 20, 20).await?;
-    fixture.apply_with(14, FamilyMode::Normal, &shallow).await;
+    fixture.apply_with(14, FamilyMode::Normal, &shallow).await?;
     assert_eq!(fixture.journalled_blocks().await?, vec![12, 13, 14]);
 
     drop_events(&fixture, &dropped).await?;
     fixture.project_row(1, Some((11, 14, "operator"))).await?;
     let redo = fixture
         .apply_with(14, FamilyMode::Redo { from: 11, to: 14 }, &shallow)
-        .await;
-    assert_eq!(redo.skipped, None);
+        .await?;
     assert!(redo.reset, "block 11's journal was pruned");
     assert_eq!(redo.undone_blocks, 0);
     assert_eq!(
@@ -182,11 +179,10 @@ async fn a_redo_below_the_retained_journal_rebuilds_from_scratch() -> Result<()>
 async fn a_redo_attempt_the_families_never_saw_rebuilds_them() -> Result<()> {
     let fixture = Fixture::new("families_undo_missed", 20).await?;
     seed(&fixture).await?;
-    fixture.apply(14, FamilyMode::Normal).await;
+    fixture.apply(14, FamilyMode::Normal).await?;
     // The Project row moved on to attempt 1 while the families were not running.
     fixture.project_row(1, None).await?;
-    let normal = fixture.apply(14, FamilyMode::Normal).await;
-    assert_eq!(normal.skipped, None);
+    let normal = fixture.apply(14, FamilyMode::Normal).await?;
     assert!(normal.reset);
     assert_eq!(
         fixture
@@ -196,7 +192,7 @@ async fn a_redo_attempt_the_families_never_saw_rebuilds_them() -> Result<()> {
         Some(json!(1))
     );
     // With the attempt recorded, the next run just follows.
-    let next = fixture.apply(15, FamilyMode::Normal).await;
+    let next = fixture.apply(15, FamilyMode::Normal).await?;
     assert_eq!((next.reset, next.blocks), (false, 1));
     fixture.cleanup().await
 }
@@ -205,7 +201,7 @@ async fn a_redo_attempt_the_families_never_saw_rebuilds_them() -> Result<()> {
 async fn a_marker_on_an_orphaned_block_is_undone_and_the_new_branch_replayed() -> Result<()> {
     let fixture = Fixture::new("families_undo_orphan", 20).await?;
     seed(&fixture).await?;
-    fixture.apply(14, FamilyMode::Normal).await;
+    fixture.apply(14, FamilyMode::Normal).await?;
     // Block 14 is replaced by 14' on the readable lineage.
     sqlx::query(
         "UPDATE chain_lineage SET canonicality_state = 'orphaned'
@@ -236,8 +232,7 @@ async fn a_marker_on_an_orphaned_block_is_undone_and_the_new_branch_replayed() -
         &token,
         &FamilyOptions::new(CONTENT_HASH),
     )
-    .await;
-    assert_eq!(outcome.skipped, None);
+    .await?;
     assert_eq!(
         (outcome.undone_blocks, outcome.blocks, outcome.reset),
         (1, 1, false)
@@ -263,7 +258,7 @@ async fn a_marker_on_an_orphaned_block_is_undone_and_the_new_branch_replayed() -
 async fn an_interrupted_replay_resumes_on_the_next_run() -> Result<()> {
     let fixture = Fixture::new("families_undo_resume", 20).await?;
     seed(&fixture).await?;
-    fixture.apply(14, FamilyMode::Normal).await;
+    fixture.apply(14, FamilyMode::Normal).await?;
     // The replay of block 14 fails once.
     sqlx::raw_sql(
         "CREATE FUNCTION refuse_fourteen() RETURNS trigger LANGUAGE plpgsql AS $$
@@ -277,10 +272,10 @@ async fn an_interrupted_replay_resumes_on_the_next_run() -> Result<()> {
     .execute(&fixture.pool)
     .await?;
     fixture.project_row(1, Some((13, 14, "operator"))).await?;
-    let stopped = fixture
+    fixture
         .apply(14, FamilyMode::Redo { from: 13, to: 14 })
-        .await;
-    assert!(stopped.skipped.is_some());
+        .await
+        .expect_err("the run stops with an error");
     assert_eq!(fixture.marker().await?.0, Some(13));
     assert_eq!(
         fixture
@@ -293,8 +288,7 @@ async fn an_interrupted_replay_resumes_on_the_next_run() -> Result<()> {
     sqlx::query("DROP TRIGGER refuse_fourteen ON project_family_marker")
         .execute(&fixture.pool)
         .await?;
-    let resumed = fixture.apply(14, FamilyMode::Normal).await;
-    assert_eq!(resumed.skipped, None);
+    let resumed = fixture.apply(14, FamilyMode::Normal).await?;
     assert_eq!(
         (resumed.blocks, resumed.undone_blocks, resumed.reset),
         (1, 0, false)

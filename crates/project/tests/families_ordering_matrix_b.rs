@@ -195,7 +195,7 @@ async fn f6_the_node_record_is_the_higher_ordinal() -> Result<()> {
         .name(&named),
     )
     .await?;
-    fixture.apply(BLOCK, FamilyMode::Normal).await;
+    fixture.apply(BLOCK, FamilyMode::Normal).await?;
     let value = only(&fixture, "project_node_record_value").await?;
     assert_eq!(
         pick(&value, &["value", "status", "event_identity"]),
@@ -261,7 +261,7 @@ async fn f7_the_record_id_value_and_link_are_the_higher_ordinal() -> Result<()> 
         ),
     )
     .await?;
-    fixture.apply(BLOCK, FamilyMode::Normal).await;
+    fixture.apply(BLOCK, FamilyMode::Normal).await?;
     let row = only(&fixture, "project_record_id_value").await?;
     assert_eq!(
         pick(&row, &["value", "event_identity"]),
@@ -305,7 +305,7 @@ async fn f9_the_account_approval_is_the_higher_ordinal() -> Result<()> {
         ),
     )
     .await?;
-    fixture.apply(BLOCK, FamilyMode::Normal).await;
+    fixture.apply(BLOCK, FamilyMode::Normal).await?;
     let row = only(&fixture, "project_account_approval").await?;
     assert_eq!(
         pick(&row, &["approved", "event_identity"]),
@@ -345,7 +345,7 @@ async fn f10_the_alias_is_the_higher_ordinal() -> Result<()> {
         .name(&named),
     )
     .await?;
-    fixture.apply(BLOCK, FamilyMode::Normal).await;
+    fixture.apply(BLOCK, FamilyMode::Normal).await?;
     for table in ["project_name_alias", "project_resolver_alias"] {
         let row = only(&fixture, table).await?;
         assert_eq!(
@@ -416,7 +416,7 @@ async fn f11_the_child_edge_and_parent_subregistry_are_the_higher_ordinal() -> R
         .name(&named),
     )
     .await?;
-    fixture.apply(BLOCK, FamilyMode::Normal).await;
+    fixture.apply(BLOCK, FamilyMode::Normal).await?;
     let row = only(&fixture, "project_child_edge_candidate").await?;
     assert_eq!(
         pick(&row, &["owner", "event_identity"]),
@@ -488,7 +488,7 @@ async fn f12_the_reverse_tuple_and_claim_are_the_higher_ordinal() -> Result<()> 
         ),
     )
     .await?;
-    fixture.apply(BLOCK, FamilyMode::Normal).await;
+    fixture.apply(BLOCK, FamilyMode::Normal).await?;
     let tuple = only(&fixture, "project_reverse_tuple").await?;
     assert_eq!(
         pick(
@@ -548,7 +548,7 @@ async fn f13_the_controller_is_the_higher_ordinal() -> Result<()> {
         .resource(&resource),
     )
     .await?;
-    fixture.apply(BLOCK, FamilyMode::Normal).await;
+    fixture.apply(BLOCK, FamilyMode::Normal).await?;
     let fold = only(&fixture, "project_address_name_fold").await?;
     assert_eq!(
         pick(
@@ -602,7 +602,7 @@ async fn f13_the_registrant_and_token_holder_are_the_higher_ordinal() -> Result<
         .resource(&resource),
     )
     .await?;
-    fixture.apply(BLOCK, FamilyMode::Normal).await;
+    fixture.apply(BLOCK, FamilyMode::Normal).await?;
     let fold = only(&fixture, "project_address_name_fold").await?;
     assert_eq!(
         pick(

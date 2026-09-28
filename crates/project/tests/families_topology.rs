@@ -63,7 +63,7 @@ async fn aliases_keep_the_latest_per_name_and_per_resolver_inactive_included() -
             RESOLVER,
         )
         .await?;
-    fixture.apply(11, FamilyMode::Normal).await;
+    fixture.apply(11, FamilyMode::Normal).await?;
     let names = fixture.rows("project_name_alias").await?;
     assert_eq!(
         names
@@ -175,7 +175,7 @@ async fn child_edges_and_the_v2_subregistry_keep_their_latest_clears_included() 
             REGISTRY,
         )
         .await?;
-    fixture.apply(11, FamilyMode::Normal).await;
+    fixture.apply(11, FamilyMode::Normal).await?;
     let edges = fixture.rows("project_child_edge_candidate").await?;
     assert_eq!(
         edges
@@ -230,8 +230,7 @@ async fn an_alias_without_an_active_flag_is_stored_active() -> Result<()> {
             RESOLVER,
         )
         .await?;
-    let outcome = fixture.apply(10, FamilyMode::Normal).await;
-    assert_eq!(outcome.skipped, None);
+    fixture.apply(10, FamilyMode::Normal).await?;
     for table in ["project_name_alias", "project_resolver_alias"] {
         let rows = fixture.rows(table).await?;
         assert_eq!(rows.len(), 1, "{table}");
@@ -261,7 +260,7 @@ async fn a_child_edge_stores_its_owner_and_owner_getter_lower_cased() -> Result<
             REGISTRY,
         )
         .await?;
-    fixture.apply(10, FamilyMode::Normal).await;
+    fixture.apply(10, FamilyMode::Normal).await?;
     let owners = || async {
         let edges = fixture.rows("project_child_edge_candidate").await?;
         anyhow::ensure!(edges.len() == 1, "one edge key: {edges:?}");
@@ -295,7 +294,7 @@ async fn a_child_edge_stores_its_owner_and_owner_getter_lower_cased() -> Result<
             REGISTRY,
         )
         .await?;
-    fixture.apply(11, FamilyMode::Normal).await;
+    fixture.apply(11, FamilyMode::Normal).await?;
     let updated = json!({"owner": "0x00000000000000000000000000000000000000cc",
                          "owner_getter": "0x00000000000000000000000000000000000000dd",
                          "block_number": 11});
@@ -338,7 +337,7 @@ async fn an_alias_active_flag_reads_as_postgresql_reads_a_boolean() -> Result<()
             )
             .await?;
     }
-    fixture.apply(10, FamilyMode::Normal).await;
+    fixture.apply(10, FamilyMode::Normal).await?;
     let rows = fixture.rows("project_name_alias").await?;
     let mut stored: Vec<(String, Option<bool>)> = rows
         .iter()
@@ -444,7 +443,7 @@ async fn an_alias_active_flag_matches_the_served_boolean_cast() -> Result<()> {
             .await?;
         expected.push((value.clone(), logical, flag));
     }
-    fixture.apply(10, FamilyMode::Normal).await;
+    fixture.apply(10, FamilyMode::Normal).await?;
     for table in ["project_name_alias", "project_resolver_alias"] {
         let rows = fixture.rows(table).await?;
         assert_eq!(rows.len(), expected.len(), "{table}");

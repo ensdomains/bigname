@@ -351,7 +351,7 @@ async fn name_wrapped_pointer_differs_from_the_served_mirror_in_attribution_only
         &token,
         &FamilyOptions::new("name-wrapped-sources"),
     )
-    .await;
+    .await?;
     let family: Value = sqlx::query_scalar(
         "SELECT jsonb_build_object('resolver', resolver_address, 'resource', resource_id,
              'source_family', source_family, 'event', normalized_event_id,

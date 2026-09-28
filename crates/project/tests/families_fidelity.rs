@@ -79,7 +79,7 @@ async fn unnamed_resource_pointers_and_boundaries_are_kept() -> Result<()> {
             R1,
         )
         .await?;
-    fixture.apply(12, FamilyMode::Normal).await;
+    fixture.apply(12, FamilyMode::Normal).await?;
     let rows = fixture.rows("project_resource_pointer").await?;
     assert_eq!(
         rows.len(),
@@ -141,7 +141,7 @@ async fn a_link_counts_only_from_the_resolver_it_names() -> Result<()> {
             STRANGER,
         )
         .await?;
-    fixture.apply(11, FamilyMode::Normal).await;
+    fixture.apply(11, FamilyMode::Normal).await?;
     let links = fixture.rows("project_resolver_link").await?;
     assert_eq!(
         links
@@ -195,7 +195,7 @@ async fn the_owner_group_and_a_named_observation_follow_their_own_events() -> Re
     fixture
         .binding(&uuid(102), &name(1), &second, "ens_v1", 12, 1, None)
         .await?;
-    fixture.apply(11, FamilyMode::Normal).await;
+    fixture.apply(11, FamilyMode::Normal).await?;
     let nodes = fixture.rows("project_registry_node_state").await?;
     assert_eq!(
         columns(
@@ -221,7 +221,7 @@ async fn the_owner_group_and_a_named_observation_follow_their_own_events() -> Re
         Some(json!({"attributed_via": "name", "resource_id": first, "target_resource_id": first}))
     );
 
-    fixture.apply(12, FamilyMode::Normal).await;
+    fixture.apply(12, FamilyMode::Normal).await?;
     assert_eq!(
         target(&fixture.rows("project_registry_binding_observation").await?),
         Some(json!({"attributed_via": "name", "resource_id": first, "target_resource_id": second})),
@@ -250,7 +250,7 @@ async fn a_grant_without_an_authority_kind_keeps_none() -> Result<()> {
             REGISTRAR,
         )
         .await?;
-    fixture.apply(10, FamilyMode::Normal).await;
+    fixture.apply(10, FamilyMode::Normal).await?;
     let events = fixture.rows("project_lifecycle_event").await?;
     assert_eq!(
         columns(&events[0], &["authority_kind", "authority_key"]),
@@ -353,7 +353,7 @@ async fn a_reverse_claim_follows_the_pointer_back_to_an_earlier_resolver() -> Re
             R2,
         )
         .await?;
-    fixture.apply(12, FamilyMode::Normal).await;
+    fixture.apply(12, FamilyMode::Normal).await?;
     assert_eq!(
         selected_claim(&fixture, &reverse).await?,
         json!({"resolver": R2, "normalized_name": "bob.eth", "status": "success",
@@ -385,7 +385,7 @@ async fn a_reverse_claim_follows_the_pointer_back_to_an_earlier_resolver() -> Re
             R2,
         )
         .await?;
-    fixture.apply(14, FamilyMode::Normal).await;
+    fixture.apply(14, FamilyMode::Normal).await?;
     assert_eq!(
         selected_claim(&fixture, &reverse).await?,
         json!({"resolver": R1, "normalized_name": "alice.eth", "status": "success",
@@ -437,7 +437,7 @@ async fn a_reverse_change_leaves_its_before_tuple_as_it_was() -> Result<()> {
             .after(moved),
         )
         .await?;
-    fixture.apply(11, FamilyMode::Normal).await;
+    fixture.apply(11, FamilyMode::Normal).await?;
     let rows = fixture.rows("project_reverse_tuple").await?;
     let by_address = |address: &str| {
         rows.iter()
@@ -498,7 +498,7 @@ async fn a_named_observation_reaches_a_binding_opened_in_its_own_block() -> Resu
             REGISTRY,
         )
         .await?;
-    fixture.apply(12, FamilyMode::Normal).await;
+    fixture.apply(12, FamilyMode::Normal).await?;
     let rows = fixture.rows("project_registry_binding_observation").await?;
     let target = rows
         .iter()

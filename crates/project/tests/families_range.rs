@@ -51,12 +51,7 @@ async fn filler(fixture: &Fixture, block: i64) -> Result<()> {
 /// Follow block by block from `first` to `target`, one run per block.
 async fn follow(fixture: &Fixture, first: i64, target: i64) -> Result<()> {
     for block in first..=target {
-        let outcome = fixture.apply(block, FamilyMode::Normal).await;
-        ensure!(
-            outcome.skipped.is_none(),
-            "block {block}: {:?}",
-            outcome.skipped
-        );
+        fixture.apply(block, FamilyMode::Normal).await?;
     }
     Ok(())
 }
@@ -71,8 +66,7 @@ async fn rebuild_equal(
     let incremental = fixture.exact().await?;
     let outcome = fixture
         .apply_with(target, FamilyMode::Rebuild, options)
-        .await;
-    ensure!(outcome.skipped.is_none(), "rebuild: {:?}", outcome.skipped);
+        .await?;
     let rebuilt = fixture.exact().await?;
     for ((table, was), (_, now)) in incremental.iter().zip(&rebuilt) {
         ensure!(
@@ -714,8 +708,9 @@ async fn a_budgeted_range_rebuild_stops_on_a_range_end_in_bootstrap() -> Result<
     let fixture = Fixture::new("families_range_budget", 40).await?;
     pointers(&fixture, 10..=29).await?;
     let options = in_ranges(30).with_max_blocks_per_run(5);
-    let first = fixture.apply_with(30, FamilyMode::Rebuild, &options).await;
-    assert_eq!(first.skipped, None);
+    let first = fixture
+        .apply_with(30, FamilyMode::Rebuild, &options)
+        .await?;
     assert_eq!(
         (first.blocks, first.ranges, first.budget_exhausted),
         (5, 3, true),
@@ -740,8 +735,7 @@ async fn a_range_rebuild_resumes_after_a_stop_and_equals_the_follow() -> Result<
     let mut mode = FamilyMode::Rebuild;
     let mut runs = 0;
     loop {
-        let outcome = fixture.apply_with(30, mode.clone(), &options).await;
-        ensure!(outcome.skipped.is_none(), "{:?}", outcome.skipped);
+        let outcome = fixture.apply_with(30, mode.clone(), &options).await?;
         ensure!(
             !outcome.reset || runs == 0,
             "run {runs} restarted the rebuild"
@@ -772,23 +766,22 @@ async fn a_resumed_range_rebuild_starts_with_a_range_of_its_whole_budget() -> Re
     follow(&fixture, 10, 30).await?;
     let incremental = fixture.exact().await?;
     let options = in_ranges(30).with_max_blocks_per_run(8);
-    let first = fixture.apply_with(30, FamilyMode::Rebuild, &options).await;
-    assert_eq!(first.skipped, None);
+    let first = fixture
+        .apply_with(30, FamilyMode::Rebuild, &options)
+        .await?;
     assert_eq!(
         (first.blocks, first.ranges, first.budget_exhausted),
         (8, 4, true)
     );
     assert_eq!(fixture.journalled_blocks().await?, vec![10, 12, 16, 17]);
-    let second = fixture.apply_with(30, FamilyMode::Normal, &options).await;
-    assert_eq!(second.skipped, None);
+    let second = fixture.apply_with(30, FamilyMode::Normal, &options).await?;
     assert_eq!(
         (second.blocks, second.ranges, second.reset),
         (8, 1, false),
         "the resumed run applies its whole budget in one range"
     );
     assert_eq!(fixture.marker().await?.0, Some(25));
-    let third = fixture.apply_with(30, FamilyMode::Normal, &options).await;
-    assert_eq!(third.skipped, None);
+    let third = fixture.apply_with(30, FamilyMode::Normal, &options).await?;
     assert_eq!(
         (third.blocks, third.ranges),
         (5, 1),
@@ -832,10 +825,9 @@ async fn a_range_cap_of_zero_counts_as_one_block() -> Result<()> {
 async fn an_undo_into_a_range_lands_on_its_predecessor_and_replays_to_a_rebuild() -> Result<()> {
     let fixture = Fixture::new("families_range_undo", 40).await?;
     pointers(&fixture, 10..=20).await?;
-    let rebuilt = fixture
+    fixture
         .apply_with(21, FamilyMode::Rebuild, &in_ranges(21))
-        .await;
-    assert_eq!(rebuilt.skipped, None);
+        .await?;
     assert_eq!(
         fixture.journalled_blocks().await?,
         vec![10, 12, 16, 20, 21],
@@ -847,18 +839,16 @@ async fn an_undo_into_a_range_lands_on_its_predecessor_and_replays_to_a_rebuild(
         "21, the range ending at 20 and the range ending at 16"
     );
     assert_eq!(fixture.marker().await?.0, Some(12));
-    let replayed = fixture.apply(21, FamilyMode::Normal).await;
-    assert_eq!(replayed.skipped, None);
+    let replayed = fixture.apply(21, FamilyMode::Normal).await?;
     assert_eq!(replayed.blocks, 9, "13 to 21, block by block");
     let incremental = fixture.exact().await?;
-    let fresh = fixture
+    fixture
         .apply_with(
             21,
             FamilyMode::Rebuild,
             &FamilyOptions::new(CONTENT_HASH).with_rebuild_ranges(RebuildRanges::Off),
         )
-        .await;
-    assert_eq!(fresh.skipped, None);
+        .await?;
     let rebuilt = fixture.exact().await?;
     for ((table, was), (_, now)) in incremental.iter().zip(&rebuilt) {
         assert_eq!(was, now, "{table}");
@@ -890,8 +880,7 @@ async fn without_a_safe_block_ranges_stop_256_blocks_below_the_target() -> Resul
     }
     let rebuilt = fixture
         .apply_with(300, FamilyMode::Rebuild, &FamilyOptions::new(CONTENT_HASH))
-        .await;
-    assert_eq!(rebuilt.skipped, None);
+        .await?;
     let mut expected = vec![10, 30, 40];
     expected.extend((50..=290).step_by(10));
     expected.push(300);

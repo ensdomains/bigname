@@ -162,7 +162,7 @@ async fn resolvers_are_classified_at_their_block_and_again_when_a_declaration_st
             REGISTRY,
         )
         .await?;
-    fixture.apply(14, FamilyMode::Normal).await;
+    fixture.apply(14, FamilyMode::Normal).await?;
     assert_eq!(
         classifications(&fixture).await?,
         vec![
@@ -188,7 +188,7 @@ async fn resolvers_are_classified_at_their_block_and_again_when_a_declaration_st
     );
     assert_eq!(rows[0]["classification"]["read_features"], json!(["addr"]));
 
-    fixture.apply(15, FamilyMode::Normal).await;
+    fixture.apply(15, FamilyMode::Normal).await?;
     let r2 = classifications(&fixture)
         .await?
         .into_iter()
@@ -221,7 +221,7 @@ async fn a_manifest_update_reclassifies_every_resolver_in_place() -> Result<()> 
     )
     .await?;
     pointer(&fixture, 10, 1, 2, R2).await?;
-    fixture.apply(11, FamilyMode::Normal).await;
+    fixture.apply(11, FamilyMode::Normal).await?;
     assert_eq!(
         classifications(&fixture).await?[0]["unsupported_reason"],
         json!("resolver_not_declared")
@@ -237,7 +237,7 @@ async fn a_manifest_update_reclassifies_every_resolver_in_place() -> Result<()> 
                              {"address": R2, "role": "public_resolver"}]}),
     )
     .await?;
-    fixture.apply(12, FamilyMode::Normal).await;
+    fixture.apply(12, FamilyMode::Normal).await?;
     let rows = fixture.rows("project_resolver_classification").await?;
     assert_eq!(
         columns(
@@ -284,7 +284,7 @@ async fn an_upgraded_proxy_follows_its_latest_implementation() -> Result<()> {
             PROXY,
         )
         .await?;
-    fixture.apply(10, FamilyMode::Normal).await;
+    fixture.apply(10, FamilyMode::Normal).await?;
     let rows = fixture.rows("project_resolver_classification").await?;
     assert_eq!(
         columns(
@@ -307,7 +307,7 @@ async fn an_upgraded_proxy_follows_its_latest_implementation() -> Result<()> {
             PROXY,
         )
         .await?;
-    fixture.apply(11, FamilyMode::Normal).await;
+    fixture.apply(11, FamilyMode::Normal).await?;
     let rows = fixture.rows("project_resolver_classification").await?;
     assert_eq!(
         columns(&rows[0], &["support_status", "unsupported_reason"]),
@@ -341,9 +341,9 @@ async fn a_resolver_edge_that_starts_creates_the_row_at_its_block() -> Result<()
     )
     .await?;
     resolver_edge(&fixture, R3, registry_manifest, 13).await?;
-    fixture.apply(12, FamilyMode::Normal).await;
+    fixture.apply(12, FamilyMode::Normal).await?;
     assert!(classifications(&fixture).await?.is_empty());
-    fixture.apply(13, FamilyMode::Normal).await;
+    fixture.apply(13, FamilyMode::Normal).await?;
     assert_eq!(
         classifications(&fixture).await?,
         vec![
@@ -431,7 +431,7 @@ async fn an_edge_only_resolver_returns_when_its_origin_manifest_does() -> Result
     )
     .await?;
     resolver_edge(&fixture, R3, origin, 5).await?;
-    fixture.apply(5, FamilyMode::Normal).await;
+    fixture.apply(5, FamilyMode::Normal).await?;
     assert_eq!(classifications(&fixture).await?, vec![edge_only_r3(5)]);
 
     let registry = "ens_v1_registry_l1";
@@ -444,7 +444,7 @@ async fn an_edge_only_resolver_returns_when_its_origin_manifest_does() -> Result
         "deprecated",
     )
     .await?;
-    fixture.apply(8, FamilyMode::Normal).await;
+    fixture.apply(8, FamilyMode::Normal).await?;
     assert!(
         classifications(&fixture).await?.is_empty(),
         "no active origin, no admission"
@@ -458,7 +458,7 @@ async fn an_edge_only_resolver_returns_when_its_origin_manifest_does() -> Result
         json!({"contracts": []}),
     )
     .await?;
-    fixture.apply(11, FamilyMode::Normal).await;
+    fixture.apply(11, FamilyMode::Normal).await?;
     assert_eq!(
         classifications(&fixture).await?,
         vec![edge_only_r3(11)],
@@ -487,7 +487,7 @@ async fn an_edge_only_resolver_appears_when_its_origin_manifest_activates() -> R
     )
     .await?;
     resolver_edge(&fixture, R3, origin, 5).await?;
-    fixture.apply(5, FamilyMode::Normal).await;
+    fixture.apply(5, FamilyMode::Normal).await?;
     assert!(classifications(&fixture).await?.is_empty());
 
     manifest(
@@ -498,7 +498,7 @@ async fn an_edge_only_resolver_appears_when_its_origin_manifest_activates() -> R
         json!({"contracts": []}),
     )
     .await?;
-    fixture.apply(9, FamilyMode::Normal).await;
+    fixture.apply(9, FamilyMode::Normal).await?;
     assert_eq!(classifications(&fixture).await?, vec![edge_only_r3(9)]);
     fixture.assert_undo_restores(9).await?;
     fixture.assert_rebuild_equal(9).await?;
@@ -525,8 +525,7 @@ async fn a_rebuild_skips_activations_below_the_retained_lineage() -> Result<()> 
     )
     .await?;
     pointer(&fixture, 10, 1, 1, R1).await?;
-    let rebuilt = fixture.apply(14, FamilyMode::Rebuild).await;
-    assert_eq!(rebuilt.skipped, None);
+    fixture.apply(14, FamilyMode::Rebuild).await?;
     assert_eq!(
         classifications(&fixture).await?,
         vec![
@@ -753,7 +752,7 @@ async fn a_resolver_is_admitted_only_by_manifests_with_a_qualifying_edge() -> Re
     )
     .await?;
 
-    fixture.apply(10, FamilyMode::Normal).await;
+    fixture.apply(10, FamilyMode::Normal).await?;
     assert_eq!(
         classifications(&fixture).await?,
         vec![
@@ -916,7 +915,7 @@ async fn an_undated_edge_admits_beside_rejected_undated_and_dated_edges() -> Res
     )
     .await?;
 
-    fixture.apply(10, FamilyMode::Normal).await;
+    fixture.apply(10, FamilyMode::Normal).await?;
     assert_eq!(
         classifications(&fixture).await?,
         vec![
@@ -967,7 +966,7 @@ async fn an_open_dated_edge_admits_beside_a_closed_one_of_the_same_manifest() ->
     edge(&fixture, 0x2201, &r2, registry, Some(3), None, false).await?;
     edge(&fixture, 0x2202, &r2, registry, Some(7), Some(9), false).await?;
 
-    fixture.apply(10, FamilyMode::Normal).await;
+    fixture.apply(10, FamilyMode::Normal).await?;
     let supported = |address: &str| {
         json!({"resolver_address": address, "support_status": "supported",
                "unsupported_reason": null, "block_number": 10,

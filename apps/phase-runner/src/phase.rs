@@ -10,7 +10,15 @@ pub type PhaseFuture<'a> =
     Pin<Box<dyn Future<Output = RunnerResult<PhaseBatchOutcome>> + Send + 'a>>;
 pub type CompletedPhaseFuture<'a> =
     Pin<Box<dyn Future<Output = RunnerResult<Option<PhaseProgress>>> + Send + 'a>>;
-pub type AfterProgressFuture<'a> = Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
+pub type AfterProgressFuture<'a> =
+    Pin<Box<dyn Future<Output = RunnerResult<AfterProgress>> + Send + 'a>>;
+
+/// Whether the work that follows a recorded batch has finished, or has more to do in another call.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AfterProgress {
+    Done,
+    More,
+}
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum PhaseName {
@@ -238,15 +246,27 @@ pub trait Phase: Send + Sync {
 
     fn run_batch(&self, context: PhaseContext) -> PhaseFuture<'_>;
 
-    /// Work that follows a batch once its progress is recorded, in transactions of its own. It
-    /// cannot fail or roll back the batch; Project applies the owned key families here.
+    /// Work that follows a batch once its progress is recorded, in transactions of its own; Project
+    /// applies the owned key families here, one family run per call. The runner calls again while
+    /// it returns `More`, probing the lock, recording the phase heartbeat and passing the capacity
+    /// guard before every call. An error fails the phase run, keeping the batch. A wrapper around
+    /// a phase that overrides this, such as `ProjectPhase`, must forward both this and
+    /// `has_after_progress_work`, or the follow-up work silently never runs.
     fn after_progress_recorded(&self, _chain_id: &str) -> AfterProgressFuture<'_> {
-        Box::pin(async {})
+        Box::pin(async { Ok(AfterProgress::Done) })
+    }
+
+    /// Whether `after_progress_recorded` has work waiting for the chain, answered without taking
+    /// it. A settled batch with no follow-up work completes despite a pending stop. With work
+    /// waiting, a stop already observable at the runner's check before the hook prevents the
+    /// hook from being called at all; work admitted before the stop becomes observable is
+    /// cancelled cooperatively, at its next await.
+    fn has_after_progress_work(&self, _chain_id: &str) -> bool {
+        false
     }
 
     /// Checked once an operator redo of the chain has finished and been recorded. An error fails
-    /// the redo command without undoing its recorded work; Project reports owned key families
-    /// that its finishing runs left short of the served marker.
+    /// the redo command without undoing its recorded work.
     fn after_redo(&self, _chain_id: &str) -> RunnerResult<()> {
         Ok(())
     }
