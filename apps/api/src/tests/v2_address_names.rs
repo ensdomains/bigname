@@ -1839,6 +1839,15 @@ async fn wrap_address_name(
     .await?;
     let node = bigname_lookup::ens_namehash_hex(name)?;
     let ordinal = NEXT_TEST_ID.fetch_add(1, Ordering::Relaxed) as i64 + 100;
+    // The binding records the log of the `NameWrapped` that opened it.
+    sqlx::query(
+        "UPDATE surface_bindings SET provenance = jsonb_build_object('transaction_index', 0,
+         'log_index', $2::bigint) WHERE surface_binding_id = $1",
+    )
+    .bind(Uuid::from_u128(seed + 2))
+    .bind(ordinal)
+    .execute(&database.pool)
+    .await?;
     let wrapped = |suffix: &str, kind: &str, log: i64, after: Value| {
         address_fixture_event(
             &format!("address-{name}-wrapper-{suffix}"),

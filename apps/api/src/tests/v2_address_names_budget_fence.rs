@@ -32,15 +32,8 @@ async fn address_name_role_summary_response_across_pause(
 
     control.wait_until_reached().await;
     if let Some(count) = republish_with {
+        // The helper's rebuild is the publication change.
         seed_address_name_budget_grants(database, resource, count).await?;
-        let advanced = sqlx::query(
-            "UPDATE chain_phase_state
-             SET updated_at = clock_timestamp()
-             WHERE chain_id = 'ethereum-mainnet' AND phase_name = 'project'",
-        )
-        .execute(&database.lookup_pool)
-        .await?;
-        assert_eq!(advanced.rows_affected(), 1, "fixture must publish Project");
     }
     control.resume().await;
 
@@ -124,7 +117,11 @@ async fn v2_address_names_grant_budget_boundaries_hold_on_a_stable_publication()
                     "{route}"
                 );
             } else {
-                assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{route}: {payload}");
+                assert_eq!(
+                    status,
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "{route}: {payload}"
+                );
                 assert_eq!(payload["error"]["code"], json!("unsupported"), "{route}");
             }
         }
