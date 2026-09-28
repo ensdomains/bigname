@@ -1,11 +1,10 @@
-//! The history heads of a composed name row, `declared_summary.history` (name_current/build.sql,
-//! the `surface_history` and `resource_history` laterals), which the binding diagnostics route
-//! serves: the name's latest readable event, and its latest on the row's resource while its
-//! authority is supported. Both read `normalized_events`, an input table, by the name's key at
-//! read, in the served order (block, transaction and log index descending with nulls last, then
-//! the generated id), so they are not a family fact. The unnamed registrar rows the staging passes
-//! give the name count as the name's own, as they do in the served staging, and are read by their
-//! identity.
+//! The history heads of a composed name row, `declared_summary.history`, which the binding
+//! diagnostics route serves: the name's latest readable event, and its latest on the row's resource
+//! while its authority is supported. Both read `normalized_events`, an input table, by the name's
+//! key at read, in the served order (block, transaction and log index descending with nulls last,
+//! then the generated id), so they are not a family fact. The unnamed registrar rows the staging
+//! passes give the name count as the name's own, as they do in the served staging, and are read by
+//! their identity.
 use std::collections::BTreeMap;
 
 use anyhow::{Context, Result};

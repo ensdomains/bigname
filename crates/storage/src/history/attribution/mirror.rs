@@ -1,13 +1,12 @@
-//! A resource whose latest pointer is a declared ENSv1 mirror resolver: Project re-points it at the
-//! ENSv1 resolver the mirror would call for the queried name when the registry walk selects that
-//! resolver at the queried node itself, and attributes that resolver's node-keyed writes for the
-//! queried node. The walk reads each registry pointer by the node the event addresses
+//! A resource whose latest pointer is a declared ENSv1 mirror resolver: the read re-points it at
+//! the ENSv1 resolver the mirror would call for the queried name when the registry walk selects
+//! that resolver at the queried node itself, and attributes that resolver's node-keyed writes for
+//! the queried node. The walk reads each registry pointer by the node the event addresses
 //! (`child_node`, then `namehash`, then `node`) and never consults the root. The mirror keeps a
-//! nearest resolver found on an ancestor only when it supports `IExtendedResolver`, and Project
+//! nearest resolver found on an ancestor only when it supports `IExtendedResolver`, and the read
 //! derives through neither kind of ancestor, so a nearest ancestor attributes nothing and the walk
-//! does not continue past it. When the mirror cannot be followed, Project publishes the resource's
-//! inventory row with no attributed writes at all
-//! (`crates/project/src/builders/record_inventory/mirror.rs`).
+//! does not continue past it. When the mirror cannot be followed, the resource has no attributed
+//! writes at all.
 //! (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/resolver/ENSV1Resolver.sol:L40-L43 @ ens_v2_sepolia_20260916@366de741)
 //! (upstream: .refs/ens_v2_sepolia_20260916/contracts/src/universalResolver/libraries/LibResolution.sol:L39-L48 @ ens_v2_sepolia_20260916@366de741)
 //! (upstream: .refs/ens_v1/contracts/universalResolver/RegistryUtils.sol:L25-L38 @ ens_v1@91c966f)
@@ -38,8 +37,8 @@ struct MirrorPointer {
 }
 
 /// For each resource whose latest pointer at the bound is an ENSv2 pointer to a resolver
-/// classified as an ENSv1 mirror: `Some(writes)` when Project would follow the mirror, `None` when
-/// it would publish the resource with no attributed writes.
+/// classified as an ENSv1 mirror: `Some(writes)` when the mirror is followed, `None` when the
+/// resource has no attributed writes.
 pub(super) async fn load_mirror_attribution(
     connection: &mut PgConnection,
     resource_ids: &[Uuid],
@@ -330,9 +329,8 @@ fn push_mirror_writes<'a>(
     // (upstream: .refs/ens_v1/contracts/universalResolver/ResolverCaller.sol:L108-L117 @ ens_v1@91c966f)
     // (upstream: .refs/ens_v1/contracts/universalResolver/ResolverCaller.sol:L175-L187 @ ens_v1@91c966f)
     // A non-extended ancestor is rejected by the mirror outright. Following only the exact node is
-    // bigname's attribution rule, mirroring the Project producer that marks an ancestor row
-    // `ensip10_extended_resolver` or `ancestor_resolver_not_extended`
-    // (bigname: `crates/project/src/builders/record_inventory/mirror.rs:169-179`).
+    // bigname's attribution rule; the family record inventory marks such an ancestor row
+    // `ensip10_extended_resolver` or `ancestor_resolver_not_extended` (`families::records`).
     builder.push(
         "
               ON declaration.active

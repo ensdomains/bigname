@@ -30,8 +30,8 @@ use super::{
 };
 
 /// One resource to read, with the summary facts the families do not hold: the authority kind
-/// today's summary derives from the resource's whole event history (resource_summary.rs:53-126,
-/// :218-237) and the registry root from the identity table.
+/// the summary derives from the resource's whole event history and the registry root from the
+/// identity table.
 #[derive(Clone, Debug, Default)]
 pub struct ResourceInput {
     pub resource_id: String,
@@ -66,7 +66,7 @@ async fn rows_for(
 
 /// The permission shadow read in `order`. In the canonical order the path-expiry drop reads the
 /// stored F2a key states; in any other order it reads each key state folded again from the
-/// resource's retained events in that order (the harness's same-block counterfactual).
+/// resource's retained events in that order.
 pub async fn load_shadow_permissions_in(
     pool: &PgPool,
     chain_id: &str,
@@ -236,7 +236,7 @@ async fn load_permissions_on(
     };
     let admins = |resource: &str| -> Vec<String> {
         // The admin rows are served rows: a resource whose registration lapsed by path expiry
-        // serves none (resource_summary.rs:272-297 reads the staged permission rows).
+        // serves none.
         if key_states
             .get(resource)
             .is_some_and(|state| registration_lapsed(state, order))
@@ -309,8 +309,8 @@ async fn refolded(
         .collect())
 }
 
-/// One served account approval (`account_permission_state_current`), in the columns the
-/// comparison reads; the whole-history evidence arrays are dropped (design F9 row).
+/// One served account approval (an F9 `project_account_approval` row), in the columns the
+/// comparison reads; the whole-history evidence arrays are dropped.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ServedApproval {
     pub authority_kind: String,
@@ -372,8 +372,8 @@ pub struct OperatorRow {
     pub transfer_behavior: Value,
 }
 
-/// The approved registry operators of a resource's registry binding (permissions/effective.rs
-/// :63-72): approvals of the binding's registry contract and owner, relation operator.
+/// The approved registry operators of a resource's registry binding: approvals of the binding's
+/// registry contract and owner, relation operator.
 pub fn effective_operator_rows(
     chain_id: &str,
     resource_id: &str,

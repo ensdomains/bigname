@@ -164,8 +164,8 @@ async fn page_rows(
     Ok(rows)
 }
 
-/// The served summaries of [`crate::load_permissions_current_resource_summaries`], read from the
-/// families: one per readable resource of `resource_ids` at or below its chain's publication.
+/// The permission summaries `load_serving_permission_summaries` serves, read from the families: one
+/// per readable resource of `resource_ids` at or below its chain's publication.
 pub async fn load_family_permission_summaries(
     pool: &PgPool,
     resource_ids: &[Uuid],

@@ -1,5 +1,5 @@
 //! The subnames page, the registry labels page and the child counts over the family child
-//! relation, with today's page semantics (crates/storage/src/children/page.rs and reads.rs): the
+//! relation, with the page semantics of crates/storage/src/children/page.rs and reads.rs: the
 //! optional prefix, the expiry fence with its null treatment, the name and timestamp sorts, the
 //! keyset cursor, and a registry's labels as the ENSv2 children its subregistry holds. The total
 //! is an exact count over the same filtered relation, taken in the same statement as the page;
@@ -8,8 +8,8 @@
 //! `evaluated_at`, never the database's transaction time.
 //!
 //! The registration and expiry times the timestamp sorts and the fence use, and the released
-//! status the fence checks, are the child's name summary (`project_name_summary`), the same
-//! expressions today's page reads from the child's `name_current.declared_summary`.
+//! status the fence checks, are the child's name summary (`project_name_summary`), which the
+//! family step writes from the child's composed `declared_summary`.
 use std::collections::BTreeMap;
 
 use anyhow::{Context, Result, bail};
@@ -29,8 +29,8 @@ use super::{
 };
 
 /// One served child, the wire fields of the subnames route (docs/api-v1-routes.md, subnames).
-/// The per-row provenance, chain positions and target blocks `children_current` stamps are not
-/// family facts and are not reproduced.
+/// The row carries no per-row provenance, chain positions or target blocks: those are not family
+/// facts.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FamilyChildRow {
     pub parent_logical_name_id: String,

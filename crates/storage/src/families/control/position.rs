@@ -73,12 +73,11 @@ impl Position {
         Self::from_json(row)
     }
 
-    /// The three-part bound the authority admission compares against (authority_events.sql
-    /// :200-217, :264-276): block, then transaction and log with a missing one read as -1. For
-    /// nonnegative transaction and log indexes, it agrees with the canonical order except that it
-    /// ignores both the emission ordinal and the identity, which only matter between two
-    /// positions the bound treats as equal; a negative index would sort after a missing one in
-    /// the canonical order but not in the bound.
+    /// The three-part bound the authority admission compares against: block, then transaction and
+    /// log with a missing one read as -1. For nonnegative transaction and log indexes, it agrees
+    /// with the canonical order except that it ignores both the emission ordinal and the identity,
+    /// which only matter between two positions the bound treats as equal; a negative index would
+    /// sort after a missing one in the canonical order but not in the bound.
     pub fn bound(&self) -> (i64, i64, i64) {
         (
             self.block_number,
@@ -89,9 +88,9 @@ impl Position {
 }
 
 /// The order a read takes its "latest" in. The readers read in the canonical order. The
-/// shadow harness reads the same facts again in the orders today's builders use, which break a
-/// tie inside a block by the generated normalized event id, to show that a same-block difference
-/// is only an ordering difference (brief section 4.3). The positions themselves never change,
+/// generated orders break a tie inside a block by the generated normalized event id instead;
+/// reading the same facts again in them shows whether a same-block difference is only an
+/// ordering difference. The positions themselves never change,
 /// so the admission's three-part bounds read the same in every order.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum EventOrder {
@@ -109,10 +108,10 @@ impl EventOrder {
         }
     }
 
-    /// The order the resource-permission fold and the wrapped-lease selector read in: today's
-    /// builders take block, then generated id, with no transaction or log (permissions.rs:132,
-    /// name_current/build.sql:373-374); an event without a generated id falls back to the
-    /// canonical order. ENSv2 name membership reads `name_membership` instead.
+    /// The order the resource-permission fold and the wrapped-lease selector read in under a
+    /// generated order: block, then generated id, with no transaction or log; an event without a
+    /// generated id falls back to the canonical order. ENSv2 name membership reads
+    /// `name_membership` instead.
     pub fn membership(&self, left: &Position, right: &Position) -> Ordering {
         match (self.generated(left), self.generated(right)) {
             (Some(left_id), Some(right_id)) => left
@@ -137,8 +136,8 @@ impl EventOrder {
         }
     }
 
-    /// The order the summary laterals read in. Today's builders take block, transaction and
-    /// log, a missing one first, then the generated id (build.sql:307-308, :388-390).
+    /// The order the summary laterals read in under a generated order: block, transaction and
+    /// log, a missing one first, then the generated id.
     pub fn lateral(&self, left: &Position, right: &Position) -> Ordering {
         match (self.generated(left), self.generated(right)) {
             (Some(left_id), Some(right_id)) => left
@@ -186,8 +185,8 @@ mod tests {
 
     #[test]
     fn transaction_and_log_decide_before_the_identity() {
-        // Two grants in one transaction with generated ids in the other order (design item 5):
-        // log order decides.
+        // Two grants in one transaction with generated ids in the other order: log order
+        // decides.
         assert!(at(5, Some((2, 5)), "b") < at(5, Some((3, 1)), "a"));
         assert!(at(5, Some((2, 1)), "z") < at(5, Some((2, 2)), "a"));
     }
@@ -208,7 +207,7 @@ mod tests {
 
     #[test]
     fn synthesised_identities_compare_as_text_not_as_ordinals() {
-        // ":10" sorts before ":9" (design, "Order among synthesised events").
+        // ":10" sorts before ":9": a synthesised event's trailing number is not an ordinal.
         assert!(
             at(5, None, "x:RegistrationReleased:expiry:r:1:10")
                 < at(5, None, "x:RegistrationReleased:expiry:r:1:9")

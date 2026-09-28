@@ -1,10 +1,8 @@
 //! The resource facts the served permission reads take beside the F8 and F9 rows, read from the
 //! identity and event input tables because no family stores them: whether a resource is
 //! readable, the authority kind the resource summary derives from the resource's whole event
-//! history (builders/permissions/resource_summary.rs, `resource_event_summaries` and
-//! `resource_authority`), its ENSv2 registry root (`registry_roots`), namespace membership
-//! (permissions/effective.rs `push_namespace_filter`) and the evidence events of a
-//! resolver-scoped grant (builders/permissions.rs, the `evidence` window). Every read is by key.
+//! history, its ENSv2 registry root (`registry_roots`), namespace membership and the evidence
+//! events of a resolver-scoped grant. Every read is by key.
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result};

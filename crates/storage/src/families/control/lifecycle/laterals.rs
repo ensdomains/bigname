@@ -1,6 +1,7 @@
-//! The summary laterals of name_current/build.sql, each restated over the admitted retained
-//! events of the name (or of the selected ENSv2 lifecycle key) and ordered by the facts'
-//! order, the canonical order in every read.
+//! The registration summary values of a composed name (latest kind, registration time, expiry,
+//! registrant and authority), each derived from the admitted retained events of the name (or of the
+//! selected ENSv2 lifecycle key) and ordered by the facts' order, the canonical order in every
+//! read.
 use anyhow::Result;
 use serde_json::{Value, json};
 
@@ -15,7 +16,7 @@ use crate::families::control::{
     rows::{BindingCandidate, LifecycleEvent, Mark},
 };
 
-/// The five kinds `latest_event_kind` reads (build.sql:67-73).
+/// The five kinds `latest_event_kind` reads.
 const FIVE_KINDS: [&str; 5] = [
     "RegistrationGranted",
     "RegistrationRenewed",
@@ -25,7 +26,7 @@ const FIVE_KINDS: [&str; 5] = [
 ];
 
 /// The registration time of the latest admitted grant: its block's timestamp, or a registrar
-/// snapshot's own registration time (build.sql:392-398).
+/// snapshot's own registration time.
 pub(super) fn registered_at(facts: &NameFacts, grant: &LifecycleEvent) -> Value {
     let snapshot = grant.source_family == REGISTRAR
         && grant.state_derived == Some(true)
@@ -44,7 +45,7 @@ pub(super) fn registered_at(facts: &NameFacts, grant: &LifecycleEvent) -> Value 
         .unwrap_or(Value::Null)
 }
 
-/// The expiry lateral (build.sql:514-551): the latest admitted grant, or renewal, release or
+/// The expiry lateral: the latest admitted grant, or renewal, release or
 /// ExpiryChanged with a JSON-number expiry, leaving out the wrapper's ExpiryChanged; its
 /// converted seconds, null for a grant without a numeric expiry.
 pub(super) fn expiry_candidate(order: &EventOrder, in_scope: &[&Tagged<'_>]) -> Option<i64> {
@@ -71,7 +72,7 @@ pub(super) fn expiry_candidate(order: &EventOrder, in_scope: &[&Tagged<'_>]) -> 
     .and_then(|tagged| tagged.event.expiry_seconds)
 }
 
-/// The registrant (build.sql:458-513 over registration_events.sql): the latest admitted grant,
+/// The registrant: the latest admitted grant,
 /// release or transfer, plus the registry-only lease's transfers after the handoff, without the
 /// custody transfer into the wrapper and without a registrar release of a lease a wrapper of the
 /// name stands for; a release names its before-state registrant.
@@ -170,16 +171,16 @@ pub(super) fn registrant(
         .and_then(|tagged| value(tagged.event).map(|value| (value, tagged.event.position.clone())))
 }
 
-/// The authority kind and key the registration serves (build.sql:411-438).
+/// The authority kind and key the registration serves.
 pub(super) struct AuthorityContext {
     pub(super) kind: Value,
     pub(super) key: Value,
-    /// The identity of the winning event, for the harness.
+    /// The identity of the winning event.
     pub(super) event: Value,
 }
 
 /// The name's state-derived registry-only SurfaceBounds the admission holds, as their binding
-/// candidates (the SurfaceBound arm of build.sql:418-419 and :688-689).
+/// candidates.
 pub(super) fn admitted_registry_only<'a>(
     facts: &'a NameFacts,
     authority: &Authority<'_>,
@@ -212,8 +213,8 @@ pub(super) fn admitted_registry_only<'a>(
         .collect()
 }
 
-/// The latest admitted grant, AuthorityEpochChanged or state-derived registry-only SurfaceBound
-/// (build.sql:411-438), with the authority kind and key its after-state carries: the retained
+/// The latest admitted grant, AuthorityEpochChanged or state-derived registry-only
+/// SurfaceBound, with the authority kind and key its after-state carries: the retained
 /// grant's columns, F1's latest AuthorityEpochChanged per arm, the binding candidate's
 /// SurfaceBound. A successor lease granted under a registry-only binding's handoff names the
 /// registration, not the authority, and is left out; the family writer folds the successor as
@@ -328,7 +329,7 @@ pub(super) fn admitted_epochs(
     found
 }
 
-/// `latest_event_kind`, the CASE of build.sql:67-73 in order: a selected reservation serves its
+/// `latest_event_kind`, decided in order: a selected reservation serves its
 /// own kind; so does a released tombstone's deciding fact (`is_released_v2`); another ENSv2
 /// selection serves the latest of the five kinds in the selected key's membership, else its own
 /// kind; an ENSv1 one the latest admitted of the five kinds, else its own. A reservation whose
@@ -355,8 +356,8 @@ pub(super) fn latest_event_kind(
     } else if let Some(key) = selected_key {
         let name = &facts.input.logical_name_id;
         if facts.order != EventOrder::Canonical {
-            // The counterfactual reads the key's members themselves in today's lateral order
-            // (build.sql:383-389), not the maxima folded in its membership order.
+            // A generated order reads the key's members themselves in block and generated-id
+            // order, not the maxima folded in its membership order.
             let live = without_expired(
                 facts,
                 members(facts, key, name)
@@ -390,12 +391,11 @@ pub(super) fn latest_event_kind(
 }
 
 /// The registration's registrar lease: the lease the latest NameWrapper SurfaceBound on the
-/// selected event's resource recorded, else that resource (build.sql:365-377). Today's builder
-/// takes that SurfaceBound by block and generated id, so the candidates compare by their
-/// SurfaceBound positions in the read's order: the canonical order in a read, block and
-/// generated id in the same-block counterfactual. A candidate without a SurfaceBound position
-/// stands at its own place with the identity `binding:<id>`, as the family writer places it
-/// (families/identity.rs `binding_position`).
+/// selected event's resource recorded, else that resource. The candidates compare by their
+/// SurfaceBound positions in the read's order: the canonical order in a read, else block and
+/// generated id. A candidate without a SurfaceBound position stands at its own place with the
+/// identity `binding:<id>`, as the family writer places it (families/identity.rs
+/// `binding_position`).
 pub(super) fn registrar_resource<'a>(
     facts: &'a NameFacts,
     resource: Option<&'a str>,

@@ -48,9 +48,8 @@ pub struct FamilyRecordInventory {
     pub mirrored: bool,
 }
 
-/// The record inventory row today's reader serves for `resource_id`, built from the families.
-/// `None` when the resource has no pointer or its current pointer is a clear, which today's
-/// record-serving reads answer the same way.
+/// The record inventory row served for `resource_id`, built from the families. `None` when the
+/// resource has no pointer or its current pointer is a clear.
 pub async fn load_family_record_inventory(
     pool: &PgPool,
     chain_id: &str,

@@ -4,22 +4,15 @@
 //! non-zero EVM-shaped address value, whatever its partition's version, under the logical name it
 //! was written under, and leaves the version and link boundary to the reader (derived.rs,
 //! `NODE_INSERT`; docs/projections.md). It reads the served payload, the `AddressChanged` half of
-//! a coin-60 pair, from `value` or raw address bytes. The retained-value scan is the safety net
-//! beside it: the candidates are the index rows together with every retained F6 and F7 address
-//! value that names the address in any stored shape (`value`, `address_bytes_hex`, and for a pair
-//! `sibling_value` and `sibling_address_bytes_hex`), with no version cutoff and no arm test, so a
-//! row the index leaves out, on purpose or not, still reaches the forward inventory assembly,
-//! which narrows the candidates to what is served. The harness names every entry only the scan
-//! found.
+//! a coin-60 pair, from `value` or raw address bytes. The forward inventory assembly then narrows
+//! the candidates to what is served.
 //!
-//! A retained value reaches the resources whose pointer can admit it: a node-keyed value the
-//! pointers at its node and resolver (or at a mirror resolver for that node), a named value also
-//! the pointers of its own resource or of its logical name's namehash at its resolver (the named
-//! arm admits by logical name with no node test), and a record-id value every pointer at its
-//! resolver. Those are the conditions under which the forward read's arms and link selection
-//! (`rows.rs`, `links.rs`) can load the value, so every resource that serves the address is a
-//! candidate. Which candidates only the retained values found is kept, per resource and coin type,
-//! so the harness can name each entry the index alone would miss.
+//! An index row reaches the resources whose pointer can admit it: a node-keyed row the pointers
+//! at its node and resolver (or at a mirror resolver for that node), a row written under a name
+//! also the pointers of that name's namehash at its resolver (the named arm admits by logical
+//! name with no node test), and a record-id row every pointer at its resolver. Those are the
+//! conditions under which the forward read's arms and link selection (`rows.rs`, `links.rs`) can
+//! load the value, so every resource that serves the address is a candidate.
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result};

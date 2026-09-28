@@ -13,12 +13,10 @@ const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
 const ROOT_NODE: &str = "0x0000000000000000000000000000000000000000000000000000000000000000";
 
 /// The resource's current pointer after the "no resolver" rejection: its latest named
-/// ResolverChanged, clears included, and nothing when that latest pointer is null, zero or empty
-/// (crates/project/src/builders/name_topology.rs, the alias resolver lateral;
-/// crates/project/src/builders/linked_records.rs, the pointer drop). An empty resolver means no
-/// alias (Tate, 2026-09-26), the record pointer's rule. No traced producer writes an empty one
-/// (the registry adapters decode the address through `address_hex` and `nullable_address`), and
-/// the read rejects it regardless.
+/// ResolverChanged, clears included, and nothing when that latest pointer is null, zero or empty.
+/// An empty resolver means no alias (Tate, 2026-09-26), the record pointer's rule. No traced
+/// producer writes an empty one (the registry adapters decode the address through `address_hex` and
+/// `nullable_address`), and the read rejects it regardless.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FamilyAliasSourcePointer {
     pub chain_id: String,
@@ -170,8 +168,7 @@ impl FamilyLink {
     }
 }
 
-/// The exact-then-default link selection for one name at a record-ID resolver
-/// (crates/project/src/builders/linked_records.rs, `project_selected_records`).
+/// The exact-then-default link selection for one name at a record-ID resolver.
 #[derive(Clone, Debug, PartialEq)]
 pub struct LinkSelection {
     /// The latest link at the name's own node, a clear included.
@@ -200,10 +197,8 @@ impl LinkSelection {
 /// .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L380-L387 @ ens_v2@a971bd64). So
 /// the newest link per (resolver, node) wins (Tate, 2026-09-26), and each probe reads the one row
 /// the F7 reducer keeps there (crates/project/src/families/records.rs, `link`; the F7 row in
-/// docs/glossary.md). `storage_model` is an annotation and plays no part. Today's link staging
-/// drops links not annotated `resolver_record_id`
-/// (crates/project/src/builders/resolver/link_summary.rs); no producer writes such a row, so on
-/// real data the two agree. `None` when neither probe finds a row.
+/// docs/glossary.md). `storage_model` is an annotation and plays no part. `None` when neither
+/// probe finds a row.
 pub async fn load_family_link_selection(
     pool: &PgPool,
     chain_id: &str,

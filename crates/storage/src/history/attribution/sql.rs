@@ -15,8 +15,7 @@ pub(super) const ENS_V2_POINTER_FAMILIES: &str = "('ens_v2_registry_l1', 'ens_v2
 pub(super) const CLEARED: &str = "('0x0000000000000000000000000000000000000000', '')";
 
 /// `alias` is an activated, canonical event on a readable block at or below the bound of its
-/// chain, or an event with no chain position at all: the rows Project stages for its target
-/// (`crates/project/src/stage.rs`, `create_events`).
+/// chain, or an event with no chain position at all.
 pub(super) fn push_readable_event(
     builder: &mut QueryBuilder<'_, Postgres>,
     alias: &str,
@@ -37,7 +36,7 @@ pub(super) fn push_readable_event(
     builder.push("))");
 }
 
-/// `alias` is a name surface Project would stage at the bound: canonical, on a readable block at
+/// `alias` is a name surface readable at the bound: canonical, on a readable block at
 /// or below the bound of its chain.
 pub(super) fn push_readable_surface(
     builder: &mut QueryBuilder<'_, Postgres>,
@@ -57,8 +56,8 @@ pub(super) fn push_readable_surface(
 }
 
 /// `LATERAL (...) declaration`: the latest readable `SourceManifestUpdated` row of the manifest
-/// `manifest_id` names, as Project stages its admitted manifests (`create_manifests`). The caller
-/// requires `declaration.active` and compares `declaration.namespace`.
+/// `manifest_id` names. The caller requires `declaration.active` and compares
+/// `declaration.namespace`.
 pub(super) fn push_declaration_manifest(
     builder: &mut QueryBuilder<'_, Postgres>,
     manifest_id: &str,
@@ -285,8 +284,7 @@ fn push_declared_resolver_arm(
 
 /// `, links, link_boundaries, link_spans, link_selections`: on a record-ID resolver each pointer's
 /// window is split wherever the node's exact link or the resolver's default link changes, and each
-/// span selects the record its latest exact link, else its default link, names
-/// (`crates/project/src/builders/linked_records/history.rs`).
+/// span selects the record its latest exact link, else its default link, names.
 fn push_record_link_ctes(
     builder: &mut QueryBuilder<'_, Postgres>,
     published: Option<&BTreeMap<String, i64>>,

@@ -1,5 +1,5 @@
 //! Declared resolution topology on the same snapshot as the composed name and inventory.
-//! The five arms mirror the served builder's order. No provider result is used or retained.
+//! The five arms are read in a fixed order. No provider result is used or retained.
 use anyhow::{Context, Result};
 use bigname_domain::resolution_topology::ResolutionTopology;
 use serde_json::{Value, json};
@@ -134,7 +134,7 @@ async fn basenames(
 ) -> Result<Option<Value>> {
     // The admitted transport resolves Base names through the L1 CCIP entrypoint
     // (upstream: .refs/basenames/src/L1/L1Resolver.sol:L164-L173 @ basenames@1809bbc).
-    // Retain the served builder's source-time selection of the Ethereum execution block.
+    // Select the Ethereum execution block at source time.
     let publication = super::servable_publication(conn, "base-mainnet").await?;
     let execution = sqlx::query(
         "WITH manifests AS (

@@ -150,7 +150,7 @@ pub(crate) fn entry(
         stored_status.unwrap_or_else(|| status(payload))
     };
     // From the status, not from which keys the payload has: a payload rebuilt from the family
-    // row's columns has no `value` for an explicit JSON null, which today serves as a success.
+    // row's columns has no `value` for an explicit JSON null, which serves as a success.
     let unsupported = status == "unsupported";
     let mut entry = Map::new();
     entry.insert("record_key".into(), json!(text(payload, "record_key")));

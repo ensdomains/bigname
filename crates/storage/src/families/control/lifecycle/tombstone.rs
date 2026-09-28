@@ -1,10 +1,9 @@
-//! The deciding fact of a released ENSv2 tombstone. When nothing
-//! ENSv2 is open for a name and the latest lifecycle fact of the registration it was last bound
-//! to is a release, authority selection keeps the name on that registration's tombstone and
-//! records the fact that decided it (name_authority/build.sql:48-271, :584-587); name_current
-//! serves that fact, its kind and payload, on the tombstone's resource, instead of the ordinary
-//! registration fold (build.sql:349-364). The fact can be a release written without a name, or
-//! the end of a later reservation of the name with no resource or another one.
+//! The deciding fact of a released ENSv2 tombstone. When nothing ENSv2 is open for a name and the
+//! latest lifecycle fact of the registration it was last bound to is a release, authority selection
+//! keeps the name on that registration's tombstone and records the fact that decided it; the
+//! composed name serves that fact, its kind and payload, on the tombstone's resource, instead of
+//! the ordinary registration fold. The fact can be a release written without a name, or the end of
+//! a later reservation of the name with no resource or another one.
 use anyhow::Result;
 use serde_json::Value;
 
@@ -20,7 +19,7 @@ pub(super) struct Tombstone<'a> {
     pub(super) resource: String,
 }
 
-/// The kinds a registration's lifecycle facts are (name_authority/build.sql:90-93).
+/// The kinds a registration's lifecycle facts are.
 const LIFECYCLE: [&str; 4] = [
     "RegistrationGranted",
     "RegistrationRenewed",
@@ -29,7 +28,7 @@ const LIFECYCLE: [&str; 4] = [
 ];
 
 /// The released tombstone's deciding fact, or none when the name is not one: the selected arm is
-/// not exactly ens_v2 (name_authority/build.sql:584-587), an ENSv2 binding of the name is open at
+/// not exactly ens_v2, an ENSv2 binding of the name is open at
 /// the publication (:267-271), or the latest lifecycle fact is not a release (:266). A
 /// reservation whose expiry cannot be compared exactly fails the read
 /// (`membership::expired_when_written`).
@@ -43,8 +42,8 @@ pub(super) fn deciding_fact<'a>(
     released_fact(facts, clock)
 }
 
-/// The released ENSv2 tombstone's deciding fact whatever arm is selected
-/// (name_authority/build.sql:246-271): the selection reads it to decide the arm.
+/// The released ENSv2 tombstone's deciding fact whatever arm is selected: the selection reads
+/// it to decide the arm.
 pub(super) fn released_fact<'a>(
     facts: &'a NameFacts,
     clock: &Clock,
@@ -120,7 +119,7 @@ pub(super) fn released_fact<'a>(
 
 /// Whether `witness` is before `event` as the reservation-end rule compares them: its block,
 /// transaction and log, a missing one read as -1, before the release's, a missing one read as the
-/// end of its block (name_authority/build.sql:156-161, :198-203).
+/// end of its block.
 fn before(witness: &Position, event: &Position) -> bool {
     witness.bound()
         < (
@@ -169,7 +168,7 @@ fn entry(event: &LifecycleEvent) -> Option<(String, String)> {
 
 /// A named release without a resource ends the name's current reservation when the latest earlier
 /// fact among the name's reservations and registrations is a reservation of the same registry
-/// instance and token id (name_authority/build.sql:139-167). The families key a resource-less
+/// instance and token id. The families key a resource-less
 /// event by its registry identifier and token id, so the two compare by that key. A reservation
 /// with its own resource has no such key here and is never a match: Interpret gives a
 /// reservation its own resource only at token version zero, while a release without a resource
@@ -193,8 +192,7 @@ fn ends_resourceless_reservation(facts: &NameFacts, event: &LifecycleEvent) -> b
 
 /// A named release on a resource other than the tombstone's ends the name's current reservation
 /// when the latest earlier fact among the name's reservations, on any resource, and the grants
-/// on the release's resource, of any name, is a reservation on that resource
-/// (name_authority/build.sql:182-209).
+/// on the release's resource, of any name, is a reservation on that resource.
 fn ends_reservation_on_its_resource(facts: &NameFacts, event: &LifecycleEvent) -> bool {
     let name = event.original_logical_name_id.as_deref();
     let resource = event.resource_id.as_deref();

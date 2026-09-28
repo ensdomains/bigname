@@ -15,8 +15,7 @@ pub(super) fn selected_authority_arm(chain: &str, child: &str) -> String {
     )
 }
 
-/// Whether the child has a serving resource, which admits an ownerless child
-/// (crates/project/src/builders/children.rs, the `project_name_serving` eligibility).
+/// Whether the child has a serving resource, which admits an ownerless child.
 pub(super) fn serving(chain: &str, child: &str) -> String {
     format!(
         "EXISTS (SELECT 1 FROM bigname_phase.project_name_summary serving_summary

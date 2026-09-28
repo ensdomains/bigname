@@ -47,8 +47,8 @@ async fn marker(conn: &mut PgConnection, chain_id: &str) -> Result<FamilyPublica
 /// `/aliases`: the binding arm (names whose selected binding is an alias-path binding whose
 /// resource's current pointer is this resolver) then the event arm (active
 /// `project_resolver_alias` rows). A name's selected binding, raw name and namehash, and whether
-/// it is served at all, come from its composed row (`families::name`), which stands where the
-/// served statement reads `name_current` under the current-name read filter.
+/// it is served at all, come from its composed row (`families::name`) under the current-name read
+/// filter.
 pub async fn load_resolver_aliases_shadow(
     pool: &PgPool,
     chain_id: &str,
@@ -131,9 +131,7 @@ pub async fn load_resolver_aliases_shadow(
 /// per node (upstream: .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L96-L97 @
 /// ens_v2@a971bd64) and each `Linked` overwrites it (upstream:
 /// .refs/ens_v2/contracts/src/resolver/PermissionedResolver.sol:L363-L367 @ ens_v2@a971bd64).
-/// `storage_model` is an annotation and plays no part (see `load_family_link_selection`). Today's
-/// `/links` drops a link not annotated `resolver_record_id` and serves an older one; no producer
-/// writes such a link, so on real data that filter keeps every link.
+/// `storage_model` is an annotation and plays no part (see `load_family_link_selection`).
 pub async fn load_resolver_links_shadow(
     pool: &PgPool,
     chain_id: &str,
