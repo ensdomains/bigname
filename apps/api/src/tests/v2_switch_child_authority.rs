@@ -67,9 +67,9 @@ async fn v2_child_relations_keep_the_selected_arm_after_token_anchor_redo() -> R
     )
     .await?;
     reset_switch_families(&database).await?;
-    publish_project_and_families(&database, 240).await?;
+    publish_test_families(&database, 240).await?;
     let uri = "/v1/names/alpha.eth/subnames";
-    let (status, before) = assert_switch_differential(&database, uri).await?;
+    let (status, before) = read_family_response(&database, uri).await?;
     assert_eq!(status, StatusCode::OK, "{before:#}");
     assert_eq!(before["data"].as_array().map(Vec::len), Some(4));
 
@@ -108,8 +108,8 @@ async fn v2_child_relations_keep_the_selected_arm_after_token_anchor_redo() -> R
         ("orphaned".to_owned(), "canonical".to_owned(), 205)
     );
     reset_switch_families(&database).await?;
-    publish_project_and_families(&database, 240).await?;
-    let (status, absent) = with_serve_on(&database, "/v1/names/one.alpha.eth").await?;
+    publish_test_families(&database, 240).await?;
+    let (status, absent) = read_family_response(&database, "/v1/names/one.alpha.eth").await?;
     assert_eq!(status, StatusCode::NOT_FOUND, "{absent:#}");
     for uri in [
         uri.to_owned(),
@@ -117,7 +117,7 @@ async fn v2_child_relations_keep_the_selected_arm_after_token_anchor_redo() -> R
         format!("/v1/registries/1/{CHILD_ALPHA_REGISTRY}/labels"),
         format!("/v1/registries/1/{CHILD_ALPHA_REGISTRY}?include=counts"),
     ] {
-        let (status, body) = assert_switch_differential(&database, &uri).await?;
+        let (status, body) = read_family_response(&database, &uri).await?;
         assert_eq!(status, StatusCode::OK, "{uri}: {body:#}");
     }
     database.cleanup().await
