@@ -6,6 +6,9 @@ use uuid::Uuid;
 
 use super::*;
 
+#[path = "tests/node_record_events.rs"]
+mod node_record_events;
+
 #[path = "tests/lookahead.rs"]
 mod lookahead;
 mod migration;
