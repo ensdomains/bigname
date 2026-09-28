@@ -30,21 +30,6 @@ pub fn record_version_boundary_storage_key(
     Ok(key)
 }
 
-pub(super) fn boundary_has_event_pointer(record_version_boundary: &Value) -> bool {
-    record_version_boundary
-        .get("normalized_event_id")
-        .is_some_and(|value| !value.is_null())
-        && record_version_boundary
-            .get("event_kind")
-            .is_some_and(|value| !value.is_null())
-}
-
-pub(super) fn boundary_str<'a>(value: &'a Value, path: &[&str]) -> Option<&'a str> {
-    path.iter()
-        .try_fold(value, |current, key| current.get(*key))
-        .and_then(Value::as_str)
-}
-
 fn append_key_part(buffer: &mut String, value: &str) {
     write!(buffer, "{}:{value};", value.len()).expect("string write to key buffer must succeed");
 }

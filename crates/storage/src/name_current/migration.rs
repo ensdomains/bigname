@@ -26,12 +26,29 @@ pub async fn load_name_migration_transition_timestamps(
     if logical_name_ids.is_empty() {
         return Ok(BTreeMap::new());
     }
+    let mut snapshot = crate::families::read_snapshot(pool).await?;
+    let names = crate::families::name::load_names_on(
+        &mut snapshot,
+        logical_name_ids,
+        crate::families::name::CoverageShape::Plain,
+    )
+    .await?;
+    let source = serde_json::Value::Array(
+        names
+            .into_values()
+            .map(|row| {
+                serde_json::json!({
+                    "logical_name_id": row.logical_name_id, "provenance": row.provenance,
+                })
+            })
+            .collect(),
+    );
     // The CASE keeps the bigint cast behind the digit check so a malformed proof id cannot fail
     // the whole page.
     let rows = sqlx::query(
         r#"
         SELECT nc.logical_name_id, lineage.block_timestamp
-        FROM bigname_phase.name_current nc
+        FROM jsonb_to_recordset($1) AS nc(logical_name_id text, provenance jsonb)
         JOIN bigname_phase.normalized_events proof
           ON proof.normalized_event_id = CASE
                  WHEN nc.provenance #>> '{authority_selection,proof_event_id}' ~ '^[0-9]+$'
@@ -40,14 +57,13 @@ pub async fn load_name_migration_transition_timestamps(
         JOIN bigname_phase.chain_lineage lineage
           ON lineage.chain_id = proof.chain_id
          AND lineage.block_hash = proof.block_hash
-        WHERE nc.logical_name_id = ANY($1::text[])
-          AND nc.provenance #>> '{authority_selection,authority_arm}' = 'ens_v2'
+        WHERE nc.provenance #>> '{authority_selection,authority_arm}' = 'ens_v2'
           AND nc.provenance #>> '{authority_selection,proof_kind}' = $2
         "#,
     )
-    .bind(logical_name_ids)
+    .bind(&source)
     .bind(MIGRATION_AUTHORITY_TRANSITION_PROOF_KIND)
-    .fetch_all(pool)
+    .fetch_all(&mut *snapshot)
     .await
     .with_context(|| {
         format!(
@@ -55,6 +71,7 @@ pub async fn load_name_migration_transition_timestamps(
             logical_name_ids.len()
         )
     })?;
+    snapshot.commit().await?;
     rows.into_iter()
         .map(|row| {
             Ok((

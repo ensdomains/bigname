@@ -3,7 +3,6 @@ use std::collections::BTreeMap;
 use super::read_error;
 use crate::v2::{HistoryEventType, V2Result, history_event_type};
 use serde_json::{Value, json};
-use sqlx::Row;
 
 pub(super) async fn page(
     pool: &sqlx::PgPool,

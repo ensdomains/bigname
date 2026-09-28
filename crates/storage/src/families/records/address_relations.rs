@@ -89,7 +89,8 @@ pub(super) fn relations(input: &NameRelationsInput<'_>) -> Vec<(String, &'static
         .pointer("/registration/registrant")
         .and_then(Value::as_str)
         .map(str::to_ascii_lowercase);
-    let controller = controller(input, modifier.is_none() || wrapped_out_of_grace);
+    let controller =
+        controller(input, modifier.is_none() || wrapped_out_of_grace).map(|(address, _)| address);
 
     let mut out = Vec::new();
     if lineage {
@@ -139,7 +140,10 @@ fn arm_of(source_family: &str) -> Option<&'static str> {
 
 /// The folded controller. `permission_mask_open` is the served condition under which a
 /// `resource_control` PermissionChanged sets rather than revokes.
-fn controller(input: &NameRelationsInput<'_>, permission_mask_open: bool) -> Option<String> {
+fn controller(
+    input: &NameRelationsInput<'_>,
+    permission_mask_open: bool,
+) -> Option<(String, FamilyPosition)> {
     let selection = AuthoritySelection::from_provenance(&input.row.provenance);
     if selection.unsupported_reason.is_some() {
         // No controller event is admitted, and the predecessor window reads only names
@@ -177,7 +181,7 @@ fn controller(input: &NameRelationsInput<'_>, permission_mask_open: bool) -> Opt
     events.sort_by(|left, right| left.position.cmp(&right.position));
 
     let name_resource = input.row.resource_id.map(|resource| resource.to_string());
-    let mut controller: Option<String> = None;
+    let mut controller: Option<(String, FamilyPosition)> = None;
     for event in events {
         let set = match event.event_kind.as_str() {
             "AuthorityTransferred" | "SurfaceBound" => true,
@@ -190,8 +194,14 @@ fn controller(input: &NameRelationsInput<'_>, permission_mask_open: bool) -> Opt
             _ => continue,
         };
         if set {
-            controller = event.subject.clone();
-        } else if controller.is_some() && controller == event.subject {
+            controller = event
+                .subject
+                .clone()
+                .map(|subject| (subject, event.position.clone()));
+        } else if controller
+            .as_ref()
+            .is_some_and(|(address, _)| Some(address) == event.subject.as_ref())
+        {
             controller = None;
         }
     }
@@ -230,3 +240,28 @@ fn registry_only_window(
 #[cfg(test)]
 #[path = "address_relations_tests.rs"]
 mod tests;
+
+/// The actual event that supplied a current relation, for bounded history attribution.
+/// Reuses the controller fold and the registration fold's selected event; it does not infer
+/// an acquisition time from the publication time.
+pub(super) fn relation_position(
+    input: &NameRelationsInput<'_>,
+    relation: &str,
+) -> Option<FamilyPosition> {
+    if relation == EFFECTIVE_CONTROLLER {
+        let modifier = input.wrapper.filter(|wrapper| wrapper.has_modifier);
+        let wrapper_state = input
+            .row
+            .declared_summary
+            .get("wrapper_state")
+            .and_then(Value::as_str);
+        let in_grace = modifier.and_then(|wrapper| in_grace(wrapper, input.clock_seconds));
+        let open = modifier.is_none()
+            || (matches!(wrapper_state, Some("wrapped" | "emancipated"))
+                && in_grace == Some(false));
+        if let Some((_, position)) = controller(input, open) {
+            return Some(position);
+        }
+    }
+    FamilyPosition::from_json(input.row.provenance.get("registrant_position")?)
+}

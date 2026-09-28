@@ -4,7 +4,7 @@ use anyhow::Result;
 use bigname_storage::{
     IdentityPrimaryNameSnapshot, ReverseIdentityGroup, ReverseIdentityStorageInput,
 };
-use sqlx::{PgPool, Row};
+use sqlx::PgPool;
 
 #[cfg(test)]
 mod hooks;

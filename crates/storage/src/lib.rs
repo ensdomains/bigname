@@ -26,7 +26,6 @@ mod permissions;
 mod phase_projection_reads;
 mod primary_name;
 mod projection_helpers;
-pub mod publication_source;
 mod record_inventory;
 mod registries;
 mod resolution_support;
@@ -159,11 +158,7 @@ pub use primary_name::{
 #[cfg(any(test, feature = "test-support"))]
 pub use record_inventory::explain_record_inventory_abi_evidence_for_test;
 pub use record_inventory::{
-    AbiContentTypes, AbiContentTypesInput, AbiContentTypesUnavailable,
-    READABLE_RECORD_INVENTORY_ENTRIES, RECORD_INVENTORY_CANONICALITY_SUMMARY_FILTER,
-    RECORD_INVENTORY_PROJECTION_LINEAGE_FILTER, RECORD_INVENTORY_RECORD_SERVING_FILTER,
-    RECORD_INVENTORY_RESOURCE_CANONICALITY_FILTER, RECORD_INVENTORY_RESOURCE_LINEAGE_FILTER,
-    RESOURCE_CANONICALITY_JOINS, RecordInventoryCurrentRow,
+    AbiContentTypes, AbiContentTypesInput, AbiContentTypesUnavailable, RecordInventoryCurrentRow,
     load_family_record_inventory_abi_content_types, load_record_inventory_abi_content_types,
     record_version_boundary_storage_key,
 };

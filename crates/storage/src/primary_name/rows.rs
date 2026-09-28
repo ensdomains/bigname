@@ -1,35 +1,4 @@
-use anyhow::Result;
-use sqlx::postgres::PgRow;
-
-use super::types::{PrimaryNameClaimStatus, PrimaryNameCurrentRow, PrimaryNameCurrentSnapshot};
-
-pub(super) fn decode_primary_name_current_snapshot(
-    row: PgRow,
-) -> Result<PrimaryNameCurrentSnapshot> {
-    let address = crate::sql_row::get::<String>(&row, "address")?.to_ascii_lowercase();
-    let namespace = crate::sql_row::get::<String>(&row, "namespace")?;
-    let coin_type = crate::sql_row::get::<String>(&row, "coin_type")?;
-    let claim_status =
-        PrimaryNameClaimStatus::parse(&crate::sql_row::get::<String>(&row, "claim_status")?)?;
-    let raw_claim_name = crate::sql_row::get::<Option<String>>(&row, "raw_claim_name")?;
-    let claim_name_is_normalized = crate::sql_row::get::<bool>(&row, "claim_name_is_normalized")?;
-    Ok(PrimaryNameCurrentSnapshot {
-        normalized_claim_name: normalized_claim_name(
-            claim_status,
-            claim_name_is_normalized,
-            raw_claim_name.as_deref(),
-        ),
-        row: PrimaryNameCurrentRow {
-            address,
-            namespace,
-            coin_type,
-            claim_status,
-            raw_claim_name,
-            claim_provenance: crate::sql_row::get(&row, "claim_provenance")?,
-        },
-        claim_name_is_normalized,
-    })
-}
+use super::types::PrimaryNameClaimStatus;
 
 /// The projection stores the raw claim spelling plus a marker for whether those bytes were already
 /// normalized; it stores no normalized column. When the marker is set the stored bytes are the

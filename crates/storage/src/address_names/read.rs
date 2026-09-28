@@ -90,36 +90,50 @@ async fn load_address_names_current_internal(
     include_noncanonical: bool,
     published: Option<&BTreeMap<String, i64>>,
 ) -> Result<Vec<AddressNameCurrentRow>> {
+    let mut snapshot = crate::families::read_snapshot(pool).await?;
+    let (composed, _) = crate::families::records::compose_address_name_rows(
+        &mut snapshot,
+        address,
+        namespace,
+        true,
+    )
+    .await?;
     let mut builder = QueryBuilder::<Postgres>::new("");
     push_address_names_current_query(
         &mut builder,
+        &composed,
         address,
         namespace,
         relations,
         include_noncanonical,
         published,
     );
-    let rows = builder.build().fetch_all(pool).await.with_context(|| {
-        let mut parts = vec![format!("address {address}")];
-        if let Some(namespace) = namespace {
-            parts.push(format!("namespace {namespace}"));
-        }
-        if let Some(relations) = relations.filter(|relations| !relations.is_empty()) {
-            parts.push(format!(
-                "relations {}",
-                relations
-                    .iter()
-                    .map(|relation| relation.as_str())
-                    .collect::<Vec<_>>()
-                    .join(",")
-            ));
-        }
-        format!(
-            "failed to load address_names_current rows for {}",
-            parts.join(" ")
-        )
-    })?;
+    let rows = builder
+        .build()
+        .fetch_all(&mut *snapshot)
+        .await
+        .with_context(|| {
+            let mut parts = vec![format!("address {address}")];
+            if let Some(namespace) = namespace {
+                parts.push(format!("namespace {namespace}"));
+            }
+            if let Some(relations) = relations.filter(|relations| !relations.is_empty()) {
+                parts.push(format!(
+                    "relations {}",
+                    relations
+                        .iter()
+                        .map(|relation| relation.as_str())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                ));
+            }
+            format!(
+                "failed to load address_names_current rows for {}",
+                parts.join(" ")
+            )
+        })?;
 
+    snapshot.commit().await?;
     rows.into_iter()
         .map(decode_address_name_current_row)
         .collect()
@@ -130,6 +144,7 @@ async fn load_address_names_current_internal(
 /// `published` when given.
 pub(crate) fn push_address_names_current_query<'a>(
     builder: &mut QueryBuilder<'a, Postgres>,
+    composed: &'a serde_json::Value,
     address: &'a str,
     namespace: Option<&'a str>,
     relations: Option<&[AddressNameRelation]>,
@@ -149,7 +164,7 @@ pub(crate) fn push_address_names_current_query<'a>(
             anc.resource_id,
             anc.token_lineage_id,
             anc.binding_kind,
-            anc.provenance,
+            anc.provenance || jsonb_build_object('normalized_event_id', history_event.normalized_event_id) AS provenance,
             CASE WHEN anc.support_status = 'supported'
                  THEN jsonb_build_object('status', 'projected', 'exhaustiveness', 'not_asserted')
                  ELSE jsonb_build_object(
@@ -160,9 +175,15 @@ pub(crate) fn push_address_names_current_query<'a>(
             anc.canonicality_summary,
             anc.manifest_version,
             anc.last_recomputed_at
-        FROM bigname_phase.address_names_current anc
         "#,
     );
+    builder.push(" FROM ");
+    super::RowSource::Composed {
+        rows: composed,
+        names: composed,
+    }
+    .push_address_names(builder);
+    builder.push(" LEFT JOIN bigname_phase.normalized_events history_event ON history_event.chain_id = anc.provenance ->> 'chain_id' AND history_event.event_identity = anc.provenance ->> 'event_identity'");
     if !include_noncanonical {
         builder.push(DEFAULT_ADDRESS_NAMES_CURRENT_IDENTITY_JOINS);
     }
@@ -284,9 +305,7 @@ fn push_same_holder_since_bound(
         r#"EXISTS (
             SELECT 1
             FROM normalized_events cited
-            WHERE cited.normalized_event_id = CASE
-                      WHEN jsonb_typeof(anc.provenance -> 'normalized_event_id') = 'number'
-                      THEN (anc.provenance ->> 'normalized_event_id')::bigint END
+            WHERE cited.normalized_event_id = history_event.normalized_event_id
               AND cited.chain_id = "#,
     );
     builder.push_bind(chain_id.to_owned());

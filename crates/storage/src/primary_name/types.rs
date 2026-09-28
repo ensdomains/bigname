@@ -1,4 +1,3 @@
-use anyhow::{Result, bail};
 use serde_json::Value;
 
 /// Persisted declared claim-state for one address, coin_type, and namespace tuple.
@@ -38,18 +37,4 @@ impl PrimaryNameClaimStatus {
             Self::InvalidName => "invalid_name",
         }
     }
-
-    pub(super) fn parse(value: &str) -> Result<Self> {
-        match value {
-            "success" => Ok(Self::Success),
-            "not_found" => Ok(Self::NotFound),
-            "unsupported" => Ok(Self::Unsupported),
-            "invalid_name" => Ok(Self::InvalidName),
-            _ => bail!("unknown primary_names_current claim_status {value}"),
-        }
-    }
-}
-
-pub(super) fn normalize_address(address: &str) -> String {
-    address.to_ascii_lowercase()
 }

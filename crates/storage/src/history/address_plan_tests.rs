@@ -350,21 +350,6 @@ async fn check_bounded_current_relation_plan(connection: &mut PgConnection) -> R
              jsonb_build_object('from', '{TARGET}'), jsonb_build_object('to', '{TARGET}'))
         ) held(identity, kind, block, before, after);
 
-        INSERT INTO address_names_current
-            (address, logical_name_id, relation, namespace, raw_name, namehash,
-             surface_binding_id, resource_id, binding_kind, support_status, provenance,
-             chain_positions, canonicality_summary, manifest_version)
-        SELECT '{TARGET}', 'ens:{held_hash}', 'token_holder', 'ens', 'held.eth', '{held_hash}',
-               '{binding}', '{held_resource}', 'declared_registry_path', 'supported',
-               jsonb_build_object('chain_id', 'ethereum-mainnet',
-                                  'normalized_event_id', normalized_event_id),
-               jsonb_build_object('block_number', {cited}, 'block_hash', 'block-{cited}',
-                                  'target_block_number', {cited},
-                                  'target_block_hash', 'block-{cited}'),
-               jsonb_build_object('state', 'canonical_lineage'), 1
-        FROM normalized_events
-        WHERE event_identity = 'held:self-2';
-
         ANALYZE;
         "#,
         held_hash = format!("0x{:064x}", 0xa12),
@@ -376,6 +361,21 @@ async fn check_bounded_current_relation_plan(connection: &mut PgConnection) -> R
     let published: &'static std::collections::BTreeMap<String, i64> = Box::leak(Box::new(
         std::collections::BTreeMap::from([("ethereum-mainnet".to_owned(), bound)]),
     ));
+    // This query's input is now the application's composed family relation, not a stored
+    // serving row. The event and identity rows above still exercise the actual bound probes.
+    let composed: &'static Value = Box::leak(Box::new(serde_json::json!([{
+        "address": TARGET, "logical_name_id": format!("ens:0x{:064x}", 0xa12),
+        "relation": "token_holder", "namespace": "ens", "raw_name": "held.eth",
+        "namehash": format!("0x{:064x}", 0xa12),
+        "surface_binding_id": Uuid::from_u128(0xa12b),
+        "resource_id": Uuid::from_u128(0xa12),
+        "binding_kind": "declared_registry_path", "support_status": "supported",
+        "provenance": {"chain_id": "ethereum-mainnet", "event_identity": "held:self-2"},
+        "chain_positions": {"block_number": cited, "target_block_number": cited,
+                            "target_block_hash": format!("block-{cited}")},
+        "canonicality_summary": {"state": "canonical_lineage"}, "manifest_version": 1,
+        "last_recomputed_at": "2026-01-01T00:00:00Z"
+    }])));
     let mut plan_failures = Vec::new();
     // Both read paths: the canonical read with its identity joins and the read that includes
     // noncanonical identity rows, which has none.
@@ -383,6 +383,7 @@ async fn check_bounded_current_relation_plan(connection: &mut PgConnection) -> R
         let push_current = move |builder: &mut QueryBuilder<'static, Postgres>| {
             push_address_names_current_query(
                 builder,
+                composed,
                 TARGET,
                 None,
                 None,

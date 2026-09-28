@@ -300,6 +300,14 @@ pub(super) fn compose(parts: &Parts<'_>, shape: CoverageShape) -> Result<NameCur
         "surface_block_number".into(),
         json!(parts.surface.block_number),
     );
+    // Retained for address-history bounds, so a later acquisition cannot admit older history.
+    if let Some(position) = shadow
+        .trace
+        .get("registrant_position")
+        .filter(|value| !value.is_null())
+    {
+        provenance.insert("registrant_position".into(), position.clone());
+    }
     provenance.insert("derivation_kind".into(), json!("name_current_rebuild"));
     provenance.insert("authority_selection".into(), parts.selection.provenance());
     provenance.insert(

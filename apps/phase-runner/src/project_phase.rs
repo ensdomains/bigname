@@ -12,7 +12,7 @@ use sqlx::PgPool;
 mod family_batch;
 
 use crate::{
-    error::{ErrorKind, RunnerError, RunnerResult},
+    error::{ErrorKind, RunnerError},
     heads::BlockMarker,
     metrics::RunnerMetricsFeed,
     phase::{Phase, PhaseContext, PhaseFuture, PhaseName},

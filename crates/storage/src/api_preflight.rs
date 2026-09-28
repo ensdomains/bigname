@@ -46,27 +46,55 @@ pub async fn load_missing_api_lookup_ddl(pool: &PgPool) -> Result<Vec<ApiLookupD
                 ('relation', 'bigname_phase.chain_phase_state'),
                 ('relation', 'bigname_phase.normalized_events'),
                 ('relation', 'bigname_phase.migration_event_associations'),
-                ('relation', 'bigname_phase.name_current'),
-                ('relation', 'bigname_phase.address_names_current'),
-                ('relation', 'bigname_phase.address_records_current'),
-                ('relation', 'bigname_phase.children_current'),
                 ('relation', 'bigname_phase.child_registration_events'),
-                ('relation', 'bigname_phase.permissions_current'),
-                ('relation', 'bigname_phase.permissions_current_resource_summary'),
-                ('relation', 'bigname_phase.account_permission_state_current'),
-                ('relation', 'bigname_phase.primary_names_current'),
-                ('relation', 'bigname_phase.resolver_current'),
                 ('relation', 'bigname_phase.name_surfaces'),
                 ('relation', 'bigname_phase.resources'),
                 ('relation', 'bigname_phase.surface_bindings'),
                 ('relation', 'bigname_phase.token_lineages'),
-                ('relation', 'bigname_phase.record_inventory_current'),
                 ('relation', 'bigname_phase.service_heartbeats'),
                 ('relation', 'bigname_phase.manifest_versions'),
                 ('relation', 'bigname_phase.manifest_contract_instances'),
                 ('relation', 'bigname_phase.contract_instance_addresses'),
                 ('relation', 'bigname_phase.resolution_divergences'),
                 ('relation', 'bigname_phase.project_family_marker'),
+                ('relation', 'bigname_phase.project_family_undo'),
+                ('relation', 'bigname_phase.project_repair_record'),
+                ('relation', 'bigname_phase.project_name_state'),
+                ('relation', 'bigname_phase.project_binding_candidate'),
+                ('relation', 'bigname_phase.project_lifecycle_key_state'),
+                ('relation', 'bigname_phase.project_lifecycle_triple_summary'),
+                ('relation', 'bigname_phase.project_lifecycle_association'),
+                ('relation', 'bigname_phase.project_lifecycle_event'),
+                ('relation', 'bigname_phase.project_child_registration_state'),
+                ('relation', 'bigname_phase.project_wrapper_state'),
+                ('relation', 'bigname_phase.project_registry_node_state'),
+                ('relation', 'bigname_phase.project_registry_owner_event'),
+                ('relation', 'bigname_phase.project_registry_binding_observation'),
+                ('relation', 'bigname_phase.project_resolver_classification'),
+                ('relation', 'bigname_phase.project_registry_pointer'),
+                ('relation', 'bigname_phase.project_resource_pointer'),
+                ('relation', 'bigname_phase.project_named_resource_pointer'),
+                ('relation', 'bigname_phase.project_node_record_partition'),
+                ('relation', 'bigname_phase.project_node_record_value'),
+                ('relation', 'bigname_phase.project_record_id_value'),
+                ('relation', 'bigname_phase.project_resolver_link'),
+                ('relation', 'bigname_phase.project_grant'),
+                ('relation', 'bigname_phase.project_resource_admin_aggregate'),
+                ('relation', 'bigname_phase.project_account_approval'),
+                ('relation', 'bigname_phase.project_name_alias'),
+                ('relation', 'bigname_phase.project_resolver_alias'),
+                ('relation', 'bigname_phase.project_child_edge_candidate'),
+                ('relation', 'bigname_phase.project_parent_subregistry'),
+                ('relation', 'bigname_phase.project_reverse_tuple'),
+                ('relation', 'bigname_phase.project_reverse_node_claim'),
+                ('relation', 'bigname_phase.project_claim_normalization'),
+                ('relation', 'bigname_phase.project_address_name_fold'),
+                ('relation', 'bigname_phase.project_address_controller_candidate'),
+                ('relation', 'bigname_phase.project_address_name_index'),
+                ('relation', 'bigname_phase.project_address_record_node_index'),
+                ('relation', 'bigname_phase.project_address_record_id_index'),
+                ('relation', 'bigname_phase.project_name_history'),
+                ('relation', 'bigname_phase.project_name_summary'),
                 (
                     'function',
                     'bigname_phase.revalidate_resolution_lookup_state(text,bigint,text,jsonb,jsonb,uuid,text,text)'
@@ -79,8 +107,7 @@ pub async fn load_missing_api_lookup_ddl(pool: &PgPool) -> Result<Vec<ApiLookupD
         )
         SELECT kind, identity
         FROM required
-        WHERE (identity <> 'bigname_phase.project_family_marker' OR $1)
-          AND CASE kind
+        WHERE CASE kind
             WHEN 'relation' THEN CASE WHEN to_regnamespace(split_part(identity, '.', 1)) IS NULL THEN TRUE
                 WHEN NOT has_schema_privilege(current_user, to_regnamespace(split_part(identity, '.', 1)), 'USAGE') THEN TRUE
                 WHEN to_regclass(identity) IS NULL THEN TRUE ELSE identity <> 'bigname_phase.resolution_divergences'
@@ -91,8 +118,6 @@ pub async fn load_missing_api_lookup_ddl(pool: &PgPool) -> Result<Vec<ApiLookupD
         ORDER BY kind, identity
         "#,
     )
-    // The family marker is a serving read only while the publication switch is on.
-    .bind(crate::publication_source::serve_from_families())
     .fetch_all(pool)
     .await
     .context("failed to inspect required API lookup DDL")?;

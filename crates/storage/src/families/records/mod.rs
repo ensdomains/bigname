@@ -36,7 +36,7 @@ use serde_json::Value;
 use sqlx::{Row, postgres::PgRow};
 
 pub use address_names::load_family_address_names_page;
-pub(crate) use address_names::name_relations_on;
+pub(crate) use address_names::{compose_address_name_rows, name_relations_on};
 pub use compare::{
     Difference, check_compatibility_pairs, compare_address_records, compare_address_results,
     compare_primary_name, compare_record_inventory,

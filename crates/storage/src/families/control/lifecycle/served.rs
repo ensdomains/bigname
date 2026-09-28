@@ -318,6 +318,19 @@ pub(super) fn evaluate(facts: &NameFacts, clock: &Clock) -> Result<ShadowName> {
         is_v2,
         selected_key.as_deref(),
     );
+    let (registrant, registrant_position) = match registrant {
+        Some((registrant, position)) => (
+            Some(registrant),
+            json!({
+                "block_number": position.block_number,
+                "transaction_index": position.transaction_index,
+                "log_index": position.log_index,
+                "event_identity": position.event_identity,
+            }),
+        ),
+        None => (None, Value::Null),
+    };
+    trace.insert("registrant_position".into(), registrant_position);
     let context = authority_context(facts, &authority, &in_scope, is_v2, selected_key.as_deref());
     trace.insert("authority_context_event".into(), context.event.clone());
     trace.insert("authority_context_kind".into(), context.kind.clone());

@@ -10,7 +10,7 @@ use bigname_storage::{
     parse_rfc3339_utc_timestamp, resolve_exact_name_snapshot_selection, snapshot_chain_has_head,
 };
 use serde_json::json;
-use sqlx::{PgPool, Row, types::JsonValue};
+use sqlx::{PgPool, types::JsonValue};
 use tracing::{error, warn};
 
 use crate::{

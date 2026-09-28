@@ -53,7 +53,7 @@ pub async fn load_family_address_names_page(
     page_size: u64,
 ) -> Result<AddressNamesCurrentSortedPage> {
     let mut snapshot = crate::families::read_snapshot(pool).await?;
-    let (rows, names) = compose_address_name_rows(&mut snapshot, address, namespace).await?;
+    let (rows, names) = compose_address_name_rows(&mut snapshot, address, namespace, false).await?;
     let page = load_address_names_page_from(
         &mut snapshot,
         RowSource::Composed {
@@ -79,10 +79,11 @@ pub async fn load_family_address_names_page(
 
 /// The composed `address_names_current` rows of `address` and the composed name rows they read,
 /// as JSON record sets.
-pub(super) async fn compose_address_name_rows(
+pub(crate) async fn compose_address_name_rows(
     conn: &mut PgConnection,
     address: &str,
     namespace: Option<&str>,
+    with_history_evidence: bool,
 ) -> Result<(Value, Value)> {
     let indexed: Vec<(String, String)> = sqlx::query_as(
         "/* storage:families.records.address_name_index */
@@ -128,7 +129,18 @@ pub(super) async fn compose_address_name_rows(
             let mut listed = false;
             for (related, relation) in relations(&input) {
                 if related == wanted {
-                    rows.push(address_name_row(&related, relation, row, &publication));
+                    let mut relation_row = address_name_row(&related, relation, row, &publication);
+                    if with_history_evidence {
+                        if let Some(position) =
+                            super::address_relations::relation_position(&input, relation)
+                        {
+                            relation_row["provenance"]["event_identity"] =
+                                json!(position.event_identity);
+                            relation_row["chain_positions"]["block_number"] =
+                                json!(position.block_number);
+                        }
+                    }
+                    rows.push(relation_row);
                     listed = true;
                 }
             }
