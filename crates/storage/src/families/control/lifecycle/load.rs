@@ -2,7 +2,7 @@
 //! identity rows only (no normalized_events). Every statement
 //! carries a `storage:families.control.lifecycle.*` prefix for the slow log.
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashMap},
     sync::Arc,
 };
 
@@ -131,8 +131,10 @@ pub async fn load_name_facts_on(
         })
         .collect();
     // An association whose triple has no null-resource event yet still names a key.
+    let summarized: BTreeSet<[String; 3]> =
+        triples.iter().map(|triple| triple.key.clone()).collect();
     for (key, (target, position)) in &targets {
-        if !triples.iter().any(|triple| &triple.key == key) {
+        if !summarized.contains(key) {
             triples.push(TripleFacts {
                 key: key.clone(),
                 maxima: Maxima::default(),
@@ -303,18 +305,71 @@ pub async fn load_name_facts_on(
         .into_iter()
         .map(|row| (row.resource_id.clone(), row))
         .collect();
+    // Each name takes its own rows from the batch through these indexes, which keep the batch's
+    // order, so the work is linear in the batch rather than one scan of it per name.
+    let mut candidates_of: HashMap<&str, Vec<&BindingCandidate>> = HashMap::new();
+    for candidate in &candidates {
+        candidates_of
+            .entry(candidate.logical_name_id.as_str())
+            .or_default()
+            .push(candidate);
+    }
+    let mut triples_of: HashMap<&str, Vec<&TripleFacts>> = HashMap::new();
+    for triple in &triples {
+        triples_of
+            .entry(triple.key[0].as_str())
+            .or_default()
+            .push(triple);
+    }
+    let mut key_states_of: HashMap<&str, Vec<&String>> = HashMap::new();
+    for (resource, (state_name, _)) in &key_states {
+        if let Some(state_name) = state_name {
+            key_states_of
+                .entry(state_name.as_str())
+                .or_default()
+                .push(resource);
+        }
+    }
+    // Event positions in the batch by the state they sit on: resource states, and every other
+    // kind by its triple key.
+    let mut resource_events: HashMap<&str, Vec<usize>> = HashMap::new();
+    let mut triple_events: HashMap<&str, Vec<usize>> = HashMap::new();
+    for (index, event) in events.iter().enumerate() {
+        let by_state = if event.state_kind == "resource" {
+            &mut resource_events
+        } else {
+            &mut triple_events
+        };
+        by_state
+            .entry(event.state_key.as_str())
+            .or_default()
+            .push(index);
+    }
+    // Lease candidate positions by the resource and the wrapped registrar resource they carry.
+    let mut lease_positions: HashMap<&str, Vec<usize>> = HashMap::new();
+    for (index, candidate) in lease_candidates.iter().enumerate() {
+        lease_positions
+            .entry(candidate.resource_id.as_str())
+            .or_default()
+            .push(index);
+        if let Some(lease) = candidate.wrapped_registrar_resource_id.as_deref() {
+            lease_positions.entry(lease).or_default().push(index);
+        }
+    }
     let mut out = Vec::new();
     for input in names {
         let name = input.logical_name_id.as_str();
-        let own: Vec<BindingCandidate> = candidates
-            .iter()
-            .filter(|candidate| candidate.logical_name_id == name)
-            .cloned()
+        let own: Vec<BindingCandidate> = candidates_of
+            .get(name)
+            .into_iter()
+            .flatten()
+            .map(|candidate| (*candidate).clone())
             .collect();
-        let own_triples: Vec<TripleFacts> = triples
-            .iter()
-            .filter(|triple| triple.key[0] == name)
-            .cloned()
+        let own_triples: Vec<TripleFacts> = triples_of
+            .get(name)
+            .into_iter()
+            .flatten()
+            .map(|triple| (*triple).clone())
             .collect();
         let mut own_resources: BTreeSet<String> = BTreeSet::new();
         for candidate in &own {
@@ -329,50 +384,60 @@ pub async fn load_name_facts_on(
                 .iter()
                 .filter_map(|triple| triple.target.clone()),
         );
-        for (resource, (state_name, _)) in &key_states {
-            if state_name.as_deref() == Some(name) {
-                own_resources.insert(resource.clone());
-            }
+        for resource in key_states_of.get(name).into_iter().flatten() {
+            own_resources.insert((*resource).clone());
         }
         let own_triple_keys: BTreeSet<String> =
             own_triples.iter().map(TripleFacts::state_key).collect();
-        let own_events: Vec<LifecycleEvent> = events
+        let own_event_positions: BTreeSet<usize> = own_resources
             .iter()
-            .filter(|event| match event.state_kind.as_str() {
-                "resource" => own_resources.contains(&event.state_key),
-                _ => own_triple_keys.contains(&event.state_key),
-            })
-            .cloned()
+            .filter_map(|resource| resource_events.get(resource.as_str()))
+            .chain(
+                own_triple_keys
+                    .iter()
+                    .filter_map(|key| triple_events.get(key.as_str())),
+            )
+            .flatten()
+            .copied()
+            .collect();
+        let own_events: Vec<LifecycleEvent> = own_event_positions
+            .into_iter()
+            .map(|index| events[index].clone())
             .collect();
         let own_leases: BTreeSet<&str> = own_events
             .iter()
             .filter_map(|event| event.resource_id.as_deref())
             .collect();
+        let own_lease_positions: BTreeSet<usize> = own_leases
+            .iter()
+            .filter_map(|lease| lease_positions.get(lease))
+            .flatten()
+            .copied()
+            .collect();
         out.push(NameFacts {
             input: input.clone(),
             candidates: own,
-            lease_candidates: lease_candidates
-                .iter()
-                .filter(|candidate| {
-                    own_leases.contains(candidate.resource_id.as_str())
-                        || candidate
-                            .wrapped_registrar_resource_id
-                            .as_deref()
-                            .is_some_and(|lease| own_leases.contains(lease))
-                })
-                .cloned()
+            lease_candidates: own_lease_positions
+                .into_iter()
+                .map(|index| lease_candidates[index].clone())
                 .collect(),
-            key_states: key_states
+            key_states: own_resources
                 .iter()
-                .filter(|(resource, _)| own_resources.contains(*resource))
-                .map(|(resource, (_, maxima))| (resource.clone(), maxima.clone()))
+                .filter_map(|resource| {
+                    key_states
+                        .get(resource)
+                        .map(|(_, maxima)| (resource.clone(), maxima.clone()))
+                })
                 .collect(),
             triples: own_triples,
             events: own_events,
-            wrappers: wrappers
+            wrappers: own_resources
                 .iter()
-                .filter(|(resource, _)| own_resources.contains(*resource))
-                .map(|(resource, row)| (resource.clone(), row.clone()))
+                .filter_map(|resource| {
+                    wrappers
+                        .get(resource)
+                        .map(|row| (resource.clone(), row.clone()))
+                })
                 .collect(),
             block_timestamps: Arc::clone(&block_timestamps),
             block_seconds: Arc::clone(&block_seconds),

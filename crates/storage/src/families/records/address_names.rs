@@ -114,7 +114,7 @@ pub(crate) async fn compose_address_name_rows(
     for (chain_id, ids) in by_chain {
         let publication = servable_publication(conn, &chain_id).await?;
         let composed = load_composed(conn, &ids, CoverageShape::Plain).await?;
-        let inputs = ChainInputs::load(conn, &chain_id, &composed).await?;
+        let inputs = ChainInputs::load(conn, &chain_id, composed.values()).await?;
         for row in composed.values() {
             let candidates = inputs.candidates_of(&row.logical_name_id);
             let input = NameRelationsInput {
@@ -217,12 +217,16 @@ struct ChainInputs {
 }
 
 impl ChainInputs {
-    async fn load(
+    async fn load<'a>(
         conn: &mut PgConnection,
         chain_id: &str,
-        composed: &BTreeMap<String, NameCurrentRow>,
+        composed: impl IntoIterator<Item = &'a NameCurrentRow>,
     ) -> Result<Self> {
-        let ids: Vec<String> = composed.keys().cloned().collect();
+        let composed: Vec<&NameCurrentRow> = composed.into_iter().collect();
+        let ids: Vec<String> = composed
+            .iter()
+            .map(|row| row.logical_name_id.clone())
+            .collect();
         let rows = sqlx::query(
             "/* storage:families.records.address_controller_candidates */
              SELECT logical_name_id, block_number, transaction_index, log_index, event_identity,
@@ -252,7 +256,7 @@ impl ChainInputs {
                 .push(candidate);
         }
         let selected: Vec<_> = composed
-            .values()
+            .iter()
             .filter_map(|row| row.surface_binding_id)
             .collect();
         let bindings: Vec<Value> = sqlx::query_scalar(
@@ -271,7 +275,7 @@ impl ChainInputs {
             .map(|binding| (binding.surface_binding_id.clone(), binding))
             .collect();
         let resources: Vec<String> = composed
-            .values()
+            .iter()
             .filter_map(|row| row.resource_id.map(|id| id.to_string()))
             .collect::<BTreeSet<_>>()
             .into_iter()
@@ -308,21 +312,18 @@ pub(crate) async fn name_relations_on(
     conn: &mut PgConnection,
     composed: &BTreeMap<String, NameCurrentRow>,
 ) -> Result<BTreeMap<String, Vec<crate::IdentityAddressRelationRow>>> {
-    let mut chains: BTreeMap<String, BTreeMap<String, NameCurrentRow>> = BTreeMap::new();
-    for (id, row) in composed {
+    let mut chains: BTreeMap<String, Vec<&NameCurrentRow>> = BTreeMap::new();
+    for row in composed.values() {
         let chain = row.provenance["chain_id"]
             .as_str()
             .context("composed name has no chain")?;
-        chains
-            .entry(chain.to_owned())
-            .or_default()
-            .insert(id.clone(), row.clone());
+        chains.entry(chain.to_owned()).or_default().push(row);
     }
     let mut out = BTreeMap::new();
     for (chain, names) in chains {
         let publication = servable_publication(conn, &chain).await?;
-        let inputs = ChainInputs::load(conn, &chain, &names).await?;
-        for row in names.values() {
+        let inputs = ChainInputs::load(conn, &chain, names.iter().copied()).await?;
+        for row in names {
             let candidates = inputs.candidates_of(&row.logical_name_id);
             let input = NameRelationsInput {
                 row,
