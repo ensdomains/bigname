@@ -80,6 +80,23 @@ impl ListCursor {
         cursor: Option<&str>,
         keys: &[&str],
     ) -> V2Result<Option<ListPosition>> {
+        let Some(payload) = self.read_shape(cursor, keys)? else {
+            return Ok(None);
+        };
+        if payload.snapshot != self.at {
+            return Err(invalid_cursor_error());
+        }
+        Ok(Some(ListPosition(payload.last_item)))
+    }
+
+    /// Every check of [`Self::read`] except the `at` pin, for a route that must refuse a
+    /// malformed cursor before it knows the request's `at` token (the resolver overview checks
+    /// the pin once its snapshot is selected).
+    pub(crate) fn check_shape(&self, cursor: Option<&str>, keys: &[&str]) -> V2Result<()> {
+        self.read_shape(cursor, keys).map(|_| ())
+    }
+
+    fn read_shape(&self, cursor: Option<&str>, keys: &[&str]) -> V2Result<Option<Payload>> {
         let Some(cursor) = cursor else {
             return Ok(None);
         };
@@ -87,7 +104,6 @@ impl ListCursor {
         let matches = only_known_fields(cursor)
             && payload.sort == self.sort
             && payload.filters == self.filters
-            && payload.snapshot == self.at
             && payload.evaluated_at.is_none()
             && payload.last_item.len() == keys.len()
             && keys.iter().all(|key| {
@@ -99,7 +115,7 @@ impl ListCursor {
         if !matches {
             return Err(invalid_cursor_error());
         }
-        Ok(Some(ListPosition(payload.last_item)))
+        Ok(Some(payload))
     }
 
     /// The continuation after `position`.

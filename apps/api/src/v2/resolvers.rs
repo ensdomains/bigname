@@ -23,6 +23,7 @@ use crate::AppState;
 mod bound_names_cursor;
 pub(crate) use bound_names_cursor::{
     BoundNamesCursorBinding, bound_names_next_cursor, bound_names_storage_cursor,
+    check_bound_names_cursor_shape,
 };
 
 #[path = "resolvers/link_items.rs"]
@@ -89,9 +90,18 @@ pub(crate) async fn get_resolver(
     let params = params.into_inner();
     let (numeric_chain_id, chain_id_slug) = parse_numeric_chain_id(&chain_id)?;
     let normalized_address = parse_evm_address(&address, "address").map_err(api_error_to_v2)?;
-    // A cursor that does not decode is refused before anything is read; its binding, which
-    // needs the selected `at` token, is checked once the snapshot is selected.
-    params.cursor.as_deref().map(super::decode).transpose()?;
+    // A cursor this list could not have written is refused before anything is read; only its
+    // `at` pin, which needs the selected snapshot, is compared once the snapshot is selected.
+    check_bound_names_cursor_shape(
+        params.cursor.as_deref(),
+        &BoundNamesCursorBinding {
+            chain_id: numeric_chain_id,
+            resolver_address: &normalized_address,
+            namespace: params.namespace.as_deref(),
+            sort: BOUND_NAMES_SORT_TOKEN,
+            at: None,
+        },
+    )?;
     // Admitted without the cursor: a bound-names cursor binds no publication (`list_cursor`), so
     // only a publication during this read refuses it, with a retry.
     let publication = super::collection_snapshot::CollectionSnapshot::capture_for_namespace(

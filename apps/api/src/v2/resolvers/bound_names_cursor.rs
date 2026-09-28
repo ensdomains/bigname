@@ -63,6 +63,15 @@ pub(crate) fn bound_names_next_cursor(
     ]))
 }
 
+/// Refuses a `cursor` this binding could not have written, `at` aside: the overview runs it
+/// before reading anything, when the request's `at` token is not yet known.
+pub(crate) fn check_bound_names_cursor_shape(
+    cursor: Option<&str>,
+    binding: &BoundNamesCursorBinding<'_>,
+) -> V2Result<()> {
+    bound_names_list_cursor(binding).check_shape(cursor, &POSITION_KEYS)
+}
+
 /// The storage position a request's `cursor` continues from; `400 invalid_input` for a cursor
 /// this binding did not write.
 pub(crate) fn bound_names_storage_cursor(

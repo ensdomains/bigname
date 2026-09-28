@@ -518,8 +518,9 @@ async fn v2_list_cursor_pinned_at_answers_409_after_any_newer_publication() -> R
     database.cleanup().await
 }
 
-/// A malformed cursor is refused before anything is read: on a resolver that does not exist,
-/// and on a database with no publication at all.
+/// A malformed or structurally foreign cursor is refused before anything is read: on a resolver
+/// that does not exist, and on a database with no publication at all. Only the `at` pin waits for
+/// the snapshot.
 #[tokio::test]
 async fn v2_list_cursor_malformed_on_the_resolver_overview_answers_400_before_reading()
 -> Result<()> {
@@ -527,13 +528,31 @@ async fn v2_list_cursor_malformed_on_the_resolver_overview_answers_400_before_re
     let database = TestDatabase::new_migrated().await?;
     seed_switch_names_fixture(&database).await?;
     seed_switch_resolver_current(&database).await?;
+    let base = format!("/v1/resolvers/1/{SWITCH_RESOLVER}?page_size=1");
     for on in [false, true] {
+        // Cursors that decode but that this list could not have written: an unknown top-level
+        // field, a missing position key, another resolver's filters.
+        let (_, next) = list_cursor_page(&database, on, &base, "/data/bound_names").await?;
+        let next = next.context("a continuation")?;
+        let structural = [
+            list_cursor_raw(&next, |raw| raw["route"] = json!("resolver")),
+            list_cursor_raw(&next, |raw| {
+                raw["last_item"].as_object_mut().expect("object").remove("namehash");
+            }),
+            list_cursor_raw(&next, |raw| {
+                raw["filters"]["resolver"] = json!(LIST_CURSOR_OTHER_RESOLVER);
+            }),
+        ];
         for db in [&database, &empty] {
             for uri in [
                 format!("/v1/resolvers/1/{LIST_CURSOR_OTHER_RESOLVER}?page_size=1&cursor=not-a-cursor"),
-                format!("/v1/resolvers/1/{SWITCH_RESOLVER}?page_size=1&cursor=7b7d"),
+                format!("{base}&cursor=7b7d"),
             ] {
                 assert_list_cursor_refused(db, on, &uri, "malformed").await?;
+            }
+            for cursor in &structural {
+                assert_list_cursor_refused(db, on, &list_cursor_continue(&base, cursor), "structural")
+                    .await?;
             }
         }
     }
