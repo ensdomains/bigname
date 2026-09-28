@@ -277,11 +277,22 @@ impl Fixture {
         logical_name_id: &str,
         namehash: &str,
     ) -> Result<()> {
+        // These fold fixtures use synthetic identity keys; their visible names still obey
+        // the same normalization contract as surfaces written by Interpret.
+        let labels = namehash.trim_start_matches("0x");
+        let (first, last) = labels.split_at(labels.len() / 2);
+        let normalized =
+            bigname_domain::normalization::normalize_name(&format!("n{first}.n{last}.eth"))?;
+        let labelhashes: Vec<String> = normalized
+            .normalized_labels
+            .iter()
+            .map(|label| format!("{:#x}", alloy_primitives::keccak256(label.as_bytes())))
+            .collect();
         sqlx::query(
             "INSERT INTO name_surfaces (logical_name_id, namespace, raw_name, raw_labels,
                  dns_encoded_name, namehash, labelhashes, normalizer_version, visibility_state,
                  chain_id, block_hash, block_number, canonicality_state)
-             VALUES ($1, 'ens', $1, ARRAY[$1], '\\x00', $2, ARRAY[$2], 'ensip15', 'active',
+             VALUES ($1, 'ens', $5, $6, $7, $2, $8, $9, 'active',
                      $3, $4, 0, 'canonical')
              ON CONFLICT DO NOTHING",
         )
@@ -289,6 +300,11 @@ impl Fixture {
         .bind(namehash)
         .bind(chain)
         .bind(hash(0))
+        .bind(normalized.normalized_name)
+        .bind(normalized.normalized_labels)
+        .bind(normalized.dns_encoded_name)
+        .bind(labelhashes)
+        .bind(bigname_domain::normalization::ENS_NORMALIZER_VERSION)
         .execute(&self.pool)
         .await?;
         Ok(())
