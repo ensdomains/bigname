@@ -372,36 +372,7 @@ async fn seed_switch_routes_events_with(database: &TestDatabase, extra: Vec<Norm
     );
     role.derivation_kind = "ens_v2_permissions".to_owned();
     role.raw_fact_ref["emitting_address"] = json!(SWITCH_RESOLVER);
-    // The resolver is declared, so Project indexes its address records.
-    let payload = json!({"deployment_epoch": "fixture", "contracts": [{
-        "role": "resolver", "address": SWITCH_RESOLVER, "proxy_kind": "none",
-        "start_block": 0, "read_features": []
-    }]});
-    let manifest_id: i64 = sqlx::query_scalar(
-        "INSERT INTO bigname_phase.manifest_versions (manifest_version, namespace,
-             source_family, chain_id, deployment_label, rollout_status, normalizer_version,
-             file_path, manifest_payload)
-         VALUES (1, 'ens', 'ens_v1_resolver_l1', $1, 'fixture', 'active', 'fixture',
-                 'fixture/switch-resolver.toml', $2)
-         RETURNING manifest_id",
-    )
-    .bind(SWITCH_CHAIN)
-    .bind(&payload)
-    .fetch_one(&database.pool)
-    .await?;
-    sqlx::query(
-        "INSERT INTO bigname_phase.normalized_events (event_identity, namespace, event_kind,
-             source_family, manifest_version, source_manifest_id, chain_id, derivation_kind,
-             canonicality_state, after_state)
-         VALUES ('switch-manifest', 'ens', 'SourceManifestUpdated', 'ens_v1_resolver_l1', 1,
-                 $1, $2, 'manifest_sync', 'canonical', $3)",
-    )
-    .bind(manifest_id)
-    .bind(SWITCH_CHAIN)
-    .bind(json!({"rollout_status": "active", "normalizer_version": "fixture",
-                 "manifest_payload": payload}))
-    .execute(&database.pool)
-    .await?;
+    let manifest_id = seed_switch_resolver_declaration(database).await?;
     let mut record = switch_event(
         "switch-alpha-addr",
         None,
@@ -817,4 +788,39 @@ async fn v2_unknown_parent_reads_answer_409_when_a_rebuild_starts_after_the_fenc
         ]
     );
     database.cleanup().await
+}
+
+/// The manifest declaration that both resolver serving sources derive from.
+async fn seed_switch_resolver_declaration(database: &TestDatabase) -> Result<i64> {
+    // The resolver is declared, so Project indexes its address records.
+    let payload = json!({"deployment_epoch": "fixture", "contracts": [{
+        "role": "resolver", "address": SWITCH_RESOLVER, "proxy_kind": "none",
+        "start_block": 0, "read_features": []
+    }]});
+    let manifest_id: i64 = sqlx::query_scalar(
+        "INSERT INTO bigname_phase.manifest_versions (manifest_version, namespace,
+             source_family, chain_id, deployment_label, rollout_status, normalizer_version,
+             file_path, manifest_payload)
+         VALUES (1, 'ens', 'ens_v1_resolver_l1', $1, 'fixture', 'active', 'fixture',
+                 'fixture/switch-resolver.toml', $2)
+         RETURNING manifest_id",
+    )
+    .bind(SWITCH_CHAIN)
+    .bind(&payload)
+    .fetch_one(&database.pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO bigname_phase.normalized_events (event_identity, namespace, event_kind,
+             source_family, manifest_version, source_manifest_id, chain_id, derivation_kind,
+             canonicality_state, after_state)
+         VALUES ('switch-manifest', 'ens', 'SourceManifestUpdated', 'ens_v1_resolver_l1', 1,
+                 $1, $2, 'manifest_sync', 'canonical', $3)",
+    )
+    .bind(manifest_id)
+    .bind(SWITCH_CHAIN)
+    .bind(json!({"rollout_status": "active", "normalizer_version": "fixture",
+                 "manifest_payload": payload}))
+    .execute(&database.pool)
+    .await?;
+    Ok(manifest_id)
 }

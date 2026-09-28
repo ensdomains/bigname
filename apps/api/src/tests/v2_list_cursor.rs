@@ -116,8 +116,7 @@ async fn assert_list_cursor_refused(
 #[tokio::test]
 async fn v2_list_cursors_are_the_same_with_the_switch_off_and_on() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    seed_switch_names_fixture(&database).await?;
-    seed_switch_resolver_current(&database).await?;
+    seed_list_cursor_fixture(&database).await?;
     for (uri, holder) in list_cursor_routes()? {
         let mut walks = Vec::new();
         for on in [false, true] {
@@ -198,26 +197,7 @@ async fn advance_list_cursor_fixture(database: &TestDatabase) -> Result<()> {
 
 /// Publishes block 241 for Project and the families over whatever events are stored.
 async fn publish_list_cursor_block_241(database: &TestDatabase) -> Result<()> {
-    publish_project_and_families(database, 241).await?;
-    // Project's batch replaces the served resolver rows, and writes one only for a declared
-    // resolver (see `seed_switch_resolver_current`): seed it again at the new publication.
-    sqlx::query(
-        "INSERT INTO bigname_phase.resolver_current (chain_id, resolver_address,
-             declared_summary, support_status, chain_positions, canonicality_summary,
-             manifest_version)
-         SELECT lineage.chain_id, $2, '{}'::jsonb, 'supported',
-                jsonb_build_object('target_block_number', lineage.block_number,
-                                   'target_block_hash', lineage.block_hash),
-                jsonb_build_object('state', 'canonical_lineage'), 1
-         FROM bigname_phase.chain_lineage lineage
-         WHERE lineage.chain_id = $1 AND lineage.block_number = 241
-         ON CONFLICT DO NOTHING",
-    )
-    .bind(SWITCH_CHAIN)
-    .bind(SWITCH_RESOLVER)
-    .execute(&database.pool)
-    .await?;
-    Ok(())
+    publish_project_and_families(database, 241).await
 }
 
 /// A cursor issued at block 240 continues after the publication moves to 241: the page reads
@@ -229,8 +209,7 @@ async fn publish_list_cursor_block_241(database: &TestDatabase) -> Result<()> {
 #[tokio::test]
 async fn v2_list_cursor_issued_before_a_publication_reads_what_is_there_now() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    seed_switch_names_fixture(&database).await?;
-    seed_switch_resolver_current(&database).await?;
+    seed_list_cursor_fixture(&database).await?;
     let routes = list_cursor_routes()?;
     let at_240 = switch_timestamp(1_700_000_240)?;
     let pinned = format!("/v1/resolvers/1/{SWITCH_RESOLVER}?page_size=1&at={at_240}");
@@ -283,8 +262,7 @@ async fn v2_list_cursor_issued_before_a_publication_reads_what_is_there_now() ->
 #[tokio::test]
 async fn v2_list_cursor_refuses_malformed_foreign_and_publication_bound_cursors() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    seed_switch_names_fixture(&database).await?;
-    seed_switch_resolver_current(&database).await?;
+    seed_list_cursor_fixture(&database).await?;
     let routes = list_cursor_routes()?;
     for on in [false, true] {
         let mut cursors = Vec::new();
@@ -355,8 +333,7 @@ type ListCursorPosition<'a> = Vec<(&'a str, &'a str)>;
 #[tokio::test]
 async fn v2_list_cursor_past_the_end_answers_an_empty_last_page() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    seed_switch_names_fixture(&database).await?;
-    seed_switch_resolver_current(&database).await?;
+    seed_list_cursor_fixture(&database).await?;
     let namehash_ff = format!("0x{}", "ff".repeat(32));
     let end_expiry = switch_timestamp(1_959_999_999)?;
     let gap_expiry = switch_timestamp(1_850_000_000)?;
@@ -431,8 +408,7 @@ async fn v2_list_cursor_past_the_end_answers_an_empty_last_page() -> Result<()> 
 async fn v2_list_cursor_continuation_retries_when_publication_changes_during_the_read()
 -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    seed_switch_names_fixture(&database).await?;
-    seed_switch_resolver_current(&database).await?;
+    seed_list_cursor_fixture(&database).await?;
     for (uri, holder) in list_cursor_routes()? {
         if uri.starts_with("/v1/search") {
             // Search admits its namespaces with its own recheck and has no collection finish.
@@ -459,8 +435,8 @@ async fn v2_list_cursor_pinned_at_answers_409_after_any_newer_publication() -> R
     seed_switch_names_events(&database).await?;
     let (gamma, gamma_resource) =
         seed_switch_name(&database, "gamma.eth", 0x5c1_0000, "ens_v1").await?;
+    seed_switch_resolver_declaration(&database).await?;
     publish_project_and_families(&database, 240).await?;
-    seed_switch_resolver_current(&database).await?;
     let at_240 = switch_timestamp(1_700_000_240)?;
     let pinned = format!("/v1/resolvers/1/{SWITCH_RESOLVER}?page_size=1&at={at_240}");
     let mut issued = Vec::new();
@@ -526,8 +502,7 @@ async fn v2_list_cursor_malformed_on_the_resolver_overview_answers_400_before_re
 -> Result<()> {
     let empty = TestDatabase::new_migrated().await?;
     let database = TestDatabase::new_migrated().await?;
-    seed_switch_names_fixture(&database).await?;
-    seed_switch_resolver_current(&database).await?;
+    seed_list_cursor_fixture(&database).await?;
     let base = format!("/v1/resolvers/1/{SWITCH_RESOLVER}?page_size=1");
     let search = "/v1/search?q=eth&match=contains&page_size=1";
     for on in [false, true] {
@@ -601,8 +576,7 @@ fn list_cursor_raw(cursor: &str, edit: impl FnOnce(&mut Value)) -> String {
 async fn v2_list_cursor_raw_wire_defects_answer_400_and_a_fabricated_position_pages() -> Result<()>
 {
     let database = TestDatabase::new_migrated().await?;
-    seed_switch_names_fixture(&database).await?;
-    seed_switch_resolver_current(&database).await?;
+    seed_list_cursor_fixture(&database).await?;
     let asc = &list_cursor_routes()?[2];
     assert!(asc.0.contains("order=asc"));
     for on in [false, true] {
@@ -644,8 +618,7 @@ async fn v2_list_cursor_raw_wire_defects_answer_400_and_a_fabricated_position_pa
 #[tokio::test]
 async fn v2_list_cursor_pinned_to_another_at_answers_400_before_availability() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    seed_switch_names_fixture(&database).await?;
-    seed_switch_resolver_current(&database).await?;
+    seed_list_cursor_fixture(&database).await?;
     let base = format!("/v1/resolvers/1/{SWITCH_RESOLVER}?page_size=1");
     let at_240 = switch_timestamp(1_700_000_240)?;
     let at_230 = switch_timestamp(1_700_000_230)?;
@@ -671,4 +644,10 @@ async fn v2_list_cursor_pinned_to_another_at_answers_400_before_availability() -
         }
     }
     database.cleanup().await
+}
+
+async fn seed_list_cursor_fixture(database: &TestDatabase) -> Result<()> {
+    seed_switch_names_events(database).await?;
+    seed_switch_resolver_declaration(database).await?;
+    publish_project_and_families(database, 240).await
 }
