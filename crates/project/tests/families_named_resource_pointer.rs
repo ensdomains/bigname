@@ -125,7 +125,11 @@ async fn shape(fixture: &Fixture) -> Result<Vec<Value>> {
 #[tokio::test]
 async fn migration_matches_baseline_resets_old_publication_and_is_idempotent() -> Result<()> {
     let fixture = Fixture::new("families_named_pointer_migration", 14).await?;
-    // This historical upgrade starts from the real installed pre-removal schema.
+    // This historical upgrade starts from the real installed pre-removal schema, whose child
+    // registration history still carries its maintenance stamps.
+    raw_sql("DROP TABLE child_registration_events")
+        .execute(&fixture.pool)
+        .await?;
     raw_sql(include_str!(
         "../../../schema-v2/fixtures/pre-7c/06_projections.sql"
     ))

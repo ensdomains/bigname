@@ -56,8 +56,7 @@ pub(super) async fn read<'a>(
                     'source_family', event.source_family,
                     'derivation_kind', 'child_registration_events_rebuild'),
                 'target_block_number', event.block_number,
-                'target_block_hash', event.block_hash,
-                'last_recomputed_at', now(), 'inserted_at', now()),
+                'target_block_hash', event.block_hash),
             child.labelhashes
          FROM normalized_events event
          JOIN name_surfaces child

@@ -19,8 +19,6 @@ CREATE TABLE IF NOT EXISTS child_registration_events (
     provenance jsonb NOT NULL DEFAULT '{}'::jsonb,
     target_block_number bigint NOT NULL,
     target_block_hash text NOT NULL,
-    last_recomputed_at timestamptz NOT NULL DEFAULT now(),
-    inserted_at timestamptz NOT NULL DEFAULT now(),
     PRIMARY KEY (parent_logical_name_id, event_identity),
     CHECK (parent_logical_name_id <> child_logical_name_id),
     CHECK (btrim(namespace) <> ''),
@@ -86,10 +84,6 @@ COMMENT ON COLUMN child_registration_events.target_block_number IS
     'This value identifies the Project target height of the publication that wrote the row.';
 COMMENT ON COLUMN child_registration_events.target_block_hash IS
     'This value identifies the Project target hash of the publication that wrote the row.';
-COMMENT ON COLUMN child_registration_events.last_recomputed_at IS
-    'This Project-owned maintenance time records the latest rebuild of the row.';
-COMMENT ON COLUMN child_registration_events.inserted_at IS
-    'This Project-owned maintenance time records the first insertion of the row.';
 COMMENT ON INDEX child_registration_events_parent_history_idx IS
     'This bounded index serves one parent''s child registrations in history order on one chain, in both directions. Every key is a bounded identifier, hash or number.';
 COMMENT ON INDEX child_registration_events_chain_block_idx IS

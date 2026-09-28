@@ -62,19 +62,12 @@ async fn run_with(
     Ok(outcome)
 }
 
-/// Every family table as text, by table, to compare two rebuilds. The retained child history
-/// stamps its rows with the wall-clock time of the transaction that wrote them, so two rebuilds
-/// always differ there; those two columns are left out, as the other rebuild comparisons do.
+/// Every family table as text, by table, to compare two rebuilds.
 async fn families_text(pool: &PgPool) -> Result<Vec<(&'static str, String)>> {
     let mut tables = Vec::new();
     for table in families::family_tables() {
-        let row = if table == "child_registration_events" {
-            "to_jsonb(t) - ARRAY['inserted_at', 'last_recomputed_at']"
-        } else {
-            "to_jsonb(t)"
-        };
         let text = sqlx::query_scalar(&format!(
-            "SELECT coalesce(jsonb_agg({row} ORDER BY ({row})::text), '[]')::text FROM {table} t"
+            "SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text), '[]')::text FROM {table} t"
         ))
         .fetch_one(pool)
         .await?;

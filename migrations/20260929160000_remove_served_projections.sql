@@ -545,6 +545,12 @@ DROP TABLE IF EXISTS bigname_phase.project_redo_child_registration_history;
 
 DROP FUNCTION IF EXISTS bigname_phase.retire_direct_divergences_for_null_resolver();
 
+-- The child registration history is a function of the chain; its wall-clock maintenance stamps
+-- had no reader and made two rebuilds of the same blocks differ.
+ALTER TABLE IF EXISTS bigname_phase.child_registration_events
+    DROP COLUMN IF EXISTS last_recomputed_at,
+    DROP COLUMN IF EXISTS inserted_at;
+
 DO $comment$
 BEGIN
     IF to_regclass('bigname_phase.project_name_summary') IS NOT NULL THEN

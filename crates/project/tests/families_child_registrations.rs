@@ -59,7 +59,7 @@ async fn registration(
 
 async fn rows(fixture: &Fixture) -> Result<Vec<Value>> {
     Ok(sqlx::query_scalar(
-        "SELECT to_jsonb(row) - ARRAY['last_recomputed_at','inserted_at']
+        "SELECT to_jsonb(row)
         FROM child_registration_events row ORDER BY event_identity",
     )
     .fetch_all(&fixture.pool)

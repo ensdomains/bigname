@@ -330,13 +330,8 @@ pub async fn family_rows(pool: &PgPool) -> Result<BTreeMap<String, Vec<String>>>
     let instances = super::perturb::contract_instance_stable_keys(pool).await?;
     let mut out = BTreeMap::new();
     for table in tables {
-        let row = if table == "child_registration_events" {
-            "to_jsonb(t) - ARRAY['last_recomputed_at', 'inserted_at']"
-        } else {
-            "to_jsonb(t)"
-        };
         let rows: Vec<Value> =
-            sqlx::query_scalar(&format!("SELECT {row} FROM bigname_phase.{table} t"))
+            sqlx::query_scalar(&format!("SELECT to_jsonb(t) FROM bigname_phase.{table} t"))
                 .fetch_all(pool)
                 .await?;
         let mut rows = rows

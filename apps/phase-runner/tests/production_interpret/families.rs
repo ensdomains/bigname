@@ -132,17 +132,12 @@ pub async fn cited_events(pool: &PgPool, name: &str) -> Result<Value> {
     ))
 }
 
-/// Full family content, excluding the child history's operational insertion/recompute clocks.
+/// Full family content.
 pub async fn family_state(pool: &PgPool, chain: &str) -> Result<Value> {
     let mut state = serde_json::Map::new();
     for table in families::family_tables() {
-        let value = if table == "child_registration_events" {
-            "to_jsonb(row) - 'inserted_at' - 'last_recomputed_at'"
-        } else {
-            "to_jsonb(row)"
-        };
         let rows: Vec<Value> = sqlx::query_scalar(&format!(
-            "SELECT {value} AS value FROM {table} row WHERE chain_id = $1 ORDER BY 1"
+            "SELECT to_jsonb(row) AS value FROM {table} row WHERE chain_id = $1 ORDER BY 1"
         ))
         .bind(chain)
         .fetch_all(pool)

@@ -455,16 +455,8 @@ async fn compare_with_rebuild(
 async fn families(pool: &PgPool) -> Result<Vec<(String, String)>> {
     let mut tables = Vec::new();
     for table in bigname_project::families::family_tables() {
-        // Retained child history has operational wall-clock stamps, unlike the native
-        // family rows. Its writer and replay tests exclude these same two audit columns;
-        // event identity, event/target positions, provenance and every other field stay exact.
-        let row = if table == "child_registration_events" {
-            "to_jsonb(t) - ARRAY['last_recomputed_at', 'inserted_at']"
-        } else {
-            "to_jsonb(t)"
-        };
         let rows: String = sqlx::query_scalar(&format!(
-            "SELECT coalesce(jsonb_agg({row} ORDER BY ({row})::text), '[]')::text
+            "SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text), '[]')::text
              FROM {table} t"
         ))
         .fetch_one(pool)
