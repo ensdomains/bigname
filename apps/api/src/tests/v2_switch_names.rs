@@ -723,7 +723,8 @@ async fn v2_expiring_names_walk_a_wrapper_expiry_past_bigint() -> Result<()> {
 #[tokio::test]
 async fn v2_primary_name_gate_is_the_same_with_the_switch_off_and_on() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    seed_switch_names_fixture(&database).await?;
+    // Actual reverse and name-record events publish the claim in both serving sources.
+    seed_switch_records_fixture(&database).await?;
     // The declared Universal Resolver at the publication, so the gate reads the admitted arms.
     let (hash, timestamp): (String, String) = sqlx::query_as(
         "SELECT block_hash,
@@ -741,16 +742,6 @@ async fn v2_primary_name_gate_is_the_same_with_the_switch_off_and_on() -> Result
          WHERE source_family = 'ens_execution'",
     )
     .execute(&database.pool)
-    .await?;
-    seed_phase_primary_name_snapshot(
-        &database,
-        SWITCH_ALICE,
-        "ens",
-        "60",
-        bigname_storage::PrimaryNameClaimStatus::Success,
-        Some("alpha.eth"),
-        true,
-    )
     .await?;
     let uri = format!("/v1/addresses/{SWITCH_ALICE}/primary-name?source=verified");
     let (status, body) = assert_switch_differential(&database, &uri).await?;
