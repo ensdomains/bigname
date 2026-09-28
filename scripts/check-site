@@ -57,12 +57,17 @@ for banned in \
   fi
 done
 
-# Every fetch in the pages goes through the switcher's base; network.js's own
-# status fetch uses the base it just read.
-if grep -rnE 'fetch\(' "${pages[@]}" | grep -vE 'fetch\(NET\.apiBase\(\) \+ '; then
-  fail "a page fetch does not start from NET.apiBase()"
+# Every fetch in the pages goes to a base read from NET.apiBase() when the
+# request was made; network.js's status request uses the base it just read.
+if grep -nE 'fetch\(' "${pages[@]}" | grep -vE 'fetch\(base \+ '; then
+  fail "a page fetch does not start from the captured API base"
 fi
-if grep -nE 'fetch\(' site/network.js | grep -vE "fetch\(base \+ '/v1/status'"; then
+for page in "${pages[@]}"; do
+  if grep -qE 'fetch\(' "$page" && ! grep -qF 'base = NET.apiBase()' "$page"; then
+    fail "$page fetches without capturing base = NET.apiBase()"
+  fi
+done
+if grep -nE 'fetch[A-Za-z]*\(' site/network.js | grep -vF "(base + '/v1/status'"; then
   fail "a network.js fetch does not start from the selected base"
 fi
 
@@ -97,4 +102,4 @@ fi
 if [ "$failures" -ne 0 ]; then
   exit 1
 fi
-printf '[check-site] ok: %s route entries, every request through the network switcher\n' "$route_entries"
+printf '[check-site] ok: static guards passed, %s route entries\n' "$route_entries"

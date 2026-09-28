@@ -444,14 +444,17 @@ const GLYPHS = {
     if (v) { view = VIEWS.find(x => x.id === v.dataset.view); renderTry(); showExample(); return; }
     const cp = e.target.closest('.cp');
     if (!cp) return;
-    const cmd = curlCmd(), clip = navigator.clipboard;
-    const copied = () => { cp.textContent = 'copied'; setTimeout(() => cp.textContent = 'curl', 1200); };
+    // The clipboard answers later; if the network changed meanwhile, the
+    // command names the old API, so neither outcome is shown.
+    const cmd = curlCmd(), clip = navigator.clipboard, g = netGen;
+    const copied = () => { if (g !== netGen) return; cp.textContent = 'copied'; setTimeout(() => cp.textContent = 'curl', 1200); };
+    const fallback = () => { if (g === netGen) showCmd(cmd); };
     if (!clip || typeof clip.writeText !== 'function') { showCmd(cmd); return; }
-    try { clip.writeText(cmd).then(copied, () => showCmd(cmd)); } catch (err) { showCmd(cmd); }
+    try { clip.writeText(cmd).then(copied, fallback); } catch (err) { showCmd(cmd); }
   });
   // Single flight: while a request is out, the name, the views and run are
   // frozen, and only the newest request may write into the output.
-  let tryGen = 0, tryBusy = false;
+  let tryGen = 0, tryBusy = false, tryAbort = null, netGen = 0;
   function setTryBusy(on) {
     tryBusy = on; tryForm.setAttribute('aria-busy', String(on));
     tryForm.querySelectorAll('input, .run, [data-view]').forEach(el => { el.disabled = on; });
@@ -459,20 +462,22 @@ const GLYPHS = {
   tryForm.addEventListener('submit', async e => {
     e.preventDefault();
     if (tryBusy) return;
-    const gen = ++tryGen, base = NET.apiBase(), u = tryUrl(), docs = `<span class="sp"><a href="${view.docs}" data-carry="${view.docs}">manual page &rarr;</a></span>`;
+    // The API asked is fixed at submission, for the request and for its failure message.
+    const gen = ++tryGen, base = NET.apiBase(), lbl = NET.label(), u = tryUrl(), docs = `<span class="sp"><a href="${view.docs}" data-carry="${view.docs}">manual page &rarr;</a></span>`;
     setTryBusy(true); tryOut.className = 'out';
     tryOut.innerHTML = `<div class="oh">${MARK.replace('class="mark"', 'class="mark busy" style="height:14px;width:auto"')}<span>asking ${esc(NET.apiHost())}</span></div><pre> </pre>`;
-    const t0 = performance.now();
+    const t0 = performance.now(), ctl = new AbortController();
+    tryAbort = ctl;
     try {
-      const res = await fetch(NET.apiBase() + u, { headers: { accept: 'application/json' } });
+      const res = await fetch(base + u, { headers: { accept: 'application/json' }, signal: ctl.signal });
       const ms = Math.round(performance.now() - t0), text = await res.text();
       if (gen !== tryGen) return;
       let pretty = text; try { pretty = JSON.stringify(JSON.parse(text), null, 2); } catch (err) {}
       tryOut.innerHTML = `<div class="oh"><span class="chip${res.ok ? '' : ' pink'}">${res.status}</span><span>${ms} ms · ${text.length} bytes</span>${docs}</div><pre>${hlJson(pretty)}</pre>`;
     } catch (err) {
       if (gen !== tryGen) return;
-      tryOut.innerHTML = `<div class="oh"><span class="chip pink">no answer</span><span>${Math.round(performance.now() - t0)} ms</span>${docs}</div><p class="why" style="padding-bottom:14px">Nothing answered at ${esc(base)}. Check the ${esc(NET.label())} status in the header, or pick another network.</p>`;
-    } finally { if (gen === tryGen) setTryBusy(false); }
+      tryOut.innerHTML = `<div class="oh"><span class="chip pink">no answer</span><span>${Math.round(performance.now() - t0)} ms</span>${docs}</div><p class="why" style="padding-bottom:14px">Nothing answered at ${esc(base)}. Check the ${esc(lbl)} status in the header, or pick another network.</p>`;
+    } finally { if (gen === tryGen) setTryBusy(false); if (tryAbort === ctl) tryAbort = null; }
   });
 
   // ---- routes as pieces ---------------------------------------------------
@@ -755,10 +760,17 @@ const GLYPHS = {
   NET.mount($('#network'));
   NET.statusPill($('#status'));
   NET.statusDetail($('#ver'));
-  // A different network answers differently: drop any request still out to the
-  // old one (its late response fails the generation check), unfreeze the line
-  // and go back to the example.
-  NET.onChange(() => { tryGen++; setTryBusy(false); showExample(); });
+  // A different network answers differently. Whatever was in progress belongs
+  // to the old one: cancel the request (its late answer also fails the
+  // generation check), unfreeze the line, hide a curl command naming the old
+  // API, and go back to the example.
+  NET.onChange(() => {
+    tryGen++; netGen++;
+    if (tryAbort) { tryAbort.abort(); tryAbort = null; }
+    setTryBusy(false);
+    const box = $('.cmd', tryForm); if (box) { box.hidden = true; box.textContent = ''; }
+    showExample();
+  });
 })();
 </script>
 </body>

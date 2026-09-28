@@ -135,7 +135,13 @@ fn try_it_line_is_single_flight_and_curl_is_safe() {
         HOME.matches("if (gen !== tryGen) return;").count() >= 2,
         "both the success and the error path must drop stale responses"
     );
-    assert!(HOME.contains("finally { if (gen === tryGen) setTryBusy(false); }"));
+    assert!(HOME.contains("finally { if (gen === tryGen) setTryBusy(false);"));
+    // A network change invalidates and cancels the request in flight, and the
+    // request and its failure message use the API chosen at submission.
+    assert!(HOME.contains("tryGen++; netGen++;"));
+    assert!(HOME.contains("if (tryAbort) { tryAbort.abort(); tryAbort = null; }"));
+    assert!(HOME.contains("await fetch(base + u,"));
+    assert!(HOME.contains("Nothing answered at ${esc(base)}"));
 
     assert!(HOME.contains("const curlCmd = () => `curl -s ${shq("));
     assert!(
@@ -144,7 +150,7 @@ fn try_it_line_is_single_flight_and_curl_is_safe() {
     );
     assert!(!HOME.contains("navigator.clipboard.writeText"));
     assert!(HOME.contains("typeof clip.writeText !== 'function'"));
-    assert!(HOME.contains("clip.writeText(cmd).then(copied, () => showCmd(cmd))"));
+    assert!(HOME.contains("clip.writeText(cmd).then(copied, fallback)"));
 }
 
 // The pages moved out of the binary. `/`, `/docs`, `/docs/` and (until the
