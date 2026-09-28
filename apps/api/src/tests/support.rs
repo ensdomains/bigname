@@ -2387,7 +2387,8 @@ async fn seed_schema_v2_ens_primary_name_authority_on_chain(
         Uuid::from_u128(0xc200_0000_0000_0000_0000_0000_0000_0105),
         true,
     )
-    .await
+    .await?;
+    rebuild_fixture_families(pool, chain_id, block_number, block_hash).await
 }
 
 async fn read_json<T: DeserializeOwned>(response: Response) -> Result<T> {
