@@ -6,15 +6,17 @@ use super::{
     laterals::{admitted_epochs, admitted_registry_only},
     served::{Tagged, latest},
 };
-use crate::families::control::position::Position;
+use crate::families::control::{position::Position, rows::family_arm};
 
 /// The control block's registry owner and latest kind, from what the
 /// families keep: the latest admitted ENSv2 transfer or registrar snapshot grant, F1's latest
 /// admitted AuthorityEpochChanged with the owner it reports, an admitted registry-only
-/// SurfaceBound with its bound owner, and, for an ENSv1 or Basenames name, each of the name's
-/// registry AuthorityTransferred events F2c keeps (`project_registry_owner_event`) that the
-/// admission holds, each reporting its own registry_owner and unmasked-word facts. A
-/// SubregistryChanged never counts, as in the served lateral.
+/// SurfaceBound with its bound owner, and each of the name's registry AuthorityTransferred
+/// events F2c keeps (`project_registry_owner_event`) that the admission holds, each reporting
+/// its own registry_owner and unmasked-word facts. For an ENSv2 name those are its ENSv2
+/// registry's transfers on the selected lifecycle key, so the owner a registration names counts
+/// until a later ERC1155 transfer, and an earlier registration's owner never reaches a later
+/// one on another resource. A SubregistryChanged never counts, as in the served lateral.
 pub(super) fn control_owner(
     facts: &NameFacts,
     authority: &Authority<'_>,
@@ -51,12 +53,21 @@ pub(super) fn control_owner(
         }
     }
     // The name's own registry transfers the admission holds (its admitted AuthorityTransferred
-    // rows), from every owner-setting event F2c keeps.
-    if !is_v2 && let Some(node) = &facts.registry_node {
+    // rows), from every owner-setting event F2c keeps; an ENSv2 name's only on its selected
+    // lifecycle key, whose events are keyed by that resource.
+    if let Some(node) = &facts.registry_node {
         let name = facts.input.logical_name_id.as_str();
         for event in &node.owner_events {
             if event.event_kind != "AuthorityTransferred"
                 || event.logical_name_id.as_deref() != Some(name)
+            {
+                continue;
+            }
+            let v2_family = family_arm(&event.source_family) == Some("ens_v2");
+            if is_v2
+                && !(v2_family
+                    && event.resource_id.is_some()
+                    && event.resource_id.as_deref() == selected_key)
             {
                 continue;
             }

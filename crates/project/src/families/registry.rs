@@ -3,8 +3,10 @@
 //! the node and the first block of a current-registry record (name_authority/build.sql,
 //! `registry_records`); the owner group carries the position and resource of the event that set
 //! it. Every owner-setting event of a node is also kept by position, since the group keeps only
-//! the latest. Each observation identity (the name, else the resource) keeps its latest
-//! registry-binding observation with the resource it reaches (permission_resources.rs).
+//! the latest. An ENSv2 registry's AuthorityTransferred, the owner a registration names, is kept
+//! the same way at its name's node, without a node row. Each observation identity (the name, else
+//! the resource) keeps its latest registry-binding observation with the resource it reaches
+//! (permission_resources.rs).
 use std::collections::BTreeMap;
 
 use serde_json::{Value, json};
@@ -23,6 +25,7 @@ use crate::{ProjectError, Result};
 
 const V1_REGISTRIES: [&str; 2] = ["ens_v1_registry_l1", "basenames_base_registry"];
 const V1_REGISTRARS: [&str; 2] = ["ens_v1_registrar_l1", "basenames_base_registrar"];
+const V2_REGISTRIES: [&str; 2] = ["ens_v2_root_l1", "ens_v2_registry_l1"];
 const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
 
 pub(super) async fn apply(
@@ -48,6 +51,7 @@ pub(super) fn preload(chain: &Value, events: &[BlockEvent], bindings: &[Row], in
         &tables::REGISTRY_OWNER_EVENT,
         nodes
             .iter()
+            .chain(&v2_owner_events(events))
             .map(|(event, node)| owner_event_key(chain, event, node)),
     );
     let table = &tables::REGISTRY_BINDING_OBSERVATION;
@@ -74,6 +78,31 @@ fn node_key(chain: &Value, event: &BlockEvent, node: &str) -> Row {
         &tables::REGISTRY_NODE_STATE,
         [chain.clone(), json!(event.namespace), json!(node)],
     )
+}
+
+/// The block's ENSv2 registry AuthorityTransferred events with their name's node. Each names the
+/// owner a registration gave its token (adapters protocol/v2_registry/transfer.rs `token_resource`
+/// and topology.rs `emit`); the ERC1155 mint that goes with it is not an event.
+fn v2_owner_events(events: &[BlockEvent]) -> Vec<(&BlockEvent, String)> {
+    events
+        .iter()
+        .filter_map(|event| Some((event, v2_owner_node(event)?)))
+        .collect()
+}
+
+/// The node of an ENSv2 registry AuthorityTransferred: the namehash of the name it carries (a
+/// logical name id is `<namespace>:<namehash>`). An unnamed one has none and is not kept.
+fn v2_owner_node(event: &BlockEvent) -> Option<String> {
+    (V2_REGISTRIES.contains(&event.source_family.as_str())
+        && event.event_kind == "AuthorityTransferred")
+        .then_some(())?;
+    event
+        .logical_name_id
+        .as_deref()?
+        .strip_prefix(event.namespace.as_str())?
+        .strip_prefix(':')
+        .filter(|node| !node.is_empty())
+        .map(str::to_ascii_lowercase)
 }
 
 /// The node an ENSv1 registry event describes: the child for NewOwner, else its own node.
@@ -103,11 +132,16 @@ async fn registry_nodes(
         .map(|(event, node)| node_key(&chain, event, node))
         .collect();
     load_rows(transaction, rows, table, keys).await?;
+    let v2 = v2_owner_events(events);
     let history = relevant
         .iter()
+        .chain(&v2)
         .map(|(event, node)| owner_event_key(&chain, event, node))
         .collect();
     load_rows(transaction, rows, &tables::REGISTRY_OWNER_EVENT, history).await?;
+    for (event, node) in &v2 {
+        owner_event(rows, &chain, event, node)?;
+    }
     for (event, node) in relevant {
         owner_event(rows, &chain, event, &node)?;
         let mut row = current(

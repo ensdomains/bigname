@@ -13,6 +13,8 @@ use super::{
 };
 
 pub const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
+/// The ENSv1 and Basenames registry families, whose transfers the ownerless profile reads.
+const V1_REGISTRIES: [&str; 2] = ["ens_v1_registry_l1", "basenames_base_registry"];
 
 /// Whether a node is the all-zero root node.
 fn is_root(node: &str) -> bool {
@@ -22,7 +24,8 @@ fn is_root(node: &str) -> bool {
 
 /// The parts of one `project_registry_node_state` row the readers use, with the node's
 /// owner-setting events. The row's owner group is not read: the control owner and the
-/// ownerless profile read the owner events, which keep every owner-setting event.
+/// ownerless profile read the owner events, which keep every owner-setting event. A node with
+/// owner events and no row (an ENSv2 name's node) reads as a node with neither registry record.
 #[derive(Clone, Debug, Default)]
 pub struct RegistryNode {
     pub namespace: String,
@@ -34,9 +37,10 @@ pub struct RegistryNode {
     pub owner_events: Vec<OwnerEvent>,
 }
 
-/// One owner-setting registry event of a node (`project_registry_owner_event`): an
-/// AuthorityTransferred or SubregistryChanged with the name, resource, authority kind and owner
-/// facts it carried, including its own `registry_owner` and `owner_word_unmasked`.
+/// One owner-setting registry event of a node (`project_registry_owner_event`): an ENSv1 or
+/// Basenames AuthorityTransferred or SubregistryChanged, or an ENSv2 registry AuthorityTransferred,
+/// with the name, resource, authority kind and owner facts it carried, including its own
+/// `registry_owner` and `owner_word_unmasked`.
 #[derive(Clone, Debug)]
 pub struct OwnerEvent {
     pub position: Position,
@@ -83,12 +87,15 @@ impl OwnerEvent {
 }
 
 impl RegistryNode {
-    /// The node's latest AuthorityTransferred in the canonical order, the event the served
-    /// ownerless-registry profile reads.
+    /// The node's latest ENSv1 or Basenames registry AuthorityTransferred in the canonical order,
+    /// the event the served ownerless-registry profile reads.
     pub fn latest_transfer(&self) -> Option<&OwnerEvent> {
         self.owner_events
             .iter()
-            .filter(|event| event.event_kind == "AuthorityTransferred")
+            .filter(|event| {
+                event.event_kind == "AuthorityTransferred"
+                    && V1_REGISTRIES.contains(&event.source_family.as_str())
+            })
             .max_by(|left, right| left.position.cmp(&right.position))
     }
 
@@ -198,11 +205,16 @@ pub async fn load_registry_nodes_on(
     .await
     .context("failed to load registry owner events")?;
     for (namespace, node, row) in events {
-        if let (Some(state), Some(event)) = (
-            nodes.get_mut(&(namespace, node)),
-            OwnerEvent::from_row(&row),
-        ) {
-            state.owner_events.push(event);
+        if let Some(event) = OwnerEvent::from_row(&row) {
+            nodes
+                .entry((namespace.clone(), node.clone()))
+                .or_insert_with(|| RegistryNode {
+                    namespace,
+                    node,
+                    ..RegistryNode::default()
+                })
+                .owner_events
+                .push(event);
         }
     }
     for state in nodes.values_mut() {
@@ -422,6 +434,50 @@ mod tests {
             },
         )]);
         assert!(registry_bindings(&observations, &v2).contains_key("node"));
+    }
+
+    fn owner_event(block: i64, family: &str, getter: Option<&str>) -> OwnerEvent {
+        OwnerEvent {
+            position: Position {
+                block_number: block,
+                transaction_index: Some(0),
+                log_index: Some(0),
+                event_identity: format!("e{block}"),
+            },
+            transaction_hash: None,
+            logical_name_id: Some("ens:0x01".into()),
+            resource_id: None,
+            event_kind: "AuthorityTransferred".into(),
+            source_family: family.into(),
+            authority_kind: None,
+            owner: Some("0x00000000000000000000000000000000000000aa".into()),
+            registry_owner: None,
+            owner_word_unmasked: None,
+            owner_getter: getter.map(str::to_owned),
+            owner_getter_reason: None,
+        }
+    }
+
+    /// The ownerless profile reads the ENSv1 and Basenames registry transfers only: a later
+    /// ENSv2 registration's owner transfer at the same node does not hide a zero-owner ENSv1
+    /// transfer, as the served profile never read ENSv2 transfers.
+    #[test]
+    fn the_ownerless_profile_reads_only_ens_v1_and_basenames_transfers() {
+        let node = RegistryNode {
+            namespace: "ens".into(),
+            node: "0x01".into(),
+            owner_events: vec![
+                owner_event(10, "ens_v1_registry_l1", Some(ZERO_ADDRESS)),
+                owner_event(12, "ens_v2_registry_l1", None),
+            ],
+            ..RegistryNode::default()
+        };
+        assert_eq!(
+            node.latest_transfer()
+                .map(|event| event.position.block_number),
+            Some(10)
+        );
+        assert!(ownerless_registry(Some(&node), None, Some("ens_v1")));
     }
 
     #[test]

@@ -1067,6 +1067,51 @@ async fn v2_get_name_classifies_ens_v2_registry_as_registered() -> Result<()> {
     Ok(())
 }
 
+/// An ENSv2 registration never transferred afterwards. The registry mints the token with a
+/// TransferSingle from the zero address, which the adapter does not write; the owner is on the
+/// AuthorityTransferred of the TokenResource log, so the name serves its registrant as owner and
+/// reads registered.
+/// (upstream: .refs/ens_v2/contracts/src/registry/PermissionedRegistry.sol:L466-L471 @ ens_v2@a971bd64)
+#[tokio::test]
+async fn v2_get_name_serves_an_untransferred_ens_v2_registration_with_its_owner() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_alice_name_inputs(&database).await?;
+    sqlx::query(
+        "UPDATE surface_bindings SET authority_arm = 'ens_v2' WHERE surface_binding_id = $1",
+    )
+    .bind(Uuid::from_u128(0x3300))
+    .execute(&database.pool)
+    .await?;
+    let owner = "0x00000000000000000000000000000000000000cc";
+    append_alice_name_input(
+        &database,
+        "RegistrationGranted",
+        "ens_v2_registry_l1",
+        json!({"source_event":"LabelRegistered", "authority_kind":"ens_v2_registry",
+            "registrant":owner, "expiry":4_000_000_000_u64, "status":"registered"}),
+    )
+    .await?;
+    append_alice_name_input(
+        &database,
+        "AuthorityTransferred",
+        "ens_v2_registry_l1",
+        json!({"source_event":"LabelRegistered", "owner":owner}),
+    )
+    .await?;
+    rebuild_fixture_families(&database.pool, "ethereum-mainnet", 21_000_003, "0xbinding").await?;
+    let payload = v2_name_record_payload_for_database(&database, "/v1/names/alice.eth").await?;
+    database.cleanup().await?;
+
+    let data = &payload["data"];
+    assert_eq!(
+        (&data["registration_status"], &data["owner"], &data["registrant"]),
+        (&json!("registered"), &json!(owner), &json!(owner)),
+        "{payload:#}"
+    );
+
+    Ok(())
+}
+
 #[tokio::test]
 async fn v2_get_name_classifies_released_as_released() -> Result<()> {
     let payload = v2_alice_state_payload("/v1/names/Alice.eth", AliceInputState::Released).await?;
