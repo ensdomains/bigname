@@ -15,6 +15,7 @@ macro_rules! tables {
 }
 
 tables! {
+    CHILD_REGISTRATION_EVENT = "child_registration_events" ["parent_logical_name_id", "event_identity"];
     NAME_STATE = "project_name_state" ["chain_id", "namespace", "logical_name_id"];
     BINDING_CANDIDATE = "project_binding_candidate" ["surface_binding_id"];
     LIFECYCLE_KEY_STATE = "project_lifecycle_key_state" ["chain_id", "resource_id"];

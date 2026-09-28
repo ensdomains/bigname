@@ -34,6 +34,7 @@ pub fn uuid(n: u32) -> String {
 
 /// Journalled family tables, compared by the undo and rebuild tests.
 pub const FAMILY_TABLES: &[&str] = &[
+    "child_registration_events",
     "project_name_state",
     "project_binding_candidate",
     "project_lifecycle_key_state",
@@ -214,7 +215,7 @@ impl Fixture {
         let mut tables = serde_json::Map::new();
         for table in FAMILY_TABLES {
             let rows: Vec<Value> = sqlx::query_scalar(&format!(
-                "SELECT to_jsonb(family_row) FROM {table} family_row
+                "SELECT to_jsonb(family_row) - ARRAY['last_recomputed_at', 'inserted_at'] FROM {table} family_row
                  ORDER BY to_jsonb(family_row)::text"
             ))
             .fetch_all(&self.pool)

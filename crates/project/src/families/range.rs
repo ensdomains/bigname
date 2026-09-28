@@ -68,6 +68,11 @@ pub(crate) async fn apply(
     }
     headers.truncate(applied);
     let events = reads::events(&mut opened.transaction, chain_id, &headers).await?;
+    let mut child_registrations = super::child_registrations::read(
+        &mut opened.transaction,
+        events.iter().flat_map(|(events, _)| events.iter()),
+    )
+    .await?;
     let mut bindings = reads::bindings(&mut opened.transaction, chain_id, &headers).await?;
     let mut activated =
         reads::activated(&mut opened.transaction, chain_id, &headers, plan.manifests).await?;
@@ -79,6 +84,9 @@ pub(crate) async fn apply(
             keys: keys::derive(&events),
             manifests: plan.manifests.at(header.number),
             prefetched: Prefetched {
+                child_registrations: child_registrations
+                    .remove(&header.number)
+                    .unwrap_or_default(),
                 bindings: bindings.remove(&header.number).unwrap_or_default(),
                 activated: activated.remove(&header.number).unwrap_or_default(),
             },

@@ -11,7 +11,9 @@
 // that are unused until then.
 mod addresses;
 mod block;
+mod child_registrations;
 mod classification;
+pub use child_registrations::EXCLUDED_CHILD_REGISTRATION_PARENTS;
 mod decode;
 mod derived;
 mod driver;

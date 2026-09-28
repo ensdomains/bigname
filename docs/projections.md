@@ -801,7 +801,7 @@ the event's chain position. Name history reads it for
 [`include=child_registrations`](api-v1-routes.md#direct-child-registrations-includechild_registrations);
 event payloads and public event IDs still come from `normalized_events`.
 
-Project derives each row from one staged event and the event's own name
+Project derives each row from one block event and the event's own name
 surface. The surface's current `visibility_state` is the one input that can
 change without a new event: a `recompute-flags` run can flip it, and the
 Project redo that run stamps rebuilds the affected rows (see
@@ -829,16 +829,14 @@ or replacing its subregistry, and a registry moving under another parent: the
 registry's earlier grants keep their earlier parent and its later grants get
 the new one.
 
-A full rebuild replaces every row of the chain from the staged history.
-Because a row depends only on its event and that event's surface, an
-incremental or redo publication deletes the chain's rows in the affected block
-range and rows above the range whose block is no longer readable canonical
-lineage, then inserts the rows derived from
-the range's staged changed events. The publication is part of the same
-transaction as every other projection. Rows keep the target of the publication
-that wrote them, like other rows outside an incremental scope. Readable rows
-above the range stay, because an operator redo can end below a target that is
-already published.
+The family block writes memberships in its own publication transaction and journals
+before-images under the existing `(parent_logical_name_id, event_identity)` key.
+Release or a later subregistry change does not remove a membership. Undo removes
+a dropped block's new memberships or restores their previous images; replay derives
+the replacement block's memberships from its events. A full rebuild clears the
+chain and replays retained events, including the existing surface visibility rule.
+Rebuild ranges read their memberships together, then fold them through the same
+block reducer. The history table and its parent-history index remain in use.
 
 For a slice-1 test re-walk that must not change product behavior at a fixed
 readable chain head, product history cursors hold positions rather than

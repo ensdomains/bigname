@@ -35,6 +35,8 @@ pub(crate) struct Context<'a> {
 pub(crate) struct Prefetched {
     /// The block's readable surface bindings, as `to_jsonb` rows (identity.rs `block_bindings`).
     pub(crate) bindings: Vec<Row>,
+    /// The block's historical child registration memberships.
+    pub(crate) child_registrations: Vec<Row>,
     /// The resolvers whose discovered candidates can change at the block (classification.rs
     /// `activated`).
     pub(crate) activated: BTreeSet<String>,
@@ -80,6 +82,7 @@ pub(crate) fn preload(
     into: &mut Preload,
 ) {
     let chain = json!(chain_id);
+    super::child_registrations::preload(&prefetched.child_registrations, into);
     super::identity::preload(&chain, events, &prefetched.bindings, into);
     super::registry::preload(&chain, events, &prefetched.bindings, into);
     super::resolver::preload(chain_id, keys, into);
@@ -113,6 +116,7 @@ pub(crate) async fn apply(
     rows: &mut RowSet,
 ) -> Result<()> {
     super::identity::apply(transaction, context, events, rows).await?;
+    super::child_registrations::apply(transaction, context, events, rows).await?;
     super::registry::apply(transaction, context, events, rows).await?;
     super::resolver::registry_pointers(transaction, context, events, rows).await?;
     super::resolver::resource_pointers(transaction, context, events, rows).await?;
