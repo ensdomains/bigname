@@ -260,8 +260,11 @@ async fn namespace_filters_permission_resources_before_their_publication() -> Re
         .execute(&fixture.pool)
         .await?;
     shadow_support::publish(&fixture, 12).await?;
-    let outcome = fixture.apply_on(base, 12).await;
-    anyhow::ensure!(outcome.skipped.is_none(), "{outcome:?}");
+    let outcome = fixture.apply_on(base, 12).await?;
+    anyhow::ensure!(
+        outcome.marker.as_ref().map(|marker| marker.number) == Some(12),
+        "{outcome:?}"
+    );
     sqlx::query("UPDATE project_family_marker SET state = 'bootstrap_pending' WHERE chain_id = $1")
         .bind(base)
         .execute(&fixture.pool)

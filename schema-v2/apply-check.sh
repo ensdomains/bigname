@@ -668,6 +668,7 @@ for migration_file in \
     "$ROOT/migrations/20260928190000_project_families_permission_read_indexes.sql" \
     "$ROOT/migrations/20260928223000_project_permission_candidate_indexes.sql" \
     "$ROOT/migrations/20260929120000_lookup_guard_family_marker.sql" \
+    "$ROOT/migrations/20260929130000_lookup_family_inputs.sql" \
     "$ROOT/migrations/20260929140000_named_resource_pointer.sql"
 do
     emit_phase_migration "$migration_file" empty-schema | run_psql
@@ -985,7 +986,9 @@ for migration_file in \
     "$ROOT/migrations/20260928223000_project_permission_candidate_indexes.sql" \
     "$ROOT/migrations/20260928223000_project_permission_candidate_indexes.sql" \
     "$ROOT/migrations/20260929120000_lookup_guard_family_marker.sql" \
+    "$ROOT/migrations/20260929130000_lookup_family_inputs.sql" \
     "$ROOT/migrations/20260929120000_lookup_guard_family_marker.sql" \
+    "$ROOT/migrations/20260929130000_lookup_family_inputs.sql" \
     "$ROOT/migrations/20260929140000_named_resource_pointer.sql" \
     "$ROOT/migrations/20260929140000_named_resource_pointer.sql"
 do
