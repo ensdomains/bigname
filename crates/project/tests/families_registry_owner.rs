@@ -2,8 +2,9 @@
 //! changes, composed from the families. Each fixture writes the facts the ENSv1 adapters emit for
 //! the Sepolia histories it is named after, in separate blocks: a registrar lease whose registry
 //! record moves to another owner (a registry-only binding) and back to the lease by a registrar
-//! token transfer (gymbaja.eth, TYR-88). A registered name whose registry owner the families
-//! cannot produce is an integrity failure and is not published.
+//! token transfer (gymbaja.eth, TYR-88), and a registry-only binding followed, after a reclaim that
+//! opens no binding, by another registry-only binding (howdy.eth, TYR-87). A registered name whose
+//! registry owner the families cannot produce is an integrity failure and is not published.
 mod families_support;
 
 use anyhow::{Result, ensure};
@@ -17,6 +18,7 @@ const REGISTRAR: &str = "0x00000000000000000000000000000000000000e2";
 const ETH_NODE: &str = "0x93cdeb708b7545dc668eb9280176169d1c33cfd8ed6f04690a0bcc88a93fc4ae";
 const ALICE: &str = "0x00000000000000000000000000000000000000a1";
 const BOB: &str = "0x00000000000000000000000000000000000000b2";
+const CAROL: &str = "0x00000000000000000000000000000000000000c3";
 const ZERO: &str = "0x0000000000000000000000000000000000000000";
 const V1_REGISTRAR: &str = "ens_v1_registrar_l1";
 const V1_REGISTRY: &str = "ens_v1_registry_l1";
@@ -291,6 +293,62 @@ async fn an_explicit_zero_registry_owner_is_served_as_zero() -> Result<()> {
         row["owner"] == json!(ZERO) && row["status"] == json!("active"),
         "{row}"
     );
+    fixture.cleanup().await
+}
+
+#[tokio::test]
+async fn a_second_registry_only_binding_keeps_the_registration_of_the_first() -> Result<()> {
+    let fixture = Fixture::new("families_registry_owner_chained", 20).await?;
+    registered(&fixture, 10, ALICE, Some(11)).await?;
+    registry_transfer(&fixture, 101, 11, BOB, Some(12)).await?;
+    // A `reclaim` writes a registry NewOwner on the lease; the adapter closes the registry-only
+    // binding and opens none (howdy.eth at Sepolia block 10184681).
+    let reclaim = json!({"source_event": "NewOwner", "node": ETH_NODE, "child_node": node(),
+                         "owner": ALICE, "owner_getter": ALICE, "emitter_role": "registry",
+                         "authority_kind": "registrar", "authority_key": "lease"});
+    for kind in ["AuthorityTransferred", "AuthorityEpochChanged"] {
+        write(
+            &fixture,
+            12,
+            1,
+            kind,
+            V1_REGISTRY,
+            &lease(),
+            reclaim.clone(),
+        )
+        .await?;
+    }
+    registry_transfer(&fixture, 102, 13, CAROL, None).await?;
+
+    fixture.apply(11, FamilyMode::Normal).await?;
+    let first = served(&fixture).await?;
+    ensure!(
+        first
+            == json!({"status": "active", "authority_kind": "registry_only", "registered": true,
+                       "expiry": EXPIRY, "owner": BOB}),
+        "the first registry-only binding: {first}"
+    );
+    fixture.apply(13, FamilyMode::Normal).await?;
+    let second = served(&fixture).await?;
+    ensure!(
+        second
+            == json!({"status": "active", "authority_kind": "registry_only", "registered": true,
+                       "expiry": EXPIRY, "owner": CAROL}),
+        "the second registry-only binding lost the registration: {second}"
+    );
+    let handoffs: Vec<Value> = fixture
+        .rows("project_binding_candidate")
+        .await?
+        .into_iter()
+        .filter(|row| row["registry_only"] == json!(true))
+        .map(|row| json!([row["predecessor_resource_id"], row["lease_resource_id"]]))
+        .collect();
+    ensure!(
+        handoffs == vec![json!([lease(), lease()]), json!([lease(), lease()])],
+        "both registry-only bindings stand for the lease: {handoffs:?}"
+    );
+    fixture.assert_undo_restores(13).await?;
+    fixture.assert_rebuild_equal(13).await?;
     fixture.cleanup().await
 }
 

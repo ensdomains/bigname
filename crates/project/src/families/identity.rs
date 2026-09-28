@@ -540,7 +540,9 @@ fn candidate_row(
 /// Mark a candidate registry-only and record its handoff (stage.rs:47-135): the latest earlier
 /// candidate of the name and arm is the predecessor, with the wrapper lease and node it recorded
 /// when it is a NameWrapper binding; the lease stands for the predecessor's resource at the
-/// predecessor's position until a later registrar grant replaces it (`successor_grant`).
+/// predecessor's position until a later registrar grant replaces it (`successor_grant`). When
+/// the predecessor is itself a registry-only binding that stands for a lease, its handoff is
+/// carried over whole, so repeated registry ownership changes keep the registration.
 fn handoff(row: &mut Row, earlier: Option<&[Row]>) {
     set(row, "registry_only", true);
     let order = candidate_order(row);
@@ -557,6 +559,28 @@ fn handoff(row: &mut Row, earlier: Option<&[Row]>) {
             .and_then(|candidate| candidate.get(column).cloned())
             .unwrap_or(Value::Null)
     };
+    // A registry-only predecessor that stands for a lease hands the same registration on: a
+    // registry owner change between two registry-only bindings writes no registrar state, so the
+    // new binding replaces what that binding replaced and stands for the lease it stood for.
+    let inherited = predecessor.filter(|candidate| {
+        candidate.get("registry_only").and_then(Value::as_bool) == Some(true)
+            && candidate
+                .get("lease_resource_id")
+                .is_some_and(|lease| !lease.is_null())
+    });
+    if inherited.is_some() {
+        for column in [
+            "predecessor_resource_id",
+            "predecessor_position",
+            "predecessor_wrapped_registrar_resource_id",
+            "predecessor_node",
+            "lease_resource_id",
+            "lease_position",
+        ] {
+            set(row, column, field(column));
+        }
+        return;
+    }
     let position = predecessor
         .and_then(Position::of_row)
         .map_or(Value::Null, |position| position.to_json());
