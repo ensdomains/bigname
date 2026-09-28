@@ -2337,7 +2337,11 @@ production reader serves from today's tables at the same publication. Shadow
 reads run only in tests and the fixture-corpus harness. A differing field passes
 only as a disclosed same-block ordering case or under a named cause whose check
 holds for that field, and no API response uses a shadow read
-([projections](projections.md#owned-key-families)).
+([projections](projections.md#owned-key-families)). With the
+[publication switch](#publication-switch) off, the default, no served path reads
+the families or their marker; with it on, the API fences on the
+[family marker](#family-marker), while its rows still come from today's tables
+until the later step 7b slices move each route onto the families.
 
 ## Sidecar
 
@@ -2538,6 +2542,29 @@ families](#owned-key-family) stand at, the generation (`sequence`) every block,
 token](#family-input-token), input revision and [active manifest
 set](#active-manifest-set-family-block) key the last block read. A block, range or undo applies only against the generation it
 planned from.
+
+While the [publication switch](#publication-switch) is on, the marker is also
+what the API serves from: snapshot selection and the verified lookup's
+admission accept a chain's publication only while its marker is `live` (never
+`bootstrap_pending`, the state of a rebuild still populating the families),
+belongs to this build's interpreter, sits on readable lineage and trails the
+stored head by at most one block, and the marker's `sequence` is the served
+generation a same-request recheck compares. `/v1/status` is mixed-source until
+the flip: its generation check applies the same rule to the marker, while its
+projected block and Project phase state still come from the Project row.
+
+## Publication switch
+
+`BIGNAME_SERVE_FROM_FAMILIES`: a process-wide setting the API and the phase
+runner read once at startup (`1` or `true` on; anything else, or unset, off).
+Off, the serving fence reads the Project row of `chain_phase_state` as it
+always has. On, it reads the [family marker](#family-marker) instead, and
+collection expiry filters are evaluated at the published block's timestamp
+rather than the request time ([API](api-v1.md#tier-2-product-reads)).
+It exists only while the served reads move to the
+[owned key families](#owned-key-family) ahead of the
+[per-block publication](#per-block-publication), and goes with the served
+batch.
 
 ## Family undo journal
 

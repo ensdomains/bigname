@@ -426,3 +426,4 @@ include!("tests/v2_envelope_conformance.rs");
 include!("tests/api_storage_quick_wins.rs");
 
 include!("tests/v2_publication_bindings.rs");
+include!("tests/v2_family_marker_fence.rs");

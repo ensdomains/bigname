@@ -46,7 +46,8 @@ permissions read current state. Their cursors
 bind anchors, filters, sorting, the served project publication (including
 same-height replacement) and manifest revisions. Counts and rows use the same
 filters; time-dependent expiry filtering retains the first page's evaluation
-time. These reads revalidate the publication before returning and disclose
+time (with the [publication switch](glossary.md#publication-switch) on, it is
+the published block's timestamp on every page). These reads revalidate the publication before returning and disclose
 `meta.as_of`. A changed or unavailable publication, or an older unbound cursor,
 returns `409 stale` and requires restarting without a cursor. A first page,
 which has no cursor to drop, whose publication changed while it was read
@@ -1389,7 +1390,10 @@ to the product and record-diagnostic routes; a family outside it is rejected as
   predicates as its list, before the cursor.
 - Snapshot behavior: the parent, child rows and filtered count use one
   revalidated publication, disclosed in `meta.as_of`. Continuations retain its
-  identity and expiry evaluation time. A changed publication returns `409 stale`
+  identity and expiry evaluation time. With the
+  [publication switch](glossary.md#publication-switch) on, the expiry
+  evaluation time is the published block's timestamp on every page instead.
+  A changed publication returns `409 stale`
   requiring a restart without the cursor; a first page whose publication changes
   during the read can simply be retried. Historical child enumeration is not
   supported.

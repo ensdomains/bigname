@@ -336,6 +336,8 @@ pub enum RedoChains {
 
 impl Cli {
     pub fn resolve(self) -> RunnerResult<ResolvedCommand> {
+        let serve_from_families = bigname_storage::publication_source::init_from_env();
+        tracing::info!(serve_from_families, "read the publication switch");
         match self.command {
             Command::SourceTransport(args) => Ok(ResolvedCommand::SourceTransport {
                 database_url: args.database_url,

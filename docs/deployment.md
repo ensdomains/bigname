@@ -159,6 +159,33 @@ A directly launched API can configure its metrics listener with
 container listener at `0.0.0.0:9464`; `BIGNAME_API_METRICS_HOST` and
 `BIGNAME_API_METRICS_PORT` change only its host port mapping.
 
+### Publication switch
+
+`BIGNAME_SERVE_FROM_FAMILIES` is the
+[publication switch](glossary.md#publication-switch). The server Compose file
+forwards it from the host environment or `.env.server` to both the `api` and
+the `phase-runner` services; Compose forwards only the variables it lists, so
+without that entry the containers would never see it. Unset or empty means
+off, and only `1` or `true` turns it on. Both binaries read it once at startup,
+so set it the same for both. To change it, edit `.env.server` (or the host
+environment) and recreate both containers:
+
+```sh
+docker compose --env-file .env.server -f docker-compose.server.yml up -d --force-recreate api phase-runner
+```
+
+`docker compose restart` does not reload changed environment configuration, so
+a restart alone keeps the old value.
+
+The direct `docker run` selectors under [Container contents](#container-contents)
+do not forward the variable: anyone running the binaries that way must pass
+`-e BIGNAME_SERVE_FROM_FAMILIES` (or an explicit value) to both the `api` and
+the `phases` invocations.
+
+Production leaves the switch off until the row and guard cutovers are complete:
+with it on, served-table reads can return inconsistent membership or counts
+(see [`api-v1.md`](api-v1.md), the publication switch paragraph).
+
 ## Phase-runner configuration
 
 The implemented phases use:
@@ -743,6 +770,7 @@ GRANT SELECT ON TABLE
     bigname_phase.chain_header_audit,
     bigname_phase.chain_lineage,
     bigname_phase.chain_phase_state,
+    bigname_phase.project_family_marker,
     bigname_phase.service_heartbeats,
     bigname_phase.normalized_events,
     bigname_phase.migration_event_associations,
@@ -782,6 +810,13 @@ block. The grant is SELECT-only and does not admit discovery writes.
 Reapply these explicit relation and function grants after a reviewed
 phase-schema replacement; do not use ownership
 or schema-wide write grants as a shortcut.
+
+`project_family_marker` is on the list for the
+[publication switch](glossary.md#publication-switch): with
+`BIGNAME_SERVE_FROM_FAMILIES` on, snapshot selection, the verified lookup and
+`/v1/status` read the [family marker](glossary.md#family-marker), and startup
+refuses a role that cannot read it. With the switch off the API does not read
+it.
 
 `migration_event_associations` is on the list because
 `GET /v1/diagnostics/events` selects the ENSv1→ENSv2 migration correlation rows

@@ -66,6 +66,7 @@ pub async fn load_missing_api_lookup_ddl(pool: &PgPool) -> Result<Vec<ApiLookupD
                 ('relation', 'bigname_phase.manifest_contract_instances'),
                 ('relation', 'bigname_phase.contract_instance_addresses'),
                 ('relation', 'bigname_phase.resolution_divergences'),
+                ('relation', 'bigname_phase.project_family_marker'),
                 (
                     'function',
                     'bigname_phase.revalidate_resolution_lookup_state(text,bigint,text,jsonb,jsonb,uuid,text,text)'
@@ -78,7 +79,8 @@ pub async fn load_missing_api_lookup_ddl(pool: &PgPool) -> Result<Vec<ApiLookupD
         )
         SELECT kind, identity
         FROM required
-        WHERE CASE kind
+        WHERE (identity <> 'bigname_phase.project_family_marker' OR $1)
+          AND CASE kind
             WHEN 'relation' THEN CASE WHEN to_regnamespace(split_part(identity, '.', 1)) IS NULL THEN TRUE
                 WHEN NOT has_schema_privilege(current_user, to_regnamespace(split_part(identity, '.', 1)), 'USAGE') THEN TRUE
                 WHEN to_regclass(identity) IS NULL THEN TRUE ELSE identity <> 'bigname_phase.resolution_divergences'
@@ -89,6 +91,8 @@ pub async fn load_missing_api_lookup_ddl(pool: &PgPool) -> Result<Vec<ApiLookupD
         ORDER BY kind, identity
         "#,
     )
+    // The family marker is a serving read only while the publication switch is on.
+    .bind(crate::publication_source::serve_from_families())
     .fetch_all(pool)
     .await
     .context("failed to inspect required API lookup DDL")?;

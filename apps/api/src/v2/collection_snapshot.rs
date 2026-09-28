@@ -80,17 +80,21 @@ impl CollectionSnapshot {
         }
         let token = namespaces.collection_fingerprint();
 
-        let evaluated_at = match cursor.as_ref() {
-            Some(cursor) => bigname_storage::parse_rfc3339_utc_timestamp(
-                cursor
-                    .evaluated_at
-                    .as_deref()
-                    .ok_or_else(restart_required)?,
-            )
-            .map_err(|_| super::cursor::invalid_cursor_error())?,
-            None => OffsetDateTime::now_utc()
-                .replace_nanosecond(0)
-                .expect("zero nanoseconds are valid"),
+        let evaluated_at = if bigname_storage::publication_source::serve_from_families() {
+            publication_clock(&namespaces)?
+        } else {
+            match cursor.as_ref() {
+                Some(cursor) => bigname_storage::parse_rfc3339_utc_timestamp(
+                    cursor
+                        .evaluated_at
+                        .as_deref()
+                        .ok_or_else(restart_required)?,
+                )
+                .map_err(|_| super::cursor::invalid_cursor_error())?,
+                None => OffsetDateTime::now_utc()
+                    .replace_nanosecond(0)
+                    .expect("zero nanoseconds are valid"),
+            }
         };
         let snapshot = Self {
             namespaces,
@@ -178,6 +182,25 @@ impl CollectionSnapshot {
         let _ = state;
         request_scope_meta(self.namespaces.request_scope())
     }
+}
+
+/// The expiry clock while the publication switch is on: the published block's time, on a first
+/// page and every continuation alike (a cursor's `evaluated_at` is still written but no longer
+/// read). Every selected position is the family marker's block, since the fence admits a scope
+/// only when the marker sits exactly there, so its lineage timestamp is the marker's
+/// `block_timestamp`. A scope spanning chains takes the earliest, as `block_bounds` takes the
+/// lowest block.
+fn publication_clock(namespaces: &PublicNamespaceSet) -> V2Result<OffsetDateTime> {
+    namespaces
+        .request_scope()
+        .iter()
+        .filter_map(|scope| scope.selected())
+        .flat_map(|selected| selected.chain_positions.as_map().values())
+        .map(|position| position.timestamp)
+        .min()
+        .ok_or_else(|| {
+            V2Error::stale("collection publication is not available; retry after indexing is ready")
+        })
 }
 
 pub(super) fn restart_required() -> V2Error {

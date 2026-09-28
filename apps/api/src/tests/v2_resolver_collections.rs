@@ -563,11 +563,29 @@ async fn v2_resolver_overview_continuation_restarts_when_publication_changes_bef
 async fn v2_resolver_collection_continuation_restarts_when_publication_changes_before_finish()
 -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
+    seed_v2_resolver_roles_pages(&database).await?;
+    let base = format!("/v1/resolvers/1/{V2_RESOLVER_ADDRESS}/roles?page_size=1");
+    let first = v2_resolver_payload_for_database(&database, &base).await?;
+    let cursor = first["page"]["next_cursor"]
+        .as_str()
+        .expect("roles first page carries a cursor")
+        .to_owned();
+    let continued =
+        resolver_publication_replaced_before_finish(&database, format!("{base}&cursor={cursor}"))
+            .await?;
+    assert_eq!(continued, RESTART_WITHOUT_CURSOR);
+    let cursorless = resolver_publication_replaced_before_finish(&database, base).await?;
+    assert_eq!(cursorless, RETRY_REQUEST);
+    database.cleanup().await
+}
+
+/// A resolver with three role holders, so `/roles?page_size=1` has continuations.
+async fn seed_v2_resolver_roles_pages(database: &TestDatabase) -> Result<()> {
     let resolver = resolver_current_row("ethereum-mainnet", V2_RESOLVER_ADDRESS);
     database
         .seed_snapshot_selector_chain_positions(&resolver.chain_positions)
         .await?;
-    upsert_test_resolver_current_rows(&database, &[resolver]).await?;
+    upsert_test_resolver_current_rows(database, &[resolver]).await?;
     let resources = (0..3)
         .map(|i| resource(Uuid::from_u128(0x5600 + i)))
         .collect::<Vec<_>>();
@@ -591,17 +609,5 @@ async fn v2_resolver_collection_continuation_restarts_when_publication_changes_b
         })
         .collect::<Vec<_>>();
     upsert_phase_permissions_current_rows(&database.pool, &permissions).await?;
-    let base = format!("/v1/resolvers/1/{V2_RESOLVER_ADDRESS}/roles?page_size=1");
-    let first = v2_resolver_payload_for_database(&database, &base).await?;
-    let cursor = first["page"]["next_cursor"]
-        .as_str()
-        .expect("roles first page carries a cursor")
-        .to_owned();
-    let continued =
-        resolver_publication_replaced_before_finish(&database, format!("{base}&cursor={cursor}"))
-            .await?;
-    assert_eq!(continued, RESTART_WITHOUT_CURSOR);
-    let cursorless = resolver_publication_replaced_before_finish(&database, base).await?;
-    assert_eq!(cursorless, RETRY_REQUEST);
-    database.cleanup().await
+    Ok(())
 }
