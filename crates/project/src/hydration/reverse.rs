@@ -19,7 +19,7 @@ const ROLLING_REFRESH_LIMIT: i64 = 250;
 /// This list selects which reverse claims get hydrated and therefore which
 /// `primary_names_current` rows exist, so it lives inside the interpreter content hash's watched
 /// roots rather than in a serving crate.
-const EVENT_SILENT_REVERSE_RESOLVER_ADDRESSES: &[&str] =
+pub(crate) const EVENT_SILENT_REVERSE_RESOLVER_ADDRESSES: &[&str] =
     &["0xa2c122be93b0074270ebee7f6b7292c7deb45047"];
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]

@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 use sqlx::{PgPool, Postgres, Transaction};
 
 use super::{
-    FamilyOptions, input,
+    FamilyOptions, hydrate, input,
     input::Revision,
     keys, manifests,
     marker::{self, FamilyMarker, RecordedToken},
@@ -86,7 +86,11 @@ pub(crate) async fn apply(
     options: &FamilyOptions,
 ) -> Result<(FamilyMarker, BlockStats)> {
     let started = Instant::now();
+    let prepared = hydrate::prepare(pool, chain_id, number, plan, options).await?;
     let mut opened = open(pool, chain_id, number, plan).await?;
+    if let Some(prepared) = &prepared {
+        prepared.require_block(&opened.block)?;
+    }
     let (events, duplicate_anomalies) =
         input::block_events(&mut opened.transaction, chain_id, &opened.block).await?;
     if duplicate_anomalies > 0 {
@@ -110,6 +114,16 @@ pub(crate) async fn apply(
         prefetched: None,
     };
     reduce::apply(&mut opened.transaction, &context, &events, &mut rows).await?;
+    if let Some(prepared) = prepared {
+        prepared
+            .apply(
+                &mut opened.transaction,
+                &context,
+                &mut rows,
+                plan.sequence + 1,
+            )
+            .await?;
+    }
     let (next, mut stats) = publish(opened, chain_id, &rows, plan, options).await?;
     stats.duplicate_anomalies = duplicate_anomalies;
     stats.elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);

@@ -1576,7 +1576,25 @@ version, or resolver changes. Explicit `NameForAddrChanged` tuple claims retain
 their existing event path. These are declared claims; forward verification
 remains request-scoped.
 
-Current-head hydration for an admitted event-silent ENSv1 reverse resolver may
+With family publication enabled, mainnet follow blocks prepare reverse hydration
+before opening the publication transaction. A short preparation transaction uses
+the normal pointer and reverse reducers to include the new block's candidates,
+then closes before the hash-pinned RPC calls. The publication transaction checks
+the predecessor, input revision and block hash again, reduces the events, and
+accepts an answer only for the same selected reverse node and resolver. The
+result and its baseline enter F12's owned row set and are journalled with the
+family marker, including refresh work on empty blocks. Failed calls retract the
+overlay and publish the block; a later follow block retries through the bounded
+rolling selection. Successful not-found is distinct from failure. Attempt cohorts
+use the monotonically increasing publication generation. The reader also binds
+the overlay to its selected node/resolver and readable block hash.
+
+Replay and rebuild perform no hydration RPC. Undo restores the previous overlay
+with its row, and new or changed selectors use event-derived claims until a later
+follow block refreshes them. Rebuild ranges retain their existing behavior.
+
+The switch-off served path retains the following behavior. Current-head hydration
+for an admitted event-silent ENSv1 reverse resolver may
 refresh an existing ENS/60 claim tuple at the exact published Ethereum head. It
 does not create a normalized event or verified result. Provider failure restores
 the event-derived row and keeps Project retryable.
