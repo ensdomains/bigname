@@ -320,19 +320,18 @@ async fn v2_history_lists_pointer_attributed_record_writes_for_the_registration(
 async fn v2_product_history_deduplicates_resolver_control_resource_linkage() -> Result<()> {
     const ADDRESS: &str = "0x0000000000000000000000000000000000007120";
     let database = TestDatabase::new_migrated().await?;
-    let logical_name_id = "ens:resolver-history.eth";
-    seed_identity_name(
+    let logical_name =
+        bigname_storage::logical_name_id_for_name("ens", "resolver-history.eth");
+    let logical_name_id = logical_name.as_str();
+    seed_v2_history_name(
         &database,
         logical_name_id,
         "resolver-history.eth",
-        "resolver-history.eth",
         "node:resolver-history.eth",
+        80,
         Uuid::from_u128(0x7120),
         Uuid::from_u128(0x8120),
         Uuid::from_u128(0x9120),
-        ADDRESS,
-        bigname_storage::AddressNameRelation::EffectiveController,
-        80,
     )
     .await?;
     seed_v2_history_blocks(&database, 121..=121).await?;
@@ -364,9 +363,12 @@ async fn v2_product_history_deduplicates_resolver_control_resource_linkage() -> 
                 "ResolverChanged",
                 121,
             ),
+            // The registry transfer that makes the address the name's manager.
+            v2_history_authority_to(logical_name_id, Uuid::from_u128(0x7120), ADDRESS, 80),
         ],
     )
     .await?;
+    rebuild_fixture_families(&database.pool, "ethereum-mainnet", 21_000_003, "0xbinding").await?;
 
     for route in [
         "/v1/names/resolver-history.eth/history?scope=both&page_size=20",
@@ -377,13 +379,15 @@ async fn v2_product_history_deduplicates_resolver_control_resource_linkage() -> 
     ] {
         let payload = v2_history_payload_for_database(&database, route).await?;
         let rows = payload["data"].as_array().expect("history data");
-        assert_eq!(rows.len(), 1, "{route}: {rows:?}");
-        assert_eq!(rows[0]["type"], json!("resolver"), "{route}");
-        assert_eq!(
-            rows[0]["registration_id"],
-            json!(Uuid::from_u128(0x7120).to_string()),
-            "{route}"
-        );
+        // One resolver row for both linkages, then the manager's own registry transfer.
+        assert_eq!(history_types(rows), vec!["resolver", "authority"], "{route}: {rows:?}");
+        for row in rows {
+            assert_eq!(
+                row["registration_id"],
+                json!(Uuid::from_u128(0x7120).to_string()),
+                "{route}"
+            );
+        }
     }
 
     let diagnostics = v2_history_payload_for_database(
@@ -392,7 +396,7 @@ async fn v2_product_history_deduplicates_resolver_control_resource_linkage() -> 
     )
     .await?;
     let diagnostic_rows = diagnostics["data"].as_array().expect("diagnostic events");
-    assert_eq!(diagnostic_rows.len(), 2, "{diagnostic_rows:?}");
+    assert_eq!(diagnostic_rows.len(), 3, "{diagnostic_rows:?}");
     assert!(diagnostic_rows.iter().any(|row| {
         row["event_identity"]
             .as_str()
@@ -439,10 +443,10 @@ async fn v2_product_history_deduplicates_resolver_control_resource_linkage() -> 
         None,
     )
     .await?;
-    assert_eq!(product_page.rows.len(), 1);
+    assert_eq!(product_page.rows.len(), 2);
     assert_eq!(
         product_page.summary.map(|summary| summary.total_count),
-        Some(1)
+        Some(2)
     );
 
     database.cleanup().await
@@ -450,22 +454,20 @@ async fn v2_product_history_deduplicates_resolver_control_resource_linkage() -> 
 
 #[tokio::test]
 async fn v2_tokenized_registry_history_keeps_identity_outside_the_binding_window() -> Result<()> {
-    const ADDRESS: &str = "0x0000000000000000000000000000000000007122";
     let database = TestDatabase::new_migrated().await?;
-    let logical_name_id = "ens:event-position-history.eth";
+    let logical_name =
+        bigname_storage::logical_name_id_for_name("ens", "event-position-history.eth");
+    let logical_name_id = logical_name.as_str();
     let resource_id = Uuid::from_u128(0x7122);
-    seed_identity_name(
+    seed_v2_history_name(
         &database,
         logical_name_id,
         "event-position-history.eth",
-        "event-position-history.eth",
         "node:event-position-history.eth",
+        80,
         resource_id,
         Uuid::from_u128(0x8122),
         Uuid::from_u128(0x9122),
-        ADDRESS,
-        bigname_storage::AddressNameRelation::EffectiveController,
-        80,
     )
     .await?;
     seed_v2_history_blocks(&database, 121..=121).await?;
@@ -511,6 +513,7 @@ async fn v2_tokenized_registry_history_keeps_identity_outside_the_binding_window
         &[before, during, after],
     )
     .await?;
+    rebuild_fixture_families(&database.pool, "ethereum-mainnet", 21_000_003, "0xbinding").await?;
 
     let payload = v2_history_payload_for_database(
         &database,
@@ -531,23 +534,19 @@ async fn v2_tokenized_registry_history_keeps_identity_outside_the_binding_window
 
 #[tokio::test]
 async fn v2_ownerless_registry_history_omits_registration_identity() -> Result<()> {
-    const ADDRESS: &str = "0x0000000000000000000000000000000000007130";
     let database = TestDatabase::new_migrated().await?;
     let logical_name_id = "ens:ownerless-history.eth";
     let control_resource_id = Uuid::from_u128(0x7130);
     let read_resource_id = Uuid::from_u128(0x7131);
-    seed_identity_name(
+    seed_v2_history_name(
         &database,
         logical_name_id,
         "ownerless-history.eth",
-        "ownerless-history.eth",
         "node:ownerless-history.eth",
+        80,
         control_resource_id,
         Uuid::from_u128(0x8130),
         Uuid::from_u128(0x9130),
-        ADDRESS,
-        bigname_storage::AddressNameRelation::EffectiveController,
-        80,
     )
     .await?;
     upsert_test_resources(
@@ -560,21 +559,12 @@ async fn v2_ownerless_registry_history_omits_registration_identity() -> Result<(
         )],
     )
     .await?;
+    // The name's registrar binding ended; the registry now reports no owner for the node.
     sqlx::query(
-        "UPDATE bigname_phase.name_current
-         SET serving_resource_id = $2,
-             surface_binding_id = NULL,
-             resource_id = NULL,
-             token_lineage_id = NULL,
-             binding_kind = NULL,
-             declared_summary = jsonb_build_object(
-                 'registration', jsonb_build_object('status', 'unregistered'),
-                 'control', jsonb_build_object('status', 'unregistered')
-             )
-         WHERE logical_name_id = $1",
+        "UPDATE bigname_phase.surface_bindings SET active_to = to_timestamp(1700000120)
+         WHERE surface_binding_id = $1",
     )
-    .bind(logical_name_id)
-    .bind(read_resource_id)
+    .bind(Uuid::from_u128(0x9130))
     .execute(&database.pool)
     .await?;
     seed_v2_history_blocks(&database, 121..=122).await?;
@@ -587,7 +577,7 @@ async fn v2_ownerless_registry_history_omits_registration_identity() -> Result<(
     );
     authority.source_family = "ens_v1_registry_l1".to_owned();
     authority.after_state = json!({
-        "node": "node:ownerless-history.eth",
+        "node": bigname_lookup::ens_namehash_hex("ownerless-history.eth")?,
         "owner": "0x0000000000000000000000000000000000000000",
         "owner_getter": "0x0000000000000000000000000000000000000000",
         "owner_getter_reason": "literal_zero",
@@ -602,7 +592,7 @@ async fn v2_ownerless_registry_history_omits_registration_identity() -> Result<(
     );
     epoch.source_family = "ens_v1_registry_l1".to_owned();
     epoch.after_state = json!({
-        "node": "node:ownerless-history.eth",
+        "node": bigname_lookup::ens_namehash_hex("ownerless-history.eth")?,
         "owner": "0x0000000000000000000000000000000000000000",
         "owner_getter": "0x0000000000000000000000000000000000000000",
         "owner_getter_reason": "literal_zero",
@@ -617,7 +607,7 @@ async fn v2_ownerless_registry_history_omits_registration_identity() -> Result<(
     );
     resolver.source_family = "ens_v1_registry_l1".to_owned();
     resolver.after_state = json!({
-        "node": "node:ownerless-history.eth",
+        "node": bigname_lookup::ens_namehash_hex("ownerless-history.eth")?,
         "resolver": "0x00000000000000000000000000000000000000aa"
     });
     bigname_storage::insert_normalized_event_fixtures(
@@ -625,6 +615,7 @@ async fn v2_ownerless_registry_history_omits_registration_identity() -> Result<(
         &[authority, epoch, resolver],
     )
     .await?;
+    rebuild_fixture_families(&database.pool, "ethereum-mainnet", 21_000_003, "0xbinding").await?;
 
     for route in [
         "/v1/names/ownerless-history.eth/history?scope=both&page_size=20",
@@ -670,23 +661,21 @@ async fn v2_ownerless_registry_history_omits_registration_identity() -> Result<(
 
 #[tokio::test]
 async fn v2_registration_filter_keeps_bound_name_surface_history() -> Result<()> {
-    const ADDRESS: &str = "0x0000000000000000000000000000000000007140";
     let database = TestDatabase::new_migrated().await?;
-    let logical_name_id = "ens:registration-filter-history.eth";
+    let logical_name =
+        bigname_storage::logical_name_id_for_name("ens", "registration-filter-history.eth");
+    let logical_name_id = logical_name.as_str();
     let resource_id = Uuid::from_u128(0x7140);
     let later_resource_id = Uuid::from_u128(0x7141);
-    seed_identity_name(
+    seed_v2_history_name(
         &database,
         logical_name_id,
         "registration-filter-history.eth",
-        "registration-filter-history.eth",
         "node:registration-filter-history.eth",
+        80,
         resource_id,
         Uuid::from_u128(0x8140),
         Uuid::from_u128(0x9140),
-        ADDRESS,
-        bigname_storage::AddressNameRelation::EffectiveController,
-        80,
     )
     .await?;
     upsert_test_resources(
@@ -711,7 +700,7 @@ async fn v2_registration_filter_keeps_bound_name_surface_history() -> Result<()>
     .await?;
     let later_binding = address_name_surface_binding(
         Uuid::from_u128(0x9141),
-        logical_name_id,
+        "ens:registration-filter-history.eth",
         later_resource_id,
         "0xhistory123",
         123,
@@ -777,6 +766,7 @@ async fn v2_registration_filter_keeps_bound_name_surface_history() -> Result<()>
         }
     }
     bigname_storage::insert_normalized_event_fixtures(&database.pool, &events).await?;
+    rebuild_fixture_families(&database.pool, "ethereum-mainnet", 21_000_003, "0xbinding").await?;
 
     let payload = v2_history_payload_for_database(
         &database,
@@ -888,34 +878,36 @@ async fn v2_product_event_routes_preserves_stored_ensip15_normalized_name_bytes(
     const ADDRESS: &str = "0x0000000000000000000000000000000000034930";
 
     let database = TestDatabase::new_migrated().await?;
-    seed_identity_name(
+    let logical_name_id = bigname_storage::logical_name_id_for_name("ens", NORMALIZED_NAME);
+    seed_v2_history_name(
         &database,
-        "ens:ᏣᎳᎩ.eth",
-        NORMALIZED_NAME,
+        &logical_name_id,
         NORMALIZED_NAME,
         "namehash:ᏣᎳᎩ.eth",
+        43,
         Uuid::from_u128(0x349_3001),
         Uuid::from_u128(0x349_3002),
         Uuid::from_u128(0x349_3003),
-        ADDRESS,
-        bigname_storage::AddressNameRelation::EffectiveController,
-        43,
     )
     .await?;
     seed_v2_history_blocks(&database, 121..=121).await?;
     bigname_storage::insert_normalized_event_fixtures(
         &database.pool,
-        &[v2_history_event(
-            "cherokee-record",
-            Some("ens:ᏣᎳᎩ.eth"),
-            None,
-            "RecordChanged",
-            121,
-        )],
+        &[
+            v2_history_event(
+                "cherokee-record",
+                Some(&logical_name_id),
+                None,
+                "RecordChanged",
+                121,
+            ),
+            v2_history_authority_to(&logical_name_id, Uuid::from_u128(0x349_3001), ADDRESS, 43),
+        ],
     )
     .await?;
+    rebuild_fixture_families(&database.pool, "ethereum-mainnet", 21_000_003, "0xbinding").await?;
     let stored_raw_name: String = sqlx::query_scalar(
-        "SELECT raw_name FROM bigname_phase.name_current WHERE raw_name = $1",
+        "SELECT raw_name FROM bigname_phase.name_surfaces WHERE raw_name = $1",
     )
     .bind(NORMALIZED_NAME)
     .fetch_one(&database.pool)
@@ -1471,10 +1463,12 @@ async fn v2_address_history_ignores_masked_owner_tail_but_keeps_valid_authority_
     )
     .await?;
     seed_v2_history_blocks(&database, 121..=123).await?;
+    let masked_tail = bigname_storage::logical_name_id_for_name("ens", "masked-tail.eth");
+    let valid_owner = bigname_storage::logical_name_id_for_name("ens", "valid-owner.eth");
 
     let mut masked = v2_history_event(
         "masked-owner-authority",
-        Some("ens:masked-tail.eth"),
+        Some(&masked_tail),
         None,
         "AuthorityTransferred",
         121,
@@ -1487,14 +1481,14 @@ async fn v2_address_history_ignores_masked_owner_tail_but_keeps_valid_authority_
     });
     let valid = v2_history_event(
         "valid-owner-authority",
-        Some("ens:valid-owner.eth"),
+        Some(&valid_owner),
         None,
         "AuthorityTransferred",
         122,
     );
     let masked_name_event = v2_history_event(
         "masked-owner-name-event",
-        Some("ens:masked-tail.eth"),
+        Some(&masked_tail),
         None,
         "RecordChanged",
         123,
@@ -1504,6 +1498,7 @@ async fn v2_address_history_ignores_masked_owner_tail_but_keeps_valid_authority_
         &[masked, valid, masked_name_event],
     )
     .await?;
+    rebuild_fixture_families(&database.pool, "ethereum-mainnet", 21_000_003, "0xbinding").await?;
 
     let address_payload = v2_history_payload_for_database(
         &database,
@@ -1918,6 +1913,25 @@ fn v2_history_event(
     event.derivation_kind = "ens_v1_unwrapped_authority".to_owned();
     event.before_state = json!({});
     event.after_state = v2_history_after_state(event_kind);
+    event
+}
+
+/// A registry transfer of `resource` to `owner`: the event that makes `owner` the name's manager.
+fn v2_history_authority_to(
+    logical_name_id: &str,
+    resource: Uuid,
+    owner: &str,
+    block_number: i64,
+) -> NormalizedEvent {
+    let mut event = v2_history_event(
+        &format!("{logical_name_id}-authority-{block_number}"),
+        Some(logical_name_id),
+        Some(resource),
+        "AuthorityTransferred",
+        block_number,
+    );
+    event.source_family = "ens_v1_registry_l1".to_owned();
+    event.after_state = json!({"source_event": "Transfer", "owner": owner});
     event
 }
 

@@ -14,14 +14,7 @@ async fn name_history_continuation_does_not_look_the_name_up_again() -> Result<(
     const NAME: &str = "continued.eth";
     let database = TestDatabase::new_migrated().await?;
     seed_bounded_membership_blocks(&database, 240).await?;
-    let (logical_name_id, resource) = seed_bounded_name(
-        &database,
-        NAME,
-        0xb0a_4000,
-        "0x00000000000000000000000000000000000b0a04",
-        bigname_storage::AddressNameRelation::EffectiveController,
-        205,
-    )
+    let (logical_name_id, resource) = seed_bounded_name(&database, NAME, 0xb0a_4000)
     .await?;
     bigname_storage::insert_normalized_event_fixtures(
         &database.pool,
@@ -50,7 +43,7 @@ async fn name_history_continuation_does_not_look_the_name_up_again() -> Result<(
         ],
     )
     .await?;
-    publish_bounded_membership_at(&database, 240).await?;
+    publish_test_families(&database, 240).await?;
 
     let mut cursors = Vec::new();
     for scope in ["name", "registration", "both"] {
@@ -68,12 +61,17 @@ async fn name_history_continuation_does_not_look_the_name_up_again() -> Result<(
         cursors.push((route, cursor));
     }
 
-    // Project stops publishing the name. The first page reports it missing; a continuation
-    // already bound to the name keeps paging through the evidence at the bound.
-    sqlx::query("DELETE FROM bigname_phase.name_current WHERE logical_name_id = $1")
-        .bind(&logical_name_id)
-        .execute(&database.pool)
-        .await?;
+    // A reorg orphans the name's token lineage, so Project stops publishing the name. The first
+    // page reports it missing; a continuation already bound to the name keeps paging through the
+    // evidence at the bound.
+    sqlx::query(
+        "UPDATE bigname_phase.token_lineages SET canonicality_state = 'orphaned'
+         WHERE token_lineage_id = $1",
+    )
+    .bind(Uuid::from_u128(0xb0a_4001))
+    .execute(&database.pool)
+    .await?;
+    rebuild_fixture_families(&database.pool, BOUNDED_CHAIN, 240, "0xhistory240").await?;
     for (route, cursor) in cursors {
         let (status, payload) = bounded_route_status(&database, &route).await?;
         assert_eq!(status, StatusCode::NOT_FOUND, "{route}: {payload}");
@@ -89,22 +87,15 @@ async fn name_history_continuation_does_not_look_the_name_up_again() -> Result<(
     database.cleanup().await
 }
 
-// Project selects a lease as the name's registration whose only registrar grant lies above the
-// bound. The lease's older rows must not join a read bound below that grant: until the grant is
-// published, no binding, wrap link or grant ties the lease to the name.
+// A lease's only registrar grant for the name lies above the bound. The lease's older rows must
+// not join a read bound below that grant: until the grant is published, no binding, wrap link or
+// grant ties the lease to the name.
 #[tokio::test]
 async fn registration_selected_above_the_bound_adds_no_lease_history() -> Result<()> {
     const NAME: &str = "selected-later.eth";
     let database = TestDatabase::new_migrated().await?;
     seed_bounded_membership_blocks(&database, 240).await?;
-    let (logical_name_id, resource) = seed_bounded_name(
-        &database,
-        NAME,
-        0xb0a_5000,
-        "0x00000000000000000000000000000000000b0a05",
-        bigname_storage::AddressNameRelation::EffectiveController,
-        205,
-    )
+    let (logical_name_id, resource) = seed_bounded_name(&database, NAME, 0xb0a_5000)
     .await?;
     let lease = Uuid::from_u128(0xb0a_5100);
     upsert_test_resources(
@@ -147,21 +138,7 @@ async fn registration_selected_above_the_bound_adds_no_lease_history() -> Result
         ],
     )
     .await?;
-    sqlx::query(
-        "UPDATE bigname_phase.name_current
-         SET declared_summary = jsonb_set(
-             declared_summary,
-             '{registration}',
-             COALESCE(declared_summary -> 'registration', '{}'::jsonb)
-                 || jsonb_build_object('resource_id', $2::text)
-         )
-         WHERE logical_name_id = $1",
-    )
-    .bind(&logical_name_id)
-    .bind(lease.to_string())
-    .execute(&database.pool)
-    .await?;
-    publish_bounded_membership_at(&database, 240).await?;
+    publish_test_families(&database, 240).await?;
 
     assert_eq!(
         bigname_storage::load_bounded_registration_resource_ids(
@@ -184,7 +161,7 @@ async fn registration_selected_above_the_bound_adds_no_lease_history() -> Result
         );
     }
 
-    publish_bounded_membership_at(&database, 241).await?;
+    publish_test_families(&database, 241).await?;
     let mut expected = vec![lease, resource];
     expected.sort_unstable();
     assert_eq!(

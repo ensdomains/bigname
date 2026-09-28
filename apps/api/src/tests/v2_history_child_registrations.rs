@@ -3,38 +3,6 @@
 
 const CHILD_PARENT_RESOURCE: u128 = 0x7c00;
 
-/// Membership rows as Project publishes them: one per (parent, event), at the event's position.
-async fn seed_child_registration_memberships(
-    database: &TestDatabase,
-    parent_name: &str,
-    event_identities: &[&str],
-) -> Result<()> {
-    let identities = event_identities
-        .iter()
-        .map(|identity| (*identity).to_owned())
-        .collect::<Vec<_>>();
-    let inserted = sqlx::query(
-        "INSERT INTO bigname_phase.child_registration_events (
-             parent_logical_name_id, event_identity, child_logical_name_id, namespace, chain_id,
-             block_number, block_hash, transaction_order_key, log_order_key, event_kind,
-             manifest_version, target_block_number, target_block_hash
-         )
-         SELECT $1, ne.event_identity, ne.logical_name_id, ne.namespace, ne.chain_id,
-                ne.block_number, ne.block_hash, COALESCE(ne.transaction_index, -1),
-                COALESCE(ne.log_index, -1), ne.event_kind, ne.manifest_version,
-                ne.block_number, ne.block_hash
-         FROM bigname_phase.normalized_events ne
-         WHERE ne.event_identity = ANY($2::text[])",
-    )
-    .bind(bigname_storage::logical_name_id_for_name("ens", parent_name))
-    .bind(&identities)
-    .execute(&database.pool)
-    .await?
-    .rows_affected();
-    assert_eq!(inserted, identities.len() as u64, "every membership cites a seeded event");
-    Ok(())
-}
-
 async fn seed_child_surfaces(database: &TestDatabase, names: &[&str]) -> Result<()> {
     let surfaces = names
         .iter()
@@ -51,7 +19,7 @@ fn child_history_event(
     kind: &str,
     block_number: i64,
 ) -> NormalizedEvent {
-    let logical_name_id = name.map(|name| format!("ens:{name}"));
+    let logical_name_id = name.map(|name| bigname_storage::logical_name_id_for_name("ens", name));
     v2_history_event(identity, logical_name_id.as_deref(), resource_id, kind, block_number)
 }
 
@@ -93,6 +61,18 @@ async fn seed_child_registration_fixture(database: &TestDatabase) -> Result<()> 
         Uuid::from_u128(0x9c02),
     )
     .await?;
+    // `lone.eth` has its own rows and no children.
+    seed_v2_history_name(
+        database,
+        "ens:lone.eth",
+        "lone.eth",
+        "node:lone.eth",
+        80,
+        Uuid::from_u128(0x7c03),
+        Uuid::from_u128(0x8c03),
+        Uuid::from_u128(0x9c03),
+    )
+    .await?;
     seed_child_surfaces(
         database,
         &[
@@ -129,17 +109,11 @@ async fn seed_child_registration_fixture(database: &TestDatabase) -> Result<()> 
             child_history_event("b-release", Some("b.parent.eth"), None, "RegistrationReleased", 111),
             child_history_event("qc-grant", Some("c.q.eth"), None, "RegistrationGranted", 112),
             child_history_event("p-renewal", None, Some(parent_resource), "RegistrationRenewed", 113),
+            child_history_event("lone-grant", None, Some(Uuid::from_u128(0x7c03)), "RegistrationGranted", 101),
+            child_history_event("lone-renewal", None, Some(Uuid::from_u128(0x7c03)), "RegistrationRenewed", 113),
         ],
     )
     .await?;
-    seed_child_registration_memberships(
-        database,
-        "parent.eth",
-        &["a-grant", "b-grant", "a-regrant", "c-grant", "d-grant"],
-    )
-    .await?;
-    seed_child_registration_memberships(database, "a.parent.eth", &["x-grant"]).await?;
-    seed_child_registration_memberships(database, "q.eth", &["qc-grant"]).await?;
     // The moved registry's later grants: many `q.eth` rows the `parent.eth` stream never reads.
     sqlx::raw_sql(
         "CREATE TEMP TABLE bulk_q_grants AS
@@ -155,13 +129,8 @@ async fn seed_child_registration_fixture(database: &TestDatabase) -> Result<()> 
     )
     .execute(&database.pool)
     .await?;
-    let bulk = (1..=5000).map(|n| format!("q-bulk-{n}")).collect::<Vec<_>>();
-    seed_child_registration_memberships(
-        database,
-        "q.eth",
-        &bulk.iter().map(String::as_str).collect::<Vec<_>>(),
-    )
-    .await?;
+    // Project places every grant under its parent from the surfaces' label hashes.
+    rebuild_fixture_families(&database.pool, "ethereum-mainnet", 21_000_003, "0xbinding").await?;
     sqlx::raw_sql("ANALYZE bigname_phase.child_registration_events; ANALYZE bigname_phase.normalized_events")
         .execute(&database.pool)
         .await?;
@@ -294,19 +263,21 @@ async fn v2_name_history_child_registrations_merge_into_the_stream() -> Result<(
     );
 
     // With no child rows the option returns the plain stream, each row marked `name`.
-    sqlx::query("DELETE FROM bigname_phase.child_registration_events WHERE parent_logical_name_id = $1")
-        .bind(bigname_storage::logical_name_id_for_name("ens", "parent.eth"))
-        .execute(&database.pool)
-        .await?;
-    let empty = v2_history_payload_for_database(&database, CHILD_COUNT_ROUTE).await?;
+    let lone_plain =
+        v2_history_payload_for_database(&database, "/v1/names/lone.eth/history").await?;
+    let empty = v2_history_payload_for_database(
+        &database,
+        "/v1/names/lone.eth/history?include=child_registrations,total_count",
+    )
+    .await?;
     assert_eq!(
         history_rows(&empty),
-        history_rows(&plain)
+        history_rows(&lone_plain)
             .into_iter()
             .map(|(tx, event_type, name, _)| (tx, event_type, name, "name".to_owned()))
             .collect::<Vec<_>>()
     );
-    assert_eq!(empty["page"]["total_count"], json!(5));
+    assert_eq!(empty["page"]["total_count"], json!(2));
 
     database.cleanup().await
 }

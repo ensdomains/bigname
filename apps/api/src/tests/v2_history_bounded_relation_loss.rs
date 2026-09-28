@@ -1,4 +1,5 @@
-// A relation the address held at the bound and lost after it. Project's current row for the relation is gone by then, so a read bound below the loss
+// A relation the address held at the bound and lost after it. Project's publication after the loss
+// has no current row for the relation, so a read bound below the loss
 // can admit the name's older events only if the historical event matcher reproduces the relation
 // from the event that created it. The matcher knows three shapes: a `RegistrationGranted`
 // registrant and a `TokenControlTransferred` recipient on a token-backed resource, and an
@@ -10,19 +11,19 @@
 const LOST_OTHER: &str = "0x00000000000000000000000000000000000b0aff";
 
 /// Seed `name` with `relation` created by `created` at block 205 and a later name event at 210,
-/// then lose the relation at 241: the address's current row is removed, as Project removes it
-/// when it publishes 241. Returns the bounded read at 240, filtered to `filter` when given.
+/// then lose the relation at 241: the token and the registry node move to another account, and
+/// Project publishes 241 without the address's relation. Returns the bounded read at 240 before
+/// and after that publication, filtered to `filter` when given.
 async fn lost_relation_history(
     name: &str,
     seed: u128,
-    relation: bigname_storage::AddressNameRelation,
     filter: Option<bigname_storage::AddressNameRelation>,
     created: impl FnOnce(&str, Uuid) -> NormalizedEvent,
 ) -> Result<(Vec<String>, Vec<String>)> {
     let database = TestDatabase::new_migrated().await?;
     seed_bounded_membership_blocks(&database, 240).await?;
     let (logical_name_id, resource) =
-        seed_bounded_name(&database, name, seed, BOUNDED_ADDRESS, relation, 205).await?;
+        seed_bounded_name(&database, name, seed).await?;
     let mut later = v2_history_event(
         &format!("{name}-renewed"),
         Some(&logical_name_id),
@@ -39,21 +40,39 @@ async fn lost_relation_history(
         241,
     );
     lost.after_state = json!({ "to": LOST_OTHER });
+    let mut lost_control = v2_history_event(
+        &format!("{name}-lost-control"),
+        Some(&logical_name_id),
+        Some(resource),
+        "AuthorityTransferred",
+        241,
+    );
+    lost_control.source_family = "ens_v1_registry_l1".to_owned();
+    lost_control.log_index = Some(1);
+    lost_control.after_state = json!({
+        "source_event": "Transfer",
+        "node": bigname_lookup::ens_namehash_hex(name)?,
+        "owner": LOST_OTHER,
+    });
     bigname_storage::insert_normalized_event_fixtures(
         &database.pool,
-        &[created(&logical_name_id, resource), later, lost],
+        &[created(&logical_name_id, resource), later, lost, lost_control],
     )
     .await?;
-    publish_bounded_membership_at(&database, 240).await?;
+    publish_test_families(&database, 240).await?;
     let held = bounded_address_history_hashes(&database, filter, 240).await?;
-    sqlx::query(
-        "DELETE FROM bigname_phase.address_names_current
-         WHERE address = $1 AND logical_name_id = $2",
+    publish_test_families(&database, 241).await?;
+    let current = bigname_storage::load_address_names_current(
+        &database.pool,
+        BOUNDED_ADDRESS,
+        None,
+        None,
     )
-    .bind(BOUNDED_ADDRESS)
-    .bind(&logical_name_id)
-    .execute(&database.pool)
     .await?;
+    anyhow::ensure!(
+        current.iter().all(|row| row.logical_name_id != logical_name_id),
+        "the publication at 241 still relates the address to {name}: {current:?}"
+    );
     let lost = bounded_address_history_hashes(&database, filter, 240).await?;
     database.cleanup().await?;
     Ok((held, lost))
@@ -100,7 +119,6 @@ async fn lost_registrant_from_a_grant_keeps_its_bounded_history() -> Result<()> 
     let (held, lost) = lost_relation_history(
         "lost-grant-registrant.eth",
         0xb0a_6000,
-        bigname_storage::AddressNameRelation::Registrant,
         Some(bigname_storage::AddressNameRelation::Registrant),
         relation_event(
             "RegistrationGranted",
@@ -118,7 +136,6 @@ async fn lost_token_holder_from_a_transfer_keeps_its_bounded_history() -> Result
     let (held, lost) = lost_relation_history(
         "lost-transfer-holder.eth",
         0xb0a_6100,
-        bigname_storage::AddressNameRelation::TokenHolder,
         Some(bigname_storage::AddressNameRelation::TokenHolder),
         relation_event(
             "TokenControlTransferred",
@@ -137,7 +154,6 @@ async fn lost_ens_v2_controller_from_an_authority_transfer_keeps_its_bounded_his
     let (held, lost) = lost_relation_history(
         "lost-v2-controller.eth",
         0xb0a_6200,
-        bigname_storage::AddressNameRelation::EffectiveController,
         Some(bigname_storage::AddressNameRelation::EffectiveController),
         relation_event(
             "AuthorityTransferred",
@@ -157,7 +173,6 @@ async fn lost_ens_v1_controller_of_a_token_backed_name_keeps_its_bounded_history
     let (held, lost) = lost_relation_history(
         "lost-v1-token-controller.eth",
         0xb0a_6300,
-        bigname_storage::AddressNameRelation::EffectiveController,
         Some(bigname_storage::AddressNameRelation::EffectiveController),
         relation_event(
             "AuthorityTransferred",
@@ -177,7 +192,6 @@ async fn lost_token_holder_from_a_grant_keeps_its_bounded_history() -> Result<()
     let (held, lost) = lost_relation_history(
         "lost-grant-holder.eth",
         0xb0a_6400,
-        bigname_storage::AddressNameRelation::TokenHolder,
         Some(bigname_storage::AddressNameRelation::TokenHolder),
         relation_event(
             "RegistrationGranted",
@@ -197,7 +211,6 @@ async fn lost_controller_from_the_token_holder_fallback_keeps_its_bounded_histor
     let (held, lost) = lost_relation_history(
         "lost-fallback-controller.eth",
         0xb0a_6600,
-        bigname_storage::AddressNameRelation::EffectiveController,
         Some(bigname_storage::AddressNameRelation::EffectiveController),
         relation_event(
             "TokenControlTransferred",
@@ -278,22 +291,9 @@ async fn lost_controller_from_a_wrapper_holder_grant_keeps_its_bounded_history()
     const NAME: &str = "lost-wrapper-controller.eth";
     let database = TestDatabase::new_migrated().await?;
     seed_bounded_membership_blocks(&database, 240).await?;
-    let (logical_name_id, resource) = seed_bounded_name(
-        &database,
-        NAME,
-        0xb0a_6700,
-        BOUNDED_ADDRESS,
-        bigname_storage::AddressNameRelation::EffectiveController,
-        205,
-    )
+    let (logical_name_id, resource) = seed_bounded_name(&database, NAME, 0xb0a_6700)
     .await?;
-    // Project writes the relation rows below from the events, not from the identity fixture. The
-    // fixture's binding opens at the identity blocks' 2024 timestamps; open it before the events'
-    // 2023 timestamps so the lease's events fall inside it.
-    sqlx::query("DELETE FROM bigname_phase.address_names_current WHERE logical_name_id = $1")
-        .bind(&logical_name_id)
-        .execute(&database.pool)
-        .await?;
+    // Open the binding before every event of the lease, so they all fall inside it.
     sqlx::query(
         "UPDATE bigname_phase.surface_bindings SET active_from = '2023-11-14T00:00:00Z'
          WHERE logical_name_id = $1",
@@ -338,17 +338,24 @@ async fn lost_controller_from_a_wrapper_holder_grant_keeps_its_bounded_history()
     )
     .await?;
     publish_test_families(&database, 240).await?;
-    let cited: (i64, i64) = sqlx::query_as(
-        "SELECT (anc.provenance ->> 'normalized_event_id')::bigint,
-                (anc.chain_positions ->> 'block_number')::bigint
-         FROM bigname_phase.address_names_current anc
-         WHERE anc.address = $1 AND anc.logical_name_id = $2
-           AND anc.relation = 'effective_controller'",
+    let controller = bigname_storage::load_address_names_current(
+        &database.pool,
+        BOUNDED_ADDRESS,
+        None,
+        Some(bigname_storage::AddressNameRelation::EffectiveController),
     )
-    .bind(BOUNDED_ADDRESS)
-    .bind(&logical_name_id)
-    .fetch_one(&database.pool)
-    .await?;
+    .await?
+    .into_iter()
+    .find(|row| row.logical_name_id == logical_name_id)
+    .context("the controller relation at 240")?;
+    let cited = (
+        controller.provenance["normalized_event_id"]
+            .as_i64()
+            .context("cited event")?,
+        controller.chain_positions["block_number"]
+            .as_i64()
+            .context("cited block")?,
+    );
     let grant: i64 = sqlx::query_scalar(
         "SELECT normalized_event_id FROM normalized_events WHERE event_identity = $1",
     )
@@ -357,17 +364,9 @@ async fn lost_controller_from_a_wrapper_holder_grant_keeps_its_bounded_history()
     .await?;
     assert_eq!(cited, (grant, 205), "Project cites the holder grant for the controller");
 
-    publish_bounded_membership_at(&database, 240).await?;
     let filter = Some(bigname_storage::AddressNameRelation::EffectiveController);
     let held = bounded_address_history_hashes(&database, filter, 240).await?;
-    sqlx::query(
-        "DELETE FROM bigname_phase.address_names_current
-         WHERE address = $1 AND logical_name_id = $2",
-    )
-    .bind(BOUNDED_ADDRESS)
-    .bind(&logical_name_id)
-    .execute(&database.pool)
-    .await?;
+    publish_test_families(&database, 241).await?;
     let lost = bounded_address_history_hashes(&database, filter, 240).await?;
     database.cleanup().await?;
     // The registration and the holder grant share the wrapper's registration transaction.
@@ -386,22 +385,15 @@ async fn lost_controller_from_a_wrapper_holder_grant_keeps_its_bounded_history()
 // A relation the address still holds, whose cited event moves above the bound without a change
 // of holder. A token transfer from the holder to itself (a registrar `Transfer(A, A)`) is a valid
 // upstream event that the adapters keep, and Project cites the latest registration event for the
-// registrant, token holder and fallback controller rows, so the current row now cites a block
-// above the bound. The holder at the bound is unchanged: a read bound at 240 must admit the same
-// rows, report the same count and continue a cursor it issued before the self-transfer.
+// registrant, token holder and fallback controller rows, so the current row published at 241
+// cites a block above the bound. The holder at the bound is unchanged: a read bound at 240 must
+// admit the same rows, and a cursor issued at 240 continues after the self-transfer.
 #[tokio::test]
 async fn self_transfer_above_the_bound_keeps_the_held_token_holder() -> Result<()> {
     const NAME: &str = "self-transfer-holder.eth";
     let database = TestDatabase::new_migrated().await?;
     seed_bounded_membership_blocks(&database, 240).await?;
-    let (logical_name_id, resource) = seed_bounded_name(
-        &database,
-        NAME,
-        0xb0a_6800,
-        BOUNDED_ADDRESS,
-        bigname_storage::AddressNameRelation::TokenHolder,
-        205,
-    )
+    let (logical_name_id, resource) = seed_bounded_name(&database, NAME, 0xb0a_6800)
     .await?;
     let mut grant = v2_history_event(
         "self-transfer-grant",
@@ -420,8 +412,7 @@ async fn self_transfer_above_the_bound_keeps_the_held_token_holder() -> Result<(
     );
     renewed.log_index = Some(1);
     bigname_storage::insert_normalized_event_fixtures(&database.pool, &[grant, renewed]).await?;
-    cite_holder_event(&database, &logical_name_id, "self-transfer-grant").await?;
-    publish_bounded_membership_at(&database, 240).await?;
+    publish_test_families(&database, 240).await?;
 
     let route =
         format!("/v1/addresses/{BOUNDED_ADDRESS}/history?relation=owner&page_size=1&include=total_count");
@@ -440,8 +431,8 @@ async fn self_transfer_above_the_bound_keeps_the_held_token_holder() -> Result<(
     .await?;
     assert_eq!(held, ["0xtx210", "0xtx205"]);
 
-    // The holder transfers the token to itself at 241, and Project republishes the row citing
-    // that transfer. The publication stays at 240.
+    // The holder transfers the token to itself at 241, and Project publishes 241 with the row
+    // citing that transfer.
     let mut self_transfer = v2_history_event(
         "self-transfer-241",
         Some(&logical_name_id),
@@ -452,7 +443,7 @@ async fn self_transfer_above_the_bound_keeps_the_held_token_holder() -> Result<(
     self_transfer.before_state = json!({ "from": BOUNDED_ADDRESS });
     self_transfer.after_state = json!({ "source_event": "Transfer", "to": BOUNDED_ADDRESS });
     bigname_storage::insert_normalized_event_fixtures(&database.pool, &[self_transfer]).await?;
-    cite_holder_event(&database, &logical_name_id, "self-transfer-241").await?;
+    publish_test_families(&database, 241).await?;
 
     let again = bounded_address_history_hashes(
         &database,
@@ -464,13 +455,10 @@ async fn self_transfer_above_the_bound_keeps_the_held_token_holder() -> Result<(
         again, held,
         "a self-transfer above the bound dropped the name the address held at 240"
     );
+    // The route now reads the publication at 241, which lists the self-transfer first.
     let repeated = v2_history_payload_for_database(&database, &route).await?;
-    assert_eq!(
-        bounded_route_hashes(&repeated),
-        bounded_route_hashes(&first),
-        "{repeated}"
-    );
-    assert_eq!(repeated["page"]["total_count"], json!(2), "{repeated}");
+    assert_eq!(bounded_route_hashes(&repeated), vec!["0xtx241"], "{repeated}");
+    assert_eq!(repeated["page"]["total_count"], json!(3), "{repeated}");
     let (status, continued) =
         bounded_route_status(&database, &format!("{route}&cursor={cursor}")).await?;
     assert_eq!(status, StatusCode::OK, "continuation: {continued}");
@@ -479,8 +467,9 @@ async fn self_transfer_above_the_bound_keeps_the_held_token_holder() -> Result<(
 }
 
 // The same for a relation that begins above the bound with a grant or an ENSv2 reservation of the
-// token to the address, followed by a self-transfer that Project then cites: the grant or the
-// reservation lies between the bound and the self-transfer, so the row stays out of a read at 240.
+// token to the address, followed by a self-transfer that Project's publication at 241 cites: the
+// grant or the reservation lies between the bound and the self-transfer, so the row stays out of
+// a read at 240.
 #[tokio::test]
 async fn self_transfer_after_a_later_grant_or_reservation_admits_no_older_events() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
@@ -490,14 +479,7 @@ async fn self_transfer_after_a_later_grant_or_reservation_admits_no_older_events
         ("granted-then-self.eth", 0xb0a_6b00_u128, "RegistrationGranted"),
         ("reserved-then-self.eth", 0xb0a_6c00_u128, "RegistrationReserved"),
     ] {
-        let (logical_name_id, resource) = seed_bounded_name(
-            &database,
-            name,
-            seed,
-            BOUNDED_ADDRESS,
-            bigname_storage::AddressNameRelation::TokenHolder,
-            205,
-        )
+        let (logical_name_id, resource) = seed_bounded_name(&database, name, seed)
         .await?;
         // Older history on the resource that names no relation of the address.
         let mut older = v2_history_event(
@@ -536,10 +518,9 @@ async fn self_transfer_after_a_later_grant_or_reservation_admits_no_older_events
             &[older, begun, self_transfer],
         )
         .await?;
-        cite_holder_event(&database, &logical_name_id, &format!("{name}-self")).await?;
         expected_absent.push(format!("0x{name}-205"));
     }
-    publish_bounded_membership_at(&database, 240).await?;
+    publish_test_families(&database, 241).await?;
     let hashes = bounded_address_history_hashes(
         &database,
         Some(bigname_storage::AddressNameRelation::TokenHolder),
@@ -553,35 +534,10 @@ async fn self_transfer_after_a_later_grant_or_reservation_admits_no_older_events
     database.cleanup().await
 }
 
-/// Point the address's current row for `logical_name_id` at the event Project cites for it, the
-/// event `event_identity`, as `provenance.normalized_event_id` and `chain_positions.block_number`.
-async fn cite_holder_event(
-    database: &TestDatabase,
-    logical_name_id: &str,
-    event_identity: &str,
-) -> Result<()> {
-    let updated = sqlx::query(
-        "UPDATE bigname_phase.address_names_current anc
-         SET provenance = anc.provenance
-                 || jsonb_build_object('normalized_event_id', event.normalized_event_id),
-             chain_positions = jsonb_set(
-                 anc.chain_positions, '{block_number}', to_jsonb(event.block_number)
-             )
-         FROM normalized_events event
-         WHERE anc.address = $1 AND anc.logical_name_id = $2 AND event.event_identity = $3",
-    )
-    .bind(BOUNDED_ADDRESS)
-    .bind(logical_name_id)
-    .bind(event_identity)
-    .execute(&database.pool)
-    .await?;
-    assert_eq!(updated.rows_affected(), 1, "one current row cites {event_identity}");
-    Ok(())
-}
-
-// The negative side of the rule above: a token-holder row cited above the bound stays out of a
-// read bound at 240 when the address acquired the token after the bound, even when the cited event
-// is a self-transfer, because a transfer to the address lies between the bound and it.
+// The negative side of the rule above: a token-holder row published at 241 and cited above the
+// bound stays out of a read bound at 240 when the address acquired the token after the bound, even
+// when the cited event is a self-transfer, because a transfer to the address lies between the
+// bound and it.
 #[tokio::test]
 async fn self_transfer_after_a_later_acquisition_admits_no_older_events() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
@@ -591,14 +547,7 @@ async fn self_transfer_after_a_later_acquisition_admits_no_older_events() -> Res
         ("acquired-then-self.eth", 0xb0a_6900_u128, "transfer"),
         ("acquired-by-transfer.eth", 0xb0a_6a00_u128, "cited"),
     ] {
-        let (logical_name_id, resource) = seed_bounded_name(
-            &database,
-            name,
-            seed,
-            BOUNDED_ADDRESS,
-            bigname_storage::AddressNameRelation::TokenHolder,
-            205,
-        )
+        let (logical_name_id, resource) = seed_bounded_name(&database, name, seed)
         .await?;
         // The name's history at the bound names another holder.
         let mut grant = v2_history_event(
@@ -620,7 +569,7 @@ async fn self_transfer_after_a_later_acquisition_admits_no_older_events() -> Res
         acquired.before_state = json!({ "from": LOST_OTHER });
         acquired.after_state = json!({ "source_event": "Transfer", "to": BOUNDED_ADDRESS });
         let mut events = vec![grant, acquired];
-        let cited = if acquired_by == "transfer" {
+        if acquired_by == "transfer" {
             let mut self_transfer = v2_history_event(
                 &format!("{name}-self"),
                 Some(&logical_name_id),
@@ -633,15 +582,11 @@ async fn self_transfer_after_a_later_acquisition_admits_no_older_events() -> Res
             self_transfer.after_state =
                 json!({ "source_event": "Transfer", "to": BOUNDED_ADDRESS });
             events.push(self_transfer);
-            format!("{name}-self")
-        } else {
-            format!("{name}-acquired")
-        };
+        }
         bigname_storage::insert_normalized_event_fixtures(&database.pool, &events).await?;
-        cite_holder_event(&database, &logical_name_id, &cited).await?;
         expected_absent.push(format!("0x{name}-205"));
     }
-    publish_bounded_membership_at(&database, 240).await?;
+    publish_test_families(&database, 241).await?;
     let hashes = bounded_address_history_hashes(
         &database,
         Some(bigname_storage::AddressNameRelation::TokenHolder),

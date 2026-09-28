@@ -117,14 +117,9 @@ async fn v2_get_resolver_returns_overview_with_nested_bound_names() -> Result<()
         bound_names["data"][0]["namehash"],
         json!(bigname_lookup::ens_namehash_hex("alpha.eth")?)
     );
-    assert_eq!(
-        bound_names["data"][0]["owner"],
-        json!("0x00000000000000000000000000000000000000a1")
-    );
-    assert_eq!(
-        bound_names["data"][0]["registrant"],
-        json!("0x00000000000000000000000000000000000000a2")
-    );
+    let alpha = &v2_address_name_specs()[0];
+    assert_eq!(bound_names["data"][0]["owner"], json!(alpha.owner));
+    assert_eq!(bound_names["data"][0]["registrant"], json!(alpha.registrant));
     assert_eq!(
         bound_names["data"][0]["registered_at"],
         json!("2024-01-02T00:00:00+00:00")
@@ -434,18 +429,38 @@ async fn v2_get_resolver_lists_a_root_registry_pointer_without_projected_authori
 async fn v2_get_resolver_omits_ownerless_reservations_from_bound_names() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_alice_state_inputs(&database, AliceInputState::Reserved).await?;
-    append_alice_name_input(&database, "ResolverChanged", "ens_v2_registry_l1",
-        json!({"node":bigname_lookup::ens_namehash_hex("alice.eth")?,"resolver":V2_RESOLVER_ADDRESS})).await?;
+    // The reserved label's resolver is set on its reservation token, not on the old lease.
+    let mut pointer = history_event(
+        "alice-reserved-resolver",
+        Some(&bigname_storage::logical_name_id_for_name("ens", "alice.eth")),
+        None,
+        Some("ethereum-mainnet"),
+        Some(21_000_003),
+        Some("0xbinding"),
+        Some("0xalice-current"),
+        Some(10_000),
+        CanonicalityState::Canonical,
+    );
+    pointer.event_kind = "ResolverChanged".into();
+    pointer.source_family = "ens_v2_registry_l1".into();
+    pointer.before_state = json!({});
+    pointer.after_state = json!({"source_event":"ResolverUpdated", "token_id":"4294967297",
+        "node":bigname_lookup::ens_namehash_hex("alice.eth")?, "resolver":V2_RESOLVER_ADDRESS});
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[pointer]).await?;
     seed_v2_resolver_overview(&database, true).await?;
+    // Publish at the reservation's block, above the overview's own block.
+    database.seed_default_ens_snapshot_selector_position().await?;
+    republish_mainnet_fixture(&database).await?;
     let name = bigname_storage::families::name::load_family_name(
         &database.pool,
         &bigname_storage::logical_name_id_for_name("ens", "alice.eth"),
     )
     .await?
     .context("reserved name")?;
+    // The reservation closed the registration's binding, so no authority is projected for it.
     assert_eq!(
-        name.declared_summary["registration"]["status"],
-        json!("reserved")
+        name.declared_summary["coverage"]["unsupported_reason"],
+        json!("current_authority_not_projected")
     );
     assert_eq!(name.declared_summary["resolver"]["address"], Value::Null);
     let body = v2_resolver_payload_for_database(

@@ -1,22 +1,17 @@
 #[tokio::test]
 async fn pre_enrichment_registrar_resolver_keeps_the_registration_handle() -> Result<()> {
-    const ADDRESS: &str = "0x0000000000000000000000000000000000007123";
     let database = TestDatabase::new_migrated().await?;
     let logical_name_id = "ens:pre-enrichment-resolver.eth";
     let registrar_resource_id = Uuid::from_u128(0x7123);
     let surface_binding_id = Uuid::from_u128(0x9123);
-    seed_identity_name(
+    seed_registration_history_name(
         &database,
         logical_name_id,
         "pre-enrichment-resolver.eth",
-        "pre-enrichment-resolver.eth",
-        "node:pre-enrichment-resolver.eth",
+        80,
         registrar_resource_id,
         Uuid::from_u128(0x8123),
         surface_binding_id,
-        ADDRESS,
-        bigname_storage::AddressNameRelation::Registrant,
-        80,
     )
     .await?;
     seed_v2_history_blocks(&database, 121..=122).await?;
@@ -44,6 +39,7 @@ async fn pre_enrichment_registrar_resolver_keeps_the_registration_handle() -> Re
         "resolver": "0x00000000000000000000000000000000000000aa"
     });
     bigname_storage::insert_normalized_event_fixtures(&database.pool, &[resolver]).await?;
+    publish_registration_history_fixture(&database).await?;
 
     let payload = v2_history_payload_for_database(
         &database,
@@ -51,7 +47,11 @@ async fn pre_enrichment_registrar_resolver_keeps_the_registration_handle() -> Re
     )
     .await?;
     let rows = payload["data"].as_array().expect("registrar history rows");
-    assert_eq!(rows.len(), 1, "pre-enrichment resolver was omitted: {rows:?}");
+    assert_eq!(
+        rows.len(),
+        1,
+        "pre-enrichment resolver was omitted: {rows:?}"
+    );
     assert_eq!(rows[0]["type"], json!("resolver"));
     assert_eq!(
         rows[0]["registration_id"],
@@ -77,18 +77,14 @@ async fn assert_registry_binding_does_not_witness_registration(released: bool) -
     let logical_name_id = "ens:registry-witness.eth";
     let registry = Uuid::from_u128(0x7132);
     let registrar = Uuid::from_u128(0x7133);
-    seed_identity_name(
+    seed_registration_history_name(
         &database,
         logical_name_id,
         name,
-        name,
-        "node:registry-witness.eth",
+        80,
         registry,
         Uuid::from_u128(0x8132),
         Uuid::from_u128(0x9132),
-        "0x0000000000000000000000000000000000007132",
-        bigname_storage::AddressNameRelation::EffectiveController,
-        80,
     )
     .await?;
     seed_v2_history_blocks(&database, 120..=125).await?;
@@ -105,29 +101,13 @@ async fn assert_registry_binding_does_not_witness_registration(released: bool) -
     })
     .execute(&database.pool)
     .await?;
+
     sqlx::query(
-        "UPDATE bigname_phase.name_current
-         SET serving_resource_id = $1, resource_id = NULL, token_lineage_id = NULL,
-             surface_binding_id = NULL, binding_kind = NULL,
-             declared_summary = jsonb_build_object(
-                 'registration', jsonb_build_object('status', 'unregistered'),
-                 'control', jsonb_build_object('status', $2::text)
-             )
-         WHERE resource_id = $1",
+        "UPDATE bigname_phase.resources SET token_lineage_id = NULL WHERE resource_id = $1",
     )
     .bind(registry)
-    .bind(if released { "unregistered" } else { "active" })
     .execute(&database.pool)
     .await?;
-    for query in [
-        "UPDATE bigname_phase.address_names_current SET token_lineage_id = NULL WHERE resource_id = $1",
-        "UPDATE bigname_phase.resources SET token_lineage_id = NULL WHERE resource_id = $1",
-    ] {
-        sqlx::query(query)
-            .bind(registry)
-            .execute(&database.pool)
-            .await?;
-    }
     let mut binding = v2_history_event(
         "registry-witness-binding",
         Some(logical_name_id),
@@ -197,6 +177,7 @@ async fn assert_registry_binding_does_not_witness_registration(released: bool) -
         }
     }
     bigname_storage::insert_normalized_event_fixtures(&database.pool, &events).await?;
+    publish_registration_history_fixture(&database).await?;
     let filtered = v2_history_payload_for_database(
         &database,
         &format!("/v1/events?registration_id={registry}&page_size=20"),
@@ -294,7 +275,6 @@ async fn registration_history_keeps_an_earlier_successor_lease_under_a_registry_
 -> Result<()> {
     const NAME: &str = "registry-successors.eth";
     const SEED_LOGICAL_NAME_ID: &str = "ens:registry-successors.eth";
-    const HOLDER: &str = "0x0000000000000000000000000000000000007170";
     let database = TestDatabase::new_migrated().await?;
     let registry = Uuid::from_u128(0x7170);
     let earlier_lease = Uuid::from_u128(0x7171);
@@ -303,18 +283,14 @@ async fn registration_history_keeps_an_earlier_successor_lease_under_a_registry_
     let logical_name_id = bigname_storage::logical_name_id_for_name("ens", NAME);
 
     // The name is bound to the registry-only resource throughout.
-    seed_identity_name(
+    seed_registration_history_name(
         &database,
         SEED_LOGICAL_NAME_ID,
         NAME,
-        NAME,
-        "node:registry-successors.eth",
+        80,
         registry,
         Uuid::from_u128(0x8170),
         Uuid::from_u128(0x9170),
-        HOLDER,
-        bigname_storage::AddressNameRelation::EffectiveController,
-        80,
     )
     .await?;
     upsert_test_resources(
@@ -344,18 +320,6 @@ async fn registration_history_keeps_an_earlier_successor_lease_under_a_registry_
         "0xhistory125",
         &crate::v2::format_timestamp(timestamp(1_700_000_125)),
     )
-    .await?;
-    // Project selected the latest successor lease as the name's registration.
-    sqlx::query(
-        "UPDATE bigname_phase.name_current
-         SET declared_summary = jsonb_set(
-             declared_summary, '{registration,resource_id}', to_jsonb($2::text)
-         )
-         WHERE resource_id = $1",
-    )
-    .bind(registry)
-    .bind(current_lease.to_string())
-    .execute(&database.pool)
     .await?;
 
     let lease_event = |identity: &str, resource: Uuid, kind: &str, block_number: i64| {
@@ -399,6 +363,7 @@ async fn registration_history_keeps_an_earlier_successor_lease_under_a_registry_
         ],
     )
     .await?;
+    publish_registration_history_fixture(&database).await?;
 
     let registration = v2_history_payload_for_database(
         &database,
@@ -490,6 +455,7 @@ async fn registration_history_keeps_an_earlier_successor_lease_under_a_registry_
         registry_events.extend([resolver, record]);
     }
     bigname_storage::insert_normalized_event_fixtures(&database.pool, &registry_events).await?;
+    publish_registration_history_fixture(&database).await?;
     let name_history = v2_history_payload_for_database(
         &database,
         &format!("/v1/names/{NAME}/history?scope=both&page_size=20"),
@@ -587,6 +553,7 @@ async fn registration_history_keeps_an_earlier_successor_lease_under_a_registry_
         &[candidate_grant, candidate_renewal],
     )
     .await?;
+    publish_registration_history_fixture(&database).await?;
     sqlx::query("UPDATE bigname_phase.normalized_events SET consumer_visibility = 'candidate', migration_correlation_ids = ARRAY['history-candidate-grant'] WHERE event_identity = 'successor-candidate-grant'")
         .execute(&database.pool).await?;
     let before_activation = v2_history_payload_for_database(
@@ -638,18 +605,14 @@ async fn nameless_registry_events_keep_the_lease_before_surface_materialization(
     let registry = Uuid::from_u128(0x7190);
     let lease = Uuid::from_u128(0x7191);
     let successor = Uuid::from_u128(0x7192);
-    seed_identity_name(
+    seed_registration_history_name(
         &database,
         "ens:nameless-registry-permissions.eth",
         NAME,
-        NAME,
-        &node,
+        80,
         registry,
         Uuid::from_u128(0x8190),
         Uuid::from_u128(0x9190),
-        OWNER,
-        bigname_storage::AddressNameRelation::EffectiveController,
-        80,
     )
     .await?;
     let blocks = (120..=127)
@@ -684,18 +647,10 @@ async fn nameless_registry_events_keep_the_lease_before_surface_materialization(
     // were emitted. It must not rewrite the rows' missing logical_name_id or node fields.
     sqlx::query("UPDATE bigname_phase.surface_bindings SET block_number = 126, block_hash = '0xhistory126', active_from = to_timestamp(1700000126) WHERE resource_id = $1")
         .bind(registry).execute(&database.pool).await?;
-    sqlx::query("UPDATE bigname_phase.name_current SET declared_summary = jsonb_set(declared_summary, '{registration,resource_id}', to_jsonb($2::text)) WHERE resource_id = $1")
-        .bind(registry).bind(successor.to_string()).execute(&database.pool).await?;
+
     // Registry control resources have no token lineage. None of the resolver rows below
     // has a binding at its event position; the later binding supplies only reachability.
-    sqlx::query("UPDATE bigname_phase.address_names_current SET token_lineage_id = NULL WHERE resource_id = $1")
-        .bind(registry).execute(&database.pool).await?;
-    sqlx::query(
-        "UPDATE bigname_phase.name_current SET token_lineage_id = NULL WHERE resource_id = $1",
-    )
-    .bind(registry)
-    .execute(&database.pool)
-    .await?;
+
     sqlx::query(
         "UPDATE bigname_phase.resources SET token_lineage_id = NULL WHERE resource_id = $1",
     )
@@ -790,6 +745,7 @@ async fn nameless_registry_events_keep_the_lease_before_surface_materialization(
         events.push(permission);
     }
     bigname_storage::insert_normalized_event_fixtures(&database.pool, &events).await?;
+    publish_registration_history_fixture(&database).await?;
     for route in [
         format!("/v1/events?name={NAME}&page_size=20"),
         format!("/v1/events?registration_id={lease}&page_size=20"),
@@ -920,6 +876,7 @@ async fn nameless_registry_events_keep_the_lease_before_surface_materialization(
         "resolver": "0x0000000000000000000000000000000000000abd"});
     bigname_storage::insert_normalized_event_fixtures(&database.pool, &[ownerless, read_resolver])
         .await?;
+    publish_registration_history_fixture(&database).await?;
     let all =
         v2_history_payload_for_database(&database, &format!("/v1/events?name={NAME}&page_size=20"))
             .await?;
@@ -940,25 +897,22 @@ async fn nameless_registry_events_keep_the_lease_before_surface_materialization(
 }
 
 #[tokio::test]
-async fn noncanonical_history_of_a_name_wrapped_at_registration_keeps_the_registrar_lease_handle() -> Result<()> {
+async fn noncanonical_history_of_a_name_wrapped_at_registration_keeps_the_registrar_lease_handle()
+-> Result<()> {
     const NAME: &str = "noncanonical-born-wrapped.eth";
     let database = TestDatabase::new_migrated().await?;
     let logical_name_id = bigname_storage::logical_name_id_for_name("ens", NAME);
     let namehash = bigname_lookup::ens_namehash_hex(NAME)?;
     let wrapper = Uuid::from_u128(0x7160);
     let registrar = Uuid::from_u128(0x7161);
-    seed_identity_name(
+    seed_registration_history_name(
         &database,
         "ens:noncanonical-born-wrapped.eth",
         NAME,
-        NAME,
-        &namehash,
+        80,
         wrapper,
         Uuid::from_u128(0x8160),
         Uuid::from_u128(0x9160),
-        "0x0000000000000000000000000000000000007160",
-        bigname_storage::AddressNameRelation::Registrant,
-        80,
     )
     .await?;
     upsert_test_resources(
@@ -1046,6 +1000,7 @@ async fn noncanonical_history_of_a_name_wrapped_at_registration_keeps_the_regist
         event.canonicality_state = CanonicalityState::Orphaned;
     }
     bigname_storage::insert_normalized_event_fixtures(&database.pool, &events).await?;
+    publish_registration_history_fixture(&database).await?;
     sqlx::query(
         "UPDATE bigname_phase.chain_lineage SET canonicality_state = 'orphaned'
          WHERE chain_id = 'ethereum-mainnet' AND block_number BETWEEN 130 AND 133",
@@ -1117,25 +1072,21 @@ async fn noncanonical_history_of_a_name_wrapped_at_registration_keeps_the_regist
 #[tokio::test]
 async fn name_wrapped_at_registration_uses_the_registrar_lease_handle() -> Result<()> {
     const NAME: &str = "born-wrapped-history.eth";
-    const LOGICAL: &str = "ens:born-wrapped-history.eth";
+    let logical = bigname_storage::logical_name_id_for_name("ens", NAME);
     let database = TestDatabase::new_migrated().await?;
     let wrapper = Uuid::from_u128(0x7140);
     let registrar = Uuid::from_u128(0x7141);
     let rewrapper = Uuid::from_u128(0x7142);
     let orphan_wrapper = Uuid::from_u128(0x7143);
     let namehash = bigname_lookup::ens_namehash_hex(NAME)?;
-    seed_identity_name(
+    seed_registration_history_name(
         &database,
-        LOGICAL,
+        &logical,
         NAME,
-        NAME,
-        &namehash,
+        80,
         wrapper,
         Uuid::from_u128(0x8140),
         Uuid::from_u128(0x9140),
-        "0x0000000000000000000000000000000000007140",
-        bigname_storage::AddressNameRelation::Registrant,
-        80,
     )
     .await?;
     upsert_test_resources(
@@ -1147,41 +1098,24 @@ async fn name_wrapped_at_registration_uses_the_registrar_lease_handle() -> Resul
         ],
     )
     .await?;
-    // Project serves the registrar lease as the registration resource of a wrapped name.
-    sqlx::query(
-        "UPDATE bigname_phase.name_current
-         SET declared_summary = jsonb_set(
-             declared_summary, '{registration,resource_id}', to_jsonb($2::text), true)
-         WHERE raw_name = $1",
-    )
-    .bind(NAME)
-    .bind(registrar)
-    .execute(&database.pool)
-    .await?;
-    // Read the detail before the history blocks move the chain head past the seeded row.
-    let detail =
-        v2_history_payload_for_database(&database, &format!("/v1/names/{NAME}")).await?;
-    assert_eq!(
-        detail["data"]["registration_id"],
-        json!(registrar.to_string()),
-        "a name wrapped at registration must serve its registrar lease as registration_id"
-    );
-    // Block 137 keeps the chain head off block 136, which the last step orphans.
+
     seed_v2_history_blocks(&database, 130..=137).await?;
     // Bind the fixture at its normalized history time, rather than the seed's default date.
     sqlx::query(
         "UPDATE bigname_phase.surface_bindings
-         SET active_from = to_timestamp(1700000130) WHERE resource_id = $1",
+         SET active_from = to_timestamp(1700000130), block_number = 130, block_hash = '0xhistory130', provenance = '{\"transaction_index\":0,\"log_index\":0}'::jsonb WHERE resource_id = $1",
     )
     .bind(wrapper)
     .execute(&database.pool)
     .await?;
     let wrapper_event = |identity: &str, resource: Uuid, kind: &str, block: i64| {
-        let mut event = v2_history_event(identity, Some(LOGICAL), Some(resource), kind, block);
+        let mut event = v2_history_event(identity, Some(logical.as_str()), Some(resource), kind, block);
         event.source_family = "ens_v1_wrapper_l1".to_owned();
         if kind == "SurfaceBound" {
             event.after_state = json!({
                 "source_event": "NameWrapped",
+            "authority_kind":"wrapper", "owner":"0x00000000000000000000000000000000000000bb",
+            "expiry":1950000000_i64, "fuses":0,
                 "node": namehash,
                 "wrapped_registrar_resource_id": registrar,
             });
@@ -1213,7 +1147,7 @@ async fn name_wrapped_at_registration_uses_the_registrar_lease_handle() -> Resul
     });
     let unwrapped_transfer = v2_history_event(
         "born-wrap-unwrapped-transfer",
-        Some(LOGICAL),
+        Some(logical.as_str()),
         Some(registrar),
         "TokenControlTransferred",
         132,
@@ -1224,17 +1158,55 @@ async fn name_wrapped_at_registration_uses_the_registrar_lease_handle() -> Resul
             grant,
             setup,
             wrapper_event("born-wrap-binding", wrapper, "SurfaceBound", 130),
-            wrapper_event("born-wrap-transfer", wrapper, "TokenControlTransferred", 131),
+            registration_history_wrapper_epoch(&wrapper_event(
+                "born-wrap-binding",
+                wrapper,
+                "SurfaceBound",
+                130,
+            )),
+            registration_history_wrapper_scope(&wrapper_event(
+                "born-wrap-binding",
+                wrapper,
+                "SurfaceBound",
+                130,
+            )),
+            wrapper_event(
+                "born-wrap-transfer",
+                wrapper,
+                "TokenControlTransferred",
+                131,
+            ),
             wrapper_event("born-wrap-unbound", wrapper, "SurfaceUnbound", 132),
             unwrapped_transfer,
         ],
     )
     .await?;
+    publish_registration_history_fixture(&database).await?;
+    // Read the profile produced from the same retained lease and wrapper events.
+    let detail = v2_history_payload_for_database(&database, &format!("/v1/names/{NAME}")).await?;
+    assert_eq!(
+        detail["data"]["registration_id"],
+        json!(registrar.to_string()),
+        "a name wrapped at registration must serve its registrar lease as registration_id: {detail}"
+    );
+    // Block 137 keeps the chain head off block 136, which the last step orphans.
+
     let lease_route = format!("/v1/events?registration_id={registrar}&page_size=20");
     let unwrapped = v2_history_payload_for_database(&database, &lease_route).await?;
     assert_eq!(
-        history_types(unwrapped["data"].as_array().expect("unwrapped history data")),
-        vec!["transfer", "transfer", "authority", "registration"]
+        history_types(
+            unwrapped["data"]
+                .as_array()
+                .expect("unwrapped history data")
+        ),
+        vec![
+            "transfer",
+            "transfer",
+            "authority",
+            "registration",
+            "permission",
+            "authority"
+        ]
     );
 
     let permission = v2_history_event(
@@ -1246,7 +1218,7 @@ async fn name_wrapped_at_registration_uses_the_registrar_lease_handle() -> Resul
     );
     let mut record = v2_history_event(
         "born-wrap-resource-less-record",
-        Some(LOGICAL),
+        Some(logical.as_str()),
         None,
         "RecordChanged",
         135,
@@ -1256,12 +1228,18 @@ async fn name_wrapped_at_registration_uses_the_registrar_lease_handle() -> Resul
         &database.pool,
         &[
             wrapper_event("born-wrap-rewrap-binding", rewrapper, "SurfaceBound", 133),
-            wrapper_event("born-wrap-rewrap-transfer", rewrapper, "TokenControlTransferred", 134),
+            wrapper_event(
+                "born-wrap-rewrap-transfer",
+                rewrapper,
+                "TokenControlTransferred",
+                134,
+            ),
             permission,
             record,
         ],
     )
     .await?;
+    publish_registration_history_fixture(&database).await?;
     let history = v2_history_payload_for_database(
         &database,
         &format!("/v1/names/{NAME}/history?scope=registration&page_size=20"),
@@ -1278,6 +1256,8 @@ async fn name_wrapped_at_registration_uses_the_registrar_lease_handle() -> Resul
         "transfer",
         "authority",
         "registration",
+        "permission",
+        "authority",
     ];
     assert_eq!(
         history_types(direct_rows),
@@ -1317,7 +1297,7 @@ async fn name_wrapped_at_registration_uses_the_registrar_lease_handle() -> Resul
     let plan = bigname_storage::explain_registration_history_filter_for_test(
         &database.pool,
         registrar,
-        LOGICAL,
+        &logical,
         "ethereum-mainnet",
         "ens",
         &namehash,
@@ -1337,10 +1317,16 @@ async fn name_wrapped_at_registration_uses_the_registrar_lease_handle() -> Resul
         &database.pool,
         &[
             orphan_grant,
-            wrapper_event("born-wrap-orphan-binding", orphan_wrapper, "SurfaceBound", 136),
+            wrapper_event(
+                "born-wrap-orphan-binding",
+                orphan_wrapper,
+                "SurfaceBound",
+                136,
+            ),
         ],
     )
     .await?;
+    publish_registration_history_fixture(&database).await?;
     sqlx::query(
         "UPDATE chain_lineage SET canonicality_state = 'orphaned'
          WHERE chain_id = 'ethereum-mainnet' AND block_hash = '0xhistory136'",
@@ -1348,7 +1334,9 @@ async fn name_wrapped_at_registration_uses_the_registrar_lease_handle() -> Resul
     .execute(&database.pool)
     .await?;
     let canonical = v2_history_payload_for_database(&database, &lease_route).await?;
-    let canonical_rows = canonical["data"].as_array().expect("canonical history data");
+    let canonical_rows = canonical["data"]
+        .as_array()
+        .expect("canonical history data");
     assert_eq!(
         history_types(canonical_rows),
         expected_types,
@@ -1368,7 +1356,6 @@ async fn name_wrapped_at_registration_uses_the_registrar_lease_handle() -> Resul
 async fn later_wrapped_name_keeps_one_followable_registrar_lifecycle_handle() -> Result<()> {
     const NAME: &str = "later-wrapped-history.eth";
     const SEED_LOGICAL_NAME_ID: &str = "ens:later-wrapped-history.eth";
-    const HOLDER: &str = "0x0000000000000000000000000000000000007150";
     let database = TestDatabase::new_migrated().await?;
     let wrapper_resource_id = Uuid::from_u128(0x7150);
     let registrar_resource_id = Uuid::from_u128(0x7151);
@@ -1376,29 +1363,20 @@ async fn later_wrapped_name_keeps_one_followable_registrar_lifecycle_handle() ->
     let namehash = bigname_lookup::ens_namehash_hex(NAME)?;
     let logical_name_id = bigname_storage::logical_name_id_for_name("ens", NAME);
 
-    seed_identity_name(
+    seed_registration_history_name(
         &database,
         SEED_LOGICAL_NAME_ID,
         NAME,
-        NAME,
-        "node:later-wrapped-history.eth",
+        80,
         wrapper_resource_id,
         Uuid::from_u128(0x8150),
         Uuid::from_u128(0x9150),
-        HOLDER,
-        bigname_storage::AddressNameRelation::Registrant,
-        80,
     )
     .await?;
     upsert_test_resources(
         &database.pool,
         &[
-            address_name_resource(
-                registrar_resource_id,
-                None,
-                "0xregistrar-resource",
-                79,
-            ),
+            address_name_resource(registrar_resource_id, None, "0xregistrar-resource", 79),
             address_name_resource(
                 older_registrar_resource_id,
                 None,
@@ -1408,52 +1386,13 @@ async fn later_wrapped_name_keeps_one_followable_registrar_lifecycle_handle() ->
         ],
     )
     .await?;
-    sqlx::query(
-        "UPDATE bigname_phase.name_current
-         SET declared_summary = jsonb_set(
-                 jsonb_set(
-                     declared_summary,
-                     '{registration,authority_kind}',
-                     '\"wrapper\"'::jsonb,
-                     true
-                 ),
-                 '{registration,resource_id}',
-                 to_jsonb($2::text),
-                 true
-             )
-         WHERE logical_name_id = $1",
-    )
-    .bind(&logical_name_id)
-    .bind(registrar_resource_id)
-    .execute(&database.pool)
-    .await?;
-    let projected_registration_id: Option<String> = sqlx::query_scalar(
-        "SELECT declared_summary #>> '{registration,resource_id}'
-         FROM bigname_phase.name_current
-         WHERE logical_name_id = $1",
-    )
-    .bind(&logical_name_id)
-    .fetch_one(&database.pool)
-    .await?;
-    assert_eq!(projected_registration_id, Some(registrar_resource_id.to_string()));
-    // Read the detail before the history blocks move the chain head past the seeded row.
-    let exact_name = v2_history_payload_for_database(
-        &database,
-        &format!("/v1/names/{NAME}"),
-    )
-    .await?;
-    assert_eq!(
-        exact_name["data"]["registration_id"],
-        json!(registrar_resource_id.to_string()),
-        "the exact-name response returned the wrapper resource instead of the registrar lifecycle handle"
-    );
 
     seed_v2_history_blocks(&database, 120..=125).await?;
 
     // Bind the fixture at its normalized history time, rather than the seed's default date.
     sqlx::query(
         "UPDATE bigname_phase.surface_bindings
-         SET active_from = to_timestamp(1700000121) WHERE resource_id = $1",
+         SET active_from = to_timestamp(1700000122), block_number = 122, block_hash = '0xhistory122', provenance = '{\"transaction_index\":0,\"log_index\":0}'::jsonb WHERE resource_id = $1",
     )
     .bind(wrapper_resource_id)
     .execute(&database.pool)
@@ -1484,6 +1423,8 @@ async fn later_wrapped_name_keeps_one_followable_registrar_lifecycle_handle() ->
     wrapper_binding.source_family = "ens_v1_wrapper_l1".to_owned();
     wrapper_binding.after_state = json!({
         "source_event": "NameWrapped",
+            "authority_kind":"wrapper", "owner":"0x00000000000000000000000000000000000000bb",
+            "expiry":1950000000_i64, "fuses":0,
         "node": namehash,
         "wrapped_registrar_resource_id": registrar_resource_id,
     });
@@ -1525,6 +1466,8 @@ async fn later_wrapped_name_keeps_one_followable_registrar_lifecycle_handle() ->
         &[
             older_registration,
             registration,
+            registration_history_wrapper_epoch(&wrapper_binding),
+            registration_history_wrapper_scope(&wrapper_binding),
             wrapper_binding,
             wrapper_transfer,
             wrapped_controller_renewal,
@@ -1533,9 +1476,17 @@ async fn later_wrapped_name_keeps_one_followable_registrar_lifecycle_handle() ->
         ],
     )
     .await?;
+    publish_registration_history_fixture(&database).await?;
+    // Read the profile produced from the same retained lease and wrapper events.
+    let exact_name =
+        v2_history_payload_for_database(&database, &format!("/v1/names/{NAME}")).await?;
+    assert_eq!(
+        exact_name["data"]["registration_id"],
+        json!(registrar_resource_id.to_string()),
+        "the exact-name response returned the wrapper resource instead of the registrar lifecycle handle: {exact_name}"
+    );
 
-    let name_history_route =
-        format!("/v1/names/{NAME}/history?scope=registration&page_size=20");
+    let name_history_route = format!("/v1/names/{NAME}/history?scope=registration&page_size=20");
     {
         let payload = v2_history_payload_for_database(&database, &name_history_route).await?;
         let rows = payload["data"].as_array().expect("history data");
@@ -1580,21 +1531,33 @@ async fn later_wrapped_name_keeps_one_followable_registrar_lifecycle_handle() ->
         row["type"] == json!("registration")
             && row["registration_id"] == json!(registrar_resource_id.to_string())
     }));
-    assert!(registration_rows.iter().any(|row| {
-        row["type"] == json!("transfer")
-            && row["registration_id"] == json!(registrar_resource_id.to_string())
-    }), "the registrar lifecycle filter omitted the later wrapper holder change: {registration_rows:?}");
-    assert!(registration_rows.iter().any(|row| {
-        row["type"] == json!("expiry")
-            && row["registration_id"] == json!(registrar_resource_id.to_string())
-    }), "the registrar lifecycle filter omitted the wrapped-controller renewal: {registration_rows:?}");
-    assert!(registration_rows.iter().any(|row| {
-        row["type"] == json!("resolver")
-            && row["registration_id"] == json!(registrar_resource_id.to_string())
-    }), "the registrar lifecycle filter omitted the wrapper-active registry resolver: {registration_rows:?}");
-    assert!(registration_rows.iter().any(|row| {
-        row["type"] == json!("record") && row["registration_id"] == Value::Null
-    }), "the registrar lifecycle filter omitted resource-less exact-name history: {registration_rows:?}");
+    assert!(
+        registration_rows.iter().any(|row| {
+            row["type"] == json!("transfer")
+                && row["registration_id"] == json!(registrar_resource_id.to_string())
+        }),
+        "the registrar lifecycle filter omitted the later wrapper holder change: {registration_rows:?}"
+    );
+    assert!(
+        registration_rows.iter().any(|row| {
+            row["type"] == json!("expiry")
+                && row["registration_id"] == json!(registrar_resource_id.to_string())
+        }),
+        "the registrar lifecycle filter omitted the wrapped-controller renewal: {registration_rows:?}"
+    );
+    assert!(
+        registration_rows.iter().any(|row| {
+            row["type"] == json!("resolver")
+                && row["registration_id"] == json!(registrar_resource_id.to_string())
+        }),
+        "the registrar lifecycle filter omitted the wrapper-active registry resolver: {registration_rows:?}"
+    );
+    assert!(
+        registration_rows
+            .iter()
+            .any(|row| { row["type"] == json!("record") && row["registration_id"] == Value::Null }),
+        "the registrar lifecycle filter omitted resource-less exact-name history: {registration_rows:?}"
+    );
     let plan = bigname_storage::explain_registration_history_filter_for_test(
         &database.pool,
         registrar_resource_id,
@@ -1632,9 +1595,7 @@ async fn later_wrapped_name_keeps_one_followable_registrar_lifecycle_handle() ->
     assert_registration_history_plan_is_page_keyed(&plan);
     let older_registration_payload = v2_history_payload_for_database(
         &database,
-        &format!(
-            "/v1/events?registration_id={older_registrar_resource_id}&page_size=20"
-        ),
+        &format!("/v1/events?registration_id={older_registrar_resource_id}&page_size=20"),
     )
     .await?;
     let older_registration_rows = older_registration_payload["data"]
@@ -1646,11 +1607,9 @@ async fn later_wrapped_name_keeps_one_followable_registrar_lifecycle_handle() ->
         json!(older_registrar_resource_id.to_string())
     );
 
-    let by_name = v2_history_payload_for_database(
-        &database,
-        &format!("/v1/events?name={NAME}&page_size=20"),
-    )
-    .await?;
+    let by_name =
+        v2_history_payload_for_database(&database, &format!("/v1/events?name={NAME}&page_size=20"))
+            .await?;
     let by_name_rows = by_name["data"].as_array().expect("history data");
     assert!(by_name_rows.iter().any(|row| {
         row["type"] == json!("registration")
@@ -1682,7 +1641,6 @@ async fn later_wrapped_name_keeps_one_followable_registrar_lifecycle_handle() ->
 async fn name_history_keeps_a_superseded_controller_free_wrapped_registration() -> Result<()> {
     const NAME: &str = "superseded-later-wrap.eth";
     const SEED_LOGICAL_NAME_ID: &str = "ens:superseded-later-wrap.eth";
-    const HOLDER: &str = "0x0000000000000000000000000000000000007160";
     let database = TestDatabase::new_migrated().await?;
     let logical_name_id = bigname_storage::logical_name_id_for_name("ens", NAME);
     let namehash = bigname_lookup::ens_namehash_hex(NAME)?;
@@ -1690,18 +1648,14 @@ async fn name_history_keeps_a_superseded_controller_free_wrapped_registration() 
     let prior_registrar_resource_id = Uuid::from_u128(0x7161);
     let current_registrar_resource_id = Uuid::from_u128(0x7162);
 
-    seed_identity_name(
+    seed_registration_history_name(
         &database,
         SEED_LOGICAL_NAME_ID,
         NAME,
-        NAME,
-        &namehash,
+        84,
         current_registrar_resource_id,
         Uuid::from_u128(0x8162),
         Uuid::from_u128(0x9162),
-        HOLDER,
-        bigname_storage::AddressNameRelation::Registrant,
-        84,
     )
     .await?;
     upsert_test_resources(
@@ -1722,31 +1676,20 @@ async fn name_history_keeps_a_superseded_controller_free_wrapped_registration() 
         ],
     )
     .await?;
+    seed_v2_history_blocks(&database, 121..=124).await?;
+    sqlx::query("UPDATE surface_bindings SET active_from = to_timestamp(1700000124), block_number = 124, block_hash = '0xhistory124' WHERE resource_id = $1")
+        .bind(current_registrar_resource_id).execute(&database.pool).await?;
     let mut prior_wrapper_binding = address_name_surface_binding(
         Uuid::from_u128(0x9160),
         SEED_LOGICAL_NAME_ID,
         prior_wrapper_resource_id,
-        "0xprior-wrapper-binding",
-        80,
-        1_717_171_600,
+        "0xhistory122",
+        122,
+        1_700_000_122,
     );
-    prior_wrapper_binding.active_to = Some(timestamp(1_717_171_699));
+    prior_wrapper_binding.active_to = Some(timestamp(1_700_000_123));
+    prior_wrapper_binding.provenance = json!({"transaction_index":0,"log_index":0});
     upsert_test_surface_bindings(&database.pool, &[prior_wrapper_binding]).await?;
-    sqlx::query(
-        "UPDATE bigname_phase.name_current
-         SET declared_summary = jsonb_set(
-             declared_summary,
-             '{registration,resource_id}',
-             to_jsonb($2::text),
-             true
-         )
-         WHERE logical_name_id = $1",
-    )
-    .bind(&logical_name_id)
-    .bind(current_registrar_resource_id)
-    .execute(&database.pool)
-    .await?;
-    seed_v2_history_blocks(&database, 121..=124).await?;
 
     let prior_registration = v2_history_event(
         "superseded-later-wrap-registration",
@@ -1765,6 +1708,8 @@ async fn name_history_keeps_a_superseded_controller_free_wrapped_registration() 
     prior_wrapper_binding_event.source_family = "ens_v1_wrapper_l1".to_owned();
     prior_wrapper_binding_event.after_state = json!({
         "source_event": "NameWrapped",
+            "authority_kind":"wrapper", "owner":"0x00000000000000000000000000000000000000bb",
+            "expiry":1950000000_i64, "fuses":0,
         "node": namehash,
         "wrapped_registrar_resource_id": prior_registrar_resource_id,
     });
@@ -1792,6 +1737,7 @@ async fn name_history_keeps_a_superseded_controller_free_wrapped_registration() 
         ],
     )
     .await?;
+    publish_registration_history_fixture(&database).await?;
 
     let payload = v2_history_payload_for_database(
         &database,
@@ -1811,11 +1757,9 @@ async fn name_history_keeps_a_superseded_controller_free_wrapped_registration() 
             && row["registration_id"] == json!(current_registrar_resource_id.to_string())
     }));
 
-    let event_payload = v2_history_payload_for_database(
-        &database,
-        &format!("/v1/events?name={NAME}&page_size=20"),
-    )
-    .await?;
+    let event_payload =
+        v2_history_payload_for_database(&database, &format!("/v1/events?name={NAME}&page_size=20"))
+            .await?;
     let event_rows = event_payload["data"].as_array().expect("event data");
     assert!(
         event_rows.iter().any(|row| {
@@ -1832,24 +1776,19 @@ async fn name_history_keeps_a_superseded_controller_free_wrapped_registration() 
 async fn wrapper_without_prior_registrar_keeps_name_history_readable() -> Result<()> {
     const NAME: &str = "wrapper-without-registrar.eth";
     const SEED_LOGICAL_NAME_ID: &str = "ens:wrapper-without-registrar.eth";
-    const HOLDER: &str = "0x0000000000000000000000000000000000007170";
     let database = TestDatabase::new_migrated().await?;
     let logical_name_id = bigname_storage::logical_name_id_for_name("ens", NAME);
     let namehash = bigname_lookup::ens_namehash_hex(NAME)?;
     let wrapper_resource_id = Uuid::from_u128(0x7170);
 
-    seed_identity_name(
+    seed_registration_history_name(
         &database,
         SEED_LOGICAL_NAME_ID,
         NAME,
-        NAME,
-        &namehash,
+        80,
         wrapper_resource_id,
         Uuid::from_u128(0x8170),
         Uuid::from_u128(0x9170),
-        HOLDER,
-        bigname_storage::AddressNameRelation::Registrant,
-        80,
     )
     .await?;
     seed_v2_history_blocks(&database, 121..=121).await?;
@@ -1863,14 +1802,14 @@ async fn wrapper_without_prior_registrar_keeps_name_history_readable() -> Result
     wrapper_binding_event.source_family = "ens_v1_wrapper_l1".to_owned();
     wrapper_binding_event.after_state = json!({
         "source_event": "NameWrapped",
+            "authority_kind":"wrapper", "owner":"0x00000000000000000000000000000000000000bb",
+            "expiry":1950000000_i64, "fuses":0,
         "node": namehash,
         "wrapped_registrar_resource_id": null,
     });
-    bigname_storage::insert_normalized_event_fixtures(
-        &database.pool,
-        &[wrapper_binding_event],
-    )
-    .await?;
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[wrapper_binding_event])
+        .await?;
+    publish_registration_history_fixture(&database).await?;
 
     let payload = v2_history_payload_for_database(
         &database,
@@ -1890,27 +1829,20 @@ async fn wrapped_subname_keeps_its_wrapper_registration_handle() -> Result<()> {
     let logical_name_id = bigname_storage::logical_name_id_for_name("ens", NAME);
     let namehash = bigname_lookup::ens_namehash_hex(NAME)?;
     let wrapper = Uuid::from_u128(0x7175);
-    seed_identity_name(
+    seed_registration_history_name(
         &database,
         SEED_LOGICAL_NAME_ID,
         NAME,
-        NAME,
-        &namehash,
+        80,
         wrapper,
         Uuid::from_u128(0x8175),
         Uuid::from_u128(0x9175),
-        "0x0000000000000000000000000000000000007175",
-        bigname_storage::AddressNameRelation::TokenHolder,
-        80,
     )
     .await?;
-    let detail =
-        v2_history_payload_for_database(&database, &format!("/v1/names/{NAME}")).await?;
-    assert_eq!(detail["data"]["registration_id"], json!(wrapper.to_string()));
     seed_v2_history_blocks(&database, 121..=123).await?;
     sqlx::query(
         "UPDATE bigname_phase.surface_bindings
-         SET active_from = to_timestamp(1700000121) WHERE resource_id = $1",
+         SET active_from = to_timestamp(1700000121), block_number = 121, block_hash = '0xhistory121', provenance = '{\"transaction_index\":0,\"log_index\":0}'::jsonb WHERE resource_id = $1",
     )
     .bind(wrapper)
     .execute(&database.pool)
@@ -1926,6 +1858,8 @@ async fn wrapped_subname_keeps_its_wrapper_registration_handle() -> Result<()> {
     binding.source_family = "ens_v1_wrapper_l1".to_owned();
     binding.after_state = json!({
         "source_event": "NameWrapped",
+            "authority_kind":"wrapper", "owner":"0x00000000000000000000000000000000000000bb",
+            "expiry":1950000000_i64, "fuses":0,
         "node": namehash,
         "wrapped_registrar_resource_id": null,
     });
@@ -1945,8 +1879,22 @@ async fn wrapped_subname_keeps_its_wrapper_registration_handle() -> Result<()> {
         123,
     );
     record.source_family = "ens_v1_resolver_l1".to_owned();
-    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[binding, transfer, record])
-        .await?;
+    bigname_storage::insert_normalized_event_fixtures(
+        &database.pool,
+        &[
+            registration_history_wrapper_epoch(&binding),
+            binding,
+            transfer,
+            record,
+        ],
+    )
+    .await?;
+    publish_registration_history_fixture(&database).await?;
+    let detail = v2_history_payload_for_database(&database, &format!("/v1/names/{NAME}")).await?;
+    assert_eq!(
+        detail["data"]["registration_id"],
+        json!(wrapper.to_string())
+    );
 
     let payload = v2_history_payload_for_database(
         &database,
@@ -1954,7 +1902,11 @@ async fn wrapped_subname_keeps_its_wrapper_registration_handle() -> Result<()> {
     )
     .await?;
     let rows = payload["data"].as_array().expect("wrapped subname history");
-    assert_eq!(history_types(rows), vec!["record", "transfer"], "{rows:?}");
+    assert_eq!(
+        history_types(rows),
+        vec!["record", "transfer", "authority"],
+        "{rows:?}"
+    );
     assert_eq!(rows[0]["registration_id"], Value::Null);
     assert_eq!(rows[1]["registration_id"], json!(wrapper.to_string()));
 
@@ -2015,18 +1967,14 @@ async fn noncanonical_registration_history_keeps_resource_less_events_on_their_f
     let logical_name_id = bigname_storage::logical_name_id_for_name("ens", NAME);
     let registration_a = Uuid::from_u128(0x7170);
     let registration_b = Uuid::from_u128(0x7171);
-    seed_identity_name(
+    seed_registration_history_name(
         &database,
         SEED,
         NAME,
-        NAME,
-        "node:fork-registration-history.eth",
+        80,
         registration_a,
         Uuid::from_u128(0x8170),
         Uuid::from_u128(0x9170),
-        "0x0000000000000000000000000000000000007170",
-        bigname_storage::AddressNameRelation::Registrant,
-        80,
     )
     .await?;
     upsert_test_resources(
@@ -2114,6 +2062,7 @@ async fn noncanonical_registration_history_keeps_resource_less_events_on_their_f
         }
     }
     bigname_storage::insert_normalized_event_fixtures(&database.pool, &events).await?;
+    publish_registration_history_fixture(&database).await?;
     // Repeat with both branches orphaned, so a canonicality-state equality
     // substitute cannot satisfy the regression.
     for both_orphaned in [false, true] {
@@ -2212,7 +2161,11 @@ async fn noncanonical_registration_history_keeps_resource_less_events_on_their_f
                     false,
                 )
                 .await?;
-                let expected = if branch == "a" { "fork-b-grant" } else { "fork-a-record" };
+                let expected = if branch == "a" {
+                    "fork-b-grant"
+                } else {
+                    "fork-a-record"
+                };
                 assert_eq!(
                     other
                         .rows
@@ -2235,18 +2188,14 @@ async fn pre_enrichment_registration_handle_requires_token_lineage() -> Result<(
     let logical_name_id = bigname_storage::logical_name_id_for_name("ens", NAME);
     let registrar = Uuid::from_u128(0x7180);
     let registry = Uuid::from_u128(0x7181);
-    seed_identity_name(
+    seed_registration_history_name(
         &database,
         SEED,
         NAME,
-        NAME,
-        "node:pre-enrichment-token-history.eth",
+        80,
         registrar,
         Uuid::from_u128(0x8180),
         Uuid::from_u128(0x9180),
-        "0x0000000000000000000000000000000000007180",
-        bigname_storage::AddressNameRelation::Registrant,
-        80,
     )
     .await?;
     upsert_test_resources(
@@ -2295,6 +2244,7 @@ async fn pre_enrichment_registration_handle_requires_token_lineage() -> Result<(
         events.push(event);
     }
     bigname_storage::insert_normalized_event_fixtures(&database.pool, &events).await?;
+    publish_registration_history_fixture(&database).await?;
     // Each event lies inside its resource's non-overlapping canonical binding
     // epoch, so both rows retain identity. The public-handle check distinguishes token lineage.
     let name_rows = bigname_storage::load_name_history(
@@ -2342,7 +2292,9 @@ async fn reserved_token_resource_is_not_a_public_registration_handle() -> Result
     let token = Uuid::from_u128(0x8190);
     seed_v2_history_blocks(&database, 120..=122).await?;
     // No name is seeded here, so publish a readable ENS position for the collection routes.
-    database.seed_default_ens_snapshot_selector_position().await?;
+    database
+        .seed_default_ens_snapshot_selector_position()
+        .await?;
     upsert_test_token_lineages(
         &database.pool,
         &[address_name_token_lineage(token, "0xhistory120", 120)],
@@ -2379,6 +2331,7 @@ async fn reserved_token_resource_is_not_a_public_registration_handle() -> Result
         events.push(event);
     }
     bigname_storage::insert_normalized_event_fixtures(&database.pool, &events).await?;
+    publish_registration_history_fixture(&database).await?;
     for canonical_only in [true, false] {
         let rows = bigname_storage::load_event_history(
             &database.pool,
@@ -2435,21 +2388,17 @@ async fn reservation_product_rows_omit_registration_identity() -> Result<()> {
         })
         .collect::<Vec<_>>();
     upsert_phase_raw_blocks(&database.pool, &blocks).await?;
-    seed_identity_name(
+    seed_registration_history_name(
         &database,
         SEED,
         NAME,
-        NAME,
-        "node:reserved-product-history.eth",
+        120,
         registration,
         Uuid::from_u128(0x81a0),
         Uuid::from_u128(0x91a1),
-        "0x00000000000000000000000000000000000071a1",
-        bigname_storage::AddressNameRelation::EffectiveController,
-        120,
     )
     .await?;
-    // The seeded name published block 120; publish the rest of the range.
+    // Select the full retained range before publishing the fixture.
     seed_schema_v2_ens_lookup_head(&database.pool, 125, "0xhistory125", "2023-11-14T22:15:25Z")
         .await?;
     upsert_test_token_lineages(
@@ -2511,6 +2460,7 @@ async fn reservation_product_rows_omit_registration_identity() -> Result<()> {
         events.push(bridge);
     }
     bigname_storage::insert_normalized_event_fixtures(&database.pool, &events).await?;
+    publish_registration_history_fixture(&database).await?;
     sqlx::query("UPDATE bigname_phase.normalized_events SET derivation_kind = 'ens_v2_migration' WHERE event_identity LIKE 'reservation-product-bridge-%'")
         .execute(&database.pool).await?;
     for canonical_only in [true, false] {
@@ -2614,7 +2564,9 @@ async fn retained_registrar_resolver_survives_resource_reanchoring() -> Result<(
     }
     upsert_phase_raw_blocks(&database.pool, &blocks).await?;
     // No name is seeded here, so publish a readable ENS position for the collection routes.
-    database.seed_default_ens_snapshot_selector_position().await?;
+    database
+        .seed_default_ens_snapshot_selector_position()
+        .await?;
     upsert_test_token_lineages(
         &database.pool,
         &[address_name_token_lineage(token, "0xreanchor-a-130", 130)],
@@ -2650,6 +2602,7 @@ async fn retained_registrar_resolver_survives_resource_reanchoring() -> Result<(
         events.push(event);
     }
     bigname_storage::insert_normalized_event_fixtures(&database.pool, &events).await?;
+    publish_registration_history_fixture(&database).await?;
     // Reproduce the identity writer's post-reorg result. The normalized event
     // on A remains, while both singleton identity anchors now refer to B.
     sqlx::query(
@@ -2763,7 +2716,9 @@ async fn block_only_reservation_release_omits_registration_identity() -> Result<
     )
     .await?;
     // No name is seeded here, so publish a readable ENS position for the collection routes.
-    database.seed_default_ens_snapshot_selector_position().await?;
+    database
+        .seed_default_ens_snapshot_selector_position()
+        .await?;
     for (resource, token, number) in [
         (reserved, Uuid::from_u128(0x81b0), 120),
         (registered, Uuid::from_u128(0x81b1), 119),
@@ -2824,6 +2779,7 @@ async fn block_only_reservation_release_omits_registration_identity() -> Result<
         events.push(release);
     }
     bigname_storage::insert_normalized_event_fixtures(&database.pool, &events).await?;
+    publish_registration_history_fixture(&database).await?;
     for canonical_only in [true, false] {
         let rows = bigname_storage::load_event_history(
             &database.pool,
@@ -2915,6 +2871,8 @@ async fn v2_history_ignores_an_unpublished_name_wrapped_link() -> Result<()> {
         binding.source_family = "ens_v1_wrapper_l1".to_owned();
         binding.after_state = json!({
             "source_event": "NameWrapped",
+            "authority_kind":"wrapper", "owner":"0x00000000000000000000000000000000000000bb",
+            "expiry":1950000000_i64, "fuses":0,
             "wrapped_registrar_resource_id": lease,
         });
         binding
@@ -2932,7 +2890,11 @@ async fn v2_history_ignores_an_unpublished_name_wrapped_link() -> Result<()> {
     .await?;
     bigname_storage::insert_normalized_event_fixtures(
         &database.pool,
-        &[wrapped("unpublished-name-wrapped", 21_000_004, "0xfuture-wrap")],
+        &[wrapped(
+            "unpublished-name-wrapped",
+            21_000_004,
+            "0xfuture-wrap",
+        )],
     )
     .await?;
     for (route, before) in routes.iter().zip(&before) {
@@ -2968,7 +2930,6 @@ async fn v2_history_ignores_an_unpublished_name_wrapped_link() -> Result<()> {
 async fn registration_history_excludes_record_writes_attributed_to_another_lease() -> Result<()> {
     const NAME: &str = "two-leases.eth";
     const SEED_LOGICAL_NAME_ID: &str = "ens:two-leases.eth";
-    const HOLDER: &str = "0x0000000000000000000000000000000000007160";
     // The wrapped era selected one resolver and the later lease another.
     const WRAPPED_RESOLVER: &str = "0x00000000000000000000000000000000000000c3";
     const LATER_RESOLVER: &str = "0x00000000000000000000000000000000000000c4";
@@ -2981,18 +2942,14 @@ async fn registration_history_excludes_record_writes_attributed_to_another_lease
     let namehash = bigname_lookup::ens_namehash_hex(NAME)?;
     let logical_name_id = bigname_storage::logical_name_id_for_name("ens", NAME);
 
-    seed_identity_name(
+    seed_registration_history_name(
         &database,
         SEED_LOGICAL_NAME_ID,
         NAME,
-        NAME,
-        "node:two-leases.eth",
+        80,
         later_lease_id,
         Uuid::from_u128(0x8160),
         Uuid::from_u128(0x9160),
-        HOLDER,
-        bigname_storage::AddressNameRelation::Registrant,
-        80,
     )
     .await?;
     upsert_test_resources(
@@ -3005,21 +2962,19 @@ async fn registration_history_excludes_record_writes_attributed_to_another_lease
     .await?;
     seed_v2_history_blocks(&database, 120..=125).await?;
     // The NameWrapper's ended binding makes it one of the name's resources.
-    let mut ended_wrapper_binding = surface_binding(
+    sqlx::query("UPDATE surface_bindings SET active_from = to_timestamp(1700000124), block_number = 124, block_hash = '0xhistory124' WHERE resource_id = $1")
+        .bind(later_lease_id).execute(&database.pool).await?;
+    let mut ended_wrapper_binding = address_name_surface_binding(
         Uuid::from_u128(0x9161),
         SEED_LOGICAL_NAME_ID,
         wrapper_resource_id,
-        timestamp(1_700_000_121),
+        "0xhistory121",
+        121,
+        1_700_000_121,
     );
     ended_wrapper_binding.active_to = Some(timestamp(1_700_000_123));
+    ended_wrapper_binding.provenance = json!({"transaction_index":0,"log_index":0});
     upsert_test_surface_bindings(&database.pool, &[ended_wrapper_binding]).await?;
-    sqlx::query(
-        "UPDATE bigname_phase.surface_bindings
-         SET active_from = to_timestamp(1700000124) WHERE resource_id = $1",
-    )
-    .bind(later_lease_id)
-    .execute(&database.pool)
-    .await?;
 
     let node_write = |event_identity: &str, block_number: i64, resolver: &str| {
         let mut event = v2_history_event(event_identity, None, None, "RecordChanged", block_number);
@@ -3055,6 +3010,8 @@ async fn registration_history_excludes_record_writes_attributed_to_another_lease
     wrapper_binding.source_family = "ens_v1_wrapper_l1".to_owned();
     wrapper_binding.after_state = json!({
         "source_event": "NameWrapped",
+            "authority_kind":"wrapper", "owner":"0x00000000000000000000000000000000000000bb",
+            "expiry":1950000000_i64, "fuses":0,
         "node": namehash,
         "wrapped_registrar_resource_id": older_lease_id,
     });
@@ -3087,14 +3044,25 @@ async fn registration_history_excludes_record_writes_attributed_to_another_lease
         &[
             older_grant,
             wrapper_binding,
-            pointer("two-leases-wrapped-pointer", wrapper_resource_id, WRAPPED_RESOLVER, 121),
+            pointer(
+                "two-leases-wrapped-pointer",
+                wrapper_resource_id,
+                WRAPPED_RESOLVER,
+                121,
+            ),
             node_write(older_write_identity, 122, WRAPPED_RESOLVER),
             later_grant,
-            pointer("two-leases-later-pointer", later_lease_id, LATER_RESOLVER, 124),
+            pointer(
+                "two-leases-later-pointer",
+                later_lease_id,
+                LATER_RESOLVER,
+                124,
+            ),
             node_write(later_write_identity, 125, LATER_RESOLVER),
         ],
     )
     .await?;
+    publish_registration_history_fixture(&database).await?;
 
     let older_route = format!("/v1/events?registration_id={older_lease_id}&page_size=20");
     let older = v2_history_payload_for_database(&database, &older_route).await?;
@@ -3136,10 +3104,9 @@ async fn registration_history_excludes_record_writes_attributed_to_another_lease
             .expect("the later lease has more than one row"),
     )
     .expect("the later lease's cursor must decode");
-    foreign_anchor.filters.insert(
-        "registration_id".to_owned(),
-        older_lease_id.to_string(),
-    );
+    foreign_anchor
+        .filters
+        .insert("registration_id".to_owned(), older_lease_id.to_string());
     let response = v2_history_response_for_database(
         &database,
         &format!(
@@ -3157,4 +3124,65 @@ async fn registration_history_excludes_record_writes_attributed_to_another_lease
 
 mod registry_handoff_history {
     include!("v2_history_registry_handoff.rs");
+}
+
+/// Publish the retained history fixture at its selected head; the API never consumes a
+/// handcrafted profile or independently advanced output stamp.
+async fn publish_registration_history_fixture(database: &TestDatabase) -> Result<()> {
+    let (block, hash): (i64, String) = sqlx::query_as(
+        "SELECT latest_block_number, latest_block_hash FROM chain_heads WHERE chain_id = 'ethereum-mainnet'"
+    ).fetch_one(&database.pool).await?;
+    let at: OffsetDateTime = sqlx::query_scalar("SELECT block_timestamp FROM chain_lineage WHERE chain_id = 'ethereum-mainnet' AND block_number = $1 AND block_hash = $2")
+        .bind(block).bind(&hash).fetch_one(&database.pool).await?;
+    database
+        .seed_snapshot_selector_chain_positions(&json!({"ethereum":{
+            "chain_id":"ethereum-mainnet", "block_number":block, "block_hash":hash,
+            "timestamp":crate::v2::format_timestamp(at)
+        }}))
+        .await?;
+    rebuild_fixture_families(&database.pool, "ethereum-mainnet", block, &hash).await
+}
+
+async fn seed_registration_history_name(
+    database: &TestDatabase,
+    logical: &str,
+    name: &str,
+    block: i64,
+    resource: Uuid,
+    token: Uuid,
+    binding: Uuid,
+) -> Result<()> {
+    let namespace = logical.split_once(':').context("history namespace")?.0;
+    seed_v2_history_blocks(database, block..=block).await?;
+    seed_family_identity_inputs(
+        &database.pool,
+        namespace,
+        name,
+        "ethereum-mainnet",
+        block,
+        &format!("0xhistory{block}"),
+        resource,
+        token,
+        binding,
+        "ens_v1",
+    )
+    .await?;
+    Ok(())
+}
+
+
+/// The NameWrapper scope a NameWrapped emits beside its binding: the wrapper state and fuses.
+fn registration_history_wrapper_scope(binding: &NormalizedEvent) -> NormalizedEvent {
+    let mut scope = binding.clone();
+    scope.event_identity = format!("{}:scope", binding.event_identity);
+    scope.event_kind = "PermissionScopeChanged".into();
+    scope.after_state = json!({"source_event": "NameWrapped", "wrapper_state": "wrapped", "fuses": 0});
+    scope
+}
+
+fn registration_history_wrapper_epoch(binding: &NormalizedEvent) -> NormalizedEvent {
+    let mut epoch = binding.clone();
+    epoch.event_identity = format!("{}:authority", binding.event_identity);
+    epoch.event_kind = "AuthorityEpochChanged".into();
+    epoch
 }

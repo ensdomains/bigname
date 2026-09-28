@@ -165,12 +165,23 @@ async fn registry_owned_subname_permission_handle_is_followable_from_real_new_ow
         followed["data"], expected_audit,
         "the advertised registry-owned subname handle must select its own grants"
     );
-    // Losing a current row does not invent a registrar lease: the subname resource remains
-    // auditable by the handle that was actually published.
-    sqlx::query("DELETE FROM bigname_phase.name_current WHERE logical_name_id = $1")
-        .bind(logical)
-        .execute(&database.pool)
-        .await?;
+    // Losing the name's current row does not invent a registrar lease: after a reorg orphans the
+    // surface, Project publishes no row for the name, and the subname resource remains auditable
+    // by the handle that was actually published.
+    sqlx::query(
+        "UPDATE bigname_phase.name_surfaces SET canonicality_state = 'orphaned'
+         WHERE logical_name_id = $1",
+    )
+    .bind(logical)
+    .execute(&database.pool)
+    .await?;
+    rebuild_fixture_families(&database.pool, CHAIN, BLOCK, &hash).await?;
+    assert!(
+        bigname_storage::load_name_current(&database.pool, logical)
+            .await?
+            .is_none(),
+        "the orphaned surface is not published"
+    );
     let audit = v2_permissions_payload_for_database(
         &database,
         &format!("/v1/permissions?registration_id={id}"),
