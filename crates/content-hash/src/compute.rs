@@ -13,6 +13,10 @@ const ADAPTER_SOURCE_ROOT: &str = "crates/adapters/src";
 const MANIFEST_AUTHORITY_SOURCE_ROOT: &str = "crates/manifests/src";
 const MANIFEST_ROOT: &str = "manifests";
 const PROJECT_SOURCE_ROOT: &str = "crates/project/src";
+/// The storage families code: Project's family step stores name summaries it composes
+/// (families/name/summary.rs and the composition it calls), so it decides persisted rows. The
+/// rest of the storage crate serves reads and stays outside.
+const STORAGE_FAMILIES_SOURCE_ROOT: &str = "crates/storage/src/families";
 /// Interpret's persistence stage: which interpreted row wins a conflict, how a redo range reopens
 /// and reanchors bindings, and which surfaces a normalizer-version recompute activates. All of it
 /// decides which identity, discovery, and label-preimage rows the projections then read.
@@ -89,6 +93,7 @@ pub(crate) fn watched_paths(workspace_root: &Path) -> Vec<PathBuf> {
         workspace_root.join(MANIFEST_AUTHORITY_SOURCE_ROOT),
         workspace_root.join(MANIFEST_ROOT),
         workspace_root.join(PROJECT_SOURCE_ROOT),
+        workspace_root.join(STORAGE_FAMILIES_SOURCE_ROOT),
         workspace_root.join(INTERPRET_WRITE_SOURCE_ROOT),
         // Not hashed, but scanned: a cfg(test) declaration here changes which files under the
         // hashed root are excluded, so it has to trigger a rebuild.
@@ -165,6 +170,7 @@ const CFG_TEST_SCAN_ROOTS: &[&str] = &[
     ADAPTER_SOURCE_ROOT,
     MANIFEST_AUTHORITY_SOURCE_ROOT,
     PROJECT_SOURCE_ROOT,
+    STORAGE_FAMILIES_SOURCE_ROOT,
     INTERPRET_SOURCE_SCAN_ROOT,
 ];
 
@@ -204,6 +210,12 @@ fn collect_inputs(workspace_root: &Path) -> io::Result<Vec<Input>> {
             collect_file(workspace_root, &path, &mut inputs)?;
         }
     }
+    collect_rust_sources(
+        workspace_root,
+        &workspace_root.join(STORAGE_FAMILIES_SOURCE_ROOT),
+        &cfg_test_sources,
+        &mut inputs,
+    )?;
     collect_rust_sources(
         workspace_root,
         &workspace_root.join(INTERPRET_WRITE_SOURCE_ROOT),

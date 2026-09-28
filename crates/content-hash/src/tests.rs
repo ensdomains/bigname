@@ -564,6 +564,59 @@ fn write_conflict_policy_changes_the_hash() {
 }
 
 #[test]
+fn storage_family_sources_change_the_hash_and_other_storage_sources_do_not() {
+    // The family step stores name summaries composed by the storage families code
+    // (crates/storage/src/families/name/summary.rs and what it calls), so that code decides
+    // persisted rows; the rest of the storage crate serves reads and does not.
+    for (relative_path, rotates) in [
+        ("crates/storage/src/families/name/summary.rs", true),
+        ("crates/storage/src/families/control/wrapper.rs", true),
+        ("crates/storage/src/families/mod.rs", true),
+        ("crates/storage/src/children/page.rs", false),
+        ("crates/storage/src/lib.rs", false),
+    ] {
+        let tree = SampleTree::new();
+        tree.write(relative_path, "fn compose() -> u8 { 1 }\n");
+        let first = interpreter_content_hash(tree.path()).expect("baseline must hash");
+
+        tree.write(relative_path, "fn compose() -> u8 { 2 }\n");
+
+        let changed = interpreter_content_hash(tree.path()).expect("updated tree must hash");
+        assert_eq!(
+            first != changed,
+            rotates,
+            "{relative_path} must {}rotate the hash",
+            if rotates { "" } else { "not " }
+        );
+    }
+}
+
+#[test]
+fn a_test_module_declared_in_the_storage_families_stays_out_of_the_hash() {
+    let tree = SampleTree::new();
+    tree.write(
+        "crates/storage/src/families/mod.rs",
+        "#[cfg(test)]\nmod tests;\npub mod name;\n",
+    );
+    tree.write(
+        "crates/storage/src/families/tests.rs",
+        "fn test_only_baseline() {}\n",
+    );
+    let first = interpreter_content_hash(tree.path()).expect("baseline must hash");
+
+    tree.write(
+        "crates/storage/src/families/tests.rs",
+        "fn test_only_change() {}\n",
+    );
+
+    let changed = interpreter_content_hash(tree.path()).expect("updated tree must hash");
+    assert_eq!(
+        first, changed,
+        "a cfg(test) module must not rotate the hash"
+    );
+}
+
+#[test]
 fn semantic_dependencies_of_the_watched_roots_affect_the_hash() {
     for (relative_path, changed_source) in [
         (
