@@ -281,11 +281,19 @@ async fn load_chain(
     let mut contested: BTreeSet<(String, String)> = BTreeSet::new();
     for facts in &facts {
         let name = &facts.input.logical_name_id;
+        // The binding candidates' and events' resources, and the registry node's (where an
+        // ownerless name's retained pointer sits).
+        let node_resources = facts
+            .registry_node
+            .iter()
+            .flat_map(|node| node.owner_events.iter())
+            .filter_map(|e| e.resource_id.as_deref());
         let resources = facts
             .candidates
             .iter()
             .map(|c| c.resource_id.as_str())
-            .chain(facts.events.iter().filter_map(|e| e.resource_id.as_deref()));
+            .chain(facts.events.iter().filter_map(|e| e.resource_id.as_deref()))
+            .chain(node_resources);
         for resource in resources {
             if pointers
                 .get(resource)
@@ -298,6 +306,13 @@ async fn load_chain(
     let contested: Vec<(String, String)> = contested.into_iter().collect();
     let named_pointers =
         named_resource_pointers(conn, chain_id, publication.block_number, &contested).await?;
+    // A name's own latest pointer on a resource: F5's when it is the name's, else the name's own.
+    let own_pointer = |resource: &str, name: &str| {
+        pointers
+            .get(resource)
+            .filter(|pointer| pointer.logical_name_id.as_deref() == Some(name))
+            .or_else(|| named_pointers.get(&(resource.to_owned(), name.to_owned())))
+    };
     let node_pointers = node_pointers(conn, chain_id, &nodes).await?;
     let root_resources: Vec<String> = roots
         .values()
@@ -341,7 +356,7 @@ async fn load_chain(
                 let resource = transfer.resource_id.as_deref()?;
                 ownerless_serving(
                     name,
-                    pointers.get(resource),
+                    own_pointer(resource, name),
                     readable
                         .get(resource)
                         .is_some_and(|(token, _)| token.is_some()),
@@ -376,12 +391,8 @@ async fn load_chain(
                 selection: &decided,
                 history,
                 serving: serving.as_ref(),
-                resource_pointer: resolver_resource.and_then(|resource| {
-                    pointers
-                        .get(resource)
-                        .filter(|pointer| pointer.logical_name_id.as_deref() == Some(name))
-                        .or_else(|| named_pointers.get(&(resource.to_owned(), name.to_owned())))
-                }),
+                resource_pointer: resolver_resource
+                    .and_then(|resource| own_pointer(resource, name)),
                 node_pointer: node_pointers.get(&node),
                 heads: &heads,
                 token_lineage_id: token.and_then(|(token, _)| *token),

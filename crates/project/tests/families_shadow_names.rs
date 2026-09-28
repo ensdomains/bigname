@@ -189,6 +189,39 @@ async fn an_ownerless_node_serves_its_retained_registry_pointer() -> Result<()> 
     fixture.cleanup().await
 }
 
+/// An ownerless registry node whose resource a second name later points elsewhere: the served
+/// row picks the ownerless name's own latest registry pointer on the resource, so the first name
+/// keeps its serving resource and resolver.
+#[tokio::test]
+async fn an_ownerless_node_keeps_its_own_pointer_on_a_shared_resource() -> Result<()> {
+    let fixture = Fixture::new("families_shadow_names_ownerless_shared", 20).await?;
+    let node_resource = uuid(7);
+    fixture
+        .write(
+            11,
+            1,
+            "AuthorityTransferred",
+            V1_REGISTRY,
+            Some(&name(1)),
+            Some(&node_resource),
+            json!({"node": node(1), "owner": ZERO, "owner_getter": ZERO,
+                   "emitter_role": "registry"}),
+            REGISTRY,
+        )
+        .await?;
+    pointer(&fixture, 12, 1, V1_REGISTRY, Some(&node_resource), RESOLVER).await?;
+    pointer(&fixture, 13, 2, V1_REGISTRY, Some(&node_resource), LATER).await?;
+    publish_and_compare(&fixture, 14).await?;
+    assert_eq!(
+        (
+            served(&fixture, 1, "/provenance/read_reachability/basis").await?,
+            served(&fixture, 1, "/declared_summary/resolver/address").await?,
+        ),
+        (json!("retained_registry_resolver_pointer"), json!(RESOLVER))
+    );
+    fixture.cleanup().await
+}
+
 /// An ENSv2 root-registry TLD with a pointer and no observed registration serves the pointer,
 /// then a root release at or after it withdraws it.
 #[tokio::test]
