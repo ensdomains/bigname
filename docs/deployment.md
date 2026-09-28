@@ -155,7 +155,7 @@ The permission family readers use the indexes in
 `20260928223000_project_permission_candidate_indexes.sql`. On a large initialized
 database, prebuild these concurrently before applying those schema-migrations;
 without a prebuild their ordinary index creation blocks writes to the indexed
-tables. Run each statement outside a transaction, with the publication switch off:
+tables. Run each statement outside a transaction:
 
 ```sql
 CREATE INDEX CONCURRENTLY IF NOT EXISTS project_grant_subject_idx
@@ -185,7 +185,7 @@ Confirm all nine indexes are `indisvalid` and `indisready` in `pg_index`, and
 compare `pg_get_indexdef` with the statements above before applying the
 schema-migrations. `IF NOT EXISTS` does not validate an existing definition or
 repair an invalid concurrent build. Record account-page query plans and latency
-on representative data before enabling the switch; bounded candidate batches
+on representative data before serving the release; bounded candidate batches
 can still examine many resources when most grants are masked or observations
 no longer match the current registry binding.
 
@@ -193,19 +193,41 @@ no longer match the current registry binding.
 to the [owned key families](glossary.md#owned-key-family) and, on a database
 whose families were built without it, resets every family table and the
 [family marker](glossary.md#family-marker), so the next family run rebuilds
-them. Apply it before `BIGNAME_SERVE_FROM_FAMILIES` is ever turned on: with the
-[publication switch](glossary.md#publication-switch) on, every fenced route
-answers `409 stale` until that rebuild finishes. It does not coordinate with a
+them. Every fenced route answers `409 stale` until that rebuild finishes. It
+does not coordinate with a
 running family publisher: a family run in flight when it applies fails once and
 the next run rebuilds.
 
 `20260928160000_project_families_name_summary.sql` adds `project_name_summary`,
 the [name summary](glossary.md#name-summary), the same way, with the indexes its
-writer reads. Apply it before starting a release that writes it, whatever the
-publication switch: that release's family step writes the table on every block,
-so it fails until the table exists. Apply it before the switch is ever turned on
-too, for the same `409 stale` window, and, as above, a family run in flight when
-it applies fails once and the next run rebuilds.
+writer reads. Apply it before starting a release that writes it: that
+release's family step writes the table on every block, so it fails until the
+table exists. It opens the same `409 stale` window until the rebuild finishes,
+and, as above, a family run in flight when it applies fails once and the next
+run rebuilds.
+
+`20260929160000_remove_served_projections.sql` drops the tables the API and
+Project used before the [owned key families](glossary.md#owned-key-family)
+became the only serving path: `name_current`, `children_current`,
+`permissions_current`, `account_permission_state_current`,
+`permissions_current_resource_summary`, `record_inventory_current`,
+`resolver_current`, `address_names_current`, `address_records_current`,
+`primary_names_current`, the append-only `project_generation_failures` audit,
+and the three Project redo handoff tables `project_redo_resolver_evidence`,
+`project_redo_expiry_roots` and `project_redo_child_registration_history`. It
+also drops the trigger function that retired divergence observations when the
+old exact-name table published a null exact resolver, and replaces the two guarded
+lookup functions so they compare captured family publications only, keeping
+their signatures and grants. Family tables, the [family
+marker](glossary.md#family-marker), normalized events and their history
+indexes, and `child_registration_events` are unchanged; the migration itself
+does not reset or rebuild them.
+Stop every older phase runner, one-shot redo and API process before applying
+it: those binaries still read the dropped tables and fail once they are gone.
+Rows in the dropped tables, including historical generation-failure audit rows,
+are not preserved; export them first if an incident record needs them.
+`BIGNAME_SERVE_FROM_FAMILIES` no longer exists: Compose does not forward it, and
+neither binary reads it, so a value left in `.env.server` has no effect.
 
 The API binds to the configured `BIGNAME_API_HOST` and
 `BIGNAME_API_PORT`; `/healthz` remains its local readiness endpoint. Current
@@ -215,39 +237,6 @@ A directly launched API can configure its metrics listener with
 `BIGNAME_API_METRICS_BIND_ADDR`. The server Compose file instead fixes that
 container listener at `0.0.0.0:9464`; `BIGNAME_API_METRICS_HOST` and
 `BIGNAME_API_METRICS_PORT` change only its host port mapping.
-
-### Publication switch
-
-`BIGNAME_SERVE_FROM_FAMILIES` is the
-[publication switch](glossary.md#publication-switch). The server Compose file
-forwards it from the host environment or `.env.server` to both the `api` and
-the `phase-runner` services; Compose forwards only the variables it lists, so
-without that entry the containers would never see it. Unset or empty keeps
-the build's default (`SERVE_FROM_FAMILIES_DEFAULT` in
-`crates/storage/src/publication_source.rs`, off in this release), `1` or `true`
-turns it on, and `0` or `false` turns it off. Any other value stops both
-binaries at startup rather than silently keeping the default. Both binaries
-read it once at startup, so set it the same for both. To change it, edit `.env.server` (or the host
-environment) and recreate both containers:
-
-```sh
-docker compose --env-file .env.server -f docker-compose.server.yml up -d --force-recreate api phase-runner
-```
-
-`docker compose restart` does not reload changed environment configuration, so
-a restart alone keeps the old value.
-
-The direct `docker run` selectors under [Container contents](#container-contents)
-do not forward the variable: anyone running the binaries that way must pass
-`-e BIGNAME_SERVE_FROM_FAMILIES` (or an explicit value) to both the `api` and
-the `phases` invocations.
-
-This release carries the guard cutover: with the switch on, the verified
-lookup's guard fences the family marker. Production still leaves the switch off
-until the row cutovers are complete: with it on, the reads that still use the
-served tables, the lookup's inputs among them, can return inconsistent
-membership or counts (see [`api-v1.md`](api-v1.md), the publication switch
-paragraph).
 
 ## Phase-runner configuration
 
@@ -419,10 +408,7 @@ starting the runner. Stop every old phase-runner and one-shot redo process
 before applying that schema-migration, and keep them stopped until the new
 binary is ready. An old binary recognizes the marker prefix but does not bind
 its boolean attestation to the new generation token or write the durable audit
-row. The
-[projection generation failure](glossary.md#projection-generation-failure)
-audit schema-migration creates a table the same way and needs the same regrant,
-without that stop-the-runner requirement. PostgreSQL does not extend an earlier
+row. PostgreSQL does not extend an earlier
 all-tables grant to tables created later. Do not reuse the writer credential in
 the verification URL:
 setting a writer session's default transaction to read-only does not remove
@@ -827,24 +813,55 @@ GRANT SELECT ON TABLE
     bigname_phase.service_heartbeats,
     bigname_phase.normalized_events,
     bigname_phase.migration_event_associations,
-    bigname_phase.name_current,
-    bigname_phase.address_names_current,
-    bigname_phase.address_records_current,
-    bigname_phase.children_current,
     bigname_phase.child_registration_events,
-    bigname_phase.permissions_current,
-    bigname_phase.account_permission_state_current,
-    bigname_phase.permissions_current_resource_summary,
-    bigname_phase.resolver_current,
+    bigname_phase.label_preimages,
+    bigname_phase.discovery_edges,
+    bigname_phase.migration_discovery_associations,
     bigname_phase.name_surfaces,
     bigname_phase.resources,
     bigname_phase.surface_bindings,
     bigname_phase.token_lineages,
-    bigname_phase.record_inventory_current,
-    bigname_phase.primary_names_current,
     bigname_phase.manifest_versions,
     bigname_phase.manifest_contract_instances,
-    bigname_phase.contract_instance_addresses
+    bigname_phase.contract_instance_addresses,
+    bigname_phase.project_family_undo,
+    bigname_phase.project_repair_record,
+    bigname_phase.project_name_state,
+    bigname_phase.project_binding_candidate,
+    bigname_phase.project_lifecycle_key_state,
+    bigname_phase.project_lifecycle_triple_summary,
+    bigname_phase.project_lifecycle_association,
+    bigname_phase.project_lifecycle_event,
+    bigname_phase.project_child_registration_state,
+    bigname_phase.project_wrapper_state,
+    bigname_phase.project_registry_node_state,
+    bigname_phase.project_registry_owner_event,
+    bigname_phase.project_registry_binding_observation,
+    bigname_phase.project_resolver_classification,
+    bigname_phase.project_registry_pointer,
+    bigname_phase.project_resource_pointer,
+    bigname_phase.project_named_resource_pointer,
+    bigname_phase.project_node_record_partition,
+    bigname_phase.project_node_record_value,
+    bigname_phase.project_record_id_value,
+    bigname_phase.project_resolver_link,
+    bigname_phase.project_grant,
+    bigname_phase.project_resource_admin_aggregate,
+    bigname_phase.project_account_approval,
+    bigname_phase.project_name_alias,
+    bigname_phase.project_resolver_alias,
+    bigname_phase.project_child_edge_candidate,
+    bigname_phase.project_parent_subregistry,
+    bigname_phase.project_reverse_tuple,
+    bigname_phase.project_reverse_node_claim,
+    bigname_phase.project_claim_normalization,
+    bigname_phase.project_address_name_fold,
+    bigname_phase.project_address_controller_candidate,
+    bigname_phase.project_address_name_index,
+    bigname_phase.project_address_record_node_index,
+    bigname_phase.project_address_record_id_index,
+    bigname_phase.project_name_history,
+    bigname_phase.project_name_summary
 TO bigname_api;
 GRANT EXECUTE ON FUNCTION bigname_phase.revalidate_resolution_lookup_state(
     text, bigint, text, jsonb, jsonb, uuid, text, text
@@ -856,20 +873,26 @@ GRANT EXECUTE ON FUNCTION bigname_phase.write_resolution_divergence(
 ```
 
 This role cannot read raw facts, the divergence table, or unrelated operational
-tables directly. Its only direct discovery-state read is
-`contract_instance_addresses`: the registry overview and labels routes use
+tables directly. Its discovery-state reads are
+`contract_instance_addresses`, `discovery_edges` and
+`migration_discovery_associations`: the registry overview and labels routes use
 declared address intervals to recognize registry contracts at the selected
-block. The grant is SELECT-only and does not admit discovery writes.
+block, and the family child reader (`crates/storage/src/families/topology/children.rs`)
+checks a migrated parent's migration registry against its readable
+`registry_announcement` edge and `migration_registry_creation` association. The
+same reader takes child labels from `label_preimages`. The grant is SELECT-only
+and does not admit discovery writes.
 Reapply these explicit relation and function grants after a reviewed
 phase-schema replacement; do not use ownership
 or schema-wide write grants as a shortcut.
 
-`project_family_marker` is on the list for the
-[publication switch](glossary.md#publication-switch): with
-`BIGNAME_SERVE_FROM_FAMILIES` on, snapshot selection, the verified lookup and
-its guard, and `/v1/status` read the [family marker](glossary.md#family-marker), and startup
-refuses a role that cannot read it. With the switch off the API does not read
-it.
+The `project_*` tables are the [owned key families](glossary.md#owned-key-family)
+the API composes names, records, permissions, resolver collections and primary
+claims from, together with their [family marker](glossary.md#family-marker),
+undo journal and repair record. Snapshot selection, the verified lookup and its
+guard, and `/v1/status` read the marker. Startup
+(`crates/storage/src/api_preflight.rs`) refuses a role that cannot read any of
+them.
 
 `migration_event_associations` is on the list because
 `GET /v1/diagnostics/events` selects the ENSv1→ENSv2 migration correlation rows
@@ -928,10 +951,11 @@ ledger rows are not reconstructable from raw facts: once any row exists, a
 future schema upgrade must use a separately reviewed schema-migration or lossless
 export/import mechanism rather than this replacement procedure.
 Schema-migration `20260831120000_retire_direct_divergences_for_null_resolver.sql` is
-such an additive upgrade: it preserves the populated ledger, installs the
-trigger that runs when Project publishes a null exact resolver, and marks
+such an additive upgrade: it preserves the populated ledger and marks
 already-active observations stale where the current ENS Mainnet exact resolver
-is null.
+is null. The trigger it installed went with the old exact-name table; Project now
+retires those observations in the family publication transaction
+([storage](storage.md#verified-lookup-storage)).
 
 The project-at-head guard also binds the API's compiled interpreter content
 hash. `bigname-api` and `phase-runner` must therefore come from the same commit.
@@ -946,10 +970,8 @@ The [complete-group](glossary.md#complete-group) ENSv1→ENSv2 activation is suc
 profiles and generated watch plans do not change, so no historical fetch or
 manifest-authority attestation is introduced. Deploy the new phase runner,
 complete the retained-range Interpret redo under the new interpreter content
-hash, run the stamped Project range, and evaluate the proof-scoped integrity
-assertions for both configured ENS deployment profiles (Mainnet and Sepolia)
-before `publish::swap`. Only after that Project generation publishes may the
-matching API be deployed. A Sepolia name with facts on both ENSv1 and ENSv2
+hash, and run the stamped Project range. Only after that Project range publishes
+may the matching API be deployed. A Sepolia name with facts on both ENSv1 and ENSv2
 and no proof follows the chain per name
 ([ADR 0007](adrs/0007-follow-the-chain-ens-authority.md)) and never blocks
 publication. The connected
@@ -1267,13 +1289,13 @@ whose nearest ENSv1 resolver is an ancestor become unsupported with
 release is recorded, recount the mirror rows by support status and
 `provenance.mirror.mirrored_unsupported_reason` at the published Project target,
 separating inventory resources from the resources names currently serve, and
-check `address_records_current` for the withdrawn rows.
+check the address-record reads for the withdrawn rows.
 
 ### ENSv2 support without a registrar event
 
 The build that serves a selected ENSv2 registration without a registrar event
 ([architecture](architecture.md#ensv1ensv2-current-authority)) edits
-`crates/project/src/builders/name_current/build.sql`, so it rotates the
+the Project name-authority SQL, so it rotates the
 [interpreter content hash](glossary.md#interpreter-content-hash) for every
 chain. It needs no schema-migration, no watch-plan widening and no historical
 ingest fetch. It also rewords the notes of the `exact_name_profile` flag in the
@@ -1286,5 +1308,5 @@ installs before the matching API serves, as for any rotation. When the Project
 redo publishes on Sepolia, `eth` and `reverse`, the only rows that carried
 `ensv2_exact_name_profile_shadow` on 2026-09-24, become supported with no
 unsupported reason; their selected authority and projected values do not
-change. Before the release is recorded, confirm that no `name_current` row still
+change. Before the release is recorded, confirm that no published name still
 carries that reason at the published Project target.

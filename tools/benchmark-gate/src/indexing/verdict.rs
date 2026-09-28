@@ -6,12 +6,12 @@ pub(super) fn projection_scale_failures(
     let mut failures = Vec::new();
     if pre_rebuild < minimum {
         failures.push(format!(
-            "name_current had {pre_rebuild} supported rows before rebuild; release profile requires {minimum}"
+            "family readers composed {pre_rebuild} supported names before rebuild; release profile requires {minimum}"
         ));
     }
     if post_rebuild < minimum {
         failures.push(format!(
-            "name_current has {post_rebuild} supported rows after rebuild; release profile requires {minimum}"
+            "family readers compose {post_rebuild} supported names after rebuild; release profile requires {minimum}"
         ));
     }
     failures

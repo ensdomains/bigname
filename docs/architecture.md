@@ -408,17 +408,15 @@ and the emancipated branch unwraps the node into the Graveyard
 which sets a new registry owner rather than clearing the entry
 (upstream: .refs/ens_v1/contracts/wrapper/NameWrapper.sol:L1029 @ ens_v1@91c966f).
 A migrated or positively registered child retains its ENSv1 relation only when
-parent reachability admits it. The slice 3B assertion, ordered after
-reachability and exact-name integrity, fails a
-[projection generation](glossary.md#projection-generation) when a child with an activated
-`migration_authority_transition` has a surviving ENSv1 relation asserted after
-its authority epoch began. An unmigrated parent can expose this contradiction;
-unwrapped, unlocked-wrapped, and emancipated-child paths cannot. Neither locked
-path can expose it for a child registered in the parent's migration registry
+parent reachability admits it, and only the arm of the child's selected
+authority epoch publishes a relation. An unmigrated parent can leave an ENSv1
+relation standing after a migrated child's ENSv2 authority began; that relation
+is not published, and it does not fail the Project publication. Unwrapped,
+unlocked-wrapped, and emancipated-child paths cannot leave one. Neither locked
+path can leave one for a child registered in the parent's migration registry
 without migrating, because that registration is permanent migration-registry
 entry history, so the migratable-child predicate filters the ENSv1 relation
-first. A surviving contradiction aborts with
-`dual_current_child_authority` through the post-rollback audit path below.
+first.
 
 A child registered in its parent's migration registry is selected by the same
 chain rule as any other ENSv2 registration Interpret binds in an admitted
@@ -434,29 +432,14 @@ only after its complete group activates.
 That ENSv2 registration holds the child while it is current; once it is
 released, the child stays with ENSv2 as a released name like any other.
 
-Project does not rank retained binding intervals against the selected arm. Its binding-order
-regression fixture directly seeds Project's post-transition input with a closed
-predecessor and current successor, proving selection without triggering the intentional
-dual-current fatal. The exact-name dual-current
-integrity assertion and durable failure audit run alongside the corresponding child
-assertion. Those assertions run after transaction-level and then block-level
-reconciliation, so a transient state while one ENSv1→ENSv2 migration transaction
-cleans up the predecessor and establishes the successor does not fail a
-generation. On either ENS deployment profile (Mainnet or Sepolia), a name whose
-bindings remain current after the applicable proven activated boundary causes Project to abort
-before `publish::swap`,
-publishes no partial generation, and fails readiness for that target
-generation. After the Project transaction rolls back, the phase runner writes a
-separate append-only `project_generation_failures` diagnostic audit row with
-both binding and resource identities, the boundary event, and the block,
-transaction, and log position of each. The assertion examines the names that
-generation derives, not the whole chain, so a clean run proves the invariant
-only for its own affected scope. On the normal path that is contained: a failed
-generation never advances the resume cursor, so the window holding the conflict
-is re-derived until it is repaired. An operator redo over a range that excludes
-the conflicted name still publishes. Reorgs retain the row and make its stored
-block hashes explicitly orphaned through lineage; a later successful generation
-does not erase the failure. Neither slice chooses by recency.
+Project does not rank retained binding intervals against the selected arm.
+Bindings that remain current on both arms after an activated ENSv1→ENSv2
+migration boundary do not stop publication on either ENS deployment profile
+(Mainnet or Sepolia): the selection below decides the name, and the other arm's
+binding stays retained state. Earlier releases aborted such a publication and
+wrote a `project_generation_failures` audit row; the family publisher has no
+such assertion, and the removal schema-migration dropped that table. Selection
+never chooses by recency.
 
 Every name follows the chain
 ([ADR 0007](adrs/0007-follow-the-chain-ens-authority.md)). Only an arm that
@@ -505,10 +488,8 @@ keeps it only to serve `migrated_at` and `is_migrated`. The ENSv2 registration
 the migration made decides the name like any other, and its epoch starts at that
 registration's own binding.
 A live ENSv1 binding next to a current ENSv2 registration is ordinary chain
-state. The dual-current contradiction keeps its migration scope: it aborts
-projection generation only for a name with an activated migration boundary.
-Before the
-exact-name slice, a corpus containing both families retained the historical
+state, with or without an activated migration boundary. Before the per-name
+rule, a corpus containing both families retained the historical
 `mixed_exact_name_corpus` product reason; the per-name rule replaced that blanket
 refusal.
 
@@ -1590,8 +1571,9 @@ Coverage is contractual.
 assert exhaustiveness: every projection that carries a coverage object emits the
 constant `not_asserted` alongside `status = "projected"`, and support is carried
 separately in `support_status` / `unsupported_reason`.
-`account_permission_state_current` is the exception: it builds no coverage object at all, so it emits neither value
-and a consumer must not probe it for one. That is a deliberate decision recorded
+Account-level approvals (composed from `project_account_approval`) are the
+exception: they carry no coverage object at all, so they emit neither value
+and a consumer must not probe them for one. That is a deliberate decision recorded
 in [`schema-v2/README.md`](../schema-v2/README.md) § Current projections, not a
 gap. Two read paths still report a richer value, and both derive it at read
 time rather than reading it from a projection. The permissions resource-summary
@@ -1660,20 +1642,13 @@ displaced readable lineage branch `orphaned` before making the selected branch
 readable; interpretation selects raw facts through that lineage rather than
 rewriting immutable raw rows. An explicit `interpret` redo replaces derived
 identity, discovery, and normalized-event output for its selected range, except
-for four bounded kinds of coordination state carried across redo preparation.
-It preserves the resolver references that Project needs to find projection rows
-affected by disappearing events, the available logical-name and
-permission-resource identifiers from state-derived ENSv2 path-expiry releases,
-child identifiers from entry-creating events in ENSv1→ENSv2 migration registries,
-and finitely retired manifest-declared address ranges that prevent replay of
-older observations from reopening retired authority. Project seeds from the
-resolver references, release identifiers, and child identifiers only during the
-covering Redo-mode publication: logical names seed bounded descendant replay as
-[expiry roots](glossary.md#expiry-root), permission resources force a resource
-rebuild, and migration-registry entry history seeds the affected child. A later
-Normal-mode catch-up consumes those rows without seeding from them; #828 tracks
-whether that asymmetry should change.
-Interpret uses the retired address boundary while rewriting discovery output.
+for one kind of coordination state carried across redo preparation: finitely
+retired manifest-declared address ranges that prevent replay of older
+observations from reopening retired authority. Interpret uses that retired
+address boundary while rewriting discovery output. Project needs nothing else
+from the deleted range: it undoes its journalled family publications to a
+trusted base and replays retained canonical input
+([Reorg and redo](projections.md#reorg-and-redo)).
 
 The live phase uses the same head-publication transaction as ingest. That
 transaction orphans the displaced suffix, clears affected active resolution

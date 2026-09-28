@@ -697,36 +697,33 @@ watch-plan inspection were cut and have no phase-runner replacements.
 
 ## Canonical-head hydration
 
-Hydration runs as the final step of the project phase, after the event-derived
-projection publication for the selected canonical head. It batches eligible
-Ethereum calls through Multicall3 with an EIP-1898 block selector containing
-the exact stored number and hash, then revalidates that `chain_heads` marker in
-the publication transaction. If a bounded project redo publishes an older
-cursor while `chain_heads` is already newer, hydration is deferred until
-project reaches that exact current head; newer execution state is never layered
-over an older event-derived projection target.
+Hydration runs inside Project's family publication on configured Ethereum
+Mainnet follow blocks. A short preparation transaction previews the block with
+the normal reducers and closes before any RPC. Eligible calls go through
+Multicall3 with an EIP-1898 block selector containing the exact number and hash
+of the block being published, never provider `latest`, and the publication
+transaction revalidates the predecessor, input revision, canonical block and
+each result's selected identity before accepting it. Replay, rebuild and
+rebuild ranges make no calls, so newer execution state is never layered over
+an older target, and there is no historical hydration pass.
 
 The candidate set is current-only:
 
-- existing ENS/60 `primary_names_current` tuples whose latest canonical reverse
+- existing ENS/60 reverse tuples whose latest canonical reverse
   claim and resolver edge select a configured legacy event-silent resolver (upstream: .refs/ensnode/packages/datasources/src/mainnet.ts:L311 @ ensnode@2017ae6) (upstream: .refs/ensnode/packages/datasources/src/mainnet.ts:L316 @ ensnode@2017ae6);
-- supported ENSv1 text entries in `record_inventory_current` whose event did
-  not retain a value, plus previously hydrated entries that need refresh.
+- supported ENSv1 text entries whose event did not retain a value, plus
+  previously hydrated entries that need refresh.
 
-Successful, absent, and invalid reverse-name results update only
-`primary_names_current`. Successful or absent text results update only
-`record_inventory_current.entries`. Provenance stores both the exact hydration
-head and the event-derived fields replaced by hydration. A failed call or
-whole Multicall/RPC batch restores every affected baseline in the same
-head-revalidated publication transaction, removes the prior head's hydration
-metadata, and keeps project retryable at the same head. If a previously
-hydrated reverse tuple no longer selects a configured legacy resolver, the
-same publication restores its baseline without issuing an ineligible call. No
-hydration value is written to raw facts, identity rows, or normalized events,
-and there is no
-historical hydration pass. Advancing or replacing the canonical head causes
-project to rebuild the affected event-derived scope and refresh the current
-values at the new exact hash.
+Results are overlays on the event-derived family rows, journalled with them: a
+reverse-name result on the reverse tuple and its baseline, a text result in
+`project_node_record_value.hydrated_value` with the block hash and selectors.
+The event-derived columns stay unchanged. A failed call or whole Multicall/RPC
+batch removes the affected overlays and the block still publishes; a later
+follow block retries. If a previously hydrated reverse tuple no longer selects
+a configured legacy resolver, the reader exposes its baseline without another
+call. No hydration value is written to raw facts, identity rows, or normalized
+events. [Follow-only hydration](projections.md#follow-only-hydration) has the
+full rules.
 
 ## Canonicality and replay facts
 

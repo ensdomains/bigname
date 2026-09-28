@@ -1359,7 +1359,7 @@ latency remains a rollout acceptance check.
 Schema-migration `20260929140000_named_resource_pointer.sql` adds the named key
 table to an existing phase schema and atomically clears all family rows, the
 marker, journal and repair record when the table was absent, including
-`project_name_summary` when the following TYR-36 slice has already installed it.
+`project_name_summary` when it exists.
 The next family
 run rebuilds from canonical interpreted input; fenced reads remain stale until
 the new publication is live. Reapplying the migration preserves an existing
