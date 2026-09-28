@@ -84,8 +84,8 @@ async fn api_serve_refuses_a_schema_missing_normalized_events() -> Result<()> {
 async fn api_verified_lookup_ddl_preflight_reports_missing_relation() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     sqlx::query(
-        "ALTER TABLE bigname_phase.record_inventory_current \
-         RENAME TO record_inventory_current_preflight_missing",
+        "ALTER TABLE bigname_phase.project_address_name_index \
+         RENAME TO project_address_name_index_preflight_missing",
     )
     .execute(&database.lookup_pool)
     .await?;
@@ -99,7 +99,7 @@ async fn api_verified_lookup_ddl_preflight_reports_missing_relation() -> Result<
             .await
             .expect_err("startup diagnostics must be repeatable");
     let expected = "API verified-lookup DDL preflight failed: required lookup objects are missing or serving relations are unreadable\n\
-                    relation: bigname_phase.record_inventory_current";
+                    relation: bigname_phase.project_address_name_index";
 
     assert_eq!(format!("{first_error:#}"), expected);
     assert_eq!(format!("{second_error:#}"), expected);
@@ -148,7 +148,7 @@ async fn api_lookup_ddl_inventory_matches_every_serving_path_phase_object() -> R
         bigname_storage::load_missing_api_lookup_ddl(&database.lookup_pool)
             .await?
             .is_empty(),
-        "baseline scripts 01-10 must install every inventoried object"
+        "the baseline scripts must install every inventoried object"
     );
 
     sqlx::query("ALTER SCHEMA bigname_phase RENAME TO bigname_phase_inventory_probe")
@@ -162,28 +162,60 @@ async fn api_lookup_ddl_inventory_matches_every_serving_path_phase_object() -> R
     let expected = BTreeSet::from([
         "function: bigname_phase.revalidate_resolution_lookup_state(text,bigint,text,jsonb,jsonb,uuid,text,text)",
         "function: bigname_phase.write_resolution_divergence(uuid,text,text,text,bigint,text,jsonb,text,text,text,text,jsonb,jsonb,boolean)",
-        "relation: bigname_phase.account_permission_state_current",
-        "relation: bigname_phase.address_names_current",
-        "relation: bigname_phase.address_records_current",
         "relation: bigname_phase.chain_header_audit",
         "relation: bigname_phase.chain_heads",
         "relation: bigname_phase.chain_lineage",
         "relation: bigname_phase.chain_phase_state",
         "relation: bigname_phase.child_registration_events",
-        "relation: bigname_phase.children_current",
         "relation: bigname_phase.contract_instance_addresses",
+        "relation: bigname_phase.discovery_edges",
+        "relation: bigname_phase.label_preimages",
         "relation: bigname_phase.manifest_contract_instances",
         "relation: bigname_phase.manifest_versions",
+        "relation: bigname_phase.migration_discovery_associations",
         "relation: bigname_phase.migration_event_associations",
-        "relation: bigname_phase.name_current",
         "relation: bigname_phase.name_surfaces",
         "relation: bigname_phase.normalized_events",
-        "relation: bigname_phase.permissions_current",
-        "relation: bigname_phase.permissions_current_resource_summary",
-        "relation: bigname_phase.primary_names_current",
-        "relation: bigname_phase.record_inventory_current",
+        "relation: bigname_phase.project_account_approval",
+        "relation: bigname_phase.project_address_controller_candidate",
+        "relation: bigname_phase.project_address_name_fold",
+        "relation: bigname_phase.project_address_name_index",
+        "relation: bigname_phase.project_address_record_id_index",
+        "relation: bigname_phase.project_address_record_node_index",
+        "relation: bigname_phase.project_binding_candidate",
+        "relation: bigname_phase.project_child_edge_candidate",
+        "relation: bigname_phase.project_child_registration_state",
+        "relation: bigname_phase.project_claim_normalization",
+        "relation: bigname_phase.project_family_marker",
+        "relation: bigname_phase.project_family_undo",
+        "relation: bigname_phase.project_grant",
+        "relation: bigname_phase.project_lifecycle_association",
+        "relation: bigname_phase.project_lifecycle_event",
+        "relation: bigname_phase.project_lifecycle_key_state",
+        "relation: bigname_phase.project_lifecycle_triple_summary",
+        "relation: bigname_phase.project_name_alias",
+        "relation: bigname_phase.project_name_history",
+        "relation: bigname_phase.project_name_state",
+        "relation: bigname_phase.project_name_summary",
+        "relation: bigname_phase.project_named_resource_pointer",
+        "relation: bigname_phase.project_node_record_partition",
+        "relation: bigname_phase.project_node_record_value",
+        "relation: bigname_phase.project_parent_subregistry",
+        "relation: bigname_phase.project_record_id_value",
+        "relation: bigname_phase.project_registry_binding_observation",
+        "relation: bigname_phase.project_registry_node_state",
+        "relation: bigname_phase.project_registry_owner_event",
+        "relation: bigname_phase.project_registry_pointer",
+        "relation: bigname_phase.project_repair_record",
+        "relation: bigname_phase.project_resolver_alias",
+        "relation: bigname_phase.project_resolver_classification",
+        "relation: bigname_phase.project_resolver_link",
+        "relation: bigname_phase.project_resource_admin_aggregate",
+        "relation: bigname_phase.project_resource_pointer",
+        "relation: bigname_phase.project_reverse_node_claim",
+        "relation: bigname_phase.project_reverse_tuple",
+        "relation: bigname_phase.project_wrapper_state",
         "relation: bigname_phase.resolution_divergences",
-        "relation: bigname_phase.resolver_current",
         "relation: bigname_phase.resources",
         "relation: bigname_phase.service_heartbeats",
         "relation: bigname_phase.surface_bindings",
@@ -193,25 +225,25 @@ async fn api_lookup_ddl_inventory_matches_every_serving_path_phase_object() -> R
     .map(str::to_owned));
 
     assert_eq!(actual, expected);
-    assert_eq!(actual.len(), 29);
+    assert_eq!(actual.len(), 61);
     database.cleanup().await
 }
 
 #[tokio::test]
-async fn api_preflight_reports_missing_account_permission_state_current() -> Result<()> {
+async fn api_preflight_reports_missing_account_approvals() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    sqlx::query("DROP TABLE bigname_phase.account_permission_state_current")
+    sqlx::query("DROP TABLE bigname_phase.project_account_approval")
         .execute(&database.lookup_pool).await?;
     let missing = bigname_storage::load_missing_api_lookup_ddl(&database.lookup_pool).await?;
     assert!(missing.iter().any(|object| {
         object.kind == bigname_storage::ApiLookupDdlKind::Relation
-            && object.identity == "bigname_phase.account_permission_state_current"
+            && object.identity == "bigname_phase.project_account_approval"
     }));
     database.cleanup().await
 }
 
 #[tokio::test]
-async fn api_preflight_reports_unreadable_account_permission_state_current() -> Result<()> {
+async fn api_preflight_reports_unreadable_account_approvals() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     let role = format!("permission_preflight_{}", std::process::id());
     sqlx::query(&format!("CREATE ROLE {role} NOLOGIN"))
@@ -220,7 +252,7 @@ async fn api_preflight_reports_unreadable_account_permission_state_current() -> 
         .execute(&database.lookup_pool).await?;
     sqlx::query(&format!("GRANT SELECT ON ALL TABLES IN SCHEMA bigname_phase TO {role}"))
         .execute(&database.lookup_pool).await?;
-    sqlx::query(&format!("REVOKE SELECT ON bigname_phase.account_permission_state_current FROM {role}"))
+    sqlx::query(&format!("REVOKE SELECT ON bigname_phase.project_account_approval FROM {role}"))
         .execute(&database.lookup_pool).await?;
     sqlx::query(&format!("REVOKE SELECT ON bigname_phase.resolution_divergences FROM {role}"))
         .execute(&database.lookup_pool).await?;
@@ -233,14 +265,14 @@ async fn api_preflight_reports_unreadable_account_permission_state_current() -> 
     }).connect_with(options).await?;
     let missing = bigname_storage::load_missing_api_lookup_ddl(&pool).await?;
     assert!(missing.iter().any(|object| object.identity
-        == "bigname_phase.account_permission_state_current"));
+        == "bigname_phase.project_account_approval"));
     assert!(!missing.iter().any(|object| object.identity
         == "bigname_phase.resolution_divergences"));
     sqlx::query(&format!("REVOKE USAGE ON SCHEMA bigname_phase FROM {role}"))
         .execute(&database.lookup_pool).await?;
     let missing = bigname_storage::load_missing_api_lookup_ddl(&pool).await?;
     assert!(missing.iter().any(|object| object.identity
-        == "bigname_phase.account_permission_state_current"));
+        == "bigname_phase.project_account_approval"));
     let error = crate::startup_preflight::ensure_verified_lookup_ddl_available(&pool)
         .await
         .expect_err("startup must reject an unreadable serving relation");
