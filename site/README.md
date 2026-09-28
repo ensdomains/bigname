@@ -33,9 +33,14 @@ The selection lives in the URL, so a link says which network it means:
 
 An unknown `?network=`, one still marked coming, or a rejected `?api=` falls
 back to Sepolia, and the address bar is rewritten to say so. Switching
-networks rewrites the query string to just `network` (and `api` when set);
-any other query parameters are dropped. Links between the two pages carry the
-same query (`data-carry` in the markup).
+networks sets `network` (and sets or removes `api`) in the query string and
+preserves every other query parameter. Links between the two pages
+(`data-carry` in the markup) get `network` and `api` merged into their own
+query, keeping their fragment.
+
+The status line asks `<api>/v1/status` every 30 seconds, with at most one
+request outstanding. Switching networks cancels the pending request, forgets
+the previous network's answer, and asks the new one.
 
 ## Preview locally
 
@@ -50,17 +55,28 @@ with `cargo run -p bigname-api`.
 
 ## Checks
 
-`scripts/check-site` runs in CI: the files exist, no API request or link goes
-to the page's own origin, generated curl commands quote every value with
-`shq()`, and no server-side placeholder is left. The API crate's
-`site_pages` tests hold the reference to the router: every `/v1` route the API
-serves must have a manual page here, and every upstream citation here must be
-in a contract doc.
+These run in CI's `site` job and in the API crate's suite:
+
+- `scripts/check-site` is a set of static guards over the source: the files
+  exist; page fetches start from a base captured from `NET.apiBase()`; no
+  root-relative link or direct use of the page's own origin; generated curl
+  commands quote every value with `shq()`; no server-side placeholder or
+  retired hostname. It checks patterns, so it
+  catches the usual regressions rather than proving every request is right.
+- `node --test scripts/tests/site.test.mjs` exercises the logic in
+  `network.js` (exported when it is loaded outside a browser): query and link
+  merging, the `?api=` rules, mainnet not selectable, one outstanding status
+  request, late answers dropped, the cache reset on a switch, and escaping.
+- The API crate's `site_pages` tests, which already held the pages to the
+  router, now read these files: every `/v1` route the API serves must have a
+  manual page here, and every upstream citation here must be in a contract
+  doc.
 
 ## Hosting
 
-Hosting (Cloudflare Pages) is set up by the infrastructure part of TYR-56, not
-from this repository. CI uploads `site/` as a build artifact on every run.
+Hosting (Cloudflare Pages) is provisioned separately, by the infrastructure
+part of TYR-56, not from this repository. After the site checks pass, CI
+uploads `site/` as an artifact.
 
 The OpenAPI document will be served by the API at `/openapi.json` (TYR-18).
 The public edge already admits that path; until the document ships the API

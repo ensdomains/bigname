@@ -1,13 +1,18 @@
 // The network switcher both pages share. It owns which bigname API the site
-// talks to: every request the pages make goes through apiBase(), never the
-// page's own origin, because the site is hosted apart from the API.
+// talks to: every API request the pages make goes through apiBase(), never
+// the page's own origin, because the site is hosted apart from the API.
 //
 // Selection lives in the URL so a link says which network it means:
 //   ?network=sepolia|mainnet   pick a network from the table below
 //   ?api=http://127.0.0.1:3000 point at any API instead (local development);
 //                              it wins over the table and shows as "custom"
-// Links marked data-carry keep the query when moving between the two pages.
-(function () {
+// Other query parameters are left alone. Links marked data-carry get the
+// selection merged into their own query when moving between the two pages.
+//
+// The first half of this file is plain logic with no DOM, exported for the
+// behavioural tests in scripts/tests/site.test.mjs. The second half wires it
+// to the page and only runs in a browser.
+(function (root) {
   'use strict';
 
   // A network with coming: true is listed but not selectable until its API exists.
@@ -19,8 +24,10 @@
   const CHAIN_NAMES = { '1': 'ethereum', '11155111': 'sepolia', '8453': 'base', '84532': 'base sepolia' };
   const STATUS_EVERY_MS = 30000;
 
-  const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const selectable = id => NETWORKS.find(n => n.id === id && !n.coming) || null;
+  const defaultNetwork = () => selectable(DEFAULT_NETWORK);
+
   // An override must be an absolute http(s) URL; anything else is ignored. A
   // value with a quote, backslash, whitespace, semicolon or angle bracket is
   // rejected outright rather than cleaned, since the pages print the base into
@@ -34,50 +41,138 @@
     } catch (e) { return null; }
   }
 
-  const initial = new URLSearchParams(location.search);
-  let custom = parseApi(initial.get('api'));
-  let network = selectable(initial.get('network')) || selectable(DEFAULT_NETWORK);
+  // The selection a query string asks for. `rewrite` is true when the address
+  // bar should change to say what was actually chosen: an unknown or coming
+  // ?network= falls back to the default, and a rejected ?api= is dropped.
+  function initialSelection(search) {
+    const q = new URLSearchParams(search);
+    const custom = parseApi(q.get('api'));
+    const network = selectable(q.get('network')) || defaultNetwork();
+    const rewrite = (q.has('network') && q.get('network') !== network.id) || (q.has('api') && !custom);
+    return { network, custom, rewrite };
+  }
 
+  function applySelection(params, network, custom) {
+    params.set('network', network.id);
+    if (custom) params.set('api', custom); else params.delete('api');
+    return params;
+  }
+  // The page's query with the selection written into it; other parameters survive.
+  function buildQuery(search, network, custom) {
+    const s = applySelection(new URLSearchParams(search), network, custom).toString();
+    return s ? '?' + s : '';
+  }
+  // A page-relative link with the selection merged into its own query,
+  // keeping its #fragment. Carrying an already carried link changes nothing.
+  function carryHref(href, network, custom) {
+    const h = href.indexOf('#');
+    const hash = h < 0 ? '' : href.slice(h), rest = h < 0 ? href : href.slice(0, h);
+    const q = rest.indexOf('?');
+    const path = q < 0 ? rest : rest.slice(0, q), search = q < 0 ? '' : rest.slice(q + 1);
+    return path + buildQuery(search, network, custom) + hash;
+  }
+
+  const hostOf = base => { try { return new URL(base).host; } catch (e) { return base; } };
+  const chainName = id => CHAIN_NAMES[id] || `chain ${id}`;
+  const fmtLag = s => s < 90 ? `${Math.round(s)}s` : s < 5400 ? `${Math.round(s / 60)}m` : `${(s / 3600).toFixed(1)}h`;
+  const fmtBlock = n => typeof n === 'number' ? n.toLocaleString('en-US') : '?';
+
+  // The switcher's buttons.
+  function controlHtml(network, custom) {
+    const opts = NETWORKS.map(n => {
+      const on = !custom && n === network;
+      return n.coming
+        ? `<button type="button" disabled title="${esc(n.label)} is coming; its API is not live yet">${esc(n.label)}<small>coming</small></button>`
+        : `<button type="button" data-net="${esc(n.id)}" aria-pressed="${on}" title="${esc(n.label)}: ${esc(n.api)}">${esc(n.label)}</button>`;
+    });
+    if (custom) opts.push(`<button type="button" data-net="custom" aria-pressed="true" title="custom: ${esc(custom)}">custom</button>`);
+    return opts.join('');
+  }
+  // The detail line: which API answered and each chain's status and head block.
+  function statusDetailHtml(data, base, label) {
+    const api = `<span title="${esc(base)}">api ${esc(hostOf(base))}</span>`;
+    if (!data) return `${api} · ${esc(label)} unreachable`;
+    const chains = Object.entries(data.chains || {}).map(([id, c]) =>
+      `<span title="indexed ${esc(fmtBlock(c.indexed_block))}, head ${esc(fmtBlock(c.latest_block))}">${esc(chainName(id))} ${esc(c.status)} at ${esc(fmtBlock(c.latest_block))}</span>`);
+    return [api, ...chains].join(' · ');
+  }
+
+  // Status of the selected API. At most one request is out at a time: a timer
+  // tick while one is pending does nothing. A selection change aborts the
+  // pending request, forgets the previous network's answer, and asks the new
+  // one. Only the newest request may publish, and an old request finishing
+  // never clears the newer one's in-flight mark.
+  function createStatus({ fetchImpl, getBase, AbortCtl }) {
+    const Ctl = AbortCtl || root.AbortController;
+    let gen = 0, active = null;
+    let cache = { pending: true, base: getBase(), data: null };
+    const listeners = [];
+    function start() {
+      const g = ++gen, base = getBase(), controller = new Ctl(), req = { controller };
+      active = req;
+      return Promise.resolve()
+        .then(() => fetchImpl(base + '/v1/status', { headers: { accept: 'application/json' }, signal: controller.signal }))
+        .then(r => (r && r.ok ? r.json().then(j => (j && j.data && j.data.status ? j.data : null)) : null))
+        .catch(() => null)
+        .then(data => {
+          if (g !== gen) return;
+          cache = { pending: false, base, data };
+          for (const cb of listeners) cb(data, base);
+        })
+        .finally(() => { if (active === req) active = null; });
+    }
+    return {
+      tick() { return active ? null : start(); },
+      restart() {
+        if (active) active.controller.abort();
+        active = null;
+        cache = { pending: true, base: getBase(), data: null };
+        return start();
+      },
+      subscribe(cb) { listeners.push(cb); if (!cache.pending) cb(cache.data, cache.base); },
+      get inFlight() { return active !== null; },
+      get cache() { return cache; },
+    };
+  }
+
+  const core = {
+    NETWORKS, DEFAULT_NETWORK, esc, selectable, parseApi, initialSelection, buildQuery, carryHref,
+    hostOf, controlHtml, statusDetailHtml, createStatus,
+  };
+  if (typeof module !== 'undefined' && module.exports) module.exports = core;
+  if (typeof document === 'undefined' || typeof location === 'undefined') return;
+
+  // ---- in the page ------------------------------------------------------
+  const initial = initialSelection(location.search);
+  let custom = initial.custom, network = initial.network;
   const apiBase = () => custom || network.api;
-  const apiHost = () => { try { return new URL(apiBase()).host; } catch (e) { return apiBase(); } };
+  const apiHost = () => hostOf(apiBase());
   const label = () => custom ? 'custom' : network.label;
-  function query() {
-    const q = new URLSearchParams();
-    q.set('network', network.id);
-    if (custom) q.set('api', custom);
-    return '?' + q.toString();
-  }
-  // An unknown or not-yet-live ?network= falls back to the default, and a
-  // rejected ?api= is dropped; say so in the address bar too, so it agrees with
-  // the links and the switcher.
-  if ((initial.has('network') && initial.get('network') !== network.id) || (initial.has('api') && !custom)) {
-    try { history.replaceState(history.state, '', location.pathname + query() + location.hash); } catch (e) {}
-  }
-  // Add the current query to a page-relative link, keeping its #fragment.
-  function carry(href) {
-    const i = href.indexOf('#');
-    const path = i < 0 ? href : href.slice(0, i), hash = i < 0 ? '' : href.slice(i);
-    return path.split('?')[0] + query() + hash;
-  }
-  function refreshLinks(root) {
-    for (const a of (root || document).querySelectorAll('a[data-carry]')) {
+  const labelFor = base => base === custom ? 'custom' : (NETWORKS.find(n => n.api === base) || network).label;
+  const query = () => buildQuery(location.search, network, custom);
+  const carry = href => carryHref(href, network, custom);
+  const writeUrl = () => { try { history.replaceState(history.state, '', location.pathname + query() + location.hash); } catch (e) {} };
+  if (initial.rewrite) writeUrl();
+
+  function refreshLinks(scope) {
+    for (const a of (scope || document).querySelectorAll('a[data-carry]')) {
       const href = carry(a.getAttribute('data-carry'));
       if (a.getAttribute('href') !== href) a.setAttribute('href', href);
     }
   }
 
-  const changeHandlers = [], statusHandlers = [];
-  let lastStatus = { data: null, base: null, pending: true };
+  const changeHandlers = [];
+  const status = createStatus({ fetchImpl: root.fetch.bind(root), getBase: apiBase });
   function select(id) {
     const next = id === 'custom' ? network : selectable(id);
     if (!next || (next === network && (id === 'custom') === !!custom)) return;
     if (id !== 'custom') custom = null;
     network = next;
-    try { history.replaceState(history.state, '', location.pathname + query() + location.hash); } catch (e) {}
+    writeUrl();
     refreshLinks();
     renderControls();
     for (const cb of changeHandlers) cb();
-    loadStatus();
+    status.restart();
   }
 
   // ---- the control ---------------------------------------------------
@@ -91,16 +186,7 @@
     .bn-net button:not(:disabled):hover { color: var(--ink); }
     @media (max-width: 560px) { .bn-net button:disabled { display: none; } .bn-net button { padding: 2px 5px; } }
   `;
-  function renderControls() {
-    const opts = NETWORKS.map(n => {
-      const on = !custom && n === network;
-      return n.coming
-        ? `<button type="button" disabled title="${esc(n.label)} is coming; its API is not live yet">${esc(n.label)}<small>coming</small></button>`
-        : `<button type="button" data-net="${esc(n.id)}" aria-pressed="${on}" title="${esc(n.label)}: ${esc(n.api)}">${esc(n.label)}</button>`;
-    });
-    if (custom) opts.push(`<button type="button" data-net="custom" aria-pressed="true" title="custom: ${esc(custom)}">custom</button>`);
-    for (const el of mounts) el.innerHTML = opts.join('');
-  }
+  function renderControls() { for (const el of mounts) el.innerHTML = controlHtml(network, custom); }
   function mount(el) {
     if (!el) return;
     if (!document.getElementById('bn-net-style')) {
@@ -117,53 +203,30 @@
   }
 
   // ---- status of the selected network ----------------------------------
-  const chainName = id => CHAIN_NAMES[id] || `chain ${id}`;
-  const fmtLag = s => s < 90 ? `${Math.round(s)}s` : s < 5400 ? `${Math.round(s / 60)}m` : `${(s / 3600).toFixed(1)}h`;
-  const fmtBlock = n => typeof n === 'number' ? n.toLocaleString('en-US') : '?';
-  let statusGen = 0;
-  async function loadStatus() {
-    const gen = ++statusGen, base = apiBase();
-    let data = null;
-    try {
-      const r = await fetch(base + '/v1/status', { headers: { accept: 'application/json' } });
-      if (r.ok) { const j = await r.json(); data = j && j.data && j.data.status ? j.data : null; }
-    } catch (e) {}
-    if (gen !== statusGen) return;
-    lastStatus = { data, base, pending: false };
-    for (const cb of statusHandlers) cb(data, base);
-  }
-  function onStatus(cb) { statusHandlers.push(cb); if (!lastStatus.pending) cb(lastStatus.data, lastStatus.base); }
   // The header pill: overall readiness, with every chain in its tooltip.
   function statusPill(el) {
     if (!el) return;
     const t = el.querySelector('.t');
     changeHandlers.push(() => { el.className = 'status'; t.textContent = 'checking'; el.title = `checking ${apiHost()}`; });
-    onStatus(d => {
-      if (!d) { el.className = 'status bad'; t.textContent = `${label()} unreachable`; el.title = `GET ${apiBase()}/v1/status did not answer`; return; }
+    status.subscribe((d, base) => {
+      if (!d) { el.className = 'status bad'; t.textContent = `${labelFor(base)} unreachable`; el.title = `GET ${base}/v1/status did not answer`; return; }
       const chains = Object.entries(d.chains || {});
       const lag = chains.map(([, c]) => c.lag_seconds).filter(x => typeof x === 'number');
       el.className = 'status ' + (d.status === 'ready' ? 'ok' : d.status === 'stale' ? 'bad' : '');
-      t.textContent = `${label()} ${d.status}${lag.length ? `, ${fmtLag(Math.max(...lag))} behind` : ''}`;
+      t.textContent = `${labelFor(base)} ${d.status}${lag.length ? `, ${fmtLag(Math.max(...lag))} behind` : ''}`;
       el.title = chains.map(([id, c]) => `${chainName(id)}: ${c.status}, indexed ${fmtBlock(c.indexed_block)} of ${fmtBlock(c.latest_block)}`).join('\n');
     });
   }
-  // The detail line: which API the page is talking to and each chain's head.
   function statusDetail(el) {
     if (!el) return;
-    const show = d => {
-      const api = `<span title="${esc(apiBase())}">api ${esc(apiHost())}</span>`;
-      if (!d) { el.innerHTML = `${api} · ${esc(label())} unreachable`; return; }
-      const chains = Object.entries(d.chains || {}).map(([id, c]) =>
-        `<span title="indexed ${esc(fmtBlock(c.indexed_block))}, head ${esc(fmtBlock(c.latest_block))}">${esc(chainName(id))} ${esc(c.status)} at ${esc(fmtBlock(c.latest_block))}</span>`);
-      el.innerHTML = [api, ...chains].join(' · ');
-    };
-    el.innerHTML = `<span>api ${esc(apiHost())}</span>`;
-    onStatus(show);
-    changeHandlers.push(() => { el.innerHTML = `<span>api ${esc(apiHost())}</span>`; });
+    const pending = () => { el.innerHTML = `<span>api ${esc(apiHost())}</span>`; };
+    pending();
+    changeHandlers.push(pending);
+    status.subscribe((d, base) => { el.innerHTML = statusDetailHtml(d, base, labelFor(base)); });
   }
 
-  window.BignameNetwork = {
-    NETWORKS, apiBase, apiHost, label, query, carry, refreshLinks, mount, statusPill, statusDetail, onStatus,
+  root.BignameNetwork = {
+    NETWORKS, apiBase, apiHost, label, query, carry, refreshLinks, mount, statusPill, statusDetail,
     onChange: cb => { changeHandlers.push(cb); },
   };
 
@@ -171,8 +234,8 @@
   const start = () => {
     refreshLinks();
     new MutationObserver(() => refreshLinks()).observe(document.body, { childList: true, subtree: true });
-    loadStatus();
-    setInterval(loadStatus, STATUS_EVERY_MS);
+    status.tick();
+    setInterval(() => status.tick(), STATUS_EVERY_MS);
   };
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start); else start();
-})();
+})(typeof globalThis !== 'undefined' ? globalThis : this);
