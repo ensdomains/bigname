@@ -193,3 +193,61 @@ test('an unreachable API publishes null for the base that was asked', async () =
   await p;
   assert.deepEqual(seen, [[null, 'https://down.test']]);
 });
+
+// Timers the test fires by hand.
+function manualTimers() {
+  const timers = new Map();
+  let next = 1;
+  return {
+    timers,
+    setTimer: (fn, ms) => { const id = next++; timers.set(id, { fn, ms }); return id; },
+    clearTimer: id => { timers.delete(id); },
+    fire: () => { for (const [id, t] of [...timers]) { timers.delete(id); t.fn(); } },
+  };
+}
+
+test('a status request that never answers is aborted after the bound and frees the slot', { timeout: 5000 }, async () => {
+  const { calls, fetchImpl } = manualFetch();
+  const clock = manualTimers();
+  const status = net.createStatus({ fetchImpl, getBase: () => 'https://hang.test', setTimer: clock.setTimer, clearTimer: clock.clearTimer });
+  const seen = [];
+  status.subscribe((d, b) => seen.push([d, b]));
+  const p = status.tick();
+  await flush();
+  assert.equal(calls.length, 1);
+  assert.deepEqual([...clock.timers.values()].map(t => t.ms), [net.STATUS_TIMEOUT_MS]);
+  assert.equal(net.STATUS_TIMEOUT_MS, 10000);
+  assert.equal(status.tick(), null, 'still in flight before the bound');
+  clock.fire();
+  await p;
+  assert.equal(calls[0].aborted, true);
+  assert.equal(status.inFlight, false);
+  assert.deepEqual(seen, [[null, 'https://hang.test']], 'reads as unreachable');
+  const again = status.tick();
+  assert.ok(again, 'the next tick starts a new request');
+  await flush();
+  assert.equal(calls.length, 2);
+  calls[1].answer(ready(9));
+  await again;
+  assert.equal(clock.timers.size, 0, 'an answered request clears its timer');
+  assert.equal(seen.at(-1)[1], 'https://hang.test');
+  assert.equal(seen.at(-1)[0].chains['11155111'].latest_block, 9);
+});
+
+test('the timeout of an aborted old request cannot touch the new one', async () => {
+  const { calls, fetchImpl } = manualFetch();
+  const clock = manualTimers();
+  let base = 'https://a.test';
+  const status = net.createStatus({ fetchImpl, getBase: () => base, setTimer: clock.setTimer, clearTimer: clock.clearTimer });
+  status.tick();
+  await flush();
+  base = 'https://b.test';
+  const b = status.restart();
+  await flush();
+  assert.equal(calls[0].aborted, true);
+  assert.equal(clock.timers.size, 1, 'the old request cleared its timer when it ended');
+  assert.equal(status.inFlight, true);
+  calls[1].answer(ready(3));
+  await b;
+  assert.equal(status.cache.base, 'https://b.test');
+});

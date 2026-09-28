@@ -23,6 +23,9 @@
   const DEFAULT_NETWORK = 'sepolia';
   const CHAIN_NAMES = { '1': 'ethereum', '11155111': 'sepolia', '8453': 'base', '84532': 'base sepolia' };
   const STATUS_EVERY_MS = 30000;
+  // A status request that has not answered by then is abandoned, so a host that
+  // accepts the connection and never replies cannot hold the single slot.
+  const STATUS_TIMEOUT_MS = 10000;
 
   const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const selectable = id => NETWORKS.find(n => n.id === id && !n.coming) || null;
@@ -98,18 +101,24 @@
   }
 
   // Status of the selected API. At most one request is out at a time: a timer
-  // tick while one is pending does nothing. A selection change aborts the
-  // pending request, forgets the previous network's answer, and asks the new
-  // one. Only the newest request may publish, and an old request finishing
-  // never clears the newer one's in-flight mark.
-  function createStatus({ fetchImpl, getBase, AbortCtl }) {
+  // tick while one is pending does nothing. A request is aborted after
+  // timeoutMs and reads as unreachable, which frees the slot for the next tick.
+  // A selection change aborts the pending request, forgets the previous
+  // network's answer, and asks the new one. Only the newest request may
+  // publish, and an old request finishing never clears the newer one's
+  // in-flight mark.
+  function createStatus({ fetchImpl, getBase, AbortCtl, setTimer, clearTimer, timeoutMs }) {
     const Ctl = AbortCtl || root.AbortController;
+    const after = setTimer || ((fn, ms) => root.setTimeout(fn, ms));
+    const cancel = clearTimer || (t => root.clearTimeout(t));
+    const limit = timeoutMs || STATUS_TIMEOUT_MS;
     let gen = 0, active = null;
     let cache = { pending: true, base: getBase(), data: null };
     const listeners = [];
     function start() {
       const g = ++gen, base = getBase(), controller = new Ctl(), req = { controller };
       active = req;
+      const timer = after(() => controller.abort(), limit);
       return Promise.resolve()
         .then(() => fetchImpl(base + '/v1/status', { headers: { accept: 'application/json' }, signal: controller.signal }))
         .then(r => (r && r.ok ? r.json().then(j => (j && j.data && j.data.status ? j.data : null)) : null))
@@ -119,7 +128,7 @@
           cache = { pending: false, base, data };
           for (const cb of listeners) cb(data, base);
         })
-        .finally(() => { if (active === req) active = null; });
+        .finally(() => { cancel(timer); if (active === req) active = null; });
     }
     return {
       tick() { return active ? null : start(); },
@@ -136,7 +145,7 @@
   }
 
   const core = {
-    NETWORKS, DEFAULT_NETWORK, esc, selectable, parseApi, initialSelection, buildQuery, carryHref,
+    NETWORKS, DEFAULT_NETWORK, STATUS_TIMEOUT_MS, esc, selectable, parseApi, initialSelection, buildQuery, carryHref,
     hostOf, controlHtml, statusDetailHtml, createStatus,
   };
   if (typeof module !== 'undefined' && module.exports) module.exports = core;
