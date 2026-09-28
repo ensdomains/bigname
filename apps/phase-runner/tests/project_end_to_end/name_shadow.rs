@@ -23,16 +23,19 @@
 //! serves no resolver, name_current/build.sql:141-169): the one known case is the control
 //! comparison's `served_membership_skips_unnamed_path_expiry`. Every other difference, and a name
 //! only one side serves, is a mismatch and fails the run.
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    time::Instant,
+};
 
 use anyhow::{Context, Result};
 use bigname_storage::{
     NameCurrentRow,
     families::{
         control::{compare::same, lifecycle::AuthoritySelection},
-        name::load_family_names_by_logical_name_ids,
+        name::{load_family_name, load_family_names_by_logical_name_ids},
     },
-    load_name_current_by_logical_name_ids,
+    load_name_current, load_name_current_by_logical_name_ids,
 };
 use serde_json::{Value, json};
 use sqlx::PgPool;
@@ -71,19 +74,31 @@ pub struct NameReport {
     /// fields may place them differently.
     pub covered_names: BTreeSet<String>,
     pub lines: Vec<String>,
+    /// Read time in microseconds, served then composed: every name read alone (name detail's
+    /// read), and every chunk of names read at once (the batch readers).
+    pub single_us: (u128, u128),
+    pub batch_us: (u128, u128),
+    pub chunks: usize,
 }
 
 impl NameReport {
     pub fn print(&self) {
+        let per = |total: u128, count: usize| total / (count.max(1) as u128);
         println!(
             "SEPOLIA_END_TO_END_NAME_SHADOW target={} names={} equal={} covered_by_control={:?} \
-             mismatched={} mismatched_fields={:?}",
+             mismatched={} mismatched_fields={:?} single_served_us_per_name={} \
+             single_composed_us_per_name={} batch_served_us_per_chunk={} \
+             batch_composed_us_per_chunk={}",
             self.target,
             self.names,
             self.equal,
             self.covered_by_control,
             self.mismatched,
-            self.mismatched_fields
+            self.mismatched_fields,
+            per(self.single_us.0, self.names),
+            per(self.single_us.1, self.names),
+            per(self.batch_us.0, self.chunks),
+            per(self.batch_us.1, self.chunks),
         );
         for line in self.lines.iter().take(PRINTED) {
             println!("  {line}");
@@ -209,9 +224,20 @@ pub async fn compare(pool: &PgPool, chain: &str, target: i64) -> Result<NameRepo
         ..NameReport::default()
     };
     for chunk in names.chunks(CHUNK) {
+        let started = Instant::now();
         let served = load_name_current_by_logical_name_ids(pool, chunk).await?;
+        report.batch_us.0 += started.elapsed().as_micros();
+        let started = Instant::now();
         let composed = load_family_names_by_logical_name_ids(pool, chunk).await?;
+        report.batch_us.1 += started.elapsed().as_micros();
+        report.chunks += 1;
         for name in chunk {
+            let started = Instant::now();
+            load_name_current(pool, name).await?;
+            report.single_us.0 += started.elapsed().as_micros();
+            let started = Instant::now();
+            load_family_name(pool, name).await?;
+            report.single_us.1 += started.elapsed().as_micros();
             report.names += 1;
             let (served, composed) = match (served.get(name), composed.get(name)) {
                 (None, None) => {

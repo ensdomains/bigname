@@ -732,9 +732,14 @@ async fn composed_bound_names(
                 )
                 .await?
             };
-            if side == 1 {
-                report.time("bound_names_composed", started);
-            }
+            report.time(
+                if side == 0 {
+                    "bound_names_served"
+                } else {
+                    "bound_names_composed"
+                },
+                started,
+            );
             pages.push(
                 rows.iter()
                     .take(page)
@@ -1014,9 +1019,14 @@ where
             } else {
                 composed(cursor.clone()).await?
             };
-            if side == 1 {
-                report.time("listings", started);
-            }
+            report.time(
+                if side == 0 {
+                    "listings_served"
+                } else {
+                    "listings"
+                },
+                started,
+            );
             pages.push((
                 page.rows.iter().map(listed).collect(),
                 page.next_cursor.clone(),
