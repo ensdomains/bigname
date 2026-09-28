@@ -15,7 +15,6 @@ mod address_names;
 mod address_relations;
 mod assemble;
 mod candidates;
-mod compare;
 mod facts;
 mod inventory;
 mod links;
@@ -37,10 +36,6 @@ use sqlx::{Row, postgres::PgRow};
 
 pub use address_names::load_family_address_names_page;
 pub(crate) use address_names::{compose_address_name_rows, name_relations_on};
-pub use compare::{
-    Difference, check_compatibility_pairs, compare_address_records, compare_address_results,
-    compare_primary_name, compare_record_inventory,
-};
 pub use facts::{
     ResolverClassification as FamilyResolverClassification,
     load_classification as load_family_resolver_classification,

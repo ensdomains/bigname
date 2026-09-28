@@ -5,7 +5,6 @@
 //! per-key family rows the Project phase fills after each publication. Nothing in the API calls
 //! them: every served response still comes from today's tables, and the test harnesses run them
 //! beside the production readers and compare the two (docs/glossary.md, "Shadow read").
-pub mod compare;
 pub mod lifecycle;
 pub mod permissions;
 pub mod position;
