@@ -1,31 +1,62 @@
 #[tokio::test]
 async fn v2_resolver_collection_aliases_exhaustive_scoped_and_latest() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    seed_v2_resolver_bound_names_fixture(&database).await?;
-    upsert_test_resolver_current_rows(
-        &database,
-        &[resolver_current_row(
-            "ethereum-mainnet",
-            V2_RESOLVER_ADDRESS,
-        )],
+    seed_permissioned_collection_inputs(&database).await?;
+    let alpha_resource = Uuid::from_u128(0x5a100);
+    let alpha = seed_family_identity_inputs(
+        &database.pool,
+        "ens",
+        "alpha.eth",
+        "ethereum-mainnet",
+        140,
+        "0xcollection140",
+        alpha_resource,
+        Uuid::from_u128(0x5a101),
+        Uuid::from_u128(0x5a102),
+        "ens_v1",
     )
     .await?;
-    // Include the overview's binding-alias group, not only AliasChanged history.
-    sqlx::query("DELETE FROM bigname_phase.address_names_current WHERE surface_binding_id IN (SELECT surface_binding_id FROM bigname_phase.name_current WHERE raw_name = 'alpha.eth')")
-        .execute(&database.pool).await?;
-    sqlx::query(r#"WITH bindings AS (
-        UPDATE bigname_phase.surface_bindings SET binding_kind = 'resolver_alias_path'
-        WHERE surface_binding_id IN (SELECT surface_binding_id FROM bigname_phase.name_current WHERE raw_name = 'alpha.eth')
-        RETURNING surface_binding_id
-    ) UPDATE bigname_phase.name_current nc SET binding_kind = 'resolver_alias_path',
-        provenance = provenance || '{"resolver_pointer_source_family":"ens_v2_registry_l1"}'::jsonb
-      FROM bindings WHERE nc.surface_binding_id = bindings.surface_binding_id"#)
+    let mut inputs = Vec::new();
+    for (kind, family, after) in [
+        (
+            "RegistrationGranted",
+            "ens_v1_registrar_l1",
+            json!({"authority_kind":"registrar",
+            "registrant":V2_ADDRESS,"expiry":1_900_000_000_i64}),
+        ),
+        (
+            "ResolverChanged",
+            "ens_v2_registry_l1",
+            json!({"resolver":V2_RESOLVER_ADDRESS}),
+        ),
+    ] {
+        let mut event = history_event(
+            &format!("alias-alpha-{kind}"),
+            Some(&alpha),
+            Some(alpha_resource),
+            Some("ethereum-mainnet"),
+            Some(150),
+            Some("0xcollection150"),
+            Some("0xalias-alpha"),
+            Some(0),
+            CanonicalityState::Canonical,
+        );
+        event.event_kind = kind.into();
+        event.source_family = family.into();
+        event.before_state = json!({});
+        event.after_state = after;
+        inputs.push(event);
+    }
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &inputs).await?;
+    // Alias bindings are retained identity inputs, selected again by the real family rebuild.
+    sqlx::query("UPDATE surface_bindings SET binding_kind = 'resolver_alias_path' WHERE logical_name_id = $1")
+        .bind(bigname_storage::logical_name_id_for_name("ens", "alpha.eth"))
         .execute(&database.pool).await?;
     upsert_phase_raw_blocks(
         &database.pool,
         &[raw_block(
             "ethereum-mainnet",
-            "0xaliases150",
+            "0xcollection150",
             None,
             150,
             1_700_000_150,
@@ -39,12 +70,13 @@ async fn v2_resolver_collection_aliases_exhaustive_scoped_and_latest() -> Result
             None,
             Some("ethereum-mainnet"),
             Some(150),
-            Some("0xaliases150"),
+            Some("0xcollection150"),
             Some("0xaliastx"),
             Some(index as i64),
             CanonicalityState::Canonical,
         );
         event.event_kind = "AliasChanged".to_owned();
+        event.source_family = "ens_v2_resolver_l1".into();
         event.after_state = json!({"resolver":resolver, "from_namehash":format!("key-{index:04}"),
             "from_name":"same.eth", "to_name":format!("target-{index:04}.eth"),
             "alias_state":"active", "active":active});
@@ -69,6 +101,7 @@ async fn v2_resolver_collection_aliases_exhaustive_scoped_and_latest() -> Result
     bigname_storage::insert_normalized_event_fixtures(&database.pool, &events).await?;
     sqlx::query("UPDATE bigname_phase.normalized_events SET consumer_visibility = 'candidate', migration_correlation_ids = ARRAY['alias-candidate-correlation'] WHERE event_identity = 'alias-candidate'")
         .execute(&database.pool).await?;
+    publish_resolver_collection_inputs(&database).await?;
     let base = format!("/v1/resolvers/1/{V2_RESOLVER_ADDRESS}/aliases?page_size=37");
     let first = v2_resolver_payload_for_database(&database, &base).await?;
     assert_eq!(first["page"]["total_count"], 105);
@@ -99,39 +132,31 @@ async fn v2_resolver_collection_aliases_exhaustive_scoped_and_latest() -> Result
 #[tokio::test]
 async fn v2_resolver_collection_roles_page_per_registration_and_scope() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    let resolver = resolver_current_row("ethereum-mainnet", V2_RESOLVER_ADDRESS);
-    database
-        .seed_snapshot_selector_chain_positions(&resolver.chain_positions)
-        .await?;
-    upsert_test_resolver_current_rows(&database, &[resolver]).await?;
-    let mut permissions = Vec::new();
-    let resources = (0..207)
-        .map(|i| resource(Uuid::from_u128(0x5500 + i)))
-        .collect::<Vec<_>>();
-    upsert_test_resources(&database.pool, &resources).await?;
-    for (index, resource) in resources.iter().enumerate() {
-        let mut permission = permission_current_row(
-            resource.resource_id,
+    let manifest = seed_permissioned_collection_inputs(&database).await?;
+    let mut events = Vec::new();
+    for index in 0..207 {
+        let resource = Uuid::from_u128(0x5500 + index);
+        insert_collection_permission_resource(&database.pool, resource).await?;
+        events.push(collection_role_event(
+            resource,
             &format!("0x{:040x}", index / 3 + 1),
-            PermissionScope::Resolver {
-                chain_id: "ethereum-mainnet".to_owned(),
-                resolver_address: if index == 205 {
-                    "0x0000000000000000000000000000000000000bbb"
-                } else {
-                    V2_RESOLVER_ADDRESS
-                }
-                .to_owned(),
+            if index == 205 {
+                "0x0000000000000000000000000000000000000bbb"
+            } else {
+                V2_RESOLVER_ADDRESS
             },
-            7,
             160,
-        );
-        permission.provenance["normalized_event_ids"] = json!([]);
-        if index == 206 {
-            permission.effective_powers = json!([]);
-        }
-        permissions.push(permission);
+            index as i64,
+            if index == 206 {
+                json!([])
+            } else {
+                json!(["set_addr", "set_text"])
+            },
+            manifest,
+        ));
     }
-    upsert_phase_permissions_current_rows(&database.pool, &permissions).await?;
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &events).await?;
+    publish_resolver_collection_inputs(&database).await?;
     let base = format!("/v1/resolvers/1/{V2_RESOLVER_ADDRESS}/roles?page_size=100");
     let mut page = v2_resolver_payload_for_database(&database, &base).await?;
     let first_cursor = page["page"]["next_cursor"].as_str().unwrap().to_owned();
@@ -140,8 +165,8 @@ async fn v2_resolver_collection_roles_page_per_registration_and_scope() -> Resul
         assert_eq!(page["page"]["total_count"], 205);
         for row in page["data"].as_array().unwrap() {
             assert!(ids.insert(row["registration_id"].as_str().unwrap().to_owned()));
-            assert_eq!(row["powers"], json!(["set_resolver", "set_records"]));
-            assert!(row.get("grant_event").is_none());
+            assert_eq!(row["powers"], json!(["set_addr", "set_text"]));
+            assert_eq!(row["grant_event"]["block_number"], 160);
         }
         let Some(cursor) = page["page"]["next_cursor"].as_str() else {
             break;
@@ -160,9 +185,7 @@ async fn v2_resolver_collection_roles_page_per_registration_and_scope() -> Resul
         let response = v2_resolver_response_for_database(&database, &uri).await?;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
-    // A real same-height republish changes the project row generation.
-    sqlx::query("UPDATE bigname_phase.chain_phase_state SET updated_at = now() WHERE phase_name = 'project' AND chain_id = 'ethereum-mainnet'")
-        .execute(&database.pool).await?;
+    publish_resolver_collection_inputs(&database).await?;
     let response =
         v2_resolver_response_for_database(&database, &format!("{base}&cursor={first_cursor}"))
             .await?;
@@ -173,15 +196,17 @@ async fn v2_resolver_collection_roles_page_per_registration_and_scope() -> Resul
 #[tokio::test]
 async fn v2_resolver_collection_links_pages_latest_link_per_node_in_record_order() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    let resolver = resolver_current_row("ethereum-mainnet", V2_RESOLVER_ADDRESS);
-    database
-        .seed_snapshot_selector_chain_positions(&resolver.chain_positions)
-        .await?;
-    upsert_test_resolver_current_rows(&database, &[resolver]).await?;
+    seed_permissioned_collection_inputs(&database).await?;
     upsert_phase_raw_blocks(
         &database.pool,
         &[
-            raw_block("ethereum-mainnet", "0xlinks150", None, 150, 1_700_000_150),
+            raw_block(
+                "ethereum-mainnet",
+                "0xcollection150",
+                None,
+                150,
+                1_700_000_150,
+            ),
             raw_block("ethereum-mainnet", "0xlinks300", None, 300, 1_700_000_300),
         ],
     )
@@ -191,7 +216,7 @@ async fn v2_resolver_collection_links_pages_latest_link_per_node_in_record_order
         let (hash, tx) = if block == 300 {
             ("0xlinks300", "0xlinktx300")
         } else {
-            ("0xlinks150", "0xlinktx150")
+            ("0xcollection150", "0xlinktx150")
         };
         let mut event = history_event(
             identity,
@@ -205,6 +230,7 @@ async fn v2_resolver_collection_links_pages_latest_link_per_node_in_record_order
             CanonicalityState::Canonical,
         );
         event.event_kind = "ResolverRecordLinked".to_owned();
+        event.source_family = "ens_v2_resolver_l1".into();
         event.after_state = json!({"source_event":"Linked", "storage_model":"resolver_record_id",
             "resolver":resolver, "node":node, "resolver_record_id":record});
         // A record-ID resolver emits its own Linked logs; the read filters on the emitter.
@@ -282,9 +308,10 @@ async fn v2_resolver_collection_links_pages_latest_link_per_node_in_record_order
     // not even normalizable -- so it must neither be shown nor break the page. The
     // root surface (the empty name at the all-zero node) exists on every ENS chain and
     // must not attach to the default record's link.
-    sqlx::query("INSERT INTO bigname_phase.name_surfaces (logical_name_id, namespace, raw_name, raw_labels, dns_encoded_name, namehash, labelhashes, normalizer_version, visibility_state, deactivation_reason, deactivated_at, chain_id, block_hash, block_number, canonicality_state) VALUES ('ens:' || $1, 'ens', 'Linked.eth', ARRAY['linked','eth'], '\\x066c696e6b656403657468'::bytea, $1, ARRAY['labelhash:linked','labelhash:eth'], 'fixture', 'active', NULL, NULL, 'ethereum-mainnet', '0xlinks150', 150, 'canonical'), ('ens:' || $2, 'ens', 'bad..name', ARRAY['bad','','name'], '\\x00'::bytea, $2, ARRAY['a','b','c'], 'fixture', 'shadow', 'fixture', now(), 'ethereum-mainnet', '0xlinks150', 150, 'canonical'), ('ens:' || $3, 'ens', '', ARRAY[]::text[], '\\x00'::bytea, $3, ARRAY[]::text[], 'fixture', 'active', NULL, NULL, 'ethereum-mainnet', '0xlinks150', 150, 'canonical')")
+    sqlx::query("INSERT INTO bigname_phase.name_surfaces (logical_name_id, namespace, raw_name, raw_labels, dns_encoded_name, namehash, labelhashes, normalizer_version, visibility_state, deactivation_reason, deactivated_at, chain_id, block_hash, block_number, canonicality_state) VALUES ('ens:' || $1, 'ens', 'Linked.eth', ARRAY['linked','eth'], '\\x066c696e6b656403657468'::bytea, $1, ARRAY['labelhash:linked','labelhash:eth'], 'fixture', 'active', NULL, NULL, 'ethereum-mainnet', '0xcollection150', 150, 'canonical'), ('ens:' || $2, 'ens', 'bad..name', ARRAY['bad','','name'], '\\x00'::bytea, $2, ARRAY['a','b','c'], 'fixture', 'shadow', 'fixture', now(), 'ethereum-mainnet', '0xcollection150', 150, 'canonical'), ('ens:' || $3, 'ens', '', ARRAY[]::text[], '\\x00'::bytea, $3, ARRAY[]::text[], 'fixture', 'active', NULL, NULL, 'ethereum-mainnet', '0xcollection150', 150, 'canonical')")
         .bind(node(4)).bind(node(5)).bind("0x0000000000000000000000000000000000000000000000000000000000000000").execute(&database.pool).await?;
 
+    publish_resolver_collection_inputs(&database).await?;
     let base = format!("/v1/resolvers/1/{V2_RESOLVER_ADDRESS}/links?page_size=40");
     let first = v2_resolver_payload_for_database(&database, &base).await?;
     // 105 links, minus the unlinked node, plus the default record.
@@ -354,11 +381,7 @@ async fn v2_resolver_collection_links_pages_latest_link_per_node_in_record_order
 #[tokio::test]
 async fn v2_resolver_collection_unsupported_is_not_empty_supported() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    let resolver = unsupported_resolver_current_row("ethereum-mainnet", V2_RESOLVER_ADDRESS);
-    database
-        .seed_snapshot_selector_chain_positions(&resolver.chain_positions)
-        .await?;
-    upsert_test_resolver_current_rows(&database, &[resolver]).await?;
+    seed_v2_resolver_overview(&database, false).await?;
     for section in ["aliases", "links", "roles"] {
         let payload = v2_resolver_payload_for_database(
             &database,
@@ -373,98 +396,26 @@ async fn v2_resolver_collection_unsupported_is_not_empty_supported() -> Result<(
     database.cleanup().await
 }
 
-// A pipeline reason on an unsupported section is not product vocabulary: the collection answers
-// 500 internal_error rather than leak it. This covered the overview's include sections before
-// they were removed; the mapping still serves the collections.
-#[tokio::test]
-async fn v2_resolver_collection_rejects_pipeline_unsupported_reason() -> Result<()> {
-    let database = TestDatabase::new_migrated().await?;
-    let mut resolver = unsupported_resolver_current_row("ethereum-mainnet", V2_RESOLVER_ADDRESS);
-    for section in ["aliases", "links", "role_holders"] {
-        resolver.declared_summary[section] = json!({
-            "status": "unsupported",
-            "unsupported_reason": "resolver_sidecar_missing"
-        });
-    }
-    database
-        .seed_snapshot_selector_chain_positions(&resolver.chain_positions)
-        .await?;
-    upsert_test_resolver_current_rows(&database, &[resolver]).await?;
-    for section in ["aliases", "links", "roles"] {
-        let response = v2_resolver_response_for_database(
-            &database,
-            &format!("/v1/resolvers/1/{V2_RESOLVER_ADDRESS}/{section}"),
-        )
-        .await?;
-        assert_eq!(
-            response.status(),
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "{section}"
-        );
-        let payload: ErrorResponse = read_json(response).await?;
-        assert_eq!(payload.error.code, "internal_error", "{section}");
-        assert_eq!(
-            payload.error.message, "failed to map resolver reason vocabulary",
-            "{section}"
-        );
-    }
-    database.cleanup().await
-}
-
 #[tokio::test]
 async fn v2_resolver_collection_role_provenance_stays_registration_scoped() -> Result<()> {
     const HOLDER: &str = "0x0000000000000000000000000000000000000abc";
     let database = TestDatabase::new_migrated().await?;
-    let resolver = resolver_current_row("ethereum-mainnet", V2_RESOLVER_ADDRESS);
-    database
-        .seed_snapshot_selector_chain_positions(&resolver.chain_positions)
-        .await?;
-    upsert_test_resolver_current_rows(&database, &[resolver]).await?;
-    let resources = [
-        resource(Uuid::from_u128(0x6500)),
-        resource(Uuid::from_u128(0x6501)),
-    ];
-    upsert_test_resources(&database.pool, &resources).await?;
-    upsert_phase_raw_blocks(
-        &database.pool,
-        &[
-            raw_block("ethereum-mainnet", "0xroles150", None, 150, 1_700_000_150),
-            raw_block("ethereum-mainnet", "0xroles160", None, 160, 1_700_000_160),
-        ],
-    )
-    .await?;
-    for (index, resource) in resources.iter().enumerate() {
-        let block = 150 + index as i64 * 10;
-        let identity = format!("per-resource-{index}");
-        let mut event = history_event(
-            &identity,
-            None,
-            Some(resource.resource_id),
-            Some("ethereum-mainnet"),
-            Some(block),
-            Some(&format!("0xroles{block}")),
-            Some(&format!("0xrole-tx-{index}")),
-            Some(3),
-            CanonicalityState::Canonical,
-        );
-        event.event_kind = "PermissionChanged".to_owned();
-        event.after_state = json!({"subject":HOLDER});
-        bigname_storage::insert_normalized_event_fixtures(&database.pool, &[event]).await?;
-        let id: i64 = sqlx::query_scalar("SELECT normalized_event_id FROM bigname_phase.normalized_events WHERE event_identity = $1")
-            .bind(&identity).fetch_one(&database.pool).await?;
-        let mut permission = permission_current_row(
-            resource.resource_id,
+    let manifest = seed_permissioned_collection_inputs(&database).await?;
+    for index in 0..2 {
+        let resource = Uuid::from_u128(0x6500 + index);
+        insert_collection_permission_resource(&database.pool, resource).await?;
+        let event = collection_role_event(
+            resource,
             HOLDER,
-            PermissionScope::Resolver {
-                chain_id: "ethereum-mainnet".to_owned(),
-                resolver_address: V2_RESOLVER_ADDRESS.to_owned(),
-            },
-            7,
-            160,
+            V2_RESOLVER_ADDRESS,
+            150 + index as i64 * 10,
+            3,
+            json!(["set_text"]),
+            manifest,
         );
-        permission.provenance["normalized_event_ids"] = json!([id]);
-        upsert_phase_permissions_current_rows(&database.pool, &[permission]).await?;
+        bigname_storage::insert_normalized_event_fixtures(&database.pool, &[event]).await?;
     }
+    publish_resolver_collection_inputs(&database).await?;
     let payload = v2_resolver_payload_for_database(
         &database,
         &format!("/v1/resolvers/1/{V2_RESOLVER_ADDRESS}/roles"),
@@ -487,14 +438,7 @@ async fn v2_resolver_collection_role_provenance_stays_registration_scoped() -> R
 async fn v2_resolver_overview_cursor_continues_across_a_same_height_republish() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_resolver_bound_names_fixture(&database).await?;
-    upsert_test_resolver_current_rows(
-        &database,
-        &[resolver_current_row(
-            "ethereum-mainnet",
-            V2_RESOLVER_ADDRESS,
-        )],
-    )
-    .await?;
+    seed_v2_resolver_overview(&database, true).await?;
     let base = format!("/v1/resolvers/1/{V2_RESOLVER_ADDRESS}?page_size=1");
     let first = v2_resolver_payload_for_database(&database, &base).await?;
     let cursor = first["data"]["bound_names"]["page"]["next_cursor"]
@@ -513,8 +457,7 @@ async fn v2_resolver_overview_cursor_continues_across_a_same_height_republish() 
     )
     .await?;
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    sqlx::query("UPDATE bigname_phase.chain_phase_state SET updated_at = now() WHERE phase_name = 'project' AND chain_id = 'ethereum-mainnet'")
-        .execute(&database.pool).await?;
+    rebuild_fixture_families(&database.pool, "ethereum-mainnet", 203, "0xresolvercb").await?;
     let again =
         v2_resolver_payload_for_database(&database, &format!("{base}&cursor={cursor}")).await?;
     assert_eq!(again["data"]["bound_names"], second["data"]["bound_names"]);
@@ -571,14 +514,7 @@ async fn v2_resolver_overview_continuation_retries_when_publication_changes_befo
 -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     seed_v2_resolver_bound_names_fixture(&database).await?;
-    upsert_test_resolver_current_rows(
-        &database,
-        &[resolver_current_row(
-            "ethereum-mainnet",
-            V2_RESOLVER_ADDRESS,
-        )],
-    )
-    .await?;
+    seed_v2_resolver_overview(&database, true).await?;
     let base = format!("/v1/resolvers/1/{V2_RESOLVER_ADDRESS}?page_size=1");
     let first = v2_resolver_payload_for_database(&database, &base).await?;
     let cursor = first["data"]["bound_names"]["page"]["next_cursor"]
@@ -617,33 +553,137 @@ async fn v2_resolver_collection_continuation_restarts_when_publication_changes_b
 
 /// A resolver with three role holders, so `/roles?page_size=1` has continuations.
 async fn seed_v2_resolver_roles_pages(database: &TestDatabase) -> Result<()> {
-    let resolver = resolver_current_row("ethereum-mainnet", V2_RESOLVER_ADDRESS);
+    let manifest = seed_permissioned_collection_inputs(database).await?;
+    for index in 0..3 {
+        let resource = Uuid::from_u128(0x5600 + index);
+        insert_collection_permission_resource(&database.pool, resource).await?;
+        let event = collection_role_event(
+            resource,
+            &format!("0x{:040x}", index + 1),
+            V2_RESOLVER_ADDRESS,
+            160,
+            index as i64,
+            json!(["set_text"]),
+            manifest,
+        );
+        bigname_storage::insert_normalized_event_fixtures(&database.pool, &[event]).await?;
+    }
+    publish_resolver_collection_inputs(database).await
+}
+
+/// Declare an implementation and observe its upgrade before the collection events. Publication
+/// is separate so each case can finish its retained inputs before reducing them.
+async fn seed_permissioned_collection_inputs(database: &TestDatabase) -> Result<i64> {
+    let blocks = [140, 150, 160].map(|block| {
+        raw_block(
+            "ethereum-mainnet",
+            &format!("0xcollection{block}"),
+            None,
+            block,
+            1_700_000_000 + block,
+        )
+    });
+    upsert_phase_raw_blocks(&database.pool, &blocks).await?;
+    let existing: Option<(i64, String, OffsetDateTime)> = sqlx::query_as(
+        "SELECT h.latest_block_number, h.latest_block_hash, l.block_timestamp FROM chain_heads h
+         JOIN chain_lineage l ON l.chain_id = h.chain_id AND l.block_hash = h.latest_block_hash
+         WHERE h.chain_id = 'ethereum-mainnet'",
+    )
+    .fetch_optional(&database.pool)
+    .await?;
+    let (block, hash, at) = existing.unwrap_or((
+        202,
+        "0xresolverc8".into(),
+        OffsetDateTime::from_unix_timestamp(1_700_000_202)?,
+    ));
     database
-        .seed_snapshot_selector_chain_positions(&resolver.chain_positions)
+        .seed_snapshot_selector_chain_positions(&json!({"ethereum":{
+        "chain_id":"ethereum-mainnet", "block_number":block, "block_hash":hash,
+        "timestamp":crate::v2::format_timestamp(at)}}))
         .await?;
-    upsert_test_resolver_current_rows(database, &[resolver]).await?;
-    let resources = (0..3)
-        .map(|i| resource(Uuid::from_u128(0x5600 + i)))
-        .collect::<Vec<_>>();
-    upsert_test_resources(&database.pool, &resources).await?;
-    let permissions = resources
-        .iter()
-        .enumerate()
-        .map(|(index, resource)| {
-            let mut permission = permission_current_row(
-                resource.resource_id,
-                &format!("0x{:040x}", index + 1),
-                PermissionScope::Resolver {
-                    chain_id: "ethereum-mainnet".to_owned(),
-                    resolver_address: V2_RESOLVER_ADDRESS.to_owned(),
-                },
-                7,
-                160,
-            );
-            permission.provenance["normalized_event_ids"] = json!([]);
-            permission
-        })
-        .collect::<Vec<_>>();
-    upsert_phase_permissions_current_rows(&database.pool, &permissions).await?;
+    let implementation = "0x0000000000000000000000000000000000000fed";
+    let payload = json!({"contracts":[],
+        "resolver_implementations":[{"role":"permissioned_resolver", "address":implementation}],
+        "abi":{"events":[{"name":"Linked", "fragment":"event Linked(uint256 indexed recordId, bytes32 indexed node, bytes name)",
+            "normalized_events":["ResolverRecordLinked", "PreimageObserved"]}]}});
+    let manifest: i64 = sqlx::query_scalar("INSERT INTO manifest_versions (manifest_version,namespace,source_family,chain_id,deployment_label,rollout_status,normalizer_version,file_path,manifest_payload) VALUES (1,'ens','ens_v2_resolver_l1','ethereum-mainnet','fixture','active','fixture','fixture/collection-resolver.toml',$1) RETURNING manifest_id")
+        .bind(&payload).fetch_one(&database.pool).await?;
+    seed_fixture_manifest_update(
+        &database.pool,
+        manifest,
+        "ethereum-mainnet",
+        "ens",
+        "ens_v2_resolver_l1",
+        &payload,
+    )
+    .await?;
+    let mut event = history_event(
+        "collection-resolver-upgrade",
+        None,
+        None,
+        Some("ethereum-mainnet"),
+        Some(140),
+        Some("0xcollection140"),
+        Some("0xupgrade"),
+        Some(0),
+        CanonicalityState::Canonical,
+    );
+    event.event_kind = "Upgraded".into();
+    event.source_family = "ens_v2_resolver_l1".into();
+    event.source_manifest_id = Some(manifest);
+    event.manifest_version = 1;
+    event.before_state = json!({});
+    event.after_state = json!({"source_event":"Upgraded", "proxy_address":V2_RESOLVER_ADDRESS, "implementation":implementation});
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[event]).await?;
+    Ok(manifest)
+}
+
+async fn publish_resolver_collection_inputs(database: &TestDatabase) -> Result<()> {
+    let (block, hash): (i64, String) = sqlx::query_as("SELECT latest_block_number, latest_block_hash FROM chain_heads WHERE chain_id = 'ethereum-mainnet'")
+        .fetch_one(&database.pool).await?;
+    rebuild_fixture_families(&database.pool, "ethereum-mainnet", block, &hash).await
+}
+
+async fn insert_collection_permission_resource(pool: &PgPool, resource: Uuid) -> Result<()> {
+    sqlx::query("INSERT INTO resources (resource_id, chain_id, block_number, block_hash, canonicality_state)
+        VALUES ($1, 'ethereum-mainnet', 140, '0xcollection140', 'canonical')")
+        .bind(resource).execute(pool).await?;
     Ok(())
+}
+
+fn collection_role_event(
+    resource: Uuid,
+    subject: &str,
+    resolver: &str,
+    block: i64,
+    log: i64,
+    powers: Value,
+    manifest: i64,
+) -> NormalizedEvent {
+    let mut event = history_event(
+        &format!("collection-role-{resource}-{block}-{log}"),
+        None,
+        Some(resource),
+        Some("ethereum-mainnet"),
+        Some(block),
+        Some(&format!("0xcollection{block}")),
+        Some(&format!("0xrole-tx-{block}")),
+        Some(log),
+        CanonicalityState::Canonical,
+    );
+    event.event_kind = "PermissionChanged".into();
+    event.source_family = "ens_v2_resolver_l1".into();
+    event.source_manifest_id = Some(manifest);
+    event.manifest_version = 1;
+    event.raw_fact_ref["emitting_address"] = json!(resolver);
+    event.before_state = json!({});
+    let node = format!("0x{:064x}", resource.as_u128());
+    event.after_state = json!({"subject":subject, "scope":{"kind":"resolver", "chain_id":"ethereum-mainnet", "resolver_address":resolver},
+        "effective_powers":powers, "source_event":"EACRolesChanged", "upstream_resource":node,
+        "resource":node, "root_resource":false, "storage_model":"resolver_record_id", "resolver":resolver,
+        "resolver_record_id":"0", "record_key":"permission",
+        "grant_source":{"kind":"raw_log", "source_event":"EACRolesChanged", "upstream_resource":node,
+            "root_resource":false, "changed_powers":powers}, "revocation_source":null,
+        "inheritance_path":[], "transfer_behavior":{}});
+    event
 }

@@ -469,22 +469,13 @@ async fn v2_get_primary_name_excludes_lower_height_orphaned_project_target() -> 
     .execute(&database.lookup_pool)
     .await?;
     let updated = sqlx::query(
-        r#"
-        UPDATE bigname_phase.primary_names_current
-        SET claim_provenance = claim_provenance || jsonb_build_object(
-                'chain_id', 'ethereum-mainnet',
-                'target_block_number', 21000004,
-                'target_block_hash', '0xorphaned-primary-target'
-            )
-        WHERE address = lower($1)
-          AND namespace = 'ens'
-          AND coin_type = '60'
-        "#,
-    )
-    .bind(V2_ON_DEMAND_PRIMARY_NAME_ADDRESS)
-    .execute(&database.lookup_pool)
-    .await?;
-    assert_eq!(updated.rows_affected(), 1);
+        "UPDATE bigname_phase.normalized_events
+         SET block_number = 21000004, block_hash = '0xorphaned-primary-target', canonicality_state = 'orphaned'
+         WHERE event_kind IN ('ReverseChanged', 'RecordChanged')",
+    ).execute(&database.lookup_pool).await?;
+    assert_eq!(updated.rows_affected(), 2);
+    rebuild_fixture_families(&database.lookup_pool, "ethereum-mainnet", 21_000_005,
+        "0xprimary-readable-head").await?;
 
     let payload = v2_primary_name_payload_for_database(
         &database,
@@ -549,13 +540,10 @@ async fn v2_get_primary_name_rejects_project_change_after_indexed_read() -> Resu
         true,
     )
     .await?;
-    sqlx::query(
-        "UPDATE chain_phase_state
-         SET updated_at = clock_timestamp()
-         WHERE chain_id = 'ethereum-mainnet' AND phase_name = 'project'",
-    )
-    .execute(&database.lookup_pool)
-    .await?;
+    let (block, hash): (i64, String) = sqlx::query_as(
+        "SELECT current_block_number, current_block_hash FROM project_family_marker WHERE chain_id = 'ethereum-mainnet'"
+    ).fetch_one(&database.lookup_pool).await?;
+    rebuild_fixture_families(&database.lookup_pool, "ethereum-mainnet", block, &hash).await?;
     control.resume().await;
 
     let response = request_task
@@ -620,13 +608,10 @@ async fn v2_get_primary_name_rejects_same_head_republication_during_mixed_read()
     });
 
     control.wait_until_reached().await;
-    sqlx::query(
-        "UPDATE chain_phase_state
-         SET updated_at = clock_timestamp()
-         WHERE chain_id = 'ethereum-mainnet' AND phase_name = 'project'",
-    )
-    .execute(&database.lookup_pool)
-    .await?;
+    let (block, hash): (i64, String) = sqlx::query_as(
+        "SELECT current_block_number, current_block_hash FROM project_family_marker WHERE chain_id = 'ethereum-mainnet'"
+    ).fetch_one(&database.lookup_pool).await?;
+    rebuild_fixture_families(&database.lookup_pool, "ethereum-mainnet", block, &hash).await?;
     control.resume().await;
 
     let response = request_task
@@ -998,12 +983,8 @@ async fn v2_get_primary_name_refuses_a_supported_ens_v2_arm_claim_without_provid
     seed_schema_v2_claimed_name(&lookup_pool, "ens", "taytems.eth", None, "ens_v2").await?;
 
     // Anti-vacuity: the projection supports this name, so only the selected arm can refuse it.
-    let support: String = sqlx::query_scalar(
-        "SELECT support_status FROM bigname_phase.name_current WHERE lower(raw_name) = 'taytems.eth'",
-    )
-    .fetch_one(&lookup_pool)
-    .await?;
-    assert_eq!(support, "supported");
+    let composed = primary_fixture_name(&lookup_pool, "taytems.eth").await?;
+    assert_ne!(composed.coverage["status"], json!("unsupported"));
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let unavailable_rpc_url = format!("http://{}", listener.local_addr()?);
@@ -1081,13 +1062,8 @@ async fn v2_get_primary_name_verifies_a_supported_ens_v2_arm_claim_through_an_ad
     )
     .await?;
     seed_schema_v2_claimed_name(&lookup_pool, "ens", "taytems.eth", None, "ens_v2").await?;
-    let live_name_arm: String = sqlx::query_scalar(
-        "SELECT provenance #>> '{authority_selection,authority_arm}' \
-         FROM bigname_phase.name_current WHERE lower(raw_name) = 'taytems.eth'",
-    )
-    .fetch_one(&lookup_pool)
-    .await?;
-    assert_eq!(live_name_arm, "ens_v2");
+    let composed = primary_fixture_name(&lookup_pool, "taytems.eth").await?;
+    assert_eq!(composed.provenance["authority_selection"]["authority_arm"], json!("ens_v2"));
 
     // Reverse leg plus the admitted forward call.
     let (rpc_url, rpc_handle) = spawn_primary_name_mock_rpc(vec![
@@ -1144,91 +1120,6 @@ async fn v2_get_primary_name_verifies_a_supported_ens_v2_arm_claim_through_an_ad
 }
 
 #[tokio::test]
-async fn a_supported_name_current_row_without_authority_arm_is_refused_without_forward_dispatch()
--> Result<()> {
-    let database = TestDatabase::new_migrated().await?;
-    database.initialize_lookup_schema().await?;
-    database
-        .seed_default_ens_primary_name_fallback_context()
-        .await?;
-    let lookup_pool = database.lookup_pool().await?;
-    seed_schema_v2_ens_primary_name_authority(
-        &lookup_pool,
-        21_000_003,
-        "0xbinding",
-        "2026-04-17T00:00:03Z",
-    )
-    .await?;
-    seed_schema_v2_claimed_name(&lookup_pool, "ens", "taytems.eth", None, "ens_v1").await?;
-    sqlx::query(
-        "UPDATE bigname_phase.name_current
-         SET provenance = provenance #- '{authority_selection,authority_arm}'
-         WHERE lower(raw_name) = 'taytems.eth'",
-    )
-    .execute(&lookup_pool)
-    .await?;
-
-    let (support, authority_arm): (String, Option<String>) = sqlx::query_as(
-        "SELECT support_status, provenance #>> '{authority_selection,authority_arm}'
-         FROM bigname_phase.name_current
-         WHERE lower(raw_name) = 'taytems.eth'",
-    )
-    .fetch_one(&lookup_pool)
-    .await?;
-    assert_eq!(support, "supported");
-    assert_eq!(authority_arm, None);
-
-    // Queue only the two reverse-leg responses. A fail-open forward dispatch has no queued
-    // response and makes the request fail instead of producing the required in-band refusal.
-    let (rpc_url, rpc_handle) = spawn_primary_name_mock_rpc(vec![
-        json!("0x000000000000000000000000a2c122be93b0074270ebee7f6b7292c7deb45047"),
-        primary_name_reverse_name_response("taytems.eth"),
-    ])
-    .await?;
-    let chain_rpc_urls =
-        bigname_lookup::ChainRpcUrls::from_entries(&[format!("ethereum-mainnet={rpc_url}")])?;
-    let state = database
-        .app_state_with_lookup_chain_rpc_urls(chain_rpc_urls)
-        .await?;
-
-    let response = app_router(state)
-        .oneshot(
-            Request::builder()
-                .uri(format!(
-                    "/v1/addresses/{V2_ON_DEMAND_PRIMARY_NAME_ADDRESS}/primary-name?source=verified"
-                ))
-                .body(Body::empty())
-                .expect("request must build"),
-        )
-        .await
-        .context("v2 missing-arm primary-name request failed")?;
-    let status = response.status();
-    let payload: Value = read_json(response).await?;
-    assert_eq!(status, StatusCode::OK, "{payload}");
-    assert_eq!(
-        payload["data"]["answers"],
-        json!([{
-            "source": "verified",
-            "status": "unsupported",
-            "unsupported_reason": "exact_name_authority_not_verifiable"
-        }]),
-        "{payload}"
-    );
-    assert!(payload["data"].get("verification").is_none(), "{payload}");
-
-    let rpc_requests = join_primary_name_mock_rpc_requests(rpc_handle).await?;
-    assert_eq!(
-        rpc_requests.len(),
-        2,
-        "only the reverse leg may dispatch when authority provenance is missing: {rpc_requests:?}"
-    );
-
-    lookup_pool.close().await;
-    database.cleanup().await?;
-    Ok(())
-}
-
-#[tokio::test]
 async fn v2_get_primary_name_refuses_an_unsupported_claim_without_provider_dispatch() -> Result<()>
 {
     let database = TestDatabase::new_migrated().await?;
@@ -1260,7 +1151,7 @@ async fn v2_get_primary_name_refuses_an_unsupported_claim_without_provider_dispa
         &lookup_pool,
         "ens",
         "taytems.eth",
-        Some("future_projection_gap"),
+        Some("current_authority_not_projected"),
         "ens_v1",
     )
     .await?;
@@ -1299,7 +1190,7 @@ async fn v2_get_primary_name_refuses_an_unsupported_claim_without_provider_dispa
     assert_eq!(verified["status"], json!("unsupported"), "{payload}");
     assert_eq!(
         verified["unsupported_reason"],
-        json!("unsupported_reason_unrecognized")
+        json!("current_authority_not_projected")
     );
     // No provider call ran, so there is no verification outcome to report.
     assert!(payload["data"].get("verification").is_none(), "{payload}");
@@ -1435,84 +1326,120 @@ async fn seed_schema_v2_claimed_name(
     authority_arm: &str,
 ) -> Result<()> {
     let chain_id = "ethereum-mainnet";
-    let (block_number, block_hash): (i64, String) = sqlx::query_as(
-        "SELECT block_number, block_hash FROM bigname_phase.chain_lineage \
-         WHERE chain_id = $1 \
-           AND canonicality_state IN ('canonical', 'safe', 'finalized') \
+    let (block_number, block_hash, at): (i64, String, OffsetDateTime) = sqlx::query_as(
+        "SELECT block_number, block_hash, block_timestamp FROM bigname_phase.chain_lineage
+         WHERE chain_id = $1 AND canonicality_state IN ('canonical', 'safe', 'finalized')
          ORDER BY block_number DESC, block_hash LIMIT 1",
     )
     .bind(chain_id)
     .fetch_one(pool)
     .await?;
-    let namehash = bigname_lookup::ens_namehash_hex(name)?;
-    let logical_name_id = format!("{namespace}:{namehash}");
-    let labels = name.split('.').collect::<Vec<_>>();
-    sqlx::query(
-        "INSERT INTO bigname_phase.name_surfaces (
-             logical_name_id, namespace, raw_name, raw_labels, dns_encoded_name, namehash,
-             labelhashes, normalizer_version, visibility_state,
-             chain_id, block_hash, block_number, canonicality_state
-         ) VALUES ($1, $2, $3, $4, '\\x00', $5, $6, 'test', 'active', $7, $8, $9, 'canonical')
-         ON CONFLICT (logical_name_id) DO NOTHING",
+    let normalized = bigname_domain::normalization::normalize_name(name)?;
+    let (logical, node) = phase_logical_identity(namespace, &normalized.normalized_name)?;
+    let resource_id = Uuid::new_v4();
+    let binding_id = Uuid::new_v4();
+    let token_id = Uuid::new_v4();
+    upsert_test_name_surfaces(
+        pool,
+        &[NameSurface {
+            logical_name_id: logical.clone(),
+            namespace: namespace.into(),
+            input_name: name.into(),
+            canonical_display_name: normalized.canonical_display_name,
+            normalized_name: normalized.normalized_name,
+            dns_encoded_name: normalized.dns_encoded_name,
+            namehash: node,
+            labelhashes: vec![],
+            normalizer_version: bigname_domain::normalization::ENS_NORMALIZER_VERSION.into(),
+            normalization_warnings: json!([]),
+            normalization_errors: json!([]),
+            chain_id: chain_id.into(),
+            block_number,
+            block_hash: block_hash.clone(),
+            provenance: json!({}),
+            canonicality_state: CanonicalityState::Canonical,
+        }],
     )
-    .bind(&logical_name_id)
-    .bind(namespace)
-    .bind(name)
-    .bind(&labels)
-    .bind(&namehash)
-    .bind(
-        labels
-            .iter()
-            .enumerate()
-            .map(|(index, _)| format!("0x{:064x}", index + 1))
-            .collect::<Vec<_>>(),
-    )
-    .bind(chain_id)
-    .bind(&block_hash)
-    .bind(block_number)
-    .execute(pool)
     .await?;
-    sqlx::query(
-        "INSERT INTO bigname_phase.name_current (
-             logical_name_id, namespace, raw_name, namehash, declared_summary,
-             support_status, unsupported_reason, provenance, chain_positions,
-             canonicality_summary, manifest_version
-         ) VALUES (
-             $1, $2, $3, $4, '{}'::jsonb,
-             CASE WHEN $8::text IS NULL THEN 'supported' ELSE 'unsupported' END, $8::text,
-             jsonb_build_object('chain_id', $5::text)
-                 || jsonb_build_object(
-                     'authority_selection', jsonb_build_object('authority_arm', $9::text)
-                 ),
-             $6, $7, 1
-         )
-         ON CONFLICT (logical_name_id) DO UPDATE SET
-             support_status = EXCLUDED.support_status,
-             unsupported_reason = EXCLUDED.unsupported_reason,
-             provenance = EXCLUDED.provenance",
-    )
-    .bind(&logical_name_id)
-    .bind(namespace)
-    .bind(name)
-    .bind(&namehash)
-    .bind(chain_id)
-    .bind(json!({
-        "ethereum": {
-            "chain_id": chain_id,
-            "block_number": block_number,
-            "block_hash": block_hash
+    if unsupported_reason.is_none() {
+        upsert_test_token_lineages(
+            pool,
+            &[TokenLineage {
+                token_lineage_id: token_id,
+                chain_id: chain_id.into(),
+                block_number,
+                block_hash: block_hash.clone(),
+                provenance: json!({}),
+                canonicality_state: CanonicalityState::Canonical,
+            }],
+        )
+        .await?;
+        upsert_test_resources(
+            pool,
+            &[Resource {
+                resource_id,
+                token_lineage_id: Some(token_id),
+                chain_id: chain_id.into(),
+                block_number,
+                block_hash: block_hash.clone(),
+                provenance: json!({}),
+                canonicality_state: CanonicalityState::Canonical,
+            }],
+        )
+        .await?;
+        upsert_test_surface_bindings(
+            pool,
+            &[SurfaceBinding {
+                surface_binding_id: binding_id,
+                logical_name_id: format!("{namespace}:{name}"),
+                resource_id,
+                binding_kind: SurfaceBindingKind::DeclaredRegistryPath,
+                authority_arm: authority_arm.into(),
+                active_from: at,
+                active_to: None,
+                chain_id: chain_id.into(),
+                block_number,
+                block_hash: block_hash.clone(),
+                provenance: json!({}),
+                canonicality_state: CanonicalityState::Canonical,
+            }],
+        )
+        .await?;
+        let mut grant = history_event(
+            &format!("claim-name-grant-{resource_id}"),
+            Some(&logical),
+            Some(resource_id),
+            Some(chain_id),
+            Some(block_number),
+            Some(&block_hash),
+            Some("0xclaim-name"),
+            Some(0),
+            CanonicalityState::Canonical,
+        );
+        grant.event_kind = "RegistrationGranted".into();
+        grant.source_family = if authority_arm == "ens_v2" {
+            "ens_v2_registry_l1"
+        } else {
+            "ens_v1_registrar_l1"
         }
-    }))
-    .bind(json!({
-        "state": "canonical_lineage",
-        "target_block_number": block_number,
-        "target_block_hash": block_hash
-    }))
-    .bind(unsupported_reason)
-    .bind(authority_arm)
-    .execute(pool)
-    .await?;
-    Ok(())
+        .into();
+        grant.after_state = json!({"authority_kind": if authority_arm == "ens_v2" { "registry" } else { "registrar" },
+            "registrant": V2_ON_DEMAND_PRIMARY_NAME_ADDRESS, "expiry": 2100000000});
+        bigname_storage::insert_normalized_event_fixtures(pool, &[grant]).await?;
+    }
+    rebuild_fixture_families(pool, chain_id, block_number, &block_hash).await
+}
+
+async fn primary_fixture_name(
+    pool: &PgPool,
+    name: &str,
+) -> Result<bigname_storage::NameCurrentRow> {
+    bigname_storage::families::name::load_family_name(
+        pool,
+        &bigname_storage::logical_name_id_for_name("ens", name),
+    )
+    .await?
+    .context("the primary fixture produced its composed name")
 }
 
 async fn seed_schema_v2_primary_name_claim(
@@ -1597,14 +1524,10 @@ async fn v2_get_primary_name_refuses_a_live_ens_v2_arm_claim_without_forward_dis
 
     // Anti-vacuity: the projection supports the name the live leg will claim, so only the selected
     // arm can refuse it, and no projected claim exists to drive the pre-lookup gate.
-    let support: String = sqlx::query_scalar(
-        "SELECT support_status FROM bigname_phase.name_current WHERE lower(raw_name) = 'taytems.eth'",
-    )
-    .fetch_one(&lookup_pool)
-    .await?;
-    assert_eq!(support, "supported");
+    let composed = primary_fixture_name(&lookup_pool, "taytems.eth").await?;
+    assert_ne!(composed.coverage["status"], json!("unsupported"));
     let projected_claims: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM bigname_phase.primary_names_current WHERE lower(address) = $1",
+        "SELECT count(*) FROM bigname_phase.project_reverse_tuple WHERE lower(address) = $1",
     )
     .bind(V2_ON_DEMAND_PRIMARY_NAME_ADDRESS.to_lowercase())
     .fetch_one(&lookup_pool)
@@ -1687,7 +1610,7 @@ async fn v2_get_primary_name_forwards_a_live_ens_v2_arm_claim_through_an_admitti
     // No projected claim for this address: only the live leg names the ENSv2-arm name.
     seed_schema_v2_claimed_name(&lookup_pool, "ens", "taytems.eth", None, "ens_v2").await?;
     let projected_claims: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM bigname_phase.primary_names_current WHERE lower(address) = $1",
+        "SELECT count(*) FROM bigname_phase.project_reverse_tuple WHERE lower(address) = $1",
     )
     .bind(V2_ON_DEMAND_PRIMARY_NAME_ADDRESS.to_lowercase())
     .fetch_one(&lookup_pool)
@@ -1775,21 +1698,11 @@ async fn a_live_authority_refusal_overrides_a_different_projected_tuple_for_resp
     seed_schema_v2_claimed_name(&lookup_pool, "ens", "alice.eth", None, "ens_v1").await?;
     seed_schema_v2_claimed_name(&lookup_pool, "ens", "taytems.eth", None, "ens_v2").await?;
 
-    let projected_claim: String = sqlx::query_scalar(
-        "SELECT raw_claim_name FROM bigname_phase.primary_names_current \
-         WHERE lower(address) = $1 AND namespace = 'ens' AND coin_type = '60'",
-    )
-    .bind(V2_ON_DEMAND_PRIMARY_NAME_ADDRESS.to_lowercase())
-    .fetch_one(&lookup_pool)
-    .await?;
-    assert_eq!(projected_claim, "alice.eth");
-    let live_name_arm: String = sqlx::query_scalar(
-        "SELECT provenance #>> '{authority_selection,authority_arm}' \
-         FROM bigname_phase.name_current WHERE lower(raw_name) = 'taytems.eth'",
-    )
-    .fetch_one(&lookup_pool)
-    .await?;
-    assert_eq!(live_name_arm, "ens_v2");
+    let projected_claim = load_primary_name_current(&lookup_pool,
+        V2_ON_DEMAND_PRIMARY_NAME_ADDRESS, "ens", "60").await?.context("indexed claim")?;
+    assert_eq!(projected_claim.raw_claim_name.as_deref(), Some("alice.eth"));
+    let composed = primary_fixture_name(&lookup_pool, "taytems.eth").await?;
+    assert_eq!(composed.provenance["authority_selection"]["authority_arm"], json!("ens_v2"));
 
     let (rpc_url, rpc_handle) = spawn_primary_name_mock_rpc(vec![
         json!("0x000000000000000000000000a2c122be93b0074270ebee7f6b7292c7deb45047"),
@@ -1868,12 +1781,9 @@ async fn an_unindexed_name_is_admitted_to_live_verification() -> Result<()> {
     )
     .await?;
 
-    let exact_name_rows: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM bigname_phase.name_current WHERE lower(raw_name) = 'taytems.eth'",
-    )
-    .fetch_one(&lookup_pool)
-    .await?;
-    assert_eq!(exact_name_rows, 0, "the contract requires no exact-name row");
+    assert!(bigname_storage::families::name::load_family_name(&lookup_pool,
+        &bigname_storage::logical_name_id_for_name("ens", "taytems.eth")).await?.is_none(),
+        "the contract requires no exact-name row");
 
     // The first two calls are the reverse leg; the third response lets the admitted forward
     // dispatch verify the address returned by the claim.
@@ -2037,12 +1947,9 @@ async fn v2_get_primary_name_verifies_against_sepolia_under_the_sepolia_profile(
     Ok(())
 }
 
-/// The indexed path answers in band when the exact-name projection is not deployed. The verified
-/// path reads the same projection to decide whether a claim may be verified, so it degrades the
-/// same way instead of failing the request -- and without resolving a name whose authority it has
-/// no way to check.
+/// A missing family publication refuses verification before any provider dispatch.
 #[tokio::test]
-async fn v2_get_primary_name_degrades_in_band_when_the_claim_projection_is_absent() -> Result<()> {
+async fn v2_get_primary_name_is_stale_without_a_family_publication() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     database.initialize_lookup_schema().await?;
     database
@@ -2056,7 +1963,7 @@ async fn v2_get_primary_name_degrades_in_band_when_the_claim_projection_is_absen
         "2026-04-17T00:00:03Z",
     )
     .await?;
-    sqlx::query("DROP TABLE bigname_phase.primary_names_current")
+    sqlx::query("DELETE FROM bigname_phase.project_family_marker")
         .execute(&lookup_pool)
         .await?;
 
@@ -2083,21 +1990,8 @@ async fn v2_get_primary_name_degrades_in_band_when_the_claim_projection_is_absen
         .context("v2 absent-projection primary-name request failed")?;
     let status = response.status();
     let payload: Value = read_json(response).await?;
-    // The RPC endpoint is closed, so a 200 at all proves no provider call was dispatched.
-    assert_eq!(status, StatusCode::OK, "{payload}");
-
-    let verified = payload["data"]["answers"]
-        .as_array()
-        .expect("answers must be an array")
-        .iter()
-        .find(|answer| answer["source"] == json!("verified"))
-        .expect("a verified answer must be present");
-    assert_eq!(verified["status"], json!("unsupported"), "{payload}");
-    assert_eq!(
-        verified["unsupported_reason"],
-        json!("declared primary-name claim surface is not yet supported"),
-        "{payload}"
-    );
+    assert_eq!(status, StatusCode::CONFLICT, "{payload}");
+    assert_eq!(payload["error"]["code"], json!("stale"));
 
     lookup_pool.close().await;
     database.cleanup().await?;

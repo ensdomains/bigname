@@ -9,7 +9,7 @@ use sqlx::PgPool;
 #[cfg(test)]
 mod hooks;
 #[cfg(test)]
-pub(crate) use hooks::{primary_coherence_test_hooks, relation_page_test_hooks, test_hooks};
+pub(crate) use hooks::{relation_page_test_hooks, test_hooks};
 
 pub(crate) async fn load_reverse_identity_records_live(
     pool: &PgPool,

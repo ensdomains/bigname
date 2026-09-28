@@ -59,19 +59,8 @@ async fn seed_switch_children_fixture_expiring(
     let (one, _) = seed_switch_name(database, "one.alpha.eth", 0x6b1_0000, "ens_v2").await?;
     let (two, _) = seed_switch_name(database, "two.alpha.eth", 0x6c1_0000, "ens_v2").await?;
     let alpha_node = alpha.strip_prefix("ens:").expect("ens id").to_owned();
-    let one_node = one.strip_prefix("ens:").expect("ens id").to_owned();
     for label in ["carol", "dave", "erin", "one", "two"] {
-        sqlx::query(
-            "INSERT INTO bigname_phase.label_preimages (labelhash, raw_label, decoded_label,
-                 normalizer_version, normalized_under_version, normalization_error,
-                 source_kind, source_priority)
-             VALUES ($1, convert_to($2, 'UTF8'), $2, 'ensip15', TRUE, NULL, 'fixture', 0)
-             ON CONFLICT DO NOTHING",
-        )
-        .bind(child_labelhash(label))
-        .bind(label)
-        .execute(&database.pool)
-        .await?;
+        insert_family_label_preimage(&database.pool, label.as_bytes()).await?;
     }
     // The ENSv2 subregistry's contract instance, which the registrations name.
     let alpha_registry = Uuid::from_u128(0x6b0_0001);
@@ -94,29 +83,11 @@ async fn seed_switch_children_fixture_expiring(
     .bind(CHILD_ALPHA_REGISTRY)
     .execute(&database.pool)
     .await?;
-    let edge = |identity: &str, node: &str, label: &str, block: i64, log: i64| {
-        let child = format!(
-            "{:#x}",
-            alloy_primitives::keccak256(
-                [
-                    alloy_primitives::hex::decode(node).expect("node hex"),
-                    alloy_primitives::hex::decode(child_labelhash(label)).expect("labelhash hex"),
-                ]
-                .concat()
-            )
-        );
-        switch_event(
-            identity,
-            None,
-            None,
-            "SubregistryChanged",
-            "ens_v1_registry_l1",
-            block,
-            log,
-            json!({"source_event": "NewOwner", "node": node, "child_node": child,
-                   "labelhash": child_labelhash(label), "owner": CHILD_OWNER}),
-        )
-    };
+    for (parent, label, block) in [("alpha.eth", "carol", 202), ("alpha.eth", "dave", 202), ("one.alpha.eth", "erin", 207)] {
+        let labelhash = child_labelhash(label);
+        insert_family_registry_child_edge(&database.pool, "ens", SWITCH_CHAIN, parent, &labelhash,
+            CHILD_OWNER, block, &format!("0xhistory{block}")).await?;
+    }
     let registration = |identity: &str, name: &str, block: i64, expiry: i64| {
         child_registry_event(
             identity,
@@ -149,8 +120,6 @@ async fn seed_switch_children_fixture_expiring(
                 json!({"authority_kind": "registrar", "registrant": CHILD_OWNER,
                        "expiry": 1_900_000_000i64}),
             ),
-            edge("children-carol", &alpha_node, "carol", 202, 0),
-            edge("children-dave", &alpha_node, "dave", 202, 1),
             child_registry_event(
                 "children-root-created",
                 None,
@@ -181,7 +150,6 @@ async fn seed_switch_children_fixture_expiring(
             ),
             registration("children-one", &one, 205, one_expiry),
             registration("children-two", &two, 206, two_expiry),
-            edge("children-erin", &one_node, "erin", 207, 0),
             switch_event(
                 "children-dave-zeroed",
                 None,

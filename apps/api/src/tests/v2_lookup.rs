@@ -2113,38 +2113,67 @@ async fn v2_lookup_reverse_orders_pages_by_the_is_primary_it_returns() -> Result
     Ok(())
 }
 
+async fn paused_reverse_lookup(
+    database: &TestDatabase,
+    address: &str,
+) -> Result<(
+    tokio::task::JoinHandle<Result<Response>>,
+    std::sync::Arc<tokio::sync::Notify>,
+    std::sync::Arc<tokio::sync::Notify>,
+)> {
+    let reached = std::sync::Arc::new(tokio::sync::Notify::new());
+    let resume = std::sync::Arc::new(tokio::sync::Notify::new());
+    let state = database.app_state();
+    let address = address.to_owned();
+    let (task_reached, task_resume) = (
+        std::sync::Arc::clone(&reached),
+        std::sync::Arc::clone(&resume),
+    );
+    let task =
+        tokio::spawn(async move {
+            bigname_storage::families::name::seams::with_pause_after_publication(
+                task_reached,
+                task_resume,
+                async move {
+                    Ok(app_router(state).oneshot(Request::builder().method("POST").uri("/v1/lookup")
+                    .header("content-type", "application/json").body(Body::from(json!({
+                        "profile":"detail", "inputs":[{"address":address,"page_size":1}]
+                    }).to_string()))?).await?)
+                },
+            )
+            .await
+        });
+    tokio::time::timeout(std::time::Duration::from_secs(10), reached.notified())
+        .await
+        .context("reverse lookup did not reach its family snapshot")?;
+    Ok((task, reached, resume))
+}
+
+async fn finish_paused_reverse_lookup(
+    mut task: tokio::task::JoinHandle<Result<Response>>,
+    reached: std::sync::Arc<tokio::sync::Notify>,
+    resume: std::sync::Arc<tokio::sync::Notify>,
+) -> Result<Response> {
+    resume.notify_one();
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            tokio::select! {
+                result = &mut task => return result.context("reverse lookup task")?,
+                () = reached.notified() => resume.notify_one(),
+            }
+        }
+    })
+    .await
+    .context("reverse lookup did not finish")?
+}
+
 #[tokio::test]
 async fn v2_lookup_reverse_keeps_primary_order_and_flag_coherent_across_projection_rewrite()
 -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     let address = "0x0000000000000000000000000000000000000abc";
     seed_v2_lookup_reverse_fixture(&database, address).await?;
-    let (_guard, control) =
-        crate::v2::support::identity_facade_primary_coherence_test_hooks::install(
-            &database.lookup_pool,
-        )
-        .await?;
-    let state = database.app_state();
-    let request_task = tokio::spawn(async move {
-        app_router(state)
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/v1/lookup")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        json!({
-                            "profile": "detail",
-                            "inputs": [{"address": address, "page_size": 1}]
-                        })
-                        .to_string(),
-                    ))
-                    .expect("lookup request must build"),
-            )
-            .await
-    });
-
-    control.wait_until_reached().await;
+    let (task, reached, resume) = paused_reverse_lookup(&database, address).await?;
     seed_phase_primary_name_snapshot(
         &database,
         address,
@@ -2155,25 +2184,27 @@ async fn v2_lookup_reverse_keeps_primary_order_and_flag_coherent_across_projecti
         true,
     )
     .await?;
-    control.resume().await;
-
-    let response = request_task
-        .await
-        .context("reverse lookup request task panicked")?
-        .context("reverse lookup request failed")?;
-    assert_eq!(response.status(), StatusCode::OK);
-    let payload: Value = read_json(response).await?;
-    let records = payload["data"][0]["records"]
-        .as_array()
-        .expect("reverse lookup records must be an array");
-    assert_eq!(records.len(), 1);
-    assert_eq!(records[0]["name"], json!("alice.eth"));
-    assert_eq!(
-        records[0]["is_primary"],
-        json!(true),
-        "the page must emit the same primary-name generation that ordered it"
-    );
-
+    let response = finish_paused_reverse_lookup(task, reached, resume).await?;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let refused: Value = read_json(response).await?;
+    assert_eq!(refused["error"]["code"], "stale");
+    assert!(refused.get("data").is_none());
+    let fresh = v2_lookup_json(
+        &database,
+        json!({"profile":"detail", "inputs":[{"address":address,"page_size":1}]}),
+    )
+    .await?;
+    assert_eq!(fresh["data"][0]["records"][0]["name"], "bob.eth");
+    assert_eq!(fresh["data"][0]["records"][0]["is_primary"], true);
+    let cursor = fresh["data"][0]["page"]["next_cursor"]
+        .as_str()
+        .context("fresh cursor")?;
+    let next = v2_lookup_json(
+        &database,
+        json!({"profile":"detail", "inputs":[{"address":address,"page_size":1,"cursor":cursor}]}),
+    )
+    .await?;
+    assert_eq!(lookup_record_names(&next), vec!["alice.eth"]);
     database.cleanup().await
 }
 
@@ -2183,95 +2214,51 @@ async fn v2_lookup_reverse_uses_candidate_name_for_order_flag_and_cursor_across_
     let database = TestDatabase::new_migrated().await?;
     let address = "0x0000000000000000000000000000000000000abc";
     seed_v2_lookup_reverse_fixture(&database, address).await?;
-    let (guard, control) =
-        crate::v2::support::identity_facade_primary_coherence_test_hooks::install(
-            &database.lookup_pool,
-        )
-        .await?;
-    let state = database.app_state();
-    let request_task = tokio::spawn(async move {
-        app_router(state)
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/v1/lookup")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        json!({
-                            "profile": "detail",
-                            "inputs": [{"address": address, "page_size": 1}]
-                        })
-                        .to_string(),
-                    ))
-                    .expect("lookup request must build"),
-            )
-            .await
-    });
+    let (task, reached, resume) = paused_reverse_lookup(&database, address).await?;
+    let replacement_resource = Uuid::from_u128(0x5a0391);
+    sqlx::query("UPDATE surface_bindings SET active_to = '2026-04-17T00:00:44Z' WHERE surface_binding_id = $1")
+        .bind(Uuid::from_u128(0x5a0203)).execute(&database.pool).await?;
 
-    control.wait_until_reached().await;
-    let rewrite = sqlx::query(
-        "UPDATE bigname_phase.name_current
-         SET raw_name = 'rewritten-alice.eth'
-         WHERE raw_name = 'alice.eth'",
-    )
-    .execute(&database.lookup_pool)
-    .await?;
-    assert_eq!(rewrite.rows_affected(), 1);
-    control.resume().await;
-
-    let response = request_task
-        .await
-        .context("reverse lookup request task panicked")?
-        .context("reverse lookup request failed")?;
-    let status = response.status();
-    let payload: Value = read_json(response).await?;
-    sqlx::query(
-        "UPDATE bigname_phase.name_current
-         SET raw_name = 'alice.eth'
-         WHERE raw_name = 'rewritten-alice.eth'",
-    )
-    .execute(&database.lookup_pool)
-    .await?;
-    crate::v2::support::identity_facade_primary_coherence_test_hooks::uninstall(
-        &database.lookup_pool,
-    )
-    .await?;
-    drop(guard);
-
-    assert_eq!(status, StatusCode::OK, "unexpected response: {payload:#}");
-    assert_eq!(
-        json!({
-            "name": payload["data"][0]["records"][0]["name"],
-            "display_name": payload["data"][0]["records"][0]["display_name"],
-            "token_id": payload["data"][0]["records"][0]["token_id"],
-            "is_primary": payload["data"][0]["records"][0]["is_primary"],
-        }),
-        json!({
-            "name": "alice.eth",
-            "display_name": "alice.eth",
-            "token_id": "70564938991660933374592024341600875602376452319261984317470407481576058979585",
-            "is_primary": true
-        })
-    );
-    assert_eq!(payload["data"][0]["page"]["has_more"], json!(true));
-    let cursor = payload["data"][0]["page"]["next_cursor"]
-        .as_str()
-        .expect("first page must include next_cursor");
-
-    let next_page = v2_lookup_json(
+    // A new registration binding for the same normalized name replaces the selected identity.
+    seed_identity_name(
         &database,
-        json!({
-            "profile": "detail",
-            "inputs": [{
-                "address": address,
-                "page_size": 1,
-                "cursor": cursor
-            }]
-        }),
+        "ens:alice.eth",
+        "alice.eth",
+        "alice.eth",
+        "unused",
+        replacement_resource,
+        Uuid::from_u128(0x5a0392),
+        Uuid::from_u128(0x5a0393),
+        address,
+        bigname_storage::AddressNameRelation::EffectiveController,
+        44,
     )
     .await?;
-    assert_eq!(lookup_record_names(&next_page), vec!["bob.eth"]);
-
+    let response = finish_paused_reverse_lookup(task, reached, resume).await?;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let refused: Value = read_json(response).await?;
+    assert_eq!(refused["error"]["code"], "stale");
+    assert!(refused.get("data").is_none());
+    let fresh = v2_lookup_json(
+        &database,
+        json!({"profile":"detail", "inputs":[{"address":address,"page_size":1}]}),
+    )
+    .await?;
+    assert_eq!(fresh["data"][0]["records"][0]["name"], "alice.eth");
+    assert_eq!(
+        fresh["data"][0]["records"][0]["registration_id"],
+        replacement_resource.to_string()
+    );
+    assert_eq!(fresh["data"][0]["records"][0]["is_primary"], true);
+    let cursor = fresh["data"][0]["page"]["next_cursor"]
+        .as_str()
+        .context("fresh cursor")?;
+    let next = v2_lookup_json(
+        &database,
+        json!({"profile":"detail", "inputs":[{"address":address,"page_size":1,"cursor":cursor}]}),
+    )
+    .await?;
+    assert_eq!(lookup_record_names(&next), vec!["bob.eth"]);
     database.cleanup().await
 }
 
