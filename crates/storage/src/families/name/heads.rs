@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
-use sqlx::{PgPool, Row};
+use sqlx::{PgConnection, Row};
 
 /// One readable event as the heads compare it.
 #[derive(Clone, Debug)]
@@ -26,7 +26,7 @@ pub(super) struct HeadEvent {
 /// The latest readable events of `names` per (name, resource), and the events `identities` name,
 /// at or below `target`.
 pub(super) async fn load_heads(
-    pool: &PgPool,
+    conn: &mut PgConnection,
     chain_id: &str,
     target: i64,
     names: &[String],
@@ -77,7 +77,7 @@ pub(super) async fn load_heads(
     .bind(target)
     .bind(names)
     .bind(identities)
-    .fetch_all(pool)
+    .fetch_all(&mut *conn)
     .await
     .context("failed to load the name history heads")?;
     rows.into_iter()

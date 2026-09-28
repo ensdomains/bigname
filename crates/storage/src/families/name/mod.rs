@@ -38,6 +38,7 @@ mod compose;
 mod heads;
 mod list;
 mod loaders;
+pub mod seams;
 pub mod selection;
 pub mod serving;
 

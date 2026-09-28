@@ -11,7 +11,7 @@
 //! whose only expiry is in one of those forms is outside this listing by design.
 
 use anyhow::{Context, Result, bail};
-use sqlx::{PgPool, Postgres, QueryBuilder, types::time::OffsetDateTime};
+use sqlx::{PgExecutor, PgPool, Postgres, QueryBuilder, types::time::OffsetDateTime};
 
 use super::list::{
     NAME_CURRENT_LIST_SELECT, NameCurrentListCursor, NameCurrentListCursorValue,
@@ -49,9 +49,9 @@ pub async fn load_name_current_expiring_page(
 }
 
 /// The expiring page over the served rows, or with `composed` over those rows instead (see
-/// `list_page_from`).
+/// `list_page_from`). One statement, so the composed reader runs it inside its read snapshot.
 pub(crate) async fn expiring_page_from(
-    pool: &PgPool,
+    executor: impl PgExecutor<'_>,
     filter: &NameCurrentExpiringFilter,
     order: NameCurrentListOrder,
     cursor: Option<&NameCurrentListCursor>,
@@ -138,7 +138,7 @@ pub(crate) async fn expiring_page_from(
 
     let rows = builder
         .build()
-        .fetch_all(pool)
+        .fetch_all(executor)
         .await
         .with_context(|| format!("failed to load name_current expiring page for {filter:?}"))?;
     let mut rows = rows

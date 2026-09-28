@@ -1,10 +1,15 @@
 //! Load and compose many names at once: one statement per input for a batch of names, then the
 //! selection, the lifecycle read, the serving pointer and the row per name.
+//!
+//! Every public reader runs in one read-only REPEATABLE READ transaction ([`read_snapshot`]):
+//! the family loop commits a block as one transaction, so every statement of a load, the marker
+//! read included, sees the same block, and a row's facts and the publication it is stamped with
+//! always agree.
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result};
 use serde_json::Value;
-use sqlx::{PgPool, Row, types::time::OffsetDateTime};
+use sqlx::{PgConnection, PgPool, Postgres, Row, Transaction, types::time::OffsetDateTime};
 use uuid::Uuid;
 
 use super::{
@@ -20,9 +25,24 @@ use super::{
 use crate::{
     NameCurrentRow,
     families::control::lifecycle::{
-        AuthoritySelection, Clock, NameInput, evaluate, load_name_facts,
+        AuthoritySelection, Clock, NameInput, evaluate, load_name_facts_on,
     },
 };
+
+/// A read-only REPEATABLE READ transaction on `pool`: its snapshot is taken at its first
+/// statement and holds for every statement after it, so a composed read cannot mix two family
+/// blocks. The caller commits it (nothing is written) once the read is done.
+pub(super) async fn read_snapshot(pool: &PgPool) -> Result<Transaction<'static, Postgres>> {
+    let mut transaction = pool
+        .begin()
+        .await
+        .context("failed to begin the composed name read")?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+        .execute(&mut *transaction)
+        .await
+        .context("failed to pin the composed name read to one snapshot")?;
+    Ok(transaction)
+}
 
 /// The family marker of `chain_id`, the publication a composed row describes. None when the
 /// chain has no marker.
@@ -30,6 +50,14 @@ pub async fn load_family_publication(
     pool: &PgPool,
     chain_id: &str,
 ) -> Result<Option<FamilyPublication>> {
+    let mut conn = pool
+        .acquire()
+        .await
+        .context("failed to acquire a connection for the family marker")?;
+    publication(&mut conn, chain_id).await
+}
+
+async fn publication(conn: &mut PgConnection, chain_id: &str) -> Result<Option<FamilyPublication>> {
     let row = sqlx::query(
         "/* storage:families.name.publication */
          SELECT chain_id, current_block_number, current_block_hash, block_timestamp,
@@ -37,7 +65,7 @@ pub async fn load_family_publication(
          FROM bigname_phase.project_family_marker WHERE chain_id = $1",
     )
     .bind(chain_id)
-    .fetch_optional(pool)
+    .fetch_optional(conn)
     .await
     .with_context(|| format!("failed to load the family marker of {chain_id}"))?;
     row.map(|row| {
@@ -58,12 +86,14 @@ pub async fn load_family_name(
     pool: &PgPool,
     logical_name_id: &str,
 ) -> Result<Option<NameCurrentRow>> {
+    let mut snapshot = read_snapshot(pool).await?;
     let mut rows = load(
-        pool,
+        &mut snapshot,
         &[logical_name_id.to_owned()],
         CoverageShape::WithBasis,
     )
     .await?;
+    snapshot.commit().await?;
     Ok(rows.remove(logical_name_id))
 }
 
@@ -73,7 +103,10 @@ pub async fn load_family_names_by_logical_name_ids(
     pool: &PgPool,
     logical_name_ids: &[String],
 ) -> Result<BTreeMap<String, NameCurrentRow>> {
-    load(pool, logical_name_ids, CoverageShape::Plain).await
+    let mut snapshot = read_snapshot(pool).await?;
+    let rows = load(&mut snapshot, logical_name_ids, CoverageShape::Plain).await?;
+    snapshot.commit().await?;
+    Ok(rows)
 }
 
 /// One composed row per resource: of the names whose row is bound to the resource, the first by
@@ -85,6 +118,7 @@ pub async fn load_family_names_by_resource_ids(
     if resource_ids.is_empty() {
         return Ok(BTreeMap::new());
     }
+    let mut snapshot = read_snapshot(pool).await?;
     let names: Vec<String> = sqlx::query_scalar(
         "/* storage:families.name.by_resource */
          SELECT DISTINCT candidate.logical_name_id
@@ -92,7 +126,7 @@ pub async fn load_family_names_by_resource_ids(
          WHERE candidate.resource_id = ANY($1::uuid[])",
     )
     .bind(resource_ids)
-    .fetch_all(pool)
+    .fetch_all(&mut *snapshot)
     .await
     .context("failed to load the names bound to resources")?;
     // The served pick orders by raw name then name id in the database's collation, so the
@@ -104,10 +138,11 @@ pub async fn load_family_names_by_resource_ids(
          ORDER BY surface.raw_name ASC, surface.logical_name_id ASC",
     )
     .bind(&names)
-    .fetch_all(pool)
+    .fetch_all(&mut *snapshot)
     .await
     .context("failed to order the names bound to resources")?;
-    let mut rows = load(pool, &names, CoverageShape::Plain).await?;
+    let mut rows = load(&mut snapshot, &names, CoverageShape::Plain).await?;
+    snapshot.commit().await?;
     let mut out: BTreeMap<Uuid, NameCurrentRow> = BTreeMap::new();
     for name in ordered {
         let Some(row) = rows.remove(&name) else {
@@ -120,8 +155,10 @@ pub async fn load_family_names_by_resource_ids(
     Ok(out)
 }
 
-async fn load(
-    pool: &PgPool,
+/// The composed rows of `logical_name_ids` read on `conn`, which the caller holds in one
+/// [`read_snapshot`].
+pub(super) async fn load(
+    conn: &mut PgConnection,
     logical_name_ids: &[String],
     shape: CoverageShape,
 ) -> Result<BTreeMap<String, NameCurrentRow>> {
@@ -130,23 +167,24 @@ async fn load(
         return Ok(out);
     }
     let mut by_chain: BTreeMap<String, Vec<Surface>> = BTreeMap::new();
-    for surface in surfaces(pool, logical_name_ids).await? {
+    for surface in surfaces(conn, logical_name_ids).await? {
         by_chain
             .entry(surface.chain_id.clone())
             .or_default()
             .push(surface);
     }
     for (chain_id, surfaces) in by_chain {
-        let Some(publication) = load_family_publication(pool, &chain_id).await? else {
+        let Some(publication) = publication(conn, &chain_id).await? else {
             continue;
         };
-        out.extend(load_chain(pool, &publication, &surfaces, shape).await?);
+        super::seams::after_publication().await;
+        out.extend(load_chain(conn, &publication, &surfaces, shape).await?);
     }
     Ok(out)
 }
 
 async fn load_chain(
-    pool: &PgPool,
+    conn: &mut PgConnection,
     publication: &FamilyPublication,
     surfaces: &[Surface],
     shape: CoverageShape,
@@ -165,9 +203,9 @@ async fn load_chain(
             selection: AuthoritySelection::default(),
         })
         .collect();
-    let mut facts = load_name_facts(pool, chain_id, &inputs).await?;
-    let histories = histories(pool, chain_id, &ids).await?;
-    let mut migrations = migrations(pool, chain_id, &ids).await?;
+    let mut facts = load_name_facts_on(conn, chain_id, &inputs).await?;
+    let histories = histories(conn, chain_id, &ids).await?;
+    let mut migrations = migrations(conn, chain_id, &ids).await?;
     let mut wanted: BTreeSet<String> = BTreeSet::new();
     for facts in &facts {
         wanted.extend(facts.candidates.iter().map(|c| c.resource_id.clone()));
@@ -181,7 +219,7 @@ async fn load_chain(
         }
     }
     let wanted: Vec<String> = wanted.into_iter().collect();
-    let readable = resources(pool, publication, &wanted).await?;
+    let readable = resources(conn, publication, &wanted).await?;
     let readable_ids: BTreeSet<String> = readable.keys().cloned().collect();
     let nodes: Vec<(String, String)> = surfaces
         .iter()
@@ -192,14 +230,14 @@ async fn load_chain(
             )
         })
         .collect();
-    let (pointers, roots) = resource_pointers(pool, chain_id, &wanted, &nodes).await?;
-    let node_pointers = node_pointers(pool, chain_id, &nodes).await?;
+    let (pointers, roots) = resource_pointers(conn, chain_id, &wanted, &nodes).await?;
+    let node_pointers = node_pointers(conn, chain_id, &nodes).await?;
     let root_resources: Vec<String> = roots
         .values()
         .flatten()
         .filter_map(|pointer| pointer.resource_id.clone())
         .collect();
-    let releases = root_releases(pool, chain_id, &root_resources).await?;
+    let releases = root_releases(conn, chain_id, &root_resources).await?;
     let staged: Vec<String> = facts
         .iter()
         .flat_map(|facts| {
@@ -211,7 +249,7 @@ async fn load_chain(
         })
         .collect();
     let heads =
-        Heads::new(load_heads(pool, chain_id, publication.block_number, &ids, &staged).await?);
+        Heads::new(load_heads(conn, chain_id, publication.block_number, &ids, &staged).await?);
 
     let mut out = BTreeMap::new();
     for (surface, facts) in surfaces.iter().zip(facts.iter_mut()) {

@@ -1,5 +1,7 @@
 use anyhow::{Context, Result};
-use sqlx::{PgPool, Postgres, QueryBuilder, postgres::PgRow, types::time::OffsetDateTime};
+use sqlx::{
+    PgExecutor, PgPool, Postgres, QueryBuilder, postgres::PgRow, types::time::OffsetDateTime,
+};
 
 use super::{
     DEFAULT_ADDRESS_NAMES_MEMBERSHIP_JOINS, DEFAULT_ADDRESS_NAMES_MEMBERSHIP_READ_FILTER,
@@ -169,30 +171,18 @@ pub async fn load_name_current_list_page(
     page_size: u64,
     include_total_count: bool,
 ) -> Result<NameCurrentListPage> {
-    list_page_from(
-        pool,
-        filter,
-        (sort, order),
-        cursor,
-        page_size,
-        include_total_count,
-        None,
-    )
-    .await
+    list_page_limits(page_size)?;
+    let total_count = if include_total_count {
+        Some(count_name_current_list(pool, filter).await?)
+    } else {
+        None
+    };
+    let mut page = list_page_from(pool, filter, (sort, order), cursor, page_size, None).await?;
+    page.total_count = total_count;
+    Ok(page)
 }
 
-/// The list page over the served rows, or with `composed` (a JSON array of
-/// [`composed_list_source`] rows) over those rows instead, through the same derived columns,
-/// predicates, order and cursor.
-pub(crate) async fn list_page_from(
-    pool: &PgPool,
-    filter: &NameCurrentListFilter,
-    (sort, order): (NameCurrentListSort, NameCurrentListOrder),
-    cursor: Option<&NameCurrentListCursor>,
-    page_size: u64,
-    include_total_count: bool,
-    composed: Option<&serde_json::Value>,
-) -> Result<NameCurrentListPage> {
+fn list_page_limits(page_size: u64) -> Result<(usize, i64)> {
     let page_size = checked_page_size_usize(
         page_size,
         "name_current list page_size must be positive",
@@ -203,11 +193,22 @@ pub(crate) async fn list_page_from(
         "name_current list page_size is too large",
         "name_current list page_size exceeds SQL limit",
     )?;
-    let total_count = if include_total_count {
-        Some(count_name_current_list(pool, filter).await?)
-    } else {
-        None
-    };
+    Ok((page_size, page_limit))
+}
+
+/// The list page, without a total, over the served rows, or with `composed` (a JSON array of
+/// the rows `source_row` in families/name/list.rs builds) over those rows instead, through the
+/// same derived columns, predicates, order and cursor. One statement, so the composed readers
+/// run it inside their read snapshot.
+pub(crate) async fn list_page_from(
+    executor: impl PgExecutor<'_>,
+    filter: &NameCurrentListFilter,
+    (sort, order): (NameCurrentListSort, NameCurrentListOrder),
+    cursor: Option<&NameCurrentListCursor>,
+    page_size: u64,
+    composed: Option<&serde_json::Value>,
+) -> Result<NameCurrentListPage> {
+    let (page_size, page_limit) = list_page_limits(page_size)?;
 
     let mut builder = QueryBuilder::<Postgres>::new("");
     push_filtered_name_list_cte(&mut builder, filter, composed, |_| {});
@@ -222,7 +223,7 @@ pub(crate) async fn list_page_from(
 
     let rows = builder
         .build()
-        .fetch_all(pool)
+        .fetch_all(executor)
         .await
         .with_context(|| format!("failed to load name_current compact page for {filter:?}"))?;
     let mut rows = rows
@@ -240,7 +241,7 @@ pub(crate) async fn list_page_from(
     Ok(NameCurrentListPage {
         rows,
         next_cursor,
-        total_count,
+        total_count: None,
     })
 }
 
@@ -371,8 +372,8 @@ fn push_filtered_name_current_cte<'a>(
     push_filtered_name_list_cte(builder, filter, None, |_| {});
 }
 
-/// The column list of a composed row set bound as `jsonb_to_recordset` (see
-/// [`composed_list_source`]).
+/// The column list of a composed row set bound as `jsonb_to_recordset` (the rows
+/// `source_row` in families/name/list.rs builds).
 pub(crate) const COMPOSED_NC_COLUMNS: &str =
     "nc(logical_name_id text, namespace text, raw_name text,
     namehash text, surface_binding_id uuid, resource_id uuid, serving_resource_id uuid,

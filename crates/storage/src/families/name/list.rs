@@ -15,12 +15,16 @@
 //!   has an expiry at or past `x` in walk order, and the walk stops once `page_size + 1` rows
 //!   sort strictly before the walk position. Events whose expiry is a JSON number that is not an
 //!   integral second carry no indexed expiry and are always considered.
+//!
+//! A page is read in one snapshot (`batch::read_snapshot`): the walk, every batch's composition
+//! and the page statement see the same family block.
 use std::collections::BTreeSet;
 
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
-use sqlx::{PgPool, Row, types::time::OffsetDateTime};
+use sqlx::{PgConnection, PgPool, Row, types::time::OffsetDateTime};
 
+use super::{CoverageShape, batch};
 use crate::{
     NameCurrentExpiringFilter, NameCurrentListCursor, NameCurrentListCursorValue,
     NameCurrentListFilter, NameCurrentListOrder, NameCurrentListPage, NameCurrentListSort,
@@ -32,11 +36,13 @@ use crate::{
 const BATCH_FLOOR: usize = 200;
 
 fn batch_size(page_size: u64) -> usize {
-    usize::try_from(page_size)
-        .unwrap_or(usize::MAX / 8)
-        .saturating_add(1)
-        .saturating_mul(4)
-        .max(BATCH_FLOOR)
+    super::seams::batch_size(
+        usize::try_from(page_size)
+            .unwrap_or(usize::MAX / 8)
+            .saturating_add(1)
+            .saturating_mul(4)
+            .max(BATCH_FLOOR),
+    )
 }
 
 /// One composed row as the list CTE binds it (name_current/list.rs, `COMPOSED_NC_COLUMNS`).
@@ -71,12 +77,12 @@ struct Gathered {
 }
 
 impl Gathered {
-    async fn add(&mut self, pool: &PgPool, names: Vec<String>) -> Result<()> {
+    async fn add(&mut self, conn: &mut PgConnection, names: Vec<String>) -> Result<()> {
         let fresh: Vec<String> = names
             .into_iter()
             .filter(|name| self.names.insert(name.clone()))
             .collect();
-        let composed = super::load_family_names_by_logical_name_ids(pool, &fresh).await?;
+        let composed = batch::load(conn, &fresh, CoverageShape::Plain).await?;
         self.rows.extend(composed.values().map(source_row));
         Ok(())
     }
@@ -107,9 +113,10 @@ pub async fn load_family_search_page(
         };
         (name, cursor.namespace.clone(), cursor.namehash.clone())
     });
+    let mut snapshot = batch::read_snapshot(pool).await?;
     let mut gathered = Gathered::default();
     loop {
-        let candidates = search_candidates(pool, filter, after.as_ref(), batch).await?;
+        let candidates = search_candidates(&mut snapshot, filter, after.as_ref(), batch).await?;
         let exhausted = candidates.len() < batch;
         after = candidates
             .last()
@@ -118,12 +125,23 @@ pub async fn load_family_search_page(
             })
             .or(after);
         gathered
-            .add(pool, candidates.into_iter().map(|(id, ..)| id).collect())
+            .add(
+                &mut snapshot,
+                candidates.into_iter().map(|(id, ..)| id).collect(),
+            )
             .await?;
         let source = gathered.source();
-        let page =
-            list_page_from(pool, filter, order, cursor, page_size, false, Some(&source)).await?;
+        let page = list_page_from(
+            &mut *snapshot,
+            filter,
+            order,
+            cursor,
+            page_size,
+            Some(&source),
+        )
+        .await?;
         if exhausted || page.next_cursor.is_some() {
+            snapshot.commit().await?;
             return Ok(page);
         }
     }
@@ -132,7 +150,7 @@ pub async fn load_family_search_page(
 /// The next readable surfaces after `after` in the search page's order that the filter's name
 /// predicates admit: (logical_name_id, raw_name, namespace, namehash).
 async fn search_candidates(
-    pool: &PgPool,
+    conn: &mut PgConnection,
     filter: &NameCurrentListFilter,
     after: Option<&(String, String, String)>,
     limit: usize,
@@ -184,7 +202,7 @@ async fn search_candidates(
     .bind(after.map(|(_, namespace, _)| namespace.as_str()))
     .bind(after.map(|(.., namehash)| namehash.as_str()))
     .bind(i64::try_from(limit).context("search batch exceeds i64")?)
-    .fetch_all(pool)
+    .fetch_all(conn)
     .await
     .context("failed to load the search candidates")?;
     rows.into_iter()
@@ -230,21 +248,38 @@ pub async fn load_family_expiring_page(
         }
     }
     let batch = batch_size(page_size);
+    let mut snapshot = batch::read_snapshot(pool).await?;
     let mut gathered = Gathered::default();
-    gathered
-        .add(pool, inexact_expiry_names(pool).await?)
-        .await?;
+    let inexact = inexact_expiry_names(&mut snapshot).await?;
+    gathered.add(&mut snapshot, inexact).await?;
     let mut position: Option<(i64, String)> = None;
     loop {
-        let pairs = expiry_pairs(pool, (low, high), ascending, position.as_ref(), batch).await?;
+        let pairs = expiry_pairs(
+            &mut snapshot,
+            (low, high),
+            ascending,
+            position.as_ref(),
+            batch,
+        )
+        .await?;
         let exhausted = pairs.len() < batch;
         position = pairs.last().cloned().or(position);
         gathered
-            .add(pool, pairs.into_iter().map(|(_, name)| name).collect())
+            .add(
+                &mut snapshot,
+                pairs.into_iter().map(|(_, name)| name).collect(),
+            )
             .await?;
         let source = gathered.source();
-        let page =
-            expiring_page_from(pool, filter, order, cursor, page_size + 1, Some(&source)).await?;
+        let page = expiring_page_from(
+            &mut *snapshot,
+            filter,
+            order,
+            cursor,
+            page_size + 1,
+            Some(&source),
+        )
+        .await?;
         let settled = page.rows.len() as u64 > page_size
             && match (page.rows.last().and_then(|row| row.expiry_date), &position) {
                 (Some(last), Some((walked, _))) => {
@@ -258,6 +293,7 @@ pub async fn load_family_expiring_page(
                 _ => false,
             };
         if exhausted || settled {
+            snapshot.commit().await?;
             return Ok(truncate(page, page_size));
         }
     }
@@ -280,7 +316,7 @@ fn truncate(mut page: NameCurrentListPage, page_size: u64) -> NameCurrentListPag
 
 /// Names with a retained lifecycle event whose expiry is a JSON number but not an integral
 /// second: the walk cannot place them, so they are always considered.
-async fn inexact_expiry_names(pool: &PgPool) -> Result<Vec<String>> {
+async fn inexact_expiry_names(conn: &mut PgConnection) -> Result<Vec<String>> {
     sqlx::query_scalar(
         "/* storage:families.name.inexact_expiry_names */
          SELECT DISTINCT name.logical_name_id
@@ -293,7 +329,7 @@ async fn inexact_expiry_names(pool: &PgPool) -> Result<Vec<String>> {
          WHERE event.expiry_seconds IS NULL AND jsonb_typeof(event.expiry) = 'number'
            AND name.logical_name_id IS NOT NULL",
     )
-    .fetch_all(pool)
+    .fetch_all(conn)
     .await
     .context("failed to load the names with an inexact expiry")
 }
@@ -304,7 +340,7 @@ async fn inexact_expiry_names(pool: &PgPool) -> Result<Vec<String>> {
 /// name, and the names whose binding candidates, associations or key states name the resource
 /// it sits on.
 async fn expiry_pairs(
-    pool: &PgPool,
+    conn: &mut PgConnection,
     (low, high): (Option<i64>, Option<i64>),
     ascending: bool,
     after: Option<&(i64, String)>,
@@ -368,7 +404,7 @@ async fn expiry_pairs(
         .bind(after.map(|(at, _)| *at))
         .bind(after.map(|(_, name)| name.as_str()))
         .bind(i64::try_from(limit).context("expiry batch exceeds i64")?)
-        .fetch_all(pool)
+        .fetch_all(conn)
         .await
         .context("failed to walk the expiry candidates")?;
     rows.into_iter()
