@@ -342,8 +342,9 @@ collection route carry neither header.
   and no projected authority.
   That classified row serves its resolver without acquiring registration
   identity or control. Indexed records are served when its serving resource has
-  supported inventory. The TLD row keeps `status=unsupported` with
-  `current_authority_not_projected` and the full detail shape; only the
+  supported inventory. The TLD row stays `current_authority_not_projected` and
+  unregistered, and like name detail it serves `status=ok` with no
+  `unsupported_reason` and no `registration_id` or `authority`; only the
   resolver and resolver-record fields are added.
   `profile=detail` name results and reverse rows take `addresses`,
   `text_records`, `content_hash`, and `primary_address` only from a record
@@ -423,6 +424,14 @@ collection route carry neither header.
   `reverse`, and `addr.reverse` follow the same rule as every other name. An
   address lookup
   returns `409 conflict` when the deployment has no ready public namespace.
+  A name result's `status` and `unsupported_reason` follow the
+  `GET /v1/names/{name}` rule for the same row at the same snapshot, for both
+  profiles: an unsupported projected row downgrades to the unsupported record
+  below unless its reason is `current_authority_not_projected`, which serves
+  `status=ok` with the registration and identity fields that can be served,
+  their omissions and `unsupported_fields` unchanged, and no `resolver` outside
+  the TLD case above. `status=ok` on such a result is not evidence of
+  ownership; `registration_status`, `owner`, and `authority` carry that.
   An unsupported name result retains `input`, `kind`, and a `record` containing
   only `name`, `display_name`, `namespace`, `namehash`, `status`, and
   `unsupported_reason`. It omits registration, control, lifecycle, resolver,
@@ -736,7 +745,21 @@ collection route carry neither header.
   `addresses`, `text_records`, `content_hash`, and `primary_address` are built
   by a fresh schema-v2 lookup at the current readable position, using the same
   verified path as `/v1/names/{name}/records`; indexed resolver-record values
-  are not substituted into those fields. The registration and identity summary
+  are not substituted into those fields. The verified lookup reads every record
+  key the name's record inventory lists (the same chain-neutral inventory
+  `GET /v1/names/{name}/records` takes its default keys from, on whichever
+  chain the deployment indexes) plus `addr:60` for `primary_address`. When
+  that inventory is missing or lists no key, it reads the bounded profile set
+  `addr:60`, `avatar`, `contenthash`, `text:description`, `text:url`, and
+  `text:email`. Inventory coverage only selects keys: whether each getter
+  executes is the lookup's answer, so a field whose keys are all `ok` or
+  unset is served (unset keys are absent from the map), while a field with no
+  requested key, or with an unsupported, stale, or failed key, is omitted and
+  listed in `unsupported_fields`; the name-level `status` and reason come from
+  those answers. The set is not an enumeration of every text key or coin type
+  the resolver holds; read others through the records route with `keys`. A
+  name that serves no resolver dispatches no call and returns
+  `status=unsupported` with `verified_records_not_supported`. The registration and identity summary
   fields (`registration_id`, `token_id`, `owner`, `manager`, `registrant`, dates,
   `registration_status`, `wrapper_state`, `wrapper_fuses`, `authority`,
   `migrated_at`, `name`, `display_name`, `namespace`, `namehash`,
