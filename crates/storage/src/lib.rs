@@ -58,7 +58,8 @@ pub use address_names::{
     explain_address_records_current_evm_page_for_test,
 };
 pub use api_preflight::{
-    ApiLookupDdlKind, ApiLookupDdlObject, load_missing_api_lookup_ddl, phase_schema_exists,
+    ApiLookupDdlKind, ApiLookupDdlObject, ServedTablesBehind, load_missing_api_lookup_ddl,
+    load_served_tables_behind, phase_schema_exists,
 };
 pub use children::{
     ChildrenCurrentKeysetCursor, ChildrenCurrentOrder, ChildrenCurrentPage,

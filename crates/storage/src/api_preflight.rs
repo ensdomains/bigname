@@ -66,6 +66,8 @@ pub async fn load_missing_api_lookup_ddl(pool: &PgPool) -> Result<Vec<ApiLookupD
                 ('relation', 'bigname_phase.manifest_contract_instances', 'always'),
                 ('relation', 'bigname_phase.contract_instance_addresses', 'always'),
                 ('relation', 'bigname_phase.resolution_divergences', 'always'),
+                -- Read only with the switch off, by the served-table stop check below.
+                ('relation', 'bigname_phase.project_served_stop', 'served'),
                 ('relation', 'bigname_phase.project_family_marker', 'families'),
                 -- Read only by the owned key family readers under the switch.
                 ('relation', 'bigname_phase.discovery_edges', 'families'),
@@ -133,7 +135,7 @@ pub async fn load_missing_api_lookup_ddl(pool: &PgPool) -> Result<Vec<ApiLookupD
         "#,
     )
     // The family marker and the owned key families are serving reads only while the
-    // publication switch is on.
+    // publication switch is on; the served-table stop is read only while it is off.
     .bind(crate::publication_source::serve_from_families())
     .fetch_all(pool)
     .await
@@ -154,6 +156,47 @@ pub async fn load_missing_api_lookup_ddl(pool: &PgPool) -> Result<Vec<ApiLookupD
             Ok(ApiLookupDdlObject {
                 kind,
                 identity: row.try_get("identity")?,
+            })
+        })
+        .collect()
+}
+
+/// A chain whose served tables stopped short of the Project row because the publication switch
+/// ran Project (TYR-36 step 7b): the phase runner records `project_served_stop` when the switch
+/// first runs Project on a chain, and a Project redo over the gap deletes it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ServedTablesBehind {
+    pub chain_id: String,
+    /// The last block the served tables applied; none when they never applied one.
+    pub stopped_at: Option<i64>,
+    /// The Project row's block, which the switch-off API would present them as current at.
+    pub project_block: i64,
+}
+
+/// Chains whose served tables are behind the Project row, which the API must not serve with the
+/// publication switch off.
+pub async fn load_served_tables_behind(pool: &PgPool) -> Result<Vec<ServedTablesBehind>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT stop.chain_id, stop.block_number, project.current_block_number
+        FROM bigname_phase.project_served_stop stop
+        JOIN bigname_phase.chain_phase_state project
+          ON project.chain_id = stop.chain_id
+         AND project.phase_name = 'project'
+        WHERE project.current_block_number IS NOT NULL
+          AND (stop.block_number IS NULL OR stop.block_number < project.current_block_number)
+        ORDER BY stop.chain_id
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+    .context("failed to inspect where the served tables stopped")?;
+    rows.into_iter()
+        .map(|row| {
+            Ok(ServedTablesBehind {
+                chain_id: row.try_get("chain_id")?,
+                stopped_at: row.try_get("block_number")?,
+                project_block: row.try_get("current_block_number")?,
             })
         })
         .collect()

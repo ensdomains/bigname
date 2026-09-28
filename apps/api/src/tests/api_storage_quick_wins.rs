@@ -181,6 +181,7 @@ async fn api_lookup_ddl_inventory_matches_every_serving_path_phase_object() -> R
         "relation: bigname_phase.permissions_current",
         "relation: bigname_phase.permissions_current_resource_summary",
         "relation: bigname_phase.primary_names_current",
+        "relation: bigname_phase.project_served_stop",
         "relation: bigname_phase.record_inventory_current",
         "relation: bigname_phase.resolution_divergences",
         "relation: bigname_phase.resolver_current",
@@ -193,7 +194,7 @@ async fn api_lookup_ddl_inventory_matches_every_serving_path_phase_object() -> R
     .map(str::to_owned));
 
     assert_eq!(actual, expected);
-    assert_eq!(actual.len(), 29);
+    assert_eq!(actual.len(), 30);
     database.cleanup().await
 }
 

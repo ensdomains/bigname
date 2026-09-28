@@ -13,6 +13,7 @@ use phase_runner::{
     INTERPRETER_CONTENT_HASH,
     capacity::CapacityGuard,
     config::{CapacityConfig, ChainConfig, SeedBasis, SourceConfig, TimingConfig},
+    error::ErrorKind,
     heads::{BlockMarker, HeadMarkers},
     phase::{
         BlockRange, LoopbackPhase, Phase, PhaseBatchOutcome, PhaseContext, PhaseName, PhaseResume,
@@ -160,6 +161,90 @@ async fn a_one_shot_redo_under_the_switch_replays_the_families_and_writes_no_ser
     ensure!(marker(&scratch).await? == Some(HEAD));
     ensure!(repair_completed(&scratch).await?);
     scratch.cleanup().await
+}
+
+// Switching back off after the switch ran Project: the first switch-on batch records the block
+// the served tables stood at, a switch-off normal run refuses the chain with the redo that
+// replays the gap, and that redo deletes the record so the next run starts.
+#[tokio::test]
+async fn switching_off_refuses_served_tables_the_switch_left_behind_until_a_redo_replays_them()
+-> Result<()> {
+    const SERVED: i64 = 20;
+    let scratch = ready("families_switch_served_stop").await?;
+    let head = head_marker(&scratch, HEAD).await?;
+    let served = head_marker(&scratch, SERVED).await?;
+    set_project_block(&scratch, &served).await?;
+    let project = ProjectPhase::new(scratch.pool().clone());
+    with_serve_from_families(true, project.run_batch(context(&head, None))).await?;
+    // The runner records the family batch's progress on the Project row.
+    set_project_block(&scratch, &head).await?;
+    ensure!(served_stop(&scratch).await? == Some(Some(SERVED)));
+
+    let restarted = ProjectPhase::new(scratch.pool().clone());
+    let refused = with_serve_from_families(false, restarted.run_batch(context(&head, Some(&head))))
+        .await
+        .expect_err("the served tables are behind the Project row");
+    ensure!(
+        refused.kind() == ErrorKind::Configuration && !refused.is_retryable(),
+        "{refused:?}"
+    );
+    ensure!(
+        refused.to_string().contains(&format!(
+            "--phase project --from-block {} --to-block {HEAD}",
+            SERVED + 1
+        )),
+        "the error names the redo: {refused}"
+    );
+    ensure!(served_stop(&scratch).await? == Some(Some(SERVED)));
+
+    with_serve_from_families(
+        false,
+        redo(
+            &scratch,
+            FamilySettings {
+                retry_family_failures: false,
+                ..FamilySettings::default()
+            },
+        ),
+    )
+    .await?;
+    ensure!(
+        served_stop(&scratch).await?.is_none(),
+        "the covering redo deleted the record"
+    );
+
+    // A record at the Project row's block skipped nothing: a normal run deletes it and runs.
+    sqlx::query("INSERT INTO project_served_stop (chain_id, block_number) VALUES ($1, $2)")
+        .bind(CHAIN)
+        .bind(HEAD)
+        .execute(scratch.pool())
+        .await?;
+    let restarted = ProjectPhase::new(scratch.pool().clone());
+    with_serve_from_families(false, restarted.run_batch(context(&head, Some(&head)))).await?;
+    ensure!(served_stop(&scratch).await?.is_none());
+    scratch.cleanup().await
+}
+
+async fn set_project_block(scratch: &ScratchDatabase, block: &BlockMarker) -> Result<()> {
+    sqlx::query(
+        "UPDATE chain_phase_state SET current_block_number = $2, current_block_hash = $3
+         WHERE chain_id = $1 AND phase_name = 'project'",
+    )
+    .bind(CHAIN)
+    .bind(block.number)
+    .bind(&block.hash)
+    .execute(scratch.pool())
+    .await?;
+    Ok(())
+}
+
+async fn served_stop(scratch: &ScratchDatabase) -> Result<Option<Option<i64>>> {
+    Ok(
+        sqlx::query_scalar("SELECT block_number FROM project_served_stop WHERE chain_id = $1")
+            .bind(CHAIN)
+            .fetch_optional(scratch.pool())
+            .await?,
+    )
 }
 
 async fn refuse_served_writes(scratch: &ScratchDatabase) -> Result<()> {

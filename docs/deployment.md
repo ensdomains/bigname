@@ -237,6 +237,26 @@ docker compose --env-file .env.server -f docker-compose.server.yml up -d --force
 `docker compose restart` does not reload changed environment configuration, so
 a restart alone keeps the old value.
 
+Turning the switch back off needs the served tables replayed first. With the
+switch on, Project skips the served engine and the Project row follows the
+family marker, so the served tables stop where they were. The first switch-on
+Project batch on a chain records that block in `project_served_stop`. With the
+switch off, the phase runner refuses to run Project on a chain whose recorded
+block is short of the Project row, and the API refuses to start, since it
+would present those tables as current at the Project row. Both errors name the
+gap. Replay it with the switch off before starting either service:
+
+```sh
+phase-runner redo --chain <chain-id> --phase project --from-block <recorded block + 1> --to-block <Project block>
+```
+
+When no block was recorded (the switch ran Project from an empty Project row),
+start the redo at the chain's first source block. The redo deletes the record
+once it commits a range that covers the gap, and both services then start.
+A chain the switch ran on only before `20260929150000_project_served_stop.sql`
+was applied has no record, so it is not refused: replay it the same way before
+switching off. Step 7c removes the switch and this record.
+
 The direct `docker run` selectors under [Container contents](#container-contents)
 do not forward the variable: anyone running the binaries that way must pass
 `-e BIGNAME_SERVE_FROM_FAMILIES` (or an explicit value) to both the `api` and
@@ -834,6 +854,7 @@ GRANT SELECT ON TABLE
     bigname_phase.chain_lineage,
     bigname_phase.chain_phase_state,
     bigname_phase.project_family_marker,
+    bigname_phase.project_served_stop,
     bigname_phase.service_heartbeats,
     bigname_phase.normalized_events,
     bigname_phase.migration_event_associations,
@@ -924,6 +945,12 @@ The `project_*` owned key families after it, and `discovery_edges`,
 children reader joins, are on the list for the same switch: with it on, the
 family readers serve every route from them, and startup refuses a role that
 cannot read any of them. With the switch off the API reads none of them.
+
+`project_served_stop` is on the list for the opposite case: with the switch
+off, startup reads it with `chain_phase_state` and refuses to serve a chain
+whose served tables the switch left behind the Project row (see
+[Publication switch](#publication-switch)). With the switch on the API does
+not read it.
 
 `migration_event_associations` is on the list because
 `GET /v1/diagnostics/events` selects the ENSv1→ENSv2 migration correlation rows
