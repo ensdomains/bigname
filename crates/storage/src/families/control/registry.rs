@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
-use sqlx::PgPool;
+use sqlx::{PgConnection, PgPool};
 
 use super::{
     position::{EventOrder, Position},
@@ -154,6 +154,19 @@ pub async fn load_registry_nodes(
     chain_id: &str,
     keys: &[(String, String)],
 ) -> Result<BTreeMap<(String, String), RegistryNode>> {
+    let mut conn = pool
+        .acquire()
+        .await
+        .context("failed to acquire a connection")?;
+    load_registry_nodes_on(&mut conn, chain_id, keys).await
+}
+
+/// [`load_registry_nodes`] on one connection.
+pub async fn load_registry_nodes_on(
+    conn: &mut PgConnection,
+    chain_id: &str,
+    keys: &[(String, String)],
+) -> Result<BTreeMap<(String, String), RegistryNode>> {
     let (namespaces, nodes_wanted): (Vec<String>, Vec<String>) = keys.iter().cloned().unzip();
     let rows: Vec<Value> = sqlx::query_scalar(
         "/* storage:families.control.registry.nodes */ SELECT jsonb_build_object(
@@ -168,7 +181,7 @@ pub async fn load_registry_nodes(
     .bind(chain_id)
     .bind(&namespaces)
     .bind(&nodes_wanted)
-    .fetch_all(pool)
+    .fetch_all(&mut *conn)
     .await
     .context("failed to load registry node states")?;
     let mut nodes: BTreeMap<(String, String), RegistryNode> = rows
@@ -187,7 +200,7 @@ pub async fn load_registry_nodes(
     .bind(chain_id)
     .bind(&namespaces)
     .bind(&nodes_wanted)
-    .fetch_all(pool)
+    .fetch_all(&mut *conn)
     .await
     .context("failed to load registry owner events")?;
     for (namespace, node, row) in events {

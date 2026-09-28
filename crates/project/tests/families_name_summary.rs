@@ -2,7 +2,8 @@
 //! the child and label lists read inside one statement, written by the family step for the names
 //! a block touches and journalled like every other family. A block that touches one name rewrites
 //! that name's row and no other, undo puts the previous row back, and a rebuild writes the same
-//! rows as the incremental follow. Every row carries the fields of the name's served row.
+//! rows as the incremental follow. Every row carries the fields of the name's served row, and a
+//! name whose composition the clock changes is composed again at the first block past it.
 #[path = "families_shadow_support/mod.rs"]
 mod shadow_support;
 #[path = "families_support/mod.rs"]
@@ -12,7 +13,7 @@ use anyhow::{Result, ensure};
 use bigname_project::families;
 use serde_json::{Value, json};
 use shadow_support::{publish, served};
-use support::{CHAIN, Fixture, uuid};
+use support::{CHAIN, Event, Fixture, uuid};
 
 const REGISTRAR: &str = "0x00000000000000000000000000000000000000e3";
 const REGISTRY: &str = "0x00000000000000000000000000000000000000e5";
@@ -163,6 +164,17 @@ async fn a_block_rewrites_the_summary_of_the_name_it_touches_and_undo_restores_i
         untouched_version == second_version && untouched == second,
         "block 8 rewrote the summary of a name it does not touch"
     );
+    let journalled: Vec<String> = sqlx::query_scalar(
+        "SELECT key FROM project_family_undo
+         WHERE chain_id = $1 AND block_number = 8 AND family = 'project_name_summary'",
+    )
+    .bind(CHAIN)
+    .fetch_all(&fixture.pool)
+    .await?;
+    ensure!(
+        journalled == vec![json!([CHAIN, name(1)]).to_string()],
+        "block 8 journalled the summaries {journalled:?}"
+    );
 
     // Undo block 8: the renewed name's summary is the block-7 row again.
     let undone = families::undo_to(&fixture.pool, CHAIN, 7).await?;
@@ -199,5 +211,89 @@ async fn the_family_undo_and_rebuild_keep_every_summary_row() -> Result<()> {
     fixture.assert_rebuild_equal(9).await?;
     let rows = fixture.rows("project_name_summary").await?;
     ensure!(rows.len() == 2, "{rows:#?}");
+    fixture.cleanup().await
+}
+
+/// Block times in the fixture: `1800000000 + 12 * block` seconds.
+fn block_time(block: i64) -> i64 {
+    1_800_000_000 + 12 * block
+}
+
+#[tokio::test]
+async fn a_binding_that_closes_by_the_clock_is_composed_again_at_the_first_block_past_it()
+-> Result<()> {
+    let fixture = Fixture::new("families_name_summary_clock", 12).await?;
+    // Name 1's binding closes at block 8's time, which no event of name 1 marks.
+    let lease = uuid(0x1001);
+    fixture
+        .binding(&uuid(101), &name(1), &lease, "ens_v1", 2, 0, Some(8))
+        .await?;
+    fixture
+        .write(
+            2,
+            0,
+            "SurfaceBound",
+            V1_REGISTRAR,
+            Some(&name(1)),
+            Some(&lease),
+            json!({"authority_kind": "registrar", "state_derived": false,
+                   "registry_contract": REGISTRY, "owner_getter": OWNER}),
+            REGISTRAR,
+        )
+        .await?;
+    fixture
+        .write(
+            3,
+            0,
+            "RegistrationGranted",
+            V1_REGISTRAR,
+            Some(&name(1)),
+            Some(&lease),
+            json!({"authority_kind": "registrar", "status": "registered", "registrant": OWNER,
+                   "expiry": 2_000_000_000u64}),
+            REGISTRAR,
+        )
+        .await?;
+    registered(&fixture, 2, 4, 2_100_000_000).await?;
+    // Block 8 carries family work that touches neither name.
+    fixture
+        .event(Event::new(
+            "filler:8",
+            8,
+            90,
+            "PreimageObserved",
+            "ens_v1_registry_l1",
+        ))
+        .await?;
+    publish(&fixture, 7).await?;
+    let (open, _) = summary(&fixture, &name(1)).await?.expect("first row");
+    let recompose_at: Option<i64> = sqlx::query_scalar(
+        "SELECT extract(epoch FROM recompose_at)::bigint FROM project_name_summary
+         WHERE chain_id = $1 AND logical_name_id = $2",
+    )
+    .bind(CHAIN)
+    .bind(name(1))
+    .fetch_one(&fixture.pool)
+    .await?;
+    ensure!(
+        recompose_at == Some(block_time(8)),
+        "the open binding's row recomposes at {recompose_at:?}, not block 8's time"
+    );
+    let (second, second_version) = summary(&fixture, &name(2)).await?.expect("second row");
+
+    fixture
+        .apply(8, bigname_project::families::FamilyMode::Normal)
+        .await;
+    let (closed, _) = summary(&fixture, &name(1)).await?.expect("first row");
+    ensure!(
+        closed != open,
+        "block 8 left the closed binding's row {closed}"
+    );
+    let (kept, kept_version) = summary(&fixture, &name(2)).await?.expect("second row");
+    ensure!(
+        kept == second && kept_version == second_version,
+        "block 8 rewrote the summary of a name the clock does not change"
+    );
+    fixture.assert_rebuild_equal(8).await?;
     fixture.cleanup().await
 }

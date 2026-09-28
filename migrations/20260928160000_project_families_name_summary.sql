@@ -1,0 +1,142 @@
+-- Existing schema-v2 databases gain project_name_summary (TYR-36 step 7b slice
+-- 2b): the per-name fields the child and label lists read inside one statement,
+-- which the family step writes for the names each block touches. A database
+-- without the table has families built without it, so it resets every owned
+-- key family and the next family run rebuilds them, writing every name's
+-- summary. It also adds the indexes the writer's work list reads. An empty
+-- schema-migration database has no phase baseline yet, so this migration is a
+-- no-op there and phase-runner init-schema installs the same table.
+DO $migration$
+BEGIN
+IF to_regclass('bigname_phase.name_current') IS NULL THEN
+    RETURN;
+END IF;
+
+IF to_regclass('bigname_phase.project_name_summary') IS NULL THEN
+    EXECUTE $ddl$DELETE FROM bigname_phase.project_family_marker$ddl$;
+    EXECUTE $ddl$DELETE FROM bigname_phase.project_family_undo$ddl$;
+    EXECUTE $ddl$DELETE FROM bigname_phase.project_repair_record$ddl$;
+    EXECUTE $ddl$DELETE FROM bigname_phase.project_name_state$ddl$;
+    EXECUTE $ddl$DELETE FROM bigname_phase.project_binding_candidate$ddl$;
+    EXECUTE $ddl$DELETE FROM bigname_phase.project_lifecycle_key_state$ddl$;
+    EXECUTE $ddl$DELETE FROM bigname_phase.project_lifecycle_triple_summary$ddl$;
+    EXECUTE $ddl$DELETE FROM bigname_phase.project_lifecycle_association$ddl$;
+    EXECUTE $ddl$DELETE FROM bigname_phase.project_lifecycle_event$ddl$;
+    EXECUTE $ddl$DELETE FROM bigname_phase.project_child_registration_state$ddl$;
+    EXECUTE $ddl$DELETE FROM bigname_phase.project_wrapper_state$ddl$;
+    EXECUTE $ddl$DELETE FROM bigname_phase.project_registry_node_state$ddl$;
+    EXECUTE $ddl$DELETE FROM bigname_phase.project_registry_owner_event$ddl$;
+    EXECUTE $ddl$DELETE FROM bigname_phase.project_registry_binding_observation$ddl$;
+    EXECUTE $ddl$DELETE FROM bigname_phase.project_resolver_classification$ddl$;
+    EXECUTE $ddl$DELETE FROM bigname_phase.project_registry_pointer$ddl$;
+    EXECUTE $ddl$DELETE FROM bigname_phase.project_resource_pointer$ddl$;
+    EXECUTE $ddl$DELETE FROM bigname_phase.project_node_record_partition$ddl$;
+    EXECUTE $ddl$DELETE FROM bigname_phase.project_node_record_value$ddl$;
+    EXECUTE $ddl$DELETE FROM bigname_phase.project_record_id_value$ddl$;
+    EXECUTE $ddl$DELETE FROM bigname_phase.project_resolver_link$ddl$;
+    EXECUTE $ddl$DELETE FROM bigname_phase.project_grant$ddl$;
+    EXECUTE $ddl$DELETE FROM bigname_phase.project_resource_admin_aggregate$ddl$;
+    EXECUTE $ddl$DELETE FROM bigname_phase.project_account_approval$ddl$;
+    EXECUTE $ddl$DELETE FROM bigname_phase.project_name_alias$ddl$;
+    EXECUTE $ddl$DELETE FROM bigname_phase.project_resolver_alias$ddl$;
+    EXECUTE $ddl$DELETE FROM bigname_phase.project_child_edge_candidate$ddl$;
+    EXECUTE $ddl$DELETE FROM bigname_phase.project_parent_subregistry$ddl$;
+    EXECUTE $ddl$DELETE FROM bigname_phase.project_reverse_tuple$ddl$;
+    EXECUTE $ddl$DELETE FROM bigname_phase.project_reverse_node_claim$ddl$;
+    EXECUTE $ddl$DELETE FROM bigname_phase.project_claim_normalization$ddl$;
+    EXECUTE $ddl$DELETE FROM bigname_phase.project_address_name_fold$ddl$;
+    EXECUTE $ddl$DELETE FROM bigname_phase.project_address_controller_candidate$ddl$;
+    EXECUTE $ddl$DELETE FROM bigname_phase.project_address_name_index$ddl$;
+    EXECUTE $ddl$DELETE FROM bigname_phase.project_address_record_node_index$ddl$;
+    EXECUTE $ddl$DELETE FROM bigname_phase.project_address_record_id_index$ddl$;
+    EXECUTE $ddl$DELETE FROM bigname_phase.project_name_history$ddl$;
+END IF;
+
+EXECUTE $ddl$
+CREATE TABLE IF NOT EXISTS bigname_phase.project_name_summary (
+    chain_id text NOT NULL,
+    logical_name_id text NOT NULL,
+    namespace text NOT NULL,
+    authority_arm text,
+    serving boolean NOT NULL,
+    registration_status text,
+    expires_at timestamptz,
+    registered_at timestamptz,
+    zero_owner boolean NOT NULL,
+    recompose_at timestamptz,
+    PRIMARY KEY (chain_id, logical_name_id)
+)
+$ddl$;
+EXECUTE $ddl$
+COMMENT ON TABLE bigname_phase.project_name_summary IS
+    'Project-owned name summary family (TYR-36 step 7b slice 2b): per name, the fields the child and label lists filter, sort and count by inside one statement, which they cannot compose at read for every child of a parent. The family step writes the row for every name a block touches, from the same composition as the composed name row (bigname_storage::families::name), and journals it like every other family; a name the composed reader serves no row for has none. Each column is the value the served lists read from the name''s name_current row.'
+$ddl$;
+EXECUTE $ddl$
+COMMENT ON COLUMN bigname_phase.project_name_summary.chain_id IS
+    'This value is the chain of the name''s surface.'
+$ddl$;
+EXECUTE $ddl$
+COMMENT ON COLUMN bigname_phase.project_name_summary.logical_name_id IS
+    'This value is the name.'
+$ddl$;
+EXECUTE $ddl$
+COMMENT ON COLUMN bigname_phase.project_name_summary.namespace IS
+    'This value is the namespace of the name.'
+$ddl$;
+EXECUTE $ddl$
+COMMENT ON COLUMN bigname_phase.project_name_summary.authority_arm IS
+    'This value is the selected authority arm (ens_v1, ens_v2 or basenames) of provenance.authority_selection, null when no single arm is selected; the child lists take a child''s arm from it.'
+$ddl$;
+EXECUTE $ddl$
+COMMENT ON COLUMN bigname_phase.project_name_summary.serving IS
+    'This value is whether the name has a serving resource (provenance.read_reachability.serving_resource_id), which admits an ownerless registry child.'
+$ddl$;
+EXECUTE $ddl$
+COMMENT ON COLUMN bigname_phase.project_name_summary.registration_status IS
+    'This value is declared_summary.registration.status; the subnames expiry fence drops a released child.'
+$ddl$;
+EXECUTE $ddl$
+COMMENT ON COLUMN bigname_phase.project_name_summary.expires_at IS
+    'This value is the expiry the subnames expiry sort and fence read: the first timestamp of the registration and control expiry fields, as address_names/query.rs reads it.'
+$ddl$;
+EXECUTE $ddl$
+COMMENT ON COLUMN bigname_phase.project_name_summary.registered_at IS
+    'This value is the registration time the subnames registration sort reads: registration.registered_at, else registration.registration_date.'
+$ddl$;
+EXECUTE $ddl$
+COMMENT ON COLUMN bigname_phase.project_name_summary.zero_owner IS
+    'This value is whether the latest registry transfer of the name''s node names the zero owner, which zeroes a registry child''s owner.'
+$ddl$;
+EXECUTE $ddl$
+COMMENT ON COLUMN bigname_phase.project_name_summary.recompose_at IS
+    'This value is the first second after the block the row was composed at at which the composition can change with no fact changing: a binding interval opening or closing, or a NameWrapper expiry or grace boundary. The family step composes the name again at the first block whose time reaches it; null when no such second exists.'
+$ddl$;
+EXECUTE $ddl$
+CREATE INDEX IF NOT EXISTS project_name_summary_recompose_idx
+    ON bigname_phase.project_name_summary (chain_id, recompose_at)
+    WHERE recompose_at IS NOT NULL
+$ddl$;
+-- The work list of the summary writer finds the names that read a changed
+-- resource through these (crates/project families/derived/summary.rs).
+EXECUTE $ddl$
+CREATE INDEX IF NOT EXISTS project_binding_candidate_predecessor_idx
+    ON bigname_phase.project_binding_candidate (chain_id, predecessor_resource_id)
+    WHERE predecessor_resource_id IS NOT NULL
+$ddl$;
+EXECUTE $ddl$
+CREATE INDEX IF NOT EXISTS project_binding_candidate_lease_idx
+    ON bigname_phase.project_binding_candidate (chain_id, lease_resource_id)
+    WHERE lease_resource_id IS NOT NULL
+$ddl$;
+EXECUTE $ddl$
+CREATE INDEX IF NOT EXISTS project_lifecycle_association_target_idx
+    ON bigname_phase.project_lifecycle_association (chain_id, target_resource_id)
+    WHERE target_resource_id IS NOT NULL
+$ddl$;
+EXECUTE $ddl$
+CREATE INDEX IF NOT EXISTS project_registry_owner_event_resource_idx
+    ON bigname_phase.project_registry_owner_event (chain_id, resource_id)
+    WHERE resource_id IS NOT NULL
+$ddl$;
+END
+$migration$;

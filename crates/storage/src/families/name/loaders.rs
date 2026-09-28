@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use anyhow::{Context, Result};
 use serde_json::Value;
-use sqlx::{PgPool, Row};
+use sqlx::{PgConnection, Row};
 use uuid::Uuid;
 
 use super::{
@@ -13,7 +13,14 @@ use super::{
 };
 use crate::families::records::FamilyPosition;
 
-pub(super) async fn surfaces(pool: &PgPool, ids: &[String]) -> Result<Vec<Surface>> {
+/// The readable active surfaces of `ids`: at the family marker of their chain, or, with `at`, on
+/// that chain at or below that block (the summary writer, whose block has not moved the marker
+/// yet).
+pub(super) async fn surfaces(
+    conn: &mut PgConnection,
+    ids: &[String],
+    at: Option<(&str, i64)>,
+) -> Result<Vec<Surface>> {
     let rows = sqlx::query(
         "/* storage:families.name.surfaces */
          SELECT surface.logical_name_id, surface.namespace, surface.raw_name, surface.namehash,
@@ -21,15 +28,19 @@ pub(super) async fn surfaces(pool: &PgPool, ids: &[String]) -> Result<Vec<Surfac
          FROM bigname_phase.name_surfaces surface
          JOIN bigname_phase.chain_lineage lineage
            ON lineage.chain_id = surface.chain_id AND lineage.block_hash = surface.block_hash
-         JOIN bigname_phase.project_family_marker marker ON marker.chain_id = surface.chain_id
+         LEFT JOIN bigname_phase.project_family_marker marker
+           ON marker.chain_id = surface.chain_id
          WHERE surface.logical_name_id = ANY($1::text[])
            AND surface.visibility_state = 'active' AND surface.raw_name <> ''
-           AND surface.block_number <= marker.current_block_number
+           AND CASE WHEN $2::text IS NULL THEN surface.block_number <= marker.current_block_number
+                    ELSE surface.chain_id = $2 AND surface.block_number <= $3 END
            AND surface.canonicality_state IN ('canonical', 'safe', 'finalized')
            AND lineage.canonicality_state IN ('canonical', 'safe', 'finalized')",
     )
     .bind(ids)
-    .fetch_all(pool)
+    .bind(at.map(|(chain, _)| chain))
+    .bind(at.map(|(_, block)| block))
+    .fetch_all(&mut *conn)
     .await
     .context("failed to load name surfaces")?;
     rows.into_iter()
@@ -47,7 +58,7 @@ pub(super) async fn surfaces(pool: &PgPool, ids: &[String]) -> Result<Vec<Surfac
 }
 
 pub(super) async fn histories(
-    pool: &PgPool,
+    conn: &mut PgConnection,
     chain_id: &str,
     ids: &[String],
 ) -> Result<BTreeMap<String, NameHistory>> {
@@ -60,7 +71,7 @@ pub(super) async fn histories(
     )
     .bind(chain_id)
     .bind(ids)
-    .fetch_all(pool)
+    .fetch_all(&mut *conn)
     .await
     .context("failed to load name histories")?;
     rows.into_iter()
@@ -87,7 +98,7 @@ pub(super) async fn histories(
 /// Each name's latest MigrationApplied, its generated id and correlation id read back by
 /// identity.
 pub(super) async fn migrations(
-    pool: &PgPool,
+    conn: &mut PgConnection,
     chain_id: &str,
     ids: &[String],
 ) -> Result<BTreeMap<String, MigrationProof>> {
@@ -103,7 +114,7 @@ pub(super) async fn migrations(
     )
     .bind(chain_id)
     .bind(ids)
-    .fetch_all(pool)
+    .fetch_all(&mut *conn)
     .await
     .context("failed to load name migrations")?;
     rows.into_iter()
@@ -123,7 +134,7 @@ pub(super) async fn migrations(
 /// The readable resources among `resources` at the publication, with their token lineage and
 /// whether that lineage is readable.
 pub(super) async fn resources(
-    pool: &PgPool,
+    conn: &mut PgConnection,
     publication: &FamilyPublication,
     resources: &[String],
 ) -> Result<BTreeMap<String, (Option<Uuid>, bool)>> {
@@ -150,7 +161,7 @@ pub(super) async fn resources(
     .bind(resources)
     .bind(&publication.chain_id)
     .bind(publication.block_number)
-    .fetch_all(pool)
+    .fetch_all(&mut *conn)
     .await
     .context("failed to load readable resources")?;
     rows.into_iter()
@@ -184,7 +195,7 @@ fn pointer_of(row: &sqlx::postgres::PgRow, position: Option<Value>) -> Result<Op
 
 /// F5 pointers by resource, and the root-registry pointers naming each `(namespace, namehash)`.
 pub(super) async fn resource_pointers(
-    pool: &PgPool,
+    conn: &mut PgConnection,
     chain_id: &str,
     resources: &[String],
     nodes: &[(String, String)],
@@ -212,7 +223,7 @@ pub(super) async fn resource_pointers(
     .bind(resources)
     .bind(&namespaces)
     .bind(&namehashes)
-    .fetch_all(pool)
+    .fetch_all(&mut *conn)
     .await
     .context("failed to load resource pointers")?;
     let mut by_resource = BTreeMap::new();
@@ -240,7 +251,7 @@ pub(super) async fn resource_pointers(
 
 /// F4 pointers by `(namespace, node)`.
 pub(super) async fn node_pointers(
-    pool: &PgPool,
+    conn: &mut PgConnection,
     chain_id: &str,
     nodes: &[(String, String)],
 ) -> Result<BTreeMap<(String, String), PointerRow>> {
@@ -263,7 +274,7 @@ pub(super) async fn node_pointers(
     .bind(chain_id)
     .bind(&namespaces)
     .bind(&namehashes)
-    .fetch_all(pool)
+    .fetch_all(&mut *conn)
     .await
     .context("failed to load registry node pointers")?;
     let mut out = BTreeMap::new();
@@ -277,7 +288,7 @@ pub(super) async fn node_pointers(
 
 /// The latest root-registry release position of each resource (stage.rs:385-395).
 pub(super) async fn root_releases(
-    pool: &PgPool,
+    conn: &mut PgConnection,
     chain_id: &str,
     resources: &[String],
 ) -> Result<BTreeMap<String, (i64, i64, i64)>> {
@@ -293,7 +304,7 @@ pub(super) async fn root_releases(
     )
     .bind(chain_id)
     .bind(resources)
-    .fetch_all(pool)
+    .fetch_all(&mut *conn)
     .await
     .context("failed to load root releases")?;
     let mut out: BTreeMap<String, (i64, i64, i64)> = BTreeMap::new();

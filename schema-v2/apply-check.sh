@@ -662,7 +662,8 @@ for migration_file in \
     "$ROOT/migrations/20260926120000_child_registration_events_transaction_index_key.sql" \
     "$ROOT/migrations/20260928130000_project_families_name_history.sql" \
     "$ROOT/migrations/20260928140000_project_families_expiry_indexes.sql" \
-    "$ROOT/migrations/20260928150000_project_families_registry_pointer_resolver_index.sql"
+    "$ROOT/migrations/20260928150000_project_families_registry_pointer_resolver_index.sql" \
+    "$ROOT/migrations/20260928160000_project_families_name_summary.sql"
 do
     emit_phase_migration "$migration_file" empty-schema | run_psql
 done
@@ -969,7 +970,9 @@ for migration_file in \
     "$ROOT/migrations/20260928140000_project_families_expiry_indexes.sql" \
     "$ROOT/migrations/20260928140000_project_families_expiry_indexes.sql" \
     "$ROOT/migrations/20260928150000_project_families_registry_pointer_resolver_index.sql" \
-    "$ROOT/migrations/20260928150000_project_families_registry_pointer_resolver_index.sql"
+    "$ROOT/migrations/20260928150000_project_families_registry_pointer_resolver_index.sql" \
+    "$ROOT/migrations/20260928160000_project_families_name_summary.sql" \
+    "$ROOT/migrations/20260928160000_project_families_name_summary.sql"
 do
     emit_phase_migration "$migration_file" baseline-first | run_psql
 done

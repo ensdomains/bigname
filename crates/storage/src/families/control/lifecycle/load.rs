@@ -8,18 +8,18 @@ use std::{
 
 use anyhow::{Context, Result};
 use serde_json::Value;
-use sqlx::PgPool;
+use sqlx::{PgConnection, PgPool};
 
 use super::{Clock, NameFacts, NameInput, ShadowName, TripleFacts, admission::REGISTRAR, evaluate};
 use crate::families::control::{
     position::{EventOrder, Position},
-    registry::load_registry_nodes,
+    registry::load_registry_nodes_on,
     rows::{BindingCandidate, LifecycleEvent, Maxima, text},
-    wrapper::load_wrapper_rows,
+    wrapper::load_wrapper_rows_on,
 };
 
 async fn json_rows(
-    pool: &PgPool,
+    conn: &mut PgConnection,
     sql: &str,
     chain_id: &str,
     keys: &[String],
@@ -30,7 +30,7 @@ async fn json_rows(
     sqlx::query_scalar(sql)
         .bind(chain_id)
         .bind(keys)
-        .fetch_all(pool)
+        .fetch_all(conn)
         .await
         .with_context(|| format!("failed to run {}", sql.lines().next().unwrap_or(sql)))
 }
@@ -66,12 +66,25 @@ pub async fn load_name_facts(
     chain_id: &str,
     names: &[NameInput],
 ) -> Result<Vec<NameFacts>> {
+    let mut conn = pool
+        .acquire()
+        .await
+        .context("failed to acquire a connection")?;
+    load_name_facts_on(&mut conn, chain_id, names).await
+}
+
+/// [`load_name_facts`] on one connection, which may be a transaction's.
+pub async fn load_name_facts_on(
+    conn: &mut PgConnection,
+    chain_id: &str,
+    names: &[NameInput],
+) -> Result<Vec<NameFacts>> {
     let ids: Vec<String> = names
         .iter()
         .map(|name| name.logical_name_id.clone())
         .collect();
     let candidates: Vec<BindingCandidate> = json_rows(
-        pool,
+        &mut *conn,
         "/* storage:families.control.lifecycle.candidates */ SELECT to_jsonb(candidate)
              || jsonb_build_object(
                  'binding_active_from', extract(epoch FROM binding.active_from)::float8,
@@ -88,7 +101,7 @@ pub async fn load_name_facts(
     .filter_map(BindingCandidate::from_row)
     .collect();
     let summaries = json_rows(
-        pool,
+        &mut *conn,
         "/* storage:families.control.lifecycle.triple_summaries */ SELECT to_jsonb(summary)
          FROM bigname_phase.project_lifecycle_triple_summary summary
          WHERE summary.chain_id = $1 AND summary.logical_name_id = ANY($2)",
@@ -97,7 +110,7 @@ pub async fn load_name_facts(
     )
     .await?;
     let associations = json_rows(
-        pool,
+        &mut *conn,
         "/* storage:families.control.lifecycle.associations */ SELECT to_jsonb(association)
          FROM bigname_phase.project_lifecycle_association association
          WHERE association.chain_id = $1 AND association.logical_name_id = ANY($2)",
@@ -169,7 +182,7 @@ pub async fn load_name_facts(
     .bind(chain_id)
     .bind(&ids)
     .bind(&resource_list)
-    .fetch_all(pool)
+    .fetch_all(&mut *conn)
     .await
     .context("failed to load the lifecycle key states")?;
     let mut key_states: BTreeMap<String, (Option<String>, Maxima)> = BTreeMap::new();
@@ -194,7 +207,7 @@ pub async fn load_name_facts(
     .bind(chain_id)
     .bind(&resource_list)
     .bind(&triple_keys)
-    .fetch_all(pool)
+    .fetch_all(&mut *conn)
     .await
     .context("failed to load the retained lifecycle events")?;
     let events: Vec<LifecycleEvent> = event_rows
@@ -213,7 +226,7 @@ pub async fn load_name_facts(
         .into_iter()
         .collect();
     let lease_candidates: Vec<BindingCandidate> = json_rows(
-        pool,
+        &mut *conn,
         "/* storage:families.control.lifecycle.lease_candidates */ SELECT to_jsonb(candidate)
          FROM bigname_phase.project_binding_candidate candidate
          WHERE candidate.chain_id = $1
@@ -227,7 +240,7 @@ pub async fn load_name_facts(
     .filter_map(BindingCandidate::from_row)
     .collect();
 
-    let wrappers = load_wrapper_rows(pool, chain_id, &resource_list).await?;
+    let wrappers = load_wrapper_rows_on(&mut *conn, chain_id, &resource_list).await?;
     let blocks: Vec<i64> = events
         .iter()
         .map(|event| event.position.block_number)
@@ -247,7 +260,7 @@ pub async fn load_name_facts(
     )
     .bind(chain_id)
     .bind(&blocks)
-    .fetch_all(pool)
+    .fetch_all(&mut *conn)
     .await
     .context("failed to load block timestamps")?;
     let block_seconds: Arc<BTreeMap<i64, i64>> = Arc::new(
@@ -274,7 +287,7 @@ pub async fn load_name_facts(
          SELECT seconds, to_jsonb(to_timestamp(seconds)) FROM unnest($1::bigint[]) seconds",
         )
         .bind(&snapshots)
-        .fetch_all(pool)
+        .fetch_all(&mut *conn)
         .await
         .context("failed to convert registration times")?
         .into_iter()
@@ -288,7 +301,7 @@ pub async fn load_name_facts(
     )
     .bind(chain_id)
     .bind(&ids)
-    .fetch_all(pool)
+    .fetch_all(&mut *conn)
     .await
     .context("failed to load name states")?
     .into_iter()
@@ -302,7 +315,7 @@ pub async fn load_name_facts(
             )
         })
         .collect();
-    let nodes = load_registry_nodes(pool, chain_id, &node_keys).await?;
+    let nodes = load_registry_nodes_on(&mut *conn, chain_id, &node_keys).await?;
 
     let wrappers: BTreeMap<String, _> = wrappers
         .into_iter()

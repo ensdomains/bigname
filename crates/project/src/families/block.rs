@@ -282,6 +282,9 @@ async fn write(
     let changes = rows.written();
     let mut stats = BlockStats::default();
     if changes.is_empty() {
+        // The name summaries follow the block clock too, which moves with no row changing.
+        let touched = super::derived::touched(transaction, chain_id, block.number).await?;
+        super::derived::refresh(transaction, chain_id, &touched).await?;
         return Ok(stats);
     }
     let journal = changes

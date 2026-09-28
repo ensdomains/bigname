@@ -4,7 +4,7 @@
 //! request time.
 use anyhow::{Context, Result};
 use serde_json::Value;
-use sqlx::PgPool;
+use sqlx::{PgConnection, PgPool};
 
 use super::rows::WrapperRow;
 
@@ -85,6 +85,18 @@ pub fn effective_wrapper(row: &WrapperRow, clock_seconds: i64) -> EffectiveWrapp
     }
 }
 
+/// The clock seconds after `clock_seconds` at which [`effective_wrapper`] of `row` can change:
+/// the first second past the expiry, and the first second inside the `.eth` grace window. A
+/// stored read of the masks is stale from the earliest of them.
+pub fn clock_boundaries(row: &WrapperRow, clock_seconds: i64) -> impl Iterator<Item = i64> {
+    let clock = i128::from(clock_seconds);
+    expiry(row)
+        .into_iter()
+        .flat_map(|expiry| [expiry + 1, expiry - GRACE_PERIOD_SECONDS + 1])
+        .filter(move |boundary| *boundary > clock)
+        .filter_map(|boundary| i64::try_from(boundary).ok())
+}
+
 /// The wrapper expiry a wrapped name with no registrar lease serves: an integral word between
 /// 1 and 253402300799 (build.sql:586-592).
 pub fn servable_expiry(row: &WrapperRow) -> Option<i64> {
@@ -118,6 +130,19 @@ pub async fn load_wrapper_rows(
     chain_id: &str,
     resource_ids: &[String],
 ) -> Result<Vec<WrapperRow>> {
+    let mut conn = pool
+        .acquire()
+        .await
+        .context("failed to acquire a connection")?;
+    load_wrapper_rows_on(&mut conn, chain_id, resource_ids).await
+}
+
+/// [`load_wrapper_rows`] on one connection.
+pub async fn load_wrapper_rows_on(
+    conn: &mut PgConnection,
+    chain_id: &str,
+    resource_ids: &[String],
+) -> Result<Vec<WrapperRow>> {
     if resource_ids.is_empty() {
         return Ok(Vec::new());
     }
@@ -128,7 +153,7 @@ pub async fn load_wrapper_rows(
     )
     .bind(chain_id)
     .bind(resource_ids)
-    .fetch_all(pool)
+    .fetch_all(&mut *conn)
     .await
     .context("failed to load the wrapper family rows")?;
     Ok(rows.iter().filter_map(WrapperRow::from_row).collect())

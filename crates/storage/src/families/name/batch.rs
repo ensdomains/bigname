@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result};
 use serde_json::Value;
-use sqlx::{PgPool, Row, types::time::OffsetDateTime};
+use sqlx::{PgConnection, PgPool, Row, types::time::OffsetDateTime};
 use uuid::Uuid;
 
 use super::{
@@ -19,8 +19,11 @@ use super::{
 };
 use crate::{
     NameCurrentRow,
-    families::control::lifecycle::{
-        AuthoritySelection, Clock, NameInput, evaluate, load_name_facts,
+    families::control::{
+        lifecycle::{
+            AuthoritySelection, Clock, NameFacts, NameInput, evaluate, load_name_facts_on,
+        },
+        wrapper::clock_boundaries,
     },
 };
 
@@ -30,6 +33,14 @@ pub async fn load_family_publication(
     pool: &PgPool,
     chain_id: &str,
 ) -> Result<Option<FamilyPublication>> {
+    let mut conn = pool
+        .acquire()
+        .await
+        .context("failed to acquire a connection")?;
+    publication(&mut conn, chain_id).await
+}
+
+async fn publication(conn: &mut PgConnection, chain_id: &str) -> Result<Option<FamilyPublication>> {
     let row = sqlx::query(
         "/* storage:families.name.publication */
          SELECT chain_id, current_block_number, current_block_hash, block_timestamp,
@@ -37,7 +48,7 @@ pub async fn load_family_publication(
          FROM bigname_phase.project_family_marker WHERE chain_id = $1",
     )
     .bind(chain_id)
-    .fetch_optional(pool)
+    .fetch_optional(conn)
     .await
     .with_context(|| format!("failed to load the family marker of {chain_id}"))?;
     row.map(|row| {
@@ -120,6 +131,9 @@ pub async fn load_family_names_by_resource_ids(
     Ok(out)
 }
 
+/// Compose the rows of `logical_name_ids` in one read-only snapshot: the marker and every family
+/// row a row reads come from the same transaction, so a family block committing meanwhile cannot
+/// mix two publications into one row.
 async fn load(
     pool: &PgPool,
     logical_name_ids: &[String],
@@ -129,28 +143,60 @@ async fn load(
     if logical_name_ids.is_empty() {
         return Ok(out);
     }
+    let mut transaction = pool
+        .begin()
+        .await
+        .context("failed to begin a composed name read")?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+        .execute(&mut *transaction)
+        .await
+        .context("failed to make the composed name read a snapshot")?;
+    let conn: &mut PgConnection = &mut transaction;
     let mut by_chain: BTreeMap<String, Vec<Surface>> = BTreeMap::new();
-    for surface in surfaces(pool, logical_name_ids).await? {
+    for surface in surfaces(&mut *conn, logical_name_ids, None).await? {
         by_chain
             .entry(surface.chain_id.clone())
             .or_default()
             .push(surface);
     }
     for (chain_id, surfaces) in by_chain {
-        let Some(publication) = load_family_publication(pool, &chain_id).await? else {
+        let Some(publication) = publication(&mut *conn, &chain_id).await? else {
             continue;
         };
-        out.extend(load_chain(pool, &publication, &surfaces, shape).await?);
+        let composed = compose_chain(&mut *conn, &publication, &surfaces, shape, true).await?;
+        out.extend(
+            composed
+                .into_iter()
+                .map(|(name, composed)| (name, composed.row)),
+        );
     }
+    transaction
+        .commit()
+        .await
+        .context("failed to end a composed name read")?;
     Ok(out)
 }
 
-async fn load_chain(
-    pool: &PgPool,
+/// One composed name: its row, whether its node's latest registry transfer names the zero owner
+/// (the selection's `ownerless_transfer`), which the child lists read, and the first clock second
+/// after the publication at which the composition can change with no fact changing: a binding
+/// interval opening or closing, or a NameWrapper expiry or grace boundary.
+pub(super) struct Composed {
+    pub(super) row: NameCurrentRow,
+    pub(super) zero_owner: bool,
+    pub(super) recompose_at: Option<i64>,
+}
+
+/// Compose `surfaces` of one chain at `publication`, on `conn`. `with_heads` reads the history
+/// heads the binding diagnostics serve; the summary writer, which does not store them, skips
+/// that read.
+pub(super) async fn compose_chain(
+    conn: &mut PgConnection,
     publication: &FamilyPublication,
     surfaces: &[Surface],
     shape: CoverageShape,
-) -> Result<BTreeMap<String, NameCurrentRow>> {
+    with_heads: bool,
+) -> Result<BTreeMap<String, Composed>> {
     let chain_id = publication.chain_id.as_str();
     let clock = Clock {
         block_number: publication.block_number,
@@ -165,9 +211,9 @@ async fn load_chain(
             selection: AuthoritySelection::default(),
         })
         .collect();
-    let mut facts = load_name_facts(pool, chain_id, &inputs).await?;
-    let histories = histories(pool, chain_id, &ids).await?;
-    let mut migrations = migrations(pool, chain_id, &ids).await?;
+    let mut facts = load_name_facts_on(&mut *conn, chain_id, &inputs).await?;
+    let histories = histories(&mut *conn, chain_id, &ids).await?;
+    let mut migrations = migrations(&mut *conn, chain_id, &ids).await?;
     let mut wanted: BTreeSet<String> = BTreeSet::new();
     for facts in &facts {
         wanted.extend(facts.candidates.iter().map(|c| c.resource_id.clone()));
@@ -181,7 +227,7 @@ async fn load_chain(
         }
     }
     let wanted: Vec<String> = wanted.into_iter().collect();
-    let readable = resources(pool, publication, &wanted).await?;
+    let readable = resources(&mut *conn, publication, &wanted).await?;
     let readable_ids: BTreeSet<String> = readable.keys().cloned().collect();
     let nodes: Vec<(String, String)> = surfaces
         .iter()
@@ -192,14 +238,14 @@ async fn load_chain(
             )
         })
         .collect();
-    let (pointers, roots) = resource_pointers(pool, chain_id, &wanted, &nodes).await?;
-    let node_pointers = node_pointers(pool, chain_id, &nodes).await?;
+    let (pointers, roots) = resource_pointers(&mut *conn, chain_id, &wanted, &nodes).await?;
+    let node_pointers = node_pointers(&mut *conn, chain_id, &nodes).await?;
     let root_resources: Vec<String> = roots
         .values()
         .flatten()
         .filter_map(|pointer| pointer.resource_id.clone())
         .collect();
-    let releases = root_releases(pool, chain_id, &root_resources).await?;
+    let releases = root_releases(&mut *conn, chain_id, &root_resources).await?;
     let staged: Vec<String> = facts
         .iter()
         .flat_map(|facts| {
@@ -210,8 +256,20 @@ async fn load_chain(
                 .map(|event| event.position.event_identity.clone())
         })
         .collect();
-    let heads =
-        Heads::new(load_heads(pool, chain_id, publication.block_number, &ids, &staged).await?);
+    let heads = if with_heads {
+        Heads::new(
+            load_heads(
+                &mut *conn,
+                chain_id,
+                publication.block_number,
+                &ids,
+                &staged,
+            )
+            .await?,
+        )
+    } else {
+        Heads::default()
+    };
 
     let mut out = BTreeMap::new();
     for (surface, facts) in surfaces.iter().zip(facts.iter_mut()) {
@@ -278,7 +336,30 @@ async fn load_chain(
             },
             shape,
         )?;
-        out.insert(name.to_owned(), row);
+        out.insert(
+            name.to_owned(),
+            Composed {
+                row,
+                zero_owner: decided.ownerless_transfer.is_some(),
+                recompose_at: recompose_at(facts, clock.timestamp_seconds),
+            },
+        );
     }
     Ok(out)
+}
+
+/// The first clock second after `clock_seconds` at which a composition of `facts` can differ:
+/// the clock enters the composition only through the binding intervals (`open_at`) and the
+/// NameWrapper masks (`effective_wrapper`).
+fn recompose_at(facts: &NameFacts, clock_seconds: i64) -> Option<i64> {
+    let bindings = facts
+        .candidates
+        .iter()
+        .chain(&facts.lease_candidates)
+        .flat_map(|candidate| candidate.clock_boundaries(clock_seconds));
+    let wrappers = facts
+        .wrappers
+        .values()
+        .flat_map(|row| clock_boundaries(row, clock_seconds));
+    bindings.chain(wrappers).min()
 }
