@@ -898,7 +898,9 @@ resolver's bound names (`GET /v1/resolvers/{chain_id}/{address}`) serve them
 whole. The records and address routes read their own rows from the families
 too: the record inventory of `GET /v1/names/{name}/records` (default keys,
 indexed answers and `include=inventory`, read at the publication only, so an
-`at` below it answers `409 stale`), the address-name relations of
+`at` below it answers `409 stale`), the same inventory for name detail's
+record fields (`GET /v1/names/{name}`, both sources) and for
+`GET /v1/diagnostics/names/{name}/records`, the address-name relations of
 `GET /v1/addresses/{address}/names`, recomputed at read from the address index
 and the composed names, its `relation=resolves_to` pages (both the exact coin
 type and `coin_type=evm`) from the record-id index alone, the record counts of

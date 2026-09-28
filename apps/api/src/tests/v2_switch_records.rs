@@ -262,3 +262,47 @@ async fn v2_family_record_inventory_refuses_an_at_below_the_publication() -> Res
     assert_eq!(body["error"]["code"], json!("stale"), "{body:#}");
     database.cleanup().await
 }
+
+// The record inventory name detail and the records diagnostic read (ruling J11: the diagnostics
+// routes keep working on the family readers) comes from the families with the switch on: the
+// same body both ways, and emptying the served inventory changes nothing.
+#[tokio::test]
+async fn v2_name_detail_and_records_diagnostic_inventories_are_the_same_with_the_switch_off_and_on()
+-> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_switch_records_fixture(&database).await?;
+    let uris = [
+        "/v1/names/alpha.eth",
+        "/v1/names/alpha.eth?source=verified",
+        "/v1/names/beta.eth",
+        "/v1/diagnostics/names/alpha.eth/records",
+        "/v1/diagnostics/names/alpha.eth/records?keys=addr:60",
+        "/v1/diagnostics/names/beta.eth/records",
+    ];
+    for uri in uris {
+        let (status, body) = assert_switch_differential(&database, uri).await?;
+        assert_eq!(status, StatusCode::OK, "{uri}: {body:#}");
+    }
+    let (_, body) = assert_switch_differential(
+        &database,
+        "/v1/diagnostics/names/alpha.eth/records?keys=addr:60",
+    )
+    .await?;
+    assert!(
+        body["data"]["record_inventory"].to_string().contains("addr"),
+        "the diagnostic reads alpha.eth's inventory: {body:#}"
+    );
+    for uri in [
+        "/v1/names/alpha.eth",
+        "/v1/names/alpha.eth?source=verified",
+        "/v1/diagnostics/names/alpha.eth/records?keys=addr:60",
+    ] {
+        assert_switch_on_ignores_served_tables(
+            &database,
+            uri,
+            &["record_inventory_current", "name_current"],
+        )
+        .await?;
+    }
+    database.cleanup().await
+}

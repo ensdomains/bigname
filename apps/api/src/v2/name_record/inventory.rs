@@ -23,6 +23,11 @@ pub(super) async fn load_name_record_inventory(
     } else {
         load_supported_record_inventory_current_for_snapshot(pool, row, selected_snapshot).await
     };
+    // A family inventory describes the family publication, which is the only position a composed
+    // name row serves, so there is no older served row to widen the match to.
+    if bigname_storage::publication_source::serve_from_families() {
+        return inventory;
+    }
     match inventory {
         Ok(Some(record_inventory)) => Ok(Some(record_inventory)),
         Ok(None) if allow_selected_superset => {

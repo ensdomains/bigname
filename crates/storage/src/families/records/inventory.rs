@@ -105,6 +105,28 @@ pub async fn load_family_record_inventory_for_snapshot(
     row: &crate::NameCurrentRow,
     selected: &crate::ChainPositions,
 ) -> std::result::Result<Option<RecordInventoryCurrentRow>, crate::SnapshotSelectionError> {
+    let key = crate::resolution_record_inventory_lookup_key_any_chain(row);
+    family_record_inventory_for_key(pool, row, key.map(|(resource, _)| resource), selected).await
+}
+
+/// [`load_family_record_inventory_for_snapshot`] with the mainnet-profile lookup key
+/// (`resolution_record_inventory_lookup_key`) the served supported readback uses: name detail's
+/// verified source and the records diagnostic.
+pub async fn load_family_supported_record_inventory_for_snapshot(
+    pool: &PgPool,
+    row: &crate::NameCurrentRow,
+    selected: &crate::ChainPositions,
+) -> std::result::Result<Option<RecordInventoryCurrentRow>, crate::SnapshotSelectionError> {
+    let key = crate::resolution_record_inventory_lookup_key(row);
+    family_record_inventory_for_key(pool, row, key.map(|(resource, _)| resource), selected).await
+}
+
+async fn family_record_inventory_for_key(
+    pool: &PgPool,
+    row: &crate::NameCurrentRow,
+    resource_id: Option<Uuid>,
+    selected: &crate::ChainPositions,
+) -> std::result::Result<Option<RecordInventoryCurrentRow>, crate::SnapshotSelectionError> {
     use crate::SnapshotSelectionError;
     let internal = |error: anyhow::Error| {
         if crate::families::name::is_publication_unavailable(&error) {
@@ -117,8 +139,7 @@ pub async fn load_family_record_inventory_for_snapshot(
             row.logical_name_id
         ))
     };
-    let Some((resource_id, _)) = crate::resolution_record_inventory_lookup_key_any_chain(row)
-    else {
+    let Some(resource_id) = resource_id else {
         return Ok(None);
     };
     let composed = crate::ChainPositions::from_value(&row.chain_positions)?;

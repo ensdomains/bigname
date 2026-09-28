@@ -49,7 +49,7 @@ pub use facts::{
 pub use inventory::{
     CompatibilityPair, FamilyAttribution, FamilyRecordInventory, load_family_record_counts,
     load_family_record_inventory, load_family_record_inventory_detail,
-    load_family_record_inventory_for_snapshot,
+    load_family_record_inventory_for_snapshot, load_family_supported_record_inventory_for_snapshot,
 };
 pub use links::{
     DEFAULT_RECORD_NODE, FamilyAliasSourcePointer, FamilyLink, FamilyWildcardSource, LinkSelection,

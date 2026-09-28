@@ -23,11 +23,22 @@ impl bigname_storage::VerifiedResolutionRecord for ResolutionRecordKey {
     }
 }
 
+/// The record inventory at the mainnet-profile lookup key: name detail's verified source and the
+/// records diagnostic. Under the publication switch it is the family inventory at the family
+/// publication (TYR-36 step 7b, ruling J11 for the diagnostic).
 pub(crate) async fn load_supported_record_inventory_current_for_snapshot(
     pool: &PgPool,
     row: &NameCurrentRow,
     selected_snapshot: &SelectedSnapshot,
 ) -> std::result::Result<Option<RecordInventoryCurrentRow>, SnapshotSelectionError> {
+    if bigname_storage::publication_source::serve_from_families() {
+        return bigname_storage::families::records::load_family_supported_record_inventory_for_snapshot(
+            pool,
+            row,
+            &selected_snapshot.chain_positions,
+        )
+        .await;
+    }
     readback::load_supported_record_inventory_current_for_snapshot(pool, row, selected_snapshot)
         .await
 }
@@ -47,11 +58,21 @@ pub(crate) async fn load_record_inventory_current_matching_selected_snapshot(
     .await
 }
 
+/// The record inventory at the any-chain lookup key: name detail's indexed source and the records
+/// route. Under the publication switch it is the family inventory at the family publication.
 pub(crate) async fn load_indexed_record_inventory_current_for_snapshot(
     pool: &PgPool,
     row: &NameCurrentRow,
     selected_snapshot: &SelectedSnapshot,
 ) -> std::result::Result<Option<RecordInventoryCurrentRow>, SnapshotSelectionError> {
+    if bigname_storage::publication_source::serve_from_families() {
+        return bigname_storage::families::records::load_family_record_inventory_for_snapshot(
+            pool,
+            row,
+            &selected_snapshot.chain_positions,
+        )
+        .await;
+    }
     readback::load_indexed_record_inventory_current_for_snapshot(pool, row, selected_snapshot).await
 }
 
@@ -71,13 +92,5 @@ pub(crate) async fn load_records_route_inventory(
     row: &NameCurrentRow,
     selected_snapshot: &SelectedSnapshot,
 ) -> std::result::Result<Option<RecordInventoryCurrentRow>, SnapshotSelectionError> {
-    if bigname_storage::publication_source::serve_from_families() {
-        return bigname_storage::families::records::load_family_record_inventory_for_snapshot(
-            pool,
-            row,
-            &selected_snapshot.chain_positions,
-        )
-        .await;
-    }
     load_indexed_record_inventory_current_for_snapshot(pool, row, selected_snapshot).await
 }
