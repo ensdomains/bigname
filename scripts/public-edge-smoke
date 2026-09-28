@@ -322,7 +322,9 @@ page_label() {
     /docs) echo docs ;;
     /docs/) echo docs-slash ;;
     /openapi.json) echo openapi ;;
-    *) fail "no label for $1" ;;
+    # Any other path still gets a distinct, file-name-safe label; a fail here
+    # would only end the $(...) subshell, not the script.
+    *) printf '%s' "$1" | tr -c 'A-Za-z0-9' '-' ;;
   esac
 }
 
