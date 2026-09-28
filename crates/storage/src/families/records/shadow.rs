@@ -21,8 +21,7 @@ use super::{
 use crate::{
     AddressNamesCurrentDedupe, AddressNamesCurrentOrder, AddressNamesCurrentSort,
     AddressNamesCurrentSortedCursor, AddressRecordCurrentEntry, load_address_records_current_page,
-    load_bounded_record_attribution, load_primary_name_current_snapshot,
-    load_record_inventory_current,
+    load_bounded_record_attribution, load_record_inventory_current,
 };
 
 /// What one shadow comparison saw. `differences` holds every key whose family read differs from
@@ -51,6 +50,22 @@ pub struct ShadowReport {
     /// F3 has no served row for them (`resolver <address>`). With F3 written block by block this
     /// is empty; a test that expects none can require it.
     pub classification_fallbacks: Vec<String>,
+    /// The production page comparisons of step 7b (`shadow_pages.rs`): the addresses whose
+    /// names were paged, the served address-names pages and entries, the served pages of the
+    /// production resolves_to reader for one coin type and for `coin_type=evm`, and the
+    /// addresses whose primary-name claims were read in one batch.
+    pub address_name_addresses: usize,
+    pub address_name_pages: usize,
+    pub address_name_entries: usize,
+    pub production_address_pages: usize,
+    pub evm_pages: usize,
+    pub primary_batches: usize,
+    /// The page comparisons that listed a name the caller excused (its composed row differs from
+    /// the served one by a cause the control comparison decides), compared without those names.
+    pub listing_excused: usize,
+    /// Per route, the microseconds the served and the family reads took and how many pairs of
+    /// reads there were.
+    pub read_timings: BTreeMap<&'static str, (u128, u128, usize)>,
 }
 
 impl ShadowReport {
@@ -68,6 +83,19 @@ pub async fn compare_family_reads(
     chain_id: &str,
     served: Option<(i64, String)>,
     page_size: u64,
+) -> Result<ShadowReport> {
+    compare_family_reads_excusing(pool, chain_id, served, page_size, &BTreeSet::new()).await
+}
+
+/// [`compare_family_reads`] with the names whose composed row the caller's name comparison
+/// leaves to the control comparison: a page that lists one is compared without them
+/// (`listing_excused`).
+pub async fn compare_family_reads_excusing(
+    pool: &PgPool,
+    chain_id: &str,
+    served: Option<(i64, String)>,
+    page_size: u64,
+    excused: &BTreeSet<String>,
 ) -> Result<ShadowReport> {
     let family_marker: Option<(Option<i64>, Option<String>)> = sqlx::query_as(
         "SELECT current_block_number, current_block_hash
@@ -101,6 +129,7 @@ pub async fn compare_family_reads(
     inventory(pool, chain_id, &mut report).await?;
     addresses(pool, chain_id, page_size, &mut report).await?;
     primary(pool, chain_id, &mut report).await?;
+    super::shadow_pages::production_pages(pool, chain_id, page_size, excused, &mut report).await?;
     report.classification_fallbacks = sqlx::query_scalar(
         "SELECT 'resolver ' || resolver.resolver_address
          FROM bigname_phase.resolver_current resolver
@@ -435,8 +464,10 @@ async fn primary(pool: &PgPool, chain_id: &str, report: &mut ShadowReport) -> Re
     .collect();
     for (address, namespace, coin_type) in tuples {
         report.primary_tuples += 1;
-        let today =
-            load_primary_name_current_snapshot(pool, &address, &namespace, &coin_type).await?;
+        let today = crate::primary_name::load_served_primary_name_current_snapshot(
+            pool, &address, &namespace, &coin_type,
+        )
+        .await?;
         let family =
             load_family_reverse_claim(pool, chain_id, &address, &namespace, &coin_type).await?;
         let differences = compare_primary_name(

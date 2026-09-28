@@ -3,7 +3,7 @@
 //! version boundary (docs/projections.md, "Owned key families").
 use anyhow::{Context, Result};
 use serde_json::Value;
-use sqlx::{PgPool, Row, types::time::OffsetDateTime};
+use sqlx::{PgConnection, PgPool, Row, types::time::OffsetDateTime};
 use uuid::Uuid;
 
 use super::FamilyPosition;
@@ -51,6 +51,19 @@ pub async fn load_family_resource_pointer(
     chain_id: &str,
     resource_id: Uuid,
 ) -> Result<Option<FamilyResourcePointer>> {
+    let mut conn = pool
+        .acquire()
+        .await
+        .context("failed to acquire a connection for the family resource pointer")?;
+    load_family_resource_pointer_on(&mut conn, chain_id, resource_id).await
+}
+
+/// [`load_family_resource_pointer`] on `conn`.
+pub(crate) async fn load_family_resource_pointer_on(
+    conn: &mut PgConnection,
+    chain_id: &str,
+    resource_id: Uuid,
+) -> Result<Option<FamilyResourcePointer>> {
     let row = sqlx::query(
         "SELECT chain_id, resource_id, block_number, transaction_index, log_index,
                 event_identity, normalized_event_id, resolver_address, pointer_position,
@@ -61,7 +74,7 @@ pub async fn load_family_resource_pointer(
     )
     .bind(chain_id)
     .bind(resource_id)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *conn)
     .await
     .with_context(|| format!("failed to load the family resource pointer of {resource_id}"))?;
     let Some(row) = row else {

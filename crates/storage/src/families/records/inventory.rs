@@ -14,19 +14,20 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::Result;
-use sqlx::PgPool;
+use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
 
 use super::{
     FamilyPosition,
     assemble::{self, Assembly, BoundaryEvent, ServedRecord},
-    facts::{ResolverClassification, load_classification, probe_events},
-    load_family_link_selection, load_family_resource_pointer,
+    facts::{ResolverClassification, load_classification_on as load_classification, probe_events},
+    links::load_family_link_selection_on as load_family_link_selection,
     mirror::{MirrorSelection, evaluate_family_mirror, is_mirror_pointer},
+    pointer::load_family_resource_pointer_on,
     rows::{RecordCandidate, admitted_partitions, load_partitions, load_record_id_values},
     serving::{ServingPointer, family_pointer_eligibility, serving_pointer},
 };
-use crate::{RecordInventoryCurrentRow, load_bounded_record_attribution};
+use crate::{RecordInventoryCurrentRow, history::load_attribution_map};
 
 /// Where a family row's `provenance.attributed_event_ids` comes from. It is the history
 /// attribution, not a family fact.
@@ -77,17 +78,158 @@ pub async fn load_family_record_inventory(
     )
 }
 
-/// [`load_family_record_inventory`] with the compatibility pairs it served.
+/// [`load_family_record_inventory`] with the compatibility pairs it served, read in one
+/// snapshot (`families::read_snapshot`).
 pub async fn load_family_record_inventory_detail(
     pool: &PgPool,
     chain_id: &str,
     resource_id: Uuid,
     attribution: FamilyAttribution,
 ) -> Result<Option<FamilyRecordInventory>> {
-    let Some(pointer) = load_family_resource_pointer(pool, chain_id, resource_id).await? else {
+    let mut snapshot = crate::families::read_snapshot(pool).await?;
+    let inventory =
+        load_family_record_inventory_detail_on(&mut snapshot, chain_id, resource_id, attribution)
+            .await?;
+    snapshot.commit().await?;
+    Ok(inventory)
+}
+
+/// The record inventory `GET /v1/names/{name}/records` reads under the publication switch
+/// (TYR-36 step 7b): the family inventory of the resource `row` serves records through, when the
+/// row has a record-inventory lookup key (`resolution_record_inventory_lookup_key_any_chain`), at
+/// the family marker's publication. The composed name row describes that publication only, so a
+/// selected position other than it is stale (ruling J5), as is a chain whose marker is not
+/// servable. `None` when the row has no lookup key or the resource no serving pointer.
+pub async fn load_family_record_inventory_for_snapshot(
+    pool: &PgPool,
+    row: &crate::NameCurrentRow,
+    selected: &crate::ChainPositions,
+) -> std::result::Result<Option<RecordInventoryCurrentRow>, crate::SnapshotSelectionError> {
+    use crate::SnapshotSelectionError;
+    let internal = |error: anyhow::Error| {
+        if crate::families::name::is_publication_unavailable(&error) {
+            return SnapshotSelectionError::stale(format!(
+                "record data is unavailable while the families rebuild: {error}"
+            ));
+        }
+        SnapshotSelectionError::internal(format!(
+            "failed to assemble the family record inventory of {}: {error}",
+            row.logical_name_id
+        ))
+    };
+    let Some((resource_id, _)) = crate::resolution_record_inventory_lookup_key_any_chain(row)
+    else {
         return Ok(None);
     };
-    let Some(serving) = serving_pointer(pool, &pointer).await? else {
+    let composed = crate::ChainPositions::from_value(&row.chain_positions)?;
+    let Some(chain_id) = composed
+        .as_map()
+        .values()
+        .map(|position| position.chain_id.clone())
+        .next()
+    else {
+        return Err(SnapshotSelectionError::internal(
+            "composed name row carries no chain position",
+        ));
+    };
+    let mut snapshot = crate::families::read_snapshot(pool)
+        .await
+        .map_err(internal)?;
+    let publication = crate::families::name::servable_publication(&mut snapshot, &chain_id)
+        .await
+        .map_err(internal)?;
+    let at_publication = selected.as_map().values().any(|position| {
+        position.chain_id == chain_id
+            && position.block_number == publication.block_number
+            && position.block_hash == publication.block_hash
+    });
+    if !at_publication {
+        return Err(SnapshotSelectionError::stale(
+            "record data is unavailable at the selected historical position",
+        ));
+    }
+    let inventory = load_family_record_inventory_detail_on(
+        &mut snapshot,
+        &chain_id,
+        resource_id,
+        FamilyAttribution::Load,
+    )
+    .await
+    .map_err(internal)?;
+    snapshot
+        .commit()
+        .await
+        .map_err(|error| internal(error.into()))?;
+    Ok(inventory.map(|inventory| inventory.row))
+}
+
+/// Under the publication switch, the public record selector count of each composed name row
+/// (`count_record_inventory_selectors_by_lookup_keys` over the families): the selectors of the
+/// family inventory of the resource the row serves records through, `None` when the row has no
+/// lookup key or the resource no inventory. Read in one snapshot at each chain's publication.
+pub async fn load_family_record_counts(
+    pool: &PgPool,
+    rows: &[&crate::NameCurrentRow],
+) -> Result<Vec<Option<u64>>> {
+    let mut snapshot = crate::families::read_snapshot(pool).await?;
+    let mut counts = Vec::with_capacity(rows.len());
+    let mut published = BTreeSet::new();
+    for row in rows {
+        let Some((resource_id, boundary)) =
+            crate::resolution_record_inventory_lookup_key_any_chain(row)
+        else {
+            counts.push(None);
+            continue;
+        };
+        // The served count reads the inventory row of the name's exact lookup key.
+        let wanted_key = crate::record_version_boundary_storage_key(&boundary, resource_id)?;
+        let chain_id = crate::ChainPositions::from_value(&row.chain_positions)
+            .ok()
+            .and_then(|positions| {
+                positions
+                    .as_map()
+                    .values()
+                    .map(|position| position.chain_id.clone())
+                    .next()
+            })
+            .ok_or_else(|| anyhow::anyhow!("composed name row carries no chain position"))?;
+        if published.insert(chain_id.clone()) {
+            crate::families::name::servable_publication(&mut snapshot, &chain_id).await?;
+        }
+        let inventory = load_family_record_inventory_detail_on(
+            &mut snapshot,
+            &chain_id,
+            resource_id,
+            FamilyAttribution::Given(BTreeSet::new()),
+        )
+        .await?;
+        counts.push(
+            inventory
+                .filter(|inventory| inventory.record_version_boundary_key == wanted_key)
+                .map(|inventory| {
+                    inventory
+                        .row
+                        .selectors
+                        .as_array()
+                        .map_or(0, |selectors| selectors.len() as u64)
+                }),
+        );
+    }
+    snapshot.commit().await?;
+    Ok(counts)
+}
+
+/// [`load_family_record_inventory_detail`] on `conn`, which the caller holds in one snapshot.
+pub(crate) async fn load_family_record_inventory_detail_on(
+    conn: &mut PgConnection,
+    chain_id: &str,
+    resource_id: Uuid,
+    attribution: FamilyAttribution,
+) -> Result<Option<FamilyRecordInventory>> {
+    let Some(pointer) = load_family_resource_pointer_on(conn, chain_id, resource_id).await? else {
+        return Ok(None);
+    };
+    let Some(serving) = serving_pointer(conn, &pointer).await? else {
         return Ok(None);
     };
     let attributed = match attribution {
@@ -99,27 +241,27 @@ pub async fn load_family_record_inventory_detail(
                  WHERE chain_id = $1",
             )
             .bind(chain_id)
-            .fetch_optional(pool)
+            .fetch_optional(&mut *conn)
             .await?
             .flatten();
             let bound = marker.map(|block| BTreeMap::from([(chain_id.to_owned(), block)]));
-            load_bounded_record_attribution(pool, &[resource_id], bound.as_ref())
+            load_attribution_map(conn, &[resource_id], bound.as_ref())
                 .await?
                 .remove(&resource_id)
                 .unwrap_or_default()
         }
     };
-    let classification = load_classification(pool, chain_id, &serving.resolver_address).await?;
+    let classification = load_classification(conn, chain_id, &serving.resolver_address).await?;
     if is_mirror_pointer(&serving, classification.as_ref()) {
         let mirror =
-            evaluate_family_mirror(pool, chain_id, &serving, classification.unwrap_or_default())
+            evaluate_family_mirror(conn, chain_id, &serving, classification.unwrap_or_default())
                 .await?;
         return match mirror.substituted(&serving) {
             Some(substituted) => {
                 let classification =
-                    load_classification(pool, chain_id, &substituted.resolver_address).await?;
+                    load_classification(conn, chain_id, &substituted.resolver_address).await?;
                 let mut inventory = select(
-                    pool,
+                    conn,
                     chain_id,
                     &substituted,
                     &serving,
@@ -132,13 +274,13 @@ pub async fn load_family_record_inventory_detail(
                 Ok(Some(inventory))
             }
             None => Ok(Some(
-                unsupported_mirror(pool, chain_id, &serving, &mirror).await?,
+                unsupported_mirror(conn, chain_id, &serving, &mirror).await?,
             )),
         };
     }
     Ok(Some(
         select(
-            pool,
+            conn,
             chain_id,
             &serving,
             &serving,
@@ -150,12 +292,12 @@ pub async fn load_family_record_inventory_detail(
 }
 
 async fn unsupported_mirror(
-    pool: &PgPool,
+    conn: &mut PgConnection,
     chain_id: &str,
     serving: &ServingPointer,
     mirror: &MirrorSelection,
 ) -> Result<FamilyRecordInventory> {
-    let stamps = super::facts::block_stamps(pool, chain_id, &[serving.block_number]).await?;
+    let stamps = super::facts::block_stamps(conn, chain_id, &[serving.block_number]).await?;
     let (row, record_version_boundary_key) =
         assemble::unsupported_mirror_row(chain_id, serving, mirror, &stamps)?;
     Ok(FamilyRecordInventory {
@@ -209,7 +351,7 @@ fn latest_eligible(
 /// Select the served records of `pointer` (the serving pointer after any mirror substitution);
 /// `link_pointer` is the pointer before substitution, whose resolver the link selection reads.
 async fn select(
-    pool: &PgPool,
+    conn: &mut PgConnection,
     chain_id: &str,
     pointer: &ServingPointer,
     link_pointer: &ServingPointer,
@@ -219,9 +361,9 @@ async fn select(
     let eligibility = family_pointer_eligibility(&pointer.namespace, classification);
     let partitions = admitted_partitions(pointer, classification);
     let (versions, mut candidates) =
-        load_partitions(pool, chain_id, &pointer.resolver_address, &partitions).await?;
+        load_partitions(conn, chain_id, &pointer.resolver_address, &partitions).await?;
     let links = load_family_link_selection(
-        pool,
+        conn,
         chain_id,
         &link_pointer.resolver_address,
         &link_pointer.namehash,
@@ -229,7 +371,7 @@ async fn select(
     .await?;
     let linked = match links.as_ref().and_then(|links| links.record_id.clone()) {
         Some(record_id) => {
-            load_record_id_values(pool, chain_id, &link_pointer.resolver_address, &record_id)
+            load_record_id_values(conn, chain_id, &link_pointer.resolver_address, &record_id)
                 .await?
         }
         None => Vec::new(),
@@ -262,7 +404,7 @@ async fn select(
     if let Some((position, "RecordVersionChanged", _)) = &boundary {
         identities.push(position.event_identity.clone());
     }
-    let probed = probe_events(pool, &identities).await?;
+    let probed = probe_events(conn, &identities).await?;
 
     let mut pairs = Vec::new();
     let mut served = Vec::new();
@@ -313,7 +455,7 @@ async fn select(
         kind,
     });
     let (row, record_version_boundary_key) = assemble::assemble(
-        pool,
+        conn,
         Assembly {
             chain_id,
             pointer,

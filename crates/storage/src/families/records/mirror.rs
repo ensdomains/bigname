@@ -12,10 +12,10 @@
 use alloy_primitives::{B256, keccak256};
 use anyhow::{Context, Result};
 use serde_json::{Map, Value, json};
-use sqlx::{PgPool, Row};
+use sqlx::{PgConnection, Row};
 
 use super::{
-    facts::{ResolverClassification, load_classification},
+    facts::{ResolverClassification, load_classification_on as load_classification},
     is_cleared,
     serving::ServingPointer,
 };
@@ -151,17 +151,17 @@ pub(crate) fn is_mirror_pointer(
 /// label of the queried name, then one classification probe for the nearest resolver. A tie at one
 /// depth follows the canonical event order, never the generated event id.
 pub(crate) async fn evaluate_family_mirror(
-    pool: &PgPool,
+    conn: &mut PgConnection,
     chain_id: &str,
     pointer: &ServingPointer,
     mirror: ResolverClassification,
 ) -> Result<MirrorSelection> {
     let mirror_namespace_matches = mirror.declared_in(&pointer.namespace);
-    let nearest = nearest(pool, chain_id, pointer).await?;
+    let nearest = nearest(conn, chain_id, pointer).await?;
     let nearest = match nearest {
         Some(mut nearest) => {
             let classification =
-                load_classification(pool, chain_id, &nearest.mirrored_resolver_address).await?;
+                load_classification(conn, chain_id, &nearest.mirrored_resolver_address).await?;
             classify(&mut nearest, classification.as_ref());
             Some(nearest)
         }
@@ -175,7 +175,7 @@ pub(crate) async fn evaluate_family_mirror(
 }
 
 async fn nearest(
-    pool: &PgPool,
+    conn: &mut PgConnection,
     chain_id: &str,
     pointer: &ServingPointer,
 ) -> Result<Option<MirrorNearest>> {
@@ -187,7 +187,7 @@ async fn nearest(
     )
     .bind(&pointer.logical_name_id)
     .bind(chain_id)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *conn)
     .await
     .context("failed to load the queried name of a mirror pointer")?;
     let Some(surface) = surface else {
@@ -227,7 +227,7 @@ async fn nearest(
         .bind(&depths)
         .bind(&nodes)
         .bind(&labels)
-        .fetch_all(pool)
+        .fetch_all(&mut *conn)
         .await
         .context("failed to walk the ENSv1 registry pointers of a mirror pointer")?;
     for row in rows {

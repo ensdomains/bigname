@@ -45,6 +45,9 @@ pub mod serving;
 
 use sqlx::types::time::OffsetDateTime;
 
+pub(crate) use batch::{
+    all_servable_publications, load as load_composed, read_snapshot, servable_publication,
+};
 pub use bound::load_family_bound_names;
 pub use list::{load_family_expiring_page, load_family_search_page};
 
