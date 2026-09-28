@@ -515,5 +515,25 @@ async fn a_shared_resource_serves_each_name_its_own_latest_pointer() -> Result<(
         ),
         (json!(RESOLVER), json!(LATER))
     );
+    // Each resolver's bound names reach the name whose own pointer names it, although the
+    // resource's latest pointer is the second name's.
+    let mut bound = Vec::new();
+    for resolver in [RESOLVER, LATER] {
+        let rows = bigname_storage::families::name::load_family_bound_names(
+            &fixture.pool,
+            support::CHAIN,
+            resolver,
+            None,
+            None,
+            10,
+        )
+        .await?;
+        bound.push(
+            rows.into_iter()
+                .map(|row| row.logical_name_id)
+                .collect::<Vec<_>>(),
+        );
+    }
+    assert_eq!(bound, [vec![name(1)], vec![name(2)]]);
     fixture.cleanup().await
 }
