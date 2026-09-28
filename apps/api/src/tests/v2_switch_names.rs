@@ -228,12 +228,10 @@ async fn v2_search_is_the_same_with_the_switch_off_and_on() -> Result<()> {
 }
 
 
-#[tokio::test]
-async fn v2_resolver_bound_names_are_the_same_with_the_switch_off_and_on() -> Result<()> {
-    let database = TestDatabase::new_migrated().await?;
-    seed_switch_names_fixture(&database).await?;
-    // The route's resolver overview still reads the served resolver row (its move is packet E5),
-    // which Project writes only for a declared resolver: seed one at the publication.
+/// The route's resolver overview still reads the served resolver row (its move is packet E5),
+/// which Project writes only for a declared resolver: seeds one for `SWITCH_RESOLVER` at the
+/// switch fixture's publication.
+async fn seed_switch_resolver_current(database: &TestDatabase) -> Result<()> {
     sqlx::query(
         "INSERT INTO bigname_phase.resolver_current (chain_id, resolver_address,
              declared_summary, support_status, chain_positions, canonicality_summary,
@@ -249,6 +247,14 @@ async fn v2_resolver_bound_names_are_the_same_with_the_switch_off_and_on() -> Re
     .bind(SWITCH_RESOLVER)
     .execute(&database.pool)
     .await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn v2_resolver_bound_names_are_the_same_with_the_switch_off_and_on() -> Result<()> {
+    let database = TestDatabase::new_migrated().await?;
+    seed_switch_names_fixture(&database).await?;
+    seed_switch_resolver_current(&database).await?;
     let uri = format!("/v1/resolvers/1/{SWITCH_RESOLVER}?page_size=1");
     let pages = assert_switch_differential_pages_in(&database, &uri, "/data/bound_names").await?;
     let names: Vec<&Value> = pages
