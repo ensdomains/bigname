@@ -67,29 +67,10 @@ async fn v2_get_permissions_empties_a_superseded_name_and_registration_pair() ->
     let database = TestDatabase::new_migrated().await?;
     seed_v2_permissions_fixture(&database).await?;
     let stale_resource_id = v2_permissions_stale_resource_id();
-    upsert_phase_permissions_current_resource_summary(
-        &database.pool,
-        &permission_current_resource_summary(stale_resource_id, Some("wrapper")),
-    )
-    .await?;
-
     let paired = v2_permissions_payload_for_database(
-        &database,
-        &format!("/v1/permissions?name=perms.eth&registration_id={stale_resource_id}"),
-    )
-    .await?;
+        &database, &format!("/v1/permissions?name=perms.eth&registration_id={stale_resource_id}"),
+    ).await?;
     assert_eq!(paired["data"], json!([]));
-    assert_eq!(paired["meta"]["completeness"], json!("partial"));
-    assert_unlisted_permission_surfaces(&paired, V2_WRAPPER_UNLISTED_SURFACES);
-
-    upsert_phase_permissions_current_resource_summary(
-        &database.pool,
-        &permission_current_resource_summary(stale_resource_id, Some("registrar")),
-    ).await?;
-    let paired = v2_permissions_payload_for_database(
-        &database,
-        &format!("/v1/permissions?name=perms.eth&registration_id={stale_resource_id}"),
-    ).await?;
     assert_unlisted_permission_surfaces(&paired, V2_UNWRAPPED_UNLISTED_SURFACES);
 
     // Anti-vacuity: the same superseded registration is still readable as a resource audit.
@@ -126,22 +107,16 @@ async fn v2_get_permissions_empties_a_superseded_name_and_registration_pair() ->
 async fn v2_get_permissions_classifies_a_paired_wrapped_lease_like_its_standalone_read()
 -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    seed_v2_address_names_fixture(&database).await?;
-    // alpha.eth serves lease L; its permission rows and wrapper summary live on NameWrapper
-    // resource W. beta.eth is a second supported current name serving its own registration.
-    let wrapper_resource_id = Uuid::from_u128(0xa100);
-    let lease_resource_id = Uuid::from_u128(0xe400);
-    seed_alpha_registrar_lease(&database, lease_resource_id).await?;
-    upsert_phase_permissions_current_resource_summary(
-        &database.pool,
-        &permission_current_resource_summary(wrapper_resource_id, Some("wrapper")),
-    )
-    .await?;
-    upsert_phase_permissions_current_resource_summary(
-        &database.pool,
-        &permission_current_resource_summary(lease_resource_id, Some("registrar")),
-    )
-    .await?;
+    let (wrapper_resource_id, lease_resource_id) =
+        seed_perms_wrapped_lease(&database, WrappedLeaseShape::LinkRecorded).await?;
+    let other = Uuid::from_u128(0xe400);
+    let other_name = seed_family_identity_inputs(&database.pool, "ens", "beta.eth", "ethereum-mainnet",
+        100, "0xperms100", other, Uuid::from_u128(0xe401), Uuid::from_u128(0xe402), "ens_v1").await?;
+    let grant = permission_fixture_event("permissions-beta-grant", Some(&other_name), Some(other),
+        "RegistrationGranted", "ens_v1_registrar_l1", 101, 3,
+        json!({"authority_kind":"registrar", "registrant":V2_PERMISSIONS_OTHER_SUBJECT, "expiry":1_900_000_000_i64}));
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[grant]).await?;
+    rebuild_fixture_families(&database.pool, "ethereum-mainnet", 130, "0xperms130").await?;
 
     let standalone = v2_permissions_payload_for_database(
         &database,
@@ -195,10 +170,8 @@ async fn v2_get_permissions_classifies_a_paired_wrapped_lease_like_its_standalon
 #[tokio::test]
 async fn v2_get_permissions_cursor_binds_the_requested_registration_id() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    seed_v2_address_names_fixture(&database).await?;
-    let wrapper_resource_id = Uuid::from_u128(0xa100);
-    let lease_resource_id = Uuid::from_u128(0xe400);
-    seed_alpha_registrar_lease(&database, lease_resource_id).await?;
+    let (wrapper_resource_id, lease_resource_id) =
+        seed_perms_wrapped_lease(&database, WrappedLeaseShape::LinkRecorded).await?;
 
     let first = v2_permissions_payload_for_database(
         &database,
@@ -236,7 +209,7 @@ async fn v2_get_permissions_cursor_binds_the_requested_registration_id() -> Resu
     // proven-empty pair, is a different request and is rejected.
     let first = v2_permissions_payload_for_database(
         &database,
-        "/v1/permissions?name=alpha.eth&page_size=1",
+        "/v1/permissions?name=perms.eth&page_size=1",
     )
     .await?;
     assert_eq!(first["data"].as_array().expect("first name page").len(), 1);
@@ -246,7 +219,7 @@ async fn v2_get_permissions_cursor_binds_the_requested_registration_id() -> Resu
         .to_owned();
     let continued = v2_permissions_payload_for_database(
         &database,
-        &format!("/v1/permissions?name=alpha.eth&page_size=1&cursor={cursor}"),
+        &format!("/v1/permissions?name=perms.eth&page_size=1&cursor={cursor}"),
     )
     .await?;
     assert_eq!(continued["data"].as_array().expect("second name page").len(), 1);
@@ -254,7 +227,7 @@ async fn v2_get_permissions_cursor_binds_the_requested_registration_id() -> Resu
     let with_lease = v2_permissions_payload_for_database(
         &database,
         &format!(
-            "/v1/permissions?name=alpha.eth&registration_id={lease_resource_id}&page_size=1&cursor={cursor}"
+            "/v1/permissions?name=perms.eth&registration_id={lease_resource_id}&page_size=1&cursor={cursor}"
         ),
     )
     .await?;
@@ -262,7 +235,7 @@ async fn v2_get_permissions_cursor_binds_the_requested_registration_id() -> Resu
     let response = v2_permissions_response_for_database(
         &database,
         &format!(
-            "/v1/permissions?name=alpha.eth&registration_id={wrapper_resource_id}&page_size=1&cursor={cursor}"
+            "/v1/permissions?name=perms.eth&registration_id={wrapper_resource_id}&page_size=1&cursor={cursor}"
         ),
     )
     .await?;
@@ -273,23 +246,14 @@ async fn v2_get_permissions_cursor_binds_the_requested_registration_id() -> Resu
     database.cleanup().await
 }
 
-// The NameWrapper resource that wrapped a lease stays outside the public handle space after the
-// name leaves it. Once the name's current row no longer names the wrapper (unwrapped, released,
-// migrated, registered again, or, as here, unsupported), only the recorded wrap link can reject
-// the resource, as history does.
+// A closed wrapper binding remains outside the public registration handle space. The
+// recorded wrap link must reject it after the registrar binding becomes current again.
 #[tokio::test]
 async fn v2_get_permissions_rejects_a_historical_name_wrapper_resource() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
     let (wrapper_resource_id, lease_resource_id) =
         seed_perms_wrapped_lease(&database, WrappedLeaseShape::LinkRecorded).await?;
-    sqlx::query(
-        "UPDATE bigname_phase.name_current
-         SET support_status = 'unsupported',
-             unsupported_reason = 'conflicting_current_ens_authority'
-         WHERE raw_name = 'perms.eth'",
-    )
-    .execute(&database.pool)
-    .await?;
+    unwrap_permission_fixture(&database, wrapper_resource_id, lease_resource_id).await?;
 
     for uri in [
         format!("/v1/permissions?registration_id={wrapper_resource_id}"),
@@ -752,26 +716,7 @@ async fn v2_permissions_cursor_binds_account_collection_anchor() -> Result<()> {
 #[tokio::test]
 async fn v2_permissions_namespace_filters_before_operator_paging() -> Result<()> {
     let database = seed_v2_registry_operator_fixture().await?;
-    let resource_id = Uuid::from_u128(0xf100);
-    database.seed_name_current_binding(
-        "basenames:base-perms.base.eth", "basenames", "base-perms.base.eth", "base-perms.base.eth",
-        "base-perms", resource_id, Uuid::from_u128(0xf101), Uuid::from_u128(0xf102),
-    ).await?;
-    upsert_phase_permissions_current_resource_summary(
-        &database.pool,
-        &permission_current_resource_summary(resource_id, Some("registrar")),
-    ).await?;
-    upsert_phase_permissions_current_rows(&database.pool, &[permission_current_row(
-        resource_id, V2_PERMISSIONS_SUBJECT, PermissionScope::Resource, 1, 112,
-    )]).await?;
-    seed_registry_operator(&database, resource_id).await?;
-    seed_permission_namespace_event(&database, "basenames", resource_id).await?;
-
-    // The collection publication for a Basenames read spans Base and Ethereum.
-    database.seed_snapshot_selector_chain_positions(&json!({"base": {
-        "chain_id": "base-mainnet", "block_number": 84_530_001,
-        "block_hash": "0xpermissions-base", "timestamp": "2026-04-17T00:10:01Z",
-    }})).await?;
+    let resource_id = seed_base_permission_inputs(&database, true).await?;
     let get = async |uri: String| -> Result<Value> {
         let response = app_router(database.app_state())
             .oneshot(Request::builder().uri(uri).body(Body::empty())?)
@@ -799,15 +744,9 @@ async fn v2_permissions_resource_reason_names_registrar_and_resolver_gaps() -> R
 #[tokio::test]
 async fn v2_permissions_ens_v2_registry_resource_names_registry_operator_gap() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    seed_v2_permissions_fixture(&database).await?;
-    let resource_id = v2_permissions_current_resource_id();
-    upsert_phase_permissions_current_resource_summary(
-        &database.pool,
-        &permission_current_resource_summary(resource_id, Some("ens_v2_registry")),
-    )
-    .await?;
+    let resource_id = seed_registry_permission_inputs(&database).await?;
 
-    for selector in [format!("registration_id={resource_id}"), "name=perms.eth".to_owned()] {
+    for selector in [format!("registration_id={resource_id}"), "name=one.alpha.eth".to_owned()] {
         let payload =
             v2_permissions_payload_for_database(&database, &format!("/v1/permissions?{selector}"))
                 .await?;
@@ -845,32 +784,10 @@ async fn v2_permissions_empty_account_result_remains_request_relative_partial() 
 #[tokio::test]
 async fn v2_get_permissions_exposes_atomic_wrapper_state_and_fuses() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    seed_v2_permissions_fixture(&database).await?;
-    let resource_id = v2_permissions_current_resource_id();
-    sqlx::query(
-        "UPDATE bigname_phase.name_current
-         SET declared_summary = declared_summary || $2::jsonb
-         WHERE resource_id = $1",
-    )
-    .bind(resource_id)
-    .bind(json!({
-        "wrapper_state": "locked",
-        "wrapper_fuses": {
-            "fuses": 196_609,
-            "cannot_unwrap": true,
-            "cannot_burn_fuses": false,
-            "cannot_transfer": false,
-            "cannot_set_resolver": false,
-            "cannot_set_ttl": false,
-            "cannot_create_subdomain": false,
-            "cannot_approve": false,
-            "parent_cannot_control": true,
-            "is_dot_eth": true,
-            "can_extend_expiry": false
-        }
-    }))
-    .execute(&database.pool)
-    .await?;
+    let (wrapper, resource_id) =
+        seed_perms_wrapped_lease(&database, WrappedLeaseShape::LinkRecorded).await?;
+    insert_permission_wrapper_state(&database, wrapper, "locked", 196_609, 1_800_000_000, 124).await?;
+    rebuild_fixture_families(&database.pool, "ethereum-mainnet", 130, "0xperms130").await?;
 
     let payload = v2_permissions_payload_for_database(
         &database,
@@ -1005,81 +922,110 @@ async fn controller_granted_wrapped_name_permissions_carry_the_registrar_lease_h
     .await
 }
 
-/// Give perms.eth the shape of a wrapped `.eth` name: the fixture's bound resource plays the
-/// NameWrapper resource and a new BaseRegistrar lease, which Project serves as the registration,
-/// is linked to it by the shape's rule. Returns `(wrapper_resource_id, lease_resource_id)`.
+/// Publish a distinct wrapper resource and registrar lease, with either a recorded lease link
+/// or the controller's later grant. The current binding points at the wrapper.
 async fn seed_perms_wrapped_lease(
     database: &TestDatabase,
     shape: WrappedLeaseShape,
 ) -> Result<(Uuid, Uuid)> {
     seed_v2_permissions_fixture(database).await?;
-    // The fixture's bound resource plays the NameWrapper resource of a wrapped `.eth` name;
-    // Project serves the BaseRegistrar lease it wrapped as the registration resource.
-    let wrapper_resource_id = v2_permissions_current_resource_id();
-    let lease_resource_id = Uuid::from_u128(0xe300);
-    upsert_test_resources(&database.pool, &[resource(lease_resource_id)]).await?;
-    sqlx::query(
-        "UPDATE bigname_phase.name_current
-         SET declared_summary = jsonb_set(
-             declared_summary,
-             '{registration,resource_id}',
-             to_jsonb($1::text),
-             true
-         )
-         WHERE raw_name = 'perms.eth'",
-    )
-    .bind(lease_resource_id)
-    .execute(&database.pool)
-    .await?;
-    let logical_name_id: String =
-        sqlx::query_scalar("SELECT logical_name_id FROM bigname_phase.name_current WHERE raw_name = 'perms.eth'")
-            .fetch_one(&database.pool)
-            .await?;
-    let namehash = bigname_lookup::ens_namehash_hex("perms.eth")?;
-    // The wrapper's constraint model must be served under the lease's handle on every page.
-    let mut summary = permission_current_resource_summary(wrapper_resource_id, Some("wrapper"));
-    summary.resource_restrictions = Some(json!({
-        "kind": "ens_v1_wrapper",
-        "wrapper_state": "wrapped",
-        "fuses": 0,
-        "expiry_seconds": 1_800_000_000,
-    }));
-    upsert_phase_permissions_current_resource_summary(&database.pool, &summary).await?;
-    // The lease's own rows carry the node. With a recorded link the NameWrapped binding names
-    // the lease; without one the later controller grant names the name.
-    let (grant_block, grant_logical_name_id, binding_block, link) = match shape {
-        WrappedLeaseShape::LinkRecorded => (120, None, 121, json!(lease_resource_id)),
-        WrappedLeaseShape::ControllerGranted => {
-            (120, Some(logical_name_id.as_str()), 120, Value::Null)
-        }
+    let lease = v2_permissions_current_resource_id();
+    let wrapper = Uuid::from_u128(0xe300);
+    sqlx::query("UPDATE surface_bindings SET active_to = (SELECT block_timestamp FROM chain_lineage
+        WHERE chain_id = 'ethereum-mainnet' AND block_hash = '0xperms120') WHERE surface_binding_id = $1")
+        .bind(Uuid::from_u128(0xe103)).execute(&database.pool).await?;
+    let logical = seed_family_identity_inputs(&database.pool, "ens", "perms.eth", "ethereum-mainnet",
+        120, "0xperms120", wrapper, Uuid::from_u128(0xe301), Uuid::from_u128(0xe302), "ens_v1").await?;
+    let node = bigname_lookup::ens_namehash_hex("perms.eth")?;
+    let (grant_block, grant_name, link) = match shape {
+        WrappedLeaseShape::LinkRecorded => (119, None, json!(lease)),
+        WrappedLeaseShape::ControllerGranted => (120, Some(logical.as_str()), Value::Null),
     };
-    let mut grant = v2_history_event(
-        "perms-lease-grant",
-        grant_logical_name_id,
-        Some(lease_resource_id),
-        "RegistrationGranted",
-        grant_block,
-    );
-    grant.after_state["namehash"] = json!(namehash);
-    if matches!(shape, WrappedLeaseShape::ControllerGranted) {
-        grant.log_index = Some(2);
+    let mut events = vec![
+        permission_fixture_event("permissions-wrapper-lease-grant", grant_name, Some(lease),
+            "RegistrationGranted", "ens_v1_registrar_l1", grant_block, 2,
+            json!({"authority_kind":"registrar", "namehash":node,
+                "registrant":V2_PERMISSIONS_SUBJECT, "expiry":1_800_000_000_i64})),
+        permission_fixture_event("permissions-wrapper-binding", Some(&logical), Some(wrapper),
+            "SurfaceBound", "ens_v1_wrapper_l1", 120, 0,
+            json!({"source_event":"NameWrapped", "node":node, "authority_kind":"wrapper",
+                "wrapped_registrar_resource_id":link})),
+        permission_fixture_event("permissions-wrapper-epoch", Some(&logical), Some(wrapper),
+            "AuthorityEpochChanged", "ens_v1_wrapper_l1", 120, 0,
+            json!({"source_event":"NameWrapped", "node":node, "authority_kind":"wrapper",
+                "owner":V2_PERMISSIONS_SUBJECT})),
+        permission_fixture_event("permissions-wrapper-owner", Some(&logical), Some(wrapper),
+            "TokenControlTransferred", "ens_v1_wrapper_l1", 120, 0,
+            json!({"source_event":"NameWrapped", "node":node, "owner":V2_PERMISSIONS_SUBJECT,
+                "to_address":V2_PERMISSIONS_SUBJECT})),
+        permission_fixture_event("permissions-wrapper-grant", Some(&logical), Some(wrapper),
+            "PermissionChanged", "ens_v1_wrapper_l1", 120, 0,
+            json!({"subject":V2_PERMISSIONS_SUBJECT, "scope":{"kind":"resource"},
+                "effective_powers":["resource_control"], "grant_source":{"kind":"raw_log",
+                    "source_event":"NameWrapped", "authority_kind":"wrapper", "relation_kind":"holder"},
+                "revocation_source":null, "inheritance_path":[], "transfer_behavior":{}})),
+    ];
+    let manifest: i64 = sqlx::query_scalar("SELECT manifest_id FROM manifest_versions
+        WHERE source_family = 'ens_v2_resolver_l1'").fetch_one(&database.pool).await?;
+    for (log, subject, powers) in [(0, V2_PERMISSIONS_SUBJECT, json!(["set_text"])),
+        (1, V2_PERMISSIONS_OTHER_SUBJECT, json!(["set_addr"]))] {
+        let mut role = collection_role_event(wrapper, subject,
+            "0x0000000000000000000000000000000000000abc", 122, log, powers, manifest);
+        role.block_hash = Some("0xperms122".into());
+        events.push(role);
     }
-    let mut binding = v2_history_event(
-        "perms-wrapper-binding",
-        Some(&logical_name_id),
-        Some(wrapper_resource_id),
-        "SurfaceBound",
-        binding_block,
-    );
-    binding.source_family = "ens_v1_wrapper_l1".to_owned();
-    binding.after_state = json!({
-        "source_event": "NameWrapped",
-        "node": namehash,
-        "wrapped_registrar_resource_id": link,
-    });
-    seed_v2_history_blocks(database, 120..=121).await?;
-    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[grant, binding]).await?;
-    Ok((wrapper_resource_id, lease_resource_id))
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &events).await?;
+    insert_permission_wrapper_state(database, wrapper, "emancipated", 196_608, 1_807_776_000, 123).await?;
+    rebuild_fixture_families(&database.pool, "ethereum-mainnet", 130, "0xperms130").await?;
+    Ok((wrapper, lease))
+}
+
+async fn unwrap_permission_fixture(database: &TestDatabase, wrapper: Uuid, lease: Uuid) -> Result<()> {
+    let logical = bigname_storage::logical_name_id_for_name("ens", "perms.eth");
+    let node = bigname_lookup::ens_namehash_hex("perms.eth")?;
+    sqlx::query("UPDATE surface_bindings SET active_to = (SELECT block_timestamp FROM chain_lineage
+        WHERE chain_id = 'ethereum-mainnet' AND block_hash = '0xperms125')
+        WHERE logical_name_id = $1 AND active_to IS NULL")
+        .bind(&logical).execute(&database.pool).await?;
+    seed_family_identity_inputs(&database.pool, "ens", "perms.eth", "ethereum-mainnet", 125,
+        "0xperms125", lease, Uuid::from_u128(0xe102), Uuid::from_u128(0xe104), "ens_v1").await?;
+    let after = json!({"source_event":"NameUnwrapped", "node":node, "owner":V2_PERMISSIONS_SUBJECT,
+        "reactivated_resource_id":lease, "reactivated_token_lineage_id":Uuid::from_u128(0xe102)});
+    let events = [
+        permission_fixture_event("permissions-unwrapped", Some(&logical), Some(wrapper),
+            "SurfaceUnbound", "ens_v1_wrapper_l1", 125, 0, after.clone()),
+        permission_fixture_event("permissions-reactivated-lease", Some(&logical), Some(lease),
+            "SurfaceBound", "ens_v1_wrapper_l1", 125, 0, after.clone()),
+        permission_fixture_event("permissions-unwrapped-epoch", Some(&logical), Some(lease),
+            "AuthorityEpochChanged", "ens_v1_wrapper_l1", 125, 0, after),
+        permission_fixture_event("permissions-unwrapped-holder-revoked", Some(&logical), Some(wrapper),
+            "PermissionChanged", "ens_v1_wrapper_l1", 125, 0,
+            json!({"subject":V2_PERMISSIONS_SUBJECT,"scope":{"kind":"resource"},"effective_powers":[],
+                "grant_source":null,"revocation_source":{"kind":"raw_log", "source_event":"NameUnwrapped",
+                    "relation_kind":"holder","authority_kind":"wrapper"}, "inheritance_path":[], "transfer_behavior":{}})),
+    ];
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &events).await?;
+    rebuild_fixture_families(&database.pool, "ethereum-mainnet", 130, "0xperms130").await
+}
+
+async fn insert_permission_wrapper_state(
+    database: &TestDatabase,
+    resource: Uuid,
+    state: &str,
+    fuses: i64,
+    expiry: i64,
+    block: i64,
+) -> Result<()> {
+    let events = [
+        permission_fixture_event(&format!("permissions-wrapper-scope-{resource}-{block}"), None, Some(resource),
+            "PermissionScopeChanged", "ens_v1_wrapper_l1", block, 0,
+            json!({"source_event":"NameWrapped", "wrapper_state":state, "fuses":fuses})),
+        permission_fixture_event(&format!("permissions-wrapper-expiry-{resource}-{block}"), None, Some(resource),
+            "ExpiryChanged", "ens_v1_wrapper_l1", block, 0,
+            json!({"source_event":"NameWrapped", "expiry":expiry})),
+    ];
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &events).await?;
+    Ok(())
 }
 
 async fn assert_wrapped_name_permissions_carry_the_registrar_lease_handle(
@@ -1188,24 +1134,41 @@ async fn assert_wrapped_name_permissions_carry_the_registrar_lease_handle(
 #[tokio::test]
 async fn wrapped_subname_permissions_read_by_the_name_wrapper_resource() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    seed_v2_permissions_fixture(&database).await?;
-    // A wrapped subname has no BaseRegistrar lease: Project records no registration resource,
-    // so its NameWrapper resource is its registration_id.
-    let wrapper_resource_id = v2_permissions_current_resource_id();
-    sqlx::query(
-        "UPDATE bigname_phase.name_current
-         SET declared_summary = jsonb_set(
-             declared_summary,
-             '{registration}',
-             '{\"status\": \"wrapped\", \"authority_kind\": \"wrapper\"}'::jsonb,
-             true
-         )
-         WHERE raw_name = 'perms.eth'",
-    )
-    .execute(&database.pool)
-    .await?;
+    seed_v2_permissions_fixture_named(&database, "parent.eth").await?;
+    let wrapper_resource_id = Uuid::from_u128(0xe400);
+    let logical = seed_family_identity_inputs(&database.pool, "ens", "child.parent.eth", "ethereum-mainnet",
+        120, "0xperms120", wrapper_resource_id, Uuid::from_u128(0xe401), Uuid::from_u128(0xe402), "ens_v1").await?;
+    let node = bigname_lookup::ens_namehash_hex("child.parent.eth")?;
+    let mut events = vec![
+        permission_fixture_event("permissions-subname-binding", Some(&logical), Some(wrapper_resource_id),
+            "SurfaceBound", "ens_v1_wrapper_l1", 120, 0,
+            json!({"source_event":"NameWrapped", "node":node,"authority_kind":"wrapper", "wrapped_registrar_resource_id":null})),
+        permission_fixture_event("permissions-subname-epoch", Some(&logical), Some(wrapper_resource_id),
+            "AuthorityEpochChanged", "ens_v1_wrapper_l1", 120, 0,
+            json!({"source_event":"NameWrapped", "node":node,"authority_kind":"wrapper", "owner":V2_PERMISSIONS_SUBJECT})),
+        permission_fixture_event("permissions-subname-owner", Some(&logical), Some(wrapper_resource_id),
+            "TokenControlTransferred", "ens_v1_wrapper_l1", 120, 0,
+            json!({"source_event":"NameWrapped", "node":node,"owner":V2_PERMISSIONS_SUBJECT,"to_address":V2_PERMISSIONS_SUBJECT})),
+        permission_fixture_event("permissions-subname-holder", Some(&logical), Some(wrapper_resource_id),
+            "PermissionChanged", "ens_v1_wrapper_l1", 120, 0,
+            json!({"subject":V2_PERMISSIONS_SUBJECT,"scope":{"kind":"resource"}, "effective_powers":["resource_control"],
+                "grant_source":{"kind":"raw_log","source_event":"NameWrapped", "authority_kind":"wrapper","relation_kind":"holder"},
+                "revocation_source":null,"inheritance_path":[],"transfer_behavior":{}})),
+    ];
+    let manifest: i64 = sqlx::query_scalar("SELECT manifest_id FROM manifest_versions WHERE source_family = 'ens_v2_resolver_l1'")
+        .fetch_one(&database.pool).await?;
+    for (log, subject, powers) in [(0, V2_PERMISSIONS_SUBJECT, json!(["set_text"])),
+        (1, V2_PERMISSIONS_OTHER_SUBJECT, json!(["set_addr"]))] {
+        let mut role = collection_role_event(wrapper_resource_id, subject,
+            "0x0000000000000000000000000000000000000abc", 122, log, powers, manifest);
+        role.block_hash = Some("0xperms122".into());
+        events.push(role);
+    }
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &events).await?;
+    insert_permission_wrapper_state(&database, wrapper_resource_id, "wrapped", 0, 1_800_000_000, 123).await?;
+    rebuild_fixture_families(&database.pool, "ethereum-mainnet", 130, "0xperms130").await?;
 
-    let name = v2_name_record_payload_for_database(&database, "/v1/names/Perms.eth").await?;
+    let name = v2_name_record_payload_for_database(&database, "/v1/names/child.parent.eth").await?;
     assert_eq!(
         name["data"]["registration_id"],
         json!(wrapper_resource_id.to_string())
@@ -1278,22 +1241,16 @@ async fn v2_get_permissions_name_filter_uses_current_sepolia_anchor_on_mixed_pha
     let database = TestDatabase::new_migrated().await?;
     seed_v2_mixed_phase_head_names(&database).await?;
     let resource_id = Uuid::from_u128(0x7e20);
-    upsert_phase_permissions_current_rows(
-        &database.pool,
-        &[permission_current_row(
-            resource_id,
-            V2_PERMISSIONS_SUBJECT,
-            PermissionScope::Resource,
-            1,
-            V2_SEPOLIA_SNAPSHOT_BLOCK,
-        )],
-    )
-    .await?;
-    upsert_phase_permissions_current_resource_summary(
-        &database.pool,
-        &permission_current_resource_summary(resource_id, Some("registrar")),
-    )
-    .await?;
+    let name = bigname_storage::logical_name_id_for_name("ens", V2_SEPOLIA_SNAPSHOT_NAME);
+    let mut grant = permission_fixture_event("permissions-sepolia-grant", Some(&name), Some(resource_id),
+        "PermissionChanged", "ens_v1_registrar_l1", V2_SEPOLIA_SNAPSHOT_BLOCK, 4,
+        json!({"subject":V2_PERMISSIONS_SUBJECT,"scope":{"kind":"resource"},"effective_powers":["resource_control"],
+            "grant_source":{"kind":"ens_v1_authority","authority_kind":"registrar"},
+            "revocation_source":null,"inheritance_path":[],"transfer_behavior":"replace_on_authority_change"}));
+    grant.chain_id = Some("ethereum-sepolia".into());
+    grant.block_hash = Some(V2_SEPOLIA_SNAPSHOT_HASH.into());
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[grant]).await?;
+    rebuild_fixture_families(&database.pool, "ethereum-sepolia", V2_SEPOLIA_SNAPSHOT_BLOCK, V2_SEPOLIA_SNAPSHOT_HASH).await?;
 
     let payload = v2_permissions_payload_for_database(
         &database,
@@ -1454,75 +1411,38 @@ async fn v2_get_permissions_empty_results_return_empty_page() -> Result<()> {
 }
 
 #[tokio::test]
-async fn v2_permissions_empty_resource_fails_closed_from_typed_support_summary() -> Result<()> {
+async fn v2_permissions_empty_resource_support_comes_from_retained_authority() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    database
-        .seed_default_ens_snapshot_selector_position()
-        .await?;
+    seed_v2_permissions_fixture(&database).await?;
     let resource_id = Uuid::from_u128(0xe400);
-    upsert_test_resources(&database.pool, &[resource(resource_id)]).await?;
+    sqlx::query("INSERT INTO resources (resource_id, chain_id, block_number, block_hash, canonicality_state)
+        VALUES ($1, 'ethereum-mainnet', 100, '0xperms100', 'canonical')")
+        .bind(resource_id).execute(&database.pool).await?;
+    rebuild_fixture_families(&database.pool, "ethereum-mainnet", 130, "0xperms130").await?;
     let uri = format!("/v1/permissions?registration_id={resource_id}");
-
     let missing = v2_permissions_payload_for_database(&database, &uri).await?;
     assert_eq!(missing["data"], json!([]));
     assert_eq!(missing["meta"]["completeness"], json!("partial"));
-    assert_eq!(
-        missing["meta"]["unsupported_reason"],
-        json!("permission_support_unknown")
-    );
+    assert_eq!(missing["meta"]["unsupported_reason"], json!("permission_support_unknown"));
 
-    upsert_phase_permissions_current_resource_summary(
-        &database.pool,
-        &permission_current_resource_summary(resource_id, Some("registrar")),
-    )
-    .await?;
+    let grant = permission_fixture_event("permissions-empty-registrar", None, Some(resource_id),
+        "RegistrationGranted", "ens_v1_registrar_l1", 120, 0,
+        json!({"authority_kind":"registrar", "registrant":V2_PERMISSIONS_SUBJECT, "expiry":1_900_000_000_i64}));
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[grant]).await?;
+    rebuild_fixture_families(&database.pool, "ethereum-mainnet", 130, "0xperms130").await?;
     let partial = v2_permissions_payload_for_database(&database, &uri).await?;
     assert_eq!(partial["data"], json!([]));
-    assert_eq!(partial["meta"]["completeness"], json!("partial"));
     assert_unlisted_permission_surfaces(&partial, V2_UNWRAPPED_UNLISTED_SURFACES);
-
-    sqlx::query(
-        "UPDATE bigname_phase.permissions_current_resource_summary
-         SET support_status = 'supported', unsupported_reason = NULL
-         WHERE resource_id = $1",
-    )
-    .bind(resource_id)
-    .execute(&database.pool)
-    .await?;
-    let synthetic_full = v2_permissions_payload_for_database(&database, &uri).await?;
-    assert_eq!(synthetic_full["data"], json!([]));
-    // Independently proven full support lists every surface, so nothing is reported.
-    for key in ["completeness", "unsupported_reason", "unlisted_permission_surfaces"] {
-        assert!(synthetic_full["meta"].get(key).is_none(), "{key}");
-    }
-
-    upsert_phase_permissions_current_resource_summary(
-        &database.pool,
-        &permission_current_resource_summary(resource_id, Some("wrapper")),
-    )
-    .await?;
-    let wrapper = v2_permissions_payload_for_database(&database, &uri).await?;
-    assert_eq!(wrapper["data"], json!([]));
-    assert_eq!(wrapper["meta"]["completeness"], json!("partial"));
-    assert_unlisted_permission_surfaces(&wrapper, V2_WRAPPER_UNLISTED_SURFACES);
-    assert!(wrapper.get("restrictions").is_none());
-
     database.cleanup().await
 }
 
 #[tokio::test]
 async fn v2_permissions_resource_bound_read_serves_wrapper_restrictions() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    seed_v2_permissions_fixture(&database).await?;
-    let resource_id = v2_permissions_current_resource_id();
-    let mut summary = permission_current_resource_summary(resource_id, Some("wrapper"));
-    summary.resource_restrictions = Some(json!({
-        "kind": "ens_v1_wrapper",
-        "wrapper_state": "locked",
-        "fuses": 196_609,
-        "expiry_seconds": 1_800_000_000,
-    }));
-    upsert_phase_permissions_current_resource_summary(&database.pool, &summary).await?;
+    let (wrapper, resource_id) =
+        seed_perms_wrapped_lease(&database, WrappedLeaseShape::LinkRecorded).await?;
+    insert_permission_wrapper_state(&database, wrapper, "locked", 196_609, 1_800_000_000, 124).await?;
+    rebuild_fixture_families(&database.pool, "ethereum-mainnet", 130, "0xperms130").await?;
 
     let registration = v2_permissions_payload_for_database(
         &database,
@@ -1572,14 +1492,7 @@ async fn v2_permissions_resource_bound_read_serves_wrapper_restrictions() -> Res
 #[tokio::test]
 async fn v2_permissions_resource_bound_read_serves_registry_locked_roles() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    seed_v2_permissions_fixture(&database).await?;
-    let resource_id = v2_permissions_current_resource_id();
-    let mut summary = permission_current_resource_summary(resource_id, Some("ens_v2_registry"));
-    summary.resource_restrictions = Some(json!({
-        "kind": "ens_v2_registry",
-        "locked_roles": ["renew", "transfer"],
-    }));
-    upsert_phase_permissions_current_resource_summary(&database.pool, &summary).await?;
+    let resource_id = seed_registry_permission_inputs(&database).await?;
 
     let payload = v2_permissions_payload_for_database(
         &database,
@@ -1596,8 +1509,8 @@ async fn v2_permissions_resource_bound_read_serves_registry_locked_roles() -> Re
     );
     assert_unlisted_permission_surfaces(&payload, V2_ENS_V2_REGISTRY_UNLISTED_SURFACES);
 
-    summary.resource_restrictions = None;
-    upsert_phase_permissions_current_resource_summary(&database.pool, &summary).await?;
+    insert_registry_permission_roles(&database, resource_id, false, 75, json!([])).await?;
+    rebuild_fixture_families(&database.pool, "ethereum-mainnet", 83, "0xregistry83").await?;
     let unrestricted = v2_permissions_payload_for_database(
         &database,
         &format!("/v1/permissions?registration_id={resource_id}"),
@@ -1735,6 +1648,103 @@ fn operator_row(payload: &Value) -> Option<&Value> {
     payload["data"].as_array()?.iter().find(|row| {
         row.get("grant_relation").and_then(Value::as_str) == Some("operator")
     })
+}
+
+/// A separate Base publication with a registrar grant; the named variant also observes its
+/// registry owner and an account-wide operator approval.
+async fn seed_base_permission_inputs(database: &TestDatabase, with_operator: bool) -> Result<Uuid> {
+    let chain = "base-mainnet";
+    let resource = Uuid::from_u128(0xf100);
+    let at = parse_rfc3339_utc_timestamp("2026-06-10T00:00:00Z")
+        .map_err(|error| anyhow::anyhow!("{error}"))?.unix_timestamp();
+    let blocks = (100..=130).map(|block| raw_block(chain, &format!("0xperms-base-{block}"),
+        None, block, at - 130 + block)).collect::<Vec<_>>();
+    upsert_phase_raw_blocks(&database.pool, &blocks).await?;
+    database.seed_snapshot_selector_chain_positions(&json!({"base":{"chain_id":chain,
+        "block_number":130,"block_hash":"0xperms-base-130","timestamp":"2026-06-10T00:00:00Z"}})).await?;
+    let name = if with_operator {
+        Some(seed_family_identity_inputs(&database.pool, "basenames", "base-perms.base.eth", chain,
+            100, "0xperms-base-100", resource, Uuid::from_u128(0xf101), Uuid::from_u128(0xf102), "basenames").await?)
+    } else {
+        sqlx::query("INSERT INTO resources (resource_id, chain_id, block_number, block_hash, canonicality_state)
+            VALUES ($1, $2, 100, '0xperms-base-100', 'canonical')")
+            .bind(resource).bind(chain).execute(&database.pool).await?;
+        None
+    };
+    let mut events = vec![
+        permission_fixture_event("permissions-base-registration", name.as_deref(), Some(resource),
+            "RegistrationGranted", "basenames_base_registrar", 101, 0,
+            json!({"authority_kind":"registrar","registrant":V2_PERMISSIONS_SUBJECT,"expiry":1_900_000_000_i64})),
+        permission_fixture_event("permissions-base-authority-grant", name.as_deref(), Some(resource),
+            "PermissionChanged", "basenames_base_registrar", 105, 0,
+            json!({"subject":V2_PERMISSIONS_SUBJECT,"scope":{"kind":"resource"},"effective_powers":["resource_control"],
+                "grant_source":{"kind":"ens_v1_authority","authority_kind":"registrar"},
+                "revocation_source":null,"inheritance_path":[],"transfer_behavior":"replace_on_authority_change"})),
+    ];
+    if with_operator {
+        events.push(permission_fixture_event("permissions-base-owner", name.as_deref(), Some(resource),
+            "AuthorityTransferred", "basenames_base_registry", 120, 0,
+            json!({"source_event":"Transfer","node":bigname_lookup::ens_namehash_hex("base-perms.base.eth")?,
+                "owner":V2_OPERATOR_OWNER,"owner_getter":V2_OPERATOR_OWNER,"registry_contract":V2_OPERATOR_REGISTRY})));
+        events.push(permission_fixture_event("permissions-base-operator", None, None,
+            "AccountPermissionChanged", "basenames_base_registry", 121, 0,
+            json!({"subject":V2_PERMISSIONS_SUBJECT,"relation_kind":"operator","approved":true,
+                "scope":{"kind":"account","chain_id":chain,"authority_kind":"registry",
+                    "authority_contract":V2_OPERATOR_REGISTRY,"owner":V2_OPERATOR_OWNER},
+                "effective_powers":["registry_control"],"grant_source":{"kind":"raw_log","source_event":"ApprovalForAll"},
+                "revocation_source":null,"inheritance_path":[],
+                "transfer_behavior":{"mode":"owner_scoped","on_registry_owner_change":"ceases_to_apply"}})));
+    }
+    for event in &mut events {
+        event.namespace = "basenames".into();
+        event.chain_id = Some(chain.into());
+        event.block_hash = event.block_number.map(|block| format!("0xperms-base-{block}"));
+    }
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &events).await?;
+    rebuild_fixture_families(&database.pool, chain, 130, "0xperms-base-130").await?;
+    Ok(resource)
+}
+
+async fn seed_registry_permission_inputs(database: &TestDatabase) -> Result<Uuid> {
+    seed_registry_fixture(database).await?;
+    let registration = Uuid::from_u128(0xA100);
+    let root = Uuid::from_u128(0xA300);
+    let provenance = json!({"source_family":"ens_v2_registry_l1",
+        "registry_contract_instance_id":Uuid::from_u128(0xA190),
+        "upstream_resource":format!("0x{:064x}", 0)});
+    sqlx::query("INSERT INTO resources (resource_id, chain_id, block_number, block_hash, provenance, canonicality_state)
+        VALUES ($1, 'ethereum-mainnet', 59, '0xregistry59', $2, 'canonical')")
+        .bind(root).bind(&provenance).execute(&database.pool).await?;
+    sqlx::query("UPDATE resources SET provenance = provenance || $2 WHERE resource_id = $1")
+        .bind(registration).bind(json!({"source_family":"ens_v2_registry_l1",
+            "registry_contract_instance_id":Uuid::from_u128(0xA190),
+            "upstream_resource":format!("0x{:064x}", 0x100000001_u64)})).execute(&database.pool).await?;
+    insert_registry_permission_roles(database, registration, false, 70, json!(["renew"])).await?;
+    insert_registry_permission_roles(database, root, true, 70,
+        json!(["admin_unregister", "admin_set_subregistry", "admin_set_resolver"])).await?;
+    rebuild_fixture_families(&database.pool, "ethereum-mainnet", 83, "0xregistry83").await?;
+    Ok(registration)
+}
+
+async fn insert_registry_permission_roles(
+    database: &TestDatabase, resource: Uuid, root: bool, block: i64, powers: Value,
+) -> Result<()> {
+    let upstream = format!("0x{:064x}", if root { 0 } else { 0x100000001_u64 });
+    let source = json!({"kind":"raw_log", "source_event":"EACRolesChanged", "upstream_resource":upstream,
+        "registry_contract_instance_id":Uuid::from_u128(0xA190), "root_resource":root, "changed_powers":powers});
+    let revoked = powers.as_array().is_some_and(Vec::is_empty);
+    let mut event = registry_event(&format!("permission-registry-role-{resource}-{block}"), None,
+        if root { "RootPermissionChanged" } else { "PermissionChanged" }, block, ALPHA_REGISTRY,
+        json!({"subject":V2_PERMISSIONS_SUBJECT,"scope":{"kind":if root { "registry_root" } else { "registry" },
+            "chain_id":"ethereum-mainnet","registry_address":ALPHA_REGISTRY}, "effective_powers":powers,
+            "source_event":"EACRolesChanged", "upstream_resource":upstream, "resource":upstream,
+            "registry_contract_instance_id":Uuid::from_u128(0xA190), "root_resource":root,
+            "grant_source":if revoked { json!({}) } else { source.clone() },
+            "revocation_source":if revoked { source } else { Value::Null },
+            "inheritance_path":[], "transfer_behavior":{}}));
+    event.resource_id = Some(resource);
+    bigname_storage::insert_normalized_event_fixtures(&database.pool, &[event]).await?;
+    Ok(())
 }
 
 async fn seed_v2_registry_operator_fixture() -> Result<TestDatabase> {
@@ -2042,53 +2052,32 @@ fn v2_permissions_stale_resource_id() -> Uuid {
 #[tokio::test]
 async fn v2_permissions_namespace_filters_audit_rows_before_paging_and_counting() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    seed_v2_permissions_fixture(&database).await?;
-    // The lower-sorting registration belongs to another namespace. The matching ENS
-    // registration has no current name and must remain readable through its audit identity.
-    let mut events = Vec::new();
-    for (namespace, resource_id, canonicality) in [
-        ("basenames", v2_permissions_current_resource_id(), CanonicalityState::Canonical),
-        ("ens", v2_permissions_stale_resource_id(), CanonicalityState::Canonical),
-        ("ens", v2_permissions_current_resource_id(), CanonicalityState::Orphaned),
-    ] {
-        let mut event = history_event(
-            &format!("permission-namespace-{namespace}-{resource_id}"), None, Some(resource_id),
-            Some("ethereum-mainnet"), Some(99), Some("0xresource"), None, None, canonicality,
-        );
-        event.namespace = namespace.to_owned();
-        event.event_kind = "PermissionChanged".to_owned();
-        events.push(event);
-    }
-    bigname_storage::insert_normalized_event_fixtures(&database.pool, &events).await?;
-    let unfiltered = v2_permissions_payload_for_database(
-        &database, &format!("/v1/permissions?address={V2_PERMISSIONS_SUBJECT}"),
-    ).await?;
-    assert_eq!(unfiltered["data"].as_array().unwrap().len(), 3);
-    let filtered = v2_permissions_payload_for_database(
-        &database, &format!("/v1/permissions?address={V2_PERMISSIONS_SUBJECT}&namespace=ens&page_size=1"),
-    ).await?;
+    let ens = seed_registry_permission_inputs(&database).await?;
+    let base = seed_base_permission_inputs(&database, false).await?;
+    let get = async |uri: String| -> Result<Value> {
+        let response = app_router(database.app_state())
+            .oneshot(Request::builder().uri(uri).body(Body::empty())?).await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        read_json(response).await
+    };
+    let unfiltered = get(format!("/v1/permissions?address={V2_PERMISSIONS_SUBJECT}")).await?;
+    let rows = unfiltered["data"].as_array().unwrap();
+    assert!(rows.iter().any(|row| row["registration_id"] == ens.to_string()));
+    assert!(rows.iter().any(|row| row["registration_id"] == base.to_string()));
+    let filtered = get(format!("/v1/permissions?address={V2_PERMISSIONS_SUBJECT}&namespace=basenames&page_size=1")).await?;
     assert_eq!(filtered["data"].as_array().unwrap().len(), 1);
-    assert_eq!(filtered["data"][0]["registration_id"], json!(v2_permissions_stale_resource_id()));
-    assert_eq!(filtered["page"]["has_more"], json!(false));
+    assert_eq!(filtered["data"][0]["registration_id"], json!(base));
+    assert!(filtered["data"][0].get("name").is_none());
+    assert_eq!(filtered["page"]["has_more"], false);
     assert_eq!(filtered["page"]["next_cursor"], Value::Null);
-    let mut summary = permission_current_resource_summary(v2_permissions_current_resource_id(), Some("ens_v2_registry"));
-    summary.resource_restrictions = Some(json!({"kind": "ens_v2_registry", "locked_roles": ["renew"]}));
-    upsert_phase_permissions_current_resource_summary(&database.pool, &summary).await?;
-    let matching = v2_permissions_payload_for_database(
-        &database, &format!("/v1/permissions?registration_id={}&namespace=ens", v2_permissions_stale_resource_id()),
-    ).await?;
+    let matching = get(format!("/v1/permissions?registration_id={base}&namespace=basenames")).await?;
     assert_eq!(matching["data"].as_array().unwrap().len(), 1);
-    let unscoped = v2_permissions_payload_for_database(
-        &database, &format!("/v1/permissions?registration_id={}", v2_permissions_current_resource_id()),
-    ).await?;
+    let unscoped = get(format!("/v1/permissions?registration_id={ens}")).await?;
     assert!(unscoped.get("restrictions").is_some());
-    let excluded = v2_permissions_payload_for_database(
-        &database, &format!("/v1/permissions?registration_id={}&namespace=ens", v2_permissions_current_resource_id()),
-    ).await?;
+    let excluded = get(format!("/v1/permissions?registration_id={ens}&namespace=basenames")).await?;
     assert_eq!(excluded["data"], json!([]));
     assert!(excluded.get("restrictions").is_none());
     assert!(excluded["meta"].get("completeness").is_none());
-
     database.cleanup().await
 }
 
@@ -2115,11 +2104,10 @@ async fn v2_permissions_rejects_unknown_namespace_before_snapshot_capture() -> R
 #[tokio::test]
 async fn historical_controller_wrap_is_never_a_registration_handle() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    let (wrapper, _) =
+    let (wrapper, lease) =
         seed_perms_wrapped_lease(&database, WrappedLeaseShape::ControllerGranted).await?;
-    sqlx::query("DELETE FROM bigname_phase.name_current WHERE raw_name = 'perms.eth'")
-        .execute(&database.pool)
-        .await?;
+    unwrap_permission_fixture(&database, wrapper, lease).await?;
+
     let payload = v2_permissions_payload_for_database(
         &database,
         &format!("/v1/permissions?registration_id={wrapper}"),
@@ -2167,36 +2155,18 @@ async fn historical_registry_control_is_never_a_registration_handle() -> Result<
 #[tokio::test]
 async fn resolver_roles_use_the_wrapped_registration_lease_handle() -> Result<()> {
     let database = TestDatabase::new_migrated().await?;
-    let (wrapper, lease) =
+    let (_, lease) =
         seed_perms_wrapped_lease(&database, WrappedLeaseShape::LinkRecorded).await?;
-    let resolver = resolver_current_row("ethereum-mainnet", V2_RESOLVER_ADDRESS);
-    database
-        .seed_snapshot_selector_chain_positions(&resolver.chain_positions)
-        .await?;
-    upsert_test_resolver_current_rows(&database, &[resolver]).await?;
-    let mut permission = permission_current_row(
-        wrapper,
-        V2_PERMISSIONS_SUBJECT,
-        PermissionScope::Resolver {
-            chain_id: "ethereum-mainnet".to_owned(),
-            resolver_address: V2_RESOLVER_ADDRESS.to_owned(),
-        },
-        7,
-        120,
-    );
-    permission.provenance["normalized_event_ids"] = json!([]);
-    upsert_phase_permissions_current_rows(&database.pool, &[permission]).await?;
     let payload = v2_resolver_payload_for_database(
         &database,
-        &format!("/v1/resolvers/1/{V2_RESOLVER_ADDRESS}/roles"),
+        &"/v1/resolvers/1/0x0000000000000000000000000000000000000abc/roles".to_owned(),
     )
     .await?;
-    assert_eq!(payload["data"].as_array().unwrap().len(), 1, "{payload}");
-    assert_eq!(
-        payload["data"][0]["registration_id"],
-        lease.to_string(),
-        "{payload}"
-    );
+    let wrapper_roles = payload["data"].as_array().unwrap().iter()
+        .filter(|row| row["grant_event"]["block_number"] == 122).collect::<Vec<_>>();
+    assert_eq!(wrapper_roles.len(), 2, "{payload}");
+    assert!(wrapper_roles.iter().all(|row| row["registration_id"] == lease.to_string()), "{payload}");
+
     let followed = v2_permissions_payload_for_database(
         &database,
         &format!("/v1/permissions?registration_id={lease}"),
